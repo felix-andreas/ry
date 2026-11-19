@@ -80,6 +80,34 @@ f : @masked fn(x: Any) -> Any
 f : fn(x: Any) -> Any
 line 0: `@masked` on `f` requires a variadic function type. The mask covers the arguments the `...` rest parameter absorbs.
 
+#==== opaque
+#---- opaque_names_the_parameters_a_ry_value_may_reach
+expect_error : @opaque(object) <T> fn(object: T, [regexp]: Any, ...: Any) -> T
+both : @pure @opaque(a, b) fn(a: Any, b: Any, c: Any) -> NULL
+#++++
+expect_error : @opaque(object) <T> fn(object: T, [regexp]: Any, ...: Any) -> T
+both : @pure @opaque(a, b) fn(a: Any, b: Any, c: Any) -> NULL
+
+#---- opaque_must_name_a_parameter
+f : @opaque(objekt) fn(object: Any) -> Any
+#++++
+f : @opaque(objekt) fn(object: Any) -> Any
+line 0: `@opaque(objekt)` on `f` names no parameter of its function type.
+
+#==== pure
+#---- pure_may_depend_on_the_functions_a_call_is_passed
+lapply : @pure(FUN) <T, U> fn(X: list[T], FUN: fn(T) -> U, ...: Any) -> list[U]
+pair : @pure(f, g) fn(f: Any, g: Any) -> Any
+#++++
+lapply : @pure(FUN) <T, U> fn(X: list[T], FUN: fn(T) -> U, ...: Any) -> list[U]
+pair : @pure(f, g) fn(f: Any, g: Any) -> Any
+
+#---- pure_must_name_a_parameter
+apply_to : @pure(fun) fn(FUN: Any) -> Any
+#++++
+apply_to : @pure(fun) fn(FUN: Any) -> Any
+line 0: `@pure(fun)` on `apply_to` names no parameter of its function type.
+
 #==== malformed
 #---- missing_colon
 length fn(x: Any) -> integer

@@ -70,7 +70,7 @@ f <- function() {
 f: fn() -> integer
 
 #---- one_origin_reported_once_however_many_uses
-frame <- data.frame(a = 1)
+frame <- as.data.frame(1)
 value <- frame$a
 first <- value
 second <- value
@@ -81,7 +81,7 @@ value: Unknown
 first: Unknown
 second: Unknown
 third: Unknown
-36..43 error[strict] strict mode: could not determine the type of `value`; add a type annotation
+35..42 error[strict] strict mode: could not determine the type of `value`; add a type annotation
 
 #==== directives
 #---- typing_comment_sets_the_mode

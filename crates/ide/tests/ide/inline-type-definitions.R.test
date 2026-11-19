@@ -112,7 +112,7 @@ signature: none
 completion (1): UserId
 
 #---- if_unknown_directive_offers_trust
-frame <- data.frame(a = 1)
+frame <- read.csv("a.csv")
 gap: @if-unknown inte$0ger <- frame$a
 #++++
 hover 44..51: integer

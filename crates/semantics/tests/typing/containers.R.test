@@ -308,6 +308,22 @@ build <- function(escape) {
 build: Unknown
 191..197 error[type-mismatch] field `escpae` does not exist in `list{} | list{escape: logical}`. Did you mean `escape`?
 
+#---- dollar_on_a_vector_or_a_list_by_a_flag_is_unknown
+f <- function(names_only) {
+  frame <- list(name = "a", size = 1)
+  if (names_only) frame$name else frame
+}
+g <- function() f(FALSE)$size
+#++++
+f: fn(names_only: logical) -> character | list{name: character, size: double}
+g: fn() -> Unknown
+
+#---- dollar_on_a_vector_or_null_is_reported
+f <- function(v: character | NULL) v$name
+#++++
+f: fn(v: character | NULL) -> Unknown
+35..41 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `character | NULL`. Extract an element with `[[` instead.
+
 #---- dollar_on_atomic_vector
 f <- function() {
   v <- c(a = 1L)

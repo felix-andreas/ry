@@ -98,14 +98,24 @@ make_person <- function(name) {
 ### Attachment
 
 A block attaches to the expression that starts on the line directly after it. A braceless function
-body, a braceless `if` branch, and a parenthesised expression are valid targets. When a block needs a
-target and has none, it is an error and the annotation does not apply. That happens when:
+body, a braceless `if` branch, a parenthesised expression, and an argument are valid targets. In an
+argument list the block types the argument's value, so a lambda gets its signature where it is passed:
+
+```r
+#: fn(m: matrix) -> double[]
+row_sums <- function(m) apply(
+  m, 1,
+  #: fn(row: double[]) -> double
+  function(row) sum(row)
+)
+```
+
+When a block needs a target and has none, it is an error and the annotation does not apply. That
+happens when:
 
 - a blank line separates the block from the expression;
 - a plain `#` comment separates them, or no expression follows at all;
-- the block has no content beyond the `#:` marker;
-- the block sits inside a call's argument list, for example beside a lambda passed to `lapply`,
-  because an argument is not a statement. Give the value its own binding and annotate that instead.
+- the block has no content beyond the `#:` marker.
 
 A definition block, one that contains only `@type` and `@alias` lines, attaches to nothing, and
 neither does a `@strict` toggle, so the adjacency rules do not apply to them.
@@ -827,11 +837,29 @@ An *opaque* nominal type has no representation to project. The standard-library 
 
 `data.frame` is not opaque: the stubs declare it as `@type data.frame {list[named: Unknown]}`, the
 named list of untyped columns it is at run time. A data frame is therefore accepted wherever a
-named list is, as in `lapply(frame, f)` and `vapply(frame, is.numeric, logical(1))`. A column read
-such as `frame$amount` or `frame[["amount"]]` is `Unknown`, and strict mode reports it where it is
-read. The stubs also declare its methods, so `frame[rows, cols]` is `Any`
-(R keeps the frame or drops it to a column depending on the indices), arithmetic such as
-`frame / 100` keeps the `data.frame`, and a comparison such as `frame > 0.5` is a `matrix`.
+named list is, as in `lapply(frame, f)` and `vapply(frame, is.numeric, logical(1))`. The stubs also
+declare its methods, so `frame[rows, cols]` is `Any` (R keeps the frame or drops it to a column
+depending on the indices), arithmetic such as `frame / 100` keeps the `data.frame`, and a comparison
+such as `frame > 0.5` is a `matrix`.
+
+`data.frame(...)` and `data.table(...)` know the columns they build, so their result is a
+`data.frame{...}` or a `data.table{...}`, whose columns are written as a [DataFrame](#dataframes)'s:
+
+```r
+frame <- data.frame(id = 1:3, price = c(1, 2, 3))   # data.frame{id: integer[], price: double[]}
+frame$price                                          # double[]
+frame$volume                                         # error: the frame `frame` has no column `volume`
+```
+
+A column takes its argument's name, or a bare variable's. An argument R spreads over several columns
+(a list, a matrix, another frame), a forwarded `...`, a repeated or non-syntactic name, and
+`stringsAsFactors = TRUE` or `keep.rownames = TRUE` leave the columns unknown. `frame$x <- v` and
+`frame[["x"]] <- v` add or replace a column. Any other write that may rename or retype columns
+(`names(frame) <- v`, `frame[, "x"] <- v`, data.table's `set` and `setattr`) forgets them, while
+`setDT` and `setDF` change the class and keep them. Everywhere else a `data.frame{...}` is a
+`data.frame`: it passes to a `data.frame` parameter, and `[` and arithmetic dispatch on the class.
+A data frame built any other way, such as by `read.csv` or `merge`, has unknown columns, so a column
+read such as `frame$amount` is `Unknown`, and strict mode reports it where it is read.
 
 #### Type-argument variance
 
@@ -1119,7 +1147,10 @@ Passing one to an R function that is not the project's own is a `type-mismatch` 
 exceptions are the functions the runtime lets them through: those that understand them (`format`,
 `print`, `identical`, `length`, `[[`, the conversions), those that only ask what a value is
 (`is.null`, `class`, `inherits`), and those that store a value without looking inside it (`list`,
-`lapply`, `do.call`). A value whose type only sometimes is a record, tuple or tag, such as
+`lapply`, `do.call`). A parameter that the callee only forces and perhaps hands back takes one
+too, as the `object` of testthat's condition, output and visibility expectations does, so
+`expect_error(make_point(-1), "negative")` checks while `expect_equal(make_point(1), p)` is
+reported (`@opaque` in the stub, see the stub authoring guide). A value whose type only sometimes is a record, tuple or tag, such as
 `Record{x: double} | NULL`, is not reported, because it may be R data when the code runs.
 
 ### Records from R
@@ -1730,6 +1761,19 @@ bad <- List.map(words, \(w) w * 2)
 # function `character` for it
 ```
 
+A function literal that is the default of a declared parameter takes its parameter types the same
+way, from the parameter's declared function type, under the same limits:
+
+```r
+#: fn(dsn: character, [connector]: fn(dsn: character) -> character) -> character
+connect <- function(dsn, connector = function(dsn) toupper(dsn)) connector(dsn)
+```
+
+Here the default's `dsn` is `character`, so strict mode accepts it with no annotation of its own. A
+misuse of such a parameter says that the declaration gave the type: `` `v` is used as a numeric
+value (`integer` or `double`) here, but the parameter this function is the default of declares
+`character` for it ``.
+
 ### Named and positional parameters
 
 Parameter names in a function type are part of the call interface. A named parameter may be passed
@@ -1881,7 +1925,7 @@ Inline, the directive goes between the binding's `:` and its type:
 <TabItem label="Inline">
 
 ```r
-frame <- data.frame(a = 1)
+frame <- read.csv("a.csv")
 
 gap: @if-unknown integer <- frame$a   # valid: `frame$a` is `Unknown`
 
@@ -1892,7 +1936,7 @@ value: @if-unknown integer <- 1L      # an error: the type is already known
 <TabItem label="Comments">
 
 ```r
-frame <- data.frame(a = 1)
+frame <- read.csv("a.csv")
 
 #: @if-unknown integer
 gap <- frame$a   # valid: `frame$a` is `Unknown`
@@ -3702,8 +3746,8 @@ A column is always a vector, so a scalar column type broadens: `DataFrame{id: in
 `DataFrame{id: integer[]}`. A bare `DataFrame` is one whose columns are unknown, and every column
 reference on it is a silent `Unknown`. Three more types share this shape: `LazyFrame{...}` is a
 query plan, `GroupBy{k: K; a: A}` is a grouped DataFrame whose key columns come before the
-semicolon, and `LazyGroupBy{...}` is a grouped plan. A `data.table` with known columns is written
-`data.table{...}` in the same way.
+semicolon, and `LazyGroupBy{...}` is a grouped plan. A `data.table` or a base `data.frame` with known
+columns is written `data.table{...}` or `data.frame{...}` in the same way.
 
 A DataFrame is no `data.frame`: its run-time class is `"DataFrame"` alone, so passing one to a
 `data.frame` parameter is a type error. `as.data.frame()` converts it and loses the column types,
@@ -4136,8 +4180,8 @@ type-mismatch
 
 #### Reading files and data.table's functions
 
-`fread`, `rbindlist`, `melt` and `dcast` return a `data.table`, and the checker sharpens its
-columns from the arguments it can see, so the result is a `data.table{...}`. A DataFrame satisfies a
+`data.table`, `fread`, `rbindlist`, `melt` and `dcast` return a `data.table`, and the checker sharpens
+its columns from the arguments it can see, so the result is a `data.table{...}`. A DataFrame satisfies a
 `data.table` parameter, so data.table's functions accept one.
 
 `fread("data/prices.csv")` types with the columns the file has. ry sniffs the head of every `.csv` and
@@ -4385,9 +4429,29 @@ A top-level statement of a library file is a definition when it is one of these:
 A constant's initializer must have no effect. Literals, names, `pkg::name`, function literals,
 formulas, and the built-in operators have none. A call has none when its function is declared pure
 and its arguments have none; the arguments of `quote`, `expression`, `alist` and `substitute` are not
-evaluated, so they are not inspected. Inside `local()`, assignments and loops touch only the local
-environment and are allowed, but a call to a function bound inside that `local()` is an effect,
-because nothing declares it pure. A replacement inside `local()` of a name bound outside it, such as
+evaluated, so they are not inspected. A call of a function declared pure only for pure callbacks,
+such as `lapply`, also needs the function it is passed to be pure: a function literal whose body has
+no effect, or the name of a pure function.
+
+```r
+squares <- vapply(1:3, function(i) i * i, numeric(1))
+widths <- lapply(list("a", "bb"), nchar)
+printed <- lapply(1:3, print)
+```
+
+```text ry check strict
+x strict mode: `lapply` calls `print` here, which is not declared pure, so it runs every time the
+  package loads. A file in `R/` may only define things at its top level: move the call into a
+  function, `.onLoad`, or the script `ry run` starts
+ --[R/main.R:3:24]
+```
+
+Inside `local()`, assignments and loops touch only the local environment and are allowed. A name
+bound there to a function literal may be called when the call has no effect: neither the defaults it
+evaluates nor the body, read with the bindings in place at the call, so rebinding a name the body
+calls after the function is defined counts. A call to a name bound inside that `local()` to anything
+else, including through a loop, a destructuring or a replacement such as `body(f) <- ...`, is an
+effect. A replacement inside `local()` of a name bound outside it, such as
 `local({ defaults$a <- 2; defaults })`, is allowed when the project binds that name once, at the top
 level, to a literal or to `c()` or `list()` of literals. R then replaces in a local copy, which leaves
 the outer value alone. Any other outer value might be an environment, which the replacement would
@@ -4408,9 +4472,12 @@ Only the first effect of a statement is reported. The effects are:
 #### Purity
 
 A function is pure when calling it has no effect beyond returning a value, whatever its arguments.
-Purity is declared and never inferred, and the declaration is trusted: ry does not check the body.
+Purity is declared, and the declaration is trusted: ry does not check the body. The one exception is
+a function bound inside `local()`, whose body ry reads, because no other file can call it.
 A project function is declared pure with a `#: @pure` comment line above its definition or an inline
-`@pure` before `function` (or `\(x)`), and a stub declares one with `name : @pure fn(...)`. With
+`@pure` before `function` (or `\(x)`), and a stub declares one with `name : @pure fn(...)`, or with
+`name : @pure(FUN) fn(...)` when it is pure only for a pure function passed as `FUN`. `@pure` above
+anything but a top-level binding declares nothing and carries an `annotation` warning. With
 inline annotations turned off, an inline `@pure` declares nothing and carries the `inline-annotation`
 warning. The
 standard library's stubs mark base R's pure functions, such as `paste0`, `seq_len` and `sum`, and
@@ -4778,8 +4845,9 @@ skipped. [Strict mode](#strict-mode) reports most of the places they occur.
 
 Not checked:
 
-- **Base data frame columns.** Everything read out of a `data.frame` is `Unknown`, so `df$whatever`
-  passes even if the column does not exist. A [`DataFrame`](#dataframes) types its columns.
+- **Base data frame columns from anything but `data.frame()`.** Everything read out of a bare
+  `data.frame` (from `read.csv`, `merge` and the like) is `Unknown`, so `df$whatever` passes even if
+  the column does not exist. A `data.frame{...}` and a [`DataFrame`](#dataframes) type their columns.
 - **Matrix dimensions.** Matrix arithmetic is checked, but a non-conformable product is not.
   Indexing with several indices, as in `m[i, j]`, or with `drop = FALSE` gives `Unknown`.
 - **S4 and R6 objects** are `Unknown`, and calls to an S3 generic that dispatches through

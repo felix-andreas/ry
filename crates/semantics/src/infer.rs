@@ -1090,10 +1090,10 @@ impl<'db> InferenceTable<'db> {
                         }
                     })
             }
-            // `data.table{...}` is the `data.table` nominal with its columns known, so the two
-            // fit each other both ways.
-            (TyKind::Named(name, arguments), TyKind::Frame(FrameKind::DataTable, _))
-                if arguments.is_empty() && name.text(db) == "data.table" =>
+            // `data.table{...}` is the `data.table` class with its columns known, so the two fit
+            // each other both ways, as `data.frame{...}` and `data.frame` do.
+            (TyKind::Named(name, arguments), TyKind::Frame(kind, _))
+                if arguments.is_empty() && kind.class() == Some(name.text(db)) =>
             {
                 true
             }
@@ -1215,10 +1215,8 @@ impl<'db> InferenceTable<'db> {
                         })
                 })
             }
-            // `data.table{...}` is the `data.table` nominal with its columns known, so the two
-            // fit each other both ways.
-            (TyKind::Frame(FrameKind::DataTable, _), TyKind::Named(name, arguments))
-                if arguments.is_empty() && name.text(db) == "data.table" =>
+            (TyKind::Frame(kind, _), TyKind::Named(name, arguments))
+                if arguments.is_empty() && kind.class() == Some(name.text(db)) =>
             {
                 true
             }
@@ -1324,6 +1322,12 @@ impl<'db> InferenceTable<'db> {
                 }
                 _ => false,
             },
+            // Past the column-wise arms, an R frame passes wherever its class does:
+            // `data.frame{...}` is a `data.frame` to `merge` and `sum`.
+            (TyKind::Frame(kind, _), _) if let Some(class) = kind.class() => {
+                let nominal = Ty::new(db, TyKind::Named(Name::new(db, class), &[]));
+                self.compatible_probe(db, nominal, expected, depth + 1)
+            }
             _ => false,
         }
     }

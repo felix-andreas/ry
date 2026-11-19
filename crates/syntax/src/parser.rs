@@ -872,7 +872,7 @@ impl Parser<'_> {
                     // Inline, a body may follow a return type, so `list {` and `fn (` with a
                     // space start the body; only the hugging spelling is the type.
                     "list" | "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy"
-                    | "data.table" | "Record" | "Tuple"
+                    | "data.table" | "data.frame" | "Record" | "Tuple"
                         if self.ann_next_significant(end) == Some(L_BRACE)
                             && (!self.inline_type || self.next_token_is(L_BRACE)) =>
                     {
@@ -1038,6 +1038,7 @@ impl Parser<'_> {
             "LazyFrame" => "LazyFrame type",
             "GroupBy" | "LazyGroupBy" => "GroupBy type",
             "data.table" => "data.table type",
+            "data.frame" => "data.frame type",
             "Record" => "Record type",
             "Tuple" => "Tuple type",
             _ => "list type",

@@ -396,21 +396,26 @@ fn render_stub_source(source: &str) -> String {
     for (name, _) in names {
         for scheme in library.schemes.get(name).into_iter().flatten() {
             let rendered = TypeRenderer::default().render_scheme(&db, scheme);
-            let pure = if library
+            let pure = match library
                 .pure_by_namespace
                 .get("base")
-                .is_some_and(|names| names.contains(name))
+                .and_then(|names| names.get(name))
             {
-                "@pure "
-            } else {
-                ""
+                Some(callbacks) if callbacks.is_empty() => "@pure ".to_owned(),
+                Some(callbacks) => format!("@pure({}) ", callbacks.join(", ")),
+                None => String::new(),
             };
             let masked = if library.masked.contains_key(name) {
                 "@masked "
             } else {
                 ""
             };
-            output.push_str(&format!("{name} : {pure}{masked}{rendered}\n"));
+            let opaque = library
+                .opaque
+                .get(name)
+                .map(|parameters| format!("@opaque({}) ", parameters.join(", ")))
+                .unwrap_or_default();
+            output.push_str(&format!("{name} : {pure}{masked}{opaque}{rendered}\n"));
         }
     }
     for problem in stub_source_problems(&db, source) {

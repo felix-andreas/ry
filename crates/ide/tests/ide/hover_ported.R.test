@@ -366,7 +366,7 @@ signature: none
 completion (99): checked, check.options, checkAtAssignment, checkCRAN, checkSlotAssignment, cacheGenericsMetaData, cacheMetaData, cacheMethod
 
 #---- if_unknown_annotation
-frame <- data.frame(a = 1)
+frame <- read.csv("a.csv")
 
 #: @if-unknown integer
 may$0be <- frame$a

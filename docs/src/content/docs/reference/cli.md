@@ -64,10 +64,12 @@ error is left unchanged, because its fixes were worked out on a guess at what th
 The editor offers the same fixes as quick fixes.
 
 `--annotate` writes the inferred type of each unannotated top-level function and binding in the
-named files, inline or as a `#:` comment as [`inline-annotations`](/reference/configuration#inline-annotations)
-says, prints how many it added, and then reports what is left.
+named files, and the signature of each unannotated function passed as an argument, such as the
+`function(v) v * 2` of a `vapply` call. It writes them inline or as `#:` comments as
+[`inline-annotations`](/reference/configuration#inline-annotations) says (a lambda's `#:` line
+needs the argument to start its own line), prints how many it added, and then reports what is left.
 [Strict mode](/guide#strict-mode) shows it at work. A binding
-whose type inference cannot write down, such as one involving `Unknown`, is skipped.
+or lambda whose type inference cannot write down, such as one involving `Unknown`, is skipped.
 
 ### The check cache
 

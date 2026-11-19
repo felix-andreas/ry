@@ -545,10 +545,10 @@ kept <- drop_na(d, a)
 t <- tibble(x = 1:3, y = x * 2)
 #++++
 Any
-d: data.frame
+d: data.frame{a: double[], b: double[]}
 long: Any
 wide: Any
-kept: data.frame
+kept: data.frame{a: double[], b: double[]}
 t: data.frame
 
 #---- an_unknown_attached_package_tolerates_a_near_miss_of_a_project_name
@@ -560,3 +560,19 @@ str_dup <- function(s) stri_dup(s, 2)
 #++++
 Any
 str_dup: <T> fn(s: T) -> Unknown
+
+#==== native_values_in_expectations
+#---- an_expectation_that_only_evaluates_its_object_takes_a_ry_value
+# `expect_error` forces `object` and never inspects it, so a call returning a record may sit
+# there, by position or by name; a value-inspecting expectation still refuses one.
+#namespace import(testthat)
+point <- function(n) (x = n, y = n)
+a <- function() expect_error(point(1), "neg")
+b <- function() testthat::expect_silent(object = point(2))
+c <- function() expect_equal(point(3), 1)
+#++++
+point: <T> fn(n: T) -> Record{x: T, y: T}
+a: fn() -> Record{x: double, y: double}
+b: fn() -> Record{x: double, y: double}
+c: Unknown
+374..382 error[type-mismatch] `expect_equal` is an R function, and this value is a ry record, not an R object. Convert it with `as.list()` first

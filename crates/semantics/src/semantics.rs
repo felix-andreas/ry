@@ -704,7 +704,7 @@ pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
     let annotated = root.any_kind(|kind| kind == SyntaxKind::ANNOTATION);
     let candidate = |kind: SyntaxKind| match kind {
         SyntaxKind::BINARY_EXPR | SyntaxKind::FUNCTION_DEF => typed,
-        SyntaxKind::BRACE_EXPR | SyntaxKind::SOURCE_FILE => annotated,
+        SyntaxKind::BRACE_EXPR | SyntaxKind::SOURCE_FILE | SyntaxKind::ARGUMENT_LIST => annotated,
         SyntaxKind::TYPE_DEFINITION
         | SyntaxKind::NEW_EXPR
         | SyntaxKind::CALL_EXPR
@@ -739,7 +739,7 @@ pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
         if syntax::is_inline_annotation_kind(kind, node.parent().map(NodeRef::kind)) {
             roles |= SiteRole::InlineAnnotation.bit();
         }
-        if (node == root || kind == SyntaxKind::BRACE_EXPR)
+        if (node == root || kind == SyntaxKind::BRACE_EXPR || kind == SyntaxKind::ARGUMENT_LIST)
             && node.has_child(SyntaxKind::ANNOTATION)
         {
             roles |= SiteRole::AnnotatedSequence.bit();
@@ -2805,7 +2805,7 @@ fn write_tokens(node: &SyntaxNode) -> usize {
             SyntaxKind::SPECIAL => matches!(token.text(), "%<-%" | "%->%"),
             SyntaxKind::IDENT | SyntaxKind::STRING => matches!(
                 token.text().trim_matches(['`', '"', '\'']),
-                ":=" | "setnames" | "setcolorder"
+                ":=" | "setnames" | "setcolorder" | "set" | "setattr" | "setDT" | "setDF"
             ),
             _ => true,
         })

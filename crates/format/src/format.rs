@@ -9,6 +9,7 @@ use {
         error::Error,
         fmt::{self, Display},
         iter::{once, repeat_n, successors},
+        mem,
     },
     syntax::{
         SyntaxElement, SyntaxError,
@@ -884,6 +885,7 @@ impl Formatter<'_> {
         let mut enabled = true;
         let mut pending_directive = None;
         let mut previous: Option<&SyntaxElement> = None;
+        let mut after_semicolon = false;
         for element in elements {
             match pending_directive {
                 Some(Directive::On) => enabled = true,
@@ -895,10 +897,18 @@ impl Formatter<'_> {
             // starts its line is stable as a directive.
             pending_directive = directive(element).filter(|_| !self.trails(previous, element));
             if element.kind() == SEMICOLON {
+                after_semicolon = true;
                 continue;
             }
+            // Past a `;` a `#:` block annotates the next statement, but trailing the code before
+            // it, once the `;` is gone, it would annotate that code.
+            let annotation_after_semicolon =
+                mem::take(&mut after_semicolon) && element.kind() == ANNOTATION;
             if enabled {
-                if is_comment(element) && self.trails(previous, element) {
+                if is_comment(element)
+                    && self.trails(previous, element)
+                    && !annotation_after_semicolon
+                {
                     self.space();
                 } else {
                     self.newlines_between(previous, element, level);
@@ -2570,6 +2580,7 @@ fn annotation_space_between(previous: &AnnotationToken, current: AnnotationToken
                         | "GroupBy"
                         | "LazyGroupBy"
                         | "data.table"
+                        | "data.frame"
                 ) =>
         {
             return false;

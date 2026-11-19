@@ -34,9 +34,14 @@ pub struct StubLibrary<'db> {
     /// Data-masking variadics, mapped to the formals before `...` (which resolve normally). An
     /// empty list masks every argument.
     pub masked: SymbolMap<Vec<String>>,
-    /// `@pure` names per declaring namespace. A bare call takes its purity from the namespace
-    /// of the name's winning declaration (`declarations`), the same one its type comes from.
-    pub pure_by_namespace: SymbolMap<SymbolSet>,
+    /// `@opaque(name, ...)` parameters: the callee forces the argument and may hand it back,
+    /// but never inspects it as an R object, so a ry value may pass there.
+    pub opaque: SymbolMap<Vec<String>>,
+    /// `@pure` names per declaring namespace, each with the parameters whose function arguments
+    /// must be pure as well (`@pure(FUN)` on `lapply`); an empty list is pure whatever the
+    /// arguments. A bare call takes its purity from the namespace of the name's winning
+    /// declaration (`declarations`), the same one its type comes from.
+    pub pure_by_namespace: SymbolMap<SymbolMap<Vec<String>>>,
     /// Declaration-level: a later source overriding a name's type does not un-export it from the
     /// namespace that declared it.
     pub exports_by_namespace: SymbolMap<SymbolSet>,
@@ -455,6 +460,18 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             }
             namespace_exports.insert(name);
             let first_here = seen_here.insert(name);
+            if first_here {
+                library.opaque.remove(name);
+            }
+            // Like purity, every candidate's marker counts toward the name.
+            if let Some(parameters) = markers.opaque {
+                let known = library.opaque.entry(name).or_default();
+                for parameter in parameters {
+                    if !known.contains(&parameter) {
+                        known.push(parameter);
+                    }
+                }
+            }
             // Purity belongs to the name within its namespace: any candidate's marker marks it,
             // and a later source that redeclares the name decides afresh, so an override stub
             // can take the marker away.
@@ -465,8 +482,13 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             if first_here {
                 pure.remove(name);
             }
-            if markers.pure {
-                pure.insert(name);
+            if let Some(callbacks) = markers.pure {
+                let known = pure.entry(name).or_default();
+                for callback in callbacks {
+                    if !known.contains(&callback) {
+                        known.push(callback);
+                    }
+                }
             }
             if first_here {
                 if documentation.is_empty() {
@@ -524,30 +546,54 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
 
 struct DeclarationMarkers<'text> {
     masked: bool,
-    pure: bool,
+    /// `@pure`, with the parameters `@pure(FUN, ...)` names.
+    pure: Option<Vec<String>>,
+    opaque: Option<Vec<String>>,
     type_text: &'text str,
 }
 
-/// The `@masked` and `@pure` markers that may precede a declaration's type, in any order.
+/// The `@masked`, `@pure`, `@pure(...)` and `@opaque(...)` markers that may precede a
+/// declaration's type, in any order.
 fn declaration_markers(mut type_text: &str) -> DeclarationMarkers<'_> {
     let mut markers = DeclarationMarkers {
         masked: false,
-        pure: false,
+        pure: None,
+        opaque: None,
         type_text,
     };
     loop {
-        let (marker, rest) = if let Some(rest) = type_text.strip_prefix("@masked") {
-            (&mut markers.masked, rest)
-        } else if let Some(rest) = type_text.strip_prefix("@pure") {
-            (&mut markers.pure, rest)
-        } else {
-            break;
-        };
-        if !rest.starts_with(char::is_whitespace) {
+        let before = type_text.len();
+        for (prefix, list) in [
+            ("@opaque(", &mut markers.opaque),
+            ("@pure(", &mut markers.pure),
+        ] {
+            if let Some(rest) = type_text.strip_prefix(prefix)
+                && let Some((names, rest)) = rest.split_once(')')
+                && rest.starts_with(char::is_whitespace)
+            {
+                let parameters = names
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|parameter| !parameter.is_empty())
+                    .map(str::to_owned);
+                list.get_or_insert_with(Vec::new).extend(parameters);
+                type_text = rest.trim_start();
+            }
+        }
+        if let Some(rest) = type_text.strip_prefix("@masked")
+            && rest.starts_with(char::is_whitespace)
+        {
+            markers.masked = true;
+            type_text = rest.trim_start();
+        } else if let Some(rest) = type_text.strip_prefix("@pure")
+            && rest.starts_with(char::is_whitespace)
+        {
+            markers.pure.get_or_insert_with(Vec::new);
+            type_text = rest.trim_start();
+        }
+        if type_text.len() == before {
             break;
         }
-        *marker = true;
-        type_text = rest.trim_start();
     }
     markers.type_text = type_text;
     markers
@@ -709,6 +755,8 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
         let markers = declaration_markers(type_text);
         type_text = markers.type_text;
         let masked = markers.masked;
+        let opaque = markers.opaque;
+        let pure_callbacks = markers.pure.unwrap_or_default();
         let Some(scheme) = lower_type_text(db, type_text) else {
             problems.push(StubProblem {
                 line,
@@ -732,6 +780,34 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
                 ),
             });
             continue;
+        }
+        let formals = match scheme.body.kind(db) {
+            TyKind::Function(function) => function
+                .named
+                .iter()
+                .map(|field| field.name.text(db))
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        for parameter in opaque.iter().flatten() {
+            if !formals.contains(&parameter.as_str()) {
+                problems.push(StubProblem {
+                    line,
+                    message: format!(
+                        "`@opaque({parameter})` on `{name}` names no parameter of its function type."
+                    ),
+                });
+            }
+        }
+        for parameter in &pure_callbacks {
+            if !formals.contains(&parameter.as_str()) {
+                problems.push(StubProblem {
+                    line,
+                    message: format!(
+                        "`@pure({parameter})` on `{name}` names no parameter of its function type."
+                    ),
+                });
+            }
         }
         let mut unknown = Vec::new();
         collect_unknown_nominals(db, scheme.body, &is_known, &mut unknown);

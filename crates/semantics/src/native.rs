@@ -23,8 +23,8 @@ use {
         naming::{BindingKind, ItemNaming},
         stubs::{is_native_function, is_ry_type},
         types::{
-            Atomic, Constraint, FrameKind, FunctionType, Name, NativeScalar, Ty, TyKind,
-            TypeScheme, array_element, dict_entries,
+            Atomic, Constraint, FunctionType, Name, NativeScalar, Ty, TyKind, TypeScheme,
+            array_element, dict_entries,
         },
     },
     rustc_hash::FxHashSet,
@@ -636,7 +636,7 @@ fn side<'db>(
                 Side::R
             }
         }
-        TyKind::Frame(FrameKind::DataTable, _) => Side::R,
+        TyKind::Frame(kind, _) if kind.class().is_some() => Side::R,
         TyKind::Frame(..) => Side::Ry,
         TyKind::Function(function) => all(
             &mut function
@@ -1795,7 +1795,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             TyKind::NativeTuple(_) => 34,
             TyKind::Tag(..) | TyKind::OtherTags => 35,
             TyKind::Union(_) if !self.is_mixed_union(ty) => 35,
-            TyKind::Frame(kind, _) if *kind != FrameKind::DataTable => 36,
+            TyKind::Frame(kind, _) if kind.class().is_none() => 36,
             TyKind::Named(name, _) => match name.text(db) {
                 "Expr" => 36,
                 "List" => 37,

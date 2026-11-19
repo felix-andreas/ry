@@ -144,11 +144,17 @@ fn rendered_schemes(db: &RootDatabase, file: SourceFile) -> Vec<(String, String,
     schemes
 }
 
-/// Ordinary comments may interleave with a multi-line `#:` block, so the whole run counts.
+/// Ordinary comments may interleave with a multi-line `#:` block, so the whole run counts, and
+/// a block may start past a `;` on the line of the statement before.
 fn already_annotated(text: &str, line_start: usize) -> bool {
-    text[..line_start]
-        .lines()
-        .rev()
-        .take_while(|line| line.trim_start().starts_with('#'))
-        .any(|line| line.trim_start().starts_with("#:"))
+    let mut lines = text[..line_start].lines().rev().peekable();
+    while let Some(line) = lines.next_if(|line| line.trim_start().starts_with('#')) {
+        if line.trim_start().starts_with("#:") {
+            return true;
+        }
+    }
+    lines.next().is_some_and(|line| {
+        line.split_once(';')
+            .is_some_and(|(_, rest)| rest.trim_start().starts_with("#:"))
+    })
 }

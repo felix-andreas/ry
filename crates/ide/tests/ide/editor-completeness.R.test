@@ -295,7 +295,7 @@ hint @38 -> T
 #---- base_data_frame_hover
 fra$0me <- data.frame(region = c("eu", "us"), units = c(3L, 5L))
 #++++
-hover 0..5: frame: data.frame
+hover 0..5: frame: data.frame{region: character[], units: integer[]}
 hover-definition: global 0..5
 definition 0..5
 references: 0..5*
@@ -303,11 +303,11 @@ rename: 1 edit(s)
 type-definition: stub source base at `data.frame`
 signature: none
 action: Add inferred type annotation for `frame`
-  edit 5..5 -> ": data.frame"
+  edit 5..5 -> ": data.frame{region: character[], units: integer[]}"
 action: Add inferred type annotations for the whole file
-  edit 5..5 -> ": data.frame"
+  edit 5..5 -> ": data.frame{region: character[], units: integer[]}"
 completion (128+): frame, format.data.frame, xtfrm.data.frame, DataFrame, DataFrame.columns, DataFrame.copy, DataFrame.filter, DataFrame.group_by
-hint @5: data.frame
+hint @5: data.frame{region: character[], units: integer[]}
 
 #---- base_matrix_hover
 gr$0id <- matrix(0, nrow = 2L, ncol = 2L)
@@ -677,6 +677,8 @@ references: 42..47*, 154..159
 rename: 2 edit(s)
 signature: fn()
 parameters:
+action: Add inferred type annotations for the whole file
+  edit 60..60 -> " -> character"
 completion (1): greet
 
 #---- field_record
@@ -732,6 +734,8 @@ action: Add inferred type annotation for `fit`
   edit 3..3 -> ": double"
 action: Add inferred type annotations for the whole file
   edit 3..3 -> ": double"
+  edit 32..32 -> ": double"
+  edit 33..33 -> " -> double"
 completion (1): root
 hint @3: double
 hint @41interval =
@@ -845,11 +849,11 @@ type-definition: stub source base at `data.frame`
 signature: fn(...: Any, [row.names]: Any, [check.rows]: logical, [check.names]: logical, [fix.empty.names]: logical, [stringsAsFactors]: logical) -> data.frame
 parameters: ...: Any | [row.names]: Any | [check.rows]: logical | [check.names]: logical | [fix.empty.names]: logical | [[stringsAsFactors]: logical]
 action: Add inferred type annotation for `df`
-  edit 2..2 -> ": data.frame"
+  edit 2..2 -> ": data.frame{x: double[]}"
 action: Add inferred type annotations for the whole file
-  edit 2..2 -> ": data.frame"
+  edit 2..2 -> ": data.frame{x: double[]}"
 completion (2): stringsAsFactors, default.stringsAsFactors
-hint @2: data.frame
+hint @2: data.frame{x: double[]}
 
 #---- field_self_reassigned
 f <- function() {

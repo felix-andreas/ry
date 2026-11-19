@@ -47,8 +47,8 @@ expect_s3_class : <T> fn(object: T, class: Any, [exact]: logical) -> T
 expect_s4_class : <T> fn(object: T, class: Any) -> T
 expect_is : <T> fn(object: T, class: Any, [info]: Any, [label]: Any) -> T
 expect_vector : <T> fn(object: T, [ptype]: Any, [size]: Any) -> T
-expect_visible : <T> fn(object: T, [label]: Any) -> T
-expect_invisible : <T> fn(call: T, [label]: Any) -> T
+expect_visible : @opaque(object) <T> fn(object: T, [label]: Any) -> T
+expect_invisible : @opaque(call) <T> fn(call: T, [label]: Any) -> T
 
 # Numeric and string expectations.
 expect_lt : <T> fn(object: T, expected: Any, [label]: Any, [expected.label]: Any) -> T
@@ -57,18 +57,18 @@ expect_gt : <T> fn(object: T, expected: Any, [label]: Any, [expected.label]: Any
 expect_gte : <T> fn(object: T, expected: Any, [label]: Any, [expected.label]: Any) -> T
 expect_match : <T> fn(object: T, regexp: Any, [perl]: logical, [fixed]: logical, ...: Any, [all]: logical, [info]: Any, [label]: Any) -> T
 expect_no_match : <T> fn(object: T, regexp: Any, [perl]: logical, [fixed]: logical, ...: Any, [all]: logical, [info]: Any, [label]: Any) -> T
-expect_output : <T> fn(object: T, [regexp]: Any, ...: Any, [info]: Any, [label]: Any) -> T
+expect_output : @opaque(object) <T> fn(object: T, [regexp]: Any, ...: Any, [info]: Any, [label]: Any) -> T
 
 # Condition expectations. `regexp` and `class` select which condition matches.
-expect_error : <T> fn(object: T, [regexp]: Any, [class]: Any, ...: Any, [inherit]: logical, [info]: Any, [label]: Any) -> T
-expect_warning : <T> fn(object: T, [regexp]: Any, [class]: Any, ...: Any, [inherit]: logical, [all]: logical, [info]: Any, [label]: Any) -> T
-expect_message : <T> fn(object: T, [regexp]: Any, [class]: Any, ...: Any, [inherit]: logical, [all]: logical, [info]: Any, [label]: Any) -> T
-expect_condition : <T> fn(object: T, [regexp]: Any, [class]: Any, ...: Any, [inherit]: logical, [info]: Any, [label]: Any) -> T
-expect_no_error : <T> fn(object: T, ...: Any, [message]: Any, [class]: Any) -> T
-expect_no_warning : <T> fn(object: T, ...: Any, [message]: Any, [class]: Any) -> T
-expect_no_message : <T> fn(object: T, ...: Any, [message]: Any, [class]: Any) -> T
-expect_no_condition : <T> fn(object: T, ...: Any, [message]: Any, [class]: Any) -> T
-expect_silent : <T> fn(object: T) -> T
+expect_error : @opaque(object) <T> fn(object: T, [regexp]: Any, [class]: Any, ...: Any, [inherit]: logical, [info]: Any, [label]: Any) -> T
+expect_warning : @opaque(object) <T> fn(object: T, [regexp]: Any, [class]: Any, ...: Any, [inherit]: logical, [all]: logical, [info]: Any, [label]: Any) -> T
+expect_message : @opaque(object) <T> fn(object: T, [regexp]: Any, [class]: Any, ...: Any, [inherit]: logical, [all]: logical, [info]: Any, [label]: Any) -> T
+expect_condition : @opaque(object) <T> fn(object: T, [regexp]: Any, [class]: Any, ...: Any, [inherit]: logical, [info]: Any, [label]: Any) -> T
+expect_no_error : @opaque(object) <T> fn(object: T, ...: Any, [message]: Any, [class]: Any) -> T
+expect_no_warning : @opaque(object) <T> fn(object: T, ...: Any, [message]: Any, [class]: Any) -> T
+expect_no_message : @opaque(object) <T> fn(object: T, ...: Any, [message]: Any, [class]: Any) -> T
+expect_no_condition : @opaque(object) <T> fn(object: T, ...: Any, [message]: Any, [class]: Any) -> T
+expect_silent : @opaque(object) <T> fn(object: T) -> T
 
 # Snapshot expectations: value-dependent, so the payload stays Any.
 expect_snapshot : Any

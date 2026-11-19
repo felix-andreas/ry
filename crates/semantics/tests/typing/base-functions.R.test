@@ -303,7 +303,7 @@ rownames(df) <- df$name
 dim(b13) <- c(4, 2)
 #++++
 m: matrix
-df: data.frame
+df: data.frame{id: integer[], name: character[]}
 b1: Any
 b2: matrix
 b3: Any
@@ -329,7 +329,7 @@ b22: Any
 b23: data.frame
 b24: data.frame
 character[]
-Unknown
+character[]
 double[]
 
 #---- control

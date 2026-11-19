@@ -10,16 +10,24 @@
 use {
     crate::{
         Db, Item,
+        check::{ArgumentShape, ArgumentTarget, argument_targets},
         hir::{
-            AssignSpelling, BinaryOperator, ExprId, ExpressionKind, Module, Symbol, UnaryOperator,
+            Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind, Module,
+            Span, Symbol, UnaryOperator,
         },
         inline_annotations_enabled, item_hir, item_syntax_flags,
         metadata::namespace_active,
         name_layer,
         naming::{base_masking_family, data_argument_flags},
         stubs::{QUALIFIED_ONLY_NAMESPACES, StubSources, stubs},
+        types::TyKind,
     },
-    rustc_hash::FxHashSet,
+    bumpalo::Bump,
+    rustc_hash::{FxHashMap, FxHashSet},
+    std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    },
     syntax::{TextRange, native_values::object_system_function},
 };
 
@@ -50,6 +58,13 @@ pub enum Effect {
     },
     /// A call whose function is computed, so nothing can say whether it is pure.
     DynamicCall,
+    /// A function passed to a parameter that `caller` calls (`lapply`'s `FUN`), when the
+    /// function is not declared pure. `function` is `None` when the argument computes it.
+    Callback {
+        caller: String,
+        function: Option<String>,
+        origin: CalleeOrigin,
+    },
     Loop,
     /// `<<-`, which assigns outside the package namespace.
     SuperAssignment,
@@ -86,7 +101,7 @@ pub fn item_top_level<'db>(db: &'db dyn Db, item: Item<'db>) -> TopLevel {
     let Some(root) = module.root else {
         return TopLevel::Definition;
     };
-    Classifier { db, module }.statement(root)
+    Classifier::new(db, module).statement(root)
 }
 
 /// Whether running the item has no effect but bindings, registrations and the loading of other
@@ -106,7 +121,7 @@ pub fn item_effect_free<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
             let Some(root) = module.root else {
                 return true;
             };
-            Classifier { db, module }.inert(root)
+            Classifier::new(db, module).inert(root)
         }
     }
 }
@@ -236,56 +251,91 @@ fn generator_part(module: &Module, id: ExprId) -> bool {
 }
 
 /// Whether calling `package::name`, or a bare `name`, is declared to have no effect, and
-/// where the declaration would live. A project definition shadows a stub's.
-pub fn callee_purity(db: &dyn Db, package: Option<&str>, name: &str) -> (bool, CalleeOrigin) {
+/// where the declaration would live. A project definition shadows a stub's. A pure function
+/// comes with the parameters whose function arguments must be pure too (`@pure(FUN)`), empty
+/// when it is pure whatever it is passed.
+pub fn callee_purity<'db>(
+    db: &'db dyn Db,
+    package: Option<&str>,
+    name: &str,
+) -> (Option<&'db [String]>, CalleeOrigin) {
     if package.is_none() {
         let definitions = name_layer(db, Symbol::new(name), false);
         if !definitions.conditional_writers.is_empty() {
-            return (false, CalleeOrigin::Conditional);
+            return (None, CalleeOrigin::Conditional);
         }
         if let Some(winner) = definitions.winner {
-            return (item_declared_pure(db, winner), CalleeOrigin::Project);
+            return (
+                item_declared_pure(db, winner).then_some(&[]),
+                CalleeOrigin::Project,
+            );
         }
         if INTRINSIC_PURE.contains(&name) {
-            return (true, CalleeOrigin::Other);
+            return (Some(&[]), CalleeOrigin::Other);
         }
     }
-    let pure = stub_namespace_declares_pure(db, package, name);
+    let pure = stubs(db)
+        .zip(stub_namespace(db, package, name))
+        .and_then(|(library, namespace)| {
+            library
+                .pure_by_namespace
+                .get(namespace)
+                .and_then(|names| names.get(name))
+                .map(Vec::as_slice)
+        });
     (pure, CalleeOrigin::Other)
 }
 
-/// A qualified call asks the named namespace. A bare call resolves to the namespace whose
-/// declaration of the name wins, which must be reachable without a qualifier, so a later
-/// package's undecorated redeclaration of the name never clears another package's marker.
-fn stub_namespace_declares_pure(db: &dyn Db, package: Option<&str>, name: &str) -> bool {
-    let (Some(library), Some(sources)) = (stubs(db), StubSources::try_get(db)) else {
-        return false;
-    };
-    let namespace = match package {
-        Some(package) => package,
-        None => {
-            let Some(declaration) = library.declarations.get(name) else {
-                return false;
-            };
-            let Some((namespace, _)) = sources.sources(db).get(declaration.source_index) else {
-                return false;
-            };
-            if QUALIFIED_ONLY_NAMESPACES.contains(&namespace.as_str())
-                && !namespace_active(db, namespace)
-            {
-                return false;
-            }
-            namespace.as_str()
-        }
-    };
-    library
-        .pure_by_namespace
-        .get(namespace)
-        .is_some_and(|names| names.contains(name))
+/// The namespace whose stub declares what a call of `package::name`, or a bare `name`, calls.
+/// A qualified call names it. A bare call resolves to the namespace whose declaration of the
+/// name wins, which must be reachable without a qualifier, so a later package's undecorated
+/// redeclaration of the name never clears another package's marker.
+fn stub_namespace<'db>(db: &'db dyn Db, package: Option<&'db str>, name: &str) -> Option<&'db str> {
+    if let Some(package) = package {
+        return Some(package);
+    }
+    let (library, sources) = stubs(db).zip(StubSources::try_get(db))?;
+    let declaration = library.declarations.get(name)?;
+    let (namespace, _) = sources.sources(db).get(declaration.source_index)?;
+    if QUALIFIED_ONLY_NAMESPACES.contains(&namespace.as_str()) && !namespace_active(db, namespace) {
+        return None;
+    }
+    Some(namespace.as_str())
 }
 
-/// Recognized by the checker or the parser rather than declared by a stub.
-const INTRINSIC_PURE: &[&str] = &["c", "list", "switch", "expression", "alist"];
+/// Recognized by the checker or the parser rather than declared by a stub, including the
+/// operators a call names in backticks, such as `Reduce(\`+\`, values)`.
+const INTRINSIC_PURE: &[&str] = &[
+    "c",
+    "list",
+    "switch",
+    "expression",
+    "alist",
+    "return",
+    "+",
+    "-",
+    "*",
+    "/",
+    "^",
+    "%%",
+    "%/%",
+    "==",
+    "!=",
+    "<",
+    ">",
+    "<=",
+    ">=",
+    "&",
+    "|",
+    "&&",
+    "||",
+    "!",
+    "[",
+    "[[",
+    "$",
+    "(",
+    ":",
+];
 
 /// Calls that load or attach a package, which a package file may make at its top level.
 const IMPORTS: &[&str] = &[
@@ -313,9 +363,72 @@ const QUOTING: &[&str] = &["quote", "expression", "alist", "substitute"];
 struct Classifier<'a> {
     db: &'a dyn Db,
     module: &'a Module,
+    /// The local function literals whose call is being judged, so a recursive call is judged
+    /// by the walk of its body already under way.
+    active: RefCell<Vec<ExprId>>,
+    /// How many more local calls may be judged by walking the callee's body. Each call walks
+    /// it again, so a chain of functions calling each other twice would take exponential time;
+    /// past the budget a call counts as an effect.
+    call_budget: Cell<u32>,
 }
 
-impl Classifier<'_> {
+/// What `local()` or a function body binds: assignments there touch only its environment.
+#[derive(Clone, Default)]
+struct LocalScope {
+    /// Every name bound in this environment or an enclosing local one.
+    names: FxHashSet<Symbol>,
+    /// The visible names bound to a function literal, with the depth of the environment that
+    /// bound it. Under lexical scoping a call runs the body against that environment as it
+    /// stands at the call, so the call, not the binding, is judged.
+    functions: FxHashMap<Symbol, (ExprId, u32)>,
+    depth: u32,
+    /// The enclosing environment as it stood when this one was entered. Code here cannot change
+    /// it except through `<<-`, which is an effect of its own.
+    outer: Option<Rc<LocalScope>>,
+}
+
+const LOCAL_CALL_BUDGET: u32 = 256;
+
+/// A new environment enclosed by `scope`, or the outermost local one.
+fn enter(scope: &Option<LocalScope>) -> LocalScope {
+    match scope {
+        Some(scope) => LocalScope {
+            names: scope.names.clone(),
+            functions: scope.functions.clone(),
+            depth: scope.depth + 1,
+            outer: Some(Rc::new(scope.clone())),
+        },
+        None => LocalScope::default(),
+    }
+}
+
+/// Binds `name` in `scope` to something other than a function literal.
+fn rebind(scope: &mut LocalScope, name: Symbol) {
+    scope.names.insert(name);
+    scope.functions.remove(&name);
+}
+
+/// The environment at `depth` that encloses `scope`, or `scope` itself.
+fn ancestor(scope: &LocalScope, depth: u32) -> &LocalScope {
+    let mut current = scope;
+    while current.depth > depth
+        && let Some(outer) = &current.outer
+    {
+        current = outer;
+    }
+    current
+}
+
+impl<'a> Classifier<'a> {
+    fn new(db: &'a dyn Db, module: &'a Module) -> Self {
+        Classifier {
+            db,
+            module,
+            active: RefCell::new(Vec::new()),
+            call_budget: Cell::new(LOCAL_CALL_BUDGET),
+        }
+    }
+
     fn statement(&self, id: ExprId) -> TopLevel {
         let expression = self.module.expression(id);
         match &expression.kind {
@@ -479,7 +592,7 @@ impl Classifier<'_> {
 
     /// The first effect evaluating `id` would have. `locals` is `Some` inside `local()`, where
     /// assignments and loops touch only the local environment; it holds the names bound there.
-    fn effect(&self, id: ExprId, locals: &mut Option<FxHashSet<Symbol>>) -> Option<TopLevel> {
+    fn effect(&self, id: ExprId, locals: &mut Option<LocalScope>) -> Option<TopLevel> {
         let expression = self.module.expression(id);
         let found = |effect: Effect| {
             Some(TopLevel::Effect {
@@ -499,25 +612,42 @@ impl Classifier<'_> {
                 let Some((package, name)) = self.callee_name(*callee) else {
                     return found(Effect::DynamicCall);
                 };
-                let local = package.is_none()
-                    && locals
-                        .as_ref()
-                        .is_some_and(|names| names.contains(&Symbol::new(name)));
-                if local {
-                    return found(Effect::Call {
-                        callee: name.to_owned(),
-                        origin: CalleeOrigin::Local,
-                    });
-                }
-                let (pure, origin) = callee_purity(self.db, package, name);
-                if !pure {
-                    return found(Effect::Call {
-                        callee: name.to_owned(),
-                        origin,
-                    });
-                }
+                let symbol = Symbol::new(name);
+                let local = locals
+                    .as_ref()
+                    .filter(|scope| package.is_none() && scope.names.contains(&symbol));
+                let callbacks = match local {
+                    Some(scope) if !self.local_call_has_effect(symbol, scope) => &[][..],
+                    Some(_) => {
+                        return found(Effect::Call {
+                            callee: name.to_owned(),
+                            origin: CalleeOrigin::Local,
+                        });
+                    }
+                    None => match callee_purity(self.db, package, name) {
+                        (Some(callbacks), _) => callbacks,
+                        (None, origin) => {
+                            return found(Effect::Call {
+                                callee: name.to_owned(),
+                                origin,
+                            });
+                        }
+                    },
+                };
                 if QUOTING.contains(&name) {
                     return None;
+                }
+                if !callbacks.is_empty()
+                    && let Some(effect) = self.callback_effect(
+                        expression.range,
+                        package,
+                        name,
+                        callbacks,
+                        *arguments,
+                        locals,
+                    )
+                {
+                    return Some(effect);
                 }
                 // A masked argument runs in an environment made from the data, so its
                 // assignments touch only that environment, as inside `local()`.
@@ -531,7 +661,7 @@ impl Classifier<'_> {
                             if data_argument {
                                 self.effect(value, locals)
                             } else {
-                                self.effect(value, &mut Some(locals.clone().unwrap_or_default()))
+                                self.effect(value, &mut Some(enter(locals)))
                             }
                         },
                     );
@@ -547,8 +677,8 @@ impl Classifier<'_> {
                 lhs,
                 rhs,
             } => {
-                let (pure, origin) = callee_purity(self.db, None, name.as_str());
-                if !pure {
+                let (purity, origin) = callee_purity(self.db, None, name.as_str());
+                if purity.is_none_or(|callbacks| !callbacks.is_empty()) {
                     return found(Effect::Call {
                         callee: name.as_str().to_owned(),
                         origin,
@@ -585,26 +715,44 @@ impl Classifier<'_> {
                 let target_name = self.root_name(*target);
                 match (spelling, locals.as_mut()) {
                     (AssignSpelling::Super, _) => found(Effect::SuperAssignment),
-                    (AssignSpelling::Destructure, Some(names)) => {
-                        self.pattern_names(*target, names);
+                    (AssignSpelling::Destructure, Some(scope)) => {
+                        let mut bound = FxHashSet::default();
+                        self.pattern_names(*target, &mut bound);
+                        for name in bound {
+                            rebind(scope, name);
+                        }
                         self.effect(*value, locals)
                     }
                     (AssignSpelling::Destructure, None) => {
                         found(Effect::NestedAssignment { target: None })
                     }
-                    (AssignSpelling::Local | AssignSpelling::Equals, Some(names)) => {
+                    (AssignSpelling::Local | AssignSpelling::Equals, Some(scope)) => {
                         match &self.module.expression(*target).kind {
                             ExpressionKind::NameRef(name) => {
-                                names.insert(*name);
+                                if matches!(
+                                    self.module.expression(*value).kind,
+                                    ExpressionKind::Function { .. }
+                                ) {
+                                    scope.names.insert(*name);
+                                    scope.functions.insert(*name, (*value, scope.depth));
+                                } else {
+                                    rebind(scope, *name);
+                                }
                             }
-                            // A replacement changes a value only `local()` can see.
-                            _ if target_name.is_some_and(|name| names.contains(&name)) => {}
+                            // A replacement changes a value only `local()` can see, and copies
+                            // it into this environment first, so `body(f) <- ...` binds a new
+                            // `f` here.
+                            _ if let Some(name) = target_name
+                                && scope.names.contains(&name) =>
+                            {
+                                rebind(scope, name);
+                            }
                             // R copies an outer vector or list into `local()`'s environment
                             // before replacing in it, so only an environment would change.
                             _ if let Some(name) = target_name
                                 && self.outer_value_is_copied(name) =>
                             {
-                                names.insert(name);
+                                rebind(scope, name);
                             }
                             _ => {
                                 return found(Effect::Replacement {
@@ -623,10 +771,12 @@ impl Classifier<'_> {
                 }
             }
             ExpressionKind::For { variable, .. } => {
-                let Some(names) = locals.as_mut() else {
+                let Some(scope) = locals.as_mut() else {
                     return found(Effect::Loop);
                 };
-                names.extend(variable.map(|variable| self.module.name(variable)));
+                if let Some(variable) = variable {
+                    rebind(scope, self.module.name(*variable));
+                }
                 self.children_effect(id, locals)
             }
             ExpressionKind::While { .. } | ExpressionKind::Repeat { .. } => {
@@ -635,19 +785,156 @@ impl Classifier<'_> {
                 }
                 self.children_effect(id, locals)
             }
-            ExpressionKind::Local { body } => {
-                let mut inner = Some(locals.clone().unwrap_or_default());
-                self.effect(*body, &mut inner)
-            }
+            ExpressionKind::Local { body } => self.effect(*body, &mut Some(enter(locals))),
             _ => self.children_effect(id, locals),
         }
     }
 
-    fn children_effect(
+    /// The first effect of calling the function literal `function` from the environment
+    /// `locals`: its formals and assignments bind in a new one, where R also evaluates the
+    /// defaults. `None` when `function` is not a literal or has none.
+    fn function_effect(&self, function: ExprId, locals: &Option<LocalScope>) -> Option<TopLevel> {
+        let ExpressionKind::Function { parameters, body } = &self.module.expression(function).kind
+        else {
+            return None;
+        };
+        let mut scope = Some(enter(locals));
+        if let Some(scope) = scope.as_mut() {
+            for parameter in &self.module[parameters] {
+                rebind(scope, parameter.name);
+            }
+        }
+        self.module[parameters]
+            .iter()
+            .filter_map(|parameter| parameter.default)
+            .find_map(|default| self.effect(default, &mut scope))
+            .or_else(|| self.effect(*body, &mut scope))
+    }
+
+    /// Whether calling the local name `name` here may have an effect: it is bound to something
+    /// other than a function literal, or the literal's body has one in the environment that
+    /// bound it, as that environment stands now.
+    fn local_call_has_effect(&self, name: Symbol, scope: &LocalScope) -> bool {
+        let Some(&(function, depth)) = scope.functions.get(&name) else {
+            return true;
+        };
+        if self.active.borrow().contains(&function) {
+            return false;
+        }
+        let Some(budget) = self.call_budget.get().checked_sub(1) else {
+            return true;
+        };
+        self.call_budget.set(budget);
+        self.active.borrow_mut().push(function);
+        let effect = self.function_effect(function, &Some(ancestor(scope, depth).clone()));
+        self.active.borrow_mut().pop();
+        effect.is_some()
+    }
+
+    /// The first effect of the functions a call of `package::caller` is passed at the parameters
+    /// that `@pure(...)` names, which the caller runs. The arguments are matched against the
+    /// winning stub's parameters, so when that stub comes from another namespace than the
+    /// purity, or declares no function, the call itself counts as the effect.
+    fn callback_effect(
         &self,
-        id: ExprId,
-        locals: &mut Option<FxHashSet<Symbol>>,
+        range: TextRange,
+        package: Option<&str>,
+        caller: &str,
+        callbacks: &[String],
+        arguments: Span<Argument>,
+        locals: &mut Option<LocalScope>,
     ) -> Option<TopLevel> {
+        let namespace = stub_namespace(self.db, package, caller);
+        let function = stubs(self.db)
+            .filter(|_| package.is_none() || stub_namespace(self.db, None, caller) == namespace)
+            .and_then(|library| library.schemes.get(caller)?.first())
+            .and_then(|scheme| match scheme.body.kind(self.db) {
+                TyKind::Function(function) => Some(function),
+                _ => None,
+            });
+        let Some(function) = function else {
+            return Some(TopLevel::Effect {
+                range,
+                effect: Effect::Call {
+                    callee: caller.to_owned(),
+                    origin: CalleeOrigin::Other,
+                },
+            });
+        };
+        let arguments = &self.module[arguments];
+        let arena = Bump::new();
+        let shapes = arena.alloc_slice_fill_iter(arguments.iter().map(|argument| ArgumentShape {
+            name: self.module.argument_name(argument).map(Symbol::as_str),
+            forwards_dots: false,
+        }));
+        let targets = argument_targets(self.db, &arena, function, shapes);
+        // purrr reads a string or a number passed as `.f` as an element to extract.
+        let extracts = namespace == Some("purrr");
+        arguments
+            .iter()
+            .zip(targets.iter())
+            .filter(|(_, target)| {
+                matches!(target, Some(ArgumentTarget::Named(index))
+                if function.named.get(*index).is_some_and(|parameter| {
+                    callbacks.iter().any(|callback| callback == parameter.name.text(self.db))
+                }))
+            })
+            .filter_map(|(argument, _)| argument.value)
+            .find_map(|value| self.callable_effect(caller, value, extracts, locals))
+    }
+
+    /// The first effect of calling `value`, a function a call of `caller` is passed.
+    fn callable_effect(
+        &self,
+        caller: &str,
+        value: ExprId,
+        extracts: bool,
+        locals: &mut Option<LocalScope>,
+    ) -> Option<TopLevel> {
+        let expression = self.module.expression(value);
+        let callback = |function: Option<&str>, origin: CalleeOrigin| {
+            Some(TopLevel::Effect {
+                range: expression.range,
+                effect: Effect::Callback {
+                    caller: caller.to_owned(),
+                    function: function.map(str::to_owned),
+                    origin,
+                },
+            })
+        };
+        let named = |package: Option<&str>, name: &str| match callee_purity(self.db, package, name)
+        {
+            (Some([]), _) => None,
+            (_, origin) => callback(Some(name), origin),
+        };
+        match &expression.kind {
+            ExpressionKind::Function { .. } => self.function_effect(value, locals),
+            ExpressionKind::Paren(inner) => self.callable_effect(caller, *inner, extracts, locals),
+            ExpressionKind::NameRef(name) => {
+                match locals.as_ref().filter(|scope| scope.names.contains(name)) {
+                    Some(scope) if !self.local_call_has_effect(*name, scope) => None,
+                    Some(_) => callback(Some(name.as_str()), CalleeOrigin::Local),
+                    None => named(None, name.as_str()),
+                }
+            }
+            ExpressionKind::Namespace {
+                package: Some(package),
+                name: Some(name),
+                ..
+            } => named(Some(package.as_str()), name.as_str()),
+            ExpressionKind::Literal(LiteralKind::String(_)) if extracts => None,
+            ExpressionKind::Literal(LiteralKind::String(text)) => named(None, &self.module[*text]),
+            ExpressionKind::Literal(_) if extracts => None,
+            // purrr's `~ .x * 2` is a function whose body is the formula's right side.
+            ExpressionKind::Unary {
+                operator: UnaryOperator::Tilde,
+                operand,
+            } if extracts => self.effect(*operand, &mut Some(enter(locals))),
+            _ => callback(None, CalleeOrigin::Other),
+        }
+    }
+
+    fn children_effect(&self, id: ExprId, locals: &mut Option<LocalScope>) -> Option<TopLevel> {
         let mut found = None;
         self.module.for_each_child(id, |child| {
             if found.is_none() {

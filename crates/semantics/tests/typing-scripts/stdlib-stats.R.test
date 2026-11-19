@@ -106,24 +106,37 @@ rpois(3, 2.5)
 integer[]
 
 #==== stats_distributions
-#---- pnorm_is_double_vector
+#---- pnorm_claims_a_scalar_double
 pnorm(1.96)
 #++++
-double[]
+double
 
 #---- qnorm_accepts_tail_controls
 qnorm(0.975, lower.tail = FALSE)
 #++++
-double[]
+double
 
 #---- dnorm_accepts_mean_and_sd
 dnorm(0, mean = 0, sd = 1)
 #++++
-double[]
+double
 
-#---- dbinom_is_double_vector
+#---- dbinom_claims_a_scalar_double
 dbinom(3, 10, 0.5, log = TRUE)
 #++++
+double
+
+#---- a_p_value_fits_a_double_and_a_vector
+# Elementwise over every parameter, so a vector in gives a vector out, and the scalar claim
+# coerces into a `double[]` position.
+#: fn(q: double) -> double
+p_value <- function(q) pchisq(q, df = 1)
+#: fn(q: double[]) -> double[]
+p_values <- function(q) pnorm(q)
+c(p_value(3.84), p_values(c(1, 2)))
+#++++
+p_value: fn(q: double) -> double
+p_values: fn(q: double[]) -> double[]
 double[]
 
 #==== stats_models
