@@ -9366,6 +9366,24 @@ impl<'db, 'a> Checker<'db, 'a> {
         for operand in [&left, &right] {
             if let NumericOperand::Flexible(ty) = operand {
                 match flexible {
+                    // R recycles the shorter operand, so a scalar bound on one side (`2:r`
+                    // makes `r` scalar) says nothing of the other: ks's `x / sigma^r` keeps `x`
+                    // and `sigma` open to vectors. The open side is the result's type.
+                    Some(existing)
+                        if self.scalar_bound(existing) != self.scalar_bound(*ty)
+                            && [existing, *ty].into_iter().all(|side| {
+                                matches!(
+                                    self.table.variable_constraint(self.db, side),
+                                    None | Some(Constraint::Numeric | Constraint::ScalarNumeric)
+                                )
+                            }) =>
+                    {
+                        self.constrain_numeric_flexible(range, existing);
+                        self.constrain_numeric_flexible(range, *ty);
+                        if self.scalar_bound(existing) {
+                            flexible = Some(*ty);
+                        }
+                    }
                     Some(existing) => {
                         if let Err(error) = self.table.unify(self.db, existing, *ty) {
                             self.report_unify(range, error);
@@ -9789,6 +9807,15 @@ impl<'db, 'a> Checker<'db, 'a> {
             TyKind::Any | TyKind::Unknown => NumericOperand::AnyUnknown,
             _ => NumericOperand::Invalid,
         }
+    }
+
+    /// Whether the type is a variable that a scalar use bounded (`1:n`).
+    fn scalar_bound(&self, ty: Ty<'db>) -> bool {
+        let resolved = self.table.shallow_resolve(self.db, ty);
+        matches!(
+            self.table.variable_constraint(self.db, resolved),
+            Some(Constraint::ScalarNumeric)
+        )
     }
 
     /// An annotation declares parameter types, never the parameter list: R matches

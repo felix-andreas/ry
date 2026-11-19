@@ -2458,3 +2458,15 @@ bench <- function(n, timefun = bit::repeat.time) {
 #++++
 bench: <T, U> fn(n: T, [timefun]: U) -> Unknown
 31..47 warning[unresolved] unknown package namespace `bit`.
+
+#---- a_scalar_bound_does_not_spread_through_arithmetic
+deriv <- function(x, mu = 0, sigma = 1, order = 0) {
+  arg <- (x - mu) / sigma
+  out <- 1
+  if (order >= 2) for (i in 2:order) out <- arg * out
+  out / sigma^order
+}
+grid <- function(n) deriv(seq(0, 1, length.out = n), order = 2)
+#++++
+deriv: <T: numeric, U: scalar numeric> fn(x: T, [mu]: T, [sigma]: T, [order]: U) -> double
+grid: <T> fn(n: T) -> double
