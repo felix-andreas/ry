@@ -193,6 +193,16 @@ fi
 base_r "$base" "$optimized/$rcmd" "$optimized/$library"
 
 if [ -n "$bolt" ]; then
+	# BOLT takes every symbol containing `.cold` or `.warm` for a split-off fragment and exits when
+	# it finds no parent. Rust writes a generic argument's path with `..`, so a closure inside a
+	# function named `warm...` or `cold...` makes such a name; list them all before BOLT stops at one.
+	fragments=$(nm --defined-only "$optimized/$library" | awk '{print $NF}' |
+		grep -E '\.(cold|warm)' | grep -v -E '\.(cold|warm)(\.[0-9]+)?$' || true)
+	if [ -n "$fragments" ]; then
+		echo "error: BOLT would take these symbols for split fragments; rename the function or module named cold... or warm... in each:" >&2
+		echo "$fragments" >&2
+		exit 1
+	fi
 	echo "optimize: BOLT instrumentation and training" >&2
 	mkdir -p "$work/bolt-instrumented"
 	cp "$work/runtime/"* "$work/bolt-instrumented/"
