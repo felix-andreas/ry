@@ -145,6 +145,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Strict mode reports where `Unknown` enters, not every type it reaches
 - An all-`logical` call of a numeric function keeps `logical` (settled)
 - A package's own `pkg::name` reads are checked against `NAMESPACE` and `data/` (settled)
+- A wrapper over a numeric overload set takes the `numeric` bound (settled)
 
 ## Editor and language server
 

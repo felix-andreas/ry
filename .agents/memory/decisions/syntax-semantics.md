@@ -2184,3 +2184,12 @@ Reading an item's range from `item_spans` made every edit re-lower every item of
 - A name the package defines gets the "fails once installed, export it or write `:::`" message
   rather than a respelling, because the intent is plainly that function.
 
+## A wrapper over a numeric overload set takes the `numeric` bound
+
+**Status:** settled (corpus, 44 CRAN packages and the three benchmark code bases: no new finding).
+
+- **Rule.** In `Checker::overloaded_call`, when the set's `Any` fallback is its only free fit and every specific candidate narrows a caller variable to number atoms (`numeric_operand_parts`), the variable takes `Constraint::Numeric`. A union parameter (`cumsum`'s `integer[] | logical[]`) bounds rather than binds, so the narrowing reads the bound.
+- **Why a fact, not a guess.** Fact-beats-guess keeps a parameter open because candidates disagree. Here they agree on "a number" and differ only in which one, and the constraint is the agreement. A class with an arithmetic method satisfies it, which keeps a user's S3 number-like class working.
+- **Number atoms, not the constraint.** `sweep`'s `matrix` candidate is admitted by the numeric constraint (`Arith.matrix`) yet takes a character matrix, so the test asks for atoms, and `max` (which takes `character`) imposes nothing.
+- **Known gap.** A class with only `Math.<class>` or `abs.<class>` methods and no arithmetic is rejected by an `abs` wrapper. `Math.` is not an arithmetic prefix because that set also drives operator dispatch.
+- **Not covered.** `sum` has no fallback and its candidates include `difftime` and `data.frame`, so a `sum` wrapper stays `fn(x: Unknown) -> Unknown`.

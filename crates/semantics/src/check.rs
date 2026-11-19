@@ -14348,6 +14348,64 @@ impl<'db, 'a> Checker<'db, 'a> {
             .map(|(_, (var, _))| *var)
     }
 
+    /// `function(x) abs(x)` fits `abs`'s `Any` fallback without narrowing `x`, so the free fit
+    /// would win and `x` stay unconstrained. When the fallback is the only free fit and every
+    /// specific candidate narrows a caller variable to a number atom, the call needs a number
+    /// there whatever candidate a caller picks, so the variable takes the `numeric` bound. A
+    /// class with an arithmetic method still satisfies it. `max`, whose candidates also take
+    /// `character`, imposes nothing.
+    fn bound_numeric_caller_variables(
+        &mut self,
+        caller_entries: &[(InferenceVar, Entry<'db>)],
+        fits: &[(usize, bool, Vec<Ty<'db>>)],
+        fit_results: &[Ty<'db>],
+    ) {
+        if fit_results.len() != fits.len()
+            || !fits.iter().any(|(_, free, _)| *free)
+            || fits
+                .iter()
+                .zip(fit_results)
+                .any(|((_, free, _), result)| *free && !self.all_any(&[*result]))
+        {
+            return;
+        }
+        let specific: Vec<&Vec<Ty<'db>>> = fits
+            .iter()
+            .filter(|(_, free, _)| !free)
+            .map(|(_, _, narrowing)| narrowing)
+            .collect();
+        if specific.is_empty() {
+            return;
+        }
+        for (position, (var, _)) in caller_entries.iter().enumerate() {
+            let numeric_everywhere = specific.iter().all(|narrowing| {
+                // A number atom, not a class that merely has arithmetic: `sweep`'s `matrix`
+                // candidate takes a character matrix too.
+                narrowing.get(position).is_some_and(|&narrowed| {
+                    let members = match narrowed.kind(self.db) {
+                        TyKind::Union(members) => &members[..],
+                        _ => std::slice::from_ref(&narrowed),
+                    };
+                    members
+                        .iter()
+                        .all(|&member| numeric_operand_parts(self.db, member).is_some())
+                })
+            });
+            if !numeric_everywhere {
+                continue;
+            }
+            let snapshot = self.table.snapshot();
+            if self
+                .table
+                .constrain(self.db, *var, Constraint::Numeric)
+                .is_err()
+            {
+                // A variable an earlier use made non-numeric keeps that finding to itself.
+                self.table.rollback(snapshot);
+            }
+        }
+    }
+
     /// A declared `<T>` passed to a shape-preserving overload set (see
     /// `preserved_caller_variable`) fits none of its candidates, because a rigid parameter
     /// refuses to narrow. Written back as an annotation, `<T> fn(values: T) -> T` for a
@@ -14596,11 +14654,17 @@ impl<'db, 'a> Checker<'db, 'a> {
                         }
                         let free = self.caller_variables_untouched(&caller_entries);
                         fit_results.push(self.table.resolve(self.db, function.ret));
+                        // A union parameter bounds the variable rather than binding it, and
+                        // that bound is what the candidate narrowed it to.
                         let narrowing = caller_entries
                             .iter()
-                            .map(|(var, _)| {
-                                self.table
-                                    .resolve(self.db, Ty::new(self.db, TyKind::Var(*var)))
+                            .map(|(var, _)| match self.table.entry(*var) {
+                                Entry::Unbound {
+                                    bound: Some(bound), ..
+                                } => self.table.resolve(self.db, *bound),
+                                _ => self
+                                    .table
+                                    .resolve(self.db, Ty::new(self.db, TyKind::Var(*var))),
                             })
                             .collect();
                         self.table.rollback(snapshot);
@@ -14687,6 +14751,9 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
                 return self.undecided_overload_result(id, call_arguments);
             }
+        }
+        if !unchecked_argument {
+            self.bound_numeric_caller_variables(&caller_entries, &fits, &fit_results);
         }
         if !unchecked_argument
             && let Some(var) = self.preserved_caller_variable(&caller_entries, &fits, &fit_results)

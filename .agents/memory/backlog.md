@@ -2705,28 +2705,6 @@ self-consistency checks.
 They remain content-blind in the sense the three injected bugs demonstrate. A uniformly wrong answer
 is deterministic, incremental and in-bounds.
 
-## Open: a stdlib wrapper loses all type information
-
-`function(x) abs(x)` infers `fn(x: T) -> Any`, and the same holds for `sum`, `cumsum` and every
-other overload set. Wrapping a standard-library numeric function in one of your own throws the types
-away. `sum` no longer has an `Any` fallback (it rejects strings), so a `sum` wrapper gives `Unknown`
-rather than `Any`.
-
-The cause is the fact-beats-guess rule. The `Any` fallback fits while binding nothing, so it beats
-every candidate that would narrow `x`.
-
-The rule is right in general and the fallback is load-bearing. A nominal with an `Arith.` or `+.`
-method satisfies the numeric constraint, so forcing `x` numeric would reject a user's S3 class that
-legitimately defines `abs.myclass`. Any fix has to keep that working, which is why this is a design
-slice rather than a tweak. The candidate shape is that if every non-fallback candidate imposes the
-same constraint, imposing it is a fact rather than a guess. That needs a decision record and
-adversarial review before it is written.
-
-One thing is worth knowing before that slice starts. The escape hatch it depends on is only now
-actually general, because `declares_arithmetic` used to consult the stub library alone while
-operator dispatch resolves a method through the global scope. Any measurement of how often
-constraining `x` would reject real code, taken before that was fixed, overstates the cost.
-
 ## Open: an ignored config key is a warning, and a warning can be missed
 
 A key written at the top level that belongs under a table now names the table, saying that it is
