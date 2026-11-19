@@ -30,8 +30,8 @@ use {
         lints::LintLevel,
         metadata::{
             NamespaceFile, OS_TYPE, PackageMetadata, attached_union, normalized_imports,
-            parse_description_collate, parse_description_dependencies, parse_description_package,
-            parse_namespace, qualified_names,
+            parse_description_collate, parse_description_dependencies, parse_description_lazy_data,
+            parse_description_package, parse_namespace, qualified_names,
         },
         stubs::{
             StubSources, namespace_exports, namespace_known, shipped_export_manifests,
@@ -1343,7 +1343,10 @@ fn install_environment(
             .as_deref()
             .and_then(parse_description_package),
         namespace_file.native_symbols.clone(),
-        own_qualified_names(root, namespace_source.is_some().then_some(&namespace_file)),
+        qualified_names(
+            namespace_source.is_some().then_some(&namespace_file),
+            lazy_datasets(root, description_source.as_deref()),
+        ),
     )
     .durability(Durability::HIGH)
     .attached_durability(Durability::LOW)
@@ -1640,20 +1643,20 @@ pub(crate) fn scan_data_files(root: &Path) -> BTreeMap<String, sniff::Layout> {
         .collect()
 }
 
-/// The names the project's own `pkg::name` reaches ([`qualified_names`]). A dataset that cannot
-/// be read makes the set unknowable, which silences the check rather than reporting every read.
-pub(crate) fn own_qualified_names(
-    root: &Path,
-    namespace: Option<&NamespaceFile>,
-) -> Option<BTreeSet<String>> {
-    let datasets = match rdb::dataset_names(root) {
+/// The datasets the project's own `pkg::name` falls back to ([`qualified_names`]): none unless
+/// `DESCRIPTION` sets `LazyData`. A dataset that cannot be read makes the set unknowable, which
+/// silences the check rather than reporting every read.
+pub(crate) fn lazy_datasets(root: &Path, description: Option<&str>) -> Option<Vec<String>> {
+    if !description.is_some_and(parse_description_lazy_data) {
+        return Some(Vec::new());
+    }
+    match rdb::dataset_names(root) {
         Ok(names) => Some(names),
         Err(error) => {
             tracing::debug!("the package's datasets are unknown: {error}");
             None
         }
-    };
-    qualified_names(namespace, datasets)
+    }
 }
 
 /// The project-relative key of a data file, or `None` for any other path.

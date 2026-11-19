@@ -20,7 +20,7 @@ use {
         lints::LintConfig,
         metadata::{
             declared_dependency, imported_by_name, imports_every_name, is_own_package,
-            native_symbol, own_qualified_names,
+            native_symbol, own_package_reaches, own_qualified_names,
         },
         naming::{BindingKind, ItemNaming, NamespaceRead},
         package_name, parse, prelude_enabled, project_type_definitions,
@@ -2151,22 +2151,25 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
     // lazy-loaded data, `.onLoad` bindings), so its own reads are validated against `NAMESPACE`.
     if is_own_package(db, &read.package) {
         let name = read.name.as_ref()?;
-        let exported = own_qualified_names(db)?;
-        if read.internal || exported.contains(name.as_str()) {
+        let query = QueryName::new(db, Name::new(db, name.as_str()));
+        if read.internal || own_package_reaches(db, query)? {
             return None;
         }
         let package = &read.package;
         // A name the package binds is internal, so the fix is to export it, not to respell it.
-        let defined = package_name(db, QueryName::new(db, Name::new(db, name.as_str())))
-            .winner
-            .is_some();
+        let defined = package_name(db, query).winner.is_some();
+        // Only a finding reads the whole set, to suggest a spelling.
         let nearest = (!defined)
-            .then(|| nearest_name(name.as_str(), exported.iter().map(String::as_str)))
+            .then(|| {
+                let exported = own_qualified_names(db)?;
+                nearest_name(name.as_str(), exported.iter().map(String::as_str))
+            })
             .flatten();
         return Some(match nearest {
             Some(nearest) => {
                 format!("`{name}` is not exported by `{package}`. Did you mean `{nearest}`?")
             }
+            None if !defined => format!("`{name}` is not exported by `{package}`."),
             None => format!(
                 "`{name}` is not exported by `{package}`, so this read fails once the package is installed. Export it in `NAMESPACE`, or write `{package}:::{name}`."
             ),

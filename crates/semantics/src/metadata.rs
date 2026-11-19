@@ -5,6 +5,7 @@ use {
     crate::{
         Db, SiteRole, SourceFile, file_syntax_sites, parse,
         stubs::{META_PACKAGE_MEMBERS, stubs},
+        types::QueryName,
     },
     rustc_hash::FxHashMap,
     std::{collections::BTreeSet, num::NonZero, thread},
@@ -306,9 +307,17 @@ pub fn imports_every_name(db: &dyn Db) -> bool {
         || metadata.attached(db).iter().any(unknowable)
 }
 
-/// The names `pkg::name` reaches in the project's own package, when they are known.
+/// The names `pkg::name` reaches in the project's own package, when they are known. A check
+/// asks [`own_package_reaches`] for one name instead.
 pub fn own_qualified_names(db: &dyn Db) -> Option<&BTreeSet<String>> {
     PackageMetadata::try_get(db)?.qualified_names(db).as_ref()
+}
+
+/// Whether the project's own `pkg::name` reaches `name`, `None` when the set is unknowable.
+/// Asked per name, so a `NAMESPACE` edit re-checks only the reads whose answer it changed.
+#[salsa::tracked(returns(copy))]
+pub fn own_package_reaches<'db>(db: &'db dyn Db, name: QueryName<'db>) -> Option<bool> {
+    own_qualified_names(db).map(|names| names.contains(name.name(db).text(db)))
 }
 
 pub fn is_own_package(db: &dyn Db, package: &str) -> bool {
@@ -953,6 +962,17 @@ pub fn parse_description_package(source: &str) -> Option<String> {
         .find(|(field, _)| *field == "Package")
         .map(|(_, name)| name)
         .filter(|name| !name.is_empty())
+}
+
+/// Whether `LazyData` is true. Only then does `R CMD INSTALL` build the lazy-load database
+/// that `pkg::name` falls back to, so without it a dataset is reachable through `data()` alone.
+pub fn parse_description_lazy_data(source: &str) -> bool {
+    dcf_fields(source)
+        .into_iter()
+        .find(|(field, _)| *field == "LazyData")
+        .is_some_and(|(_, value)| {
+            matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "yes")
+        })
 }
 
 /// The operating system's name as R's `.Platform$OS.type` gives it, which names both the

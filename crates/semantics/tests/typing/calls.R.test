@@ -853,17 +853,30 @@ wrap: fn(x: Unknown) -> Unknown
 # Every `abs` candidate but the `Any` fallback takes a number, so the wrapper
 # needs one whichever candidate a call picks.
 magnitude <- function(x) abs(x)
-running <- function(x) cumsum(x)
 larger <- function(x, y) pmax(x, y)
 whole <- magnitude(-1L)
 word <- magnitude("a")
 #++++
 magnitude: <T: numeric> fn(x: T) -> T
-running: <T: numeric> fn(x: T) -> Any
 larger: <T: numeric, U: numeric> fn(x: T, y: U) -> Any
 whole: integer
 word: Unknown
-267..270 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+234..237 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- a_numeric_wrapper_takes_what_arithmetic_takes
+# `cumsum` takes `NULL` as an empty vector, so its wrapper imposes no bound. A
+# data frame has arithmetic methods, so it satisfies the bound as it does for `-`.
+magnitude <- function(x) abs(x)
+running <- function(x) cumsum(x)
+empty <- running(NULL)
+frame <- magnitude(data.frame(a = 1))
+negated <- -data.frame(a = 1)
+#++++
+magnitude: <T: numeric> fn(x: T) -> T
+running: <T> fn(x: T) -> Any
+empty: Any
+frame: data.frame{a: double[]}
+negated: data.frame{a: double[]}
 
 #---- a_wrapper_over_overloads_that_also_take_text_stays_open
 # `max` also takes `character`, and `sweep`'s `matrix` may hold text, so

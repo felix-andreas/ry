@@ -262,6 +262,18 @@ tally_all: <T> fn(x: T) -> integer
 call_it: fn() -> Unknown
 115..131 warning[unresolved] `tally_al` is not exported by `tallyr`. Did you mean `tally_all`?
 
+#---- an_own_read_of_a_name_defined_nowhere_offers_no_export
+# Nothing binds `zzqqxx` and no export is near it, so there is nothing to
+# export or respell.
+#description Package: tallyr
+#namespace export(tally)
+tally <- function(x) length(x)
+call_it <- function() tallyr::zzqqxx(1:3)
+#++++
+tally: <T> fn(x: T) -> integer
+call_it: fn() -> Unknown
+202..216 warning[unresolved] `zzqqxx` is not exported by `tallyr`.
+
 #---- an_own_read_of_an_internal_name_is_not_respelled
 # `tally_one` is a letter away from the export `tally_all`, but the package
 # defines it, so the read wants an export, not a different name.

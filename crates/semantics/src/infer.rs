@@ -2067,6 +2067,10 @@ fn constraint_rejects<'db>(
                 _ => false,
             },
             TyKind::Named(name, _) => declares_arithmetic(name),
+            // A frame with known columns carries its class like a nominal one does.
+            TyKind::Frame(kind, _) => kind.class().is_some_and(|class| {
+                arithmetic_classes.is_some_and(|classes| classes.contains(class))
+            }),
             TyKind::Rigid(name) => binder_implies(name),
             _ => false,
         },

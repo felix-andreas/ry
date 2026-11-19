@@ -19,7 +19,7 @@ use {
             Entry, FunctionMismatch, InferenceTable, RecordMismatch, UNCHECKED_WITNESS, UnifyError,
             apply_definition, numeric_join,
         },
-        metadata::{imported_by_name, imports_every_name, is_own_package, own_qualified_names},
+        metadata::{imported_by_name, imports_every_name, is_own_package, own_package_reaches},
         naming::{
             BindingId, BindingKind, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable,
             is_column_update, query_index_arguments,
@@ -31,8 +31,8 @@ use {
         types::{
             Atomic, Binder, Bound, Constraint, DefaultRead, FlagReturn, FrameKind, FunctionType,
             InferenceVar, Name, NativeField, NativeScalar, NullUnless, NumberLiteral, Parameter,
-            RecordField, ReduceForward, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeList,
-            TypeScheme, any, array, array_element, column_type, conflicting_tags,
+            QueryName, RecordField, ReduceForward, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind,
+            TypeList, TypeScheme, any, array, array_element, column_type, conflicting_tags,
             contains_inference_var, erase_vars, for_each_child_type, is_ry_value_type, is_tag_type,
             map_child_types, native_record, native_scalar, null, scalar, substitute_rigid,
             type_size, union_of, unknown,
@@ -8566,15 +8566,20 @@ impl<'db, 'a> Checker<'db, 'a> {
     }
 
     /// A class with arithmetic methods (`matrix`, `difftime`) negates to itself: R
-    /// dispatches unary `-` through the same `-.class`, `Arith.class` and `Ops.class`.
+    /// dispatches unary `-` through the same `-.class`, `Arith.class` and `Ops.class`. A
+    /// frame with known columns carries its class (`data.frame`) like a nominal type does.
     fn declares_arithmetic(&self, ty: Ty<'db>) -> bool {
-        let TyKind::Named(name, _) = ty.kind(self.db) else {
-            return false;
+        let class = match ty.kind(self.db) {
+            TyKind::Named(name, _) => name.text(self.db),
+            TyKind::Frame(kind, _) => match kind.class() {
+                Some(class) => class,
+                None => return false,
+            },
+            _ => return false,
         };
         let Some(globals) = self.globals else {
             return false;
         };
-        let class = name.text(self.db);
         ["-", "Arith", "Ops"].iter().any(|prefix| {
             let method = method_symbol(prefix, class);
             globals
@@ -20780,7 +20785,8 @@ fn validated_namespace_name(
     // The project's own package resolves through globals and wins over a same-named stub namespace.
     if is_own_package(db, package.as_str()) {
         return (internal
-            || own_qualified_names(db).is_none_or(|exported| exported.contains(name.as_str())))
+            || own_package_reaches(db, QueryName::new(db, Name::new(db, name.as_str())))
+                != Some(false))
         .then_some(name);
     }
     match library.map(|library| library.knows_namespace(package.as_str())) {

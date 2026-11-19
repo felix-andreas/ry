@@ -12,7 +12,7 @@ use {
         check_cache,
         cli::{
             analysable_source, collect_r_files, data_file_key, document_kind, exclude_matcher,
-            is_package_source, own_qualified_names, project_order, project_stub_paths,
+            is_package_source, lazy_datasets, project_order, project_stub_paths,
             read_project_stubs, scan_data_files, sniff_data_file,
         },
         config::{
@@ -50,7 +50,7 @@ use {
         metadata::{
             NativeSymbols, PackageMetadata, attached_union, file_attached_namespaces,
             normalized_imports, parse_description_collate, parse_description_dependencies,
-            parse_description_package, parse_namespace,
+            parse_description_package, parse_namespace, qualified_names,
         },
         project_global_names,
         stubs::{
@@ -453,6 +453,9 @@ struct Worker {
     stub_source_paths: Vec<Option<PathBuf>>,
     installed: Option<InstalledPackages>,
     namespace_documents: HashMap<PathBuf, String>,
+    /// Read when `DESCRIPTION` or `data/` changes on disk, never per `NAMESPACE` keystroke,
+    /// because naming a saved image's objects unserializes all of it.
+    lazy_datasets: Option<Vec<String>>,
     collate_order: Vec<String>,
     virtual_document_uris: HashMap<PathBuf, lsp_types::Url>,
     /// Most recent last.
@@ -603,6 +606,7 @@ impl Worker {
             stub_source_paths: Vec::new(),
             installed: None,
             namespace_documents: HashMap::new(),
+            lazy_datasets: None,
             collate_order: Vec::new(),
             virtual_document_uris: HashMap::new(),
             pending_semantic_publishes: Vec::new(),
@@ -628,6 +632,7 @@ impl Worker {
         )
         .durability(Durability::MEDIUM)
         .new(&worker.db);
+        worker.refresh_lazy_datasets();
         let metadata = worker.current_metadata();
         worker.collate_order = metadata.collate;
         // No file has been scanned yet, so nothing is attached.
@@ -692,9 +697,9 @@ impl Worker {
             .as_deref()
             .map(parse_namespace)
             .unwrap_or_default();
-        let qualified_names = own_qualified_names(
-            &self.workspace_root,
+        let qualified_names = qualified_names(
             namespace_text.is_some().then_some(&namespace_file),
+            self.lazy_datasets.clone(),
         );
         let imports = normalized_imports(&namespace_file.imports);
         let native_symbols = namespace_file.native_symbols;
@@ -746,6 +751,11 @@ impl Worker {
         }
         metadata.set_attached(&mut self.db).to(union);
         self.refresh_all_diagnostics();
+    }
+
+    fn refresh_lazy_datasets(&mut self) {
+        let description = fs::read_to_string(self.workspace_root.join("DESCRIPTION")).ok();
+        self.lazy_datasets = lazy_datasets(&self.workspace_root, description.as_deref());
     }
 
     /// A real change refreshes all diagnostics; a `Collate` change reorders the project.
@@ -1817,10 +1827,17 @@ impl Worker {
         let mut metadata_changed = false;
         let mut reloaded_document = false;
         let mut data_changed = false;
+        let mut datasets_changed = false;
         for change in &params.changes {
             let Ok(path) = change.uri.to_file_path() else {
                 continue;
             };
+            if path.starts_with(self.workspace_root.join("data"))
+                || path.file_name().is_some_and(|name| name == "DESCRIPTION")
+            {
+                datasets_changed = true;
+                metadata_changed = true;
+            }
             if let Some(key) = data_file_key(&self.workspace_root, &path) {
                 let data_files = DataFiles::get(&self.db);
                 let mut layouts = data_files.layouts(&self.db).clone();
@@ -1931,6 +1948,9 @@ impl Worker {
         if reloaded_document {
             self.refresh_attached();
         }
+        if datasets_changed {
+            self.refresh_lazy_datasets();
+        }
         if metadata_changed {
             self.refresh_metadata();
         }
@@ -1980,6 +2000,14 @@ impl Worker {
                 glob_pattern: lsp_types::GlobPattern::Relative(lsp_types::RelativePattern {
                     base_uri: lsp_types::OneOf::Right(self.document_uri(&self.workspace_root)),
                     pattern: "**/*.{csv,tsv,CSV,TSV}".to_owned(),
+                }),
+                kind: None,
+            },
+            // A dataset `pkg::name` reaches lives in `data/`.
+            lsp_types::FileSystemWatcher {
+                glob_pattern: lsp_types::GlobPattern::Relative(lsp_types::RelativePattern {
+                    base_uri: lsp_types::OneOf::Right(self.document_uri(&self.workspace_root)),
+                    pattern: "data/*".to_owned(),
                 }),
                 kind: None,
             },

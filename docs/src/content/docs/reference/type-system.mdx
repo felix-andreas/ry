@@ -2748,11 +2748,11 @@ to such a name is resolved separately at each call site:
   leaves a parameter open, and every other candidate narrows it to a number (`logical`, `integer`,
   `double` or `complex`, scalar or vector), the call needs a number whichever candidate a caller
   picks, so the parameter takes the `numeric` bound. `function(x) abs(x)` infers
-  `<T: numeric> fn(x: T) -> T`, `function(x) cumsum(x)` infers `<T: numeric> fn(x: T) -> Any`, and
-  calling either with a string is an error. A class with an arithmetic method (`Ops.<class>`,
-  `Arith.<class>` or an operator method) satisfies the bound, as it does for an operator. A set
-  that also accepts other values imposes nothing: `max` takes `character` and `sweep` takes any
-  `matrix`, so `function(x) max(x)` stays `<T> fn(x: T) -> Any`.
+  `<T: numeric> fn(x: T) -> T`, and calling it with a string or `NULL` is an error, as `abs` is in
+  R. A class with an arithmetic method (`Ops.<class>`, `Arith.<class>` or an operator method)
+  satisfies the bound, as it does for an operator, and so does a data frame. A set that also
+  accepts other values imposes nothing: `max` takes `character`, `cumsum` takes `NULL` and `sweep`
+  takes any `matrix`, so `function(x) max(x)` stays `<T> fn(x: T) -> Any`.
 - When several candidates fit only by narrowing the caller's undetermined types, the call keeps that
   narrowing only if they all narrow the same way. Otherwise the type becomes `Unknown`, and so does
   the call: `function(xs) lapply(xs, f)` infers `fn(xs: Unknown) -> Unknown`, because `lapply`'s
@@ -3368,15 +3368,17 @@ scoping.
   and wins over a stub namespace of the same name. It reads the namespace only, so in a test file or
   a script `pathpkg::path` skips that file's own `path` binding.
 - The name of an own `pkg::name` read is checked against what the installed package will export:
-  the `export()` and `exportMethods()` names in `NAMESPACE`, and the datasets under `data/` (every
-  object of an `.rda` file, and the stem of a `.csv`, `.tab` or `.txt` file). The read is checked
+  the `export()` and `exportMethods()` names in `NAMESPACE`, and, when `DESCRIPTION` sets
+  `LazyData: true`, the datasets under `data/` (every object of an `.rda` file, and the stem of a
+  `.csv`, `.tab` or `.txt` file). Without `LazyData`, `::` cannot reach a dataset, which only
+  `data()` loads. The read is checked
   against `NAMESPACE`, not against what the sources bind, because a package exports names its
   sources never bind (re-exports, S4 generics, datasets) and binds internals R refuses to read with
   `::`. A name the package defines but does not export warns that the read fails once the package
   is installed, and suggests exporting it or writing `pkg:::name`. Any other name warns "not
-  exported", with the nearest export as a suggestion. The check is off when the package has no
-  `NAMESPACE`, when `NAMESPACE` has an `exportPattern()`, and when `data/` holds an `.R` file, because
-  each makes the export set unknowable. `pkg:::name` is never checked.
+  exported", with the nearest export as a suggestion when there is one. The check is off when the
+  package has no `NAMESPACE`, when `NAMESPACE` has an `exportPattern()`, and when a lazy-loading
+  package's `data/` holds an `.R` file, because each makes the export set unknowable. `pkg:::name` is never checked.
 - When the stubs declare `name` in `pkg`, the qualified read has the stub's type. A project binding
   of the same name does not change it: `base::date()` calls base's `date` even when the package
   defines its own `date`. A name that only the namespace's [export manifest](#standard-library-exports) lists
