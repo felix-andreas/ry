@@ -1891,6 +1891,8 @@ enum ReplacementStep {
     /// `formals(f) <- v` or `body(f) <- v` rewrites the function itself, so its prior
     /// signature no longer describes it.
     Rewrite,
+    /// `names(x) <- v`, which names a list's items.
+    Names,
 }
 
 /// Where a callee came from. A lookup in a collection (`handlers[[name]]`, `handlers$add`)
@@ -4998,23 +5000,18 @@ impl<'db, 'a> Checker<'db, 'a> {
             } => Some((*target, ReplacementStep::Slice)),
             ExpressionKind::Field { target, .. } => Some((*target, ReplacementStep::Other)),
             ExpressionKind::Call { callee, arguments } => {
-                let rewrites = match self.module.kind(*callee) {
-                    ExpressionKind::NameRef(name) => {
-                        matches!(name.as_str(), "formals" | "body")
-                    }
-                    _ => false,
+                let step = match self.module.kind(*callee) {
+                    ExpressionKind::NameRef(name) => match name.as_str() {
+                        "formals" | "body" => ReplacementStep::Rewrite,
+                        "names" => ReplacementStep::Names,
+                        _ => ReplacementStep::Other,
+                    },
+                    _ => ReplacementStep::Other,
                 };
                 self.module[arguments]
                     .first()
                     .and_then(|argument| argument.value)
-                    .map(|value| {
-                        let step = if rewrites {
-                            ReplacementStep::Rewrite
-                        } else {
-                            ReplacementStep::Other
-                        };
-                        (value, step)
-                    })
+                    .map(|value| (value, step))
             }
             _ => None,
         }
@@ -5056,6 +5053,9 @@ impl<'db, 'a> Checker<'db, 'a> {
     ) -> Ty<'db> {
         if matches!(step, ReplacementStep::Rewrite) {
             return unknown(self.db);
+        }
+        if matches!(step, ReplacementStep::Names) {
+            return self.write_names(value_expression, prior);
         }
         // Each member a path may hold takes the write, so `ret <- list()` that a loop may or
         // may not have filled still records `ret$count <- n` on both shapes.
@@ -5273,6 +5273,33 @@ impl<'db, 'a> Checker<'db, 'a> {
                 Ty::new(self.db, TyKind::List(union_of(self.db, [*element, value])))
             }
             _ => prior,
+        }
+    }
+
+    /// `names(x) <- c("a", "b")` turns a list of two items into a record with those fields,
+    /// and renames a record's fields. Names the code computes leave a list whose fields are
+    /// not tracked, so `x$a` may read any item.
+    fn write_names(&mut self, value_expression: ExprId, prior: Ty<'db>) -> Ty<'db> {
+        let items: Vec<Ty<'db>> = match self.table.resolve(self.db, prior).kind(self.db) {
+            TyKind::Tuple(items) => items.to_vec(),
+            TyKind::Record(fields) => fields.iter().map(|field| field.ty).collect(),
+            _ => return prior,
+        };
+        match literal_strings(self.module, value_expression) {
+            Some(names) if names.len() == items.len() => {
+                let fields: Vec<RecordField<'db>> = names
+                    .into_iter()
+                    .zip(items)
+                    .map(|((name, _), ty)| RecordField {
+                        name: Name::new(self.db, name),
+                        ty,
+                        optional: false,
+                    })
+                    .collect();
+                Ty::new(self.db, TyKind::Record(&fields))
+            }
+            _ if items.is_empty() => prior,
+            _ => Ty::new(self.db, TyKind::NamedList(union_of(self.db, items))),
         }
     }
 
@@ -6741,9 +6768,16 @@ impl<'db, 'a> Checker<'db, 'a> {
                 self.collect_formal_uses(*callee, uses);
                 let (forwards, optional_targets) = match self.module.kind(*callee) {
                     ExpressionKind::NameRef(name) => {
-                        let forwards = self
-                            .globals
-                            .is_none_or(|globals| globals.library_candidates(*name).is_none());
+                        // A library function stubbed as `Any` (graphics' `rect`) declares no
+                        // parameters, so nothing says it forces one: `rect(angle = angle)`
+                        // reads `angle` only when `density` is set.
+                        let forwards = self.globals.is_none_or(|globals| {
+                            globals.library_candidates(*name).is_none_or(|candidates| {
+                                candidates.iter().all(|scheme| {
+                                    matches!(scheme.body.kind(self.db), TyKind::Any)
+                                })
+                            })
+                        });
                         let optional_targets = match forwards {
                             true => self.optional_argument_targets(
                                 *callee,
@@ -18308,6 +18342,18 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
+    /// Whether `slot` is a parameter that still holds a type nothing has constrained.
+    fn is_open_formal(&self, slot: BindingId, ty: Ty<'db>) -> bool {
+        self.naming
+            .bindings
+            .get(&slot)
+            .is_some_and(|binding| binding.kind == BindingKind::Parameter)
+            && matches!(
+                self.table.open_constraint(self.db, ty),
+                Some(Constraint::Unconstrained)
+            )
+    }
+
     /// Returns the slots whose entries changed: the loop fixed point's stability signal.
     fn join_writes(
         &mut self,
@@ -18347,6 +18393,15 @@ impl<'db, 'a> Checker<'db, 'a> {
                 (None, Some(entry)) => Some(entry),
                 // Keeping identical entries as-is preserves a function slot's polymorphism.
                 (Some(a), Some(b)) if a == b => Some(a),
+                // `if (missing(f)) f <- function(n) ...` supplies a default: the formal keeps
+                // its own open type, as it does under `function(f = function(n) ...)`, so the
+                // literal's parameters do not pin to the first call's arguments.
+                (Some(EnvEntry::Mono(formal)), Some(EnvEntry::Scheme(_)))
+                | (Some(EnvEntry::Scheme(_)), Some(EnvEntry::Mono(formal)))
+                    if self.is_open_formal(slot, formal) =>
+                {
+                    Some(EnvEntry::Mono(formal))
+                }
                 // A conditionally rewritten function slot is not polymorphic: its honest type is
                 // the monotype union of what each path holds.
                 (Some(a), Some(b)) => {

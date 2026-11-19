@@ -2365,3 +2365,60 @@ k <- function(x) { p <- "a"; grepl(p, x) }
 f: <T> fn(x: T) -> character
 g: <T> fn([x]: T) -> double[]
 k: <T> fn(x: T) -> logical
+
+#---- a_function_supplied_on_the_missing_path_types_as_a_default
+# ks: `if (missing(col.fun)) col.fun <- function(n) ...` called with an integer and then a double.
+f <- function(xs, col.fun) {
+  if (missing(col.fun)) col.fun <- function(n) rep("a", n)
+  a <- col.fun(n = length(xs))
+  b <- col.fun(n = length(xs) + 1)
+  c(a, b)
+}
+g <- function(xs, col.fun = function(n) rep("a", n)) {
+  a <- col.fun(n = length(xs))
+  b <- col.fun(n = length(xs) + 1)
+  c(a, b)
+}
+#++++
+f: <T, U> fn(xs: T, [col.fun]: fn(n: integer) -> U) -> Unknown
+g: <T, U, V> fn(xs: T, [col.fun]: fn(n: integer) -> U) -> Unknown
+
+#---- a_formal_forwarded_by_name_to_an_undeclared_library_function_is_not_forced
+# PerformanceAnalytics: graphics' `rect`, stubbed as `Any`, reads `angle` only when `density` is
+# set, so `rect2()` without `angle` runs. A declared library function forces what it reads.
+rect2 <- function(left, density = NULL, angle) {
+  rect(left, 1, 2, 3, angle = angle, density = density)
+}
+g <- function() rect2(1, density = NULL)
+h2 <- function(left, angle) paste(left, angle = angle)
+h <- function() h2(1)
+#++++
+rect2: <T, U, V> fn(left: T, [density]: U, [angle]: V) -> Unknown
+g: fn() -> Unknown
+h2: <T, U> fn(left: T, angle: U) -> character
+h: Unknown
+408..410 error[type-mismatch] this call leaves out `angle`, which the function requires
+
+#---- names_written_on_a_list_name_its_items
+# PerformanceAnalytics: `ret <- list(VaR, CVaR); names(ret) <- c(...)`, then `ret$VaR`.
+risk <- function(v, cv) {
+  ret <- list(v * 2, cv)
+  names(ret) <- c("VaR", "contribution")
+  ret
+}
+use <- function() risk(1, "a")$VaR + 1
+computed <- function(keys) {
+  ret <- list(1, "a")
+  names(ret) <- keys
+  ret$anything
+}
+renamed <- function() {
+  ret <- list(a = 1, b = "x")
+  names(ret) <- c("x", "y")
+  ret$y
+}
+#++++
+risk: <T: numeric, U> fn(v: T, cv: U) -> list{VaR: double, contribution: U}
+use: fn() -> double
+computed: <T> fn(keys: T) -> double | character | NULL
+renamed: fn() -> character
