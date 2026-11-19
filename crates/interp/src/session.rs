@@ -51,14 +51,11 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     let site_profile = options.site_profile.then(site_profile_path).flatten();
     let user_profile = options.user_profile.then(user_profile_path).flatten();
     if let Some(host) = &options.image
-        && crate::image::applies(
-            options.interactive,
-            site_profile.is_some() || user_profile.is_some(),
-        )
+        && crate::image::applies(options.interactive)
     {
         match crate::image::load(host, &home) {
             Ok(()) => {
-                let started = start_from_image(&home);
+                let started = start_from_image(&home, site_profile, user_profile);
                 crate::image::touch::finish_start_up();
                 return started;
             }
@@ -115,11 +112,15 @@ unsafe fn prepare_process() {
 }
 
 /// The start-up steps that read the process environment, run after the image loads: the
-/// C-level options and the variables that describe this machine, base R's profile, and the
-/// `.onLoad` hooks of the default packages that set options from the environment. Every option
-/// is removed first, so that the hooks, which set only options not yet set, see the order GNU
-/// R's start-up gives them.
-unsafe fn start_from_image(home: &str) -> R<()> {
+/// C-level options and the variables that describe this machine, base R's profile, the
+/// `.onLoad` hooks of the default packages that set options from the environment, and the site
+/// and user profiles. Every option is removed first, so that the hooks, which set only options
+/// not yet set, see the order GNU R's start-up gives them.
+unsafe fn start_from_image(
+    home: &str,
+    site_profile: Option<String>,
+    user_profile: Option<String>,
+) -> R<()> {
     // The image was written by a start that had locked them.
     lock_base_bindings(false)?;
     crate::base_fast_paths::register_native_entries(base_namespace())?;
@@ -144,11 +145,114 @@ unsafe fn start_from_image(home: &str) -> R<()> {
          if (name == \"utils\") lockBinding(\"osVersion\", namespace) })",
         base_env(),
     )?;
-    remove_library_site()?;
+    if site_profile.is_none() && user_profile.is_none() {
+        remove_library_site()?;
+    } else {
+        // GNU R's order: the profiles and `.First()` run with only `methods`, `Autoloads` and base
+        // attached, then `.First.sys()` attaches the default packages in front of what they
+        // attached (`decisions/heap-gc.md`, "Profiles run over the start-up image").
+        let methods = crate::envir::as_environment(values::scalar_string("package:methods")?)?;
+        let held: Vec<Sexp> = crate::envir::search_path()
+            .skip(1)
+            .take_while(|&env| env != methods)
+            .collect();
+        let option_strings = |name: &str| -> Vec<String> {
+            let value = crate::envir::get_option(name);
+            if value.kind() != SexpType::String {
+                return Vec::new();
+            }
+            (0..length(value))
+                .filter_map(|index| values::string_at(value, index).map(|text| text.into_owned()))
+                .collect()
+        };
+        // `attach()` would copy a package environment, so an entry goes back by relinking.
+        let insert_after_global = |env: Sexp| {
+            crate::heap().set_enclosure(env, global_env().enclosure());
+            crate::heap().set_enclosure(global_env(), env);
+            if !interp().globals.keep.contains(&env) {
+                interp().globals.keep.push(env);
+            }
+        };
+        let image_packages = option_strings("defaultPackages");
+        crate::heap().set_enclosure(global_env(), methods);
+        if let Some(site) = site_profile {
+            source_file(&site, base_env())?;
+        }
+        remove_library_site()?;
+        if let Some(user) = user_profile {
+            source_file(&user, global_env())?;
+        }
+        eval_text(CALL_FIRST, global_env())?;
+        let mut restored = vec![false; held.len()];
+        for package in &option_strings("defaultPackages") {
+            let name = format!("package:{package}");
+            if crate::envir::search_path().any(|env| crate::envir::search_name(env) == name) {
+                continue;
+            }
+            let mark = crate::heap().handle_mark();
+            let scope = values::new_env(base_env())?;
+            crate::heap().root(scope);
+            eval::define(
+                values::install("pkg")?,
+                values::scalar_string(package)?,
+                scope,
+            )?;
+            let held_entry = held
+                .iter()
+                .position(|&env| crate::envir::search_name(env) == name);
+            // An attach hook a profile set runs only through `library()`.
+            let hooked = || -> R<bool> {
+                Ok(values::is_true(eval_text(
+                    "length(getHook(packageEvent(pkg, \"attach\"))) > 0L",
+                    scope,
+                )?))
+            };
+            match held_entry {
+                Some(index) if !hooked()? => {
+                    insert_after_global(held[index]);
+                    restored[index] = true;
+                }
+                _ => {
+                    eval_text(FIRST_SYS_PACKAGE, scope)?;
+                }
+            }
+            crate::heap().release_handles(mark);
+        }
+        // ry's own entries are attached after `.First.sys()`, so they go back in front.
+        for (index, &env) in held.iter().enumerate().rev() {
+            let name = crate::envir::search_name(env);
+            let default_package = name
+                .strip_prefix("package:")
+                .is_some_and(|package| image_packages.iter().any(|held| held == package));
+            if !default_package {
+                insert_after_global(env);
+                restored[index] = true;
+            }
+        }
+        let dropped: Vec<Sexp> = held
+            .iter()
+            .zip(&restored)
+            .filter(|&(_, &restored)| !restored)
+            .map(|(&env, _)| env)
+            .collect();
+        interp().globals.keep.retain(|kept| !dropped.contains(kept));
+    }
     crate::profile_summary::mark_ready();
     crate::capture::mark_ready();
-    conditions::print_warnings()
+    conditions::print_warnings(conditions::DURING_STARTUP)
 }
+
+/// The body of base R's `.First.sys()` for the one package `pkg`.
+const FIRST_SYS_PACKAGE: &str = "\
+if (!require(pkg, quietly = !getOption(\"verbose\", FALSE), warn.conflicts = FALSE, \
+             character.only = TRUE)) \
+    warning(gettextf(\"package %s in options(\\\"defaultPackages\\\") was not found\", sQuote(pkg)), \
+            call. = FALSE, domain = NA)";
+
+/// Calls `.First()` when the global environment or the search path behind it binds a closure
+/// of that name, as GNU R does after the user profile.
+const CALL_FIRST: &str =
+    "if (typeof(get0(\".First\", envir = globalenv())) == \"closure\") .First()";
 
 /// The options and base variables that depend on this process: the C-level options,
 /// `.Machine`, `.Platform` and the graphics device variables.
@@ -255,11 +359,12 @@ unsafe fn start_slowly(
     if let Some(user) = user_profile {
         source_file(&user, global_env())?;
     }
+    eval_text(CALL_FIRST, global_env())?;
     eval_text(".First.sys()", global_env())?;
     install_os_version()?;
     crate::standard_library::attach_package()?;
     let warned = !interp().warnings.is_empty();
-    conditions::print_warnings()?;
+    conditions::print_warnings(conditions::DURING_STARTUP)?;
     crate::profile_summary::mark_ready();
     crate::capture::mark_ready();
     Ok(warned)
@@ -1014,7 +1119,7 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
     interp().handlers = interp().global_handlers.clone();
     interp().restarts = None;
     interp().srcref = nil();
-    if let Err(unwind) = conditions::print_warnings() {
+    if let Err(unwind) = conditions::print_warnings("") {
         report_toplevel(unwind);
     }
     // The task's warnings print first, as in GNU R, and the callbacks' own warnings after them.
@@ -1027,7 +1132,7 @@ pub unsafe fn run_toplevel(expression: Sexp) -> bool {
         interp().handlers = interp().global_handlers.clone();
         interp().restarts = None;
     }
-    if let Err(unwind) = conditions::print_warnings() {
+    if let Err(unwind) = conditions::print_warnings("") {
         report_toplevel(unwind);
     }
     crate::heap().release_handles(mark);

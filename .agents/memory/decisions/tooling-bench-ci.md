@@ -394,7 +394,7 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 - **Rule.** `ry run` (script and console), `ry load`, `ry test`, `ry document` and the debug adapter source the user profile once base R has loaded: `R_PROFILE_USER` when set (even when the file is missing), else `./.Rprofile`, else `~/.Rprofile`. `--no-init-file`, with the alias `--vanilla`, skips it (`StartupArguments` in `crates/ry/src/command_line.rs`; `RuntimeFlags::user_profile`, bit `1 << 4`). `ry R` and the GNU R runtime get `--no-init-file`, which skips only the user profile: GNU R still reads its `.Renviron` and site profile. On ry's runtime a script session sources no site profile and ry reads no `.Renviron`, so there `--vanilla` means `--no-init-file`.
 - **Why.** A project's `.Rprofile` is where users set what their package's `.onLoad` needs (a test user's sets `TZ`), and the GNU R equivalents (`Rscript`, `devtools::load_all()` in an R session, `devtools::test()`) all run after it. A command that skipped it ran different code than the user's R.
 - **Not read:** executables from `ry build --aot --exe` (a shipped program does not depend on the directory it starts in) and `ry check`, which runs nothing. `ry test` workers read whatever callr's profile sources (it sources the project's `.Rprofile` too), not the parent's flag.
-- **Cost.** A start that sources a profile does not use the start-up image (backlog, "a profile turns off the start-up image").
+- **Cost.** None beyond the profile itself: profiles run over the start-up image (`decisions/heap-gc.md`, "Profiles run over the start-up image").
 
 ## A package `ry load` loaded counts as a pkgload dev package
 

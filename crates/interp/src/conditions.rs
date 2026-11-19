@@ -359,7 +359,7 @@ pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
         }
         if !interp().warnings.is_empty() {
             write_console(b"In addition: ", true);
-            if let Err(unwind) = print_warnings() {
+            if let Err(unwind) = print_warnings("") {
                 return unwind;
             }
         }
@@ -813,13 +813,18 @@ unsafe fn immediate_warning_text(call: Sexp, message: &str) -> String {
     format!("Warning in {call_text}{separator}{message}\n")
 }
 
+/// The heading of the warnings a session's start left.
+pub const DURING_STARTUP: &str = "During startup - ";
+
 /// Prints the deferred warnings the way the top level does after a call, and clears them.
-pub unsafe fn print_warnings() -> R<()> {
+/// `heading` goes in front, as GNU R puts `During startup - ` ([`DURING_STARTUP`]) in front of
+/// the warnings a session's start left.
+pub unsafe fn print_warnings(heading: &str) -> R<()> {
     let warnings = std::mem::take(&mut interp().warnings);
     if warnings.is_empty() {
         return Ok(());
     }
-    let mut text = String::new();
+    let mut text = heading.to_owned();
     if warnings.len() == 1 {
         text.push_str("Warning message:\n");
         let (call, message) = &warnings[0];
@@ -1097,7 +1102,7 @@ unsafe fn do_seterrmessage(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_print_deferred_warnings(_call: &Call<'_>) -> R<Sexp> {
     if !interp().warnings.is_empty() {
         write_console(b"In addition: ", true);
-        print_warnings()?;
+        print_warnings("")?;
     }
     Ok(nil())
 }
