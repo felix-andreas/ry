@@ -2044,3 +2044,43 @@ Reading an item's range from `item_spans` made every edit re-lower every item of
   since it is all comments to R; the golden cases in `crates/syntax/tests/errors`; the oracle's
   `parser` kind for GNU R's side.
 - **Open.** `semantics/src/hir.rs` recognizes a pipe's shape with rules of its own (`pipe_shape`).
+
+## Corpus false reports: the narrowing and overload rules that cleared them
+
+**Status:** built.
+
+- **A local written from a literal fills a vector parameter.** A literal constraint lasts until the
+  local's first use, and only scalar-bounded variables filled a vector parameter as its element, so
+  `p <- "a"; sprintf(p, x)` failed (about 150 corpus reports). `compatible` treats the literal bound
+  like the scalar one.
+- **A missing-path function is a default.** `if (missing(f)) f <- function(n) ...` types as a default,
+  so the formal stays open. An explicit `NULL` to a formal whose default is `NULL` is the omitted call.
+  A default naming a function ry cannot type reads as `Unknown` in the body, because the body's calls
+  do not say what a callback must accept.
+- **A scalar bound does not spread through arithmetic.** R recycles the shorter operand, so `sigma^r`
+  with `r` scalar-bounded by `2:r` leaves `sigma` open instead of unifying the operands. Two distinct
+  rigid parameters (`a / b` under `<T: numeric, U: numeric>`) give `double` instead of a mismatch.
+- **An `if` over an undecided library call is `Unknown`.** `overloaded_call` marks a call whose
+  unchecked arguments left candidates disagreeing (`Checker::undecided_calls`), and a value `if` with
+  one as a branch is `Unknown`. A plain `Unknown` branch still joins as the other one, because a
+  recursive call's placeholder is `Unknown` during the group fixpoint; the mark is the provenance.
+- **An unchecked argument beside open caller variables still decides.** Without this, the
+  narrowings agreed and declaration order picked `vapply`'s first candidate for an `Unknown`
+  `FUN.VALUE`. Disagreeing narrowings become `Unknown`; agreed ones commit by re-probing the first fit,
+  since a probe's narrowings name rolled-back variables and cannot be unified directly.
+- **`identical` guards.** `identical(f, g)` with `g` a function narrows the local `f` to `g`'s type on
+  the true edge (roxygen2's `format_name`). `identical(x$field, literal)` rules `NULL` out of `x`.
+- **Correlated branch writes.** After `if (case == "a") x <- f(x)`, `Fact::Correlated` keeps `x`'s
+  value on both edges keyed on `case`; a later test of `case` whose edge implies the earlier test (or
+  its negation) narrows `x` to that value (`KeyTest::implies` over literal sets, `==`, `!=`, `%in%`,
+  a bare logical local). A write to either local drops the fact through `Environment::forget`. Two
+  tests that only jointly cover an enclosing test are not combined (snakecase `to_any_case` 286).
+- **Union echo.** An inferred `list[T] | T[]` parameter returned as-is gives back what a call passed,
+  a union argument included, when every member is accepted.
+- **No sound rule for a vector of unknown length at a scalar parameter.** `p[file.exists(p)]` has one
+  element only by the program's logic, so devtools `test.R` 72 and knitr `citation.R` 163 stay
+  reported; relaxing scalar parameters for vectors would hide true length bugs.
+- **Deferred: a union-bounded variable.** renv `python.R` 109 needs `<T: list[U] | U[]> fn(path: T)
+  -> character | T`, so the return names the argument's own member. That needs a bound meet over
+  unions with variables, generalization and print/parse support; the same class is the fresh
+  sample's "`vapply` over a parameter" (ggplot2).

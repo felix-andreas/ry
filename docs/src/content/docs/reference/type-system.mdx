@@ -656,7 +656,9 @@ Otherwise it takes the first member it fits, so
 `n` the type `T[]` from `lapply`'s `list[T] | T[] | NULL`, with `T: scalar numeric`.
 
 A constraint limits what a caller may instantiate `T` with, and the annotated body may rely on it.
-Under `<T: numeric> fn(x: T) -> T` the body may use `x` as a number. A body under a plain `<T>` that
+Under `<T: numeric> fn(x: T) -> T` the body may use `x` as a number. Arithmetic between two different
+constrained parameters, `a / b` under `<T: numeric, U: numeric> fn(a: T, b: U) -> double`, is
+`double`, R's widest numeric, because neither parameter's type fixes the other's. A body under a plain `<T>` that
 does arithmetic is a type error, and `atomic` does not imply `numeric`.
 
 Using a type parameter as a vector element, `T[]`, imposes the `atomic` bound, because a vector holds
@@ -2674,6 +2676,10 @@ to such a name is resolved separately at each call site:
   that accepts any value there, because then the known arguments chose the candidate. So with `n`
   unknown, `rep(0, n)` is `double[]`, since `n` is `rep`'s `times: Any`, while `rep(x, 2)` with `x`
   unknown stays `Unknown`, since `x` is what `rep`'s vector candidate and its fallback differ on.
+  The same holds beside arguments whose types the call narrows: `vapply(seq_along(x), g, template)`
+  with `template` unknown is `Unknown`, whatever `g`'s parameter narrows to. An `if` whose branch
+  ends in such an undecided call is `Unknown` as a whole, rather than the join of the other branch
+  with nothing.
 - The [whole-number literal rule](#argument-compatibility) does not influence which candidate is
   selected. Candidates are first tried against the arguments' true types, so `sum(1, 2)` selects the
   `double` candidate, matching what R computes. Only if no candidate accepts them is the set tried
@@ -2898,6 +2904,18 @@ The details:
   `if (!is_loaded(package)) stop("not loaded")` followed by `parent.env(ns_env(package))` checks,
   while the same call without the test is reported. A write to the variable after the test, even
   on one branch or in a loop, forgets it.
+- `identical(f, g)` with `f` a local and `g` a function narrows `f` to `g`'s type on the true edge,
+  so after `format_name <- identity` as a default, `if (identical(format_name, identity))
+  format_name(name + 1)` calls `identity` with a number although an earlier call passed a string.
+- `identical(x$field, "literal")`, with any non-`NULL` literal, rules `NULL` out of `x` on the true
+  edge, because a `NULL` `x` has no field equal to the literal. So with `info` a record or `NULL`,
+  `if (identical(info$type, "venv")) use(info$path)` passes `info$path` as the record's field.
+- A local written under a test of another local remembers both values. After
+  `if (case == "a") x <- "s"` with `x` a number before it, a later test of `case` that implies
+  `case == "a"` sees `x` as the string, and one that rules it out sees the number:
+  `if (case == "b") x + 1` checks. The tests compare the local with literals through `==`, `!=` and
+  `%in%`, a bare logical local, and `!` of these. A write to either local ends it, and two tests
+  that only together cover an earlier one are not combined.
 
 #### Lazy arguments and required formals
 
@@ -4771,6 +4789,17 @@ Known bugs, where correct code is reported:
   trailing comma is reported as it is for `c(1, 2, )`.
 - **Package-qualified calls to a package ry does not know.** `pkg::fun()` reports an unknown
   namespace when ry has no stub or export list for `pkg`, even if a file calls `library(pkg)`.
+- **A vector of statically unknown length at a scalar parameter.** `p[file.exists(p)]` returned
+  through a function and passed to a stub's scalar `character` parameter is reported, although the
+  program guarantees one element. No type records the length.
+- **A union parameter that flows to the return.** A parameter inferred as `list[T] | T[]` and
+  returned keeps both members at a call that passes only one of them through another function, so
+  a `character` argument comes back as `character | list[T] | T[]`. Annotate the parameter.
+- **Tests that together cover an earlier one.** Inside `if (case %in% c("a", "b"))`, writes under
+  `if (case == "a")` and `if (case == "b")` are not combined, so a local both make a list still
+  joins its value from before them.
+- **A closure whose body is replaced.** After `body(f) <- quote(...)`, `f` keeps the parameters it
+  was defined with, so passing it where more parameters are expected is reported.
 - **A generic function passed inline as an argument.** `lapply(xs, function<T>(v: T) -> T v)` is
   reported, because type parameters on a function that is not bound to a name are not
   instantiated. Leave the function's types off, or bind it to a name first.

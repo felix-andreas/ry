@@ -134,6 +134,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A function has one signature, resolved in `syntax::annotation`
 - A splice reparse shares what the parser's recorded lookahead proves untouched
 - One syntax verdict, in the `syntax` crate, for `ry check` and the runtime
+- Corpus false reports: the narrowing and overload rules that cleared them
 
 ## Editor and language server
 
