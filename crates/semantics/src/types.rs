@@ -783,8 +783,49 @@ impl Constraint {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub struct TypeScheme<'db> {
-    pub binders: ThinVec<(Name<'db>, Constraint)>,
+    pub binders: ThinVec<Binder<'db>>,
     pub body: Ty<'db>,
+}
+
+/// A type parameter of a scheme: `T`, `T: numeric` or `T: list[U] | U[]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub struct Binder<'db> {
+    pub name: Name<'db>,
+    pub bound: Bound<'db>,
+}
+
+/// What a type parameter ranges over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub enum Bound<'db> {
+    Constraint(Constraint),
+    /// The types that fit this type, usually a union. `function(path) { vapply(path, f, ...);
+    /// path }` takes any vector or list and returns the argument's own type, which the union
+    /// alone cannot say: as the parameter's type it would hand every caller back the whole union.
+    Type(Ty<'db>),
+}
+
+impl<'db> Binder<'db> {
+    pub fn constrained(name: Name<'db>, constraint: Constraint) -> Binder<'db> {
+        Binder {
+            name,
+            bound: Bound::Constraint(constraint),
+        }
+    }
+
+    /// `Unconstrained` for a type bound, which says what the binder admits on its own.
+    pub fn constraint(self) -> Constraint {
+        match self.bound {
+            Bound::Constraint(constraint) => constraint,
+            Bound::Type(_) => Constraint::Unconstrained,
+        }
+    }
+
+    pub fn type_bound(self) -> Option<Ty<'db>> {
+        match self.bound {
+            Bound::Type(bound) => Some(bound),
+            Bound::Constraint(_) => None,
+        }
+    }
 }
 
 impl<'db> TypeScheme<'db> {

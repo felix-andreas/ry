@@ -139,6 +139,9 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The stats d/p/q functions follow the scalar claim
 - A `#:` block in an argument list types the argument after it
 - A function literal default takes its parameter's declared function type
+- A type variable may be bounded by a union
+- A value whose code a later top-level write replaces is a template
+- A key test reads within the tests that enclose it
 
 ## Editor and language server
 

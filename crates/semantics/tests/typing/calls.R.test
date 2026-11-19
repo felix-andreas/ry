@@ -394,7 +394,7 @@ label: fn([title]: character) -> character
 65..69 error[type-mismatch] `title` defaults to `NULL`, which its declared type `character` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
 
 #==== union_commit
-#---- flexible_argument_commits_to_the_union_at_first_use
+#---- an_open_argument_takes_the_narrower_of_two_unions
 #: fn(x: integer | character) -> logical
 first <- function(x) TRUE
 #: fn(x: logical | character) -> logical
@@ -406,10 +406,9 @@ both <- function(v) {
 #++++
 first: fn(x: integer | character) -> logical
 second: fn(x: logical | character) -> logical
-both: Unknown
-177..178 error[type-mismatch] expected `logical | character`, found `integer | character`
+both: fn(v: logical | character) -> logical
 
-#---- union_commit_blames_the_later_conflicting_use
+#---- two_overlapping_unions_leave_their_common_members
 #: fn(x: integer | logical) -> logical
 first <- function(x) TRUE
 #: fn(x: character | logical) -> logical
@@ -421,8 +420,75 @@ both <- function(v) {
 #++++
 first: fn(x: integer | logical) -> logical
 second: fn(x: character | logical) -> logical
+both: fn(v: logical) -> logical
+
+#---- a_numeric_use_settles_a_union_bound
+f <- function(x) {
+  vapply(x, function(e) TRUE, logical(1))
+  x + 1
+}
+#++++
+f: Unknown
+63..68 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list[T] | T[]`
+
+#---- a_settled_bound_checks_a_later_caller
+f <- function(x) {
+  vapply(x, function(e) TRUE, logical(1))
+  y <- x + 1
+  x
+}
+g <- function() f("a")
+#++++
+f: Unknown
+g: fn() -> Unknown
+63..64 warning[unused] `y` is assigned but never used.
+68..73 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list[T] | T[]`
+
+#---- a_bounded_variable_unified_into_its_own_bound_settles
+same <- function(a, b) if (TRUE) a else b
+f <- function(x) {
+  vapply(x, function(e) {
+    same(e, x)
+    TRUE
+  }, logical(1))
+  x
+}
+#++++
+same: <T> fn([a]: T, [b]: T) -> T
+f: Unknown
+73..114 error[type-mismatch] this function is passed `T`, but its parameter `e` accepts `U`
+
+#---- two_bounded_variables_meet_on_their_common_members
+#: fn(x: integer | logical) -> logical
+first <- function(x) TRUE
+#: fn(x: character | logical) -> logical
+second <- function(x) TRUE
+same <- function(a, b) if (TRUE) a else b
+g <- function(a, b) {
+  first(a)
+  second(b)
+  same(a, b)
+}
+#++++
+first: fn(x: integer | logical) -> logical
+second: fn(x: character | logical) -> logical
+same: <T> fn([a]: T, [b]: T) -> T
+g: fn(a: logical, b: logical) -> logical
+
+#---- union_commit_blames_the_later_conflicting_use
+#: fn(x: integer | logical) -> logical
+first <- function(x) TRUE
+#: fn(x: character | list[integer]) -> logical
+second <- function(x) TRUE
+both <- function(v) {
+  second(v)
+  first(v)
+}
+#++++
+first: fn(x: integer | logical) -> logical
+second: fn(x: character | list[integer]) -> logical
 both: Unknown
-175..176 error[type-mismatch] expected `integer | logical`, found `character | logical`
+181..182 error[type-mismatch] expected `integer | logical`, found `character | list[integer]`
 
 #---- a_logical_member_promotes_into_an_integer_member
 #: fn(x: integer | character) -> logical

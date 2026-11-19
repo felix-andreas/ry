@@ -298,6 +298,17 @@ impl Parser<'_> {
     }
 
     fn push_error(&mut self, range: TextRange, message: impl Into<String>) {
+        // After a final line break, the input's end sits on a line the file does not show, so
+        // an error there moves to just past the last code, where a missing token would go.
+        let start = usize::from(range.start()).min(self.text.len());
+        let code_end = self.text[..start].trim_end().len();
+        let range = match code_end > 0
+            && start == self.text.len()
+            && self.text[code_end..].contains('\n')
+        {
+            true => TextRange::empty(TextSize::from(code_end as u32)),
+            false => range,
+        };
         let mut error = SyntaxError::new(message, self.on_one_line(range));
         error.in_annotation = self.in_annotation;
         match self.peek_significant(self.pos, true) {
@@ -734,7 +745,7 @@ impl Parser<'_> {
         if self.ann_at(COLON, end) {
             self.bump();
             self.ann_trivia(end);
-            if self.ann_at(IDENT, end) {
+            if self.ann_at(IDENT, end) && self.ann_constraint_ahead(end) {
                 // A constraint may span words (`scalar numeric`). Trivia is taken
                 // only between words: after the last it would pull the next `#:`
                 // marker into the binder.
@@ -743,11 +754,37 @@ impl Parser<'_> {
                     self.ann_trivia(end);
                 }
                 self.wrap(NAME);
+            } else if self.pos < end && !matches!(self.current(), Some(COMMA | GREATER)) {
+                // A union bound: `<U: list[T] | T[]>`.
+                self.ann_union(end);
             } else {
                 self.error_here("expected a constraint name after `:`");
             }
         }
         self.finish();
+    }
+
+    /// Whether the binder bound at the cursor is a constraint's words (`scalar numeric`), which
+    /// end at the binder's `,` or `>`, rather than a type such as `list[T] | T[]`.
+    fn ann_constraint_ahead(&self, end: usize) -> bool {
+        let mut pos = self.pos;
+        loop {
+            let next = if self.inline_type {
+                self.peek_significant(pos + 1, !self.inline_newlines_significant())
+            } else {
+                (pos + 1..end).find_map(|at| match self.kind_at(at) {
+                    Some(WHITESPACE | COMMENT | ANNOTATION_MARKER) | None => None,
+                    Some(kind) => Some((kind, at)),
+                })
+            };
+            match next {
+                Some((IDENT, at)) if at < end => pos = at,
+                // A line break ends a `#:` constraint: `@forall T: numeric` is often the last
+                // thing on its line, and the next line's tag is no type.
+                Some((COMMA | GREATER | NEWLINE, _)) | None => return true,
+                Some((_, at)) => return at >= end,
+            }
+        }
     }
 
     fn ann_union(&mut self, end: usize) {

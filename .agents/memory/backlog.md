@@ -785,7 +785,7 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-gives 33 errors: 26 true package bugs, 2 known limitations and 5 false reports on correct R. The
+gives 28 errors: 26 true package bugs and 2 known limitations, and no false report on correct R. The
 three generated benchmark packages (`tools/bench/tooling/generate.py`) report nothing. To reproduce, give
 each package a `ry.toml` with `[check]` `typing = true` (typing is off by default) and run
 `ry check --output json R` inside it. A fix also deletes its line here and, for a user-visible
@@ -818,20 +818,6 @@ gap, in the Limitations section of `reference/type-system.mdx`.
   (`p[file.exists(p)]` returned through a function) reaches a stub's scalar `character` parameter.
   The value has length one at run time, but no type says so, and no sound rule can say so
   (`decisions/syntax-semantics.md`, "Corpus false reports: the narrowing and overload rules that cleared them").
-
-### False reports (5), one cause each
-
-- diffobj `diff.R` 654: a closure in a package reads a top-level name as its definition
-  (`layer_source` takes the winner and ignores conditional writers), so a later top-level
-  `body(f) <- quote(...)` is not seen and the one-parameter function meets an interface that names
-  more parameters. Needs a deferred read to join a definition with the later top-level writes of
-  its name (in collation order), measured on the corpus.
-- renv `python.R` 109: a union parameter that flows to the return keeps every member at the call
-  (`path: list[T] | T[]` from `map_lgl(path, ...)`). Needs a variable bounded by a union so the
-  return names the argument's own type.
-- snakecase `to_any_case.R` 286, 295 and 304: inside `if (case %in% <9 values>)`, two `if`s on
-  `case` together cover that set and each makes `string` a list, so it is always a list after
-  them. Correlated facts track one test at a time, so the pre-`if` `character[]` joins in.
 
 ### Scalar-claim chains
 
@@ -894,22 +880,6 @@ diagnostic that reads perfectly while blaming the wrong expression counted as a 
 
 Only the open findings are below. `test-user-reports.md` holds the closed ones with what each
 measurement showed.
-
-### Placement
-
-Caret placement is good for ordinary nesting, which covers four-deep calls, multi-line arguments,
-lambdas and pipes. The renderer is display-width aware while JSON stays in codepoints. Every failure
-found was the same shape, which is a collapse to the outermost node, and one rule now covers them in
-the reference under "Where a finding points": a finding underlines the smallest expression its
-message is about. Comparison operators, a return-type mismatch with an `if` and `else` tail, `$` and
-`[[`, a surplus positional argument, a record mismatch and an annotation range ending at
-end-of-line all follow it now.
-
-**One shape is still open.** A parse error was reported past the end of the file. The filed shape,
-which was line 10 of a 9-line file, does not reproduce. An unterminated `f <- function(x,` in a
-one-line file reports at `1:14-1:15`, which is in range. Either an earlier fix covered it or the
-note was imprecise. This needs a fresh reproduction before it can be worked, and it should be
-re-derived rather than trusted.
 
 ### Should strict mode report a binding whose exported type contains `Unknown`?
 

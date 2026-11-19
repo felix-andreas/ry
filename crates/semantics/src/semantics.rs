@@ -42,7 +42,7 @@ use {
     syntax::{
         NodeOrToken, NodeRef, Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, Tree,
         annotation::{AnnotationTarget, formals, statement_annotations},
-        ast::{is_expression_kind, name_text},
+        ast::{BinaryExpr, is_expression_kind, name_text},
         matching_nodes, node_text, paired_comment_definition,
     },
     thin_vec::ThinVec,
@@ -2729,6 +2729,9 @@ pub struct ItemSyntaxFlags {
     /// It binds a function marked `@pure function`, which counts only while inline
     /// annotations are enabled.
     pub inline_pure: bool,
+    /// It may be a `body(name) <-` write, which replaces a function's code. It may overcount;
+    /// `file_code_rewrites` reads the item's HIR to confirm.
+    pub rewrites_code: bool,
 }
 
 #[salsa::tracked(returns(copy))]
@@ -2753,6 +2756,14 @@ pub fn item_syntax_flags<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemSyntaxFla
         binds_only_own_name: binds_only_own_name(db, item, &root),
         comment_pure,
         inline_pure,
+        rewrites_code: BinaryExpr::cast(root.clone()).is_some_and(|assignment| {
+            [assignment.lhs(), assignment.rhs()]
+                .into_iter()
+                .flatten()
+                .filter(|side| side.kind() == SyntaxKind::CALL_EXPR)
+                .filter_map(|side| side.first_child())
+                .any(|callee| matches!(callee.text().to_string().as_str(), "body" | "base::body"))
+        }),
     }
 }
 
@@ -3178,7 +3189,67 @@ fn check_item_against<'db>(
         Some(globals),
         file_is_strict(db, *item.file(db)),
         *file_holds_ry_values(db, *item.file(db)),
+        code_rewritten_later(db, item),
     ))
+}
+
+/// Whether the file's last top-level write of the item's name is `body(name) <- ...` in another
+/// item, so the item's value is a template whose code R replaces before anything calls it.
+/// `formals(name) <-` keeps the body, so that body still runs as written.
+fn code_rewritten_later<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
+    if *item.kind(db) != ItemKind::Value {
+        return false;
+    }
+    let Some(name) = item.name(db) else {
+        return false;
+    };
+    // The file's list is empty almost always, so an ordinary value never reads the file's
+    // binders, which change whenever an item is inserted.
+    if !file_code_rewrites(db, *item.file(db)).contains(&name) {
+        return false;
+    }
+    frame_binder(db, item, types::Name::new(db, name), true)
+        .is_some_and(|writer| writer != item && code_rewrite_target(db, writer) == Some(name))
+}
+
+/// The names a top-level `body(name) <-` of the file rewrites. It
+/// backdates on every edit that adds or removes no such write.
+#[salsa::tracked(returns(ref))]
+fn file_code_rewrites<'db>(db: &'db dyn Db, file: SourceFile) -> ThinVec<Symbol> {
+    let mut names: ThinVec<Symbol> = item_tree(db, file)
+        .iter()
+        .filter(|&&item| item_syntax_flags(db, item).rewrites_code)
+        .filter_map(|&item| code_rewrite_target(db, item))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+fn code_rewrite_target<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<Symbol> {
+    let module = item_hir(db, item).as_ref()?;
+    let ExpressionKind::Assign { target, .. } = module.kind(module.root?) else {
+        return None;
+    };
+    let ExpressionKind::Call { callee, arguments } = module.kind(*target) else {
+        return None;
+    };
+    let replaces_body = match *module.kind(*callee) {
+        ExpressionKind::NameRef(head) => head.as_str() == "body",
+        ExpressionKind::Namespace {
+            package: Some(package),
+            name: Some(name),
+            ..
+        } => package.as_str() == "base" && name.as_str() == "body",
+        _ => false,
+    };
+    if !replaces_body {
+        return None;
+    }
+    match module.kind(module[arguments].first()?.value?) {
+        ExpressionKind::NameRef(read) => Some(*read),
+        _ => None,
+    }
 }
 
 /// Always `item_check`'s scheme, so export and hover share one source of truth.

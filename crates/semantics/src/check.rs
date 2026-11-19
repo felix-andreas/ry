@@ -29,13 +29,13 @@ use {
         stubs::{NATIVE_NAMESPACES, StubLibrary, is_ry_type, lower_type_text, stubs},
         top_level::super_assigned_names,
         types::{
-            Atomic, Constraint, DefaultRead, FlagReturn, FrameKind, FunctionType, InferenceVar,
-            Name, NativeField, NativeScalar, NullUnless, NumberLiteral, Parameter, RecordField,
-            ReduceForward, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeList, TypeScheme, any,
-            array, array_element, column_type, conflicting_tags, contains_inference_var,
-            erase_vars, for_each_child_type, is_ry_value_type, is_tag_type, map_child_types,
-            native_record, native_scalar, null, scalar, substitute_rigid, type_size, union_of,
-            unknown,
+            Atomic, Binder, Bound, Constraint, DefaultRead, FlagReturn, FrameKind, FunctionType,
+            InferenceVar, Name, NativeField, NativeScalar, NullUnless, NumberLiteral, Parameter,
+            RecordField, ReduceForward, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeList,
+            TypeScheme, any, array, array_element, column_type, conflicting_tags,
+            contains_inference_var, erase_vars, for_each_child_type, is_ry_value_type, is_tag_type,
+            map_child_types, native_record, native_scalar, null, scalar, substitute_rigid,
+            type_size, union_of, unknown,
         },
     },
     bumpalo::{Bump, collections::Vec as BumpVec},
@@ -778,6 +778,7 @@ pub fn check_item_with_annotation<'db>(
     globals: Option<&dyn GlobalEnv<'db>>,
     record_strict_origins: bool,
     top_level_ry_values: bool,
+    template: bool,
 ) -> ItemCheck<'db> {
     CHECK_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
     // A check can fetch another item's scheme and so run a nested check on the same thread,
@@ -793,6 +794,7 @@ pub fn check_item_with_annotation<'db>(
         globals,
         record_strict_origins,
         top_level_ry_values,
+        template,
     );
     arena.reset();
     CHECK_ARENAS.with_borrow_mut(|arenas| arenas.push(arena));
@@ -816,6 +818,7 @@ fn check_item_in<'db>(
     globals: Option<&dyn GlobalEnv<'db>>,
     record_strict_origins: bool,
     top_level_ry_values: bool,
+    template: bool,
 ) -> ItemCheck<'db> {
     let mut table = InferenceTable::default();
     let expressions = module.expression_count();
@@ -891,6 +894,15 @@ fn check_item_in<'db>(
         lookup_slots: Bitset::new_in(arena, bindings),
         valued_slots: Bitset::new_in(arena, bindings),
         super_assigned: super_assigned_names(module),
+        template_call: module
+            .root
+            .filter(|_| template)
+            .and_then(|root| match module.kind(root) {
+                ExpressionKind::Assign { value, .. } => Some(*value),
+                _ => None,
+            })
+            .filter(|value| matches!(module.kind(*value), ExpressionKind::Call { .. }))
+            .map(|value| module.range(value)),
         next_non_local_slot: naming
             .bindings
             .keys()
@@ -934,9 +946,7 @@ fn check_item_in<'db>(
                 if matches!(module.kind(*value), ExpressionKind::Function { .. })
                     && !context.expression_annotations.contains_key(*value) =>
             {
-                for (name, constraint) in &declared.binders {
-                    context.table.rigid_constraints.insert(*name, *constraint);
-                }
+                context.table.enter_rigid_binders(&declared.binders);
                 // Export the reconciled signature, not the annotation as written: R matches
                 // arguments against the definition's formals, so annotation mistakes report once.
                 let declared = TypeScheme {
@@ -982,9 +992,7 @@ fn check_item_in<'db>(
                         // declared nominal still rejects a structural value (`@new` is the only nominal
                         // introduction).
                         Some(declared) => {
-                            for (name, constraint) in &declared.binders {
-                                context.table.rigid_constraints.insert(*name, *constraint);
-                            }
+                            context.table.enter_rigid_binders(&declared.binders);
                             context.record_expectation(*value, declared.body);
                             if annotation.is_some_and(|a| !a.trusted)
                                 && !matches!(declared.body.kind(db), TyKind::Unknown | TyKind::Any)
@@ -1374,7 +1382,7 @@ fn close_scheme<'db>(
 }
 
 struct ResidualCloser<'db> {
-    binders: ThinVec<(Name<'db>, Constraint)>,
+    binders: ThinVec<Binder<'db>>,
     generalized: FxHashMap<InferenceVar, Ty<'db>>,
     /// Only variables some parameter abstracts generalize; any other constrained
     /// variable is one fixed type nobody chooses, so it takes the constraint's default.
@@ -1433,11 +1441,18 @@ fn erase_residual_vars_at<'db>(
     let Some(closer) = closer else {
         return unknown(db);
     };
-    let Entry::Unbound { constraint, .. } = *table.entry(var) else {
+    let Entry::Unbound {
+        constraint, bound, ..
+    } = *table.entry(var)
+    else {
         return unknown(db);
     };
     if constraint == Constraint::Unconstrained {
-        return unknown(db);
+        // A residual bounded variable is one type nobody chooses, so it is its bound.
+        return match bound {
+            Some(bound) => erase_residual_vars_at(db, table, bound, depth + 1, Some(closer)),
+            None => unknown(db),
+        };
     }
     // `Int` and `Frac` each admit one type, so a literal they describe is that type rather than
     // a type parameter.
@@ -1474,14 +1489,14 @@ fn erase_residual_vars_at<'db>(
         if !closer
             .binders
             .iter()
-            .any(|(existing, _)| *existing == candidate)
+            .any(|existing| existing.name == candidate)
         {
             break candidate;
         }
         ordinal += 1;
     };
     let rigid = Ty::new(db, TyKind::Rigid(name));
-    closer.binders.push((name, constraint));
+    closer.binders.push(Binder::constrained(name, constraint));
     closer.generalized.insert(var, rigid);
     rigid
 }
@@ -1512,6 +1527,14 @@ enum Fact<'db> {
         when_true: Ty<'db>,
         when_false: Ty<'db>,
     },
+    /// Inside `if (case %in% c("a", "b"))`, `case` is one of those values (`negated` on the
+    /// false edge), so a nested test of `case` decides an earlier correlated write together
+    /// with this one.
+    KeyDomain {
+        key: BindingId,
+        condition: ExprId,
+        negated: bool,
+    },
 }
 
 impl Fact<'_> {
@@ -1522,6 +1545,7 @@ impl Fact<'_> {
             Fact::Correlated {
                 slot: written, key, ..
             } => written == slot || key == slot,
+            Fact::KeyDomain { key, .. } => key == slot,
         }
     }
 }
@@ -1575,6 +1599,13 @@ impl<'db> Environment<'db, '_> {
         if !self.facts.contains(&fact) {
             self.facts.push(fact);
             self.undo.push(Undo::Established(fact));
+        }
+    }
+
+    fn retract(&mut self, fact: Fact<'db>) {
+        if let Some(position) = self.facts.iter().position(|&held| held == fact) {
+            self.facts.remove(position);
+            self.undo.push(Undo::Dropped(fact));
         }
     }
 
@@ -1768,6 +1799,10 @@ struct Checker<'db, 'a> {
     valued_slots: Bitset<'a, BindingId>,
     /// The item's `<<-` target names, sorted.
     super_assigned: Vec<Symbol>,
+    /// The call building the item's value when a later top-level `body(name) <-` replaces
+    /// that value's code: the closure it builds never runs as written, so a function argument
+    /// is not held to what that closure would do with it.
+    template_call: Option<TextRange>,
 }
 
 /// How a call head's function lookup went; see [`Checker::function_lookup`].
@@ -2158,6 +2193,62 @@ impl KeyTest {
             values: self.values.clone(),
             excluded: !self.excluded,
         })
+    }
+
+    /// The values passing both `self` and `domain`, a test of the same local that holds where
+    /// `self` is asked. Literals of mixed kinds compare by coercion, so they keep `self`.
+    fn within(&self, domain: &KeyTest) -> KeyTest {
+        let kind = |value: &KeyValue| std::mem::discriminant(value);
+        let mut kinds = self.values.iter().chain(&domain.values).map(kind);
+        if kinds
+            .next()
+            .is_some_and(|first| kinds.any(|other| other != first))
+        {
+            return self.clone();
+        }
+        let (values, excluded) = match (self.excluded, domain.excluded) {
+            (false, false) => (
+                self.values
+                    .iter()
+                    .filter(|value| domain.values.contains(value))
+                    .cloned()
+                    .collect(),
+                false,
+            ),
+            (false, true) => (
+                self.values
+                    .iter()
+                    .filter(|value| !domain.values.contains(value))
+                    .cloned()
+                    .collect(),
+                false,
+            ),
+            (true, false) => (
+                domain
+                    .values
+                    .iter()
+                    .filter(|value| !self.values.contains(value))
+                    .cloned()
+                    .collect(),
+                false,
+            ),
+            (true, true) => {
+                let mut values = self.values.clone();
+                values.extend(
+                    domain
+                        .values
+                        .iter()
+                        .filter(|value| !self.values.contains(value))
+                        .cloned(),
+                );
+                (values, true)
+            }
+        };
+        KeyTest {
+            key: self.key,
+            values,
+            excluded,
+        }
     }
 
     /// Whether every value passing `self` passes `other`, for tests of the same local.
@@ -3323,19 +3414,36 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// `ty` with every undecided literal in it given its default, for a message that should
-    /// name `I64` rather than a type variable, or a use that fixes the type, as a frame column
-    /// does. It decides the literals, so only such a use calls it.
+    /// `ty` with every undecided literal in it given its default and every bounded variable
+    /// settled to its bound, for a message that should name `I64` rather than a type variable,
+    /// or a use that fixes the type, as a frame column does. It decides the variables, so only
+    /// such a use calls it.
     fn settle_literals(&mut self, ty: Ty<'db>) -> Ty<'db> {
         let mut open = FxHashSet::default();
         self.table.collect_unbound_vars(self.db, ty, &mut open);
+        let mut bounded = Vec::new();
         for var in open {
             let representative = self.table.find(var);
             if let Some((literal, native)) = self.table.literal_of(representative) {
                 self.default_literal_var(Ty::new(self.db, TyKind::Var(literal)), native);
+            } else if self.table.bound_of(representative).is_some() {
+                bounded.push(representative);
             }
         }
-        self.table.resolve(self.db, ty)
+        if bounded.is_empty() {
+            return self.table.resolve(self.db, ty);
+        }
+        // A report names what a bounded value can be, never a bare variable, but wording it
+        // must not change what later uses of the variable see.
+        let snapshot = self.table.snapshot();
+        for var in bounded {
+            if self.table.settle_bound(self.db, var).is_err() {
+                break;
+            }
+        }
+        let settled = self.table.resolve(self.db, ty);
+        self.table.rollback(snapshot);
+        settled
     }
 
     /// Every two-type report goes through here so record mismatches narrow to the field
@@ -3664,9 +3772,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 let value_annotated = self.expression_annotations.contains_key(value);
                 let value_ty = match declares_function {
                     Some(declared) => {
-                        for (name, constraint) in &declared.binders {
-                            self.table.rigid_constraints.insert(*name, *constraint);
-                        }
+                        self.table.enter_rigid_binders(&declared.binders);
                         let body = match declared.body.kind(self.db) {
                             TyKind::Function(function) => {
                                 let inline = self.inline_parameters(id);
@@ -3917,9 +4023,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 // Declared parameter types push into the body; inferring freely and comparing
                 // afterwards would report a shape mismatch and miss the real error inside the body.
                 if let Some(declared) = self.declared_function_annotation(id) {
-                    for (name, constraint) in &declared.binders {
-                        self.table.rigid_constraints.insert(*name, *constraint);
-                    }
+                    self.table.enter_rigid_binders(&declared.binders);
                     let TyKind::Function(function) = declared.body.kind(self.db) else {
                         return unknown(self.db);
                     };
@@ -4411,9 +4515,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         if matches!(declared.body.kind(self.db), TyKind::Unknown | TyKind::Any) {
             return declared.body;
         }
-        for (name, constraint) in &declared.binders {
-            self.table.rigid_constraints.insert(*name, *constraint);
-        }
+        self.table.enter_rigid_binders(&declared.binders);
         self.record_expectation(value, declared.body);
         if self.adapt_literal(value, declared.body) != LiteralFit::NotLiteral {
             return declared.body;
@@ -4475,6 +4577,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         Entry::Unbound {
                             level: var_level,
                             constraint: Constraint::Unconstrained,
+                            bound: None,
                         } if *var_level >= level
                     ) && mentioned.get(&representative) == Some(&1)
                 }
@@ -5675,6 +5778,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             // A value nobody reads must not relate its branches: unifying them would tie
             // `nm(x, value)` to `attr(x, name) <- value` and so `x` to `value`.
             (false, false) if discarded => {
+                self.retract_false_domain(condition);
                 let correlations = self.branch_correlations(condition, &then_writes, false_mark);
                 self.join_writes(&then_writes, JoinEdge::Branch);
                 for fact in correlations {
@@ -5709,6 +5813,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     }
                     !normalizes
                 });
+                self.retract_false_domain(condition);
                 let correlations = self.branch_correlations(condition, &then_writes, false_mark);
                 self.join_writes(&then_writes, JoinEdge::Branch);
                 for fact in correlations {
@@ -7288,6 +7393,14 @@ impl<'db, 'a> Checker<'db, 'a> {
             .into_iter()
             .map(|(name, constraint)| (name, self.fresh(constraint)))
             .collect();
+        for &(name, fresh) in &substitution {
+            if let Some(&bound) = self.table.rigid_bounds.get(&name)
+                && let Some(var) = fresh.as_var(self.db)
+            {
+                let bound = substitute_rigid(self.db, bound, &substitution);
+                self.table.set_bound(var, bound);
+            }
+        }
         substitute_rigid(self.db, ty, &substitution)
     }
 
@@ -7356,25 +7469,53 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     /// Adds to `guard` the slot values that earlier correlated writes imply on each edge: after
     /// `if (case == "a") s <- f(s)`, the true edge of `if (case == "b")` holds `s` as it was
-    /// before, because the two tests exclude each other.
+    /// before, because the two tests exclude each other. Each edge also records what it shows
+    /// about the tested local, and an edge reads its test within the enclosing ones, so two
+    /// `if`s that together cover an enclosing `case %in% ...` leave no path that skips both.
     fn correlated_edges(
         &mut self,
         condition: ExprId,
         guard: Option<GuardRefinement<'db>>,
     ) -> Option<GuardRefinement<'db>> {
-        let correlated = self
-            .environment
-            .facts
-            .iter()
-            .any(|fact| matches!(fact, Fact::Correlated { .. }));
-        if !correlated {
-            return guard;
-        }
         let Some(test) = key_test(self.module, &self.naming.resolutions, condition) else {
             return guard;
         };
-        let negated = test.negated();
         let mut guard = guard.unwrap_or_default();
+        for negated in [false, true] {
+            let edge = match negated {
+                false => &mut guard.true_edge,
+                true => &mut guard.false_edge,
+            };
+            edge.push(SlotRefinement::Establish(Fact::KeyDomain {
+                key: test.key,
+                condition,
+                negated,
+            }));
+        }
+        let mut negated = test.negated();
+        let mut test = test;
+        for fact in &self.environment.facts {
+            let Fact::KeyDomain {
+                key,
+                condition: enclosing,
+                negated: enclosing_negated,
+            } = *fact
+            else {
+                continue;
+            };
+            if key != test.key {
+                continue;
+            }
+            let Some(enclosing) = key_test(self.module, &self.naming.resolutions, enclosing) else {
+                continue;
+            };
+            let enclosing = match enclosing_negated {
+                true => enclosing.negated(),
+                false => enclosing,
+            };
+            test = test.within(&enclosing);
+            negated = negated.within(&enclosing);
+        }
         for fact in &self.environment.facts {
             let Fact::Correlated {
                 slot,
@@ -7408,6 +7549,18 @@ impl<'db, 'a> Checker<'db, 'a> {
             return None;
         }
         Some(guard)
+    }
+
+    /// After an `if` whose branches both continue, the false edge's view of a tested local
+    /// does not hold.
+    fn retract_false_domain(&mut self, condition: ExprId) {
+        if let Some(test) = key_test(self.module, &self.naming.resolutions, condition) {
+            self.environment.retract(Fact::KeyDomain {
+                key: test.key,
+                condition,
+                negated: true,
+            });
+        }
     }
 
     /// Whether `id`'s value is the result of a library call its untyped arguments left
@@ -14741,7 +14894,17 @@ impl<'db, 'a> Checker<'db, 'a> {
             call_arguments[index].ty = if quoted.contains(index) {
                 Some(unknown(self.db))
             } else {
-                argument.value.map(|value| self.infer(value))
+                argument.value.map(|value| {
+                    let ty = self.infer(value);
+                    match self.template_call == Some(range)
+                        && matches!(
+                            self.table.resolve(self.db, ty).kind(self.db),
+                            TyKind::Function(_)
+                        ) {
+                        true => unknown(self.db),
+                        false => ty,
+                    }
+                })
             };
         }
         if deferred.is_empty() {
@@ -19208,6 +19371,15 @@ impl<'db, 'a> Checker<'db, 'a> {
         {
             return union_of(self.db, [left_resolved, right_resolved]);
         }
+        // Two values a union bounds keep their own types: `if (k) a else b` over two such
+        // parameters returns whichever the caller passed, not one type both must share.
+        let bounded = |ty: Ty<'db>| {
+            ty.as_var(self.db)
+                .is_some_and(|var| self.table.bound_of(var).is_some())
+        };
+        if left_resolved != right_resolved && (bounded(left_resolved) || bounded(right_resolved)) {
+            return union_of(self.db, [left_resolved, right_resolved]);
+        }
         let snapshot = self.table.snapshot();
         match self.table.unify(self.db, left, right) {
             Ok(()) => left,
@@ -19318,6 +19490,7 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     /// Quantifies unbound variables above the current level.
     fn generalize(&mut self, ty: Ty<'db>) -> TypeScheme<'db> {
+        self.settle_lone_bounds(ty);
         let resolved = self.table.resolve(self.db, ty);
         let mut binders = Vec::new();
         let mut mapping: FxHashMap<InferenceVar, Name<'db>> = FxHashMap::default();
@@ -19331,7 +19504,7 @@ impl<'db, 'a> Checker<'db, 'a> {
     fn abstract_vars(
         &mut self,
         ty: Ty<'db>,
-        binders: &mut Vec<(Name<'db>, Constraint)>,
+        binders: &mut Vec<Binder<'db>>,
         mapping: &mut FxHashMap<InferenceVar, Name<'db>>,
     ) -> Ty<'db> {
         let TyKind::Var(var) = *ty.kind(self.db) else {
@@ -19343,7 +19516,12 @@ impl<'db, 'a> Checker<'db, 'a> {
         if let Some(&name) = mapping.get(&representative) {
             return Ty::new(self.db, TyKind::Rigid(name));
         }
-        let Entry::Unbound { level, constraint } = *self.table.entry(representative) else {
+        let Entry::Unbound {
+            level,
+            constraint,
+            bound,
+        } = *self.table.entry(representative)
+        else {
             return ty;
         };
         if level <= self.table.level {
@@ -19354,6 +19532,12 @@ impl<'db, 'a> Checker<'db, 'a> {
             self.default_literal_var(Ty::new(self.db, TyKind::Var(literal)), native);
             return self.table.resolve(self.db, ty);
         }
+        // The bound's own variables are binders first, so `<T, U: list[T] | T[]>` names
+        // `T` before the bound reads it.
+        let bound = bound.map(|bound| {
+            let resolved = self.table.resolve(self.db, bound);
+            self.abstract_vars(resolved, binders, mapping)
+        });
         let letter = (b'T' + (binders.len() as u8 % 7)) as char;
         let suffix = binders.len() / 7;
         let text = if suffix == 0 {
@@ -19363,8 +19547,67 @@ impl<'db, 'a> Checker<'db, 'a> {
         };
         let name = Name::new(self.db, text);
         mapping.insert(representative, name);
-        binders.push((name, constraint));
+        binders.push(Binder {
+            name,
+            bound: match bound {
+                Some(bound) => Bound::Type(bound),
+                None => Bound::Constraint(constraint),
+            },
+        });
         Ty::new(self.db, TyKind::Rigid(name))
+    }
+
+    /// A bounded variable earns a binder only where it ties two places of a signature together
+    /// (a parameter and the return, or two parameters); anywhere else it is its bound, which
+    /// reads better than a binder that says nothing more.
+    fn settle_lone_bounds(&mut self, ty: Ty<'db>) {
+        let resolved = self.table.resolve(self.db, ty);
+        let slots: Vec<Ty<'db>> = match resolved.kind(self.db) {
+            TyKind::Function(function) => function
+                .positional
+                .iter()
+                .copied()
+                .chain(
+                    function
+                        .named
+                        .iter()
+                        .flat_map(|parameter| parameter.types()),
+                )
+                .chain(function.variadic.iter().map(|rest| rest.element))
+                .chain([function.ret])
+                .collect(),
+            _ => vec![resolved],
+        };
+        let mut seen = FxHashSet::default();
+        let mut tied = FxHashSet::default();
+        for slot in slots {
+            let mut vars = FxHashSet::default();
+            self.table.collect_unbound_vars(self.db, slot, &mut vars);
+            for var in vars {
+                if !seen.insert(var) {
+                    tied.insert(var);
+                }
+            }
+        }
+        let mut lone: Vec<InferenceVar> =
+            seen.into_iter().filter(|var| !tied.contains(var)).collect();
+        lone.sort_unstable_by_key(|var| var.0);
+        for var in lone {
+            if let Entry::Unbound {
+                level,
+                bound: Some(_),
+                ..
+            } = *self.table.entry(var)
+                && level > self.table.level
+            {
+                let snapshot = self.table.snapshot();
+                if self.table.settle_bound(self.db, var).is_err() {
+                    // A bounded variable carries no constraint and no cycle, so this does not
+                    // happen; if it did, keeping the binder still gives a correct scheme.
+                    self.table.rollback(snapshot);
+                }
+            }
+        }
     }
 
     /// The candidates instantiated only when an argument can use their parameter types.
@@ -19389,9 +19632,17 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     fn instantiate(&mut self, scheme: &TypeScheme<'db>) -> Ty<'db> {
         let mut substitution = BumpVec::with_capacity_in(scheme.binders.len(), self.arena);
-        for (name, constraint) in &scheme.binders {
-            let fresh = self.fresh(*constraint);
-            substitution.push((*name, fresh));
+        for binder in &scheme.binders {
+            let fresh = self.fresh(binder.constraint());
+            substitution.push((binder.name, fresh));
+        }
+        for (binder, &(_, fresh)) in scheme.binders.iter().zip(substitution.iter()) {
+            if let Some(bound) = binder.type_bound()
+                && let Some(var) = fresh.as_var(self.db)
+            {
+                let bound = substitute_rigid(self.db, bound, &substitution);
+                self.table.set_bound(var, bound);
+            }
         }
         substitute_rigid(self.db, scheme.body, &substitution)
     }

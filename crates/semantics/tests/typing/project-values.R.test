@@ -208,7 +208,7 @@ result <- helper()
 helper: fn() -> integer
 oops: fn() -> Unknown
 43..44 error[syntax-error] unclosed `(`; expected a matching `)`
-45..45 error[syntax-error] expected an expression inside `(`, found end of file
+44..44 error[syntax-error] expected an expression inside `(`, found end of file
 == R/b.R
 result: integer
 

@@ -30,9 +30,9 @@ use {
         },
         top_level::{CalleeOrigin, Effect, TopLevel, item_top_level},
         types::{
-            Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
-            QueryName, RecordField, Ty, TyKind, TypeScheme, array_element, for_each_child_type,
-            map_child_types, substitute_rigid, union_of,
+            Atomic, Binder, Bound, Constraint, FrameKind, FunctionType, InferenceVar, Name,
+            NativeField, QueryName, RecordField, Ty, TyKind, TypeScheme, array_element,
+            for_each_child_type, map_child_types, substitute_rigid, union_of,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -1371,8 +1371,10 @@ fn agreement_candidates<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Agreement
             .declared
             .map(|declared| declared.binders)
             .unwrap_or_default();
-        let comment_names = positional_binders(db, &comment_binders);
-        let inline_names = positional_binders(db, &inline_binders);
+        let binder_names =
+            |binders: &[Binder<'db>]| binders.iter().map(|binder| binder.name).collect::<Vec<_>>();
+        let comment_names = positional_binders(db, &binder_names(&comment_binders));
+        let inline_names = positional_binders(db, &binder_names(&inline_binders));
         let binder_nodes = |node: &SyntaxNode| -> Vec<TextRange> {
             node.descendants()
                 .filter(|binder| binder.kind() == SyntaxKind::TYPE_BINDER)
@@ -1388,7 +1390,7 @@ fn agreement_candidates<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Agreement
             })
             .flatten()
             .unwrap_or_default();
-        for (index, ((_, inline_constraint), (_, comment_constraint))) in
+        for (index, (inline_binder, comment_binder)) in
             inline_binders.iter().zip(&comment_binders).enumerate()
         {
             let (Some(&inline_range), Some(&comment_range)) = (
@@ -1397,12 +1399,24 @@ fn agreement_candidates<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Agreement
             ) else {
                 continue;
             };
-            if inline_constraint == comment_constraint {
+            // Bounds compare with the binders renamed by position, like the signatures.
+            let positional = |bound: Bound<'db>, names: &[(Name<'db>, Ty<'db>)]| match bound {
+                Bound::Type(ty) => Bound::Type(substitute_rigid(db, ty, names)),
+                bound => bound,
+            };
+            let inline_bound = positional(inline_binder.bound, &inline_names);
+            let comment_bound = positional(comment_binder.bound, &comment_names);
+            if inline_bound == comment_bound {
                 continue;
             }
-            let describe = |constraint: &Constraint| match constraint.spelling() {
-                Some(spelling) => format!("`{spelling}`"),
-                None => "no constraint".to_owned(),
+            let describe = |binder: &Binder<'db>| match binder.bound {
+                Bound::Type(ty) => {
+                    format!("the bound `{}`", TypeRenderer::default().render(db, ty))
+                }
+                Bound::Constraint(constraint) => match constraint.spelling() {
+                    Some(spelling) => format!("`{spelling}`"),
+                    None => "no constraint".to_owned(),
+                },
             };
             candidates.push(AgreementCandidate::Finding(Diagnostic {
                 range: inline_range,
@@ -1410,8 +1424,8 @@ fn agreement_candidates<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<Agreement
                 code: "annotation-mismatch",
                 message: format!(
                     "the inline annotation gives this type parameter {}, but the `#:` comment gives it {}. ry uses the inline one; make the two agree, or delete one",
-                    describe(inline_constraint),
-                    describe(comment_constraint)
+                    describe(inline_binder),
+                    describe(comment_binder)
                 ),
                 fix: None,
                 related: vec![RelatedLocation {
@@ -1616,12 +1630,11 @@ fn definition_agreement_candidates<'db>(
         }
         let [inline_body, comment_body] =
             [inline_definition, comment_definition].map(|definition| {
-                let binders: Vec<(Name, Constraint)> = definition
-                    .parameters
-                    .iter()
-                    .map(|parameter| (*parameter, Constraint::Unconstrained))
-                    .collect();
-                substitute_rigid(db, definition.body, &positional_binders(db, &binders))
+                substitute_rigid(
+                    db,
+                    definition.body,
+                    &positional_binders(db, &definition.parameters),
+                )
             });
         if inline_body != comment_body
             && let (Some(inline_type), Some(comment_type)) =
@@ -1643,14 +1656,11 @@ fn definition_agreement_candidates<'db>(
 
 /// Renames type parameters by position, so two signatures that differ only in what
 /// they call their type parameters compare equal.
-fn positional_binders<'db>(
-    db: &'db dyn Db,
-    binders: &[(Name<'db>, Constraint)],
-) -> Vec<(Name<'db>, Ty<'db>)> {
-    binders
+fn positional_binders<'db>(db: &'db dyn Db, names: &[Name<'db>]) -> Vec<(Name<'db>, Ty<'db>)> {
+    names
         .iter()
         .enumerate()
-        .map(|(index, (name, _))| {
+        .map(|(index, name)| {
             (
                 *name,
                 Ty::new(db, TyKind::Rigid(Name::new(db, format!("#{index}")))),
@@ -3796,7 +3806,7 @@ impl<'db> TypeRenderer<'db> {
     }
 
     pub fn render_scheme(&mut self, db: &'db dyn Db, scheme: &TypeScheme<'db>) -> String {
-        match self.render_binder_prefix(&scheme.binders) {
+        match self.render_binder_prefix(db, &scheme.binders) {
             Some(prefix) => format!("{prefix} {}", self.render(db, scheme.body)),
             None => self.render(db, scheme.body),
         }
@@ -3804,17 +3814,24 @@ impl<'db> TypeRenderer<'db> {
 
     /// Registers each binder's display name so the body rendered afterwards through
     /// this renderer reuses them.
-    pub fn render_binder_prefix(&mut self, binders: &[(Name<'db>, Constraint)]) -> Option<String> {
+    pub fn render_binder_prefix(
+        &mut self,
+        db: &'db dyn Db,
+        binders: &[Binder<'db>],
+    ) -> Option<String> {
         if binders.is_empty() {
             return None;
         }
         let binders: Vec<String> = binders
             .iter()
-            .map(|(name, constraint)| {
-                let rendered = self.variable_name(RenderedVar::Rigid(*name));
-                match constraint.spelling() {
-                    Some(spelling) => format!("{rendered}: {spelling}"),
-                    None => rendered,
+            .map(|binder| {
+                let rendered = self.variable_name(RenderedVar::Rigid(binder.name));
+                match binder.bound {
+                    Bound::Type(bound) => format!("{rendered}: {}", self.render(db, bound)),
+                    Bound::Constraint(constraint) => match constraint.spelling() {
+                        Some(spelling) => format!("{rendered}: {spelling}"),
+                        None => rendered,
+                    },
                 }
             })
             .collect();
