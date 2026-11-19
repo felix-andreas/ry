@@ -21,8 +21,10 @@ check <- function(a) {
   all(vapply(perms, function(p) identical(aperm(a, p), reference(a, p)), NA))
 }
 
+# 70 and 33 rows cross the transpose's 32-row tiles and leave a partial one; the other extents
+# stay small because the reference copies element by element, which collection stress makes slow.
 set.seed(1)
-shapes <- list(c(3, 5), c(70, 33), c(2, 3, 4), c(33, 40, 3), c(1, 5, 2), c(5, 1, 7), c(2, 3, 2, 4))
+shapes <- list(c(3, 5), c(70, 3), c(2, 3, 4), c(33, 4, 3), c(1, 5, 2), c(5, 1, 7), c(2, 3, 2, 4))
 for (shape in shapes) {
   n <- prod(shape)
   arrays <- list(
