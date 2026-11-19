@@ -402,6 +402,55 @@ pick: fn(flag: logical) -> integer[] | NULL
 span: Unknown
 166..174 error[type-mismatch] expected a scalar numeric value (`integer` or `double`), found `integer | NULL`
 
+#---- a_test_excluding_an_earlier_one_sees_the_value_before_its_write
+excluded <- function(case) {
+  x <- 1
+  if (case == "a") x <- "s"
+  if (case == "b") x + 1 else 0
+}
+sets <- function(case) {
+  x <- 1
+  if (case %in% c("snake", "parsed")) x <- "s"
+  if (!case %in% c("snake", "parsed", "none")) x + 1 else 0
+}
+flag <- function(flag) {
+  x <- "a"
+  if (flag) x <- list(a = 1)
+  if (!flag) toupper(x) else x$a
+}
+#++++
+excluded: <T> fn(case: T) -> double
+sets: <T> fn(case: T) -> double
+flag: fn(flag: logical) -> character | double
+
+#---- a_test_implying_an_earlier_one_sees_its_write
+implied <- function(case) {
+  x <- 1
+  if (case %in% c("a", "b")) x <- "s"
+  if (case == "b") x + 1 else 0
+}
+#++++
+implied: Unknown
+94..95 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- a_test_of_another_or_rewritten_local_sees_both_values
+unrelated <- function(case, other) {
+  x <- 1
+  if (case == "a") x <- "s"
+  if (other == "b") x + 1 else 0
+}
+rewritten <- function(case) {
+  x <- 1
+  if (case == "a") x <- "s"
+  case <- "a"
+  if (case == "b") x + 1 else 0
+}
+#++++
+unrelated: Unknown
+rewritten: Unknown
+94..95 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | character`
+209..210 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | character`
+
 #==== loops
 #---- accumulator_is_stable
 f <- function() {

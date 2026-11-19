@@ -41,7 +41,7 @@ use {
     bumpalo::{Bump, collections::Vec as BumpVec},
     hashbrown::{HashMap, HashSet},
     rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet},
-    smallvec::SmallVec,
+    smallvec::{SmallVec, smallvec},
     std::{
         alloc::{AllocError, Allocator, Layout},
         borrow::Cow,
@@ -1477,26 +1477,36 @@ struct Environment<'db, 'a> {
     entries: Column<'a, BindingId, EnvEntry<'db>>,
     /// What dominating tests showed about slots' values beyond their types. A write to a slot
     /// drops every fact that mentions it.
-    facts: Vec<Fact>,
+    facts: Vec<Fact<'db>>,
     undo: Vec<Undo<'db>>,
     /// Scratch for [`Environment::writes_since`], empty between calls.
     written: Bitset<'a, BindingId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Fact {
+enum Fact<'db> {
     /// After `if (!is_loaded(package)) stop()`, `is_loaded(package)` holds.
     Holds(BindingId, Symbol),
     /// After `if (is.null(A) != is.null(b)) stop()`, the two are `NULL` together, so a test
     /// of one narrows the other.
     NullTogether(BindingId, BindingId),
+    /// After `if (case == "a") s <- f(s)`, `s` holds `when_true` wherever a later test of `key`
+    /// implies `condition`, and `when_false` wherever it implies the opposite.
+    Correlated {
+        slot: BindingId,
+        key: BindingId,
+        condition: ExprId,
+        when_true: Ty<'db>,
+        when_false: Ty<'db>,
+    },
 }
 
-impl Fact {
+impl Fact<'_> {
     fn mentions(self, slot: BindingId) -> bool {
         match self {
             Fact::Holds(held, _) => held == slot,
             Fact::NullTogether(first, second) => first == slot || second == slot,
+            Fact::Correlated { slot: written, key, .. } => written == slot || key == slot,
         }
     }
 }
@@ -1504,8 +1514,8 @@ impl Fact {
 #[derive(Debug)]
 enum Undo<'db> {
     Entry(BindingId, Option<EnvEntry<'db>>),
-    Established(Fact),
-    Dropped(Fact),
+    Established(Fact<'db>),
+    Dropped(Fact<'db>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1546,7 +1556,7 @@ impl<'db> Environment<'db, '_> {
         true
     }
 
-    fn establish(&mut self, fact: Fact) {
+    fn establish(&mut self, fact: Fact<'db>) {
         if !self.facts.contains(&fact) {
             self.facts.push(fact);
             self.undo.push(Undo::Established(fact));
@@ -1973,7 +1983,7 @@ enum SlotRefinement<'db> {
     Missing(BindingId),
     /// An edge that records what the test showed beyond a type: `is_loaded(package)` holds,
     /// which a `null_unless` callee reads, or two slots are `NULL` together.
-    Establish(Fact),
+    Establish(Fact<'db>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2089,6 +2099,147 @@ fn length_operand(module: &Module, id: ExprId) -> Option<(ExprId, ExprId)> {
         [argument] if argument.name.is_none() => Some((*callee, argument.value?)),
         _ => None,
     }
+}
+
+/// A test of one local against literal values: `case == "a"`, `case %in% c("a", "b")`, their
+/// negations, or a bare flag.
+#[derive(Debug, Clone)]
+struct KeyTest {
+    key: BindingId,
+    values: SmallVec<[KeyValue; 4]>,
+    /// The test holds when the local is none of `values`.
+    excluded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum KeyValue {
+    Text(String),
+    Number(f64),
+    Logical(bool),
+}
+
+impl KeyTest {
+    fn negated(&self) -> KeyTest {
+        normalized_key_test(KeyTest {
+            key: self.key,
+            values: self.values.clone(),
+            excluded: !self.excluded,
+        })
+    }
+
+    /// Whether every value passing `self` passes `other`, for tests of the same local.
+    fn implies(&self, other: &KeyTest) -> bool {
+        match (self.excluded, other.excluded) {
+            (false, false) => self.values.iter().all(|value| other.values.contains(value)),
+            (false, true) => self.values.iter().all(|value| !other.values.contains(value)),
+            (true, true) => other.values.iter().all(|value| self.values.contains(value)),
+            // An exclusion leaves infinitely many values, which no finite set holds.
+            (true, false) => false,
+        }
+    }
+}
+
+fn key_test(
+    module: &Module,
+    resolutions: &SortedMap<ExprId, BindingId>,
+    id: ExprId,
+) -> Option<KeyTest> {
+    let local = |id: ExprId| match module.kind(id) {
+        ExpressionKind::NameRef(_) => resolutions.get(&id).copied(),
+        _ => None,
+    };
+    let test = match module.kind(id) {
+        ExpressionKind::Paren(inner) => return key_test(module, resolutions, *inner),
+        ExpressionKind::Unary {
+            operator: UnaryOperator::Not,
+            operand,
+        } => return Some(key_test(module, resolutions, *operand)?.negated()),
+        ExpressionKind::NameRef(_) => KeyTest {
+            key: local(id)?,
+            values: smallvec![KeyValue::Logical(true)],
+            excluded: false,
+        },
+        ExpressionKind::Binary {
+            operator: operator @ (BinaryOperator::Equal | BinaryOperator::NotEqual),
+            lhs,
+            rhs,
+            ..
+        } => {
+            let (key, value) = match (local(*lhs), local(*rhs)) {
+                (Some(key), None) => (key, *rhs),
+                (None, Some(key)) => (key, *lhs),
+                _ => return None,
+            };
+            KeyTest {
+                key,
+                values: smallvec![key_value(module, value)?],
+                excluded: *operator == BinaryOperator::NotEqual,
+            }
+        }
+        ExpressionKind::Binary {
+            operator: BinaryOperator::Special,
+            special_name: Some(name),
+            lhs,
+            rhs,
+        } if name.as_str() == "%in%" => KeyTest {
+            key: local(*lhs)?,
+            values: key_values(module, resolutions, *rhs)?,
+            excluded: false,
+        },
+        _ => return None,
+    };
+    Some(normalized_key_test(test))
+}
+
+/// A flag is `TRUE` or `FALSE` in an `if` (`NA` stops it), so excluding one is the other.
+fn normalized_key_test(test: KeyTest) -> KeyTest {
+    let logical = |value: &KeyValue| matches!(value, KeyValue::Logical(_));
+    if !test.excluded || test.values.is_empty() || !test.values.iter().all(logical) {
+        return test;
+    }
+    let values = [true, false]
+        .into_iter()
+        .map(KeyValue::Logical)
+        .filter(|value| !test.values.contains(value))
+        .collect();
+    KeyTest {
+        key: test.key,
+        values,
+        excluded: false,
+    }
+}
+
+fn key_value(module: &Module, id: ExprId) -> Option<KeyValue> {
+    match module.kind(id) {
+        ExpressionKind::Literal(LiteralKind::String(text)) => {
+            Some(KeyValue::Text(module[text].to_string()))
+        }
+        ExpressionKind::Literal(LiteralKind::Logical(value)) => Some(KeyValue::Logical(*value)),
+        _ => numeric_literal(module, id).map(KeyValue::Number),
+    }
+}
+
+/// The literals of `"a"` or `c("a", "b")`.
+fn key_values(
+    module: &Module,
+    resolutions: &SortedMap<ExprId, BindingId>,
+    id: ExprId,
+) -> Option<SmallVec<[KeyValue; 4]>> {
+    let ExpressionKind::Call { callee, arguments } = module.kind(id) else {
+        return Some(smallvec![key_value(module, id)?]);
+    };
+    if !matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "c")
+        || resolutions.contains_key(callee)
+    {
+        return None;
+    }
+    module[arguments]
+        .iter()
+        .map(|argument| match argument.name {
+            None => key_value(module, argument.value?),
+            Some(_) => None,
+        })
+        .collect()
 }
 
 fn numeric_literal(module: &Module, id: ExprId) -> Option<f64> {
@@ -5331,6 +5482,7 @@ impl<'db, 'a> Checker<'db, 'a> {
     ) -> Ty<'db> {
         self.expect_scalar_logical(condition, ConditionSite::IfOrWhile);
         let guard = self.recognize_guard(condition);
+        let guard = self.correlated_edges(condition, guard);
 
         let mark = self.environment.mark();
         let pre_guard: Vec<(BindingId, Ty<'db>, Option<EnvEntry<'db>>)> = guard
@@ -5405,7 +5557,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             // A value nobody reads must not relate its branches: unifying them would tie
             // `nm(x, value)` to `attr(x, name) <- value` and so `x` to `value`.
             (false, false) if discarded => {
+                let correlations = self.branch_correlations(condition, &then_writes, false_mark);
                 self.join_writes(&then_writes, JoinEdge::Branch);
+                for fact in correlations {
+                    self.environment.establish(fact);
+                }
                 let then_ty = self.table.resolve(self.db, then_ty);
                 let else_ty = self.table.resolve(self.db, else_ty);
                 union_of(self.db, [then_ty, else_ty])
@@ -5435,7 +5591,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                     }
                     !normalizes
                 });
+                let correlations = self.branch_correlations(condition, &then_writes, false_mark);
                 self.join_writes(&then_writes, JoinEdge::Branch);
+                for fact in correlations {
+                    self.environment.establish(fact);
+                }
                 // A library call its untyped arguments left undecided may return anything, so
                 // the `if` may too: renv's `if (is.null(FUN.VALUE)) lapply(...) else vapply(...,
                 // FUN.VALUE = FUN.VALUE)` is a list only on one path. Any other `Unknown` branch
@@ -7038,6 +7198,97 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
+    /// The facts an `if` leaves about the slots its then branch wrote, when its condition tests
+    /// a local that neither branch writes (`if (case %in% c("a", "b")) s <- f(s)`).
+    fn branch_correlations(
+        &mut self,
+        condition: ExprId,
+        then_writes: &[(BindingId, Option<EnvEntry<'db>>)],
+        false_mark: usize,
+    ) -> Vec<Fact<'db>> {
+        let Some(test) = key_test(self.module, &self.naming.resolutions, condition) else {
+            return Vec::new();
+        };
+        let else_writes = self.environment.writes_since(false_mark);
+        if then_writes
+            .iter()
+            .chain(&else_writes)
+            .any(|(slot, _)| *slot == test.key)
+        {
+            return Vec::new();
+        }
+        then_writes
+            .iter()
+            .filter_map(|&(slot, entry)| {
+                let (Some(EnvEntry::Mono(when_true)), Some(EnvEntry::Mono(when_false))) =
+                    (entry, self.environment.get(slot))
+                else {
+                    return None;
+                };
+                (when_true != when_false).then_some(Fact::Correlated {
+                    slot,
+                    key: test.key,
+                    condition,
+                    when_true,
+                    when_false,
+                })
+            })
+            .collect()
+    }
+
+    /// Adds to `guard` the slot values that earlier correlated writes imply on each edge: after
+    /// `if (case == "a") s <- f(s)`, the true edge of `if (case == "b")` holds `s` as it was
+    /// before, because the two tests exclude each other.
+    fn correlated_edges(
+        &mut self,
+        condition: ExprId,
+        guard: Option<GuardRefinement<'db>>,
+    ) -> Option<GuardRefinement<'db>> {
+        let correlated = self
+            .environment
+            .facts
+            .iter()
+            .any(|fact| matches!(fact, Fact::Correlated { .. }));
+        if !correlated {
+            return guard;
+        }
+        let Some(test) = key_test(self.module, &self.naming.resolutions, condition) else {
+            return guard;
+        };
+        let negated = test.negated();
+        let mut guard = guard.unwrap_or_default();
+        for fact in &self.environment.facts {
+            let Fact::Correlated {
+                slot,
+                key,
+                condition: earlier,
+                when_true,
+                when_false,
+            } = *fact
+            else {
+                continue;
+            };
+            if key != test.key {
+                continue;
+            }
+            let Some(earlier) = key_test(self.module, &self.naming.resolutions, earlier) else {
+                continue;
+            };
+            let earlier_negated = earlier.negated();
+            for (edge, edge_test) in [(&mut guard.true_edge, &test), (&mut guard.false_edge, &negated)] {
+                if edge_test.implies(&earlier) {
+                    edge.push(SlotRefinement::Narrow(slot, when_true));
+                } else if edge_test.implies(&earlier_negated) {
+                    edge.push(SlotRefinement::Narrow(slot, when_false));
+                }
+            }
+        }
+        if guard.true_edge.is_empty() && guard.false_edge.is_empty() {
+            return None;
+        }
+        Some(guard)
+    }
+
     /// Whether `id`'s value is the result of a library call its untyped arguments left
     /// undecided between candidates.
     fn ends_in_undecided_call(&self, id: ExprId) -> bool {
@@ -7259,6 +7510,21 @@ impl<'db, 'a> Checker<'db, 'a> {
                     && second.name.is_none()
                 {
                     let (local, function) = (first.value?, second.value?);
+                    // `identical(info$type, "conda")` holds only when `info` has that field, so
+                    // the true edge has `info` not `NULL`.
+                    if let ExpressionKind::Field {
+                        at: false,
+                        target,
+                        name: Some(_),
+                    } = self.module.kind(local)
+                    {
+                        key_value(self.module, function)?;
+                        let slot = self.guard_slot(*target)?;
+                        return Some(GuardRefinement {
+                            true_edge: self.non_null_edge(slot)?,
+                            false_edge: Vec::new(),
+                        });
+                    }
                     if !matches!(self.module.kind(local), ExpressionKind::NameRef(_)) {
                         return None;
                     }
@@ -9437,6 +9703,14 @@ impl<'db, 'a> Checker<'db, 'a> {
                             flexible = Some(*ty);
                         }
                     }
+                    // Two distinct declared parameters (`a / b` under `<T: numeric, U: numeric>`)
+                    // are different types by contract, so neither fixes the other. The result
+                    // claims `double`, R's widest numeric, shaped like any variable operand's.
+                    Some(existing) if self.distinct_rigids(existing, *ty) => {
+                        self.constrain_numeric_flexible(range, existing);
+                        self.constrain_numeric_flexible(range, *ty);
+                        return scalar(self.db, Atomic::Double);
+                    }
                     Some(existing) => {
                         if let Err(error) = self.table.unify(self.db, existing, *ty) {
                             self.report_unify(range, error);
@@ -9863,6 +10137,14 @@ impl<'db, 'a> Checker<'db, 'a> {
     }
 
     /// Whether the type is a variable that a scalar use bounded (`1:n`).
+    fn distinct_rigids(&self, left: Ty<'db>, right: Ty<'db>) -> bool {
+        let left = self.table.shallow_resolve(self.db, left);
+        let right = self.table.shallow_resolve(self.db, right);
+        left != right
+            && matches!(left.kind(self.db), TyKind::Rigid(_))
+            && matches!(right.kind(self.db), TyKind::Rigid(_))
+    }
+
     fn scalar_bound(&self, ty: Ty<'db>) -> bool {
         let resolved = self.table.shallow_resolve(self.db, ty);
         matches!(
@@ -13749,6 +14031,56 @@ impl<'db, 'a> Checker<'db, 'a> {
             self.undecided_calls.insert(id);
             return unknown(self.db);
         }
+        // Beside open caller variables, an unchecked argument can still be what picks the
+        // candidate: `vapply(xs, g, FUN.VALUE = value)` with an unknown `value` fits every
+        // candidate whatever `g` narrows to, each with its own result.
+        if !unchecked_argument && fit_results.len() > 1 {
+            let mut decided = fit_results
+                .iter()
+                .filter(|result| !matches!(result.kind(self.db), TyKind::Any));
+            let first = decided.next();
+            if decided.any(|result| Some(result) != first)
+                && call_arguments
+                    .iter()
+                    .any(|argument| argument.ty.is_some_and(|ty| self.is_unchecked(ty)))
+                && !self.unchecked_arguments_decide_nothing(callee, schemes, &fits, call_arguments)
+            {
+                // A caller variable the candidates narrow differently stays unchecked, as when
+                // no candidate is picked below, and one they agree on takes that narrowing:
+                // re-probing the first fit commits it, since an unchecked variable fits it too.
+                if let Some(&(first_index, _, ref first)) = fits.first() {
+                    for (position, (var, _)) in caller_entries.iter().enumerate() {
+                        if fits
+                            .iter()
+                            .any(|(_, _, narrowing)| narrowing.get(position) != first.get(position))
+                        {
+                            let var = Ty::new(self.db, TyKind::Var(*var));
+                            let unknown = unknown(self.db);
+                            if self.table.unify(self.db, var, unknown).is_err() {
+                                return unknown;
+                            }
+                        }
+                    }
+                    if let Some(scheme) = schemes.get(first_index) {
+                        let snapshot = self.table.snapshot();
+                        if self
+                            .probe_overload_candidate(callee, scheme, call_arguments, fitting_courtesy)
+                            .is_err()
+                        {
+                            self.table.rollback(snapshot);
+                        }
+                    }
+                }
+                if call_arguments.iter().all(|argument| {
+                    argument.forwards_dots
+                        || argument.ty.is_none_or(|ty| !self.is_inferred_unknown(ty))
+                }) {
+                    return any(self.db);
+                }
+                self.undecided_calls.insert(id);
+                return unknown(self.db);
+            }
+        }
         if !unchecked_argument
             && let Some(var) = self.preserved_caller_variable(&caller_entries, &fits, &fit_results)
         {
@@ -15043,9 +15375,9 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// The return of a call to an inferred signature whose return is a union.
     ///
     /// An inferred parameter typed `list[T] | T[]` takes a list or a vector, and a body that
-    /// hands the parameter back returns that same union. A call that passes one of the two
-    /// returns what it passed: `normalize(tempfile())` is a `character`, not also a
-    /// `list[character]`.
+    /// hands the parameter back returns that same union. A call that passes one of the two,
+    /// or a union of members the parameter accepts, returns what it passed:
+    /// `normalize(tempfile())` is a `character`, not also a `list[character]`.
     fn narrow_echoed_parameter_unions(
         &mut self,
         function: &FunctionType<'db>,
@@ -15078,7 +15410,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             let TyKind::Union(accepted) = expected.kind(self.db) else {
                 continue;
             };
-            if matches!(passed.kind(self.db), TyKind::Union(_) | TyKind::Var(_))
+            if matches!(passed.kind(self.db), TyKind::Var(_))
                 || !accepted.iter().all(|member| returned.contains(member))
             {
                 continue;

@@ -90,6 +90,16 @@ increment: <T: numeric> fn(x: T) -> T
 bad: Unknown
 49..55 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
+#---- arithmetic_on_two_declared_numeric_parameters_is_double
+#: <T: numeric, U: numeric> fn(a: T, b: U) -> double
+ratio <- function(a, b) a / b
+#: <T, U: numeric> fn(a: T, b: U) -> double
+untyped <- function(a, b) a / b
+#++++
+ratio: <T: numeric, U: numeric> fn(a: T, b: U) -> double
+untyped: <T, U: numeric> fn(a: T, b: U) -> double
+153..154 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T`
+
 #---- a_shared_parameter_joins_tags_in_either_order
 #: :Red | :Green
 light <- :Red

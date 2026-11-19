@@ -1996,7 +1996,7 @@ normalize <- function(path) {
 either <- function(flag) normalize(if (flag) "a" else list("a"))
 #++++
 normalize: <T> fn(path: list[T] | T[]) -> list[T] | T[]
-either: fn(flag: logical) -> list[character] | character[]
+either: fn(flag: logical) -> character | list{character}
 
 #---- a_getter_call_to_a_getter_and_setter_closure_is_not_the_setter_value
 store <- local({
@@ -2481,6 +2481,26 @@ keep <- function(records, f) records[!enumerate(records, f, FUN.VALUE = logical(
 #++++
 enumerate: <T> fn(x: T, f: fn(Unknown) -> Unknown, [FUN.VALUE]: Unknown) -> Unknown
 keep: <T> fn(records: T, f: fn(Unknown) -> Unknown) -> Unknown
+
+#---- identical_on_a_field_rules_out_null
+# renv: `info` is a record or `NULL`, and a field equal to a string proves it is the record.
+info <- function(found) if (found) list(path = "a", type = "venv")
+#: fn(path: character) -> character
+shout <- function(path) toupper(path)
+use <- function(found) {
+  details <- info(found)
+  if (identical(details$type, "venv")) shout(details$path) else "none"
+}
+unguarded <- function(found) {
+  details <- info(found)
+  shout(details$path)
+}
+#++++
+info: fn(found: logical) -> list{path: character, type: character} | NULL
+shout: fn(path: character) -> character
+use: fn(found: logical) -> character
+unguarded: Unknown
+421..433 error[type-mismatch] expected `character`, found `character | NULL`
 
 #---- identical_to_a_function_narrows_the_local_to_it
 usage <- function(name, format_name = identity) {
