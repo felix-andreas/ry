@@ -364,6 +364,13 @@ Unverified until a Windows release smoke test runs:
 - **ry's own base R has never run on Windows.** Earlier Windows releases ran on GNU R's base, so the smoke test after a green base build is the first run of the bundled base there. Behind lattice wait 11 more recommended packages, the archive, and the smoke test.
 - **Landed:** the `fork` module is Unix-only again (a moved `#[cfg(unix)]` broke the Windows compile); the `Sys.which` fast path is Unix-only, because Windows base R defines its own `Sys.which`; the base tree carries GNU R's `Rblas.dll` and `Rlapack.dll`; it writes `etc/Rcmd_environ` and base's `Rprofile` with the lines GNU R's installer uncomments, so Rtools comes first on `PATH`; `shlib` runs `make` on the `PATH` that `Rcmd_environ` sets, which got grid and splines compiling (`shlib_runs_make_on_the_path_rcmd_environ_sets`).
 
+## Open: a profile turns off the start-up image (runtime)
+
+- A session that sources a site or user profile starts the slow way (`interp::image::applies`), about 0.2 s instead of 0.02 s, and then evaluates the loader's R code afresh (`libr::loader_backend::build`). callr points every worker at its own `R_PROFILE_USER`, so each `ry test --jobs N` worker pays this once: in a measured suite it was most of a worker's fixed overhead (idle workers and the main process's wait cost no CPU). Every `ry run` in a project with a `.Rprofile` pays it too.
+- Fix: start from the image, then source the site and user profiles, call `.First()`, and put the search path in GNU R's order: entries a profile attached move to directly in front of `package:methods` (where `.First.sys()` leaves them), a default package a profile drops from `defaultPackages` is detached, and `.First.sys()` attaches one it adds. The entries move by relinking enclosures, as `do_detach` in `crates/interp/src/envir.rs` does, because `attach()` would copy a package environment.
+- `.First()` from a profile never runs on ry's runtime; GNU R calls it after the user profile and before `.First.sys()`.
+- `ry_repl` (libr) starts a console with `user_profile: true` whatever its flags say, so `ry run --vanilla` and `ry load --vanilla` without code still read the profile. It should read `RUN_FLAG_USER_PROFILE` as `start_script_session` does.
+
 ## Open: one Renviron reader
 
 - ry has two Renviron readers, the interpreter's startup one in `crates/interp/src/session.rs` and `rcmd::command_environment`. The interpreter's lets an already-set variable win, which differs from GNU R's `process_Renviron` (a file line always overrides). Merge them into one reader with GNU R's semantics.

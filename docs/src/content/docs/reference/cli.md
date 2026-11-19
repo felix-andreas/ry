@@ -377,6 +377,17 @@ time where many objects outlive a collection: on a generated package's 1,907 tes
 runs 48 full collections instead of 5, and collecting takes 3.8 s of the 23 s instead of 0.7 s.
 A value outside a variable's range is ignored, as on GNU R.
 
+### Profiles
+
+Every command that starts a session (`ry run` with a script or a console, `ry load`, `ry test`,
+`ry document`) sources the user profile once base R has loaded, as Rscript does: the file
+`R_PROFILE_USER` names when it is set, else `./.Rprofile`, else `~/.Rprofile`. So a project's
+`.Rprofile` that sets `TZ` or an option holds before its package loads. `--no-init-file`, or its
+alias `--vanilla`, starts a script, `ry load -e`/`-f` code or a test run without it; a console
+of ry's runtime reads the profile whatever the flag. ry reads no `.Renviron`, so the two flags do the same, and
+the site profile is not sourced. `ry R` passes `--no-init-file` on to GNU R, and an executable
+from `ry build --aot --exe` reads no profile.
+
 ### Start-up image
 
 ry's base R tree ships an image of the session as it stands once base R and the default packages
@@ -391,8 +402,8 @@ a running session uses.
 Each start still runs the steps that read the environment: the C-level options, base R's profile,
 and the `.onLoad` hooks of utils, grDevices and stats. So `EDITOR`, `R_LIBS`, `_R_RNG_VERSION_`
 and the other variables they read take effect on every run, as they do on GNU R. A start runs the
-slow way, with the same result, when it is interactive, sources a site or user profile (which
-`ry run` never does and ry's `Rscript` does when one exists), or sets a variable that changes which
+slow way, with the same result, when it is interactive, sources a site or user profile (a
+[profile](#profiles) when the project has one, and a worker that callr starts always), or sets a variable that changes which
 packages load or how: `R_DEFAULT_PACKAGES`, `R_TESTS`, `R_KEEP_PKG_SOURCE=yes`,
 `_R_TRACE_LOADNAMESPACE_`, `_R_NO_REPORT_MISSING_NAMESPACES_`, `_R_METHODS_DONT_CHECKSUBCLASSES`
 or `RY_METHODS_NATIVE`.

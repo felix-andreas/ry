@@ -41,7 +41,7 @@
 
 .ry_stoplist <- c(
   ".__NAMESPACE__.", ".__S3MethodsTable__.", ".packageName", ".First.lib", ".onLoad",
-  ".onAttach", ".onUnload", ".conflicts.OK", ".noGenerics", ".__ry_loader__."
+  ".onAttach", ".onUnload", ".conflicts.OK", ".noGenerics", ".__ry_loader__.", ".__DEVTOOLS__"
 )
 
 load_all <- function(path = ".", export_all = TRUE, attach = TRUE, full = FALSE, quiet = FALSE,
