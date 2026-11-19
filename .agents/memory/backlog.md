@@ -814,9 +814,11 @@ gap, in the Limitations section of `reference/type-system.mdx`.
 
 ### False reports (5), one cause each
 
-- diffobj `diff.R` 654: `body(f) <- quote(...)` replaces a closure's body, so the one-parameter
-  function meets an interface that names more parameters. Needs a fact that a body assignment
-  makes the closure untyped.
+- diffobj `diff.R` 654: a closure in a package reads a top-level name as its definition
+  (`layer_source` takes the winner and ignores conditional writers), so a later top-level
+  `body(f) <- quote(...)` is not seen and the one-parameter function meets an interface that names
+  more parameters. Needs a deferred read to join a definition with the later top-level writes of
+  its name (in collation order), measured on the corpus.
 - renv `python.R` 109: a union parameter that flows to the return keeps every member at the call
   (`path: list[T] | T[]` from `map_lgl(path, ...)`). Needs a variable bounded by a union so the
   return names the argument's own type.

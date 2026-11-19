@@ -2379,9 +2379,17 @@ g <- function(xs, col.fun = function(n) rep("a", n)) {
   b <- col.fun(n = length(xs) + 1)
   c(a, b)
 }
+# Only the `missing()` path supplies a default: a function written on any other path is a
+# rewrite, so the call meets both values.
+rewritten <- function(f, flag) {
+  if (flag) f <- function(n) n + 1
+  f("a")
+}
 #++++
 f: <T, U> fn(xs: T, [col.fun]: fn(n: integer) -> U) -> Unknown
 g: <T, U, V> fn(xs: T, [col.fun]: fn(n: integer) -> U) -> Unknown
+rewritten: Unknown
+602..605 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- a_formal_forwarded_by_name_to_an_undeclared_library_function_is_not_forced
 # PerformanceAnalytics: graphics' `rect`, stubbed as `Any`, reads `angle` only when `density` is
@@ -2467,9 +2475,17 @@ deriv <- function(x, mu = 0, sigma = 1, order = 0) {
   out / sigma^order
 }
 grid <- function(n) deriv(seq(0, 1, length.out = n), order = 2)
+# Neither side fixes the result's atomic type: `1L + 2.5` is `double`.
+widened <- function(x, n) {
+  for (i in 1:n) NULL
+  x + n
+}
+use <- function() widened(1L, 2.5)
 #++++
 deriv: <T: numeric, U: scalar numeric> fn(x: T, [mu]: T, [sigma]: T, [order]: U) -> double
 grid: <T> fn(n: T) -> double
+widened: <T: numeric, U: scalar numeric> fn(x: T, n: U) -> double
+use: fn() -> double
 
 #---- an_if_over_an_undecided_library_call_is_untyped
 enumerate <- function(x, f, FUN.VALUE = NULL) {
@@ -2511,7 +2527,18 @@ unguarded <- function(name, format_name = identity) {
   label <- format_name("x")
   if (nchar(label) > 1) format_name(name + 1) else label
 }
+# A generic function stays generic, so each call instantiates it afresh.
+twice <- function(name, format_name = identity) {
+  if (identical(format_name, identity)) c(format_name(1), format_name("a")) else "b"
+}
 #++++
 usage: <T: numeric, U, V> fn([name]: T, [format_name]: fn(character) -> U) -> double | U
 unguarded: Unknown
+twice: <T, U, V> fn([name]: T, [format_name]: U) -> character[] | character
 271..279 error[type-mismatch] expected `character`, found `double`
+
+#---- sweep_takes_a_vector_of_margins
+# pracma: `MARGIN = c(1, 2)` sweeps over both dimensions of an array.
+spread <- function(x, y, func) sweep(x, y, MARGIN = c(1, 2), FUN = func)
+#++++
+spread: <T, U, V> fn(x: T, y: U, func: V) -> Any

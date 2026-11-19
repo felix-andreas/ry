@@ -2069,11 +2069,14 @@ Reading an item's range from `item_spans` made every edit re-lower every item of
   `FUN.VALUE`. Disagreeing narrowings become `Unknown`; agreed ones commit by re-probing the first fit,
   since a probe's narrowings name rolled-back variables and cannot be unified directly.
 - **`identical` guards.** `identical(f, g)` with `g` a function narrows the local `f` to `g`'s type on
-  the true edge (roxygen2's `format_name`). `identical(x$field, literal)` rules `NULL` out of `x`.
+  the true edge (roxygen2's `format_name`); a generic `g` narrows to its scheme
+  (`SlotRefinement::NarrowScheme`), so each read instantiates it afresh. `identical(x$field, literal)` rules `NULL` out of `x`.
 - **Correlated branch writes.** After `if (case == "a") x <- f(x)`, `Fact::Correlated` keeps `x`'s
   value on both edges keyed on `case`; a later test of `case` whose edge implies the earlier test (or
   its negation) narrows `x` to that value (`KeyTest::implies` over literal sets, `==`, `!=`, `%in%`,
-  a bare logical local). A write to either local drops the fact through `Environment::forget`. Two
+  a bare local read as `== TRUE`). Only literals of one kind compare, since R coerces before it
+  compares (`"1" == 1`), and a string with a backslash is no key, since a raw string keeps its
+  escapes literally. A write to either local drops the fact through `Environment::forget`. Two
   tests that only jointly cover an enclosing test are not combined (snakecase `to_any_case` 286).
 - **Union echo.** An inferred `list[T] | T[]` parameter returned as-is gives back what a call passed,
   a union argument included, when every member is accepted.

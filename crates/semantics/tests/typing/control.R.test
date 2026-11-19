@@ -451,6 +451,68 @@ rewritten: Unknown
 94..95 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | character`
 209..210 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | character`
 
+#---- literals_of_different_kinds_are_not_told_apart
+text_and_number <- function(case) {
+  x <- 1
+  if (case == "1") x <- "s"
+  if (case == 1) x + 1 else 0
+}
+number_and_flag <- function(flag) {
+  x <- 1
+  if (flag == 1) x <- "s"
+  if (flag) x + 1 else 0
+}
+text_and_flag <- function(case) {
+  x <- 1
+  if (case == "TRUE") x <- "s"
+  if (case) x + 1 else 0
+}
+escaped <- function(case) {
+  x <- 1
+  if (case == "\"") x <- "s"
+  if (case == '"') x + 1 else 0
+}
+#++++
+text_and_number: Unknown
+number_and_flag: Unknown
+text_and_flag: Unknown
+escaped: Unknown
+90..91 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | character`
+188..189 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | character`
+289..290 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | character`
+389..390 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | character`
+
+#---- a_key_written_in_a_loop_or_by_a_closure_sees_both_values
+in_loop <- function(case, n) {
+  x <- 1
+  if (case == "a") x <- "s"
+  for (i in seq_len(n)) case <- "b"
+  if (case == "b") x + 1 else 0
+}
+loop_key <- function(keys) {
+  x <- 1
+  for (case in keys) {
+    if (case == "a") x <- "s"
+  }
+  for (case in keys) {
+    if (case == "b") x + 1
+  }
+}
+superassigned <- function(case) {
+  x <- 1
+  if (case == "a") x <- "s"
+  reset <- function() case <<- "b"
+  reset()
+  if (case == "b") x + 1 else 0
+}
+#++++
+in_loop: Unknown
+loop_key: Unknown
+superassigned: Unknown
+123..124 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | character`
+277..278 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | character`
+424..425 error[type-mismatch] expected a numeric value (`integer` or `double`), found `double | character`
+
 #==== loops
 #---- accumulator_is_stable
 f <- function() {

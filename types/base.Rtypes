@@ -575,8 +575,8 @@ colMeans : @pure fn(x: Any, [na.rm]: logical, [dims]: Any) -> double[]
 # callbacks with more formals.
 apply : fn(X: Any, MARGIN: Any, FUN: fn(Any) -> Any, ...: Any) -> Any
 # `sweep` keeps its input's dimensions, so a matrix in is a matrix out.
-sweep : fn(x: matrix, MARGIN: integer | double | character, STATS: Any, [FUN]: Any, [check.margin]: logical, ...: Any) -> matrix
-sweep : fn(x: Any, MARGIN: integer | double | character, STATS: Any, [FUN]: Any, [check.margin]: logical, ...: Any) -> Any
+sweep : fn(x: matrix, MARGIN: integer[] | double[] | character[], STATS: Any, [FUN]: Any, [check.margin]: logical, ...: Any) -> matrix
+sweep : fn(x: Any, MARGIN: integer[] | double[] | character[], STATS: Any, [FUN]: Any, [check.margin]: logical, ...: Any) -> Any
 # `lapply` keeps its input's names, so a named list in is a named list out. The
 # named candidate comes first because it is the narrower one: a plain list or a
 # vector does not fit it at all and takes the general form below, which also takes
