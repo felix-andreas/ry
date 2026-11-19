@@ -1007,9 +1007,16 @@ pub fn pretty(
 /// and `0L` (the argument was not given) keeps the old behavior, recycling only `from` and `by`
 /// to `nvec`, with a warning when that drops elements.
 unsafe fn do_sequence(call: &Call<'_>) -> R<Sexp> {
-    let lengths = coerce_vector(call.arg(0), SexpType::Integer)?;
-    let from = coerce_vector(call.arg(1), SexpType::Integer)?;
-    let by = coerce_vector(call.arg(2), SexpType::Integer)?;
+    let integers = |argument: Sexp| {
+        let vector = coerce_vector(argument, SexpType::Integer)?;
+        crate::heap().root(vector);
+        R::Ok(vector)
+    };
+    let (lengths, from, by) = (
+        integers(call.arg(0))?,
+        integers(call.arg(1))?,
+        integers(call.arg(2))?,
+    );
     let recycle_argument = call.arg(3);
     // R 4.6 and later pass `recycle`, as an integer when the caller left it missing.
     let maybe_warn = call.len() > 3 && recycle_argument.kind() != SexpType::Logical;
@@ -1061,22 +1068,34 @@ unsafe fn do_sequence(call: &Call<'_>) -> R<Sexp> {
             "'{name}' must be a vector of non-negative integers"
         )));
     }
-    let mut output = Vec::new();
-    for index in 0..total {
-        let count = lengths[index % lengths.len()];
-        let start = from[index % from.len()];
-        let step = by[index % by.len()];
+    let runs = (0..total).map(|index| {
+        (
+            lengths[index % lengths.len()],
+            from[index % from.len()],
+            by[index % by.len()],
+        )
+    });
+    let mut size = 0usize;
+    for (count, start, step) in runs.clone() {
         if count != 0 && start == NA_INTEGER {
             return Err(crate::unwind::error("'from' contains NAs"));
         }
         if count >= 2 && step == NA_INTEGER {
             return Err(crate::unwind::error("'by' contains NAs"));
         }
-        for position in 0..count {
-            output.push(start + position * step);
-        }
+        size += count as usize;
     }
-    values::integer_vector(&output)
+    let result = values::alloc_uninit(SexpType::Integer, size)?;
+    let mut rest = values::ints_mut(result);
+    for (count, start, step) in runs {
+        let (run, after) = rest.split_at_mut(count as usize);
+        // C's int arithmetic, as GNU R's loop does it.
+        for (slot, position) in run.iter_mut().zip(0i32..) {
+            *slot = start.wrapping_add(position.wrapping_mul(step));
+        }
+        rest = after;
+    }
+    Ok(result)
 }
 
 /// `.bincode(x, breaks, right, include.lowest)`.

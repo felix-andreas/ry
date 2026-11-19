@@ -1280,9 +1280,9 @@ pub fn math(function: Math, source: Option<Reals<'_>>, output: &mut [f64]) -> bo
     // The common functions get their own loop, so the loop calls no function it cannot
     // vectorize.
     match function {
-        Math::Floor => math_lanes(source, output, f64::floor),
-        Math::Ceiling => math_lanes(source, output, f64::ceil),
-        Math::Trunc => math_lanes(source, output, f64::trunc),
+        Math::Floor => math_lanes(source, output, floor),
+        Math::Ceiling => math_lanes(source, output, ceiling),
+        Math::Trunc => math_lanes(source, output, truncate),
         Math::Abs => math_lanes(source, output, f64::abs),
         Math::Sqrt => math_lanes(source, output, f64::sqrt),
         Math::Exp => {
@@ -1310,6 +1310,53 @@ pub fn math(function: Math, source: Option<Reals<'_>>, output: &mut [f64]) -> bo
             )
         }
     }
+}
+
+/// `f64::floor`, `f64::ceil` and `f64::trunc` in SSE2 arithmetic, which vectorizes: the
+/// baseline x86-64 target has no rounding instruction, so the library functions are a call per
+/// element. Adding and subtracting 2^52 rounds a smaller magnitude to the nearest integer, a
+/// step of one corrects the direction, and the sign of `x` keeps a zero result's sign. A larger
+/// magnitude, infinity and NaN are already integral and pass through.
+fn floor(x: f64) -> f64 {
+    let nearest = nearest_integer(x);
+    let result = if nearest > x { nearest - 1.0 } else { nearest };
+    if x.abs() < TWO_TO_52 {
+        result.copysign(x)
+    } else {
+        x
+    }
+}
+
+fn ceiling(x: f64) -> f64 {
+    let nearest = nearest_integer(x);
+    let result = if nearest < x { nearest + 1.0 } else { nearest };
+    if x.abs() < TWO_TO_52 {
+        result.copysign(x)
+    } else {
+        x
+    }
+}
+
+fn truncate(x: f64) -> f64 {
+    let magnitude = x.abs();
+    let nearest = (magnitude + TWO_TO_52) - TWO_TO_52;
+    let result = if nearest > magnitude {
+        nearest - 1.0
+    } else {
+        nearest
+    };
+    if magnitude < TWO_TO_52 {
+        result.copysign(x)
+    } else {
+        x
+    }
+}
+
+const TWO_TO_52: f64 = 4_503_599_627_370_496.0;
+
+/// The integer nearest `x`, ties to even, for `|x| < 2^52`.
+fn nearest_integer(x: f64) -> f64 {
+    ((x.abs() + TWO_TO_52) - TWO_TO_52).copysign(x)
 }
 
 /// The total of integers or logicals in 64 bits, or `None` when one is `NA` and `na_rm` is

@@ -2362,15 +2362,22 @@ unsafe fn arma_to_ma(call: &NativeCall<'_>) -> R<Sexp> {
 
 /// `intgrt_vec(x, xi, lag)`: the inverse of lagged differencing, from initial values `xi`.
 unsafe fn intgrt_vec(call: &NativeCall<'_>) -> R<Sexp> {
-    let x = real_values(call.arg(0))?;
     let initial = real_values(call.arg(1))?;
     let lag = values::as_integer_scalar(call.arg(2)).max(0) as usize;
-    let mut y = vec![0.0; x.len() + lag];
-    y[..lag.min(initial.len())].copy_from_slice(&initial[..lag.min(initial.len())]);
-    for i in 0..x.len() {
-        y[i + lag] = x[i] + y[i];
+    let x = real_data(call.arg(0))?;
+    let result = values::alloc_uninit(SexpType::Real, x.len() + lag)?;
+    let y = values::reals_mut(result);
+    let known = lag.min(initial.len());
+    y[..known].copy_from_slice(&initial[..known]);
+    y[known..lag].fill(0.0);
+    if lag == 0 {
+        y.copy_from_slice(&x);
+    } else {
+        for (i, &step) in x.iter().enumerate() {
+            y[i + lag] = step + y[i];
+        }
     }
-    values::real_vector(&y)
+    Ok(result)
 }
 
 /// `pp_sum(u, l)`: the Newey-West weighted sum of autocovariances behind `PP.test`.
