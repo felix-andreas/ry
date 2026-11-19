@@ -7251,6 +7251,27 @@ impl<'db, 'a> Checker<'db, 'a> {
                 if self.naming.resolutions.contains_key(callee) {
                     return None;
                 }
+                // `identical(format_name, identity)` holds only when the local is that very
+                // function, so the true edge calls it with the function's own type.
+                if name == "identical"
+                    && let [first, second] = &self.module[arguments][..]
+                    && first.name.is_none()
+                    && second.name.is_none()
+                {
+                    let (local, function) = (first.value?, second.value?);
+                    if !matches!(self.module.kind(local), ExpressionKind::NameRef(_)) {
+                        return None;
+                    }
+                    let slot = *self.naming.resolutions.get(&local)?;
+                    let ty = self.recorded_type(function);
+                    if self.callable(ty) != Callable::Yes {
+                        return None;
+                    }
+                    return Some(GuardRefinement {
+                        true_edge: vec![SlotRefinement::Narrow(slot, ty)],
+                        false_edge: Vec::new(),
+                    });
+                }
                 let [argument] = &self.module[arguments][..] else {
                     return None;
                 };

@@ -2481,3 +2481,17 @@ keep <- function(records, f) records[!enumerate(records, f, FUN.VALUE = logical(
 #++++
 enumerate: <T> fn(x: T, f: fn(Unknown) -> Unknown, [FUN.VALUE]: Unknown) -> Unknown
 keep: <T> fn(records: T, f: fn(Unknown) -> Unknown) -> Unknown
+
+#---- identical_to_a_function_narrows_the_local_to_it
+usage <- function(name, format_name = identity) {
+  label <- format_name("x")
+  if (identical(format_name, identity)) format_name(name + 1) else label
+}
+unguarded <- function(name, format_name = identity) {
+  label <- format_name("x")
+  if (nchar(label) > 1) format_name(name + 1) else label
+}
+#++++
+usage: <T: numeric, U, V> fn([name]: T, [format_name]: fn(character) -> U) -> double | U
+unguarded: Unknown
+271..279 error[type-mismatch] expected `character`, found `double`
