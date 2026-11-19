@@ -2470,3 +2470,14 @@ grid <- function(n) deriv(seq(0, 1, length.out = n), order = 2)
 #++++
 deriv: <T: numeric, U: scalar numeric> fn(x: T, [mu]: T, [sigma]: T, [order]: U) -> double
 grid: <T> fn(n: T) -> double
+
+#---- an_if_over_an_undecided_library_call_is_untyped
+enumerate <- function(x, f, FUN.VALUE = NULL) {
+  callback <- function(i) f(x[[i]])
+  if (is.null(FUN.VALUE)) lapply(seq_along(x), callback)
+  else vapply(seq_along(x), callback, FUN.VALUE = FUN.VALUE)
+}
+keep <- function(records, f) records[!enumerate(records, f, FUN.VALUE = logical(1))]
+#++++
+enumerate: <T> fn(x: T, f: fn(Unknown) -> Unknown, [FUN.VALUE]: Unknown) -> Unknown
+keep: <T> fn(records: T, f: fn(Unknown) -> Unknown) -> Unknown

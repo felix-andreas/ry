@@ -846,6 +846,7 @@ fn check_item_in<'db>(
         selected_overloads: Column::new_in(arena, expressions),
         callee_targets: Column::new_in(arena, expressions),
         masked_reads: Bitset::new_in(arena, expressions),
+        undecided_calls: Bitset::new_in(arena, expressions),
         unseen_frames: 0,
         column_scopes: Vec::new(),
         column_misses: Column::new_in(arena, expressions),
@@ -1658,6 +1659,8 @@ struct Checker<'db, 'a> {
     selected_overloads: Column<'a, ExprId, usize>,
     callee_targets: Column<'a, ExprId, CalleeTarget>,
     masked_reads: Bitset<'a, ExprId>,
+    /// Library calls whose untyped arguments left the candidates disagreeing.
+    undecided_calls: Bitset<'a, ExprId>,
     /// How many enclosing `[` index a value that may be a data.table of unknown columns.
     unseen_frames: u32,
     /// Queries being inferred, innermost last: a bare name inside one reads a column.
@@ -5433,7 +5436,23 @@ impl<'db, 'a> Checker<'db, 'a> {
                     !normalizes
                 });
                 self.join_writes(&then_writes, JoinEdge::Branch);
-                let joined = self.join_branch_values(then_ty, else_ty);
+                // A library call its untyped arguments left undecided may return anything, so
+                // the `if` may too: renv's `if (is.null(FUN.VALUE)) lapply(...) else vapply(...,
+                // FUN.VALUE = FUN.VALUE)` is a list only on one path. Any other `Unknown` branch
+                // still joins as the typed one, because a recursive call's placeholder is one.
+                let undecided = |checker: &mut Self, branch: ExprId, ty: Ty<'db>| {
+                    let ty = checker.table.resolve(checker.db, ty);
+                    checker.ends_in_undecided_call(branch)
+                        && matches!(ty.kind(checker.db), TyKind::Unknown)
+                };
+                let joined = if undecided(self, then_branch, then_ty)
+                    || else_branch.is_some_and(|branch| undecided(self, branch, else_ty))
+                {
+                    self.join_branch_values(then_ty, else_ty);
+                    unknown(self.db)
+                } else {
+                    self.join_branch_values(then_ty, else_ty)
+                };
                 let mut range = self.module.range(then_branch);
                 if let Some(else_branch) = else_branch {
                     range = range.cover(self.module.range(else_branch));
@@ -7015,6 +7034,19 @@ impl<'db, 'a> Checker<'db, 'a> {
                 !arms.is_empty() && self.module[arms].iter().all(|arm| self.diverges(arm.body))
             }
             ExpressionKind::Repeat { body } => !self.breaks_out(*body),
+            _ => false,
+        }
+    }
+
+    /// Whether `id`'s value is the result of a library call its untyped arguments left
+    /// undecided between candidates.
+    fn ends_in_undecided_call(&self, id: ExprId) -> bool {
+        match self.module.kind(id) {
+            ExpressionKind::Call { .. } => self.undecided_calls.contains(id),
+            ExpressionKind::Block { statements, .. } => self.module[statements]
+                .last()
+                .is_some_and(|&last| self.ends_in_undecided_call(last)),
+            ExpressionKind::Paren(inner) => self.ends_in_undecided_call(*inner),
             _ => false,
         }
     }
@@ -13693,6 +13725,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             }) {
                 return any(self.db);
             }
+            self.undecided_calls.insert(id);
             return unknown(self.db);
         }
         if !unchecked_argument
@@ -13735,6 +13768,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         if winner.is_none()
             && let Some((_, _, first)) = fits.first()
         {
+            self.undecided_calls.insert(id);
             for (position, (var, _)) in caller_entries.iter().enumerate() {
                 if fits
                     .iter()
