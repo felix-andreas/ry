@@ -505,14 +505,24 @@ no rewrite
 
 #---- update_rows_unknown_columns_is_left_alone
 library(data.table)
+sales <- data.table(read.csv("sales.csv"))
+sales[units > 2L, flag := TRUE]
+#++++
+no rewrite
+
+#---- update_rows_of_a_constructed_table
+library(data.table)
 sales <- data.table(region = c("eu", "us"), units = c(3L, 5L))
 sales[units > 2L, flag := TRUE]
 #++++
 Rewrite `data.table()` as `DataFrame()`
 - data.table
-left alone by the whole-file migration
-applied alone:
 + DataFrame
+Rewrite `:=` with `DataFrame.with_columns`
+- sales[units > 2L, flag := TRUE]
++ sales <- sales |> DataFrame.with_columns(flag = Expr.if_else(Expr.col("units") > 2L, TRUE, NA))
+applied alone:
++ sales <- as.DataFrame(sales) |> DataFrame.with_columns(flag = Expr.if_else(Expr.col("units") > 2L, TRUE, NA))
 
 #---- join_on
 library(data.table)
@@ -526,20 +536,11 @@ Rewrite the join with `DataFrame.join`
 
 #---- join_with_unknown_columns_is_left_alone
 library(data.table)
-sales <- data.table(region = c("eu", "us"), units = c(3L, 5L))
-regions <- data.table(region = c("eu", "us"), manager = c("Ana", "Bo"))
+sales <- data.table(read.csv("sales.csv"))
+regions <- data.table(read.csv("regions.csv"))
 joined <- regions[sales, on = "region"]
 #++++
-Rewrite `data.table()` as `DataFrame()`
-- data.table
-left alone by the whole-file migration
-applied alone:
-+ DataFrame
-Rewrite `data.table()` as `DataFrame()`
-- data.table
-left alone by the whole-file migration
-applied alone:
-+ DataFrame
+no rewrite
 
 #---- query_on_a_parameter_keeps_its_conversion
 library(data.table)

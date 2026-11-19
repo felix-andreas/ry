@@ -410,7 +410,12 @@ fn render_stub_source(source: &str) -> String {
             } else {
                 ""
             };
-            output.push_str(&format!("{name} : {pure}{masked}{rendered}\n"));
+            let opaque = library
+                .opaque
+                .get(name)
+                .map(|parameters| format!("@opaque({}) ", parameters.join(", ")))
+                .unwrap_or_default();
+            output.push_str(&format!("{name} : {pure}{masked}{opaque}{rendered}\n"));
         }
     }
     for problem in stub_source_problems(&db, source) {

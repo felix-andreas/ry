@@ -751,11 +751,13 @@ impl Context<'_> {
                         self.resolve_switch(&module[arguments]);
                         return;
                     }
-                    // data.table's `setnames(f, ...)` and `setcolorder(f, ...)` change the
-                    // frame's columns by reference, which ry models like `:=`: a new write of
-                    // the subject's slot. `write_tokens` screens items for these names, so a
-                    // new by-reference writer belongs there too.
-                    Some("setnames" | "setcolorder") if !arguments.is_empty() => {
+                    // data.table's `setnames(f, ...)`, `setcolorder(f, ...)`, `set`, `setattr`,
+                    // `setDT` and `setDF` change the frame by reference, which ry models like
+                    // `:=`: a new write of the subject's slot. `write_tokens` screens items for
+                    // these names, so a new by-reference writer belongs there too.
+                    Some("setnames" | "setcolorder" | "set" | "setattr" | "setDT" | "setDF")
+                        if !arguments.is_empty() =>
+                    {
                         self.resolve_arguments(&module[arguments]);
                         if let Some(subject) = module[arguments][0]
                             .value

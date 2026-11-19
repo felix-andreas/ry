@@ -34,6 +34,9 @@ pub struct StubLibrary<'db> {
     /// Data-masking variadics, mapped to the formals before `...` (which resolve normally). An
     /// empty list masks every argument.
     pub masked: SymbolMap<Vec<String>>,
+    /// `@opaque(name, ...)` parameters: the callee forces the argument and may hand it back,
+    /// but never inspects it as an R object, so a ry value may pass there.
+    pub opaque: SymbolMap<Vec<String>>,
     /// `@pure` names per declaring namespace. A bare call takes its purity from the namespace
     /// of the name's winning declaration (`declarations`), the same one its type comes from.
     pub pure_by_namespace: SymbolMap<SymbolSet>,
@@ -455,6 +458,12 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             }
             namespace_exports.insert(name);
             let first_here = seen_here.insert(name);
+            if first_here {
+                library.opaque.remove(name);
+            }
+            if let Some(parameters) = markers.opaque {
+                library.opaque.insert(name, parameters);
+            }
             // Purity belongs to the name within its namespace: any candidate's marker marks it,
             // and a later source that redeclares the name decides afresh, so an override stub
             // can take the marker away.
@@ -525,17 +534,33 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
 struct DeclarationMarkers<'text> {
     masked: bool,
     pure: bool,
+    opaque: Option<Vec<String>>,
     type_text: &'text str,
 }
 
-/// The `@masked` and `@pure` markers that may precede a declaration's type, in any order.
+/// The `@masked`, `@pure` and `@opaque(...)` markers that may precede a declaration's type, in
+/// any order.
 fn declaration_markers(mut type_text: &str) -> DeclarationMarkers<'_> {
     let mut markers = DeclarationMarkers {
         masked: false,
         pure: false,
+        opaque: None,
         type_text,
     };
     loop {
+        if let Some(rest) = type_text.strip_prefix("@opaque(")
+            && let Some((list, rest)) = rest.split_once(')')
+            && rest.starts_with(char::is_whitespace)
+        {
+            let parameters = list
+                .split(',')
+                .map(str::trim)
+                .filter(|parameter| !parameter.is_empty())
+                .map(str::to_owned);
+            markers.opaque.get_or_insert_with(Vec::new).extend(parameters);
+            type_text = rest.trim_start();
+            continue;
+        }
         let (marker, rest) = if let Some(rest) = type_text.strip_prefix("@masked") {
             (&mut markers.masked, rest)
         } else if let Some(rest) = type_text.strip_prefix("@pure") {
@@ -709,6 +734,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
         let markers = declaration_markers(type_text);
         type_text = markers.type_text;
         let masked = markers.masked;
+        let opaque = markers.opaque;
         let Some(scheme) = lower_type_text(db, type_text) else {
             problems.push(StubProblem {
                 line,
@@ -732,6 +758,24 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
                 ),
             });
             continue;
+        }
+        let formals = match scheme.body.kind(db) {
+            TyKind::Function(function) => function
+                .named
+                .iter()
+                .map(|field| field.name.text(db))
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        for parameter in opaque.iter().flatten() {
+            if !formals.contains(&parameter.as_str()) {
+                problems.push(StubProblem {
+                    line,
+                    message: format!(
+                        "`@opaque({parameter})` on `{name}` names no parameter of its function type."
+                    ),
+                });
+            }
         }
         let mut unknown = Vec::new();
         collect_unknown_nominals(db, scheme.body, &is_known, &mut unknown);

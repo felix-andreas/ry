@@ -185,7 +185,7 @@ x: @trust integer <- readRDS("x.rds")
 x: integer
 
 #---- if_unknown_binding
-frame <- data.frame(a = 1)
+frame <- read.csv("a.csv")
 gap: @if-unknown integer <- frame$a
 known: @if-unknown integer <- "a"
 #++++

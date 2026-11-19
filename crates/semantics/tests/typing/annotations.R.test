@@ -115,7 +115,7 @@ outer: Unknown
 
 #==== unknown_only_coercions
 #---- if_unknown_fills_a_genuine_gap
-frame <- data.frame(a = 1)
+frame <- read.csv("a.csv")
 
 #: @if-unknown integer
 gap <- frame$a
@@ -131,7 +131,7 @@ known: Unknown
 32..34 error[type-mismatch] `@if-unknown` applies only where the type is unknown, and this is already `integer`. Drop the annotation, or use `#:` to check the type or `@trust` to override it
 
 #---- the_coerced_type_is_then_enforced
-frame <- data.frame(a = 1)
+frame <- read.csv("a.csv")
 
 #: @if-unknown character
 gap <- frame$a

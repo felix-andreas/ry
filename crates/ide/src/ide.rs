@@ -3146,10 +3146,13 @@ pub fn type_definition(
         .expressions_at()
         .into_iter()
         .find_map(|id| check.editor().expression_types.get(&id).copied())?;
-    let TyKind::Named(name, _) = ty.kind(db) else {
-        return None;
+    let name = match *ty.kind(db) {
+        TyKind::Named(name, _) => name.text(db),
+        // A `data.frame{...}` is its class with the columns known.
+        TyKind::Frame(kind, _) => kind.class()?,
+        _ => return None,
     };
-    type_name_definition(db, files, name.text(db))
+    type_name_definition(db, files, name)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

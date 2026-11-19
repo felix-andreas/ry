@@ -2087,3 +2087,15 @@ Reading an item's range from `item_spans` made every edit re-lower every item of
   -> character | T`, so the return names the argument's own member. That needs a bound meet over
   unions with variables, generalization and print/parse support; the same class is the fresh
   sample's "`vapply` over a parameter" (ggplot2).
+
+## `@opaque` parameters accept ry values
+
+**Status:** built.
+
+- **A stub marks a parameter the callee only evaluates or quotes** with `@opaque(name)` (`stubs.rs`, `DeclarationMarkers.opaque`), and `check_native_arguments` skips the R-boundary check for it. testthat's expectations mark `object` (and `expect_invisible` its `call`), so `expect_error(g(-1L), "neg")` with a record-returning `g` passes: the value is evaluated and dropped, never handed to R code. A marker rather than a hard-coded list keeps the knowledge in the stubs, where package authors extend it.
+
+## The stats d/p/q functions follow the scalar claim
+
+**Status:** built.
+
+- **`dnorm`, `pnorm`, `qnorm`, `pchisq` and their 17 siblings return `double`** in `types/stats.Rtypes`, like base's arithmetic, so `function(q: double) -> double stats::pchisq(q, df = 1)` checks. Measured on the GNU R corpus, the scalar claim adds no false report, because callers that pass vectors read the result as `double`, which a `double[]` slot accepts.

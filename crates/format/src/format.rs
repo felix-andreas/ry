@@ -2570,6 +2570,7 @@ fn annotation_space_between(previous: &AnnotationToken, current: AnnotationToken
                         | "GroupBy"
                         | "LazyGroupBy"
                         | "data.table"
+                        | "data.frame"
                 ) =>
         {
             return false;

@@ -2805,7 +2805,7 @@ fn write_tokens(node: &SyntaxNode) -> usize {
             SyntaxKind::SPECIAL => matches!(token.text(), "%<-%" | "%->%"),
             SyntaxKind::IDENT | SyntaxKind::STRING => matches!(
                 token.text().trim_matches(['`', '"', '\'']),
-                ":=" | "setnames" | "setcolorder"
+                ":=" | "setnames" | "setcolorder" | "set" | "setattr" | "setDT" | "setDF"
             ),
             _ => true,
         })

@@ -83,30 +83,29 @@ rchisq : fn(n: Any, df: Any, [ncp]: Any) -> double[]
 rbinom : fn(n: Any, size: Any, prob: Any) -> integer[]
 rpois : fn(n: Any, lambda: Any) -> integer[]
 
-# Density / distribution / quantile functions: elementwise doubles over their first argument
-# (scalar-claim would fight the vector idiom less, but these mirror the established `double[]` claim
-# of the r-family; both directions are shape compromises until `T[]` generics land).
-dnorm : @pure fn(x: Any, [mean]: Any, [sd]: Any, [log]: logical) -> double[]
-pnorm : @pure fn(q: Any, [mean]: Any, [sd]: Any, [lower.tail]: logical, [log.p]: logical) -> double[]
-qnorm : @pure fn(p: Any, [mean]: Any, [sd]: Any, [lower.tail]: logical, [log.p]: logical) -> double[]
-dbinom : @pure fn(x: Any, size: Any, prob: Any, [log]: logical) -> double[]
-pbinom : @pure fn(q: Any, size: Any, prob: Any, [lower.tail]: logical, [log.p]: logical) -> double[]
-qbinom : @pure fn(p: Any, size: Any, prob: Any, [lower.tail]: logical, [log.p]: logical) -> double[]
-dpois : @pure fn(x: Any, lambda: Any, [log]: logical) -> double[]
-ppois : @pure fn(q: Any, lambda: Any, [lower.tail]: logical, [log.p]: logical) -> double[]
-qpois : @pure fn(p: Any, lambda: Any, [lower.tail]: logical, [log.p]: logical) -> double[]
-dunif : @pure fn(x: Any, [min]: Any, [max]: Any, [log]: logical) -> double[]
-punif : @pure fn(q: Any, [min]: Any, [max]: Any, [lower.tail]: logical, [log.p]: logical) -> double[]
-qunif : @pure fn(p: Any, [min]: Any, [max]: Any, [lower.tail]: logical, [log.p]: logical) -> double[]
-dexp : @pure fn(x: Any, [rate]: Any, [log]: logical) -> double[]
-pexp : @pure fn(q: Any, [rate]: Any, [lower.tail]: logical, [log.p]: logical) -> double[]
-qexp : @pure fn(p: Any, [rate]: Any, [lower.tail]: logical, [log.p]: logical) -> double[]
-dt : @pure fn(x: Any, df: Any, [ncp]: Any, [log]: logical) -> double[]
-pt : @pure fn(q: Any, df: Any, [ncp]: Any, [lower.tail]: logical, [log.p]: logical) -> double[]
-qt : @pure fn(p: Any, df: Any, [ncp]: Any, [lower.tail]: logical, [log.p]: logical) -> double[]
-dchisq : @pure fn(x: Any, df: Any, [ncp]: Any, [log]: logical) -> double[]
-pchisq : @pure fn(q: Any, df: Any, [ncp]: Any, [lower.tail]: logical, [log.p]: logical) -> double[]
-qchisq : @pure fn(p: Any, df: Any, [ncp]: Any, [lower.tail]: logical, [log.p]: logical) -> double[]
+# Density, distribution and quantile functions: elementwise over every parameter, scalar-claim,
+# Any-param, so a p-value or a density is a `double` wherever one is used.
+dnorm : @pure fn(x: Any, [mean]: Any, [sd]: Any, [log]: logical) -> double
+pnorm : @pure fn(q: Any, [mean]: Any, [sd]: Any, [lower.tail]: logical, [log.p]: logical) -> double
+qnorm : @pure fn(p: Any, [mean]: Any, [sd]: Any, [lower.tail]: logical, [log.p]: logical) -> double
+dbinom : @pure fn(x: Any, size: Any, prob: Any, [log]: logical) -> double
+pbinom : @pure fn(q: Any, size: Any, prob: Any, [lower.tail]: logical, [log.p]: logical) -> double
+qbinom : @pure fn(p: Any, size: Any, prob: Any, [lower.tail]: logical, [log.p]: logical) -> double
+dpois : @pure fn(x: Any, lambda: Any, [log]: logical) -> double
+ppois : @pure fn(q: Any, lambda: Any, [lower.tail]: logical, [log.p]: logical) -> double
+qpois : @pure fn(p: Any, lambda: Any, [lower.tail]: logical, [log.p]: logical) -> double
+dunif : @pure fn(x: Any, [min]: Any, [max]: Any, [log]: logical) -> double
+punif : @pure fn(q: Any, [min]: Any, [max]: Any, [lower.tail]: logical, [log.p]: logical) -> double
+qunif : @pure fn(p: Any, [min]: Any, [max]: Any, [lower.tail]: logical, [log.p]: logical) -> double
+dexp : @pure fn(x: Any, [rate]: Any, [log]: logical) -> double
+pexp : @pure fn(q: Any, [rate]: Any, [lower.tail]: logical, [log.p]: logical) -> double
+qexp : @pure fn(p: Any, [rate]: Any, [lower.tail]: logical, [log.p]: logical) -> double
+dt : @pure fn(x: Any, df: Any, [ncp]: Any, [log]: logical) -> double
+pt : @pure fn(q: Any, df: Any, [ncp]: Any, [lower.tail]: logical, [log.p]: logical) -> double
+qt : @pure fn(p: Any, df: Any, [ncp]: Any, [lower.tail]: logical, [log.p]: logical) -> double
+dchisq : @pure fn(x: Any, df: Any, [ncp]: Any, [log]: logical) -> double
+pchisq : @pure fn(q: Any, df: Any, [ncp]: Any, [lower.tail]: logical, [log.p]: logical) -> double
+qchisq : @pure fn(p: Any, df: Any, [ncp]: Any, [lower.tail]: logical, [log.p]: logical) -> double
 
 # Clustering. `dist` is a double vector of the lower triangle (class "dist"), and arithmetic on it
 # works as on any double vector. `cutree` returns one group per observation for a single `k` or `h`;

@@ -147,6 +147,22 @@ function only when no argument can make it read or change state outside its resu
 `Sys.time` and `options` are not pure, and neither is a function that calls back into an argument it
 was given, such as `lapply`.
 
+### Parameters that take ry values
+
+The `@opaque(...)` attribute names the parameters the function only forces, and perhaps hands
+back, without inspecting the value as an R object:
+
+```
+expect_error : @opaque(object) <T> fn(object: T, [regexp]: Any, ...: Any) -> T
+```
+
+A ry record, tuple, tag or other native value may reach a named parameter, so
+`expect_error(make_point(-1), "negative")` checks while `expect_equal(make_point(1), p)` is still
+reported. Arguments match the parameters as R matches them against the first candidate, by name
+or by position. A name the function type does not declare is a stub problem. Like `@pure`, the
+attribute belongs to the name, combines with the others in any order, and a later source that
+redeclares the name without it clears it.
+
 ## Overloads and generics
 
 Declaring the same name more than once in one file builds an ordered *overload set*, with each
@@ -352,6 +368,7 @@ source:
   [overload sets](#overloads-and-generics)).
 - `nominals` is the set of `@type` names.
 - `masked` maps each `@masked` name to the formals declared before its `...`.
+- `opaque` maps each `@opaque` name to the parameters it names.
 - `pure` holds each `@pure` name, and `pure_by_namespace` the same names per declaring namespace,
   for `pkg::name` calls.
 - `exports_by_namespace` maps a namespace to the names it declares.

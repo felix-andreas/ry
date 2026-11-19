@@ -135,6 +135,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A splice reparse shares what the parser's recorded lookahead proves untouched
 - One syntax verdict, in the `syntax` crate, for `ry check` and the runtime
 - Corpus false reports: the narrowing and overload rules that cleared them
+- `@opaque` parameters accept ry values
+- The stats d/p/q functions follow the scalar claim
 
 ## Editor and language server
 
@@ -572,6 +574,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A `NULL` local inside a query of unknown columns is the column
 - String keys sort by rank, and merge pairs come from sorted codes
 - package:ry attaches no bare name another package exports
+- A base frame built by `data.frame()` or `data.table()` knows its columns
 
 ## Build, benchmarks and CI
 

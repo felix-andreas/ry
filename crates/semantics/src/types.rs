@@ -300,7 +300,8 @@ pub enum TyKind<'db> {
 }
 
 /// What a table type is. The kinds never fit each other: a `data.table` runs data.table's code,
-/// a `LazyFrame` holds a plan rather than rows, and a `GroupBy` only feeds `GroupBy.agg`.
+/// a `data.frame` runs base R's, a `LazyFrame` holds a plan rather than rows, and a `GroupBy`
+/// only feeds `GroupBy.agg`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum FrameKind {
     DataFrame,
@@ -313,6 +314,8 @@ pub enum FrameKind {
     },
     /// A data.table whose columns are known, from `fread` and the rest of data.table's readers.
     DataTable,
+    /// An R `data.frame` whose columns are known, from `data.frame(...)`.
+    RDataFrame,
 }
 
 impl FrameKind {
@@ -323,6 +326,17 @@ impl FrameKind {
             FrameKind::GroupBy { lazy: false, .. } => "GroupBy",
             FrameKind::GroupBy { lazy: true, .. } => "LazyGroupBy",
             FrameKind::DataTable => "data.table",
+            FrameKind::RDataFrame => "data.frame",
+        }
+    }
+
+    /// The R class of a kind whose values are R objects: such a frame is its class with the
+    /// columns known, and passes wherever the class does.
+    pub fn class(self) -> Option<&'static str> {
+        match self {
+            FrameKind::DataTable => Some("data.table"),
+            FrameKind::RDataFrame => Some("data.frame"),
+            _ => None,
         }
     }
 
@@ -340,6 +354,7 @@ impl FrameKind {
                 keys: 0,
             },
             "data.table" => FrameKind::DataTable,
+            "data.frame" => FrameKind::RDataFrame,
             _ => return None,
         })
     }
