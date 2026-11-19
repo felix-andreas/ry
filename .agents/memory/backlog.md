@@ -778,13 +778,13 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-gives 39 errors: 25 true package bugs, 2 known limitations and 12 false reports on correct R. The
+gives 33 errors: 26 true package bugs, 2 known limitations and 5 false reports on correct R. The
 three generated benchmark packages (`tools/bench/tooling/generate.py`) report nothing. To reproduce, give
 each package a `ry.toml` with `[check]` `typing = true` (typing is off by default) and run
 `ry check --output json R` inside it. A fix also deletes its line here and, for a user-visible
 gap, in the Limitations section of `reference/type-system.mdx`.
 
-### True bugs, left reported (25)
+### True bugs, left reported (26)
 
 - DBI `data.R` (5): coerce calls that leave out the required `to`.
 - GeneralizedHyperbolic `nigFit.R` 99 and 110: `llfunc(paramStart, x)` on a one-parameter `llfunc`.
@@ -801,36 +801,30 @@ gap, in the Limitations section of `reference/type-system.mdx`.
 - kernlab `gausspr.R` 194: passes a `double` where the callee multiplies a `matrix`.
 - mclust `toremove.R` 259: leaves out `k`.
 - processx `process.R` 748: `new_not_implemented_error` without `call`.
+- renv `r.R` 137: `diagnostics$suggestion` reads the list of records where the loop variable
+  `diagnostic` was meant.
 - rugarch `rugarch-startpars.R` 518: reads `temph` for `tmph`.
 
 ### Known limitation (2)
 
 - devtools `test.R` 72 and knitr `citation.R` 163: a vector of statically unknown length
   (`p[file.exists(p)]` returned through a function) reaches a stub's scalar `character` parameter.
-  The value has length one at run time, but no type says so.
+  The value has length one at run time, but no type says so, and no sound rule can say so
+  (`decisions/syntax-semantics.md`, "Corpus false reports: the narrowing and overload rules that cleared them").
 
-### False reports (12), one cause each
+### False reports (5), one cause each
 
-- PerformanceAnalytics `legend.R` 293: a missing `angle` is passed to `rect(angle = angle)`, which
-  forces it only when `density` is not `NULL`. Laziness that depends on a value.
-- PerformanceAnalytics `PortfolioRisk.R` 387: `VAR$VaR` on a value inferred as a tuple.
-- Rsolnp `benchmarks.R` 470: `eqB = NULL` to a project parameter typed numeric from a use outside
-  the callee's `is.null()` test.
-- bit64 `highlevel64.R` 309: an `if` joining `table()` and a list return reaches a stub union.
-- diffobj `diff.R` 654: a one-parameter callback against an interface that names more parameters.
-- ks `kdde.R` 304: a rigid `T` meets `double[] | integer[]`; not reduced.
-- ks `kdde.R` 568: `if (missing(col.fun)) col.fun <- function(n) ...` binds the lambda's `n` to
-  the first call's `integer`, so a later `double` fails.
+- diffobj `diff.R` 654: a closure in a package reads a top-level name as its definition
+  (`layer_source` takes the winner and ignores conditional writers), so a later top-level
+  `body(f) <- quote(...)` is not seen and the one-parameter function meets an interface that names
+  more parameters. Needs a deferred read to join a definition with the later top-level writes of
+  its name (in collation order), measured on the corpus.
 - renv `python.R` 109: a union parameter that flows to the return keeps every member at the call
-  (`path: list[T] | T[]` from `map_lgl(path, ...)`). Needs a bounded variable so the return names
-  the argument's own type.
-- renv `r.R` 137: a callback of a project `lapply` wrapper receives the whole tuple of records
-  instead of one element.
-- renv `use.R` 100: `records[!compat]` where `compat` is a named list from a project `enum_lgl`.
-- roxygen2 `rd-usage.R` 88: `format_name(name)` after `identical(format_name, identity)` sees an
-  over-wide `name`.
-- snakecase `to_any_case.R` 266: `vapply` over a union with a `factor` member, which the stub's
-  `list[T] | T[]` does not accept.
+  (`path: list[T] | T[]` from `map_lgl(path, ...)`). Needs a variable bounded by a union so the
+  return names the argument's own type.
+- snakecase `to_any_case.R` 286, 295 and 304: inside `if (case %in% <9 values>)`, two `if`s on
+  `case` together cover that set and each makes `string` a list, so it is always a list after
+  them. Correlated facts track one test at a time, so the pre-`if` `character[]` joins in.
 
 ### Scalar-claim chains
 
@@ -852,7 +846,8 @@ false classes, largest first:
   that are now checked).
 - Dead code after `stop()` still binds names that shadow outer ones (psych, 44).
 - An unannotated parameter over-inferred from one use, a default or one branch (21).
-- A variable correlated with a flag tested elsewhere (20).
+- A variable correlated with a flag tested elsewhere (20, measured before tests of the same local
+  were correlated; not re-measured).
 - A union of function types where a function is expected (lme4, kableExtra, 18).
 - A missing argument forwarded to `[` or to a callee that tests `missing()` (flextable, 10).
 - An element write `d[[i]] <- v` does not update the container type (psych, 10).

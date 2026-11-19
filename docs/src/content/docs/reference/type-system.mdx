@@ -656,7 +656,11 @@ Otherwise it takes the first member it fits, so
 `n` the type `T[]` from `lapply`'s `list[T] | T[] | NULL`, with `T: scalar numeric`.
 
 A constraint limits what a caller may instantiate `T` with, and the annotated body may rely on it.
-Under `<T: numeric> fn(x: T) -> T` the body may use `x` as a number. A body under a plain `<T>` that
+Under `<T: numeric> fn(x: T) -> T` the body may use `x` as a number. Arithmetic between two different
+constrained parameters, `a / b` under `<T: numeric, U: numeric> fn(a: T, b: U) -> double`, is
+`double`, R's widest numeric, because neither parameter's type fixes the other's. The same holds for
+any two distinct type parameters, and for an unannotated parameter that a scalar use bounds, such as
+`n` in `for (i in 1:n)`: `x + n` is `double`, so a call passing `1L` and `2.5` checks. A body under a plain `<T>` that
 does arithmetic is a type error, and `atomic` does not imply `numeric`.
 
 Using a type parameter as a vector element, `T[]`, imposes the `atomic` bound, because a vector holds
@@ -1649,6 +1653,16 @@ Defaults are type-checked, and they interact with the parameter's type in four w
   default does not have, the exported type is widened by the default's: with `up` declared
   `fn(x: character) -> character`, `function(s = NULL) up(s)` is
   `fn([s]: character | NULL) -> character`.
+- An explicit `NULL` argument matches a `NULL` default, because the callee sees the value it would
+  have seen without the argument. So with `search <- function(fun, target = NULL)` passing `target`
+  on to arithmetic, `search(fun = f, target = NULL)` checks while `target = "a"` is reported.
+- A default that names a function the checker has no type for, such as `timefun = bit::repeat.time`
+  in a package it cannot read, makes the parameter's own type open, so calling it with any
+  arguments checks.
+- A function written to a formal on its `missing()` path, as in
+  `if (missing(col.fun)) col.fun <- function(n) rep("a", n)`, types like the same function given as
+  the default: it fills in for an omitted argument and does not rewrite a supplied one. A function
+  written on any other path is a rewrite, so later calls meet both values.
 
 An `if` without `else` that writes a formal under a test reading that same formal *normalizes* the
 input, as in `if (is.logical(type)) type <- if (type) "q" else "m"` or
@@ -2674,6 +2688,10 @@ to such a name is resolved separately at each call site:
   that accepts any value there, because then the known arguments chose the candidate. So with `n`
   unknown, `rep(0, n)` is `double[]`, since `n` is `rep`'s `times: Any`, while `rep(x, 2)` with `x`
   unknown stays `Unknown`, since `x` is what `rep`'s vector candidate and its fallback differ on.
+  The same holds beside arguments whose types the call narrows: `vapply(seq_along(x), g, template)`
+  with `template` unknown is `Unknown`, whatever `g`'s parameter narrows to. An `if` whose branch
+  ends in such an undecided call is `Unknown` as a whole, rather than the join of the other branch
+  with nothing.
 - The [whole-number literal rule](#argument-compatibility) does not influence which candidate is
   selected. Candidates are first tried against the arguments' true types, so `sum(1, 2)` selects the
   `double` candidate, matching what R computes. Only if no candidate accepts them is the set tried
@@ -2898,6 +2916,20 @@ The details:
   `if (!is_loaded(package)) stop("not loaded")` followed by `parent.env(ns_env(package))` checks,
   while the same call without the test is reported. A write to the variable after the test, even
   on one branch or in a loop, forgets it.
+- `identical(f, g)` with `f` a local and `g` a function narrows `f` to `g`'s type on the true edge,
+  and a generic `g` is instantiated afresh at each call, so after `format_name <- identity` as a default, `if (identical(format_name, identity))
+  format_name(name + 1)` calls `identity` with a number although an earlier call passed a string.
+- `identical(x$field, "literal")`, with a string, logical or numeric literal, rules `NULL` out of `x` on the true
+  edge, because a `NULL` `x` has no field equal to the literal. So with `info` a record or `NULL`,
+  `if (identical(info$type, "venv")) use(info$path)` passes `info$path` as the record's field.
+- A local written under a test of another local remembers both values. After
+  `if (case == "a") x <- "s"` with `x` a number before it, a later test of `case` that implies
+  `case == "a"` sees `x` as the string, and one that rules it out sees the number:
+  `if (case == "b") x + 1` checks. The tests compare the local with literals through `==`, `!=` and
+  `%in%`, a bare local (read as `== TRUE`), and `!` of these. R coerces before it compares (`"1" == 1` holds),
+  so only literals of one kind are told apart by their values, and a string with a backslash is told
+  apart from none. A write to either local ends it, so does a write in a loop or through `<<-`, and
+  two tests that only together cover an earlier one are not combined.
 
 #### Lazy arguments and required formals
 
@@ -2922,7 +2954,8 @@ exceptions and additions:
   does not force it, because the callee decides whether it is needed. A call to a library function
   still forces it, except for a base R parameter that has no default and that the function tests
   with `missing()`: `Reduce(f, x, init = .init)` and `base::tryCatch(expr, finally = finally)` leave
-  the formal unforced.
+  the formal unforced. A library function declared only as `Any`, such as graphics' `rect`, forces
+  nothing either, because no declaration says what it reads.
 - Passing the formal bare, under any name or position, to a project function's parameter that the
   callee may leave unread does not force it either. Such a parameter is optional without a default,
   or tested with `missing()` in the callee's body. A missing formal passed on does not take the
@@ -3355,7 +3388,10 @@ slot, so the slot's type reflects the update:
   `old[[1]]$private$deep_clone` is a `double`. Writing a field of a `NULL` grows it into a one-field
   record, as R does, so `x <- NULL; x$a <- 1` makes `x` a `list{a: double}`.
 - `formals(f) <- v` and `body(f) <- v` rewrite the function itself, so `f` is `Unknown` afterwards
-  and calls to it are not checked. Other replacement calls, such as `names(x) <- v` or
+  and calls to it are not checked.
+- `names(x) <- c("a", "b")` with literal names, as many as `x` has items, turns a list of known
+  items into a record with those fields and renames a record's fields. Computed names leave a list
+  whose fields are not tracked, so `x$a` may read any item. Other replacement calls, such as
   `attr(f, "kind") <- v`, leave the base's type as it was.
 - The accessor chain and the index or key expressions are ordinary reads, so their own errors surface.
   A replacement whose accessor chain has no variable at its root, such as `f(x)$a <- v`, is an
@@ -4771,6 +4807,19 @@ Known bugs, where correct code is reported:
   trailing comma is reported as it is for `c(1, 2, )`.
 - **Package-qualified calls to a package ry does not know.** `pkg::fun()` reports an unknown
   namespace when ry has no stub or export list for `pkg`, even if a file calls `library(pkg)`.
+- **A vector of statically unknown length at a scalar parameter.** `p[file.exists(p)]` returned
+  through a function and passed to a stub's scalar `character` parameter is reported, although the
+  program guarantees one element. No type records the length.
+- **A union parameter that flows to the return.** A parameter inferred as `list[T] | T[]` and
+  returned keeps both members at a call that passes only one of them through another function, so
+  a `character` argument comes back as `character | list[T] | T[]`. Annotate the parameter.
+- **Tests that together cover an earlier one.** Inside `if (case %in% c("a", "b"))`, writes under
+  `if (case == "a")` and `if (case == "b")` are not combined, so a local both make a list still
+  joins its value from before them.
+- **A later top-level write in a package.** A closure in a package reads a top-level name as its
+  definition, so a later top-level `body(f) <- quote(...)` or `x$a <- v` is not seen there. A
+  closure that receives `f` keeps the parameters `f` was defined with, and passing it where more
+  parameters are expected is reported. Reads at top level and in a script see the write.
 - **A generic function passed inline as an argument.** `lapply(xs, function<T>(v: T) -> T v)` is
   reported, because type parameters on a function that is not bound to a name are not
   instantiated. Leave the function's types off, or bind it to a name first.

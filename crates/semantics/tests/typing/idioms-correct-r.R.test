@@ -1996,7 +1996,7 @@ normalize <- function(path) {
 either <- function(flag) normalize(if (flag) "a" else list("a"))
 #++++
 normalize: <T> fn(path: list[T] | T[]) -> list[T] | T[]
-either: fn(flag: logical) -> list[character] | character[]
+either: fn(flag: logical) -> character | list{character}
 
 #---- a_getter_call_to_a_getter_and_setter_closure_is_not_the_setter_value
 store <- local({
@@ -2354,3 +2354,191 @@ span <- function(n) {
 #++++
 basis: <T, U> fn([n]: T, [penalty]: U) -> list{off: double | NULL}
 span: <T: numeric> fn(n: T) -> double[]
+
+#---- a_literal_local_fills_a_vector_parameter
+# A literal is a length-one vector, so a local written from one fills a `character[]` or
+# `double[]` parameter as the literal itself does.
+f <- function(x) { p <- "a"; sprintf(p, x) }
+g <- function(x) { n <- 2; flag <- TRUE; c(rev(n), isTRUE(flag)) }
+k <- function(x) { p <- "a"; grepl(p, x) }
+#++++
+f: <T> fn(x: T) -> character
+g: <T> fn([x]: T) -> double[]
+k: <T> fn(x: T) -> logical
+
+#---- a_function_supplied_on_the_missing_path_types_as_a_default
+# ks: `if (missing(col.fun)) col.fun <- function(n) ...` called with an integer and then a double.
+f <- function(xs, col.fun) {
+  if (missing(col.fun)) col.fun <- function(n) rep("a", n)
+  a <- col.fun(n = length(xs))
+  b <- col.fun(n = length(xs) + 1)
+  c(a, b)
+}
+g <- function(xs, col.fun = function(n) rep("a", n)) {
+  a <- col.fun(n = length(xs))
+  b <- col.fun(n = length(xs) + 1)
+  c(a, b)
+}
+# Only the `missing()` path supplies a default: a function written on any other path is a
+# rewrite, so the call meets both values.
+rewritten <- function(f, flag) {
+  if (flag) f <- function(n) n + 1
+  f("a")
+}
+#++++
+f: <T, U> fn(xs: T, [col.fun]: fn(n: integer) -> U) -> Unknown
+g: <T, U, V> fn(xs: T, [col.fun]: fn(n: integer) -> U) -> Unknown
+rewritten: Unknown
+602..605 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- a_formal_forwarded_by_name_to_an_undeclared_library_function_is_not_forced
+# PerformanceAnalytics: graphics' `rect`, stubbed as `Any`, reads `angle` only when `density` is
+# set, so `rect2()` without `angle` runs. A declared library function forces what it reads.
+rect2 <- function(left, density = NULL, angle) {
+  rect(left, 1, 2, 3, angle = angle, density = density)
+}
+g <- function() rect2(1, density = NULL)
+h2 <- function(left, angle) paste(left, angle = angle)
+h <- function() h2(1)
+#++++
+rect2: <T, U, V> fn(left: T, [density]: U, [angle]: V) -> Unknown
+g: fn() -> Unknown
+h2: <T, U> fn(left: T, angle: U) -> character
+h: Unknown
+408..410 error[type-mismatch] this call leaves out `angle`, which the function requires
+
+#---- names_written_on_a_list_name_its_items
+# PerformanceAnalytics: `ret <- list(VaR, CVaR); names(ret) <- c(...)`, then `ret$VaR`.
+risk <- function(v, cv) {
+  ret <- list(v * 2, cv)
+  names(ret) <- c("VaR", "contribution")
+  ret
+}
+use <- function() risk(1, "a")$VaR + 1
+computed <- function(keys) {
+  ret <- list(1, "a")
+  names(ret) <- keys
+  ret$anything
+}
+renamed <- function() {
+  ret <- list(a = 1, b = "x")
+  names(ret) <- c("x", "y")
+  ret$y
+}
+#++++
+risk: <T: numeric, U> fn(v: T, cv: U) -> list{VaR: double, contribution: U}
+use: fn() -> double
+computed: <T> fn(keys: T) -> double | character | NULL
+renamed: fn() -> character
+
+#---- an_explicit_null_matches_a_null_default
+check <- function(pars, fun, target) {
+  fun(pars) - target
+}
+solve <- function(pars, fun, constraint = NULL, target = NULL) {
+  if (!is.null(constraint)) {
+    return(check(pars, constraint, target))
+  }
+  fun(pars)
+}
+search <- function(pars = NULL, fun, constraint = NULL, target = NULL) {
+  solve(pars, fun, constraint = constraint, target = target)
+}
+none <- function() search(fun = function(x) 1, constraint = NULL, target = NULL)
+maybe <- function(flag) search(fun = function(x) 1, target = if (flag) 2 else NULL)
+wrong <- function() search(fun = function(x) 1, target = "a")
+#++++
+check: <T, U: numeric> fn(pars: T, fun: fn(T) -> U, target: U) -> U
+solve: <T, U, V: numeric> fn(pars: T, [fun]: fn(T) -> U, [constraint]: (fn(T) -> V) | NULL, [target]: V) -> V | U
+search: <T, U, V: numeric> fn([pars]: T, fun: fn(T) -> U, [constraint]: (fn(T) -> V) | NULL, [target]: V) -> V | U
+none: fn() -> Unknown
+maybe: fn(flag: logical) -> double
+wrong: Unknown
+577..580 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- a_callback_defaulted_to_an_untyped_function_takes_any_arguments
+bench <- function(n, timefun = bit::repeat.time) {
+  b <- sample(n, n, TRUE)
+  x <- timefun(match(b, b))[3L]
+  w <- timefun(if (n == 1L) table(b) else list(a = 1))[3L]
+  c(x, w)
+}
+#++++
+bench: <T, U> fn(n: T, [timefun]: U) -> Unknown
+31..47 warning[unresolved] unknown package namespace `bit`.
+
+#---- a_scalar_bound_does_not_spread_through_arithmetic
+deriv <- function(x, mu = 0, sigma = 1, order = 0) {
+  arg <- (x - mu) / sigma
+  out <- 1
+  if (order >= 2) for (i in 2:order) out <- arg * out
+  out / sigma^order
+}
+grid <- function(n) deriv(seq(0, 1, length.out = n), order = 2)
+# Neither side fixes the result's atomic type: `1L + 2.5` is `double`.
+widened <- function(x, n) {
+  for (i in 1:n) NULL
+  x + n
+}
+use <- function() widened(1L, 2.5)
+#++++
+deriv: <T: numeric, U: scalar numeric> fn(x: T, [mu]: T, [sigma]: T, [order]: U) -> double
+grid: <T> fn(n: T) -> double
+widened: <T: numeric, U: scalar numeric> fn(x: T, n: U) -> double
+use: fn() -> double
+
+#---- an_if_over_an_undecided_library_call_is_untyped
+enumerate <- function(x, f, FUN.VALUE = NULL) {
+  callback <- function(i) f(x[[i]])
+  if (is.null(FUN.VALUE)) lapply(seq_along(x), callback)
+  else vapply(seq_along(x), callback, FUN.VALUE = FUN.VALUE)
+}
+keep <- function(records, f) records[!enumerate(records, f, FUN.VALUE = logical(1))]
+#++++
+enumerate: <T> fn(x: T, f: fn(Unknown) -> Unknown, [FUN.VALUE]: Unknown) -> Unknown
+keep: <T> fn(records: T, f: fn(Unknown) -> Unknown) -> Unknown
+
+#---- identical_on_a_field_rules_out_null
+# renv: `info` is a record or `NULL`, and a field equal to a string proves it is the record.
+info <- function(found) if (found) list(path = "a", type = "venv")
+#: fn(path: character) -> character
+shout <- function(path) toupper(path)
+use <- function(found) {
+  details <- info(found)
+  if (identical(details$type, "venv")) shout(details$path) else "none"
+}
+unguarded <- function(found) {
+  details <- info(found)
+  shout(details$path)
+}
+#++++
+info: fn(found: logical) -> list{path: character, type: character} | NULL
+shout: fn(path: character) -> character
+use: fn(found: logical) -> character
+unguarded: Unknown
+421..433 error[type-mismatch] expected `character`, found `character | NULL`
+
+#---- identical_to_a_function_narrows_the_local_to_it
+usage <- function(name, format_name = identity) {
+  label <- format_name("x")
+  if (identical(format_name, identity)) format_name(name + 1) else label
+}
+unguarded <- function(name, format_name = identity) {
+  label <- format_name("x")
+  if (nchar(label) > 1) format_name(name + 1) else label
+}
+# A generic function stays generic, so each call instantiates it afresh.
+twice <- function(name, format_name = identity) {
+  if (identical(format_name, identity)) c(format_name(1), format_name("a")) else "b"
+}
+#++++
+usage: <T: numeric, U, V> fn([name]: T, [format_name]: fn(character) -> U) -> double | U
+unguarded: Unknown
+twice: <T, U, V> fn([name]: T, [format_name]: U) -> character[] | character
+271..279 error[type-mismatch] expected `character`, found `double`
+
+#---- sweep_takes_a_vector_of_margins
+# pracma: `MARGIN = c(1, 2)` sweeps over both dimensions of an array.
+spread <- function(x, y, func) sweep(x, y, MARGIN = c(1, 2), FUN = func)
+#++++
+spread: <T, U, V> fn(x: T, y: U, func: V) -> Any
