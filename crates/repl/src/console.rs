@@ -48,11 +48,19 @@ pub fn run(api: RApi, mut options: RunOptions) -> Result<(), ReplError> {
     });
     let startup = std::mem::take(&mut options.startup);
     let arguments = std::mem::take(&mut options.arguments);
+    let no_init_file = options.no_init_file;
     install(options, false, None)?;
     install_sigint_handler();
     // A batch run prints only what its code prints, and so does a console reading a pipe.
     let quiet = batch || !stdin().is_terminal();
-    api.initialize(read_console, write_console_ex, quiet, !batch, &arguments)?;
+    api.initialize(
+        read_console,
+        write_console_ex,
+        quiet,
+        !batch,
+        no_init_file,
+        &arguments,
+    )?;
     api.register_call_routines(&routines);
     for statement in &startup {
         api.eval(statement);

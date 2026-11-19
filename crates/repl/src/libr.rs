@@ -345,6 +345,7 @@ impl RApi {
         write_console_ex: WriteConsoleEx,
         quiet: bool,
         interactive: bool,
+        no_init_file: bool,
         arguments: &[String],
     ) -> Result<(), ReplError> {
         let trailing = trailing_arguments(arguments)?;
@@ -355,6 +356,7 @@ impl RApi {
         let mut argv: Vec<*mut c_char> = [c"repl", c"--no-save", c"--no-restore-data"]
             .iter()
             .chain(interactive.then_some(&c"--interactive"))
+            .chain(no_init_file.then_some(&c"--no-init-file"))
             // `--no-echo` also keeps R from ending the session with a newline of its own.
             .chain(quiet.then_some(&c"--no-echo"))
             .map(|argument| argument.as_ptr() as *mut c_char)
@@ -396,6 +398,7 @@ impl RApi {
         write_console_ex: WriteConsoleEx,
         quiet: bool,
         interactive: bool,
+        no_init_file: bool,
         arguments: &[String],
     ) -> Result<(), ReplError> {
         unsafe { env::set_var("R_HOME", &self.r_home) };
@@ -437,6 +440,9 @@ impl RApi {
             start.r_interactive = c_int::from(interactive);
             start.r_quiet = c_int::from(quiet);
             start.r_no_echo = c_int::from(quiet);
+            if no_init_file {
+                start.load_init_file = 0;
+            }
             start.restore_action = SA_NORESTORE;
             start.save_action = SA_NOSAVE;
             start.rhome = rhome.as_ptr() as *mut c_char;
