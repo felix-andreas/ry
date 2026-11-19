@@ -685,19 +685,31 @@ fn complete_covariance(
     if count < 2 {
         return LongDouble::from(NA_REAL);
     }
-    let mut sum = LongDouble::ZERO;
     if kendall {
-        for k in 0..x.len() {
-            if !used[k] {
-                continue;
-            }
-            for other in 0..x.len() {
-                if used[other] {
-                    sum += sign(x[k] - x[other]) * sign(y[k] - y[other]);
-                }
-            }
-        }
-        return sum;
+        // Every term is -1, 0 or 1 (a NaN difference has sign 0), so the sum is an exact
+        // integer whatever the order: each pair counts twice, and the branchless signs of one
+        // row's pairs vectorize.
+        let (x, y) = if count == x.len() {
+            (Cow::Borrowed(x), Cow::Borrowed(y))
+        } else {
+            (
+                Cow::Owned(used_values(x, used)),
+                Cow::Owned(used_values(y, used)),
+            )
+        };
+        let signum = |difference: f64| i32::from(difference > 0.0) - i32::from(difference < 0.0);
+        let concordance: i64 = (0..x.len())
+            .map(|k| {
+                let (x_k, y_k) = (x[k], y[k]);
+                let row: i32 = x[k + 1..]
+                    .iter()
+                    .zip(&y[k + 1..])
+                    .map(|(&x_other, &y_other)| signum(x_k - x_other) * signum(y_k - y_other))
+                    .sum();
+                i64::from(row)
+            })
+            .sum();
+        return LongDouble::from((2 * concordance) as f64);
     }
     let (x, y, means) = if count == x.len() {
         (Cow::Borrowed(x), Cow::Borrowed(y), means)
@@ -713,7 +725,7 @@ fn complete_covariance(
         let mean = mean.unwrap_or_else(|| arith::long_double_mean(data));
         LongDouble::from(mean.to_f64())
     });
-    long_double::add_products(sum, &x, &y, x_mean, y_mean) / (count - 1)
+    long_double::add_products(LongDouble::ZERO, &x, &y, x_mean, y_mean) / (count - 1)
 }
 
 /// Columns of a covariance argument: the used rows of each column, one column after another,
@@ -901,16 +913,6 @@ fn pair_statistic(
         return NA_REAL;
     }
     (covariance / (x_scale * y_scale)).clamp(-1.0, 1.0)
-}
-
-pub(crate) fn sign(value: f64) -> f64 {
-    if value > 0.0 {
-        1.0
-    } else if value < 0.0 {
-        -1.0
-    } else {
-        0.0
-    }
 }
 
 /// `Cdist(x, method, attrs, p)`: the lower triangle of the distance matrix between the rows of
@@ -1942,79 +1944,113 @@ unsafe fn ksmooth(call: &NativeCall<'_>) -> R<Sexp> {
 /// `runmed(x, k, iend, naAction, ...)`: running medians of odd span `k`. Ends keep the data
 /// (`iend` 0) or take the median of the first or last `k` points (`iend` 1).
 unsafe fn runmed(call: &NativeCall<'_>) -> R<Sexp> {
-    let mut x = real_values(call.arg(0))?;
+    let x = real_data(call.arg(0))?;
     let span = values::as_integer_scalar(call.arg(2)).max(1) as usize;
     let end_rule = values::as_integer_scalar(call.arg(3));
     let na_action = values::as_integer_scalar(call.arg(4));
     let n = x.len();
-    let missing: Vec<usize> = (0..n).filter(|&index| x[index].is_nan()).collect();
-    if !missing.is_empty() {
-        match na_action {
-            4 => {
-                return Err(call.error(format!(
-                    "runmed(x, .., na.action=\"na.fail\"): have NAs starting at x[{}]",
-                    missing[0] + 1
-                )));
-            }
-            3 => {
-                let kept: Vec<f64> = x.iter().copied().filter(|value| !value.is_nan()).collect();
-                let smoothed = running_median(&kept, span, end_rule);
-                let mut result = vec![NA_REAL; n];
-                let mut source = smoothed.into_iter();
-                for (slot, value) in result.iter_mut().zip(&x) {
-                    if !value.is_nan() {
-                        *slot = source.next().unwrap_or(NA_REAL);
+    let first_missing = x.iter().position(|value| value.is_nan());
+    let replaced = match (first_missing, na_action) {
+        (None, _) => None,
+        (Some(at), 4) => {
+            return Err(call.error(format!(
+                "runmed(x, .., na.action=\"na.fail\"): have NAs starting at x[{}]",
+                at + 1
+            )));
+        }
+        (Some(_), 3) => {
+            let kept: Vec<f64> = x.iter().copied().filter(|value| !value.is_nan()).collect();
+            let mut smoothed = vec![0.0; kept.len()];
+            running_median(&kept, span, end_rule, &mut smoothed);
+            let mut source = smoothed.into_iter();
+            let result: Vec<f64> = x
+                .iter()
+                .map(|&value| {
+                    if value.is_nan() {
+                        value
                     } else {
-                        *slot = *value;
+                        source.next().unwrap_or(NA_REAL)
                     }
-                }
-                return values::real_vector(&result);
+                })
+                .collect();
+            return values::real_vector(&result);
+        }
+        // NAs become huge values of alternating sign, which the medians mostly pass over.
+        (Some(_), _) => {
+            let mut big = if na_action == 2 { -STAND_IN } else { STAND_IN };
+            let mut replaced = x.to_vec();
+            for value in replaced.iter_mut().filter(|value| value.is_nan()) {
+                *value = big;
+                big = -big;
             }
-            _ => {
-                let mut big = if na_action == 2 { -f64::MAX } else { f64::MAX };
-                for &index in &missing {
-                    x[index] = big;
-                    big = -big;
-                }
+            Some(replaced)
+        }
+    };
+    let result = values::alloc_uninit(SexpType::Real, n)?;
+    let medians = values::reals_mut(result);
+    running_median(replaced.as_deref().unwrap_or(&x), span, end_rule, medians);
+    if replaced.is_some() {
+        // Only a missing row whose median is a stand-in gets its own NA or NaN back.
+        for (median, &value) in medians.iter_mut().zip(x.iter()) {
+            if value.is_nan() && median.abs() == STAND_IN {
+                *median = value;
             }
         }
     }
-    let mut result = running_median(&x, span, end_rule);
-    for &index in &missing {
-        if result[index].abs() == f64::MAX {
-            result[index] = NA_REAL;
-        }
-    }
-    for value in result.iter_mut() {
-        if value.abs() == f64::MAX {
-            *value = NA_REAL;
-        }
-    }
-    values::real_vector(&result)
+    Ok(result)
 }
 
-fn running_median(x: &[f64], span: usize, end_rule: i32) -> Vec<f64> {
+/// GNU R's `BIG_dbl`, the stand-in for an NA: finite, so twice it is still a normal number.
+const STAND_IN: f64 = 8.888888888e307;
+
+/// Writes the running medians of `x` into `medians`. The window stays sorted, as keys whose
+/// integer order is `f64::total_cmp`'s: each step finds the outgoing and incoming keys by
+/// binary search and shifts the keys between them by one, which beats sorting every window.
+fn running_median(x: &[f64], span: usize, end_rule: i32, medians: &mut [f64]) {
     let n = x.len();
     let half = span / 2;
     if n == 0 || span <= 1 || n < span {
-        return x.to_vec();
+        medians.copy_from_slice(x);
+        return;
     }
-    let median = |window: &[f64]| {
-        let mut sorted = window.to_vec();
-        sorted.sort_by(f64::total_cmp);
-        sorted[sorted.len() / 2]
+    let key = |value: f64| {
+        let bits = value.to_bits();
+        if bits >> 63 == 1 {
+            !bits
+        } else {
+            bits | 1 << 63
+        }
     };
-    let mut result = x.to_vec();
-    for i in half..n - half {
-        result[i] = median(&x[i - half..=i + half]);
+    let value = |key: u64| {
+        f64::from_bits(if key >> 63 == 1 {
+            key & !(1 << 63)
+        } else {
+            !key
+        })
+    };
+    let mut window: Vec<u64> = x[..span].iter().map(|&item| key(item)).collect();
+    window.sort_unstable();
+    medians[..half].copy_from_slice(&x[..half]);
+    medians[n - half..].copy_from_slice(&x[n - half..]);
+    medians[half] = value(window[half]);
+    for i in half + 1..n - half {
+        let (outgoing, incoming) = (key(x[i - half - 1]), key(x[i + half]));
+        let leaving = window.partition_point(|&item| item < outgoing);
+        let entering = window.partition_point(|&item| item < incoming);
+        if entering <= leaving {
+            window.copy_within(entering..leaving, entering + 1);
+            window[entering] = incoming;
+        } else {
+            window.copy_within(leaving + 1..entering, leaving);
+            window[entering - 1] = incoming;
+        }
+        medians[i] = value(window[half]);
     }
     if end_rule != 0 {
-        let first = result[half];
-        let last = result[n - 1 - half];
-        result[..half].fill(first);
-        result[n - half..].fill(last);
+        let (first, last) = (medians[half], medians[n - 1 - half]);
+        medians[..half].fill(first);
+        medians[n - half..].fill(last);
     }
-    result
 }
 
 /// `cfilter(x, filter, sides, circular)`: the convolution filter behind `filter()`.
