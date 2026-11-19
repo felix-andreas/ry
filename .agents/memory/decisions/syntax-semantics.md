@@ -1023,12 +1023,17 @@ as `Unknown`; a `[` or `@` step leaves its container unchanged.
 - **Higher-order purity is a per-parameter stub marker.** `@pure(FUN)` (`StubLibrary::pure_by_namespace`
   keeps the names, empty for plain `@pure`) means pure when the functions passed at those parameters are,
   so `lapply` and purrr's `map` family accept a pure callback without inferring effects through R's
-  higher-order functions. Arguments match by `check::argument_targets` against the first candidate. A
-  callback is pure when it is a function literal whose body has no effect, or names a pure function; a
-  computed callback is an effect. purrr's string, number and formula `.f` are extractors or bodies, judged
-  by the caller's namespace. Inside `local()` purity is inferred for a function-literal binding
-  (`LocalScope::pure_functions`), because no other item can call it and the read stays inside the item; a
-  rebinding to anything else clears it. `#: @pure` above anything but a top-level name binding is an
+  higher-order functions. Arguments match by `check::argument_targets` against the first candidate,
+  and a call whose winning stub comes from another namespace than its purity, or is no function, is an
+  effect (fail closed). A callback is pure when it is a function literal whose defaults and body have no
+  effect, or names a pure function; a computed callback is an effect. purrr's string, number and formula
+  `.f` are extractors or bodies, judged by the caller's namespace. Inside `local()` purity is inferred for
+  a function-literal binding, because no other item can call it and the read stays inside the item. The
+  call, not the binding, is judged: `LocalScope::functions` records the literal and the depth of the
+  environment that bound it, and a call walks the literal against that environment as it stands then
+  (`LocalScope::outer` snapshots), which is lexical scoping with later rebindings seen. Any other write
+  to the name (loop, destructuring, replacement) clears it. A recursion guard and a per-item walk budget
+  (`LOCAL_CALL_BUDGET`, past which a call is an effect) bound the walk. `#: @pure` above anything but a top-level name binding is an
   `annotation` warning, since nothing reads it there.
 - **Lazy constants.** In a strict file a single-writer constant is bound lazily
   (`load_index::package_index`) only when every package name its initializer mentions has one earlier

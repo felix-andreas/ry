@@ -461,10 +461,13 @@ answer <- function(x) {
 }
 #: @pure
 1 -> one
+#: @pure
+"quoted" <- function() 1
 #++++
 NULL
 answer: <T> fn(x: T) -> T
 one: double
+quoted: fn() -> double
 3..8 warning[annotation] `@pure` declares nothing here. It marks a top-level definition, such as `name <- function(...)`, as safe to call while the package loads; put it above one, or remove it
 64..69 warning[annotation] `@pure` declares nothing here. It marks a top-level definition, such as `name <- function(...)`, as safe to call while the package loads; put it above one, or remove it
 

@@ -363,7 +363,14 @@ fn misplaced_pure_diagnostic(
             Some(SyntaxKind::MINUS_GREATER) => binary.rhs(),
             _ => None,
         };
-        target.is_some_and(|target| target.kind() == SyntaxKind::NAME)
+        // `"name" <- value` binds `name` too.
+        target.is_some_and(|target| match target.kind() {
+            SyntaxKind::NAME => true,
+            SyntaxKind::LITERAL => target
+                .first_token()
+                .is_some_and(|token| token.kind() == SyntaxKind::STRING),
+            _ => false,
+        })
     });
     if sequence.kind() == SyntaxKind::SOURCE_FILE && binds_a_name {
         return None;

@@ -463,8 +463,14 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             if first_here {
                 library.opaque.remove(name);
             }
+            // Like purity, every candidate's marker counts toward the name.
             if let Some(parameters) = markers.opaque {
-                library.opaque.insert(name, parameters);
+                let known = library.opaque.entry(name).or_default();
+                for parameter in parameters {
+                    if !known.contains(&parameter) {
+                        known.push(parameter);
+                    }
+                }
             }
             // Purity belongs to the name within its namespace: any candidate's marker marks it,
             // and a later source that redeclares the name decides afresh, so an override stub

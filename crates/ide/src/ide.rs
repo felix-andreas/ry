@@ -2982,8 +2982,8 @@ pub fn inferred_annotations(db: &dyn Db, file: SourceFile) -> Vec<InferredAnnota
             .iter()
             .map(|(id, _)| *id)
             .collect();
-        // An annotation, inline or `#:`, belongs to a statement: inside a call's arguments
-        // `x: T <- 1` does not parse, and a `#:` line there annotates nothing.
+        // A binding's annotation belongs to a statement: inside a call's arguments
+        // `x: T <- 1` does not parse, and a `#:` block there types the argument, not a binding.
         let statements: BTreeSet<ExprId> = hir
             .root
             .into_iter()

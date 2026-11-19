@@ -4446,9 +4446,12 @@ x strict mode: `lapply` calls `print` here, which is not declared pure, so it ru
  --[R/main.R:3:24]
 ```
 
-Inside `local()`, assignments and loops touch only the local environment and are allowed. A function
-bound there to a function literal whose body has no effect may be called, but a call to any other
-function bound inside that `local()` is an effect. A replacement inside `local()` of a name bound outside it, such as
+Inside `local()`, assignments and loops touch only the local environment and are allowed. A name
+bound there to a function literal may be called when the call has no effect: neither the defaults it
+evaluates nor the body, read with the bindings in place at the call, so rebinding a name the body
+calls after the function is defined counts. A call to a name bound inside that `local()` to anything
+else, including through a loop, a destructuring or a replacement such as `body(f) <- ...`, is an
+effect. A replacement inside `local()` of a name bound outside it, such as
 `local({ defaults$a <- 2; defaults })`, is allowed when the project binds that name once, at the top
 level, to a literal or to `c()` or `list()` of literals. R then replaces in a local copy, which leaves
 the outer value alone. Any other outer value might be an environment, which the replacement would

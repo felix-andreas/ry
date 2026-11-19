@@ -3,8 +3,8 @@
 # A mapped function receives each element. The candidates go from the shape
 # that keeps the most information to the most general: a named input keeps its
 # names in the result. `.f` may also be a formula, a name, or a position,
-# which the last candidate of each set accepts. None of these is pure, because
-# they call `.f`.
+# which the last candidate of each set accepts. Each is pure when the function
+# it calls is (`@pure(.f)`).
 map : @pure(.f) <T, U> fn(.x: list[named: T] | T[named], .f: fn(T) -> U, ...: Any, [.progress]: logical | character) -> list[named: U]
 map : @pure(.f) <T, U> fn(.x: list[T] | T[], .f: fn(T) -> U, ...: Any, [.progress]: logical | character) -> list[U]
 map : @pure(.f) fn(.x: Any, .f: Any, ...: Any, [.progress]: logical | character) -> list[Any]

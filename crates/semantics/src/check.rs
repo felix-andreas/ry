@@ -16695,8 +16695,6 @@ impl<'db, 'a> Checker<'db, 'a> {
         self.generalize(nominal)
     }
 
-    /// Projects non-alias nominals to their representation. An undeclared nominal (a
-    /// typo reported elsewhere) floors to `Unknown` so operator checks never cascade.
     /// An R frame as its class, for the rules that dispatch on a class (`Arith.data.frame`,
     /// `[.data.frame`); any other type as it is.
     fn frame_as_class(&self, ty: Ty<'db>) -> Ty<'db> {
@@ -16708,6 +16706,8 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
+    /// Projects non-alias nominals to their representation. An undeclared nominal (a
+    /// typo reported elsewhere) floors to `Unknown` so operator checks never cascade.
     fn structural(&mut self, ty: Ty<'db>) -> Ty<'db> {
         let mut current = self.table.resolve(self.db, ty);
         for _ in 0..16 {
