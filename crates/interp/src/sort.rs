@@ -3154,7 +3154,10 @@ pub(crate) unsafe fn duplicated_elements(
         let mut table = PositionTable::new(count);
         for index in visit {
             let key = key_at(index);
-            if table.find_or_insert(key, index, key_at).is_some() {
+            let same = |left: ListElement, right: ListElement| {
+                left.hash == right.hash && identical(left.element, right.element, &flags)
+            };
+            if table.find_or_insert_by(key, index, key_at, same).is_some() {
                 let element = key.element;
                 let incomparable = incomparable_elements.is_some_and(|elements| {
                     (0..length(elements))
@@ -3341,7 +3344,7 @@ impl DenseRange {
 
 /// `false`, with `out` partly written, when a key that is not [`TableKey::exact`] is a distinct
 /// table key or misses the table, because then equal values may differ as keys.
-fn hashed_matches<K: TableKey>(
+fn hashed_matches<K: TableKey + Eq>(
     table_count: usize,
     table_key: impl Fn(usize) -> K,
     x_key: impl Fn(usize) -> K,
@@ -3368,7 +3371,7 @@ fn hashed_matches<K: TableKey>(
 /// `None` when a distinct key is not [`TableKey::exact`]. Each word of flags is built in a
 /// register over its 64 elements and stored once. With `first_only` the scan stops after the
 /// first word, in visiting order, that holds a duplicate, which is all `anyDuplicated()` reads.
-fn hashed_duplicates<K: TableKey>(
+fn hashed_duplicates<K: TableKey + Eq>(
     count: usize,
     from_last: bool,
     first_only: bool,
@@ -3403,7 +3406,7 @@ fn hashed_duplicates<K: TableKey>(
 /// `table`, or `None` for a new key that is not [`TableKey::exact`]. Always inlined, because a
 /// call per element costs more than the probe.
 #[inline(always)]
-fn duplicate_bit<K: TableKey>(
+fn duplicate_bit<K: TableKey + Eq>(
     table: &mut PositionTable,
     key_at: &impl Fn(usize) -> K,
     index: usize,
@@ -3509,7 +3512,7 @@ impl Bits {
 
 /// A key that `PositionTable` can hash. The hash must spread every input bit into the high bits,
 /// which pick the slot.
-trait TableKey: Copy + Eq {
+trait TableKey: Copy {
     fn table_hash(self) -> u64;
 
     /// Whether equal keys are always equal values, so that a key missing from the table is a
@@ -3537,23 +3540,14 @@ impl TableKey for u64 {
     }
 }
 
-/// A list element with its [`structural_hash`]: equal when the hashes agree and the elements
-/// are `identical()` under the default flags.
+/// A list element with its [`structural_hash`]. Two are the same key when the hashes agree and
+/// the elements are `identical()` under the default flags, which the caller tests, because
+/// `identical` needs the list rooted.
 #[derive(Clone, Copy)]
 struct ListElement {
     hash: u64,
     element: Sexp,
 }
-
-impl PartialEq for ListElement {
-    fn eq(&self, other: &Self) -> bool {
-        // SAFETY: both elements belong to a list that stays rooted while the table is in use.
-        self.hash == other.hash
-            && unsafe { identical(self.element, other.element, &IdenticalFlags::default()) }
-    }
-}
-
-impl Eq for ListElement {}
 
 impl TableKey for ListElement {
     fn table_hash(self) -> u64 {
@@ -3603,11 +3597,22 @@ impl PositionTable {
 
     /// The position of the first key equal to `key`, or `None` after recording `position` for
     /// it.
-    fn find_or_insert<K: TableKey>(
+    fn find_or_insert<K: TableKey + Eq>(
         &mut self,
         key: K,
         position: usize,
         key_at: impl Fn(usize) -> K,
+    ) -> Option<usize> {
+        self.find_or_insert_by(key, position, key_at, |left, right| left == right)
+    }
+
+    /// [`PositionTable::find_or_insert`] with keys compared by `same`.
+    fn find_or_insert_by<K: TableKey>(
+        &mut self,
+        key: K,
+        position: usize,
+        key_at: impl Fn(usize) -> K,
+        same: impl Fn(K, K) -> bool,
     ) -> Option<usize> {
         let slots: &mut [u32] = &mut self.slots;
         let mask = slots.len() - 1;
@@ -3617,7 +3622,7 @@ impl PositionTable {
             if stored == 0 {
                 break;
             }
-            if key_at(stored as usize - 1) == key {
+            if same(key_at(stored as usize - 1), key) {
                 return Some(stored as usize - 1);
             }
             slot += 1;
@@ -3630,7 +3635,7 @@ impl PositionTable {
         None
     }
 
-    fn find<K: TableKey>(&self, key: K, key_at: impl Fn(usize) -> K) -> Option<usize> {
+    fn find<K: TableKey + Eq>(&self, key: K, key_at: impl Fn(usize) -> K) -> Option<usize> {
         let slots: &[u32] = &self.slots;
         let mask = slots.len() - 1;
         let mut slot = (key.table_hash() >> self.shift) as usize;

@@ -38,6 +38,16 @@ const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 #[cfg(target_os = "linux")]
 const PURGE_DELAY_MS: std::ffi::c_long = 1_000_000_000;
 
+/// glibc's `malloc` serves blocks below this from its heap and larger ones from mappings of their
+/// own. It is the most glibc's dynamic tuning ever raises the threshold to (32 MB on 64-bit).
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const GLIBC_MMAP_THRESHOLD: std::ffi::c_int = 32 << 20;
+
+/// glibc's `malloc` returns free memory at the top of its heap to the kernel once it exceeds this,
+/// twice [`GLIBC_MMAP_THRESHOLD`], as glibc's dynamic tuning sets it.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const GLIBC_TRIM_THRESHOLD: std::ffi::c_int = 64 << 20;
+
 /// Two allocator defaults, set from a constructor that runs when the library loads because
 /// mimalloc reads them each time it reserves an arena or considers a purge. The environment
 /// variables `MIMALLOC_ARENA_EAGER_COMMIT` and `MIMALLOC_PURGE_DELAY` still override them.
@@ -58,6 +68,15 @@ const PURGE_DELAY_MS: std::ffi::c_long = 1_000_000_000;
 /// non-negative, and a scheduled purge is what the forced `mi_collect` behind `gc()` and a dropped
 /// large table carries out. So freed memory is reused while R code runs and returned to the kernel
 /// when the program asks for a collection, as GNU R's `gc()` returns it.
+///
+/// Package C code allocates with glibc's `malloc`, which ry's own values never touch, so the top
+/// of glibc's heap is free most of the time. With glibc's defaults every `free` that leaves more
+/// than 128 KB there returns it to the kernel, and the next call faults the pages in again. In GNU
+/// R its own vectors fill the same heap, so this rarely happens. ry therefore fixes both of
+/// glibc's thresholds at the values its dynamic tuning converges to ([`GLIBC_MMAP_THRESHOLD`],
+/// [`GLIBC_TRIM_THRESHOLD`]), unless `MALLOC_MMAP_THRESHOLD_`, `MALLOC_TRIM_THRESHOLD_` or
+/// `GLIBC_TUNABLES` set them (`.agents/memory/decisions/heap-gc.md`, "glibc's malloc keeps freed
+/// package buffers").
 #[cfg(target_os = "linux")]
 #[used]
 #[unsafe(link_section = ".init_array")]
@@ -67,6 +86,23 @@ static ALLOCATOR_DEFAULTS: extern "C" fn() = {
         unsafe {
             libmimalloc_sys::mi_option_set_default(MI_OPTION_ARENA_EAGER_COMMIT, 0);
             libmimalloc_sys::mi_option_set_default(MI_OPTION_PURGE_DELAY, PURGE_DELAY_MS);
+        }
+        #[cfg(target_env = "gnu")]
+        {
+            let configured = |name: &std::ffi::CStr| {
+                // SAFETY: `getenv` reads the environment, which nothing writes while a library loads.
+                !unsafe { libc::getenv(name.as_ptr()) }.is_null()
+            };
+            if !configured(c"MALLOC_MMAP_THRESHOLD_")
+                && !configured(c"MALLOC_TRIM_THRESHOLD_")
+                && !configured(c"GLIBC_TUNABLES")
+            {
+                // SAFETY: `mallopt` only sets a tuning parameter of glibc's allocator.
+                unsafe {
+                    libc::mallopt(libc::M_MMAP_THRESHOLD, GLIBC_MMAP_THRESHOLD);
+                    libc::mallopt(libc::M_TRIM_THRESHOLD, GLIBC_TRIM_THRESHOLD);
+                }
+            }
         }
     }
     allocator_defaults

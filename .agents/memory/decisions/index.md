@@ -274,7 +274,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `order`, `sort.int` and `sort.default` run natively on plain vectors
 - Strings collate with ICU4X's CLDR collator, as GNU R's ICU does
 - `abbreviate` is GNU R's `stripchars`, pass for pass (settled)
-- Vector kernels: one typed loop per case, exact sizes, and GNU R's polygamma (settled)
+- Vector kernels: one typed loop per case, exact sizes, and GNU R's polygamma and Bessel functions (settled)
 
 ## R compatibility
 
@@ -413,6 +413,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A list of inert elements skips its children when it dies
 - A cached ASCII string is the only string with its text
 - A vector kind has no `downcast`: the caller chooses `standard` or `dense`
+- glibc's malloc keeps freed package buffers (settled)
 
 ## C API, R home and packages
 
