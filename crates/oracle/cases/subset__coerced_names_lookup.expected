@@ -1,0 +1,105 @@
+[stdout]
+| integer 
+| double_bracket        subset2         single          match       in_names 
+|           "20"           "20"     "list(20)"            "2"         "TRUE" 
+|         switch 
+|      "\"two\"" 
+| double_bracket        subset2         single          match       in_names 
+|           "30"           "30"     "list(30)"            "3"         "TRUE" 
+|         switch 
+|    "\"three\"" 
+| double_bracket        subset2         single          match       in_names 
+|           "20"           "20"           "20"            "2"         "TRUE" 
+|         switch 
+|      "\"two\"" 
+| dollar: 20 30 
+| computed key: 10 10 
+| double 
+| double_bracket        subset2         single          match       in_names 
+|           "20"           "20"     "list(20)"            "2"         "TRUE" 
+|         switch 
+|      "\"two\"" 
+| double_bracket        subset2         single          match       in_names 
+|           "30"           "30"     "list(30)"            "3"         "TRUE" 
+|         switch 
+|    "\"three\"" 
+| double_bracket        subset2         single          match       in_names 
+|           "20"           "20"           "20"            "2"         "TRUE" 
+|         switch 
+|      "\"two\"" 
+| dollar: 20 30 
+| computed key: 10 10 
+| as_character 
+| double_bracket        subset2         single          match       in_names 
+|           "20"           "20"     "list(20)"            "2"         "TRUE" 
+|         switch 
+|      "\"two\"" 
+| double_bracket        subset2         single          match       in_names 
+|           "30"           "30"     "list(30)"            "3"         "TRUE" 
+|         switch 
+|    "\"three\"" 
+| double_bracket        subset2         single          match       in_names 
+|           "20"           "20"           "20"            "2"         "TRUE" 
+|         switch 
+|      "\"two\"" 
+| dollar: 20 30 
+| computed key: 10 10 
+| paste0 
+| double_bracket        subset2         single          match       in_names 
+|           "20"           "20"     "list(20)"            "2"         "TRUE" 
+|         switch 
+|      "\"two\"" 
+| double_bracket        subset2         single          match       in_names 
+|           "30"           "30"     "list(30)"            "3"         "TRUE" 
+|         switch 
+|    "\"three\"" 
+| double_bracket        subset2         single          match       in_names 
+|           "20"           "20"           "20"            "2"         "TRUE" 
+|         switch 
+|      "\"two\"" 
+| dollar: 20 30 
+| computed key: 10 10 
+| sprintf 
+| double_bracket        subset2         single          match       in_names 
+|           "20"           "20"     "list(20)"            "2"         "TRUE" 
+|         switch 
+|      "\"two\"" 
+| double_bracket        subset2         single          match       in_names 
+|           "30"           "30"     "list(30)"            "3"         "TRUE" 
+|         switch 
+|    "\"three\"" 
+| double_bracket        subset2         single          match       in_names 
+|           "20"           "20"           "20"            "2"         "TRUE" 
+|         switch 
+|      "\"two\"" 
+| dollar: 20 30 
+| computed key: 10 10 
+| format 
+| double_bracket        subset2         single          match       in_names 
+|           "20"           "20"     "list(20)"            "2"         "TRUE" 
+|         switch 
+|      "\"two\"" 
+| double_bracket        subset2         single          match       in_names 
+|           "30"           "30"     "list(30)"            "3"         "TRUE" 
+|         switch 
+|    "\"three\"" 
+| double_bracket        subset2         single          match       in_names 
+|           "20"           "20"           "20"            "2"         "TRUE" 
+|         switch 
+|      "\"two\"" 
+| dollar: 20 30 
+| computed key: 10 10 
+| deparse 
+| double_bracket        subset2         single          match       in_names 
+|         "NULL"         "NULL"   "list(NULL)"             NA        "FALSE" 
+|         switch 
+|      "\"two\"" 
+| double_bracket        subset2         single          match       in_names 
+|         "NULL"         "NULL"   "list(NULL)"             NA        "FALSE" 
+|         switch 
+|    "\"three\"" 
+[messages]
+[warnings]
+[errors]
+- subscript out of bounds (in x[[key]])
+[value]

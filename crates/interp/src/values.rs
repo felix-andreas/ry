@@ -1022,6 +1022,12 @@ pub unsafe fn same_string(left: Sexp, right: Sexp) -> bool {
     let interned_ascii = gp::ASCII | gp::CACHED;
     if right.gp() & interned_ascii == interned_ascii || left.gp() & interned_ascii == interned_ascii
     {
+        if cfg!(debug_assertions) && syntax::testing::invariants_enabled() {
+            crate::handles::assert_distinct_text(
+                heap::handle::Gc::adopt(left),
+                heap::handle::Gc::adopt(right),
+            );
+        }
         return false;
     }
     same_text_across_encodings(left, right)

@@ -1,0 +1,17 @@
+# Environment bindings named by coerced strings are found by every lookup route.
+e <- new.env()
+for (id in 1:3) assign(as.character(id), id * 10, envir = e)
+print(get("2", envir = e))
+print(exists("3", envir = e, inherits = FALSE))
+print(exists(paste0("", 4L), envir = e, inherits = FALSE))
+print(e[["1"]])
+print(e$`2`)
+print(mget(sprintf("%d", 1:3), envir = e))
+print(sort(ls(e)))
+f <- list2env(setNames(as.list(c(5, 6)), 1:2))
+print(get(as.character(2L), envir = f))
+print(f[[format(1L)]])
+key <- deparse(3L)
+e[[key]] <- "set by deparse"
+print(get("3", envir = e))
+print(exists(as.character(3), envir = e))

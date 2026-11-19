@@ -409,6 +409,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A raw entry into handle code picks its scope by who releases
 - An allocation failure reports the size of the vector's data
 - A list of inert elements skips its children when it dies
+- A cached ASCII string is the only string with its text
 
 ## C API, R home and packages
 
