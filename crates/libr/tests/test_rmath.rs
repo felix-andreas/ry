@@ -31,11 +31,6 @@ fn tolerance(name: &str, arguments: &[f64], expected: f64) -> (f64, f64) {
         // absolute part for their zeros.
         "bessel_i" => (2e-12, 0.0),
         "bessel_j" | "bessel_y" => (1e-12, 1e-15),
-        // The polygamma functions sum the Hurwitz zeta series rather than running Amos's
-        // algorithm; digamma loses relative accuracy near its root at 1.46.
-        "digamma" | "trigamma" | "tetragamma" | "pentagamma" | "psigamma" | "dpsifn" => {
-            (1e-13, 1e-15)
-        }
         // GNU R stops its noncentral beta sum (AS 226) once the Poisson weight it has left
         // out is below 1e-9, so its probabilities are good to 1e-9 absolute; ry sums to
         // rounding.

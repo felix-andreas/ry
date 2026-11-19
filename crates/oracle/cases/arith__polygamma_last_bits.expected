@@ -1,0 +1,54 @@
+[stdout]
+| 0x1.32f97ff2abfddp+1 -0x1.b0ade9fee8e08p-1 0x1.680425af12b65p-1 
+| 0x1.7d783fdb0ee6p+26 -0x1.7e43c8800759bp+996 -0x1.dcd650049e233p+29 
+| -0x1.923e58c1e9644p+6 -0x1.f6a897d3214fap+0 -0x1.2788cfc6fb614p-1 
+| -0x1.75c9b2cp-25 0x1.680425af12b6p-1 0x1.004959cb7063ap+1 0x1.6927c720f3a85p+1 
+| 0x1.26168366104ccp+2 0x1.7069d82dcebc1p+3 0x1.26bb1bbb55516p+5 
+| 0x1.5963447f87fb5p+9 Inf NaN NaN NA NaN NaN
+| 0x1.38eb955a005e2p+3 0x1.daf51eb27b2b4p+3 0x1.2c22c9dc2b128p+3 
+| 0x1.1c37937e08002p+53 NaN 0x1.bc16d674ec7f5p+59 0x1.388cf83ecc5f8p+13 
+| 0x1.3bd3cc9be45dep+2 0x1.a51a6625307d3p+0 0x1.ef72bde4f21f8p-1 
+| 0x1.f62057f7296cap-2 0x1.145697315bf5fp-3 0x1.e779aa29a3e7cp-5 
+| 0x1.4afcb19787df9p-7 0x1.4f8bc681cdfb4p-17 0x1.cd2b297d889ap-54 
+| 0x1.56e1fc2f8f3e8p-997 0x0p+0 Inf NaN NA Inf Inf
+| -0x1.0e40c8ec79602p-7 -0x1.1392e5c9313d1p+6 -0x1.e3bef327def4ep-3 
+| 0x1.a784379d99db6p+80 NaN -0x1.9d971e4fe83f2p+90 -0x1.e848257245e21p+20 
+| -0x1.0d42c0452055dp+4 -0x1.33ba004f00621p+1 -0x1.c563b7a1be6d4p-1 
+| -0x1.e3bef327df0e8p-3 -0x1.29d845d048708p-6 -0x1.cffd14247a2eep-9 
+| -0x1.abef84d8b8aebp-14 -0x1.b7cf1dd8d43c8p-34 -0x1.9f623d5a8a7p-107 -0x0p+0 
+| -0x0p+0 NaN NaN NA NaN NaN
+| 0x1.85a2249d8a2afp+7 0x1.807f50ac41beap+9 0x1.853044f8fc67p+7 
+| 0x1.d95108f882526p+108 NaN 0x1.20e3b5b9ad89bp+122 0x1.1e1a3032022cbp+29 
+| 0x1.85a2e8c290826p+6 0x1.9f9cb402bc46cp+2 0x1.8d0e40ebe4efbp+0 
+| 0x1.ca8f26506cfd8p-3 0x1.408c59cfd10bcp-8 0x1.b980f527a3848p-12 
+| 0x1.14a360ad6ef99p-19 0x1.203c15467dc3ep-49 0x1.7624f8a762f94p-159 0x0p+0 
+| 0x0p+0 Inf NaN NA Inf Inf
+| 0x1.e0b1d0cb017c3p+13 0x1.438e1421e1c1ap+17 0x1.e0ad302f763bfp+13 
+| 0x1.486de8697abeep+166 NaN 0x1.3936f0f937d19p+186 0x1.b48eb57e01cbcp+46 
+| 0x1.e0b1d11856df6p+12 0x1.e8531d8e91242p+6 0x1.9e0b5fba9e83ap+3 
+| 0x1.283a3828d6daap-1 0x1.153d2ab266051p-10 0x1.2b8c96421e87ep-16 
+| 0x1.5acef96d22e2cp-29 0x1.73642c00b4897p-79 0x1.c750222f410bap-262 0x0p+0 
+| 0x0p+0 Inf NaN NA Inf Inf
+| NaN NaN NaN NaN NaN -0x1.b58e46667f90dp+218 -0x1.ff973cafa802p+55 
+| -0x1.682b753a7e8e1p+16 -0x1.6b01782ad4369p+9 -0x1.9fde9b922e9bp+5 
+| -0x1.5168d927db0c8p+0 -0x1.73584fb053c18p-11 -0x1.63fa971b88dc4p-18 
+| -0x1.183c288a58b9dp-33 -0x1.303eca18aa6a6p-93 -0x1.00518590fb363p-312 -0x0p+0 
+| -0x0p+0 NaN NaN NA NaN NaN
+| NaN NaN NaN NaN NaN -Inf -0x1.96ec162245848p+313 -0x1.a27ec6e1f2d1ep+138 
+| -0x1.a27ec6e537cf1p+107 -0x1.a9d075350758ep+90 -0x1.a86ac783aeaeap+66 
+| -0x1.3d03e250a5361p+15 -0x1.69fefb87e368ap-20 -0x1.e2f78db904fd8p-97 
+| -0x1.6d5c6bcf5f94dp-396 -0x0p+0 -0x0p+0 -0x0p+0 NaN NaN NA NaN NaN
+| [1] NaN
+|               a         b
+| [1,] -1.9635100 0.9227843
+| [2,]  0.4227843 1.2561177
+[messages]
+[warnings]
+- deriv = 101 > 100 (= n_max) (in psigamma(1, 101))
+- NaNs produced (in psigamma(1, 101))
+[errors]
+[value]
+double
+| structure(c(-1.96351002602142, 0.422784335098467, 0.922784335098467, 
+| 1.2561176684318), dim = c(2L, 2L), dimnames = list(NULL, c("a", 
+| "b")))

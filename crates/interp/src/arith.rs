@@ -1731,7 +1731,18 @@ pub fn integer_divide(a: i32, b: i32) -> i32 {
     if a == NA_INTEGER || b == NA_INTEGER || b == 0 {
         return NA_INTEGER;
     }
-    (a as f64 / b as f64).floor() as i32
+    floored_quotient(a, b)
+}
+
+/// `floor(a / b)` as GNU R computes it, in doubles. A quotient of two `int`s is never within
+/// rounding of an integer it does not equal (it is at least `1 / |b|` from one), so the
+/// truncated quotient, one lower when it lies above, is the floor; unlike `f64::floor`, which
+/// is a libm call on baseline x86-64, it vectorizes. A zero `b` gives a meaningless value.
+#[inline(always)]
+pub fn floored_quotient(a: i32, b: i32) -> i32 {
+    let quotient = f64::from(a) / f64::from(b);
+    let truncated = quotient as i32;
+    truncated - i32::from(f64::from(truncated) > quotient)
 }
 
 /// `a %/% b`, bit for bit as GNU R computes it (`myfloor`), and consistent with
@@ -2392,13 +2403,33 @@ unsafe fn do_not(call: &Call<'_>) -> R<Sexp> {
         }
         SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex => {
             let result = values::alloc_uninit(SexpType::Logical, count)?;
-            if operand.kind() == SexpType::Logical {
-                kernels::not(Some(values::ints(operand)), values::ints_mut(result));
-            } else {
-                for (index, flag) in values::ints_mut(result).iter_mut().enumerate() {
-                    *flag = logical_at(operand, index);
+            let flags = values::ints_mut(result);
+            match operand.kind() {
+                SexpType::Logical => kernels::not(Some(values::ints(operand)), flags),
+                SexpType::Integer => {
+                    for (flag, &value) in flags.iter_mut().zip(values::ints(operand)) {
+                        *flag = if value == NA_INTEGER {
+                            NA_LOGICAL
+                        } else {
+                            i32::from(value == 0)
+                        };
+                    }
                 }
-                kernels::not(None, values::ints_mut(result));
+                SexpType::Real => {
+                    for (flag, &value) in flags.iter_mut().zip(values::reals(operand)) {
+                        *flag = if value.is_nan() {
+                            NA_LOGICAL
+                        } else {
+                            i32::from(value == 0.0)
+                        };
+                    }
+                }
+                _ => {
+                    for (index, flag) in flags.iter_mut().enumerate() {
+                        *flag = logical_at(operand, index);
+                    }
+                    kernels::not(None, flags);
+                }
             }
             for symbol in [symbols().names, symbols().dim, symbols().dimnames] {
                 let value = get_attr(operand, symbol);
@@ -2476,10 +2507,18 @@ math_functions! {
 }
 
 pub fn math_value(function: Math, x: f64) -> f64 {
+    math_value_at(function, x, x == 0.0 && r_at_least(4, 6))
+}
+
+/// [`math_value`] with the release test hoisted out: `unsigned_zero` is whether the emulated
+/// GNU R answers a zero argument with a positive zero, so a loop asks once per vector.
+#[inline(always)]
+pub fn math_value_at(function: Math, x: f64, unsigned_zero: bool) -> f64 {
     use std::f64::consts::PI;
     // GNU R 4.6's `math1_ari` answers these functions at a zero argument with a positive zero,
     // so a negative zero loses its sign.
-    if x == 0.0
+    if unsigned_zero
+        && x == 0.0
         && matches!(
             function,
             Math::Expm1
@@ -2493,7 +2532,6 @@ pub fn math_value(function: Math, x: f64) -> f64 {
                 | Math::Asinh
                 | Math::Atanh
         )
-        && r_at_least(4, 6)
     {
         return 0.0;
     }
@@ -5406,16 +5444,24 @@ unsafe fn do_which(call: &Call<'_>) -> R<Sexp> {
     if operand.kind() != SexpType::Logical {
         return Err(call.error("argument to 'which' is not logical"));
     }
-    let positions: Vec<i32> = values::ints(operand)
+    let flags = values::ints(operand);
+    // Counting first sizes the result exactly, and the fill stores every position up to the last
+    // `TRUE` and advances only past a `TRUE`, so neither loop branches on the data.
+    let count = flags.iter().filter(|&&value| value == 1).count();
+    let end = flags
         .iter()
-        .enumerate()
-        .filter(|(_, value)| **value == 1)
-        .map(|(index, _)| index as i32 + 1)
-        .collect();
-    let result = values::integer_vector(&positions)?;
+        .rposition(|&value| value == 1)
+        .map_or(0, |last| last + 1);
+    let result = values::alloc_uninit(SexpType::Integer, count)?;
+    let positions = values::ints_mut(result);
+    let mut written = 0;
+    for (index, &value) in values::ints(operand)[..end].iter().enumerate() {
+        positions[written] = index as i32 + 1;
+        written += usize::from(value == 1);
+    }
     let names = values::names(operand);
     if names != nil() {
-        let indices: Vec<usize> = positions
+        let indices: Vec<usize> = values::ints(result)
             .iter()
             .map(|&position| position as usize - 1)
             .collect();

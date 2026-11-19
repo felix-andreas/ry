@@ -1291,7 +1291,24 @@ pub fn math(function: Math, source: Option<Reals<'_>>, output: &mut [f64]) -> bo
             }
             math_lanes(source, output, f64::exp)
         }
-        _ => math_lanes(source, output, |x| arith::math_value(function, x)),
+        _ => {
+            let unsigned_zero = r_at_least(4, 6);
+            // One loop per function, so none of them dispatches on the function per element.
+            macro_rules! each {
+                ($($variant:ident),* $(,)?) => {
+                    match function {
+                        $(Math::$variant => math_lanes(source, output, |x| {
+                            arith::math_value_at(Math::$variant, x, unsigned_zero)
+                        }),)*
+                    }
+                };
+            }
+            each!(
+                Abs, Sign, Sqrt, Floor, Ceiling, Trunc, Exp, Expm1, Log1p, Log2, Log10, Cos, Sin,
+                Tan, Cospi, Sinpi, Tanpi, Acos, Asin, Atan, Cosh, Sinh, Tanh, Acosh, Asinh, Atanh,
+                Gamma, Lgamma, Digamma, Trigamma,
+            )
+        }
     }
 }
 
@@ -1937,10 +1954,11 @@ fn integer_operation(
             }
         }),
         Op::IntegerDivide => map2(x, y, output, |a: i32, b: i32| {
+            let quotient = arith::floored_quotient(a, b);
             if (a == NA_INTEGER) | (b == NA_INTEGER) | (b == 0) {
                 NA_INTEGER
             } else {
-                (f64::from(a) / f64::from(b)).floor() as i32
+                quotient
             }
         }),
         // `/` and `^` on integers give doubles, through `real_arithmetic`.

@@ -2453,177 +2453,364 @@ pub fn choose(n: f64, k: f64) -> f64 {
     lfastchoose(n, k).exp()
 }
 
-/// The Bernoulli numbers `B_2, B_4, ..., B_30`.
-const BERNOULLI: [f64; 15] = [
-    1.0 / 6.0,
-    -1.0 / 30.0,
-    1.0 / 42.0,
-    -1.0 / 30.0,
-    5.0 / 66.0,
-    -691.0 / 2730.0,
-    7.0 / 6.0,
-    -3617.0 / 510.0,
-    43867.0 / 798.0,
-    -174611.0 / 330.0,
-    854513.0 / 138.0,
-    -236364091.0 / 2730.0,
-    8553103.0 / 6.0,
-    -23749461029.0 / 870.0,
-    8615841276005.0 / 14322.0,
+/// `d^n/dx^n cot(x)` for `n <= 5`, GNU R's closed forms.
+fn d_n_cot(x: f64, n: c_int) -> f64 {
+    match n {
+        0 => x.cos() / x.sin(),
+        1 => -1.0 / r_pow_di(x.sin(), 2),
+        2 => 2.0 * x.cos() / r_pow_di(x.sin(), 3),
+        3 => {
+            let sin2 = r_pow_di(x.sin(), 2);
+            -2.0 * (3.0 - 2.0 * sin2) / r_pow_di(sin2, 2)
+        }
+        4 => {
+            let co = x.cos();
+            8.0 * co * (r_pow_di(co, 2) + 2.0) / r_pow_di(x.sin(), 5)
+        }
+        5 => {
+            let co2 = r_pow_di(x.cos(), 2);
+            -8.0 * (2.0 * r_pow_di(co2, 2) + 11.0 * co2 + 2.0) / r_pow_di(x.sin(), 6)
+        }
+        _ => f64::NAN,
+    }
+}
+
+/// The Bernoulli numbers `B_0` to `B_21` as Amos's algorithm indexes them.
+const BERNOULLI: [f64; 22] = [
+    1.00000000000000000e+00,
+    -5.00000000000000000e-01,
+    1.66666666666666667e-01,
+    -3.33333333333333333e-02,
+    2.38095238095238095e-02,
+    -3.33333333333333333e-02,
+    7.57575757575757576e-02,
+    -2.53113553113553114e-01,
+    1.16666666666666667e+00,
+    -7.09215686274509804e+00,
+    5.49711779448621554e+01,
+    -5.29124242424242424e+02,
+    6.19212318840579710e+03,
+    -8.65802531135531136e+04,
+    1.42551716666666667e+06,
+    -2.72982310678160920e+07,
+    6.01580873900642368e+08,
+    -1.51163157670921569e+10,
+    4.29614643061166667e+11,
+    -1.37116552050883328e+13,
+    4.88332318973593167e+14,
+    -1.92965793419400681e+16,
 ];
 
-/// `psi(x)` for `x > 0`: the recurrence `psi(x) = psi(x + 1) - 1/x` up to where the asymptotic
-/// series in the Bernoulli numbers is exact to double precision.
-fn digamma_positive(x: f64) -> f64 {
-    let mut shift = 0.0;
-    let mut z = x;
-    while z < 10.0 {
-        shift += 1.0 / z;
-        z += 1.0;
-    }
-    let inverse_square = 1.0 / (z * z);
-    let mut power = inverse_square;
-    let mut series = 0.0;
-    for (index, bernoulli) in BERNOULLI.iter().take(8).enumerate() {
-        let order = 2.0 * (index + 1) as f64;
-        series += bernoulli / (order * 1.0) * power;
-        power *= inverse_square;
-    }
-    z.ln() - 0.5 / z - series - shift
-}
-
-/// The Hurwitz zeta function `sum_{i >= 0} (x + i)^(-s)` for integer `s >= 2` and `x > 0`, by
-/// Euler-Maclaurin summation after shifting `x` far enough that the correction terms shrink.
-fn hurwitz_zeta(s: f64, x: f64) -> f64 {
-    let threshold = 16.0 + 0.5 * s;
-    let mut sum = 0.0;
-    let mut z = x;
-    while z < threshold {
-        sum += z.powf(-s);
-        z += 1.0;
-    }
-    let mut tail = z.powf(1.0 - s) / (s - 1.0) + 0.5 * z.powf(-s);
-    // term_j = B_2j / (2j)! * s (s+1) ... (s+2j-2) * z^(-s-2j+1)
-    let mut factor = s / z.powf(s + 1.0);
-    let mut factorial = 2.0;
-    for (index, bernoulli) in BERNOULLI.iter().enumerate() {
-        let j = (index + 1) as f64;
-        let term = bernoulli / factorial * factor;
-        tail += term;
-        if term.abs() <= DBL_EPSILON * 0.25 * tail.abs() {
-            break;
-        }
-        factor *= (s + 2.0 * j - 1.0) * (s + 2.0 * j) / (z * z);
-        factorial *= (2.0 * j + 1.0) * (2.0 * j + 2.0);
-    }
-    sum + tail
-}
-
-/// Fills `ans[j]` with `(-1)^(k+1) / k! * psi^(k)(x)` for `k = n + j` and returns Amos's error
-/// code: 1 for invalid arguments, 4 where the reflection for negative `x` does not apply.
+/// Amos's algorithm 610 as GNU R's `dpsifn`: fills `ans[j]` with `(-1)^(k+1) / k! * psi^(k)(x)`
+/// for `k = n + j` and returns the error code (1 for invalid arguments, 2 for overflow, 3 when
+/// the backward recurrence would exceed 100 steps, 4 for `x <= 0` beyond the fifth derivative).
+/// GNU R's underflow count increments its pointer rather than the count, so it is always 0.
 pub fn dpsifn(x: f64, n: c_int, kode: c_int, ans: &mut [f64]) -> c_int {
-    if n < 0 || !(1..=2).contains(&kode) || ans.is_empty() {
+    let m = ans.len() as c_int;
+    if n < 0 || !(1..=2).contains(&kode) || m < 1 {
         return 1;
     }
-    if x.is_nan() {
-        ans.fill(x);
-        return 0;
-    }
-    if x == f64::INFINITY {
-        for (j, slot) in ans.iter_mut().enumerate() {
-            *slot = if j as c_int + n == 0 {
-                f64::NEG_INFINITY
-            } else {
-                0.0
-            };
-        }
-        return 0;
-    }
-    if x <= 0.0 && x == x.round() {
-        for (j, slot) in ans.iter_mut().enumerate() {
-            *slot = if (j as c_int + n) % 2 == 1 {
-                f64::INFINITY
-            } else {
-                f64::NAN
-            };
-        }
-        return 0;
-    }
-    if x < 0.0 {
-        // psi^(k)(x) = (-1)^k psi^(k)(1 - x) - pi^(k+1) cot^(k)(pi x), the k-th derivative of
-        // the reflection formula psi(1 - x) - psi(x) = pi cot(pi x).
-        // GNU R's reflection stops at the fifth derivative.
-        if n as usize + ans.len() - 1 > 5 {
-            return 4;
+    if x <= 0.0 {
+        // The reflection formula psi(n, x) = (-1)^n psi(n, 1 - x) - pi^(n+1) d_n(pi x).
+        if x == x.round() {
+            for (j, slot) in ans.iter_mut().enumerate() {
+                *slot = if (j as c_int + n) % 2 != 0 {
+                    f64::INFINITY
+                } else {
+                    f64::NAN
+                };
+            }
+            return 0;
         }
         let status = dpsifn(1.0 - x, n, 1, ans);
-        if status != 0 {
-            return status;
+        if n > 5 {
+            return 4;
         }
-        let cot = cot_derivatives(x * M_PI, (n as usize) + ans.len() - 1);
-        let mut factorial = 1.0;
-        let mut pi_power = M_PI;
-        for k in 1..=n {
-            factorial *= k as f64;
-            pi_power *= M_PI;
-        }
-        for (j, slot) in ans.iter_mut().enumerate() {
-            let k = n as usize + j;
-            if j > 0 {
-                factorial *= k as f64;
-                pi_power *= M_PI;
+        let x = x * M_PI;
+        let (mut t1, mut t2, mut s) = (1.0, 1.0, 1.0);
+        let mut k: c_int = 0;
+        let mut j = k - n;
+        while j < m {
+            t1 *= M_PI;
+            if k >= 2 {
+                t2 *= f64::from(k);
             }
-            // ans holds (-1)^(k+1)/k! psi^(k)(1 - x); convert, reflect and convert back.
-            let sign = if k.is_multiple_of(2) { -1.0 } else { 1.0 };
-            let psi_reflected = sign * factorial * *slot;
-            let parity = if k.is_multiple_of(2) { 1.0 } else { -1.0 };
-            let psi = parity * psi_reflected - pi_power * cot[k];
-            *slot = sign * psi / factorial;
+            if j >= 0 {
+                let slot = &mut ans[j as usize];
+                *slot = s * (*slot + t1 / t2 * d_n_cot(x, k));
+            }
+            k += 1;
+            j += 1;
+            s = -s;
         }
-        return 0;
+        return status;
     }
-    for (j, slot) in ans.iter_mut().enumerate() {
-        let k = n + j as c_int;
-        *slot = if k == 0 {
-            let value = -digamma_positive(x);
-            if kode == 2 { value + x.ln() } else { value }
+    let xln = x.ln();
+    if kode == 1 && m == 1 {
+        let lrg = 1.0 / (2.0 * DBL_EPSILON);
+        if n == 0 && x * xln > lrg {
+            ans[0] = -xln;
+            return 0;
+        } else if n >= 1 && x > f64::from(n) * lrg {
+            ans[0] = (f64::from(-n) * xln).exp() / f64::from(n);
+            return 0;
+        }
+    }
+    // d1mach(5), d1mach(4) / 2 and i1mach(14) of IEEE doubles.
+    let r1m5 = std::f64::consts::LOG10_2;
+    let r1m4 = DBL_EPSILON * 0.5;
+    let wdtol = fmax2(r1m4, 0.5e-18);
+    let mut nx: c_int = 1021;
+    let elim = 2.302 * (f64::from(nx) * r1m5 - 3.0);
+    let rln = fmin2(r1m5 * 53.0, 18.06);
+    let mut fln = fmax2(rln, 3.0) - 3.0;
+    let yint = 3.50 + 0.40 * fln;
+    let slope = 0.21 + fln * (0.0006038 * fln + 0.008677);
+    let mut trm = [0.0; 23];
+    let mut mm = m;
+    let (mut nn, mut fn_, mut t);
+    let (mut xdmy, mut xdmln, mut xinc);
+    loop {
+        nn = n + mm - 1;
+        fn_ = nn;
+        t = f64::from(fn_ + 1) * xln;
+        let mut series = false;
+        if t.abs() > elim {
+            if t <= 0.0 {
+                return 2;
+            }
         } else {
-            hurwitz_zeta((k + 1) as f64, x)
-        };
-        if !finite(*slot) {
-            // Amos's overflow error, which GNU R reports as NaN.
-            return 2;
+            if x < wdtol {
+                ans[0] = r_pow_di(x, -n - 1);
+                for k in 1..mm as usize {
+                    ans[k] = ans[k - 1] / x;
+                }
+                if n == 0 && kode == 2 {
+                    ans[0] += xln;
+                }
+                return 0;
+            }
+            let mut xm = yint + slope * f64::from(fn_);
+            let mx = xm as c_int + 1;
+            let xmin = f64::from(mx);
+            if n != 0 {
+                xm = -2.302 * rln - fmin2(0.0, xln);
+                let arg = fmin2(0.0, xm / f64::from(n));
+                let eps = arg.exp();
+                xm = if arg.abs() < 1.0e-3 { -arg } else { 1.0 - eps };
+                fln = x * xm / eps;
+                xm = xmin - x;
+                if xm > 7.0 && fln < 15.0 {
+                    series = true;
+                }
+            }
+            if !series {
+                xdmy = x;
+                xdmln = xln;
+                xinc = 0.0;
+                if x < xmin {
+                    nx = x as c_int;
+                    xinc = xmin - f64::from(nx);
+                    xdmy = x + xinc;
+                    xdmln = xdmy.ln();
+                }
+                t = f64::from(fn_) * xdmln;
+                let t1 = xdmln + xdmln;
+                let t2 = t + xdmln;
+                let tk = fmax2(t.abs(), fmax2(t1.abs(), t2.abs()));
+                if tk <= elim {
+                    return dpsifn_asymptotic(
+                        x, kode, ans, mm, nn, fn_, t, xdmy, xdmln, xinc, &mut trm, wdtol,
+                    );
+                }
+            }
+        }
+        if series {
+            break;
+        }
+        mm -= 1;
+        ans[mm as usize] = 0.0;
+        if mm == 0 {
+            return 0;
+        }
+    }
+    // A direct sum of the series for x small enough against the derivative's order.
+    nn = fln as c_int + 1;
+    let np = n + 1;
+    let t1 = f64::from(n + 1) * xln;
+    let mut t = (-t1).exp();
+    let mut s = t;
+    let mut den = x;
+    for slot in &mut trm[1..=nn as usize] {
+        den += 1.0;
+        *slot = den.powf(f64::from(-np));
+        s += *slot;
+    }
+    ans[0] = s;
+    if n == 0 && kode == 2 {
+        ans[0] = s + xln;
+    }
+    if mm != 1 {
+        let tol = wdtol / 5.0;
+        for answer in &mut ans[1..mm as usize] {
+            t /= x;
+            s = t;
+            let tols = t * tol;
+            den = x;
+            for slot in &mut trm[1..=nn as usize] {
+                den += 1.0;
+                *slot /= den;
+                s += *slot;
+                if *slot < tols {
+                    break;
+                }
+            }
+            *answer = s;
         }
     }
     0
 }
 
-/// The derivatives `d^k/dt^k cot(t)` for `k <= order` at `t`, from the polynomials in
-/// `c = cot(t)` that the rule `d/dt c = -(1 + c^2)` generates.
-fn cot_derivatives(t: f64, order: usize) -> Vec<f64> {
-    let c = t.cos() / t.sin();
-    let mut polynomial = vec![0.0, 1.0];
-    let mut values = Vec::with_capacity(order + 1);
-    for k in 0..=order {
-        values.push(
-            polynomial
-                .iter()
-                .rev()
-                .fold(0.0, |sum, coefficient| sum * c + coefficient),
-        );
-        if k == order {
-            break;
-        }
-        // P'(c) * -(1 + c^2)
-        let mut next = vec![0.0; polynomial.len() + 1];
-        for (power, coefficient) in polynomial.iter().enumerate().skip(1) {
-            let derivative = coefficient * power as f64;
-            next[power - 1] -= derivative;
-            next[power + 1] -= derivative;
-        }
-        polynomial = next;
+/// The asymptotic expansion of `dpsifn` at `xdmy = x + xinc` (Amos's label 10), recurring back
+/// to `x` and down to the lower derivatives.
+#[allow(clippy::too_many_arguments)]
+fn dpsifn_asymptotic(
+    x: f64,
+    kode: c_int,
+    ans: &mut [f64],
+    mm: c_int,
+    nn: c_int,
+    mut fn_: c_int,
+    t: f64,
+    xdmy: f64,
+    xdmln: f64,
+    xinc: f64,
+    trm: &mut [f64; 23],
+    wdtol: f64,
+) -> c_int {
+    let mut tss = (-t).exp();
+    let tt = 0.5 / xdmy;
+    let mut t1 = tt;
+    let tst = wdtol * tt;
+    if nn != 0 {
+        t1 = tt + 1.0 / f64::from(fn_);
     }
-    values
+    let rxsq = 1.0 / (xdmy * xdmy);
+    let ta = 0.5 * rxsq;
+    let mut t = f64::from(fn_ + 1) * ta;
+    let mut s = t * BERNOULLI[2];
+    if s.abs() >= tst {
+        let mut tk = 2.0;
+        for k in 4..=22 {
+            t = t
+                * ((tk + f64::from(fn_) + 1.0) / (tk + 1.0))
+                * ((tk + f64::from(fn_)) / (tk + 2.0))
+                * rxsq;
+            trm[k] = t * BERNOULLI[k - 1];
+            if trm[k].abs() < tst {
+                break;
+            }
+            s += trm[k];
+            tk += 2.0;
+        }
+    }
+    s = (s + t1) * tss;
+    let mut nx = 0;
+    // The terms of the backward recurrence, kept only when lower derivatives reuse them.
+    let mut trmr = Vec::new();
+    if xinc != 0.0 {
+        nx = xinc as usize;
+        let np = nn + 1;
+        if nx > 100 {
+            return 3;
+        }
+        if nn == 0 {
+            return dpsifn_small(x, kode, ans, s, nx, xdmy, xdmln);
+        }
+        let mut xm = xinc - 1.0;
+        let mut fx = x + xm;
+        // GNU R: "this loop should not be changed. fx is accurate when x is small".
+        for _ in 0..nx {
+            let term = fx.powf(f64::from(-np));
+            s += term;
+            if mm > 1 {
+                trmr.push(term);
+            }
+            xm -= 1.0;
+            fx = x + xm;
+        }
+    }
+    ans[mm as usize - 1] = s;
+    if fn_ == 0 {
+        return dpsifn_finish(x, kode, ans, s, xdmy, xdmln);
+    }
+    for j in 2..=mm as usize {
+        fn_ -= 1;
+        tss *= xdmy;
+        t1 = tt;
+        if fn_ != 0 {
+            t1 = tt + 1.0 / f64::from(fn_);
+        }
+        t = f64::from(fn_ + 1) * ta;
+        s = t * BERNOULLI[2];
+        if s.abs() >= tst {
+            let mut tk = f64::from(4 + fn_);
+            for slot in &mut trm[4..=22] {
+                *slot = *slot * f64::from(fn_ + 1) / tk;
+                if slot.abs() < tst {
+                    break;
+                }
+                s += *slot;
+                tk += 2.0;
+            }
+        }
+        s = (s + t1) * tss;
+        if xinc != 0.0 {
+            if fn_ == 0 {
+                return dpsifn_small(x, kode, ans, s, nx, xdmy, xdmln);
+            }
+            let mut xm = xinc - 1.0;
+            let mut fx = x + xm;
+            for slot in &mut trmr {
+                *slot *= fx;
+                s += *slot;
+                xm -= 1.0;
+                fx = x + xm;
+            }
+        }
+        ans[mm as usize - j] = s;
+        if fn_ == 0 {
+            return dpsifn_finish(x, kode, ans, s, xdmy, xdmln);
+        }
+    }
+    0
+}
+
+/// Amos's label 20: the digamma recurrence summed from the small end, which avoids the
+/// cancellation of GNU R's PR#13714.
+fn dpsifn_small(
+    x: f64,
+    kode: c_int,
+    ans: &mut [f64],
+    mut s: f64,
+    nx: usize,
+    xdmy: f64,
+    xdmln: f64,
+) -> c_int {
+    for i in 1..=nx {
+        s += 1.0 / (x + (nx - i) as f64);
+    }
+    dpsifn_finish(x, kode, ans, s, xdmy, xdmln)
+}
+
+/// Amos's label 30.
+fn dpsifn_finish(x: f64, kode: c_int, ans: &mut [f64], s: f64, xdmy: f64, xdmln: f64) -> c_int {
+    if kode != 2 {
+        ans[0] = s - xdmln;
+    } else if xdmy != x {
+        ans[0] = s - (xdmy / x).ln();
+    }
+    0
 }
 
 /// The `n`-th derivative of the digamma function.
