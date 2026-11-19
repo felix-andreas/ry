@@ -74,6 +74,7 @@ use {
             integer_vector, ints, ints_mut, length, list_vector, materialize, nil, reals,
             reals_mut, set_attr, symbols,
         },
+        vector_math,
     },
     heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType, is_na_real},
 };
@@ -285,7 +286,7 @@ distributions! {
         "runif" 3 real UniformSampler;
         "rweibull" 3 real Rweibull |s, v| rweibull(s, v[0], v[1]);
         "rwilcox" 3 integer Rwilcox |s, v| rwilcox(s, v[0], v[1]);
-        "rhyper" 4 integer Rhyper |s, v| rhyper(s, v[0], v[1], v[2]);
+        "rhyper" 4 integer Hypergeometric;
     }
 }
 
@@ -1382,6 +1383,11 @@ pub fn rbeta(deviates: &mut impl Deviates, aa: f64, bb: f64) -> R<f64> {
 /// means below 10, and otherwise a normal deviate accepted outright, by a squeeze, or by
 /// quotient and hat tests against Hermite approximations to the discrete normal probabilities.
 pub fn rpois(deviates: &mut impl Deviates, mu: f64) -> R<f64> {
+    // A one-off draw from a large mean builds only the normal method's few constants, not a
+    // whole sampler with the inversion table, which `rgeom` would build and move per draw.
+    if mu >= 10.0 && mu.is_finite() {
+        return PoissonNormal::new(mu).draw(deviates);
+    }
     Poisson::new(mu).draw(deviates)
 }
 
@@ -1450,13 +1456,7 @@ impl Poisson {
                 cumulative: [0.0; 36],
             })
         } else {
-            PoissonKind::Normal(PoissonNormal {
-                mu,
-                s: mu.sqrt(),
-                d: 6.0 * mu * mu,
-                big_l: (mu - 1.1484).floor(),
-                hat: None,
-            })
+            PoissonKind::Normal(PoissonNormal::new(mu))
         };
         Self { kind }
     }
@@ -1514,6 +1514,17 @@ impl PoissonTable {
 }
 
 impl PoissonNormal {
+    #[inline]
+    fn new(mu: f64) -> Self {
+        Self {
+            mu,
+            s: mu.sqrt(),
+            d: 6.0 * mu * mu,
+            big_l: vector_math::floor(mu - 1.1484),
+            hat: None,
+        }
+    }
+
     #[allow(clippy::excessive_precision)]
     fn draw(&mut self, deviates: &mut impl Deviates) -> R<f64> {
         let Self {
@@ -1524,7 +1535,7 @@ impl PoissonNormal {
         let mut u = 0.0;
         let normal = mu + s * deviates.normal()?;
         if normal >= 0.0 {
-            count = normal.floor();
+            count = vector_math::floor(normal);
             if count >= big_l {
                 return Ok(count);
             }
@@ -1561,7 +1572,7 @@ impl PoissonNormal {
             let u = 2.0 * deviates.uniform()? - 1.0;
             let t = 1.8 + if u >= 0.0 { e } else { -e };
             if t > -0.6744 {
-                let count = (mu + s * t).floor();
+                let count = vector_math::floor(mu + s * t);
                 let difference = mu - count;
                 let (px, py, fx, fy) = poisson_probabilities(mu, s, hat, count, difference);
                 if hat.c * u.abs() <= py * (px + e).exp() - fy * (fx + e).exp() {
@@ -1991,98 +2002,267 @@ fn log_factorial(i: f64) -> f64 {
 /// (HIN) when the mode is within 10 of the smallest value, and otherwise H2PE, a rectangle and
 /// two exponential tails as the hat with squeezes in the acceptance test.
 pub fn rhyper(deviates: &mut impl Deviates, red: f64, black: f64, drawn: f64) -> R<f64> {
-    const DELTA_LOWER: f64 = 0.0078;
-    const DELTA_UPPER: f64 = 0.0034;
-    if !red.is_finite() || !black.is_finite() || !drawn.is_finite() {
-        return Ok(f64::NAN);
-    }
-    let (red, black, drawn) = (forceint(red), forceint(black), forceint(drawn));
-    if red < 0.0 || black < 0.0 || drawn < 0.0 || drawn > red + black {
-        return Ok(f64::NAN);
-    }
-    let limit = f64::from(i32::MAX);
-    if red >= limit || black >= limit || drawn >= limit {
-        if drawn == 1.0 {
-            return rbinom(deviates, drawn, red / (red + black));
-        }
-        return Ok(qhyper(deviates.uniform()?, red, black, drawn, false, false));
-    }
-    let total = red + black;
-    let (n1, n2) = if red <= black {
-        (red, black)
-    } else {
-        (black, red)
-    };
-    let k = if drawn + drawn >= total {
-        total - drawn
-    } else {
-        drawn
-    };
-    let m = ((k + 1.0) * (n1 + 1.0) / (total + 2.0)).trunc();
-    let min_x = (k - n2).max(0.0);
-    let max_x = n1.min(k);
-    let ix = if min_x == max_x {
-        max_x
-    } else if m - min_x < 10.0 {
-        // The probability of min_x, scaled by 1e25 against underflow.
-        const SCALE: f64 = 1e25;
-        const LOG_SCALE: f64 = 57.564_627_324_851_14;
-        let log_w = if k < n2 {
-            log_factorial(n2) + log_factorial(n1 + n2 - k)
-                - log_factorial(n2 - k)
-                - log_factorial(n1 + n2)
-        } else {
-            log_factorial(n1) + log_factorial(k) - log_factorial(k - n2) - log_factorial(n1 + n2)
+    Hypergeometric::new(red, black, drawn).draw(deviates)
+}
+
+/// [`rhyper`] prepared for one urn, holding the setup GNU R keeps in static variables between
+/// calls with the same parameters.
+pub struct Hypergeometric {
+    kind: HypergeometricKind,
+    red: f64,
+    black: f64,
+    drawn: f64,
+}
+
+enum HypergeometricKind {
+    Constant(f64),
+    /// Beyond the integer range: one red ball in a single draw is a Bernoulli draw, and
+    /// otherwise the distribution function is inverted.
+    Single {
+        probability: f64,
+    },
+    Quantile,
+    /// The reduced sample `k` from `n1` and `n2` balls, drawn from the reduced count `ix`.
+    Reduced(Reduced),
+}
+
+struct Reduced {
+    n1: f64,
+    n2: f64,
+    k: f64,
+    min_x: f64,
+    max_x: f64,
+    method: ReducedMethod,
+}
+
+enum ReducedMethod {
+    /// Every draw is `max_x`.
+    Fixed,
+    /// Inversion from `min_x`, whose probability `w` is scaled by 1e25 against underflow.
+    Inversion {
+        w: f64,
+    },
+    Ratio(Box<RatioSetup>),
+}
+
+/// The constants of the ratio method (H2PE), around the mode `m`.
+struct RatioSetup {
+    m: f64,
+    a: f64,
+    xl: f64,
+    xr: f64,
+    lambda_left: f64,
+    lambda_right: f64,
+    p1: f64,
+    p2: f64,
+    p3: f64,
+}
+
+impl Hypergeometric {
+    pub fn new(red: f64, black: f64, drawn: f64) -> Self {
+        let constant = |value| Self {
+            kind: HypergeometricKind::Constant(value),
+            red,
+            black,
+            drawn,
         };
-        let w = (log_w + LOG_SCALE).exp();
-        'draw: loop {
-            let mut ix = min_x;
-            let mut u = deviates.uniform()? * SCALE;
-            let mut p = w;
-            while u > p {
-                u -= p;
-                p *= (n1 - ix) * (k - ix);
-                ix += 1.0;
-                p = p / ix / (n2 - k + ix);
-                if ix > max_x {
-                    continue 'draw;
+        if !red.is_finite() || !black.is_finite() || !drawn.is_finite() {
+            return constant(f64::NAN);
+        }
+        let (red, black, drawn) = (forceint(red), forceint(black), forceint(drawn));
+        if red < 0.0 || black < 0.0 || drawn < 0.0 || drawn > red + black {
+            return constant(f64::NAN);
+        }
+        let with = |kind| Self {
+            kind,
+            red,
+            black,
+            drawn,
+        };
+        let limit = f64::from(i32::MAX);
+        if red >= limit || black >= limit || drawn >= limit {
+            if drawn == 1.0 {
+                return with(HypergeometricKind::Single {
+                    probability: red / (red + black),
+                });
+            }
+            return with(HypergeometricKind::Quantile);
+        }
+        let total = red + black;
+        let (n1, n2) = if red <= black {
+            (red, black)
+        } else {
+            (black, red)
+        };
+        let k = if drawn + drawn >= total {
+            total - drawn
+        } else {
+            drawn
+        };
+        let m = ((k + 1.0) * (n1 + 1.0) / (total + 2.0)).trunc();
+        let min_x = (k - n2).max(0.0);
+        let max_x = n1.min(k);
+        let method = if min_x == max_x {
+            ReducedMethod::Fixed
+        } else if m - min_x < 10.0 {
+            const LOG_SCALE: f64 = 57.564_627_324_851_14;
+            let log_w = if k < n2 {
+                log_factorial(n2) + log_factorial(n1 + n2 - k)
+                    - log_factorial(n2 - k)
+                    - log_factorial(n1 + n2)
+            } else {
+                log_factorial(n1) + log_factorial(k)
+                    - log_factorial(k - n2)
+                    - log_factorial(n1 + n2)
+            };
+            ReducedMethod::Inversion {
+                w: (log_w + LOG_SCALE).exp(),
+            }
+        } else {
+            let s = ((total - k) * k * n1 * n2 / (total - 1.0) / total / total).sqrt();
+            let d = (1.5 * s).trunc() + 0.5;
+            let xl = m - d + 0.5;
+            let xr = m + d + 0.5;
+            let a = log_factorial(m)
+                + log_factorial(n1 - m)
+                + log_factorial(k - m)
+                + log_factorial(n2 - k + m);
+            let kl = (a
+                - log_factorial(xl.trunc())
+                - log_factorial((n1 - xl).trunc())
+                - log_factorial((k - xl).trunc())
+                - log_factorial((n2 - k + xl).trunc()))
+            .exp();
+            let kr = (a
+                - log_factorial((xr - 1.0).trunc())
+                - log_factorial((n1 - xr + 1.0).trunc())
+                - log_factorial((k - xr + 1.0).trunc())
+                - log_factorial((n2 - k + xr - 1.0).trunc()))
+            .exp();
+            let lambda_left = -(xl * (n2 - k + xl) / (n1 - xl + 1.0) / (k - xl + 1.0)).ln();
+            let lambda_right = -((n1 - xr + 1.0) * (k - xr + 1.0) / xr / (n2 - k + xr)).ln();
+            let p1 = d + d;
+            let p2 = p1 + kl / lambda_left;
+            let p3 = p2 + kr / lambda_right;
+            ReducedMethod::Ratio(Box::new(RatioSetup {
+                m,
+                a,
+                xl,
+                xr,
+                lambda_left,
+                lambda_right,
+                p1,
+                p2,
+                p3,
+            }))
+        };
+        with(HypergeometricKind::Reduced(Reduced {
+            n1,
+            n2,
+            k,
+            min_x,
+            max_x,
+            method,
+        }))
+    }
+
+    pub fn draw(&self, deviates: &mut impl Deviates) -> R<f64> {
+        let (red, black, drawn) = (self.red, self.black, self.drawn);
+        let reduced = match &self.kind {
+            HypergeometricKind::Constant(value) => return Ok(*value),
+            HypergeometricKind::Single { probability } => {
+                return rbinom(deviates, 1.0, *probability);
+            }
+            HypergeometricKind::Quantile => {
+                return Ok(qhyper(deviates.uniform()?, red, black, drawn, false, false));
+            }
+            HypergeometricKind::Reduced(reduced) => reduced,
+        };
+        let ix = match reduced.draw(deviates)? {
+            Some(ix) => ix,
+            None => return Ok(f64::NAN),
+        };
+        // Undo the reductions to the smaller color and the smaller sample.
+        let total = red + black;
+        let value = if drawn + drawn >= total {
+            if red > black {
+                drawn - black + ix
+            } else {
+                red - ix
+            }
+        } else if red > black {
+            drawn - ix
+        } else {
+            ix
+        };
+        Ok(value)
+    }
+}
+
+impl Sampler for Hypergeometric {
+    fn prepare(parameters: &[f64; 3]) -> Self {
+        Self::new(parameters[0], parameters[1], parameters[2])
+    }
+
+    #[inline(always)]
+    fn draw<D: Deviates>(&mut self, deviates: &mut D) -> R<f64> {
+        Hypergeometric::draw(self, deviates)
+    }
+}
+
+impl Reduced {
+    /// The reduced count, or `None` when the ratio method rejects 10000 candidates in a row.
+    fn draw(&self, deviates: &mut impl Deviates) -> R<Option<f64>> {
+        const DELTA_LOWER: f64 = 0.0078;
+        const DELTA_UPPER: f64 = 0.0034;
+        let Self {
+            n1,
+            n2,
+            k,
+            min_x,
+            max_x,
+            ..
+        } = *self;
+        let setup = match &self.method {
+            ReducedMethod::Fixed => return Ok(Some(max_x)),
+            ReducedMethod::Inversion { w } => {
+                const SCALE: f64 = 1e25;
+                'draw: loop {
+                    let mut ix = min_x;
+                    let mut u = deviates.uniform()? * SCALE;
+                    let mut p = *w;
+                    while u > p {
+                        u -= p;
+                        p *= (n1 - ix) * (k - ix);
+                        ix += 1.0;
+                        p = p / ix / (n2 - k + ix);
+                        if ix > max_x {
+                            continue 'draw;
+                        }
+                    }
+                    return Ok(Some(ix));
                 }
             }
-            break ix;
-        }
-    } else {
-        let s = ((total - k) * k * n1 * n2 / (total - 1.0) / total / total).sqrt();
-        let d = (1.5 * s).trunc() + 0.5;
-        let xl = m - d + 0.5;
-        let xr = m + d + 0.5;
-        let a = log_factorial(m)
-            + log_factorial(n1 - m)
-            + log_factorial(k - m)
-            + log_factorial(n2 - k + m);
-        let kl = (a
-            - log_factorial(xl.trunc())
-            - log_factorial((n1 - xl).trunc())
-            - log_factorial((k - xl).trunc())
-            - log_factorial((n2 - k + xl).trunc()))
-        .exp();
-        let kr = (a
-            - log_factorial((xr - 1.0).trunc())
-            - log_factorial((n1 - xr + 1.0).trunc())
-            - log_factorial((k - xr + 1.0).trunc())
-            - log_factorial((n2 - k + xr - 1.0).trunc()))
-        .exp();
-        let lambda_left = -(xl * (n2 - k + xl) / (n1 - xl + 1.0) / (k - xl + 1.0)).ln();
-        let lambda_right = -((n1 - xr + 1.0) * (k - xr + 1.0) / xr / (n2 - k + xr)).ln();
-        let p1 = d + d;
-        let p2 = p1 + kl / lambda_left;
-        let p3 = p2 + kr / lambda_right;
+            ReducedMethod::Ratio(setup) => setup,
+        };
+        let RatioSetup {
+            m,
+            a,
+            xl,
+            xr,
+            lambda_left,
+            lambda_right,
+            p1,
+            p2,
+            p3,
+        } = **setup;
         let mut attempts = 0;
         loop {
             let u = deviates.uniform()? * p3;
             let mut v = deviates.uniform()?;
             attempts += 1;
             if attempts >= 10000 {
-                return Ok(f64::NAN);
+                return Ok(None);
             }
             let ix;
             if u < p1 {
@@ -2164,23 +2344,10 @@ pub fn rhyper(deviates: &mut impl Deviates, red: f64, black: f64, drawn: f64) ->
                 }
             };
             if accept {
-                break ix;
+                return Ok(Some(ix));
             }
         }
-    };
-    // Undo the reductions to the smaller color and the smaller sample.
-    let value = if drawn + drawn >= total {
-        if red > black {
-            drawn - black + ix
-        } else {
-            red - ix
-        }
-    } else if red > black {
-        drawn - ix
-    } else {
-        ix
-    };
-    Ok(value)
+    }
 }
 
 pub fn rsignrank(deviates: &mut impl Deviates, n: f64) -> R<f64> {

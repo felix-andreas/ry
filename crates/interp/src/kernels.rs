@@ -21,7 +21,8 @@ use {
         long_double::{self, LongDouble},
         system::r_at_least,
         unwind::R,
-        values, vector_math,
+        values,
+        vector_math::{self, Rounding},
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, is_na_real},
     std::cmp::Ordering,
@@ -1280,9 +1281,9 @@ pub fn math(function: Math, source: Option<Reals<'_>>, output: &mut [f64]) -> bo
     // The common functions get their own loop, so the loop calls no function it cannot
     // vectorize.
     match function {
-        Math::Floor => math_lanes(source, output, f64::floor),
-        Math::Ceiling => math_lanes(source, output, f64::ceil),
-        Math::Trunc => math_lanes(source, output, f64::trunc),
+        Math::Floor => round_lanes(Rounding::Floor, source, output, vector_math::floor),
+        Math::Ceiling => round_lanes(Rounding::Ceiling, source, output, vector_math::ceiling),
+        Math::Trunc => round_lanes(Rounding::Truncate, source, output, vector_math::truncate),
         Math::Abs => math_lanes(source, output, f64::abs),
         Math::Sqrt => math_lanes(source, output, f64::sqrt),
         Math::Exp => {
@@ -1291,7 +1292,24 @@ pub fn math(function: Math, source: Option<Reals<'_>>, output: &mut [f64]) -> bo
             }
             math_lanes(source, output, f64::exp)
         }
-        _ => math_lanes(source, output, |x| arith::math_value(function, x)),
+        _ => {
+            let unsigned_zero = r_at_least(4, 6);
+            // One loop per function, so none of them dispatches on the function per element.
+            macro_rules! each {
+                ($($variant:ident),* $(,)?) => {
+                    match function {
+                        $(Math::$variant => math_lanes(source, output, |x| {
+                            arith::math_value_at(Math::$variant, x, unsigned_zero)
+                        }),)*
+                    }
+                };
+            }
+            each!(
+                Abs, Sign, Sqrt, Floor, Ceiling, Trunc, Exp, Expm1, Log1p, Log2, Log10, Cos, Sin,
+                Tan, Cospi, Sinpi, Tanpi, Acos, Asin, Atan, Cosh, Sinh, Tanh, Acosh, Asinh, Atanh,
+                Gamma, Lgamma, Digamma, Trigamma,
+            )
+        }
     }
 }
 
@@ -1937,10 +1955,11 @@ fn integer_operation(
             }
         }),
         Op::IntegerDivide => map2(x, y, output, |a: i32, b: i32| {
+            let quotient = arith::floored_quotient(a, b);
             if (a == NA_INTEGER) | (b == NA_INTEGER) | (b == 0) {
                 NA_INTEGER
             } else {
-                (f64::from(a) / f64::from(b)).floor() as i32
+                quotient
             }
         }),
         // `/` and `^` on integers give doubles, through `real_arithmetic`.
@@ -2018,6 +2037,23 @@ fn math_lanes(
         }
     ));
     produced_nan
+}
+
+/// `floor`, `ceiling` or `trunc` through [`vector_math::round_all`] for a double or in-place
+/// operand, and through [`math_lanes`] with `function` for the others. Rounding never makes a
+/// NaN.
+fn round_lanes(
+    rounding: Rounding,
+    source: Option<Reals<'_>>,
+    output: &mut [f64],
+    function: fn(f64) -> f64,
+) -> bool {
+    match source.map(real_input) {
+        Some(Reals::Doubles(values)) => vector_math::round_all(rounding, Some(values), output),
+        None => vector_math::round_all(rounding, None, output),
+        Some(other) => return math_lanes(Some(other), output, function),
+    }
+    false
 }
 
 /// [`math_lanes`] through a SIMD kernel of [`vector_math`], for a double or in-place operand.

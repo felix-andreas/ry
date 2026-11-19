@@ -1,0 +1,24 @@
+[stdout]
+|  [1] FALSE FALSE FALSE  TRUE  TRUE FALSE  TRUE  TRUE FALSE FALSE  TRUE
+| [1] -Inf -1.0  0.0  1.0  2.5  Inf
+| [1] 4
+|  [1] FALSE FALSE  TRUE  TRUE FALSE  TRUE  TRUE FALSE FALSE  TRUE FALSE
+| [1] -Inf -1.0  0.0  1.0  2.5  Inf
+| [1] 10
+| [1] -Inf
+| [1] Inf
+| [1]  1  2 NA
+| [1] NaN  NA
+| [1] FALSE  TRUE FALSE  TRUE
+| [1] 1 2 3
+| [1] 0
+| numeric(0)
+| 90000 4499674613 2 99999 10000 
+| 23988 199994 23988 
+| 6 24282 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

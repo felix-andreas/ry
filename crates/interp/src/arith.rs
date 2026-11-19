@@ -1007,9 +1007,16 @@ pub fn pretty(
 /// and `0L` (the argument was not given) keeps the old behavior, recycling only `from` and `by`
 /// to `nvec`, with a warning when that drops elements.
 unsafe fn do_sequence(call: &Call<'_>) -> R<Sexp> {
-    let lengths = coerce_vector(call.arg(0), SexpType::Integer)?;
-    let from = coerce_vector(call.arg(1), SexpType::Integer)?;
-    let by = coerce_vector(call.arg(2), SexpType::Integer)?;
+    let integers = |argument: Sexp| {
+        let vector = coerce_vector(argument, SexpType::Integer)?;
+        crate::heap().root(vector);
+        R::Ok(vector)
+    };
+    let (lengths, from, by) = (
+        integers(call.arg(0))?,
+        integers(call.arg(1))?,
+        integers(call.arg(2))?,
+    );
     let recycle_argument = call.arg(3);
     // R 4.6 and later pass `recycle`, as an integer when the caller left it missing.
     let maybe_warn = call.len() > 3 && recycle_argument.kind() != SexpType::Logical;
@@ -1061,22 +1068,34 @@ unsafe fn do_sequence(call: &Call<'_>) -> R<Sexp> {
             "'{name}' must be a vector of non-negative integers"
         )));
     }
-    let mut output = Vec::new();
-    for index in 0..total {
-        let count = lengths[index % lengths.len()];
-        let start = from[index % from.len()];
-        let step = by[index % by.len()];
+    let runs = (0..total).map(|index| {
+        (
+            lengths[index % lengths.len()],
+            from[index % from.len()],
+            by[index % by.len()],
+        )
+    });
+    let mut size = 0usize;
+    for (count, start, step) in runs.clone() {
         if count != 0 && start == NA_INTEGER {
             return Err(crate::unwind::error("'from' contains NAs"));
         }
         if count >= 2 && step == NA_INTEGER {
             return Err(crate::unwind::error("'by' contains NAs"));
         }
-        for position in 0..count {
-            output.push(start + position * step);
-        }
+        size += count as usize;
     }
-    values::integer_vector(&output)
+    let result = values::alloc_uninit(SexpType::Integer, size)?;
+    let mut rest = values::ints_mut(result);
+    for (count, start, step) in runs {
+        let (run, after) = rest.split_at_mut(count as usize);
+        // C's int arithmetic, as GNU R's loop does it.
+        for (slot, position) in run.iter_mut().zip(0i32..) {
+            *slot = start.wrapping_add(position.wrapping_mul(step));
+        }
+        rest = after;
+    }
+    Ok(result)
 }
 
 /// `.bincode(x, breaks, right, include.lowest)`.
@@ -1084,44 +1103,106 @@ unsafe fn do_sequence(call: &Call<'_>) -> R<Sexp> {
 /// that `right` closes, and only the outer border honours `include.lowest`.
 unsafe fn do_bincode(call: &Call<'_>) -> R<Sexp> {
     let points = coerce_vector(call.arg(0), SexpType::Real)?;
+    crate::heap().root(points);
     let breaks = coerce_vector(call.arg(1), SexpType::Real)?;
+    crate::heap().root(breaks);
     let right = values::as_logical_scalar(call.arg(2));
     let lowest = values::as_logical_scalar(call.arg(3));
+    if length(breaks) < 2 {
+        return Err(error("invalid 'breaks' argument"));
+    }
     if right == NA_LOGICAL {
         return Err(error("invalid 'right' argument"));
     }
     if lowest == NA_LOGICAL {
         return Err(error("invalid 'include.lowest' argument"));
     }
-    let (left, include_border) = (right != 1, lowest == 1);
     let breaks = values::reals(breaks);
     if breaks.windows(2).any(|pair| pair[0] > pair[1]) {
         return Err(error("'breaks' is not sorted"));
     }
-    let last = breaks.len().saturating_sub(1);
-    let codes: Vec<i32> = values::reals(points)
-        .iter()
-        .map(|&value| {
-            if value.is_nan() || breaks.len() < 2 {
-                return NA_INTEGER;
-            }
-            let border = if left { breaks[last] } else { breaks[0] };
-            if value < breaks[0] || breaks[last] < value || (value == border && !include_border) {
-                return NA_INTEGER;
-            }
-            let (mut low, mut high) = (0, last);
-            while high - low >= 2 {
-                let middle = (high + low) / 2;
-                if value > breaks[middle] || (left && value == breaks[middle]) {
-                    low = middle;
-                } else {
-                    high = middle;
+    let points = values::reals(points);
+    let result = values::alloc_uninit(SexpType::Integer, points.len())?;
+    let codes = values::ints_mut(result);
+    if right == 1 {
+        bin_codes::<false>(codes, points, breaks, lowest == 1);
+    } else {
+        bin_codes::<true>(codes, points, breaks, lowest == 1);
+    }
+    Ok(result)
+}
+
+/// `bincode` on breaks sorted except for NaN: each point's interval, by GNU R's bisection for the
+/// last break below the point, where a break equal to the point counts as below when `LEFT`.
+fn bin_codes<const LEFT: bool>(
+    codes: &mut [i32],
+    points: &[f64],
+    breaks: &[f64],
+    include_border: bool,
+) {
+    let last = breaks.len() - 1;
+    let (first, final_break) = (breaks[0], breaks[last]);
+    let border = if LEFT { final_break } else { first };
+    let below = |boundary: f64, value: f64| {
+        if LEFT {
+            boundary <= value
+        } else {
+            boundary < value
+        }
+    };
+    let outside =
+        |value: f64| value < first || final_break < value || (value == border && !include_border);
+    if breaks.iter().any(|value| value.is_nan()) {
+        for (code, &value) in codes.iter_mut().zip(points) {
+            *code = if value.is_nan() || outside(value) {
+                NA_INTEGER
+            } else {
+                let (mut low, mut high) = (0, last);
+                while high - low >= 2 {
+                    let middle = (high + low) / 2;
+                    if below(breaks[middle], value) {
+                        low = middle;
+                    } else {
+                        high = middle;
+                    }
                 }
-            }
-            low as i32 + 1
-        })
-        .collect();
-    values::integer_vector(&codes)
+                low as i32 + 1
+            };
+        }
+        return;
+    }
+    // On sorted breaks the bisection finds the last break below the point, which is one less
+    // than the number of breaks below it. Counting them for a short vector of breaks, or
+    // searching with a fixed number of steps for a long one, takes no branch that depends on
+    // the point, so a point's interval is unpredictable at no cost.
+    let interval = |count: usize| count.clamp(1, last) as i32;
+    if breaks.len() <= 64 {
+        for (code, &value) in codes.iter_mut().zip(points) {
+            let count = breaks
+                .iter()
+                .map(|&boundary| usize::from(below(boundary, value)))
+                .sum();
+            *code = if value.is_nan() || outside(value) {
+                NA_INTEGER
+            } else {
+                interval(count)
+            };
+        }
+        return;
+    }
+    for (code, &value) in codes.iter_mut().zip(points) {
+        let (mut base, mut length) = (0, breaks.len());
+        while length > 1 {
+            let half = length / 2;
+            base += usize::from(below(breaks[base + half], value)) * half;
+            length -= half;
+        }
+        *code = if value.is_nan() || outside(value) {
+            NA_INTEGER
+        } else {
+            interval(base + usize::from(below(breaks[base], value)))
+        };
+    }
 }
 
 // Arithmetic.
@@ -1731,7 +1812,18 @@ pub fn integer_divide(a: i32, b: i32) -> i32 {
     if a == NA_INTEGER || b == NA_INTEGER || b == 0 {
         return NA_INTEGER;
     }
-    (a as f64 / b as f64).floor() as i32
+    floored_quotient(a, b)
+}
+
+/// `floor(a / b)` as GNU R computes it, in doubles. A quotient of two `int`s is never within
+/// rounding of an integer it does not equal (it is at least `1 / |b|` from one), so the
+/// truncated quotient, one lower when it lies above, is the floor; unlike `f64::floor`, which
+/// is a libm call on baseline x86-64, it vectorizes. A zero `b` gives a meaningless value.
+#[inline(always)]
+pub fn floored_quotient(a: i32, b: i32) -> i32 {
+    let quotient = f64::from(a) / f64::from(b);
+    let truncated = quotient as i32;
+    truncated - i32::from(f64::from(truncated) > quotient)
 }
 
 /// `a %/% b`, bit for bit as GNU R computes it (`myfloor`), and consistent with
@@ -2392,13 +2484,33 @@ unsafe fn do_not(call: &Call<'_>) -> R<Sexp> {
         }
         SexpType::Logical | SexpType::Integer | SexpType::Real | SexpType::Complex => {
             let result = values::alloc_uninit(SexpType::Logical, count)?;
-            if operand.kind() == SexpType::Logical {
-                kernels::not(Some(values::ints(operand)), values::ints_mut(result));
-            } else {
-                for (index, flag) in values::ints_mut(result).iter_mut().enumerate() {
-                    *flag = logical_at(operand, index);
+            let flags = values::ints_mut(result);
+            match operand.kind() {
+                SexpType::Logical => kernels::not(Some(values::ints(operand)), flags),
+                SexpType::Integer => {
+                    for (flag, &value) in flags.iter_mut().zip(values::ints(operand)) {
+                        *flag = if value == NA_INTEGER {
+                            NA_LOGICAL
+                        } else {
+                            i32::from(value == 0)
+                        };
+                    }
                 }
-                kernels::not(None, values::ints_mut(result));
+                SexpType::Real => {
+                    for (flag, &value) in flags.iter_mut().zip(values::reals(operand)) {
+                        *flag = if value.is_nan() {
+                            NA_LOGICAL
+                        } else {
+                            i32::from(value == 0.0)
+                        };
+                    }
+                }
+                _ => {
+                    for (index, flag) in flags.iter_mut().enumerate() {
+                        *flag = logical_at(operand, index);
+                    }
+                    kernels::not(None, flags);
+                }
             }
             for symbol in [symbols().names, symbols().dim, symbols().dimnames] {
                 let value = get_attr(operand, symbol);
@@ -2476,10 +2588,18 @@ math_functions! {
 }
 
 pub fn math_value(function: Math, x: f64) -> f64 {
+    math_value_at(function, x, x == 0.0 && r_at_least(4, 6))
+}
+
+/// [`math_value`] with the release test hoisted out: `unsigned_zero` is whether the emulated
+/// GNU R answers a zero argument with a positive zero, so a loop asks once per vector.
+#[inline(always)]
+pub fn math_value_at(function: Math, x: f64, unsigned_zero: bool) -> f64 {
     use std::f64::consts::PI;
     // GNU R 4.6's `math1_ari` answers these functions at a zero argument with a positive zero,
     // so a negative zero loses its sign.
-    if x == 0.0
+    if unsigned_zero
+        && x == 0.0
         && matches!(
             function,
             Math::Expm1
@@ -2493,7 +2613,6 @@ pub fn math_value(function: Math, x: f64) -> f64 {
                 | Math::Asinh
                 | Math::Atanh
         )
-        && r_at_least(4, 6)
     {
         return 0.0;
     }
@@ -2524,7 +2643,7 @@ pub fn math_value(function: Math, x: f64) -> f64 {
         Math::Sin => x.sin(),
         Math::Tan => x.tan(),
         Math::Cospi => {
-            let reduced = (x.abs() % 2.0).abs();
+            let reduced = periodic_remainder(x.abs(), 2.0);
             if reduced == 0.5 || reduced == 1.5 {
                 0.0
             } else if reduced == 1.0 {
@@ -2536,7 +2655,7 @@ pub fn math_value(function: Math, x: f64) -> f64 {
             }
         }
         Math::Sinpi => {
-            let mut reduced = x % 2.0;
+            let mut reduced = periodic_remainder(x, 2.0);
             if reduced <= -1.0 {
                 reduced += 2.0;
             } else if reduced > 1.0 {
@@ -2554,7 +2673,7 @@ pub fn math_value(function: Math, x: f64) -> f64 {
         }
         Math::Tanpi => {
             // Reducing into (-1/2, 1/2] is exact, so values one period apart agree exactly.
-            let mut reduced = x % 1.0;
+            let mut reduced = periodic_remainder(x, 1.0);
             if reduced > 0.5 {
                 reduced -= 1.0;
             } else if reduced <= -0.5 {
@@ -2584,6 +2703,15 @@ pub fn math_value(function: Math, x: f64) -> f64 {
         Math::Digamma => rmath::psigamma(x, 0.0),
         Math::Trigamma => rmath::psigamma(x, 1.0),
     }
+}
+
+/// `fmod(x, period)` for a power-of-two `period`: `x / period`, its truncation and the
+/// product are exact, and so is the difference, whose bits are the low bits of `x`. It is
+/// `fmod`'s value without `fmod`'s bit-by-bit loop, except that an exact multiple of a negative
+/// `x` gives a positive zero.
+#[inline(always)]
+fn periodic_remainder(x: f64, period: f64) -> f64 {
+    x - period * (x / period).trunc()
 }
 
 unsafe fn math1(call: &Call<'_>, function: Math) -> R<Sexp> {
@@ -4870,9 +4998,19 @@ unsafe fn is_replicable(object: Sexp) -> bool {
 /// The elements of `object` recycled to `total`, copied a whole run at a time; `None` for an
 /// empty object, an ALTREP vector of strings or values, and anything that is not a vector.
 unsafe fn repeat_plain(object: Sexp, total: usize) -> R<Option<Sexp>> {
+    // A short source repeated by doubling the filled prefix takes a few large copies instead of
+    // one `memcpy` call per repetition.
     fn fill<T: Copy>(target: &mut [T], source: &[T]) {
-        for chunk in target.chunks_mut(source.len()) {
-            chunk.copy_from_slice(&source[..chunk.len()]);
+        if let [single] = source {
+            target.fill(*single);
+            return;
+        }
+        let mut filled = source.len().min(target.len());
+        target[..filled].copy_from_slice(&source[..filled]);
+        while filled < target.len() {
+            let step = filled.min(target.len() - filled);
+            target.copy_within(..step, filled);
+            filled += step;
         }
     }
     let kind = object.kind();
@@ -5396,16 +5534,24 @@ unsafe fn do_which(call: &Call<'_>) -> R<Sexp> {
     if operand.kind() != SexpType::Logical {
         return Err(call.error("argument to 'which' is not logical"));
     }
-    let positions: Vec<i32> = values::ints(operand)
+    let flags = values::ints(operand);
+    // Counting first sizes the result exactly, and the fill stores every position up to the last
+    // `TRUE` and advances only past a `TRUE`, so neither loop branches on the data.
+    let count = flags.iter().filter(|&&value| value == 1).count();
+    let end = flags
         .iter()
-        .enumerate()
-        .filter(|(_, value)| **value == 1)
-        .map(|(index, _)| index as i32 + 1)
-        .collect();
-    let result = values::integer_vector(&positions)?;
+        .rposition(|&value| value == 1)
+        .map_or(0, |last| last + 1);
+    let result = values::alloc_uninit(SexpType::Integer, count)?;
+    let positions = values::ints_mut(result);
+    let mut written = 0;
+    for (index, &value) in values::ints(operand)[..end].iter().enumerate() {
+        positions[written] = index as i32 + 1;
+        written += usize::from(value == 1);
+    }
     let names = values::names(operand);
     if names != nil() {
-        let indices: Vec<usize> = positions
+        let indices: Vec<usize> = values::ints(result)
             .iter()
             .map(|&position| position as usize - 1)
             .collect();
@@ -5460,6 +5606,30 @@ unsafe fn do_is_unsorted(call: &Call<'_>) -> R<Sexp> {
     let operand = values::materialize(call.arg(0))?;
     let strictly = values::as_logical_scalar(call.arg(2)) == 1;
     let count = length(operand);
+    // GNU R's `isUnsorted` flags a pair only when `x[i] > x[i + 1]` (`>=` when `strictly`), so
+    // a NaN is never out of order, and an integer `NA`, the smallest `int`, sorts first.
+    let in_order = match operand.kind() {
+        SexpType::Real if !operand.is_altrep() => {
+            let values = values::reals(operand);
+            Some(if strictly {
+                crate::sort::adjacent_pairs_all(values, |left, right| !(left >= right))
+            } else {
+                crate::sort::adjacent_pairs_all(values, |left, right| !(left > right))
+            })
+        }
+        SexpType::Integer | SexpType::Logical if !operand.is_altrep() => {
+            let values = values::ints(operand);
+            Some(if strictly {
+                crate::sort::adjacent_pairs_all(values, |left, right| left < right)
+            } else {
+                crate::sort::adjacent_pairs_all(values, |left, right| left <= right)
+            })
+        }
+        _ => None,
+    };
+    if let Some(in_order) = in_order {
+        return scalar_bool(!in_order);
+    }
     for index in 1..count {
         let ordering = match operand.kind() {
             SexpType::String => crate::sort::collate(
@@ -5494,14 +5664,11 @@ fn do_pack_bits<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'
         return Err(arguments.error(format!("argument 'x' must be a multiple of {width} long")));
     }
     let not_standard = || error("internal error: an expanded vector has no standard form");
-    let flags: Vec<u64> = match bits.r_type() {
+    let flags: Vec<u8> = match bits.r_type() {
         _ if count == 0 => Vec::new(),
         SexpType::Raw => {
             let raw = dense::<Raw>(context, bits)?.ok_or_else(not_standard)?;
-            raw.as_slice(context)
-                .iter()
-                .map(|byte| u64::from(byte & 1))
-                .collect()
+            raw.as_slice(context).iter().map(|byte| byte & 1).collect()
         }
         SexpType::Logical => {
             let logicals = dense::<Logical>(context, bits)?.ok_or_else(not_standard)?;
@@ -5513,11 +5680,11 @@ fn do_pack_bits<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'
         }
         _ => return Err(arguments.error("argument 'x' must be raw, integer or logical")),
     };
-    let packed = flags.chunks(width).map(|chunk| {
+    let packed = flags.chunks_exact(width).map(|chunk| {
         chunk
             .iter()
-            .enumerate()
-            .fold(0u64, |word, (bit, flag)| word | (flag << bit))
+            .rev()
+            .fold(0u64, |word, &flag| (word << 1) | u64::from(flag))
     });
     let words = count / width;
     match width {
@@ -5546,14 +5713,11 @@ fn do_pack_bits<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'
 }
 
 /// The low bit of each logical or integer, refusing an `NA`.
-fn integer_flags(arguments: &Args<'_, '_>, values: &[i32]) -> R<Vec<u64>> {
-    values
-        .iter()
-        .map(|&value| match value {
-            NA_INTEGER => Err(arguments.error("argument 'x' must not contain NAs")),
-            value => Ok((value & 1) as u64),
-        })
-        .collect()
+fn integer_flags(arguments: &Args<'_, '_>, values: &[i32]) -> R<Vec<u8>> {
+    if values.contains(&NA_INTEGER) {
+        return Err(arguments.error("argument 'x' must not contain NAs"));
+    }
+    Ok(values.iter().map(|&value| (value & 1) as u8).collect())
 }
 
 /// `polyroot(z)`: the roots of the polynomial with coefficients `z` in increasing order, by

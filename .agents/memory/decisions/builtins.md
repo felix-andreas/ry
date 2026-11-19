@@ -449,11 +449,13 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 - **glibc behavior matched.** A negative `.*` precision echoes the unparsed spec (`%.0-1f`); `%#g` carrying to the next power of ten prints `1.e+02`; `%#o` adds 0 only when the digits do not start with one. Type errors print the spec with `n$` removed and `*` replaced.
 - **Contract.** `base__sprintf_conversions.R` and `fuzz_sprintf_matches_gnu_r` (`crates/oracle/src/fuzz.rs`, `sprintf_program`, with a bounded pass in `cargo test -p oracle`).
 
-## Hash tables for `unique()` and `match()` stop growing with the elements at 256 KB
+## Hash tables for `unique()` and `match()` start at 512 KB and grow by extrapolation
 
 **Status:** built.
 
-- `PositionTable` (`crates/interp/src/sort.rs`) starts at two slots per element, capped at 65,536 slots (256 KB), and doubles when half full past the cap, so a long vector with few distinct values zeroes 256 KB once (presizing a million strings zeroed 8 MB). Starting small and always doubling was rejected: rehashing made `match()` on 5,000 distinct strings cost about 100 more instructions per element and slowed `merge()` by about 10% through `cbind()`'s `make.unique` check.
+- `PositionTable` (`crates/interp/src/sort.rs`) starts at two slots per element, capped at 65,536 slots (512 KB), so a long vector with few distinct values zeroes 512 KB once (presizing a million strings zeroed 16 MB). Starting small and always doubling was rejected: rehashing made `match()` on 5,000 distinct strings cost about 100 more instructions per element and slowed `merge()` by about 10% through `cbind()`'s `make.unique` check.
+- A slot is 64 bits: the 1-based position below the hash's high 32 bits. A probe reads the stored key only when the hash bits agree, so a miss in a table larger than the cache costs one random read instead of one per occupied slot, and growing moves slots without rehashing keys.
+- Past the cap the table grows to the distinct keys that the share of distinct keys so far predicts for the remaining lookups, at least twofold and at most eightfold per step. A vector of distinct values grows a few times instead of once per doubling; the eightfold cap exists because `anyDuplicated` often stops early, and without it `anyDuplicated` of 1e6 doubles zeroed a 16 MB table and ran at half GNU R's speed.
 - Strings hash by interned object, which is exact only for ASCII (equal text in latin1 and UTF-8 is two objects), so `TableKey::exact` is checked per distinct key and miss, and the first inexact one goes to the general path.
 - Duplicate flags are a bitset built a register word at a time; `anyDuplicated()` stops at the first word with a duplicate. `split()` counts per level, allocates each piece once and scatters typed slices through per-level cursors on the stack (1e6 doubles 121M to 69M instructions; `match()` of 1e6 strings 51M to 37M; the sales workload -20.8% warm). The table is a call local, so peak RSS does not rise.
 - `gather_kind` keeps the filtered position walk: mask walks and branchless compaction cost more where the selection branch predicts well.
@@ -575,3 +577,39 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 - **A negative minimum** (reachable through `.Internal` only) follows GNU R's unsigned comparisons: an ASCII element is returned unchanged, and a non-ASCII one loses its inner spaces.
 - **Lower case can differ from GNU R by Unicode version** for letters added or reclassified between the Unicode of Rust's standard library and of the system's glibc (U+0295 and the letters Unicode 16 added are examples).
 - Oracle case: `strings__abbreviate_non_ascii`.
+
+## Vector kernels: one typed loop per case, exact sizes, and GNU R's polygamma and Bessel functions
+
+**Status:** settled.
+
+- **Typed loops.** A kernel that read each element through a generic accessor (`logical_at`, `real_at`) or matched on the function per element runs one loop per operand type or per function instead: `!` (`do_not`), the one-argument math functions (`kernels::math`, with GNU R 4.6's signed-zero release test asked once per vector through `arith::math_value_at`).
+- **Integer `%/%`** floors the double quotient as truncation minus one where the truncation lies above it (`arith::floored_quotient`). A quotient of two `int`s is at least `1 / |b|` from any integer it does not equal, so this is GNU R's `floor((double) x / y)` exactly, and unlike `f64::floor`, a libm call on baseline x86-64 without SSE4.1, it vectorizes.
+- **Exact sizes before fills.** `which` counts its `TRUE`s, allocates the result, and stores every position up to the last `TRUE`, advancing only past a `TRUE`, so neither loop branches on the data. `rep` of a short source fills by doubling the filled prefix.
+- **Blocks.** `is.unsorted` (and `order`'s sortedness check) test adjacent pairs in branchless blocks of 16 with GNU R's comparisons. `unique` and `duplicated` of a list hash each element once into a `PositionTable`.
+- **`make.unique`** works on interned strings and gives a made name as native text. GNU R hashes by `CHARSXP` address and compares text only on a bucket collision, so its answer for the same text in two encodings depends on allocation; ry always gives the answer of distinct buckets, and the oracle case avoids mixing encodings.
+- **Polygamma** runs a line-by-line port of GNU R's `dpsifn` (Amos's algorithm 610), bit-identical on a 72,444-value grid; the earlier Hurwitz-zeta sum differed in the last bits and cost more per value. GNU R's underflow count increments its pointer, not the count, so `Rf_dpsifn` reports 0, as GNU R does.
+- **The Bessel functions** run a port of GNU R 4.6.2's netlib routines (`I_bessel`, `J_bessel`, `K_bessel`, `Y_bessel`, with Cody's `gamma_cody`) in C evaluation order with `bessel.h`'s constants, bit-identical with GNU R on 72,000 random and 6,318 edge points, warnings included. The C quirks are kept: J's inner `n` shadows the outer one, so `besselJ(5, 200)` is 0 without a warning. Orders up to 16 use a stack work array.
+- **Measured and not taken: carrying `order`'s second key through the first key's counting scatter.** At 1e7 rows `order(g, -x)` took 0.64 s with it against 0.50 to 0.59 s without, because the per-run sort, not the gather, dominates.
+- **Oracle cases:** `arith__integer_divide_not_and_which_kernels`, `arith__polygamma_last_bits`, `arith__bessel_last_bits`, `sort__fast_paths_for_repeats_and_order_checks`, `strings__make_unique_encodings`.
+
+## Base and stats kernels: exact shortcuts, GNU R's quirks kept, and one prepared state per call
+
+**Status:** built.
+
+Each kernel below matched or trailed GNU R in the builtins sweep (`tools/bench/builtins`) and keeps GNU R's result bit for bit.
+
+- **`strtod` scales short decimals exactly.** A hardware division gives the double when its exact remainder (Dekker's product) shows it is not near a rounding tie; otherwise integer arithmetic rounds once to 64 bits and then to double, as the long-double reader does. A fuzz test checks both paths against `LongDouble`.
+- **`floor`, `ceiling` and `trunc` round whole vectors with `roundpd`** (`numeric::vector_math::round_all`), compiled for AVX or SSE4.1 and chosen at run time, because glibc's own `floor` is an ifunc that uses SSE4.1's `roundsd` one element at a time. Without SSE4.1 the loop rounds with the 2^52 trick on SSE2 lanes. An NA or NaN input comes back with its own bits, as GNU R's `math1` keeps them.
+- **`cospi`, `sinpi` and `tanpi` reduce with `x - p * trunc(x / p)`** (`arith::periodic_remainder`) for a power-of-two period, which is exact and equals `fmod` without its bit-by-bit loop.
+- **`.bincode`** is one loop per side of the interval (`bin_codes::<LEFT>`): with up to 64 breaks it counts the breaks below each point, a branch-free sum the compiler vectorizes, and beyond that it runs a fixed-length binary search whose steps add a comparison times the half width. Breaks holding NaN keep GNU R's bisection, whose answer on them is not a partition point. The errors keep GNU R's order.
+- **Grouping comes from the radix sort's tie runs.** `radixsort(retgrp = TRUE)` reports the last key's runs as well, so the group ends need no second pass over the keys. With `sortstr = FALSE`, GNU R numbers strings by first appearance within each run of rows tied on the earlier keys, and reverses a run whose strings are strictly in descending byte order; ry ports both. Under `na.last = NA`, a run that holds an NA is never reversed, and the first key of such strings drops no NA unless every entry is NA, when it drops every row; a later key drops its NA rows like any other (GNU R's `csorted`).
+- **`duplicated` and `anyDuplicated` of a non-decreasing double vector compare neighbours** without a hash table. A NaN fails every comparison, so such a vector holds none, and the test fails at the first descent of unsorted input.
+- **`runmed` slides one sorted window** of order-preserving integer keys, finding the outgoing and incoming values by binary search. The NA stand-ins follow `Srunmed`: the stand-in is its `BIG_dbl`, and only a missing row whose median is a stand-in gets its NA or NaN back.
+- **Kendall's covariance counts sign products as integers.** Each is -1, 0 or 1, so the long-double sum over ordered pairs is an exact integer: ry counts unordered pairs once and doubles.
+- **`model.matrix`** resolves each term's parts, allocates the matrix once and writes each column in place. Automatic row names are `as.character(seq_len(n))` deferred, as in GNU R.
+- **`approx`, `spline` and `splinefun` look points up in a knot grid** (`KnotGrid`, `crates/stats/src/routines.rs`): equal buckets over the knots, sized by the points that fall inside, each holding the last knot not above its left edge. A lookup reads one bucket and walks at most eight knots, then falls back to bisection. On sorted knots without NaN, bisection's answer is the partition point the walk also finds, so the two agree exactly.
+- **`smooth.spline` prepares each point's cubic B-spline state once** (`CubicPoint`, `crates/stats/src/spline.rs`): the knot interval and de Boor's differences are shared by every criterion evaluation in the search for the smoothing parameter, and the basis values come from `bsplvd` once per fit.
+- **`rhyper` prepares its sampler once per call** (`Hypergeometric`), holding the setup GNU R keeps in static variables between calls with the same parameters, and draws the same uniforms in the same order. A single `rpois` draw from a mean of at least 10, as `rgeom` makes per element, builds only the normal method's constants, not a sampler with the inversion table.
+- **Not explained: `rpois` with a large mean** takes about 66 ns per draw against GNU R's 47 with similar instruction and branch-miss counts, and `rgeom` runs at about 0.8 times GNU R's speed; both stay in `slower.txt`.
+- **Oracle cases:** `coerce__string_to_number_last_bits`, `kernels__pi_trigonometry_periods`, `kernels__bincode_breaks`, `kernels__sorted_duplicates`, `kernels__interpolation_grid`, `stats__smooth_spline_prepared_points`, `random__hypergeometric_and_poisson_streams`.
+

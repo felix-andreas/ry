@@ -768,16 +768,18 @@ fn read_integers<'s, T: Atomic<Element = i32>>(
 }
 
 /// `object[index]` for a logical, integer, double, character or list vector whose selection
-/// keeps none of its attributes (the caller checks that) and an attribute-free integer, double
-/// or logical subscript, gathered straight from the subscript without first resolving it to a
-/// position list. `None` defers to the general path, which handles every other shape
-/// (negative or zero subscripts, recycled logical subscripts, other element types).
+/// keeps none of its attributes (the caller checks that) and an integer, double or logical
+/// subscript, gathered straight from the subscript without first resolving it to a position
+/// list. `None` defers to the general path, which handles every other shape (negative or zero
+/// subscripts, recycled logical subscripts, other element types). The subscript's attributes
+/// play no part: the caller has already taken a matrix subscript of an array, and a factor
+/// selects by its codes.
 fn gather_plain<'s>(
     context: &mut Cx<'s>,
     object: Local<'s>,
     index: Local<'s>,
 ) -> R<Option<Local<'s>>> {
-    if is_missing_argument(index) || has_attributes(context, index) {
+    if is_missing_argument(index) {
         return Ok(None);
     }
     // A selection `select` reads sparsely takes the general path.
@@ -4056,6 +4058,9 @@ fn scatter_plain<'s>(
         return Ok(highest < count && scatter_offsets(context, target, offsets, value, value_count));
     }
     let index = handles::materialize(context, index)?;
+    if let Some(mask) = index.standard::<Logical>() {
+        return Ok(scatter_mask(context, target, mask, value));
+    }
     let offsets: Positions = if let Some(positions) = index.standard::<Integer>() {
         let positions = positions.as_slice(context);
         if positions
@@ -4091,6 +4096,73 @@ fn scatter_plain<'s>(
         value,
         value_count,
     ))
+}
+
+/// Writes `value`, recycled, to the elements of `target` that `mask` selects, recycled over
+/// `target`. `value` has `target`'s type. False, having written nothing, for a list or character
+/// target, an empty mask or one longer than `target`, and wherever the general path warns or
+/// fails: an NA flag with a value longer than one, or a selection that is no multiple of it.
+fn scatter_mask<'s>(
+    context: &mut Cx<'s>,
+    target: &mut Owned<'s>,
+    mask: Local<'s, Logical>,
+    value: Local<'s>,
+) -> bool {
+    fn atomic<'s, T: Atomic>(
+        context: &mut Cx<'s>,
+        target: &mut Owned<'s>,
+        mask: Local<'s, Logical>,
+        value: Local<'s>,
+    ) -> Option<bool> {
+        let (target, source) = (target.narrow::<T>()?, value.standard::<T>()?);
+        let mut write = target.write(context);
+        let (elements, reader) = write.split();
+        let (flags, source) = (reader.slice(mask)?, reader.slice(source)?);
+        if flags.is_empty() || flags.len() > elements.len() {
+            return Some(false);
+        }
+        if let [single] = source {
+            // A single value skips the NA flags.
+            for chunk in elements.chunks_mut(flags.len()) {
+                for (element, &flag) in chunk.iter_mut().zip(flags) {
+                    if flag != 0 && flag != NA_LOGICAL {
+                        *element = *single;
+                    }
+                }
+            }
+            return Some(true);
+        }
+        let mut selected = 0usize;
+        for chunk in elements.chunks(flags.len()) {
+            for &flag in &flags[..chunk.len()] {
+                if flag == NA_LOGICAL {
+                    return Some(false);
+                }
+                selected += usize::from(flag != 0);
+            }
+        }
+        if !selected.is_multiple_of(source.len()) {
+            return Some(false);
+        }
+        let mut next = 0;
+        for chunk in elements.chunks_mut(flags.len()) {
+            for (element, &flag) in chunk.iter_mut().zip(flags) {
+                if flag != 0 {
+                    *element = source[next];
+                    next = if next + 1 == source.len() {
+                        0
+                    } else {
+                        next + 1
+                    };
+                }
+            }
+        }
+        Some(true)
+    }
+    atomic::<Real>(context, target, mask, value)
+        .or_else(|| atomic::<Integer>(context, target, mask, value))
+        .or_else(|| atomic::<Logical>(context, target, mask, value))
+        .unwrap_or(false)
 }
 
 /// Writes `value`, recycled, to the `run` elements of `target` from `start`, which lie inside it,
