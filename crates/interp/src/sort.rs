@@ -2327,13 +2327,18 @@ fn sort_keys(column: &Column<'_>, decreasing: bool, na_last: bool) -> Option<Sor
 /// cache. Within a run the rows are still in their original order, which is what lets a run
 /// sort `(key, row)` pairs with an unstable algorithm.
 fn radix_order(keys: &[SortKeys], order: &mut [u32]) {
-    sort_runs(keys, order, true);
+    sort_runs(keys, order, true, None);
 }
 
 /// Sorts `order` by `keys`, most significant first, where rows that tie on every key are in
 /// increasing order already. With `identity` the rows are `0..order.len()` and `order` holds
-/// nothing yet.
-fn sort_runs(keys: &[SortKeys], order: &mut [u32], identity: bool) {
+/// nothing yet. `gathered`, when given, holds the first key's value of each row in `order`.
+///
+/// When the first key sorts every row by counting, its scatter also places each row's value of
+/// the next key beside the row, so each run that ties on the first key reads its next key as
+/// one contiguous slice. Gathering it afterwards would read one row at a time from anywhere in
+/// the column, a cache miss per row, which dominated `order(g, x)` on a grouping key.
+fn sort_runs(keys: &[SortKeys], order: &mut [u32], identity: bool, gathered: Option<Gathered<'_>>) {
     // A run this short sorts by comparing rows, which costs less than gathering its keys.
     const SHORT_RUN: usize = 32;
     let Some((key, rest)) = keys.split_first() else {
@@ -2342,22 +2347,108 @@ fn sort_runs(keys: &[SortKeys], order: &mut [u32], identity: bool) {
         }
         return;
     };
-    let runs = match key {
-        SortKeys::Narrow(key) => sort_by_key(key, order, identity, !rest.is_empty()),
-        SortKeys::Wide(key) => sort_by_key(key, order, identity, !rest.is_empty()),
+    let want_runs = !rest.is_empty();
+    let next = rest.first().filter(|_| identity);
+    let (runs, carried) = match (key, gathered) {
+        (SortKeys::Narrow(key), Some(Gathered::Narrow(values))) => {
+            sort_first(key, next, order, identity, want_runs, Some(values))
+        }
+        (SortKeys::Wide(key), Some(Gathered::Wide(values))) => {
+            sort_first(key, next, order, identity, want_runs, Some(values))
+        }
+        (SortKeys::Narrow(key), _) => sort_first(key, next, order, identity, want_runs, None),
+        (SortKeys::Wide(key), _) => sort_first(key, next, order, identity, want_runs, None),
     };
     for (start, end) in runs {
         let run = &mut order[start..end];
+        let next_values = carried.as_ref().map(|carried| carried.slice(start, end));
         if run.len() > SHORT_RUN {
-            sort_runs(rest, run, false);
-        } else {
-            run.sort_by(|&left, &right| {
-                rest.iter()
-                    .map(|key| key.compare(left as usize, right as usize))
-                    .find(|ordering| ordering.is_ne())
-                    .unwrap_or(Ordering::Equal)
-            });
+            sort_runs(rest, run, false, next_values);
+            continue;
         }
+        let compare_rest = |keys: &[SortKeys], left: u32, right: u32| {
+            keys.iter()
+                .map(|key| key.compare(left as usize, right as usize))
+                .find(|ordering| ordering.is_ne())
+                .unwrap_or(Ordering::Equal)
+        };
+        match next_values {
+            Some(next_values) => {
+                let mut pairs: SmallVec<[(u64, u32); SHORT_RUN]> = run
+                    .iter()
+                    .enumerate()
+                    .map(|(position, &row)| (next_values.wide(position), row))
+                    .collect();
+                pairs.sort_by(|left, right| {
+                    left.0
+                        .cmp(&right.0)
+                        .then_with(|| compare_rest(&rest[1..], left.1, right.1))
+                });
+                for (slot, (_, row)) in run.iter_mut().zip(pairs) {
+                    *slot = row;
+                }
+            }
+            None => run.sort_by(|&left, &right| compare_rest(rest, left, right)),
+        }
+    }
+}
+
+/// A key's values in the order of some rows: carried through a scatter, or read for a run.
+#[derive(Clone, Copy)]
+enum Gathered<'a> {
+    Narrow(&'a [u32]),
+    Wide(&'a [u64]),
+}
+
+impl Gathered<'_> {
+    fn wide(self, position: usize) -> u64 {
+        match self {
+            Gathered::Narrow(values) => u64::from(values[position]),
+            Gathered::Wide(values) => values[position],
+        }
+    }
+}
+
+/// The next key's values that the first key's scatter placed in the order of the sorted rows.
+enum Carried {
+    Narrow(Vec<u32>),
+    Wide(Vec<u64>),
+}
+
+impl Carried {
+    fn slice(&self, start: usize, end: usize) -> Gathered<'_> {
+        match self {
+            Carried::Narrow(values) => Gathered::Narrow(&values[start..end]),
+            Carried::Wide(values) => Gathered::Wide(&values[start..end]),
+        }
+    }
+}
+
+/// Sorts `order` by `key` as [`sort_by_key`] does, carrying the values of `next` when the sort
+/// scatters every row by counting.
+fn sort_first<K: RadixKey>(
+    key: &Keys<K>,
+    next: Option<&SortKeys>,
+    order: &mut [u32],
+    identity: bool,
+    want_runs: bool,
+    gathered: Option<&[K]>,
+) -> (Vec<(usize, usize)>, Option<Carried>) {
+    match next {
+        Some(SortKeys::Narrow(next)) => {
+            let mut target = Vec::new();
+            let runs = sort_by_key(key, order, identity, want_runs, gathered, Some((&next.values, &mut target)));
+            (runs, (!target.is_empty()).then_some(Carried::Narrow(target)))
+        }
+        Some(SortKeys::Wide(next)) => {
+            let mut target = Vec::new();
+            let runs = sort_by_key(key, order, identity, want_runs, gathered, Some((&next.values, &mut target)));
+            (runs, (!target.is_empty()).then_some(Carried::Wide(target)))
+        }
+        None => (
+            sort_by_key::<K, u32>(key, order, identity, want_runs, gathered, None),
+            None,
+        ),
     }
 }
 
@@ -2373,25 +2464,39 @@ fn fill_identity(order: &mut [u32]) {
 /// short slice a comparison sort of `(key, row)` pairs, and anything else a most significant
 /// digit radix sort of those pairs. Every pass counts, since these sorts are bound by memory
 /// bandwidth.
-fn sort_by_key<K: RadixKey>(
+///
+/// `carry` is the next key's column and the vector that receives its values in the sorted
+/// rows' order; it is filled only when the rows are the identity and the passes place each row
+/// once, which is the one-pass cases below.
+fn sort_by_key<K: RadixKey, C: RadixKey>(
     keys: &Keys<K>,
     order: &mut [u32],
     identity: bool,
     want_runs: bool,
+    given: Option<&[K]>,
+    carry: Option<(&[C], &mut Vec<C>)>,
 ) -> Vec<(usize, usize)> {
     let key = &keys.values[..];
     let count = order.len();
     // The keys gather once into row order, so every pass below streams one contiguous slice
     // instead of chasing rows through the key column.
     let rows: Option<Vec<u32>> = (!identity).then(|| order.to_vec());
-    let gathered: Option<Vec<K>> = rows
-        .as_ref()
-        .map(|rows| rows.iter().map(|&row| key[row as usize]).collect());
-    let values = gathered.as_deref().unwrap_or(key);
+    let gathered: Option<Vec<K>> = match (&rows, given) {
+        (Some(_), Some(_)) | (None, _) => None,
+        (Some(rows), None) => Some(rows.iter().map(|&row| key[row as usize]).collect()),
+    };
+    let values = given
+        .filter(|_| !identity)
+        .or(gathered.as_deref())
+        .unwrap_or(key);
+    let carry = carry.filter(|_| identity);
     let mut runs = Vec::new();
     if values.is_sorted() {
         if identity {
             fill_identity(order);
+        }
+        if let Some((source, target)) = carry {
+            target.extend_from_slice(source);
         }
         if want_runs {
             push_runs(&mut runs, 0, count, |position| values[position].wide());
@@ -2432,15 +2537,24 @@ fn sort_by_key<K: RadixKey>(
                     .map(|pair| (pair[0] as usize, pair[1] as usize)),
             );
         }
-        match &rows {
-            None => {
+        match (&rows, carry) {
+            (None, Some((source, target))) => {
+                *target = vec![C::narrow(0); count];
+                for ((row, value), &next) in (0..).zip(values).zip(source) {
+                    let start = &mut starts[(value.wide() - low) as usize];
+                    order[*start as usize] = row;
+                    target[*start as usize] = next;
+                    *start += 1;
+                }
+            }
+            (None, None) => {
                 for (row, value) in (0..).zip(values) {
                     let start = &mut starts[(value.wide() - low) as usize];
                     order[*start as usize] = row;
                     *start += 1;
                 }
             }
-            Some(rows) => {
+            (Some(rows), _) => {
                 for (&row, value) in rows.iter().zip(values) {
                     let start = &mut starts[(value.wide() - low) as usize];
                     order[*start as usize] = row;
