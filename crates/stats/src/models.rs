@@ -18,6 +18,7 @@ use {
         unwind::R,
         values::{self, length, nil, symbols},
     },
+    std::borrow::Cow,
 };
 
 /// `termsform(x, specials, data, keep.order, allowDotAsName)`: the `terms` object of a formula.
@@ -438,20 +439,27 @@ pub unsafe fn modelmatrix(call: &NativeCall<'_>) -> R<Sexp> {
                     vec![value, values::scalar_bool(false)?]
                 };
                 let contrast_call = values::call(contrasts_symbol, &arguments)?;
-                let matrix = as_reals(eval::eval(contrast_call, call.env()?)?)?;
+                // The parts borrow each coding until the design matrix is written, after later
+                // contrast calls and the matrix's own allocation.
+                let evaluated = eval::eval(contrast_call, call.env()?)?;
+                interp::heap().root(evaluated);
+                let matrix = as_reals(evaluated)?;
+                interp::heap().root(matrix);
                 *slot = Some(matrix);
             }
         }
     }
 
-    let mut columns: Vec<Vec<f64>> = Vec::new();
+    // Every term's parts are resolved first, so the matrix is allocated once and each column
+    // is written straight into it: a term's columns are the products of one column of each
+    // part, the first part varying fastest.
     let mut column_names: Vec<String> = Vec::new();
     let mut assign: Vec<i32> = Vec::new();
     if intercept {
-        columns.push(vec![1.0; rows]);
         column_names.push("(Intercept)".to_owned());
         assign.push(0);
     }
+    let mut term_parts: Vec<Vec<Part>> = Vec::with_capacity(term_count);
     for term in 0..term_count {
         let mut width = 1.0;
         for variable in 0..variable_count {
@@ -471,7 +479,7 @@ pub unsafe fn modelmatrix(call: &NativeCall<'_>) -> R<Sexp> {
             let width = interp::format::c_format(width, "g", 0, "", false);
             return Err(call.error(format!("term {} would require {width} columns", term + 1)));
         }
-        let mut current: Vec<(Vec<f64>, String)> = vec![(vec![1.0; rows], String::new())];
+        let mut parts = Vec::new();
         for variable in 0..variable_count {
             let code = codes[variable + term * variable_count];
             if code == 0 {
@@ -479,20 +487,20 @@ pub unsafe fn modelmatrix(call: &NativeCall<'_>) -> R<Sexp> {
             }
             let value = values::list_elt(frame, variable);
             let name = &variable_names[variable];
-            let mut factor_columns: Vec<(Vec<f64>, String)> = Vec::new();
             match kinds[variable] {
                 Variable::Numeric { columns: count } => {
-                    let data = crate::routines::real_values(value)?;
-                    let labels = column_labels(value, count)?;
-                    for column in 0..count {
-                        let label = if count == 1 {
-                            name.clone()
-                        } else {
-                            format!("{name}{}", labels[column])
-                        };
-                        factor_columns
-                            .push((data[column * rows..(column + 1) * rows].to_vec(), label));
-                    }
+                    let labels = if count == 1 {
+                        vec![name.clone()]
+                    } else {
+                        column_labels(value, count)?
+                            .into_iter()
+                            .map(|label| format!("{name}{label}"))
+                            .collect()
+                    };
+                    parts.push(Part {
+                        source: Source::Numeric(crate::routines::real_data(value)?),
+                        labels,
+                    });
                 }
                 Variable::Factor { levels } => {
                     let coding = if code == 1 {
@@ -505,64 +513,70 @@ pub unsafe fn modelmatrix(call: &NativeCall<'_>) -> R<Sexp> {
                     if coding_rows != levels {
                         return Err(call.error(format!("invalid contrasts for variable '{name}'")));
                     }
-                    let entries = values::reals(coding).to_vec();
-                    let labels = column_labels(coding, coding_columns)?;
-                    let level_codes: Vec<i32> = if value.kind() == SexpType::Logical {
-                        values::ints(value)
-                            .iter()
-                            .map(|&entry| {
-                                if entry == NA_INTEGER {
-                                    NA_INTEGER
-                                } else {
-                                    entry + 1
-                                }
-                            })
-                            .collect()
-                    } else {
-                        values::ints(value).to_vec()
-                    };
-                    for column in 0..coding_columns {
-                        let data: Vec<f64> = level_codes
-                            .iter()
-                            .map(|&level| {
-                                if level == NA_INTEGER || level < 1 || level as usize > levels {
-                                    NA_REAL
-                                } else {
-                                    entries[level as usize - 1 + column * coding_rows]
-                                }
-                            })
-                            .collect();
-                        factor_columns.push((data, format!("{name}{}", labels[column])));
-                    }
+                    let labels = column_labels(coding, coding_columns)?
+                        .into_iter()
+                        .map(|label| format!("{name}{label}"))
+                        .collect();
+                    parts.push(Part {
+                        source: Source::Factor {
+                            codes: values::ints(value),
+                            logical: value.kind() == SexpType::Logical,
+                            coding: values::reals(coding),
+                            levels,
+                        },
+                        labels,
+                    });
                 }
             }
-            let mut next = Vec::with_capacity(current.len() * factor_columns.len());
-            for (factor_data, factor_label) in &factor_columns {
-                for (data, label) in &current {
-                    let product: Vec<f64> =
-                        data.iter().zip(factor_data).map(|(a, b)| a * b).collect();
-                    let joined = if label.is_empty() {
-                        factor_label.clone()
-                    } else {
-                        format!("{label}:{factor_label}")
-                    };
-                    next.push((product, joined));
-                }
-            }
-            current = next;
         }
-        for (data, label) in current {
-            columns.push(data);
+        for column in 0..parts
+            .iter()
+            .map(|part| part.labels.len())
+            .product::<usize>()
+        {
+            let mut rest = column;
+            let mut label = String::new();
+            for part in &parts {
+                let count = part.labels.len();
+                if !label.is_empty() {
+                    label.push(':');
+                }
+                label.push_str(&part.labels[rest % count]);
+                rest /= count;
+            }
             column_names.push(label);
             assign.push(term as i32 + 1);
         }
+        term_parts.push(parts);
     }
 
-    let mut data = Vec::with_capacity(rows * columns.len());
-    for column in &columns {
-        data.extend_from_slice(column);
+    let matrix = values::alloc_uninit(SexpType::Real, rows * column_names.len())?;
+    interp::heap().root(matrix);
+    let data = values::reals_mut(matrix);
+    let mut columns = data.chunks_exact_mut(rows.max(1));
+    if intercept && let Some(slot) = columns.next() {
+        slot.fill(1.0);
     }
-    let matrix = crate::routines::real_matrix(&data, rows, columns.len())?;
+    for parts in &term_parts {
+        for column in 0..parts
+            .iter()
+            .map(|part| part.labels.len())
+            .product::<usize>()
+        {
+            let Some(slot) = columns.next() else { break };
+            if parts.is_empty() {
+                slot.fill(1.0);
+            }
+            let mut rest = column;
+            for (position, part) in parts.iter().enumerate() {
+                let count = part.labels.len();
+                write_part(slot, &part.source, rest % count, position == 0);
+                rest /= count;
+            }
+        }
+    }
+    let dim = values::integer_vector(&[rows as i32, column_names.len() as i32])?;
+    values::set_attr(matrix, symbols().dim, dim)?;
     let row_names = expanded_row_names(values::get_attr(frame, symbols().row_names), rows)?;
     let dimnames = values::list_vector(&[row_names, values::string_vector(&column_names)?])?;
     values::set_attr(matrix, symbols().dimnames, dimnames)?;
@@ -643,6 +657,70 @@ pub unsafe fn influence(call: &NativeCall<'_>) -> R<Sexp> {
         ("hat", values::real_vector(&hat)?),
         ("sigma", crate::routines::real_matrix(&sigma, n, outcomes)?),
     ])
+}
+
+/// One variable's columns in a term of the design matrix, with their labels.
+struct Part {
+    source: Source,
+    labels: Vec<String>,
+}
+
+enum Source {
+    /// The columns of a numeric variable, one after another.
+    Numeric(Cow<'static, [f64]>),
+    /// A factor's level codes (a logical's values, from 0) and its column-major coding matrix.
+    Factor {
+        codes: &'static [i32],
+        logical: bool,
+        coding: &'static [f64],
+        levels: usize,
+    },
+}
+
+/// Writes column `column` of `source` into `slot`, or multiplies it in unless `first`.
+fn write_part(slot: &mut [f64], source: &Source, column: usize, first: bool) {
+    let rows = slot.len();
+    match source {
+        Source::Numeric(data) => {
+            let values = &data[column * rows..(column + 1) * rows];
+            if first {
+                slot.copy_from_slice(values);
+            } else {
+                for (entry, &value) in slot.iter_mut().zip(values) {
+                    *entry *= value;
+                }
+            }
+        }
+        &Source::Factor {
+            codes,
+            logical,
+            coding,
+            levels,
+        } => {
+            let coding = &coding[column * levels..(column + 1) * levels];
+            let value = |code: i32| {
+                let level = if logical && code != NA_INTEGER {
+                    code + 1
+                } else {
+                    code
+                };
+                if level < 1 || level as usize > levels {
+                    NA_REAL
+                } else {
+                    coding[level as usize - 1]
+                }
+            };
+            if first {
+                for (entry, &code) in slot.iter_mut().zip(codes) {
+                    *entry = value(code);
+                }
+            } else {
+                for (entry, &code) in slot.iter_mut().zip(codes) {
+                    *entry *= value(code);
+                }
+            }
+        }
+    }
 }
 
 /// A sorted set of variable indices.
@@ -1079,6 +1157,15 @@ unsafe fn rows_of(x: Sexp) -> usize {
 /// Row names as a character vector, expanding GNU R's compact `c(NA, n)` form.
 unsafe fn expanded_row_names(row_names: Sexp, rows: usize) -> R<Sexp> {
     if row_names == nil() || values::compact_row_count(row_names).is_some() {
+        // `as.character(seq_len(rows))`, deferred as GNU R defers it, so a large model's row
+        // names cost nothing until something reads them.
+        let hooks = &interp::interp().hooks;
+        if let Some(sequence) = (hooks.compact_sequence)(SexpType::Integer, rows, 1.0, 1.0)? {
+            interp::heap().root(sequence);
+            if let Some(deferred) = (hooks.defer_strings)(sequence)? {
+                return Ok(deferred);
+            }
+        }
         let names: Vec<String> = (1..=rows).map(|row| row.to_string()).collect();
         return values::string_vector(&names);
     }

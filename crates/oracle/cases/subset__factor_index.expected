@@ -1,0 +1,32 @@
+[stdout]
+|    b    c    b <NA>    a 
+|   20   30   20   NA   10 
+| [1] 20 30 20 NA 10
+| [[1]]
+| [1] "two"
+| 
+| [[2]]
+| [1] 3
+| 
+| [[3]]
+| [1] "two"
+| 
+| [[4]]
+| NULL
+| 
+| [[5]]
+| [1] 1
+| 
+| [1] "a" "b"
+| [1] "a" "b"
+| [1] 2 1
+| [1]  TRUE FALSE  TRUE
+|  a  b  c  d 
+|  0  0 30 40 
+| named numeric(0)
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| structure(numeric(0), names = character(0))

@@ -25,8 +25,7 @@ use {
         pcre::{CompileError, PerlRegex},
         unwind::{R, Unwind, error},
         values::{
-            self, alloc, get_attr, length, na_string, nil, set_attr, set_elt, string_at, strings,
-            symbols,
+            self, alloc, get_attr, length, na_string, nil, set_attr, set_elt, string_at, symbols,
         },
     },
     fancy_regex::{Regex, RegexBuilder},
@@ -36,7 +35,7 @@ use {
     },
     memchr::{memchr, memmem},
     regex_automata::{Anchored, Input, MatchKind, meta, util::syntax},
-    rustc_hash::{FxHashMap, FxHashSet},
+    rustc_hash::FxHashMap,
     smallvec::{SmallVec, smallvec},
     std::{
         borrow::Cow,
@@ -2018,48 +2017,22 @@ unsafe fn do_make_unique(call: &Call<'_>) -> R<Sexp> {
         }
         _ => return Err(error("'sep' must be a character string")),
     };
-    let ascii = separator.is_ascii()
-        && (0..length(names)).all(|index| {
-            let charsxp = names.element(index);
-            charsxp == na_string() || charsxp.has_gp(gp::ASCII)
-        });
-    if ascii {
-        return make_unique_interned(names, separator.as_bytes());
-    }
-    // NA is a name of its own, distinct from the text "NA": its first occurrence stays NA, and
-    // a repeat is made unique from the text "NA", as in GNU R.
-    let original: Vec<Option<String>> = strings(names);
-    let mut taken: FxHashSet<String> = original.iter().flatten().cloned().collect();
-    let mut seen: FxHashSet<Option<&str>> = FxHashSet::default();
-    let mut counters: FxHashMap<Option<&str>, usize> = FxHashMap::default();
-    let mut made: Vec<Option<String>> = Vec::with_capacity(original.len());
-    for name in &original {
-        let key = name.as_deref();
-        if seen.insert(key) {
-            made.push(name.clone());
-            continue;
-        }
-        let text = key.unwrap_or("NA");
-        let counter = counters.entry(key).or_insert(1);
-        let mut candidate = format!("{text}{separator}{counter}");
-        while taken.contains(&candidate) {
-            *counter += 1;
-            candidate = format!("{text}{separator}{counter}");
-        }
-        *counter += 1;
-        taken.insert(candidate.clone());
-        made.push(Some(candidate));
-    }
-    values::string_vector_na(&made)
+    values::refuse_bytes(names)?;
+    make_unique_interned(names, separator.as_bytes())
 }
 
-/// `make.unique` over ASCII names, which works on the strings themselves rather than copies of
-/// their text. R interns its strings and ASCII text has one CHARSXP, so a name is taken exactly
-/// when its CHARSXP is marked. The mark is the CHARSXP's truelength, negated, as data.table's C
-/// marks strings: it numbers the string's slot in `marked`, which keeps the truelength to put
-/// back and, for a name of the input, the next suffix to try (0 until its first occurrence has
-/// been kept). Copying every name into owned text took about 150 MB for a million names, which
-/// `[.data.frame` builds row names from whenever its row index repeats.
+/// `make.unique(names, sep)`, which works on the strings themselves rather than copies of their
+/// text. GNU R hashes the names by CHARSXP address, whose identity includes the encoding:
+/// `c(x, x)` makes `x.1` whatever `x` holds, but a Latin-1 and a UTF-8 spelling of one text are
+/// two names, and so are a made name, which is native text as GNU R's `mkChar` makes it, and a
+/// UTF-8 name of the same text. (GNU R compares by text only when two addresses share a hash
+/// bucket, so its answer for such a pair depends on where they were allocated; ry always gives
+/// the answer of distinct buckets.) So a name is taken exactly when its CHARSXP is marked. The
+/// mark is the CHARSXP's truelength, negated, as data.table's C marks strings: it numbers the
+/// string's slot in `marked`, which keeps the truelength to put back and, for a name of the
+/// input, the next suffix to try (0 until its first occurrence has been kept). Copying every
+/// name into owned text took about 150 MB for a million names, which `[.data.frame` builds row
+/// names from whenever its row index repeats.
 unsafe fn make_unique_interned(names: Sexp, separator: &[u8]) -> R<Sexp> {
     struct Marked {
         strings: Vec<Sexp>,
@@ -2119,13 +2092,19 @@ unsafe fn make_unique_interned(names: Sexp, separator: &[u8]) -> R<Sexp> {
         let mut candidate = Vec::new();
         for index in 0..count {
             let charsxp = names.element(index);
-            let (counter, text): (&mut u32, &[u8]) = if charsxp == na {
-                (&mut na_counter, b"NA")
+            let (counter, text): (&mut u32, Cow<'_, [u8]>) = if charsxp == na {
+                (&mut na_counter, Cow::Borrowed(b"NA"))
             } else {
                 let slot = marked
                     .slot(charsxp)
                     .ok_or_else(|| error("a name lost its mark while 'make.unique' ran"))?;
-                (&mut marked.counters[slot], charsxp.bytes())
+                // A made name is the name's text translated to UTF-8, ry's native encoding.
+                let text = if charsxp.has_gp(gp::LATIN1) {
+                    Cow::Owned(values::char_str(charsxp).into_owned().into_bytes())
+                } else {
+                    Cow::Borrowed(charsxp.bytes())
+                };
+                (&mut marked.counters[slot], text)
             };
             if *counter == 0 {
                 *counter = 1;
@@ -2135,7 +2114,7 @@ unsafe fn make_unique_interned(names: Sexp, separator: &[u8]) -> R<Sexp> {
             let mut next = *counter;
             let made = loop {
                 candidate.clear();
-                candidate.extend_from_slice(text);
+                candidate.extend_from_slice(&text);
                 candidate.extend_from_slice(separator);
                 // A suffix counts the names, which fit an `i32`.
                 candidate.extend_from_slice(integer_digits(next as i32, &mut [0; 11]));

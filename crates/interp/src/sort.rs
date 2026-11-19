@@ -693,7 +693,7 @@ pub(crate) unsafe fn do_sort(call: &Call<'_>) -> R<Sexp> {
                 unreachable!("string ranks always have radix keys");
             };
             let mut order = vec![0u32; length(x)];
-            radix_order(&[keys], &mut order);
+            radix_order(&mut [keys], &mut order);
             let Column::Ranks(ranks) = ranks else {
                 unreachable!("the column was built from ranks");
             };
@@ -860,12 +860,12 @@ unsafe fn do_sorted_fpass(call: &Call<'_>) -> R<Sexp> {
 /// Whether an integer or double column without `NA` or NaN is non-decreasing, or
 /// non-increasing when `decreasing`, and strictly so when `strict`.
 fn in_order(x: &Column<'_>, decreasing: bool, strict: bool) -> bool {
-    fn ordered<T: PartialOrd>(values: &[T], decreasing: bool, strict: bool) -> bool {
+    fn ordered<T: PartialOrd + Copy>(values: &[T], decreasing: bool, strict: bool) -> bool {
         match (decreasing, strict) {
-            (false, false) => values.is_sorted_by(|left, right| left <= right),
-            (false, true) => values.is_sorted_by(|left, right| left < right),
-            (true, false) => values.is_sorted_by(|left, right| left >= right),
-            (true, true) => values.is_sorted_by(|left, right| left > right),
+            (false, false) => adjacent_pairs_all(values, |left, right| left <= right),
+            (false, true) => adjacent_pairs_all(values, |left, right| left < right),
+            (true, false) => adjacent_pairs_all(values, |left, right| left >= right),
+            (true, true) => adjacent_pairs_all(values, |left, right| left > right),
         }
     }
     match *x {
@@ -880,6 +880,32 @@ fn in_order(x: &Column<'_>, decreasing: bool, strict: bool) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether `ordered(values[i], values[i + 1])` holds for every adjacent pair. A block of pairs is
+/// tested without an early exit inside it, so the comparisons vectorize; an early exit per pair,
+/// as `is_sorted_by` takes, compiles to one compare and branch per element.
+pub(crate) fn adjacent_pairs_all<T: Copy>(values: &[T], ordered: impl Fn(T, T) -> bool) -> bool {
+    const BLOCK: usize = 16;
+    let Some(last) = values.len().checked_sub(1) else {
+        return true;
+    };
+    let mut lefts = values[..last].chunks_exact(BLOCK);
+    let mut rights = values[1..].chunks_exact(BLOCK);
+    for (left, right) in (&mut lefts).zip(&mut rights) {
+        let all = left
+            .iter()
+            .zip(right)
+            .fold(true, |all, (&left, &right)| all & ordered(left, right));
+        if !all {
+            return false;
+        }
+    }
+    lefts
+        .remainder()
+        .iter()
+        .zip(rights.remainder())
+        .all(|(&left, &right)| ordered(left, right))
 }
 
 const SORTED_DECR_NA_FIRST: i32 = -2;
@@ -944,12 +970,12 @@ pub(crate) unsafe fn do_order(call: &Call<'_>) -> R<Sexp> {
                 .and_then(|column| sort_keys(column, decreasing, na_last))
         })
         .collect();
-    if let Some(radix_keys) = radix_keys {
+    if let Some(mut radix_keys) = radix_keys {
         let permutation = alloc(SexpType::Integer, count)?;
         let ints = values::ints_mut(permutation);
         let order: &mut [u32] =
             std::slice::from_raw_parts_mut(ints.as_mut_ptr().cast::<u32>(), ints.len());
-        radix_order(&radix_keys, order);
+        radix_order(&mut radix_keys, order);
         for slot in order.iter_mut() {
             *slot += 1;
         }
@@ -1044,7 +1070,7 @@ pub(crate) unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
         )));
     }
     let nas_last = na_last == 1;
-    let radix_keys: Option<Vec<SortKeys>> = columns
+    let mut radix_keys: Option<Vec<SortKeys>> = columns
         .iter()
         .zip(&directions)
         .map(|(column, &decreasing)| {
@@ -1059,22 +1085,16 @@ pub(crate) unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
     let ints = values::ints_mut(permutation);
     let order: &mut [u32] =
         std::slice::from_raw_parts_mut(ints.as_mut_ptr().cast::<u32>(), ints.len());
+    for key in radix_keys.iter_mut().flatten() {
+        if let SortKeys::Appearance(key) = key {
+            key.nas_unsorted = na_last == NA_LOGICAL;
+        }
+    }
     let ends = match radix_keys {
-        Some(keys) => {
-            radix_order(&keys, order);
-            return_groups.then(|| {
-                let mut ends = Vec::new();
-                for position in 1..=order.len() {
-                    if position == order.len()
-                        || keys.iter().any(|key| {
-                            !key.equal(order[position - 1] as usize, order[position] as usize)
-                        })
-                    {
-                        ends.push(position as i32);
-                    }
-                }
-                ends
-            })
+        Some(mut keys) if return_groups => Some(radix_groups(&mut keys, order)),
+        Some(mut keys) => {
+            radix_order(&mut keys, order);
+            None
         }
         // A key the radix sort cannot read (a complex or raw vector after the first key) is reported
         // only when rows tie on every earlier key, so it needs the comparison sort.
@@ -1118,13 +1138,23 @@ pub(crate) unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
             })
         }
     };
+    // A string key kept in order of appearance has an NA where its byte rank is 0. GNU R's
+    // `csorted` drops no NA from the first key unless every entry is NA, and then drops every
+    // row; a later key drops its NA rows like any other key.
+    let string_na = |column: &Column<'_>, index: usize| matches!(column, Column::Grouped(codes, byte_ranks) if byte_ranks[codes[index] as usize] == 0);
+    let only_missing_strings = na_last == NA_LOGICAL
+        && matches!(columns.first(), Some(Some(first @ Column::Grouped(..)))
+            if (0..count).all(|index| string_na(first, index)));
+    let missing = |index: usize| {
+        only_missing_strings
+            || columns.iter().enumerate().any(|(position, column)| {
+                column.as_ref().is_some_and(|column| {
+                    column.is_na(index) || position > 0 && string_na(column, index)
+                })
+            })
+    };
     // `na.last = NA` is the default of `sort`, and most keys have no NA to drop.
-    let any_missing = na_last == NA_LOGICAL
-        && columns
-            .iter()
-            .flatten()
-            .any(|column| (0..count).any(|index| column.is_na(index)));
-    if !any_missing {
+    if na_last != NA_LOGICAL || !(0..count).any(missing) {
         for slot in order.iter_mut() {
             *slot += 1;
         }
@@ -1134,11 +1164,11 @@ pub(crate) unsafe fn do_radixsort(call: &Call<'_>) -> R<Sexp> {
     let mut result: Vec<i32> = order
         .iter()
         .map(|&index| {
-            let missing = columns
-                .iter()
-                .flatten()
-                .any(|column| column.is_na(index as usize));
-            if missing { 0 } else { index as i32 + 1 }
+            if missing(index as usize) {
+                0
+            } else {
+                index as i32 + 1
+            }
         })
         .collect();
     if ends.is_none() {
@@ -1222,7 +1252,7 @@ unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
         .and_then(|column| complete_prefix(column, count))
         .and_then(|column| sort_keys(&column, false, true));
     if let Some(keys) = keys {
-        rank_by_keys(&keys, &rank_of, &mut ranks);
+        rank_by_keys(keys, &rank_of, &mut ranks);
     } else {
         let column = column(x).ok_or_else(|| unimplemented_type(x, "greater"))?;
         let mut order: Vec<usize> = (0..count).collect();
@@ -1272,11 +1302,11 @@ fn complete_prefix(x: Column<'_>, count: usize) -> Option<Column<'_>> {
 /// run of tied rows takes to their shared rank. A key whose range is no wider than the rows
 /// (string ranks, small integers) needs no sort: counting each key gives the positions its
 /// rows take.
-fn rank_by_keys(keys: &SortKeys, rank_of: &dyn Fn(usize, usize) -> f64, ranks: &mut [f64]) {
+fn rank_by_keys(mut keys: SortKeys, rank_of: &dyn Fn(usize, usize) -> f64, ranks: &mut [f64]) {
     if ranks.is_empty() {
         return;
     }
-    if let SortKeys::Narrow(keys) = keys
+    if let SortKeys::Narrow(keys) = &keys
         && keys.high - keys.low < ranks.len() as u64
     {
         let low = keys.low as u32;
@@ -1303,7 +1333,7 @@ fn rank_by_keys(keys: &SortKeys, rank_of: &dyn Fn(usize, usize) -> f64, ranks: &
         return;
     }
     let mut order = vec![0u32; ranks.len()];
-    radix_order(std::slice::from_ref(keys), &mut order);
+    radix_order(std::slice::from_mut(&mut keys), &mut order);
     let mut start = 0;
     while start < order.len() {
         let mut end = start;
@@ -1811,8 +1841,9 @@ enum Column<'a> {
     Ranks(Vec<u32>),
     /// Strings the radix sort groups without sorting (`sortstr = FALSE`): each element is the
     /// rank of its first appearance, NA included, and the groups keep that order whatever
-    /// `decreasing` and `na.last` say.
-    Grouped(Vec<i32>),
+    /// `decreasing` and `na.last` say. Alongside, each code's rank by bytes (from 1, with 0 for
+    /// `NA`), since a run strictly in the opposite byte order reverses instead.
+    Grouped(Vec<i32>, Vec<u32>),
 }
 
 unsafe fn column<'a>(vector: Sexp) -> Option<Column<'a>> {
@@ -1844,7 +1875,15 @@ unsafe fn radix_column<'a>(vector: Sexp, sort_strings: bool) -> Option<Column<'a
                     *ranks.entry(string_at(vector, index)).or_insert(next)
                 })
                 .collect();
-            Some(Column::Grouped(codes))
+            // `None` sorts first, so it takes rank 0 and the texts follow from 1.
+            let mut distinct: Vec<_> = ranks.into_iter().collect();
+            distinct.sort_unstable();
+            let shift = u32::from(distinct.first().is_some_and(|(text, _)| text.is_some()));
+            let mut byte_ranks = vec![0; distinct.len()];
+            for (rank, (_, code)) in (0..).zip(&distinct) {
+                byte_ranks[*code as usize] = rank + shift;
+            }
+            Some(Column::Grouped(codes, byte_ranks))
         }
         SexpType::String => Some(Column::Ranks(string_ranks(vector, TextOrder::Bytes))),
         _ => column(vector),
@@ -2143,7 +2182,7 @@ impl Column<'_> {
             Column::Complex(items) => items[index].r.is_nan() || items[index].i.is_nan(),
             Column::String(items) => items[index].is_none(),
             Column::Ranks(ranks) => ranks[index] == 0,
-            Column::Grouped(_) | Column::Raw(_) => false,
+            Column::Grouped(..) | Column::Raw(_) => false,
         }
     }
 
@@ -2151,7 +2190,7 @@ impl Column<'_> {
     fn compare_values(&self, left: usize, right: usize) -> Ordering {
         match self {
             Column::Integer(items) => items[left].cmp(&items[right]),
-            Column::Grouped(items) => items[left].cmp(&items[right]),
+            Column::Grouped(items, _) => items[left].cmp(&items[right]),
             Column::Raw(items) => items[left].cmp(&items[right]),
             Column::Real(items) => items[left]
                 .partial_cmp(&items[right])
@@ -2204,7 +2243,7 @@ impl Column<'_> {
             }
             (false, false) => {
                 let ordering = self.compare_values(left, right);
-                let decreasing = decreasing && !matches!(self, Column::Grouped(_));
+                let decreasing = decreasing && !matches!(self, Column::Grouped(..));
                 if decreasing {
                     ordering.reverse()
                 } else {
@@ -2220,6 +2259,24 @@ impl Column<'_> {
 enum SortKeys {
     Narrow(Keys<u32>),
     Wide(Keys<u64>),
+    Appearance(Appearance),
+}
+
+/// Strings ordered by first appearance, as `radixsort(sortstr = FALSE)` orders them. GNU R
+/// numbers the strings by their first appearance within each run of rows that tie on the earlier
+/// keys, not in the whole column, so before a run sorts by this key its rows' codes are
+/// renumbered in that order. Each row lies in one run, so rewriting its code in place is safe.
+/// A run whose strings are strictly in the opposite byte order reverses instead, since GNU R
+/// checks every run for order by bytes before it groups one.
+struct Appearance {
+    keys: Keys<u32>,
+    /// For each code of the whole column, the run that last renumbered it and its code there.
+    renumbered: Vec<(u32, u32)>,
+    /// For each code of the whole column, its place in the byte order the check reads.
+    byte_order: Vec<u32>,
+    /// `na.last = NA`, under which NAs sort first and have byte order 0.
+    nas_unsorted: bool,
+    run: u32,
 }
 
 /// A key's values, with the least and greatest found in the pass that builds them, which spares
@@ -2255,7 +2312,9 @@ fn keys<T: Copy, K: RadixKey>(items: &[T], key: impl Fn(T) -> K) -> Keys<K> {
 impl SortKeys {
     fn compare(&self, left: usize, right: usize) -> Ordering {
         match self {
-            SortKeys::Narrow(keys) => keys.values[left].cmp(&keys.values[right]),
+            SortKeys::Narrow(keys) | SortKeys::Appearance(Appearance { keys, .. }) => {
+                keys.values[left].cmp(&keys.values[right])
+            }
             SortKeys::Wide(keys) => keys.values[left].cmp(&keys.values[right]),
         }
     }
@@ -2309,7 +2368,26 @@ fn sort_keys(column: &Column<'_>, decreasing: bool, na_last: bool) -> Option<Sor
             });
             place(key, u64::MAX)
         }))),
-        Column::Grouped(items) => Some(SortKeys::Narrow(keys(items, |code| code as u32))),
+        Column::Grouped(items, byte_ranks) => {
+            // GNU R's `StrCmp2`: bytes in the direction asked, and NA at the end `na.last` says.
+            let top = byte_ranks.len() as u32 + 1;
+            let byte_order = byte_ranks
+                .iter()
+                .map(|&rank| match rank {
+                    0 if na_last => u32::MAX,
+                    0 => 0,
+                    rank if decreasing => top - rank,
+                    rank => rank,
+                })
+                .collect();
+            Some(SortKeys::Appearance(Appearance {
+                keys: keys(items, |code| code as u32),
+                renumbered: vec![(0, 0); byte_ranks.len()],
+                byte_order,
+                nas_unsorted: false,
+                run: 0,
+            }))
+        }
         Column::Ranks(ranks) => {
             // The ranks count the rows at most, which are fewer than `u32::MAX`.
             let top = u64::from(ranks.iter().copied().max().unwrap_or(0)) + 1;
@@ -2326,30 +2404,90 @@ fn sort_keys(column: &Column<'_>, decreasing: bool, na_last: bool) -> Option<Sor
 /// by the remaining keys, so a later key is only ever sorted within a run, whose keys stay in
 /// cache. Within a run the rows are still in their original order, which is what lets a run
 /// sort `(key, row)` pairs with an unstable algorithm.
-fn radix_order(keys: &[SortKeys], order: &mut [u32]) {
-    sort_runs(keys, order, true);
+fn radix_order(keys: &mut [SortKeys], order: &mut [u32]) {
+    sort_runs(keys, order, true, 0, None);
+}
+
+/// [`radix_order`], returning the 1-based end of each group of rows that tie on every key, as
+/// `radixsort(retgrp = TRUE)` reports them. The groups come from the runs the sort finds anyway,
+/// so no pass compares neighbouring rows' keys again.
+fn radix_groups(keys: &mut [SortKeys], order: &mut [u32]) -> Vec<i32> {
+    let mut ties = Vec::new();
+    sort_runs(keys, order, true, 0, Some(&mut ties));
+    let mut ends = Vec::with_capacity(
+        order.len()
+            - ties
+                .iter()
+                .map(|(start, end)| end - start - 1)
+                .sum::<usize>(),
+    );
+    let mut position = 0;
+    for (start, end) in ties {
+        ends.extend((position + 1..=start).map(|end| end as i32));
+        ends.push(end as i32);
+        position = end;
+    }
+    ends.extend((position + 1..=order.len()).map(|end| end as i32));
+    ends
 }
 
 /// Sorts `order` by `keys`, most significant first, where rows that tie on every key are in
 /// increasing order already. With `identity` the rows are `0..order.len()` and `order` holds
-/// nothing yet.
-fn sort_runs(keys: &[SortKeys], order: &mut [u32], identity: bool) {
+/// nothing yet. With `ties`, it appends in increasing order the ranges, offset by `offset`, of
+/// two or more rows that tie on every key.
+fn sort_runs(
+    keys: &mut [SortKeys],
+    order: &mut [u32],
+    identity: bool,
+    offset: usize,
+    mut ties: Option<&mut Vec<(usize, usize)>>,
+) {
     // A run this short sorts by comparing rows, which costs less than gathering its keys.
     const SHORT_RUN: usize = 32;
-    let Some((key, rest)) = keys.split_first() else {
+    let Some((key, rest)) = keys.split_first_mut() else {
         if identity {
             fill_identity(order);
         }
         return;
     };
+    let want_runs = !rest.is_empty() || ties.is_some();
     let runs = match key {
-        SortKeys::Narrow(key) => sort_by_key(key, order, identity, !rest.is_empty()),
-        SortKeys::Wide(key) => sort_by_key(key, order, identity, !rest.is_empty()),
+        SortKeys::Narrow(key) => sort_by_key(key, order, identity, want_runs),
+        SortKeys::Wide(key) => sort_by_key(key, order, identity, want_runs),
+        SortKeys::Appearance(key) => {
+            if identity {
+                fill_identity(order);
+            }
+            // GNU R's `csorted` calls a run with some but not all NAs unsorted when
+            // `na.last = NA`, so such a run is never reversed.
+            let code = |row: u32| key.keys.values[row as usize] as usize;
+            let strictly_reversed = order.len() > 1
+                && !(key.nas_unsorted && order.iter().any(|&row| key.byte_order[code(row)] == 0))
+                && order
+                    .windows(2)
+                    .all(|pair| key.byte_order[code(pair[1])] < key.byte_order[code(pair[0])]);
+            if strictly_reversed {
+                // Strictly ordered rows are all distinct, so no run ties.
+                order.reverse();
+                Vec::new()
+            } else {
+                renumber(key, order);
+                sort_by_key(&key.keys, order, false, want_runs)
+            }
+        }
     };
+    // Comparing rows reads codes that only a run of their own renumbers.
+    let comparable = !rest
+        .iter()
+        .any(|key| matches!(key, SortKeys::Appearance(_)));
     for (start, end) in runs {
         let run = &mut order[start..end];
-        if run.len() > SHORT_RUN {
-            sort_runs(rest, run, false);
+        if rest.is_empty() {
+            if let Some(ties) = ties.as_deref_mut() {
+                ties.push((offset + start, offset + end));
+            }
+        } else if run.len() > SHORT_RUN || !comparable {
+            sort_runs(rest, run, false, offset + start, ties.as_deref_mut());
         } else {
             run.sort_by(|&left, &right| {
                 rest.iter()
@@ -2357,7 +2495,37 @@ fn sort_runs(keys: &[SortKeys], order: &mut [u32], identity: bool) {
                     .find(|ordering| ordering.is_ne())
                     .unwrap_or(Ordering::Equal)
             });
+            if let Some(ties) = ties.as_deref_mut() {
+                let mut group = 0;
+                for position in 1..=run.len() {
+                    if position == run.len()
+                        || rest.iter().any(|key| {
+                            !key.equal(run[position - 1] as usize, run[position] as usize)
+                        })
+                    {
+                        if position - group > 1 {
+                            ties.push((offset + start + group, offset + start + position));
+                        }
+                        group = position;
+                    }
+                }
+            }
         }
+    }
+}
+
+/// Numbers the codes of `rows`, a run in increasing row order, by their first appearance in it.
+fn renumber(key: &mut Appearance, rows: &[u32]) {
+    key.run += 1;
+    let mut next = 0;
+    for &row in rows {
+        let code = &mut key.keys.values[row as usize];
+        let slot = &mut key.renumbered[*code as usize];
+        if slot.0 != key.run {
+            *slot = (key.run, next);
+            next += 1;
+        }
+        *code = slot.1;
     }
 }
 
@@ -3118,14 +3286,21 @@ pub(crate) unsafe fn duplicated_elements(
     };
     if list {
         let flags = IdenticalFlags::default();
-        let mut buckets: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
+        let hashes: Vec<u64> = (0..count)
+            .map(|index| structural_hash(x.element(index)))
+            .collect();
+        let key_at = |index: usize| ListElement {
+            hash: hashes[index],
+            element: x.element(index),
+        };
+        let mut table = PositionTable::new(count);
         for index in visit {
-            let element = x.element(index);
-            let bucket = buckets.entry(structural_hash(element)).or_default();
-            if bucket
-                .iter()
-                .any(|&seen| identical(x.element(seen), element, &flags))
-            {
+            let key = key_at(index);
+            let same = |left: ListElement, right: ListElement| {
+                left.hash == right.hash && identical(left.element, right.element, &flags)
+            };
+            if table.find_or_insert_by(key, index, key_at, same).is_some() {
+                let element = key.element;
                 let incomparable = incomparable_elements.is_some_and(|elements| {
                     (0..length(elements))
                         .any(|position| identical(elements.element(position), element, &flags))
@@ -3133,8 +3308,6 @@ pub(crate) unsafe fn duplicated_elements(
                 if !incomparable {
                     duplicated.insert(index);
                 }
-            } else {
-                bucket.push(index);
             }
         }
         return Ok(duplicated);
@@ -3254,6 +3427,19 @@ unsafe fn duplicate_flags(keys: PlainKeys<'_>, from_last: bool, first_only: bool
             hashed_duplicates(values.len(), from_last, first_only, |index| values[index])
         }
         PlainKeys::Real(values) => {
+            // In a vector that never decreases, equal values are neighbours. A NaN fails every
+            // comparison, so a vector of two or more that passes holds none, and equal values
+            // are then equal keys. Unsorted input fails the test at its first descent.
+            if values.windows(2).all(|pair| pair[0] <= pair[1]) {
+                return Some(visit_in_order(values.len(), from_last, |index| {
+                    let neighbour = if from_last {
+                        index + 1
+                    } else {
+                        index.wrapping_sub(1)
+                    };
+                    values.get(neighbour) == Some(&values[index])
+                }));
+            }
             hashed_duplicates(values.len(), from_last, first_only, |index| {
                 real_key(values[index])
             })
@@ -3313,7 +3499,7 @@ impl DenseRange {
 
 /// `false`, with `out` partly written, when a key that is not [`TableKey::exact`] is a distinct
 /// table key or misses the table, because then equal values may differ as keys.
-fn hashed_matches<K: TableKey>(
+fn hashed_matches<K: TableKey + Eq>(
     table_count: usize,
     table_key: impl Fn(usize) -> K,
     x_key: impl Fn(usize) -> K,
@@ -3340,7 +3526,7 @@ fn hashed_matches<K: TableKey>(
 /// `None` when a distinct key is not [`TableKey::exact`]. Each word of flags is built in a
 /// register over its 64 elements and stored once. With `first_only` the scan stops after the
 /// first word, in visiting order, that holds a duplicate, which is all `anyDuplicated()` reads.
-fn hashed_duplicates<K: TableKey>(
+fn hashed_duplicates<K: TableKey + Eq>(
     count: usize,
     from_last: bool,
     first_only: bool,
@@ -3375,7 +3561,7 @@ fn hashed_duplicates<K: TableKey>(
 /// `table`, or `None` for a new key that is not [`TableKey::exact`]. Always inlined, because a
 /// call per element costs more than the probe.
 #[inline(always)]
-fn duplicate_bit<K: TableKey>(
+fn duplicate_bit<K: TableKey + Eq>(
     table: &mut PositionTable,
     key_at: &impl Fn(usize) -> K,
     index: usize,
@@ -3481,7 +3667,7 @@ impl Bits {
 
 /// A key that `PositionTable` can hash. The hash must spread every input bit into the high bits,
 /// which pick the slot.
-trait TableKey: Copy + Eq {
+trait TableKey: Copy {
     fn table_hash(self) -> u64;
 
     /// Whether equal keys are always equal values, so that a key missing from the table is a
@@ -3509,6 +3695,21 @@ impl TableKey for u64 {
     }
 }
 
+/// A list element with its [`structural_hash`]. Two are the same key when the hashes agree and
+/// the elements are `identical()` under the default flags, which the caller tests, because
+/// `identical` needs the list rooted.
+#[derive(Clone, Copy)]
+struct ListElement {
+    hash: u64,
+    element: Sexp,
+}
+
+impl TableKey for ListElement {
+    fn table_hash(self) -> u64 {
+        mix(self.hash)
+    }
+}
+
 impl TableKey for Sexp {
     fn table_hash(self) -> u64 {
         mix(self.as_ptr() as usize as u64 >> 3)
@@ -3520,91 +3721,135 @@ impl TableKey for Sexp {
     }
 }
 
-/// An open-addressing hash table from keys to the first position that holds them. Slots store
-/// 1-based positions (0 is empty) and leave the keys in their vector, so a slot is four bytes.
-/// Probing is linear over a power-of-two array kept at most half full, and the slot comes from
-/// the hash's high bits. The table starts with two slots per element, so a vector of up to
-/// [`PositionTable::PRESIZED`] / 2 elements never rehashes, and doubles past that cap only as
-/// distinct keys arrive: a million strings with four distinct values zero 256 KB once and probe
-/// four cache lines of it, where sizing by elements would take 8 MB.
+/// An open-addressing hash table from keys to the first position that holds them. A slot packs
+/// the 1-based position (0 is empty) in its low half and the hash's high 32 bits in its high
+/// half, leaving the keys in their vector: a probe reads a stored key only when the hash bits
+/// agree, so a miss on a large table costs one random read rather than one per occupied slot,
+/// and growing rehashes from the slots alone. Probing is linear over a power-of-two array kept
+/// at most half full, and the slot comes from the hash's high bits. The table starts with two
+/// slots per element, so a vector of up to [`PositionTable::PRESIZED`] / 2 elements never
+/// rehashes, and doubles past that cap only as distinct keys arrive: a million strings with
+/// four distinct values zero 512 KB once and probe a few cache lines of it, where sizing by
+/// elements would take 16 MB.
 struct PositionTable {
-    slots: SmallVec<[u32; 32]>,
+    slots: SmallVec<[u64; 16]>,
+    /// The table's slot index is the top `32 - shift` bits of the 32 stored hash bits.
     shift: u32,
     /// Inserts left before the table is more than half full, counted down so that an insert
     /// tests one field rather than the slots' length, which `SmallVec` keeps behind a branch.
     room: usize,
+    /// Lookups so far and the most keys the table can receive, from which growing extrapolates
+    /// the distinct keys still to come.
+    lookups: usize,
+    capacity: usize,
 }
 
 impl PositionTable {
-    /// The most slots a table starts with. Growing by doubling rehashes every stored key and
-    /// zeroes each new array, which costs more than zeroing this many slots up front.
+    /// The most slots a table starts with. Growing by doubling zeroes each new array and moves
+    /// every stored slot, which costs more than zeroing this many slots up front.
     const PRESIZED: usize = 1 << 16;
 
     fn new(count: usize) -> Self {
         let size = (2 * count).clamp(32, Self::PRESIZED).next_power_of_two();
         Self {
             slots: smallvec![0; size],
-            shift: 64 - size.trailing_zeros(),
+            shift: 32 - size.trailing_zeros(),
             room: size / 2 + 1,
+            lookups: 0,
+            capacity: count,
         }
     }
 
     /// The position of the first key equal to `key`, or `None` after recording `position` for
     /// it.
-    fn find_or_insert<K: TableKey>(
+    fn find_or_insert<K: TableKey + Eq>(
         &mut self,
         key: K,
         position: usize,
         key_at: impl Fn(usize) -> K,
     ) -> Option<usize> {
-        let slots: &mut [u32] = &mut self.slots;
+        self.find_or_insert_by(key, position, key_at, |left, right| left == right)
+    }
+
+    /// [`PositionTable::find_or_insert`] with keys compared by `same`.
+    fn find_or_insert_by<K: TableKey>(
+        &mut self,
+        key: K,
+        position: usize,
+        key_at: impl Fn(usize) -> K,
+        same: impl Fn(K, K) -> bool,
+    ) -> Option<usize> {
+        let slots: &mut [u64] = &mut self.slots;
         let mask = slots.len() - 1;
-        let mut slot = (key.table_hash() >> self.shift) as usize;
+        let tag = key.table_hash() >> 32;
+        let mut slot = (tag >> self.shift) as usize;
+        self.lookups += 1;
         loop {
             let stored = slots[slot & mask];
             if stored == 0 {
                 break;
             }
-            if key_at(stored as usize - 1) == key {
-                return Some(stored as usize - 1);
+            if stored >> 32 == tag {
+                let found = (stored as u32 - 1) as usize;
+                if same(key_at(found), key) {
+                    return Some(found);
+                }
             }
             slot += 1;
         }
-        slots[slot & mask] = position as u32 + 1;
+        slots[slot & mask] = tag << 32 | (position as u64 + 1);
         self.room -= 1;
         if self.room == 0 {
-            self.grow(key_at);
+            self.grow();
         }
         None
     }
 
-    fn find<K: TableKey>(&self, key: K, key_at: impl Fn(usize) -> K) -> Option<usize> {
-        let slots: &[u32] = &self.slots;
+    fn find<K: TableKey + Eq>(&self, key: K, key_at: impl Fn(usize) -> K) -> Option<usize> {
+        let slots: &[u64] = &self.slots;
         let mask = slots.len() - 1;
-        let mut slot = (key.table_hash() >> self.shift) as usize;
+        let tag = key.table_hash() >> 32;
+        let mut slot = (tag >> self.shift) as usize;
         loop {
             let stored = slots[slot & mask];
             if stored == 0 {
                 return None;
             }
-            if key_at(stored as usize - 1) == key {
-                return Some(stored as usize - 1);
+            if stored >> 32 == tag {
+                let found = (stored as u32 - 1) as usize;
+                if key_at(found) == key {
+                    return Some(found);
+                }
             }
             slot += 1;
         }
     }
 
-    /// Doubles the slots and reinserts every stored position, whose keys are distinct.
+    /// Moves every stored slot, by its stored hash bits, into a table at least twice as large:
+    /// large enough for the distinct keys that the share of distinct keys so far predicts for
+    /// the remaining lookups, so that a vector of distinct values grows a few times rather than
+    /// once per doubling, each of which zeroes a new array and moves every slot again. A step
+    /// grows at most eightfold, because `anyDuplicated` often stops long before the end and
+    /// would otherwise zero a table sized for the whole vector.
     #[cold]
-    fn grow<K: TableKey>(&mut self, key_at: impl Fn(usize) -> K) {
-        let doubled = smallvec![0; 2 * self.slots.len()];
-        let old = std::mem::replace(&mut self.slots, doubled);
-        self.shift -= 1;
-        let slots: &mut [u32] = &mut self.slots;
+    fn grow(&mut self) {
+        let distinct = self.slots.len() / 2;
+        let predicted = distinct
+            .saturating_mul(self.capacity)
+            .checked_div(self.lookups)
+            .unwrap_or(0)
+            .min(self.capacity);
+        let size = (2 * predicted)
+            .next_power_of_two()
+            .clamp(2 * self.slots.len(), 8 * self.slots.len());
+        let bigger = smallvec![0; size];
+        let old = std::mem::replace(&mut self.slots, bigger);
+        self.shift -= size.trailing_zeros() - old.len().trailing_zeros();
+        let slots: &mut [u64] = &mut self.slots;
         let mask = slots.len() - 1;
         let mut moved = 0;
         for stored in old.into_iter().filter(|&stored| stored != 0) {
-            let mut slot = (key_at(stored as usize - 1).table_hash() >> self.shift) as usize;
+            let mut slot = (stored >> 32 >> self.shift) as usize;
             while slots[slot & mask] != 0 {
                 slot += 1;
             }

@@ -788,3 +788,46 @@ fn hash_table_walk_keeps_unvisited_entries_alive() {
     assert_eq!(r.integers(corrupt), vec![0]);
     assert_eq!(r.runtime_protect_depth(), 0);
 }
+
+/// Package code's `malloc` buffers come from glibc, whose heap holds nothing else of ry's, so with
+/// glibc's defaults freeing them shrank the heap and the next call faulted every page in again.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn freed_native_buffers_stay_resident() {
+    let _r = r();
+    const BUFFERS: usize = 8;
+    const BYTES: usize = 64 << 10;
+    let round = || {
+        // SAFETY: each block is written within its length and freed once.
+        unsafe {
+            let blocks: Vec<*mut libc::c_void> =
+                (0..BUFFERS).map(|_| libc::malloc(BYTES)).collect();
+            for &block in &blocks {
+                assert!(!block.is_null(), "malloc failed");
+                std::ptr::write_bytes(block.cast::<u8>(), 1, BYTES);
+            }
+            for block in blocks {
+                libc::free(block);
+            }
+        }
+    };
+    let faults = || {
+        // SAFETY: `getrusage` fills the zeroed struct it is given.
+        unsafe {
+            let mut usage: libc::rusage = std::mem::zeroed();
+            libc::getrusage(libc::RUSAGE_THREAD, &mut usage);
+            usage.ru_minflt
+        }
+    };
+    round();
+    let before = faults();
+    for _ in 0..50 {
+        round();
+    }
+    let pages = (BUFFERS * BYTES / 4096) as libc::c_long;
+    let faulted = faults() - before;
+    assert!(
+        faulted < pages,
+        "50 rounds of {BUFFERS} freed {BYTES}-byte buffers faulted {faulted} pages"
+    );
+}

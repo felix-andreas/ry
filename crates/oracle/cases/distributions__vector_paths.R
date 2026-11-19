@@ -46,7 +46,7 @@ show17(dbinom(0:5, c(5, 10), c(0.2, 0.5, 0.7)))
 show17(phyper(1:6, c(5, 10), 7, c(3, 4, 5)))
 # The Bessel and polygamma ports differ from GNU R in the last ulp, so these check recycling
 # at 12 digits.
-print(besselJ(1:5, c(0, 1)), digits = 12)
+print(besselJ(1:5, c(0, 1)), digits = 17)
 print(psigamma(c(0.5, 1, 2.5), 0:1), digits = 12)
 # NA beats NaN, and a NaN produced from ordinary operands warns.
 dnorm(c(1, NA, NaN, Inf, -Inf), c(0, 0, NA, 1, NaN))

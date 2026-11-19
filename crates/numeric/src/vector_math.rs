@@ -206,13 +206,8 @@ mod avx2 {
                 // SAFETY: as for the load.
                 unsafe { _mm256_storeu_pd(output.add(index), value) };
             } else {
-                let mut lanes = [0.0; LANES];
-                let mut arguments = [0.0; LANES];
-                // SAFETY: both arrays hold `LANES` elements.
-                unsafe {
-                    _mm256_storeu_pd(lanes.as_mut_ptr(), value);
-                    _mm256_storeu_pd(arguments.as_mut_ptr(), x);
-                }
+                let lanes = elements(value);
+                let arguments = elements(x);
                 for lane in 0..LANES {
                     let result = if fast & (1 << lane) != 0 {
                         lanes[lane]
@@ -230,6 +225,19 @@ mod avx2 {
             unsafe { output.add(index).write(scalar(input.add(index).read())) };
             index += 1;
         }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    fn elements(vector: __m256d) -> [f64; LANES] {
+        let bits = _mm256_castpd_si256(vector);
+        [
+            _mm256_extract_epi64::<0>(bits),
+            _mm256_extract_epi64::<1>(bits),
+            _mm256_extract_epi64::<2>(bits),
+            _mm256_extract_epi64::<3>(bits),
+        ]
+        .map(|lane| f64::from_bits(lane as u64))
     }
 
     #[inline]
@@ -944,6 +952,138 @@ mod avx2 {
         0x3fe756cadbd6130c,
         0x3fd432eee32fe000,
     ];
+}
+
+/// How [`round_all`] rounds.
+#[derive(Clone, Copy, Debug)]
+pub enum Rounding {
+    Floor,
+    Ceiling,
+    Truncate,
+}
+
+/// `floor`, `ceiling` or `trunc` of each element of `source` (or of `output` itself, when
+/// `source` is `None`) into `output`, a NaN input, `NA` among them, unchanged, as GNU R's
+/// `math1` keeps it. glibc's rounding functions are ifuncs that run SSE4.1's `roundsd` where
+/// the CPU has it, so on such a CPU the loop is compiled for AVX or SSE4.1 to round whole
+/// lanes with `roundpd`; elsewhere it uses the SSE2 arithmetic of [`floor`].
+pub fn round_all(rounding: Rounding, source: Option<&[f64]>, output: &mut [f64]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let avx = std::is_x86_feature_detected!("avx");
+        if avx || std::is_x86_feature_detected!("sse4.1") {
+            // SAFETY: the CPU has the features the chosen function is compiled for.
+            return unsafe {
+                if avx {
+                    round_all_avx(rounding, source, output)
+                } else {
+                    round_all_sse41(rounding, source, output)
+                }
+            };
+        }
+    }
+    round_each(rounding, source, output, floor, ceiling, truncate);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+fn round_all_avx(rounding: Rounding, source: Option<&[f64]>, output: &mut [f64]) {
+    round_each(rounding, source, output, f64::floor, f64::ceil, f64::trunc);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+fn round_all_sse41(rounding: Rounding, source: Option<&[f64]>, output: &mut [f64]) {
+    round_each(rounding, source, output, f64::floor, f64::ceil, f64::trunc);
+}
+
+/// One loop per rounding, inlined into each caller so that it compiles for the caller's target
+/// features.
+#[inline(always)]
+fn round_each(
+    rounding: Rounding,
+    source: Option<&[f64]>,
+    output: &mut [f64],
+    floor: fn(f64) -> f64,
+    ceiling: fn(f64) -> f64,
+    truncate: fn(f64) -> f64,
+) {
+    match rounding {
+        Rounding::Floor => map_keeping_nan(source, output, floor),
+        Rounding::Ceiling => map_keeping_nan(source, output, ceiling),
+        Rounding::Truncate => map_keeping_nan(source, output, truncate),
+    }
+}
+
+#[inline(always)]
+fn map_keeping_nan(source: Option<&[f64]>, output: &mut [f64], function: fn(f64) -> f64) {
+    let keep = |value: f64| {
+        let result = function(value);
+        if value.is_nan() { value } else { result }
+    };
+    match source {
+        Some(source) => {
+            for (slot, &value) in output.iter_mut().zip(source) {
+                *slot = keep(value);
+            }
+        }
+        None => {
+            for slot in output.iter_mut() {
+                *slot = keep(*slot);
+            }
+        }
+    }
+}
+
+/// `f64::floor`, `f64::ceil` and `f64::trunc` in SSE2 arithmetic, which vectorizes: the
+/// baseline x86-64 target has no rounding instruction, so the library functions are a call per
+/// element. Adding and subtracting 2^52 rounds a smaller magnitude to the nearest integer, a
+/// step of one corrects the direction, and the sign of `x` keeps a zero result's sign. A larger
+/// magnitude, infinity and NaN are already integral and pass through.
+#[inline]
+pub fn floor(x: f64) -> f64 {
+    let nearest = nearest_integer(x);
+    let result = if nearest > x { nearest - 1.0 } else { nearest };
+    if x.abs() < TWO_TO_52 {
+        result.copysign(x)
+    } else {
+        x
+    }
+}
+
+#[inline]
+pub fn ceiling(x: f64) -> f64 {
+    let nearest = nearest_integer(x);
+    let result = if nearest < x { nearest + 1.0 } else { nearest };
+    if x.abs() < TWO_TO_52 {
+        result.copysign(x)
+    } else {
+        x
+    }
+}
+
+#[inline]
+pub fn truncate(x: f64) -> f64 {
+    let magnitude = x.abs();
+    let nearest = (magnitude + TWO_TO_52) - TWO_TO_52;
+    let result = if nearest > magnitude {
+        nearest - 1.0
+    } else {
+        nearest
+    };
+    if magnitude < TWO_TO_52 {
+        result.copysign(x)
+    } else {
+        x
+    }
+}
+
+const TWO_TO_52: f64 = 4_503_599_627_370_496.0;
+
+/// The integer nearest `x`, ties to even, for `|x| < 2^52`.
+#[inline]
+fn nearest_integer(x: f64) -> f64 {
+    ((x.abs() + TWO_TO_52) - TWO_TO_52).copysign(x)
 }
 
 #[cfg(test)]

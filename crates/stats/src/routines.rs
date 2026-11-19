@@ -685,19 +685,31 @@ fn complete_covariance(
     if count < 2 {
         return LongDouble::from(NA_REAL);
     }
-    let mut sum = LongDouble::ZERO;
     if kendall {
-        for k in 0..x.len() {
-            if !used[k] {
-                continue;
-            }
-            for other in 0..x.len() {
-                if used[other] {
-                    sum += sign(x[k] - x[other]) * sign(y[k] - y[other]);
-                }
-            }
-        }
-        return sum;
+        // Every term is -1, 0 or 1 (a NaN difference has sign 0), so the sum is an exact
+        // integer whatever the order: each pair counts twice, and the branchless signs of one
+        // row's pairs vectorize.
+        let (x, y) = if count == x.len() {
+            (Cow::Borrowed(x), Cow::Borrowed(y))
+        } else {
+            (
+                Cow::Owned(used_values(x, used)),
+                Cow::Owned(used_values(y, used)),
+            )
+        };
+        let signum = |difference: f64| i32::from(difference > 0.0) - i32::from(difference < 0.0);
+        let concordance: i64 = (0..x.len())
+            .map(|k| {
+                let (x_k, y_k) = (x[k], y[k]);
+                let row: i32 = x[k + 1..]
+                    .iter()
+                    .zip(&y[k + 1..])
+                    .map(|(&x_other, &y_other)| signum(x_k - x_other) * signum(y_k - y_other))
+                    .sum();
+                i64::from(row)
+            })
+            .sum();
+        return LongDouble::from((2 * concordance) as f64);
     }
     let (x, y, means) = if count == x.len() {
         (Cow::Borrowed(x), Cow::Borrowed(y), means)
@@ -713,7 +725,7 @@ fn complete_covariance(
         let mean = mean.unwrap_or_else(|| arith::long_double_mean(data));
         LongDouble::from(mean.to_f64())
     });
-    long_double::add_products(sum, &x, &y, x_mean, y_mean) / (count - 1)
+    long_double::add_products(LongDouble::ZERO, &x, &y, x_mean, y_mean) / (count - 1)
 }
 
 /// Columns of a covariance argument: the used rows of each column, one column after another,
@@ -901,16 +913,6 @@ fn pair_statistic(
         return NA_REAL;
     }
     (covariance / (x_scale * y_scale)).clamp(-1.0, 1.0)
-}
-
-pub(crate) fn sign(value: f64) -> f64 {
-    if value > 0.0 {
-        1.0
-    } else if value < 0.0 {
-        -1.0
-    } else {
-        0.0
-    }
 }
 
 /// `Cdist(x, method, attrs, p)`: the lower triangle of the distance matrix between the rows of
@@ -1331,8 +1333,8 @@ unsafe fn nextn(call: &NativeCall<'_>) -> R<Sexp> {
 
 /// `ApproxTest(x, y, method, f, na.rm)`: validates `approx`'s inputs.
 unsafe fn approx_test(call: &NativeCall<'_>) -> R<Sexp> {
-    let x = real_values(call.arg(0))?;
-    let y = real_values(call.arg(1))?;
+    let x = real_data(call.arg(0))?;
+    let y = real_data(call.arg(1))?;
     let method = values::as_integer_scalar(call.arg(2));
     let f = values::as_real_scalar(call.arg(3));
     let remove_missing = values::as_logical_scalar(call.arg(4)) == 1;
@@ -1343,7 +1345,10 @@ unsafe fn approx_test(call: &NativeCall<'_>) -> R<Sexp> {
         return Err(call.error("approx(): invalid interpolation method"));
     }
     if remove_missing {
-        if x.iter().zip(&y).any(|(a, b)| a.is_nan() || b.is_nan()) {
+        if x.iter()
+            .zip(y.iter())
+            .any(|(a, b)| a.is_nan() || b.is_nan())
+        {
             return Err(call.error("approx(): attempted to interpolate NA values"));
         }
     } else if x.iter().any(|value| value.is_nan()) {
@@ -1355,15 +1360,27 @@ unsafe fn approx_test(call: &NativeCall<'_>) -> R<Sexp> {
 /// `Approx(x, y, v, method, yleft, yright, f, na.rm)`: linear or constant interpolation of
 /// the sorted points `(x, y)` at `v`.
 unsafe fn approx(call: &NativeCall<'_>) -> R<Sexp> {
-    let x = real_values(call.arg(0))?;
-    let y = real_values(call.arg(1))?;
-    let v = real_values(call.arg(2))?;
+    let x = real_data(call.arg(0))?;
+    let y = real_data(call.arg(1))?;
+    let v = real_data(call.arg(2))?;
     let method = values::as_integer_scalar(call.arg(3));
     let left = values::as_real_scalar(call.arg(4));
     let right = values::as_real_scalar(call.arg(5));
     let f = values::as_real_scalar(call.arg(6));
     let n = x.len();
+    if y.len() < n {
+        return Err(call.error("approx(): x and y lengths differ"));
+    }
     let (f1, f2) = (1.0 - f, f);
+    // Points outside the knots never look up an interval, so only those inside size the grid.
+    let inside = match (x.first(), x.last()) {
+        (Some(&first), Some(&last)) => v
+            .iter()
+            .filter(|&&point| first <= point && point <= last)
+            .count(),
+        _ => 0,
+    };
+    let grid = KnotGrid::new(&x, inside);
     let interpolate = |point: f64| -> f64 {
         if point.is_nan() {
             return point;
@@ -1377,15 +1394,24 @@ unsafe fn approx(call: &NativeCall<'_>) -> R<Sexp> {
         if point > x[n - 1] {
             return right;
         }
-        let (mut low, mut high) = (0, n - 1);
-        while low + 1 < high {
-            let middle = (low + high) / 2;
-            if point < x[middle] {
-                high = middle;
-            } else {
-                low = middle;
+        // The bisection keeps `low` below the last knot, and otherwise finds the last knot not
+        // above the point, as the grid does.
+        let (low, high) = match &grid {
+            Some(grid) => {
+                let low = grid.interval(&x, point).min(n.saturating_sub(2));
+                (low, (low + 1).min(n - 1))
             }
-        }
+            None => {
+                let (mut low, mut high) = (0, n - 1);
+                while low + 1 < high {
+                    let middle = (low + high) / 2;
+                    let below = point < x[middle];
+                    high = if below { middle } else { high };
+                    low = if below { low } else { middle };
+                }
+                (low, high)
+            }
+        };
         if point == x[high] {
             return y[high];
         }
@@ -1399,8 +1425,11 @@ unsafe fn approx(call: &NativeCall<'_>) -> R<Sexp> {
                 + (if f2 != 0.0 { y[high] * f2 } else { 0.0 })
         }
     };
-    let result: Vec<f64> = v.iter().map(|&point| interpolate(point)).collect();
-    values::real_vector(&result)
+    let result = values::alloc_uninit(SexpType::Real, v.len())?;
+    for (slot, &point) in values::reals_mut(result).iter_mut().zip(v.iter()) {
+        *slot = interpolate(point);
+    }
+    Ok(result)
 }
 
 /// `SplineCoef(method, x, y)`: the coefficients of an interpolating cubic spline, as
@@ -1611,9 +1640,9 @@ fn periodic_spline(x: &[f64], y: &[f64]) -> SplineCoefficients {
 
 /// `SplineEval(xout, z)`: evaluates the spline `z` from `SplineCoef` at `xout`.
 unsafe fn spline_eval(call: &NativeCall<'_>) -> R<Sexp> {
-    let u = real_values(call.arg(0))?;
+    let u = real_data(call.arg(0))?;
     let z = call.arg(1);
-    let component = |name: &str| real_values(values::list_get(z, name));
+    let component = |name: &str| real_data(values::list_get(z, name));
     let method = values::as_integer_scalar(values::list_get(z, "method"));
     let x = component("x")?;
     let y = component("y")?;
@@ -1621,13 +1650,22 @@ unsafe fn spline_eval(call: &NativeCall<'_>) -> R<Sexp> {
     let c = component("c")?;
     let d = component("d")?;
     let n = x.len();
-    let mut result = Vec::with_capacity(u.len());
+    if [y.len(), b.len(), c.len(), d.len()]
+        .iter()
+        .any(|&length| length < n)
+    {
+        return Err(call.error("invalid spline coefficients"));
+    }
+    let result = values::alloc_uninit(SexpType::Real, u.len())?;
+    let out = values::reals_mut(result);
+    if n == 0 {
+        out.fill(NA_REAL);
+        return Ok(result);
+    }
+    let (x, y, b, c, d) = (&x[..n], &y[..n], &b[..n], &c[..n], &d[..n]);
+    let grid = KnotGrid::new(x, u.len());
     let mut interval = 0usize;
-    for &point in &u {
-        if n == 0 {
-            result.push(NA_REAL);
-            continue;
-        }
+    for (slot, &point) in out.iter_mut().zip(u.iter()) {
         let mut position = point;
         if method == 1 && n > 1 {
             let period = x[n - 1] - x[0];
@@ -1638,16 +1676,10 @@ unsafe fn spline_eval(call: &NativeCall<'_>) -> R<Sexp> {
             position += x[0];
         }
         if position < x[interval] || (interval < n - 1 && x[interval + 1] < position) {
-            let (mut low, mut high) = (0usize, n);
-            while high > low + 1 {
-                let middle = (low + high) / 2;
-                if position < x[middle] {
-                    high = middle;
-                } else {
-                    low = middle;
-                }
-            }
-            interval = low;
+            interval = match &grid {
+                Some(grid) => grid.interval(x, position),
+                None => bisect(x, position),
+            };
         }
         let offset = position - x[interval];
         let cubic = if method == 2 && position < x[0] {
@@ -1655,9 +1687,105 @@ unsafe fn spline_eval(call: &NativeCall<'_>) -> R<Sexp> {
         } else {
             d[interval]
         };
-        result.push(y[interval] + offset * (b[interval] + offset * (c[interval] + offset * cubic)));
+        *slot = y[interval] + offset * (b[interval] + offset * (c[interval] + offset * cubic));
     }
-    values::real_vector(&result)
+    Ok(result)
+}
+
+/// GNU R's bisection in `spline_eval`: the last knot not above `position`, or the first knot
+/// when every knot is above it.
+fn bisect(x: &[f64], position: f64) -> usize {
+    let (mut low, mut high) = (0usize, x.len());
+    while high > low + 1 {
+        let middle = (low + high) / 2;
+        if position < x[middle] {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    low
+}
+
+/// Sorted knots cut into equal buckets, each holding the last knot not above its left edge, so
+/// that finding a point's interval reads one bucket and walks a knot or two instead of
+/// bisecting with one unpredictable branch per halving. On sorted knots without NaN the
+/// bisection's answer is the partition point of "not above `position`", which the walk finds
+/// from any start, so the two agree exactly; other knots keep the bisection.
+struct KnotGrid {
+    lowest: f64,
+    scale: f64,
+    starts: Vec<u32>,
+}
+
+impl KnotGrid {
+    /// The walk is bounded, and past it a point bisects, so clustered knots cost no more than
+    /// the plain bisection.
+    const WALK: usize = 8;
+
+    /// `None` when there are too few points to repay the table, or the knots are unsorted,
+    /// hold NaN, or span no finite width.
+    fn new(x: &[f64], points: usize) -> Option<Self> {
+        let n = x.len();
+        if n < 16 || points < 64 || x.iter().any(|value| value.is_nan()) {
+            return None;
+        }
+        if !x.windows(2).all(|pair| pair[0] <= pair[1]) {
+            return None;
+        }
+        let lowest = x[0];
+        let buckets = n.min(2 * points).next_power_of_two();
+        let width = (x[n - 1] - lowest) / buckets as f64;
+        let scale = width.recip();
+        if !scale.is_finite() || scale <= 0.0 || n > u32::MAX as usize {
+            return None;
+        }
+        let mut starts = Vec::with_capacity(buckets + 1);
+        let mut knot = 0usize;
+        // An edge a rounding away from the lookup's bucket boundary only lengthens the walk.
+        for bucket in 0..=buckets {
+            let edge = lowest + bucket as f64 * width;
+            while knot + 1 < n && x[knot + 1] <= edge {
+                knot += 1;
+            }
+            starts.push(knot as u32);
+        }
+        Some(Self {
+            lowest,
+            scale,
+            starts,
+        })
+    }
+
+    /// [`bisect`]'s answer for knots that passed [`KnotGrid::new`]'s checks.
+    fn interval(&self, x: &[f64], position: f64) -> usize {
+        if position.is_nan() {
+            return x.len() - 1;
+        }
+        let offset = (position - self.lowest) * self.scale;
+        let bucket = if offset >= 0.0 {
+            (offset as usize).min(self.starts.len() - 1)
+        } else {
+            0
+        };
+        let mut knot = self.starts[bucket] as usize;
+        let mut steps = 0;
+        while knot > 0 && position < x[knot] {
+            knot -= 1;
+            steps += 1;
+            if steps > Self::WALK {
+                return bisect(x, position);
+            }
+        }
+        while knot + 1 < x.len() && !(position < x[knot + 1]) {
+            knot += 1;
+            steps += 1;
+            if steps > Self::WALK {
+                return bisect(x, position);
+            }
+        }
+        knot
+    }
 }
 
 /// `monoFC_m(m, Sx)`: Fritsch and Carlson's adjustment of the Hermite slopes `m` so that the
@@ -1942,79 +2070,113 @@ unsafe fn ksmooth(call: &NativeCall<'_>) -> R<Sexp> {
 /// `runmed(x, k, iend, naAction, ...)`: running medians of odd span `k`. Ends keep the data
 /// (`iend` 0) or take the median of the first or last `k` points (`iend` 1).
 unsafe fn runmed(call: &NativeCall<'_>) -> R<Sexp> {
-    let mut x = real_values(call.arg(0))?;
+    let x = real_data(call.arg(0))?;
     let span = values::as_integer_scalar(call.arg(2)).max(1) as usize;
     let end_rule = values::as_integer_scalar(call.arg(3));
     let na_action = values::as_integer_scalar(call.arg(4));
     let n = x.len();
-    let missing: Vec<usize> = (0..n).filter(|&index| x[index].is_nan()).collect();
-    if !missing.is_empty() {
-        match na_action {
-            4 => {
-                return Err(call.error(format!(
-                    "runmed(x, .., na.action=\"na.fail\"): have NAs starting at x[{}]",
-                    missing[0] + 1
-                )));
-            }
-            3 => {
-                let kept: Vec<f64> = x.iter().copied().filter(|value| !value.is_nan()).collect();
-                let smoothed = running_median(&kept, span, end_rule);
-                let mut result = vec![NA_REAL; n];
-                let mut source = smoothed.into_iter();
-                for (slot, value) in result.iter_mut().zip(&x) {
-                    if !value.is_nan() {
-                        *slot = source.next().unwrap_or(NA_REAL);
+    let first_missing = x.iter().position(|value| value.is_nan());
+    let replaced = match (first_missing, na_action) {
+        (None, _) => None,
+        (Some(at), 4) => {
+            return Err(call.error(format!(
+                "runmed(x, .., na.action=\"na.fail\"): have NAs starting at x[{}]",
+                at + 1
+            )));
+        }
+        (Some(_), 3) => {
+            let kept: Vec<f64> = x.iter().copied().filter(|value| !value.is_nan()).collect();
+            let mut smoothed = vec![0.0; kept.len()];
+            running_median(&kept, span, end_rule, &mut smoothed);
+            let mut source = smoothed.into_iter();
+            let result: Vec<f64> = x
+                .iter()
+                .map(|&value| {
+                    if value.is_nan() {
+                        value
                     } else {
-                        *slot = *value;
+                        source.next().unwrap_or(NA_REAL)
                     }
-                }
-                return values::real_vector(&result);
+                })
+                .collect();
+            return values::real_vector(&result);
+        }
+        // NAs become huge values of alternating sign, which the medians mostly pass over.
+        (Some(_), _) => {
+            let mut big = if na_action == 2 { -STAND_IN } else { STAND_IN };
+            let mut replaced = x.to_vec();
+            for value in replaced.iter_mut().filter(|value| value.is_nan()) {
+                *value = big;
+                big = -big;
             }
-            _ => {
-                let mut big = if na_action == 2 { -f64::MAX } else { f64::MAX };
-                for &index in &missing {
-                    x[index] = big;
-                    big = -big;
-                }
+            Some(replaced)
+        }
+    };
+    let result = values::alloc_uninit(SexpType::Real, n)?;
+    let medians = values::reals_mut(result);
+    running_median(replaced.as_deref().unwrap_or(&x), span, end_rule, medians);
+    if replaced.is_some() {
+        // Only a missing row whose median is a stand-in gets its own NA or NaN back.
+        for (median, &value) in medians.iter_mut().zip(x.iter()) {
+            if value.is_nan() && median.abs() == STAND_IN {
+                *median = value;
             }
         }
     }
-    let mut result = running_median(&x, span, end_rule);
-    for &index in &missing {
-        if result[index].abs() == f64::MAX {
-            result[index] = NA_REAL;
-        }
-    }
-    for value in result.iter_mut() {
-        if value.abs() == f64::MAX {
-            *value = NA_REAL;
-        }
-    }
-    values::real_vector(&result)
+    Ok(result)
 }
 
-fn running_median(x: &[f64], span: usize, end_rule: i32) -> Vec<f64> {
+/// GNU R's `BIG_dbl`, the stand-in for an NA: finite, so twice it is still a normal number.
+const STAND_IN: f64 = 8.888888888e307;
+
+/// Writes the running medians of `x` into `medians`. The window stays sorted, as keys whose
+/// integer order is `f64::total_cmp`'s: each step finds the outgoing and incoming keys by
+/// binary search and shifts the keys between them by one, which beats sorting every window.
+fn running_median(x: &[f64], span: usize, end_rule: i32, medians: &mut [f64]) {
     let n = x.len();
     let half = span / 2;
     if n == 0 || span <= 1 || n < span {
-        return x.to_vec();
+        medians.copy_from_slice(x);
+        return;
     }
-    let median = |window: &[f64]| {
-        let mut sorted = window.to_vec();
-        sorted.sort_by(f64::total_cmp);
-        sorted[sorted.len() / 2]
+    let key = |value: f64| {
+        let bits = value.to_bits();
+        if bits >> 63 == 1 {
+            !bits
+        } else {
+            bits | 1 << 63
+        }
     };
-    let mut result = x.to_vec();
-    for i in half..n - half {
-        result[i] = median(&x[i - half..=i + half]);
+    let value = |key: u64| {
+        f64::from_bits(if key >> 63 == 1 {
+            key & !(1 << 63)
+        } else {
+            !key
+        })
+    };
+    let mut window: Vec<u64> = x[..span].iter().map(|&item| key(item)).collect();
+    window.sort_unstable();
+    medians[..half].copy_from_slice(&x[..half]);
+    medians[n - half..].copy_from_slice(&x[n - half..]);
+    medians[half] = value(window[half]);
+    for i in half + 1..n - half {
+        let (outgoing, incoming) = (key(x[i - half - 1]), key(x[i + half]));
+        let leaving = window.partition_point(|&item| item < outgoing);
+        let entering = window.partition_point(|&item| item < incoming);
+        if entering <= leaving {
+            window.copy_within(entering..leaving, entering + 1);
+            window[entering] = incoming;
+        } else {
+            window.copy_within(leaving + 1..entering, leaving);
+            window[entering - 1] = incoming;
+        }
+        medians[i] = value(window[half]);
     }
     if end_rule != 0 {
-        let first = result[half];
-        let last = result[n - 1 - half];
-        result[..half].fill(first);
-        result[n - half..].fill(last);
+        let (first, last) = (medians[half], medians[n - 1 - half]);
+        medians[..half].fill(first);
+        medians[n - half..].fill(last);
     }
-    result
 }
 
 /// `cfilter(x, filter, sides, circular)`: the convolution filter behind `filter()`.
@@ -2362,15 +2524,22 @@ unsafe fn arma_to_ma(call: &NativeCall<'_>) -> R<Sexp> {
 
 /// `intgrt_vec(x, xi, lag)`: the inverse of lagged differencing, from initial values `xi`.
 unsafe fn intgrt_vec(call: &NativeCall<'_>) -> R<Sexp> {
-    let x = real_values(call.arg(0))?;
     let initial = real_values(call.arg(1))?;
     let lag = values::as_integer_scalar(call.arg(2)).max(0) as usize;
-    let mut y = vec![0.0; x.len() + lag];
-    y[..lag.min(initial.len())].copy_from_slice(&initial[..lag.min(initial.len())]);
-    for i in 0..x.len() {
-        y[i + lag] = x[i] + y[i];
+    let x = real_data(call.arg(0))?;
+    let result = values::alloc_uninit(SexpType::Real, x.len() + lag)?;
+    let y = values::reals_mut(result);
+    let known = lag.min(initial.len());
+    y[..known].copy_from_slice(&initial[..known]);
+    y[known..lag].fill(0.0);
+    if lag == 0 {
+        y.copy_from_slice(&x);
+    } else {
+        for (i, &step) in x.iter().enumerate() {
+            y[i + lag] = step + y[i];
+        }
     }
-    values::real_vector(&y)
+    Ok(result)
 }
 
 /// `pp_sum(u, l)`: the Newey-West weighted sum of autocovariances behind `PP.test`.

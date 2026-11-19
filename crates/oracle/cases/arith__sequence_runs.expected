@@ -1,0 +1,21 @@
+[stdout]
+| [1] 1 2 3 1 2 1 2 3 4
+| [1] 10 11 12 -1  0
+| [1]  1  3  5  7  1 -2 -5
+| [1] 5 5 5 5 5 5
+| integer(0)
+| [1] 2147483646 2147483647 2147483646 2147483647         NA
+| [1] "'from' contains NAs"
+| [1] 1 1
+| [1] "'nvec' must be a vector of non-negative integers"
+| [1] "'nvec' must be a vector of non-negative integers"
+| [1] "'from' contains NAs"
+| [1] "'by' contains NAs"
+| [1] 1 2 2 3 3 4
+| [1] 167167000
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 167167000L

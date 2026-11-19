@@ -531,3 +531,13 @@ GNU R finalizes an object at the first full `gc()` after its last reference goes
 - **Why a type split, not an audit alone.** Each such bug came from one call site choosing silently, and audits fix the sites that exist. With two spellings every new site chooses in writing, and the reviewer sees `standard` where the code reads `None` as absent.
 - **Rejected.** A downcast that materializes (it needs `&mut Cx` and allocates, so it would turn every non-allocating fast path into a safepoint), and a three-way result type (each fast path would match an arm it only declines).
 - **Audit.** The 71 vector downcasts in `interp` became `standard` except where `None` meant absent: dimnames in matrix subsetting and `[[<-`, the first dimnames of a one-dimensional array, `srcref` lists, the `dim` count in `[[`'s missing-subscript check, and the class named in the S4 `names<-` error. `stored_names` asks for the slow path for an ALTREP dimnames list.
+
+## glibc's malloc keeps freed package buffers
+
+**Status:** settled.
+
+- **Previous shape.** libR left glibc's `malloc` at its defaults. Package C code allocates through it, but ry's own values come from mimalloc, so glibc's heap held little else and its top was free most of the time. A `free` that left more than the trim threshold (128 KB by default) there returned the memory to the kernel, and the next call faulted the pages in again. In GNU R its own vectors fill the same heap, so this rarely happens.
+- **Measured (a test user's report, data.table on a 20-row table).** `merge(all.x = TRUE)` cost 560-640 µs per call alone and 650-710 µs after 3,000 joins, while GNU R did not change. Callgrind and cachegrind counted the same instructions and cache misses per merge either way. The difference was system time: 38 µs per merge alone, 73-96 µs after the joins, against GNU R's 2-8 µs. Over 6,000 merges that came from 1,900 or 5,786 `brk` calls and 94k or 261k minor page faults, against GNU R's 600 and 30k, all from `malloc` in data.table's C code.
+- **Shape.** libR's load-time constructor (`crates/libr/src/libr.rs`) pins glibc's mmap threshold at 32 MB and its trim threshold at 64 MB, the values glibc's dynamic tuning converges to after freeing large blocks. `MALLOC_MMAP_THRESHOLD_`, `MALLOC_TRIM_THRESHOLD_` or `GLIBC_TUNABLES` in the environment leave glibc's own settings in place. Freed memory above the heap's live data stays resident up to 64 MB, and blocks of 32 MB and more still get mappings that go back to the kernel when freed.
+- **Effect.** Over 6,000 merges, 287 `brk` calls and 30k page faults; system time 5-17 µs per merge whatever ran before; `merge()` after joins 828 to 550 µs per call (GNU R 1,270). `freed_native_buffers_stay_resident` in `crates/libr/tests/test_native.rs` pins it.
+

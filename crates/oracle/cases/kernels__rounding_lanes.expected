@@ -1,0 +1,40 @@
+[stdout]
+|  [1] "-0x1.8p+1"              "-0x1p+0"                "-0x0p+0"               
+|  [4] "0x0p+0"                 "0x0p+0"                 "0x1p+1"                
+|  [7] "NA"                     "NaN"                    "Inf"                   
+| [10] "-Inf"                   "0x1.ffffffffffffep+51"  "-0x1.0000000000001p+52"
+| [13] "0x1.7e43c8800759cp+996" "-0x1p+0"                "0x0p+0"                
+| [1] -Inf  Inf
+|  [1] FALSE FALSE FALSE FALSE FALSE FALSE  TRUE  TRUE FALSE FALSE FALSE FALSE
+| [13] FALSE FALSE FALSE
+|  [1] "-0x1p+1"                "-0x0p+0"                "-0x0p+0"               
+|  [4] "0x0p+0"                 "0x1p+0"                 "0x1.8p+1"              
+|  [7] "NA"                     "NaN"                    "Inf"                   
+| [10] "-Inf"                   "0x1p+52"                "-0x1.0000000000001p+52"
+| [13] "0x1.7e43c8800759cp+996" "-0x0p+0"                "0x1p+0"                
+| [1] -Inf  Inf
+|  [1] FALSE FALSE FALSE FALSE FALSE FALSE  TRUE  TRUE FALSE FALSE FALSE FALSE
+| [13] FALSE FALSE FALSE
+|  [1] "-0x1p+1"                "-0x0p+0"                "-0x0p+0"               
+|  [4] "0x0p+0"                 "0x0p+0"                 "0x1p+1"                
+|  [7] "NA"                     "NaN"                    "Inf"                   
+| [10] "-Inf"                   "0x1.ffffffffffffep+51"  "-0x1.0000000000001p+52"
+| [13] "0x1.7e43c8800759cp+996" "-0x0p+0"                "0x0p+0"                
+| [1] -Inf  Inf
+|  [1] FALSE FALSE FALSE FALSE FALSE FALSE  TRUE  TRUE FALSE FALSE FALSE FALSE
+| [13] FALSE FALSE FALSE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] 1 2 3
+| [1]  1 NA
+|   [,1] [,2]
+| a    1    2
+| b   -1   NA
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| structure(c(1, -1, 2, NA), dim = c(2L, 2L), dimnames = list(c("a", 
+| "b"), NULL))
