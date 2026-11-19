@@ -893,11 +893,19 @@ impl<'db> InferenceTable<'db> {
                 .any(|&member| self.compatible_probe(db, actual, member, depth + 1));
         }
         // A scalar is a length-one vector in R, so a variable that a scalar use bounded (`1:n`)
-        // fills a vector parameter as its element, as a scalar argument does.
+        // or a literal wrote (`p <- "a"`) fills a vector parameter as its element, as a scalar
+        // argument does.
         if let (TyKind::Var(var), TyKind::Vector(element) | TyKind::NamedVector(element)) =
             (actual.kind(db), expected.kind(db))
             && let Entry::Unbound {
-                constraint: Constraint::ScalarNumeric | Constraint::AtomicElement | Constraint::Key,
+                constraint:
+                    Constraint::ScalarNumeric
+                    | Constraint::AtomicElement
+                    | Constraint::Key
+                    | Constraint::WholeLiteral { .. }
+                    | Constraint::FracLiteral
+                    | Constraint::StrLiteral
+                    | Constraint::BoolLiteral,
                 ..
             } = self.entry(self.find(*var))
         {

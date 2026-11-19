@@ -2354,3 +2354,14 @@ span <- function(n) {
 #++++
 basis: <T, U> fn([n]: T, [penalty]: U) -> list{off: double | NULL}
 span: <T: numeric> fn(n: T) -> double[]
+
+#---- a_literal_local_fills_a_vector_parameter
+# A literal is a length-one vector, so a local written from one fills a `character[]` or
+# `double[]` parameter as the literal itself does.
+f <- function(x) { p <- "a"; sprintf(p, x) }
+g <- function(x) { n <- 2; flag <- TRUE; c(rev(n), isTRUE(flag)) }
+k <- function(x) { p <- "a"; grepl(p, x) }
+#++++
+f: <T> fn(x: T) -> character
+g: <T> fn([x]: T) -> double[]
+k: <T> fn(x: T) -> logical
