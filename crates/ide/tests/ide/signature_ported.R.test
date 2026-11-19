@@ -132,3 +132,23 @@ signature: fn(x: double, [by]: double) -> double
 parameters: x: double | [[by]: double]
 completion (74): by = , by, break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot
 hint @69by =
+
+#---- a_block_function_called_in_the_same_block
+encapsulate <- function(expr) eval(substitute(expr), new.env())
+encapsulate({
+  helper <- function(objs, target_env) objs
+  user <- function(x) helper(x$0, NULL)
+})
+#++++
+hover 64..162: Any
+definition 141..142
+references: 141..142*, 151..152
+rename: 2 edit(s)
+signature: fn(objs, target_env)
+parameters: [objs] | target_env
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T> fn([expr]: T) -> Any\n"
+completion (29): x, x11, xedit, xemacs, xfig, xinch, xor, xpdrows.data.frame
+hint @11: <T> fn([expr]: T) -> Any
+hint @35expr =
+hint @53envir =

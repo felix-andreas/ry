@@ -889,8 +889,6 @@ measurement showed.
 - A nominal union is unchecked through `$` while a structural union is exact. There is also no
   discriminator for a nominal type, because `is.list` is true of both arms, so a tagged union cannot
   be narrowed at all.
-- Signature help misses R6's own helpers (`assign_func_envs`, `merge_vectors`, `list2env2`),
-  which R6 defines inside `encapsulate({...})` blocks; go-to-definition already finds them.
 - Editor gaps left by the completeness pass against rust-analyzer (`ide/tests/ide/editor-completeness.R.test`
   pins what works). `df$` on a base `data.frame` completes nothing, because its columns are not
   typed (the `DataFrame` type is the typed alternative). A local whose

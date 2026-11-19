@@ -780,10 +780,11 @@ hover 150..155: envir: NULL
 definition 104..109
 references: 104..109*, 150..155
 rename: 2 edit(s)
-signature: none
+signature: fn(x, envir = NULL)
+parameters: x | [envir = NULL]
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn([expr]: T) -> Any\n"
-completion (63): env.profile, environment, environmentIsLocked, environmentName, emptyenv, .expand_R_libs_env_var, getGraphicsEventEnv, new.env
+completion (64): envir, env.profile, environment, environmentIsLocked, environmentName, emptyenv, .expand_R_libs_env_var, getGraphicsEventEnv
 hint @11: <T> fn([expr]: T) -> Any
 hint @35expr =
 hint @53envir =
