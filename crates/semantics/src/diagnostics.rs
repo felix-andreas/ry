@@ -20,10 +20,10 @@ use {
         lints::LintConfig,
         metadata::{
             declared_dependency, imported_by_name, imports_every_name, is_own_package,
-            native_symbol,
+            native_symbol, own_qualified_names,
         },
         naming::{BindingKind, ItemNaming, NamespaceRead},
-        parse, prelude_enabled, project_type_definitions,
+        package_name, parse, prelude_enabled, project_type_definitions,
         stubs::{
             CONDITIONAL_NAMESPACES, STANDARD_LIBRARY, StubLibrary, SymbolSet,
             dormant_namespace_exports, namespace_exports, namespace_known, outside_prelude, stubs,
@@ -2147,11 +2147,30 @@ fn script_duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagn
 /// `:::` reaches unexported names, so only `::` checks exports. No stub corpus
 /// means no validation.
 fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
-    // A package's export set is not the names its sources bind (re-exports, S4
-    // generics, lazy-loaded data, `.onLoad` bindings), so its own qualified reads
-    // are never validated.
+    // A package's export set is not the names its sources bind (re-exports, S4 generics,
+    // lazy-loaded data, `.onLoad` bindings), so its own reads are validated against `NAMESPACE`.
     if is_own_package(db, &read.package) {
-        return None;
+        let name = read.name.as_ref()?;
+        let exported = own_qualified_names(db)?;
+        if read.internal || exported.contains(name.as_str()) {
+            return None;
+        }
+        let package = &read.package;
+        // A name the package binds is internal, so the fix is to export it, not to respell it.
+        let defined = package_name(db, QueryName::new(db, Name::new(db, name.as_str())))
+            .winner
+            .is_some();
+        let nearest = (!defined)
+            .then(|| nearest_name(name.as_str(), exported.iter().map(String::as_str)))
+            .flatten();
+        return Some(match nearest {
+            Some(nearest) => {
+                format!("`{name}` is not exported by `{package}`. Did you mean `{nearest}`?")
+            }
+            None => format!(
+                "`{name}` is not exported by `{package}`, so this read fails once the package is installed. Export it in `NAMESPACE`, or write `{package}:::{name}`."
+            ),
+        });
     }
     match namespace_known(db, &read.package)? {
         // A declared dependency without stubs is real, just undescribed.

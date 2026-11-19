@@ -2166,3 +2166,21 @@ Reading an item's range from `item_spans` made every edit re-lower every item of
 
 - `bump <- function(x) x + 1L` is `<T: numeric> fn(x: T) -> T`, so `bump(TRUE)` is `logical` where R gives `2L`. A `logical` argument meets the numeric constraint, and mixed arguments join (`add(1L, 1.5)` is `double`).
 - Binding `T` to `integer` for a `logical` argument would mistype `checked <- function(x) { stopifnot(x + 1L > 0L); x }`, which returns the `logical`. Only a type-level `promote(T, integer)` separates the two, and no corpus or benchmark finding depends on the difference, because a `logical` fits wherever an `integer` is expected. Build `promote` when a false report or a typed-ry need shows up, not before.
+
+## A package's own `pkg::name` reads are checked against `NAMESPACE` and `data/`
+
+**Status:** settled.
+
+- The export set is `export()` and `exportMethods()` from `NAMESPACE` plus the dataset names in
+  `data/` (`rdb::dataset_names`: every object of an `.rda`/`.RData`, the `Rdata.rdx` index, the stem
+  of `.csv`/`.tab`/`.txt`). It is a `PackageMetadata` field (`qualified_names`), so an edit to a
+  source file never touches it, and the server refreshes it with the rest of the metadata.
+- The project's bindings are the wrong set. Checked against them, every report on the CRAN corpus
+  was false: re-exports, S4 generics, datasets and `.onLoad` bindings are exported without a
+  definition. `NAMESPACE` plus `data/` gives no report on 44 CRAN packages, and a
+  planted typo, an internal read and `survival::lung` (one object of `cancer.rda`) behave as R does.
+- Unknowable means silent: no `NAMESPACE`, an `exportPattern()`, or an `.R` file under `data/` makes
+  the set `None`. The loader passes `None` because it reports no findings.
+- A name the package defines gets the "fails once installed, export it or write `:::`" message
+  rather than a respelling, because the intent is plainly that function.
+

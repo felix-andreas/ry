@@ -3358,9 +3358,17 @@ scoping.
 - The project's own package is always known. Qualifying a name with the package you are editing, as
   `withr::defer()` does inside the package `withr`, reads the definition the checker already holds,
   and wins over a stub namespace of the same name. It reads the namespace only, so in a test file or
-  a script `pathpkg::path` skips that file's own `path` binding. The name itself is not validated,
-  because a package exports names its sources never bind: re-exports, S4 generics from
-  `setGeneric`, datasets under `data/`, and bindings installed by `.onLoad`.
+  a script `pathpkg::path` skips that file's own `path` binding.
+- The name of an own `pkg::name` read is checked against what the installed package will export:
+  the `export()` and `exportMethods()` names in `NAMESPACE`, and the datasets under `data/` (every
+  object of an `.rda` file, and the stem of a `.csv`, `.tab` or `.txt` file). The read is checked
+  against `NAMESPACE`, not against what the sources bind, because a package exports names its
+  sources never bind (re-exports, S4 generics, datasets) and binds internals R refuses to read with
+  `::`. A name the package defines but does not export warns that the read fails once the package
+  is installed, and suggests exporting it or writing `pkg:::name`. Any other name warns "not
+  exported", with the nearest export as a suggestion. The check is off when the package has no
+  `NAMESPACE`, when `NAMESPACE` has an `exportPattern()`, and when `data/` holds an `.R` file, because
+  each makes the export set unknowable. `pkg:::name` is never checked.
 - When the stubs declare `name` in `pkg`, the qualified read has the stub's type. A project binding
   of the same name does not change it: `base::date()` calls base's `date` even when the package
   defines its own `date`. A name that only the namespace's [export manifest](#standard-library-exports) lists

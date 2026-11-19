@@ -144,6 +144,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A key test reads within the tests that enclose it
 - Strict mode reports where `Unknown` enters, not every type it reaches
 - An all-`logical` call of a numeric function keeps `logical` (settled)
+- A package's own `pkg::name` reads are checked against `NAMESPACE` and `data/` (settled)
 
 ## Editor and language server
 

@@ -2705,31 +2705,6 @@ self-consistency checks.
 They remain content-blind in the sense the three injected bugs demonstrate. A uniformly wrong answer
 is deterministic, incremental and in-bounds.
 
-## Open: a package's own `pkg::name` reads are not validated
-
-The project's own package, taken from `DESCRIPTION`'s `Package` field, is a known namespace whatever
-the stubs say. `withr::defer()` inside `withr` therefore reads the project's own definition and has
-its type instead of `Unknown`. The own package also wins over a stub namespace of the same name,
-matching the rule that a package binding shadows a stub name.
-
-The name itself is still not checked, so `withr::typoed_name()` reports nothing. Validating it
-against the project's definitions was implemented, measured and removed, because across the CRAN
-corpus every candidate report was a false positive. A package's export set is not the set of names
-its sources bind. Five shapes showed up.
-
-- A re-export. `shiny` has `importFrom(htmltools, validateCssUnit)` beside
-  `export(validateCssUnit)`, so the name is exported with no definition in the package.
-- An S4 generic from `setGeneric("raster", ...)`, which S4 opacity already covers.
-- A lazy-loaded dataset under `data/`. `survival::survexp.us` lives in `data/survexp.rda`.
-- A binding installed by `.onLoad`, such as `cli`'s `symbol`.
-- An S3 generic re-exported from another package, such as `broom`'s `glance`, from `generics`.
-
-Closing this needs the package's real export set, which means reading `NAMESPACE` `export()` and
-resolving re-exports, plus a decision about `exportPattern`. That last one is a regex over names, so
-it makes the set unknowable and must fall back to silence. It is worth doing, because a typo in a
-self-qualified call is otherwise invisible, but it is a namespace-model slice rather than a one-line
-check.
-
 ## Open: a stdlib wrapper loses all type information
 
 `function(x) abs(x)` infers `fn(x: T) -> Any`, and the same holds for `sum`, `cumsum` and every

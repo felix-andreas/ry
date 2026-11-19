@@ -901,6 +901,7 @@ fn a_data_file_edit_rechecks_only_the_reads_of_that_file() {
         attached,
         None,
         Default::default(),
+        None,
     );
     let layouts = |prices: &str| {
         BTreeMap::from([

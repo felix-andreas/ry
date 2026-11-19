@@ -116,6 +116,7 @@ fn main() {
         Default::default(),
         Default::default(),
         Default::default(),
+        None,
     )
     .durability(Durability::MEDIUM)
     .new(&db);

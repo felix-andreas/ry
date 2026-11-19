@@ -12,8 +12,8 @@ use {
         check_cache,
         cli::{
             analysable_source, collect_r_files, data_file_key, document_kind, exclude_matcher,
-            is_package_source, project_order, project_stub_paths, read_project_stubs,
-            scan_data_files, sniff_data_file,
+            is_package_source, own_qualified_names, project_order, project_stub_paths,
+            read_project_stubs, scan_data_files, sniff_data_file,
         },
         config::{
             CONFIG_FILE_NAME, CONFIG_FILE_NAMES, Config, ConfigError, INLINE_ANNOTATIONS_OFF,
@@ -508,6 +508,7 @@ struct WorkspaceMetadata {
     collate: Vec<String>,
     package: Option<String>,
     native_symbols: NativeSymbols,
+    qualified_names: Option<BTreeSet<String>>,
 }
 
 impl Worker {
@@ -636,6 +637,7 @@ impl Worker {
             Default::default(),
             metadata.package,
             metadata.native_symbols,
+            metadata.qualified_names,
         )
         .durability(Durability::MEDIUM)
         .new(&worker.db);
@@ -690,6 +692,10 @@ impl Worker {
             .as_deref()
             .map(parse_namespace)
             .unwrap_or_default();
+        let qualified_names = own_qualified_names(
+            &self.workspace_root,
+            namespace_text.is_some().then_some(&namespace_file),
+        );
         let imports = normalized_imports(&namespace_file.imports);
         let native_symbols = namespace_file.native_symbols;
         let description_text = fs::read_to_string(self.workspace_root.join("DESCRIPTION"));
@@ -711,6 +717,7 @@ impl Worker {
             collate,
             package,
             native_symbols,
+            qualified_names,
         }
     }
 
@@ -753,7 +760,8 @@ impl Worker {
         let facts_changed = metadata.imports(&self.db) != &current.imports
             || metadata.dependencies(&self.db) != &current.dependencies
             || metadata.package(&self.db) != &current.package
-            || metadata.native_symbols(&self.db) != &current.native_symbols;
+            || metadata.native_symbols(&self.db) != &current.native_symbols
+            || metadata.qualified_names(&self.db) != &current.qualified_names;
         if facts_changed {
             metadata.set_imports(&mut self.db).to(current.imports);
             metadata
@@ -763,6 +771,9 @@ impl Worker {
             metadata
                 .set_native_symbols(&mut self.db)
                 .to(current.native_symbols);
+            metadata
+                .set_qualified_names(&mut self.db)
+                .to(current.qualified_names);
         }
         if facts_changed || collate_changed {
             self.refresh_all_diagnostics();

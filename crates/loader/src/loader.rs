@@ -943,6 +943,8 @@ impl Loader {
                     BTreeSet::new(),
                     package,
                     native_symbols,
+                    // The loader reports no findings on qualified reads, so it leaves its own exports unknown.
+                    None,
                 )
                 .durability(Durability::HIGH)
                 .attached_durability(Durability::LOW)

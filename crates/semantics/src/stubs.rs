@@ -1031,6 +1031,7 @@ mod tests {
             Default::default(),
             None,
             Default::default(),
+            None,
         );
         let sources = StubSources::new(&db, shipped_stub_sources(), Vec::new());
         let library = stub_library(&db, sources);

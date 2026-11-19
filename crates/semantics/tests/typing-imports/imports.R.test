@@ -238,6 +238,77 @@ call_it <- function() stats::sd(1L)
 sd: <T> fn([x]: T) -> character
 call_it: fn() -> character
 
+#---- an_own_read_of_an_unexported_name_fails_once_installed
+# R resolves `pkg::name` against the installed package's exports, so a read of
+# an internal function works under `load_all` and fails for every user.
+#description Package: tallyr
+#namespace export(tally)
+tally <- function(x) helper(x)
+helper <- function(x) length(x)
+call_it <- function() tallyr::helper(1:3)
+#++++
+tally: <T> fn(x: T) -> integer
+helper: <T> fn(x: T) -> integer
+call_it: fn() -> Unknown
+290..304 warning[unresolved] `helper` is not exported by `tallyr`, so this read fails once the package is installed. Export it in `NAMESPACE`, or write `tallyr:::helper`.
+
+#---- an_own_read_of_a_misspelled_export_suggests_it
+#description Package: tallyr
+#namespace export(tally_all)
+tally_all <- function(x) length(x)
+call_it <- function() tallyr::tally_al(1:3)
+#++++
+tally_all: <T> fn(x: T) -> integer
+call_it: fn() -> Unknown
+115..131 warning[unresolved] `tally_al` is not exported by `tallyr`. Did you mean `tally_all`?
+
+#---- an_own_read_of_an_internal_name_is_not_respelled
+# `tally_one` is a letter away from the export `tally_all`, but the package
+# defines it, so the read wants an export, not a different name.
+#description Package: tallyr
+#namespace export(tally_all)
+tally_all <- function(x) tally_one(x)
+tally_one <- function(x) length(x)
+call_it <- function() tallyr::tally_one(1:3)
+#++++
+tally_all: <T> fn(x: T) -> integer
+tally_one: <T> fn(x: T) -> integer
+call_it: fn() -> Unknown
+294..311 warning[unresolved] `tally_one` is not exported by `tallyr`, so this read fails once the package is installed. Export it in `NAMESPACE`, or write `tallyr:::tally_one`.
+
+#---- an_own_triple_colon_read_reaches_internals
+#description Package: tallyr
+#namespace export(tally)
+tally <- function(x) helper(x)
+helper <- function(x) length(x)
+call_it <- function() tallyr:::helper(1:3)
+#++++
+tally: <T> fn(x: T) -> integer
+helper: <T> fn(x: T) -> integer
+call_it: fn() -> integer
+
+#---- an_own_read_of_a_dataset_or_exported_method_is_known
+#description Package: tallyr
+#namespace export(tally)
+#namespace exportMethods(show)
+#dataset sales
+tally <- function(x) length(x)
+read_data <- function() tallyr::sales
+read_method <- function() tallyr::show
+#++++
+tally: <T> fn(x: T) -> integer
+read_data: fn() -> Unknown
+read_method: fn() -> fn(object: Any) -> Any
+
+#---- an_export_pattern_leaves_own_reads_unknowable
+#description Package: tallyr
+#namespace exportPattern("^[a-z]")
+helper <- function(x) length(x)
+call_it <- function() tallyr::anything(1:3)
+#++++
+helper: <T> fn(x: T) -> integer
+call_it: fn() -> Unknown
+
 #---- a_different_package_is_still_validated
 #description Package: withr
 call_it <- function(d) unshipped::mutate(d, x = 1)

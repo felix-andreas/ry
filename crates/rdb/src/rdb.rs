@@ -324,6 +324,65 @@ pub fn namespace_names(package_dir: &Path) -> io::Result<Vec<String>> {
         .collect())
 }
 
+/// The datasets a source package's `data/` directory holds, by the names `data()` and lazy
+/// loading give them: each object of an `.rda` or `.RData` file, the stem of a table file
+/// (`.csv`, `.tab`, `.txt`, compressed or not), and every object of an `Rdata.rdx` index. A `.R`
+/// data script creates whatever names it runs, so it is an error, like an unreadable file.
+pub fn dataset_names(package_dir: &Path) -> io::Result<Vec<String>> {
+    let entries = match fs::read_dir(package_dir.join("data")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let uncompressed = [".gz", ".bz2", ".xz"]
+            .iter()
+            .find_map(|suffix| file_name.strip_suffix(suffix))
+            .unwrap_or(file_name);
+        let Some((stem, extension)) = uncompressed.rsplit_once('.') else {
+            continue;
+        };
+        match extension.to_ascii_lowercase().as_str() {
+            "rda" | "rdata" => {
+                let Value::Pairlist(objects) = unserialize(&decompress_file(&fs::read(&path)?)?)?
+                else {
+                    return Err(invalid(format!("{} is not a saved image", path.display())));
+                };
+                names.extend(
+                    objects
+                        .into_iter()
+                        .filter_map(|object| object.name)
+                        .map(|name| name.to_string()),
+                );
+            }
+            "rdx" if stem == "Rdata" => {
+                names.extend(
+                    read_index(&path)?
+                        .variables
+                        .into_iter()
+                        .map(|(name, _)| name),
+                );
+            }
+            "csv" | "tab" | "txt" => names.push(stem.to_owned()),
+            "r" => {
+                return Err(invalid(format!(
+                    "{} is R code, so only running it names its datasets",
+                    path.display()
+                )));
+            }
+            _ => {}
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 /// A lazy-load database's index: where each object's record is, and how records are
 /// compressed.
 struct Index {

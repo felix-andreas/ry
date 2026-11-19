@@ -19,7 +19,7 @@ use {
             Entry, FunctionMismatch, InferenceTable, RecordMismatch, UNCHECKED_WITNESS, UnifyError,
             apply_definition, numeric_join,
         },
-        metadata::{imported_by_name, imports_every_name, is_own_package},
+        metadata::{imported_by_name, imports_every_name, is_own_package, own_qualified_names},
         naming::{
             BindingId, BindingKind, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable,
             is_column_update, query_index_arguments,
@@ -20712,7 +20712,9 @@ fn validated_namespace_name(
     };
     // The project's own package resolves through globals and wins over a same-named stub namespace.
     if is_own_package(db, package.as_str()) {
-        return Some(name);
+        return (internal
+            || own_qualified_names(db).is_none_or(|exported| exported.contains(name.as_str())))
+        .then_some(name);
     }
     match library.map(|library| library.knows_namespace(package.as_str())) {
         None => Some(name),
