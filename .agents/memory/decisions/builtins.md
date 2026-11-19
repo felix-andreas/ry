@@ -576,7 +576,7 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 - **Lower case can differ from GNU R by Unicode version** for letters added or reclassified between the Unicode of Rust's standard library and of the system's glibc (U+0295 and the letters Unicode 16 added are examples).
 - Oracle case: `strings__abbreviate_non_ascii`.
 
-## Vector kernels: one typed loop per case, exact sizes, and GNU R's polygamma
+## Vector kernels: one typed loop per case, exact sizes, and GNU R's polygamma and Bessel functions
 
 **Status:** settled.
 
@@ -586,5 +586,6 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 - **Blocks.** `is.unsorted` (and `order`'s sortedness check) test adjacent pairs in branchless blocks of 16 with GNU R's comparisons. `unique` and `duplicated` of a list hash each element once into a `PositionTable`.
 - **`make.unique`** works on interned strings and gives a made name as native text. GNU R hashes by `CHARSXP` address and compares text only on a bucket collision, so its answer for the same text in two encodings depends on allocation; ry always gives the answer of distinct buckets, and the oracle case avoids mixing encodings.
 - **Polygamma** runs a line-by-line port of GNU R's `dpsifn` (Amos's algorithm 610), bit-identical on a 72,444-value grid; the earlier Hurwitz-zeta sum differed in the last bits and cost more per value. GNU R's underflow count increments its pointer, not the count, so `Rf_dpsifn` reports 0, as GNU R does.
+- **The Bessel functions** run a port of GNU R 4.6.2's netlib routines (`I_bessel`, `J_bessel`, `K_bessel`, `Y_bessel`, with Cody's `gamma_cody`) in C evaluation order with `bessel.h`'s constants, bit-identical with GNU R on 72,000 random and 6,318 edge points, warnings included. The C quirks are kept: J's inner `n` shadows the outer one, so `besselJ(5, 200)` is 0 without a warning. Orders up to 16 use a stack work array.
 - **Measured and not taken: carrying `order`'s second key through the first key's counting scatter.** At 1e7 rows `order(g, -x)` took 0.64 s with it against 0.50 to 0.59 s without, because the per-run sort, not the gather, dominates.
-- **Oracle cases:** `arith__integer_divide_not_and_which_kernels`, `arith__polygamma_last_bits`, `sort__fast_paths_for_repeats_and_order_checks`, `strings__make_unique_encodings`.
+- **Oracle cases:** `arith__integer_divide_not_and_which_kernels`, `arith__polygamma_last_bits`, `arith__bessel_last_bits`, `sort__fast_paths_for_repeats_and_order_checks`, `strings__make_unique_encodings`.

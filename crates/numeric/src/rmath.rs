@@ -9686,8 +9686,8 @@ fn i_bessel(x: f64, alpha: f64, ize: i32, bi: &mut [f64]) -> i64 {
     let mut overflowed = false;
     if nbmx >= 3 {
         let mut tover = BESSEL_ENTEN / BESSEL_ENSIG;
-        let mut nstart = intx + 2;
-        let mut nend = nb - 1;
+        let nstart = intx + 2;
+        let nend = nb - 1;
         for k in nstart..nend + 1 {
             n = k;
             en += 2.0;
@@ -9702,7 +9702,7 @@ fn i_bessel(x: f64, alpha: f64, ize: i32, bi: &mut [f64]) -> i64 {
                 plast /= tover;
                 let mut psave = p;
                 let mut psavel = plast;
-                nstart = n + 1;
+                let rescale_start = n + 1;
                 loop {
                     n += 1;
                     en += 2.0;
@@ -9719,9 +9719,9 @@ fn i_bessel(x: f64, alpha: f64, ize: i32, bi: &mut [f64]) -> i64 {
                 p = plast * tover;
                 n -= 1;
                 en -= 2.0;
-                nend = nb.min(n);
-                ncalc = nend + 1;
-                for l in nstart..nend + 1 {
+                let rescale_end = nb.min(n);
+                ncalc = rescale_end + 1;
+                for l in rescale_start..rescale_end + 1 {
                     pold = psavel;
                     psavel = psave;
                     psave = en * psavel / x + pold;
@@ -10026,8 +10026,8 @@ fn j_bessel(x: f64, alpha: f64, b: &mut [f64]) -> i64 {
     let mut overflowed = false;
     if nbmx >= 3 {
         let mut tover = BESSEL_ENTEN / BESSEL_ENSIG;
-        let mut nstart = intx + 2;
-        let mut nend = nb - 1;
+        let nstart = intx + 2;
+        let nend = nb - 1;
         en = (nstart + nstart) as f64 - 2.0 + twonu;
         for k in nstart..nend + 1 {
             // The C declares a fresh `n` in this loop, so the overflow branch advances that copy
@@ -10043,7 +10043,7 @@ fn j_bessel(x: f64, alpha: f64, b: &mut [f64]) -> i64 {
                 plast /= tover;
                 let mut psave = p;
                 let mut psavel = plast;
-                nstart = inner_n + 1;
+                let rescale_start = inner_n + 1;
                 loop {
                     inner_n += 1;
                     en += 2.0;
@@ -10060,9 +10060,9 @@ fn j_bessel(x: f64, alpha: f64, b: &mut [f64]) -> i64 {
                 p = plast * tover;
                 inner_n -= 1;
                 en -= 2.0;
-                nend = nb.min(inner_n);
-                ncalc = nend;
-                for i in nstart..nend + 1 {
+                let rescale_end = nb.min(inner_n);
+                ncalc = rescale_end;
+                for i in rescale_start..rescale_end + 1 {
                     pold = psavel;
                     psavel = psave;
                     psave = en * psavel / x - pold;
