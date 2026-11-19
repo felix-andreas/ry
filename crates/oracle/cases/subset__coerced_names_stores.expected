@@ -1,0 +1,100 @@
+[stdout]
+| == integer 
+| List of 3
+|  $ : num 2
+|  $ :List of 1
+|   ..$ : num 2
+|  $ : num 2
+| List of 2
+|  $ :List of 2
+|   ..$ 1: num 1
+|   ..$ 2: chr "by [[<-"
+|  $ :List of 3
+|   ..$ 1: num 1
+|   ..$ 2: chr "by $<-"
+|   ..$ 3: chr "new"
+| == double 
+| List of 3
+|  $ : num 2
+|  $ :List of 1
+|   ..$ : num 2
+|  $ : num 2
+| List of 2
+|  $ :List of 2
+|   ..$ 1: num 1
+|   ..$ 2: chr "by [[<-"
+|  $ :List of 3
+|   ..$ 1: num 1
+|   ..$ 2: chr "by $<-"
+|   ..$ 3: chr "new"
+| == as_character 
+| List of 3
+|  $ : num 2
+|  $ :List of 1
+|   ..$ : num 2
+|  $ : num 2
+| List of 2
+|  $ :List of 2
+|   ..$ 1: num 1
+|   ..$ 2: chr "by [[<-"
+|  $ :List of 3
+|   ..$ 1: num 1
+|   ..$ 2: chr "by $<-"
+|   ..$ 3: chr "new"
+| == format 
+| List of 3
+|  $ : num 2
+|  $ :List of 1
+|   ..$ : num 2
+|  $ : num 2
+| List of 2
+|  $ :List of 2
+|   ..$ 1: num 1
+|   ..$ 2: chr "by [[<-"
+|  $ :List of 3
+|   ..$ 1: num 1
+|   ..$ 2: chr "by $<-"
+|   ..$ 3: chr "new"
+| == literal 
+| List of 3
+|  $ : num 2
+|  $ :List of 1
+|   ..$ : num 2
+|  $ : num 2
+| List of 2
+|  $ :List of 2
+|   ..$ 1: num 1
+|   ..$ 2: chr "by [[<-"
+|  $ :List of 3
+|   ..$ 1: num 1
+|   ..$ 2: chr "by $<-"
+|   ..$ 3: chr "new"
+| == paste0 
+| List of 3
+|  $ : num 2
+|  $ :List of 1
+|   ..$ : num 2
+|  $ : num 2
+| List of 2
+|  $ :List of 2
+|   ..$ 1: num 1
+|   ..$ 2: chr "by [[<-"
+|  $ :List of 3
+|   ..$ 1: num 1
+|   ..$ 2: chr "by $<-"
+|   ..$ 3: chr "new"
+| [1] "object 1" "object 2" "object 3" "object 4"
+| [1] "object 1" "object 2" "object 3" "object 4"
+| List of 4
+|  $ 7     : chr "replaced by $"
+|  $ 42    : chr "replaced"
+|  $ 1000  : chr "object 3"
+|  $ 123456: chr "object 4"
+| 1 2 3 
+| 1 1 3 
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| c("1" = 1L, "2" = 1L, "3" = 3L)
