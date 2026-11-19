@@ -24,11 +24,11 @@ list[named: Any]
 handler: fn() -> Any
 
 #---- manifest_only_exports_resolve
-f <- function(x, y) bitwAnd(x, y)
+f <- function(path) R.home(path)
 g <- function(path) utils::aspell(path)
 h <- function(d) aggregate(d)
 #++++
-f: <T, U> fn(x: T, y: U) -> Unknown
+f: <T> fn(path: T) -> Unknown
 g: <T> fn(path: T) -> Unknown
 h: <T> fn(d: T) -> Unknown
 

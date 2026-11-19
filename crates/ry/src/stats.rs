@@ -15,7 +15,7 @@ use {
     semantics::{
         AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
         check::CHECK_EXECUTIONS,
-        diagnostics::file_diagnostics,
+        diagnostics::{TypeRenderer, file_diagnostics},
         infer::resolve_calls,
         lints::lint_file,
         metadata::{
@@ -23,6 +23,7 @@ use {
             parse_description_dependencies, parse_namespace,
         },
         stubs::{StubSources, shipped_export_manifests, shipped_stub_sources},
+        types::{self, TyKind},
     },
     std::{
         cmp::Reverse,
@@ -287,6 +288,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
     }
 
     print_memo_census(&mut db);
+    unknown_exports(&db, &records, &root);
 
     println!();
     println!("slowest files (typecheck):");
@@ -401,6 +403,123 @@ fn editor_requests(db: &mut RootDatabase, records: &[FileRecord], edited: usize,
 
 /// How often hover and goto-definition answer at identifiers in package files, by the role the
 /// identifier plays, with a few unanswered positions per role to show where the gaps are.
+const UNKNOWN_EXPORT_EXAMPLES: usize = 8;
+
+#[derive(Default)]
+struct UnknownExportTally {
+    count: usize,
+    /// Neither a finding nor a strict origin in the item explains the `Unknown`.
+    silent: usize,
+    examples: Vec<String>,
+}
+
+/// How many package items export a type that contains `Unknown`, and why: the volume a strict
+/// rule reporting such exports would produce.
+fn unknown_exports(db: &RootDatabase, records: &[FileRecord], root: &Path) {
+    let mut tallies: BTreeMap<&'static str, UnknownExportTally> = BTreeMap::new();
+    let mut exported = 0usize;
+    let mut aliases = 0usize;
+    let mut strict_silent = 0usize;
+    for record in records {
+        if record.file.kind(db) != &DocumentKind::Package {
+            continue;
+        }
+        for span in semantics::item_spans(db, record.file) {
+            let Some(check) = semantics::item_check(db, span.item) else {
+                continue;
+            };
+            let Some(scheme) = &check.scheme else {
+                continue;
+            };
+            exported += 1;
+            if !types::contains_unknown(db, scheme.body) {
+                continue;
+            }
+            let cause = match scheme.body.kind(db) {
+                TyKind::Unknown if !check.errors.is_empty() => "cut by a finding in the item",
+                TyKind::Unknown => "the whole value",
+                TyKind::Function(function) => {
+                    let in_parameters = function
+                        .positional
+                        .iter()
+                        .copied()
+                        .chain(function.named.iter().map(|parameter| parameter.ty))
+                        .chain(function.variadic.map(|rest| rest.element))
+                        .any(|ty| types::contains_unknown(db, ty));
+                    match (in_parameters, types::contains_unknown(db, function.ret)) {
+                        (true, true) => "a function: parameters and return",
+                        (true, false) => "a function: parameters only",
+                        _ => "a function: return only",
+                    }
+                }
+                _ => "part of another composite",
+            };
+            let text = record
+                .source
+                .get(usize::from(span.range.start())..usize::from(span.range.end()))
+                .unwrap_or_default();
+            let value = text.split_once("<-").map_or("", |(_, value)| value.trim());
+            if !value.is_empty()
+                && value
+                    .chars()
+                    .all(|character| character.is_alphanumeric() || "._:".contains(character))
+            {
+                aliases += 1;
+            }
+            let silent = check.strict_origins.is_empty() && check.errors.is_empty();
+            let tally = tallies.entry(cause).or_default();
+            tally.count += 1;
+            if !silent {
+                continue;
+            }
+            strict_silent += 1;
+            tally.silent += 1;
+            let examples = &mut tally.examples;
+            if examples.len() < UNKNOWN_EXPORT_EXAMPLES {
+                let line = record
+                    .source
+                    .get(..usize::from(span.range.start()))
+                    .unwrap_or_default()
+                    .matches('\n')
+                    .count()
+                    + 1;
+                let name = span
+                    .name_range
+                    .and_then(|range| {
+                        record
+                            .source
+                            .get(usize::from(range.start())..usize::from(range.end()))
+                    })
+                    .unwrap_or("?");
+                let rendered = TypeRenderer::default().render_scheme(db, scheme);
+                examples.push(format!(
+                    "{}:{line} {name}: {}",
+                    record
+                        .path
+                        .strip_prefix(root)
+                        .unwrap_or(&record.path)
+                        .display(),
+                    rendered.chars().take(160).collect::<String>(),
+                ));
+            }
+        }
+    }
+    let total: usize = tallies.values().map(|tally| tally.count).sum();
+    println!();
+    println!(
+        "exports containing Unknown: {total} of {exported} package items ({aliases} bare-name aliases, {strict_silent} with no finding; strict origins are recorded only under strict mode)"
+    );
+    for (cause, tally) in &tallies {
+        println!(
+            "  {:>6}  {cause} ({} with no finding)",
+            tally.count, tally.silent
+        );
+        for example in &tally.examples {
+            println!("            {example}");
+        }
+    }
+}
+
 fn editor_coverage(db: &RootDatabase, records: &[FileRecord], root: &Path) {
     let Some(files) = ProjectFiles::try_get(db) else {
         return;

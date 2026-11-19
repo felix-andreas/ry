@@ -4383,6 +4383,13 @@ determine a type, together with the [parameters nothing constrains](#untyped-par
 escalates unresolved references to errors. It also holds each function written in ry types to
 [running natively](#native-functions).
 
+Strict mode reports an `Unknown` once, where it enters: at the construct, read or call the checker
+could not type. A value computed from it, such as the result of a function that returns another
+function's `Unknown` result, is not reported again. A call to a function that no stub declares is
+such an entry point, whether the function comes from base R, as `R.home()` and `.Call(...)` do, or
+from another package. `#: @if-unknown TYPE` on the binding that receives the result accepts it, and
+a [stub](/development/authoring-stubs) line declaring the function removes the finding everywhere.
+
 A value typed `Any` by an annotation or a single declaration is an intentional opt-out and never
 produces a strict finding. A call that falls back to an overload set's `Any` candidate is the
 exception, because the fallback marks a call the declarations could not describe.

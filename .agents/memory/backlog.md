@@ -881,33 +881,6 @@ diagnostic that reads perfectly while blaming the wrong expression counted as a 
 Only the open findings are below. `test-user-reports.md` holds the closed ones with what each
 measurement showed.
 
-### Should strict mode report a binding whose exported type contains `Unknown`?
-
-This is a design question, not a bug fix, and it needs volume measured before it is chosen.
-
-The gap is real. `g <- f` closes to `g: fn(p: Unknown) -> Unknown`, which the
-`aliased_function_reference_exports_closed` fixture pins, and strict reports nothing. Calls through
-`g` are therefore unchecked while the run looks like a pass.
-
-Two earlier diagnoses of it were wrong, and the measurements are the keepable part.
-
-- **`Any` is not what blinds strict mode.** Changing `do.call`'s return from `Any` to `Unknown`
-  produces no strict finding at all. This was tried: the stub was edited, the binary rebuilt, and a
-  strict project run over `do.call(fun, args)`. Nothing.
-- **Strict mode has no binding-level `Unknown` test to widen.** It reports origins recorded at
-  construct sites, which are `UnsupportedConstruct`, `UndeterminedReference`, `LoopWidened` and
-  `RecursiveUnknown`. Nothing inspects a finished type.
-- **`Any` in the corpus is deliberate.** The shipped stubs declare 176 entries whose return is
-  `Any`, across nine files rather than just `base`, and none returning `Unknown`. The stub header
-  names each compromise.
-- The one behavioral difference between them is that `@if-unknown` coerces an `Unknown` and is
-  refused on an `Any`, saying that the value is already `Any` so the annotation should be dropped.
-
-Measure before deciding. Strict mode already emits 2879 findings on dplyr and 2458 on shiny with
-typing and strict forced on, and `erase_residual_vars` gives every aliased function `Unknown`
-parameters, so a containment sweep would fire on `g <- f`, an idiom ordinary R uses constantly.
-Decide it as a design note with numbers, not as a one-line widening.
-
 ### Promotion needs to live in the type, not in the binding
 
 Two findings are the same missing piece, and they should be designed together.

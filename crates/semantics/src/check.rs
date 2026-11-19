@@ -11559,6 +11559,25 @@ impl<'db, 'a> Checker<'db, 'a> {
             Some(ty) => ty,
             None => self.infer(callee),
         };
+        // Reading a base function no stub declares is left unchecked, because intrinsics such
+        // as `c` are typed at their calls. A call that reaches this point is not one of them, so
+        // its `Unknown` result enters here, as a library function's does.
+        if looked_up.is_none()
+            && let Some(name) = self.naming.non_locals.get(&callee)
+            && matches!(
+                self.table.shallow_resolve(self.db, callee_ty).kind(self.db),
+                TyKind::Unknown
+            )
+            && is_base_export(self.db, name)
+            && !self.globals.is_some_and(|globals| {
+                globals.defined_in_project(*name, self.naming.deferred_non_locals.contains(&callee))
+            })
+        {
+            self.record_strict_origin(
+                callee,
+                StrictOriginKind::UndeterminedReference(name.to_string()),
+            );
+        }
         let named_callee = matches!(
             self.module.kind(callee),
             ExpressionKind::NameRef(_) | ExpressionKind::Namespace { .. }
