@@ -76,7 +76,7 @@ hint @114FUN =
 pick <- function(x, y) x
 value <- pick($0)
 #++++
-hover 34..40: T
+hover 34..40: Unknown
 definition: none
 references: none
 rename: none

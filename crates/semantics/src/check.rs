@@ -11626,8 +11626,18 @@ impl<'db, 'a> Checker<'db, 'a> {
             false => CalleeSource::Value,
         };
         let enclosing_call_first_var = mem::replace(&mut self.call_first_var, first_var);
+        let errors_before = self.errors.len();
         let result = self.dispatch_call(range, callee_range, callee_ty, source, &call_arguments);
         self.call_first_var = enclosing_call_first_var;
+        // A call its callee refuses can leave the callee's result variables unbound, and
+        // printing one would show a bare `T`. A result the declaration fixes is kept.
+        if self.errors.len() > errors_before {
+            let mut variables = FxHashSet::default();
+            collect_vars(self.db, self.table.resolve(self.db, result), &mut variables);
+            if variables.iter().any(|variable| variable.0 >= first_var) {
+                return unknown(self.db);
+            }
+        }
         if callback_outputs.is_empty() {
             return result;
         }

@@ -84,7 +84,7 @@ mirror <- function(x) x
 mirror()
 #++++
 mirror: <T> fn(x: T) -> T
-T
+Unknown
 24..30 error[type-mismatch] this call leaves out `x`, which the function requires
 
 #---- extra_argument
@@ -142,7 +142,7 @@ mirror <- function(x) x
 mirror(y = 1L)
 #++++
 mirror: <T> fn(x: T) -> T
-T
+Unknown
 31..32 error[type-mismatch] this function has no parameter `y`. Its named parameter is `x`
 
 #==== optional_parameters
@@ -476,7 +476,7 @@ f <- function(..., sep) sep
 f("a", 1L)
 #++++
 f: <T> fn(...: Any, sep: T) -> T
-T
+Unknown
 28..29 error[type-mismatch] this call leaves out `sep`, which the function requires
 
 #---- unmatched_keyword_is_absorbed_by_the_rest

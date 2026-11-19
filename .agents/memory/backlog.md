@@ -881,38 +881,6 @@ diagnostic that reads perfectly while blaming the wrong expression counted as a 
 Only the open findings are below. `test-user-reports.md` holds the closed ones with what each
 measurement showed.
 
-### Promotion needs to live in the type, not in the binding
-
-Two findings are the same missing piece, and they should be designed together.
-
-**A `logical` is accepted at a declared `integer` parameter and refused at an inferred numeric one.**
-Both halves reproduce. `bump <- function(x) x + 1L; bump(TRUE)` is refused, and the same body under
-`#: fn(n: integer) -> integer` accepts it. R does promote, because `TRUE + 1L` is `2L`, and the
-checker's own arithmetic rules say so. Verified against R 4.3.3.
-
-Do not just widen the constraint. The obvious repair is to bind the numeric variable to `integer`
-when a `logical` argument arrives, which is exactly R's promotion, and it is wrong. The
-counter-example is ordinary R.
-
-```r
-bump    <- function(x) x + 1L                          # R: bump(TRUE) is 2L, integer
-checked <- function(x) { stopifnot(x + 1L > 0L); x }   # R: checked(TRUE) is TRUE, logical
-```
-
-Both infer `<T: numeric> fn(x: T) -> ...`. One binding of `T` cannot be `integer` for the first and
-`logical` for the second, so the promotion produces a wrong return type. This project ranks a wrong
-answer below a refusal, because a gap means checks are skipped rather than that wrong answers are
-produced.
-
-**A numeric variable shared by two parameters refuses ordinary mixed arithmetic.**
-`add <- function(a, b) a + b` infers `<T: numeric> fn(a: T, b: T) -> T`, which ties both operands to
-one variable, so `add(1L, 1.5)` reports ``expected `integer`, found `double` `` where R gives `2.5`.
-That is a false positive on about as plain a piece of R as exists. The operand types need a numeric
-join, where `integer` with `double` is `double`, rather than unification.
-
-Closing either properly needs a scheme like `<T: numeric> fn(x: T) -> promote(T)`, which is a
-type-level function the annotation language does not have.
-
 ### Smaller open items
 
 - `@new` is unrestricted project-wide, so a nominal type's invariant holds only by convention. The
@@ -927,9 +895,6 @@ type-level function the annotation language does not have.
 - A generic lambda passed as an argument keeps its binders rigid, so
   `lapply(xs, function<T>(v: T) -> T v)` reports `its parameter v accepts T`. An inline signature
   on a function that is not bound should instantiate its binders like a call does.
-- A call that fails against a generic signature types its statement as the leaked rigid name, so
-  `twice("a")` against `<T: numeric> fn(x: T) -> T` renders `T` in the typing fixtures. It should
-  be `Unknown`.
 - Signature help misses R6's own helpers (`assign_func_envs`, `merge_vectors`, `list2env2`),
   which R6 defines inside `encapsulate({...})` blocks; go-to-definition already finds them.
 - httr2's argument-name definition role (about 90%) counts arguments collected into `...` and

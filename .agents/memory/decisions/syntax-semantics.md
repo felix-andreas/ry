@@ -2159,3 +2159,10 @@ Reading an item's range from `item_spans` made every edit re-lower every item of
 - Measured with `ry debug analysis-stats`, which prints the count. On the ten-package corpus with strict forced on, 1665 of 4036 package items export a type containing `Unknown`, and 1563 of them have a finding in the same item. Every sampled one of the other 102 inherits an `Unknown` that a project callee's own finding reports (renv's `data_frame <- function(...) as_data_frame(list(...))`, knitr's `child_mode` over `opts_knit$get`). The strict typed finbench exports `Unknown` from 0 of 40,746 items. A containment rule would repeat each origin at every item downstream of it.
 - **A call to a base function no stub declares is an origin** (`R.home()`, `.Call(...)`), as a package function with no stub already was. Reading such a name as a value stays unreported, because intrinsics such as `c` and `[[` have no stub and are typed at their calls. `@if-unknown` accepts the result, and the remedy is a stub line.
 - The backlog's premise that `g <- f` exports `fn(p: Unknown) -> Unknown` no longer holds: an alias keeps the scheme (`aliased_function_reference_exports_closed`).
+
+## An all-`logical` call of a numeric function keeps `logical`
+
+**Status:** settled.
+
+- `bump <- function(x) x + 1L` is `<T: numeric> fn(x: T) -> T`, so `bump(TRUE)` is `logical` where R gives `2L`. The two refusals this once caused are gone: a `logical` argument meets the numeric constraint, and mixed arguments join (`add(1L, 1.5)` is `double`).
+- Binding `T` to `integer` for a `logical` argument would mistype `checked <- function(x) { stopifnot(x + 1L > 0L); x }`, which returns the `logical`. Only a type-level `promote(T, integer)` separates the two, and no corpus or benchmark finding depends on the difference, because a `logical` fits wherever an `integer` is expected. Build `promote` when a false report or a typed-ry need shows up, not before.

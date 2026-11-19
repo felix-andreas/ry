@@ -2295,6 +2295,12 @@ A `matrix` absorbs any number, logical or numeric vector the same way, because R
 matrix: with `weigh <- function(a, H) a * H`, both `weigh(2, m)` and `weigh(m, 2)` are `matrix`. A
 matrix's element type is not tracked, so a character matrix is absorbed too.
 
+When every argument a numeric parameter receives is `logical`, the result stays `logical`, so with
+`bump <- function(x) x + 1L`, `bump(TRUE)` is `logical` where R returns the integer `2L`. The
+signature `<T: numeric> fn(x: T) -> T` cannot say "the wider of `T` and `integer`", and binding `T`
+to `integer` instead would mistype a function that returns `x` itself. Neither choice causes a false
+error, because a `logical` fits wherever an `integer` is expected.
+
 An argument that is itself still generic, such as the parameter `H` in
 `outer <- function(H) weigh(2, H)`, is constrained to be numeric rather than pinned to the literal's
 `double`, so `outer` is `<T: numeric> fn(H: T) -> double` and accepts a vector or a matrix. The result

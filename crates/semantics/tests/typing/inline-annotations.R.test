@@ -175,7 +175,7 @@ twice <- function<T: numeric>(x: T) -> T x + x
 twice("a")
 #++++
 twice: <T: numeric> fn(x: T) -> T
-T
+Unknown
 53..56 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- lambda_spelling
@@ -353,7 +353,7 @@ g <- function<T: numeric>(x: T) -> T x
 g("a")
 #++++
 g: <T: numeric> fn(x: T) -> T
-T
+Unknown
 35..45 warning[annotation-mismatch] the inline annotation gives this type parameter `numeric`, but the `#:` comment gives it no constraint. ry uses the inline one; make the two agree, or delete one
   = 4..5 the `#:` comment's type parameter is here
 62..65 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`

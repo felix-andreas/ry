@@ -252,7 +252,7 @@ hint @50 -> T
 helper <- function(first, second = 2L, third = 3L) first
 helper(third = 1L, $0)
 #++++
-hover 57..77: T
+hover 57..77: Unknown
 definition: none
 references: none
 rename: none
@@ -275,7 +275,7 @@ hint @50 -> T
 helper <- function(first, second = 2L) first
 helper(second = $0)
 #++++
-hover 45..62: T
+hover 45..62: Unknown
 definition: none
 references: none
 rename: none

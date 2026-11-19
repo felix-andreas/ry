@@ -143,6 +143,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A value whose code a later top-level write replaces is a template
 - A key test reads within the tests that enclose it
 - Strict mode reports where `Unknown` enters, not every type it reaches
+- An all-`logical` call of a numeric function keeps `logical` (settled)
 
 ## Editor and language server
 
