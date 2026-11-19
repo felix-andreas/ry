@@ -800,7 +800,14 @@ representation. Its name may appear anywhere a type expression may.
   function written for the representation, while `@new` stays the only place the type's invariant is
   established.
 - When an operator, an indexing form, or a loop needs a structural shape, a nominal value projects to
-  its representation type. The result of the projection is structural, not nominal.
+  its representation type. The result of the projection is structural, not nominal. A union of
+  nominal types projects member by member, so `s$radus` on `Circle | Square` is checked against
+  both representations.
+- A nominal type carries no runtime class, so `is.list()` cannot tell `Circle` from `Square`. A
+  field test can: `is.null(s$radius)` drops, on its false edge, each member whose representation
+  has no such field, and keeps the others as the nominal types they are. After
+  `if (is.null(s$radius)) stop("not a circle")`, `s` is `Circle`. Tags (`:Circle(radius: double)`)
+  are the discriminated form when the representation is yours to choose.
 
 In this example, `Person` and `Pet` are distinct and incompatible. The annotation on `shape` is valid
 because a nominal value satisfies its representation, and the final call is an error because a

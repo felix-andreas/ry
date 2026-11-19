@@ -886,9 +886,6 @@ measurement showed.
 - `@new` is unrestricted project-wide, so a nominal type's invariant holds only by convention. The
   guide's step 4 says so conditionally ("put `@new` in one constructor"). An
   encapsulation modifier would make it a guarantee.
-- A nominal union is unchecked through `$` while a structural union is exact. There is also no
-  discriminator for a nominal type, because `is.list` is true of both arms, so a tagged union cannot
-  be narrowed at all.
 - Editor gaps left by the completeness pass against rust-analyzer (`ide/tests/ide/editor-completeness.R.test`
   pins what works). `df$` on a base `data.frame` completes nothing, because its columns are not
   typed (the `DataFrame` type is the typed alternative). A local whose

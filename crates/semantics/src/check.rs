@@ -8097,11 +8097,23 @@ impl<'db, 'a> Checker<'db, 'a> {
                 .any(|candidate| candidate.name.text(self.db).starts_with(field)),
             _ => is_empty_list(self.db, member),
         };
+        // A nominal member is tested through its representation and kept as itself, so the
+        // test tells `Circle` from `Square` without losing either identity.
+        let projections: Vec<Ty<'db>> = members
+            .iter()
+            .map(|&member| match member.kind(self.db) {
+                TyKind::Named(..) => self.structural(member),
+                _ => member,
+            })
+            .collect();
         let kept: Vec<Ty<'db>> = members
             .iter()
-            .copied()
-            .filter(|&member| !lacks_field(member))
-            .map(|member| self.without_null_field(member, field))
+            .zip(&projections)
+            .filter(|&(_, &projection)| !lacks_field(projection))
+            .map(|(&member, _)| match member.kind(self.db) {
+                TyKind::Named(..) => member,
+                _ => self.without_null_field(member, field),
+            })
             .collect();
         if kept.is_empty() || kept.as_slice() == members.as_slice() {
             return None;
@@ -16982,6 +16994,19 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// typo reported elsewhere) floors to `Unknown` so operator checks never cascade.
     fn structural(&mut self, ty: Ty<'db>) -> Ty<'db> {
         let mut current = self.table.resolve(self.db, ty);
+        // A union of nominal types projects member by member, so `$` on `Circle | Square` is
+        // checked against both representations as it is on the structural union.
+        if let TyKind::Union(members) = current.kind(self.db)
+            && members
+                .iter()
+                .any(|member| matches!(member.kind(self.db), TyKind::Named(..)))
+        {
+            let projected: Vec<Ty<'db>> = members
+                .iter()
+                .map(|&member| self.structural(member))
+                .collect();
+            return union_of(self.db, projected);
+        }
         for _ in 0..16 {
             let TyKind::Named(name, arguments) = current.kind(self.db) else {
                 break;
