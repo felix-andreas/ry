@@ -617,20 +617,22 @@ pub fn covariance(x: &[f64], x_offset: f64, y: &[f64], y_offset: f64, divisor: i
 /// on each NaN operand, never sees one.
 pub fn running_sums(values: &[f64], out: &mut [f64]) {
     let count = values.len().min(out.len());
-    let first = values[..count]
-        .iter()
-        .position(|value| value.is_nan())
-        .unwrap_or(count);
     #[cfg(all(target_arch = "x86_64", not(windows)))]
-    x87::running_sums(&values[..first], &mut out[..first]);
+    let first = x87::running_sums(&values[..count], &mut out[..count]);
     #[cfg(not(all(target_arch = "x86_64", not(windows))))]
-    {
+    let first = {
         let mut total = LongDouble::ZERO;
-        for (&value, out) in values[..first].iter().zip(&mut out[..first]) {
+        let mut first = count;
+        for (index, (&value, out)) in values[..count].iter().zip(&mut out[..count]).enumerate() {
+            if value.is_nan() {
+                first = index;
+                break;
+            }
             total += value;
             *out = total.to_f64();
         }
-    }
+        first
+    };
     out[first..count].fill(f64::NAN);
 }
 
@@ -638,20 +640,22 @@ pub fn running_sums(values: &[f64], out: &mut [f64]) {
 /// `out`, for the shorter of the two. NA and NaN end the products as in `running_sums`.
 pub fn running_products(values: &[f64], out: &mut [f64]) {
     let count = values.len().min(out.len());
-    let first = values[..count]
-        .iter()
-        .position(|value| value.is_nan())
-        .unwrap_or(count);
     #[cfg(all(target_arch = "x86_64", not(windows)))]
-    x87::running_products(&values[..first], &mut out[..first]);
+    let first = x87::running_products(&values[..count], &mut out[..count]);
     #[cfg(not(all(target_arch = "x86_64", not(windows))))]
-    {
+    let first = {
         let mut product = LongDouble::from(1.0);
-        for (&value, out) in values[..first].iter().zip(&mut out[..first]) {
+        let mut first = count;
+        for (index, (&value, out)) in values[..count].iter().zip(&mut out[..count]).enumerate() {
+            if value.is_nan() {
+                first = index;
+                break;
+            }
             product = product * LongDouble::from(value);
             *out = product.to_f64();
         }
-    }
+        first
+    };
     out[first..count].fill(f64::NAN);
 }
 
@@ -1425,70 +1429,94 @@ mod x87 {
     }
 
     /// `out[i]` is the running total of `values[..=i]`, stored as a double without leaving the
-    /// register. `out` must be as long as `values`.
-    pub(super) fn running_sums(values: &[f64], out: &mut [f64]) {
+    /// register, up to the first NaN or NA in `values`; returns its position, or the length.
+    /// The NaN test reads the loaded value off the total's dependency chain, so it costs no
+    /// latency, and the caller needs no pass of its own over the values to find it.
+    /// `out` must be as long as `values`.
+    pub(super) fn running_sums(values: &[f64], out: &mut [f64]) -> usize {
         assert_eq!(
             values.len(),
             out.len(),
             "running sums need an output per value"
         );
-        // SAFETY: reads and writes `values.len()` doubles; the stack is left empty.
+        let remaining: usize;
+        // SAFETY: reads and writes at most `values.len()` doubles; the stack is left empty.
         unsafe {
             asm!(
                 "fldz",
                 "test {count}, {count}",
                 "jz 3f",
                 "2:",
-                "fadd qword ptr [{data}]",
+                "fld qword ptr [{data}]",
+                "fucomi st(0), st(0)",
+                "jp 4f",
+                "faddp st(1), st(0)",
                 "fst qword ptr [{out}]",
                 "add {data}, 8",
                 "add {out}, 8",
                 "dec {count}",
                 "jnz 2b",
+                "jmp 3f",
+                "4:",
+                "fstp st(0)",
                 "3:",
                 "fstp st(0)",
                 data = inout(reg) values.as_ptr() => _,
                 out = inout(reg) out.as_mut_ptr() => _,
-                count = inout(reg) values.len() => _,
+                count = inout(reg) values.len() => remaining,
                 out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
                 out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
                 options(nostack),
             );
         }
+        values.len() - remaining
     }
 
-    /// `out[i]` is the running product of `values[..=i]`, stored as a double without leaving
-    /// the register. `out` must be as long as `values`.
-    pub(super) fn running_products(values: &[f64], out: &mut [f64]) {
+
+    /// `out[i]` is the running product of `values[..=i]`, stored as a double without leaving the
+    /// register, up to the first NaN or NA in `values`; returns its position, or the length.
+    /// The NaN test reads the loaded value off the product's dependency chain, so it costs no
+    /// latency, and the caller needs no pass of its own over the values to find it.
+    /// `out` must be as long as `values`.
+    pub(super) fn running_products(values: &[f64], out: &mut [f64]) -> usize {
         assert_eq!(
             values.len(),
             out.len(),
             "running products need an output per value"
         );
-        // SAFETY: reads and writes `values.len()` doubles; the stack is left empty.
+        let remaining: usize;
+        // SAFETY: reads and writes at most `values.len()` doubles; the stack is left empty.
         unsafe {
             asm!(
                 "fld1",
                 "test {count}, {count}",
                 "jz 3f",
                 "2:",
-                "fmul qword ptr [{data}]",
+                "fld qword ptr [{data}]",
+                "fucomi st(0), st(0)",
+                "jp 4f",
+                "fmulp st(1), st(0)",
                 "fst qword ptr [{out}]",
                 "add {data}, 8",
                 "add {out}, 8",
                 "dec {count}",
                 "jnz 2b",
+                "jmp 3f",
+                "4:",
+                "fstp st(0)",
                 "3:",
                 "fstp st(0)",
                 data = inout(reg) values.as_ptr() => _,
                 out = inout(reg) out.as_mut_ptr() => _,
-                count = inout(reg) values.len() => _,
+                count = inout(reg) values.len() => remaining,
                 out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
                 out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
                 options(nostack),
             );
         }
+        values.len() - remaining
     }
+
 
     /// The rows `block_row_sums` keeps in registers at once: seven totals and one loaded term
     /// fill the eight-register stack.
