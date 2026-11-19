@@ -2166,3 +2166,37 @@ Reading an item's range from `item_spans` made every edit re-lower every item of
 
 - `bump <- function(x) x + 1L` is `<T: numeric> fn(x: T) -> T`, so `bump(TRUE)` is `logical` where R gives `2L`. A `logical` argument meets the numeric constraint, and mixed arguments join (`add(1L, 1.5)` is `double`).
 - Binding `T` to `integer` for a `logical` argument would mistype `checked <- function(x) { stopifnot(x + 1L > 0L); x }`, which returns the `logical`. Only a type-level `promote(T, integer)` separates the two, and no corpus or benchmark finding depends on the difference, because a `logical` fits wherever an `integer` is expected. Build `promote` when a false report or a typed-ry need shows up, not before.
+
+## A package's own `pkg::name` reads are checked against `NAMESPACE` and `data/`
+
+**Status:** settled.
+
+- The export set is `export()` and `exportMethods()` from `NAMESPACE` plus, under `LazyData: true`,
+  the dataset names in `data/` (`rdb::dataset_names`: every object of an `.rda`/`.RData`, the
+  `Rdata.rdx` index, the stem of `.csv`/`.tab`/`.txt`). `getExportedValue` falls back to the
+  namespace's lazydata environment, which `R CMD INSTALL` fills only under `LazyData`.
+- It is a `PackageMetadata` field (`qualified_names`), so an edit to a source file never touches it,
+  and a check asks the per-name `own_package_reaches`, so a `NAMESPACE` edit re-checks only the reads
+  whose answer moved. Naming a saved image's objects unserializes it, so the server reads `data/`
+  at start-up and when `DESCRIPTION` or a `data/` file changes on disk, never per `NAMESPACE`
+  keystroke.
+- The project's bindings are the wrong set. Checked against them, every report on the CRAN corpus
+  was false: re-exports, S4 generics, datasets and `.onLoad` bindings are exported without a
+  definition. `NAMESPACE` plus `data/` gives no report on 44 CRAN packages, and a
+  planted typo, an internal read and `survival::lung` (one object of `cancer.rda`) behave as R does.
+- Unknowable means silent: no `NAMESPACE`, an `exportPattern()`, or an `.R` file under a lazy-loading
+  package's `data/` makes the set `None`. The loader passes `None` because it reports no findings.
+- A name the package defines gets the "fails once installed, export it or write `:::`" message
+  rather than a respelling, because the intent is plainly that function. A name defined nowhere,
+  with no export near it, gets the plain "not exported".
+
+## A wrapper over a numeric overload set takes the `numeric` bound
+
+**Status:** settled (corpus, 44 CRAN packages and the three benchmark code bases: no new finding).
+
+- **Rule.** In `Checker::overloaded_call`, when the set's `Any` fallback is its only free fit and every specific candidate narrows a caller variable to number atoms (`numeric_operand_parts`), the variable takes `Constraint::Numeric`. A union parameter (`integer[] | logical[]`) bounds rather than binds, so the narrowing reads the bound.
+- **Why a fact, not a guess.** Fact-beats-guess keeps a parameter open because candidates disagree. Here they agree on "a number" and differ only in which one, and the constraint is the agreement. A class with an arithmetic method satisfies it, which keeps a user's S3 number-like class working.
+- **Number atoms, not the constraint.** `sweep`'s `matrix` candidate is admitted by the numeric constraint (`Arith.matrix`) yet takes a character matrix, so the test asks for atoms, and `max` (which takes `character`) imposes nothing.
+- **`NULL` is not a number.** `abs(NULL)` is an error in R. The cumulative functions take `NULL` as an empty vector, so their stubs declare a `NULL` candidate and their wrappers impose nothing; admitting `NULL` in the constraint instead turns a `NULL`-default argument used in arithmetic into an `Unknown` result.
+- **Known gap.** A class with only `Math.<class>` or `abs.<class>` methods and no arithmetic is rejected by an `abs` wrapper. `Math.` is not an arithmetic prefix because that set also drives operator dispatch.
+- **Not covered.** `sum` has no fallback and its candidates include `difftime` and `data.frame`, so a `sum` wrapper stays `fn(x: Unknown) -> Unknown`.

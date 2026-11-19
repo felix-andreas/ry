@@ -118,6 +118,7 @@ pub fn analysis_stats(target: Option<&Path>) -> Result<(), CommandError> {
         BTreeSet::new(),
         None,
         namespace_file.native_symbols,
+        None,
     )
     .durability(Durability::MEDIUM)
     .new(&db);

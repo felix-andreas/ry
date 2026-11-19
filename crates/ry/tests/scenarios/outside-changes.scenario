@@ -35,3 +35,21 @@ expect no diagnostic R/main.R "expected `double`"
 
 remove R/balance.R
 expect diagnostics R/main.R "balance"
+
+# `ledger::rates` reaches a dataset only once `data/` holds it and `LazyData` is set, and the
+# editor follows both changes on disk.
+file NAMESPACE
+| export(run)
+file R/rates.R
+| rate <- function() ledger::rates
+open R/rates.R
+expect diagnostics R/rates.R "`rates` is not exported by `ledger`"
+file data/rates.csv
+| a
+| 1
+expect diagnostics R/rates.R "`rates` is not exported by `ledger`"
+file DESCRIPTION
+| Package: ledger
+| Version: 0.1.0
+| LazyData: true
+expect diagnostics R/rates.R none

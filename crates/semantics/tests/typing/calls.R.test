@@ -849,6 +849,62 @@ wrap <- function(x) sum(x)
 #++++
 wrap: fn(x: Unknown) -> Unknown
 
+#---- a_wrapper_over_numeric_overloads_takes_the_numeric_bound
+# Every `abs` candidate but the `Any` fallback takes a number, so the wrapper
+# needs one whichever candidate a call picks.
+magnitude <- function(x) abs(x)
+larger <- function(x, y) pmax(x, y)
+whole <- magnitude(-1L)
+word <- magnitude("a")
+#++++
+magnitude: <T: numeric> fn(x: T) -> T
+larger: <T: numeric, U: numeric> fn(x: T, y: U) -> Any
+whole: integer
+word: Unknown
+234..237 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- a_numeric_wrapper_takes_what_arithmetic_takes
+# `cumsum` takes `NULL` as an empty vector, so its wrapper imposes no bound. A
+# data frame has arithmetic methods, so it satisfies the bound as it does for `-`.
+magnitude <- function(x) abs(x)
+running <- function(x) cumsum(x)
+empty <- running(NULL)
+frame <- magnitude(data.frame(a = 1))
+negated <- -data.frame(a = 1)
+#++++
+magnitude: <T: numeric> fn(x: T) -> T
+running: <T> fn(x: T) -> Any
+empty: Any
+frame: data.frame{a: double[]}
+negated: data.frame{a: double[]}
+
+#---- a_wrapper_over_overloads_that_also_take_text_stays_open
+# `max` also takes `character`, and `sweep`'s `matrix` may hold text, so
+# neither imposes a bound.
+largest <- function(x) max(x)
+spread <- function(x) sweep(x, 1L, 2)
+#++++
+largest: <T> fn(x: T) -> Any
+spread: <T> fn(x: T) -> Any
+
+#---- a_class_with_arithmetic_passes_a_numeric_wrapper
+#: @type money {list{cents: integer}}
+
+#: fn(cents: integer) -> money
+money <- function(cents) {
+  #: @new money
+  structure(list(cents = cents), class = "money")
+}
+#: fn(e1: money, e2: money) -> money
+Ops.money <- function(e1, e2) money(1L)
+magnitude <- function(x) abs(x)
+m <- magnitude(money(1L))
+#++++
+money: fn(cents: integer) -> money
+Ops.money: fn(e1: money, e2: money) -> money
+magnitude: <T: numeric> fn(x: T) -> T
+m: money
+
 #---- a_summary_method_on_the_first_argument_takes_over_the_generic
 #: @type money {list{cents: integer}}
 

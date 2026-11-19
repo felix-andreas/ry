@@ -400,16 +400,19 @@ mean : @pure fn(x: Any, [trim]: Any, [na.rm]: logical, ...: Any) -> double
 
 # Cumulative reductions: elementwise type-preserving (logical/integer input gives an integer
 # vector, double gives double), overloaded per atomic family. `cumprod` always returns double —
-# R computes it in double to dodge integer overflow.
+# R computes it in double to dodge integer overflow. `NULL` is an empty vector to them.
 cumsum : @pure fn(x: integer[] | logical[]) -> integer[]
 cumsum : fn(x: double[]) -> double[]
+cumsum : fn(x: NULL) -> double[]
 cumsum : fn(x: Any) -> Any
 cumprod : @pure fn(x: Any) -> double[]
 cummax : @pure fn(x: integer[] | logical[]) -> integer[]
 cummax : fn(x: double[]) -> double[]
+cummax : fn(x: NULL) -> double[]
 cummax : fn(x: Any) -> Any
 cummin : @pure fn(x: integer[] | logical[]) -> integer[]
 cummin : fn(x: double[]) -> double[]
+cummin : fn(x: NULL) -> double[]
 cummin : fn(x: Any) -> Any
 
 # Math with a fixed double result (elementwise, scalar-claim, Any-param). `abs` is type-preserving.

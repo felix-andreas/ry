@@ -15,7 +15,7 @@ use {
         testing::{ProbeDatabase, render_semantics},
         types::{Atomic, scalar},
     },
-    std::{collections::BTreeMap, thread},
+    std::{collections::{BTreeMap, BTreeSet}, thread},
 };
 
 fn settle(db: &ProbeDatabase, files: &[SourceFile]) {
@@ -901,6 +901,7 @@ fn a_data_file_edit_rechecks_only_the_reads_of_that_file() {
         attached,
         None,
         Default::default(),
+        None,
     );
     let layouts = |prices: &str| {
         BTreeMap::from([
@@ -928,6 +929,43 @@ fn a_data_file_edit_rechecks_only_the_reads_of_that_file() {
         semantics::diagnostics::TypeRenderer::default().render_scheme(&db, &scheme),
         "data.table{id: integer[], price: double[], ticker: character[]}"
     );
+}
+
+#[test]
+fn a_namespace_edit_rechecks_only_the_qualified_reads_it_answers_differently() {
+    let mut db = ProbeDatabase::default();
+    install_shipped_stubs(&db);
+    let files = db.project(&[
+        "first <- function() 1\nsecond <- function() 2\n",
+        "use_first <- function() tallyr::first()\n",
+        "use_second <- function() tallyr::second()\n",
+    ]);
+    let attached = attached_union(&db, files.iter().copied());
+    let exports = |names: &[&str]| {
+        Some(
+            names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<BTreeSet<_>>(),
+        )
+    };
+    let metadata = PackageMetadata::new(
+        &db,
+        Vec::new(),
+        Default::default(),
+        attached,
+        Some("tallyr".to_owned()),
+        Default::default(),
+        exports(&["first"]),
+    );
+    settle(&db, &files);
+    db.checked_since();
+
+    metadata
+        .set_qualified_names(&mut db)
+        .to(exports(&["first", "second"]));
+    settle(&db, &files);
+    assert_eq!(db.checked_since(), ["use_second"]);
 }
 
 /// Renders every file, edits `files[edited]` to `text`, and renders again after editing it

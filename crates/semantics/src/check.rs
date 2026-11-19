@@ -19,7 +19,7 @@ use {
             Entry, FunctionMismatch, InferenceTable, RecordMismatch, UNCHECKED_WITNESS, UnifyError,
             apply_definition, numeric_join,
         },
-        metadata::{imported_by_name, imports_every_name, is_own_package},
+        metadata::{imported_by_name, imports_every_name, is_own_package, own_package_reaches},
         naming::{
             BindingId, BindingKind, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable,
             is_column_update, query_index_arguments,
@@ -31,8 +31,8 @@ use {
         types::{
             Atomic, Binder, Bound, Constraint, DefaultRead, FlagReturn, FrameKind, FunctionType,
             InferenceVar, Name, NativeField, NativeScalar, NullUnless, NumberLiteral, Parameter,
-            RecordField, ReduceForward, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind, TypeList,
-            TypeScheme, any, array, array_element, column_type, conflicting_tags,
+            QueryName, RecordField, ReduceForward, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind,
+            TypeList, TypeScheme, any, array, array_element, column_type, conflicting_tags,
             contains_inference_var, erase_vars, for_each_child_type, is_ry_value_type, is_tag_type,
             map_child_types, native_record, native_scalar, null, scalar, substitute_rigid,
             type_size, union_of, unknown,
@@ -8566,15 +8566,20 @@ impl<'db, 'a> Checker<'db, 'a> {
     }
 
     /// A class with arithmetic methods (`matrix`, `difftime`) negates to itself: R
-    /// dispatches unary `-` through the same `-.class`, `Arith.class` and `Ops.class`.
+    /// dispatches unary `-` through the same `-.class`, `Arith.class` and `Ops.class`. A
+    /// frame with known columns carries its class (`data.frame`) like a nominal type does.
     fn declares_arithmetic(&self, ty: Ty<'db>) -> bool {
-        let TyKind::Named(name, _) = ty.kind(self.db) else {
-            return false;
+        let class = match ty.kind(self.db) {
+            TyKind::Named(name, _) => name.text(self.db),
+            TyKind::Frame(kind, _) => match kind.class() {
+                Some(class) => class,
+                None => return false,
+            },
+            _ => return false,
         };
         let Some(globals) = self.globals else {
             return false;
         };
-        let class = name.text(self.db);
         ["-", "Arith", "Ops"].iter().any(|prefix| {
             let method = method_symbol(prefix, class);
             globals
@@ -14348,6 +14353,64 @@ impl<'db, 'a> Checker<'db, 'a> {
             .map(|(_, (var, _))| *var)
     }
 
+    /// `function(x) abs(x)` fits `abs`'s `Any` fallback without narrowing `x`, so the free fit
+    /// would win and `x` stay unconstrained. When the fallback is the only free fit and every
+    /// specific candidate narrows a caller variable to a number atom, the call needs a number
+    /// there whatever candidate a caller picks, so the variable takes the `numeric` bound. A
+    /// class with an arithmetic method still satisfies it. `max`, whose candidates also take
+    /// `character`, imposes nothing.
+    fn bound_numeric_caller_variables(
+        &mut self,
+        caller_entries: &[(InferenceVar, Entry<'db>)],
+        fits: &[(usize, bool, Vec<Ty<'db>>)],
+        fit_results: &[Ty<'db>],
+    ) {
+        if fit_results.len() != fits.len()
+            || !fits.iter().any(|(_, free, _)| *free)
+            || fits
+                .iter()
+                .zip(fit_results)
+                .any(|((_, free, _), result)| *free && !self.all_any(&[*result]))
+        {
+            return;
+        }
+        let specific: Vec<&Vec<Ty<'db>>> = fits
+            .iter()
+            .filter(|(_, free, _)| !free)
+            .map(|(_, _, narrowing)| narrowing)
+            .collect();
+        if specific.is_empty() {
+            return;
+        }
+        for (position, (var, _)) in caller_entries.iter().enumerate() {
+            let numeric_everywhere = specific.iter().all(|narrowing| {
+                // A number atom, not a class that merely has arithmetic: `sweep`'s `matrix`
+                // candidate takes a character matrix too.
+                narrowing.get(position).is_some_and(|&narrowed| {
+                    let members = match narrowed.kind(self.db) {
+                        TyKind::Union(members) => &members[..],
+                        _ => std::slice::from_ref(&narrowed),
+                    };
+                    members
+                        .iter()
+                        .all(|&member| numeric_operand_parts(self.db, member).is_some())
+                })
+            });
+            if !numeric_everywhere {
+                continue;
+            }
+            let snapshot = self.table.snapshot();
+            if self
+                .table
+                .constrain(self.db, *var, Constraint::Numeric)
+                .is_err()
+            {
+                // A variable an earlier use made non-numeric keeps that finding to itself.
+                self.table.rollback(snapshot);
+            }
+        }
+    }
+
     /// A declared `<T>` passed to a shape-preserving overload set (see
     /// `preserved_caller_variable`) fits none of its candidates, because a rigid parameter
     /// refuses to narrow. Written back as an annotation, `<T> fn(values: T) -> T` for a
@@ -14596,11 +14659,17 @@ impl<'db, 'a> Checker<'db, 'a> {
                         }
                         let free = self.caller_variables_untouched(&caller_entries);
                         fit_results.push(self.table.resolve(self.db, function.ret));
+                        // A union parameter bounds the variable rather than binding it, and
+                        // that bound is what the candidate narrowed it to.
                         let narrowing = caller_entries
                             .iter()
-                            .map(|(var, _)| {
-                                self.table
-                                    .resolve(self.db, Ty::new(self.db, TyKind::Var(*var)))
+                            .map(|(var, _)| match self.table.entry(*var) {
+                                Entry::Unbound {
+                                    bound: Some(bound), ..
+                                } => self.table.resolve(self.db, *bound),
+                                _ => self
+                                    .table
+                                    .resolve(self.db, Ty::new(self.db, TyKind::Var(*var))),
                             })
                             .collect();
                         self.table.rollback(snapshot);
@@ -14687,6 +14756,9 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
                 return self.undecided_overload_result(id, call_arguments);
             }
+        }
+        if !unchecked_argument {
+            self.bound_numeric_caller_variables(&caller_entries, &fits, &fit_results);
         }
         if !unchecked_argument
             && let Some(var) = self.preserved_caller_variable(&caller_entries, &fits, &fit_results)
@@ -20712,7 +20784,10 @@ fn validated_namespace_name(
     };
     // The project's own package resolves through globals and wins over a same-named stub namespace.
     if is_own_package(db, package.as_str()) {
-        return Some(name);
+        return (internal
+            || own_package_reaches(db, QueryName::new(db, Name::new(db, name.as_str())))
+                != Some(false))
+        .then_some(name);
     }
     match library.map(|library| library.knows_namespace(package.as_str())) {
         None => Some(name),
