@@ -2903,7 +2903,9 @@ a local variable or parameter, or an assignment to a local written inside the te
   `url` as the filled record. The false branch also drops `NULL` from the field itself, in each
   record that names it exactly, so after `if (is.null(cfg$limit)) return("")` a later
   `cfg$limit` reads `character` where the field is declared `character | NULL`, until the code
-  writes `cfg` or one of its fields again.
+  writes `cfg` or that field, directly or from a closure with `<<-`. A nominal type's field is not
+  narrowed: the narrowed record would no longer be that type, so after
+  `if (is.null(node$left)) stop()` on a `Tree`, `node$left` still reads `Tree | NULL`.
 - `length(x)` as a condition, or `length(x)` compared with a numeric literal, removes `NULL` from `x`'s union
   in whichever branch a length of zero cannot reach. So after
   `if (length(range) != 2) return(0L)`, `range` is no longer `NULL`, and `if (length(range))` or
@@ -2975,8 +2977,8 @@ The details:
   Dead branches get no special typing.
 - Only a read of a variable, or one field of it, narrows: a parameter, a function local, or a
   top-level variable assigned by an earlier statement. `is.null(f(x))`, `is.null(x$a$b)` and
-  `is.null(x[["a"]])` do not narrow. When such a value reaches a place that rejects `NULL`, the
-  mismatch says to assign it to a variable and test that:
+  `is.null(x[["a"]])` do not narrow. When such a value reaches a place that rejects only its `NULL`
+  member, the mismatch says to assign it to a variable and test that:
 
   ```text
   expected `character`, found `character | NULL`. A test such as `!is.null()` narrows only a

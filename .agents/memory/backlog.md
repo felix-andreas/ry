@@ -891,6 +891,21 @@ measurement showed.
   typed (the `DataFrame` type is the typed alternative). A local whose
   type is a generic parameter (`total <- a + b` inside `<T> fn(a: T, ...)`) gets no inlay hint,
   because a bare `T` without its binder would mislead.
+- A closure reads a captured variable's narrowing as it stands where the closure is defined, so
+  `if (is.null(x)) return(""); get <- function() x; x <- NULL; use(get())` is silent, for a
+  variable and for a narrowed field (`get <- function() cfg$limit`). A write after the definition
+  should widen the captured read, as `capture_joins` does for reads before any write.
+- A nominal type's field is not narrowed by `is.null(node$left)`, because `field_null_guard` can
+  only rewrite the variable's type and a narrowed record is no longer the nominal. A narrowing fact
+  keyed on (slot, field), rather than a rewritten type, would cover `Tree`-style recursion.
+- A generic function literal bound to a local name keeps its rigid parameters:
+  `id <- function<T>(v: T) -> T v; id(1); id("a")` inside a function reports "expected `T`, found
+  `double`". A literal used directly (an argument, inside `list()`, called at once) instantiates;
+  a bound one should generalize to its declared scheme.
+- Signature help's formals for an untyped callee (`ide::bound_function`) take the last function
+  literal the item assigns to the name and, for a script's global, the first definition across
+  files, so a name defined twice can show the other definition's formals. It should prefer the
+  definition that reaches the call.
 - `development/design/r-runtime.md` section 8 keeps `declare(type(...))` as a third annotation
   spelling for code that must stay valid R, and a strip step (`ry build`) that moves inline types
   into `#:` comments. Neither exists yet; `syntax::erase_inline_annotations` is the starting point

@@ -154,6 +154,26 @@ untested: fn(s: Circle | Square) -> Circle
 341..342 error[type-mismatch] expected `Circle`, found `Circle | Square`
 
 #==== nominal_constructors
+#---- a_nominal_defined_as_a_union_projects_each_member
+type Circle = list{ radius: double }
+type Square = list{ side: double }
+type Shape = Circle | Square
+f <- function(s: Shape) -> double s$radus
+#++++
+f: fn(s: Shape) -> double
+137..142 error[type-mismatch] field `radus` does not exist in `list{radius: double} | list{side: double}`. Did you mean `radius`?
+
+#---- a_recursive_union_of_nominals_projects_once
+type L = list{ a: double } | L
+type M = N | list{ b: double }
+type N = M | list{ c: double }
+f <- function(s: L | M) -> double {
+  if (is.null(s$a)) stop()
+  s$a
+}
+#++++
+f: fn(s: L | M) -> double
+
 #---- constructor_introduces_the_nominal
 type UserId = integer
 id <- @UserId(5L)

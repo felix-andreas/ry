@@ -3512,13 +3512,26 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// Whether `found` fails `expected` only by its `NULL` member and `value` is an expression
     /// that `is.null()` cannot narrow: a guard narrows a variable and a field of a variable,
     /// so a deeper `$` chain, an index or a call needs a variable first.
-    fn unnarrowed_null(&self, value: ExprId, expected: Ty<'db>, found: Ty<'db>) -> bool {
-        let is_null = |member: &Ty<'db>| matches!(member.kind(self.db), TyKind::Null);
-        let expected = self.table.resolve(self.db, expected);
-        let found = self.table.resolve(self.db, found);
-        if guard_members(self.db, expected).iter().any(is_null)
-            || !guard_members(self.db, found).iter().any(is_null)
-        {
+    fn unnarrowed_null(&mut self, value: ExprId, expected: Ty<'db>, found: Ty<'db>) -> bool {
+        let db = self.db;
+        let is_null = |member: &Ty<'db>| matches!(member.kind(db), TyKind::Null);
+        let expected = self.table.resolve(db, expected);
+        let found = self.table.resolve(db, found);
+        let found_members = guard_members(db, found);
+        if guard_members(db, expected).iter().any(is_null) || !found_members.iter().any(is_null) {
+            return false;
+        }
+        let rest = union_of(
+            db,
+            found_members
+                .iter()
+                .copied()
+                .filter(|member| !is_null(member)),
+        );
+        let snapshot = self.table.snapshot();
+        let fits = self.table.compatible(db, rest, expected);
+        self.table.rollback(snapshot);
+        if !fits {
             return false;
         }
         let mut current = value;
@@ -5149,7 +5162,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             if let Some(&slot) = self.naming.resolutions.get(&root) {
                 self.string_values.insert(slot, None);
             }
-            self.write_replacement_target(target, value, value_ty);
+            self.write_replacement_target(spelling, target, value, value_ty);
         }
     }
 
@@ -5242,7 +5255,13 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    fn write_replacement_target(&mut self, target: ExprId, value: ExprId, value_ty: Ty<'db>) {
+    fn write_replacement_target(
+        &mut self,
+        spelling: AssignSpelling,
+        target: ExprId,
+        value: ExprId,
+        value_ty: Ty<'db>,
+    ) {
         let base = self.replacement_base(target);
         self.infer_replacement_spine(target, base);
         let Some(base) = base else {
@@ -5260,6 +5279,12 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         if let Some(&slot) = self.naming.resolutions.get(&base) {
             self.environment.set(slot, EnvEntry::Mono(written));
+            // `x$a <<- v` in a closure writes the enclosing `x`, as `x <<- v` does, so the
+            // defining frame joins it and drops a narrowing of `x` or of `x$a`.
+            if spelling == AssignSpelling::Super {
+                self.pending_enclosing_writes.push((slot, written));
+            }
+            self.note_captured_write(slot, written);
         }
     }
 
@@ -16993,20 +17018,13 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// Projects non-alias nominals to their representation. An undeclared nominal (a
     /// typo reported elsewhere) floors to `Unknown` so operator checks never cascade.
     fn structural(&mut self, ty: Ty<'db>) -> Ty<'db> {
+        self.structural_outside(ty, &mut Vec::new())
+    }
+
+    /// `expanding` holds the nominal types whose representation is being projected, so a
+    /// recursive union such as `type L = list{a: double} | L` keeps its inner `L` as written.
+    fn structural_outside(&mut self, ty: Ty<'db>, expanding: &mut Vec<Ty<'db>>) -> Ty<'db> {
         let mut current = self.table.resolve(self.db, ty);
-        // A union of nominal types projects member by member, so `$` on `Circle | Square` is
-        // checked against both representations as it is on the structural union.
-        if let TyKind::Union(members) = current.kind(self.db)
-            && members
-                .iter()
-                .any(|member| matches!(member.kind(self.db), TyKind::Named(..)))
-        {
-            let projected: Vec<Ty<'db>> = members
-                .iter()
-                .map(|&member| self.structural(member))
-                .collect();
-            return union_of(self.db, projected);
-        }
         for _ in 0..16 {
             let TyKind::Named(name, arguments) = current.kind(self.db) else {
                 break;
@@ -17016,10 +17034,33 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             match self.table.representation(self.db, *name, arguments) {
                 Some(representation) => {
+                    expanding.push(current);
                     current = self.table.resolve(self.db, representation);
                 }
                 None => break,
             }
+        }
+        // A union of nominal types projects member by member, so `$` on `Circle | Square`, or
+        // on a `Shape` defined as that union, is checked against both representations as it is
+        // on the structural union.
+        if let TyKind::Union(members) = current.kind(self.db)
+            && members
+                .iter()
+                .any(|member| matches!(member.kind(self.db), TyKind::Named(..)))
+        {
+            let mark = expanding.len();
+            let projected: Vec<Ty<'db>> = members
+                .iter()
+                .map(|&member| {
+                    if expanding.contains(&member) {
+                        return member;
+                    }
+                    let projected = self.structural_outside(member, expanding);
+                    expanding.truncate(mark);
+                    projected
+                })
+                .collect();
+            return union_of(self.db, projected);
         }
         current
     }
@@ -19519,9 +19560,37 @@ impl<'db, 'a> Checker<'db, 'a> {
             Ok(()) => left,
             Err(_) => {
                 self.table.rollback(snapshot);
-                union_of(self.db, [left_resolved, right_resolved])
+                self.wider_record(left_resolved, right_resolved)
+                    .unwrap_or_else(|| union_of(self.db, [left_resolved, right_resolved]))
             }
         }
+    }
+
+    /// Of two records with the same field names, the one the other fits, so a branch that
+    /// narrowed `cfg$limit` joins back into `cfg`'s own type rather than a union of both.
+    fn wider_record(&mut self, left: Ty<'db>, right: Ty<'db>) -> Option<Ty<'db>> {
+        let (TyKind::Record(left_fields), TyKind::Record(right_fields)) =
+            (left.kind(self.db), right.kind(self.db))
+        else {
+            return None;
+        };
+        if left_fields.len() != right_fields.len()
+            || left_fields
+                .iter()
+                .zip(right_fields.iter())
+                .any(|(left_field, right_field)| left_field.name != right_field.name)
+        {
+            return None;
+        }
+        for (narrow, wide) in [(left, right), (right, left)] {
+            let snapshot = self.table.snapshot();
+            let fits = self.table.compatible(self.db, narrow, wide);
+            self.table.rollback(snapshot);
+            if fits {
+                return Some(wide);
+            }
+        }
+        None
     }
 
     /// A scheme instantiates; its fresh variables erase at the export edge like any residual.

@@ -401,8 +401,6 @@ fn editor_requests(db: &mut RootDatabase, records: &[FileRecord], edited: usize,
     let _ = document_diagnostics(db, edited.file, config);
 }
 
-/// How often hover and goto-definition answer at identifiers in package files, by the role the
-/// identifier plays, with a few unanswered positions per role to show where the gaps are.
 const UNKNOWN_EXPORT_EXAMPLES: usize = 8;
 
 #[derive(Default)]
@@ -520,6 +518,8 @@ fn unknown_exports(db: &RootDatabase, records: &[FileRecord], root: &Path) {
     }
 }
 
+/// How often hover and goto-definition answer at identifiers in package files, by the role the
+/// identifier plays, with a few unanswered positions per role to show where the gaps are.
 fn editor_coverage(db: &RootDatabase, records: &[FileRecord], root: &Path) {
     let Some(files) = ProjectFiles::try_get(db) else {
         return;
