@@ -596,7 +596,7 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 `tools/bench/builtins/slower.txt` lists every export of base, stats and utils that the builtins sweep finds slower than GNU R (or failing) in at least one case; `sweep.py ratchet --update` shrinks it as fixes land, and `sweep.py weights` orders the work by call frequency in the code bases and the oracle corpus.
 
 - **Largest gap left:** `rpois` with a vector `mu` (about 0.85x) and `rgeom` (about 0.9x), both unexplained (`decisions/builtins.md`); `slower.txt` has the rest. `cumprod` of products that underflow a double pays an x87 store assist per element, as GNU R does; skipping that store would beat it.
-- **`aregexec` is about 2x GNU R's time on long patterns** (`"brown fox"` over 1,000 sentences: 8.3 ms against 3.65 ms; `"lazy"` 5.7 against 2.75; `"qu(i|a)ck"` is at parity). `approximate::Reach` holds `i32` fields and no stored edit count; the rest is the per-step cost of the path set, not yet profiled.
+- **`aregexec` is 1.4 to 2.5x GNU R's wall time on long patterns at about TRE's instruction count** (`"lazy"` with `max.distance = 0.1` over 1,000 sentences: 25M instructions per call in `search_levels` against 22M in `tre_tnfa_run_approx`, with as many mispredicted branches; `"qu(i|a)ck"` is faster than GNU R). Entries are 32 bytes (`Reach<1>`, settings by index into `ParamsTable`), so the remaining gap is not entry copies or instruction count; measure cycles with a hardware profiler (no `perf` in the cloud container) before redesigning.
 - **`ar.mle` is slower than GNU R** (its `arima0` fits run the ported `starma.c`; not yet profiled).
 
 ## Open: base R kernels against GNU R

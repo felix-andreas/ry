@@ -26,7 +26,6 @@ use {
         hir::{Class, Hir, HirKind, Look},
     },
     rustc_hash::FxHashSet,
-    std::collections::VecDeque,
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -472,20 +471,18 @@ unsafe fn aregexec(call: &Call<'_>) -> R<Sexp> {
     let count = length(text);
     let result = alloc(SexpType::List, count)?;
     crate::heap().root(result);
+    let mut characters: Vec<char> = Vec::new();
     for index in 0..count {
         let charsxp = text.element(index);
         let (starts, lengths) = if charsxp == values::na_string() {
             (vec![NA_INTEGER], vec![NA_INTEGER])
         } else {
-            let characters: Vec<char> = if use_bytes {
-                charsxp
-                    .bytes()
-                    .iter()
-                    .map(|&byte| char::from(byte))
-                    .collect()
+            characters.clear();
+            if use_bytes {
+                characters.extend(charsxp.bytes().iter().map(|&byte| char::from(byte)));
             } else {
-                values::char_str(charsxp).chars().collect()
-            };
+                characters.extend(values::char_str(charsxp).chars());
+            }
             match regex.search_with(&characters, false, &params)? {
                 Some((start, end, groups)) => std::iter::once(Some((start, end)))
                     .chain(groups)
@@ -1054,6 +1051,8 @@ pub(crate) struct ApproximateRegex {
     initial: Vec<Transition>,
     final_position: usize,
     group_count: usize,
+    /// Whether some scope nests settings, so that paths count costs per nesting level.
+    nested: bool,
 }
 
 /// A match: its character range and the character range of each capture group.
@@ -1117,7 +1116,7 @@ const DELETIONS: usize = 2;
 const SUBSTITUTIONS: usize = 3;
 
 /// The settings in force on a path: TRE's `regaparams_t`.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Params {
     insertion_cost: Option<i32>,
     deletion_cost: Option<i32>,
@@ -1148,28 +1147,49 @@ const DEFAULT_PARAMS: Params = Params {
 
 /// The cheapest known path to a position, at one text position: TRE's
 /// `tre_tnfa_approx_reach_t` without the capture slots, which live beside it. Every path step
-/// copies one, so it is kept small: 32-bit fields, and no stored count of all edits, which is
-/// the sum of the three kinds.
+/// copies one, so it is kept small: the settings are an index into the search's table of them,
+/// a pattern without nested scopes has one cost level (`LEVELS`), and no field stores the count
+/// of all edits, which is the sum of the three kinds.
 #[derive(Clone, Copy)]
-struct Reach {
+struct Reach<const LEVELS: usize> {
     /// The text position the entry belongs to; older entries are stale.
     at: i32,
     /// Where the match on this path starts.
     start: i32,
-    depth: usize,
-    params: Params,
+    /// The settings in force, as an index into the search's [`ParamsTable`].
+    params: u32,
+    depth: u8,
     /// The cost and the edit counts within each nesting level of settings, with the totals at
     /// level 0.
-    costs: [[i32; 4]; MOST_DEPTH + 1],
+    costs: [[i32; 4]; LEVELS],
 }
 
-const UNREACHED: Reach = Reach {
-    at: -2,
-    start: -1,
-    depth: 0,
-    params: DEFAULT_PARAMS,
-    costs: [[0; 4]; MOST_DEPTH + 1],
-};
+impl<const LEVELS: usize> Reach<LEVELS> {
+    const UNREACHED: Self = Reach {
+        at: -2,
+        start: -1,
+        params: 0,
+        depth: 0,
+        costs: [[0; 4]; LEVELS],
+    };
+}
+
+/// The distinct settings the paths of one search have met, the whole pattern's first. Scopes
+/// combine into few distinct settings, so a path refers to them by index.
+struct ParamsTable(Vec<Params>);
+
+impl ParamsTable {
+    fn index_of(&mut self, params: Params) -> u32 {
+        let index = match self.0.iter().position(|known| *known == params) {
+            Some(index) => index,
+            None => {
+                self.0.push(params);
+                self.0.len() - 1
+            }
+        };
+        index as u32
+    }
+}
 
 /// The number of edits of all kinds a cost level counts.
 fn edits(level: [i32; 4]) -> i32 {
@@ -1216,11 +1236,20 @@ impl ApproximateRegex {
                     transitions_from(*next, &states, &position_of, scopes);
             }
         }
+        let nested = initial
+            .iter()
+            .chain(positions.iter().flat_map(|position| &position.transitions))
+            .any(|transition| {
+                transition.settings.is_some_and(
+                    |settings| matches!(settings[DEPTH], Setting::Value(depth) if depth > 0),
+                )
+            });
         Ok(ApproximateRegex {
             positions,
             initial,
             final_position: position_of[0],
             group_count,
+            nested,
         })
     }
 
@@ -1243,10 +1272,24 @@ impl ApproximateRegex {
         not_bol: bool,
         defaults: &Params,
     ) -> R<Option<ApproximateMatch>> {
+        if self.nested {
+            self.search_levels::<{ MOST_DEPTH + 1 }>(text, not_bol, defaults)
+        } else {
+            self.search_levels::<1>(text, not_bol, defaults)
+        }
+    }
+
+    fn search_levels<const LEVELS: usize>(
+        &self,
+        text: &[char],
+        not_bol: bool,
+        defaults: &Params,
+    ) -> R<Option<ApproximateMatch>> {
         let count = self.positions.len();
         let slot_count = 2 * self.group_count;
-        let mut reach = vec![UNREACHED; count];
-        let mut reach_next = vec![UNREACHED; count];
+        let mut table = ParamsTable(vec![*defaults]);
+        let mut reach = vec![Reach::<LEVELS>::UNREACHED; count];
+        let mut reach_next = vec![Reach::<LEVELS>::UNREACHED; count];
         let mut slots = vec![-1i32; count * slot_count];
         let mut slots_next = vec![-1i32; count * slot_count];
         let mut path_slots = vec![-1i32; slot_count];
@@ -1256,29 +1299,24 @@ impl ApproximateRegex {
             cost: NO_BOUND,
             slots: vec![-1; slot_count],
         };
-        let mut queue: VecDeque<usize> = VecDeque::with_capacity(count);
+        // The deletion phase's worklist, read from `head` on.
+        let mut queue: Vec<usize> = Vec::with_capacity(count);
         // The positions reached at the current and the next text position, so the loops below
         // visit only those; each phase sorts them, because ties go to the lower position.
         let mut active: Vec<usize> = Vec::with_capacity(count);
         let mut active_next: Vec<usize> = Vec::with_capacity(count);
         // The entry each initial transition makes, which differs between text positions only in
         // `at` and `start`. `None` marks settings TRE rejects, reported when the entry is made.
-        let initial_entries: Vec<Option<Reach>> = self
-            .initial
-            .iter()
-            .map(|transition| {
-                let mut entry = Reach {
-                    params: *defaults,
-                    ..UNREACHED
-                };
-                match &transition.settings {
-                    Some(settings) => apply_settings(&mut entry, settings, defaults)
-                        .ok()
-                        .map(|()| entry),
-                    None => Some(entry),
-                }
-            })
-            .collect();
+        let mut initial_entries = Vec::with_capacity(self.initial.len());
+        for transition in &self.initial {
+            let mut entry = Reach::<LEVELS>::UNREACHED;
+            initial_entries.push(match &transition.settings {
+                Some(settings) => apply_settings(&mut entry, settings, &mut table)
+                    .ok()
+                    .map(|()| entry),
+                None => Some(entry),
+            });
+        }
         let mut position = 0;
         loop {
             let here = position as i32;
@@ -1293,7 +1331,7 @@ impl ApproximateRegex {
                     }
                     let Some(initial) = initial else {
                         if let Some(settings) = &transition.settings {
-                            apply_settings(&mut reach_next[target], settings, defaults)?;
+                            apply_settings(&mut reach_next[target], settings, &mut table)?;
                         }
                         continue;
                     };
@@ -1317,19 +1355,19 @@ impl ApproximateRegex {
             // An insertion skips a text character and stays at the same position.
             for &id in &active {
                 let source = &reach[id];
-                let depth = source.depth;
+                let params = &table.0[source.params as usize];
+                let depth = usize::from(source.depth);
                 let level = source.costs[depth];
-                let cost = level[COST].saturating_add(source.params.insertion_cost.unwrap_or(0));
-                if cost > source.params.cost_limit
-                    || level[INSERTIONS] + 1 > source.params.insertions
-                    || edits(level) + 1 > source.params.edits
+                let cost = level[COST].saturating_add(params.insertion_cost.unwrap_or(0));
+                if cost > params.cost_limit
+                    || level[INSERTIONS] + 1 > params.insertions
+                    || edits(level) + 1 > params.edits
                 {
                     continue;
                 }
                 let total = if depth > 0 {
                     source.costs[0][COST].saturating_add(
-                        source
-                            .params
+                        params
                             .insertion_cost
                             .or(defaults.insertion_cost)
                             .unwrap_or(DEFAULT_COST),
@@ -1357,22 +1395,24 @@ impl ApproximateRegex {
             // no position can be reached more cheaply.
             active_next.sort_unstable();
             queue.clear();
-            queue.extend(active_next.iter().copied());
-            while let Some(id) = queue.pop_front() {
+            queue.extend_from_slice(&active_next);
+            let mut head = 0;
+            while let Some(&id) = queue.get(head) {
+                head += 1;
                 let source = reach_next[id];
-                let depth = source.depth;
+                let params = &table.0[source.params as usize];
+                let depth = usize::from(source.depth);
                 let level = source.costs[depth];
-                let cost = level[COST].saturating_add(source.params.deletion_cost.unwrap_or(0));
-                if cost > source.params.cost_limit
-                    || level[DELETIONS] + 1 > source.params.deletions
-                    || edits(level) + 1 > source.params.edits
+                let cost = level[COST].saturating_add(params.deletion_cost.unwrap_or(0));
+                if cost > params.cost_limit
+                    || level[DELETIONS] + 1 > params.deletions
+                    || edits(level) + 1 > params.edits
                 {
                     continue;
                 }
                 let total = if depth > 0 {
                     source.costs[0][COST].saturating_add(
-                        source
-                            .params
+                        params
                             .deletion_cost
                             .or(defaults.deletion_cost)
                             .unwrap_or(DEFAULT_COST),
@@ -1402,10 +1442,10 @@ impl ApproximateRegex {
                     }
                     let mut entry = Reach { at: here, ..source };
                     if let Some(settings) = &transition.settings {
-                        apply_settings(&mut entry, settings, defaults)?;
+                        apply_settings(&mut entry, settings, &mut table)?;
                     }
                     // TRE takes the new settings but stays at the nesting level it came from.
-                    entry.depth = depth;
+                    entry.depth = source.depth;
                     count_edit(&mut entry, depth, cost, total, DELETIONS, 1);
                     if reach_next[target].at != here {
                         active_next.push(target);
@@ -1415,7 +1455,7 @@ impl ApproximateRegex {
                     if target == self.final_position {
                         best.record(here, &entry, &path_slots);
                     }
-                    queue.push_back(target);
+                    queue.push(target);
                 }
             }
             let Some(&character) = text.get(position) else {
@@ -1435,23 +1475,22 @@ impl ApproximateRegex {
                     .ranges
                     .iter()
                     .any(|&(low, high)| low <= character && character <= high);
-                let depth = source.depth;
+                let depth = usize::from(source.depth);
                 let level = source.costs[depth];
                 let (cost, total, error) = if exact {
                     (level[COST], source.costs[0][COST], 0)
                 } else {
-                    let cost =
-                        level[COST].saturating_add(source.params.substitution_cost.unwrap_or(0));
-                    if cost > source.params.cost_limit
-                        || level[SUBSTITUTIONS] + 1 > source.params.substitutions
-                        || edits(level) + 1 > source.params.edits
+                    let params = &table.0[source.params as usize];
+                    let cost = level[COST].saturating_add(params.substitution_cost.unwrap_or(0));
+                    if cost > params.cost_limit
+                        || level[SUBSTITUTIONS] + 1 > params.substitutions
+                        || edits(level) + 1 > params.edits
                     {
                         continue;
                     }
                     let total = if depth > 0 {
                         source.costs[0][COST].saturating_add(
-                            source
-                                .params
+                            params
                                 .substitution_cost
                                 .or(defaults.substitution_cost)
                                 .unwrap_or(DEFAULT_COST),
@@ -1486,7 +1525,7 @@ impl ApproximateRegex {
                         ..*source
                     };
                     if let Some(settings) = &transition.settings {
-                        apply_settings(&mut entry, settings, defaults)?;
+                        apply_settings(&mut entry, settings, &mut table)?;
                     }
                     count_edit(&mut entry, depth, cost, total, SUBSTITUTIONS, error);
                     if reach_next[target].at != here {
@@ -1525,7 +1564,7 @@ struct Best {
 
 impl Best {
     /// Takes a match ending at `end` if it is cheaper, or as cheap and starts no later.
-    fn record(&mut self, end: i32, entry: &Reach, slots: &[i32]) {
+    fn record<const LEVELS: usize>(&mut self, end: i32, entry: &Reach<LEVELS>, slots: &[i32]) {
         let cost = entry.costs[0][COST];
         if self.end < 0 || cost < self.cost || (cost == self.cost && entry.start <= self.start) {
             self.end = end;
@@ -1540,8 +1579,8 @@ impl Best {
 /// loses to the entry already at the target: a costlier path loses, and so does an equally
 /// costly one that starts later. Between equal starts the POSIX subexpression rule decides, as
 /// TRE's tag order does: the first group that differs should start earlier and end later.
-fn loses(
-    existing: &Reach,
+fn loses<const LEVELS: usize>(
+    existing: &Reach<LEVELS>,
     here: i32,
     total: i32,
     start: i32,
@@ -1569,7 +1608,14 @@ fn loses(
 
 /// Charges an edit of kind `kind` (`count` of them, 0 or 1) at nesting level `depth`, whose cost
 /// becomes `cost`, with `total` as the overall cost.
-fn count_edit(entry: &mut Reach, depth: usize, cost: i32, total: i32, kind: usize, count: i32) {
+fn count_edit<const LEVELS: usize>(
+    entry: &mut Reach<LEVELS>,
+    depth: usize,
+    cost: i32,
+    total: i32,
+    kind: usize,
+    count: i32,
+) {
     entry.costs[depth][COST] = cost;
     entry.costs[depth][kind] += count;
     if depth > 0 {
@@ -1582,27 +1628,29 @@ fn count_edit(entry: &mut Reach, depth: usize, cost: i32, total: i32, kind: usiz
 /// (TRE stores the unset marker as the cost), while they still count at the default cost
 /// overall. TRE asserts that settings nest at most three deep, and R reports a failed
 /// assertion as an error.
-fn apply_settings(
-    entry: &mut Reach,
+fn apply_settings<const LEVELS: usize>(
+    entry: &mut Reach<LEVELS>,
     settings: &[Setting; SETTING_COUNT],
-    defaults: &Params,
+    table: &mut ParamsTable,
 ) -> R<()> {
+    let current_depth = usize::from(entry.depth);
     let depth = match settings[DEPTH] {
         Setting::Value(depth) => depth.max(0) as usize,
-        Setting::Unset | Setting::Default => entry.depth,
+        Setting::Unset | Setting::Default => current_depth,
     };
     if depth > MOST_DEPTH {
         return Err(error(
             "assertion 'value <= 3' failed in executing regexp: file 'tre-match-approx.c', line 141\n",
         ));
     }
-    if depth > entry.depth {
-        for level in &mut entry.costs[entry.depth + 1..=depth] {
+    if depth > current_depth {
+        for level in &mut entry.costs[current_depth + 1..=depth] {
             *level = [0; 4];
         }
     }
-    entry.depth = depth;
-    let params = &mut entry.params;
+    entry.depth = depth as u8;
+    let defaults = table.0[0];
+    let mut params = table.0[entry.params as usize];
     let cost = |setting: Setting, current: Option<i32>, default: Option<i32>| match setting {
         Setting::Default => default,
         Setting::Unset => current,
@@ -1645,6 +1693,7 @@ fn apply_settings(
         defaults.substitutions,
     );
     params.edits = limit(settings[MOST_EDITS], params.edits, defaults.edits);
+    entry.params = table.index_of(params);
     Ok(())
 }
 
