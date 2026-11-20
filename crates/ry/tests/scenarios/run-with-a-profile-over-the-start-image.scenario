@@ -50,6 +50,9 @@ expect stdout "first ran: TRUE"
 expect stdout "graphics: FALSE"
 expect stdout "coef: 20.5 6.16 -0.76"
 
+# `sQuote` quotes the package name with curly quotes in a UTF-8 locale and straight ones in the C
+# locale, as in GNU R, so the locale is pinned.
+env LC_ALL C
 env R_PROFILE_USER missing-package.R
 run ry run short.R
 expect exit 0
