@@ -129,6 +129,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - An error against a fixed type keeps the item's export
 - An annotation that misuses the type vocabulary carries no payload
 - An unassigned path reads the name outside the function
+- A declared type parameter keeps its name in messages
 
 ## Analysis core
 

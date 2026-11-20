@@ -657,7 +657,10 @@ A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
   `List.from_r` uses it to type a `list[T]` argument.
 
 Any other constraint name is an annotation error, and the error lists the ones that exist. An
-argument whose type violates a constraint is a type error at the call. A union satisfies a
+argument whose type violates a constraint is a type error at the call, and the message names the
+constraint: `middle("a")` under `<N: scalar numeric>` reports "expected a scalar numeric value
+(`integer` or `double`), found `character`". A message names a declared type parameter as its
+signature spells it, and an inferred one `T`, `U` and so on in order of appearance. A union satisfies a
 constraint when every member does, so `double | integer` satisfies `numeric`. A vector `U[]`
 satisfies `numeric` when its element is a number, and an undetermined element becomes a
 `scalar numeric` one. A constrained value that meets a union takes the union whole when the
@@ -683,7 +686,9 @@ many <- normalize(list("a", "b"))  # list{character, character}
 
 Written `fn(path: list[T] | T[]) -> list[T] | T[]`, the signature would return the whole union to
 every caller. The body may use the parameter wherever its bound fits, and an argument outside the
-bound, such as `normalize(sum)`, is a type error at the call. `@forall T, U: list[T] | T[]` and
+bound, such as `normalize(sum)`, is a type error at the call. A bound whose every member meets a
+constraint meets it too, so under `<N: integer | double> fn(x: N) -> N` the body `x + x` is
+arithmetic and has the type `N`. `@forall T, U: list[T] | T[]` and
 `function<T, U: list[T] | T[]>(path: U) -> U` declare the same binders. A bound that is a single
 name reads as a constraint, so a type bound is a union or a compound type such as `list[T]`.
 
@@ -4993,6 +4998,3 @@ Known bugs, where correct code is reported:
 - **A later top-level write in a package.** A closure in a package reads a top-level name as its
   definition, so a later top-level `x$a <- v` is not seen there. Reads at top level and in a
   script see the write.
-- **A generic function passed inline as an argument.** `lapply(xs, function<T>(v: T) -> T v)` is
-  reported, because type parameters on a function that is not bound to a name are not
-  instantiated. Leave the function's types off, or bind it to a name first.

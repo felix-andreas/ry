@@ -857,10 +857,6 @@ measurement showed.
 - A nominal type's field is not narrowed by `is.null(node$left)`, because `field_null_guard` can
   only rewrite the variable's type and a narrowed record is no longer the nominal. A narrowing fact
   keyed on (slot, field), rather than a rewritten type, would cover `Tree`-style recursion.
-- A generic function literal bound to a local name keeps its rigid parameters:
-  `id <- function<T>(v: T) -> T v; id(1); id("a")` inside a function reports "expected `T`, found
-  `double`". A literal used directly (an argument, inside `list()`, called at once) instantiates;
-  a bound one should generalize to its declared scheme.
 - Signature help's formals for an untyped callee (`ide::bound_function`) take the last function
   literal the item assigns to the name and, for a script's global, the first definition across
   files, so a name defined twice can show the other definition's formals. It should prefer the

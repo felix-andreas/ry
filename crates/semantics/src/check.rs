@@ -1508,7 +1508,7 @@ fn erase_residual_vars_at<'db>(
     }
     let mut ordinal = closer.binders.len() + 1;
     let name = loop {
-        let candidate = Name::new(db, format!("R{ordinal}"));
+        let candidate = Name::new(db, format!("#R{ordinal}"));
         if !closer
             .binders
             .iter()
@@ -3864,7 +3864,23 @@ impl<'db, 'a> Checker<'db, 'a> {
                             }
                             _ => declared.body,
                         };
-                        self.record(value, body)
+                        let signature = self.record(value, body);
+                        // The body is checked with the binders rigid, but each use of the name
+                        // takes fresh variables: created a level up, they generalize with the
+                        // binding into the declared scheme.
+                        let binds_name = spelling != AssignSpelling::Super
+                            && matches!(self.module.kind(target), ExpressionKind::NameRef(_));
+                        if declared.binders.is_empty() || !binds_name {
+                            signature
+                        } else {
+                            self.table.level += 1;
+                            let open = self.instantiate(&TypeScheme {
+                                binders: declared.binders,
+                                body: signature,
+                            });
+                            self.table.level -= 1;
+                            open
+                        }
                     }
                     None => {
                         let binds_name = spelling != AssignSpelling::Super
@@ -9869,10 +9885,9 @@ impl<'db, 'a> Checker<'db, 'a> {
         let probe_operand =
             |ty: Ty<'db>| match self.table.shallow_resolve(self.db, ty).kind(self.db) {
                 TyKind::Rigid(name)
-                    if matches!(
-                        self.table.rigid_constraints.get(name),
-                        Some(Constraint::Numeric | Constraint::ScalarNumeric)
-                    ) =>
+                    if self
+                        .table
+                        .rigid_satisfies(self.db, *name, Constraint::Numeric) =>
                 {
                     scalar(self.db, Atomic::Double)
                 }
@@ -10160,10 +10175,9 @@ impl<'db, 'a> Checker<'db, 'a> {
                 self.table.open_constraint(self.db, ty),
                 Some(Constraint::Numeric | Constraint::ScalarNumeric)
             ),
-            TyKind::Rigid(name) => matches!(
-                self.table.rigid_constraints.get(name),
-                Some(Constraint::Numeric | Constraint::ScalarNumeric)
-            ),
+            TyKind::Rigid(name) => self
+                .table
+                .rigid_satisfies(self.db, *name, Constraint::Numeric),
             _ => false,
         }
     }
@@ -10472,10 +10486,9 @@ impl<'db, 'a> Checker<'db, 'a> {
                     result_atomic = Atomic::Double;
                 }
                 TyKind::Rigid(name)
-                    if matches!(
-                        self.table.rigid_constraints.get(name),
-                        Some(Constraint::ScalarNumeric)
-                    ) =>
+                    if self
+                        .table
+                        .rigid_satisfies(self.db, *name, Constraint::ScalarNumeric) =>
                 {
                     result_atomic = Atomic::Double;
                 }
@@ -10629,10 +10642,9 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
             }
             TyKind::Rigid(name)
-                if !matches!(
-                    self.table.rigid_constraints.get(name),
-                    Some(Constraint::Numeric | Constraint::ScalarNumeric)
-                ) =>
+                if !self
+                    .table
+                    .rigid_satisfies(self.db, *name, Constraint::Numeric) =>
             {
                 self.errors.push(TypeError {
                     range,
@@ -10694,19 +10706,21 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
             }
             TyKind::Var(_) => NumericOperand::Flexible(resolved),
-            TyKind::Rigid(name) => match self.table.rigid_constraints.get(name) {
-                Some(Constraint::Numeric | Constraint::ScalarNumeric) => {
-                    NumericOperand::Flexible(resolved)
+            TyKind::Rigid(name) => {
+                match self
+                    .table
+                    .rigid_satisfies(self.db, *name, Constraint::Numeric)
+                {
+                    true => NumericOperand::Flexible(resolved),
+                    false => NumericOperand::Invalid,
                 }
-                _ => NumericOperand::Invalid,
-            },
+            }
             TyKind::Vector(element) | TyKind::NamedVector(element) => match element.kind(self.db) {
                 TyKind::Var(_) => NumericOperand::FlexibleVector(Some(*element)),
                 TyKind::Rigid(name)
-                    if matches!(
-                        self.table.rigid_constraints.get(name),
-                        Some(Constraint::Numeric | Constraint::ScalarNumeric)
-                    ) =>
+                    if self
+                        .table
+                        .rigid_satisfies(self.db, *name, Constraint::Numeric) =>
                 {
                     NumericOperand::FlexibleVector(Some(*element))
                 }
@@ -17179,14 +17193,16 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         if let TyKind::Var(var) = resolved_expected.kind(self.db)
             && let Entry::Unbound {
-                constraint: Constraint::Numeric,
+                constraint,
+                bound: None,
                 ..
-            } = self.table.entry(*var)
+            } = *self.table.entry(*var)
+            && constraint != Constraint::Unconstrained
         {
             return Err(TypeError {
                 range,
                 kind: TypeErrorKind::ConstraintViolation {
-                    constraint: Constraint::Numeric,
+                    constraint,
                     found: resolved_found,
                 },
             });
@@ -20133,14 +20149,8 @@ impl<'db, 'a> Checker<'db, 'a> {
             let resolved = self.table.resolve(self.db, bound);
             self.abstract_vars(resolved, binders, mapping)
         });
-        let letter = (b'T' + (binders.len() as u8 % 7)) as char;
-        let suffix = binders.len() / 7;
-        let text = if suffix == 0 {
-            letter.to_string()
-        } else {
-            format!("{letter}{suffix}")
-        };
-        let name = Name::new(self.db, text);
+        // A generated name is no identifier, so a message letters it by position.
+        let name = Name::new(self.db, format!("#{}", binders.len()));
         mapping.insert(representative, name);
         binders.push(Binder {
             name,

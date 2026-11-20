@@ -174,7 +174,7 @@ foo.bar
 #---- dotted_binder_is_one_name
 <T.x> fn(T) -> T
 #++++
-<T> fn(T) -> T
+<T.x> fn(T) -> T
 
 #==== variadic
 #---- bare_rest_parameter

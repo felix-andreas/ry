@@ -379,7 +379,7 @@ Unknown
 #: <T> fn(x: T) -> T
 h <- function<U>(x: U) -> U x
 #++++
-h: <T> fn(x: T) -> T
+h: <U> fn(x: U) -> U
 
 #---- an_inline_binder_takes_a_union_bound
 normalize <- function<T, U: list[T] | T[]>(path: U) -> U {
@@ -390,3 +390,45 @@ one <- normalize("a")
 #++++
 normalize: <T, U: list[T] | T[]> fn(path: U) -> U
 one: character
+
+#---- a_generic_literal_bound_inside_a_function_generalizes
+f <- function() {
+  id <- function<T>(v: T) -> T v
+  a <- id(1)
+  b <- id("a")
+  #: character
+  c1 <- a
+  list(a, b, c1)
+}
+#++++
+f: fn() -> list{double, character, character}
+102..103 error[type-mismatch] expected `character`, found `double`
+
+#---- a_type_bound_of_numbers_takes_arithmetic
+plus <- function<N: integer | double>(x: N) -> N x + x
+whole <- plus(1L)
+#++++
+plus: <N: integer | double> fn(x: N) -> N
+whole: integer
+
+#---- a_broken_constraint_names_the_constraint
+middle <- function<N: scalar numeric>(x: N) -> N x
+total <- function<N: number>(x: N) -> N x
+list(middle("a"), total("a"))
+#++++
+middle: <N: scalar numeric> fn(x: N) -> N
+total: <N: number> fn(x: N) -> N
+list{Unknown, Unknown}
+105..108 error[type-mismatch] expected a scalar numeric value (`integer` or `double`), found `character`
+117..120 error[type-mismatch] expected a ry number (`I64` or `F64`), found `character`
+
+#---- a_message_names_the_declared_type_parameter
+h <- function<N: integer | double>(x: N) -> N {
+  #: character
+  y <- x
+  y
+}
+#++++
+h: <N: integer | double> fn(x: N) -> N
+70..71 error[type-mismatch] expected `character`, found `N`
+74..75 error[type-mismatch] expected `N`, found `character`

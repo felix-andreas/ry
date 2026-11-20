@@ -1903,3 +1903,11 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
   on `g <- f`) has no body to infer an elided `->` from, so the return comes from the value's own
   function type, called with the written parameter types (`elided_return_from_value`). Parameters
   pair by position, as a call binds them, because the written signature names no formals.
+
+## A declared type parameter keeps its name in messages
+
+**Status:** built
+
+- `TypeRenderer` prints a rigid binder whose name is an identifier as written (`<N: numeric>` gives `N`), so a report on a user's signature uses the user's names. Generated binders are named `#0`, `#R1` (`abstract_vars`, the closer), which no identifier spells, and the renderer letters them `T`, `U`, ... in order of appearance, skipping a name already taken.
+- A local `id <- function<T>(...)` instantiates its checked signature one level up, so the binding generalizes to the declared scheme, as an unbound literal instantiates at its use.
+- A rigid binder meets a constraint through its declared constraint or its type bound (`InferenceTable::rigid_satisfies`), so `<N: integer | double>` is numeric for an operator.

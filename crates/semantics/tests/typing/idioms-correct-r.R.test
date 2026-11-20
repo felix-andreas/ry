@@ -1602,7 +1602,7 @@ use <- function(tr) {
   wrap(gh)
 }
 #++++
-wrap: <T> fn(f: fn(...: Any) -> T) -> T
+wrap: <R> fn(f: fn(...: Any) -> R) -> R
 maker: <T, U> fn(tr: T) -> fn(endpoint: U, ...: Any) -> character
 use: <T> fn(tr: T) -> character
 
@@ -1618,10 +1618,11 @@ use <- function(tr) {
   wrap(gh)
 }
 #++++
-wrap: <T> fn(f: fn(...: double) -> T) -> T
+wrap: <R> fn(f: fn(...: double) -> R) -> R
 maker: <T, U, V> fn(tr: T) -> fn(endpoint: U, [other]: V, ...: Any) -> character
 use: Unknown
 208..210 error[type-mismatch] expected `fn(...: double) -> T`, found `fn(endpoint: U, [other]: V, ...: Any) -> character`
+
 #---- months_of_a_date_is_its_name_and_months_of_anything_else_is_a_package_method
 name <- months(Sys.Date())
 period <- months(3L)

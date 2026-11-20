@@ -3862,7 +3862,7 @@ fn missing_arms_fix(
 /// across every type in a message: a fresh one restarts the numbering.
 #[derive(Default)]
 pub struct TypeRenderer<'db> {
-    names: Vec<RenderedVar<'db>>,
+    names: Vec<(RenderedVar<'db>, String)>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -3940,8 +3940,8 @@ impl<'db> TypeRenderer<'db> {
                     format!("{}<{}>", name.text(db), arguments.join(", "))
                 }
             }
-            TyKind::Var(var) => self.variable_name(RenderedVar::Inference(*var)),
-            TyKind::Rigid(name) => self.variable_name(RenderedVar::Rigid(*name)),
+            TyKind::Var(var) => self.variable_name(db, RenderedVar::Inference(*var)),
+            TyKind::Rigid(name) => self.variable_name(db, RenderedVar::Rigid(*name)),
         }
     }
 
@@ -3965,7 +3965,7 @@ impl<'db> TypeRenderer<'db> {
         let binders: Vec<String> = binders
             .iter()
             .map(|binder| {
-                let rendered = self.variable_name(RenderedVar::Rigid(binder.name));
+                let rendered = self.variable_name(db, RenderedVar::Rigid(binder.name));
                 match binder.bound {
                     Bound::Type(bound) => format!("{rendered}: {}", self.render(db, bound)),
                     Bound::Constraint(constraint) => match constraint.spelling() {
@@ -4045,21 +4045,39 @@ impl<'db> TypeRenderer<'db> {
         format!("fn({}) -> {}", parameters.join(", "), ret)
     }
 
-    fn variable_name(&mut self, var: RenderedVar<'db>) -> String {
-        let index = match self.names.iter().position(|existing| *existing == var) {
-            Some(index) => index,
-            None => {
-                self.names.push(var);
-                self.names.len() - 1
-            }
-        };
-        let letter = (b'T' + (index as u8 % 7)) as char;
-        let suffix = index / 7;
-        if suffix == 0 {
-            letter.to_string()
-        } else {
-            format!("{letter}{suffix}")
+    /// A declared type parameter keeps the name its signature gives it, so `<N: numeric>` reads
+    /// as `N` in a message; other variables take the next free letter.
+    fn variable_name(&mut self, db: &'db dyn Db, var: RenderedVar<'db>) -> String {
+        if let Some((_, name)) = self.names.iter().find(|(existing, _)| *existing == var) {
+            return name.clone();
         }
+        let declared = match var {
+            RenderedVar::Rigid(name) => Some(name.text(db))
+                .filter(|text| text.starts_with(|first: char| first.is_ascii_alphabetic())),
+            RenderedVar::Inference(_) => None,
+        };
+        let taken = |names: &[(RenderedVar<'db>, String)], candidate: &str| {
+            names.iter().any(|(_, name)| name == candidate)
+        };
+        let name = match declared {
+            Some(text) if !taken(&self.names, text) => text.to_owned(),
+            Some(text) => (1..)
+                .map(|suffix| format!("{text}{suffix}"))
+                .find(|candidate| !taken(&self.names, candidate))
+                .unwrap_or_default(),
+            None => (0..)
+                .map(|index| {
+                    let letter = (b'T' + (index % 7) as u8) as char;
+                    match index / 7 {
+                        0 => letter.to_string(),
+                        suffix => format!("{letter}{suffix}"),
+                    }
+                })
+                .find(|candidate| !taken(&self.names, candidate))
+                .unwrap_or_default(),
+        };
+        self.names.push((var, name.clone()));
+        name
     }
 }
 
@@ -4115,8 +4133,8 @@ mod tests {
         let mut renderer = TypeRenderer::default();
         let t = Ty::new(&db, TyKind::Rigid(Name::new(&db, "A")));
         let u = Ty::new(&db, TyKind::Rigid(Name::new(&db, "B")));
-        assert_eq!(renderer.render(&db, t), "T");
-        assert_eq!(renderer.render(&db, u), "U");
-        assert_eq!(renderer.render(&db, t), "T");
+        assert_eq!(renderer.render(&db, t), "A");
+        assert_eq!(renderer.render(&db, u), "B");
+        assert_eq!(renderer.render(&db, t), "A");
     }
 }
