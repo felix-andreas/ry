@@ -2139,58 +2139,203 @@ fn statement_binding_recover<'db>(
 }
 
 /// The last top-level definition of each name across the package files.
-pub fn package_definitions<'db>(
-    db: &'db dyn Db,
-    files: ProjectFiles,
-) -> &'db FxHashMap<Symbol, Item<'db>> {
-    &package_definition_index(db, files).winners
-}
-
-/// The package files' definitions, folded once: a new top-level name re-runs this fold on
-/// every keystroke until the name is complete, so the duplicate check shares its pass.
-#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
-pub struct DefinitionIndex<'db> {
-    pub winners: FxHashMap<Symbol, Item<'db>>,
-    /// Every file that defines a name the package defines more than once, one entry per
-    /// definition, in project order. Near-empty in a healthy project.
-    pub duplicates: FxHashMap<Symbol, Vec<SourceFile>>,
-}
-
-#[salsa::tracked(returns(ref))]
-pub fn package_definition_index<'db>(db: &'db dyn Db, files: ProjectFiles) -> DefinitionIndex<'db> {
-    winners_of(db, files, DocumentKind::Package)
+pub fn package_definitions<'db>(db: &'db dyn Db, files: ProjectFiles) -> Definitions<'db> {
+    Definitions {
+        db,
+        layer: definition_layer(db, files, false),
+    }
 }
 
 /// The last top-level definition of each name across the helper files, which testthat
 /// sources into the one environment every test file runs in.
-#[salsa::tracked(returns(ref))]
-pub fn test_definitions<'db>(db: &'db dyn Db, files: ProjectFiles) -> FxHashMap<Symbol, Item<'db>> {
-    winners_of(db, files, DocumentKind::TestHelper).winners
+pub fn test_definitions<'db>(db: &'db dyn Db, files: ProjectFiles) -> Definitions<'db> {
+    Definitions {
+        db,
+        layer: definition_layer(db, files, true),
+    }
 }
 
-fn winners_of<'db>(
+/// One layer's top-level definitions, read through its chunks. A lookup of a name that no
+/// file of the layer defines probes no chunk, and one of a defined name starts at the chunk
+/// that wins it.
+#[derive(Clone, Copy)]
+pub struct Definitions<'db> {
     db: &'db dyn Db,
-    files: ProjectFiles,
-    kind: DocumentKind,
-) -> DefinitionIndex<'db> {
-    let mut index = DefinitionIndex::default();
-    for &file in files.files(db) {
-        if *file.kind(db) != kind {
-            continue;
+    layer: &'db DefinitionLayer<'db>,
+}
+
+impl<'db> Definitions<'db> {
+    pub fn get(&self, name: &Symbol) -> Option<&'db Item<'db>> {
+        let last = self.layer.last_chunk(*name);
+        self.layer.chunks[..last]
+            .iter()
+            .rev()
+            .find_map(|&chunk| definition_chunk(self.db, chunk).winners.get(name))
+    }
+
+    pub fn contains_key(&self, name: &Symbol) -> bool {
+        self.get(name).is_some()
+    }
+
+    /// Every defined name, once per chunk that defines it.
+    pub fn keys(self) -> impl Iterator<Item = &'db Symbol> + 'db {
+        let db = self.db;
+        self.layer
+            .chunks
+            .iter()
+            .flat_map(move |&chunk| definition_chunk(db, chunk).winners.keys())
+    }
+
+    /// Every file that defines `name`, one entry per definition, in project order.
+    pub fn defining_files(&self, name: Symbol) -> SmallVec<[SourceFile; 2]> {
+        let last = self.layer.last_chunk(name);
+        let mut files = SmallVec::new();
+        for &chunk in &self.layer.chunks[..last] {
+            let definitions = definition_chunk(self.db, chunk);
+            match definitions.repeated.get(&name) {
+                Some(repeated) => files.extend(repeated.iter().copied()),
+                None => files.extend(
+                    definitions
+                        .winners
+                        .get(&name)
+                        .map(|item| *item.file(self.db)),
+                ),
+            }
         }
-        let definitions = file_definitions(db, file);
-        index.winners.reserve(definitions.len());
-        for &(name, item) in definitions {
-            if let Some(previous) = index.winners.insert(name, item) {
-                index
-                    .duplicates
+        files
+    }
+}
+
+/// Files per definition chunk. A new top-level name re-folds its own chunk alone, and a lookup
+/// probes at most one chunk per this many files.
+const DEFINITION_CHUNK_FILES: usize = 32;
+
+/// A run of a layer's files, in project order, whose definitions fold together.
+#[salsa::interned(debug)]
+pub struct DefinitionChunk<'db> {
+    #[returns(ref)]
+    pub files: Box<[SourceFile]>,
+}
+
+/// A layer's chunks and, per hash bucket of names, one more than the index of the last chunk
+/// that defines a name in the bucket (0 when none does). Building it reads each chunk's names
+/// once and inserts nothing into a map, which is what a new name costs on every keystroke
+/// until it is complete.
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct DefinitionLayer<'db> {
+    chunks: Vec<DefinitionChunk<'db>>,
+    last_chunk: Box<[u32]>,
+}
+
+impl DefinitionLayer<'_> {
+    fn bucket(&self, name: Symbol) -> usize {
+        let shift = u32::BITS - self.last_chunk.len().trailing_zeros();
+        (name.index().wrapping_mul(0x9E37_79B9) >> shift) as usize
+    }
+
+    fn last_chunk(&self, name: Symbol) -> usize {
+        match self.last_chunk.is_empty() {
+            true => 0,
+            false => self.last_chunk[self.bucket(name)] as usize,
+        }
+    }
+}
+
+#[salsa::tracked(returns(ref))]
+fn definition_layer<'db>(db: &'db dyn Db, files: ProjectFiles, test: bool) -> DefinitionLayer<'db> {
+    let kind = match test {
+        true => DocumentKind::TestHelper,
+        false => DocumentKind::Package,
+    };
+    let members: Vec<SourceFile> = files
+        .files(db)
+        .iter()
+        .copied()
+        .filter(|file| *file.kind(db) == kind)
+        .collect();
+    let chunks: Vec<DefinitionChunk<'db>> = members
+        .chunks(DEFINITION_CHUNK_FILES)
+        .map(|run| DefinitionChunk::new(db, Box::<[SourceFile]>::from(run)))
+        .collect();
+    let names: usize = chunks
+        .iter()
+        .map(|&chunk| definition_chunk(db, chunk).winners.len())
+        .sum();
+    if names == 0 {
+        return DefinitionLayer {
+            chunks,
+            last_chunk: Box::default(),
+        };
+    }
+    // Twice as many buckets as names keeps most lookups of an undefined name at one probe.
+    let buckets = (names * 2).next_power_of_two().max(64);
+    let mut layer = DefinitionLayer {
+        chunks,
+        last_chunk: vec![0; buckets].into_boxed_slice(),
+    };
+    for (index, &chunk) in layer.chunks.iter().enumerate() {
+        let Ok(bound) = u32::try_from(index + 1) else {
+            panic!("definition_layer: more chunks than u32::MAX");
+        };
+        for &name in definition_chunk(db, chunk).winners.keys() {
+            let bucket = layer.bucket(name);
+            layer.last_chunk[bucket] = bound;
+        }
+    }
+    layer
+}
+
+/// One chunk's definitions: the last one of each name, and every defining file of the names
+/// the chunk defines more than once.
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct ChunkDefinitions<'db> {
+    pub winners: FxHashMap<Symbol, Item<'db>>,
+    /// One entry per definition, in project order; near-empty in a healthy project.
+    pub repeated: FxHashMap<Symbol, Vec<SourceFile>>,
+}
+
+#[salsa::tracked(returns(ref))]
+fn definition_chunk<'db>(db: &'db dyn Db, chunk: DefinitionChunk<'db>) -> ChunkDefinitions<'db> {
+    let mut definitions = ChunkDefinitions::default();
+    for &file in chunk.files(db).iter() {
+        let own = file_definitions(db, file);
+        definitions.winners.reserve(own.len());
+        for &(name, item) in own {
+            if let Some(previous) = definitions.winners.insert(name, item) {
+                definitions
+                    .repeated
                     .entry(name)
                     .or_insert_with(|| vec![*previous.file(db)])
                     .push(file);
             }
         }
     }
-    index
+    definitions
+}
+
+/// The names `file` defines that the package defines more than once, each with every
+/// defining file in project order. Per file, so a new name elsewhere costs each reading file
+/// one probe per name it defines, and the value backdates while nothing duplicates.
+#[salsa::tracked(returns(ref))]
+pub fn file_duplicate_definitions(
+    db: &dyn Db,
+    file: SourceFile,
+) -> Vec<(Symbol, SmallVec<[SourceFile; 2]>)> {
+    let Some(files) = ProjectFiles::try_get(db) else {
+        return Vec::new();
+    };
+    let definitions = package_definitions(db, files);
+    let mut duplicated: Vec<(Symbol, SmallVec<[SourceFile; 2]>)> = Vec::new();
+    for &(name, _) in file_definitions(db, file) {
+        if duplicated.iter().any(|(seen, _)| *seen == name) {
+            continue;
+        }
+        let defining = definitions.defining_files(name);
+        if defining.len() > 1 {
+            duplicated.push((name, defining));
+        }
+    }
+    duplicated
 }
 
 /// The file's named function and value items in item order, the candidates for

@@ -152,7 +152,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Every host keeps every tree
 - `ry check` releases its trees once, and memoized records are compact (built, with exceptions)
 - HIR as struct-of-arrays, lowered from the green tree (built, with exceptions)
-- A new top-level name costs one project fold (built, with exceptions)
+- A new top-level name costs one chunk fold (built, with exceptions)
 - Typed checking costs per name, not per file
 - The cold check's per-call work: a bump arena, borrowed schemes, a token-only green builder (built, with exceptions)
 - The item check's working maps live in a pooled bump arena (built, with exceptions)

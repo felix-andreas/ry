@@ -203,13 +203,53 @@ fn a_new_definition_reprojects_the_name_maps_and_checks_only_the_new_item() {
             "item_links",
             "item_check",
             "file_interface_groups",
-            "duplicate_binding_map",
-            "package_definition_index",
+            "definition_chunk",
+            "definition_layer",
+            "file_duplicate_definitions",
         ]),
-        [5, 1, 1, 1, 1],
+        [5, 1, 1, 1, 1, 3],
         "each item projects the maps again and only the new one is checked; the edited file \
-         walks its groups again, and the fold runs once and its duplicates backdate"
+         walks its groups again, only the edited file's chunk folds again, and each file's \
+         duplicates are probed again and backdate"
     );
+}
+
+/// A project spans three definition chunks. A new name re-folds the chunk of its own file
+/// alone, and a duplicate across chunks is reported in both files and cleared with them.
+#[test]
+fn a_new_name_refolds_only_its_own_chunk() {
+    let mut db = ProbeDatabase::default();
+    let sources: Vec<String> = (0..70)
+        .map(|index| format!("f{index} <- function() {index}L\n"))
+        .collect();
+    let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
+    let files = db.project(&sources);
+    settle(&db, &files);
+    db.executions_since(&[]);
+
+    db.edit(files[0], "f0 <- function() 0L\nfresh <- 2L\n".to_owned());
+    settle(&db, &files);
+    assert_eq!(
+        db.executions_since(&["definition_chunk", "definition_layer"]),
+        [1, 1],
+        "only the first chunk folds again"
+    );
+    assert!(package_definitions(&db, ProjectFiles::get(&db)).contains_key(&Symbol::new("fresh")));
+
+    db.edit(files[69], "f69 <- function() 69L\nfresh <- 3L\n".to_owned());
+    let duplicates = |db: &ProbeDatabase, file: SourceFile| {
+        file_diagnostics(db, file)
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "duplicate")
+            .count()
+    };
+    assert_eq!(duplicates(&db, files[0]), 1);
+    assert_eq!(duplicates(&db, files[69]), 1);
+    assert_eq!(duplicates(&db, files[35]), 0);
+
+    db.edit(files[69], "f69 <- function() 69L\n".to_owned());
+    assert_eq!(duplicates(&db, files[0]), 0);
+    assert_eq!(duplicates(&db, files[69]), 0);
 }
 
 /// An item's links ask whether its file belongs to the project, which reads the file list and

@@ -136,7 +136,7 @@ plain parallel loops (`in_parallel` in `crates/ry/src/cli.rs`), and tree readers
 small results, so a check never walks another file's tree. Trade-off measured: cold `ry check` went from
 about 2.2-2.5 s to 1.6-1.8 s while peak RSS rose from about 485 to 565 MB; mimalloc's remaining time is
 fresh-page setup, and its purge and huge-page options made no difference. Remaining waits are salsa claims on
-project-wide queries (`duplicate_binding_map`, `project_arithmetic_classes`, `project_type_definitions`)
+project-wide queries (the definition fold, `project_arithmetic_classes`, `project_type_definitions`)
 that one thread computes while others need them.
 
 ## `ry check` releases its trees once, and memoized records are compact
@@ -183,20 +183,27 @@ that one thread computes while others need them.
   value, so salsa backdating works. The checker records expression types in a vector indexed by `ExprId`
   (`RecordedTypes` in `check.rs`), not a hash map.
 
-## A new top-level name costs one project fold
+## A new top-level name costs one chunk fold
 
 **Status:** built, except that `item_interface_edges` is part of `item_links`, which reads the project name maps once per item ("Every host resolves names through one path, and trees live in the host's store").
 
-A name being typed is a new top-level definition on every keystroke, so the project fold must happen once.
-`package_definition_index` folds once into winners and duplicated names; `package_definitions` borrows its
-winners and `duplicate_binding_map` is a tracked copy of its duplicates (empty in a healthy project, which
-keeps the per-file duplicate check firewalled). Map keys are `Symbol`, hashed by the spelling's FxHash
+A name being typed is a new top-level definition on every keystroke, so it must fold only what it changes.
+A layer's files split into interned `DefinitionChunk`s of 32 files; `definition_chunk` folds one into winners
+and the names it repeats, and `definition_layer` holds the chunks plus a power-of-two bucket table (about two
+buckets per name) of the last chunk defining a name in each bucket. `Definitions` answers `get` by probing
+chunks from that bound downward: an undefined name, the common case for typo and unbound checks, costs one
+array read. Duplicates are per file (`file_duplicate_definitions`, every definer of each of the file's own
+names across chunks), which backdates while nothing duplicates. A single project fold (the previous shape)
+cost 1.6 to 2.3 ms of the new-item edit on finbench, as one hash insert per name in 500 files; the layer
+rebuild reads the same names but writes only a `u32` per name. Measured on finbench (4 cores): the new-item
+edit went from a 2.9 to 3.1 ms median to 2.0 to 2.4 ms, body edits and the cold check unchanged. A
+per-name `package_name` alone was rejected: the duplicate and typo checks need every name, and per-name
+memos for names nothing binds cost about 100,000 memos. Map keys are `Symbol`, hashed by the spelling's FxHash
 computed once at interning, not by index, because index order depends on which thread interned first.
 `Symbol` therefore does not implement `Borrow<str>`: a lookup by text interns first (`Symbol::new`). The
 symbol table stores each spelling's character count, which the typo-suggestion scan filters on before
-reading any spelling. A new-name edit costs about 4 to 6 ms on dsbench and finbench (23 to 27 ms with two
-folds and per-item edges read from project maps). Pinned by
-`a_new_definition_reprojects_the_name_maps_and_checks_only_the_new_item` in `test_incremental.rs`.
+reading any spelling. Pinned by `a_new_definition_reprojects_the_name_maps_and_checks_only_the_new_item`
+and `a_new_name_refolds_only_its_own_chunk` in `test_incremental.rs`.
 Measurement trap: a keystroke probe that edits a digit inside an identifier renames an item, and stubs
 entered at `LOW` durability deep-verify every memo (about 51,000 per keystroke).
 

@@ -814,7 +814,7 @@ struct ReadContext<'db> {
 
 /// The package's top-level definitions and its definitions made inside a condition.
 struct PackageDefinitions<'db> {
-    top_level: &'db FxHashMap<Symbol, Item<'db>>,
+    top_level: crate::Definitions<'db>,
     conditional: &'db FxHashMap<Symbol, Vec<Item<'db>>>,
 }
 
@@ -1829,15 +1829,6 @@ fn top_level_name_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange
     sites
 }
 
-/// Near-empty in healthy projects, so its value-equality firewall holds: a new name that
-/// duplicates nothing leaves every file's duplicate check untouched.
-#[salsa::tracked(returns(ref))]
-fn duplicate_binding_map(db: &dyn Db, files: ProjectFiles) -> FxHashMap<Symbol, Vec<SourceFile>> {
-    crate::package_definition_index(db, files)
-        .duplicates
-        .clone()
-}
-
 /// Each site warns: per-site winner semantics make every earlier binding dead, unless code
 /// that runs before the later binding reads the earlier value. Ranges are read only for files
 /// involved in a duplication.
@@ -1845,24 +1836,12 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
     if *file.kind(db) != DocumentKind::Package {
         return Vec::new();
     }
-    let Some(files) = ProjectFiles::try_get(db) else {
-        return Vec::new();
-    };
-    let map = duplicate_binding_map(db, files);
-    if map.is_empty() {
-        return Vec::new();
-    }
-    let mut own_duplicated: Vec<Symbol> = Vec::new();
-    for &(name, _) in file_definitions(db, file) {
-        if map.contains_key(&name) && !own_duplicated.contains(&name) {
-            own_duplicated.push(name);
-        }
-    }
     let mut diagnostics = Vec::new();
-    for name in own_duplicated {
+    for (name, defining_files) in crate::file_duplicate_definitions(db, file) {
+        let name = *name;
         let mut sites: Vec<DefinitionSite> = Vec::new();
         let mut seen_files: Vec<SourceFile> = Vec::new();
-        for &site_file in &map[&name] {
+        for &site_file in defining_files {
             if seen_files.contains(&site_file) {
                 continue;
             }
