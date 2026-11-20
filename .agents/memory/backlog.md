@@ -2092,7 +2092,6 @@ The message says to add a type annotation, and no annotation form silences it. `
 - **`vapply(x, f, numeric(1))` errors whenever the callback is not statically `double`.** R accepts
   a wider template, which the tester confirmed with `ry run` on
   `vapply(1:3, function(i) i, numeric(1))`.
-- **A function name inside `mutate` and `filter` is swallowed** along with the column names.
 
 ### Two lints need a model change rather than a patch
 

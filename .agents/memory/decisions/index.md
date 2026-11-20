@@ -149,6 +149,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A nominal over a nominal extends it (settled)
 - `numeric` is closed under arithmetic, `arithmetic` is not (settled)
 - Diagnostic messages are lowercase and end without a full stop (settled)
+- A called name inside a table's mask resolves loudly (settled)
 
 ## Analysis core
 

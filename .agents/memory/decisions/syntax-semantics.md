@@ -2112,3 +2112,20 @@ lowering path and a third way for two annotations to disagree, for no case `#:` 
   fragments). Which messages count as sentences is a judgment per message, so no test can hold
   it, and the corpus had drifted under it. Lowercase was already the majority (229 of 355
   rendered messages).
+
+## A called name inside a table's mask resolves loudly
+
+**Status:** settled.
+
+- A masked argument's unresolved reads stay quiet because a bare name may be a column. A called
+  name may not: R looks it up as a function, skipping non-functions, and a table's column is a
+  vector. So inside `subset`, `transform`, an `@masked` verb or a table `[`, an unresolved callee
+  reports (`mutate(d, b = scale_it(a))`).
+- `with` and `within` stay fully quiet, because their data is any list or environment and often
+  holds functions (`with(options, real_callback(x))`, found on the CRAN corpus).
+- A quiet level from anything else (a formula, a quotation, `%op%`) keeps the callee quiet too:
+  `mask_depth` in `naming.rs` counts only table masks, and the callee is loud only when every quiet
+  level is one.
+- `MASK_ONLY_CALLEES` names what a mask provides without an import: data.table's `.()`, `J()`,
+  `:=`, `let()` and `patterns()`, and tidyselect's selection helpers, which tidyselect puts in
+  every selection's mask, so `where()` works under tidyr with nothing attached.

@@ -4093,6 +4093,14 @@ strict-mode origin. The recognized masks are:
 - A call to a [`@masked`](#conditional-stub-namespaces-datatable-dplyr-ggplot2-and-testthat) stub
   declaration.
 
+A called name is not a column reference, because R looks a called name up as a function and a
+column is a vector. So inside every mask except `with()` and `within()`, an unresolved called name
+is reported like any other: `mutate(d, b = scale_it(a))` reports `scale_it` when nothing defines it.
+`with()` and `within()` evaluate in any list or environment, which may hold functions, so their
+called names stay quiet. The names a mask provides without an import also stay quiet: data.table's
+`.()`, `J()`, `:=`, `let()` and `patterns()`, and tidyselect's selection helpers (`where()`,
+`starts_with()`, `everything()` and the rest), which tidyselect makes available in every selection.
+
 A name inside a mask that does resolve, such as a local variable or a function like `sum`, keeps its
 ordinary resolution and typing, because data.table itself falls back to the lexical scope for names
 that are not columns. Inside any single `[`, a `..name` read is data.table's way to name the

@@ -225,6 +225,25 @@ f <- function(d) dplyr::filter(d)
 #++++
 f: <T> fn(d: T) -> T
 
+#---- a_called_name_inside_a_table_mask_still_resolves
+#description Imports: dplyr, tidyr
+f <- function(d) {
+  out <- dplyr::mutate(d, b = scale_it(a), c = mean(a), k = dplyr::n())
+  dplyr::filter(out, keep_row(a), dplyr::if_any(dplyr::starts_with("a")))
+}
+g <- function(d) tidyr::pivot_longer(d, cols = where(is.numeric))
+#++++
+f: <T> fn(d: T) -> T
+g: <T> fn(d: T) -> Any
+84..92 warning[unresolved] I could not resolve `scale_it` in this package, its imports, or builtins
+147..155 warning[unresolved] I could not resolve `keep_row` in this package, its imports, or builtins
+
+#---- a_called_name_inside_with_may_be_a_function_of_the_data
+#description Imports: dplyr
+f <- function(callbacks) with(callbacks, on_line("x"))
+#++++
+f: <T> fn(callbacks: T) -> Any
+
 #---- a_package_qualifying_its_own_name_reads_its_own_definition
 #description Package: withr
 defer <- function(x) x + 1L
