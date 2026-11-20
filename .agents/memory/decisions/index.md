@@ -309,6 +309,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `abbreviate` is GNU R's `stripchars`, pass for pass (settled)
 - Vector kernels: one typed loop per case, exact sizes, and GNU R's polygamma and Bessel functions (settled)
 - Base and stats kernels: exact shortcuts, GNU R's quirks kept, and one prepared state per call
+- Approximate repetitions expand as TRE's do
+- Fortran-style ports keep C's `pow` call for constant bases
 
 ## R compatibility
 

@@ -623,3 +623,16 @@ Each kernel below matched or trailed GNU R in the builtins sweep (`tools/bench/b
 - **Not explained: `rpois` with a vector mean** (about 0.85 times GNU R's speed) and `rgeom` (about 0.9 times at 10^6 draws). Cachegrind's branch simulator counts five times GNU R's mispredicts in the scalar `qnorm` on the same inputs, which no branch in its code accounts for; both stay in `slower.txt`.
 - **Oracle cases:** `coerce__string_to_number_last_bits`, `kernels__pi_trigonometry_periods`, `kernels__bincode_breaks`, `kernels__sorted_duplicates`, `kernels__interpolation_grid`, `stats__smooth_spline_prepared_points`, `random__hypergeometric_and_poisson_streams`, `random__lookahead_streams`.
 
+
+## Approximate repetitions expand as TRE's do
+
+**Status:** built.
+
+- `ApproximateRegex` lays out a repetition as TRE's parser expands it: `x*` and `x+` are one copy of `x` with a loop, `x{m,}` is `m` copies followed by `x*`, and `x{m,n}` is `m` copies followed by nested optional ones. The layout is semantic, not cosmetic: two paths that reach the same position compete for it, so which positions a path occupies decides which match starts survive. It shows in `aregexec("([a-c]+)(d)(e?)", "xbcdy", max.distance = 1)`, where GNU R buys the earlier start `x` with a substitution (`strings__aregexec_starts`).
+- `Reach`, the per-position state every path step copies, holds 32-bit fields and no total edit count (the sum of insertions, deletions and substitutions), which shrinks the copy below the inline `memcpy` threshold.
+
+## Fortran-style ports keep C's `pow` call for constant bases
+
+**Status:** built.
+
+- `r_pow` in `crates/stats/src/spline.rs` passes its base through `std::hint::black_box`. Inlined with the constant 16 of `sbart`'s `ratio * 16^(6 * spar - 2)`, LLVM rewrites `pow(16, y)` to `exp2(4 * y)`, which differs from glibc's `pow` in the last bit, and `smooth.spline` and `ppr` (whose `supsmu` with `bass` and `spline` smoothers runs `sbart`) amplify that bit through Brent's search into visibly different fits.

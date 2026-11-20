@@ -226,7 +226,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Sys.setlocale", 2, do_sys_setlocale),
     internal("Sys.getlocale", 1, do_sys_getlocale),
     internal("l10n_info", 0, do_l10n_info),
-    internal("Sys.localeconv", 0, |_| unsafe { do_sys_localeconv() }),
+    internal("Sys.localeconv", 0, do_sys_localeconv),
     internal("Sys.sleep", 1, |call| unsafe {
         {
             let seconds = values::as_real_scalar(call.arg(0));
@@ -5230,7 +5230,7 @@ fn do_compiler_version<'s>(context: &mut Cx<'s>, _arguments: &Args<'_, 's>) -> R
 
 /// `Sys.localeconv()`: the C library's `localeconv` for the current locale, its numbers as
 /// strings, where `127` (`CHAR_MAX`) means the locale does not say.
-unsafe fn do_sys_localeconv() -> R<Sexp> {
+unsafe fn do_sys_localeconv(_call: &Call<'_>) -> R<Sexp> {
     #[cfg(unix)]
     let values = {
         let conventions = &*libc::localeconv();

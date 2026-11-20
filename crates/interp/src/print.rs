@@ -881,6 +881,21 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
     } else {
         (slices, rows, cols)
     };
+    // Every slice prints with the dimnames of the first two dimensions, and their titles.
+    let leading = if dimnames.kind() == SexpType::List {
+        let leading = values::list_vector(&[dimnames.element(0), dimnames.element(1)])?;
+        crate::heap().root(leading);
+        if dimnames_names != nil() {
+            let titles = values::string_vector(&[
+                &values::string_at(dimnames_names, 0).unwrap_or_default(),
+                &values::string_at(dimnames_names, 1).unwrap_or_default(),
+            ])?;
+            values::set_attr(leading, symbols().names, titles)?;
+        }
+        leading
+    } else {
+        nil()
+    };
     if slices == 0 {
         // GNU R names the shape of an array with no slices, then prints the labels of its first
         // two dimensions with no cells.
@@ -891,8 +906,7 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
             array.kind().name()
         ));
         let matrix = values::alloc(array.kind(), 0)?;
-        if dimnames.kind() == SexpType::List {
-            let leading = leading_dimnames(dimnames, dimnames_names)?;
+        if leading != nil() {
             values::set_attr(matrix, symbols().dimnames, leading)?;
         }
         print_matrix_rows(matrix, rows, cols, rows, false, options)?;
@@ -933,8 +947,7 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
         let matrix = crate::subset::select_elements(array, &indices)?;
         let dim = values::integer_vector(&[rows as i32, cols as i32])?;
         values::set_attr(matrix, symbols().dim, dim)?;
-        if dimnames.kind() == SexpType::List {
-            let leading = leading_dimnames(dimnames, dimnames_names)?;
+        if leading != nil() {
             values::set_attr(matrix, symbols().dimnames, leading)?;
         }
         let (shown, shown_cols) = if index + 1 == shown_slices {
@@ -972,19 +985,6 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
         ));
     }
     Ok(())
-}
-
-/// The dimnames of an array's first two dimensions, with their titles.
-unsafe fn leading_dimnames(dimnames: Sexp, dimnames_names: Sexp) -> R<Sexp> {
-    let leading = values::list_vector(&[dimnames.element(0), dimnames.element(1)])?;
-    if dimnames_names != nil() {
-        let titles = values::string_vector(&[
-            &values::string_at(dimnames_names, 0).unwrap_or_default(),
-            &values::string_at(dimnames_names, 1).unwrap_or_default(),
-        ])?;
-        values::set_attr(leading, symbols().names, titles)?;
-    }
-    Ok(leading)
 }
 
 unsafe fn print_list_array(list: Sexp, dims: &[usize], options: &PrintOptions) -> R<()> {
