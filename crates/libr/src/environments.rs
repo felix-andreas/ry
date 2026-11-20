@@ -422,6 +422,9 @@ pub unsafe extern "C" fn R_EnvironmentIsLocked(env: Sexp) -> Rboolean {
 }
 
 unsafe fn binding(symbol: Sexp, env: Sexp) -> ApiResult<Sexp> {
+    if symbol.kind() != SexpType::Symbol {
+        return Err(error("not a symbol"));
+    }
     let env = environment(env, "bindingIsLocked")?;
     runtime()
         .heap
@@ -612,65 +615,71 @@ unsafe fn promise_is_forced(promise: Sexp) -> bool {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_GetBindingType(symbol: Sexp, env: Sexp) -> BindingType {
-    let kind = |runtime: &Runtime, env: Sexp| {
-        let Some(cell) = runtime.heap.frame_cell(env, symbol) else {
-            return if base_binds_missing_arg(env, symbol) {
-                BindingType::Missing
-            } else {
-                BindingType::Unbound
-            };
-        };
-        if cell.has_gp(gp::ACTIVE_BINDING) {
-            return BindingType::Active;
-        }
-        let value = cell.cdr();
-        if value == runtime.heap.known().missing_arg {
-            BindingType::Missing
-        } else if value.kind() == SexpType::Promise {
-            if promise_is_forced(value) {
-                BindingType::Forced
-            } else {
-                BindingType::Delayed
-            }
-        } else {
-            BindingType::Value
-        }
-    };
     direct(
-        |runtime| (env.kind() == SexpType::Environment).then(|| kind(runtime, env)),
-        || Ok(kind(runtime(), environment(env, "R_GetBindingType")?)),
+        |runtime| {
+            (symbol.kind() == SexpType::Symbol && env.kind() == SexpType::Environment)
+                .then(|| classify_binding(runtime, symbol, env))
+        },
+        || binding_type(symbol, env),
     )
+}
+
+unsafe fn binding_type(symbol: Sexp, env: Sexp) -> ApiResult<BindingType> {
+    if symbol.kind() != SexpType::Symbol {
+        return Err(error("not a symbol"));
+    }
+    Ok(classify_binding(
+        runtime(),
+        symbol,
+        environment(env, "R_GetBindingType")?,
+    ))
+}
+
+unsafe fn classify_binding(runtime: &Runtime, symbol: Sexp, env: Sexp) -> BindingType {
+    let Some(cell) = runtime.heap.frame_cell(env, symbol) else {
+        return if base_binds_missing_arg(env, symbol) {
+            BindingType::Missing
+        } else {
+            BindingType::Unbound
+        };
+    };
+    if cell.has_gp(gp::ACTIVE_BINDING) {
+        return BindingType::Active;
+    }
+    let value = cell.cdr();
+    if value == runtime.heap.known().missing_arg {
+        BindingType::Missing
+    } else if value.kind() == SexpType::Promise {
+        if promise_is_forced(value) {
+            BindingType::Forced
+        } else {
+            BindingType::Delayed
+        }
+    } else {
+        BindingType::Value
+    }
 }
 
 impl crate::boundary::Handout for BindingType {}
 impl crate::boundary::Handout for DotType {}
 
-unsafe fn binding_of_type(
-    symbol: Sexp,
-    env: Sexp,
-    wanted: &[BindingType],
-    what: &str,
-) -> ApiResult<Sexp> {
-    let cell = binding(symbol, env)?;
-    let kind = R_GetBindingType(symbol, env);
-    if !wanted.contains(&kind) {
-        return Err(error(format!(
-            "{what}: the binding of \"{}\" is not of the right type",
-            symbol_name(symbol)
-        )));
+unsafe fn binding_of_type(symbol: Sexp, env: Sexp, wanted: BindingType) -> ApiResult<Sexp> {
+    if binding_type(symbol, env)? != wanted {
+        return Err(error(match wanted {
+            BindingType::Active => {
+                format!("no active binding for \"{}\"", symbol_name(symbol))
+            }
+            BindingType::Forced => "not a forced binding".to_owned(),
+            _ => "not a delayed binding".to_owned(),
+        }));
     }
-    Ok(cell.cdr())
+    Ok(binding(symbol, env)?.cdr())
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_ActiveBindingFunction(symbol: Sexp, env: Sexp) -> Sexp {
     enter(|| {
-        binding_of_type(
-            symbol,
-            env,
-            &[BindingType::Active],
-            "R_ActiveBindingFunction",
-        )
+        binding_of_type(symbol, env, BindingType::Active)
     })
 }
 
@@ -679,12 +688,7 @@ pub unsafe extern "C" fn R_DelayedBindingExpression(symbol: Sexp, env: Sexp) -> 
     direct(
         |runtime| Some(Reachable(delayed_promise(runtime, symbol, env)?.cdr())),
         || {
-            let promise = binding_of_type(
-                symbol,
-                env,
-                &[BindingType::Delayed],
-                "R_DelayedBindingExpression",
-            )?;
+            let promise = binding_of_type(symbol, env, BindingType::Delayed)?;
             Ok(innermost_promise(promise).cdr())
         },
     )
@@ -702,12 +706,7 @@ pub unsafe extern "C" fn R_DelayedBindingEnvironment(symbol: Sexp, env: Sexp) ->
                 .then_some(Reachable(promise_env))
         },
         || {
-            let promise = binding_of_type(
-                symbol,
-                env,
-                &[BindingType::Delayed],
-                "R_DelayedBindingEnvironment",
-            )?;
+            let promise = binding_of_type(symbol, env, BindingType::Delayed)?;
             interp::eval::promise_env(innermost_promise(promise))
         },
     )
@@ -737,12 +736,7 @@ unsafe fn delayed_promise(runtime: &Runtime, symbol: Sexp, env: Sexp) -> Option<
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_ForcedBindingExpression(symbol: Sexp, env: Sexp) -> Sexp {
     enter(|| {
-        let promise = binding_of_type(
-            symbol,
-            env,
-            &[BindingType::Forced],
-            "R_ForcedBindingExpression",
-        )?;
+        let promise = binding_of_type(symbol, env, BindingType::Forced)?;
         Ok(innermost_promise(promise).cdr())
     })
 }
@@ -922,7 +916,13 @@ pub unsafe extern "C" fn R_findDotsEnv(env: Sexp) -> Sexp {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_DotsExist(env: Sexp) -> Rboolean {
-    enter(|| Ok(dots_in_frame(env)?.is_some() as Rboolean))
+    // Unlike the other accessors, a `...` bound to anything else answers FALSE, not an error.
+    enter(|| {
+        let env = environment(env, "dots")?;
+        let value = frame_value(env, crate::globals::R_DotsSymbol.get());
+        Ok((value == runtime().heap.known().missing_arg || value.kind() == SexpType::Dots)
+            as Rboolean)
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -989,32 +989,34 @@ pub unsafe extern "C" fn R_GetDotType(index: c_int, env: Sexp) -> DotType {
     })
 }
 
-unsafe fn dot_promise(index: c_int, env: Sexp, wanted: DotType, what: &str) -> ApiResult<Sexp> {
+unsafe fn dot_promise(index: c_int, env: Sexp, wanted: DotType) -> ApiResult<Sexp> {
     let value = dot(index, env)?;
     if R_GetDotType(index, env) != wanted {
-        return Err(error(format!(
-            "{what}: the ... element is not of the right type"
-        )));
+        return Err(error(if wanted == DotType::Forced {
+            "not a forced ... element"
+        } else {
+            "not a delayed ... element"
+        }));
     }
     Ok(innermost_promise(value))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_DotDelayedExpression(index: c_int, env: Sexp) -> Sexp {
-    enter(|| Ok(dot_promise(index, env, DotType::Delayed, "R_DotDelayedExpression")?.cdr()))
+    enter(|| Ok(dot_promise(index, env, DotType::Delayed)?.cdr()))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_DotDelayedEnvironment(index: c_int, env: Sexp) -> Sexp {
     enter(|| {
-        let promise = dot_promise(index, env, DotType::Delayed, "R_DotDelayedEnvironment")?;
+        let promise = dot_promise(index, env, DotType::Delayed)?;
         interp::eval::promise_env(promise)
     })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_DotForcedExpression(index: c_int, env: Sexp) -> Sexp {
-    enter(|| Ok(dot_promise(index, env, DotType::Forced, "R_DotForcedExpression")?.cdr()))
+    enter(|| Ok(dot_promise(index, env, DotType::Forced)?.cdr()))
 }
 
 /// `R_envSymbols(env)`: the symbols bound in `env`'s frame, as a list, in frame order.

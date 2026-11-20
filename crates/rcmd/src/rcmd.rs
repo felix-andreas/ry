@@ -1746,6 +1746,10 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                         // A single-architecture build has nothing to skip, and every build
                         // starts from a fresh copy, so there is nothing to clean beforehand.
                         "--no-multiarch" | "--preclean" => {}
+                        // A package replaces the installed one only once it has built and
+                        // loaded in a staging library, which is the protection GNU R's locks
+                        // give; `install.packages(Ncpus = 2)` passes `--pkglock`.
+                        "--lock" | "--no-lock" | "--pkglock" => {}
                         "--no-data" | "--no-inst" | "--no-demo" | "--no-exec" | "--no-R" => {
                             options.driver_flags.push(argument.clone());
                         }

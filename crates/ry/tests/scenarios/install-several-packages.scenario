@@ -1,0 +1,50 @@
+# A user installs two source packages from a local repository in one `install.packages()` call,
+# on two cores, where one imports the other. Both install in dependency order, and the options
+# `install.packages()` passes to `R CMD INSTALL` raise no warning.
+
+requires ry-runtime
+
+file pkga/DESCRIPTION
+| Package: pkga
+| Version: 0.1
+| Title: A
+| Description: The package pkgb imports.
+| License: MIT
+| Author: x
+| Maintainer: x <x@example.com>
+file pkga/NAMESPACE
+| export(fa)
+file pkga/R/a.R
+| fa <- function() 1
+file pkgb/DESCRIPTION
+| Package: pkgb
+| Version: 0.1
+| Title: B
+| Description: Imports pkga.
+| License: MIT
+| Author: x
+| Maintainer: x <x@example.com>
+| Imports: pkga
+file pkgb/NAMESPACE
+| export(fb)
+| importFrom(pkga, fa)
+file pkgb/R/b.R
+| fb <- function() fa() + 1
+file install.R
+| dir.create("repo/src/contrib", recursive = TRUE)
+| for (package in c("pkga", "pkgb")) {
+|   tar(file.path("repo/src/contrib", paste0(package, "_0.1.tar.gz")), package, compression = "gzip")
+| }
+| tools::write_PACKAGES("repo/src/contrib", type = "source")
+| options(repos = c(local = paste0("file://", normalizePath("repo"))))
+| dir.create("library")
+| install.packages(c("pkgb", "pkga"), lib = "library", type = "source", Ncpus = 2)
+| print(sort(list.files("library")))
+| library(pkgb, lib.loc = "library")
+| print(fb())
+
+run ry run --runtime ry install.R
+expect exit 0
+expect stdout "[1] \"pkga\" \"pkgb\""
+expect stdout "[1] 2"
+expect stderr lacks "unknown option"

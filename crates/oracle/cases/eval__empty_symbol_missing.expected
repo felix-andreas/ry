@@ -17,9 +17,15 @@
 | h()
 | [1] TRUE
 | [1] TRUE
+| [1] "object '' not found"
+| eval(quote(expr = ), new.env(parent = emptyenv()))
+| [1] "object '' not found"
+| eval(quote(expr = ), new.env(parent = new.env(parent = emptyenv())))
+| [1] "argument is missing, with no default"
+| eval(quote(expr = ), new.env(parent = baseenv()))
 [messages]
 [warnings]
 [errors]
 [value]
-logical
-| TRUE
+language
+| eval(quote(expr = ), new.env(parent = baseenv()))
