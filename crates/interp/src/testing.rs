@@ -212,9 +212,16 @@ pub fn check_bytecode_agreement(entropy: &mut impl Entropy) {
     ];
     let a = arguments[entropy.below(arguments.len())];
     let b = arguments[entropy.below(arguments.len())];
+    check_bytecode_program(&body, a, b);
+}
+
+/// [`check_bytecode_agreement`]'s check of one program, `body`, with `a` and `b` bound to the
+/// given argument texts.
+pub fn check_bytecode_program(body: &str, a: &str, b: &str) {
+    syntax::testing::enable_invariants();
     with_interpreter(|| {
         // SAFETY: the interpreter is installed.
-        let (direct, compiled) = unsafe { outcomes(&body, a, b) };
+        let (direct, compiled) = unsafe { outcomes(body, a, b) };
         for (call, outcome) in compiled.iter().enumerate() {
             assert_eq!(
                 &direct,

@@ -1818,12 +1818,14 @@ pub fn integer_divide(a: i32, b: i32) -> i32 {
 /// `floor(a / b)` as GNU R computes it, in doubles. A quotient of two `int`s is never within
 /// rounding of an integer it does not equal (it is at least `1 / |b|` from one), so the
 /// truncated quotient, one lower when it lies above, is the floor; unlike `f64::floor`, which
-/// is a libm call on baseline x86-64, it vectorizes. A zero `b` gives a meaningless value.
+/// is a libm call on baseline x86-64, it vectorizes. A zero `b` gives a meaningless value but
+/// no overflow: a negative `a` makes the quotient `-Inf`, which saturates to `i32::MIN` and then
+/// lies above it, so the subtraction wraps.
 #[inline(always)]
 pub fn floored_quotient(a: i32, b: i32) -> i32 {
     let quotient = f64::from(a) / f64::from(b);
     let truncated = quotient as i32;
-    truncated - i32::from(f64::from(truncated) > quotient)
+    truncated.wrapping_sub(i32::from(f64::from(truncated) > quotient))
 }
 
 /// `a %/% b`, bit for bit as GNU R computes it (`myfloor`), and consistent with
