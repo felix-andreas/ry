@@ -156,6 +156,16 @@ negated: Unknown
 563..566 error[type-mismatch] expected a numeric value (`integer` or `double`) or a class with arithmetic between two of its values, found `Date`
 647..650 error[type-mismatch] expected a numeric value (`integer` or `double`) or a class with arithmetic between two of its values, found `Date`
 
+#---- a_difference_of_two_values_asks_only_arithmetic
+# R subtracts two dates or two times, and testthat compares them with `abs(x - y) < tol`.
+near <- function(x, y, tolerance = 1e-8) abs(x - y) < tolerance
+times <- near(Sys.time(), Sys.time())
+days <- near(Sys.Date(), Sys.Date())
+#++++
+near: <T: arithmetic, U> fn(x: T, y: T, [tolerance]: U) -> logical
+times: logical
+days: logical
+
 #---- a_shared_parameter_promotes_numbers_like_r
 add <- function(a, b) a + b
 a <- add(1L, 1.5)

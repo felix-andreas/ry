@@ -2494,12 +2494,17 @@ For example, `double * integer[]` is `double[]`, `integer[named] + integer` is `
 An unannotated value used as an arithmetic operand is *required to be numeric* rather than rejected:
 it must end up as `integer` or `double`, in any vector shape, or as a class with arithmetic. Beside
 a number it takes the [`arithmetic` constraint](#constraints), and two operands of one type take
-`numeric`, because a class such as `Date` adds a number but not another value of its own.
+`numeric`, because a class such as `Date` adds a number but not another value of its own. A
+difference `a - b` is the exception and asks only `arithmetic`, because R subtracts two dates or
+two times.
 
 - `function(x) x + 1L` is `<T: arithmetic> fn(x: T) -> T`, and calling it with `"oops"` is a type
   error.
 - `function(x) x / 2` is `<T: arithmetic> fn(x: T) -> double`.
-- `function(a, b) a + b` is `<T: numeric> fn(a: T, b: T) -> T`.
+- `function(a, b) a + b` is `<T: numeric> fn(a: T, b: T) -> T`, and calling it with two dates is a
+  type error.
+- `function(a, b) abs(a - b) < 1e-8` is `<T: arithmetic> fn(a: T, b: T) -> logical`, and accepts two
+  dates.
 
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
 vector, so `f <- function(x) x + c(1L, 2L)` is `<T: arithmetic> fn(x: T) -> double[]` and accepts
@@ -4691,8 +4696,23 @@ out of the parts decided at run time from a value's class attribute:
 - `structure(list(...), class = "dog")` keeps the argument's type, because a `class` attribute is
   data, not a type, so the record's fields stay checkable. A `dim` attribute is the exception: it
   makes the value an array, whose shape is not tracked, so such a value is `Unknown`.
-- `setClass`, `setGeneric`, `setMethod`, and `new` are not modeled, so `new(...)` is `Unknown`, and
-  a call to a generic made by `setGeneric` gives `Any`, like a call to an S3 generic.
+- `setClass`, `setGeneric`, `setMethod`, and `new` are not modeled as types, so `new(...)` is
+  `Any`, and a call to a generic made by `setGeneric` gives `Any`, like a call to an S3 generic.
+- A named argument of `new("Class", ...)` must be one of the class's slots, as R requires.
+  The slots come from `setClass`'s `representation(...)` and `slots =` arguments, together with
+  every class it `contains`, in the same file or anywhere in the package:
+
+  ```r
+  setClass("Shape", representation("VIRTUAL", name = "character"))
+  setClass("Circle", contains = "Shape", slots = list(radius = "numeric"))
+  new("Circle", name = "unit", radius = 1)    # fine
+  new("Circle", radius = 1, colour = "red")
+  # error[type-mismatch]: class `Circle` has no slot `colour`. Its slots are `name`, `radius`
+  ```
+
+  The check is skipped when a class on the chain is defined twice, has a computed slot list or
+  parent, extends a class the project does not define (such as `numeric` or another package's
+  class), or has its own `initialize` method, which may take any argument.
 - `x@slot` reads an S4 slot and types as `Unknown`, and is a strict-mode origin, except on an `Any`
   subject, whose slots are `Any` like its `$` fields. The subject
   expression is still inferred and counts as a read for naming, the unused check, references, and

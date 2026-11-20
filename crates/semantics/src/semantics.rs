@@ -11,6 +11,7 @@ pub mod load_index;
 pub mod metadata;
 pub mod naming;
 pub mod native;
+pub mod s4;
 pub mod session;
 pub mod sorted;
 pub mod stubs;

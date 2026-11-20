@@ -315,6 +315,90 @@ use <- function(object, kind = "response") {
 use: Unknown
 109..113 error[type-mismatch] this has type `character`, which is not a function, so it cannot be called
 
+#==== s4_slots
+#---- a_slot_typo_in_new_is_reported
+setClass("Account", representation(balance = "numeric", owner = "character"))
+account <- new("Account", balanse = 10)
+#++++
+fn(...: Any) -> Any
+account: Any
+104..111 error[type-mismatch] class `Account` has no slot `balanse`. Did you mean `balance`?
+
+#---- a_slot_the_class_lacks_lists_its_slots
+setClass("Point", slots = c(x = "numeric", y = "numeric"))
+point <- new("Point", x = 1, z = 2)
+#++++
+fn(...: Any) -> Any
+point: Any
+88..89 error[type-mismatch] class `Point` has no slot `z`. Its slots are `x`, `y`
+
+#---- an_inherited_slot_is_accepted
+setClass("Shape", representation("VIRTUAL", name = "character"))
+setClass("Circle", contains = "Shape", slots = list(radius = "numeric"))
+circle <- methods::new("Circle", name = "unit", radius = 1)
+wrong <- new(Class = "Circle", radius = 1, colour = "red")
+#++++
+fn(...: Any) -> Any
+fn(...: Any) -> Any
+circle: Any
+wrong: Any
+241..247 error[type-mismatch] class `Circle` has no slot `colour`. Its slots are `name`, `radius`
+
+#---- a_bare_slot_name_and_an_unnamed_argument_are_accepted
+setClass("Pair", slots = c("first", "second"))
+setClass("Labelled", contains = "Pair", slots = c(label = "character"))
+base <- new("Pair", first = 1, second = 2)
+labelled <- new("Labelled", base, label = "a")
+#++++
+fn(...: Any) -> Any
+fn(...: Any) -> Any
+base: Any
+labelled: Any
+
+#---- a_computed_class_is_not_checked
+fields <- c(x = "numeric")
+setClass("Open", slots = fields)
+setClass("Child", contains = "Open")
+open <- new("Child", anything = 1)
+#++++
+fields: character[named]
+fn(...: Any) -> Any
+fn(...: Any) -> Any
+open: Any
+
+#---- a_class_with_an_initialize_method_is_not_checked
+setClass("Counter", representation(count = "numeric"))
+setMethod("initialize", "Counter", function(.Object, start = 0, ...) {
+  .Object@count <- start
+  .Object
+})
+counter <- new("Counter", start = 5)
+#++++
+fn(...: Any) -> Any
+character
+counter: Any
+
+#---- a_basic_type_parent_or_unknown_class_is_not_checked
+setClass("Prices", contains = "numeric")
+prices <- new("Prices", c(1, 2), .Data = c(3, 4))
+other <- new("dgCMatrix", Dim = c(2L, 2L))
+#++++
+fn(...: Any) -> Any
+prices: Any
+other: Any
+
+#---- a_class_defined_in_another_file_is_checked
+#~~~~ R/classes.R
+setClass("Ledger", representation(entries = "list"))
+#~~~~ R/use.R
+make_ledger <- function() new("Ledger", entires = list())
+#++++
+== R/classes.R
+fn(...: Any) -> Any
+== R/use.R
+make_ledger: fn() -> Any
+40..47 error[type-mismatch] class `Ledger` has no slot `entires`. Did you mean `entries`?
+
 #==== nominal_field_writes
 #---- a_write_the_representation_admits_keeps_the_nominal
 #: @type Person {list{name: character, age: integer}}

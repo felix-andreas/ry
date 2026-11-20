@@ -2090,6 +2090,10 @@ lowering path and a third way for two annotations to disagree, for no case `#:` 
   unless the other side is `numeric`, so no lattice pair is new.
 - Rejected: operator-specific constraints (`T: Add<T>`), which are traits by another name and are
   declined (`development/design/open-questions.md`, section 3).
+- `a - b` on two tied operands asks only `arithmetic`: R defines `-.Date` and `-.POSIXct` for
+  two values of the class, and `abs(x - y) < tol` over times is common (testthat's compare). The
+  tie's result stays `T`, so such a helper over dates claims `Date` where R gives a `difftime`;
+  that imprecision is the cost of having no operator-specific constraint.
 
 
 ## Diagnostic messages are lowercase and end without a full stop
@@ -2129,3 +2133,11 @@ lowering path and a third way for two annotations to disagree, for no case `#:` 
 - `MASK_ONLY_CALLEES` names what a mask provides without an import: data.table's `.()`, `J()`,
   `:=`, `let()` and `patterns()`, and tidyselect's selection helpers, which tidyselect puts in
   every selection's mask, so `where()` works under tidyr with nothing attached.
+
+## `new()` is checked against the slots `setClass` writes out
+
+**Status:** settled
+
+- `s4.rs` reads each top-level `setClass` call as written: `representation(...)` (named entries are slots, unnamed strings parents), `slots =` (named or bare strings) and `contains =`. `class_slots` is a per-(file, class) projection over the package's definitions, so a `new()` check never reads the project-wide map directly.
+- Inheritance is followed, because a subclass legitimately takes its parent's slots. Anything the call does not settle (a computed slot list, a parent outside the project such as `numeric`, a class defined twice, an `initialize` method, which may take any argument) makes the check silent: a false positive on correct S4 code costs more than a missed typo.
+- The finding is `type-mismatch` at the argument name, like a nominal's missing field. Slot types stay `Unknown`; typing them is a separate step.

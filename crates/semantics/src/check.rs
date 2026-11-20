@@ -10523,8 +10523,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 self.infer_compare(lhs, rhs, left, right)
             }
             // `/` and `^` always produce doubles.
-            Divide | Power => self.infer_binary_numeric(range, lhs, rhs, left, right, true),
-            _ => self.infer_binary_numeric(range, lhs, rhs, left, right, false),
+            _ => self.infer_binary_numeric(range, operator, lhs, rhs, left, right),
         }
     }
 
@@ -10955,12 +10954,14 @@ impl<'db, 'a> Checker<'db, 'a> {
     fn infer_binary_numeric(
         &mut self,
         range: TextRange,
+        operator: BinaryOperator,
         lhs: ExprId,
         rhs: ExprId,
         lhs_ty: Ty<'db>,
         rhs_ty: Ty<'db>,
-        always_double: bool,
     ) -> Ty<'db> {
+        // `/` and `^` always produce doubles.
+        let always_double = matches!(operator, BinaryOperator::Divide | BinaryOperator::Power);
         let lhs_range = self.blame_range(lhs);
         let rhs_range = self.blame_range(rhs);
         let resolved_left = self.operand_view(lhs_ty);
@@ -11094,7 +11095,9 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
         }
         if let Some(ty) = flexible {
-            let constraint = match tied {
+            // R subtracts two dates or two times (their difference is a `difftime`), so `a - b`
+            // asks no more of a class than `a + 1` does, while `a + b` asks `numeric`.
+            let constraint = match tied && operator != BinaryOperator::Subtract {
                 true => Constraint::Numeric,
                 false => Constraint::Arithmetic,
             };

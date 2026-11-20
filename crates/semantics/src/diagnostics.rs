@@ -23,7 +23,7 @@ use {
             native_symbol, own_package_reaches, own_qualified_names,
         },
         naming::{BindingKind, ItemNaming, NamespaceRead},
-        package_name, parse, prelude_enabled, project_type_definitions,
+        package_name, parse, prelude_enabled, project_type_definitions, s4,
         stubs::{
             CONDITIONAL_NAMESPACES, STANDARD_LIBRARY, StubLibrary, SymbolSet,
             dormant_namespace_exports, namespace_exports, namespace_known, outside_prelude, stubs,
@@ -677,6 +677,55 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 "unresolved",
                 message,
             ));
+        }
+        for expression in module.expression_ids() {
+            let ExpressionKind::Call { callee, arguments } = module.kind(expression) else {
+                continue;
+            };
+            if s4::methods_function(&module, *callee) != Some("new")
+                || naming.resolutions.contains_key(callee)
+            {
+                continue;
+            }
+            let arguments = &module[arguments];
+            let Some(class) = s4::match_arguments(&module, arguments, &["Class"])[0]
+                .and_then(|value| s4::string(&module, value))
+            else {
+                continue;
+            };
+            let Some(slots) = s4::class_slots(db, file, QueryName::new(db, Name::new(db, class)))
+            else {
+                continue;
+            };
+            for argument in arguments {
+                let (Some(name), Some(name_range)) = (
+                    module.argument_name(argument),
+                    module.argument_name_range(argument),
+                ) else {
+                    continue;
+                };
+                if name == "Class" || slots.contains(&name) {
+                    continue;
+                }
+                let advice = match nearest_name(&name, slots.iter().map(|slot| slot.as_str())) {
+                    Some(nearest) => format!(". Did you mean `{nearest}`?"),
+                    None if slots.is_empty() => ". It has no slots".to_owned(),
+                    None => format!(
+                        ". Its slots are {}",
+                        slots
+                            .iter()
+                            .map(|slot| format!("`{slot}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                };
+                diagnostics.push(Diagnostic::new(
+                    name_range + offset,
+                    Severity::Error,
+                    "type-mismatch",
+                    format!("class `{class}` has no slot `{name}`{advice}"),
+                ));
+            }
         }
         // Immediate reads see only slots created by earlier statements; reads inside a
         // nested function run after the frame settled, so any slot in the document

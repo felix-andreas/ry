@@ -150,6 +150,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `numeric` is closed under arithmetic, `arithmetic` is not (settled)
 - Diagnostic messages are lowercase and end without a full stop (settled)
 - A called name inside a table's mask resolves loudly (settled)
+- `new()` is checked against the slots `setClass` writes out (settled)
 
 ## Analysis core
 

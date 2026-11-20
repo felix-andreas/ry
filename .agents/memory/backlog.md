@@ -2255,24 +2255,16 @@ Two of the four claims this entry used to make were stale, including the one it 
   deliberate. What is actually missing is typed declarations. The class, its fields and its methods
   are `Unknown`, so `obj$typo()` is silent and completion after `self$` offers every record field in
   the workspace.
-- **Still true: an S4 slot typo is silent.** `setClass("A", representation(x = "numeric"))` followed
-  by `new("A", y = 1)` reports nothing, where R halts with `invalid name for slot of class "A": y`.
-  `x@slot` has no type either, and `setClass`, `setMethod` and `new` are `Any` stubs.
+- **Still true: S4 slots have no types.** `x@slot` is `Unknown`, and `setClass`, `setMethod` and
+  `new` are `Any` stubs. `new("A", y = 1)` with no slot `y` is reported (`s4.rs`).
 - **Still true: `UseMethod` is not modelled**, so a generic call is `Unknown`, and
   `structure(list(...), class = "dog")` produces a plain record, so the class attribute is data. S3
   operator dispatch is real, because `+.Date`, `Arith.X` and `Ops.X` are built and dispatched, and
   the linter knows `generic.class` names.
 
 All three systems are recognized structurally by the IDE outline, in `classify_symbol_call`, which
-is where the type-side work can start. The fix order, cheapest real win first, is the S4 slot-name
-check, then R6 class typing, then S4 slot types, then `UseMethod`.
-
-The slot check is bounded, because `setClass` names the slots and `new("Class", ...)` names its
-arguments. But `contains =` is the trap. A subclass legitimately takes its parent's slots, verified
-against R, where `setClass("C", contains = "P", ...)` followed by `new("C", x = 1, y = 2)` runs. A
-check that does not follow the inheritance chain therefore turns correct code into a false positive.
-Both the `representation(...)` and the `slots =` form need reading, and a class assembled
-dynamically must fall back to silence.
+is where the type-side work can start. The fix order, cheapest real win first, is R6 class typing,
+then S4 slot types, then `UseMethod`.
 
 ### Matrix shape is untracked
 
