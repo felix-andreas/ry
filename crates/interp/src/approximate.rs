@@ -1286,7 +1286,7 @@ impl ApproximateRegex {
             }
             // An insertion skips a text character and stays at the same position.
             for id in 0..count {
-                let source = reach[id];
+                let source = &reach[id];
                 if source.at != previous {
                     continue;
                 }
@@ -1312,7 +1312,7 @@ impl ApproximateRegex {
                 if reach_next[id].at == here && total >= reach_next[id].costs[0][COST] {
                     continue;
                 }
-                let mut entry = Reach { at: here, ..source };
+                let mut entry = Reach { at: here, ..*source };
                 count_edit(&mut entry, depth, cost, total, INSERTIONS, 1);
                 reach_next[id] = entry;
                 slots_next[id * slot_count..][..slot_count]
@@ -1388,7 +1388,7 @@ impl ApproximateRegex {
             std::mem::swap(&mut slots, &mut slots_next);
             // Each reached position consumes the character, exactly or as a substitution.
             for id in 0..count {
-                let source = reach[id];
+                let source = &reach[id];
                 if source.at < previous {
                     continue;
                 }
@@ -1440,7 +1440,7 @@ impl ApproximateRegex {
                     ) {
                         continue;
                     }
-                    let mut entry = Reach { at: here, ..source };
+                    let mut entry = Reach { at: here, ..*source };
                     if let Some(settings) = &transition.settings {
                         apply_settings(&mut entry, settings, defaults)?;
                     }
