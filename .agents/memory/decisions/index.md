@@ -139,6 +139,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Shipping stack: Plain R comes from `ry build --plain-r`
 - A signature's type parameters are in scope in its body
 - `opaque` makes a type's representation private to its file
+- Open records are explicit, with no row variables
 
 ## Analysis core
 

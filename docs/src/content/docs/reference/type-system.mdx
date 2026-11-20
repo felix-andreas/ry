@@ -567,7 +567,7 @@ rendered, in backticks, so `list(\`max size\` = 10L)` has the type `` list{`max 
 - Otherwise the reverse is not allowed: a `list[T]` does not coerce back into a tuple-like, record-like, or
   dict-like list, and a `list[named: T]` does not coerce back into a record-like one.
 
-Two records are compatible when they declare the same field names and each field's type is
+Two closed records are compatible when they declare the same field names and each field's type is
 compatible with the field of the same name on the other side. Fields pair by name, so their order
 does not matter: `list(label = "a", id = 1L)` satisfies `list{id: integer, label: character}`.
 
@@ -575,6 +575,28 @@ When a record is rejected, the finding names the one field that failed rather th
 whole types: a field both sides declare whose types do not fit, a field the expected type declares
 that the value lacks, or a field the value has that the expected type does not declare. For a nested
 record, the finding names the path, outermost field first, as in `retry.count`.
+
+#### Open records
+
+A record type ending in `..` is open: `list{tick: fn() -> NULL, ..}` asks for a `tick` field and
+accepts a record with more fields. It types a dependency by what the code uses from it, so a fake
+built for a test may carry extra fields:
+
+```r
+#: fn(t: list{tick: fn() -> NULL, ..}) -> NULL
+run <- function(t) t$tick()
+run(list(tick = function() NULL, finished = TRUE))   # accepted
+run(list(tock = function() NULL))                    # error: expected a field `tick` here, and this list has `tock` instead
+```
+
+A closed record never takes `..` implicitly, so `list{id: integer}` still reports a surplus or
+misspelled field. Through an open record, `$` and `[[` read the listed fields by name. A name it
+does not list reads as `Unknown` (the field may or may not be there), except a near miss of a
+listed field, which is reported as a typo. A positional `[[` and a `[` subset read `Unknown`,
+because the listed fields need not be the first ones. An open record does not pass its unlisted
+fields through: `fn(t: list{tick: fn() -> NULL, ..}) -> list{tick: fn() -> NULL, ..}` returns
+only what it lists. Every item of an open record is named, and a frame type such as
+`data.frame{a: double, ..}` cannot be open, because a frame type lists every column.
 
 #### The empty list
 

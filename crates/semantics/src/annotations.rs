@@ -1266,6 +1266,13 @@ impl<'db> Lowering<'db> {
                 Ty::new(self.db, kind)
             }
             SyntaxKind::TYPE_TUPLE | SyntaxKind::TYPE_RECORD
+                if node
+                    .children()
+                    .any(|c| c.kind() == SyntaxKind::TYPE_OTHER_TAGS) =>
+            {
+                self.lower_open_record(node)
+            }
+            SyntaxKind::TYPE_TUPLE | SyntaxKind::TYPE_RECORD
                 if node.children().any(|c| c.kind() == SyntaxKind::TYPE_FIELD)
                     && node.children().any(|c| is_type_kind(c.kind())) =>
             {
@@ -1473,6 +1480,57 @@ impl<'db> Lowering<'db> {
             });
         }
         native_record(self.db, fields)
+    }
+
+    /// `list{a: A, ..}`: the fields a record must have at least. `..` stands for the rest, so
+    /// it pairs with named fields only.
+    fn lower_open_record(&mut self, node: &SyntaxNode) -> Ty<'db> {
+        if let Some(kind) = frame_kind(node) {
+            self.errors.push((
+                format!(
+                    "a `{}{{...}}` type lists every column, so it cannot end in `..`",
+                    kind.head()
+                ),
+                node.text_range(),
+            ));
+            return unknown(self.db);
+        }
+        let mut seen = FxHashSet::default();
+        let mut fields = Vec::new();
+        for child in node.children() {
+            match child.kind() {
+                SyntaxKind::TYPE_OTHER_TAGS => {}
+                SyntaxKind::TYPE_FIELD => {
+                    let Some(name) = name_text(&child) else {
+                        continue;
+                    };
+                    if !seen.insert(name.clone()) {
+                        self.errors.push((
+                            format!("the field `{name}` appears twice in this `list{{...}}` type"),
+                            child.text_range(),
+                        ));
+                        continue;
+                    }
+                    let ty = self
+                        .lower_child_type(&child)
+                        .unwrap_or_else(|| unknown(self.db));
+                    fields.push(RecordField {
+                        name: Name::new(self.db, name),
+                        ty,
+                        optional: false,
+                    });
+                }
+                kind if is_type_kind(kind) => {
+                    self.errors.push((
+                        "`..` stands for more named fields, so every item of this `list{...}` type needs a name: write it as `name: TYPE`".to_owned(),
+                        child.text_range(),
+                    ));
+                    return unknown(self.db);
+                }
+                _ => {}
+            }
+        }
+        Ty::new(self.db, TyKind::OpenRecord(&fields))
     }
 
     fn lower_type_ref(&mut self, node: &SyntaxNode) -> Ty<'db> {

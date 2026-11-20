@@ -13083,6 +13083,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             | TyKind::NamedList(_)
             | TyKind::Tuple(_)
             | TyKind::Record(_)
+            | TyKind::OpenRecord(_)
             | TyKind::NativeTuple(_)
             | TyKind::NativeRecord(_)
             | TyKind::Tag(..)
@@ -20073,7 +20074,13 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
                 (None, None) => Ok(union_of(self.db, columns.iter().map(|column| column.ty))),
             },
-            TyKind::Record(fields) => {
+            // An open record lists only some of its fields, in no fixed order, so it answers
+            // only a read by name.
+            TyKind::OpenRecord(_) if literal_position.is_some() || literal_name.is_none() => {
+                self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
+                Ok(unknown(self.db))
+            }
+            TyKind::Record(fields) | TyKind::OpenRecord(fields) => {
                 // Record fields are declaration-ordered, so a positional `[[` works like a tuple's.
                 if let Some(position) = literal_position {
                     return match fields.get(position) {
@@ -20233,6 +20240,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             | TyKind::NamedList(_)
             | TyKind::Tuple(_)
             | TyKind::Record(_)
+            | TyKind::OpenRecord(_)
             | TyKind::NativeTuple(_)
             | TyKind::NativeRecord(_)
             | TyKind::Tag(..)
@@ -20473,7 +20481,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             // (`x$total <- ...` in another function), so a name the literal lacks reads as
             // `Unknown`, not as R's `NULL`: the type records only the fields seen at
             // construction. Only a near miss of a known field reads as a typo.
-            TyKind::Record(fields) => {
+            TyKind::Record(fields) | TyKind::OpenRecord(fields) => {
                 if let Some(field) = fields.iter().find(|field| field.name.text(self.db) == name) {
                     return Ok(field.ty);
                 }
@@ -21716,6 +21724,7 @@ fn is_row_index<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
         | TyKind::NamedList(_)
         | TyKind::Tuple(_)
         | TyKind::Record(_)
+        | TyKind::OpenRecord(_)
         | TyKind::NativeTuple(_)
         | TyKind::NativeRecord(_)
         | TyKind::Tag(..)

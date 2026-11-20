@@ -1996,3 +1996,12 @@ lowering path and a third way for two annotations to disagree, for no case `#:` 
 - **One gate.** `TypeDefinitions::get` returns `hidden_type_definition` (body `Unknown`, `Opaque::hidden`) when the definition's home is not the asking file, so every structural path (projection, widening, arithmetic) sees no representation without a check of its own. The explicit `refuse_hidden_representation` calls exist only so access reports the opaque type instead of an abstract nominal's silent `Unknown`.
 - **Not refused.** R functions over any value (`length`, `attr<-`, `unclass`) still reach it; they leave the type system for every type, and refusing them would make an opaque value unusable with base R. Nothing changes at run time.
 - **Naming.** A stub's bare `@type NAME`, which has no representation, was renamed from "opaque nominal" to "abstract nominal" in the docs, so one word names one thing. The stub attribute `@opaque(...)` on a function's parameters is a separate, stub-only spelling.
+
+## Open records are explicit, with no row variables
+
+**Status:** built.
+
+- **Rule.** `list{a: A, ..}` (`TyKind::OpenRecord`) accepts a record or open record carrying at least the listed fields, paired by name. A closed `list{a: A}` keeps exact field-set equality, so a surplus or misspelled field stays a finding. Implicit width subtyping on every record was rejected for that reason: record typos are the most common record finding.
+- **Reads.** `$` and `[[` by name behave as on a closed record (exact, unique prefix, near-miss typo, else `Unknown`). Positional `[[` and `[` read `Unknown`, because an open record's listed fields are not its first ones.
+- **No row variables.** Roc's `{ a : A }*` and `{ a : A }r` pass the unlisted fields through a function; ry's `..` cannot, so a function returning its open argument returns only the listed fields. Add a row variable only when a corpus needs that round trip.
+- **Scope.** Only the R record shape is open. Frame types list every column, and native `Record{...}` stays closed until typed ry code needs extensible records.

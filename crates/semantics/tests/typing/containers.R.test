@@ -198,6 +198,51 @@ row_id: fn(row: list{id: integer}) -> integer
 integer
 99..104 error[type-mismatch] this list has a field `extra`, which is not expected here
 
+#---- an_open_record_lets_more_fields_through
+# `..` asks for the listed fields and accepts a list with more, so a function can
+# take any list that carries a `tick` callback.
+#: fn(t: list{tick: fn() -> NULL, ..}) -> NULL
+run <- function(t) t$tick()
+run(list(tick = function() NULL, finished = TRUE))
+#++++
+run: fn(t: list{tick: fn() -> NULL, ..}) -> NULL
+NULL
+
+#---- an_open_record_still_needs_its_listed_fields
+#: fn(t: list{tick: fn() -> NULL, ..}) -> NULL
+run <- function(t) t$tick()
+run(list(tock = function() NULL))
+run(list(tick = 1))
+#++++
+run: fn(t: list{tick: fn() -> NULL, ..}) -> NULL
+NULL
+NULL
+79..107 error[type-mismatch] expected a field `tick` here, and this list has `tock` instead. Check the spelling
+125..126 error[type-mismatch] expected `fn() -> NULL` for field `tick`, found `double`
+
+#---- an_open_record_reads_only_its_listed_fields
+# A field the type does not list may or may not be there, so it reads as
+# `Unknown`; a near miss of a listed one is still a typo.
+#: fn(t: list{tick: fn() -> NULL, ..}) -> Any
+peek <- function(t) t$finished
+#: fn(t: list{tick: fn() -> NULL, ..}) -> Any
+tickk <- function(t) t$tikc
+#++++
+peek: fn(t: list{tick: fn() -> NULL, ..}) -> Any
+tickk: fn(t: list{tick: fn() -> NULL, ..}) -> Any
+277..281 error[type-mismatch] field `tikc` does not exist in `list{tick: fn() -> NULL, ..}`. Did you mean `tick`?
+
+#---- an_open_record_takes_named_fields_only
+#: fn(t: list{a: double, character, ..}) -> NULL
+f <- function(t) NULL
+#: fn(t: data.frame{a: double, ..}) -> NULL
+g <- function(t) NULL
+#++++
+f: <T> fn([t]: T) -> NULL
+g: <T> fn([t]: T) -> NULL
+25..34 error[annotation] `..` stands for more named fields, so every item of this `list{...}` type needs a name: write it as `name: TYPE`
+80..105 error[annotation] a `data.frame{...}` type lists every column, so it cannot end in `..`
+
 #---- fields_pair_by_name_so_order_does_not_matter
 #: fn(row: list{id: integer, label: character}) -> integer
 row_id <- function(row) row$id

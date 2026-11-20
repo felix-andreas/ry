@@ -585,7 +585,8 @@ impl<'db> InferenceTable<'db> {
                 }
                 Ok(())
             }
-            (TyKind::Record(left), TyKind::Record(right)) => {
+            (TyKind::Record(left), TyKind::Record(right))
+            | (TyKind::OpenRecord(left), TyKind::OpenRecord(right)) => {
                 if left.len() != right.len()
                     || left
                         .iter()
@@ -1411,6 +1412,18 @@ impl<'db> InferenceTable<'db> {
                     },
                 )
             }
+            // An open record asks for its fields and lets the rest through.
+            (
+                TyKind::Record(actual_fields) | TyKind::OpenRecord(actual_fields),
+                TyKind::OpenRecord(expected_fields),
+            ) => expected_fields.iter().all(|expected_field| {
+                actual_fields
+                    .iter()
+                    .find(|field| field.name == expected_field.name)
+                    .is_some_and(|actual_field| {
+                        self.compatible_probe(db, actual_field.ty, expected_field.ty, depth + 1)
+                    })
+            }),
             (TyKind::Record(actual_fields), TyKind::Record(expected_fields))
                 if actual_fields.len() == expected_fields.len() =>
             {
@@ -1646,12 +1659,17 @@ impl<'db> InferenceTable<'db> {
         expected: Ty<'db>,
         path: &mut Vec<String>,
     ) -> Option<RecordMismatch<'db>> {
-        let (TyKind::Record(actual_fields), TyKind::Record(expected_fields)) = (
+        let (
+            TyKind::Record(actual_fields) | TyKind::OpenRecord(actual_fields),
+            TyKind::Record(expected_fields) | TyKind::OpenRecord(expected_fields),
+        ) = (
             self.resolve(db, actual).kind(db),
             self.resolve(db, expected).kind(db),
-        ) else {
+        )
+        else {
             return None;
         };
+        let open = matches!(self.resolve(db, expected).kind(db), TyKind::OpenRecord(_));
         // Optionality is not compared: `compatible` does not compare it either.
         for expected_field in expected_fields.iter() {
             let name = expected_field.name.text(db);
@@ -1679,6 +1697,9 @@ impl<'db> InferenceTable<'db> {
                 found: self.resolve(db, actual_field.ty),
                 path: mem::take(path),
             });
+        }
+        if open {
+            return None;
         }
         // Surplus fields last: a wrong type in a shared field is the likelier mistake.
         for actual_field in actual_fields.iter() {

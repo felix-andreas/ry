@@ -272,6 +272,9 @@ pub enum TyKind<'db> {
     Tuple(&'db [Ty<'db>]),
     /// `list{a: A, b: B}`; fields keep declaration order.
     Record(&'db [RecordField<'db>]),
+    /// `list{a: A, ..}`: a record-like list with at least these fields. A record with more
+    /// fits it, and only the listed fields can be read through it.
+    OpenRecord(&'db [RecordField<'db>]),
     /// `Tuple{A, B}`: ry's native tuple, which is not a list and never fits a list type.
     NativeTuple(&'db [Ty<'db>]),
     /// `Record{a: A, b: B}`: ry's native record. Field order is not part of the type, so the
@@ -1201,6 +1204,7 @@ fn rebuilt_type<'db>(
             Ty::new(db, TyKind::Tuple(&items))
         }
         TyKind::Record(fields) => Ty::new(db, TyKind::Record(&mapped_fields(fields, map))),
+        TyKind::OpenRecord(fields) => Ty::new(db, TyKind::OpenRecord(&mapped_fields(fields, map))),
         TyKind::NativeTuple(items) => {
             let items: TypeList<'db> = items.iter().map(|&item| map(item)).collect();
             Ty::new(db, TyKind::NativeTuple(&items))
@@ -1285,7 +1289,7 @@ fn for_each_child<'db>(kind: &TyKind<'db>, visit: &mut impl FnMut(Ty<'db>)) {
         }
         TyKind::NativeRecord(fields) => fields.iter().for_each(|field| visit(field.ty)),
         TyKind::Tag(_, payload) => payload.iter().copied().for_each(visit),
-        TyKind::Record(fields) | TyKind::Frame(_, Some(fields)) => {
+        TyKind::Record(fields) | TyKind::OpenRecord(fields) | TyKind::Frame(_, Some(fields)) => {
             fields.iter().for_each(|field| visit(field.ty))
         }
         TyKind::Frame(_, None) => {}
@@ -1515,6 +1519,7 @@ fn stored_kind<'a>(arena: &'a Bump, kind: TyKind<'a>) -> TyKind<'a> {
     match kind {
         TyKind::Tuple(items) => TyKind::Tuple(arena.alloc_slice_copy(items)),
         TyKind::Record(fields) => TyKind::Record(arena.alloc_slice_copy(fields)),
+        TyKind::OpenRecord(fields) => TyKind::OpenRecord(arena.alloc_slice_copy(fields)),
         TyKind::NativeTuple(items) => TyKind::NativeTuple(arena.alloc_slice_copy(items)),
         TyKind::NativeRecord(fields) => TyKind::NativeRecord(arena.alloc_slice_copy(fields)),
         TyKind::Frame(frame, Some(columns)) => {
