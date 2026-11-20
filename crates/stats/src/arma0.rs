@@ -121,8 +121,16 @@ pub fn setup_starma<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) ->
     let ip = ns * msp + mp;
     let iq = ns * msq + mq;
     let ir = ip.max(iq + 1);
-    let np = (ir * (ir + 1)) / 2;
-    let nrbar = 1.max(np * np.saturating_sub(1) / 2);
+    let np = ir
+        .checked_mul(ir + 1)
+        .map(|twice| twice / 2)
+        .ok_or_else(|| allocation_failure(arguments, usize::MAX))?;
+    // starma.c sizes `rbar` in C `int`, so past that range its consistency check fails with
+    // fault 7 instead of allocating the true size.
+    let nrbar = match np.checked_mul(np.saturating_sub(1)) {
+        Some(twice) if twice / 2 <= i32::MAX as usize => (twice / 2).max(1),
+        _ => 1,
+    };
     let mut reg = vec![0.0; 1 + n * m];
     reg[..n * m].copy_from_slice(&xreg[..n * m]);
     let starma = Starma {
@@ -145,15 +153,15 @@ pub fn setup_starma<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) ->
         delta,
         s2: 0.0,
         params: vec![0.0; mp + mq + msp + msq + m],
-        phi: vec![0.0; ir],
-        theta: vec![0.0; ir],
-        a: vec![0.0; ir],
-        covariance: vec![0.0; np],
-        innovation: vec![0.0; np],
-        thetab: vec![0.0; np],
-        xnext: vec![0.0; np],
-        xrow: vec![0.0; np],
-        rbar: vec![0.0; nrbar],
+        phi: zeroed(arguments, ir)?,
+        theta: zeroed(arguments, ir)?,
+        a: zeroed(arguments, ir)?,
+        covariance: zeroed(arguments, np)?,
+        innovation: zeroed(arguments, np)?,
+        thetab: zeroed(arguments, np)?,
+        xnext: zeroed(arguments, np)?,
+        xrow: zeroed(arguments, np)?,
+        rbar: zeroed(arguments, nrbar)?,
         w: x[..n].to_vec(),
         wkeep: x[..n].to_vec(),
         resid: vec![0.0; n],
@@ -343,6 +351,23 @@ fn with_model<T>(
     })
 }
 
+/// A zeroed vector whose length comes from the model orders or the forecast horizon, which a
+/// caller can make too large to allocate: that is an R error, as `R_Calloc`'s failure is.
+fn zeroed(arguments: &NativeArgs<'_, '_>, len: usize) -> R<Vec<f64>> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(len)
+        .map_err(|_| allocation_failure(arguments, len))?;
+    values.resize(len, 0.0);
+    Ok(values)
+}
+
+fn allocation_failure(arguments: &NativeArgs<'_, '_>, len: usize) -> Unwind {
+    arguments.error(format!(
+        "'R_Calloc' could not allocate memory ({len} of 8 bytes)"
+    ))
+}
+
 fn bad_model(arguments: &NativeArgs<'_, '_>) -> Unwind {
     arguments.error("bad Starma struct")
 }
@@ -475,8 +500,8 @@ fn forecast(
     }
     let d = d as usize;
 
-    let mut del = vec![0.0; d + 1];
-    let mut del2 = vec![0.0; d + 1];
+    let mut del = zeroed(arguments, d + 1)?;
+    let mut del2 = zeroed(arguments, d + 1)?;
     del[0] = 1.0;
     for _ in 0..dd.max(0) {
         del2.copy_from_slice(&del);
@@ -495,8 +520,8 @@ fn forecast(
     }
 
     let il = il as usize;
-    let mut x = vec![0.0; il];
-    let mut var = vec![0.0; il];
+    let mut x = zeroed(arguments, il)?;
+    let mut var = zeroed(arguments, il)?;
     forkal(arguments, g, d, il, &del[1..], &mut x, &mut var)?;
     Ok((x, var))
 }
@@ -630,7 +655,7 @@ fn starma(g: &mut Starma) -> i32 {
     if np != r * (r + 1) / 2 {
         ifault = 6;
     }
-    if nrbar != np * (np - 1) / 2 {
+    if nrbar != np.saturating_mul(np - 1) / 2 {
         ifault = 7;
     }
     if r == 1 {
@@ -940,10 +965,13 @@ fn forkal(
 ) -> R<()> {
     let (p, q, r, n, np) = (g.p, g.q, g.r, g.n, g.np);
     let rd = r + d;
-    let rz = rd * (rd + 1) / 2;
-    let mut store = vec![0.0; rd];
-    g.a = vec![0.0; rd];
-    g.covariance = vec![0.0; rz];
+    let rz = rd
+        .checked_mul(rd + 1)
+        .map(|twice| twice / 2)
+        .ok_or_else(|| allocation_failure(arguments, usize::MAX))?;
+    let mut store = zeroed(arguments, rd)?;
+    g.a = zeroed(arguments, rd)?;
+    g.covariance = zeroed(arguments, rz)?;
 
     let mut ifault = 0;
     if p * p + q * q == 0 {

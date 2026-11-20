@@ -282,7 +282,11 @@ pub unsafe fn element_as_charsxp(vector: Sexp, index: usize) -> R<Sexp> {
                 Ok(na_string())
             } else {
                 values::mkchar(&crate::format::localize_decimal(
-                    crate::format::format_complex_alone(value, 15, 0),
+                    crate::format::format_complex_alone(
+                        value,
+                        15,
+                        crate::format::Settings::current_scipen(),
+                    ),
                 ))
             }
         }

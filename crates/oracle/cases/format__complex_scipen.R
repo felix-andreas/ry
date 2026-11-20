@@ -1,0 +1,10 @@
+# Complex numbers follow `scipen` in `write.table`, `cat`, `as.character` and `paste`.
+options(scipen = 50)
+write.table(data.frame(z = 1e8+1i), quote = FALSE)
+cat(1e8+1i, 1e-8+2i, "\n")
+as.character(1e8+1i)
+paste(1e8+1i)
+options(scipen = -5)
+cat(123+1i, "\n")
+write.table(data.frame(z = 123+1i), quote = FALSE)
+as.character(123+1i)

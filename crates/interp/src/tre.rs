@@ -1638,6 +1638,9 @@ fn expand(
                         Some(before) => push(nodes, Kind::Concat(before, copied)),
                         None => copied,
                     });
+                    if nodes.len() > NODE_LIMIT {
+                        return None;
+                    }
                 }
                 let mut optional: Option<u32> = None;
                 if maximum == -1 {

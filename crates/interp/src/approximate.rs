@@ -1051,8 +1051,9 @@ pub(crate) struct ApproximateRegex {
     initial: Vec<Transition>,
     final_position: usize,
     group_count: usize,
-    /// Whether some scope nests settings, so that paths count costs per nesting level.
-    nested: bool,
+    /// Whether some `{...}` scope sets costs or limits, so that paths count costs per scope
+    /// depth as well as in total.
+    scoped: bool,
 }
 
 /// A match: its character range and the character range of each capture group.
@@ -1148,7 +1149,7 @@ const DEFAULT_PARAMS: Params = Params {
 /// The cheapest known path to a position, at one text position: TRE's
 /// `tre_tnfa_approx_reach_t` without the capture slots, which live beside it. Every path step
 /// copies one, so it is kept small: the settings are an index into the search's table of them,
-/// a pattern without nested scopes has one cost level (`LEVELS`), and no field stores the count
+/// a pattern without `{...}` scopes has one cost level (`LEVELS`), and no field stores the count
 /// of all edits, which is the sum of the three kinds.
 #[derive(Clone, Copy)]
 struct Reach<const LEVELS: usize> {
@@ -1236,7 +1237,7 @@ impl ApproximateRegex {
                     transitions_from(*next, &states, &position_of, scopes);
             }
         }
-        let nested = initial
+        let scoped = initial
             .iter()
             .chain(positions.iter().flat_map(|position| &position.transitions))
             .any(|transition| {
@@ -1249,7 +1250,7 @@ impl ApproximateRegex {
             initial,
             final_position: position_of[0],
             group_count,
-            nested,
+            scoped,
         })
     }
 
@@ -1272,7 +1273,7 @@ impl ApproximateRegex {
         not_bol: bool,
         defaults: &Params,
     ) -> R<Option<ApproximateMatch>> {
-        if self.nested {
+        if self.scoped {
             self.search_levels::<{ MOST_DEPTH + 1 }>(text, not_bol, defaults)
         } else {
             self.search_levels::<1>(text, not_bol, defaults)

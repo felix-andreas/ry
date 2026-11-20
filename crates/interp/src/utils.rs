@@ -2113,7 +2113,7 @@ unsafe fn write_element(
         SexpType::Complex => with_decimal(format_complex_alone(
             values::complexes(vector)[index],
             15,
-            0,
+            settings.scipen,
         )),
         SexpType::Raw => format!("{:02x}", values::raws(vector)[index]).into_bytes(),
         _ => {

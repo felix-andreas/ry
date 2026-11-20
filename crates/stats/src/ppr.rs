@@ -239,6 +239,11 @@ pub fn pppred<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Loc
             .map_or(0, |&value| (value + 0.1).max(0.0) as usize)
     };
     let (m, p, q, n, mu) = (header(0), header(1), header(2), header(3), header(4));
+    // A valid model is longer than each of its sizes, so bounding them first keeps the offsets
+    // below from overflowing on a crafted `smod`.
+    if [m, p, q, n].iter().any(|&size| size > smod.len()) {
+        return Err(error("invalid 'smod' in 'pppred'"));
+    }
     let jf = q + 6 + p * m + m * q;
     let jt = jf + n * m;
     if smod.len() < jt + n * m || mu > m || x.len() < np * p {
