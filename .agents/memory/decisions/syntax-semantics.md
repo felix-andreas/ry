@@ -391,7 +391,7 @@ superset dialect (next two entries).
 
 ## Shipping stack: The inline annotation syntax is a superset of R
 
-**Status:** built, except `declare(type(...))` as an annotation spelling: the checker does not read it.
+**Status:** built. `declare(type(...))` is not a spelling (see "Plain R comes from `ry build --plain-r`").
 
 The mandate (inline syntax on by default, a warning when off) only makes sense for a syntax GNU R cannot
 parse, so the inline form is a superset of R (costed in `development/design/inline-type-syntax.md`), and
@@ -1959,3 +1959,22 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 **Status:** built
 
 - `list()` is the empty tuple, and its element is the union of zero items, which `union_of` answers as `NULL`. `c()` and a `for` loop over a union skip `NULL` and empty-list members instead (`is_empty_list`), because they contribute no element: `c(list(), f)` is `list[fn]` and `for (f in actions)` over `list{} | list[fn]` binds a function. rmarkdown's exit-action loop was reported as calling a maybe-`NULL`.
+
+## Shipping stack: Plain R comes from `ry build --plain-r`
+
+**Status:** built.
+
+Code that must run on GNU R (a CRAN submission) goes through `ry build --plain-r`, which writes the tarball's
+R files through `syntax::inline_annotations_to_comments`: each statement's inline annotations become a `#:`
+block above it, the rest erases as `erase_inline_annotations` does, and each annotation no block can carry
+(a lambda argument's signature, a `@Name(value)` inside an expression, an inline type on a statement that
+already has a block) is a warning. A flag, not the default, because the default tarball is the one ry's
+runtime installs, with its rewrites for the runtime; a plain tarball has none. ry code with no R spelling
+(records, tags, suffixed numbers, native functions) refuses the build. Pinned by
+`crates/syntax/tests/comments` and `build-plain-r.scenario`, and checked by hand to report the same findings
+on both spellings.
+
+`declare(type(...))` is not built as a third spelling. The `#:` comment is already the spelling that keeps a
+file valid R, and it covers every position (parameters, returns, binders, directives), which a call inside
+`declare()` cannot reach without inventing a grammar inside R call syntax. A third spelling would add a
+lowering path and a third way for two annotations to disagree, for no case `#:` misses.

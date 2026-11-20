@@ -1913,13 +1913,13 @@ that already fail. The rest follows from the mandate:
 
 - **The syntax is on by default** in ry's parser and runtime, and ry warns when a project turns it off
   in `ry.toml`.
-- **`declare(type(...))` stays a recognized spelling** of the same annotation, for code that must
-  remain valid R, as the pluggable design intends.
+- **`#:` comments are the spelling for code that must remain valid R.** A `declare(type(...))`
+  form was considered and not built, because `#:` already covers every position.
 - **A typed file keeps the `.R` extension,** which reverses the draft's `.ry` files: in a runtime
   that executes the syntax, a second extension buys nothing. The cost is real, though. Every other R
   tool (`R CMD check`, roxygen2, lintr, styler) fails on a typed file under `R/`. Code that must also
-  run on GNU R, such as a package submitted to CRAN, therefore needs a strip step: a `ry build`
-  command would write plain R with the inline types moved into `#:` comments.
+  run on GNU R, such as a package submitted to CRAN, therefore needs a strip step: `ry build
+  --plain-r` writes plain R with the inline types moved into `#:` comments.
 - **Comment and inline annotations must agree.** When both annotate the same item, ry compares them
   as types, after alias expansion, and reports a warning on the inline annotation when they differ.
 - **Strict mode rejects untyped code.** The settled rule is in the typing reference

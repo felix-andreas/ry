@@ -271,6 +271,13 @@ stay. `count: integer <- 0L`
 erases to `count <- 0L`, `function<T>(x: T) -> T x` to `function(x) x`, `@UserId(5L)` to `(5L)`,
 and `type UserId = integer` to `#: @type UserId {integer}`.
 
+`ry build --plain-r` keeps the types instead of deleting them: each statement's inline annotations
+become a `#:` block above it, so `count: integer <- 0L` is written as `#: integer` over
+`count <- 0L`, a function's signature as `#: <T> fn(x: T, [y]: double) -> T`, `@pure` as a
+`#: @pure` line, and a statement's value `@Name(value)` as `#: @new Name`. An annotation with no
+statement to sit above, such as the signature of a function passed as an argument, is erased
+([the CLI reference](/reference/cli) lists the cases).
+
 ### Inline and comment annotations together
 
 A statement can carry both a `#:` block and inline annotations. They combine one *slot* at a time,

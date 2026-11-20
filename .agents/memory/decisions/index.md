@@ -37,7 +37,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Shipping stack: Why salsa rather than an in-house engine
 - Shipping stack: Item granularity and item identity (planned)
 - Shipping stack: An annotation is one concept with pluggable spellings
-- Shipping stack: The inline annotation syntax is a superset of R (built, with exceptions)
+- Shipping stack: The inline annotation syntax is a superset of R
 - Shipping stack: How inline annotations are built
 - Shipping stack: Inline type definitions, coercions and nominal constructors
 - Shipping stack: Testing doctrine for `syntax`
@@ -136,6 +136,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A `logical` argument binds a numeric type parameter to `integer`
 - Feature probes, Windows-only exports and callback strings
 - An empty list adds no element to `c()` or a loop
+- Shipping stack: Plain R comes from `ry build --plain-r`
 
 ## Analysis core
 

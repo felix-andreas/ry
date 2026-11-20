@@ -1,0 +1,145 @@
+#==== bindings
+#---- binding_type
+count: integer <- 0L
+#++++
+#: integer
+count <- 0L
+
+#---- binding_with_equals
+count: integer = 0L
+#++++
+#: integer
+count = 0L
+
+#---- binding_directive
+x: @trust integer <- v
+#++++
+#: @trust integer
+x <- v
+
+#---- binding_union_across_lines
+label: character
+  | NULL <- NULL
+#++++
+#: character
+#:   | NULL
+label <- NULL
+
+#---- binding_in_a_body
+f <- function() {
+  total: double <- 0
+  total
+}
+#++++
+f <- function() {
+  #: double
+  total <- 0
+  total
+}
+
+#---- binding_behind_other_code
+x <- 1; y: integer <- 2L
+#++++
+x <- 1;
+#: integer
+y <- 2L
+
+#==== functions
+#---- signature
+scale_by <- function<T: numeric>(values: T, scale: T = 1) -> T {
+  values * scale
+}
+#++++
+#: <T: numeric> fn(values: T, [scale]: T) -> T
+scale_by <- function(values, scale = 1)  {
+  values * scale
+}
+
+#---- partial_signature
+f <- function(x: integer, y) x + y
+#++++
+#: fn(x: integer)
+f <- function(x, y) x + y
+
+#---- rest_parameter
+f <- function(...: integer) sum(...)
+#++++
+#: fn(...: integer)
+f <- function(...) sum(...)
+
+#---- return_only
+f <- function(x) -> character format(x)
+#++++
+#: fn() -> character
+f <- function(x)  format(x)
+
+#---- pure
+f <- @pure function(x: double) -> double x * 2
+#++++
+#: @pure
+#: fn(x: double) -> double
+f <-  function(x)  x * 2
+
+#---- pure_lambda_without_types
+f <- @pure \(x) x
+#++++
+#: @pure
+f <-  \(x) x
+
+#---- binding_type_over_function
+step: fn(x: integer) -> integer <- function(x) x + 1L
+#++++
+#: fn(x: integer) -> integer
+step <- function(x) x + 1L
+
+#---- binding_type_and_signature
+step: fn(x: integer) -> integer <- function(x: integer) -> integer x + 1L
+#++++
+#: fn(x: integer) -> integer
+step <- function(x)  x + 1L
+#> dropped: : fn(x: integer) -> integer
+
+#==== nominal
+#---- new_value
+id <- @UserId(5L)
+#++++
+#: @new UserId
+id <- (5L)
+
+#---- generic_new_value
+p <- @Box<integer>((x = 1,))
+#++++
+#: @new Box<integer>
+p <- ((x = 1,))
+
+#---- new_inside_a_call
+ids <- c(@UserId(5L), @UserId(6L))
+#++++
+ids <- c((5L), (6L))
+#> dropped: @UserId
+#> dropped: @UserId
+
+#==== left_out
+#---- lambda_argument
+labels <- lapply(ids, function(id: integer) -> character format(id))
+#++++
+labels <- lapply(ids, function(id)  format(id))
+#> dropped: : integer
+#> dropped: -> character
+
+#---- existing_block
+#: integer
+count: integer <- 0L
+#++++
+#: integer
+count <- 0L
+#> dropped: : integer
+
+#---- type_definition
+type UserId = integer
+id: UserId <- @UserId(5L)
+#++++
+#: @type UserId {integer}
+#: @new UserId
+id <- (5L)
+#> dropped: : UserId

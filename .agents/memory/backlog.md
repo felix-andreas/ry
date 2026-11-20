@@ -830,10 +830,6 @@ measurement showed.
   typed (the `DataFrame` type is the typed alternative). A local whose
   type is a generic parameter (`total <- a + b` inside `<T> fn(a: T, ...)`) gets no inlay hint,
   because a bare `T` without its binder would mislead.
-- `development/design/r-runtime.md` section 8 keeps `declare(type(...))` as a third annotation
-  spelling for code that must stay valid R, and a strip step (`ry build`) that moves inline types
-  into `#:` comments. Neither exists yet; `syntax::erase_inline_annotations` is the starting point
-  for the strip step.
 
 ### What the round said overall
 
