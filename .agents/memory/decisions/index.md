@@ -123,6 +123,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - An all-`logical` call of a numeric function keeps `logical` (settled)
 - A package's own `pkg::name` reads are checked against `NAMESPACE` and `data/` (settled)
 - A wrapper over a numeric overload set takes the `numeric` bound (settled)
+- A `[` on a query's result is a query
+- Branches decide each other's literal items, and `c()` decides a literal as R's type
 
 ## Analysis core
 
@@ -645,6 +647,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The parser is fuzzed against GNU R's `parse()`, with the known differences in one list
 - Session commands read the user profile, as Rscript does
 - A package `ry load` loaded counts as a pkgload dev package
+- Typed benchmark templates do R-level work in boundary functions
 
 ## Docs, process and positioning
 

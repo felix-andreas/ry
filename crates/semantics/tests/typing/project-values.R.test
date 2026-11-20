@@ -255,6 +255,22 @@ summarize_sales: <T> fn(dt: T) -> Unknown
 add_revenue: <T> fn(dt: T) -> Unknown
 peek: <T> fn(dt: T) -> Any
 
+#---- a_chained_query_produces_no_noise
+# A `[` on a query's result is a query too. A lone `[` without query syntax is base indexing,
+# where `total` must be a variable.
+#~~~~ R/dt.R
+ranked <- function(dt) {
+  dt[, .(total = sum(amount)), by = group][order(-total)][1:3]
+}
+reordered <- function(dt) {
+  dt[order(-total)]
+}
+#++++
+== R/dt.R
+ranked: <T> fn(dt: T) -> Unknown
+reordered: <T> fn(dt: T) -> Unknown
+130..135 warning[unresolved] I could not resolve `total` in this package, its imports, or builtins.
+
 #---- base_indexing_still_reports_unresolved_names
 #~~~~ R/plain.R
 pick <- function(m) {

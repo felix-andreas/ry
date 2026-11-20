@@ -402,3 +402,15 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 
 - **Rule.** `.ry_new_package` (`crates/loader/src/runtime.R`) sets `ns$.__DEVTOOLS__` to an environment, the marker pkgload's `create_dev_meta` sets, and `.ry_stoplist` keeps it out of `export_all`.
 - **Why.** testthat's `local_mocked_bindings()` outside a test run finds the package to mock in through `pkgload::dev_packages()`, which lists the namespaces that carry the marker. Without it `ry load -f test-file.R` stopped with "No packages loaded with pkgload", while `ry test` passed because testthat knows the package it is testing.
+
+## Typed benchmark templates do R-level work in boundary functions
+
+**Status:** built.
+
+The typed benchmark packages check in strict mode with zero findings, so a template whose typed
+function needs R semantics declares an R type in its signature, which makes it a boundary function
+that the native rules do not judge. `with_workers` forces a lazy argument after `on.exit`, so it
+takes `<T: numeric>` rather than an unbounded `T`. `visits_per_month` buckets dates with
+`lubridate::floor_date`, which has no table-expression equivalent, so it takes the period as
+`unit: character = "month"`. The checker is not relaxed for these: the native rules are the
+contract in the type-system reference.
