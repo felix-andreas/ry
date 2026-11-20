@@ -303,6 +303,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Small base closures with call arguments run their bodies natively behind prologues
 - `c`, `unlist`, `rep` and positional `[` copy handle vectors a run at a time
 - The radix string order ranks bytes with integer keys, and plain POSIX patterns capture on the automata
+- POSIX capture groups come from a port of TRE's tagged automaton
 - `x[] <- value` and `x[a:b] <- value` write whole copies of the value
 - `order`, `sort.int` and `sort.default` run natively on plain vectors
 - Strings collate with ICU4X's CLDR collator, as GNU R's ICU does

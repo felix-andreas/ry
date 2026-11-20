@@ -86,7 +86,7 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 
 **Status:** built.
 
-- `Matcher::Automaton` keeps two regex-automata `meta::Regex` beside fancy-regex: a leftmost-first search gives the start, and an anchored `MatchKind::All` search the longest end, POSIX leftmost-longest in linear time (`leftmost_longest` on fancy-regex backtracked forever on lgr's `(.*z.*){10}`). Groups come from fancy-regex only for callers that report them (not `regexpr`/`gregexpr` without `perl`, nor `sub`/`gsub` without backreferences); patterns regex-automata cannot compile, such as backreferences, stay on fancy-regex.
+- `Matcher::Automaton` keeps two regex-automata `meta::Regex` beside fancy-regex: a leftmost-first search gives the start, and an anchored `MatchKind::All` search the longest end, POSIX leftmost-longest in linear time (`leftmost_longest` on fancy-regex backtracked forever on lgr's `(.*z.*){10}`). Groups come from the port of TRE's tagged automaton (`crates/interp/src/tre.rs`, below) only for callers that report them (not `regexpr`/`gregexpr` without `perl`, nor `sub`/`gsub` without backreferences); patterns regex-automata cannot compile, such as backreferences, stay on fancy-regex.
 
 ## `perl = TRUE` runs on PCRE2, linked statically
 
@@ -115,8 +115,8 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 
 **Status:** built.
 
-- Without submatches (`regexpr`, `gregexpr`, `grepl`), TRE minimizes lazy repetitions over all top-level alternatives: `regexpr("a.*?Z|a.*?Y", "aXbYcXdZ")` has length 4. Such patterns compile to `Matcher::Automaton` with `shortest`, taking the earliest end among leftmost matches.
-- Submatch queries (`sub`, `regexec`) keep leftmost-first, so `sub("(a).*?Z|(a)(.*?)Y", ...)` takes the first alternative, as TRE does on the corpus's shapes; TRE's submatch results for these are irregular in general (`regexec` can skip the leftmost match). `connections__message_sink_and_flush` pins both.
+- TRE minimizes lazy repetitions over all top-level alternatives: `regexpr("a.*?Z|a.*?Y", "aXbYcXdZ")` has length 4. Where a match with a minimal repetition ends follows TRE's tag priorities, which can even end it at a later start (`regexpr("xabcd|b*?c", "xabcd")` is `"bc"`), so every pattern that repeats minimally (`Translation::repeats_minimally`) compiles to `Matcher::Automaton` with `minimal`, and both `find_at` and `captures_at` take the match from the tagged automaton started at the leftmost-first start. Threads from later starts join there as in TRE, and none from an earlier one can match.
+- `shortest` (a minimal repetition outside every group, none opening after it: the earliest end among leftmost matches) remains only for a pattern the tagged automaton does not model. `connections__message_sink_and_flush` and `strings__tre_capture_priorities` pin it.
 
 ## The message sink and connection flush points
 
@@ -538,7 +538,17 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 **Status:** built.
 
 - **`byte_ranks` (`crates/interp/src/sort.rs`)** ranks the distinct strings of a radix sort by their stored `CHAR()` bytes, untranslated, which is GNU R's rule (`StrCmp2` is `strcmp`), so a latin1 string and its UTF-8 twin rank apart. It skips the prefix all strings share, packs the next eight bytes into a big-endian `u64` (zero padding orders correctly because no R string holds a NUL), sorts the keys with an LSD radix that skips constant bytes, and re-keys only runs of equal keys. A comparison sort over the strings chased pointers per comparison and took 185 ms on 1e6 strings against GNU R's 170 ms; the key sort takes about GNU R's time. `order()` under a collation keeps the comparison sort.
-- **POSIX captures without backtracking:** when a pattern has no alternation, no lazy quantifier and repeats only single characters (`greedy_single_width` in `crates/interp/src/strings.rs`), the leftmost-first captures of the `regex` crate equal TRE's whenever the leftmost-first match ends where the leftmost-longest one does. `captures_at` checks that end against the longest automaton and falls back to the backtracker otherwise, so `sub`/`gsub` with back-references and `regexec` on such patterns run at GNU R's speed. A repeated group (`(a)?(ab)?b*`) still differs from TRE on the backtracker (`crates/oracle/known_failures.toml`).
+- **POSIX captures without backtracking:** when a pattern has no alternation, no lazy quantifier and repeats only single characters (`greedy_single_width` in `crates/interp/src/strings.rs`), the leftmost-first captures of the `regex` crate equal TRE's whenever the leftmost-first match ends where the leftmost-longest one does. `captures_at` checks that end against the longest automaton and hands the pattern to the tagged automaton otherwise, so `sub`/`gsub` with back-references and `regexec` on such patterns run at GNU R's speed. Every other pattern without backreferences captures on the tagged automaton (next entry).
+
+## POSIX capture groups come from a port of TRE's tagged automaton
+
+**Status:** built.
+
+- **Before.** Groups of a pattern with alternation or a repeated group came from fancy-regex's backtracker run leftmost-longest, which splits text between groups by its own priorities: `(a)?(ab)?b*` on `"abb"` filled the first group where TRE fills the second, and patterns with a minimal repetition inside a group matched leftmost-first.
+- **Shape.** `crates/interp/src/tre.rs` ports what decides TRE's groups: the parser's positions (all items of a bracket share one, and a multi-item bracket under a group becomes a union of a guarded leaf per item, as `tre_parse_bracket` builds it), `tre_add_tags` (tag placement, directions, minimal pairs), `tre_expand_ast`, the position automaton with `tre_match_empty` tags, `tre_tnfa_run_parallel` and `tre_fill_pmatch`. Wide mode (UTF-8 locale) and byte mode differ for named classes, so a pattern with one builds both and an ASCII subject runs the byte one. The matcher keeps tag rows in one flat array and swaps row indices, never copies rows, as TRE swaps pointers.
+- **Where it runs.** `captures_at` keeps `greedy_captures` (exact for single-width greedy patterns), starts the tagged automaton at the leftmost-first start otherwise, and falls back to fancy-regex only when `tre::compile` declines: backreferences, approximate settings, expansions past `NODE_LIMIT` and friends, or a group count that disagrees with the `regex` crate's. A group under `{0}` keeps its number (`(?:x){0}` in the translation) and reports the empty string at the match start, as TRE's never-tagged submatch reads tag 0.
+- **Differential.** 2,000 random patterns over `{a,b,c}` with groups, `?`, `*`, `+`, bounds, minimal repetitions, alternation, classes and anchors, each through `regexec`, `regexpr` and `gsub`, against GNU R 4.6.2: the mismatches drop from 275 to 39, and no case that matched before mismatches after. What remains: `^` or `$` inside a group or alternative, where TRE's assertion handling in `gsub`'s `REG_NOTBOL` loop differs; `gsub`'s empty-match loop (GNU R compares each match end with the previous one's in shifting coordinates); and TRE producing spans the pattern cannot match (`(c(a?|([bc]{2}[^a]+a|c*)*)(b)?)?` on `"caca"` gives `"caca"`).
+- **Contract.** `strings__tre_capture_priorities` and `strings__posix_repeated_group`.
 
 ## `x[] <- value` and `x[a:b] <- value` write whole copies of the value
 

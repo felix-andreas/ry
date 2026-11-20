@@ -598,7 +598,6 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 - **Largest gap left:** `rpois` with a vector `mu` (about 0.85x) and `rgeom` (about 0.9x), both unexplained (`decisions/builtins.md`); `slower.txt` has the rest. `cumprod` of products that underflow a double pays an x87 store assist per element, as GNU R does; skipping that store would beat it.
 - **`aregexec` is about 2x GNU R's time on long patterns** (`"brown fox"` over 1,000 sentences: 8.3 ms against 3.65 ms; `"lazy"` 5.7 against 2.75; `"qu(i|a)ck"` is at parity). `approximate::Reach` holds `i32` fields and no stored edit count; the rest is the per-step cost of the path set, not yet profiled.
 - **`ar.mle` is slower than GNU R** (its `arima0` fits run the ported `starma.c`; not yet profiled).
-- **POSIX repeated groups:** `(a)?(ab)?b*` on "abb" fills the first optional group where TRE fills the second (`strings__posix_repeated_group`, a known failure). TRE's tag priorities, not a leftmost-longest rule, decide the split: GNU R gives `(a*)(ab)?b*` on "abb" `[][ab]`, `(a|ab)(bc|c)?` on "abc" `[ab][c]`, `(a|ab)(c|bcd)(d*)` on "abcd" `[a][bcd][]` (ry agrees), `(a?)((ab)?)(b?)` on "ab" `[][ab][ab][]` and `(aa)?(aab)?b*` on "aabb" `[][aab]`, and every variant with `?`, `*`, `{0,1}` or a class before `(ab)?` leaves the first group empty. Matching them needs TRE's tagged-NFA priorities in the POSIX matcher.
 
 ## Open: base R kernels against GNU R
 
