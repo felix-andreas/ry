@@ -118,6 +118,18 @@ The code is `crates/interp` (`development/design/r-runtime.md`, step 3).
   `jpeg-encoder` on the PNG device's raster.
 - **The native codeset follows `LC_CTYPE`** (`l10n_info`, `iconv("")`), so the C locale reports
   ASCII and escaping under `LC_ALL=C` matches GNU R.
+- **A C `LC_CTYPE` from the environment becomes C.UTF-8 at startup** unless `LC_ALL` is set
+  (`system::init_locale`, after PEP 538). The string builtins read native strings as UTF-8 in
+  every locale, which is more useful than GNU R's escapes and errors in a container that sets no
+  locale, and the coercion makes the C library (`MB_CUR_MAX`, `mbrtowc`, `iconv("")`) and
+  `l10n_info()` agree with them. An explicit `LC_ALL=C` and a locale that fails to load keep the C
+  locale, where the builtins still read UTF-8 and diverge from GNU R.
+- **Native strings are UTF-8 in a Latin-1 locale too**: `enc2native` converts nothing and
+  symbols intern UTF-8 names as they are. GNU R translates both to Latin-1 with `<U+XXXX>` for
+  what Latin-1 lacks; converting only in `enc2native` would make a native copy of a name miss its
+  symbol (rlang's "env_get() survives native encoding" and data-mask tests). So rlang's
+  "env_poke() ... unrepresentable characters" test finds no unrepresentable string on ry and
+  skips its assertion.
 
 ## The interpreter's call path, lookups and allocation
 

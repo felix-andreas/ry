@@ -5391,6 +5391,20 @@ pub unsafe fn init_locale() -> Vec<&'static str> {
         #[cfg(windows)]
         use_utf8_codeset(category);
     }
+    // A C or POSIX `LC_CTYPE` from the environment moves to C.UTF-8, as in Python (PEP 538),
+    // unless `LC_ALL` asks for it: the string builtins read native strings as UTF-8 in every
+    // locale, and this keeps the C library (`MB_CUR_MAX`, `mbrtowc`) agreeing with them.
+    #[cfg(unix)]
+    if !failed.contains(&"LC_CTYPE")
+        && std::env::var_os("LC_ALL").is_none_or(|value| value.is_empty())
+        && matches!(current_locale(libc::LC_CTYPE).as_str(), "C" | "POSIX")
+    {
+        for name in [c"C.UTF-8", c"C.utf8", c"UTF-8"] {
+            if !set_locale(libc::LC_CTYPE, name.as_ptr()).is_null() {
+                break;
+            }
+        }
+    }
     crate::sort::refresh_collation();
     failed
 }

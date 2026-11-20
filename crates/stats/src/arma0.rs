@@ -430,13 +430,15 @@ fn likelihood(arguments: &NativeArgs<'_, '_>, g: &mut Starma, inparams: &[f64]) 
     }
 
     let streg = mp + mq + msp + msq;
-    if g.m > 0 {
-        for i in 0..g.n {
-            let mut tmp = g.wkeep[i];
-            for j in 0..g.m {
-                tmp -= g.reg[i + g.n * j] * g.params[streg + j];
+    let n = g.n;
+    if g.m > 0 && n > 0 {
+        // Column by column, which subtracts each element's terms in the same order as row by row.
+        let w = &mut g.w[..n];
+        w.copy_from_slice(&g.wkeep[..n]);
+        for (column, &coefficient) in g.reg.chunks_exact(n).zip(&g.params[streg..streg + g.m]) {
+            for (value, &regressor) in w.iter_mut().zip(column) {
+                *value -= regressor * coefficient;
             }
-            g.w[i] = tmp;
         }
     }
 
@@ -453,11 +455,12 @@ fn likelihood(arguments: &NativeArgs<'_, '_>, g: &mut Starma, inparams: &[f64]) 
         }
         for i in ncond..g.n {
             let mut tmp = w[i];
-            for j in 0..(i - ncond).min(p) {
-                tmp -= phi[j] * w[i - j - 1];
+            let lags = i - ncond;
+            for (coefficient, value) in phi[..lags.min(p)].iter().zip(w[..i].iter().rev()) {
+                tmp -= coefficient * value;
             }
-            for j in 0..(i - ncond).min(q) {
-                tmp -= theta[j] * resid[i - j - 1];
+            for (coefficient, value) in theta[..lags.min(q)].iter().zip(resid[..i].iter().rev()) {
+                tmp -= coefficient * value;
             }
             resid[i] = tmp;
             if !tmp.is_nan() {
@@ -937,11 +940,11 @@ fn karma(g: &mut Starma, sumlog: &mut f64, ssq: &mut f64, iupd: i32, nit: &mut u
         let mut sum = *ssq;
         for ii in i..n {
             let mut et = w[ii];
-            for j in 0..p.min(ii) {
-                et -= phi[j] * w[ii - j - 1];
+            for (coefficient, value) in phi.iter().zip(w[..ii].iter().rev()) {
+                et -= coefficient * value;
             }
-            for j in 0..ii.min(q) {
-                et -= theta[j] * resid[ii - j - 1];
+            for (coefficient, value) in theta.iter().zip(resid[..ii].iter().rev()) {
+                et -= coefficient * value;
             }
             resid[ii] = et;
             sum += et * et;
