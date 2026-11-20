@@ -956,9 +956,11 @@ impl Worker {
             &contents,
             |_| true,
             surface_of,
-            |index| loaded.get(index).is_some_and(Option::is_some),
-            attaches_of,
-            changes_findings,
+            check_cache::Attaching {
+                files: |index| loaded.get(index).is_some_and(Option::is_some),
+                attaches_of,
+                changes_findings,
+            },
         );
         let (record, stale) = match plan {
             check_cache::Plan::Fresh => return HashMap::new(),

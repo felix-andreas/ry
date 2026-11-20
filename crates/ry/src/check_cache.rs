@@ -21,12 +21,6 @@
 //! recorded unchecked. A changed file without a recorded surface therefore cannot invalidate any
 //! recorded findings, and a later run computes its surface. For the same reason a run that
 //! leaves a file unanalysed does not compare that file's surface when its text changed.
-//!
-//! Attach calls are the one way files outside the package reach a package file's findings
-//! (`library()` of a package the stubs do not describe tolerates every bare read). So the
-//! record keeps the namespaces each file attaches and the set its findings were computed under,
-//! and a run whose analysed files attach a set that differs in a namespace that can change a
-//! finding ([`semantics::metadata::attaching_changes_findings`]) checks everything.
 
 use {
     crate::config::{self, Config},
@@ -76,8 +70,9 @@ pub struct Record {
     key: Fingerprint,
     files: Vec<RecordedFile>,
     namespace: Option<Vec<RecordedDiagnostic>>,
-    /// The packages the analysed files attach, which every recorded finding was computed under
-    /// (see the module docs).
+    /// The packages the analysed files attach, which every recorded finding was computed under,
+    /// because attach calls reach findings across files (`decisions/libr-rcmd.md`, "The strict
+    /// load check analyses only the package").
     attached: Vec<String>,
 }
 
@@ -275,9 +270,18 @@ pub fn load(root: &Path) -> Option<Record> {
     (record.format == FORMAT).then_some(record)
 }
 
-/// Plans a run against the previous record. `attaches_of` gives the namespaces an analysed
-/// file's text attaches (`None` when it cannot tell), and `changes_findings` whether attaching a
-/// namespace can change a finding. A record the plan keeps carries this run's attached set.
+/// How a run's attached set is computed, which [`plan`] compares with the recorded one.
+pub struct Attaching<Files, Of, Changes> {
+    /// Whether the run's analysis attaches the file's calls.
+    pub files: Files,
+    /// The namespaces a file's text attaches, `None` when it cannot tell.
+    pub attaches_of: Of,
+    /// Whether attaching a namespace can change a finding.
+    pub changes_findings: Changes,
+}
+
+/// Plans a run against the previous record. A record the plan keeps carries this run's
+/// attached set.
 pub fn plan(
     previous: Option<Record>,
     key: Fingerprint,
@@ -285,10 +289,17 @@ pub fn plan(
     contents: &[Fingerprint],
     analysed: impl Fn(usize) -> bool,
     surface_of: impl Fn(usize) -> Fingerprint,
-    attaching: impl Fn(usize) -> bool,
-    attaches_of: impl Fn(usize) -> Option<BTreeSet<String>>,
-    changes_findings: impl Fn(&str) -> bool,
+    attaching: Attaching<
+        impl Fn(usize) -> bool,
+        impl Fn(usize) -> Option<BTreeSet<String>>,
+        impl Fn(&str) -> bool,
+    >,
 ) -> Plan {
+    let Attaching {
+        files: attaching,
+        attaches_of,
+        changes_findings,
+    } = attaching;
     let Some(mut previous) = previous else {
         return Plan::Fresh;
     };

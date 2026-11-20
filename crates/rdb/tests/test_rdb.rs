@@ -127,7 +127,7 @@ fn saved_image(names: &[&str]) -> Vec<u8> {
     const CHARSXP_ASCII: i32 = 9 | (64 << 12);
     const NILVALUE_SXP: i32 = 254;
     let mut bytes = b"RDX2\nX\n".to_vec();
-    let mut word = |bytes: &mut Vec<u8>, value: i32| bytes.extend_from_slice(&value.to_be_bytes());
+    let word = |bytes: &mut Vec<u8>, value: i32| bytes.extend_from_slice(&value.to_be_bytes());
     for header in [2, 0x040300, 0x020300] {
         word(&mut bytes, header);
     }

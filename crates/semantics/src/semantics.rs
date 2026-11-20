@@ -3232,7 +3232,7 @@ fn code_rewritten_later<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
 /// The names a top-level `body(name) <-` of the file rewrites. It
 /// backdates on every edit that adds or removes no such write.
 #[salsa::tracked(returns(ref))]
-fn file_code_rewrites<'db>(db: &'db dyn Db, file: SourceFile) -> ThinVec<Symbol> {
+fn file_code_rewrites(db: &dyn Db, file: SourceFile) -> ThinVec<Symbol> {
     let mut names: ThinVec<Symbol> = item_tree(db, file)
         .iter()
         .filter(|&&item| item_syntax_flags(db, item).rewrites_code)

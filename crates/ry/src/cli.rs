@@ -726,14 +726,18 @@ fn analyze_project_with(
                         &project_fold_shares(&db, file),
                     )
                 },
-                analysed,
-                |index| {
-                    Some(semantics::metadata::file_attached_namespaces(
-                        &db,
-                        files[index],
-                    ))
+                check_cache::Attaching {
+                    files: analysed,
+                    attaches_of: |index| {
+                        Some(semantics::metadata::file_attached_namespaces(
+                            &db,
+                            files[index],
+                        ))
+                    },
+                    changes_findings: |namespace: &str| {
+                        semantics::metadata::attaching_changes_findings(&db, namespace)
+                    },
                 },
-                |namespace| semantics::metadata::attaching_changes_findings(&db, namespace),
             )
         }
     };
