@@ -133,6 +133,9 @@ pub struct NamingExtras {
     /// Reads of a function's own slot that some path reaches unassigned, each with the
     /// enclosing function's slot R reads on that path instead.
     pub enclosing_fallbacks: SortedMap<ExprId, BindingId>,
+    /// Reads that observe a slot of an enclosing frame, or of their own frame from code that
+    /// runs later (a closure, a default): a write after the read may be the value they see.
+    pub captured_reads: SortedSet<ExprId>,
 }
 
 static NO_EXTRAS: LazyLock<NamingExtras> = LazyLock::new(NamingExtras::default);
@@ -189,6 +192,7 @@ struct NamingDraft {
     native_routine_reads: BTreeSet<ExprId>,
     replacement_copies: BTreeMap<BindingId, CopySource>,
     enclosing_fallbacks: BTreeMap<ExprId, BindingId>,
+    captured_reads: BTreeSet<ExprId>,
 }
 
 impl NamingDraft {
@@ -210,6 +214,7 @@ impl NamingDraft {
             native_routine_reads: self.native_routine_reads.into(),
             replacement_copies: self.replacement_copies.into(),
             enclosing_fallbacks: self.enclosing_fallbacks.into(),
+            captured_reads: self.captured_reads.into(),
         };
         ItemNaming {
             bindings: self.bindings.into(),
@@ -1388,7 +1393,7 @@ impl Context<'_> {
     /// Separate from [`Self::resolve_read`] because a `%op%` read is a token with no expression
     /// id. A slot resolves when a write reaches the read or the read crosses a function
     /// boundary (a capture); an unassignable slot does not shadow.
-    fn mark_slot_read(&mut self, name: Symbol) -> Option<(BindingId, Unassigned)> {
+    fn mark_slot_read(&mut self, name: Symbol) -> Option<(BindingId, Unassigned, bool)> {
         let function_depth = self.current_function_depth();
         let (depth, slot) = self
             .scopes
@@ -1407,11 +1412,12 @@ impl Context<'_> {
         if forward {
             self.deferred_depth += 1;
         }
+        let captured = depth < function_depth || self.deferred_depth > 0;
         let unassigned = self.mark_slot_reached(name, depth, slot, function_depth);
         if forward {
             self.deferred_depth -= 1;
         }
-        Some((slot, unassigned))
+        Some((slot, unassigned, captured))
     }
 
     /// Records that a read at the current point observes `slot`, which lives at scope `depth`,
@@ -1514,8 +1520,11 @@ impl Context<'_> {
             _ => name,
         };
         match self.mark_slot_read(name) {
-            Some((slot, unassigned)) => {
+            Some((slot, unassigned, captured)) => {
                 self.naming.resolutions.insert(id, slot);
+                if captured {
+                    self.naming.captured_reads.insert(id);
+                }
                 if self.emit {
                     match unassigned {
                         Unassigned::Never => {}

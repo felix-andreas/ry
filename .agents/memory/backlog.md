@@ -850,10 +850,6 @@ measurement showed.
   typed (the `DataFrame` type is the typed alternative). A local whose
   type is a generic parameter (`total <- a + b` inside `<T> fn(a: T, ...)`) gets no inlay hint,
   because a bare `T` without its binder would mislead.
-- A closure reads a captured variable's narrowing as it stands where the closure is defined, so
-  `if (is.null(x)) return(""); get <- function() x; x <- NULL; use(get())` is silent, for a
-  variable and for a narrowed field (`get <- function() cfg$limit`). A write after the definition
-  should widen the captured read, as `capture_joins` does for reads before any write.
 - A nominal type's field is not narrowed by `is.null(node$left)`, because `field_null_guard` can
   only rewrite the variable's type and a narrowed record is no longer the nominal. A narrowing fact
   keyed on (slot, field), rather than a rewritten type, would cover `Tree`-style recursion.

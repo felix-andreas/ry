@@ -1663,7 +1663,7 @@ memoize <- function(fun) {
   dec
 }
 #++++
-memoize: <T> fn([fun]: fn() -> T) -> fn() -> T
+memoize: <T> fn([fun]: fn() -> T) -> fn() -> T | logical
 
 #---- a_closure_reads_back_the_value_it_just_superassigned
 once <- function(fun) {

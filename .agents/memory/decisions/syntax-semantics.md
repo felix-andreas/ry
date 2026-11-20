@@ -1911,3 +1911,11 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - `TypeRenderer` prints a rigid binder whose name is an identifier as written (`<N: numeric>` gives `N`), so a report on a user's signature uses the user's names. Generated binders are named `#0`, `#R1` (`abstract_vars`, the closer), which no identifier spells, and the renderer letters them `T`, `U`, ... in order of appearance, skipping a name already taken.
 - A local `id <- function<T>(...)` instantiates its checked signature one level up, so the binding generalizes to the declared scheme, as an unbound literal instantiates at its use.
 - A rigid binder meets a constraint through its declared constraint or its type bound (`InferenceTable::rigid_satisfies`), so `<N: integer | double>` is numeric for an operator.
+
+## A closure's read sees the writes after its definition
+
+**Status:** built
+
+- Naming marks every read that crosses a function boundary (`NamingExtras::captured_reads`). Where such a read finds an environment entry, the checker joins it with each write to the slot positioned after the read (`Checker::capture_writes`, by source offset), so a narrowing at the definition does not survive a later `x <- NULL`, whether from the frame or from a sibling closure's `<<-`.
+- The reading body's own `<<-` writes are left to its superassignment seeds, and an R literal written later takes the read's type when its constraint admits it (or the read is still open), so `step <- 2` after `step <- 1` stays `I64` in typed code.
+- A newly seen later write records the read's position in `late_triggers`; the function body whose range holds it re-checks once, so a write in a nested closure re-checks the frame that defined the reading closure. Late writes join with `join_closure_write`, which keeps a callback's open result generic (`memoize` returns `T | logical` after a `cache <<- TRUE` reset).

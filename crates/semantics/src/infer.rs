@@ -2028,7 +2028,7 @@ fn nullable_single_member<'db>(db: &'db dyn Db, members: &[Ty<'db>]) -> Option<T
 /// Beyond atoms: a class declaring an arithmetic operator method is numeric
 /// (`a + b` is legal R for it), and a rigid binder is admitted when its declared
 /// bound is at least as strong (self-recursive calls unify it with a fresh variable).
-fn constraint_rejects<'db>(
+pub(crate) fn constraint_rejects<'db>(
     db: &'db dyn Db,
     table: &InferenceTable<'db>,
     constraint: Constraint,

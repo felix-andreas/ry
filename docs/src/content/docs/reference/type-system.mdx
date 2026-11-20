@@ -3020,6 +3020,13 @@ The details:
 - A read from inside a closure narrows when the guard is in the same statement, just as a local
   does. The guard's own subject must not itself be a deferred read: that body runs later, so the test
   proves nothing about the value it will see then.
+- A closure may run after the rest of its frame, so it reads an enclosing variable as it stands
+  where the closure is defined, joined with every write that comes later in the frame or in another
+  closure. After `if (is.null(x)) return(""); get <- function() x; x <- NULL`, the call `get()` is
+  `character | NULL`, and the same holds for a narrowed field (`get <- function() cfg$limit`
+  followed by `cfg$limit <- NULL`). An R literal written later takes the read's type when it can,
+  and the closure's own `<<-` writes are joined as described under
+  [the assignment operator](#assignment-operator--).
 - Guards compose across `&&` and `||`. The right operand of `&&` runs only on the left's true edge,
   so it is checked under that refinement, and the whole condition refines its true edge by both
   tests: `!is.null(x) && length(x) > 0L` reads a non-`NULL` `x`. `||` does the same on the false

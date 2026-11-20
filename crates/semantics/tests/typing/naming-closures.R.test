@@ -125,3 +125,58 @@ x: integer
   = 0..1 the earlier binding is here.
 == R/c.R
 f: fn() -> fn() -> integer
+#==== late_capture_writes
+#---- a_write_after_a_closure_undoes_the_narrowing_it_reads
+f <- function(x: character | NULL) -> character {
+  if (is.null(x)) return("")
+  get <- function() x
+  x <- NULL
+  get()
+}
+#++++
+f: fn(x: character | NULL) -> character
+115..120 error[type-mismatch] expected `character`, found `character | NULL`
+
+#---- a_literal_written_after_a_closure_joins_its_default
+f <- function(x: character | NULL) -> character {
+  if (is.null(x)) return("")
+  get <- function() x
+  x <- 5
+  get()
+}
+#++++
+f: fn(x: character | NULL) -> character
+112..117 error[type-mismatch] expected `character`, found `character | double`
+
+#---- a_field_write_after_a_closure_undoes_the_field_narrowing
+f <- function(cfg: list{limit: double | NULL}) -> double {
+  if (is.null(cfg$limit)) return(0)
+  get <- function() cfg$limit
+  cfg$limit <- NULL
+  get()
+}
+#++++
+f: fn(cfg: list{limit: double | NULL}) -> double
+147..152 error[type-mismatch] expected `double`, found `double | NULL`
+
+#---- a_sibling_closure_write_reaches_an_earlier_closure
+f <- function(x: character | NULL) -> character {
+  if (is.null(x)) return("")
+  get <- function() x
+  clear <- function() x <<- NULL
+  clear()
+  get()
+}
+#++++
+f: fn(x: character | NULL) -> character
+146..151 error[type-mismatch] expected `character`, found `character | NULL`
+
+#---- writes_before_the_closure_keep_the_narrowing
+f <- function(x: character | NULL) -> character {
+  x <- NULL
+  x <- "a"
+  get <- function() x
+  get()
+}
+#++++
+f: fn(x: character | NULL) -> character

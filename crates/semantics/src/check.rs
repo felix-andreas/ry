@@ -17,7 +17,7 @@ use {
         },
         infer::{
             Entry, FunctionMismatch, InferenceTable, RecordMismatch, UNCHECKED_WITNESS, UnifyError,
-            apply_definition, numeric_join,
+            apply_definition, constraint_rejects, numeric_join,
         },
         metadata::{imported_by_name, imports_every_name, is_own_package, own_package_reaches},
         naming::{
@@ -897,6 +897,10 @@ fn check_item_in<'db>(
         pending_enclosing_writes: Vec::new(),
         forward_captured: Bitset::new_in(arena, bindings),
         capture_joins: Column::new_in(arena, bindings),
+        capture_writes: Column::new_in(arena, bindings),
+        late_reads: Column::new_in(arena, bindings),
+        late_triggers: SmallVec::new(),
+        body_range: TextRange::default(),
         capture_repass_needed: false,
         superassign_seeds: SmallVec::new(),
         pre_materialized: Column::new_in(arena, bindings),
@@ -1787,6 +1791,14 @@ struct Checker<'db, 'a> {
     /// Variable-erased join of every write to a captured slot, surviving rollbacks;
     /// forward-capture reads resolve here instead of the empty definition-point entry.
     capture_joins: Column<'a, BindingId, Ty<'db>>,
+    /// Each write to a captured slot by source position, with its variable-erased type.
+    capture_writes: Column<'a, BindingId, SmallVec<[(TextSize, LateWrite<'db>); 2]>>,
+    /// The earliest closure read of each slot that found an entry; a write after it widens it.
+    late_reads: Column<'a, BindingId, TextSize>,
+    /// Closure reads a newly seen later write widens: the body holding each one re-checks.
+    late_triggers: SmallVec<[TextSize; 2]>,
+    /// The function body being inferred.
+    body_range: TextRange,
     /// Closures were inferred against an incomplete capture join, so the body re-checks once.
     capture_repass_needed: bool,
     /// Per function body: the variable each `<<-`-written enclosing slot reads beside its
@@ -1856,6 +1868,15 @@ enum Callable {
 }
 
 /// The variable an enclosing slot reads on entry to a body that writes it with `<<-`.
+/// A write to a captured slot, as a closure defined before it may observe it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct LateWrite<'db> {
+    /// Variable-erased; an open R literal's default.
+    ty: Ty<'db>,
+    /// The constraint of an open R literal, which may take the reading type instead.
+    literal: Option<Constraint>,
+}
+
 #[derive(Clone, Copy)]
 struct SuperassignSeed<'db> {
     slot: BindingId,
@@ -3425,6 +3446,21 @@ impl<'db, 'a> Checker<'db, 'a> {
     }
 
     /// Whether `ty` is a literal variable that a use may still decide.
+    /// An open R literal's constraint and the atomic type it defaults to, without deciding it.
+    fn open_literal_constraint(&mut self, ty: Ty<'db>) -> Option<(Constraint, Atomic)> {
+        if !self.open_literal_var(ty) {
+            return None;
+        }
+        let resolved = self.table.shallow_resolve(self.db, ty);
+        let TyKind::Var(var) = *resolved.kind(self.db) else {
+            return None;
+        };
+        match *self.table.entry(self.table.find(var)) {
+            Entry::Unbound { constraint, .. } => Some((constraint, constraint.literal_default()?)),
+            _ => None,
+        }
+    }
+
     fn open_literal_var(&mut self, ty: Ty<'db>) -> bool {
         let resolved = self.table.shallow_resolve(self.db, ty);
         let TyKind::Var(var) = *resolved.kind(self.db) else {
@@ -4064,7 +4100,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 if let Some(&slot) = self.naming.extras().run_time_writes.get(&id) {
                     let written = unknown(self.db);
                     self.environment.set(slot, EnvEntry::Mono(written));
-                    self.note_captured_write(slot, written);
+                    self.note_captured_write(id, slot, written);
                 }
                 ty
             }
@@ -4962,10 +4998,11 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// The value `slot` holds at the read `id`.
     fn read_slot(&mut self, id: ExprId, slot: BindingId) -> Ty<'db> {
         match self.environment.get(slot) {
-            Some(EnvEntry::Mono(ty)) => ty,
+            Some(EnvEntry::Mono(ty)) => self.widen_captured_read(id, slot, ty),
             Some(EnvEntry::Scheme(index)) => {
                 let scheme = self.scheme_arena[index as usize].clone();
-                self.instantiate(&scheme)
+                let ty = self.instantiate(&scheme);
+                self.widen_captured_read(id, slot, ty)
             }
             Some(EnvEntry::MissingFormal(_)) => {
                 let name = self
@@ -4996,6 +5033,43 @@ impl<'db, 'a> Checker<'db, 'a> {
                 unknown(self.db)
             }
         }
+    }
+
+    /// A closure runs after its definition, so its read of an enclosing variable also sees the
+    /// writes that come later in the frame: `get <- function() x; x <- NULL` reads `x` as
+    /// possibly `NULL`, whatever narrowing held where `get` was defined.
+    fn widen_captured_read(&mut self, id: ExprId, slot: BindingId, ty: Ty<'db>) -> Ty<'db> {
+        if !self.naming.extras().captured_reads.contains(&id) {
+            return ty;
+        }
+        let position = self.module.range(id).start();
+        let open = self.table.shallow_resolve(self.db, ty).is_var();
+        if self
+            .late_reads
+            .get(slot)
+            .is_none_or(|&earliest| position < earliest)
+        {
+            self.late_reads.insert(slot, position);
+        }
+        // A literal written later takes the read's type when it can, as `x <- 2` would.
+        let later: SmallVec<[Ty<'db>; 2]> = self
+            .capture_writes
+            .get(slot)
+            .into_iter()
+            .flatten()
+            // The reading body's own `<<-` writes are left to its superassignment seeds.
+            .filter(|(at, late)| {
+                *at > position
+                    && !self.body_range.contains(*at)
+                    && late.literal.is_none_or(|constraint| {
+                        !open && constraint_rejects(self.db, &self.table, constraint, ty).is_some()
+                    })
+            })
+            .map(|(_, late)| late.ty)
+            .collect();
+        later.into_iter().fold(ty, |joined, written| {
+            self.join_closure_write(joined, written)
+        })
     }
 
     /// A bare name inside a query reads the frame's column before any lexical binding, as
@@ -5203,7 +5277,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             for leaf in destructure_leaves(self.module, target).unwrap_or_default() {
                 if let Some(&slot) = self.naming.resolutions.get(&leaf) {
                     self.environment.set(slot, EnvEntry::Mono(unchecked));
-                    self.note_captured_write(slot, unchecked);
+                    self.note_captured_write(leaf, slot, unchecked);
                 }
                 self.recorded.insert(leaf, unchecked);
             }
@@ -5247,7 +5321,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     }
                     self.environment.set(slot, EnvEntry::Mono(written));
                     self.pending_enclosing_writes.push((slot, written));
-                    self.note_captured_write(slot, value_ty);
+                    self.note_captured_write(target, slot, value_ty);
                 } else {
                     // Let-polymorphism: only function values generalize.
                     let resolved = self.table.shallow_resolve(self.db, value_ty);
@@ -5265,7 +5339,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         self.environment.set(slot, EnvEntry::Mono(value_ty));
                     }
                 }
-                self.note_captured_write(slot, value_ty);
+                self.note_captured_write(target, slot, value_ty);
             } else if spelling == AssignSpelling::Super
                 && let Some(&name) = self.naming.non_locals.get(&target)
             {
@@ -5319,15 +5393,47 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    fn note_captured_write(&mut self, slot: BindingId, value_ty: Ty<'db>) {
+    fn note_captured_write(&mut self, write: ExprId, slot: BindingId, value_ty: Ty<'db>) {
         if !self.naming.extras().captured_slots.contains(&slot) {
             return;
         }
-        let written = erase_vars(self.db, self.table.resolve(self.db, value_ty));
+        let erased = erase_vars(self.db, self.table.resolve(self.db, value_ty));
+        // An R literal decides its type only later, after this record has outlived the table
+        // it was decided in, so `x <- 5` keeps the literal's constraint and its default.
+        let late = match self.open_literal_constraint(value_ty) {
+            Some((constraint, atomic)) => LateWrite {
+                ty: scalar(self.db, atomic),
+                literal: Some(constraint),
+            },
+            None => LateWrite {
+                ty: erased,
+                literal: None,
+            },
+        };
+        let position = self.module.range(write).start();
+        let mut writes = self.capture_writes.remove(slot).unwrap_or_default();
+        let late_changed = match writes.iter_mut().find(|(at, _)| *at == position) {
+            Some((_, existing)) if *existing == late => false,
+            Some((_, existing)) => {
+                *existing = late;
+                true
+            }
+            None => {
+                writes.push((position, late));
+                true
+            }
+        };
+        self.capture_writes.insert(slot, writes);
+        if late_changed
+            && let Some(&read) = self.late_reads.get(slot)
+            && read < position
+        {
+            self.late_triggers.push(read);
+        }
         let joined = match self.capture_joins.get(slot) {
-            Some(&existing) if existing != written => self.join_types(existing, written),
+            Some(&existing) if existing != erased => self.join_types(existing, erased),
             Some(&existing) => existing,
-            None => written,
+            None => erased,
         };
         let changed = self.capture_joins.get(slot) != Some(&joined);
         self.capture_joins.insert(slot, joined);
@@ -5422,7 +5528,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             if spelling == AssignSpelling::Super {
                 self.pending_enclosing_writes.push((slot, written));
             }
-            self.note_captured_write(slot, written);
+            self.note_captured_write(base, slot, written);
         }
     }
 
@@ -6111,7 +6217,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             self.check_pattern(arm.pattern, scrutinee_ty, &mut bindings);
             for (slot, ty) in bindings {
                 self.environment.set(slot, EnvEntry::Mono(ty));
-                self.note_captured_write(slot, ty);
+                self.note_captured_write(arm.body, slot, ty);
             }
             if let Some(guard) = arm.guard {
                 self.expect_scalar_logical(guard, ConditionSite::Operand);
@@ -11581,6 +11687,7 @@ impl<'db, 'a> Checker<'db, 'a> {
     fn infer_body_with_capture_discovery(&mut self, body: ExprId, pending_mark: usize) -> Ty<'db> {
         let saved_repass = mem::replace(&mut self.capture_repass_needed, false);
         let saved_seeds = mem::take(&mut self.superassign_seeds);
+        let saved_body_range = mem::replace(&mut self.body_range, self.module.range(body));
         let body_mark = self.environment.mark();
         let body_snapshot = self.table.snapshot();
         let errors_mark = self.errors.len();
@@ -11589,7 +11696,10 @@ impl<'db, 'a> Checker<'db, 'a> {
         self.collect_superassigned(body, &mut superassigned);
         self.seed_superassigned_reads(&superassigned);
         let mut trailing_ty = self.infer(body);
-        if self.capture_repass_needed {
+        let range = self.body_range;
+        let before = self.late_triggers.len();
+        self.late_triggers.retain(|read| !range.contains(*read));
+        if self.capture_repass_needed || self.late_triggers.len() < before {
             self.environment.rollback(body_mark);
             self.table.rollback(body_snapshot);
             self.errors.truncate(errors_mark);
@@ -11602,6 +11712,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             self.superassign_seeds.clear();
             self.seed_superassigned_reads(&superassigned);
             trailing_ty = self.infer(body);
+            self.late_triggers.retain(|read| !range.contains(*read));
         }
         // A write the body never reached leaves its seed open; it must not generalize.
         let seeds = mem::replace(&mut self.superassign_seeds, saved_seeds);
@@ -11616,6 +11727,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
         }
         self.capture_repass_needed = saved_repass;
+        self.body_range = saved_body_range;
         trailing_ty
     }
 
@@ -13496,7 +13608,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             };
             if let Some(written) = written {
                 self.environment.set(slot, EnvEntry::Mono(written));
-                self.note_captured_write(slot, written);
+                self.note_captured_write(id, slot, written);
             }
         }
         refined.unwrap_or(ordinary)
@@ -17363,7 +17475,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         if let Some(&slot) = self.naming.extras().column_updates.get(&id) {
             let written = if is_query { result } else { target_ty };
             self.environment.set(slot, EnvEntry::Mono(written));
-            self.note_captured_write(slot, written);
+            self.note_captured_write(id, slot, written);
         } else if is_query
             && is_column_update(self.module, arguments)
             && let Some(name) = self.naming.non_locals.get(&target)
