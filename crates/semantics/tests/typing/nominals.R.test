@@ -599,3 +599,64 @@ $.Request: fn(x: Request, name: character) -> double
 request: Request
 url: character
 328..339 error[type-mismatch] expected `character`, found `double`
+
+#==== s3_method_signatures
+#---- a_method_without_an_argument_of_its_generic_is_reported
+#~~~~ R/generic.R
+area <- function(shape, units) UseMethod("area")
+#~~~~ R/square.R
+area.square <- function(shape) shape$side^2
+#++++
+== R/generic.R
+area: <T, U> fn([shape]: T, [units]: U) -> Any
+== R/square.R
+area.square: <T> fn(shape: T) -> Unknown
+0..11 warning[s3-method-signature] this method of `area` has no `units` parameter, which the generic takes, so a call that passes `units` fails for this class. Add `units`
+
+#---- a_method_that_renames_the_dispatch_argument_is_reported
+area <- function(shape, ...) UseMethod("area")
+area.circle <- function(x, ...) pi * x$radius^2
+#++++
+area: <T> fn([shape]: T, ...: Any) -> Any
+area.circle: <T> fn(x: T, ...: Any) -> Unknown
+71..72 warning[s3-method-signature] this method of `area` takes `x` where the generic takes `shape`, so a call that passes `shape` by name fails for this class. Rename it to `shape`
+
+#---- a_method_argument_the_generic_cannot_pass_is_reported
+describe <- function(x) UseMethod("describe")
+describe.default <- function(x, verbose = FALSE) if (verbose) "long" else "short"
+#++++
+describe: <T> fn([x]: T) -> Any
+describe.default: <T, U> fn([x]: T, [verbose]: U) -> character
+78..85 warning[s3-method-signature] this method of `describe` takes `verbose`, which the generic does not, and the generic has no `...` to pass it on, so no call through `describe` can supply it. Add `verbose` or `...` to the generic
+
+#---- a_method_without_dots_is_reported_when_the_generic_has_them
+describe <- function(x, ...) UseMethod("describe")
+describe.default <- function(x) "value"
+#++++
+describe: <T> fn([x]: T, ...: Any) -> Any
+describe.default: <T> fn([x]: T) -> character
+51..67 warning[s3-method-signature] this method of `describe` has no `...` parameter, which the generic takes, so a call that passes an extra argument fails for this class. Add `...`
+
+#---- a_method_may_add_arguments_before_and_after_dots
+summarise <- function(object, ...) UseMethod("summarise")
+summarise.default <- function(object, digits = 2, ...) round(object, digits)
+summarise.list <- function(object, ..., recursive = TRUE) lengths(object)
+fit <- function(x, data, ...) UseMethod("fit")
+fit.formula <- function(formula, data, ...) formula
+#++++
+summarise: <T> fn([object]: T, ...: Any) -> Any
+summarise.default: <T, U> fn(object: T, [digits]: U, ...: Any) -> double
+summarise.list: <T, U> fn(object: T, ...: Any, [recursive]: U) -> integer[]
+fit: <T, U> fn([x]: T, [data]: U, ...: Any) -> Any
+fit.formula: <T, U> fn(formula: T, [data]: U, ...: Any) -> T
+
+#---- a_dotted_name_without_a_dispatching_generic_is_not_a_method
+scale_to <- function(x, by) x * by
+scale_to.unit <- function(x) x
+render <- function(x) UseMethod("print")
+render.html <- function(page) page
+#++++
+scale_to: <T: numeric> fn(x: T, by: T) -> T
+scale_to.unit: <T> fn(x: T) -> T
+render: <T> fn([x]: T) -> Any
+render.html: <T> fn(page: T) -> T

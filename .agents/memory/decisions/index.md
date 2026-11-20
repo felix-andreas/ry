@@ -151,6 +151,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Diagnostic messages are lowercase and end without a full stop (settled)
 - A called name inside a table's mask resolves loudly (settled)
 - `new()` is checked against the slots `setClass` writes out (settled)
+- S3 methods are held to their package generic's formals, by `R CMD check`'s rule
 
 ## Analysis core
 

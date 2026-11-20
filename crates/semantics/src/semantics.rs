@@ -2412,7 +2412,7 @@ pub(crate) fn file_s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<Strin
 
 /// A firewall, so a body edit does not re-derive the file's generics.
 #[salsa::tracked]
-fn reads_use_method<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
+pub(crate) fn reads_use_method<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
     item_naming(db, item)
         .as_ref()
         .is_some_and(|naming| naming.non_locals.values().any(|name| *name == "UseMethod"))

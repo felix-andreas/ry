@@ -13,7 +13,7 @@ use {
         exhaustiveness::{MatchFinding, MatchFindingKind},
         file_comment_annotations, file_conditional_writers, file_definitions, file_syntax_sites,
         file_type_definitions,
-        hir::{ExprId, ExpressionKind, Symbol},
+        hir::{self, ExprId, ExpressionKind, Symbol},
         infer::{FunctionMismatch, RecordMismatch, apply_definition},
         inline_annotations_enabled, item_check, item_hir, item_naming, item_spans, item_syntax,
         item_tree,
@@ -23,7 +23,7 @@ use {
             native_symbol, own_package_reaches, own_qualified_names,
         },
         naming::{BindingKind, ItemNaming, NamespaceRead},
-        package_name, parse, prelude_enabled, project_type_definitions, s4,
+        package_name, parse, prelude_enabled, project_type_definitions, reads_use_method, s4,
         stubs::{
             CONDITIONAL_NAMESPACES, STANDARD_LIBRARY, StubLibrary, SymbolSet,
             dormant_namespace_exports, namespace_exports, namespace_known, outside_prelude, stubs,
@@ -726,6 +726,14 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     format!("class `{class}` has no slot `{name}`{advice}"),
                 ));
             }
+        }
+        if let Some((range, message)) = s3_method_finding(db, item, &module) {
+            diagnostics.push(Diagnostic::new(
+                range + offset,
+                Severity::Warning,
+                "s3-method-signature",
+                message,
+            ));
         }
         // Immediate reads see only slots created by earlier statements; reads inside a
         // nested function run after the frame settled, so any slot in the document
@@ -2463,6 +2471,145 @@ fn file_defines_r6_class(db: &dyn Db, file: SourceFile) -> bool {
                 }
             })
         })
+    })
+}
+
+/// `R CMD check`'s S3 generic/method consistency rule, for a package function `generic.class`
+/// whose generic is the package's own function that calls `UseMethod("generic")`. Dispatch
+/// passes the call's arguments on as they were matched to the generic, so the method must take
+/// the generic's arguments, in the generic's order up to the first `...`.
+fn s3_method_finding<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+    module: &hir::Module,
+) -> Option<(TextRange, String)> {
+    if *item.file(db).kind(db) != DocumentKind::Package {
+        return None;
+    }
+    let method = item.name(db)?;
+    let ExpressionKind::Assign { target, value, .. } = *module.kind(module.root?) else {
+        return None;
+    };
+    let ExpressionKind::Function { parameters, .. } = *module.kind(value) else {
+        return None;
+    };
+    let (generic, generic_parameters) = method
+        .as_str()
+        .match_indices('.')
+        .rev()
+        .filter(|&(dot, _)| dot > 0 && dot + 1 < method.as_str().len())
+        .find_map(|(dot, _)| {
+            let generic = Symbol::new(&method.as_str()[..dot]);
+            let parameters = s3_generic_parameters(db, generic)?;
+            Some((generic, parameters))
+        })?;
+    let method_parameters = &module[parameters];
+    let mut generic_names: &[Symbol] = &generic_parameters;
+    let mut method_names: Vec<Symbol> = method_parameters
+        .iter()
+        .map(|parameter| parameter.name)
+        .collect();
+    let mut skipped = 0;
+    // A formula method may call its first argument `formula`.
+    if method.as_str().ends_with(".formula") && !method_names.is_empty() {
+        if generic_names.first().is_some_and(|name| *name != "...") {
+            generic_names = &generic_names[1..];
+        }
+        method_names.remove(0);
+        skipped = 1;
+    }
+    let dots = |names: &[Symbol]| names.iter().position(|name| *name == "...");
+    let generic_dots = dots(generic_names);
+    let method_dots = dots(&method_names);
+    let positional = generic_dots
+        .unwrap_or(generic_names.len())
+        .min(method_dots.unwrap_or(usize::MAX));
+    let parameter_range = |index: usize| method_parameters[index + skipped].range;
+    let name_range = module.range(target);
+    for (index, expected) in generic_names[..positional].iter().enumerate() {
+        match method_names.get(index) {
+            Some(found) if found == expected => {}
+            Some(found) => {
+                return Some((
+                    parameter_range(index),
+                    format!(
+                        "this method of `{generic}` takes `{found}` where the generic takes `{expected}`, so a call that passes `{expected}` by name fails for this class. Rename it to `{expected}`"
+                    ),
+                ));
+            }
+            None => {
+                return Some((
+                    name_range,
+                    format!(
+                        "this method of `{generic}` has no `{expected}` parameter, which the generic takes, so a call that passes `{expected}` fails for this class. Add `{expected}`"
+                    ),
+                ));
+            }
+        }
+    }
+    if method_dots.is_none()
+        && let Some(missing) = generic_names
+            .iter()
+            .find(|name| !method_names.contains(name))
+    {
+        return Some((
+            name_range,
+            match missing.as_str() {
+                "..." => format!(
+                    "this method of `{generic}` has no `...` parameter, which the generic takes, so a call that passes an extra argument fails for this class. Add `...`"
+                ),
+                _ => format!(
+                    "this method of `{generic}` has no `{missing}` parameter, which the generic takes, so a call that passes `{missing}` fails for this class. Add `{missing}` or `...`"
+                ),
+            },
+        ));
+    }
+    if generic_dots.is_none()
+        && let Some(index) = method_names
+            .iter()
+            .position(|name| *name != "..." && !generic_names.contains(name))
+    {
+        return Some((
+            parameter_range(index),
+            format!(
+                "this method of `{generic}` takes `{}`, which the generic does not, and the generic has no `...` to pass it on, so no call through `{generic}` can supply it. Add `{}` or `...` to the generic",
+                method_names[index], method_names[index]
+            ),
+        ));
+    }
+    None
+}
+
+/// The formals of the package's own S3 generic `generic`: a function whose body calls
+/// `UseMethod("generic")`.
+fn s3_generic_parameters(db: &dyn Db, generic: Symbol) -> Option<Vec<Symbol>> {
+    let winner = package_name(db, QueryName::new(db, Name::new(db, generic))).winner?;
+    if !*reads_use_method(db, winner) {
+        return None;
+    }
+    let module = item_hir(db, winner).as_ref()?;
+    let ExpressionKind::Assign { value, .. } = *module.kind(module.root?) else {
+        return None;
+    };
+    let ExpressionKind::Function { parameters, .. } = *module.kind(value) else {
+        return None;
+    };
+    let dispatches = module.expression_ids().any(|expression| {
+        let ExpressionKind::Call { callee, arguments } = module.kind(expression) else {
+            return false;
+        };
+        matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "UseMethod")
+            && module[arguments]
+                .first()
+                .and_then(|argument| argument.value)
+                .and_then(|value| s4::string(module, value))
+                == Some(generic)
+    });
+    dispatches.then(|| {
+        module[parameters]
+            .iter()
+            .map(|parameter| parameter.name)
+            .collect()
     })
 }
 

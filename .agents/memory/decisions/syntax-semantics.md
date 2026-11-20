@@ -2141,3 +2141,11 @@ lowering path and a third way for two annotations to disagree, for no case `#:` 
 - `s4.rs` reads each top-level `setClass` call as written: `representation(...)` (named entries are slots, unnamed strings parents), `slots =` (named or bare strings) and `contains =`. `class_slots` is a per-(file, class) projection over the package's definitions, so a `new()` check never reads the project-wide map directly.
 - Inheritance is followed, because a subclass legitimately takes its parent's slots. Anything the call does not settle (a computed slot list, a parent outside the project such as `numeric`, a class defined twice, an `initialize` method, which may take any argument) makes the check silent: a false positive on correct S4 code costs more than a missed typo.
 - The finding is `type-mismatch` at the argument name, like a nominal's missing field. Slot types stay `Unknown`; typing them is a separate step.
+
+## S3 methods are held to their package generic's formals, by `R CMD check`'s rule
+
+**Status:** built (`s3_method_finding` in `crates/semantics/src/diagnostics.rs`).
+
+- A package function `a.b` is a method when the package's winner for a prefix `a` calls `UseMethod("a")`; the longest such prefix wins. The generic is reached through `package_name`, so a method's check depends on its generic's name alone.
+- The rule is `tools:::checkS3methods`'s: the generic's parameters up to its first `...` (cut at the method's own `...`) match by position, every generic parameter appears in the method unless the method has `...`, and a method parameter outside the generic needs `...` on the generic. One finding per method, the first rule it breaks.
+- Generics from other packages are not checked: stub formals are written for typing and need not be the real ones, so a stub generic would turn a stub's spelling into a false report.

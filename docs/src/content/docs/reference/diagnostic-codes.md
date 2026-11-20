@@ -231,6 +231,25 @@ level says:
 x S4 classes are turned off in this project (`[check] object-systems = false`), so `setClass` cannot define an S4 class. Use a record or a tagged union instead
 ```
 
+**`s3-method-signature`** (warning): an S3 method whose parameters do not fit its generic, by the
+rule `R CMD check` applies. A package function `generic.class` is a method when `generic` is a
+package function that calls `UseMethod("generic")`. R re-matches the call's arguments against the
+method, so the method must take the generic's parameters in the generic's order up to the first
+`...`, must take every other parameter of the generic unless it has `...` itself, and may add
+parameters only when the generic has `...` to pass them on. A `.formula` method may call its first
+parameter `formula`.
+
+```r
+area <- function(shape, ...) UseMethod("area")
+area.circle <- function(x, ...) pi * x$radius^2
+```
+
+```text
+! this method of `area` takes `x` where the generic takes `shape`, so a call that passes `shape` by name fails for this class. Rename it to `shape`
+```
+
+Methods of generics from other packages, such as `print` or `format`, are not checked.
+
 **`stub`** (error): a line in your `stubs/*.Rtypes` files that ry could not load, so a broken
 declaration is never dropped in silence.
 

@@ -2087,8 +2087,6 @@ The message says to add a type annotation, and no annotation form silences it. `
 - **`$` on an unannotated parameter constrains nothing**, so the parameter accepts anything.
 - **`#: @new` does not stop `structure()` being a strict origin**, so the documented S3 remedy fails
   at exactly the site it exists for.
-- **S3 generic and method signature consistency is unchecked.** Both planted violations were missed,
-  and `R CMD check` catches both. ry already does the rarer undefined-export check.
 - **`vapply(x, f, numeric(1))` errors whenever the callback is not statically `double`.** R accepts
   a wider template, which the tester confirmed with `ry run` on
   `vapply(1:3, function(i) i, numeric(1))`.
