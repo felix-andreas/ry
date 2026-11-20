@@ -174,6 +174,26 @@ unsafe fn start_from_image(
             }
         };
         let image_packages = option_strings("defaultPackages");
+        let default_package = |env: Sexp| {
+            crate::envir::search_name(env)
+                .strip_prefix("package:")
+                .is_some_and(|package| image_packages.iter().any(|held| held == package))
+        };
+        let own: Vec<Sexp> = held
+            .iter()
+            .copied()
+            .filter(|&env| !default_package(env))
+            .collect();
+        // `package:ry` stays reachable in front of base, where a slow start has it, because a
+        // test worker loads its package from the profile.
+        let autoloads = methods.enclosure();
+        if let Some(&loader) = own
+            .iter()
+            .find(|&&env| crate::envir::search_name(env) == "package:ry")
+        {
+            crate::heap().set_enclosure(loader, base_env());
+            crate::heap().set_enclosure(autoloads, loader);
+        }
         crate::heap().set_enclosure(global_env(), methods);
         if let Some(site) = site_profile {
             source_file(&site, base_env())?;
@@ -189,43 +209,47 @@ unsafe fn start_from_image(
             if crate::envir::search_path().any(|env| crate::envir::search_name(env) == name) {
                 continue;
             }
-            let mark = crate::heap().handle_mark();
-            let scope = values::new_env(base_env())?;
-            crate::heap().root(scope);
-            eval::define(
-                values::install("pkg")?,
-                values::scalar_string(package)?,
-                scope,
-            )?;
-            let held_entry = held
-                .iter()
-                .position(|&env| crate::envir::search_name(env) == name);
-            // An attach hook a profile set runs only through `library()`.
-            let hooked = || -> R<bool> {
-                Ok(values::is_true(eval_text(
+            scope(|| -> R<()> {
+                let pkg_scope = values::new_env(base_env())?;
+                crate::heap().root(pkg_scope);
+                eval::define(
+                    values::install("pkg")?,
+                    values::scalar_string(package)?,
+                    pkg_scope,
+                )?;
+                let held_entry = held
+                    .iter()
+                    .position(|&env| crate::envir::search_name(env) == name);
+                // An attach hook a profile set runs only through `library()`.
+                let hooked = values::is_true(eval_text(
                     "length(getHook(packageEvent(pkg, \"attach\"))) > 0L",
-                    scope,
-                )?))
-            };
-            match held_entry {
-                Some(index) if !hooked()? => {
-                    insert_after_global(held[index]);
-                    restored[index] = true;
+                    pkg_scope,
+                )?);
+                match held_entry {
+                    Some(index) if !hooked => {
+                        insert_after_global(held[index]);
+                        restored[index] = true;
+                    }
+                    _ => {
+                        eval_text(FIRST_SYS_PACKAGE, pkg_scope)?;
+                    }
                 }
-                _ => {
-                    eval_text(FIRST_SYS_PACKAGE, scope)?;
-                }
-            }
-            crate::heap().release_handles(mark);
+                Ok(())
+            })?;
         }
-        // ry's own entries are attached after `.First.sys()`, so they go back in front.
-        for (index, &env) in held.iter().enumerate().rev() {
-            let name = crate::envir::search_name(env);
-            let default_package = name
-                .strip_prefix("package:")
-                .is_some_and(|package| image_packages.iter().any(|held| held == package));
-            if !default_package {
-                insert_after_global(env);
+        // ry's own entries are attached after `.First.sys()`, so they move to the front.
+        for &env in own.iter().rev() {
+            let mut previous = global_env();
+            while previous != base_env() && previous.enclosure() != env {
+                previous = previous.enclosure();
+            }
+            if previous != base_env() {
+                crate::heap().set_enclosure(previous, env.enclosure());
+            }
+            insert_after_global(env);
+        }
+        for (index, &env) in held.iter().enumerate() {
+            if own.contains(&env) {
                 restored[index] = true;
             }
         }
@@ -586,6 +610,8 @@ pub unsafe fn source_file(path: &str, env: Sexp) -> R<()> {
     crate::heap().root(expressions);
     for index in 0..length(expressions) {
         scope(|| eval::eval(expressions.element(index), env))?;
+        // GNU R's `R_ReplFile` prints a profile's warnings after each expression, unheaded.
+        conditions::print_warnings("")?;
     }
     Ok(())
 }

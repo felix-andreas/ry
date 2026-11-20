@@ -105,14 +105,14 @@ fn a_stale_start_image_is_written_again_and_never_loaded() {
     let home = scratch.join("home-0");
     fs::write(
         home.join("site.R"),
-        "site_value <- 42\ncat('site:', search(), '\\n')\n",
+        "site_value <- 42\ncat('site:', setdiff(search(), 'package:ry'), '\\n')\n",
     )
     .expect("write the site profile");
     fs::write(
         home.join(".Rprofile"),
-        "cat('user:', search(), '\\n')\nlibrary(tools)\n\
+        "cat('user:', setdiff(search(), 'package:ry'), '\\n')\nlibrary(tools)\n\
          options(defaultPackages = c('splines', setdiff(getOption('defaultPackages'), 'graphics')))\n\
-         .First <- function() cat('first:', search(), '\\n')\n",
+         .First <- function() cat('first:', setdiff(search(), 'package:ry'), '\\n')\n",
     )
     .expect("write the user profile");
     let touches = scratch.join("profile-touches");

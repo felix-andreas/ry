@@ -386,8 +386,9 @@ a project's `.Rprofile` that sets `TZ` or an option holds before its package loa
 
 `--no-init-file`, or its alias `--vanilla`, starts a script, a console, `ry load -e`/`-f` code, a
 test run or `ry document` without it. These commands source no site profile, and ry reads no
-`.Renviron`; `R` and `Rscript` in ry's R home source the site profile unless given `--vanilla`. Under GNU R (`ry R`, or `--runtime gnu-r`) either flag passes `--no-init-file`,
-which skips only the user profile. An executable from `ry build --aot --exe` reads no profile.
+`.Renviron`; `R` and `Rscript` in ry's R home source the site profile unless given `--vanilla`.
+Under GNU R (`ry R`, or `--runtime gnu-r`) either flag passes `--no-init-file`, which skips only
+the user profile. An executable from `ry build --aot --exe` reads no profile.
 
 ### Start-up image
 
@@ -404,7 +405,8 @@ Each start still runs the steps that read the environment: the C-level options, 
 the `.onLoad` hooks of utils, grDevices and stats, and the site and user [profiles](#profiles). So
 `EDITOR`, `R_LIBS`, `_R_RNG_VERSION_` and the other variables they read take effect on every run,
 as they do on GNU R. A profile sees the search path GNU R shows it, with only `methods`,
-`Autoloads` and base attached. `.First()` runs after it, and then the packages left in
+`Autoloads` and base attached, plus ry's `package:ry` in front of base so that a profile can load a
+package with ry's loader. `.First()` runs after it, and then the packages left in
 `options(defaultPackages=)` are attached in front of whatever the profile attached, so a default
 package the profile drops is not attached and one it adds is. Because the image holds the default
 packages already loaded, three things differ from GNU R: `loadedNamespaces()` lists them while a
