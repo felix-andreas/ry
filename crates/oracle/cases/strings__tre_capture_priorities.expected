@@ -1,0 +1,22 @@
+[stdout]
+| [1] "abb" ""    "ab" 
+| [1] "abb" ""    "ab" 
+| [1] "abc" "ab"  "c"  
+| [1] "abcd" "a"    "bcd"  ""    
+| [1] "ab" ""   "ab" "ab" ""  
+| [1] "aabb" ""     "aab" 
+| [1] "b" "b" "" 
+| [1] "abac" "a"   
+| [1] "x12-" "12"   ""    
+| [1] "" "" ""
+| [1] "aXbXb" "X"    
+| [1] "bc"
+| [1] "c" "" 
+| [1] "<|ab>"
+| [1] "[a,bcd] [ab,c]"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "[a,bcd] [ab,c]"

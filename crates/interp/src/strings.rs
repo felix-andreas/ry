@@ -23,6 +23,7 @@ use {
             safe,
         },
         pcre::{CompileError, PerlRegex},
+        tre::{self, Tnfa},
         unwind::{R, Unwind, error},
         values::{
             self, alloc, get_attr, length, na_string, nil, set_attr, set_elt, string_at, symbols,
@@ -3636,7 +3637,7 @@ fn valid_subject(
 
 /// The byte ranges of a match (group 0) and of its capture groups, `None` for a group that took
 /// no part in the match.
-type Groups = SmallVec<[Option<(usize, usize)>; 4]>;
+pub(crate) type Groups = SmallVec<[Option<(usize, usize)>; 4]>;
 
 /// How a TRE pattern that does not compile is reported. GNU R words the error differently on
 /// each path: the wide-character path of `regexpr`, `gregexpr` and `grep` (taken when the
@@ -3705,22 +3706,16 @@ enum Matcher {
     Literal(Rc<memmem::Finder<'static>>),
     /// `fresh_start` as in [`Translation`], here and in `Automaton`.
     Pattern { regex: Rc<Regex>, fresh_start: bool },
-    /// A POSIX pattern without backreferences, which finite automata can match in linear time.
-    /// `regex` (leftmost-longest) still serves capture groups, but `fancy-regex` runs every
-    /// leftmost-longest pattern of variable width on its backtracker, which takes exponential
-    /// time on patterns such as `(.*z.*){10}` that TRE matches instantly. The leftmost match
-    /// starts where the leftmost-first match does, and `longest` (which reports every match end)
-    /// searched anchored at that start finds where the longest one ends.
-    ///
-    /// A pattern that repeats minimally takes the earliest of those ends instead (`shortest`), or
-    /// with groups the leftmost-first match, whose capture groups come from `first`.
-    ///
-    /// The automata are built on first use, since a `sub` or `gsub` whose replacement refers to
-    /// groups only ever runs `regex`. A pattern they cannot express runs on `regex` alone.
+    /// A POSIX pattern without backreferences, matched in linear time: the leftmost-first
+    /// start, then the longest end anchored there. A minimal repetition (`minimal`) ends where
+    /// TRE's tagged automaton ([`tre`]) ends it, which also gives the groups; `regex` serves
+    /// what that automaton does not model. The automata are built on first use, since most
+    /// `sub` calls never need the tagged one.
     Automaton {
         regex: Rc<Regex>,
         automata: Rc<LazyAutomata>,
         shortest: bool,
+        minimal: bool,
         fresh_start: bool,
     },
     /// `perl = TRUE`, compiled by PCRE2 itself as GNU R does.
@@ -3733,9 +3728,17 @@ enum Matcher {
 /// The `first` and `longest` automata of [`Matcher::Automaton`], built from the translated
 /// pattern the first time a search needs them.
 struct LazyAutomata {
+    /// The translated pattern, which `first` and `longest` compile.
     pattern: String,
+    /// The pattern as written, which the tagged automaton compiles.
+    original: Box<str>,
     ignore_case: bool,
+    /// The number of capture groups, which the tagged automaton must agree with.
+    groups: usize,
+    /// As in [`Translation`]; such a pattern never takes `first`'s groups.
+    zero_repeated_group: bool,
     built: OnceCell<Option<Automata>>,
+    tagged: OnceCell<Option<Tnfa>>,
 }
 
 struct Automata {
@@ -3765,13 +3768,21 @@ impl LazyAutomata {
                     .case_insensitive(self.ignore_case)
                     .build()
                     .parse(&self.pattern)
-                    .is_ok_and(|hir| greedy_single_width(&hir));
+                    .is_ok_and(|hir| greedy_single_width(&hir))
+                    && !self.zero_repeated_group;
                 Some(Automata {
                     first: build(MatchKind::LeftmostFirst)?,
                     longest: build(MatchKind::All)?,
                     greedy_groups,
                 })
             })
+            .as_ref()
+    }
+
+    /// TRE's tagged automaton, or `None` for a pattern it does not model.
+    fn tagged(&self) -> Option<&Tnfa> {
+        self.tagged
+            .get_or_init(|| tre::compile(&self.original, self.ignore_case, self.groups))
             .as_ref()
     }
 }
@@ -3917,14 +3928,19 @@ impl Matcher {
             Err(_) => (build(false), false),
         };
         let matcher = match compiled {
-            Ok(regex) if longest || translated.minimal => Matcher::Automaton {
-                regex: Rc::new(regex),
+            Ok(regex) if longest || translated.repeats_minimally => Matcher::Automaton {
                 automata: Rc::new(LazyAutomata {
                     pattern: translated.pattern,
+                    original: pattern.into(),
                     ignore_case: options.ignore_case,
+                    groups: translated.group_count,
+                    zero_repeated_group: translated.zero_repeated_group,
                     built: OnceCell::new(),
+                    tagged: OnceCell::new(),
                 }),
+                regex: Rc::new(regex),
                 shortest: translated.minimal,
+                minimal: translated.repeats_minimally,
                 fresh_start: translated.fresh_start,
             },
             Ok(regex) => Matcher::Pattern {
@@ -3956,6 +3972,7 @@ impl Matcher {
                 regex,
                 automata,
                 shortest,
+                minimal,
                 ..
             } => {
                 let Some(Automata { first, longest, .. }) = automata.get() else {
@@ -3967,6 +3984,13 @@ impl Matcher {
                 let Some(found) = first.search(&Input::new(text).range(from..)) else {
                     return Ok(None);
                 };
+                if *minimal
+                    && let Some(tagged) = automata.tagged()
+                    && let Some(groups) = tre::search(tagged, text, found.start())
+                    && let Some(&Some(span)) = groups.first()
+                {
+                    return Ok(Some(span));
+                }
                 let anchored = Input::new(text)
                     .range(found.start()..)
                     .anchored(Anchored::Yes)
@@ -3996,58 +4020,38 @@ impl Matcher {
         match self {
             Matcher::Literal(_) => Ok(self.find_at(text, from)?.map(|span| smallvec![Some(span)])),
             Matcher::Approximate(regex) => approximate_search(regex, text, from),
-            Matcher::Automaton { regex, .. } if regex.captures_len() == 1 => {
+            Matcher::Automaton { automata, .. } if automata.groups == 0 => {
                 Ok(self.find_at(text, from)?.map(|span| smallvec![Some(span)]))
             }
-            Matcher::Automaton {
-                automata,
-                shortest: true,
-                ..
-            } if let Some(Automata { first, .. }) = automata.get() => {
-                // Only a plain find minimizes over the top-level alternatives. With submatches
-                // GNU R's TRE keeps the leftmost-first match: `sub("(a).*?Z|(a)(.*?)Y", ...)`
-                // takes the first alternative even though the second ends sooner.
-                let mut captures = first.create_captures();
-                first.search_captures(&Input::new(text).range(from..), &mut captures);
-                if !captures.is_match() {
-                    return Ok(None);
-                }
-                Ok(Some(
-                    (0..captures.group_len())
-                        .map(|group| captures.get_group(group).map(|span| (span.start, span.end)))
-                        .collect(),
-                ))
-            }
-            Matcher::Automaton {
-                automata,
-                shortest: false,
-                ..
-            } if let Some(Automata {
-                first,
-                longest,
-                greedy_groups: true,
-            }) = automata.get()
-                && let Some(groups) = greedy_captures(first, longest, text, from) =>
+            Matcher::Automaton { automata, .. }
+                if let Some(Automata {
+                    first,
+                    longest,
+                    greedy_groups: true,
+                }) = automata.get()
+                    && let Some(groups) = greedy_captures(first, longest, text, from) =>
             {
                 Ok(groups)
             }
-            Matcher::Pattern { regex, .. } | Matcher::Automaton { regex, .. } => {
-                let Some(captures) = regex
-                    .captures_from_pos(text, from)
-                    .map_err(matching_error)?
-                else {
+            Matcher::Automaton {
+                regex, automata, ..
+            } if let Some(Automata { first, .. }) = automata.get()
+                && let Some(tagged) = automata.tagged() =>
+            {
+                let Some(found) = first.search(&Input::new(text).range(from..)) else {
                     return Ok(None);
                 };
-                Ok(Some(
-                    (0..captures.len())
-                        .map(|group| {
-                            captures
-                                .get(group)
-                                .map(|found| (found.start(), found.end()))
-                        })
-                        .collect(),
-                ))
+                match tre::search(tagged, text, found.start()) {
+                    Some(groups) => Ok(Some(groups)),
+                    None => backtracked_captures(regex, automata.groups + 1, text, from),
+                }
             }
+            Matcher::Pattern { regex, .. } => {
+                backtracked_captures(regex, regex.captures_len(), text, from)
+            }
+            Matcher::Automaton {
+                regex, automata, ..
+            } => backtracked_captures(regex, automata.groups + 1, text, from),
             Matcher::Perl(regex) => regex.captures_at(text, from).map_err(perl_matching_error),
         }
     }
@@ -4065,9 +4069,8 @@ impl Matcher {
     fn group_count(&self) -> usize {
         match self {
             Matcher::Literal(_) => 0,
-            Matcher::Pattern { regex, .. } | Matcher::Automaton { regex, .. } => {
-                regex.captures_len().saturating_sub(1)
-            }
+            Matcher::Pattern { regex, .. } => regex.captures_len().saturating_sub(1),
+            Matcher::Automaton { automata, .. } => automata.groups,
             Matcher::Perl(regex) => regex.groups().saturating_sub(1),
             Matcher::Approximate(regex) => regex.group_count(),
         }
@@ -4077,7 +4080,8 @@ impl Matcher {
     fn group_names(&self) -> Vec<String> {
         match self {
             Matcher::Literal(_) => Vec::new(),
-            Matcher::Pattern { regex, .. } | Matcher::Automaton { regex, .. } => regex
+            Matcher::Automaton { automata, .. } => vec![String::new(); automata.groups],
+            Matcher::Pattern { regex, .. } => regex
                 .capture_names()
                 .skip(1)
                 .map(|name| name.unwrap_or_default().to_owned())
@@ -4091,6 +4095,26 @@ impl Matcher {
             Matcher::Approximate(regex) => vec![String::new(); regex.group_count()],
         }
     }
+}
+
+/// The `count` groups `fancy-regex` finds (the whole match first), for a POSIX pattern the tagged
+/// automaton does not model.
+fn backtracked_captures(regex: &Regex, count: usize, text: &str, from: usize) -> R<Option<Groups>> {
+    let Some(captures) = regex
+        .captures_from_pos(text, from)
+        .map_err(matching_error)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        (0..count)
+            .map(|group| {
+                captures
+                    .get(group)
+                    .map(|found| (found.start(), found.end()))
+            })
+            .collect(),
+    ))
 }
 
 /// Searches `text` from byte `from` with an approximate pattern, and returns the match and its
@@ -4168,10 +4192,18 @@ pub(crate) struct Translation {
     /// with no capture group opening after it. TRE then ends a match at the first end it
     /// reaches, so the whole match is the shortest one at the leftmost start, and even a greedy
     /// `.*` in such a pattern matches as little as it can: `a.*?b.*` and `(a).*?b.*` match `aXb`
-    /// of `aXbXb`. A minimal repetition inside a capture group, or followed by one, runs on
-    /// TRE's tagged matcher, which follows the leftmost-first rule: `a(.*?)b.*` and `a.*?(b).*`
-    /// match all of it.
+    /// of `aXbXb`, while `a(.*?)b.*` and `a.*?(b).*` match all of it.
     minimal: bool,
+    /// Whether a POSIX pattern repeats minimally anywhere. Where its match ends then follows
+    /// TRE's tag priorities, which only the tagged automaton models: `(b?a(c*?b)*)*` matches
+    /// the empty string at the start of `acaa`, not `a`.
+    repeats_minimally: bool,
+    /// The number of capture groups. The `regex` crate leaves out a group repeated zero times
+    /// (`(a){0}`) and so undercounts when it is the last one, while TRE counts it.
+    group_count: usize,
+    /// Whether some capture group is repeated zero times. TRE reports such a group as the empty
+    /// string at the start of the match, where the `regex` crate reports no match.
+    zero_repeated_group: bool,
     /// Whether every search after the first should see its start as the start of the text, which
     /// is how TRE runs the follow-on searches of `gsub` and `gregexpr`: `\b`, `\B`, `\<` and `\>`
     /// then see no character before that start (`gsub("\\b", "|", "ab")` is `"|a|b|"`), while
@@ -4215,6 +4247,7 @@ fn translate_classes(pattern: &str, unicode: bool) -> Translation {
 fn translate_pass(chars: &[char], unicode: bool, approximate: bool) -> (Translation, bool) {
     let mut problem = None;
     let mut minimal = false;
+    let mut repeats_minimally = false;
     let mut word_assertion = false;
     let mut start_anchor = false;
     let mut settings_seen = false;
@@ -4225,6 +4258,9 @@ fn translate_pass(chars: &[char], unicode: bool, approximate: bool) -> (Translat
     output.push_str("(?s)");
     // Where each open group starts in `output`, and whether it captures.
     let mut groups: Vec<(usize, bool)> = Vec::new();
+    // Where each capture group opens in `output`.
+    let mut capture_starts: Vec<usize> = Vec::new();
+    let mut zero_repeated_group = false;
     // Where the latest atom starts in `output`, while a quantifier may still apply to it.
     let mut atom: Option<usize> = None;
     let mut quantified = false;
@@ -4305,6 +4341,7 @@ fn translate_pass(chars: &[char], unicode: bool, approximate: bool) -> (Translat
             }
             '(' => {
                 groups.push((start, true));
+                capture_starts.push(output.len());
                 minimal = false;
                 output.push('(');
                 atom = None;
@@ -4338,6 +4375,7 @@ fn translate_pass(chars: &[char], unicode: bool, approximate: bool) -> (Translat
                     if chars.get(index + 1) == Some(&'?') {
                         if !approximate {
                             minimal |= !groups.iter().any(|&(_, capturing)| capturing);
+                            repeats_minimally = true;
                             output.push('?');
                         }
                         index += 1;
@@ -4362,9 +4400,18 @@ fn translate_pass(chars: &[char], unicode: bool, approximate: bool) -> (Translat
                     }
                 };
                 let Some(repetition) = repetition else {
-                    // `{0}` and `{0,0}` match the empty string, settings and all.
+                    // `{0}` and `{0,0}` match the empty string, settings and all. TRE still
+                    // counts the groups they repeat, and reports each one as the empty string at
+                    // the start of the match.
                     if let Some(atom_start) = atom {
-                        output.truncate(atom_start);
+                        zero_repeated_group |=
+                            capture_starts.iter().any(|&opened| opened >= atom_start);
+                        if approximate {
+                            output.truncate(atom_start);
+                        } else {
+                            output.insert_str(atom_start, "(?:");
+                            output.push_str("){0}");
+                        }
                     }
                     atom = None;
                     quantified = false;
@@ -4396,6 +4443,7 @@ fn translate_pass(chars: &[char], unicode: bool, approximate: bool) -> (Translat
                         quantified = true;
                         if bound.minimal && !approximate {
                             minimal |= !groups.iter().any(|&(_, capturing)| capturing);
+                            repeats_minimally = true;
                             output.push('?');
                         }
                     }
@@ -4426,6 +4474,9 @@ fn translate_pass(chars: &[char], unicode: bool, approximate: bool) -> (Translat
         pattern: output,
         problem,
         minimal,
+        repeats_minimally,
+        group_count: capture_starts.len(),
+        zero_repeated_group,
         fresh_start: word_assertion && !start_anchor,
         scopes,
     };
@@ -4450,7 +4501,7 @@ const ASCII_SPACE: &str = r"\t\n\x0B\f\r ";
 
 /// Translates the escape at `index` (outside a bracket expression) and returns the index after
 /// it.
-fn translate_escape(
+pub(crate) fn translate_escape(
     chars: &[char],
     index: usize,
     unicode: bool,
@@ -4577,7 +4628,7 @@ fn hex_escape(chars: &[char], start: usize) -> (u32, usize) {
 
 /// Translates a bracket expression starting at `index` and returns the index after it. An
 /// unterminated one is left unterminated, so that compiling it fails.
-fn translate_class(
+pub(crate) fn translate_class(
     chars: &[char],
     index: usize,
     unicode: bool,
@@ -4724,15 +4775,15 @@ fn push_class_literal(output: &mut String, character: char) {
 }
 
 /// A bound `{...}` as TRE reads it: a repetition count, approximate-matching settings, or both.
-struct Bound {
+pub(crate) struct Bound {
     /// The counts, `-1` where the bound leaves one out.
-    minimum: i64,
-    maximum: i64,
-    settings: Option<ApproximateSettings>,
+    pub(crate) minimum: i64,
+    pub(crate) maximum: i64,
+    pub(crate) settings: Option<ApproximateSettings>,
     /// Whether a `?` follows, asking for minimal repetition.
-    minimal: bool,
+    pub(crate) minimal: bool,
     /// The index after the bound and its `?`.
-    end: usize,
+    pub(crate) end: usize,
 }
 
 const INVALID_BOUND: &str = "Invalid contents of {}";
@@ -4772,7 +4823,7 @@ impl Bound {
 /// deletions, substitutions and all edits (no number means no limit), and an equation such as
 /// `2i + 1d < 5` sets the costs of insertions, deletions and substitutions and keeps the total
 /// below a limit. Commas and spaces between the settings are skipped.
-fn parse_bound(chars: &[char], open: usize) -> Result<Bound, &'static str> {
+pub(crate) fn parse_bound(chars: &[char], open: usize) -> Result<Bound, &'static str> {
     let end = chars.len();
     let contents = open + 1;
     let mut cursor = contents;

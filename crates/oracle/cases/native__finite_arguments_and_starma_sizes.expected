@@ -1,0 +1,13 @@
+[stdout]
+| <simpleError in f(): NA/NaN/Inf in foreign function call (arg 5)>
+| [1] "NAs in foreign function call (arg 3)"
+|  num NaN
+| [1] "NA/NaN/Inf in foreign function call (arg 7)"
+| <simpleError in fn(par, ...): starma error code 7>
+[messages]
+[warnings]
+[errors]
+[value]
+list
+| structure(list(message = "starma error code 7", call = fn(par, 
+|     ...)), class = c("simpleError", "error", "condition"))

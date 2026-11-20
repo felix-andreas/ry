@@ -24,7 +24,10 @@
 //! GNU R to the last printed digit.
 
 use {
-    crate::{arima, cluster, deriv, hypothesis_tests, loess, models, nlm, optimize, port, spline},
+    crate::{
+        arima, arma0, cluster, deriv, hypothesis_tests, loess, models, nlm, optimize, port, ppr,
+        spline,
+    },
     heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType},
     interp::{
         arith,
@@ -33,7 +36,8 @@ use {
         connections::write_output,
         distributions,
         format::format_g,
-        linalg, random,
+        handles::{self, Cx, Integer, List, Local, NativeArgs, Real, Str, Symbol},
+        linalg, random, safe,
         unwind::{R, error},
         values::{self, length, scalar_bool, scalar_integer, symbols},
     },
@@ -104,6 +108,9 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("Rsm", tukey_smooth),
     ("setsmu", setsmu),
     ("supsmu", supsmu),
+    ("setppr", safe!(native ppr::setppr)),
+    ("smart", safe!(native ppr::smart)),
+    ("pppred", safe!(native ppr::pppred)),
     ("cutree", cluster::cutree),
     ("rWishart", r_wishart),
     ("loess_raw", loess::loess_raw),
@@ -159,6 +166,17 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("KalmanLike", arima::kalman_like),
     ("KalmanFore", arima::kalman_fore),
     ("KalmanSmooth", arima::kalman_smooth),
+    ("setup_starma", safe!(native arma0::setup_starma)),
+    ("free_starma", safe!(native arma0::free_starma)),
+    ("Starma_method", safe!(native arma0::starma_method)),
+    ("arma0fa", safe!(native arma0::arma0fa)),
+    ("get_s2", safe!(native arma0::get_s2)),
+    ("get_resid", safe!(native arma0::get_resid)),
+    ("Dotrans", safe!(native arma0::dotrans_routine)),
+    ("arma0_kfore", safe!(native arma0::arma0_kfore)),
+    ("Invtrans", safe!(native arma0::invtrans)),
+    ("Gradtrans", safe!(native arma0::gradtrans)),
+    ("set_trans", safe!(native arma0::set_trans)),
     ("LogLin", loglin),
     ("stl", stl),
     ("rbart", spline::rbart),
@@ -177,6 +195,74 @@ pub(crate) unsafe fn c_arguments(call: &NativeCall<'_>) -> R<Vec<Sexp>> {
 
 pub(crate) unsafe fn c_return(call: &NativeCall<'_>, arguments: &[Sexp]) -> R<Sexp> {
     c_result(call, arguments)
+}
+
+/// The result of a safe `.C` or `.Fortran` routine: a copy of each argument, or the vector the
+/// routine wrote in its place, named by the call's tags.
+pub(crate) fn fortran_result<'s>(
+    context: &mut Cx<'s>,
+    arguments: &NativeArgs<'_, 's>,
+    written: &[(usize, Local<'s>)],
+) -> R<Local<'s>> {
+    let count = arguments.len();
+    let mut result = context.alloc::<List>(count)?;
+    for index in 0..count {
+        let value = match written.iter().find(|&&(at, _)| at == index) {
+            Some(&(_, value)) => value,
+            None => handles::shallow_copy(context, arguments.value(index))?.finish(),
+        };
+        result.set(context, index, value);
+    }
+    if (0..count).any(|index| arguments.tag(index).r_type() != SexpType::Nil) {
+        let mut names = context.alloc::<Str>(count)?;
+        for index in 0..count {
+            match arguments.tag(index).downcast::<Symbol>() {
+                Some(symbol) => names.set(context, index, symbol.read(context).name()),
+                None => names.set(context, index, handles::blank()),
+            }
+        }
+        let names = names.finish().value();
+        handles::set_attribute_named(context, &mut result, "names", names)?;
+    }
+    Ok(result.finish().value())
+}
+
+/// The elements of `value` as doubles, coerced as `as.double` coerces.
+pub(crate) fn read_reals<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Vec<f64>> {
+    let coerced = handles::coerce(context, value, SexpType::Real)?;
+    let reals = handles::dense::<Real>(context, coerced)?
+        .ok_or_else(|| error("internal error: a coerced vector has no standard form"))?;
+    Ok(reals.as_slice(context).to_vec())
+}
+
+/// The elements of `value` as integers, coerced as `as.integer` coerces.
+pub(crate) fn read_integers<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Vec<i32>> {
+    let integers = handles::integer_vector(context, value)?;
+    Ok(integers.as_slice(context).to_vec())
+}
+
+/// A new double vector holding `data`.
+pub(crate) fn new_reals<'s>(context: &mut Cx<'s>, data: &[f64]) -> R<Local<'s>> {
+    let mut vector = context.alloc::<Real>(data.len())?;
+    vector.as_mut_slice().copy_from_slice(data);
+    Ok(vector.finish().value())
+}
+
+/// A new double matrix with `rows` rows holding `data` in column-major order.
+pub(crate) fn new_real_matrix<'s>(
+    context: &mut Cx<'s>,
+    data: &[f64],
+    rows: usize,
+    columns: usize,
+) -> R<Local<'s>> {
+    let mut matrix = context.alloc::<Real>(data.len())?;
+    matrix.as_mut_slice().copy_from_slice(data);
+    let mut dim = context.alloc::<Integer>(2)?;
+    dim.as_mut_slice()
+        .copy_from_slice(&[rows as i32, columns as i32]);
+    let dim = dim.finish().value();
+    handles::set_attribute_named(context, &mut matrix, "dim", dim)?;
+    Ok(matrix.finish().value())
 }
 
 /// `x` as a double vector (a fresh one if it had to be converted).
@@ -2816,11 +2902,6 @@ unsafe fn eureka(call: &NativeCall<'_>) -> R<Sexp> {
     c_return(call, &arguments)
 }
 
-std::thread_local! {
-    /// Whether `supsmu` reports each running-lines smooth, as `setsmu` last set it.
-    static SUPSMU_TRACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
 /// The three spans the cross-validated super smoother chooses between. GNU R 4.6's `ppr.f`
 /// writes them as double-precision constants, but `big`, `sml` and `eps` beside them are
 /// single-precision ones, so those three carry `f32` rounding.
@@ -2832,7 +2913,7 @@ const SUPSMU_EPS: f64 = 1.0e-3_f32 as f64;
 /// `.Fortran(C_setsmu, trace)`: whether the next `supsmu` traces its smooths.
 unsafe fn setsmu(call: &NativeCall<'_>) -> R<Sexp> {
     let arguments = c_arguments(call)?;
-    SUPSMU_TRACE.set(values::as_integer_scalar(arguments[0]) != 0);
+    ppr::set_supsmu(values::as_integer_scalar(arguments[0]) != 0);
     c_return(call, &arguments)
 }
 
@@ -2855,16 +2936,17 @@ unsafe fn supsmu(call: &NativeCall<'_>) -> R<Sexp> {
     let iper = values::as_integer_scalar(arguments[4]);
     let span = values::as_real_scalar(arguments[5]);
     let alpha = values::as_real_scalar(arguments[6]);
-    let trace = SUPSMU_TRACE.get();
+    let settings = ppr::smoother_settings();
     let mut smo = vec![0.0; n];
     let mut log = String::new();
-    let cross_validated = super_smooth(x, y, w, iper, span, alpha, trace, &mut smo, &mut log);
+    let edf = ppr::supsmu(x, y, w, iper, span, alpha, &settings, &mut smo, &mut log);
     if !log.is_empty() {
         write_output(log.as_bytes());
     }
+    let edf = edf?;
     arguments[7] = values::real_vector(&smo)?;
-    if cross_validated {
-        arguments[9] = values::real_vector(&[0.0])?;
+    if let Some(edf) = edf {
+        arguments[9] = values::real_vector(&[edf])?;
     }
     c_return(call, &arguments)
 }
@@ -2872,7 +2954,7 @@ unsafe fn supsmu(call: &NativeCall<'_>) -> R<Sexp> {
 /// The super smoother of [`supsmu`], writing the fit to `smo`; whether the span was chosen by
 /// cross-validation.
 #[allow(clippy::too_many_arguments)]
-fn super_smooth(
+pub(crate) fn super_smooth(
     x: &[f64],
     y: &[f64],
     w: &[f64],

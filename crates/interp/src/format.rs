@@ -698,10 +698,10 @@ pub fn format_complex_common(values: &[Rcomplex], settings: Settings) -> (RealFo
     (real, imaginary)
 }
 
-pub fn format_complex_alone(value: Rcomplex, digits: usize) -> String {
+pub fn format_complex_alone(value: Rcomplex, digits: usize, scipen: i32) -> String {
     let settings = Settings {
         digits,
-        scipen: 0,
+        scipen,
         na_width: 2,
         nsmall: 0,
     };

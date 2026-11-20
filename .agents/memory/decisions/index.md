@@ -314,12 +314,15 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Small base closures with call arguments run their bodies natively behind prologues
 - `c`, `unlist`, `rep` and positional `[` copy handle vectors a run at a time
 - The radix string order ranks bytes with integer keys, and plain POSIX patterns capture on the automata
+- POSIX capture groups come from a port of TRE's tagged automaton
 - `x[] <- value` and `x[a:b] <- value` write whole copies of the value
 - `order`, `sort.int` and `sort.default` run natively on plain vectors
 - Strings collate with ICU4X's CLDR collator, as GNU R's ICU does
 - `abbreviate` is GNU R's `stripchars`, pass for pass (settled)
 - Vector kernels: one typed loop per case, exact sizes, and GNU R's polygamma and Bessel functions (settled)
 - Base and stats kernels: exact shortcuts, GNU R's quirks kept, and one prepared state per call
+- Approximate repetitions expand as TRE's do
+- Fortran-style ports keep C's `pow` call for constant bases
 
 ## R compatibility
 
@@ -460,6 +463,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A vector kind has no `downcast`: the caller chooses `standard` or `dense`
 - glibc's malloc keeps freed package buffers (settled)
 - Profiles run over the start-up image
+- Native routines enter through the same safe entry as builtins
 
 ## C API, R home and packages
 

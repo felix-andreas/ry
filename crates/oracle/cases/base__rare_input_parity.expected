@@ -1,0 +1,24 @@
+[stdout]
+| [1] "invalid 'y' type in 'x || y'"
+| [1] "invalid 'x' type in 'x || y'"
+| [1] "invalid 'y' type in 'x && y'"
+| [1] "invalid 'y' type in 'x || y'"
+| [1] "invalid 'y' type in 'x || y'"
+| [1] "cannot change value of locked binding for 'toupper'"
+| [1] TRUE
+|  int(0) 
+|  NULL
+| [1] "attempt to set invalid 'comment' attribute"
+| [1] NA  3
+| [1] 1.27202+0.7861514i
+| [1] 6.123234e-17+1i
+| [1] 1.5000000+2.25i 0.3333333+0.00i
+| NextMethod("[<-")
+| UseMethod("zz")
+| [1] FALSE
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "C"

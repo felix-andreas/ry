@@ -193,12 +193,15 @@ pub unsafe fn try_call(foreign: &Call<'_>) -> R<Option<Sexp>> {
     };
     let control = ["PACKAGE", "NAOK", "DUP", "ENCODING"];
     let mut package = None;
+    let mut na_ok = false;
     let mut routine_args = crate::eval::Args::new();
     for arg in rest {
         let tag = arg.tag;
         if tag.kind() == SexpType::Symbol && control.contains(&&*values::symbol_name(tag)) {
-            if &*values::symbol_name(tag) == "PACKAGE" {
-                package = values::first_string(arg.value);
+            match &*values::symbol_name(tag) {
+                "PACKAGE" => package = values::first_string(arg.value),
+                "NAOK" => na_ok = values::as_logical_scalar(arg.value) == 1,
+                _ => {}
             }
             continue;
         }
@@ -253,6 +256,13 @@ pub unsafe fn try_call(foreign: &Call<'_>) -> R<Option<Sexp>> {
                 routine.2
             ),
         ));
+    }
+    if matches!(routine.1, RoutineKind::C | RoutineKind::Fortran) && !na_ok {
+        for (index, arg) in routine_args.iter().enumerate() {
+            if let Some(message) = crate::native::non_finite(values::materialize(arg.value)?) {
+                return Err(native.error(format!("{message} (arg {})", index + 1)));
+            }
+        }
     }
     let _activity = if activity::enabled() {
         activity::count(Counter::NativeCalls);

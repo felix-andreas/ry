@@ -829,7 +829,7 @@ pub unsafe fn print_warnings(heading: &str) -> R<()> {
         text.push_str("Warning message:\n");
         let (call, message) = &warnings[0];
         if *call == nil() {
-            // GNU R ends a lone warning without a call with a space.
+            // GNU R ends a warning without a call with a space, alone or numbered.
             text.push_str(message);
             text.push(' ');
         } else {
@@ -856,7 +856,7 @@ pub unsafe fn print_warnings(heading: &str) -> R<()> {
         if warnings.len() <= 10 {
             for (index, (call, message)) in warnings.iter().enumerate() {
                 if *call == nil() {
-                    text.push_str(&format!("{}: {message}\n", index + 1));
+                    text.push_str(&format!("{}: {message} \n", index + 1));
                 } else {
                     let call_text = deparse::deparse_first_line(*call);
                     let separator = if call_text.len() + message.len() + 10 > 75 {

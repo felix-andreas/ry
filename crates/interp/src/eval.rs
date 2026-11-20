@@ -3252,10 +3252,7 @@ pub unsafe fn run_inlined(
     let mut hooks = crate::profile_summary::enter_closure(call, function, sys_parent, &[], nil());
     let state = interp();
     if state.frames.len() as u32 >= state.max_depth {
-        return Err(error_in(
-            call,
-            "evaluation nested too deeply: infinite recursion / options(expressions=)?",
-        ));
+        return Err(crate::unwind::expression_stack_overflow());
     }
     let caller = if sys_parent == nil() {
         state.slot_owner
@@ -3794,10 +3791,7 @@ pub unsafe fn enter(
     }
     if state.frames.len() as u32 >= state.max_depth {
         release_window(header);
-        return Err(error_in(
-            call,
-            "evaluation nested too deeply: infinite recursion / options(expressions=)?",
-        ));
+        return Err(crate::unwind::expression_stack_overflow());
     }
     // A `NULL` `sys_parent` comes from byte code running on a slot frame's slots, the caller.
     let caller = if sys_parent == nil() {
@@ -3971,10 +3965,7 @@ unsafe fn run_frame_general(
     }
     let state = interp();
     if state.frames.len() as u32 >= state.max_depth {
-        return Err(error_in(
-            call,
-            "evaluation nested too deeply: infinite recursion / options(expressions=)?",
-        ));
+        return Err(crate::unwind::expression_stack_overflow());
     }
     // A `NULL` `sys_parent` comes from byte code running on a slot frame's slots, the caller.
     let caller = if sys_parent == nil() {

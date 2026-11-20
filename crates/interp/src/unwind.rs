@@ -216,6 +216,8 @@ pub enum ErrorClass {
     Simple,
     /// GNU R's `missingArgError`, under the subclass that names what read the argument.
     MissingArgument(ArgumentReader),
+    /// GNU R's `expressionStackOverflowError`, for calls nested past `options(expressions=)`.
+    ExpressionStackOverflow,
 }
 
 /// What read a missing argument. GNU R names it in the first class of the condition.
@@ -257,6 +259,9 @@ pub fn condition_classes(class: ErrorClass) -> SmallVec<[&'static str; 4]> {
             });
             classes.push("missingArgError");
         }
+        ErrorClass::ExpressionStackOverflow => {
+            classes.extend(["expressionStackOverflowError", "stackOverflowError"]);
+        }
     }
     classes.extend(["error", "condition"]);
     classes
@@ -295,6 +300,16 @@ pub fn error_in(call: Sexp, message: impl Into<String>) -> Unwind {
         message: message.into(),
         call,
         class: ErrorClass::Simple,
+    })
+}
+
+/// The error for calls nested past `options(expressions=)`, which GNU R signals without a call.
+pub fn expression_stack_overflow() -> Unwind {
+    Unwind::Error(RError {
+        message: "evaluation nested too deeply: infinite recursion / options(expressions=)?"
+            .to_owned(),
+        call: crate::values::nil(),
+        class: ErrorClass::ExpressionStackOverflow,
     })
 }
 

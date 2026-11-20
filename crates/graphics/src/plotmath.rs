@@ -1974,7 +1974,7 @@ unsafe fn number_text(expression: Sexp) -> String {
             value => format_integer(value),
         },
         SexpType::Complex => {
-            format_complex_alone(values::complexes(expression)[0], settings.digits)
+            format_complex_alone(values::complexes(expression)[0], settings.digits, 0)
         }
         _ => {
             let value = values::reals(expression)[0];

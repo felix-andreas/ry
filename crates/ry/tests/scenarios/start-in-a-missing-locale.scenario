@@ -1,0 +1,23 @@
+# A locale the system does not have falls back to "C" for every category it names, and start-up
+# warns about each, in GNU R's order and after every other start-up warning, from the image and
+# without it alike. The session then runs in the C locale, so it is not UTF-8.
+
+requires ry-runtime
+
+file locale.R
+| cat("locale:", Sys.getlocale("LC_CTYPE"), l10n_info()[["UTF-8"]], "\n")
+file profile.R
+| .First <- function() warning("from First")
+
+env LC_ALL xx_YY.UTF-8
+env R_PROFILE_USER profile.R
+run ry run locale.R
+expect exit 0
+expect stdout "locale: C FALSE \n"
+expect stderr "During startup - Warning messages:\n1: In .First() : from First\n2: Setting LC_CTYPE failed, using \"C\" \n3: Setting LC_COLLATE failed, using \"C\" \n4: Setting LC_TIME failed, using \"C\" \n5: Setting LC_MESSAGES failed, using \"C\" \n6: Setting LC_MONETARY failed, using \"C\" \n7: Setting LC_PAPER failed, using \"C\" \n8: Setting LC_MEASUREMENT failed, using \"C\" \n"
+
+env RY_IMAGE 0
+run ry run locale.R
+expect exit 0
+expect stdout "locale: C FALSE \n"
+expect stderr "During startup - Warning messages:\n1: In .First() : from First\n2: Setting LC_CTYPE failed, using \"C\" \n3: Setting LC_COLLATE failed, using \"C\" \n4: Setting LC_TIME failed, using \"C\" \n5: Setting LC_MESSAGES failed, using \"C\" \n6: Setting LC_MONETARY failed, using \"C\" \n7: Setting LC_PAPER failed, using \"C\" \n8: Setting LC_MEASUREMENT failed, using \"C\" \n"

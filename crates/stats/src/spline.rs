@@ -178,17 +178,18 @@ pub unsafe fn bvalus(call: &NativeCall<'_>) -> R<Sexp> {
     c_return(call, &arguments)
 }
 
-struct SearchControl {
-    lower: f64,
-    upper: f64,
-    tolerance: f64,
-    eps: f64,
-    max_iterations: i32,
+/// The bounds, tolerances and iteration limit of `sbart`'s search for `spar`.
+pub(crate) struct SearchControl {
+    pub(crate) lower: f64,
+    pub(crate) upper: f64,
+    pub(crate) tolerance: f64,
+    pub(crate) eps: f64,
+    pub(crate) max_iterations: i32,
 }
 
 /// The state `sbart` and `sslvrg` share, kept between evaluations because a failed evaluation
 /// leaves the previous criterion in place and the search reads it.
-struct Smoother<'a> {
+pub(crate) struct Smoother<'a> {
     x: &'a [f64],
     y: &'a [f64],
     /// The square roots of the observation weights.
@@ -212,20 +213,20 @@ struct Smoother<'a> {
     /// The band of the inverse's inner products, in the same storage.
     inner_products: Vec<f64>,
     coef: Vec<f64>,
-    fitted: Vec<f64>,
-    leverage: Vec<f64>,
+    pub(crate) fitted: Vec<f64>,
+    pub(crate) leverage: Vec<f64>,
     /// Each point prepared for evaluating the spline, which the criterion does once per lambda.
     points: Vec<Option<CubicPoint>>,
     /// Each point's first coefficient index and the values there of the four B-splines that do
     /// not vanish, for the leverages.
     bases: Vec<(usize, [f64; 4])>,
     crit: f64,
-    info: i32,
+    pub(crate) info: i32,
 }
 
 impl<'a> Smoother<'a> {
     #[allow(clippy::too_many_arguments)]
-    fn new(
+    pub(crate) fn new(
         x: &'a [f64],
         y: &'a [f64],
         weights: &'a [f64],
@@ -266,7 +267,7 @@ impl<'a> Smoother<'a> {
 
     /// `sgram` and `stxwx`, the trace ratio that scales lambda, and the points prepared for the
     /// fits.
-    fn setup(&mut self) {
+    pub(crate) fn setup(&mut self) {
         self.penalty_matrix = roughness_matrix(self.knots, self.count);
         let (xwy, gram) = normal_equations(self.x, self.y, self.weights, self.knots, self.count);
         self.xwy = xwy;
@@ -320,7 +321,7 @@ impl<'a> Smoother<'a> {
 
     /// Brent's minimizer in the form `sbart` inlines, over `spar`. Returns the abscissa and the
     /// number of iterations.
-    fn minimize(&mut self, search: &SearchControl) -> (f64, i32) {
+    pub(crate) fn minimize(&mut self, search: &SearchControl) -> (f64, i32) {
         let (mut a, mut b) = (search.lower, search.upper);
         let mut iterations = 0;
         let mut v = a + GOLDEN * (b - a);
@@ -517,7 +518,9 @@ fn r_pow(base: f64, exponent: f64) -> f64 {
     } else if exponent == 2.0 {
         base * base
     } else {
-        base.powf(exponent)
+        // With the constant base 16 inlined, LLVM rewrites `pow(16, y)` as `exp2(4 * y)`, which
+        // can differ from C's `pow` in the last bit; the opaque base keeps the `pow` call.
+        std::hint::black_box(base).powf(exponent)
     }
 }
 
