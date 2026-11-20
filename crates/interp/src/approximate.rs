@@ -1312,7 +1312,10 @@ impl ApproximateRegex {
                 if reach_next[id].at == here && total >= reach_next[id].costs[0][COST] {
                     continue;
                 }
-                let mut entry = Reach { at: here, ..*source };
+                let mut entry = Reach {
+                    at: here,
+                    ..*source
+                };
                 count_edit(&mut entry, depth, cost, total, INSERTIONS, 1);
                 reach_next[id] = entry;
                 slots_next[id * slot_count..][..slot_count]
@@ -1440,7 +1443,10 @@ impl ApproximateRegex {
                     ) {
                         continue;
                     }
-                    let mut entry = Reach { at: here, ..*source };
+                    let mut entry = Reach {
+                        at: here,
+                        ..*source
+                    };
                     if let Some(settings) = &transition.settings {
                         apply_settings(&mut entry, settings, defaults)?;
                     }
