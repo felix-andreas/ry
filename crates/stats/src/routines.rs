@@ -125,7 +125,7 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("multi_yw", multi_yw),
     ("Burg", burg),
     ("SWilk", hypothesis_tests::swilk),
-    ("pKolmogorov2x", hypothesis_tests::p_kolmogorov_2x),
+    ("pKolmogorov2x", hypothesis_tests::p_kolmogorov_two_exact),
     ("pKS2", hypothesis_tests::p_ks2),
     (
         "pkolmogorov_two_exact",

@@ -6,7 +6,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Call, builtin, internal, special},
         coerce::parse_real,
-        handles::{self, Args, Cx, Local, safe},
+        handles::{self, Args, Cx, Local, Str, safe},
         http::FetchError,
         interp,
         platform::{Iconv, IconvStop, convert_all},
@@ -73,12 +73,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("isdebugged", 1, |call| unsafe {
         scalar_bool(debugged_function(call)?.has_gp(gp::CLOSURE_DEBUG))
     }),
-    internal("debugOnOff", 1, |call| unsafe {
-        toggle_state(call, &DEBUGGING, "debuggingState")
-    }),
-    internal("traceOnOff", 1, |call| unsafe {
-        toggle_state(call, &TRACING, "tracingState")
-    }),
+    internal("debugOnOff", 1, safe!(do_debug_on_off)),
+    internal("traceOnOff", 1, safe!(do_trace_on_off)),
     internal("browserText", 1, |call| {
         Err(call.error("no browser context to query"))
     }),
@@ -226,16 +222,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("Sys.info", 0, do_sys_info),
     // `R_compiled_by()`: GNU R reports the C and Fortran compilers that built it, and "" for
     // one it does not know. ry's runtime is Rust, built by neither.
-    internal("compilerVersion", 0, |_| unsafe {
-        let result = values::string_vector(&["", ""])?;
-        crate::heap().root(result);
-        values::set_attr(
-            result,
-            symbols().names,
-            values::string_vector(&["C", "Fortran"])?,
-        )?;
-        Ok(result)
-    }),
+    internal("compilerVersion", 0, safe!(do_compiler_version)),
     internal("Sys.setlocale", 2, do_sys_setlocale),
     internal("Sys.getlocale", 1, do_sys_getlocale),
     internal("l10n_info", 0, do_l10n_info),
@@ -5163,23 +5150,46 @@ unsafe fn debugged_function(call: &Call<'_>) -> R<Sexp> {
     }
 }
 
-/// `.Internal(traceOnOff(state))` and `.Internal(debugOnOff(state))`: the previous state,
-/// after setting it to `state` unless that is `NULL`.
-unsafe fn toggle_state(
-    call: &Call<'_>,
+/// `.Internal(debugOnOff(state))`: whether a function `debug()` flagged stops at its entry.
+fn do_debug_on_off<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    toggle_state(context, arguments, &DEBUGGING, "debuggingState")
+}
+
+/// `.Internal(traceOnOff(state))`: whether `trace()`'s inserted calls run.
+fn do_trace_on_off<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    toggle_state(context, arguments, &TRACING, "tracingState")
+}
+
+/// The previous state of `cell`, after setting it to the first argument unless that is `NULL`.
+fn toggle_state<'s>(
+    context: &mut Cx<'s>,
+    arguments: &Args<'_, 's>,
     cell: &'static std::thread::LocalKey<std::cell::Cell<bool>>,
     name: &str,
-) -> R<Sexp> {
-    let state = call.arg(0);
+) -> R<Local<'s>> {
+    let state = arguments.value(0);
     let previous = cell.with(|current| current.get());
-    if state != nil() {
-        let value = values::as_logical_scalar(state);
+    if state.r_type() != SexpType::Nil {
+        let value = handles::logical_scalar(context, state);
         if value == NA_LOGICAL {
-            return Err(call.error(format!("Value for '{name}' must be TRUE or FALSE")));
+            return Err(arguments.error(format!("Value for '{name}' must be TRUE or FALSE")));
         }
         cell.with(|current| current.set(value != 0));
     }
-    scalar_bool(previous)
+    handles::logical_constant(context, i32::from(previous))
+}
+
+/// `R_compiled_by()`: GNU R reports the C and Fortran compilers that built it, and "" for one
+/// it does not know. ry's runtime is Rust, built by neither.
+fn do_compiler_version<'s>(context: &mut Cx<'s>, _arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let mut result = context.alloc::<Str>(2)?;
+    let mut names = context.alloc::<Str>(2)?;
+    for (index, (compiler, version)) in [("C", ""), ("Fortran", "")].into_iter().enumerate() {
+        handles::set_text(context, &mut result, index, version)?;
+        handles::set_text(context, &mut names, index, compiler)?;
+    }
+    handles::set_attribute_named(context, &mut result, "names", names.finish().value())?;
+    Ok(result.finish().value())
 }
 
 /// `Sys.localeconv()`: the C library's `localeconv` for the current locale, its numbers as
