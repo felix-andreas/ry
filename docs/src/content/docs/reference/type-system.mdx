@@ -690,7 +690,9 @@ Written `fn(path: list[T] | T[]) -> list[T] | T[]`, the signature would return t
 every caller. The body may use the parameter wherever its bound fits, and an argument outside the
 bound, such as `normalize(sum)`, is a type error at the call. A bound whose every member meets a
 constraint meets it too, so under `<N: integer | double> fn(x: N) -> N` the body `x + x` is
-arithmetic and has the type `N`. `@forall T, U: list[T] | T[]` and
+arithmetic and has the type `N`. A bound with a `logical` member does its arithmetic as the bound
+itself, because R promotes the `logical` member: under `<N: integer | logical> fn(x: N) -> N`,
+`x + x` is `integer`, and returning it as `N` is a type error. `@forall T, U: list[T] | T[]` and
 `function<T, U: list[T] | T[]>(path: U) -> U` declare the same binders. A bound that is a single
 name reads as a constraint, so a type bound is a union or a compound type such as `list[T]`.
 
@@ -2324,11 +2326,11 @@ A `matrix` absorbs any number, logical or numeric vector the same way, because R
 matrix: with `weigh <- function(a, H) a * H`, both `weigh(2, m)` and `weigh(m, 2)` are `matrix`. A
 matrix's element type is not tracked, so a character matrix is absorbed too.
 
-When every argument a numeric parameter receives is `logical`, the result stays `logical`, so with
-`bump <- function(x) x + 1L`, `bump(TRUE)` is `logical` where R returns the integer `2L`. The
-signature `<T: numeric> fn(x: T) -> T` cannot say "the wider of `T` and `integer`", and binding `T`
-to `integer` instead would mistype a function that returns `x` itself. Neither choice causes a false
-error, because a `logical` fits wherever an `integer` is expected.
+A `logical` argument binds a numeric type parameter to `integer`, the type R's arithmetic reads it
+as, so with `bump <- function(x) x + 1L`, `bump(TRUE)` is `integer`, as in R. A function that
+returns its `logical` argument unchanged, such as `keep <- function(x) { x + 0L; x }`, is then
+reported to return `integer` where R returns the `logical`. That claim is safe, because a `logical`
+fits wherever an `integer` is expected, while the opposite claim would type R's `2L` as a flag.
 
 An argument that is itself still generic, such as the parameter `H` in
 `outer <- function(H) weigh(2, H)`, is constrained to be numeric rather than pinned to the literal's
@@ -2695,7 +2697,9 @@ Arguments are checked for compatibility, not exact equality:
   `apply(m, 1, "mean")` idiomatic. At the base helpers that call `match.fun`, such as `lapply`,
   `sapply`, `vapply`, `Map`, `Filter`, `Reduce`, `do.call`, and `apply`, a string literal that names a
   known function is checked as that function, so `lapply(list(1, 2), "sqrt")` is `list[double]`.
-  Any other string is accepted unchecked. `match.fun` also looks a bare name up as a function, past
+  Any other string is accepted unchecked. A function that takes a ry value, such as `List.map`,
+  calls its callback directly, so a string there is an error: `List.map([1, 2], "toupper")` is
+  reported, with the hint to pass `toupper` itself. `match.fun` also looks a bare name up as a function, past
   a binding that holds something else, so after a mocking placeholder such as `nchar <- NULL`,
   `vapply(words, nchar, integer(1))` calls the library's `nchar`. A name the library does not
   export is still checked as the value it holds.

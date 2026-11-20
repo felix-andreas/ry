@@ -2636,3 +2636,20 @@ f1: <T> fn([name]: T) -> T | NULL
 f2: <T> fn([name]: T) -> T | NULL
 f3: fn(name: Unknown) -> Unknown
 f4: <T> fn([name]: T) -> T | NULL
+
+#---- an_empty_list_adds_no_element
+# Exit actions collected with `c()` onto `list()`, then run in a loop: no element is `NULL`.
+make <- function(flag) {
+  actions <- list()
+  if (flag) actions <- c(actions, function() 1)
+  for (action in actions) action()
+  actions
+}
+both <- c(list(), list())
+step <- function(a) {
+  for (x in if (a) c(1, 2)) print(x + 1)
+}
+#++++
+make: fn(flag: logical) -> list{} | list[fn() -> double]
+both: list{}
+step: fn(a: logical) -> NULL

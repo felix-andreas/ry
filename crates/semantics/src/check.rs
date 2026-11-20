@@ -97,6 +97,13 @@ pub enum TypeErrorKind<'db> {
         nominal: Ty<'db>,
         found: Ty<'db>,
     },
+    /// A function's name where a function that takes a ry value expects a callback. Only R's
+    /// `match.fun` turns a name into a function, and a ry function never calls it.
+    FunctionName {
+        expected: Ty<'db>,
+        /// The name, when the argument is a string literal.
+        name: Option<String>,
+    },
     /// A value that may be `NULL` where `NULL` is not accepted, read through an expression no
     /// guard narrows (`x$a$b`, `x[["a"]]`, a call), so the message can say how to narrow it.
     UnnarrowedNull {
@@ -2976,6 +2983,30 @@ fn operator_spelling(operator: BinaryOperator) -> Option<&'static str> {
         NotEqual => "!=",
         _ => return None,
     })
+}
+
+/// A `logical` scalar or vector as the `integer` one R's arithmetic reads it as.
+fn promote_logical<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Ty<'db>> {
+    let integer = scalar(db, Atomic::Integer);
+    match ty.kind(db) {
+        TyKind::Scalar(Atomic::Logical) => Some(integer),
+        TyKind::Vector(element) if matches!(element.kind(db), TyKind::Scalar(Atomic::Logical)) => {
+            Some(Ty::new(db, TyKind::Vector(integer)))
+        }
+        _ => None,
+    }
+}
+
+/// Whether some value of `ty` is a `logical` scalar or vector.
+fn admits_logical(db: &dyn Db, ty: Ty<'_>) -> bool {
+    match ty.kind(db) {
+        TyKind::Scalar(Atomic::Logical) => true,
+        TyKind::Vector(element) | TyKind::NamedVector(element) => {
+            matches!(element.kind(db), TyKind::Scalar(Atomic::Logical))
+        }
+        TyKind::Union(members) => members.iter().any(|&member| admits_logical(db, member)),
+        _ => false,
+    }
 }
 
 fn is_character(db: &dyn Db, ty: Ty<'_>) -> bool {
@@ -7194,10 +7225,16 @@ impl<'db, 'a> Checker<'db, 'a> {
     fn iteration_element(&mut self, resolved: Ty<'db>) -> Result<Ty<'db>, Ty<'db>> {
         match resolved.kind(self.db) {
             TyKind::Union(members) => {
+                // A `NULL` or `list()` member runs the body zero times, so it adds no element:
+                // `for (f in if (a) list(g))` binds `f` to `g`'s type, never `NULL`.
                 let mut elements = Vec::with_capacity(members.len());
                 for &member in members.iter() {
                     let element = self.iteration_element(member).map_err(|_| resolved)?;
-                    elements.push(element);
+                    if !matches!(member.kind(self.db), TyKind::Null)
+                        && !is_empty_list(self.db, member)
+                    {
+                        elements.push(element);
+                    }
                 }
                 Ok(union_of(self.db, elements))
             }
@@ -11017,6 +11054,14 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
             }
             TyKind::Var(_) => NumericOperand::Flexible(resolved),
+            // R's arithmetic reads a logical as an integer, so a parameter bounded by
+            // `integer | logical` gives the bound's arithmetic, never itself.
+            TyKind::Rigid(name)
+                if let Some(&bound) = self.table.rigid_bounds.get(name)
+                    && admits_logical(self.db, bound) =>
+            {
+                self.classify_numeric_operand(bound)
+            }
             TyKind::Rigid(name) => {
                 match self
                     .table
@@ -14516,12 +14561,18 @@ impl<'db, 'a> Checker<'db, 'a> {
             .iter()
             .any(|&ty| self.combined_list_element(ty).is_some())
         {
-            // `c()` drops `NULL`, so `c(if (a) list(1), if (a) list(2))` is a list.
+            // `c()` drops `NULL`, so `c(if (a) list(1), if (a) list(2))` is a list, and an
+            // empty list adds no element, so `c(list(), f)` is `list[fn]`.
             let elements: Vec<Ty<'db>> = inferred
                 .iter()
-                .filter(|ty| !matches!(ty.kind(self.db), TyKind::Null))
+                .filter(|&&ty| {
+                    !matches!(ty.kind(self.db), TyKind::Null) && !is_empty_list(self.db, ty)
+                })
                 .map(|&ty| self.combined_list_element(ty).unwrap_or(ty))
                 .collect();
+            if elements.is_empty() {
+                return Ty::new(self.db, TyKind::Tuple(&[]));
+            }
             return Ty::new(self.db, TyKind::List(union_of(self.db, elements)));
         }
         // A class declaring `c.Class` keeps its class through concatenation (`c(d1, d2)`
@@ -14622,15 +14673,17 @@ impl<'db, 'a> Checker<'db, 'a> {
         )
     }
 
-    /// The element a list-shaped `c()` argument contributes; a `NULL` member of a union
-    /// contributes nothing, as `c()` drops it.
+    /// The element a list-shaped `c()` argument contributes; a `NULL` or empty-list member
+    /// of a union contributes nothing, as `c()` adds nothing for it.
     fn combined_list_element(&self, ty: Ty<'db>) -> Option<Ty<'db>> {
         let TyKind::Union(members) = ty.kind(self.db) else {
             return self.list_element_type(ty);
         };
         let elements: Option<Vec<Ty<'db>>> = members
             .iter()
-            .filter(|member| !matches!(member.kind(self.db), TyKind::Null))
+            .filter(|&&member| {
+                !matches!(member.kind(self.db), TyKind::Null) && !is_empty_list(self.db, member)
+            })
             .map(|&member| self.list_element_type(member))
             .collect();
         elements.map(|elements| union_of(self.db, elements))
@@ -17461,6 +17514,14 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     /// Compatibility, not unification, so parameter-position coercions apply. An
     /// `Unknown` argument is accepted: its cause was already diagnosed.
+    /// Whether `expected` is an open type variable that only a number fits.
+    fn numeric_parameter(&self, expected: Ty<'db>) -> bool {
+        matches!(
+            self.table.open_constraint(self.db, expected),
+            Some(Constraint::Numeric | Constraint::ScalarNumeric)
+        )
+    }
+
     fn check_argument(
         &mut self,
         expected: Ty<'db>,
@@ -17475,6 +17536,15 @@ impl<'db, 'a> Checker<'db, 'a> {
         let resolved_found = self.table.resolve(self.db, found);
         if matches!(resolved_found.kind(self.db), TyKind::Unknown)
             || value.is_some_and(|value| self.reads_null_placeholder(value, resolved_found))
+        {
+            return Ok(());
+        }
+        // R's arithmetic reads `TRUE` as `1L`, so a `numeric` type parameter, which the callee
+        // may do arithmetic on, takes a logical argument as `integer`: `twice(TRUE)` under
+        // `<N: numeric> fn(x: N) -> N` returns the integer `2`, never a logical.
+        if self.numeric_parameter(expected)
+            && let Some(promoted) = promote_logical(self.db, resolved_found)
+            && self.table.compatible(self.db, promoted, expected)
         {
             return Ok(());
         }
@@ -17502,11 +17572,27 @@ impl<'db, 'a> Checker<'db, 'a> {
         let resolved_expected = self.table.resolve(self.db, expected);
         // A function parameter of base R goes through `match.fun`, which also takes the
         // function's name, so `lapply(xs, "[[", "id")` and `apply(m, 1, "mean")` are
-        // idiomatic. The name is not resolved, so the call is accepted unchecked.
+        // idiomatic. The name is not resolved, so the call is accepted unchecked. A function
+        // that takes a ry value is ry's own and calls its callback directly.
         if matches!(resolved_expected.kind(self.db), TyKind::Function(_))
             && is_character(self.db, resolved_found)
         {
-            return Ok(());
+            if !self.ry_callee {
+                return Ok(());
+            }
+            let name = value.and_then(|value| match self.module.kind(value) {
+                ExpressionKind::Literal(LiteralKind::String(text)) => {
+                    Some(self.module[text].to_owned())
+                }
+                _ => None,
+            });
+            return Err(TypeError {
+                range,
+                kind: TypeErrorKind::FunctionName {
+                    expected: resolved_expected,
+                    name,
+                },
+            });
         }
         if let TyKind::Var(var) = resolved_expected.kind(self.db)
             && let Entry::Unbound {

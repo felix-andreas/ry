@@ -2187,8 +2187,11 @@ fn script_duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagn
 }
 
 /// `:::` reaches unexported names, so only `::` checks exports. No stub corpus
-/// means no validation.
+/// means no validation, and neither does a probe inside `try()`.
 fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
+    if read.probed {
+        return None;
+    }
     // A package's export set is not the names its sources bind (re-exports, S4 generics,
     // lazy-loaded data, `.onLoad` bindings), so its own reads are validated against `NAMESPACE`.
     if is_own_package(db, &read.package) {
@@ -3150,6 +3153,20 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 "expected `{}`, found `{}`. The value has the right shape, but `{name}` is a nominal type, so only `@{name}(...)` or `#: @new {name}` creates one",
                 renderer.render(db, *nominal),
                 renderer.render(db, *found)
+            )
+        }
+        TypeErrorKind::FunctionName { expected, name } => {
+            let function = match name {
+                Some(name) => format!("`{name}`, not `\"{name}\"`"),
+                None => "the function, not its name".to_owned(),
+            };
+            // A callback's undecided types would print as variables the reader never wrote.
+            let expected = match contains_inference_var(db, *expected) {
+                true => "a function".to_owned(),
+                false => format!("`{}`", renderer.render(db, *expected)),
+            };
+            format!(
+                "expected {expected}, found a function's name. A function that takes ry values calls its callback directly and never looks a name up, so pass {function}"
             )
         }
         TypeErrorKind::UnnarrowedNull { expected, found } => format!(

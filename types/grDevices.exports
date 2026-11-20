@@ -28,6 +28,7 @@ bitmap
 blues9
 bmp
 boxplot.stats
+bringToTop
 cairoSymbolFont
 cairo_pdf
 cairo_ps
@@ -95,6 +96,7 @@ hsv
 is.raster
 jpeg
 make.rgb
+msgWindow
 n2mfrow
 nclass.FD
 nclass.Sturges
@@ -131,6 +133,13 @@ terrain.colors
 tiff
 topo.colors
 trans3d
+win.graph
+win.metafile
+win.print
+windows
+windows.options
+windowsFont
+windowsFonts
 x11
 xfig
 xy.coords

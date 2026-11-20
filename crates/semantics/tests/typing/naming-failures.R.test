@@ -173,6 +173,29 @@ result: Unknown
 10..23 warning[unresolved] `bazqux` is not exported by `stats`.
 
 #==== typo_suggestions
+#---- a_read_inside_try_probes_the_export
+# doParallel falls back to its own `splitList` where parallel exports none: the error a missing
+# export raises is caught, so the read is a probe.
+#~~~~ R/main.R
+split_list <- try(parallel::splitList, silent = TRUE)
+check <- tryCatch(base::check_tzones, error = function(e) NULL)
+outside <- stats::bazqux
+#++++
+== R/main.R
+split_list: Any
+check: Unknown
+outside: Unknown
+129..142 warning[unresolved] `bazqux` is not exported by `stats`.
+
+#---- a_windows_only_export_resolves
+#~~~~ R/main.R
+short <- function(path) if (.Platform$OS.type == "windows") utils::shortPathName(path) else path
+device <- function(file) grDevices::win.metafile(file)
+#++++
+== R/main.R
+short: <T> fn(path: T) -> Unknown
+device: <T> fn(file: T) -> Unknown
+
 #---- near_miss_of_a_stub_name_suggests_it
 #~~~~ R/main.R
 lenght(c(1L, 2L))

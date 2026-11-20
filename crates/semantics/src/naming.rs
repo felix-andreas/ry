@@ -65,6 +65,9 @@ pub struct NamespaceRead {
     pub internal: bool,
     pub package: Symbol,
     pub name: Option<Symbol>,
+    /// Inside the expression of `try()` or `tryCatch()`, which catches the error a missing
+    /// export raises, so the read probes whether the package exports the name.
+    pub probed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -281,6 +284,7 @@ pub fn resolve_item(
         read_parameter_slots: BTreeSet::new(),
         emit: true,
         quiet_depth: 0,
+        probe_ranges: Vec::new(),
         deferred_depth: 0,
         in_defaults: false,
         quoted_depth: 0,
@@ -410,6 +414,8 @@ struct Context<'a> {
     /// The variables of the `for` loops being walked, innermost last.
     active_loop_variables: Vec<BindingId>,
     quiet_depth: u32,
+    /// The expressions `try()` and `tryCatch()` evaluate under their handler.
+    probe_ranges: Vec<TextRange>,
     /// Inside an expression R evaluates later (`on.exit`): its reads see the final value, so
     /// they keep every write of the name alive.
     deferred_depth: u32,
@@ -707,6 +713,19 @@ impl Context<'_> {
                     } => Some(name.as_str()),
                     _ => builtin_callee,
                 };
+                if matches!(accessor, Some("try" | "tryCatch"))
+                    && let Some(expr) = module[arguments]
+                        .iter()
+                        .find(|argument| module.argument_name(argument).as_deref() == Some("expr"))
+                        .or_else(|| {
+                            module[arguments]
+                                .iter()
+                                .find(|argument| argument.name.is_none())
+                        })
+                        .and_then(|argument| argument.value)
+                {
+                    self.probe_ranges.push(module.range(expr));
+                }
                 if accessor.is_some_and(|name| EAGER_CALLERS.contains(&name)) {
                     let until = self.run_horizon(call_end);
                     for value in module[arguments]
@@ -1000,12 +1019,18 @@ impl Context<'_> {
                     && self.quiet_depth == 0
                     && let Some(package) = package
                 {
+                    let range = module.range(id);
+                    let probed = self
+                        .probe_ranges
+                        .iter()
+                        .any(|probe| probe.contains_range(range));
                     self.naming.namespace_reads.insert(
                         id,
                         NamespaceRead {
                             internal: *internal,
                             package: *package,
                             name: *name,
+                            probed,
                         },
                     );
                 }
