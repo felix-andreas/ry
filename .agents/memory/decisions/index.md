@@ -261,6 +261,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - POSIX regular expressions run on an automaton when they need the longest match
 - `perl = TRUE` runs on PCRE2, linked statically
 - TRE approximate regular expressions
+- aregexec and compilerVersion
 - TRE minimal repetitions over alternatives
 - The message sink and connection flush points
 - utils' sockets, internal downloads and allocation profiling

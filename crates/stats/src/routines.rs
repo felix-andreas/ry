@@ -144,6 +144,7 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("pRho", hypothesis_tests::p_rho),
     ("d2x2xk", hypothesis_tests::d2x2xk),
     ("Fisher_sim", hypothesis_tests::fisher_sim),
+    ("Smirnov_sim", hypothesis_tests::smirnov_sim),
     ("Fexact", hypothesis_tests::fexact),
     ("chisq_sim", hypothesis_tests::chisq_sim),
     ("r2dtable", hypothesis_tests::r2dtable),
@@ -236,14 +237,12 @@ unsafe fn cdqrls(call: &NativeCall<'_>) -> R<Sexp> {
     let tolerance = values::as_real_scalar(call.arg(2));
     let check = values::as_logical_scalar(call.arg(3)) == 1;
     let (n, p) = matrix_shape(x);
-    let y_dims = values::dims(y);
-    let (y_rows, ny) = match &y_dims {
-        Some(dims) if dims.len() == 2 => (dims[0], dims[1]),
-        _ => (length(y), 1),
-    };
-    if check && y_rows != n {
+    // `y` is an n-vector or an n x ny matrix, read by length alone as GNU R reads it.
+    let ny = if n > 0 { length(y) / n } else { 0 };
+    if check && n * ny != length(y) {
         return Err(call.error(format!(
-            "dimensions of 'x' ({n},{p}) and 'y' ({y_rows}) do not match"
+            "dimensions of 'x' ({n},{p}) and 'y' ({}) do not match",
+            length(y)
         )));
     }
     let qr = as_reals(x)?;
@@ -255,14 +254,13 @@ unsafe fn cdqrls(call: &NativeCall<'_>) -> R<Sexp> {
             return Err(call.error(format!("NA/NaN/Inf in '{name}'")));
         }
     }
-    let coefficients = match &y_dims {
-        Some(dims) if dims.len() == 2 => {
-            let matrix = values::alloc(SexpType::Real, p * ny)?;
-            let dim = values::integer_vector(&[p as i32, ny as i32])?;
-            values::set_attr(matrix, symbols().dim, dim)?;
-            matrix
-        }
-        _ => values::alloc(SexpType::Real, p)?,
+    let coefficients = if ny > 1 {
+        let matrix = values::alloc(SexpType::Real, p * ny)?;
+        let dim = values::integer_vector(&[p as i32, ny as i32])?;
+        values::set_attr(matrix, symbols().dim, dim)?;
+        matrix
+    } else {
+        values::alloc(SexpType::Real, p)?
     };
     values::reals_mut(coefficients).fill(0.0);
     // LINPACK's dqrls: base's dqrdc2, then Q'y, the coefficients and the residuals of every

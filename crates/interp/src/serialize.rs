@@ -1839,19 +1839,25 @@ unsafe fn do_mem_compress(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// `memDecompress(from, type)`, with `type` 1 to 6 for none, gzip, bzip2, xz, unknown (which
-/// detects the format from its magic bytes) and zstd.
+/// detects the format from its magic bytes, as GNU R's `comp_type_from_memory` does) and zstd.
 unsafe fn do_mem_decompress(call: &Call<'_>) -> R<Sexp> {
     let from = values::raws(call.arg(0));
     let gzip_header = from.starts_with(&[0x1f, 0x8b]);
-    let xz_header = from.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0x00]);
+    // An LZMA-alone stream, the format `xz --format=lzma` writes, which GNU R's xz decoder
+    // reads beside xz's own.
+    let lzma_alone = from.starts_with(&[b']', 0, 0, 0x80, 0]);
     let mut kind = values::as_integer_scalar(call.arg(1));
     if kind == 5 {
-        kind = if gzip_header {
+        kind = if gzip_header || from.starts_with(&[0x78, 0x9c]) {
             2
-        } else if from.starts_with(b"BZh") {
+        } else if bzip2_header(from) {
             3
-        } else if xz_header {
+        } else if from.starts_with(&[0xfd, b'7', b'z', b'X', b'Z']) || lzma_alone {
             4
+        } else if from.starts_with(&[0x89, b'L', b'Z', b'O']) {
+            return Err(
+                call.error("this is a lzop-compressed file which this build of R does not support")
+            );
         } else if from.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
             6
         } else {
@@ -1869,6 +1875,9 @@ unsafe fn do_mem_decompress(call: &Call<'_>) -> R<Sexp> {
         3 => bzip2::read::MultiBzDecoder::new(from)
             .read_to_end(&mut output)
             .map(drop),
+        4 if lzma_alone => lzma_rust2::LzmaReader::new_mem_limit(from, u32::MAX, None)
+            .and_then(|mut reader| reader.read_to_end(&mut output))
+            .map(drop),
         4 => lzma_rust2::XzReader::new(from, true)
             .read_to_end(&mut output)
             .map(drop),
@@ -1879,6 +1888,19 @@ unsafe fn do_mem_decompress(call: &Call<'_>) -> R<Sexp> {
     };
     outcome.map_err(|_| call.error("internal error in memDecompress"))?;
     raw_vector(&output)
+}
+
+/// A bzip2 stream: `BZh`, a block size digit, then the magic of a block (the BCD digits of pi)
+/// or of the end of the stream (those of the square root of pi). GNU R checks all of it so that
+/// plain text starting with `BZh` is not taken for bzip2.
+fn bzip2_header(bytes: &[u8]) -> bool {
+    bytes.len() >= 10
+        && bytes.starts_with(b"BZh")
+        && (b'1'..=b'9').contains(&bytes[3])
+        && matches!(
+            &bytes[4..10],
+            [0x31, 0x41, 0x59, 0x26, 0x53, 0x59] | [0x17, 0x72, 0x45, 0x38, 0x50, 0x90]
+        )
 }
 
 unsafe fn raw_vector(bytes: &[u8]) -> R<Sexp> {

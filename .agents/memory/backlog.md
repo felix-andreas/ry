@@ -598,7 +598,7 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 `tools/bench/builtins/slower.txt` lists every export of base, stats and utils that the builtins sweep finds slower than GNU R (or failing) in at least one case; `sweep.py ratchet --update` shrinks it as fixes land, and `sweep.py weights` orders the work by call frequency in the code bases and the oracle corpus.
 
 - **Largest gap left:** `rpois` with a vector `mu` (about 0.85x) and `rgeom` (about 0.9x), both unexplained (`decisions/builtins.md`); `slower.txt` has the rest. `cumprod` of products that underflow a double pays an x87 store assist per element, as GNU R does; skipping that store would beat it.
-- **Failing on ry in the sweep:** `R_compiled_by`, `aregexec`, `rsmirnov`, `ppr`, `arima0` and others; `sweep.py compare` prints the full list.
+- **Failing on ry in the sweep:** `arima0` and `ar.mle` need the `setup_starma` family (`starma.c` and the Starma half of `pacf.c`, about 800 lines of C, holding its state behind an external pointer, which the stats crate has no helper for yet), and `ppr` needs `setppr` and `smart` (`ppr.f`, about 1,500 lines of Fortran). `sweep.py validate --with-ry` lists the rest.
 - **POSIX repeated groups:** `(a)?(ab)?b*` on "abb" fills the first optional group where TRE fills the second (`strings__posix_repeated_group`, a known failure). TRE's tag priorities, not a leftmost-longest rule, decide the split: GNU R gives `(a*)(ab)?b*` on "abb" `[][ab]`, `(a|ab)(bc|c)?` on "abc" `[ab][c]`, `(a|ab)(c|bcd)(d*)` on "abcd" `[a][bcd][]` (ry agrees), `(a?)((ab)?)(b?)` on "ab" `[][ab][ab][]` and `(aa)?(aab)?b*` on "aabb" `[][aab]`, and every variant with `?`, `*`, `{0,1}` or a class before `(ab)?` leaves the first group empty. Matching them needs TRE's tagged-NFA priorities in the POSIX matcher.
 
 ## Open: base R kernels against GNU R
@@ -3237,8 +3237,12 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 - **Approximate matching has two engines.** POSIX patterns with TRE bounds such as `{+}` run on
   `ApproximateRegex` (`decisions/builtins.md`, "TRE approximate regular expressions"), but `agrep`,
   `agrepl` and `adist` still use the older edit-cost NFA in `crates/interp/src/approximate.rs`.
-  Move them onto `ApproximateRegex`, which already has TRE's cost model. `aregexec` is not
-  implemented at all ("there is no .Internal function 'aregexec'").
+  Move them onto `ApproximateRegex`, which already has TRE's cost model (`aregexec` runs on it).
+  Ties between equally costly paths follow the POSIX subexpression rule over the capture slots
+  rather than TRE's tag order. Some match starts differ too, for a reason not yet found:
+  `aregexec("([a-c]+)(d)(e?)", "xbcdy", max.distance = 1)`
+  gives `"xbcd"` on GNU R (an earlier start bought with a substitution) and `"bcd"` on ry, and
+  `aregexec("([a-c]+)(d)(e?)", "aXcde", max.distance = 1)` gives `"aXcde"` against `"cde"`.
 - **`strptime` drops a leap second.** `strptime("2020-01-01 10:59:60.5", "%Y-%m-%d %H:%M:%OS")`
   gives 11:00:00.5 where GNU R keeps `sec = 60.5`, because the parsed time is stored as epoch
   seconds before the `POSIXlt` fields are built.
