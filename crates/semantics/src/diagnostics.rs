@@ -32,7 +32,7 @@ use {
         types::{
             Atomic, Binder, Bound, Constraint, FrameKind, FunctionType, InferenceVar, Name,
             NativeField, QueryName, RecordField, Ty, TyKind, TypeScheme, array_element,
-            contains_inference_var, for_each_child_type, map_child_types, substitute_rigid,
+            contains_inference_var, for_each_child_type, map_child_types, null, substitute_rigid,
             union_of,
         },
     },
@@ -3271,9 +3271,11 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         ),
         TypeErrorKind::NullDefaultNotAdmitted { name, declared } => {
             let mut renderer = TypeRenderer::default();
+            // Rendered as one union so a function member is parenthesized in the suggestion.
+            let suggested = renderer.render(db, union_of(db, [*declared, null(db)]));
             let declared = renderer.render(db, *declared);
             format!(
-                "`{name}` defaults to `NULL`, which its declared type `{declared}` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `{declared} | NULL` and narrow with `is.null()`"
+                "`{name}` defaults to `NULL`, which its declared type `{declared}` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `{suggested}` and narrow with `is.null()`"
             )
         }
         TypeErrorKind::ConstraintViolation { constraint, found } => format!(

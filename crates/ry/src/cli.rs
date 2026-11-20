@@ -136,6 +136,7 @@ pub fn check(
     let groups = project_groups(maybe_files)?;
     let mut n_files = 0;
     let mut n_diagnostics = 0;
+    let mut n_problem_files = 0;
     let mut n_failures = 0;
     let mut n_fixed = 0;
     let mut n_fixable = 0;
@@ -184,17 +185,20 @@ pub fn check(
             n_unsafe_fixable += applicable_fixes(&file.diagnostics, true).len();
         }
         for (path, source, problems) in &analysis.stub_problems {
-            n_diagnostics +=
-                render_findings(output, min_severity, path, source, problems, &|_| None);
+            let rendered = render_findings(output, min_severity, path, source, problems, &|_| None);
+            n_diagnostics += rendered;
+            n_problem_files += usize::from(rendered > 0);
         }
         for (text, rendered) in render_project_findings(&analysis, output, min_severity) {
             n_files += 1;
             n_diagnostics += rendered;
+            n_problem_files += usize::from(rendered > 0);
             print_findings(output, &text);
         }
         if let Some((path, source, problems)) = &analysis.namespace {
-            n_diagnostics +=
-                render_findings(output, min_severity, path, source, problems, &|_| None);
+            let rendered = render_findings(output, min_severity, path, source, problems, &|_| None);
+            n_diagnostics += rendered;
+            n_problem_files += usize::from(rendered > 0);
         }
         // Freeing every memo one by one costs close to a second on a large project, and the
         // process is about to exit.
@@ -218,7 +222,7 @@ pub fn check(
             };
             println!("added {n_annotated} inferred {annotations}");
         }
-        report_check_summary(n_files, n_diagnostics);
+        report_check_summary(n_files, n_problem_files, n_diagnostics);
         let unsafe_only = n_unsafe_fixable.saturating_sub(n_fixable);
         match (n_fixable, unsafe_only) {
             (0, 0) => {}
@@ -1530,10 +1534,11 @@ fn in_parallel<T: Send>(
 }
 
 /// An empty tree exits clean: a monorepo stage with no R in it yet must not fail a pipeline.
-fn report_check_summary(n_files: usize, n_diagnostics: usize) {
-    let files = if n_files == 1 { "file" } else { "files" };
+/// The files with problems include a stub file or NAMESPACE, which are not counted as checked.
+fn report_check_summary(n_files: usize, n_problem_files: usize, n_diagnostics: usize) {
+    let files = |count: usize| if count == 1 { "file" } else { "files" };
     if n_diagnostics == 0 {
-        println!("{n_files} {files} checked, no problems");
+        println!("{n_files} {} checked, no problems", files(n_files));
         return;
     }
     let problems = if n_diagnostics == 1 {
@@ -1541,7 +1546,14 @@ fn report_check_summary(n_files: usize, n_diagnostics: usize) {
     } else {
         "problems"
     };
-    println!("{n_diagnostics} {problems} in {n_files} {files}");
+    if n_problem_files >= n_files {
+        println!(
+            "{n_diagnostics} {problems} in {n_problem_files} {}",
+            files(n_problem_files)
+        );
+    } else {
+        println!("{n_diagnostics} {problems} in {n_problem_files} of {n_files} files");
+    }
 }
 
 /// For a literate document, the R its chunks contain with prose blanked, so

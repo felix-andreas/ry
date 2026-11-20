@@ -43,7 +43,8 @@ package and cannot change its findings. A file matched by `exclude` is analyzed 
 it.
 
 `ry check` reads `.R` files and the R chunks of `.Rmd`, `.qmd`, and `.Rnw` documents. Findings go to
-stderr and the one-line summary to stdout. A terminal gets color and Unicode box drawing, `NO_COLOR`
+stderr and the one-line summary to stdout. The summary counts the problems and the files that have
+them, out of the files checked when some are clean, as in `2 problems in 1 of 3 files`. A terminal gets color and Unicode box drawing, `NO_COLOR`
 turns off only the color, and a pipe gets plain ASCII. [Diagnostic
 codes](/reference/diagnostic-codes) shows how to read a finding.
 
