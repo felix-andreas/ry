@@ -5368,22 +5368,31 @@ unsafe fn do_sys_getlocale(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// Takes the locale of the categories GNU R uses from the environment, as it does at startup;
-/// numbers and the rest stay in the C locale.
-pub unsafe fn init_locale() {
-    for category in [
-        libc::LC_CTYPE,
-        libc::LC_COLLATE,
-        libc::LC_TIME,
-        libc::LC_MONETARY,
-        LC_MESSAGES,
-        LC_PAPER,
-        LC_MEASUREMENT,
+/// numbers stay in the C locale. Returns the categories the system cannot provide, which fall
+/// back to "C", in GNU R's order: start-up warns about them last.
+pub unsafe fn init_locale() -> Vec<&'static str> {
+    let mut failed = Vec::new();
+    for (category, name) in [
+        (libc::LC_CTYPE, "LC_CTYPE"),
+        (libc::LC_COLLATE, "LC_COLLATE"),
+        (libc::LC_TIME, "LC_TIME"),
+        (LC_MESSAGES, "LC_MESSAGES"),
+        (libc::LC_MONETARY, "LC_MONETARY"),
+        (LC_PAPER, "LC_PAPER"),
+        (LC_MEASUREMENT, "LC_MEASUREMENT"),
     ] {
-        set_locale(category, c"".as_ptr());
+        if category < 0 {
+            continue;
+        }
+        if set_locale(category, c"".as_ptr()).is_null() {
+            set_locale(category, c"C".as_ptr());
+            failed.push(name);
+        }
         #[cfg(windows)]
         use_utf8_codeset(category);
     }
     crate::sort::refresh_collation();
+    failed
 }
 
 /// Moves a Windows locale category to the UTF-8 codeset of the same language and region

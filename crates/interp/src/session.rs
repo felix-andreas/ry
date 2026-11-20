@@ -46,7 +46,7 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     interp().command_args = options.command_args;
     interp().interactive = options.interactive;
     interp().code_image.build = options.build;
-    prepare_process();
+    let locale_failures = prepare_process();
     let home = crate::system::r_home();
     let site_profile = options.site_profile.then(site_profile_path).flatten();
     let user_profile = options.user_profile.then(user_profile_path).flatten();
@@ -55,7 +55,7 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     {
         match crate::image::load(host, &home) {
             Ok(()) => {
-                let started = start_from_image(&home, site_profile, user_profile);
+                let started = start_from_image(&home, site_profile, user_profile, &locale_failures);
                 crate::image::touch::finish_start_up();
                 return started;
             }
@@ -75,7 +75,7 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
             }
         }
     }
-    start_slowly(&home, site_profile, user_profile)?;
+    start_slowly(&home, site_profile, user_profile, &locale_failures)?;
     Ok(())
 }
 
@@ -89,26 +89,22 @@ pub unsafe fn write_start_image(
     layout: Option<&std::path::Path>,
 ) -> R<()> {
     interp().interactive = false;
-    prepare_process();
+    let locale_failures = prepare_process();
     let home = crate::system::r_home();
     let before = crate::image::before(&host).map_err(error)?;
-    if start_slowly(&home, None, None)? {
+    if start_slowly(&home, None, None, &locale_failures)? {
         return Err(error("start-up warned, so it cannot be imaged"));
     }
     interp().globals.host_environment = (host.environment)()?;
     crate::image::write(&host, &home, path, layout, &before).map_err(error)
 }
 
-/// The process state every start sets before R code runs: the C library's locale, the system
-/// `Renviron`, and the interpreter's locale.
-unsafe fn prepare_process() {
-    // The runtime reports a UTF-8 locale (`l10n_info`), so the C library's character
-    // functions must agree: iconv's `//TRANSLIT` and packages calling `mbrtowc` read
-    // LC_CTYPE, which stays "C" (ASCII) until something sets it. Numeric formatting keeps
-    // the C locale, so only LC_CTYPE changes. A system without C.UTF-8 keeps ASCII.
-    libc::setlocale(libc::LC_CTYPE, c"C.UTF-8".as_ptr());
+/// The process state every start sets before R code runs: the system `Renviron` and the
+/// locale. Returns the locale categories that fell back to "C", which start-up warns about
+/// after every other start-up warning, as GNU R does.
+unsafe fn prepare_process() -> Vec<&'static str> {
     read_renviron();
-    crate::system::init_locale();
+    crate::system::init_locale()
 }
 
 /// The start-up steps that read the process environment, run after the image loads: the
@@ -120,6 +116,7 @@ unsafe fn start_from_image(
     home: &str,
     site_profile: Option<String>,
     user_profile: Option<String>,
+    locale_failures: &[&str],
 ) -> R<()> {
     // The image was written by a start that had locked them.
     lock_base_bindings(false)?;
@@ -254,6 +251,9 @@ unsafe fn start_from_image(
     }
     crate::profile_summary::mark_ready();
     crate::capture::mark_ready();
+    for name in locale_failures {
+        conditions::warning_call(nil(), format!("Setting {name} failed, using \"C\""))?;
+    }
     conditions::print_warnings(conditions::DURING_STARTUP)
 }
 
@@ -353,6 +353,7 @@ unsafe fn start_slowly(
     home: &str,
     site_profile: Option<String>,
     user_profile: Option<String>,
+    locale_failures: &[&str],
 ) -> R<bool> {
     define_process_variables()?;
     eval::define(
@@ -408,6 +409,9 @@ unsafe fn start_slowly(
     }
     install_os_version()?;
     crate::standard_library::attach_package()?;
+    for name in locale_failures {
+        conditions::warning_call(nil(), format!("Setting {name} failed, using \"C\""))?;
+    }
     let warned = !interp().warnings.is_empty();
     conditions::print_warnings(conditions::DURING_STARTUP)?;
     crate::profile_summary::mark_ready();
