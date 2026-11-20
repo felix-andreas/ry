@@ -174,8 +174,8 @@ fn check_related_notes_render_on_both_surfaces() {
     assert_eq!(human.code, 1, "stderr: {}", human.stderr);
     let rendered = &human.stderr;
     assert!(
-        rendered.contains("> the later binding is here.")
-            && rendered.contains("> the earlier binding is here."),
+        rendered.contains("> the later binding is here")
+            && rendered.contains("> the earlier binding is here"),
         "expected one note per overwrite warning, got: {rendered}"
     );
     // Each note is drawn from the file it points into.
@@ -278,7 +278,7 @@ fn check_reaches_a_package_s_own_dataset_only_under_lazy_data() {
     assert!(
         eager
             .stderr
-            .contains("`prices` is not exported by `tallyr`."),
+            .contains("`prices` is not exported by `tallyr`"),
         "a dataset without `LazyData` is reachable through `data()` alone: {}",
         eager.stderr
     );
