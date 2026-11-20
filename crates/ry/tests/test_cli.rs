@@ -114,7 +114,7 @@ fn check_counts_warnings_as_findings() {
     let stderr = &output.stderr;
 
     assert!(
-        stderr.contains(&heading("unused", '!', "`x` is assigned but never used.")),
+        stderr.contains(&heading("unused", '!', "`x` is assigned but never used")),
         "expected a code-carrying warning diagnostic, got: {stderr}"
     );
     assert_eq!(output.code, 1, "warnings must exit 1: {stderr}");
@@ -239,7 +239,7 @@ fn check_validates_namespace_imports_against_stubs() {
         rendered.contains(&heading(
             "unresolved",
             'x',
-            "`medain` is not exported by `stats`, so this package will not load.",
+            "`medain` is not exported by `stats`, so this package will not load",
         )),
         "an import R refuses to load is an error, not advice: {rendered}"
     );
@@ -303,7 +303,7 @@ fn check_flags_unused_imports_when_opted_in() {
     let rendered = &output.stderr;
     assert_eq!(output.code, 1, "stderr: {rendered}");
     assert!(
-        rendered.contains("imported name `median` from `stats` is never used."),
+        rendered.contains("imported name `median` from `stats` is never used"),
         "expected the unused-import warning, got: {rendered}"
     );
     assert!(
@@ -698,7 +698,7 @@ fn check_reports_only_an_export_nothing_defines_or_imports() {
     }
     assert!(
         rendered.contains(
-            "`not_anywhere` is exported but this package defines no such top-level object."
+            "`not_anywhere` is exported but this package defines no such top-level object"
         ),
         "an export nothing defines or imports is still reported: {rendered}"
     );

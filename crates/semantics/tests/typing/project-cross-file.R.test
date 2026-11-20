@@ -63,12 +63,12 @@ y <- x
 #++++
 == R/a.R
 x: integer
-0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
-  = 0..1 the later binding is here.
+0..1 warning[duplicate] top-level binding `x` is overwritten by a later top-level binding in this package
+  = 0..1 the later binding is here
 == R/b.R
 x: character
-0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
-  = 0..1 the earlier binding is here.
+0..1 warning[duplicate] top-level binding `x` overwrites an earlier top-level binding in this package
+  = 0..1 the earlier binding is here
 == R/c.R
 y: character
 
@@ -83,12 +83,12 @@ y <- x
 #++++
 == R/a.R
 x: integer
-0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
-  = 0..1 the later binding is here.
+0..1 warning[duplicate] top-level binding `x` is overwritten by a later top-level binding in this package
+  = 0..1 the later binding is here
 == R/b.R
 x: character
-0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
-  = 0..1 the earlier binding is here.
+0..1 warning[duplicate] top-level binding `x` overwrites an earlier top-level binding in this package
+  = 0..1 the earlier binding is here
 == R/c.R
 y: integer
 16..17 error[type-mismatch] expected `integer`, found `character`
@@ -103,12 +103,12 @@ r <- f("x")
 #++++
 == R/a.R
 f: <T> fn(value: T) -> T
-0..1 warning[duplicate] Top-level binding `f` is overwritten by a later top-level binding in this package.
-  = 0..1 the later binding is here.
+0..1 warning[duplicate] top-level binding `f` is overwritten by a later top-level binding in this package
+  = 0..1 the later binding is here
 == R/b.R
 f: <T: arithmetic> fn(x: T) -> T
-0..1 warning[duplicate] Top-level binding `f` overwrites an earlier top-level binding in this package.
-  = 0..1 the earlier binding is here.
+0..1 warning[duplicate] top-level binding `f` overwrites an earlier top-level binding in this package
+  = 0..1 the earlier binding is here
 == R/c.R
 r: Unknown
 7..10 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
@@ -249,10 +249,10 @@ r: integer
 #: @alias Shape {character}
 #++++
 == R/a.R
-3..24 error[annotation] The type name `Shape` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+3..24 error[annotation] the type name `Shape` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 3..27 another definition of this name is here
 == R/b.R
-3..27 error[annotation] The type name `Shape` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+3..27 error[annotation] the type name `Shape` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 3..24 another definition of this name is here
 
 #==== cross_file_scripts
@@ -271,8 +271,8 @@ mirror: <T> fn(value: T) -> T
 == scripts/use.R
 a: integer
 b: character
-11..12 warning[unused] `a` is assigned but never used.
-41..42 warning[unused] `b` is assigned but never used.
+11..12 warning[unused] `a` is assigned but never used
+41..42 warning[unused] `b` is assigned but never used
 
 #---- script_numeric_package_function_rejects
 #~~~~ R/a.R
@@ -284,7 +284,7 @@ r <- add_one("x")
 add_one: <T: arithmetic> fn(x: T) -> T
 == scripts/use.R
 r: Unknown
-0..1 warning[unused] `r` is assigned but never used.
+0..1 warning[unused] `r` is assigned but never used
 13..16 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- script_binding_not_visible_to_other_script
@@ -295,11 +295,11 @@ r <- helper(1L)
 #++++
 == scripts/define.R
 helper: <T> fn(x: T) -> T
-0..6 warning[unused] `helper` is assigned but never used.
+0..6 warning[unused] `helper` is assigned but never used
 == scripts/use.R
 r: Unknown
-0..1 warning[unused] `r` is assigned but never used.
-5..11 warning[unresolved] I could not resolve `helper` in this package, its imports, or builtins.
+0..1 warning[unused] `r` is assigned but never used
+5..11 warning[unresolved] I could not resolve `helper` in this package, its imports, or builtins
 
 #---- script_uses_package_alias
 #~~~~ R/a.R
@@ -311,4 +311,4 @@ value <- 1L
 == R/a.R
 == scripts/use.R
 value: Count
-9..14 warning[unused] `value` is assigned but never used.
+9..14 warning[unused] `value` is assigned but never used

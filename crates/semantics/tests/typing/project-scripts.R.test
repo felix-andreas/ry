@@ -10,7 +10,7 @@ result <- double_count(2L)
 double_count: fn(count: integer) -> integer
 == scripts/use.R
 result: integer
-0..6 warning[unused] `result` is assigned but never used.
+0..6 warning[unused] `result` is assigned but never used
 
 #---- script_binding_is_not_package_global
 #~~~~ R/a.R
@@ -20,10 +20,10 @@ helper <- function(x) x
 #++++
 == R/a.R
 result: Unknown
-10..16 warning[unresolved] I could not resolve `helper` in this package, its imports, or builtins.
+10..16 warning[unresolved] I could not resolve `helper` in this package, its imports, or builtins
 == scripts/local.R
 helper: <T> fn(x: T) -> T
-0..6 warning[unused] `helper` is assigned but never used.
+0..6 warning[unused] `helper` is assigned but never used
 
 #---- script_type_declaration_is_not_project_global
 #~~~~ R/a.R
@@ -34,7 +34,7 @@ value <- list(name = "bob")
 #++++
 == R/a.R
 value: list{name: character}
-3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
+3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 == scripts/local.R
 
 #---- package_and_script_can_reuse_type_name
@@ -56,10 +56,10 @@ use_b: Thing <- "x"
 #++++
 == one.R
 use_a: Thing
-25..30 warning[unused] `use_a` is assigned but never used.
+25..30 warning[unused] `use_a` is assigned but never used
 == two.R
 use_b: Thing
-28..33 warning[unused] `use_b` is assigned but never used.
+28..33 warning[unused] `use_b` is assigned but never used
 
 #==== script_typing
 #---- script_self_reference_typechecks_sequentially
@@ -76,7 +76,7 @@ pkg_value: integer
 == scripts/local.R
 count: integer
 doubled: integer
-24..31 warning[unused] `doubled` is assigned but never used.
+24..31 warning[unused] `doubled` is assigned but never used
 
 #---- script_rebinding_uses_latest_type
 #~~~~ R/pkg.R
@@ -94,8 +94,8 @@ pkg_value: integer
 value: integer
 value: character
 label: character
-0..5 warning[unused] `value` is assigned but never used.
-42..47 warning[unused] `label` is assigned but never used.
+0..5 warning[unused] `value` is assigned but never used
+42..47 warning[unused] `label` is assigned but never used
 
 #---- script_annotation_error_reports
 #~~~~ R/pkg.R
@@ -108,7 +108,7 @@ x <- "wrong"
 pkg_value: integer
 == scripts/local.R
 x: integer
-11..12 warning[unused] `x` is assigned but never used.
+11..12 warning[unused] `x` is assigned but never used
 16..23 error[type-mismatch] expected `integer`, found `character`
 
 #---- script_local_type_shadows_package_type
@@ -123,7 +123,7 @@ person <- list(age = 20)
 == R/pkg.R
 == scripts/local.R
 person: Person
-52..58 warning[unused] `person` is assigned but never used.
+52..58 warning[unused] `person` is assigned but never used
 
 #---- script_resolves_its_own_type_declaration
 #~~~~ R/pkg.R
@@ -142,7 +142,7 @@ pkg_value: integer
 == scripts/local.R
 w: Widget
 s: integer
-87..88 warning[unused] `s` is assigned but never used.
+87..88 warning[unused] `s` is assigned but never used
 
 #==== per_file_strict_directive
 #---- strict_directive_enables_for_one_file
@@ -169,7 +169,7 @@ fixture_labels <- c("a", "b")
 #++++
 == R/a.R
 first_label: fn() -> Unknown
-26..40 warning[unresolved] I could not resolve `fixture_labels` in this package, its imports, or builtins.
+26..40 warning[unresolved] I could not resolve `fixture_labels` in this package, its imports, or builtins
 == tests/testthat/test-a.R
 fixture_labels: character[]
 
@@ -194,7 +194,7 @@ built <- make()
 make: <T> fn(x: T) -> T
 == tests/testthat/test-b.R
 built: Unknown
-9..13 warning[unresolved] I could not resolve `make` in this package, its imports, or builtins.
+9..13 warning[unresolved] I could not resolve `make` in this package, its imports, or builtins
 
 #---- helper_is_visible_to_every_test_file
 #~~~~ R/a.R

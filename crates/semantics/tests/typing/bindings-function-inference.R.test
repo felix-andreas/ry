@@ -99,7 +99,7 @@ f <- function(x) {
 }
 #++++
 f: <T> fn(x: T) -> T
-21..22 warning[unused] `y` is assigned but never used.
+21..22 warning[unused] `y` is assigned but never used
 
 #---- let_polymorphism_two_uses
 mirror <- function(x) x

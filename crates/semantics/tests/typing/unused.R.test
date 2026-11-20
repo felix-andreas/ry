@@ -6,7 +6,7 @@ f <- function() {
 }
 #++++
 f: fn() -> integer
-20..21 warning[unused] `x` is assigned but never used.
+20..21 warning[unused] `x` is assigned but never used
 
 #---- used_local_is_not_reported
 f <- function() {
@@ -24,7 +24,7 @@ f <- function() {
 }
 #++++
 f: fn() -> integer
-20..21 warning[unused] `x` is assigned but never used.
+20..21 warning[unused] `x` is assigned but never used
 
 #---- a_function_named_by_a_match_fun_string_is_used
 f <- function(xs) {
@@ -66,7 +66,7 @@ f <- function() {
 }
 #++++
 f: fn() -> integer
-20..21 warning[unused] `x` is assigned but never used.
+20..21 warning[unused] `x` is assigned but never used
 
 #---- write_read_only_on_loop_back_edge_is_used
 f <- function(n) {
@@ -78,8 +78,8 @@ f <- function(n) {
 }
 #++++
 f: <T: arithmetic> fn(n: T) -> NULL
-42..43 warning[unused] `y` is assigned but never used.
-47..48 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
+42..43 warning[unused] `y` is assigned but never used
+47..48 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing
 
 #---- a_while_condition_reads_the_body_s_last_write
 f <- function() {
@@ -100,7 +100,7 @@ f <- function(flag) {
 }
 #++++
 f: fn(flag: logical) -> integer
-40..41 warning[unused] `x` is assigned but never used.
+40..41 warning[unused] `x` is assigned but never used
 
 #---- read_before_conditional_introduction_warns
 f <- function(flag) {
@@ -111,7 +111,7 @@ f <- function(flag) {
 }
 #++++
 f: fn(flag: logical) -> integer
-54..55 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
+54..55 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing
 
 #---- multiple_unused_locals_each_reported
 f <- function() {
@@ -121,8 +121,8 @@ f <- function() {
 }
 #++++
 f: fn() -> integer
-20..21 warning[unused] `a` is assigned but never used.
-30..31 warning[unused] `b` is assigned but never used.
+20..21 warning[unused] `a` is assigned but never used
+30..31 warning[unused] `b` is assigned but never used
 
 #---- local_used_only_in_nested_function_is_not_reported
 f <- function() {
@@ -142,7 +142,7 @@ f <- function() {
 }
 #++++
 f: fn() -> fn() -> integer
-46..52 warning[unused] `helper` is assigned but never used.
+46..52 warning[unused] `helper` is assigned but never used
 
 #==== conventions
 #---- dot_prefixed_local_is_ignored
@@ -230,7 +230,7 @@ f <- function(x) {
 }
 #++++
 f: <T: arithmetic> fn(x: T) -> T
-21..22 warning[unused] `z` is assigned but never used.
+21..22 warning[unused] `z` is assigned but never used
 
 #---- next_method_forwards_a_reassigned_formal
 print.myc <- function(x, ...) {
@@ -247,7 +247,7 @@ print.myc <- function(x, ...) {
 }
 #++++
 print.myc: <T> fn(x: T, ...: Any) -> Any
-34..35 warning[unused] `y` is assigned but never used.
+34..35 warning[unused] `y` is assigned but never used
 
 #---- call_generic_without_arguments_forwards_the_formals
 setClass("A", representation(x = "numeric"))
@@ -292,7 +292,7 @@ f <- function(cl) {
 }
 #++++
 f: <T> fn(cl: T) -> Unknown
-31..32 warning[unused] `b` is assigned but never used.
+31..32 warning[unused] `b` is assigned but never used
 
 #---- get_and_exists_read_a_literal_name
 f <- function() {

@@ -183,7 +183,7 @@ error: expected `]` after the optional parameter name
 #: Box[integer]
 items <- list(1L)
 #++++
-error: Type arguments go in angle brackets, as `Box<...>`. Only `list` takes its element type in square brackets.
+error: type arguments go in angle brackets, as `Box<...>`. Only `list` takes its element type in square brackets
  --> 1:7
   | #: Box[integer]
   |       ^^^^^^^^^

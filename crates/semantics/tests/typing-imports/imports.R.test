@@ -9,7 +9,7 @@ f: <T> fn(x: T) -> data.table
 f <- function(x) setDT(x)
 #++++
 f: <T> fn(x: T) -> Unknown
-17..22 warning[unresolved] I could not resolve `setDT` in this package, its imports, or builtins.
+17..22 warning[unresolved] I could not resolve `setDT` in this package, its imports, or builtins
 
 #---- imports_in_both_branches_of_a_namespace_if_count
 #namespace if (.Platform$OS.type == "windows") { importFrom(data.table, setDT) } else importFrom(data.table, fread)
@@ -36,7 +36,7 @@ f: <T> fn(x: T) -> Unknown
 f <- function(x) zzz_not_exported(x)
 #++++
 f: <T> fn(x: T) -> Unknown
-42..58 warning[unresolved] I could not resolve `zzz_not_exported` in this package, its imports, or builtins.
+42..58 warning[unresolved] I could not resolve `zzz_not_exported` in this package, its imports, or builtins
 
 #---- r6_injects_self_and_private_into_method_bodies
 #namespace importFrom(R6, R6Class)
@@ -67,7 +67,7 @@ f <- function(x) zzframboz(x)
 #++++
 Any
 f: <T> fn(x: T) -> Unknown
-291..300 warning[unresolved] I could not resolve `zzframboz` in this package, its imports, or builtins.
+291..300 warning[unresolved] I could not resolve `zzframboz` in this package, its imports, or builtins
 
 #---- attaching_a_different_unstubbed_package_still_tolerates
 #description Package: tallyr
@@ -76,7 +76,7 @@ f <- function(x) zzframboz(x)
 #++++
 Any
 f: <T> fn(x: T) -> Unknown
-64..73 warning[unresolved] I could not resolve `zzframboz` in this package, its imports, or builtins.
+64..73 warning[unresolved] I could not resolve `zzframboz` in this package, its imports, or builtins
 
 #---- a_blanket_tolerance_still_reports_a_typo_of_the_project_s_own_name
 library(testthat)
@@ -124,7 +124,7 @@ g <- function(d) zzframboz(d)
 f: <T> fn(x: T) -> Unknown
 g: <T> fn(d: T) -> Unknown
 17..23 warning[unresolved] I could not resolve `lenght` in this package, its imports, or builtins. Did you mean `length`?
-44..53 warning[unresolved] I could not resolve `zzframboz` in this package, its imports, or builtins.
+44..53 warning[unresolved] I could not resolve `zzframboz` in this package, its imports, or builtins
 
 #==== ggplot2
 #---- a_plot_pipeline_types_end_to_end
@@ -212,7 +212,7 @@ f: <T> fn(d: T) -> T
 f <- function(d) unshipped::mutate(d, x = 1)
 #++++
 f: <T> fn(d: T) -> Unknown
-17..34 warning[unresolved] unknown package namespace `unshipped`.
+17..34 warning[unresolved] unknown package namespace `unshipped`
 
 #---- a_shipped_package_may_be_read_by_qualification_alone
 f <- function(d) dplyr::mutate(d, x = 1)
@@ -259,7 +259,7 @@ call_it <- function() tallyr::helper(1:3)
 tally: <T> fn(x: T) -> integer
 helper: <T> fn(x: T) -> integer
 call_it: fn() -> Unknown
-290..304 warning[unresolved] `helper` is not exported by `tallyr`, so this read fails once the package is installed. Export it in `NAMESPACE`, or write `tallyr:::helper`.
+290..304 warning[unresolved] `helper` is not exported by `tallyr`, so this read fails once the package is installed. Export it in `NAMESPACE`, or write `tallyr:::helper`
 
 #---- an_own_read_of_a_misspelled_export_suggests_it
 #description Package: tallyr
@@ -281,7 +281,7 @@ call_it <- function() tallyr::zzqqxx(1:3)
 #++++
 tally: <T> fn(x: T) -> integer
 call_it: fn() -> Unknown
-202..216 warning[unresolved] `zzqqxx` is not exported by `tallyr`.
+202..216 warning[unresolved] `zzqqxx` is not exported by `tallyr`
 
 #---- an_own_read_of_an_internal_name_is_not_respelled
 # `tally_one` is a letter away from the export `tally_all`, but the package
@@ -295,7 +295,7 @@ call_it <- function() tallyr::tally_one(1:3)
 tally_all: <T> fn(x: T) -> integer
 tally_one: <T> fn(x: T) -> integer
 call_it: fn() -> Unknown
-294..311 warning[unresolved] `tally_one` is not exported by `tallyr`, so this read fails once the package is installed. Export it in `NAMESPACE`, or write `tallyr:::tally_one`.
+294..311 warning[unresolved] `tally_one` is not exported by `tallyr`, so this read fails once the package is installed. Export it in `NAMESPACE`, or write `tallyr:::tally_one`
 
 #---- an_own_triple_colon_read_reaches_internals
 #description Package: tallyr
@@ -335,7 +335,7 @@ call_it: fn() -> Unknown
 call_it <- function(d) unshipped::mutate(d, x = 1)
 #++++
 call_it: <T> fn(d: T) -> Unknown
-51..68 warning[unresolved] unknown package namespace `unshipped`.
+51..68 warning[unresolved] unknown package namespace `unshipped`
 
 #==== datatable
 #---- declared_dependency_activates_the_stub
@@ -348,7 +348,7 @@ load: fn(path: character) -> data.table
 load <- function(path) fread(path)
 #++++
 load: <T> fn(path: T) -> Unknown
-23..28 warning[unresolved] I could not resolve `fread` in this package, its imports, or builtins.
+23..28 warning[unresolved] I could not resolve `fread` in this package, its imports, or builtins
 
 #---- manifest_only_and_qualified_only_names_stay_dark_until_activated
 # `alloc.col` is a data.table export with no typed declaration, and `parallel` is
@@ -358,7 +358,7 @@ spread <- function(xs) mclapply(xs, length)
 #++++
 grow: <T> fn(x: T) -> Unknown
 spread: <T> fn(xs: T) -> Unknown
-153..162 warning[unresolved] I could not resolve `alloc.col` in this package, its imports, or builtins.
+153..162 warning[unresolved] I could not resolve `alloc.col` in this package, its imports, or builtins
 189..197 warning[unresolved] I could not resolve `mclapply` in this package, its imports, or builtins. Did you mean `lapply`?
 
 #---- activation_reaches_manifest_only_and_qualified_only_names
@@ -481,7 +481,7 @@ counts: <T> fn(df: T) -> T
 f <- function(df) mutate(df, x = 1)
 #++++
 f: <T> fn(df: T) -> Unknown
-18..24 warning[unresolved] I could not resolve `mutate` in this package, its imports, or builtins.
+18..24 warning[unresolved] I could not resolve `mutate` in this package, its imports, or builtins
 
 #==== native_symbols
 #---- registered_routines_with_a_prefix_resolve
@@ -499,7 +499,7 @@ other <- function() C_size
 #++++
 size: <T> fn(x: T) -> Unknown
 other: fn() -> Unknown
-108..114 warning[unresolved] I could not resolve `C_size` in this package, its imports, or builtins.
+108..114 warning[unresolved] I could not resolve `C_size` in this package, its imports, or builtins
 
 #---- listed_symbols_resolve_with_their_prefix
 #namespace useDynLib(memo, hash, alias = digest_impl, .fixes = "c_")
@@ -510,13 +510,13 @@ plain <- function(x) .Call(hash, x)
 h: <T> fn(x: T) -> Unknown
 a: <T> fn(x: T) -> Unknown
 plain: <T> fn(x: T) -> Unknown
-165..169 warning[unresolved] I could not resolve `hash` in this package, its imports, or builtins.
+165..169 warning[unresolved] I could not resolve `hash` in this package, its imports, or builtins
 
 #---- without_use_dyn_lib_a_routine_is_unresolved
 f <- function(x) .Call(C_endpoints, x)
 #++++
 f: <T> fn(x: T) -> Unknown
-23..34 warning[unresolved] I could not resolve `C_endpoints` in this package, its imports, or builtins.
+23..34 warning[unresolved] I could not resolve `C_endpoints` in this package, its imports, or builtins
 
 #---- a_parameter_named_like_an_unknown_import_calls_the_import
 #namespace import(fs)
@@ -540,7 +540,7 @@ package_file: fn(path: character) -> Any
 apply_twice <- function(path) path(path)
 #++++
 apply_twice: Unknown
-30..40 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`.
+30..40 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`
 
 #---- an_xml_nodeset_is_a_list_of_nodes_and_keeps_its_class_when_subset
 #namespace import(xml2)
@@ -751,7 +751,7 @@ fields: fn(groups: list[integer[]]) -> Any
 pairs: fn(n: integer) -> list[list[integer]]
 running: fn(xs: double[]) -> double
 weighted: fn(groups: list[double[]], weights: double[]) -> list[double]
-245..251 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `integer[]`. Extract an element with `[[` instead.
+245..251 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `integer[]`. Extract an element with `[[` instead
 
 #---- a_subclass_subsets_with_its_own_method_before_its_representation
 #namespace importFrom(xts, xts)

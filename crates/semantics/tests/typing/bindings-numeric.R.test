@@ -244,7 +244,7 @@ f <- function(x) {
 }
 #++++
 f: <T: arithmetic> fn(x: T) -> T
-21..22 warning[unused] `y` is assigned but never used.
+21..22 warning[unused] `y` is assigned but never used
 
 #---- param_sum_then_compare
 f <- function(a, b) a + b > 0L

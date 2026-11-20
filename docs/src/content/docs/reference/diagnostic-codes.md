@@ -192,7 +192,7 @@ consumes a value. A format with `%1$s` positions, a format that is not a literal
 or a named argument other than `fmt` turns the check off for that call.
 
 ```text
-! This format wants 2 values but sprintf() gets 1 value, so R stops with "too few arguments"
+! this format wants 2 values but sprintf() gets 1 value, so R stops with "too few arguments"
 ```
 
 **`length-test`** (warning): a comparison inside `length()`, such as `length(x == 0)`. It counts

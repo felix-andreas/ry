@@ -18,10 +18,10 @@ x <- 1L
 #++++
 == R/main.R
 Unknown
-0..1 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
+0..1 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins
 == inst/scripts/helper.R
 x: integer
-0..1 warning[unused] `x` is assigned but never used.
+0..1 warning[unused] `x` is assigned but never used
 
 #---- script_value_does_not_contribute_to_other_script
 #~~~~ inst/scripts/a.R
@@ -31,10 +31,10 @@ x
 #++++
 == inst/scripts/a.R
 x: integer
-0..1 warning[unused] `x` is assigned but never used.
+0..1 warning[unused] `x` is assigned but never used
 == inst/scripts/b.R
 Unknown
-0..1 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
+0..1 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins
 
 #---- package_and_script_same_value_name_do_not_conflict
 #~~~~ R/main.R
@@ -46,7 +46,7 @@ x <- 2L
 x: integer
 == inst/scripts/helper.R
 x: integer
-0..1 warning[unused] `x` is assigned but never used.
+0..1 warning[unused] `x` is assigned but never used
 
 #==== type_lookup
 #---- script_can_consume_package_global_type
@@ -59,7 +59,7 @@ value <- 1L
 == R/main.R
 == inst/scripts/helper.R
 value: Person
-10..15 warning[unused] `value` is assigned but never used.
+10..15 warning[unused] `value` is assigned but never used
 19..21 error[type-mismatch] expected `Person`, found `integer`. The value has the right shape, but `Person` is a nominal type, so only `@Person(...)` or `#: @new Person` creates one
 
 #---- script_type_does_not_contribute_project_global
@@ -71,7 +71,7 @@ value <- 1L
 #++++
 == R/main.R
 value: integer
-3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
+3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 == inst/scripts/helper.R
 
 #---- script_type_does_not_contribute_to_other_script
@@ -84,8 +84,8 @@ value <- 1L
 == inst/scripts/a.R
 == inst/scripts/b.R
 value: integer
-3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
-10..15 warning[unused] `value` is assigned but never used.
+3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
+10..15 warning[unused] `value` is assigned but never used
 
 #---- package_and_script_same_type_name_do_not_conflict
 #~~~~ R/main.R

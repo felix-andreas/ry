@@ -263,13 +263,13 @@ pub fn misplaced_directives(annotation: &SyntaxNode) -> Vec<(&'static str, TextR
     {
         match directive_name(&directive).as_str() {
             "forall" if saw_param || saw_return => misplaced.push((
-                "`@forall` directives must appear before `@param`, `@return`, or `@returns` in the same `#:` block.",
+                "`@forall` directives must appear before `@param`, `@return`, or `@returns` in the same `#:` block",
                 directive.text_range(),
             )),
             "param" => {
                 if saw_return {
                     misplaced.push((
-                        "`@param` directives must appear before `@return` or `@returns` in the same `#:` block.",
+                        "`@param` directives must appear before `@return` or `@returns` in the same `#:` block",
                         directive.text_range(),
                     ));
                 }
@@ -278,7 +278,7 @@ pub fn misplaced_directives(annotation: &SyntaxNode) -> Vec<(&'static str, TextR
             "return" | "returns" => {
                 if saw_return {
                     misplaced.push((
-                        "cannot use more than one `@return` or `@returns` directive in the same `#:` block.",
+                        "cannot use more than one `@return` or `@returns` directive in the same `#:` block",
                         directive.text_range(),
                     ));
                 }
@@ -584,7 +584,7 @@ pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
                 if form == BlockForm::Compact {
                     if directives.contains(&name) {
                         return Some(BlockRefusal::FormMixing(format!(
-                            "`@{name}` appears more than once in this `#:` block. Keep one."
+                            "`@{name}` appears more than once in this `#:` block. Keep one"
                         )));
                     }
                     directives.push(name);
@@ -607,14 +607,14 @@ pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
             | (Some(BlockForm::Definition), BlockForm::Definition)
             | (Some(BlockForm::Expanded), BlockForm::Expanded) => None,
             (Some(BlockForm::Compact), BlockForm::Compact) => Some(
-                "Only one compact annotation fits in a `#:` block. Separate the annotations with a blank line so each gets its own block.",
+                "only one compact annotation fits in a `#:` block. Separate the annotations with a blank line so each gets its own block",
             ),
             (Some(BlockForm::Definition), _) | (_, BlockForm::Definition) => Some(
-                "A type definition needs its own `#:` block. Separate it from other annotations with a blank line.",
+                "a type definition needs its own `#:` block. Separate it from other annotations with a blank line",
             ),
             (Some(BlockForm::Compact), BlockForm::Expanded)
             | (Some(BlockForm::Expanded), BlockForm::Compact) => Some(
-                "A `#:` block uses either one compact annotation or `@param`/`@return` lines, not both. Separate the two forms with a blank line.",
+                "a `#:` block uses either one compact annotation or `@param`/`@return` lines, not both. Separate the two forms with a blank line",
             ),
         };
         if let Some(message) = mixing {

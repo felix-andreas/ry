@@ -102,15 +102,15 @@ print(totl)
 ```text ry check
 assignment-operator
 
-  ! Use <-, not =, for assignment
+  ! use <-, not =, for assignment
 
 boolean-shorthand
 
-  ! Use TRUE, not T, for Boolean values
+  ! use TRUE, not T, for Boolean values
 
 trailing-comma
 
-  ! Unexpected comma after last argument
+  ! unexpected comma after last argument
 ```
 
 The other eight flag code that reads right but does something else:
@@ -311,7 +311,9 @@ tab choice holds on every page.
 
 The body is checked against the signature too: a function declared `-> logical` that returns a
 string is an error at the return value. `[name]` in a `#:` signature marks a parameter callers may
-omit, as in `#: fn(name: character, [greeting]: character) -> character`. Annotate where code meets
+omit, as in `#: fn(name: character, [greeting]: character) -> character`, and `...: TYPE` types
+the arguments a function's `...` absorbs, as an S3 method needs: `#: fn(x: Celsius, ...: Any) ->
+character`. Annotate where code meets
 other code: exported functions, values read from files, and any contract you want enforced.
 Inference covers the rest.
 

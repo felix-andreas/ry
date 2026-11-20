@@ -9,8 +9,8 @@ mirror: <T> fn(x: T) -> T
 alias: <T> fn(x: T) -> T
 first: integer
 second: character
-40..45 warning[unused] `first` is assigned but never used.
-59..65 warning[unused] `second` is assigned but never used.
+40..45 warning[unused] `first` is assigned but never used
+59..65 warning[unused] `second` is assigned but never used
 
 #---- later_items_see_earlier_bindings
 radius <- 2.5
@@ -20,7 +20,7 @@ describe <- function() area + 1
 radius: double
 area: double
 describe: fn() -> double
-45..53 warning[unused] `describe` is assigned but never used.
+45..53 warning[unused] `describe` is assigned but never used
 
 #---- rebinding_changes_later_uses
 x <- 1L
@@ -32,8 +32,8 @@ x: integer
 first_use: integer
 x: character
 second_use: fn() -> integer
-8..17 warning[unused] `first_use` is assigned but never used.
-40..50 warning[unused] `second_use` is assigned but never used.
+8..17 warning[unused] `first_use` is assigned but never used
+40..50 warning[unused] `second_use` is assigned but never used
 
 #---- script_calls_its_own_helpers
 double_it <- function(n) n * 2L
@@ -41,7 +41,7 @@ result <- double_it(21L)
 #++++
 double_it: <T: arithmetic> fn(n: T) -> T
 result: integer
-32..38 warning[unused] `result` is assigned but never used.
+32..38 warning[unused] `result` is assigned but never used
 
 #---- script_local_type_declarations
 #: @type Point {list{x: double, y: double}}
@@ -52,7 +52,7 @@ norm <- function() origin$x
 #++++
 origin: Point
 norm: fn() -> double
-88..92 warning[unused] `norm` is assigned but never used.
+88..92 warning[unused] `norm` is assigned but never used
 
 #---- stub_names_still_resolve
 sizes <- c(3L, 1L, 2L)
@@ -60,7 +60,7 @@ total <- sum(sizes)
 #++++
 sizes: integer[]
 total: integer
-23..28 warning[unused] `total` is assigned but never used.
+23..28 warning[unused] `total` is assigned but never used
 
 #---- script_definition_shadows_a_stub
 sum <- function(a, b) a + b
@@ -68,7 +68,7 @@ shadowed <- sum(1L, 2L)
 #++++
 sum: <T: numeric> fn(a: T, b: T) -> T
 shadowed: integer
-28..36 warning[unused] `shadowed` is assigned but never used.
+28..36 warning[unused] `shadowed` is assigned but never used
 
 #---- aliased_function_reference_exports_closed
 f <- function(p) p
@@ -78,7 +78,7 @@ h <- function() g()
 f: <T> fn(p: T) -> T
 g: <T> fn(p: T) -> T
 h: Unknown
-26..27 warning[unused] `h` is assigned but never used.
+26..27 warning[unused] `h` is assigned but never used
 42..43 error[type-mismatch] this call leaves out `p`, which the function requires
 
 #---- unused_marks_the_name_not_the_multiline_value
@@ -87,26 +87,26 @@ helper <- function(count) {
 }
 #++++
 helper: <T: arithmetic> fn(count: T) -> T
-0..6 warning[unused] `helper` is assigned but never used.
+0..6 warning[unused] `helper` is assigned but never used
 
 #---- unused_super_assignment_marks_the_name
 counter <<- 0L
 #++++
 counter: integer
-0..7 warning[unused] `counter` is assigned but never used.
+0..7 warning[unused] `counter` is assigned but never used
 
 #---- unused_generic_marks_the_name_string
 setGeneric("area", function(shape) standardGeneric("area"))
 #++++
 character
-12..16 warning[unused] `area` is assigned but never used.
+12..16 warning[unused] `area` is assigned but never used
 
 #---- a_walrus_statement_defines_nothing
 x := 1
 #++++
 Unknown
-0..1 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
-2..4 warning[unresolved] I could not resolve ``:=`` in this package, its imports, or builtins.
+0..1 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins
+2..4 warning[unresolved] I could not resolve ``:=`` in this package, its imports, or builtins
 
 #---- a_declared_contract_survives_a_failing_body
 #: fn(spec: character) -> integer
@@ -146,7 +146,7 @@ print(label)
 #++++
 total: character
 T
-466..471 warning[unused] `total` is assigned but never used.
+466..471 warning[unused] `total` is assigned but never used
 475..484 error[syntax-error] this is a value, not a name, so nothing can be assigned to it. The operator at the end of this line pulled the next line in as its right-hand side
 501..506 warning[unresolved] I could not resolve `label` in this package, its imports, or builtins. Did you mean `labels`?
 
@@ -157,7 +157,7 @@ a <- 1L
 #++++
 a: integer
 integer
-56..57 warning[unused] `a` is assigned but never used.
+56..57 warning[unused] `a` is assigned but never used
 64..69 error[syntax-error] this is a value, not a name, so nothing can be assigned to it
 
 #---- a_multiline_target_earns_no_hint_when_the_operator_starts_its_line
@@ -190,7 +190,7 @@ negated <- 1L
 #++++
 negated: integer
 integer
-0..7 warning[unused] `negated` is assigned but never used.
+0..7 warning[unused] `negated` is assigned but never used
 14..22 error[syntax-error] this is a value, not a name, so nothing can be assigned to it
 
 #---- a_string_target_binds_the_name_it_spells
@@ -204,7 +204,7 @@ print(limit)
 x: integer
 limit: integer
 integer
-244..247 warning[unused] `x` is assigned but never used.
+244..247 warning[unused] `x` is assigned but never used
 
 #---- a_string_target_works_with_super_assign_and_dotted_names
 # The name-target arm handles both spellings, so `<<-` and a name carrying `.`
@@ -231,7 +231,7 @@ attr(v, "k") <- 1L
 v: double[]
 character[]
 integer
-42..43 warning[unused] `v` is assigned but never used.
+42..43 warning[unused] `v` is assigned but never used
 
 #---- use_before_any_definition_is_unresolved
 b <- a
@@ -243,7 +243,7 @@ b: Unknown
 a: integer
 T
 integer
-5..6 warning[unresolved] I could not resolve `a` in this package, its imports, or builtins.
+5..6 warning[unresolved] I could not resolve `a` in this package, its imports, or builtins
 
 #---- read_inside_the_defining_statement_is_unresolved
 x <- x + 1L
@@ -251,7 +251,7 @@ print(x)
 #++++
 x: Unknown
 T
-5..6 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
+5..6 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins
 
 #---- self_recursive_closure_resolves
 a <- function() a()
@@ -301,9 +301,9 @@ step: character
 between: character
 step: logical
 after: logical
-406..410 warning[unused] `step` is assigned but never used.
-431..438 warning[unused] `between` is assigned but never used.
-460..465 warning[unused] `after` is assigned but never used.
+406..410 warning[unused] `step` is assigned but never used
+431..438 warning[unused] `between` is assigned but never used
+460..465 warning[unused] `after` is assigned but never used
 
 #---- a_scripts_closure_sees_the_last_binding_in_the_file
 # A closure runs once the file's frame has settled, so a deferred read sees the
@@ -315,7 +315,7 @@ total <- "settled"
 report: fn() -> character
 total: integer
 total: character
-148..154 warning[unused] `report` is assigned but never used.
+148..154 warning[unused] `report` is assigned but never used
 
 #==== conditional_slots
 #---- a_conditional_write_joins_the_earlier_binding
@@ -328,7 +328,7 @@ flag: logical
 x: integer
 character | NULL
 y: integer | character
-45..46 warning[unused] `y` is assigned but never used.
+45..46 warning[unused] `y` is assigned but never used
 
 #---- a_loop_write_joins_the_earlier_binding
 flag <- is.na(NA)
@@ -342,7 +342,7 @@ flag: logical
 z: integer
 NULL
 w: integer | character
-54..55 warning[unused] `w` is assigned but never used.
+54..55 warning[unused] `w` is assigned but never used
 
 #---- a_conditional_write_with_no_earlier_binding_keeps_its_type
 if (is.na(NA)) q <- "a"
@@ -350,7 +350,7 @@ r <- q
 #++++
 character | NULL
 r: character
-24..25 warning[unused] `r` is assigned but never used.
+24..25 warning[unused] `r` is assigned but never used
 
 #---- a_nested_assignment_binds_at_top_level
 other <- (value <- 1L)
@@ -358,8 +358,8 @@ copy <- value
 #++++
 other: integer
 copy: integer
-0..5 warning[unused] `other` is assigned but never used.
-23..27 warning[unused] `copy` is assigned but never used.
+0..5 warning[unused] `other` is assigned but never used
+23..27 warning[unused] `copy` is assigned but never used
 
 #---- loop_binding_resolves_a_later_read
 for (i in 1:3) x <- i
@@ -372,7 +372,7 @@ integer
 for (i in 1:3) dead <- i + 1L
 #++++
 NULL
-15..19 warning[unused] `dead` is assigned but never used.
+15..19 warning[unused] `dead` is assigned but never used
 
 #---- loop_reading_its_carried_variable_stays_alive
 x <- 1L
@@ -389,7 +389,7 @@ print(g)
 g: <T> fn(x: T) -> T
 NULL
 fn(x: Unknown) -> Unknown
-39..40 warning[unresolved] I could not resolve `f` in this package, its imports, or builtins.
+39..40 warning[unresolved] I could not resolve `f` in this package, its imports, or builtins
 
 #==== reads_that_keep_bindings_alive
 #---- pipe_read_is_a_use
@@ -416,7 +416,7 @@ print(guard)
 #++++
 guard: <T> fn([con]: T) -> logical
 fn([con]: T) -> logical
-383..391 warning[unresolved] I could not resolve `rollback` in this package, its imports, or builtins.
+383..391 warning[unresolved] I could not resolve `rollback` in this package, its imports, or builtins
 
 #---- a_real_dead_store_beside_an_on_exit_guard_still_reports
 guard <- function(con) {
@@ -431,8 +431,8 @@ print(guard)
 #++++
 guard: <T> fn([con]: T) -> integer
 fn([con]: T) -> integer
-72..80 warning[unresolved] I could not resolve `rollback` in this package, its imports, or builtins.
-89..96 warning[unused] `scratch` is assigned but never used.
+72..80 warning[unresolved] I could not resolve `rollback` in this package, its imports, or builtins
+89..96 warning[unused] `scratch` is assigned but never used
 
 #---- s3_dispatch_is_a_use
 # Nothing reads `speak.dog` — every call goes through the generic — so the
@@ -454,7 +454,7 @@ print(1L)
 #++++
 render.thing: <T> fn(x: T) -> T
 integer
-0..12 warning[unused] `render.thing` is assigned but never used.
+0..12 warning[unused] `render.thing` is assigned but never used
 
 #---- operator_use_is_a_use
 `%||%` <- function(a, b) if (is.null(a)) b else a
@@ -471,7 +471,7 @@ print(1L)
 #++++
 %unused%: <T, U> fn(a: T, [b]: U) -> T
 integer
-0..10 warning[unused] `%unused%` is assigned but never used.
+0..10 warning[unused] `%unused%` is assigned but never used
 
 #---- a_local_operator_use_is_a_use
 # The operator name is a read, and it has to reach the SLOT, not just the
@@ -498,7 +498,7 @@ print(dead(1L))
 #++++
 dead: <T> fn(x: T) -> T
 integer
-96..106 warning[unused] `%unused%` is assigned but never used.
+96..106 warning[unused] `%unused%` is assigned but never used
 
 #---- a_local_alias_of_a_namespaced_operator_is_a_use
 # The shape packages actually write, and the one that was reported wrongly:
@@ -536,7 +536,7 @@ p <- p - 1L
 #++++
 p: character
 p: Unknown
-12..13 warning[unused] `p` is assigned but never used.
+12..13 warning[unused] `p` is assigned but never used
 17..18 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- loop_carried_read_starts_from_the_earlier_binding
@@ -557,7 +557,7 @@ n: integer
 n: integer
 n: double
 final: fn() -> double
-33..38 warning[unused] `final` is assigned but never used.
+33..38 warning[unused] `final` is assigned but never used
 
 #==== top_level_guards
 #---- a_guard_narrows_a_top_level_variable
@@ -582,7 +582,7 @@ want_chr: fn(s: character) -> character
 maybe: fn() -> character | NULL
 x: character | NULL
 character
-419..426 warning[unused] `message` is assigned but never used.
+419..426 warning[unused] `message` is assigned but never used
 
 #---- a_negated_top_level_guard_narrows_the_other_edge
 #: fn(s: character) -> character
@@ -598,7 +598,7 @@ want_chr: fn(s: character) -> character
 maybe: fn() -> character | NULL
 x: character | NULL
 narrowed: character
-127..135 warning[unused] `narrowed` is assigned but never used.
+127..135 warning[unused] `narrowed` is assigned but never used
 
 #---- a_family_guard_narrows_a_top_level_variable
 #: fn(s: character) -> character
@@ -614,7 +614,7 @@ want_chr: fn(s: character) -> character
 mixed: fn() -> character | integer
 y: character | integer
 narrowed: character
-128..136 warning[unused] `narrowed` is assigned but never used.
+128..136 warning[unused] `narrowed` is assigned but never used
 
 #---- a_refinement_does_not_outlive_its_statement
 # Checking is per top-level statement, so the following statement reads the
@@ -635,7 +635,7 @@ maybe: fn() -> character | NULL
 x: character | NULL
 NULL
 after: Unknown
-371..376 warning[unused] `after` is assigned but never used.
+371..376 warning[unused] `after` is assigned but never used
 389..390 error[type-mismatch] expected `character`, found `character | NULL`
 
 #---- the_early_return_idiom_narrows_inside_one_braced_statement
@@ -654,7 +654,7 @@ maybe <- function() NULL
 want_chr: fn(s: character) -> character
 maybe: fn() -> character | NULL
 character
-162..166 warning[unused] `kept` is assigned but never used.
+162..166 warning[unused] `kept` is assigned but never used
 
 #==== duplicate_type_names
 #---- a_name_declared_twice_in_one_script_is_a_duplicate
@@ -669,11 +669,11 @@ character
 use_it <- function(t) t
 #++++
 use_it: fn(t: Thing) -> character
-234..255 error[annotation] The type name `Thing` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace, which for a script is this file.
+234..255 error[annotation] the type name `Thing` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace, which for a script is this file
   = 260..284 another definition of this name is here
-260..284 error[annotation] The type name `Thing` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace, which for a script is this file.
+260..284 error[annotation] the type name `Thing` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace, which for a script is this file
   = 234..255 another definition of this name is here
-315..321 warning[unused] `use_it` is assigned but never used.
+315..321 warning[unused] `use_it` is assigned but never used
 
 #---- a_type_and_an_alias_of_one_name_conflict_too
 #: @type Thing {double}
@@ -683,11 +683,11 @@ use_it: fn(t: Thing) -> character
 keep <- 1.0
 #++++
 keep: double
-3..23 error[annotation] The type name `Thing` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace, which for a script is this file.
+3..23 error[annotation] the type name `Thing` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace, which for a script is this file
   = 28..52 another definition of this name is here
-28..52 error[annotation] The type name `Thing` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace, which for a script is this file.
+28..52 error[annotation] the type name `Thing` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace, which for a script is this file
   = 3..23 another definition of this name is here
-54..58 warning[unused] `keep` is assigned but never used.
+54..58 warning[unused] `keep` is assigned but never used
 
 #---- distinct_names_in_one_script_are_fine
 #: @alias First {double}
@@ -697,7 +697,7 @@ keep: double
 keep <- 1.0
 #++++
 keep: double
-56..60 warning[unused] `keep` is assigned but never used.
+56..60 warning[unused] `keep` is assigned but never used
 
 #==== quoting_forms
 #---- a_quoted_assignment_binds_nothing
@@ -714,7 +714,7 @@ print(built)
 built: Any
 T
 T
-467..473 warning[unresolved] I could not resolve `target` in this package, its imports, or builtins.
+467..473 warning[unresolved] I could not resolve `target` in this package, its imports, or builtins
 
 #---- quoted_code_is_not_judged
 # Quoted code is data: R does not run the call, so checking it reports errors
@@ -727,8 +727,8 @@ direct <- takes_two(1)
 takes_two: <T: numeric> fn(a: T, b: T) -> T
 quoted: Any
 direct: Unknown
-267..273 warning[unused] `quoted` is assigned but never used.
-301..307 warning[unused] `direct` is assigned but never used.
+267..273 warning[unused] `quoted` is assigned but never used
+301..307 warning[unused] `direct` is assigned but never used
 311..320 error[type-mismatch] this call leaves out `b`, which the function requires
 
 #---- a_quoted_read_still_keeps_a_write_alive
@@ -760,9 +760,9 @@ m <- List.length([1L])
 #++++
 n: Unknown
 m: Unknown
-78..79 warning[unused] `n` is assigned but never used.
+78..79 warning[unused] `n` is assigned but never used
 83..93 warning[unresolved] ry's standard library has no function `lenght` in `Str`. Did you mean `Str.count_utf8_bytes`?
-101..102 warning[unused] `m` is assigned but never used.
+101..102 warning[unused] `m` is assigned but never used
 106..117 warning[unresolved] ry's standard library has no function `length` in `List`. Did you mean `List.len`?
 
 #---- a_number_where_a_callback_goes_names_the_parameter_types
@@ -770,5 +770,5 @@ m: Unknown
 mapped <- Result.map(:Ok(1L), 3)
 #++++
 mapped: Unknown
-84..90 warning[unused] `mapped` is assigned but never used.
+84..90 warning[unused] `mapped` is assigned but never used
 114..115 error[type-mismatch] expected a function that takes `integer`, found `double`

@@ -799,14 +799,14 @@ Any
 deviation <- stats::sd(c(1, 2, 3))
 #++++
 deviation: double
-0..9 warning[unused] `deviation` is assigned but never used.
+0..9 warning[unused] `deviation` is assigned but never used
 
 #---- unknown_namespace_read_is_unknown
 mystery <- foobar::bazqux
 #++++
 mystery: Unknown
-0..7 warning[unused] `mystery` is assigned but never used.
-11..25 warning[unresolved] unknown package namespace `foobar`.
+0..7 warning[unused] `mystery` is assigned but never used
+11..25 warning[unresolved] unknown package namespace `foobar`
 
 #==== opaque_nominal_types
 #---- sys_date_returns_the_date_nominal
@@ -851,7 +851,7 @@ grow <- function() {
 }
 #++++
 grow: fn() -> double[] | NULL
-0..4 warning[unused] `grow` is assigned but never used.
+0..4 warning[unused] `grow` is assigned but never used
 
 #==== callback_forwarding
 #---- lapply_forwards_named_arguments_into_the_callback

@@ -310,8 +310,8 @@ two <- function(x) x
 #++++
 one: <T> fn(x: T) -> T
 two: <T> fn(x: T) -> T
-7..15 error[annotation] unknown type-parameter constraint `nonsense`; the available constraints are `numeric`, `arithmetic`, `atomic`, `key`, `scalar numeric`, `item`, `number`, or `eq`.
-59..71 error[annotation] unknown type-parameter constraint `scalar bogus`; the available constraints are `numeric`, `arithmetic`, `atomic`, `key`, `scalar numeric`, `item`, `number`, or `eq`.
+7..15 error[annotation] unknown type-parameter constraint `nonsense`; the available constraints are `numeric`, `arithmetic`, `atomic`, `key`, `scalar numeric`, `item`, `number`, or `eq`
+59..71 error[annotation] unknown type-parameter constraint `scalar bogus`; the available constraints are `numeric`, `arithmetic`, `atomic`, `key`, `scalar numeric`, `item`, `number`, or `eq`
 
 #---- value_annotation_checks
 #: integer
@@ -337,7 +337,7 @@ f: fn(x: integer) -> character
 n <- 1L
 #++++
 n: integer
-0..50 error[annotation] A type definition needs its own `#:` block. Separate it from other annotations with a blank line.
+0..50 error[annotation] a type definition needs its own `#:` block. Separate it from other annotations with a blank line
 
 #---- definition_mixed_with_expanded_is_refused
 #: @type Person {list{name: character}}
@@ -346,7 +346,7 @@ n: integer
 make <- function(count) list(name = "a")
 #++++
 make: <T> fn([count]: T) -> list{name: character}
-0..85 error[annotation] A type definition needs its own `#:` block. Separate it from other annotations with a blank line.
+0..85 error[annotation] a type definition needs its own `#:` block. Separate it from other annotations with a blank line
 
 #---- compact_mixed_with_expanded_is_refused
 #: fn(x: integer) -> integer
@@ -354,7 +354,7 @@ make: <T> fn([count]: T) -> list{name: character}
 f <- function(x) x
 #++++
 f: <T> fn(x: T) -> T
-0..49 error[annotation] A `#:` block uses either one compact annotation or `@param`/`@return` lines, not both. Separate the two forms with a blank line.
+0..49 error[annotation] a `#:` block uses either one compact annotation or `@param`/`@return` lines, not both. Separate the two forms with a blank line
 
 #---- a_repeated_compact_directive_is_named
 #: @new Money
@@ -362,14 +362,14 @@ f: <T> fn(x: T) -> T
 price <- 2
 #++++
 price: double
-0..27 error[annotation] `@new` appears more than once in this `#:` block. Keep one.
+0..27 error[annotation] `@new` appears more than once in this `#:` block. Keep one
 
 #---- square_brackets_after_a_type_name_point_to_angle_brackets
 #: Box[integer]
 items <- list(1L)
 #++++
 items: list{integer}
-6..15 error[annotation] Type arguments go in angle brackets, as `Box<...>`. Only `list` takes its element type in square brackets.
+6..15 error[annotation] type arguments go in angle brackets, as `Box<...>`. Only `list` takes its element type in square brackets
 
 #---- multiple_compact_annotations_are_refused
 #: integer
@@ -377,7 +377,7 @@ items: list{integer}
 n <- 1L
 #++++
 n: integer
-0..20 error[annotation] Only one compact annotation fits in a `#:` block. Separate the annotations with a blank line so each gets its own block.
+0..20 error[annotation] only one compact annotation fits in a `#:` block. Separate the annotations with a blank line so each gets its own block
 
 #---- declared_return_mismatch_blames_the_tail_expression
 #: fn(x: integer) -> character
@@ -398,9 +398,9 @@ f: fn(x: integer) -> character
 origin <- list(v = 1)
 #++++
 origin: list{v: double}
-3..32 error[annotation] The type name `Point` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+3..32 error[annotation] the type name `Point` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 37..59 another definition of this name is here
-37..59 error[annotation] The type name `Point` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+37..59 error[annotation] the type name `Point` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 3..32 another definition of this name is here
 
 #==== form
@@ -410,7 +410,7 @@ origin: list{v: double}
 render <- function(count) count
 #++++
 render: <T> fn(count: T) -> T
-24..46 error[annotation] `@param` directives must appear before `@return` or `@returns` in the same `#:` block.
+24..46 error[annotation] `@param` directives must appear before `@return` or `@returns` in the same `#:` block
 
 #---- multiple_returns_are_refused
 #: @param count {integer}
@@ -419,7 +419,7 @@ render: <T> fn(count: T) -> T
 render <- function(count) count
 #++++
 render: <T> fn(count: T) -> T
-50..70 error[annotation] cannot use more than one `@return` or `@returns` directive in the same `#:` block.
+50..70 error[annotation] cannot use more than one `@return` or `@returns` directive in the same `#:` block
 
 #---- forall_after_param_is_refused
 #: @param count {integer}
@@ -427,7 +427,7 @@ render: <T> fn(count: T) -> T
 render <- function(count) count
 #++++
 render: <T> fn(count: T) -> T
-29..38 error[annotation] `@forall` directives must appear before `@param`, `@return`, or `@returns` in the same `#:` block.
+29..38 error[annotation] `@forall` directives must appear before `@param`, `@return`, or `@returns` in the same `#:` block
 
 #---- duplicate_forall_parameter_is_refused
 #: @forall T
@@ -437,28 +437,28 @@ render: <T> fn(count: T) -> T
 f <- function(value) value
 #++++
 f: <T> fn(value: T) -> T
-24..29 error[annotation] duplicate type parameter name `T` in expanded function annotation.
+24..29 error[annotation] duplicate type parameter name `T` in expanded function annotation
 
 #---- duplicate_compact_binder_is_refused
 #: <T, T> fn(x: T) -> T
 f <- function(x) x
 #++++
 f: <T> fn(x: T) -> T
-7..8 error[annotation] duplicate type parameter name `T` in `<...>`.
+7..8 error[annotation] duplicate type parameter name `T` in `<...>`
 
 #---- duplicate_definition_parameter_is_refused
 #: @type Pair<T, T> {list{a: T, b: T}}
 value <- 1L
 #++++
 value: integer
-17..18 error[annotation] duplicate type parameter name `T` in named type definition.
+17..18 error[annotation] duplicate type parameter name `T` in named type definition
 
 #---- unknown_constraint_name_is_refused
 #: <T: frobnicate> fn(x: T) -> T
 f <- function(x) x
 #++++
 f: <T> fn(x: T) -> T
-7..17 error[annotation] unknown type-parameter constraint `frobnicate`; the available constraints are `numeric`, `arithmetic`, `atomic`, `key`, `scalar numeric`, `item`, `number`, or `eq`.
+7..17 error[annotation] unknown type-parameter constraint `frobnicate`; the available constraints are `numeric`, `arithmetic`, `atomic`, `key`, `scalar numeric`, `item`, `number`, or `eq`
 
 #---- a_refused_higher_rank_block_carries_no_payload
 # The parser refuses the binder and reads the type as if it were absent, which
@@ -491,7 +491,7 @@ f: <T: arithmetic> fn(count: T) -> T
 value <- 1L
 #++++
 value: integer
-55..68 error[annotation] `Wrap` is a type parameter here and takes no type arguments.
+55..68 error[annotation] `Wrap` is a type parameter here and takes no type arguments
 
 #==== dangling
 #---- empty_annotation_is_refused
@@ -499,14 +499,14 @@ value: integer
 value <- 1L
 #++++
 value: integer
-0..2 error[annotation] A `#:` typing comment must include a type expression.
+0..2 error[annotation] a `#:` typing comment must include a type expression
 
 #---- annotation_at_end_of_file_is_refused
 value <- 1L
 #: integer
 #++++
 value: integer
-12..22 error[annotation] A `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block.
+12..22 error[annotation] a `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block
 
 #---- blank_line_breaks_the_annotation
 #: integer
@@ -514,7 +514,7 @@ value: integer
 value <- "s"
 #++++
 value: character
-0..10 error[annotation] A `#:` typing comment cannot be separated from its expression by an empty line.
+0..10 error[annotation] a `#:` typing comment cannot be separated from its expression by an empty line
 
 #---- comment_between_annotation_and_expression_is_refused
 #: integer
@@ -522,7 +522,7 @@ value: character
 value <- 1L
 #++++
 value: integer
-0..10 error[annotation] A `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block.
+0..10 error[annotation] a `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block
 
 #---- expanded_annotation_separated_by_blank_line_is_refused
 #: @param count {integer}
@@ -530,7 +530,7 @@ value: integer
 render <- function(count) count
 #++++
 render: <T> fn(count: T) -> T
-0..25 error[annotation] A `#:` typing comment cannot be separated from its expression by an empty line.
+0..25 error[annotation] a `#:` typing comment cannot be separated from its expression by an empty line
 
 #---- definitions_and_strict_toggles_need_no_target
 #: @type Person {list{name: character}}
@@ -555,9 +555,9 @@ total: I64
 count: I64
 rate: F64
 f: fn() -> double
-11..21 error[annotation] This `#:` comment follows code on its line, so it annotates nothing. Put it on its own line, directly above the expression it describes.
-64..74 error[annotation] This `#:` comment follows code on its line, so it annotates nothing. Put it on its own line, directly above the expression it describes.
-118..130 error[annotation] This `#:` comment follows code on its line, so it annotates nothing. Put it on its own line, directly above the expression it describes.
+11..21 error[annotation] this `#:` comment follows code on its line, so it annotates nothing. Put it on its own line, directly above the expression it describes
+64..74 error[annotation] this `#:` comment follows code on its line, so it annotates nothing. Put it on its own line, directly above the expression it describes
+118..130 error[annotation] this `#:` comment follows code on its line, so it annotates nothing. Put it on its own line, directly above the expression it describes
 
 #---- pure_marks_only_a_top_level_binding
 #: @pure
@@ -586,7 +586,7 @@ quoted: fn() -> double
 value <- 1L
 #++++
 value: integer
-8..15 error[annotation] expected a nominal type reference after `@new`.
+8..15 error[annotation] expected a nominal type reference after `@new`
 
 #---- new_on_alias_is_refused
 #: @alias Meters {double}
@@ -595,7 +595,7 @@ value: integer
 h <- 1.8
 #++++
 h: double
-35..41 error[annotation] `@new` requires a nominal type declared with `@type`, but `Meters` is an alias.
+35..41 error[annotation] `@new` requires a nominal type declared with `@type`, but `Meters` is an alias
 
 #==== vectors
 #---- alias_vector_element_must_be_atomic
@@ -625,7 +625,7 @@ total <- count_all(list())
 #++++
 count_all: <T> fn(xs: T) -> integer
 total: integer
-10..20 error[annotation] I do not know the type `Undeclared`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
+10..20 error[annotation] I do not know the type `Undeclared`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 
 #---- a_bare_optional_parameter_causes_no_follow_on_findings
 #: fn(integer, [character]) -> integer
@@ -806,7 +806,7 @@ f <- function() {
 }
 #++++
 f: fn() -> character
-20..30 error[annotation] A `#:` typing comment cannot be separated from its expression by an empty line.
+20..30 error[annotation] a `#:` typing comment cannot be separated from its expression by an empty line
 
 #==== alias_callees
 #---- alias_typed_callee_expands_to_a_function
@@ -893,7 +893,7 @@ value <- {
 }
 #++++
 value: integer
-13..52 error[annotation] Type definition blocks are only allowed at the top level of a file.
+13..52 error[annotation] type definition blocks are only allowed at the top level of a file
 
 #---- named_parameters_pair_by_name_not_order
 #: fn(a: integer, b: character) -> character
@@ -1069,7 +1069,7 @@ mapped <- lapply(xs,
 #++++
 xs: list{integer}
 mapped: list[integer]
-38..66 error[annotation] A `#:` typing comment cannot be separated from its expression by an empty line.
+38..66 error[annotation] a `#:` typing comment cannot be separated from its expression by an empty line
 
 #---- a_braceless_function_body_does_attach_and_is_not_reported
 # The contrast, measured against a no-annotation control: these positions look

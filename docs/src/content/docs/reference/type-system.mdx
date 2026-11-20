@@ -4524,7 +4524,7 @@ logicals. Any other pair is a type error, and so is an ordering on a column of s
 ```text
 type-mismatch
 
-  x the join condition `t > label` compares numbers, but `label` is `character[]`. Only `==` joins strings.
+  x the join condition `t > label` compares numbers, but `label` is `character[]`. Only `==` joins strings
    --[a.R:6:32]
  6 | print(events[names, on = .(t > label)])
    |                                ^^^^^

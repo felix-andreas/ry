@@ -20,14 +20,14 @@ g <- 2L
 #++++
 == R/a.R
 g: integer
-0..1 warning[duplicate] Top-level binding `g` is overwritten by a later top-level binding in this package.
-  = 0..1 the later binding is here.
+0..1 warning[duplicate] top-level binding `g` is overwritten by a later top-level binding in this package
+  = 0..1 the later binding is here
 == R/b.R
 integer
 == R/c.R
 g: integer
-0..1 warning[duplicate] Top-level binding `g` overwrites an earlier top-level binding in this package.
-  = 0..1 the earlier binding is here.
+0..1 warning[duplicate] top-level binding `g` overwrites an earlier top-level binding in this package
+  = 0..1 the earlier binding is here
 
 #---- winner_flip_then_later_definer_drops
 #~~~~ R/a.R
@@ -56,18 +56,18 @@ g
 #++++
 == R/a.R
 g: integer
-0..1 warning[duplicate] Top-level binding `g` is overwritten by a later top-level binding in this package.
-  = 0..1 the later binding is here.
+0..1 warning[duplicate] top-level binding `g` is overwritten by a later top-level binding in this package
+  = 0..1 the later binding is here
 == R/b.R
 g: integer
-0..1 warning[duplicate] Top-level binding `g` overwrites an earlier top-level binding in this package.
-  = 0..1 the earlier binding is here.
-0..1 warning[duplicate] Top-level binding `g` is overwritten by a later top-level binding in this package.
-  = 0..1 the later binding is here.
+0..1 warning[duplicate] top-level binding `g` overwrites an earlier top-level binding in this package
+  = 0..1 the earlier binding is here
+0..1 warning[duplicate] top-level binding `g` is overwritten by a later top-level binding in this package
+  = 0..1 the later binding is here
 == R/c.R
 g: integer
-0..1 warning[duplicate] Top-level binding `g` overwrites an earlier top-level binding in this package.
-  = 0..1 the earlier binding is here.
+0..1 warning[duplicate] top-level binding `g` overwrites an earlier top-level binding in this package
+  = 0..1 the earlier binding is here
 == R/d.R
 integer
 
@@ -83,12 +83,12 @@ g
 #++++
 == R/a.R
 g: integer
-0..1 warning[duplicate] Top-level binding `g` is overwritten by a later top-level binding in this package.
-  = 0..1 the later binding is here.
+0..1 warning[duplicate] top-level binding `g` is overwritten by a later top-level binding in this package
+  = 0..1 the later binding is here
 == R/b.R
 g: integer
-0..1 warning[duplicate] Top-level binding `g` overwrites an earlier top-level binding in this package.
-  = 0..1 the earlier binding is here.
+0..1 warning[duplicate] top-level binding `g` overwrites an earlier top-level binding in this package
+  = 0..1 the earlier binding is here
 == R/c.R
 c_other: integer
 == R/d.R
@@ -100,7 +100,7 @@ g
 #++++
 == R/b.R
 Unknown
-0..1 warning[unresolved] I could not resolve `g` in this package, its imports, or builtins.
+0..1 warning[unresolved] I could not resolve `g` in this package, its imports, or builtins
 
 #---- earlier_path_insert
 #~~~~ R/b.R
@@ -123,12 +123,12 @@ g
 #++++
 == R/a.R
 g: integer
-0..1 warning[duplicate] Top-level binding `g` is overwritten by a later top-level binding in this package.
-  = 0..1 the later binding is here.
+0..1 warning[duplicate] top-level binding `g` is overwritten by a later top-level binding in this package
+  = 0..1 the later binding is here
 == R/b.R
 g: integer
-0..1 warning[duplicate] Top-level binding `g` overwrites an earlier top-level binding in this package.
-  = 0..1 the earlier binding is here.
+0..1 warning[duplicate] top-level binding `g` overwrites an earlier top-level binding in this package
+  = 0..1 the earlier binding is here
 == R/c.R
 integer
 
@@ -155,7 +155,7 @@ bar: integer
 == R/b.R
 Unknown
 integer
-0..3 warning[unresolved] I could not resolve `foo` in this package, its imports, or builtins.
+0..3 warning[unresolved] I could not resolve `foo` in this package, its imports, or builtins
 
 #---- D_defined_ness_flip_on_non_dirty_referrer
 #~~~~ R/a.R
@@ -167,4 +167,4 @@ g
 placeholder: integer
 == R/b.R
 Unknown
-0..1 warning[unresolved] I could not resolve `g` in this package, its imports, or builtins.
+0..1 warning[unresolved] I could not resolve `g` in this package, its imports, or builtins

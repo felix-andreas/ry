@@ -130,7 +130,7 @@ NULL
 }
 #++++
 integer
-4..5 warning[unused] `x` is assigned but never used.
+4..5 warning[unused] `x` is assigned but never used
 
 #---- block_last_is_if_without_else
 {
@@ -446,7 +446,7 @@ NULL
 for (item in function(x) x) item
 #++++
 NULL
-13..26 error[type-mismatch] this `for` sequence is `fn(x: T) -> T`, which cannot be iterated. Expected a vector or list.
+13..26 error[type-mismatch] this `for` sequence is `fn(x: T) -> T`, which cannot be iterated. Expected a vector or list
 
 #---- for_over_null_runs_zero_iterations
 for (item in NULL) item
@@ -461,7 +461,7 @@ consume <- function(values) {
 }
 #++++
 consume: fn(values: Any) -> NULL
-27..34 warning[unused] `consume` is assigned but never used.
+27..34 warning[unused] `consume` is assigned but never used
 
 #---- for_over_unannotated_parameter_stays_unconstrained
 drain <- function(items) {
@@ -470,7 +470,7 @@ drain <- function(items) {
 }
 #++++
 drain: <T> fn(items: T) -> T
-0..5 warning[unused] `drain` is assigned but never used.
+0..5 warning[unused] `drain` is assigned but never used
 
 #==== branch_unification
 #---- unknown_branch_propagates

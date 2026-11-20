@@ -426,7 +426,7 @@ f <- function(flag) {
 }
 #++++
 f: fn(flag: logical) -> logical
-56..57 warning[unused] `v` is assigned but never used.
+56..57 warning[unused] `v` is assigned but never used
 61..124 error[type-mismatch] these branches build `:Some(integer)` and `:Some(integer, integer)`, one tag with two payload shapes. Within a union a tag has one shape, so that a `match` can tell its cases apart
 
 #==== patterns_that_cannot_match
@@ -466,7 +466,7 @@ f <- function(o) {
 }
 #++++
 f: fn(o: :Some(integer) | :None) -> integer
-81..87 error[type-mismatch] this pattern can never match: the value is `:Some(integer) | :None`. The value has no tag `:Somee`. Did you mean `:Some`?
+81..87 error[type-mismatch] this pattern can never match: the value is `:Some(integer) | :None`. the value has no tag `:Somee`. Did you mean `:Some`?
 
 #---- payload_of_the_wrong_length
 #: fn(o: :Some(integer) | :None) -> integer
@@ -672,7 +672,7 @@ f <- function(o) {
 }
 #++++
 f: fn(o: :Some(integer) | :None) -> integer
-81..94 error[type-mismatch] this pattern can never match: the value is `:Some(integer) | :None`. `:None` carries no payload.
+81..94 error[type-mismatch] this pattern can never match: the value is `:Some(integer) | :None`. `:None` carries no payload
 
 #==== mismatch_blame
 #---- record_field_mismatch_blames_the_field_value

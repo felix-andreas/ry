@@ -3,13 +3,13 @@
 mirror <- function(x) x
 #++++
 mirror: <T> fn(x: T) -> T
-0..6 warning[unused] `mirror` is assigned but never used.
+0..6 warning[unused] `mirror` is assigned but never used
 
 #---- two_parameter_function_returns_first_argument_type
 first <- function(x, y) x
 #++++
 first: <T, U> fn(x: T, [y]: U) -> T
-0..5 warning[unused] `first` is assigned but never used.
+0..5 warning[unused] `first` is assigned but never used
 
 #==== annotated_functions
 #---- compact_annotation_named_parameter_and_return
@@ -184,7 +184,7 @@ integer
 double_count <- function(count, label) count + nchar(label)
 #++++
 double_count: fn(count: integer, label: character) -> integer
-53..65 warning[unused] `double_count` is assigned but never used.
+53..65 warning[unused] `double_count` is assigned but never used
 69..112 error[type-mismatch] expected `fn(count: integer, [label]: character) -> integer`, found `fn(count: integer, label: character) -> integer`
 
 #==== argument_coercions
@@ -330,7 +330,7 @@ double
 value <- 1.5
 #++++
 value: integer
-11..16 warning[unused] `value` is assigned but never used.
+11..16 warning[unused] `value` is assigned but never used
 20..23 error[type-mismatch] expected `integer`, found `double`
 
 #---- whole_number_literal_accepted_at_integer_annotation
@@ -347,7 +347,7 @@ integer
 swapped <- function(b, a) b + 1L
 #++++
 swapped: fn(b: character, a: integer) -> integer
-43..50 warning[unused] `swapped` is assigned but never used.
+43..50 warning[unused] `swapped` is assigned but never used
 69..70 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- swapped_names_accept_when_body_matches
@@ -363,7 +363,7 @@ character
 f <- function(n) n
 #++++
 f: fn(n: integer) -> integer
-33..34 warning[unused] `f` is assigned but never used.
+33..34 warning[unused] `f` is assigned but never used
 38..51 error[type-mismatch] this annotation names a parameter `count`, but the function does not define one. An annotation parameter name must match the function's parameter name
 
 #---- positional_annotation_needs_no_names
@@ -384,7 +384,7 @@ f <- function() {
 }
 #++++
 f: fn() -> character | double
-0..1 warning[unused] `f` is assigned but never used.
+0..1 warning[unused] `f` is assigned but never used
 
 #---- bare_return_contributes_null
 f <- function(x) {
@@ -395,7 +395,7 @@ f <- function(x) {
 }
 #++++
 f: fn(x: logical) -> integer | NULL
-0..1 warning[unused] `f` is assigned but never used.
+0..1 warning[unused] `f` is assigned but never used
 
 #---- return_value_errors_still_surface
 f <- function() {
@@ -403,7 +403,7 @@ f <- function() {
 }
 #++++
 f: Unknown
-0..1 warning[unused] `f` is assigned but never used.
+0..1 warning[unused] `f` is assigned but never used
 32..35 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- return_inside_a_loop_exits_the_function
@@ -415,7 +415,7 @@ f <- function() {
 }
 #++++
 f: fn() -> integer | NULL
-0..1 warning[unused] `f` is assigned but never used.
+0..1 warning[unused] `f` is assigned but never used
 
 #==== switch_calls
 #---- switch_branches_union_with_null_without_default
@@ -424,7 +424,7 @@ describe <- function(x) {
 }
 #++++
 describe: <T> fn(x: T) -> integer | character | NULL
-0..8 warning[unused] `describe` is assigned but never used.
+0..8 warning[unused] `describe` is assigned but never used
 
 #---- switch_default_branch_removes_null
 describe <- function(x) {
@@ -432,7 +432,7 @@ describe <- function(x) {
 }
 #++++
 describe: <T> fn(x: T) -> integer | character
-0..8 warning[unused] `describe` is assigned but never used.
+0..8 warning[unused] `describe` is assigned but never used
 
 #---- switch_branches_are_typechecked
 f <- function(x) {
@@ -440,7 +440,7 @@ f <- function(x) {
 }
 #++++
 f: Unknown
-0..1 warning[unused] `f` is assigned but never used.
+0..1 warning[unused] `f` is assigned but never used
 40..46 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #==== variadic_functions
@@ -448,7 +448,7 @@ f: Unknown
 join <- function(...) NULL
 #++++
 join: fn(...: Any) -> NULL
-0..4 warning[unused] `join` is assigned but never used.
+0..4 warning[unused] `join` is assigned but never used
 
 #---- pre_dots_formal_fills_positionally_and_surplus_is_absorbed
 wrap <- function(x, ...) x + 1L
@@ -508,7 +508,7 @@ NULL
 f <- function(x, ...) x
 #++++
 f: fn(x: integer, ...: Any) -> integer
-39..40 warning[unused] `f` is assigned but never used.
+39..40 warning[unused] `f` is assigned but never used
 44..62 error[type-mismatch] expected `fn(...: Any, x: integer) -> integer`, found `fn(x: integer, ...: Any) -> integer`
 
 #---- fixed_annotation_on_a_variadic_function_is_rejected
@@ -516,7 +516,7 @@ f: fn(x: integer, ...: Any) -> integer
 f <- function(x, ...) x
 #++++
 f: fn(x: integer, ...: Any) -> integer
-29..30 warning[unused] `f` is assigned but never used.
+29..30 warning[unused] `f` is assigned but never used
 34..52 error[type-mismatch] expected `fn(x: integer) -> integer`, found `fn(x: integer, ...: Any) -> integer`
 
 #==== constrained_binders
@@ -529,8 +529,8 @@ rejected <- passthrough("text")
 passthrough: <T: numeric> fn(values: T) -> T
 kept: double
 rejected: Unknown
-74..78 warning[unused] `kept` is assigned but never used.
-99..107 warning[unused] `rejected` is assigned but never used.
+74..78 warning[unused] `kept` is assigned but never used
+99..107 warning[unused] `rejected` is assigned but never used
 123..129 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- numeric_binder_accepts_numeric_arguments

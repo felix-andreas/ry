@@ -2,7 +2,7 @@
 #---- missing_following_expression
 #: integer
 #++++
-0..10 error[annotation] A `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block.
+0..10 error[annotation] a `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block
 
 #---- empty_line_after_typing_comment
 #: integer
@@ -10,7 +10,7 @@
 value <- 1L
 #++++
 value: integer
-0..10 error[annotation] A `#:` typing comment cannot be separated from its expression by an empty line.
+0..10 error[annotation] a `#:` typing comment cannot be separated from its expression by an empty line
 
 #---- consecutive_typing_comments
 #: integer
@@ -18,7 +18,7 @@ value: integer
 value <- 1L
 #++++
 value: integer
-0..23 error[annotation] Only one compact annotation fits in a `#:` block. Separate the annotations with a blank line so each gets its own block.
+0..23 error[annotation] only one compact annotation fits in a `#:` block. Separate the annotations with a blank line so each gets its own block
 
 #---- invalid_type_syntax
 #: list{length:
@@ -53,13 +53,13 @@ value: list{value: integer}
 value <- 1L
 #++++
 value: integer
-3..10 error[annotation] I do not know the type `user_id`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
+3..10 error[annotation] I do not know the type `user_id`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 
 #==== expanded_typing_comments
 #---- expanded_missing_following_expression
 #: @param count {integer}
 #++++
-0..25 error[annotation] A `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block.
+0..25 error[annotation] a `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block
 
 #---- expanded_invalid_type_syntax
 #: @param count {list{length:}
@@ -81,7 +81,7 @@ render: fn(count: list{length: integer}) -> list{length: integer}
 render <- function(count) count
 #++++
 render: <T> fn(count: T) -> T
-17..24 error[annotation] I do not know the type `user_id`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
+17..24 error[annotation] I do not know the type `user_id`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 
 #==== mixed_typing_comments
 #---- compact_followed_by_expanded
@@ -90,7 +90,7 @@ render: <T> fn(count: T) -> T
 render <- function(count) count
 #++++
 render: <T> fn(count: T) -> T
-0..36 error[annotation] A `#:` block uses either one compact annotation or `@param`/`@return` lines, not both. Separate the two forms with a blank line.
+0..36 error[annotation] a `#:` block uses either one compact annotation or `@param`/`@return` lines, not both. Separate the two forms with a blank line
 
 #---- expanded_followed_by_compact
 #: @param count {integer}
@@ -98,7 +98,7 @@ render: <T> fn(count: T) -> T
 render <- function(count) count
 #++++
 render: <T> fn(count: T) -> T
-0..36 error[annotation] A `#:` block uses either one compact annotation or `@param`/`@return` lines, not both. Separate the two forms with a blank line.
+0..36 error[annotation] a `#:` block uses either one compact annotation or `@param`/`@return` lines, not both. Separate the two forms with a blank line
 
 #==== type_definitions
 #---- definition_can_reference_previous_definition
@@ -113,7 +113,7 @@ value: integer
 value <- 1L
 #++++
 value: integer
-27..33 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
+27..33 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 
 #---- nominal_introduction_rejects_alias
 #: @alias Person {list{name: character}}
@@ -123,4 +123,4 @@ other <- list(name = "bob")
 #++++
 value: integer
 other: list{name: character}
-61..67 error[annotation] `@new` requires a nominal type declared with `@type`, but `Person` is an alias.
+61..67 error[annotation] `@new` requires a nominal type declared with `@type`, but `Person` is an alias

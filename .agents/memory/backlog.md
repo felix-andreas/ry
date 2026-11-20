@@ -2010,33 +2010,6 @@ triggering shape is unknown. Do not guess at it. The `unused` warning has severa
 script liveness, the package top level, parameters, and the interaction with `shadows-namespace`. A
 fix aimed at the wrong one is worse than none. Ask for the snippet before working it.
 
-## Open: diagnostic wording is not styled consistently
-
-Six findings shown side by side in the README read as though five people wrote them. Three
-`type-mismatch` messages are lowercase sentence fragments. `Unexpected comma after last argument` and
-`Use TRUE, not T, for Boolean values` are capitalized, and the second is imperative. ``` `tmp` is
-assigned but never used. ``` is the only one carrying a full stop. A README reviewer caught it,
-noticing that the page claims a finding says the same thing everywhere while the sample visibly
-disagrees with itself.
-
-**The obvious rule does not survive measurement.** Across 62 message literals in `diagnostics.rs`,
-36 are lowercase with no period, 14 are lowercase with a period, and 9 are capitalized. So
-"lowercase fragment, no period" is the plurality and nothing like a convention. It also cannot be
-applied blanket, because the capitalized ones are capitalized for a reason. `R's $ operator` opens
-with a proper noun, and three messages are first-person sentences: `I could not resolve ...`,
-`I do not know the type ...` and `I cannot construct an infinite type`. Lowercasing those yields
-`r's` and `i could not`.
-
-The rule that fits the corpus has two shapes. A message that is a complete sentence is sentence-cased
-and ends with a period. A message that is a fragment, which is the expected-and-found family, is
-lowercase with no period. Under that rule the real violations are far fewer than "five people wrote
-them" suggests, and are mostly sentences missing their period.
-
-This is unblocked. The reporter change that re-captured every rendered sample has landed, so
-rewording a message now invalidates only the samples that quote it. Those samples have to be
-re-captured in the same change. There is no harness for that yet, so it is a manual pass over the
-pages named in the next item.
-
 ## Open: findings from the second simulated-user round
 
 Five simulated users each worked on a distinct project of their own writing, learned the tool from
@@ -2135,22 +2108,16 @@ The message says to add a type annotation, and no annotation form silences it. `
   class and a testthat suite, in the package author's words. Two of the three causes are fixed. The
   shadow lint above is the third.
 
-### Formatter and message defects
+### Two format questions left from the round
 
-- **`m[i, , drop = FALSE]` becomes `m[i,, drop = FALSE]`**, which removes the space that makes the
-  empty dimension slot visible, in exactly the code where miscounting slots is the bug. It is
-  idempotent, so it is deliberate, and it is undocumented.
-- **Any `X[Y]` annotation reports "only one compact annotation fits in a `#:` block, separate the
-  annotations with a blank line" when there is only one annotation.**
-- **The unknown-type and duplicate-definition messages name only `@type` or `@alias`**, although a
-  definition may also be written inline as `type` or `alias`.
 - **A bodyless abstract type (`@type Dict<K, V>`) is a stub-format form only.** If project files ever
   accept it, the inline `type Name<K, V>` must accept a missing `= TYPE` in the same change, so the
   two spellings stay one grammar.
-- **"Add inferred type annotation" is offered on `x <- @UserId(1L)`**, where the constructor already
-  states the type.
-- **An unclosed chunk reports the tester's English prose as an unresolved variable** rather than the
-  missing fence.
+- **An unclosed literate chunk reports the prose after it as unresolved names** rather than the
+  missing fence. Deferred because analysis sees only the blanked script that
+  `r_source_of_literate` produces, so semantics cannot see a fence: the fix needs the hosts (the
+  CLI's `analysable_source` and the server) to report literate findings of their own. The fix then
+  reports the missing fence at the opening one and ends the chunk at the next chunk start.
 
 ### Documentation gaps the round hit
 
@@ -2387,12 +2354,6 @@ the space serves, and the `trailing-comma` lint reports the mistake.
 
 ## Open: semantics
 
-### A `#:` comment after a type definition annotates the next binding
-
-After `type P = Record{x: double} #: integer`, the line `p: P <- ...` reports
-`annotation-mismatch` against `integer`. The comment should annotate nothing, or be reported
-where it stands.
-
 ### A list operation over a record still loses the field types
 
 `rev`, `unique`, `head`, `tail` and `Filter` declare a `list[named: T]` candidate ahead of the plain
@@ -2404,13 +2365,6 @@ Only a shape-mirroring return, meaning "the same record", fixes it, and the type
 for a stub to say that. `rev` is the case where that claim would be exactly right, because it
 reorders and drops nothing, while `head`, `tail` and `Filter` genuinely may drop a name and are
 correctly nullable. This is the same family as the data.frame row-type and matrix-shape designs.
-
-### One residual on annotating a lambda
-
-Reporting that an annotation in a call's argument list is silent does not give the lambda parameter
-an annotatable position. That stays the one genuine expressiveness argument for inline type syntax,
-which `development/design/inline-type-syntax.md` records. The message says to lift the function to
-its own binding, rather than to move it up a line, which would annotate the wrong thing.
 
 ### `Unknown` is both the gradual top and the recursion fixpoint's seed
 

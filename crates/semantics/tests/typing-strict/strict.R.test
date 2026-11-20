@@ -59,7 +59,7 @@ f: <T> fn(x: T) -> Unknown
 f <- function() somepkg::mystery()
 #++++
 f: fn() -> Unknown
-16..32 warning[unresolved] unknown package namespace `somepkg`.
+16..32 warning[unresolved] unknown package namespace `somepkg`
 
 #---- no_origin_when_types_are_known
 f <- function() {
@@ -111,7 +111,7 @@ f: <T> fn(x: T) -> T
 f <- function(x) x
 #++++
 f: <T> fn(x: T) -> T
-0..14 error[annotation] Unknown typing directive `loud`. Use `# typing: on`, `# typing: off`, or `# typing: strict`.
+0..14 error[annotation] unknown typing directive `loud`. Use `# typing: on`, `# typing: off`, or `# typing: strict`
 
 #==== masking
 #---- a_directive_may_end_in_a_comment

@@ -115,7 +115,7 @@ frobnicate(1L)
 #++++
 == R/main.R
 Unknown
-0..10 warning[unresolved] I could not resolve `frobnicate` in this package, its imports, or builtins.
+0..10 warning[unresolved] I could not resolve `frobnicate` in this package, its imports, or builtins
 0..14 error[strict] strict mode: this calls `frobnicate`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
 
 #==== unresolved_escalation
@@ -125,7 +125,7 @@ foobar::bazqux(1L)
 #++++
 == R/main.R
 Unknown
-0..14 warning[unresolved] unknown package namespace `foobar`.
+0..14 warning[unresolved] unknown package namespace `foobar`
 0..18 error[strict] strict mode: this calls `bazqux`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
 
 #---- strict_off_keeps_unresolved_a_warning
@@ -136,7 +136,7 @@ frobnicate(1L)
 == R/main.R
 typing mode: On
 Unknown
-15..25 warning[unresolved] I could not resolve `frobnicate` in this package, its imports, or builtins.
+15..25 warning[unresolved] I could not resolve `frobnicate` in this package, its imports, or builtins
 
 #---- s4_slot_read_is_a_strict_origin
 #~~~~ R/main.R
@@ -231,11 +231,10 @@ ages <- function(df) {
 #++++
 == R/main.R
 ages: fn(df: data.frame) -> double[]
-122..127 warning[unused] `later` is assigned but never used.
-163..172 warning[unused] `uncovered` is assigned but never used.
+122..127 warning[unused] `later` is assigned but never used
+163..172 warning[unused] `uncovered` is assigned but never used
 153..159 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
 187..193 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
-
 
 #==== strict_covered_origins
 #---- trust_on_a_binding_covers_an_unknown_source
@@ -332,7 +331,7 @@ greeting <- glue("a {1}")
 == scripts/run.R
 Any
 greeting: Unknown
-41..49 warning[unused] `greeting` is assigned but never used.
+41..49 warning[unused] `greeting` is assigned but never used
 53..57 error[strict] strict mode: could not determine the type of `glue`; it has no known type
 
 #---- a_call_to_an_undeclared_base_function_is_a_strict_origin

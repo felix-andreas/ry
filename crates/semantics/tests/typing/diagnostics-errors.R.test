@@ -53,13 +53,13 @@ Unknown
 nonexistent
 #++++
 Unknown
-0..11 warning[unresolved] I could not resolve `nonexistent` in this package, its imports, or builtins.
+0..11 warning[unresolved] I could not resolve `nonexistent` in this package, its imports, or builtins
 
 #---- unknown_name_in_arithmetic_no_cascade
 nonexistent + 1L
 #++++
 Unknown
-0..11 warning[unresolved] I could not resolve `nonexistent` in this package, its imports, or builtins.
+0..11 warning[unresolved] I could not resolve `nonexistent` in this package, its imports, or builtins
 
 #---- arith_character_operand
 "a" + 1L
@@ -164,7 +164,7 @@ value: integer
 f <- function(x) x(x)
 #++++
 f: Unknown
-17..21 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`.
+17..21 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`
 
 #---- duplicate_type_name
 #: @type Person {list{name: character}}
@@ -172,9 +172,9 @@ f: Unknown
 value <- 1L
 #++++
 value: integer
-3..39 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+3..39 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 43..66 another definition of this name is here
-43..66 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+43..66 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 3..39 another definition of this name is here
 
 #---- recovery_unknown_no_cascade
@@ -194,7 +194,7 @@ z <- y + 2L
 #++++
 y: Unknown
 z: Unknown
-5..16 warning[unresolved] I could not resolve `nonexistent` in this package, its imports, or builtins.
+5..16 warning[unresolved] I could not resolve `nonexistent` in this package, its imports, or builtins
 
 #---- for_iter_scalar_source_coerces
 for (item in 1L) { }
@@ -206,7 +206,7 @@ NULL
 value <- list(name = "bob")
 #++++
 value: list{name: character}
-8..15 error[annotation] I do not know the type `Missing`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
+8..15 error[annotation] I do not know the type `Missing`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 
 #---- assignment_list_field_mismatch
 #: list{a: integer}
@@ -298,7 +298,7 @@ f: fn() -> integer
 value <- list(name = "bob")
 #++++
 value: list{name: character}
-49..54 error[annotation] `@new` requires a nominal type declared with `@type`, but `Shape` is an alias.
+49..54 error[annotation] `@new` requires a nominal type declared with `@type`, but `Shape` is an alias
 
 #---- new_generic_unapplied_infers_arguments
 #: @type Box<T> {list{value: T}}
@@ -315,7 +315,7 @@ value: Box<integer>
 value <- list(a = 1L, b = 2L)
 #++++
 value: Pair<integer>
-43..47 error[annotation] generic type `Pair` expects 2 type arguments, but found 1.
+43..47 error[annotation] generic type `Pair` expects 2 type arguments, but found 1
 
 #---- duplicate_forall_param
 #: @forall T
@@ -325,7 +325,7 @@ value: Pair<integer>
 f <- function(x) x
 #++++
 f: <T> fn(x: T) -> T
-24..29 error[annotation] duplicate type parameter name `T` in expanded function annotation.
+24..29 error[annotation] duplicate type parameter name `T` in expanded function annotation
 
 #---- map_index_bracket_ok
 #: list[named: integer]
@@ -368,7 +368,7 @@ x$foo
 #++++
 x: integer
 Unknown
-8..13 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `integer`. Extract an element with `[[` instead.
+8..13 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `integer`. Extract an element with `[[` instead
 
 #---- double_bracket_position_does_not_exist
 x <- list(1L, 2L)
@@ -410,7 +410,7 @@ f <- function(x) {
 }
 #++++
 f: <T> fn(x: T) -> integer
-21..31 warning[unresolved] I could not resolve `frobnicate` in this package, its imports, or builtins.
+21..31 warning[unresolved] I could not resolve `frobnicate` in this package, its imports, or builtins
 
 #==== return_position_coercions
 #---- return_nullable_widening_ok

@@ -289,8 +289,8 @@ in_local: <T> fn([x]: T) -> double
 in_loop: <T, U> fn([x]: T, fs: U) -> Unknown
 f1: <T> fn([fs]: T) -> double
 f2: <T> fn([fs]: T) -> Unknown
-141..144 warning[unused] `run` is assigned but never used.
-207..210 warning[unused] `run` is assigned but never used.
+141..144 warning[unused] `run` is assigned but never used
+207..210 warning[unused] `run` is assigned but never used
 
 #---- an_inline_call_runs_the_closure
 g <- function(x) (function() x)()
@@ -499,7 +499,7 @@ g <- function() f("a")
 #++++
 f: Unknown
 g: fn() -> Unknown
-63..64 warning[unused] `y` is assigned but never used.
+63..64 warning[unused] `y` is assigned but never used
 68..73 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list[T] | T[]`
 
 #---- a_bounded_variable_unified_into_its_own_bound_settles
@@ -778,8 +778,8 @@ helper: <T> fn(r: T) -> Unknown
 f <- function(a, b) quo(a := b)
 #++++
 f: <T, U> fn(a: T, b: U) -> Unknown
-20..23 warning[unresolved] I could not resolve `quo` in this package, its imports, or builtins.
-26..28 warning[unresolved] I could not resolve ``:=`` in this package, its imports, or builtins.
+20..23 warning[unresolved] I could not resolve `quo` in this package, its imports, or builtins
+26..28 warning[unresolved] I could not resolve ``:=`` in this package, its imports, or builtins
 
 #---- any_callee_arguments_are_not_checked
 fail_with <- function(x) stop(paste0("bad: ", class(x)[1]))

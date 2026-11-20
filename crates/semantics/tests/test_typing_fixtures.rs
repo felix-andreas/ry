@@ -21,7 +21,7 @@ use {
             stub_library, stub_source_problems,
         },
         test_document_kind,
-        testing::{with_fixture_project, with_strict_fixture_project},
+        testing::{assert_message_style, with_fixture_project, with_strict_fixture_project},
         top_level::{TopLevel, item_declared_pure, item_top_level},
     },
     std::{collections::BTreeMap, path::Path},
@@ -169,6 +169,7 @@ fn render_file(db: &RootDatabase, file: SourceFile) -> String {
 
 fn render_diagnostics(output: &mut String, diagnostics: &[Diagnostic]) {
     for diagnostic in diagnostics {
+        assert_message_style(&diagnostic.message);
         output.push_str(&format!(
             "{}..{} {}[{}] {}\n",
             u32::from(diagnostic.range.start()),
@@ -178,6 +179,7 @@ fn render_diagnostics(output: &mut String, diagnostics: &[Diagnostic]) {
             diagnostic.message
         ));
         for related in &diagnostic.related {
+            assert_message_style(&related.message);
             output.push_str(&format!(
                 "  = {}..{} {}\n",
                 u32::from(related.range.start()),

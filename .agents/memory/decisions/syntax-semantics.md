@@ -2091,3 +2091,24 @@ lowering path and a third way for two annotations to disagree, for no case `#:` 
 - Rejected: operator-specific constraints (`T: Add<T>`), which are traits by another name and are
   declined (`development/design/open-questions.md`, section 3).
 
+
+## Diagnostic messages are lowercase and end without a full stop
+
+**Status:** settled.
+
+- Every finding's message and related label starts lowercase and ends without a full stop, in the
+  style of rustc. A message may hold several sentences: the later ones are capitalized and keep
+  their full stops, and only the last loses it (`this comment is code. Delete it, since version
+  control keeps the history`).
+- A message keeps a capital when its first word is `I`, `R`, code, an acronym or a proper noun
+  (`I could not resolve ...`, `R's $ operator ...`, `S4 classes ...`, `Reference Classes ...`).
+- A hint appended to a message carries its own separator (`". Did you mean `x`?"`), so the base
+  message never ends in a full stop that an empty hint would leave behind.
+- Quick-fix titles are not messages: they are capitalized imperatives (`Change to `TRUE``), as
+  editors show them in a menu.
+- `semantics::testing::assert_message_style` checks every message the typing and lint fixtures
+  render, so a new message in another style fails its suite.
+- Rejected: two shapes (sentence-cased with a full stop for sentences, lowercase without for
+  fragments). Which messages count as sentences is a judgment per message, so no test can hold
+  it, and the corpus had drifted under it. Lowercase was already the majority (229 of 355
+  rendered messages).

@@ -25,7 +25,7 @@ driver <- function(n) {
 }
 #++++
 driver: fn(n: integer) -> integer
-0..6 warning[unused] `driver` is assigned but never used.
+0..6 warning[unused] `driver` is assigned but never used
 
 #---- mutual_local_recursion_resolves
 pair <- function() {
@@ -35,7 +35,7 @@ pair <- function() {
 }
 #++++
 pair: fn() -> logical
-0..4 warning[unused] `pair` is assigned but never used.
+0..4 warning[unused] `pair` is assigned but never used
 
 #---- mutual_top_level_pair_schemes
 is_even <- function(n) if (n == 0L) TRUE else is_odd(n - 1L)

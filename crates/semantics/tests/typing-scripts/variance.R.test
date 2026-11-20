@@ -10,7 +10,7 @@ widened <- handler
 #++++
 handler: Handler<integer>
 widened: Handler<integer | NULL>
-129..136 warning[unused] `widened` is assigned but never used.
+129..136 warning[unused] `widened` is assigned but never used
 140..147 error[type-mismatch] expected `Handler<integer | NULL>`, found `Handler<integer>`
 
 #---- contravariant_arg_widening_accepted
@@ -52,7 +52,7 @@ widened <- cell
 #++++
 cell: Cell<integer>
 widened: Cell<integer | NULL>
-158..165 warning[unused] `widened` is assigned but never used.
+158..165 warning[unused] `widened` is assigned but never used
 169..173 error[type-mismatch] expected `Cell<integer | NULL>`, found `Cell<integer>`
 
 #---- invariant_arg_requires_exact_match
@@ -96,4 +96,4 @@ widened <- outer
 outer: Unknown
 widened: Outer<integer | NULL>
 101..121 error[type-mismatch] expected `Sink<integer>`, found `fn([value]: T) -> NULL`. The value has the right shape, but `Sink` is a nominal type, so only `@Sink(...)` or `#: @new Sink` creates one
-148..155 warning[unused] `widened` is assigned but never used.
+148..155 warning[unused] `widened` is assigned but never used

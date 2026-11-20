@@ -75,7 +75,7 @@ render_count: fn(count: integer) -> character
 value <- some_unknown
 #++++
 value: integer
-27..39 warning[unresolved] I could not resolve `some_unknown` in this package, its imports, or builtins.
+27..39 warning[unresolved] I could not resolve `some_unknown` in this package, its imports, or builtins
 
 #---- trust_on_bare_expression
 #: @trust character
@@ -89,7 +89,7 @@ character
 value <- some_unknown
 #++++
 value: integer
-32..44 warning[unresolved] I could not resolve `some_unknown` in this package, its imports, or builtins.
+32..44 warning[unresolved] I could not resolve `some_unknown` in this package, its imports, or builtins
 
 #---- if_unknown_on_known_type
 #: @if-unknown integer
@@ -135,7 +135,7 @@ boxed: Box<integer>
 person <- list(name = "bob")
 #++++
 person: list{name: character}
-8..14 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
+8..14 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 
 #---- new_already_nominal
 #: @type Person {list{name: character}}
@@ -228,8 +228,8 @@ value: list[integer]
 value <- some_unknown
 #++++
 value: Unknown
-15..22 error[annotation] I do not know the type `user_id`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
-32..44 warning[unresolved] I could not resolve `some_unknown` in this package, its imports, or builtins.
+15..22 error[annotation] I do not know the type `user_id`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
+32..44 warning[unresolved] I could not resolve `some_unknown` in this package, its imports, or builtins
 
 #---- new_wrong_arity
 #: @type Box<T> {list{value: T}}
@@ -238,7 +238,7 @@ value: Unknown
 boxed <- list(value = 1L)
 #++++
 boxed: Box<integer>
-42..45 error[annotation] generic type `Box` expects 1 type argument, but found 2.
+42..45 error[annotation] generic type `Box` expects 1 type argument, but found 2
 
 #---- checked_nominal_requires_new
 #: @type Person {list{name: character}}

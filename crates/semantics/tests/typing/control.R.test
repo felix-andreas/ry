@@ -697,7 +697,7 @@ f <- function() {
 }
 #++++
 f: Unknown
-51..52 error[type-mismatch] this `for` sequence is `fn() -> integer`, which cannot be iterated. Expected a vector or list.
+51..52 error[type-mismatch] this `for` sequence is `fn() -> integer`, which cannot be iterated. Expected a vector or list
 
 #---- repeat_applies_exit_state
 f <- function() {
@@ -845,7 +845,7 @@ f <- function(flag) {
 }
 #++++
 f: fn(flag: logical) -> integer
-229..230 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
+229..230 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing
 
 #---- a_switch_with_no_default_reaches_the_read_unassigned
 f <- function(key) {
@@ -854,7 +854,7 @@ f <- function(key) {
 }
 #++++
 f: <T> fn(key: T) -> integer
-54..55 warning[maybe-undefined] `r` is only assigned on some paths here, so this read can find nothing.
+54..55 warning[maybe-undefined] `r` is only assigned on some paths here, so this read can find nothing
 
 #---- a_repeat_that_always_assigns_before_breaking_is_not_reported
 # R returns 1: the body runs at least once and the `break` follows the write,
@@ -883,7 +883,7 @@ f <- function(cond) {
 }
 #++++
 f: fn(cond: logical) -> integer
-148..149 warning[maybe-undefined] `y` is only assigned on some paths here, so this read can find nothing.
+148..149 warning[maybe-undefined] `y` is only assigned on some paths here, so this read can find nothing
 
 #---- a_loop_that_may_run_zero_times_reaches_the_read_unassigned
 f <- function(cond) {
@@ -894,7 +894,7 @@ f <- function(cond) {
 }
 #++++
 f: fn(cond: logical) -> integer
-57..58 warning[maybe-undefined] `z` is only assigned on some paths here, so this read can find nothing.
+57..58 warning[maybe-undefined] `z` is only assigned on some paths here, so this read can find nothing
 
 #---- a_diverging_switch_branch_never_reaches_the_read
 # Every key either assigns or ends the call, so nothing arrives at the read
@@ -1051,7 +1051,7 @@ f <- function() {
 }
 #++++
 f: fn() -> double
-178..179 warning[unresolved] I could not resolve `a` in this package, its imports, or builtins.
+178..179 warning[unresolved] I could not resolve `a` in this package, its imports, or builtins
 
 #---- unresolved_reference_suggests_the_nearest_stub
 f <- function(x) lenght(x)
@@ -1158,7 +1158,7 @@ f <- function() {
 }
 #++++
 f: fn() -> fn() -> fn() -> logical
-20..21 warning[unused] `x` is assigned but never used.
+20..21 warning[unused] `x` is assigned but never used
 
 #---- rebinding_in_the_captured_frame_stays_alive
 f <- function() {
@@ -1180,7 +1180,7 @@ describe <- function(name, punct) {
 }
 #++++
 describe: Unknown
-77..82 error[type-mismatch] reading `punct` here would fail at run time: this branch runs only when `punct` is missing, and it has no default.
+77..82 error[type-mismatch] reading `punct` here would fail at run time: this branch runs only when `punct` is missing, and it has no default
 
 #---- supplying_the_formal_on_the_missing_branch_is_fine
 describe <- function(name, punct) {

@@ -2,7 +2,7 @@
 #---- equals_assignment_warns
 x = 1
 #++++
-2..3 warning[assignment-operator] Use <-, not =, for assignment
+2..3 warning[assignment-operator] use <-, not =, for assignment
   safe fix 2..3 "<-"
 
 #---- arrow_assignment_clean
@@ -26,9 +26,9 @@ clean
 x <- T
 y <- F
 #++++
-5..6 warning[boolean-shorthand] Use TRUE, not T, for Boolean values
+5..6 warning[boolean-shorthand] use TRUE, not T, for Boolean values
   safe fix 5..6 "TRUE"
-12..13 warning[boolean-shorthand] Use FALSE, not F, for Boolean values
+12..13 warning[boolean-shorthand] use FALSE, not F, for Boolean values
   safe fix 12..13 "FALSE"
 
 #---- true_false_clean
@@ -66,7 +66,7 @@ clean
 f <- function(a, b) a
 f(1, 2,)
 #++++
-28..29 warning[trailing-comma] Unexpected comma after last argument
+28..29 warning[trailing-comma] unexpected comma after last argument
   safe fix 28..29 ""
 
 #---- subset_trailing_comma_allowed
@@ -80,7 +80,7 @@ g <- function(x) x
 h <- function(x) x
 g(h(1,))
 #++++
-43..44 warning[trailing-comma] Unexpected comma after last argument
+43..44 warning[trailing-comma] unexpected comma after last argument
   safe fix 43..44 ""
 
 #==== levels
@@ -113,7 +113,7 @@ clean
 #---- equals_binding_with_an_annotation_still_lints
 count: integer = 1L
 #++++
-15..16 warning[assignment-operator] Use <-, not =, for assignment
+15..16 warning[assignment-operator] use <-, not =, for assignment
   safe fix 15..16 "<-"
 
 #==== object-system
@@ -164,11 +164,11 @@ if (x == NA) 1
 y <- z != NA_character_
 w <- NA == v
 #++++
-4..11 warning[equals-na] Comparing with NA always gives NA, whatever the other side holds. Use is.na() to test for missing values
+4..11 warning[equals-na] comparing with NA always gives NA, whatever the other side holds. Use is.na() to test for missing values
   unsafe fix 4..11 "is.na(x)"
-20..38 warning[equals-na] Comparing with NA always gives NA, whatever the other side holds. Use is.na() to test for missing values
+20..38 warning[equals-na] comparing with NA always gives NA, whatever the other side holds. Use is.na() to test for missing values
   unsafe fix 20..38 "!is.na(z)"
-44..51 warning[equals-na] Comparing with NA always gives NA, whatever the other side holds. Use is.na() to test for missing values
+44..51 warning[equals-na] comparing with NA always gives NA, whatever the other side holds. Use is.na() to test for missing values
   unsafe fix 44..51 "is.na(v)"
 
 #---- is_na_and_strings_are_clean
@@ -184,11 +184,11 @@ if (a & b) 1
 while (!(x | y)) x <- step(x)
 if (a && (b & c)) 2
 #++++
-6..7 warning[vector-logic] Use &&, not &, in an `if` condition: & works element by element and always evaluates both sides
+6..7 warning[vector-logic] use &&, not &, in an `if` condition: & works element by element and always evaluates both sides
   unsafe fix 6..7 "&&"
-24..25 warning[vector-logic] Use ||, not |, in a `while` condition: | works element by element and always evaluates both sides
+24..25 warning[vector-logic] use ||, not |, in a `while` condition: | works element by element and always evaluates both sides
   unsafe fix 24..25 "||"
-55..56 warning[vector-logic] Use &&, not &, in an `if` condition: & works element by element and always evaluates both sides
+55..56 warning[vector-logic] use &&, not &, in an `if` condition: & works element by element and always evaluates both sides
   unsafe fix 55..56 "&&"
 
 #---- reductions_and_scalar_operators_are_clean
@@ -236,11 +236,11 @@ if (class(x) == "data.frame") 1
 y <- class(z) != "lm"
 w <- "foo" == class(v)
 #++++
-4..28 warning[class-equals] Comparing class() with a string misses objects that have several classes. Use inherits()
+4..28 warning[class-equals] comparing class() with a string misses objects that have several classes. Use inherits()
   unsafe fix 4..28 "inherits(x, \"data.frame\")"
-37..53 warning[class-equals] Comparing class() with a string misses objects that have several classes. Use inherits()
+37..53 warning[class-equals] comparing class() with a string misses objects that have several classes. Use inherits()
   unsafe fix 37..53 "!inherits(z, \"lm\")"
-59..76 warning[class-equals] Comparing class() with a string misses objects that have several classes. Use inherits()
+59..76 warning[class-equals] comparing class() with a string misses objects that have several classes. Use inherits()
   unsafe fix 59..76 "inherits(v, \"foo\")"
 
 #---- inherits_and_other_comparisons_are_clean
@@ -276,9 +276,9 @@ g <- function() {
   1
 }
 #++++
-33..55 warning[unreachable-code] This code never runs, because return() above it leaves the block first
-84..92 warning[unreachable-code] This code never runs, because `next` above it leaves the block first
-128..129 warning[unreachable-code] This code never runs, because stop() above it leaves the block first
+33..55 warning[unreachable-code] this code never runs, because return() above it leaves the block first
+84..92 warning[unreachable-code] this code never runs, because `next` above it leaves the block first
+128..129 warning[unreachable-code] this code never runs, because stop() above it leaves the block first
 
 #---- exits_at_the_end_and_inside_branches_are_clean
 f <- function(x) {
@@ -316,10 +316,10 @@ sprintf("%s", "a", "b")
 gettextf("%5.2f%%: %s", 1)
 sprintf(fmt = "%*d", 5)
 #++++
-8..18 warning[sprintf-arguments] This format wants 2 values but sprintf() gets 1 value, so R stops with "too few arguments"
-31..35 warning[sprintf-arguments] This format wants 1 value but sprintf() gets 2 values, so R ignores the extra values with a warning
-56..69 warning[sprintf-arguments] This format wants 2 values but gettextf() gets 1 value, so R stops with "too few arguments"
-88..93 warning[sprintf-arguments] This format wants 2 values but sprintf() gets 1 value, so R stops with "too few arguments"
+8..18 warning[sprintf-arguments] this format wants 2 values but sprintf() gets 1 value, so R stops with "too few arguments"
+31..35 warning[sprintf-arguments] this format wants 1 value but sprintf() gets 2 values, so R ignores the extra values with a warning
+56..69 warning[sprintf-arguments] this format wants 2 values but gettextf() gets 1 value, so R stops with "too few arguments"
+88..93 warning[sprintf-arguments] this format wants 2 values but sprintf() gets 1 value, so R stops with "too few arguments"
 
 #---- matching_and_unmodelled_formats_are_clean
 sprintf("%d of %d", 1, 2)

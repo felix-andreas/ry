@@ -794,8 +794,8 @@ sample_starts <- function(pars, fun, eqfun) {
 #++++
 evaluate: <T, U, V> fn(pars: T, fun: fn(T) -> U, [eqfun]: fn(T) -> V) -> Unknown
 sample_starts: <T, U, V> fn(pars: T, fun: fn(T) -> U, eqfun: (fn(T) -> V) | NULL) -> Unknown
-140..144 warning[unused] `kind` is assigned but never used.
-157..161 warning[unused] `kind` is assigned but never used.
+140..144 warning[unused] `kind` is assigned but never used
+157..161 warning[unused] `kind` is assigned but never used
 
 #---- a_computed_string_that_may_be_a_vector_passes_as_one_string
 format_message <- function(fmt, ...) if (nargs() == 1L) fmt else sprintf(fmt, ...)
@@ -875,7 +875,7 @@ f <- function() {
 #++++
 width: fn(name: character) -> integer
 f: Unknown
-90..91 warning[unused] `x` is assigned but never used.
+90..91 warning[unused] `x` is assigned but never used
 158..159 error[type-mismatch] expected `character`, found `character | NULL`
 
 #---- an_annotated_function_that_may_be_null_is_reported_when_called
@@ -1394,7 +1394,7 @@ f <- function() {
 }
 #++++
 f: fn() -> Unknown
-20..21 warning[unused] `x` is assigned but never used.
+20..21 warning[unused] `x` is assigned but never used
 
 #---- a_matrix_valued_vapply_callback_and_a_matrix_sum_type
 pair <- function(x) matrix(c(x, x), nrow = 1)
@@ -1871,7 +1871,7 @@ f <- function() {
 #++++
 g: fn(s: character) -> character
 f: Unknown
-72..73 warning[unused] `x` is assigned but never used.
+72..73 warning[unused] `x` is assigned but never used
 99..100 error[type-mismatch] expected `character`, found `NULL`
 
 #---- a_cache_read_as_a_number_before_its_first_write_rejects_a_string_write
@@ -2336,7 +2336,7 @@ use <- function() wrap("a")
 helper: <T: arithmetic> fn([v]: T) -> double
 wrap: <T: arithmetic> fn([pre]: T) -> double
 use: Unknown
-77..78 warning[unused] `s` is assigned but never used.
+77..78 warning[unused] `s` is assigned but never used
 137..140 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- a_reference_class_method_calls_its_sibling_not_the_top_level_namesake
@@ -2424,7 +2424,7 @@ weights: fn() -> Unknown
 added <- function(plot) undeclared::plot_of(plot) + list(1)
 #++++
 added: <T> fn(plot: T) -> Unknown
-24..43 warning[unresolved] unknown package namespace `undeclared`.
+24..43 warning[unresolved] unknown package namespace `undeclared`
 
 #---- a_sequence_between_computed_bounds_is_numeric
 # `seq` dispatches on `from`, so bounds computed from an unannotated parameter are numbers, not dates.
@@ -2559,7 +2559,7 @@ bench <- function(n, timefun = bit::repeat.time) {
 }
 #++++
 bench: <T, U> fn(n: T, [timefun]: U) -> Unknown
-31..47 warning[unresolved] unknown package namespace `bit`.
+31..47 warning[unresolved] unknown package namespace `bit`
 
 #---- a_scalar_bound_does_not_spread_through_arithmetic
 deriv <- function(x, mu = 0, sigma = 1, order = 0) {

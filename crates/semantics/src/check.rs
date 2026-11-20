@@ -6868,7 +6868,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             .collect();
         let found = tags.iter().find(|(tag, _)| *tag == name.as_str());
         if let Some((_, None)) = found {
-            return Some((format!("`:{}` carries no payload.", name.as_str()), None));
+            return Some((format!("`:{}` carries no payload", name.as_str()), None));
         }
         let Some((_, Some(tag_payload))) = found else {
             let nearest = nearest_name(name.as_str(), tags.iter().map(|(tag, _)| *tag))?;
@@ -6878,7 +6878,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 .map(|start| TextRange::new(start, name_range.end()));
             return Some((
                 format!(
-                    "The value has no tag `:{}`. Did you mean `:{nearest}`?",
+                    "the value has no tag `:{}`. Did you mean `:{nearest}`?",
                     name.as_str()
                 ),
                 tag_range,
@@ -6899,11 +6899,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             .iter()
             .find(|field| !known.contains(&field.name.as_str()))?;
         let suggestion = nearest_name(unknown.name.as_str(), known.iter().copied())
-            .map(|nearest| format!(" Did you mean `{nearest}`?"))
+            .map(|nearest| format!(". Did you mean `{nearest}`?"))
             .unwrap_or_default();
         Some((
             format!(
-                "`:{}` has no field `{}`.{suggestion}",
+                "`:{}` has no field `{}`{suggestion}",
                 name.as_str(),
                 unknown.name.as_str()
             ),

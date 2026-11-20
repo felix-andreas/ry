@@ -7,9 +7,9 @@ value <- 1L
 #++++
 == R/main.R
 value: integer
-3..25 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+3..25 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 29..50 another definition of this name is here
-29..50 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+29..50 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 3..25 another definition of this name is here
 
 #---- duplicate_alias_name
@@ -20,9 +20,9 @@ value <- 1L
 #++++
 == R/main.R
 value: integer
-3..26 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+3..26 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 30..52 another definition of this name is here
-30..52 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+30..52 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 3..26 another definition of this name is here
 
 #---- alias_collides_with_nominal_type_name
@@ -33,9 +33,9 @@ value <- 1L
 #++++
 == R/main.R
 value: integer
-3..25 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+3..25 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 29..51 another definition of this name is here
-29..51 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+29..51 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 3..25 another definition of this name is here
 
 #---- nominal_type_collides_with_alias_name
@@ -46,9 +46,9 @@ value <- 1L
 #++++
 == R/main.R
 value: integer
-3..26 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+3..26 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 30..51 another definition of this name is here
-30..51 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+30..51 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 3..26 another definition of this name is here
 
 #---- definition_unknown_type
@@ -58,7 +58,7 @@ value <- 1L
 #++++
 == R/main.R
 value: integer
-27..33 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
+27..33 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 
 #---- duplicate_nominal_type_name_across_files
 #~~~~ R/a.R
@@ -67,10 +67,10 @@ value: integer
 #: @type Person {double}
 #++++
 == R/a.R
-3..25 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+3..25 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 3..24 another definition of this name is here
 == R/b.R
-3..24 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+3..24 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 3..25 another definition of this name is here
 
 #---- duplicate_alias_name_across_files
@@ -80,10 +80,10 @@ value: integer
 #: @alias Person {double}
 #++++
 == R/a.R
-3..26 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+3..26 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 3..25 another definition of this name is here
 == R/b.R
-3..25 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+3..25 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 3..26 another definition of this name is here
 
 #---- nominal_alias_collision_across_files
@@ -93,10 +93,10 @@ value: integer
 #: @alias Person {double}
 #++++
 == R/a.R
-3..25 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+3..25 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 3..25 another definition of this name is here
 == R/b.R
-3..25 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+3..25 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 3..25 another definition of this name is here
 
 #==== annotations
@@ -107,7 +107,7 @@ value <- 1L
 #++++
 == R/main.R
 value: integer
-3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
+3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 
 #---- annotation_unknown_field_type_underlines_only_the_name
 #~~~~ R/main.R
@@ -116,7 +116,7 @@ record <- list(age = 1L)
 #++++
 == R/main.R
 record: list{age: integer}
-13..18 error[annotation] I do not know the type `intgr`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
+13..18 error[annotation] I do not know the type `intgr`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 
 #---- annotation_unknown_type_nested_in_generic_argument
 #~~~~ R/main.R
@@ -127,7 +127,7 @@ value <- list(value = 1L)
 #++++
 == R/main.R
 value: list{value: integer}
-42..48 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
+42..48 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 
 #---- annotation_wrong_type_argument_arity
 #~~~~ R/main.R
@@ -138,7 +138,7 @@ value <- list(left = 1L, right = 2L)
 #++++
 == R/main.R
 value: Pair<integer>
-51..55 error[annotation] generic type `Pair` expects 2 type arguments, but found 1.
+51..55 error[annotation] generic type `Pair` expects 2 type arguments, but found 1
 
 #---- annotation_wrong_nominal_type_argument_arity
 #~~~~ R/main.R
@@ -149,7 +149,7 @@ value <- list(value = 1L)
 #++++
 == R/main.R
 value: Person<integer, character>
-40..46 error[annotation] generic type `Person` expects 1 type argument, but found 2.
+40..46 error[annotation] generic type `Person` expects 1 type argument, but found 2
 
 #---- annotation_non_generic_type_rejects_type_arguments
 #~~~~ R/main.R
@@ -160,7 +160,7 @@ value <- 1L
 #++++
 == R/main.R
 value: Person<integer>
-30..36 error[annotation] `Person` is not a generic type. It takes no type arguments.
+30..36 error[annotation] `Person` is not a generic type. It takes no type arguments
 
 #==== nominal_introduction
 #---- nominal_introduction_rejects_alias
@@ -173,7 +173,7 @@ other <- list(name = "bob")
 == R/main.R
 value: integer
 other: list{name: character}
-61..67 error[annotation] `@new` requires a nominal type declared with `@type`, but `Person` is an alias.
+61..67 error[annotation] `@new` requires a nominal type declared with `@type`, but `Person` is an alias
 
 #---- nominal_introduction_rejects_unknown_type
 #~~~~ R/main.R
@@ -182,7 +182,7 @@ value <- list(name = "bob")
 #++++
 == R/main.R
 value: list{name: character}
-8..14 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
+8..14 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 
 #---- nominal_introduction_infers_missing_type_arguments
 #~~~~ R/main.R
@@ -201,7 +201,7 @@ value <- list(name = "bob")
 #++++
 == R/main.R
 value: list{name: character}
-8..29 error[annotation] expected a nominal type reference after `@new`.
+8..29 error[annotation] expected a nominal type reference after `@new`
 
 #---- nominal_introduction_rejects_too_many_type_arguments
 #~~~~ R/main.R
@@ -212,4 +212,4 @@ value <- list(value = 1L)
 #++++
 == R/main.R
 value: Person<integer>
-45..51 error[annotation] generic type `Person` expects 1 type argument, but found 2.
+45..51 error[annotation] generic type `Person` expects 1 type argument, but found 2

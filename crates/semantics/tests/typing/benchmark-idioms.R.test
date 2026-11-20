@@ -41,7 +41,7 @@ plain <- !!TRUE
 inject: <T> fn([query]: T) -> Unknown
 twice: <T> fn(x: T) -> Unknown
 plain: logical
-35..42 warning[unresolved] I could not resolve `request` in this package, its imports, or builtins.
+35..42 warning[unresolved] I could not resolve `request` in this package, its imports, or builtins
 
 #---- zeallot_destructuring_binds_the_pattern_names
 span <- function(dates) {

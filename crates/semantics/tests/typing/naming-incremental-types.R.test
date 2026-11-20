@@ -26,14 +26,14 @@ other <- 2L
 #++++
 == R/a.R
 person: integer
-3..25 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+3..25 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 3..24 another definition of this name is here
 == R/b.R
 value: Person
 19..21 error[type-mismatch] expected `Person`, found `integer`. The value has the right shape, but `Person` is a nominal type, so only `@Person(...)` or `#: @new Person` creates one
 == R/c.R
 other: integer
-3..24 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+3..24 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
   = 3..25 another definition of this name is here
 
 #---- kind_flip_on_non_dirty_referrer
@@ -61,7 +61,7 @@ value <- 1L
 shape: integer
 == R/b.R
 value: integer
-8..13 error[annotation] `@new` requires a nominal type declared with `@type`, but `Shape` is an alias.
+8..13 error[annotation] `@new` requires a nominal type declared with `@type`, but `Shape` is an alias
 
 #---- arity_flip_on_non_dirty_referrer
 #~~~~ R/a.R
@@ -89,7 +89,7 @@ value <- 1L
 compartment: integer
 == R/b.R
 value: Slot
-3..7 error[annotation] generic type `Slot` expects 1 type argument, but found 0.
+3..7 error[annotation] generic type `Slot` expects 1 type argument, but found 0
 
 #---- forward_type_reference
 #~~~~ R/a.R
@@ -98,7 +98,7 @@ value <- 1L
 #++++
 == R/a.R
 value: integer
-3..9 error[annotation] I do not know the type `Widget`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
+3..9 error[annotation] I do not know the type `Widget`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 
 #---- forward_type_reference_then_defined_later
 #~~~~ R/a.R

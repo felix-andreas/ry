@@ -104,7 +104,7 @@ x: Unknown
 f <- function(g) g(g)
 #++++
 f: Unknown
-17..21 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`.
+17..21 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`
 
 #==== constants
 #---- reserved_constants_infer_fixed_types

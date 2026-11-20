@@ -19,7 +19,7 @@ f <- function() {
 #++++
 == R/main.R
 f: fn() -> character
-20..25 warning[unused] `value` is assigned but never used.
+20..25 warning[unused] `value` is assigned but never used
 
 #---- assignment_rhs_sees_outer_parameter_before_local_rebinding
 #~~~~ R/main.R

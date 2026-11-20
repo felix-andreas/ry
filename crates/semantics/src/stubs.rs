@@ -728,7 +728,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
                             problems.push(StubProblem {
                                 line,
                                 message: format!(
-                                    "this declaration does not load: I do not know the type `{unknown_name}`."
+                                    "this declaration does not load: I do not know the type `{unknown_name}`"
                                 ),
                             });
                         }
@@ -736,7 +736,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
                 }
                 None => problems.push(StubProblem {
                     line,
-                    message: "this type declaration does not load: write `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>`.".to_owned(),
+                    message: "this type declaration does not load: write `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>`".to_owned(),
                 }),
             }
             continue;
@@ -746,12 +746,12 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
             if name.is_empty() {
                 problems.push(StubProblem {
                     line,
-                    message: "expected a type name after `@type`.".to_owned(),
+                    message: "expected a type name after `@type`".to_owned(),
                 });
             } else if !is_nominal_name(name) {
                 problems.push(StubProblem {
                     line,
-                    message: format!("`{name}` is not a valid type name."),
+                    message: format!("`{name}` is not a valid type name"),
                 });
             }
             continue;
@@ -759,7 +759,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
         let Some(separator) = top_level_colon(content) else {
             problems.push(StubProblem {
                 line,
-                message: "this line is not a declaration (`name : TYPE`).".to_owned(),
+                message: "this line is not a declaration (`name : TYPE`)".to_owned(),
             });
             continue;
         };
@@ -769,9 +769,9 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
             problems.push(StubProblem {
                 line,
                 message: if name.is_empty() {
-                    "expected a name before `:`.".to_owned()
+                    "expected a name before `:`".to_owned()
                 } else {
-                    format!("`{name}` is not a valid declaration name.")
+                    format!("`{name}` is not a valid declaration name")
                 },
             });
             continue;
@@ -779,7 +779,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
         if type_text.is_empty() {
             problems.push(StubProblem {
                 line,
-                message: format!("expected a type after `{name} :`."),
+                message: format!("expected a type after `{name} :`"),
             });
             continue;
         }
@@ -792,7 +792,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
             problems.push(StubProblem {
                 line,
                 message: format!(
-                    "this declaration does not load: `{type_text}` is not a valid type."
+                    "this declaration does not load: `{type_text}` is not a valid type"
                 ),
             });
             continue;
@@ -807,7 +807,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
                 line,
                 message: format!(
                     "`@masked` on `{name}` requires a variadic function type. The mask covers \
-                     the arguments the `...` rest parameter absorbs."
+                     the arguments the `...` rest parameter absorbs"
                 ),
             });
             continue;
@@ -825,7 +825,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
                 problems.push(StubProblem {
                     line,
                     message: format!(
-                        "`@opaque({parameter})` on `{name}` names no parameter of its function type."
+                        "`@opaque({parameter})` on `{name}` names no parameter of its function type"
                     ),
                 });
             }
@@ -835,7 +835,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
                 problems.push(StubProblem {
                     line,
                     message: format!(
-                        "`@pure({parameter})` on `{name}` names no parameter of its function type."
+                        "`@pure({parameter})` on `{name}` names no parameter of its function type"
                     ),
                 });
             }
@@ -846,7 +846,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
             problems.push(StubProblem {
                 line,
                 message: format!(
-                    "this declaration does not load: I do not know the type `{unknown_name}`."
+                    "this declaration does not load: I do not know the type `{unknown_name}`"
                 ),
             });
         }

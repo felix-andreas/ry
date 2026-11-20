@@ -136,7 +136,7 @@ Unknown
 result <- (1L + "x")@slot
 #++++
 result: Unknown
-0..6 warning[unused] `result` is assigned but never used.
+0..6 warning[unused] `result` is assigned but never used
 16..19 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #==== whole_number_literal_operands

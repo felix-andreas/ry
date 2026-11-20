@@ -51,27 +51,27 @@ new Result<Person<integer>>
 @new
 #++++
 syntax error: expected a type after `@new`
-error: expected a nominal type reference after `@new`.
+error: expected a nominal type reference after `@new`
 
 #---- invalid_nominal_introduction_scalar_payload
 @new integer
 #++++
-error: expected a nominal type reference after `@new`.
+error: expected a nominal type reference after `@new`
 
 #---- invalid_nominal_introduction_structural_payload
 @new list{name: character}
 #++++
-error: expected a nominal type reference after `@new`.
+error: expected a nominal type reference after `@new`
 
 #---- invalid_nominal_introduction_nullable_payload
 @new Person | NULL
 #++++
-error: expected a nominal type reference after `@new`.
+error: expected a nominal type reference after `@new`
 
 #---- invalid_nominal_introduction_function_payload
 @new fn(integer) -> integer
 #++++
-error: expected a nominal type reference after `@new`.
+error: expected a nominal type reference after `@new`
 
 #==== named_type_references
 #---- bare_named_type_reference
@@ -141,11 +141,11 @@ syntax error: unexpected text after the `@type` definition
 @type Person {list{name: character}}
 integer
 #++++
-error: A type definition needs its own `#:` block. Separate it from other annotations with a blank line.
+error: a type definition needs its own `#:` block. Separate it from other annotations with a blank line
 
 #---- mixed_definition_and_expanded_annotation_block
 @type Person {list{name: character}}
 @param count {integer}
 @return {Person}
 #++++
-error: A type definition needs its own `#:` block. Separate it from other annotations with a blank line.
+error: a type definition needs its own `#:` block. Separate it from other annotations with a blank line

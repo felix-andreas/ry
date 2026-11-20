@@ -24,7 +24,7 @@ first: fn(p: Pair<integer>) -> integer
 value <- 1L
 #++++
 value: integer
-3..15 error[annotation] the alias `A` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle.
+3..15 error[annotation] the alias `A` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle
 
 #---- alias_mutual_cycle_used
 #: @alias A {B}
@@ -34,8 +34,8 @@ value: integer
 value <- 1L
 #++++
 value: integer
-3..15 error[annotation] the alias `A` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle.
-19..31 error[annotation] the alias `B` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle.
+3..15 error[annotation] the alias `A` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle
+19..31 error[annotation] the alias `B` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle
 
 #==== nominals
 #---- alias_cycle_is_reported_at_its_declarations_when_unused
@@ -45,8 +45,8 @@ value: integer
 f <- function() 1L
 #++++
 f: fn() -> integer
-3..27 error[annotation] the alias `A` refers to itself, so its expansion never ends. A recursive type needs a name of its own: declare it as `@type A {...}` instead of `@alias`.
-31..43 error[annotation] the alias `B` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle.
+3..27 error[annotation] the alias `A` refers to itself, so its expansion never ends. A recursive type needs a name of its own: declare it as `@type A {...}` instead of `@alias`
+31..43 error[annotation] the alias `B` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle
 
 #---- a_recursive_record_is_a_nominal_type
 # An alias is shorthand for its expansion, so one that mentions itself never
@@ -63,7 +63,7 @@ use <- function(log) {
 }
 #++++
 use: fn(log: Logger) -> NULL
-161..206 error[annotation] the alias `Chain` refers to itself, so its expansion never ends. A recursive type needs a name of its own: declare it as `@type Chain {...}` instead of `@alias`.
+161..206 error[annotation] the alias `Chain` refers to itself, so its expansion never ends. A recursive type needs a name of its own: declare it as `@type Chain {...}` instead of `@alias`
 422..423 error[type-mismatch] expected `character`, found `double`
 
 #---- new_introduces_and_projects
@@ -194,7 +194,7 @@ NULL
 x <- list(v = 1L)
 #++++
 x: Outer<character>
-55..68 error[annotation] `Wrap` is a type parameter here and takes no type arguments.
+55..68 error[annotation] `Wrap` is a type parameter here and takes no type arguments
 
 #---- misspelled_type_inside_a_type_body
 #: @type Instrument {list{isin: character}}
@@ -212,7 +212,7 @@ f: Future
 x <- 1L
 #++++
 x: integer
-3..12 error[annotation] I do not know the type `Instument`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
+3..12 error[annotation] I do not know the type `Instument`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 
 #---- forward_reference_resolves_and_needs_new
 #: Point
@@ -227,7 +227,7 @@ origin: Point
 x <- 1L
 #++++
 x: integer
-3..7 error[annotation] I do not know the type `Pair`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
+3..7 error[annotation] I do not know the type `Pair`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 
 #---- stub_class_resolves
 #: data.frame
@@ -245,7 +245,7 @@ data.frame
 b <- list(value = 1L)
 #++++
 b: Box<integer, double>
-37..40 error[annotation] generic type `Box` expects 1 type argument, but found 2.
+37..40 error[annotation] generic type `Box` expects 1 type argument, but found 2
 
 #---- non_generic_takes_no_arguments
 #: @type Meters {double}
@@ -254,7 +254,7 @@ b: Box<integer, double>
 m <- 1.0
 #++++
 m: Meters<integer>
-29..35 error[annotation] `Meters` is not a generic type. It takes no type arguments.
+29..35 error[annotation] `Meters` is not a generic type. It takes no type arguments
 
 #---- bare_generic_reference_must_be_applied
 #: @type Box<T> {list{value: T}}
@@ -263,7 +263,7 @@ m: Meters<integer>
 b <- list(value = 1L)
 #++++
 b: Box
-37..40 error[annotation] generic type `Box` expects 1 type argument, but found 0.
+37..40 error[annotation] generic type `Box` expects 1 type argument, but found 0
 
 #---- bare_generic_under_new_infers_its_arguments
 #: @type Box<T> {list{value: T}}

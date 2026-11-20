@@ -952,7 +952,7 @@ impl Parser<'_> {
                         self.finish();
                         self.error_at(
                             TextRange::new(start, close),
-                            format!("Type arguments go in angle brackets, as `{name}<...>`. Only `list` takes its element type in square brackets."),
+                            format!("type arguments go in angle brackets, as `{name}<...>`. Only `list` takes its element type in square brackets"),
                         );
                     }
                     _ => {

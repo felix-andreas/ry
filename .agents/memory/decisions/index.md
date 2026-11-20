@@ -148,6 +148,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A generic's dispatch formal is forced when an argument reaches it (settled)
 - A nominal over a nominal extends it (settled)
 - `numeric` is closed under arithmetic, `arithmetic` is not (settled)
+- Diagnostic messages are lowercase and end without a full stop (settled)
 
 ## Analysis core
 

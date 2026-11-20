@@ -78,7 +78,7 @@ filter : @masked fn(.data: Any, ...: Any) -> Any
 f : @masked fn(x: Any) -> Any
 #++++
 f : fn(x: Any) -> Any
-line 0: `@masked` on `f` requires a variadic function type. The mask covers the arguments the `...` rest parameter absorbs.
+line 0: `@masked` on `f` requires a variadic function type. The mask covers the arguments the `...` rest parameter absorbs
 
 #==== opaque
 #---- opaque_names_the_parameters_a_ry_value_may_reach
@@ -92,7 +92,7 @@ both : @pure @opaque(a, b) fn(a: Any, b: Any, c: Any) -> NULL
 f : @opaque(objekt) fn(object: Any) -> Any
 #++++
 f : @opaque(objekt) fn(object: Any) -> Any
-line 0: `@opaque(objekt)` on `f` names no parameter of its function type.
+line 0: `@opaque(objekt)` on `f` names no parameter of its function type
 
 #==== pure
 #---- pure_may_depend_on_the_functions_a_call_is_passed
@@ -106,28 +106,28 @@ pair : @pure(f, g) fn(f: Any, g: Any) -> Any
 apply_to : @pure(fun) fn(FUN: Any) -> Any
 #++++
 apply_to : @pure(fun) fn(FUN: Any) -> Any
-line 0: `@pure(fun)` on `apply_to` names no parameter of its function type.
+line 0: `@pure(fun)` on `apply_to` names no parameter of its function type
 
 #==== malformed
 #---- missing_colon
 length fn(x: Any) -> integer
 #++++
-line 0: this line is not a declaration (`name : TYPE`).
+line 0: this line is not a declaration (`name : TYPE`)
 
 #---- empty_name
 : fn(x: Any) -> integer
 #++++
-line 0: expected a name before `:`.
+line 0: expected a name before `:`
 
 #---- missing_type
 length :
 #++++
-line 0: expected a type after `length :`.
+line 0: expected a type after `length :`
 
 #---- invalid_type_expression
 broken : fn(x: ) -> integer
 #++++
-line 0: this declaration does not load: `fn(x: ) -> integer` is not a valid type.
+line 0: this declaration does not load: `fn(x: ) -> integer` is not a valid type
 
 #---- valid_and_malformed_mixed
 length : fn(x: Any) -> integer
@@ -136,7 +136,7 @@ pi : double
 #++++
 length : fn(x: Any) -> integer
 pi : double
-line 1: this line is not a declaration (`name : TYPE`).
+line 1: this line is not a declaration (`name : TYPE`)
 
 #---- a_structural_representation_is_refused_and_so_is_its_use
 # The use reports too, so an author who reads only the second problem is not
@@ -145,8 +145,8 @@ line 1: this line is not a declaration (`name : TYPE`).
 mk : fn() -> structural
 #++++
 mk : fn() -> structural
-line 2: this type declaration does not load: write `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>`.
-line 3: this declaration does not load: I do not know the type `structural`.
+line 2: this type declaration does not load: write `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>`
+line 3: this declaration does not load: I do not know the type `structural`
 
 #==== purity
 #---- pure_marker_declares_the_name_pure
@@ -173,4 +173,4 @@ round : @pure fn(x: double) -> double
 #---- a_marker_glued_to_the_type_is_not_a_marker
 odd : @purefn(x: Any) -> Any
 #++++
-line 0: this declaration does not load: `@purefn(x: Any) -> Any` is not a valid type.
+line 0: this declaration does not load: `@purefn(x: Any) -> Any` is not a valid type

@@ -331,14 +331,14 @@ outer: fn() -> integer
 count: Integr <- 1L
 #++++
 count: integer
-7..13 error[annotation] I do not know the type `Integr`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
+7..13 error[annotation] I do not know the type `Integr`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 
 #---- generic_without_arguments
 #: @type Box<T> {list{value: T}}
 box: Box <- list(value = 1L)
 #++++
 box: Box
-38..41 error[annotation] generic type `Box` expects 1 type argument, but found 0.
+38..41 error[annotation] generic type `Box` expects 1 type argument, but found 0
 
 #---- record_cannot_mix_named_and_positional_items
 pair: list{a: integer, character} <- list(a = 1L, "b")
@@ -350,7 +350,7 @@ pair: list[integer | character]
 pick <- function<T, T>(x: T) -> T x
 #++++
 pick: <T> fn(x: T) -> T
-20..21 error[annotation] duplicate type parameter name `T` in a function's type parameters.
+20..21 error[annotation] duplicate type parameter name `T` in a function's type parameters
 
 #---- unknown_constraint
 twice <- function<T: number>(x: T) -> T x + x

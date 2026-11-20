@@ -207,7 +207,7 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
 
     for (range, value) in crate::file_typing_directives(db, file).1 {
         diagnostics.push(Diagnostic::new(range, Severity::Error, "annotation", format!(
-                "Unknown typing directive `{value}`. Use `# typing: on`, `# typing: off`, or `# typing: strict`."
+                "unknown typing directive `{value}`. Use `# typing: on`, `# typing: off`, or `# typing: strict`"
             )));
     }
 
@@ -230,7 +230,7 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                 node.text_range(),
                 Severity::Error,
                 "annotation",
-                "Type definition blocks are only allowed at the top level of a file.".to_owned(),
+                "type definition blocks are only allowed at the top level of a file".to_owned(),
             ));
         }
     }
@@ -243,7 +243,7 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
             node.text_range(),
             Severity::Error,
             "annotation",
-            "Type definitions are only allowed at the top level of a file.".to_owned(),
+            "type definitions are only allowed at the top level of a file".to_owned(),
         ));
     }
     diagnostics.extend(dangling_annotation_diagnostics(db, file));
@@ -423,20 +423,20 @@ fn dangling_annotation_diagnostic(
     let message = match target {
         AnnotationTarget::Attached(_) => {
             if node.children().next().is_none() {
-                "A `#:` typing comment must include a type expression."
+                "a `#:` typing comment must include a type expression"
             } else {
                 return None;
             }
         }
         AnnotationTarget::BlankLineSeparated => {
-            "A `#:` typing comment cannot be separated from its expression by an empty line."
+            "a `#:` typing comment cannot be separated from its expression by an empty line"
         }
         AnnotationTarget::AfterCode => {
-            "This `#:` comment follows code on its line, so it annotates nothing. Put it on its own line, directly above the expression it describes."
+            "this `#:` comment follows code on its line, so it annotates nothing. Put it on its own line, directly above the expression it describes"
         }
         AnnotationTarget::Dangling => {
             // Almost always a `#:` block placed above a roxygen2 block, so name the fix.
-            "A `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block."
+            "a `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block"
         }
     };
     Some(Diagnostic::new(
@@ -588,7 +588,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 range,
                 Severity::Warning,
                 "unused",
-                format!("`{}` is assigned but never used.", unused.name),
+                format!("`{}` is assigned but never used", unused.name),
             ));
         }
         for target in &naming.extras().invalid_assignment_targets {
@@ -661,7 +661,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 Severity::Warning,
                 "maybe-undefined",
                 format!(
-                    "`{}` is only assigned on some paths here, so this read can find nothing.",
+                    "`{}` is only assigned on some paths here, so this read can find nothing",
                     display_name(&binding.name)
                 ),
             ));
@@ -699,7 +699,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 diagnostics.push(with_name_fix(
                     Diagnostic::new(range, Severity::Warning, "unresolved", format!(
                         "`{display}` is in ry's standard library, which `[check] prelude = false` \
-                         keeps out of scope. Write `{qualified}`."
+                         keeps out of scope. Write `{qualified}`"
                     )),
                     Some(&qualified),
                 ));
@@ -707,14 +707,14 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             }
             let hint = suggestion
                 .as_ref()
-                .map(|nearest| format!(" Did you mean `{nearest}`?"))
+                .map(|nearest| format!(". Did you mean `{nearest}`?"))
                 .unwrap_or_default();
             let message = match display.split_once('.') {
                 Some((module, member)) if STANDARD_MODULES.contains(&module) => {
-                    format!("ry's standard library has no function `{member}` in `{module}`.{hint}")
+                    format!("ry's standard library has no function `{member}` in `{module}`{hint}")
                 }
                 _ => format!(
-                    "I could not resolve `{display}` in this package, its imports, or builtins.{hint}"
+                    "I could not resolve `{display}` in this package, its imports, or builtins{hint}"
                 ),
             };
             diagnostics.push(with_name_fix(
@@ -747,7 +747,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 nearest_name(name, miss.columns.iter().map(String::as_str)).or(suggestion);
             let hint = suggestion
                 .as_ref()
-                .map(|nearest| format!(" Did you mean `{nearest}`?"))
+                .map(|nearest| format!(". Did you mean `{nearest}`?"))
                 .unwrap_or_default();
             let subject = match &miss.frame {
                 Some(frame) => format!("the frame `{frame}`"),
@@ -760,7 +760,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     Severity::Warning,
                     "unresolved",
                     format!(
-                        "{subject} has no column `{}`, and nothing else defines that name.{hint}",
+                        "{subject} has no column `{}`, and nothing else defines that name{hint}",
                         display_name(name)
                     ),
                 ),
@@ -991,11 +991,11 @@ fn alias_cycle_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 // `@type` gives a name of its own; a bare alias chain is just a mistake.
                 if matches!(definition.body.kind(db), TyKind::Named(..)) {
                     format!(
-                        "the alias `{name}` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle."
+                        "the alias `{name}` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle"
                     )
                 } else {
                     format!(
-                        "the alias `{name}` refers to itself, so its expansion never ends. A recursive type needs a name of its own: declare it as `@type {name} {{...}}` instead of `@alias`."
+                        "the alias `{name}` refers to itself, so its expansion never ends. A recursive type needs a name of its own: declare it as `@type {name} {{...}}` instead of `@alias`"
                     )
                 },
             ));
@@ -1058,10 +1058,10 @@ fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             ;
             let hint = suggestion
                 .as_ref()
-                .map(|nearest| format!(" Did you mean `{nearest}`?"))
+                .map(|nearest| format!(". Did you mean `{nearest}`?"))
                 .unwrap_or_default();
             let diagnostic = Diagnostic::new(range, Severity::Error, "annotation", format!(
-                    "I do not know the type `{name}`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.{hint}"
+                    "I do not know the type `{name}`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs{hint}"
                 ));
             match suggestion {
                 Some(nearest) => {
@@ -1124,7 +1124,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                     *range,
                     Severity::Error,
                     "annotation",
-                    format!("`{name}` is not a generic type. It takes no type arguments."),
+                    format!("`{name}` is not a generic type. It takes no type arguments"),
                 ));
             } else if arity != *count {
                 diagnostics.push(Diagnostic::new(
@@ -1132,7 +1132,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                     Severity::Error,
                     "annotation",
                     format!(
-                        "generic type `{name}` expects {arity} type {}, but found {count}.",
+                        "generic type `{name}` expects {arity} type {}, but found {count}",
                         plural(arity, "argument", "arguments"),
                     ),
                 ));
@@ -1160,7 +1160,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                     Severity::Error,
                     "annotation",
                     format!(
-                        "generic type `{name}` expects {arity} type {}, but found 0.",
+                        "generic type `{name}` expects {arity} type {}, but found 0",
                         plural(arity, "argument", "arguments"),
                     ),
                 ));
@@ -1177,7 +1177,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                 Severity::Error,
                 "annotation",
                 format!(
-                    "`@new` requires a nominal type declared with `@type`, but `{}` is an alias.",
+                    "`@new` requires a nominal type declared with `@type`, but `{}` is an alias",
                     name.text(db)
                 ),
             ));
@@ -1925,13 +1925,13 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
                     severity: Severity::Warning,
                     code: "duplicate",
                     message: format!(
-                        "Top-level binding `{name}` overwrites an earlier top-level binding in this package."
+                        "top-level binding `{name}` overwrites an earlier top-level binding in this package"
                     ),
                     fix: None,
                     related: vec![RelatedLocation {
                         file: earlier_file,
                         range: earlier_range,
-                        message: "the earlier binding is here.",
+                        message: "the earlier binding is here",
                     }],
                 });
             }
@@ -1948,13 +1948,13 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
                     severity: Severity::Warning,
                     code: "duplicate",
                     message: format!(
-                        "Top-level binding `{name}` is overwritten by a later top-level binding in this package."
+                        "top-level binding `{name}` is overwritten by a later top-level binding in this package"
                     ),
                     fix: None,
                     related: vec![RelatedLocation {
                         file: later_file,
                         range: later_range,
-                        message: "the later binding is here.",
+                        message: "the later binding is here",
                     }],
                 });
             }
@@ -2168,7 +2168,7 @@ fn duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> 
                 severity: Severity::Error,
                 code: "annotation",
                 message: format!(
-                    "The type name `{name}` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project."
+                    "the type name `{name}` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project"
                 ),
                 fix: None,
                 related: vec![RelatedLocation {
@@ -2200,7 +2200,7 @@ fn script_duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagn
             severity: Severity::Error,
             code: "annotation",
             message: format!(
-                "The type name `{name}` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace, which for a script is this file."
+                "the type name `{name}` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace, which for a script is this file"
             ),
             fix: None,
             related: vec![RelatedLocation {
@@ -2241,9 +2241,9 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
             Some(nearest) => {
                 format!("`{name}` is not exported by `{package}`. Did you mean `{nearest}`?")
             }
-            None if !defined => format!("`{name}` is not exported by `{package}`."),
+            None if !defined => format!("`{name}` is not exported by `{package}`"),
             None => format!(
-                "`{name}` is not exported by `{package}`, so this read fails once the package is installed. Export it in `NAMESPACE`, or write `{package}:::{name}`."
+                "`{name}` is not exported by `{package}`, so this read fails once the package is installed. Export it in `NAMESPACE`, or write `{package}:::{name}`"
             ),
         });
     }
@@ -2257,21 +2257,21 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
         false if CONDITIONAL_NAMESPACES.contains(&read.package.as_str()) => {
             let name = read.name.as_ref()?;
             (!read.internal && dormant_namespace_exports(db, &read.package, name) == Some(false))
-                .then(|| format!("`{name}` is not exported by `{}`.", read.package))
+                .then(|| format!("`{name}` is not exported by `{}`", read.package))
         }
-        false => Some(format!("unknown package namespace `{}`.", read.package)),
+        false => Some(format!("unknown package namespace `{}`", read.package)),
         true => {
             let name = read.name.as_ref()?;
             if !read.internal && !namespace_exports(db, &read.package, name) {
                 // `ry` is the other namespace ry ships, so `ry::List.map` is the likely slip.
                 let hint = if read.package == "ry" && namespace_exports(db, STANDARD_LIBRARY, name)
                 {
-                    format!(" It is in ry's standard library: write `{STANDARD_LIBRARY}::{name}`.")
+                    format!(". It is in ry's standard library: write `{STANDARD_LIBRARY}::{name}`")
                 } else {
                     String::new()
                 };
                 Some(format!(
-                    "`{name}` is not exported by `{}`.{hint}",
+                    "`{name}` is not exported by `{}`{hint}",
                     read.package
                 ))
             } else {
@@ -2823,7 +2823,7 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 definer.range,
                 Severity::Warning,
                 "unused",
-                format!("`{}` is assigned but never used.", definer.name),
+                format!("`{}` is assigned but never used", definer.name),
             )
         })
         .collect()
@@ -3202,7 +3202,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             renderer.render(db, *found)
         ),
         TypeErrorKind::MissingFormalRead { name } => format!(
-            "reading `{name}` here would fail at run time: this branch runs only when `{name}` is missing, and it has no default."
+            "reading `{name}` here would fail at run time: this branch runs only when `{name}` is missing, and it has no default"
         ),
         TypeErrorKind::TemplateDisagreesWithCallback {
             callback,
@@ -3444,7 +3444,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             renderer.render(db, *found)
         ),
         TypeErrorKind::NotIterable { found } => format!(
-            "this `for` sequence is `{}`, which cannot be iterated. Expected a vector or list.",
+            "this `for` sequence is `{}`, which cannot be iterated. Expected a vector or list",
             renderer.render(db, *found)
         ),
         TypeErrorKind::UnsupportedSubset { found } => {
@@ -3570,7 +3570,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             if *names == 1 { "name is" } else { "names are" }
         ),
         TypeErrorKind::IncompatibleJoinColumns { condition, x, i } => format!(
-            "the join condition `{condition}` compares `{}` with `{}`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals.",
+            "the join condition `{condition}` compares `{}` with `{}`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals",
             renderer.render(db, *x),
             renderer.render(db, *i)
         ),
@@ -3579,7 +3579,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             column,
             found,
         } => format!(
-            "the join condition `{condition}` compares numbers, but `{column}` is `{}`. Only `==` joins strings.",
+            "the join condition `{condition}` compares numbers, but `{column}` is `{}`. Only `==` joins strings",
             renderer.render(db, *found)
         ),
         TypeErrorKind::InSubsetColumn { column, inner } => {
@@ -3624,7 +3624,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         }
         TypeErrorKind::BadRowIndex { found } => {
             let hint = if matches!(found.kind(db), TyKind::Frame(..)) {
-                ". To join two frames, add `on =`."
+                ". To join two frames, add `on =`"
             } else {
                 ""
             };
@@ -3634,7 +3634,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             )
         }
         TypeErrorKind::DollarOnAtomicVector { found } => format!(
-            "R's `$` operator is invalid on atomic vectors, and this value is `{}`. Extract an element with `[[` instead.",
+            "R's `$` operator is invalid on atomic vectors, and this value is `{}`. Extract an element with `[[` instead",
             renderer.render(db, *found)
         ),
         TypeErrorKind::InvalidOperand { expected, found } => format!(
@@ -3671,7 +3671,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             variable,
             container,
         } => format!(
-            "I cannot construct an infinite type: {} occurs inside `{}`.",
+            "I cannot construct an infinite type: {} occurs inside `{}`",
             renderer.render(db, *variable),
             renderer.render(db, *container)
         ),

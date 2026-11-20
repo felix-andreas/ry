@@ -157,7 +157,7 @@ syntax error: expected a type, found `->`
 #---- attached_named_type_application_not_supported
 Person[T]
 #++++
-syntax error: Type arguments go in angle brackets, as `Person<...>`. Only `list` takes its element type in square brackets.
+syntax error: type arguments go in angle brackets, as `Person<...>`. Only `list` takes its element type in square brackets
 
 #---- bare_forall_without_type
 <T>
