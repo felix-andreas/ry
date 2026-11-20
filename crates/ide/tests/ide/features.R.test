@@ -684,6 +684,7 @@ rename: 2 edit(s)
 type-definition 9..14
 signature: none
 completion (1): Score
+hint @42 -> Score
 
 #---- declaration_name_is_target
 #: @type Sco$0re {double}
@@ -699,6 +700,7 @@ references: 9..14*, 49..54
 rename: 2 edit(s)
 signature: none
 completion (1): Score
+hint @41 -> Score
 
 #---- annotation_completion_types
 #: @type UserId {integer}

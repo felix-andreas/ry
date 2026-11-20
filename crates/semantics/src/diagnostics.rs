@@ -1725,6 +1725,23 @@ fn canonical_type<'db>(
     })
 }
 
+/// Whether an annotation names a type the vocabulary lacks or writes `X[]` over an element that
+/// is not atomic. Both are reported here, so the checker drops such an annotation's payload
+/// rather than check code against a type the author did not mean.
+pub(crate) fn annotation_misuses_vocabulary<'db>(
+    db: &'db dyn Db,
+    annotation: &Annotation<'db>,
+    definitions: TypeDefinitions<'db>,
+    stub_nominals: &SymbolSet,
+) -> bool {
+    annotation.nominal_references.iter().any(|(name, _)| {
+        !stub_nominals.contains(name.as_str()) && definitions.get(db, Name::new(db, name)).is_none()
+    }) || annotation
+        .vector_elements
+        .iter()
+        .any(|(element, _)| !vector_element_atomic(db, *element, definitions, stub_nominals))
+}
+
 /// Rigid binders count (their use adds the atomic bound); nominals never do, and
 /// undeclared names stay silent because the unknown-type error reports them.
 fn vector_element_atomic<'db>(
@@ -3108,6 +3125,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         ),
         TypeErrorKind::MissingFormalRead { name } => format!(
             "reading `{name}` here would fail at run time: this branch runs only when `{name}` is missing, and it has no default."
+        ),
+        TypeErrorKind::TemplateDisagreesWithCallback {
+            callback,
+            returns,
+            template,
+        } => format!(
+            "{callback} returns `{}`, but this `FUN.VALUE` asks for `{}`",
+            renderer.render(db, *returns),
+            renderer.render(db, *template)
         ),
         TypeErrorKind::NotAFunction { found } => {
             format!(

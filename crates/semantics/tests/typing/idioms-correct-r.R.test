@@ -1588,7 +1588,8 @@ flags: <T> fn(words: list[T] | T[]) -> logical[]
 counts <- function(words) vapply(words, function(word) paste(word, collapse = " "), numeric(1))
 #++++
 counts: Unknown
-84..94 error[type-mismatch] expected `character[] | character`, found `double[]`
+84..94 error[type-mismatch] the function returns `character`, but this `FUN.VALUE` asks for `double[]`
+
 #---- a_returned_closure_with_named_parameters_fits_a_dots_only_callback
 #: <R> fn(f: fn(...: Any) -> R) -> R
 wrap <- function(f) f()

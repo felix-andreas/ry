@@ -125,10 +125,11 @@ neither does a `@strict` toggle, so the adjacency rules do not apply to them.
 A block is refused as a whole when it mixes forms, orders its directives wrongly, declares a
 duplicate or unknown type parameter, or gives `@new` a payload that is not nominal. A refused block
 reports its error and carries no typing payload, so a broken annotation does not cause follow-on
-findings. Two known exceptions still do: a `[]` vector whose element type is not atomic or is not
-declared (`Rec[]`), and a bare optional positional parameter (`fn(integer, [character])`). A block
-the annotation grammar could not read at all is refused silently, because the parse error has
-already said what was wrong.
+findings. An annotation that names an undeclared type, or writes `X[]` over an element that is not
+atomic (`Rec[]` with `Rec` a record alias), is refused the same way, so the code it covers is
+typed as if it had no annotation. A block the annotation grammar could not read at all, such as
+the bare optional parameter in `fn(integer, [character])`, is refused silently, because the parse
+error has already said what was wrong.
 
 ## Inline annotation syntax
 
@@ -1873,7 +1874,13 @@ The base functions that take a function argument and resolve it with `match.fun`
 `apply`, `tapply`, `sweep`, `rapply`, `eapply`, `Vectorize`, `Negate`, `aggregate`, and `match.fun`
 itself) also accept the function's name as a string. A string literal that names a known function
 checks as that function, so `vapply(words, "toupper", numeric(1))` is an error because `toupper`
-returns `character`. Any other string, such as `"[["` or a computed name, is `Unknown` and
+returns `character`. The finding sits on the template and names the callback:
+
+```text
+`toupper` returns `character`, but this `FUN.VALUE` asks for `double[]`
+```
+
+Any other string, such as `"[["` or a computed name, is `Unknown` and
 unchecked. A string reaches a function-typed parameter only at these callees: a project function
 that calls its `callback` parameter does not accept `"toupper"`.
 

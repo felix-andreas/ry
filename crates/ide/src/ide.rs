@@ -325,9 +325,13 @@ fn typed_hover(
     let (lines, definition) = match &hir.kind(expression) {
         ExpressionKind::NameRef(name) => {
             // The item's own top-level name renders the exported scheme, not the initializer's
-            // type: `#: @new` brands the scheme even when the initializer is `Unknown`.
+            // type: `#: @new` brands the scheme even when the initializer is `Unknown`. Only the
+            // name the item assigns does: in `m$amount <- 5` the scheme is the value's.
             let naming = item_naming(db, position.item).as_ref();
-            let exported = naming.and_then(|naming| {
+            let defines_item = hir.root.is_some_and(|root| {
+                matches!(hir.kind(root), ExpressionKind::Assign { target, .. } if *target == expression)
+            });
+            let exported = naming.filter(|_| defines_item).and_then(|naming| {
                 let binding = naming.resolutions.get(&expression)?;
                 (naming.bindings.get(binding)?.kind == BindingKind::TopLevel).then_some(())?;
                 check.scheme.clone()

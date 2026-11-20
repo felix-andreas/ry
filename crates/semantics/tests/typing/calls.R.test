@@ -512,7 +512,7 @@ wrong <- vapply(xs, function(v) as.character(v), numeric(1))
 xs: double[]
 labels: character[]
 wrong: Unknown
-130..140 error[type-mismatch] expected `character[] | character`, found `double[]`
+130..140 error[type-mismatch] the function returns `character`, but this `FUN.VALUE` asks for `double[]`
 
 #---- a_switch_result_without_a_default_is_called_as_the_function
 pick <- function(kind) {
@@ -794,7 +794,7 @@ f: <T> fn() -> list[T]
 f <- function() vapply(c("a", "b"), "toupper", numeric(1))
 #++++
 f: Unknown
-47..57 error[type-mismatch] expected `character[] | character`, found `double[]`
+47..57 error[type-mismatch] `toupper` returns `character`, but this `FUN.VALUE` asks for `double[]`
 
 #---- a_closure_parameter_does_not_accept_a_function_name_string
 run <- function(callback) callback(1)

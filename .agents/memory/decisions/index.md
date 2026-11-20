@@ -127,6 +127,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Branches decide each other's literal items, and `c()` decides a literal as R's type
 - A loop's `break`s and `next`s join where they land
 - An error against a fixed type keeps the item's export
+- An annotation that misuses the type vocabulary carries no payload
 
 ## Analysis core
 

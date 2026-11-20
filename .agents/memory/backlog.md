@@ -736,14 +736,6 @@ Smaller gaps:
 
 - A string literal where a ry function's callback goes is not reported: `List.map([1L], "a")`
   passes, because a string names a function for R's `match.fun`, which a ry function never calls.
-- Two broken annotations still cause follow-on findings: `#: Rec[]` over an alias of a record (also
-  coded `type-mismatch` instead of as an annotation error), and `fn(integer, [character])`.
-- A `vapply` whose callback's return type disagrees with `FUN.VALUE` reports only the two types, as
-  `vapply(words, toupper, numeric(1))` gives "expected `character[] | character`, found `double[]`"
-  on `numeric(1)`, whether the callback is a name or a `match.fun` string. Naming the callback needs
-  the generic argument check to carry which argument fixed the type variable.
-- After an invalid field write, a later field typo on the same record goes
-  unreported. Hover on `m2` in `m2$amount <- 5` shows `double` instead of the nominal type.
 - From the final type-system review, each now documented as a known gap in the reference:
   - an elided return in a trusted coercion or on a non-literal value (`#: fn(integer)` on `g <- f`)
     is `Unknown` rather than `f`'s known return;

@@ -70,7 +70,7 @@ value <- 1L
 #: @type Person {integer}
 #++++
 == R/main.R
-value: Person
+value: integer
 3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 == inst/scripts/helper.R
 
@@ -83,7 +83,7 @@ value <- 1L
 #++++
 == inst/scripts/a.R
 == inst/scripts/b.R
-value: Person
+value: integer
 3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 10..15 warning[unused] `value` is assigned but never used.
 

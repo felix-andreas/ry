@@ -563,3 +563,19 @@ references: none
 rename: none
 signature: none
 completion (1): currency
+
+#---- hover_on_a_field_write_target_shows_the_nominal_type
+#: @type Money {list{amount: double}}
+
+#: @new Money
+m2 <- list(amount = 1)
+m$02$amount <- 5
+#++++
+hover 76..78: m2: Money
+hover-definition: global 53..55
+definition 53..55
+references: 53..55*, 76..78
+rename: 2 edit(s)
+type-definition 9..14
+signature: none
+completion (117): m2, mad, mahalanobis, maintainer, make.link, make.names, make.packages.html, make.rgb

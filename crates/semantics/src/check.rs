@@ -7,7 +7,7 @@ use {
         annotations::Annotation,
         data_file_layout,
         dense::{Bitset, Column},
-        diagnostics::{STANDARD_MODULES, nearest_name},
+        diagnostics::{STANDARD_MODULES, annotation_misuses_vocabulary, nearest_name},
         exhaustiveness::{MatchFinding, match_findings},
         hir::{
             Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind,
@@ -26,7 +26,7 @@ use {
         },
         native::{Judged, NativeBlocker, has_r_bound, native_blockers},
         sorted::{SortedMap, SortedSet},
-        stubs::{NATIVE_NAMESPACES, StubLibrary, is_ry_type, lower_type_text, stubs},
+        stubs::{NATIVE_NAMESPACES, StubLibrary, SymbolSet, is_ry_type, lower_type_text, stubs},
         top_level::super_assigned_names,
         types::{
             Atomic, Binder, Bound, Constraint, DefaultRead, FlagReturn, FrameKind, FunctionType,
@@ -110,6 +110,13 @@ pub enum TypeErrorKind<'db> {
     },
     NotAFunction {
         found: Ty<'db>,
+    },
+    /// `vapply`'s `FUN.VALUE` disagrees with what the callback returns, which names the
+    /// callback rather than printing the stub's `V[] | V` template.
+    TemplateDisagreesWithCallback {
+        callback: String,
+        returns: Ty<'db>,
+        template: Ty<'db>,
     },
     /// A read of a no-default formal on the branch where `missing(name)` held.
     MissingFormalRead {
@@ -848,7 +855,9 @@ fn check_item_in<'db>(
         expression_annotations: {
             let mut annotations = Column::new_in(arena, expressions);
             for (expression, annotation) in expression_annotations {
-                annotations.insert(*expression, annotation.clone());
+                if !refused_by_vocabulary(db, globals, annotation) {
+                    annotations.insert(*expression, annotation.clone());
+                }
             }
             annotations
         },
@@ -931,7 +940,7 @@ fn check_item_in<'db>(
                 .find_map(|ty| alias_cycle_walk(db, definitions, ty, &mut FxHashSet::default()))
         });
         // The cycle is reported at the alias declarations, so a use only stops trusting it.
-        if cycle.is_some() {
+        if cycle.is_some() || refused_by_vocabulary(db, globals, present) {
             annotation = None;
         }
     }
@@ -11649,7 +11658,13 @@ impl<'db, 'a> Checker<'db, 'a> {
                 return ty;
             }
         }
+        let errors_before = self.errors.len();
         let ty = self.infer_ordinary_call(id, range, callee, arguments);
+        if matches!(self.module.kind(callee), ExpressionKind::NameRef(name) if name.as_str() == "vapply")
+            && !self.naming.resolutions.contains_key(&callee)
+        {
+            self.name_vapply_callback(errors_before, arguments);
+        }
         if let Some(sequence) = self.integer_seq(callee, arguments, ty) {
             return self.record(id, sequence);
         }
@@ -18544,6 +18559,49 @@ impl<'db, 'a> Checker<'db, 'a> {
         })
     }
 
+    /// The generic `vapply` candidate fixes `V` from the callback first, so a template that
+    /// disagrees is reported against `V[] | V`; this names the callback and its return instead.
+    fn name_vapply_callback(&mut self, errors_before: usize, arguments: &[Argument]) {
+        let db = self.db;
+        let bound = bind_formals(self.module, arguments, &["X", "FUN", "FUN.VALUE"]);
+        let (Some(function), Some(template)) = (bound.value(1), bound.value(2)) else {
+            return;
+        };
+        let template_range = self.module.range(template);
+        let callback = match self.module.kind(function) {
+            ExpressionKind::NameRef(name) => format!("`{name}`"),
+            ExpressionKind::Literal(LiteralKind::String(text)) => {
+                format!("`{}`", &self.module[text])
+            }
+            ExpressionKind::Function { .. } => "the function".to_owned(),
+            _ => return,
+        };
+        for index in errors_before..self.errors.len() {
+            let error = &self.errors[index];
+            let TypeErrorKind::Mismatch { expected, found } = error.kind else {
+                continue;
+            };
+            if error.range != template_range {
+                continue;
+            }
+            let returns = match self.table.resolve(db, expected).kind(db) {
+                TyKind::Union(members) => members
+                    .iter()
+                    .copied()
+                    .find(|member| !matches!(member.kind(db), TyKind::Vector(_))),
+                _ => None,
+            };
+            let Some(returns) = returns else {
+                continue;
+            };
+            self.errors[index].kind = TypeErrorKind::TemplateDisagreesWithCallback {
+                callback: callback.clone(),
+                returns,
+                template: found,
+            };
+        }
+    }
+
     fn join_all(&mut self, types: &[Ty<'db>]) -> Ty<'db> {
         let mut joined: Option<Ty<'db>> = None;
         for &ty in types {
@@ -20917,6 +20975,25 @@ fn data_table_keeps_class(module: &Module, arguments: &[Argument]) -> bool {
 
 /// A DFS gray set: a name is expanding only while its own body is walked, so a
 /// diamond is not a cycle. Nominal definitions may legitimately recurse.
+/// An annotation that names an undeclared type or a non-atomic `X[]` element carries no
+/// payload, like a refused block: the diagnostics report the mistake once, and a call is never
+/// checked against a type the author did not mean.
+fn refused_by_vocabulary<'db>(
+    db: &'db dyn Db,
+    globals: Option<&dyn GlobalEnv<'db>>,
+    annotation: &Annotation<'db>,
+) -> bool {
+    if annotation.nominal_references.is_empty() && annotation.vector_elements.is_empty() {
+        return false;
+    }
+    let Some(globals) = globals else {
+        return false;
+    };
+    let no_nominals = SymbolSet::default();
+    let stub_nominals = stubs(db).map_or(&no_nominals, |library| &library.nominals);
+    annotation_misuses_vocabulary(db, annotation, globals.type_definitions(), stub_nominals)
+}
+
 pub(crate) fn alias_cycle_walk<'db>(
     db: &'db dyn Db,
     definitions: TypeDefinitions<'db>,

@@ -1867,3 +1867,21 @@ Fixtures: `typing/control.R.test` group `loops`, `naming/for-bindings.R.test`.
 Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_record_type`,
 `a_column_update_is_not_a_dead_store`, `a_size_name_from_r_suggests_the_library_spelling`,
 `a_number_where_a_callback_goes_names_the_parameter_types`).
+
+## An annotation that misuses the type vocabulary carries no payload
+
+**Status:** built.
+
+- An annotation that names an undeclared type or writes `X[]` over a non-atomic element is
+  refused in the checker (`refused_by_vocabulary`, beside the alias-cycle refusal), not in
+  lowering, because both judgments need the project's type vocabulary, which lowering does not
+  read. The code is then typed as if unannotated, so the one annotation finding is the only one.
+  The `[]` finding keeps the `type-mismatch` code so it disappears when typing is off.
+- A malformed optional parameter (`[character]` with no `: TYPE`) leaves an empty `ERROR` node, so
+  the block is `Unparsed` and refused like any unreadable block.
+- `vapply`'s generic candidate fixes `V` from the callback before it reaches `FUN.VALUE`, so the
+  mismatch lands on the template as `V[] | V`. The call rewrites that finding to name the callback
+  (`TemplateDisagreesWithCallback`) rather than threading which argument fixed a variable through
+  the generic argument check.
+- Hover on a top-level name renders the item's exported scheme only when the item assigns that
+  name; in `m$amount <- 5` the scheme is the value's.

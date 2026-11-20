@@ -1260,16 +1260,19 @@ impl Parser<'_> {
             Some(L_BRACKET) => {
                 self.bump();
                 self.ann_trivia(end);
+                let mut malformed = false;
                 if self.ann_at(IDENT, end) {
                     self.wrap(NAME);
                 } else {
                     self.error_here("expected `[name]: TYPE` for an optional parameter");
+                    malformed = true;
                 }
                 self.ann_trivia(end);
                 if self.ann_at(R_BRACKET, end) {
                     self.bump();
                 } else {
                     self.error_here("expected `]` after the optional parameter name");
+                    malformed = true;
                 }
                 self.ann_trivia(end);
                 if self.ann_at(COLON, end) {
@@ -1278,6 +1281,13 @@ impl Parser<'_> {
                     self.ann_type(end, false);
                 } else {
                     self.error_here("expected `:` after `[name]` in an optional parameter");
+                    malformed = true;
+                }
+                // `[character]` reads as a parameter named `character` with no type, which
+                // the checker would then blame as a name the function lacks.
+                if malformed {
+                    self.start(ERROR);
+                    self.finish();
                 }
             }
             Some(IDENT) if self.ann_next_significant(end) == Some(COLON) => {

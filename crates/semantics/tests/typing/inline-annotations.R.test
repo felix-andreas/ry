@@ -330,7 +330,7 @@ outer: fn() -> integer
 #---- unknown_type_name
 count: Integr <- 1L
 #++++
-count: Integr
+count: integer
 7..13 error[annotation] I do not know the type `Integr`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 
 #---- generic_without_arguments

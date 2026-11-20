@@ -67,7 +67,7 @@ result: Unknown
 value <- list(name = "bob")
 #++++
 == R/a.R
-value: Person
+value: list{name: character}
 3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 
 #---- new_type_definition_resolves_forward_reference_then_v1
