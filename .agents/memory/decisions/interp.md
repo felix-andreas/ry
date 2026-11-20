@@ -118,7 +118,7 @@ The code is `crates/interp` (`development/design/r-runtime.md`, step 3).
   `jpeg-encoder` on the PNG device's raster.
 - **The native codeset follows `LC_CTYPE`** (`l10n_info`, `iconv("")`), so the C locale reports
   ASCII and escaping under `LC_ALL=C` matches GNU R.
-- **A C `LC_CTYPE` from the environment becomes C.UTF-8 at startup** unless `LC_ALL` is set
+- **A C `LC_CTYPE` from the environment becomes C.UTF-8 at startup** unless `LC_ALL` is set and non-empty
   (`system::init_locale`, after PEP 538). The string builtins read native strings as UTF-8 in
   every locale, which is more useful than GNU R's escapes and errors in a container that sets no
   locale, and the coercion makes the C library (`MB_CUR_MAX`, `mbrtowc`, `iconv("")`) and
