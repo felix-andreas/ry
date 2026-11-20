@@ -137,6 +137,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Feature probes, Windows-only exports and callback strings
 - An empty list adds no element to `c()` or a loop
 - Shipping stack: Plain R comes from `ry build --plain-r`
+- A signature's type parameters are in scope in its body
 
 ## Analysis core
 
@@ -203,6 +204,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - An editor target is what the code means, and rename refuses what it cannot trace
 - `--annotate` and the code action write a lambda argument's signature
 - A cancellation flips the worker's token only inside an armed scope
+- A local typed by a signature's type parameter reads as that parameter
 
 ## Interpreter
 

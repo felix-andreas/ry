@@ -647,6 +647,39 @@ a named type declares them on its name, as in `@type Pair<T>`. All three of thes
 A refused binder is reported once. The type is then read as though the binder had not been written,
 and the block carries no typing payload.
 
+A function signature's type parameters are in scope in the function's body, so an annotation there
+can name them. The body sees each parameter as one fixed type, the one the caller chose, so a value
+of another type is an error even when it would fit some other choice:
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+twice <- function<T: numeric>(y: T) -> T {
+  doubled: T <- y + y
+  doubled
+}
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: <T: numeric> fn(y: T) -> T
+twice <- function(y) {
+  #: T
+  doubled <- y + y
+  doubled
+}
+```
+
+</TabItem>
+</Tabs>
+
+In `#: <T, U> fn(x: T, y: U) -> T`, the body annotation `#: T` on `kept <- y` reports "expected
+`T`, found `U`". A nested function reads the type parameters of every signature around it, and a
+signature only ry inferred binds no name, so `#: T` in an unannotated function is an unknown type.
+
 #### Constraints
 
 A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in

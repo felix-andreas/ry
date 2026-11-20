@@ -27,7 +27,7 @@ use {
         },
         types::{
             Atomic, Binder, Constraint, FunctionType, Name, Parameter, RecordField, Ty, TyKind,
-            TypeScheme, contains_inference_var, union_of,
+            TypeScheme, contains_inference_var, contains_rigid, union_of,
         },
     },
     std::{
@@ -274,7 +274,7 @@ fn typed_hover(
                 Some(mut scheme) => {
                     scheme.body = without_impossible_vectors(db, scheme.body);
                     (
-                        hover_lines(db, name, &scheme),
+                        hover_lines(db, name, &scheme, &[]),
                         hover_definition(db, files, position.item, innermost, name),
                     )
                 }
@@ -303,7 +303,7 @@ fn typed_hover(
             Some(mut scheme) => {
                 scheme.body = without_impossible_vectors(db, scheme.body);
                 (
-                    hover_lines(db, name, &scheme),
+                    hover_lines(db, name, &scheme, &[]),
                     stub_hover_definition(db, name),
                 )
             }
@@ -345,12 +345,14 @@ fn typed_hover(
                 referenced_scheme(db, files, name, (position.item, check), expression)
             };
             // Render the whole scheme so the `<T>` prefix explains `T`, matching the inlay hint.
-            let mut scheme = exported
-                .or_else(referenced)
-                .unwrap_or_else(|| TypeScheme::monomorphic(ty));
+            // A local's type names the item's own type parameters as its signature letters them.
+            let (mut scheme, outer) = match exported.or_else(referenced) {
+                Some(scheme) => (scheme, &[][..]),
+                None => (TypeScheme::monomorphic(ty), item_binders(check)),
+            };
             scheme.body = without_impossible_vectors(db, scheme.body);
             (
-                hover_lines(db, name, &scheme),
+                hover_lines(db, name, &scheme, outer),
                 hover_definition(db, files, position.item, expression, name),
             )
         }
@@ -364,7 +366,7 @@ fn typed_hover(
                 .as_ref()
                 .is_some_and(|package| declaring_namespace(db, name) == Some(package.as_str()));
             (
-                hover_lines(db, name, &TypeScheme::monomorphic(ty)),
+                hover_lines(db, name, &TypeScheme::monomorphic(ty), &[]),
                 declared.then(|| stub_hover_definition(db, name)).flatten(),
             )
         }
@@ -631,9 +633,15 @@ fn updated_column_at<'db>(
     None
 }
 
-fn hover_lines(db: &dyn Db, name: &str, scheme: &TypeScheme<'_>) -> Vec<String> {
+/// `outer` are the binders of the item around a local, which the local's type reads.
+fn hover_lines<'db>(
+    db: &'db dyn Db,
+    name: &str,
+    scheme: &TypeScheme<'db>,
+    outer: &[Binder<'db>],
+) -> Vec<String> {
     const WIDTH: usize = 80;
-    let mut renderer = TypeRenderer::default();
+    let mut renderer = renderer_within(db, outer, scheme.body);
     let line = format!("{name}: {}", renderer.render_scheme(db, scheme));
     let TyKind::Function(function) = scheme.body.kind(db) else {
         return vec![line];
@@ -641,7 +649,7 @@ fn hover_lines(db: &dyn Db, name: &str, scheme: &TypeScheme<'_>) -> Vec<String> 
     if line.chars().count() <= WIDTH {
         return vec![line];
     }
-    let mut renderer = TypeRenderer::default();
+    let mut renderer = renderer_within(db, outer, scheme.body);
     let binders = renderer
         .render_binder_prefix(db, &scheme.binders)
         .map(|prefix| format!("{prefix} "))
@@ -660,6 +668,26 @@ fn hover_lines(db: &dyn Db, name: &str, scheme: &TypeScheme<'_>) -> Vec<String> 
     }
     lines.push(label[usize::from(last.end())..].to_owned());
     lines
+}
+
+/// The binders of an item's own scheme, which its locals' types read as rigid variables.
+fn item_binders<'a, 'db>(check: &'a ItemCheck<'db>) -> &'a [Binder<'db>] {
+    check
+        .scheme
+        .as_ref()
+        .map_or(&[][..], |scheme| &scheme.binders[..])
+}
+
+/// A renderer for `ty` that letters `outer` first, as the signature that binds them does, so
+/// a type naming the signature's parameters reads with the same names. A type naming none of
+/// them letters its own variables from `T`.
+fn renderer_within<'db>(db: &'db dyn Db, outer: &[Binder<'db>], ty: Ty<'db>) -> TypeRenderer<'db> {
+    let mut renderer = TypeRenderer::default();
+    if contains_rigid(ty) {
+        // Only the lettering is wanted here; the prefix is the signature's to show.
+        renderer.render_binder_prefix(db, outer);
+    }
+    renderer
 }
 
 fn hover_definition<'db>(
@@ -1360,7 +1388,12 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
                 }));
                 continue;
             }
-            let label = TypeRenderer::default().render_scheme(db, &scheme);
+            let mut renderer = if is_root {
+                TypeRenderer::default()
+            } else {
+                renderer_within(db, item_binders(check), scheme.body)
+            };
+            let label = renderer.render_scheme(db, &scheme);
             hints.push(InlayHint {
                 offset: hir.range(*target).end() + node.text_range().start(),
                 label: format!(": {label}"),
@@ -3070,13 +3103,22 @@ pub fn inferred_annotations(db: &dyn Db, file: SourceFile) -> Vec<InferredAnnota
             let Some(scheme) = inferred_scheme(db, check, id, *value, is_root) else {
                 continue;
             };
+            // A signature's `T` is in scope for the body only where the signature is written.
+            if !is_root && !annotated && contains_rigid(scheme.body) {
+                continue;
+            }
             let target_range = hir.range(*target) + item_offset;
             let value_range = hir.range(*value) + item_offset;
             let inline_edits = inline
                 .then(|| inline_annotation_edits(db, &node, &scheme, target_range, value_range))
                 .flatten();
             let edits = inline_edits.unwrap_or_else(|| {
-                let label = TypeRenderer::default().render_scheme(db, &scheme);
+                let outer = if is_root {
+                    &[][..]
+                } else {
+                    item_binders(check)
+                };
+                let label = renderer_within(db, outer, scheme.body).render_scheme(db, &scheme);
                 vec![TextEdit {
                     range: TextRange::empty(TextSize::from(line_start as u32)),
                     replacement: format!("{indentation}#: {label}\n"),
@@ -7172,12 +7214,11 @@ fn inferred_scheme<'db>(
         TypeScheme::monomorphic(*ty)
     };
     scheme.body = without_impossible_vectors(db, scheme.body);
-    is_hintable(
-        db,
-        scheme.body,
-        matches!(scheme.body.kind(db), TyKind::Function(_)),
-    )
-    .then_some(scheme)
+    // Inside a function, a variable the signature binds reads as the signature's `T`; one it
+    // does not bind has no name the reader can find.
+    let variables_allowed = matches!(scheme.body.kind(db), TyKind::Function(_))
+        || (!is_root && !contains_inference_var(db, scheme.body));
+    is_hintable(db, scheme.body, variables_allowed).then_some(scheme)
 }
 
 /// Drops the union members that name an atomic vector of non-atomic elements, such as the

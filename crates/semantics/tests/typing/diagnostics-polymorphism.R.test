@@ -158,3 +158,63 @@ both_hold: <T> fn(f: fn(T) -> logical, a: T, b: T) -> logical
 is_red: fn(x: :Red) -> logical
 checked: Unknown
 172..178 error[type-mismatch] this function is passed `:Red | :Green`, but its parameter `x` accepts `:Red`
+
+#---- a_body_annotation_names_the_signatures_type_parameter
+#: <T: numeric> fn(y: T) -> T
+twice <- function(y) {
+  #: T
+  doubled <- y + y
+  doubled
+}
+#++++
+twice: <T: numeric> fn(y: T) -> T
+
+#---- an_inline_body_annotation_names_the_inline_type_parameter
+twice <- function<T: numeric>(y: T) -> T {
+  doubled: T <- y + y
+  doubled
+}
+#++++
+twice: <T: numeric> fn(y: T) -> T
+
+#---- a_body_annotation_holds_the_parameter_to_its_signature
+#: <T, U> fn(x: T, y: U) -> T
+first <- function(x, y) {
+  #: T
+  kept <- y
+  x
+}
+#++++
+first: <T, U> fn(x: T, y: U) -> T
+65..69 warning[unused] `kept` is assigned but never used.
+73..74 error[type-mismatch] expected `T`, found `U`
+
+#---- a_nested_function_reads_the_outer_type_parameter
+#: <T> fn(x: T) -> fn() -> T
+constant <- function(x) {
+  #: fn() -> T
+  get <- function() x
+  get
+}
+#++++
+constant: <T> fn(x: T) -> fn() -> T
+
+#---- a_body_annotation_outside_any_signature_does_not_know_t
+twice <- function(y) {
+  #: T
+  doubled <- y + y
+  doubled
+}
+#++++
+twice: <T: numeric> fn(y: T) -> T
+28..29 error[annotation] I do not know the type `T`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+
+#---- a_body_annotation_widens_the_signatures_type_parameter
+#: <T> fn(fn: fn() -> T) -> T | NULL
+attempt <- function(fn) {
+  #: T | NULL
+  result <- tryCatch(fn(), error = function(e) NULL)
+  result
+}
+#++++
+attempt: <T> fn(fn: fn() -> T) -> T | NULL

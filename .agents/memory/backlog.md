@@ -825,11 +825,6 @@ measurement showed.
 - `@new` is unrestricted project-wide, so a nominal type's invariant holds only by convention. The
   guide's step 4 says so conditionally ("put `@new` in one constructor"). An
   encapsulation modifier would make it a guarantee.
-- Editor gaps left by the completeness pass against rust-analyzer (`ide/tests/ide/editor-completeness.R.test`
-  pins what works). `df$` on a base `data.frame` completes nothing, because its columns are not
-  typed (the `DataFrame` type is the typed alternative). A local whose
-  type is a generic parameter (`total <- a + b` inside `<T> fn(a: T, ...)`) gets no inlay hint,
-  because a bare `T` without its binder would mislead.
 
 ### What the round said overall
 
@@ -986,7 +981,6 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   }
   ```
   With `importFrom(zeallot, "%<-%")`: `1 file checked, no problems`.
-- **A body annotation cannot name the signature's type parameter.** Bring the enclosing signature's type parameters into scope for annotations in the body. `#: <T> fn(fn: fn() -> T) -> T | NULL` over a body with `#: T | NULL` above `result <- tryCatch(fn(), error = function(e) NULL)` gives `` I do not know the type `T`. ``
 - **No record width subtyping.** An injected fake with extra fields is refused, so a dependency cannot be typed as "any record with at least `tick`". `#: @alias Ticker {list{tick: fn() -> NULL}}` and a call `run(list(tick = function() NULL, finished = TRUE))` give `` this list has a field `finished`, which is not expected here ``.
 - **A mismatch message leaks an uninstantiated type variable.** Against a field typed `fn([len]: double) -> Any`, `list(tick = function() invisible())` gives `` expected `fn([len]: double) -> Any` for field `tick`, found `fn() -> T` ``; the found type should not print the bare `T` of `invisible`'s signature.
 - **Recursive aliases are refused**, so chaining methods (lgr setters, `progress` `tick()`) return `Any`. `#: @alias Logger {list{set_threshold: fn(level: character) -> Logger}}` gives `` Type alias `Logger` expands in a cycle. ``, filed under `type-mismatch` and underlining the whole function that uses it. Allow recursive record aliases, or a `Self` type for R6-style records.

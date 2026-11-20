@@ -1978,3 +1978,11 @@ on both spellings.
 file valid R, and it covers every position (parameters, returns, binders, directives), which a call inside
 `declare()` cannot reach without inventing a grammar inside R call syntax. A third spelling would add a
 lowering path and a third way for two annotations to disagree, for no case `#:` misses.
+
+## A signature's type parameters are in scope in its body
+
+**Status:** built.
+
+- **Rule.** An annotation in a function's body may name the type parameters of every enclosing signature, outermost first (`annotations::enclosing_type_parameters`), whether the binder is inline (`function<T>`) or in a `#:` block. The body annotation reads the same rigid `T` the signature binds, so `#: T | NULL` widens it and `#: U` where `T` is expected is a mismatch.
+- **The root item's block.** An item's syntax window is detached from its own `#:` block, so `expression_annotations` passes that block's binders (`block_type_parameters`) in as the outer scope; a nested function's block is in the tree and is found by the ancestor walk.
+- **An inferred signature binds no name**, so a body annotation under an unannotated function still reports an unknown `T`.

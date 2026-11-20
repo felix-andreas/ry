@@ -1316,6 +1316,11 @@ pub fn contains_inference_var<'db>(_db: &'db dyn Db, ty: Ty<'db>) -> bool {
     ty.bits.get() & HAS_VAR != 0
 }
 
+/// Whether `ty` names a type parameter of an enclosing signature.
+pub fn contains_rigid(ty: Ty<'_>) -> bool {
+    ty.bits.get() & HAS_RIGID != 0
+}
+
 /// Unmapped rigid variables are left intact. A name bound twice takes its last binding.
 pub fn substitute_rigid<'db>(
     db: &'db dyn Db,

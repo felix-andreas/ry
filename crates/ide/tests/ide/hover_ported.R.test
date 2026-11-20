@@ -686,7 +686,7 @@ hint @19 -> list{T, integer}
 #---- parameter_never_raw_variable
 wrap <- function(first, second) sec$0ond
 #++++
-hover 32..38: second: T
+hover 32..38: second: U
 hover-definition: local 24..30
 definition 24..30
 references: 24..30*, 32..38

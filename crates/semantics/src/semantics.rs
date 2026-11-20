@@ -1298,6 +1298,11 @@ fn expression_annotations<'db>(
             targets.push((statement, None));
         }
     }
+    // The item's own `#:` block is outside its tree, so its signature's type parameters come
+    // from the block itself.
+    let outer = item_annotation_syntax(db, item)
+        .map(|block| annotations::block_type_parameters(db, &block.syntax_node()))
+        .unwrap_or_default();
     let mut attachments = Vec::new();
     for (statement, comment) in targets {
         let range = hir::significant_range(&statement);
@@ -1306,11 +1311,12 @@ fn expression_annotations<'db>(
         };
         let written_signature =
             annotations::has_written_signature(&statement, comment.as_ref(), inline_enabled);
-        let comment = comment.map(|comment| annotations::lower_annotation(db, &comment));
+        let comment =
+            comment.map(|comment| annotations::lower_annotation_within(db, &comment, &outer));
         let site = annotations::statement_inline_site(&statement).filter(|_| inline_enabled);
         let inline = site
             .as_ref()
-            .map(|site| annotations::lower_inline_annotation(db, site));
+            .map(|site| annotations::lower_inline_annotation_within(db, site, &outer));
         let Some(mut lowered) = annotations::merge_annotations(db, comment, inline, site.as_ref())
         else {
             continue;

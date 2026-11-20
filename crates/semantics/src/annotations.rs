@@ -19,9 +19,9 @@ use {
     syntax::{
         NodeRef, SyntaxKind, SyntaxNode, TextRange,
         annotation::{
-            BlockRefusal, Declaration, Paired, assigned_function, block_refusal,
-            compact_declaration, directive_name, expanded_declaration, formals, has_token,
-            is_type_kind, misplaced_directives, name_text, pair_formals, signature_from,
+            BlockRefusal, Declaration, Paired, assigned_function, attached_annotation,
+            block_refusal, compact_declaration, directive_name, expanded_declaration, formals,
+            has_token, is_type_kind, misplaced_directives, name_text, pair_formals, signature_from,
             written_function_type,
         },
         ast, is_inline_annotation_kind, node_text,
@@ -82,8 +82,18 @@ pub struct NamedDefinition<'db> {
 }
 
 pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'db> {
+    lower_annotation_within(db, node, &[])
+}
+
+/// [`lower_annotation`] inside signatures whose type parameters `outer` names, beyond those
+/// the block's own tree reaches (an item's own `#:` block sits outside the item's tree).
+pub fn lower_annotation_within<'db>(
+    db: &'db dyn Db,
+    node: &SyntaxNode,
+    outer: &[Name<'db>],
+) -> Annotation<'db> {
     debug_assert_eq!(node.kind(), SyntaxKind::ANNOTATION);
-    let mut lowering = Lowering::new(db);
+    let mut lowering = Lowering::within(db, node, outer);
     let mut annotation = Annotation::default();
     match block_refusal(node) {
         Some(BlockRefusal::FormMixing(message)) => {
@@ -229,8 +239,17 @@ pub fn is_inline_site_ref(node: NodeRef<'_>) -> bool {
 /// a checked annotation, and a function's signature as a compact `fn(...)` naming the
 /// annotated parameters, with an elided return inferred from the body.
 pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annotation<'db> {
+    lower_inline_annotation_within(db, site, &[])
+}
+
+/// [`lower_inline_annotation`] inside signatures whose type parameters `outer` names.
+pub fn lower_inline_annotation_within<'db>(
+    db: &'db dyn Db,
+    site: &SyntaxNode,
+    outer: &[Name<'db>],
+) -> Annotation<'db> {
     debug_assert!(is_inline_site(site));
-    let mut lowering = Lowering::new(db);
+    let mut lowering = Lowering::within(db, site, outer);
     let mut annotation = Annotation::default();
     match site.kind() {
         SyntaxKind::TYPE_DEFINITION => {
@@ -322,6 +341,56 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
         ),
     });
     lowering.finish(annotation, inline_range(site))
+}
+
+/// The type parameters of the signatures around `node`, innermost last: each enclosing
+/// function literal's own `<...>` and the `<...>` of the `#:` block on the statement binding
+/// it. An annotation in a function's body names them as its signature does.
+pub fn enclosing_type_parameters<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Vec<Name<'db>> {
+    let mut names = Vec::new();
+    for function in node
+        .ancestors()
+        .skip(1)
+        .filter(|ancestor| ancestor.kind() == SyntaxKind::FUNCTION_DEF)
+    {
+        let statement = function
+            .parent()
+            .filter(|parent| assigned_function(parent).as_ref() == Some(&function))
+            .unwrap_or_else(|| function.clone());
+        let mut written = attached_annotation(&statement)
+            .map(|block| block_type_parameters(db, &block))
+            .unwrap_or_default();
+        if let Some(list) = function
+            .children()
+            .find(|child| child.kind() == SyntaxKind::TYPE_BINDER_LIST)
+        {
+            written.extend(binder_names(db, &list));
+        }
+        written.extend(names);
+        names = written;
+    }
+    names
+}
+
+/// The type parameters a `#:` block's signature declares, in `<...>` or `@forall`.
+pub fn block_type_parameters<'db>(db: &'db dyn Db, block: &SyntaxNode) -> Vec<Name<'db>> {
+    block
+        .children()
+        .filter(|child| {
+            child.kind() == SyntaxKind::TYPE_BINDER_LIST
+                || (child.kind() == SyntaxKind::ANNOTATION_DIRECTIVE
+                    && directive_name(child) == "forall")
+        })
+        .flat_map(|list| binder_names(db, &list))
+        .collect()
+}
+
+/// The names of the `TYPE_BINDER`s of `list`.
+fn binder_names<'db>(db: &'db dyn Db, list: &SyntaxNode) -> Vec<Name<'db>> {
+    list.children()
+        .filter(|child| child.kind() == SyntaxKind::TYPE_BINDER)
+        .filter_map(|binder| Some(Name::new(db, name_text(&binder)?)))
+        .collect()
 }
 
 /// `type` or `alias`, the word that opens an inline type definition.
@@ -735,7 +804,7 @@ pub fn inline_slots<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Vec<SlotType<'db
 /// blocks, function types and literals around it in scope. `None` when lowering it reports an
 /// error, which leaves the written type to the diagnostics.
 pub fn lower_written_type<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Option<Ty<'db>> {
-    let mut lowering = Lowering::new(db);
+    let mut lowering = Lowering::within(db, node, &[]);
     let mut bound = Vec::new();
     for ancestor in node.ancestors().skip(1) {
         for list in ancestor
@@ -829,6 +898,17 @@ struct Lowering<'db> {
 }
 
 impl<'db> Lowering<'db> {
+    /// A lowering of `node`, where the type parameters of the signatures around it are in
+    /// scope as rigid variables.
+    fn within(db: &'db dyn Db, node: &SyntaxNode, outer: &[Name<'db>]) -> Lowering<'db> {
+        let mut binders = outer.to_vec();
+        binders.extend(enclosing_type_parameters(db, node));
+        Lowering {
+            binders,
+            ..Lowering::new(db)
+        }
+    }
+
     fn new(db: &'db dyn Db) -> Lowering<'db> {
         Lowering {
             db,

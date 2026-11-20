@@ -880,6 +880,7 @@ fn check_item_in<'db>(
         recorded_patterns: Column::new_in(arena, module.pattern_count()),
         recorded_expectations: Column::new_in(arena, expressions),
         recorded_loop_variables: Column::new_in(arena, expressions),
+        root_binders: FxHashMap::default(),
         selected_overloads: Column::new_in(arena, expressions),
         callee_targets: Column::new_in(arena, expressions),
         masked_reads: Bitset::new_in(arena, expressions),
@@ -1064,7 +1065,7 @@ fn check_item_in<'db>(
                             scheme_is_declared = true;
                             Some(declared)
                         }
-                        None => Some(context.generalize(value_ty)),
+                        None => Some(context.generalize_root(value_ty)),
                     }
                 };
             }
@@ -1275,26 +1276,27 @@ fn check_item_in<'db>(
     let editor_facts = db.editor_facts();
     let mut editor = None;
     if editor_facts {
+        let mut binder_types = FxHashMap::default();
         let expression_types = recorded
             .into_iter()
-            .map(|slot| slot.map(|ty| context.table.resolve(context.db, ty)))
+            .map(|slot| slot.map(|ty| context.editor_type(ty, &mut binder_types)))
             .collect();
         let mut patterns = vec![None; module.pattern_count()];
         for (id, &ty) in context.recorded_patterns.iter() {
             if let Some(slot) = patterns.get_mut(id.index()) {
-                *slot = Some(context.table.resolve(context.db, ty));
+                *slot = Some(context.editor_type(ty, &mut binder_types));
             }
         }
         let pattern_types = PatternTypes(ThinVec::from(patterns));
         let literal_expectations = context
             .recorded_expectations
             .iter()
-            .map(|(id, &ty)| (id, context.table.resolve(context.db, ty)))
+            .map(|(id, &ty)| (id, context.editor_type(ty, &mut binder_types)))
             .collect();
         let loop_variables = context
             .recorded_loop_variables
             .iter()
-            .map(|(id, &ty)| (id, context.table.resolve(context.db, ty)))
+            .map(|(id, &ty)| (id, context.editor_type(ty, &mut binder_types)))
             .collect();
         editor = Some(Box::new(EditorFacts {
             expression_types,
@@ -1752,6 +1754,9 @@ struct Checker<'db, 'a> {
     recorded_patterns: Column<'a, PatId, Ty<'db>>,
     recorded_expectations: Column<'a, ExprId, Ty<'db>>,
     recorded_loop_variables: Column<'a, ExprId, Ty<'db>>,
+    /// The variables the item's own generalization turned into binders, so a local the
+    /// signature's `T` types reads as that `T` in the editor rather than as a fresh variable.
+    root_binders: FxHashMap<InferenceVar, Name<'db>>,
     selected_overloads: Column<'a, ExprId, usize>,
     callee_targets: Column<'a, ExprId, CalleeTarget>,
     masked_reads: Bitset<'a, ExprId>,
@@ -20589,15 +20594,61 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     /// Quantifies unbound variables above the current level.
     fn generalize(&mut self, ty: Ty<'db>) -> TypeScheme<'db> {
+        self.abstract_scheme(ty).0
+    }
+
+    fn abstract_scheme(
+        &mut self,
+        ty: Ty<'db>,
+    ) -> (TypeScheme<'db>, FxHashMap<InferenceVar, Name<'db>>) {
         self.settle_lone_bounds(ty);
         let resolved = self.table.resolve(self.db, ty);
         let mut binders = Vec::new();
         let mut mapping: FxHashMap<InferenceVar, Name<'db>> = FxHashMap::default();
         let body = self.abstract_vars(resolved, &mut binders, &mut mapping);
-        TypeScheme {
+        let scheme = TypeScheme {
             binders: ThinVec::from(binders),
             body,
+        };
+        (scheme, mapping)
+    }
+
+    /// Generalizes the item's own value and keeps which variable became which binder.
+    /// A recorded type as the editor shows it: resolved, with each variable the item's
+    /// signature generalized named by its binder. `memo` spans one item's types, which share
+    /// subterms.
+    fn editor_type(&self, ty: Ty<'db>, memo: &mut FxHashMap<Ty<'db>, Ty<'db>>) -> Ty<'db> {
+        let resolved = self.table.resolve(self.db, ty);
+        if self.root_binders.is_empty() || !contains_inference_var(self.db, resolved) {
+            return resolved;
         }
+        self.name_root_binders(resolved, memo)
+    }
+
+    fn name_root_binders(&self, ty: Ty<'db>, memo: &mut FxHashMap<Ty<'db>, Ty<'db>>) -> Ty<'db> {
+        if !contains_inference_var(self.db, ty) {
+            return ty;
+        }
+        if let Some(&named) = memo.get(&ty) {
+            return named;
+        }
+        let named = match *ty.kind(self.db) {
+            TyKind::Var(var) => match self.root_binders.get(&self.table.find(var)) {
+                Some(&name) => Ty::new(self.db, TyKind::Rigid(name)),
+                None => ty,
+            },
+            _ => map_child_types(self.db, ty, &mut |child| {
+                self.name_root_binders(child, memo)
+            }),
+        };
+        memo.insert(ty, named);
+        named
+    }
+
+    fn generalize_root(&mut self, ty: Ty<'db>) -> TypeScheme<'db> {
+        let (scheme, mapping) = self.abstract_scheme(ty);
+        self.root_binders = mapping;
+        scheme
     }
 
     fn abstract_vars(

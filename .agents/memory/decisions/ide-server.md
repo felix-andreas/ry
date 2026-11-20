@@ -283,3 +283,10 @@ The Zed extension bundles no binary: it locates `ry` at run time through the LSP
 - **A flip that outlives its scope.** Salsa's tokens expose only `cancel` and `is_cancelled`, and a fetch on a flipped token unwinds. A flip landing after a scope's last query returned leaves the token set, so the outermost disarm replaces the handle (`db.clone()`, which carries a fresh token) and records `pending`.
 - **Jobs.** `run_job` clears `pending` as a job starts: the job runs on the newest state, so what an earlier job was asked to abandon no longer applies.
 - **Helpers** (parallel clones) keep flipping at any time: every read of theirs runs inside a catch of their own.
+
+## A local typed by a signature's type parameter reads as that parameter
+
+**Status:** built.
+
+- **Shape.** The checker maps the variables its root generalization turned into binders (`root_binders`) and the editor facts name them (`editor_type`), so a local typed by the signature's `T` hovers and hints as `T` instead of an anonymous variable. Hover and inlay hints letter such a type with the item's binders (`renderer_within`), so the second parameter's local reads `U` as the signature does. The renderer is seeded only when the type holds a rigid parameter, so an unrelated generic type keeps its own lettering.
+- **The annotation action** offers a local's `T` only under a written signature, where the body annotation can name it; under an inferred signature it offers nothing, because no binder names `T`.
