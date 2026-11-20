@@ -156,15 +156,6 @@ unsafe fn start_from_image(
             .skip(1)
             .take_while(|&env| env != methods)
             .collect();
-        let option_strings = |name: &str| -> Vec<String> {
-            let value = crate::envir::get_option(name);
-            if value.kind() != SexpType::String {
-                return Vec::new();
-            }
-            (0..length(value))
-                .filter_map(|index| values::string_at(value, index).map(|text| text.into_owned()))
-                .collect()
-        };
         // `attach()` would copy a package environment, so an entry goes back by relinking.
         let insert_after_global = |env: Sexp| {
             crate::heap().set_enclosure(env, global_env().enclosure());
@@ -264,6 +255,20 @@ unsafe fn start_from_image(
     crate::profile_summary::mark_ready();
     crate::capture::mark_ready();
     conditions::print_warnings(conditions::DURING_STARTUP)
+}
+
+/// The packages ry attaches itself rather than from a library.
+const OWN_PACKAGES: [&str; 2] = ["std", "ry"];
+
+/// The strings of the option `name`, or none when it is not a character vector.
+unsafe fn option_strings(name: &str) -> Vec<String> {
+    let value = crate::envir::get_option(name);
+    if value.kind() != SexpType::String {
+        return Vec::new();
+    }
+    (0..length(value))
+        .filter_map(|index| values::string_at(value, index).map(|text| text.into_owned()))
+        .collect()
 }
 
 /// The body of base R's `.First.sys()` for the one package `pkg`.
@@ -384,7 +389,23 @@ unsafe fn start_slowly(
         source_file(&user, global_env())?;
     }
     eval_text(CALL_FIRST, global_env())?;
-    eval_text(".First.sys()", global_env())?;
+    // `.First.sys()` for each default package, except ry's own, which are attached next: a
+    // start from the image finds them on the search path, so neither start warns for them.
+    for package in option_strings("defaultPackages") {
+        if !OWN_PACKAGES.contains(&package.as_str()) {
+            scope(|| -> R<()> {
+                let pkg_scope = values::new_env(base_env())?;
+                crate::heap().root(pkg_scope);
+                eval::define(
+                    values::install("pkg")?,
+                    values::scalar_string(&package)?,
+                    pkg_scope,
+                )?;
+                eval_text(FIRST_SYS_PACKAGE, pkg_scope)?;
+                Ok(())
+            })?;
+        }
+    }
     install_os_version()?;
     crate::standard_library::attach_package()?;
     let warned = !interp().warnings.is_empty();

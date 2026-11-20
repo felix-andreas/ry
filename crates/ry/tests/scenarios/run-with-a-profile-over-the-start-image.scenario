@@ -55,3 +55,10 @@ run ry run short.R
 expect exit 0
 expect stdout "script: .GlobalEnv package:stats package:methods Autoloads package:base \n"
 expect stderr "During startup - Warning message:\npackage 'nosuchpkg' in options(\"defaultPackages\") was not found"
+
+# A slow start warns for the same default packages.
+env RY_IMAGE 0
+run ry run short.R
+expect exit 0
+expect stdout "script: .GlobalEnv package:stats package:methods Autoloads package:base \n"
+expect stderr "During startup - Warning message:\npackage 'nosuchpkg' in options(\"defaultPackages\") was not found"
