@@ -305,8 +305,17 @@ fn q_p01_boundaries(p: f64, lower: bool, log: bool, left: f64, right: f64) -> Op
 }
 
 /// `R_forceint`: round half to even, as C's `nearbyint` does in the default rounding mode.
+/// `round_ties_even` is a libm call on baseline x86-64; adding and removing 2^52 rounds a
+/// smaller magnitude to an integer in the same way, and every larger one is already whole.
+#[inline]
 pub fn forceint(x: f64) -> f64 {
-    x.round_ties_even()
+    const WHOLE: f64 = 4_503_599_627_370_496.0;
+    let magnitude = x.abs();
+    if magnitude < WHOLE {
+        (magnitude + WHOLE - WHOLE).copysign(x)
+    } else {
+        x
+    }
 }
 
 /// `R_nonint`: whether `x` is not within rounding of an integer.
@@ -3298,7 +3307,7 @@ fn qnorm_tail_positions(
 }
 
 /// The central region across AVX lanes, and the tail positions from a comparison mask per four
-/// probabilities, so a block of central values costs one test.
+/// probabilities.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx")]
 fn qnorm_central_avx(probabilities: &[f64], out: &mut [f64], tails: &mut [u16]) -> usize {
@@ -3319,13 +3328,14 @@ fn qnorm_central_avx(probabilities: &[f64], out: &mut [f64], tails: &mut [u16]) 
         // `!(|p - 0.5| <= 0.425)`, where the ordered comparison is false for NaN.
         let distance = _mm256_andnot_pd(sign, _mm256_sub_pd(probability, half));
         let central = _mm256_movemask_pd(_mm256_cmp_pd::<_CMP_LE_OQ>(distance, limit));
-        let mut outside = !central & 0b1111;
-        while outside != 0 {
+        // Branch-free, as in `qnorm_tail_positions`: about one block in two holds a tail, at
+        // random, so a loop over the set bits would mispredict.
+        let outside = !central;
+        for lane in 0..LANES {
             if let Some(slot) = tails.get_mut(count) {
-                *slot = (start + outside.trailing_zeros() as usize) as u16;
+                *slot = (start + lane) as u16;
             }
-            count += 1;
-            outside &= outside - 1;
+            count += ((outside >> lane) & 1) as usize;
         }
     }
     qnorm_tail_positions(&probabilities[blocks..], blocks, tails, count)
@@ -9168,7 +9178,9 @@ thread_local! {
     static SIGNRANK_COUNTS: RefCell<Option<(usize, Rc<[f64]>)>> = const { RefCell::new(None) };
 }
 
-/// The number of subsets of `1..=n` with each sum from 0 to `n (n + 1) / 2`.
+/// The number of subsets of `1..=n` with each sum from 0 to the middle sum `n (n + 1) / 4`.
+/// The counts are symmetric about the middle, so, as in GNU R, only the lower half is built
+/// and [`signrank_count`] reflects a larger sum into it.
 fn signrank_counts(n: usize) -> Rc<[f64]> {
     debug_assert!(signrank_valid(n as f64));
     if let Some(counts) = SIGNRANK_COUNTS.with_borrow(|table| {
@@ -9179,19 +9191,30 @@ fn signrank_counts(n: usize) -> Rc<[f64]> {
     }) {
         return counts;
     }
-    let total = n * (n + 1) / 2;
-    let mut counts = vec![0.0; total + 1];
+    let middle = n * (n + 1) / 4;
+    let mut counts = vec![0.0; middle + 1];
     counts[0] = 1.0;
-    let mut reach = 0;
-    for j in 1..=n {
-        reach += j;
-        for i in (j..=reach).rev() {
-            counts[i] += counts[i - j];
+    for j in 1..=n.min(middle) {
+        // Adding the counts `j` below, from the top down, in blocks of at most `j` sums, so a
+        // block never reads what it writes and the additions vectorize.
+        let mut end = (j * (j + 1) / 2).min(middle) + 1;
+        while end > j {
+            let start = (end - j.min(64)).max(j);
+            let (low, high) = counts.split_at_mut(start);
+            for (count, lower) in high[..end - start].iter_mut().zip(&low[start - j..]) {
+                *count += *lower;
+            }
+            end = start;
         }
     }
     let counts: Rc<[f64]> = counts.into();
     SIGNRANK_COUNTS.with_borrow_mut(|table| *table = Some((n, Rc::clone(&counts))));
     counts
+}
+
+/// The number of subsets of `1..=n` that sum to `sum`, at most `n (n + 1) / 2`.
+fn signrank_count(counts: &[f64], n: usize, sum: usize) -> f64 {
+    counts[sum.min(n * (n + 1) / 2 - sum)]
 }
 
 /// Releases the signed rank counts, as the GNU R wrappers do on exit.
@@ -9214,8 +9237,9 @@ pub fn dsignrank(x: f64, n: f64, log: bool) -> f64 {
     if x < 0.0 || x > n * (n + 1.0) / 2.0 {
         return d0(log);
     }
-    let count = signrank_counts(n as usize)[x as usize];
-    d_exp(count.ln() - n * M_LN2, log)
+    let n = n as usize;
+    let count = signrank_count(&signrank_counts(n), n, x as usize);
+    d_exp(count.ln() - n as f64 * M_LN2, log)
 }
 
 pub fn psignrank(x: f64, n: f64, lower: bool, log: bool) -> f64 {
@@ -9281,14 +9305,16 @@ pub fn qsignrank(x: f64, n: f64, lower: bool, log: bool) -> f64 {
     } else {
         x
     };
-    let counts = signrank_counts(n as usize);
+    let size = n as usize;
+    let total = size * (size + 1) / 2;
+    let counts = signrank_counts(size);
     let f = (-n * M_LN2).exp();
     let mut p = 0.0;
     let mut q = 0usize;
     if x <= 0.5 {
         x -= 10.0 * DBL_EPSILON;
-        while q + 1 < counts.len() {
-            p += counts[q] * f;
+        while q < total {
+            p += signrank_count(&counts, size, q) * f;
             if p >= x {
                 break;
             }
@@ -9297,8 +9323,8 @@ pub fn qsignrank(x: f64, n: f64, lower: bool, log: bool) -> f64 {
         q as f64
     } else {
         x = 1.0 - x + 10.0 * DBL_EPSILON;
-        while q + 1 < counts.len() {
-            p += counts[q] * f;
+        while q < total {
+            p += signrank_count(&counts, size, q) * f;
             if p > x {
                 break;
             }
