@@ -1,33 +1,24 @@
 //! Metamorphic R programs over a zoo of values, one per seed.
 //!
-//! [`fuzz::program`](crate::fuzz::program) draws from shapes its author thought of. The programs
-//! here start from the other end: a *value* drawn from a zoo that covers every atomic type, the
-//! lengths around the runtime's size thresholds, compact sequences, names and strings in UTF-8,
-//! latin1 and bytes, matrices, arrays, data frames, factors and dates, and a random *body* of
-//! one to five statements that mutate and read it. A body alone says little, so each one runs in
-//! many forms that R's semantics require to agree: called again and again (a body compiles after
-//! its first call), in `local()`, in an anonymous function, at top level, with the variable
-//! renamed, on a value that went through `serialize`, through `do.call` and `lapply`, with a
-//! collection between its statements, and after calls on values of other types and sizes.
-//! Every form's result is compared with the first by `identical()` inside the program, and the
-//! first is printed, so GNU R checks both the result and the claim that the forms agree. A form
-//! that shares its input with a second variable also checks that the mutation did not write
-//! through to it. A program therefore checks itself: a line that ends in `DIFFERENT` is a bug
-//! in the engine that printed it, with or without GNU R to compare with.
+//! [`fuzz::program`](crate::fuzz::program) draws from shapes its author thought of. These start
+//! from a *value* drawn from a zoo covering every atomic type, lengths around the runtime's size
+//! thresholds, compact sequences, strings in UTF-8, latin1 and bytes, matrices, arrays, data
+//! frames, factors and dates, and a random *body* of one to five statements on it. Each body runs
+//! in many forms that R's semantics require to agree: called repeatedly (it compiles after its
+//! first call), in `local()`, in an anonymous function, at top level, renamed, after `serialize`,
+//! through `do.call` and `lapply`, with a collection between statements, and after calls on other
+//! values. Every form is compared with the first by `identical()` inside the program, and the
+//! first is printed, so GNU R checks both the result and the agreement; a form sharing its input
+//! with a second variable also checks that the mutation did not write through. A line ending in
+//! `DIFFERENT` is therefore a bug in the engine that printed it, even without GNU R.
 //!
-//! [`builtins_program`] is the same zoo fed to builtins instead: one or two values and a few
-//! dozen calls on them, each a top-level value the deep observer dumps. Its calls are written
-//! by hand, so each is a sensible use of its function. [`api_program`] draws its calls from
-//! the table of every function base, stats and utils export instead, with arguments nobody
-//! chose: it reaches the functions and the argument checks no one thought to test.
-//! [`io_program`] writes zoo values to files and connections and reads them back: a string's
-//! bytes and encoding mark, a number's digits and a table's cells must come back as GNU R
-//! brings them back, whatever the writer, the reader and the encoding between them.
+//! [`builtins_program`] feeds the zoo to a few dozen hand-written builtin calls. [`api_program`]
+//! draws calls from every function base, stats and utils export, with arguments nobody chose.
+//! [`io_program`] writes zoo values to files and connections and reads them back as GNU R does.
 //!
 //! Swarm testing: a seed first draws the subset of [`Feature`]s its programs may use, so a rare
-//! pairing (raw vectors and `dim<-`, say) is not drowned out by the common ones.
-//!
-//! Every program is deterministic under GNU R, and none prints an environment or a closure.
+//! pairing (raw vectors and `dim<-`, say) is not drowned out by the common ones. Every program is
+//! deterministic under GNU R, and none prints an environment or a closure.
 
 use {
     std::{
