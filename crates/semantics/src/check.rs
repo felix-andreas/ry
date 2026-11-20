@@ -882,7 +882,7 @@ fn check_item_in<'db>(
         column_misses: Column::new_in(arena, expressions),
         query_depth: 0,
         errors: Vec::new(),
-        contained_errors: FxHashSet::default(),
+        contained_errors: Vec::new(),
         record_strict_origins,
         strict_origins: Vec::new(),
         // A statement with its own annotation is typed by the annotation, as in a function.
@@ -1311,9 +1311,7 @@ fn check_item_in<'db>(
     // the item read them as absent facts rather than cascading. An error whose slot took a
     // fixed type anyway leaves the shape trustworthy.
     let mut errors = context.errors;
-    let trusted = errors
-        .iter()
-        .all(|error| context.contained_errors.contains(&error.range));
+    let trusted = context.contained_errors.len() == errors.len();
     let scheme = if trusted || scheme_is_declared {
         // Inference variables are table-scoped: a scheme crossing the item boundary must
         // never carry one.
@@ -1762,10 +1760,11 @@ struct Checker<'db, 'a> {
     /// that is no column still reads its global.
     query_depth: u32,
     errors: Vec<TypeError<'db>>,
-    /// The ranges of errors whose value was checked against a fixed type, an annotation's or a
-    /// ry record field's: the written slot takes that type whatever the value, so the error
-    /// leaves the item's export trustworthy.
-    contained_errors: FxHashSet<TextRange>,
+    /// The indices into `errors` of errors whose value was checked against a fixed type, an
+    /// annotation's or a ry record field's: the written slot takes that type whatever the
+    /// value, so the error leaves the item's export trustworthy. Kept in step with `errors`
+    /// by `truncate_errors` and `remove_error`.
+    contained_errors: Vec<usize>,
     /// Off outside strict files, where nothing reports the origins.
     record_strict_origins: bool,
     strict_origins: Vec<StrictOrigin>,
@@ -1875,7 +1874,6 @@ enum Callable {
     Yes,
 }
 
-/// The variable an enclosing slot reads on entry to a body that writes it with `<<-`.
 /// A write to a captured slot, as a closure defined before it may observe it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct LateWrite<'db> {
@@ -1885,6 +1883,7 @@ struct LateWrite<'db> {
     literal: Option<Constraint>,
 }
 
+/// The variable an enclosing slot reads on entry to a body that writes it with `<<-`.
 #[derive(Clone, Copy)]
 struct SuperassignSeed<'db> {
     slot: BindingId,
@@ -3453,7 +3452,6 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// Whether `ty` is a literal variable that a use may still decide.
     /// An open R literal's constraint and the atomic type it defaults to, without deciding it.
     fn open_literal_constraint(&mut self, ty: Ty<'db>) -> Option<(Constraint, Atomic)> {
         if !self.open_literal_var(ty) {
@@ -3469,6 +3467,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
+    /// Whether `ty` is a literal variable that a use may still decide.
     fn open_literal_var(&mut self, ty: Ty<'db>) -> bool {
         let resolved = self.table.shallow_resolve(self.db, ty);
         let TyKind::Var(var) = *resolved.kind(self.db) else {
@@ -4565,7 +4564,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                                 TypeErrorKind::NoMatchingOverload { .. }
                             ));
                     if restated {
-                        self.errors.remove(index);
+                        self.remove_error(index);
                     } else {
                         index += 1;
                     }
@@ -4749,7 +4748,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         {
             let range = self.blame_range(value);
             let error = self.type_mismatch(range, declared.body, resolved_value, Some(value));
-            self.contained_errors.insert(error.range);
+            self.contained_errors.push(self.errors.len());
             self.errors.push(error);
         }
         declared.body
@@ -4885,6 +4884,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         };
         let mut ty = self.read_slot(id, slot);
         if let Some(fallback) = self.unassigned_path_read(id, slot) {
+            self.default_join_literals(ty, fallback);
             let db = self.db;
             ty = union_of(
                 db,
@@ -4985,6 +4985,29 @@ impl<'db, 'a> Checker<'db, 'a> {
         unknown(self.db)
     }
 
+    fn truncate_errors(&mut self, length: usize) {
+        self.errors.truncate(length);
+        self.contained_errors.retain(|&index| index < length);
+    }
+
+    /// The errors from `at` on, which lose their containment: a caller that puts them back
+    /// leaves the export untrusted, the safe side.
+    fn split_off_errors(&mut self, at: usize) -> Vec<TypeError<'db>> {
+        self.contained_errors.retain(|&index| index < at);
+        self.errors.split_off(at)
+    }
+
+    fn remove_error(&mut self, index: usize) {
+        self.errors.remove(index);
+        self.contained_errors
+            .retain(|&contained| contained != index);
+        for contained in &mut self.contained_errors {
+            if *contained > index {
+                *contained -= 1;
+            }
+        }
+    }
+
     /// What a function's read of its own `slot` finds on a path that has not written the slot:
     /// R looks the name up outside the function, in an enclosing function or the package.
     fn unassigned_path_read(&mut self, id: ExprId, slot: BindingId) -> Option<Ty<'db>> {
@@ -4999,8 +5022,18 @@ impl<'db, 'a> Checker<'db, 'a> {
         if binding.kind == BindingKind::TopLevel {
             return None;
         }
-        let scheme = self.globals?.scheme(binding.name, true)?;
-        Some(self.instantiate(&scheme))
+        let globals = self.globals?;
+        let scheme = globals.scheme(binding.name, true)?;
+        let ty = self.instantiate(&scheme);
+        // A library function under a local variable, as base's `max` under `max <- 3`, is left
+        // out: a variable named like a function is the common case, and a read that reaches
+        // the function is the opt-in `maybe-undefined` warning's to report.
+        let library_function = !globals.defined_in_project(binding.name, true)
+            && matches!(
+                self.table.resolve(self.db, ty).kind(self.db),
+                TyKind::Function(_)
+            );
+        (!library_function).then_some(ty)
     }
 
     /// The value `slot` holds at the read `id`.
@@ -5047,11 +5080,15 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// writes that come later in the frame: `get <- function() x; x <- NULL` reads `x` as
     /// possibly `NULL`, whatever narrowing held where `get` was defined.
     fn widen_captured_read(&mut self, id: ExprId, slot: BindingId, ty: Ty<'db>) -> Ty<'db> {
-        if !self.naming.extras().captured_reads.contains(&id) {
+        let Some(&horizon) = self.naming.extras().captured_reads.get(&id) else {
             return ty;
-        }
+        };
         let position = self.module.range(id).start();
-        let open = self.table.shallow_resolve(self.db, ty).is_var();
+        let resolved = self.table.shallow_resolve(self.db, ty);
+        let open = resolved.is_var();
+        let read_literal = self.open_literal_constraint(ty).map(|(_, default)| default);
+        // Only a ry scalar decides a literal: in R, `x <- 2.5` makes an `integer` `x` a `double`.
+        let native = matches!(resolved.kind(self.db), TyKind::Native(_));
         if self
             .late_reads
             .get(slot)
@@ -5059,7 +5096,8 @@ impl<'db, 'a> Checker<'db, 'a> {
         {
             self.late_reads.insert(slot, position);
         }
-        // A literal written later takes the read's type when it can, as `x <- 2` would.
+        // A literal written later takes a ry scalar read's type when it can, as `x <- 2` would,
+        // and one with the default of a literal read takes whatever type that read takes.
         let later: SmallVec<[Ty<'db>; 2]> = self
             .capture_writes
             .get(slot)
@@ -5068,9 +5106,16 @@ impl<'db, 'a> Checker<'db, 'a> {
             // The reading body's own `<<-` writes are left to its superassignment seeds.
             .filter(|(at, late)| {
                 *at > position
+                    && *at <= horizon
                     && !self.body_range.contains(*at)
-                    && late.literal.is_none_or(|constraint| {
-                        !open && constraint_rejects(self.db, &self.table, constraint, ty).is_some()
+                    && late.literal.is_none_or(|constraint| match read_literal {
+                        Some(default) => constraint.literal_default() != Some(default),
+                        None => {
+                            !open
+                                && !(native
+                                    && constraint_rejects(self.db, &self.table, constraint, ty)
+                                        .is_none())
+                        }
                     })
             })
             .map(|(_, late)| late.ty)
@@ -5867,7 +5912,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                             {
                                 let range = self.blame_range(value_expression);
                                 let kind = self.type_mismatch(range, field.ty, value, None).kind;
-                                self.contained_errors.insert(range);
+                                self.contained_errors.push(self.errors.len());
                                 self.errors.push(TypeError { range, kind });
                             }
                         }
@@ -5878,7 +5923,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                                 } => module.name_range(*name),
                                 _ => module.range(lhs),
                             };
-                            self.contained_errors.insert(range);
+                            self.contained_errors.push(self.errors.len());
                             self.errors.push(TypeError {
                                 range,
                                 kind: TypeErrorKind::FieldCannotBeAdded {
@@ -7256,7 +7301,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             // Not yet stable: this pass ran under a stale entry state, so its diagnostics are
             // discarded.
-            self.errors.truncate(errors_mark);
+            self.truncate_errors(errors_mark);
             self.strict_origins.truncate(origins_mark);
         }
     }
@@ -7925,8 +7970,6 @@ impl<'db, 'a> Checker<'db, 'a> {
         Some(guard)
     }
 
-    /// After an `if` whose branches both continue, the false edge's view of a tested local
-    /// does not hold.
     /// A false-edge fact holds after the `if` only when the then branch diverged.
     fn retract_false_facts(&mut self, guard: Option<&GuardRefinement<'db>>) {
         for refinement in guard.into_iter().flat_map(|guard| &guard.false_edge) {
@@ -7936,6 +7979,8 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
+    /// After an `if` whose branches both continue, the false edge's view of a tested local
+    /// does not hold.
     fn retract_false_domain(&mut self, condition: ExprId) {
         if let Some(test) = key_test(self.module, &self.naming.resolutions, condition) {
             self.environment.retract(Fact::KeyDomain {
@@ -8804,7 +8849,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         for &operand in operands {
             self.infer(operand);
         }
-        self.errors.truncate(errors_mark);
+        self.truncate_errors(errors_mark);
         self.strict_origins.truncate(origins_mark);
         Ty::new(self.db, TyKind::Named(Name::new(self.db, "formula"), &[]))
     }
@@ -9265,7 +9310,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         _ => {}
                     }
                 }
-                self.errors.truncate(errors_mark);
+                self.truncate_errors(errors_mark);
                 self.strict_origins.truncate(origins_mark);
                 self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
                 unknown(self.db)
@@ -10043,7 +10088,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             if results.len() == member_count {
                 return Some(union_of(self.db, results));
             }
-            self.errors.truncate(errors_before);
+            self.truncate_errors(errors_before);
             self.strict_origins.truncate(origins_before);
             self.table.rollback(snapshot);
         }
@@ -11762,7 +11807,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         if self.capture_repass_needed || self.late_triggers.len() < before {
             self.environment.rollback(body_mark);
             self.table.rollback(body_snapshot);
-            self.errors.truncate(errors_mark);
+            self.truncate_errors(errors_mark);
             self.strict_origins.truncate(origins_mark);
             self.pending_enclosing_writes.truncate(pending_mark);
             if let Some(frame) = self.return_frames.last_mut() {
@@ -12091,7 +12136,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             let recorded_errors = self.errors.len();
             let recorded_origins = self.strict_origins.len();
             self.infer_call_arguments(range, arguments);
-            self.errors.truncate(recorded_errors);
+            self.truncate_errors(recorded_errors);
             self.strict_origins.truncate(recorded_origins);
             // The `Unknown` enters here, so strict mode attributes it to this call.
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
@@ -16419,7 +16464,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let first_var = self.table.next_var().0;
         let callback_ty = self.infer(callback);
         let callback_ty = self.table.resolve(db, callback_ty);
-        self.errors.truncate(recorded_errors);
+        self.truncate_errors(recorded_errors);
         self.strict_origins.truncate(recorded_origins);
         if !matches!(callback_ty.kind(db), TyKind::Function(_))
             || self.mentions_var_before(callback_ty, first_var)
@@ -18557,7 +18602,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
                 let recorded_errors = self.errors.len();
                 let ty = self.infer(value);
-                findings.push(self.errors.split_off(recorded_errors));
+                findings.push(self.split_off_errors(recorded_errors));
                 let element = match self.table.resolve(db, ty).kind(db) {
                     TyKind::List(element) | TyKind::NamedList(element) => Some(*element),
                     _ => None,
@@ -18657,7 +18702,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 callback.schemes,
                 &call_arguments,
             );
-            results.push((ty, self.errors.split_off(recorded_errors)));
+            results.push((ty, self.split_off_errors(recorded_errors)));
         }
         results
     }
@@ -18841,11 +18886,13 @@ impl<'db, 'a> Checker<'db, 'a> {
             if error.range != template_range {
                 continue;
             }
+            // The expected type is `V[] | V`, and `V` may itself be a union, so the vector
+            // member's element is the callback's return.
             let returns = match self.table.resolve(db, expected).kind(db) {
-                TyKind::Union(members) => members
-                    .iter()
-                    .copied()
-                    .find(|member| !matches!(member.kind(db), TyKind::Vector(_))),
+                TyKind::Union(members) => members.iter().find_map(|member| match member.kind(db) {
+                    TyKind::Vector(element) => Some(*element),
+                    _ => None,
+                }),
                 _ => None,
             };
             let Some(returns) = returns else {
@@ -18918,7 +18965,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             _ => callable(callback_ty),
         };
         if !all_functions || self.mentions_var_before(callback_ty, first_var) {
-            self.errors.truncate(recorded_errors);
+            self.truncate_errors(recorded_errors);
             self.strict_origins.truncate(recorded_origins);
             return None;
         }
@@ -18990,12 +19037,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                 return widened;
             }
             accumulator = widened;
-            self.errors.truncate(step_errors);
+            self.truncate_errors(step_errors);
             self.strict_origins.truncate(step_origins);
             let step_errors = self.errors.len();
             let step_origins = self.strict_origins.len();
             callback_ty = self.infer(function);
-            self.errors.truncate(step_errors);
+            self.truncate_errors(step_errors);
             self.strict_origins.truncate(step_origins);
         }
         accumulator
@@ -19678,14 +19725,14 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         let &slot = self.naming.resolutions.get(&target)?;
         // A closure may run after a later write has undone the test.
-        if self.naming.extras().captured_reads.contains(&target) {
+        if let Some(&horizon) = self.naming.extras().captured_reads.get(&target) {
             let position = self.module.range(target).start();
             let rewritten = self
                 .capture_writes
                 .get(slot)
                 .into_iter()
                 .flatten()
-                .any(|(at, _)| *at > position && !self.body_range.contains(*at));
+                .any(|(at, _)| *at > position && *at <= horizon && !self.body_range.contains(*at));
             if rewritten {
                 return None;
             }
@@ -21253,8 +21300,6 @@ fn data_table_keeps_class(module: &Module, arguments: &[Argument]) -> bool {
     )
 }
 
-/// A DFS gray set: a name is expanding only while its own body is walked, so a
-/// diamond is not a cycle. Nominal definitions may legitimately recurse.
 /// An annotation that names an undeclared type or a non-atomic `X[]` element carries no
 /// payload, like a refused block: the diagnostics report the mistake once, and a call is never
 /// checked against a type the author did not mean.
@@ -21284,6 +21329,8 @@ fn parameter_types<'db>(function: &FunctionType<'db>) -> SmallVec<[Ty<'db>; 4]> 
         .collect()
 }
 
+/// A DFS gray set: a name is expanding only while its own body is walked, so a
+/// diamond is not a cycle. Nominal definitions may legitimately recurse.
 pub(crate) fn alias_cycle_walk<'db>(
     db: &'db dyn Db,
     definitions: TypeDefinitions<'db>,

@@ -736,6 +736,12 @@ Smaller gaps:
 
 - A string literal where a ry function's callback goes is not reported: `List.map([1L], "a")`
   passes, because a string names a function for R's `match.fun`, which a ry function never calls.
+- **Arithmetic on a type parameter that admits `logical` returns the parameter.** `<N: numeric>`
+  and `<N: integer | logical>` both accept `TRUE`, and `function(x: N) -> N x + x` checks, so
+  `a(TRUE)` types as `logical` though R returns the integer `2`. `classify_numeric_operand` makes a
+  rigid that meets `Numeric` a `Flexible` operand whose result is the rigid itself. A sound result
+  promotes `logical` to `integer`, which needs either a constraint that excludes `logical` for
+  `N + N -> N` or a result type other than `N` when the bound admits `logical`.
 - The Zed extension is not in Zed's registry yet. It downloads the newest full release's archive
   (`editors/zed/src/lib.rs`), and the first full release is 0.4.4, so publish it to Zed's registry
   no earlier than 0.4.4 (before that it would serve 0.1.1), and 0.4.4 must ship every platform's

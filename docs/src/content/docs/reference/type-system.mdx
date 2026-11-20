@@ -659,8 +659,10 @@ A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
 Any other constraint name is an annotation error, and the error lists the ones that exist. An
 argument whose type violates a constraint is a type error at the call, and the message names the
 constraint: `middle("a")` under `<N: scalar numeric>` reports "expected a scalar numeric value
-(`integer` or `double`), found `character`". A message names a declared type parameter as its
-signature spells it, and an inferred one `T`, `U` and so on in order of appearance. A union satisfies a
+(`integer` or `double`), found `character`". A printed signature names a declared type parameter
+as the annotation spells it, and an inferred one `T`, `U` and so on in order of appearance. A
+call's message prints the parameter as the fresh variable the call instantiated, so `wrap(gh)`
+under `<R> fn(f: fn(...: double) -> R) -> R` expects `fn(...: double) -> T`. A union satisfies a
 constraint when every member does, so `double | integer` satisfies `numeric`. A vector `U[]`
 satisfies `numeric` when its element is a number, and an undetermined element becomes a
 `scalar numeric` one. A constrained value that meets a union takes the union whole when the
@@ -3021,11 +3023,24 @@ The details:
   does. The guard's own subject must not itself be a deferred read: that body runs later, so the test
   proves nothing about the value it will see then.
 - A closure may run after the rest of its frame, so it reads an enclosing variable as it stands
-  where the closure is defined, joined with every write that comes later in the frame or in another
-  closure. After `if (is.null(x)) return(""); get <- function() x; x <- NULL`, the call `get()` is
+  where the closure is defined, joined with every later write the closure can still see when it
+  runs, in the frame or in another closure. After
+  `if (is.null(x)) return(""); get <- function() x; x <- NULL`, the call `get()` is
   `character | NULL`, and the same holds for a narrowed field (`get <- function() cfg$limit`
-  followed by `cfg$limit <- NULL`). An R literal written later takes the read's type when it can,
-  and the closure's own `<<-` writes are joined as described under
+  followed by `cfg$limit <- NULL`). When the closure runs decides which writes it sees:
+
+  | The closure | Sees writes up to |
+  | --- | --- |
+  | called inline, `(function() x)()` | the call |
+  | passed to a function that calls it before returning (`lapply`, `vapply` and the rest of the apply family, `do.call`, `tryCatch`) | the call |
+  | bound with `get <- function() x` and only called | its last call |
+  | called inside a loop | the end of that loop |
+  | read in any other way: returned, stored, passed to another function | the end of the frame |
+
+  So `out <- get(); x <- NULL; out` keeps `out` a `character`, and a write on the other branch of an
+  `if` is never seen. A later R literal with the same default type as the read changes nothing, a
+  literal with another default joins (`x <- 1L; get <- function() x; x <- 2.5` makes `get()`
+  `integer | double`), and the closure's own `<<-` writes are joined as described under
   [the assignment operator](#assignment-operator--).
 - Guards compose across `&&` and `||`. The right operand of `&&` runs only on the left's true edge,
   so it is checked under that refinement, and the whole condition refines its true edge by both

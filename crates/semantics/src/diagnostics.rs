@@ -3085,19 +3085,29 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         {
             // A value that is no function where a callback goes: the callback's undecided types
             // would print as type variables the reader never wrote, so name only what is known.
-            let known_parameters = function.named.is_empty()
-                && function.variadic.is_none()
-                && !function.positional.is_empty()
-                && function
-                    .positional
+            // A required parameter takes an argument whether it is positional or named.
+            let required: Vec<Ty<'_>> = function
+                .positional
+                .iter()
+                .copied()
+                .chain(
+                    function
+                        .named
+                        .iter()
+                        .filter(|parameter| !parameter.optional)
+                        .map(|parameter| parameter.ty),
+                )
+                .collect();
+            let known_parameters = function.variadic.is_none()
+                && !required.is_empty()
+                && required
                     .iter()
                     .all(|&parameter| !contains_inference_var(db, parameter));
             let found = renderer.render(db, *found);
             if !known_parameters {
                 return format!("expected a function, found `{found}`");
             }
-            let parameters: Vec<String> = function
-                .positional
+            let parameters: Vec<String> = required
                 .iter()
                 .map(|&parameter| format!("`{}`", renderer.render(db, parameter)))
                 .collect();
@@ -3872,6 +3882,15 @@ enum RenderedVar<'db> {
 }
 
 impl<'db> TypeRenderer<'db> {
+    /// `[]` binds tighter than `|` and `->`, so a union or function element is parenthesized.
+    fn render_postfix_operand(&mut self, db: &'db dyn Db, element: Ty<'db>) -> String {
+        let rendered = self.render(db, element);
+        match element.kind(db) {
+            TyKind::Union(_) | TyKind::Function(_) => format!("({rendered})"),
+            _ => rendered,
+        }
+    }
+
     pub fn render(&mut self, db: &'db dyn Db, ty: Ty<'db>) -> String {
         match ty.kind(db) {
             TyKind::Any => "Any".to_owned(),
@@ -3879,8 +3898,10 @@ impl<'db> TypeRenderer<'db> {
             TyKind::Null => "NULL".to_owned(),
             TyKind::Scalar(atomic) => atomic_name(*atomic).to_owned(),
             TyKind::Native(native) => native.name().to_owned(),
-            TyKind::Vector(element) => format!("{}[]", self.render(db, *element)),
-            TyKind::NamedVector(element) => format!("{}[named]", self.render(db, *element)),
+            TyKind::Vector(element) => format!("{}[]", self.render_postfix_operand(db, *element)),
+            TyKind::NamedVector(element) => {
+                format!("{}[named]", self.render_postfix_operand(db, *element))
+            }
             TyKind::List(element) => format!("list[{}]", self.render(db, *element)),
             TyKind::NamedList(element) => format!("list[named: {}]", self.render(db, *element)),
             TyKind::Tuple(items) => format!("list{{{}}}", self.render_items(db, items)),

@@ -19,7 +19,7 @@ use {
         mem,
         sync::LazyLock,
     },
-    syntax::{SyntaxKind, TextRange, lex},
+    syntax::{SyntaxKind, TextRange, TextSize, lex},
     thin_vec::ThinVec,
 };
 
@@ -134,8 +134,10 @@ pub struct NamingExtras {
     /// enclosing function's slot R reads on that path instead.
     pub enclosing_fallbacks: SortedMap<ExprId, BindingId>,
     /// Reads that observe a slot of an enclosing frame, or of their own frame from code that
-    /// runs later (a closure, a default): a write after the read may be the value they see.
-    pub captured_reads: SortedSet<ExprId>,
+    /// runs later (a closure, a default), each with the last position whose write the read
+    /// may see: a closure passed to `lapply` runs before the call ends, and one bound to a
+    /// name runs by its last call, unless it escapes.
+    pub captured_reads: SortedMap<ExprId, TextSize>,
 }
 
 static NO_EXTRAS: LazyLock<NamingExtras> = LazyLock::new(NamingExtras::default);
@@ -192,7 +194,7 @@ struct NamingDraft {
     native_routine_reads: BTreeSet<ExprId>,
     replacement_copies: BTreeMap<BindingId, CopySource>,
     enclosing_fallbacks: BTreeMap<ExprId, BindingId>,
-    captured_reads: BTreeSet<ExprId>,
+    captured_reads: BTreeMap<ExprId, TextSize>,
 }
 
 impl NamingDraft {
@@ -266,6 +268,7 @@ pub fn resolve_item(
             id: 0,
             kind: ScopeKind::TopLevel,
             slots: FxHashMap::default(),
+            horizon: Horizon::Unbounded,
         }],
         bindings_by_site: FxHashMap::default(),
         scope_ids: FxHashMap::default(),
@@ -286,12 +289,30 @@ pub fn resolve_item(
         escaped_frames: FxHashSet::default(),
         explicit_frame_arguments: FxHashSet::default(),
         quoting_aliases: FxHashSet::default(),
+        literal_horizons: FxHashMap::default(),
+        loop_ends: Vec::new(),
+        callee_reads: FxHashMap::default(),
+        closure_runs: FxHashMap::default(),
+        captured_horizons: Vec::new(),
         naming: NamingDraft::default(),
     };
     if let Some(root) = module.root {
         context.resolve(root);
     }
     context.collect_unused();
+    let unbounded = TextSize::from(u32::MAX);
+    for (read, horizon) in mem::take(&mut context.captured_horizons) {
+        let end = match horizon {
+            Horizon::Until(end) => end,
+            Horizon::CallsOf(slot, defined) => match context.closure_runs.get(&slot) {
+                Some(Some(latest)) => defined.max(*latest),
+                Some(None) => unbounded,
+                None => defined,
+            },
+            Horizon::Unbounded => unbounded,
+        };
+        context.naming.captured_reads.insert(read, end);
+    }
     context.naming.freeze()
 }
 
@@ -315,6 +336,20 @@ struct Scope {
     id: u32,
     kind: ScopeKind,
     slots: FxHashMap<Symbol, BindingId>,
+    /// For a function scope, how long the closure may run after its definition.
+    horizon: Horizon,
+}
+
+/// The last point at which a function literal may still run, which bounds the writes its
+/// reads of an enclosing frame can observe.
+#[derive(Debug, Clone, Copy)]
+enum Horizon {
+    /// The closure runs inside a call that ends here, as `lapply(xs, function(x) ...)` does.
+    Until(TextSize),
+    /// The closure is bound to this slot at a definition ending at the position, and runs by
+    /// the last call through the slot, unless another read lets it escape.
+    CallsOf(BindingId, TextSize),
+    Unbounded,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -399,6 +434,18 @@ struct Context<'a> {
     explicit_frame_arguments: FxHashSet<ExprId>,
     /// Slots bound to a quoting function itself (`e <- expression`), whose calls quote too.
     quoting_aliases: FxHashSet<BindingId>,
+    /// The horizons of function literals whose context bounds when they run, set before the
+    /// literal is walked.
+    literal_horizons: FxHashMap<ExprId, Horizon>,
+    /// The function depth and end of each loop being walked, outermost first: a call inside a
+    /// loop runs again after every write in it.
+    loop_ends: Vec<(usize, TextSize)>,
+    /// Called names, each with the end of its call.
+    callee_reads: FxHashMap<ExprId, TextSize>,
+    /// Slots bound to a function literal, each with the latest point a call through it runs
+    /// to, or `None` once a read other than a call lets the closure escape.
+    closure_runs: FxHashMap<BindingId, Option<TextSize>>,
+    captured_horizons: Vec<(ExprId, Horizon)>,
     naming: NamingDraft,
 }
 
@@ -427,6 +474,16 @@ impl Context<'_> {
             .iter()
             .rposition(|scope| scope.kind == ScopeKind::Function)
             .unwrap_or(0)
+    }
+
+    /// Where a call ending at `end` stops running in the current frame: a loop around it runs
+    /// it again, so the end of the outermost such loop.
+    fn run_horizon(&self, end: TextSize) -> TextSize {
+        let depth = self.current_function_depth();
+        self.loop_ends
+            .iter()
+            .find(|(loop_depth, _)| *loop_depth == depth)
+            .map_or(end, |&(_, loop_end)| loop_end.max(end))
     }
 
     fn record_write(&mut self, slot: BindingId, reach: Reach) {
@@ -511,6 +568,22 @@ impl Context<'_> {
                 if *spelling == AssignSpelling::Destructure
                     || matches!(module.kind(*target), ExpressionKind::NameRef(_))
                 {
+                    if !matches!(
+                        *spelling,
+                        AssignSpelling::Super | AssignSpelling::Destructure
+                    ) && matches!(module.kind(*value), ExpressionKind::Function { .. })
+                        && matches!(
+                            self.scopes.last().map(|scope| scope.kind),
+                            Some(ScopeKind::Function | ScopeKind::Local)
+                        )
+                        && let ExpressionKind::NameRef(name) = module.kind(*target)
+                        && let Some(&slot) = self.current_scope().slots.get(name)
+                    {
+                        let defined = self.run_horizon(module.range(id).end());
+                        self.literal_horizons
+                            .insert(*value, Horizon::CallsOf(slot, defined));
+                        self.closure_runs.entry(slot).or_insert(Some(defined));
+                    }
                     self.resolve(*value);
                     self.resolve_assignment_target(id, *target, *spelling);
                     if let Some(&slot) = self.naming.resolutions.get(target) {
@@ -568,6 +641,21 @@ impl Context<'_> {
                         self.method_classes.insert(method, definition.key);
                     }
                 }
+                let call_end = module.range(id).end();
+                let mut inline = *callee;
+                while let ExpressionKind::Paren(inner) = module.kind(inline) {
+                    inline = *inner;
+                }
+                match module.kind(inline) {
+                    ExpressionKind::NameRef(_) => {
+                        self.callee_reads.insert(inline, call_end);
+                    }
+                    ExpressionKind::Function { .. } => {
+                        let until = self.run_horizon(call_end);
+                        self.literal_horizons.insert(inline, Horizon::Until(until));
+                    }
+                    _ => {}
+                }
                 self.resolve(*callee);
                 let callee_symbol = match module.kind(*callee) {
                     ExpressionKind::NameRef(name) => Some(*name),
@@ -619,6 +707,18 @@ impl Context<'_> {
                     } => Some(name.as_str()),
                     _ => builtin_callee,
                 };
+                if accessor.is_some_and(|name| EAGER_CALLERS.contains(&name)) {
+                    let until = self.run_horizon(call_end);
+                    for value in module[arguments]
+                        .iter()
+                        .filter_map(|argument| argument.value)
+                        .filter(|&value| {
+                            matches!(module.kind(value), ExpressionKind::Function { .. })
+                        })
+                    {
+                        self.literal_horizons.insert(value, Horizon::Until(until));
+                    }
+                }
                 if accessor.is_some_and(|name| EXPLICIT_NAME_ACCESSORS.contains(&name)) {
                     for value in module[arguments]
                         .iter()
@@ -840,6 +940,7 @@ impl Context<'_> {
                             id: scope_id,
                             kind: ScopeKind::Mask,
                             slots: FxHashMap::default(),
+                            horizon: Horizon::Unbounded,
                         });
                         self.premint_frame_assignments(value);
                         self.quiet_depth += 1;
@@ -919,6 +1020,11 @@ impl Context<'_> {
                     id: scope_id,
                     kind: ScopeKind::Function,
                     slots: FxHashMap::default(),
+                    horizon: self
+                        .literal_horizons
+                        .get(&id)
+                        .copied()
+                        .unwrap_or(Horizon::Unbounded),
                 });
                 let saved_flow = mem::take(&mut self.flow);
                 for parameter in &module[parameters] {
@@ -991,18 +1097,18 @@ impl Context<'_> {
                     self.naming.for_variables.insert(id, slot);
                     self.record_write(slot, Reach::Implicit);
                     self.active_loop_variables.push(slot);
-                    self.loop_body(*body, None, true);
+                    self.walk_loop(id, *body, None, true);
                     self.active_loop_variables.pop();
                 } else {
-                    self.loop_body(*body, None, true);
+                    self.walk_loop(id, *body, None, true);
                 }
             }
             ExpressionKind::While { condition, body } => {
                 self.resolve(*condition);
-                self.loop_body(*body, Some(*condition), true);
+                self.walk_loop(id, *body, Some(*condition), true);
             }
             ExpressionKind::Repeat { body } => {
-                self.loop_body(*body, None, false);
+                self.walk_loop(id, *body, None, false);
             }
             ExpressionKind::Local { body } => {
                 let scope_id = self.stable_scope_id(id);
@@ -1010,6 +1116,7 @@ impl Context<'_> {
                     id: scope_id,
                     kind: ScopeKind::Local,
                     slots: FxHashMap::default(),
+                    horizon: Horizon::Unbounded,
                 });
                 self.premint_frame_assignments(*body);
                 self.resolve(*body);
@@ -1258,6 +1365,13 @@ impl Context<'_> {
     /// Re-walks to a fixed point (the reach lattice is finite and joins only grow), then
     /// records effects on one final pass. A `while` loop's `condition` runs again after each
     /// pass, so it reads what the body wrote. `may_skip` joins the never-entered path back in.
+    fn walk_loop(&mut self, id: ExprId, body: ExprId, condition: Option<ExprId>, may_skip: bool) {
+        let depth = self.current_function_depth();
+        self.loop_ends.push((depth, self.module.range(id).end()));
+        self.loop_body(body, condition, may_skip);
+        self.loop_ends.pop();
+    }
+
     fn loop_body(&mut self, body: ExprId, condition: Option<ExprId>, may_skip: bool) {
         let entry = self.flow.clone();
         let saved_emit = self.emit;
@@ -1393,7 +1507,9 @@ impl Context<'_> {
     /// Separate from [`Self::resolve_read`] because a `%op%` read is a token with no expression
     /// id. A slot resolves when a write reaches the read or the read crosses a function
     /// boundary (a capture); an unassignable slot does not shadow.
-    fn mark_slot_read(&mut self, name: Symbol) -> Option<(BindingId, Unassigned, bool)> {
+    /// The third value is the horizon of a read that may run after later writes (`None` for
+    /// an immediate read).
+    fn mark_slot_read(&mut self, name: Symbol) -> Option<(BindingId, Unassigned, Option<Horizon>)> {
         let function_depth = self.current_function_depth();
         let (depth, slot) = self
             .scopes
@@ -1412,12 +1528,35 @@ impl Context<'_> {
         if forward {
             self.deferred_depth += 1;
         }
-        let captured = depth < function_depth || self.deferred_depth > 0;
+        let captured = if self.deferred_depth > 0 {
+            Some(Horizon::Unbounded)
+        } else if depth < function_depth {
+            Some(self.capture_horizon(depth))
+        } else {
+            None
+        };
         let unassigned = self.mark_slot_reached(name, depth, slot, function_depth);
         if forward {
             self.deferred_depth -= 1;
         }
         Some((slot, unassigned, captured))
+    }
+
+    /// How long a read of a slot at scope `depth` from inside a closure may run: the outermost
+    /// closure inside the slot's frame decides, and one nested inside it bounds nothing unless
+    /// it too runs before its enclosing call ends.
+    fn capture_horizon(&self, depth: usize) -> Horizon {
+        let mut functions = self.scopes[depth + 1..]
+            .iter()
+            .filter(|scope| scope.kind == ScopeKind::Function);
+        let outermost = functions
+            .next()
+            .map_or(Horizon::Unbounded, |scope| scope.horizon);
+        if functions.all(|scope| matches!(scope.horizon, Horizon::Until(_))) {
+            outermost
+        } else {
+            Horizon::Unbounded
+        }
     }
 
     /// Records that a read at the current point observes `slot`, which lives at scope `depth`,
@@ -1522,8 +1661,28 @@ impl Context<'_> {
         match self.mark_slot_read(name) {
             Some((slot, unassigned, captured)) => {
                 self.naming.resolutions.insert(id, slot);
-                if captured {
-                    self.naming.captured_reads.insert(id);
+                // The enclosing slot a path leaving the own slot unassigned reads is a capture.
+                let fallback = match unassigned {
+                    Unassigned::Enclosing(enclosing) if captured.is_none() => self
+                        .scopes
+                        .iter()
+                        .rposition(|scope| scope.slots.get(&name) == Some(&enclosing))
+                        .map(|depth| self.capture_horizon(depth)),
+                    _ => None,
+                };
+                if let Some(horizon) = captured.or(fallback) {
+                    self.captured_horizons.push((id, horizon));
+                }
+                // A closure bound to `slot` escapes through any read but a call in its own
+                // frame, which runs it by the time the call ends.
+                if self.closure_runs.contains_key(&slot) {
+                    let run = match (captured, self.callee_reads.get(&id)) {
+                        (None, Some(&end)) => Some(self.run_horizon(end)),
+                        _ => None,
+                    };
+                    if let Some(latest) = self.closure_runs.get_mut(&slot) {
+                        *latest = latest.zip(run).map(|(latest, run)| latest.max(run));
+                    }
                 }
                 if self.emit {
                     match unassigned {
@@ -2207,6 +2366,37 @@ pub(crate) const MATCH_FUN_CALLERS: [&str; 20] = [
 
 /// The base functions that call a compiled routine named by their `.NAME` argument.
 const NATIVE_INTERFACES: [&str; 5] = [".Call", ".External", ".External2", ".C", ".Fortran"];
+
+/// Functions that call a function argument before they return, and never keep it.
+const EAGER_CALLERS: [&str; 27] = [
+    "lapply",
+    "sapply",
+    "vapply",
+    "mapply",
+    "Map",
+    "Filter",
+    "Reduce",
+    "Find",
+    "Position",
+    "apply",
+    "tapply",
+    "rapply",
+    "outer",
+    "do.call",
+    "tryCatch",
+    "withCallingHandlers",
+    "map",
+    "map_chr",
+    "map_dbl",
+    "map_int",
+    "map_lgl",
+    "map2",
+    "pmap",
+    "imap",
+    "walk",
+    "keep",
+    "discard",
+];
 
 const QUOTING_FORMS: [&str; 4] = ["quote", "substitute", "bquote", "expression"];
 

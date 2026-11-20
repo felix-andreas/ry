@@ -7703,7 +7703,16 @@ fn bound_function<'db>(
     };
     let hir = item_hir(db, item).as_ref()?;
     let naming = item_naming(db, item).as_ref()?;
-    let call_start = (item == calling).then(|| hir.range(callee).start());
+    // A call inside a closure runs later, so it reaches the last definition the closure may
+    // still see, not the one written before it.
+    let call_start = (item == calling).then(|| {
+        naming
+            .extras()
+            .captured_reads
+            .get(&callee)
+            .copied()
+            .unwrap_or_else(|| hir.range(callee).start())
+    });
     let (mut before_call, mut last) = (None, None);
     for expression in hir.expressions() {
         let ExpressionKind::Assign { target, value, .. } = expression.kind else {

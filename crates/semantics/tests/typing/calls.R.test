@@ -796,6 +796,23 @@ f <- function() vapply(c("a", "b"), "toupper", numeric(1))
 f: Unknown
 47..57 error[type-mismatch] `toupper` returns `character`, but this `FUN.VALUE` asks for `double[]`
 
+#---- a_vapply_message_names_a_callbacks_whole_return
+maybe <- function(v: double) -> double | NULL if (v > 0) v else NULL
+f <- function(xs: double) vapply(xs, maybe, character(1))
+#++++
+maybe: fn(v: double) -> double | NULL
+f: fn(xs: double) -> Unknown
+113..125 error[type-mismatch] `maybe` returns `double | NULL`, but this `FUN.VALUE` asks for `character[]`
+
+#---- a_number_where_a_callback_with_named_parameters_goes_names_their_types
+#: <R> fn(f: fn(x: double) -> R) -> R
+wrap <- function(f) f(1)
+out <- wrap(5)
+#++++
+wrap: <R> fn(f: fn(x: double) -> R) -> R
+out: Unknown
+75..76 error[type-mismatch] expected a function that takes `double`, found `double`
+
 #---- a_closure_parameter_does_not_accept_a_function_name_string
 run <- function(callback) callback(1)
 f <- function() run("toupper")
