@@ -587,6 +587,10 @@ pub struct FunctionType<'db> {
     /// Formals the body reads only as the whole condition of an `if` or `while`, which takes a
     /// string through `as.logical`. Inferred only.
     pub condition_only: &'db [Name<'db>],
+    /// The formal an S3 generic's `UseMethod` dispatches on. Dispatch forces a supplied
+    /// argument, so forwarding a missing formal there fails even though a call may leave the
+    /// formal out. Inferred only.
+    pub dispatch: Option<Name<'db>>,
     /// The body returns `NULL` only through `if (!predicate(parameter)) return(NULL)`, so a
     /// call where the caller already showed `predicate` holds of its argument returns the
     /// other members alone. Inferred only.
@@ -620,6 +624,7 @@ impl<'db> FunctionType<'db> {
             default_reads: &[],
             missing_tested: &[],
             condition_only: &[],
+            dispatch: None,
             null_unless: None,
             reduces: None,
             from_calls: false,

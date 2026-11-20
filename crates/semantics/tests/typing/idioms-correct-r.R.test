@@ -138,12 +138,19 @@ f: <T, U> fn(left: T, [length]: U) -> T
 g: Unknown
 54..56 error[type-mismatch] this function has no parameter `le`. Its named parameters are `left`, `length`
 
-#---- a_generic_does_not_require_the_formals_it_passes_on
+#---- a_generic_forces_only_its_dispatch_formal
+# `UseMethod` forces the argument it dispatches on, so `f()` fails in R with
+# "argument "fit" is missing". Whether a method reads `pars` is up to the method.
 persistence <- function(object, pars, distribution = "norm") UseMethod("persistence")
 f <- function(fit) persistence(fit)
+g <- function(spec) persistence(1, spec)
+h <- function() f()
 #++++
 persistence: <T, U, V> fn([object]: T, [pars]: U, [distribution]: V) -> Any
-f: <T> fn([fit]: T) -> Any
+f: <T> fn(fit: T) -> Any
+g: <T> fn([spec]: T) -> Any
+h: Unknown
+338..339 error[type-mismatch] this call leaves out `fit`, which the function requires
 
 #---- a_generic_leaves_its_dispatch_formal_to_the_method
 describe <- function(x, ...) UseMethod("describe")
@@ -261,6 +268,23 @@ f <- function(flag) {
 }
 #++++
 f: fn(flag: logical) -> double[]
+
+#---- a_range_takes_a_local_over_an_enclosing_parameter
+# mgcv's `multinom`: the closure counts `lpi` when it has one, and otherwise
+# reads the enclosing `K`, which must then be a number.
+multinom <- function(K = 1) {
+  function(lpi = NULL) {
+    if (!is.null(lpi)) K <- length(lpi)
+    1:K
+  }
+}
+counted <- multinom(3)
+named <- multinom("a")
+#++++
+multinom: <T: scalar numeric, U> fn([K]: T) -> fn([lpi]: U | NULL) -> double[]
+counted: <T> fn([lpi]: T | NULL) -> double[]
+named: Unknown
+283..286 error[type-mismatch] expected a scalar numeric value (`integer` or `double`), found `character`
 
 #---- calling_a_null_placeholder_field_is_unchecked
 registry <- NULL

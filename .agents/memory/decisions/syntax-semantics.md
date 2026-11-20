@@ -2028,3 +2028,32 @@ lowering path and a third way for two annotations to disagree, for no case `#:` 
 - **Rule.** `environment{count: integer}` (`TyKind::Environment`) types an environment's bindings. A `$<-` or `[[<-` write is checked against the binding and the variable keeps its type (`check_fixed_field_write`, shared with ry's `Record`); an unlisted name is an error on read and write. `new.env()`'s abstract `environment` fits any typed environment and the reverse, and two typed environments must match field for field in both directions, since they alias.
 - **Why not a record.** A record write builds a new record type (`x$a <- v` adds or retypes `a`), which is R's copy semantics for lists. An environment is shared by reference, so a write through one name is visible through every other, and only a fixed type is sound.
 - **Why closed.** An open environment could not check a write to an unlisted binding, and a typo in a write is the common mistake with environment state.
+
+## A top-level `if (FALSE)` body binds no package name
+
+**Status:** settled.
+
+- Packages keep example code in `if (FALSE) { ... }` at the top level (ff's `ordermerge.R`). As
+  package globals, its writes joined other items' SCCs, the fixpoint failed to converge and pinned
+  real functions to `Unknown`, which hid true reports in the same file.
+- `naming.rs` resolves the body in its own `Local` scope with a stable id, marked escaped so its
+  stores never report unused. Only the literal `FALSE` counts: any other condition may run.
+- Its calls are still checked, because the example is usually how the package means to be called.
+
+## S3 subsetting dispatches on the declared class first
+
+**Status:** settled.
+
+- `[`, `[[` on a nominal look up `[.class` for the declared class before the representation's,
+  because the declared class leads the class vector. An `xts` (`@type xts {zoo}`) took `[.zoo`
+  whenever zoo was imported and lost its `Arith.xts` methods.
+
+## A generic's dispatch formal is forced when an argument reaches it
+
+**Status:** settled.
+
+- `FunctionType::dispatch` names the first formal of an inferred body that calls `UseMethod`.
+  A caller forwarding its own formal there makes that formal required, because `UseMethod`
+  evaluates the supplied argument to read its class. A direct call may still omit it (R then
+  dispatches on a missing object, and the method decides). Declared signatures carry no dispatch
+  formal: an annotation states requiredness itself.

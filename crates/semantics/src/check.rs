@@ -2248,6 +2248,23 @@ fn fits_with_results<'db>(
         .collect()
 }
 
+/// The formal `UseMethod` dispatches on when the body calls it as a statement: the first one,
+/// unless that is `...`.
+fn dispatch_formal(module: &Module, body: ExprId, parameters: &[Formal]) -> Option<Symbol> {
+    let calls_use_method = |id: ExprId| {
+        matches!(module.kind(id), ExpressionKind::Call { callee, .. }
+            if matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "UseMethod"))
+    };
+    let dispatches = match module.kind(body) {
+        ExpressionKind::Block { statements } => module[statements]
+            .iter()
+            .any(|&statement| calls_use_method(statement)),
+        _ => calls_use_method(body),
+    };
+    let first = parameters.first()?;
+    (dispatches && first.name != "...").then_some(first.name)
+}
+
 /// The callee and `x` of a call `length(x)`.
 fn length_operand(module: &Module, id: ExprId) -> Option<(ExprId, ExprId)> {
     let ExpressionKind::Call { callee, arguments } = module.kind(id) else {
@@ -4450,6 +4467,8 @@ impl<'db, 'a> Checker<'db, 'a> {
                             .into_iter()
                             .map(|name| Name::new(self.db, name))
                             .collect::<Vec<_>>(),
+                        dispatch: dispatch_formal(module, *body, &module[parameters])
+                            .map(|name| Name::new(self.db, name)),
                         null_unless,
                         reduces,
                         from_calls: false,
@@ -5159,28 +5178,28 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// R looks the name up outside the function, in an enclosing function or the package.
     fn unassigned_path_read(&mut self, id: ExprId, slot: BindingId) -> Option<Ty<'db>> {
         let naming = self.naming;
-        if let Some(&enclosing) = naming.extras().enclosing_fallbacks.get(&id) {
-            return Some(self.read_slot(id, enclosing));
-        }
-        if !naming.maybe_undefined.contains(&id) {
-            return None;
-        }
-        let binding = naming.bindings.get(&slot)?;
-        if binding.kind == BindingKind::TopLevel {
-            return None;
-        }
-        let globals = self.globals?;
-        let scheme = globals.scheme(binding.name, true)?;
-        let ty = self.instantiate(&scheme);
-        // A library function under a local variable, as base's `max` under `max <- 3`, is left
-        // out: a variable named like a function is the common case, and a read that reaches
-        // the function is the opt-in `maybe-undefined` warning's to report.
-        let library_function = !globals.defined_in_project(binding.name, true)
-            && matches!(
-                self.table.resolve(self.db, ty).kind(self.db),
-                TyKind::Function(_)
-            );
-        (!library_function).then_some(ty)
+        let ty = if let Some(&enclosing) = naming.extras().enclosing_fallbacks.get(&id) {
+            self.read_slot(id, enclosing)
+        } else {
+            if !naming.maybe_undefined.contains(&id) {
+                return None;
+            }
+            let binding = naming.bindings.get(&slot)?;
+            if binding.kind == BindingKind::TopLevel {
+                return None;
+            }
+            let scheme = self.globals?.scheme(binding.name, true)?;
+            self.instantiate(&scheme)
+        };
+        // A function under a local variable, as base's `max` under `max <- 3` or a package's
+        // `t2` under `if (trace) t2 <- proc.time()`, is left out: a variable named like a
+        // function is the common case, a read guarded like its write never reaches the
+        // function, and a read that does is the opt-in `maybe-undefined` warning's to report.
+        let function = matches!(
+            self.table.resolve(self.db, ty).kind(self.db),
+            TyKind::Function(_)
+        );
+        (!function).then_some(ty)
     }
 
     /// The value `slot` holds at the read `id`.
@@ -8092,6 +8111,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         };
         let leaves_unread = |parameter: &Parameter<'db>| {
             parameter.optional
+                && function.dispatch != Some(parameter.name)
                 && (parameter.default.is_none()
                     || function.missing_tested.contains(&parameter.name))
         };
@@ -11169,6 +11189,29 @@ impl<'db, 'a> Checker<'db, 'a> {
                 if atomics.contains(&Atomic::Double) && !whole_literal {
                     result_atomic = Atomic::Double;
                 }
+                continue;
+            }
+            // A local written on one path over an enclosing parameter, `integer | T`, needs a
+            // number from its open member as a lone `T` would.
+            if members.len() > 1
+                && members.iter().any(|member| member.is_var())
+                && members.iter().all(|member| {
+                    member.is_var()
+                        || numeric_operand_parts(self.db, *member)
+                            .is_some_and(|(_, atomic)| atomic != Atomic::Complex)
+                })
+            {
+                for member in &members {
+                    if let TyKind::Var(var) = member.kind(self.db)
+                        && let Err(error) =
+                            self.table
+                                .constrain(self.db, *var, Constraint::ScalarNumeric)
+                    {
+                        self.report_unify(operand_range, error);
+                        return unknown(self.db);
+                    }
+                }
+                result_atomic = Atomic::Double;
                 continue;
             }
             match resolved.kind(self.db) {
@@ -15311,12 +15354,15 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// specific candidate narrows a caller variable to a number atom, the call needs a number
     /// there whatever candidate a caller picks, so the variable takes the `numeric` bound. A
     /// class with an arithmetic method still satisfies it. `max`, whose candidates also take
-    /// `character`, imposes nothing.
+    /// `character`, imposes nothing, and neither does a call where the variable is one member
+    /// of a union argument: in `unique(x)` with `x: T | double[]`, the `double[]` member is
+    /// what rules out the `factor` candidate, so a `factor` for `T` fits the fallback.
     fn bound_numeric_caller_variables(
         &mut self,
         caller_entries: &[(InferenceVar, Entry<'db>)],
         fits: &[(usize, bool, Vec<Ty<'db>>)],
         fit_results: &[Ty<'db>],
+        call_arguments: &[CallArgument<'db>],
     ) {
         if fit_results.len() != fits.len()
             || !fits.iter().any(|(_, free, _)| *free)
@@ -15349,7 +15395,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         .all(|&member| numeric_operand_parts(self.db, member).is_some())
                 })
             });
-            if !numeric_everywhere {
+            if !numeric_everywhere || self.shares_a_union(*var, call_arguments) {
                 continue;
             }
             let snapshot = self.table.snapshot();
@@ -15362,6 +15408,32 @@ impl<'db, 'a> Checker<'db, 'a> {
                 self.table.rollback(snapshot);
             }
         }
+    }
+
+    /// Whether `var` is a member of a union argument beside a member that is no variable, so
+    /// that member, not `var`, may be what picked the candidates.
+    fn shares_a_union(&self, var: InferenceVar, call_arguments: &[CallArgument<'db>]) -> bool {
+        call_arguments
+            .iter()
+            .filter_map(|argument| argument.ty)
+            .any(|ty| {
+                let TyKind::Union(members) = self.table.shallow_resolve(self.db, ty).kind(self.db)
+                else {
+                    return false;
+                };
+                let mut holds_var = false;
+                let mut holds_other = false;
+                for &member in members.iter() {
+                    match self.table.shallow_resolve(self.db, member).kind(self.db) {
+                        TyKind::Var(other) if self.table.find(*other) == self.table.find(var) => {
+                            holds_var = true;
+                        }
+                        TyKind::Var(_) | TyKind::Null => {}
+                        _ => holds_other = true,
+                    }
+                }
+                holds_var && holds_other
+            })
     }
 
     /// A declared `<T>` passed to a shape-preserving overload set (see
@@ -15711,7 +15783,12 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
         }
         if !unchecked_argument {
-            self.bound_numeric_caller_variables(&caller_entries, &fits, &fit_results);
+            self.bound_numeric_caller_variables(
+                &caller_entries,
+                &fits,
+                &fit_results,
+                call_arguments,
+            );
         }
         if !unchecked_argument
             && let Some(var) = self.preserved_caller_variable(&caller_entries, &fits, &fit_results)
@@ -16754,6 +16831,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         default_reads: &[],
                         missing_tested: &[],
                         condition_only: &[],
+                        dispatch: None,
                         null_unless: None,
                         reduces: None,
                         from_calls: true,
@@ -18402,14 +18480,21 @@ impl<'db, 'a> Checker<'db, 'a> {
         if self.naming.extras().masked_subsets.contains(&id) {
             return unknown(self.db);
         }
+        // R dispatches `[` and `[[` on the class before any shape rule applies, so a stub's
+        // `[.factor` or `[[.Date` gives the result type. The declared class comes first,
+        // because it leads the class vector: an `xts` subsets with `[.xts`, not with the
+        // `[.zoo` of its representation.
+        if let TyKind::Named(name, _) = self.table.resolve(self.db, target_ty).kind(self.db)
+            && let Some(ty) = self.index_method_result(name.text(self.db), double)
+        {
+            return ty;
+        }
         if let TyKind::Named(name, _) = subject.kind(self.db)
             && name.text(self.db) == "matrix"
             && let Some(ty) = self.matrix_index(double, arguments, &index_types)
         {
             return ty;
         }
-        // R dispatches `[` and `[[` on the class before any shape rule applies, so a stub's
-        // `[.factor` or `[[.Date` gives the result type.
         if let TyKind::Named(name, _) = subject.kind(self.db)
             && let Some(ty) = self.index_method_result(name.text(self.db), double)
         {
@@ -18417,13 +18502,6 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         if let Some(element) = array_element(self.db, subject) {
             return self.array_index(range, double, subject, element, arguments, &index_types);
-        }
-        // R dispatches `[` on the class, so a stub's `[.factor` gives the result type. The
-        // class is the declared one, before any representation projects it away.
-        if let TyKind::Named(name, _) = self.table.resolve(self.db, target_ty).kind(self.db)
-            && let Some(ty) = self.index_method_result(name.text(self.db), double)
-        {
-            return ty;
         }
         // An `Unknown`/`Any` subject's gap was already diagnosed, so `m[i, j]` must not
         // cascade an arity error.

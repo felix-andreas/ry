@@ -728,3 +728,13 @@ pairs: fn(n: integer) -> list[list[integer]]
 running: fn(xs: double[]) -> double
 weighted: fn(groups: list[double[]], weights: double[]) -> list[double]
 245..251 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `integer[]`. Extract an element with `[[` instead.
+
+#---- a_subclass_subsets_with_its_own_method_before_its_representation
+#namespace importFrom(xts, xts)
+#namespace importFrom(zoo, index)
+f <- function(x, at, n) {
+  series <- xts(x, at)
+  series[1:n] * series[1:n]
+}
+#++++
+f: <T, U, V: scalar numeric> fn(x: T, at: U, n: V) -> xts

@@ -3316,7 +3316,10 @@ exceptions and additions:
   when the sibling reads it, and a call that omits it is not reported.
 - A body that dispatches with `UseMethod()` forces none of its formals, because it hands them to a
   method unevaluated, and the method decides what it needs. So
-  `describe <- function(x, ...) UseMethod("describe")` may be called as `describe()`.
+  `describe <- function(x, ...) UseMethod("describe")` may be called as `describe()`. Forwarding a
+  formal into the generic's first formal, the one it dispatches on, is different: `UseMethod`
+  evaluates a supplied argument there to read its class, so after
+  `f <- function(fit) persistence(fit)`, the call `f()` is reported as leaving out `fit`.
 - A read guarded by `missing(name)` does not make the formal required; see below.
 - An argument of `substitute()` or `quote()` is not evaluated, so a formal named only there is not
   forced. The same holds for rlang's `enquo()`, `enquos()`, `enexpr()`, `enexprs()`, `ensym()`,
@@ -3509,7 +3512,10 @@ A top-level value name in a package is global across its files:
 - When several files define the same name, the later file wins, and both definitions are reported.
 - Every top-level assignment binds a package global, wherever it sits in the statement: in a bare
   `{ }` block, in an `if`, `for`, or `while` body, in a block passed to a call such as
-  `suppressWarnings({ x <- f() })`, or in the value of another assignment.
+  `suppressWarnings({ x <- f() })`, or in the value of another assignment. The exception is the
+  body of a top-level `if (FALSE)`, which holds example code R never runs: its assignments bind
+  local scratch names that no other item sees and that are never reported unused, while its calls
+  are still checked.
 
 A reference from another file sees the binding's generalized exported type. Type information does not
 flow back into the exporting file, so a call in one file never changes the inferred type of a
@@ -3854,7 +3860,10 @@ Definite assignment follows four rules:
   instead (in an enclosing function, the package, or base R), so the read is reported only when no
   such binding exists, and otherwise types as the union of the local writes and that binding:
   after `if (ok) limit <- 5L`, a function reads `limit` as `integer | character` when the package
-  binds `limit <- "all"`. The finding is off by default; turn it on with
+  binds `limit <- "all"`. A function outside does not join: a local variable that shares a
+  function's name, such as `if (trace) t2 <- proc.time()` in a package that also defines a
+  function `t2`, is a different thing that happens to have the same name, so the read types as the
+  local writes alone. The finding is off by default; turn it on with
   `[check] maybe-undefined = true`. Two conditions that always agree at run time are still two
   branches to the checker, so `if (ok) v <- …` followed by `if (ok) use(v)` is reported, although it
   is safe.
@@ -3895,7 +3904,8 @@ and still warns.
   innermost function reads the `x` of `g`.
 
 `on.exit(expr)` reads the same way: R runs the expression when the function returns, so it observes
-the last value of every name it mentions. The standard rollback guard is therefore clean:
+the last value of every name it mentions, including a name first written after the `on.exit` call
+(`on.exit(close(con))` before `con <- file(path)` is neither unused nor maybe undefined). The standard rollback guard is therefore clean:
 
 ```r
 with_transaction <- function(con, body) {

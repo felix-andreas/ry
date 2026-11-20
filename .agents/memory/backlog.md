@@ -799,15 +799,11 @@ false classes, largest first:
   declared optional `NULL` default should read as a placeholder too, or the renderer should mark
   it. Flag-selected returns (`p_dist`, `iam`) are listed there for the same reason: an annotation
   cannot say that a literal flag picks the branch.
-- **A generic's dispatch formal, forwarded, reads as optional** (missed error).
-  `f <- function(fit) persistence(fit)` over a `UseMethod` generic gives `f` an optional `fit`, yet
-  `f()` errors in R (`a_generic_does_not_require_the_formals_it_passes_on`).
 - **`m * tol` after `if (missing(tol)) tol <- 1e-8` leaves both parameters unbounded**, so
-  `fast_svd("a", 1)` is not reported (missed error).
-- **A number passed to a parameter tested as a condition.** `if (x)` and `!x` bind an open
-  parameter to `logical`, and R takes `0L` there. Bounding it by `scalar numeric` was tried and
-  rejected for hover readability; a call-site relaxation for an inferred `logical` is the likely
-  shape, but schemes do not record where the `logical` came from.
+  `fast_svd("a", 1)` is not reported (missed error). The join of an open parameter and a value
+  written on one path is `Unknown` (`join_written_values`), so that `omega <- omega + m %*% m` on
+  one path leaves a caller free to pass a plain vector. Keeping `U | double` instead would bound
+  `U` by the later use; it needs a rule for which uses of a joined parameter bound it.
 
 ## Open: where findings point, and what the type system still refuses
 

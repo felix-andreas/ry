@@ -953,6 +953,20 @@ empty: Any
 frame: data.frame{a: double[]}
 negated: data.frame{a: double[]}
 
+#---- a_union_member_beside_a_vector_takes_no_numeric_bound
+# mclust's plotting helper: `unique(x)` with `x: T | double[]` fits only the
+# `T[]` candidate, because the `double[]` member rules out the `factor` one. A
+# `factor` for `T` still fits the fallback, so `T` takes no numeric bound.
+plot1 <- function(z = NULL, x = NULL) {
+  if (is.null(x) && !is.null(z)) x <- numeric(3)
+  if (!is.null(x)) length(unique(x))
+  x
+}
+grouped <- plot1(x = factor("a"))
+#++++
+plot1: <T, U> fn([z]: T | NULL, [x]: U | NULL) -> U | double[] | NULL
+grouped: double[] | factor
+
 #---- a_wrapper_over_overloads_that_also_take_text_stays_open
 # `max` also takes `character`, and `sweep`'s `matrix` may hold text, so
 # neither imposes a bound.

@@ -96,6 +96,25 @@ NULL
 == R/b.R
 integer
 
+#---- a_dead_branch_binds_no_package_name
+#~~~~ R/a.R
+f <- function(n) n
+if (FALSE) {
+  x <- 1L
+  scratch <- 2L
+  f(x, verbose = TRUE)
+}
+#~~~~ R/b.R
+g <- function() x
+#++++
+== R/a.R
+f: <T> fn(n: T) -> T
+integer | NULL
+65..72 error[type-mismatch] this function has no parameter `verbose`. Its named parameter is `n`
+== R/b.R
+g: fn() -> Unknown
+16..17 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
+
 #==== conditional_top_level_slots
 #---- reference_within_top_level_if_body_resolves_to_slot
 #~~~~ R/a.R

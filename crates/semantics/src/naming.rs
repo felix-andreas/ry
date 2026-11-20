@@ -1111,7 +1111,29 @@ impl Context<'_> {
             } => {
                 self.resolve(*condition);
                 let entry = self.flow.clone();
-                self.resolve(*then_branch);
+                // A top-level `if (FALSE) { ... }` holds example code R never runs, so its
+                // writes bind no global: as package names they would join other items' cycles.
+                let dead = self.current_scope().kind == ScopeKind::TopLevel
+                    && matches!(
+                        module.kind(*condition),
+                        ExpressionKind::Literal(LiteralKind::Logical(false))
+                    );
+                if dead {
+                    let scope_id = self.stable_scope_id(*then_branch);
+                    // Its stores are scratch for stepping through by hand, so none is unused.
+                    self.escaped_frames.insert(scope_id);
+                    self.scopes.push(Scope {
+                        id: scope_id,
+                        kind: ScopeKind::Local,
+                        slots: FxHashMap::default(),
+                        horizon: Horizon::Unbounded,
+                    });
+                    self.premint_frame_assignments(*then_branch);
+                    self.resolve(*then_branch);
+                    self.scopes.pop();
+                } else {
+                    self.resolve(*then_branch);
+                }
                 let after_then = mem::replace(&mut self.flow, entry);
                 if let Some(else_branch) = else_branch {
                     self.resolve(*else_branch);
@@ -1630,12 +1652,16 @@ impl Context<'_> {
             .rev()
             .find_map(|(depth, scope)| {
                 let &slot = scope.slots.get(&name)?;
-                let own_frame_default = self.in_defaults && depth == function_depth;
-                (self.flow.contains_key(&slot) || depth < function_depth || own_frame_default)
+                let own_frame_later =
+                    // A quoted read stays quiet: the quotation may never run.
+                    (self.in_defaults || (self.deferred_depth > 0 && self.quiet_depth == 0))
+                        && depth == function_depth;
+                (self.flow.contains_key(&slot) || depth < function_depth || own_frame_later)
                     .then_some((depth, slot))
             })?;
-        // A default forced after the body assigned the name reads it like a closure would:
-        // the read comes before every write, and any of them may be the one it observes.
+        // A default forced after the body assigned the name, or an `on.exit` expression, reads
+        // it like a closure would: the read comes before every write, and any of them may be
+        // the one it observes.
         let forward = !self.flow.contains_key(&slot) && depth == function_depth;
         if forward {
             self.deferred_depth += 1;

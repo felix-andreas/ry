@@ -143,6 +143,9 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Recursive types are nominal; an alias never recurses
 - S4 is typed through a nominal wrapper, not from `setClass`
 - A typed environment lists its bindings and never changes type
+- A top-level `if (FALSE)` body binds no package name (settled)
+- S3 subsetting dispatches on the declared class first (settled)
+- A generic's dispatch formal is forced when an argument reaches it (settled)
 
 ## Analysis core
 
