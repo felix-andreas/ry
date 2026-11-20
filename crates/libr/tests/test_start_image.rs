@@ -97,20 +97,63 @@ fn a_stale_start_image_is_written_again_and_never_loaded() {
         assert!(!touches.exists(), "a session loaded {kind} image");
         assert_eq!(fs::read(&image).expect("read the image"), stale);
     }
+
+    // A session that sources a site and a user profile starts from the image, runs the
+    // profiles and `.First()` with only `methods`, `Autoloads` and base attached, and ends with
+    // GNU R's search path: the default packages in front of what the profiles attached.
+    fs::write(&image, &current).expect("write the current image");
+    let home = scratch.join("home-0");
+    fs::write(
+        home.join("site.R"),
+        "site_value <- 42\ncat('site:', setdiff(search(), 'package:ry'), '\\n')\n",
+    )
+    .expect("write the site profile");
+    fs::write(
+        home.join(".Rprofile"),
+        "cat('user:', setdiff(search(), 'package:ry'), '\\n')\nlibrary(tools)\n\
+         options(defaultPackages = c('splines', setdiff(getOption('defaultPackages'), 'graphics')))\n\
+         .First <- function() cat('first:', setdiff(search(), 'package:ry'), '\\n')\n",
+    )
+    .expect("write the user profile");
+    let touches = scratch.join("profile-touches");
+    let mut command = rscript_command(&home, Some(&touches));
+    command.env("R_PROFILE", home.join("site.R")).args([
+        "-e",
+        "cat('script:', setdiff(search(), c('tools:ry', 'package:std', 'package:ry')), site_value, '\\n')",
+    ]);
+    let (stdout, stderr) = output_of(command);
+    assert_eq!(
+        stdout,
+        "site: .GlobalEnv package:methods Autoloads package:base \n\
+         user: .GlobalEnv package:methods Autoloads package:base \n\
+         first: .GlobalEnv package:tools package:methods Autoloads package:base \n\
+         script: .GlobalEnv package:stats package:grDevices package:utils package:datasets \
+         package:splines package:tools package:methods Autoloads package:base 42 \n",
+        "stderr: {stderr}"
+    );
+    if RECORDS_TOUCHES {
+        assert!(
+            touches.is_file(),
+            "the session with profiles did not start from the image"
+        );
+    }
     fs::remove_dir_all(&scratch).expect("remove the test directory");
 }
 
 /// Runs a script in the home's `Rscript` and returns its stdout and stderr. With `touches`, the
 /// session records the image objects it touches there, which it does only when it started from
 /// the image.
-///
-/// A start that sources a profile never loads the image, so the session runs in the home's
-/// directory with `HOME` pointing there too, away from the user's `~/.Rprofile` and any
-/// `./.Rprofile`.
 fn rscript(home: &Path, touches: Option<&Path>) -> (String, String) {
+    let mut command = rscript_command(home, touches);
+    command.args(["-e", "cat(sum(1:10), is.function(stats::lm), '\\n')"]);
+    output_of(command)
+}
+
+/// The home's `Rscript`, run in the home's directory with `HOME` pointing there too, away from
+/// the user's `~/.Rprofile` and any `./.Rprofile`.
+fn rscript_command(home: &Path, touches: Option<&Path>) -> Command {
     let mut command = Command::new(home.join("bin/Rscript"));
     command
-        .args(["-e", "cat(sum(1:10), is.function(stats::lm), '\\n')"])
         .current_dir(home)
         .env("HOME", home)
         .env_remove("R_PROFILE")
@@ -123,6 +166,11 @@ fn rscript(home: &Path, touches: Option<&Path>) -> (String, String) {
     if let Some(touches) = touches {
         command.env("RY_IMAGE_TOUCH", touches);
     }
+    command
+}
+
+/// Runs `command`, which must succeed, and returns its stdout and stderr.
+fn output_of(mut command: Command) -> (String, String) {
     let output = command.output().expect("run Rscript");
     assert!(
         output.status.success(),

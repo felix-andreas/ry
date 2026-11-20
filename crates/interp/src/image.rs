@@ -93,12 +93,12 @@ pub fn path(home: &str, identity: &str) -> PathBuf {
     rcmd::images::start_image(Path::new(home), identity)
 }
 
-/// Whether a start can load the image: it is not interactive, sources no profile, does not turn
-/// images off with `RY_IMAGE=0`, and leaves every variable that changes what start-up loads
-/// unset. `R_TESTS` names a file base R's profile sources before the default packages load.
-pub(crate) fn applies(interactive: bool, profiles: bool) -> bool {
+/// Whether a start can load the image: it is not interactive, does not turn images off with
+/// `RY_IMAGE=0`, and leaves every variable that changes what start-up loads unset. `R_TESTS`
+/// names a file base R's profile sources before the default packages load. The site and user
+/// profiles run after the image loads (`session::start_from_image`).
+pub(crate) fn applies(interactive: bool) -> bool {
     !interactive
-        && !profiles
         && std::env::var_os("RY_IMAGE").is_none_or(|value| value != "0")
         && std::env::var_os("R_KEEP_PKG_SOURCE").is_none_or(|value| value != "yes")
         && LOADING_VARIABLES

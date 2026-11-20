@@ -427,6 +427,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A cached ASCII string is the only string with its text
 - A vector kind has no `downcast`: the caller chooses `standard` or `dense`
 - glibc's malloc keeps freed package buffers (settled)
+- Profiles run over the start-up image
 
 ## C API, R home and packages
 

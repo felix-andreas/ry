@@ -4151,7 +4151,7 @@ unsafe fn do_quit(call: &Call<'_>) -> R<Sexp> {
     let status = values::as_integer_scalar(call.arg(1));
     // GNU R prints the warnings still deferred when it quits, such as a failed `require()`'s
     // in `if (!require(pkg)) q()`.
-    crate::conditions::print_warnings()?;
+    crate::conditions::print_warnings("")?;
     crate::console_server::finish();
     crate::session::finish();
     use std::io::Write;
