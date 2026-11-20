@@ -133,6 +133,9 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A closure's read sees the writes after its definition
 - A nominal field narrows through a fact, not a rewritten type
 - A type past the size ceiling widens to `Unknown`, never to a recursive nominal (settled)
+- A `logical` argument binds a numeric type parameter to `integer`
+- Feature probes, Windows-only exports and callback strings
+- An empty list adds no element to `c()` or a loop
 
 ## Analysis core
 

@@ -714,31 +714,8 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 - **A statement reading a name before its defining statement** sees, on reload, the previous load's
   value (a fresh load fails on such code); documented as a limit.
 
-## Open: false reports and gaps found by the documentation review
+## Open: publish the Zed extension
 
-An adversarial review of every docs page ran each claim against the binary. The docs now state the
-behavior below truthfully, most of it under "Where correct code is reported" in
-the Limitations section of `reference/type-system.mdx`, so fixing an item means updating that page too.
-
-False reports on correct R, worst first:
-
-- **Platform-conditional `pkg::name` reads are reported "not exported".** 17 corpus reads, such as
-  `utils::shortPathName`, `utils::readRegistry` and `grDevices::win.metafile`, name Windows-only
-  exports the Linux-generated manifests lack, and `parallel::splitList` and `base::check_tzones`
-  are feature probes inside `try()` or `tryCatch()`. Adding the Windows-only exports to
-  `scripts/export-manifests.R` would fix the first class; a qualified read inside a `try()`
-  argument is a probe and could skip validation.
-
-Smaller gaps:
-
-- A string literal where a ry function's callback goes is not reported: `List.map([1L], "a")`
-  passes, because a string names a function for R's `match.fun`, which a ry function never calls.
-- **Arithmetic on a type parameter that admits `logical` returns the parameter.** `<N: numeric>`
-  and `<N: integer | logical>` both accept `TRUE`, and `function(x: N) -> N x + x` checks, so
-  `a(TRUE)` types as `logical` though R returns the integer `2`. `classify_numeric_operand` makes a
-  rigid that meets `Numeric` a `Flexible` operand whose result is the rigid itself. A sound result
-  promotes `logical` to `integer`, which needs either a constraint that excludes `logical` for
-  `N + N -> N` or a result type other than `N` when the bound admits `logical`.
 - The Zed extension is not in Zed's registry yet. It downloads the newest full release's archive
   (`editors/zed/src/lib.rs`), and the first full release is 0.4.4, so publish it to Zed's registry
   no earlier than 0.4.4 (before that it would serve 0.1.1), and 0.4.4 must ship every platform's
@@ -3355,23 +3332,18 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 table; `tools/bench/tooling/lsp_latency.py` drives `ry server` over stdio. Release build, 4-core container,
 typing on:
 
-| code base | cold check | peak RSS | findings | body edit first / settled | signature edit first / settled |
-|---|---:|---:|---|---:|---:|
-| finance | 1.36-1.6 s | 406 MiB | 1005 `unused` (genuine), 848 `object-system` | 1 / 44 ms | 2 / 39 ms |
-| data science | 1.5-1.65 s | 400 MiB | 2337 `object-system` | 2 / 41 ms | 2 / 39 ms |
-| biostatistics | 1.4-1.7 s | 403 MiB | 784 `object-system` | 1 / 41 ms | 1 / 40 ms |
+| code base | cold check | CPU | peak RSS | findings | body edit first / settled | signature edit first / settled |
+|---|---:|---:|---:|---|---:|---:|
+| finance | 0.84-0.94 s | 3.0-3.3 s | 240 MiB | none | 2 / 3 ms | 2 / 3 ms |
+| data science | 0.74-0.80 s | 2.7-3.0 s | 233 MiB | none | 2 / 3 ms | 1 / 2 ms |
+| biostatistics | 0.72-0.79 s | 2.6-2.9 s | 231 MiB | none | 1 / 2 ms | 1 / 2 ms |
 
-The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (about 4.2-5 s of CPU on four cores, about 3 times its wall time). The latest profile of the finance bench (1.4 s, 4.6-4.8 s of CPU): item checking is about a third of samples, parse about 12%, the interface reads about 8% (most of it frame lookups and top-level names), naming about 8%, and no function above about 4% exclusive. The syntax and check passes keep all four cores busy; about 0.1 s between the syntax pass and naming runs at half the cores. The struct-of-arrays HIR lowered from the green tree (`decisions/analysis-core.md`, "HIR as struct-of-arrays, lowered from the green tree") measured, in interleaved runs against the list-owning HIR, 7 to 12% less CPU, 6 to 10% less wall time and 23 to 35 MiB less peak RSS on all three code bases, with identical findings; the edit latencies did not move. Keeping literal text in a per-module buffer instead of interning it took off about another 0.1 s and 0.2 s of CPU; against a main build in the same interleaved runs the median cold check went from 1.74-1.86 s to 1.58-1.60 s, 5.3-5.7 s to 4.8-4.9 s of CPU, and 425-440 MiB to 399-403 MiB. After it, `item_hir` is about 9% of samples and parse about 12%, and parse is now the largest cost of the syntax pass. The machine was busier for these numbers than for the older rows below: in the same interleaved runs the build before hash-consed types measured 1.75-1.9 s, 5.1-5.6 s of CPU and 439-450 MiB. The profile is flat: item checking is about 35% of samples, then HIR lowering (13%), parse (11%), naming (8%), the syntax lints and the annotation queries, and the hash-consing table itself is about 3% exclusive. The syntax pass ran in batches with eviction between them and kept about 78% of the cores busy; it is now one parallel loop like the naming and check passes. Levers left toward 1 s: a cheaper parse (done since: the flat preorder tree replaced rowan, see "Check cache follow-ups"), re-interning names the HIR already holds as `Symbol` (naming's `mint_binding` and `GlobalEnv::scheme` take `&str` and intern again, about 2%), the `GlobalEnv::scheme` and `layers` lookups (about 11% inclusive), and the syntax pass's idle cores. Hashing `Symbol` by its index (ordering stays by spelling, so sorted output is unchanged) and the compact HIR (name sites in one side array, `NonZeroU32` ids, a 16-byte expression kind and an 8-byte argument; `decisions/analysis-core.md`, "HIR as struct-of-arrays, lowered from the green tree") together measured, in interleaved runs against a main build that already kept trees resident, medians of 1.52-1.58 s against 1.61-1.66 s, 5.0-5.3 s against 5.5 s of CPU, and 533-538 MiB against 563-568 MiB, with identical findings. After them the heap peak on finance is 490 MiB under the system allocator: resident green trees 127 MiB, HIR kinds 30 MiB and ranges 15 MiB, the `item_check` memos about 50 MiB, closed top-level schemes 21 MiB (2.3 million allocations, `check.rs` where `top_level_bindings` is built), and the expression-type tables 15 MiB. Tried without gain: a per-check cache of common scalar types, mimalloc's purge and huge-page options. A thread-local front cache for the type table measured no wall-time gain alone, but sampling showed the shard mutexes contended, so it is kept (`decisions/analysis-core.md`, "Every host keeps every tree"). Before the green-walk fusion, immortal interning, frame-binder query, one-batch passes and input durability, main measured 2.3-2.5 s, 6.4-7.0 s of CPU and 510-517 MiB on the same machine. Before tree
-eviction, compact names and durability the same machine measured 3.4, 3.6, 2.8 s, about 790 MiB, and
-47 to 63 ms settled; before the cold-path work, 6.1, 6.7, 6.2 s, about 1 GiB, and 95 to 120 ms.
+The cold check is CPU-bound, at about 3.5 times its wall time on four cores. Its profile and the levers left are under "Check cache follow-ups".
 
 Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. Remaining debt:
-- Peak RSS of `ry check` is 417-419 MiB on the benchmark code bases (`decisions/analysis-core.md`, "`ry check`
-  releases its trees once, and memoized records are compact"). The largest heap holders left are
-  HIR kinds (30 MB) and ranges (15 MB), salsa's dependency edges (about 30 MB), the naming and
-  check memos, the source texts (20 MB) and mimalloc's overhead over glibc (about 45 MiB). A
-  typed, strict finance bench peaks at about 712 MiB, because strict origins are recorded there;
-  that table is the next memory target for strict projects.
+- A typed, strict finance bench peaks far above the untyped one (about 712 MiB when last
+  measured), because strict origins are recorded there; that table is the next memory target for
+  strict projects.
 - The server keeps every tree. Bounding its tree memory would need eviction without salsa's
   per-read bookkeeping.
 - The cold check's remaining waits are salsa claims on project-wide queries
@@ -3502,62 +3474,41 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
 
 ## Open: false errors on real CRAN code
 
-`ry check R` on 25 packages from the benchmark dependency set (purrr, rlang, cli, httr2, zoo, xts, lubridate and others; sources fetched from CRAN, each with `[check] typing = true`) went from 669 errors to 175 after the call-checking, name-resolution and inference fixes (`decisions/syntax-semantics.md`). What remains, by message shape:
-- 38 "expected X, found Y" and 17 "expected a numeric value": mostly `T | NULL` results of functions that really can return NULL, vector `if` conditions, and parameters pinned by an unconditional write before a test (xts `Ops.xts.R:52`).
-- 26 "exported but this package defines no such top-level object": dynamic exports (cli `pb_*` through `makeActiveBinding`, rlang `ffi_` natives, lgr's `lgr`).
-- 20 "this call leaves out": formals the body does force on some path, worth a second look per site.
-- 17 "not a function": parameters named like a function and called (`log`, `serialize`, `format`, `lag`) where the parameter's own type is open.
-- 15 "expected a list": `$` on a value that is definitely NULL, and R6's metaprogrammed `generator_funs`.
-- 12 "expected a comparable value": `while (n && out)` pins a counter to logical now that comparisons no longer imply numeric (rlang `stack.R:99`).
-- 5 matrix indexing, a documented limitation.
+`ry check R` with `[check] typing = true` on the 25 benchmark-dependency packages reports 6 errors,
+all true bugs in the packages: DBI's `coerce(sqlvar, from, to)` leaves out the forced `to`
+(`R/data.R`, 5 sites) and httr's `revoke_oauth2.0` call leaves out `credentials`. Over 201
+packages (those plus their dependency closure and a statistics sample) there are 31, and every one
+read so far is a true bug (kernlab calls `ramloss` after `ramloss <- 0`, renv reads
+`diagnostics$suggestion`, gmp tests `if (log)`, and so on). Not yet read:
+- mclust `mclustda.R:719`: `classification = cl` (a factor) against `W | NULL` of
+  `mclust1Dplot`; `graphics.R` alone accepts it, so another file constrains `W`.
+- mgcv `bam.r:2623` (2), `efam.r:1475` and `gamlss.r:1193`: a local value unioned with a
+  same-named package function (`double[] | fn(...)`), and `integer | T` at a scalar numeric use.
+- A read inside `on.exit()` counts where `on.exit()` is registered, not where the exit action runs,
+  so `on.exit(run()); x <- 1` with `run <- function() x` reports "leaves out `x`" though the write
+  comes first at run time. Direct reads inside `on.exit()` behave the same.
 
 ## Check cache follow-ups
 
 - A partial `ry check` still parses every file (about 0.3 s of its 0.45 s on 4 cores), because
   `package_definitions` and the other project-wide folds read every file's item tree. Persisting
   each file's share of those folds next to its findings would remove that floor.
-- A cold check of the finance bench is about 1.48 s median on 4 cores (4.8 s of CPU, 431 MiB peak
-  RSS), so the 1 s target still needs about a third less CPU work. Under callgrind it is 22.0 G
-  instructions, after the one-shot check path, shared small green nodes, unaligned mimalloc entry
-  points and green walks in the annotation and lint passes (`decisions/analysis-core.md`, "One-shot checks record
-  coarse dependencies"). (The red nodes these figures counted are gone with rowan; see the flat-tree
-  item below.) What is left is flat: item checking about 7.7 G
-  inclusive, parse about 3.1 G (lexing 0.7 G, about 105 instructions per token in the tree builder
-  and 300 per node), naming 1.9 G, interface edges and reads about 3 G, the syntax lints 1.7 G, and
-  mimalloc about 1.5 G over 19 M allocations. A real third needs fewer allocations in the checker
-  (`map_child_types`, `resolve_rec`, the `Ty` maps' rehashing) and a cheaper parse, not one cut.
-- The checker's working maps now live in a pooled bump arena and its names are interned
-  (`decisions/analysis-core.md`, "The item check's working maps live in a pooled bump arena"), which took the
-  finance bench from 19.78 M to 15.82 M mimalloc calls and 23.59 G to 22.68 G instructions,
-  with wall time unchanged within noise (median about 1.34 s). The
-  1 s target still needs about 35% less CPU, and no single function is above about 1.2% of
-  self cost. What is left is structural:
-  - Done: rowan is replaced by ry's own flat preorder tree with windowed item trees, one-shot name
-    lookups read the project maps once per query, unlisted frame binders are built once per item,
-    and overload probes reject by call shape before instantiating (`decisions/syntax-semantics.md`, "The syntax
-    tree is ry's own flat preorder arena" and "Overload probes reject by call shape first"). The
-    finance bench is now 22.5 G instructions and 11.1 M `mi_malloc` calls under whole-process
-    callgrind (from 23.6 G and 19.8 M), wall median 1.11-1.15 s against 1.35-1.45 s for the previous
-    build in interleaved runs, 3.6-3.7 s of CPU and 371 MiB, with byte-identical findings. About 10% of wall time remains to the 1 s target.
-  - Done: a cold check holds one parse tree per worker, skips the per-item syntax memos and the
-    editor-only check facts, and purges freed memory after 10 ms (`decisions/analysis-core.md`, "A cold check
-    holds one parse tree per worker"). Peak RSS is 298-306 MiB on the three benches, under the
-    300 MiB target, but with only 1-3 MiB of margin on finance and data science; wall time is
-    1.1-1.3 s on a noisy 4-core machine, and instructions moved only 23.4 G to 23.0 G.
-  - salsa's per-query edge bookkeeping that remains is per item, behind the firewalls
-    `test_incremental.rs` pins. Every host runs the same queries (`decisions/syntax-semantics.md`, "Decision
-    record: every host resolves names through one path, and trees live in the host's store"), so
-    a cut here is a cut for the server too. Salsa edges are about 29 MiB of the heap peak, 8 MiB
-    of it `item_check`.
-  - Done: kind-column scans, phase overlap, one-allocation HIR, memchr lexing and a one-pass tree
-    finish took finance to 17.6 G instructions and 222-228 MiB in release (`decisions/analysis-core.md`, "The
-    one-shot check scans kind columns and overlaps its serial phases"). Left: the parser and
-    `TreeBuilder` self cost (about 1.4 G), the lexer's ident scans and per-token work (about
-    0.65 G), and salsa fetch overhead spread across queries.
-  - checker work itself: `infer_ordinary_call` is still the largest inclusive cost; `match_arguments`
-    and type instantiation dominate it.
-  - small `Vec` growth spread across many sites (`map_child_types` alone reserves about 88k
-    times on the slice), which a small-buffer type would absorb.
+- A cold check meets the 1 s target on 4 cores, with little margin on finance. Measured with
+  `tools/bench/tooling/check.py` on freshly generated code bases (500 files, about 305,000 lines,
+  release build): finance 0.84-0.94 s wall, 3.0-3.3 s of CPU, 240 MiB peak; data science
+  0.74-0.80 s; biostatistics 0.72-0.79 s. Under whole-process callgrind finance is 18.8 G
+  instructions (17.6 G before the checker grew the rules for real CRAN code). The profile is flat,
+  and no function is above 2.2% of self cost: item checking about 45% inclusive
+  (`infer_ordinary_call` 25%, `match_arguments` 11%, `InferenceTable::resolve` 9%), parse about
+  16% (lexing 4%), naming about 8%, HIR lowering about 6%. More headroom needs fewer allocations
+  in the checker (`map_child_types`, `resolve_rec`, the `Ty` maps' rehashing, small `Vec` growth
+  that a small-buffer type would absorb), the parser's and `TreeBuilder`'s self cost, and salsa
+  fetch overhead spread across queries. The settled history of this work is in
+  `decisions/analysis-core.md` ("The one-shot check scans kind columns and overlaps its serial
+  phases" and the entries it names).
+- salsa's per-query edge bookkeeping that remains is per item, behind the firewalls
+  `test_incremental.rs` pins. Every host runs the same queries, so a cut here is a cut for the
+  server too. Salsa edges are about 29 MiB of the heap peak, 8 MiB of it `item_check`.
 
 ## Open: the VS Code extension has no eslint configuration
 

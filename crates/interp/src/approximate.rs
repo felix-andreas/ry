@@ -32,8 +32,8 @@ use {
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("agrep", 8, |call| unsafe { agrep(call, false) }),
     internal("agrepl", 8, |call| unsafe { agrep(call, true) }),
-    internal("adist", 8, |call| unsafe { adist(call) }),
-    internal("aregexec", 7, |call| unsafe { aregexec(call) }),
+    internal("adist", 8, adist),
+    internal("aregexec", 7, aregexec),
 ];
 
 /// `.Internal(agrep(pattern, x, ignore.case, value, costs, bounds, useBytes, fixed))`, and
@@ -462,7 +462,12 @@ unsafe fn aregexec(call: &Call<'_>) -> R<Sexp> {
     };
     let regex = ApproximateRegex::compile(&expression, &scopes, ignore_case)
         .map_err(|reason| call.error(format!("regcomp error: '{reason}'")))?;
-    let params = whole_pattern_params(call.arg(2), call.arg(3), pattern_text.chars().count())?;
+    let (bounds, costs) = (call.arg(2), call.arg(3));
+    if costs.kind() != SexpType::Integer || length(costs) < 3 || length(bounds) < 5 {
+        return Err(error("invalid 'costs' or 'bounds' argument"));
+    }
+    let bounds: Vec<f64> = (0..5).map(|index| real_at(bounds, index)).collect();
+    let params = whole_pattern_params(&bounds, values::ints(costs), pattern_text.chars().count());
     let match_length = values::install("match.length")?;
     let count = length(text);
     let result = alloc(SexpType::List, count)?;
@@ -512,23 +517,20 @@ unsafe fn aregexec(call: &Call<'_>) -> R<Sexp> {
 /// fraction of the pattern length (times the largest cost, for the cost) rounded up. GNU R reads
 /// the insertion bound as TRE's bound on deletions and the deletion bound as its bound on
 /// insertions, and so does this.
-unsafe fn whole_pattern_params(bounds: Sexp, costs: Sexp, pattern_length: usize) -> R<Params> {
-    if costs.kind() != SexpType::Integer || length(costs) < 3 || length(bounds) < 5 {
-        return Err(error("invalid 'costs' or 'bounds' argument"));
-    }
-    let cost_at = |index: usize| values::ints(costs)[index];
+fn whole_pattern_params(bounds: &[f64], costs: &[i32], pattern_length: usize) -> Params {
+    let cost_at = |index: usize| costs[index];
     let (insertion, deletion, substitution) = (cost_at(0), cost_at(1), cost_at(2));
     let largest = f64::from(insertion.max(deletion).max(substitution));
     let length = pattern_length as f64;
     let bound_at = |index: usize, scale: f64| -> i32 {
-        let bound = real_at(bounds, index);
+        let bound = bounds[index];
         if is_na_real(bound) {
             return NO_BOUND;
         }
         let bound = if bound < 1.0 { bound * scale } else { bound };
         bound.ceil().clamp(f64::from(i32::MIN), f64::from(NO_BOUND)) as i32
     };
-    Ok(Params {
+    Params {
         insertion_cost: Some(insertion),
         deletion_cost: Some(deletion),
         substitution_cost: Some(substitution),
@@ -537,7 +539,7 @@ unsafe fn whole_pattern_params(bounds: Sexp, costs: Sexp, pattern_length: usize)
         insertions: bound_at(2, length),
         substitutions: bound_at(3, length),
         edits: bound_at(4, length),
-    })
+    }
 }
 
 /// The edit costs and the bounds a match must stay within.

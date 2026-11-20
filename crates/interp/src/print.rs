@@ -1207,7 +1207,9 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
                     options.settings.digits = digits as usize;
                 }
             }
-            "quote" => options.quote = logical_argument(argument, "quote")?,
+            "quote" => {
+                options.quote = logical_argument(values::as_logical_scalar(argument), "quote")?
+            }
             "na.print" => {
                 if argument != nil() {
                     if argument.kind() != SexpType::String || values::length(argument) == 0 {
@@ -1229,7 +1231,9 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
                     options.gap = gap as usize;
                 }
             }
-            "right" => options.right = logical_argument(argument, "right")?,
+            "right" => {
+                options.right = logical_argument(values::as_logical_scalar(argument), "right")?
+            }
             "max" => {
                 if argument != nil() {
                     let max = integer_scalar(argument)?;
@@ -1248,7 +1252,10 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
                     options.width = width as usize;
                 }
             }
-            "useSource" => options.use_source = logical_argument(argument, "useSource")?,
+            "useSource" => {
+                options.use_source =
+                    logical_argument(values::as_logical_scalar(argument), "useSource")?
+            }
             _ => {}
         }
     }
@@ -1264,8 +1271,9 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
     Ok(value)
 }
 
-unsafe fn logical_argument(argument: Sexp, name: &str) -> R<bool> {
-    match values::as_logical_scalar(argument) {
+/// The logical argument `name`, read as `value`, which must not be `NA`.
+fn logical_argument(value: i32, name: &str) -> R<bool> {
+    match value {
         NA_LOGICAL => Err(error(format!("invalid '{name}' argument"))),
         value => Ok(value != 0),
     }

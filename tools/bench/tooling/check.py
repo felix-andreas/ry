@@ -55,7 +55,7 @@ def cold_check(binary, root):
     before, cpu_before = usage.ru_maxrss, usage.ru_utime + usage.ru_stime
     with tempfile.TemporaryFile() as findings:
         started = time.perf_counter()
-        status = subprocess.run([binary, "check", root, "--output", "json"], stdout=findings, stderr=subprocess.DEVNULL)
+        status = subprocess.run([binary, "check", root, "--no-cache", "--output", "json"], stdout=findings, stderr=subprocess.DEVNULL)
         if status.returncode not in (0, 1):
             sys.exit(f"ry check failed on {root} with status {status.returncode}")
         elapsed = time.perf_counter() - started
@@ -83,8 +83,8 @@ def lsp_latency(binary, root, runs):
 def isolated_cold_check(binary, root):
     """Re-run in a fresh interpreter so the child's peak is not inherited from a larger one."""
     script = (
-        "import json,sys;sys.path.insert(0,sys.argv[1]);import run;"
-        "e,u,p,c=run.cold_check(sys.argv[2],sys.argv[3]);print(json.dumps([e,u,p,c]))"
+        "import json,sys;sys.path.insert(0,sys.argv[1]);import check;"
+        "e,u,p,c=check.cold_check(sys.argv[2],sys.argv[3]);print(json.dumps([e,u,p,c]))"
     )
     output = subprocess.run(
         [sys.executable, "-c", script, HERE, binary, root], capture_output=True, text=True, check=True

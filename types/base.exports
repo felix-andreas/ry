@@ -229,6 +229,7 @@ Sys.getlocale
 Sys.getpid
 Sys.glob
 Sys.info
+Sys.junction
 Sys.localeconv
 Sys.readlink
 Sys.setFileTime
@@ -1172,6 +1173,8 @@ setdiff
 setequal
 setwd
 shQuote
+shell
+shell.exec
 showConnections
 sign
 signalCondition

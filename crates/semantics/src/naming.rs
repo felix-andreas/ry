@@ -65,6 +65,9 @@ pub struct NamespaceRead {
     pub internal: bool,
     pub package: Symbol,
     pub name: Option<Symbol>,
+    /// The whole expression of `try()` or an error-catching `tryCatch()`, or its callee, so
+    /// the read probes whether the package exports the name.
+    pub probed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -281,6 +284,7 @@ pub fn resolve_item(
         read_parameter_slots: BTreeSet::new(),
         emit: true,
         quiet_depth: 0,
+        probes: Vec::new(),
         deferred_depth: 0,
         in_defaults: false,
         quoted_depth: 0,
@@ -410,6 +414,9 @@ struct Context<'a> {
     /// The variables of the `for` loops being walked, innermost last.
     active_loop_variables: Vec<BindingId>,
     quiet_depth: u32,
+    /// The `pkg::name` reads that are the whole expression a `try()` or an error-catching
+    /// `tryCatch()` evaluates, or that expression's callee.
+    probes: Vec<ExprId>,
     /// Inside an expression R evaluates later (`on.exit`): its reads see the final value, so
     /// they keep every write of the name alive.
     deferred_depth: u32,
@@ -707,6 +714,46 @@ impl Context<'_> {
                     } => Some(name.as_str()),
                     _ => builtin_callee,
                 };
+                // `try(pkg::name)` asks whether the running R has the name, so that one read
+                // is a probe; a read deeper in the expression, or under a `tryCatch()` that
+                // catches no error, is ordinary code.
+                let from_base = match module.kind(*callee) {
+                    ExpressionKind::Namespace { package, .. } => {
+                        package.is_some_and(|package| package == "base")
+                    }
+                    _ => true,
+                };
+                let catches_errors = match accessor {
+                    Some("try") => true,
+                    Some("tryCatch") => module[arguments].iter().any(|argument| {
+                        matches!(
+                            module.argument_name(argument).as_deref(),
+                            Some("error" | "condition")
+                        )
+                    }),
+                    _ => false,
+                };
+                if from_base
+                    && catches_errors
+                    && let Some(mut probed) = module[arguments]
+                        .iter()
+                        .find(|argument| module.argument_name(argument).as_deref() == Some("expr"))
+                        .or_else(|| {
+                            module[arguments]
+                                .iter()
+                                .find(|argument| argument.name.is_none())
+                        })
+                        .and_then(|argument| argument.value)
+                {
+                    while let ExpressionKind::Paren(inner)
+                    | ExpressionKind::Call { callee: inner, .. } = module.kind(probed)
+                    {
+                        probed = *inner;
+                    }
+                    if matches!(module.kind(probed), ExpressionKind::Namespace { .. }) {
+                        self.probes.push(probed);
+                    }
+                }
                 if accessor.is_some_and(|name| EAGER_CALLERS.contains(&name)) {
                     let until = self.run_horizon(call_end);
                     for value in module[arguments]
@@ -1000,12 +1047,14 @@ impl Context<'_> {
                     && self.quiet_depth == 0
                     && let Some(package) = package
                 {
+                    let probed = self.probes.contains(&id);
                     self.naming.namespace_reads.insert(
                         id,
                         NamespaceRead {
                             internal: *internal,
                             package: *package,
                             name: *name,
+                            probed,
                         },
                     );
                 }

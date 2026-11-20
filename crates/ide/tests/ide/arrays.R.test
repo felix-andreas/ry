@@ -74,7 +74,7 @@ references: none
 rename: none
 signature: <A: item, B: item> fn(list: List<A>, f: fn(A) -> B) -> List<B>
 parameters: list: List<A> | [f: fn(A) -> B]
-completion (103): f = , for, function, factanal, factor, factor.scope, factorial, faithful
+completion (104): f = , for, function, factanal, factor, factor.scope, factorial, faithful
 hint @20list =
 
 #---- hover_on_the_for_variable

@@ -650,8 +650,7 @@ pub(crate) unsafe fn eval_text(text: &str, env: Sexp) -> R<Sexp> {
 /// and `${VAR:-default}` expand, and a variable already set wins.
 fn read_renviron() {
     let home = crate::system::r_home();
-    // SAFETY: the session starts before any other thread exists.
-    unsafe { std::env::set_var("R_HOME", &home) };
+    set_start_variable("R_HOME", &home);
     export_wrapper_directories(&home);
     let user_set = std::env::var_os("R_LIBS_USER").is_some();
     let site_set = std::env::var_os("R_LIBS_SITE").is_some();
@@ -675,9 +674,14 @@ fn read_renviron() {
                 value.push_str(&path);
             }
         }
-        // SAFETY: the session starts before any other thread exists.
-        unsafe { std::env::set_var(name, value) };
+        set_start_variable(name, value);
     }
+}
+
+/// Sets the environment variable `name` while the session starts.
+fn set_start_variable(name: &str, value: impl AsRef<std::ffi::OsStr>) {
+    // SAFETY: the session starts before any other thread exists.
+    unsafe { std::env::set_var(name, value) };
 }
 
 /// GNU R's user libraries for this major version and an older minor one, newest first:
@@ -778,8 +782,7 @@ fn read_renviron_file(home: &str) {
                 continue;
             }
             let value = expand_environment(value.trim().trim_matches(|c| c == '\'' || c == '"'));
-            // SAFETY: as above.
-            unsafe { std::env::set_var(name, value) };
+            set_start_variable(name, value);
         }
         break;
     }
@@ -806,8 +809,7 @@ fn export_wrapper_directories(home: &str) {
             && !value.is_empty()
             && !value.contains('$')
         {
-            // SAFETY: the session starts before any other thread exists.
-            unsafe { std::env::set_var(name, value) };
+            set_start_variable(name, value);
         }
     }
 }

@@ -165,16 +165,10 @@ pub unsafe fn swilk(call: &NativeCall<'_>) -> R<Sexp> {
     values::real_vector(&[w, p])
 }
 
-/// `pKolmogorov2x(statistic, n)`: the exact distribution function of the one-sample
-/// two-sided Kolmogorov statistic, by Marsaglia, Tsang and Wang's matrix power ("Evaluating
-/// Kolmogorov's distribution", Journal of Statistical Software, 2003).
-pub unsafe fn p_kolmogorov_2x(call: &NativeCall<'_>) -> R<Sexp> {
-    let d = values::as_real_scalar(call.arg(0));
-    let n = values::as_integer_scalar(call.arg(1)).max(1) as usize;
-    values::scalar_real(kolmogorov_exact(d, n))
-}
-
-/// R 4.4's `pkolmogorov_two_exact(q, n)`: [`p_kolmogorov_2x`] over a vector of statistics.
+/// R 4.4's `pkolmogorov_two_exact(q, n)`, and the scalar `pKolmogorov2x(statistic, n)` before
+/// it: the exact distribution function of the one-sample two-sided Kolmogorov statistic, by
+/// Marsaglia, Tsang and Wang's matrix power ("Evaluating Kolmogorov's distribution", Journal of
+/// Statistical Software, 2003).
 pub unsafe fn p_kolmogorov_two_exact(call: &NativeCall<'_>) -> R<Sexp> {
     let statistics = real_values(call.arg(0))?;
     let n = values::as_integer_scalar(call.arg(1)).max(1) as usize;

@@ -169,7 +169,7 @@ action: Add inferred type annotations for the whole file
   edit 10..10 -> "<T: numeric>"
   edit 12..12 -> ": T"
   edit 13..13 -> " -> T"
-completion (53): twice, HoltWinters, Num.bitwise_and, Num.bitwise_not, Num.bitwise_or, Num.bitwise_xor, .__C__MethodWithNextWithTrace, RtangleWritedoc
+completion (59): twice, getWindowsHandle, getWindowsHandles, getWindowTitle, getWinProgressBar, setWindowTitle, setWinProgressBar, HoltWinters
 hint @10<T: numeric>
 hint @12: T
 hint @13 -> T
@@ -208,7 +208,7 @@ action: Add inferred type annotation for `f`
   edit 15..15 -> " -> integer"
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> integer"
-completion (128+): total, prototype, NLSstAsymptotic, NLSstLfAsymptote, NLSstRtAsymptote, defaultPrototype, makePrototypeFromClassDef, .__C__classPrototypeDef
+completion (128+): total, prototype, NLSstAsymptotic, NLSstLfAsymptote, NLSstRtAsymptote, bringToTop, defaultPrototype, makePrototypeFromClassDef
 hint @15 -> integer
 hint @25: integer
 
