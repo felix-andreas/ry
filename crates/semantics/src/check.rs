@@ -4238,7 +4238,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                     if reaches_project {
                         globals.namespace_scheme(name)
                     } else {
-                        self.library?.schemes.get(name)?.last().cloned()
+                        let package = (*package)?;
+                        self.library?
+                            .namespace_schemes(package, name)?
+                            .last()
+                            .cloned()
                     }
                 }) {
                     Some(namespace_scheme) => self.instantiate(&namespace_scheme),
@@ -15265,7 +15269,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 let name =
                     validated_namespace_name(self.db, self.library, *internal, package, name)?;
                 if !namespace_reaches_project(self.db, package) {
-                    let schemes = self.library?.schemes.get(name)?;
+                    let schemes = self.library?.namespace_schemes((*package)?, name)?;
                     if schemes.len() < 2 {
                         return None;
                     }

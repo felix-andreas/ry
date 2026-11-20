@@ -672,3 +672,18 @@ as_xts <- function(x) x
 as_zoo: fn(x: xts) -> zoo
 as_xts: fn(x: zoo) -> xts
 135..136 error[type-mismatch] expected `xts`, found `zoo`
+
+#---- a_qualified_call_reads_its_own_namespace_s_declaration
+#namespace import(rugarch)
+#: fn(fit: Any) -> double
+residual_scale <- function(fit) stats::sigma(fit)
+
+#: fn(fit: uGARCHfit) -> matrix
+volatility <- function(fit) sigma(fit)
+
+#: fn(fit: uGARCHfit) -> matrix
+qualified_volatility <- function(fit) rugarch::sigma(fit)
+#++++
+residual_scale: fn(fit: Any) -> double
+volatility: fn(fit: uGARCHfit) -> matrix
+qualified_volatility: fn(fit: uGARCHfit) -> matrix

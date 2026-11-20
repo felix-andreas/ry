@@ -16,6 +16,9 @@ median : @pure fn(x: Any, [na.rm]: logical, ...: Any) -> Any
 weighted.mean : @pure fn(x: Any, [w]: Any, [na.rm]: logical, ...: Any) -> double
 mad : @pure fn(x: Any, [center]: Any, [constant]: Any, [na.rm]: logical, [low]: logical, [high]: logical) -> double
 IQR : @pure fn(x: Any, [na.rm]: logical, [type]: Any) -> double
+# `sigma` is the residual standard deviation of a fitted model: a number for most models, a vector
+# for a multivariate one. rugarch declares its own `sigma`, which `stats::sigma` never reaches.
+sigma : @pure fn(object: Any, ...: Any) -> Any
 # `quantile`'s second positional is `probs` (not `na.rm`). The default interpolating types always
 # return double; types 1/3 can preserve integer input — a rare edge accepted for a precise default.
 quantile : @pure fn(x: Any, [probs]: Any, [na.rm]: logical, [names]: logical, [type]: Any, [digits]: Any, ...: Any) -> double[]

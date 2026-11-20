@@ -3581,8 +3581,11 @@ scoping.
   package's `data/` holds an `.R` file, because each makes the export set unknowable. `pkg:::name` is never checked.
 - When the stubs declare `name` in `pkg`, the qualified read has the stub's type. A project binding
   of the same name does not change it: `base::date()` calls base's `date` even when the package
-  defines its own `date`. A name that only the namespace's [export manifest](#standard-library-exports) lists
-  validates the same way, and types as `Unknown`.
+  defines its own `date`. When two namespaces declare the same name, a bare reference takes the
+  declaration that loads last, but `pkg::name` always takes `pkg`'s own: with rugarch imported,
+  `sigma(fit)` is rugarch's and `stats::sigma(fit)` is stats'. A name only another namespace
+  declares, such as a re-export, takes that declaration. A name that only the namespace's
+  [export manifest](#standard-library-exports) lists validates the same way, and types as `Unknown`.
 - An unknown namespace warns, and so does a known namespace that neither declares nor lists the name
   ("not exported"). An unknown namespace stays quiet when it belongs to the package's
   [declared universe](#package-imports-namespace-and-description).

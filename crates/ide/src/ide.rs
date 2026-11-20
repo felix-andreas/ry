@@ -1828,9 +1828,19 @@ pub fn signature_help_with(
             }
         });
         let bare = matches!(hir.kind(*callee), ExpressionKind::NameRef(_));
+        let package = match hir.kind(*callee) {
+            ExpressionKind::Namespace {
+                package: Some(package),
+                ..
+            } => Some(*package),
+            _ => None,
+        };
         let schemes = name
             .filter(|name| !(bare && hidden_by_prelude(db, name)))
-            .and_then(|name| stubs(db)?.schemes.get(&name));
+            .and_then(|name| match package {
+                Some(package) => stubs(db)?.namespace_schemes(package, &name),
+                None => stubs(db)?.schemes.get(&name),
+            });
         let overloads = schemes.filter(|schemes| schemes.len() > 1);
         if function.is_some() || overloads.is_some() {
             typed = Some((*callee, function, overloads, arguments, cursor_index));
