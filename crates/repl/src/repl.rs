@@ -683,11 +683,8 @@ fn extract_base(base: &EmbeddedBase) -> Result<PathBuf, ReplError> {
             path.display()
         ))
     };
-    let hold = || {
-        rcmd::hold_extracted(&directory, || rcmd::base::is_complete(&directory))
-            .map_err(|error| failed(&directory, error))
-    };
-    if hold()? {
+    let hold = || rcmd::hold_extracted(&directory, || rcmd::base::is_complete(&directory));
+    if hold() {
         return Ok(directory);
     }
     fs::create_dir_all(&parent).map_err(|error| failed(&parent, error))?;
@@ -695,8 +692,8 @@ fn extract_base(base: &EmbeddedBase) -> Result<PathBuf, ReplError> {
     // lock; the extraction is then repeated.
     for _ in 0..3 {
         unpack_into_place(base, &parent, &directory, &failed)?;
-        if hold()? {
-            rcmd::prune_extracted(&parent, base.key).map_err(|error| failed(&parent, error))?;
+        if hold() {
+            prune(&parent, base.key);
             return Ok(directory);
         }
     }
@@ -831,15 +828,13 @@ fn extract_runtime(runtime: &EmbeddedRuntime) -> Result<PathBuf, ReplError> {
             path.display()
         ))
     };
-    let held = rcmd::hold_extracted(&directory, || complete(&library_path, library))
-        .map_err(|error| failed(&directory, error))?;
-    if held {
+    if rcmd::hold_extracted(&directory, || complete(&library_path, library)) {
         return Ok(library_path);
     }
     // The directory is held before its files are written, so a pruner of another version
     // cannot remove it halfway; one that removed it before the lock was taken is retried.
     let mut attempts = 0;
-    while !rcmd::hold_extracted(&directory, || true).map_err(|error| failed(&directory, error))? {
+    while !rcmd::hold_extracted(&directory, || true) {
         attempts += 1;
         if attempts > 3 {
             return Err(failed(
@@ -879,8 +874,19 @@ fn extract_runtime(runtime: &EmbeddedRuntime) -> Result<PathBuf, ReplError> {
             removed.map_err(|error| failed(&staging, error))?;
         }
     }
-    rcmd::prune_extracted(&parent, runtime.key).map_err(|error| failed(&parent, error))?;
+    prune(&parent, runtime.key);
     Ok(library_path)
+}
+
+/// Removes the older copies beside `key` in `parent`. Pruning only frees disk, so a failure
+/// warns rather than stopping the start.
+fn prune(parent: &Path, key: &str) {
+    if let Err(error) = rcmd::prune_extracted(parent, key) {
+        eprintln!(
+            "Warning: older copies in {} were not removed: {error}",
+            parent.display()
+        );
+    }
 }
 
 #[cfg(test)]

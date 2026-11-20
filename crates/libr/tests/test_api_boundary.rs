@@ -121,6 +121,10 @@ fn environment_accessors_reject_the_wrong_kind_with_gnu_r_messages() {
             "accessor(6L, values, quote(b))",
             "no active binding for \"b\"",
         ),
+        (
+            "accessor(6L, values, quote(unbound))",
+            "no binding for \"unbound\"",
+        ),
         ("accessor(4L, values, \"b\")", "not a symbol"),
         ("accessor(7L, values, \"b\")", "not a symbol"),
     ];

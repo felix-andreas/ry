@@ -26,6 +26,10 @@
 | r2   - 4
 |      [,1] [,2]
 | [1,]    a   bb
+|     x y
+| a 1.5 3
+| b  NA 4
+| [1] "too few row labels"
 | [1] TRUE
 | [1] TRUE
 | [1] TRUE

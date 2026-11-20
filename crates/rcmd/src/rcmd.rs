@@ -956,26 +956,29 @@ const EXTRACTED_LEDGER: &str = ".ledger";
 /// Takes a shared lock on `directory`, a copy ry extracted into the cache, and holds it until
 /// the process exits, so no pruner removes the copy while this process uses it. Returns false,
 /// holding nothing, when the directory is not in place or `complete` says it is unfinished.
-pub fn hold_extracted(directory: &Path, complete: impl Fn() -> bool) -> io::Result<bool> {
+/// A cache where the lock cannot be taken (read-only, or a file system without locks) still
+/// serves a complete copy, unprotected from pruners, because a missing lock must not stop ry.
+pub fn hold_extracted(directory: &Path, complete: impl Fn() -> bool) -> bool {
     let path = directory.join(LOCK_FILE);
-    let lock = match File::options()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-    {
+    let mut options = File::options();
+    options.create(true).truncate(false).write(true);
+    // Without delete sharing, Windows moves no directory while this file is open in it, so a
+    // pruner cannot take the copy away between this open and the lock.
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 0x1 | 0x2);
+    let lock = match options.open(&path) {
         Ok(lock) => lock,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return false,
+        Err(_) => return complete(),
     };
-    lock.lock_shared()?;
-    // A pruner moves a copy away before it deletes it, so one still in place once the lock is
-    // taken stays until this process exits.
-    if !directory.join(LOCK_FILE).exists() || !complete() {
-        return Ok(false);
+    if lock.lock_shared().is_err() {
+        return complete();
+    }
+    if !locks_in_place(&lock, &path) || !complete() {
+        return false;
     }
     hold(lock);
-    Ok(true)
+    true
 }
 
 /// Records `key` as the newest copy in `parent` (`ry/runtime` or `ry/base` of the cache), then
@@ -1004,6 +1007,10 @@ pub fn prune_extracted(parent: &Path, key: &str) -> io::Result<Vec<PathBuf>> {
             .to_string_lossy()
             .into_owned();
         if !path.is_dir() {
+            // A ledger written only under this lock is left over from a crashed prune.
+            if name.starts_with(&format!(".{EXTRACTED_LEDGER}.")) {
+                drop(fs::remove_file(&path));
+            }
             continue;
         }
         if name.starts_with(REMOVING) {
@@ -1034,16 +1041,18 @@ pub fn prune_extracted(parent: &Path, key: &str) -> io::Result<Vec<PathBuf>> {
     let doomed_count = order.len().saturating_sub(KEPT_EXTRACTED - 1);
     for copy in &order[..doomed_count] {
         let path = parent.join(copy);
-        // A copy from an ry that takes no locks has no lock file to take.
-        let lock = match File::options().write(true).open(path.join(LOCK_FILE)) {
-            Ok(lock) => match lock.try_lock() {
-                Ok(()) => Some(lock),
-                Err(TryLockError::WouldBlock) => continue,
-                Err(TryLockError::Error(error)) => return Err(error),
-            },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error),
-        };
+        // Created when missing, as for a copy of an ry that takes no locks, so a process that
+        // starts holding the copy now waits for this lock. A copy whose lock cannot be taken
+        // may be in use, so it stays.
+        let lock = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path.join(LOCK_FILE));
+        let Ok(lock) = lock else { continue };
+        if lock.try_lock().is_err() {
+            continue;
+        }
         // Moved out of its place first, so a process that opened the lock file before this one
         // took it finds no copy there once it gets its lock, and extracts its own.
         let doomed = parent.join(format!("{REMOVING}{}", staging_suffix()));
@@ -1074,6 +1083,27 @@ pub fn prune_extracted(parent: &Path, key: &str) -> io::Result<Vec<PathBuf>> {
         drop(fs::remove_dir_all(&leftover));
     }
     Ok(removed)
+}
+
+/// Whether `lock`, opened at `path`, is still the file there: a pruner may have moved the copy
+/// away while this process waited for the lock, and another process extracted a new copy in
+/// its place. On Windows the open file keeps its directory from moving, so presence suffices.
+fn locks_in_place(lock: &File, path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (lock.metadata(), fs::metadata(path)) {
+            (Ok(locked), Ok(current)) => {
+                locked.dev() == current.dev() && locked.ino() == current.ino()
+            }
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        drop(lock);
+        path.exists()
+    }
 }
 
 /// Whether the files `home` was built from would no longer name it.
@@ -3787,6 +3817,7 @@ PATH="${R_CUSTOM_TOOLS_PATH:-${R_RTOOLS45_PATH}};${PATH}/"
             fs::create_dir_all(parent.join(copy)).expect("create copy");
         }
         fs::write(parent.join(EXTRACTED_LEDGER), "c\nb\nvanished\n").expect("write ledger");
+        fs::write(parent.join("..ledger.1-000000002"), "a\n").expect("write staged ledger");
         let held = File::create(parent.join("a").join(LOCK_FILE)).expect("create lock");
         held.lock_shared().expect("hold copy");
         let removed = prune_extracted(&parent, "e").expect("prune");
@@ -3805,8 +3836,16 @@ PATH="${R_CUSTOM_TOOLS_PATH:-${R_RTOOLS45_PATH}};${PATH}/"
         assert_eq!(left, [".ledger", ".lock", "a", "b", "c", "e"]);
         let ledger = fs::read_to_string(parent.join(EXTRACTED_LEDGER)).expect("read ledger");
         assert_eq!(ledger, "a\nc\nb\ne\n");
-        assert!(hold_extracted(&parent.join("e"), || true).expect("hold current"));
-        assert!(!hold_extracted(&parent.join("d"), || true).expect("hold removed"));
+        assert!(hold_extracted(&parent.join("e"), || true));
+        assert!(!hold_extracted(&parent.join("d"), || true));
+        // A lock opened before its copy was moved away and replaced holds nothing in place.
+        let replaced = parent.join("f");
+        fs::create_dir_all(&replaced).expect("create copy");
+        let stale = File::create(replaced.join(LOCK_FILE)).expect("create lock");
+        fs::rename(&replaced, parent.join(".removing-2-000000003")).expect("move copy");
+        fs::create_dir_all(&replaced).expect("recreate copy");
+        File::create(replaced.join(LOCK_FILE)).expect("recreate lock");
+        assert!(!locks_in_place(&stale, &replaced.join(LOCK_FILE)));
         drop(held);
         drop(fs::remove_dir_all(&parent));
     }

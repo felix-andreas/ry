@@ -5185,37 +5185,47 @@ unsafe fn toggle_state(
 /// `Sys.localeconv()`: the C library's `localeconv` for the current locale, its numbers as
 /// strings, where `127` (`CHAR_MAX`) means the locale does not say.
 unsafe fn do_sys_localeconv() -> R<Sexp> {
-    let conventions = &*libc::localeconv();
-    let text = |field: *const libc::c_char| {
-        if field.is_null() {
-            String::new()
-        } else {
-            std::ffi::CStr::from_ptr(field)
-                .to_string_lossy()
-                .into_owned()
-        }
+    #[cfg(unix)]
+    let values = {
+        let conventions = &*libc::localeconv();
+        let text = |field: *const libc::c_char| {
+            if field.is_null() {
+                String::new()
+            } else {
+                std::ffi::CStr::from_ptr(field)
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        };
+        let number = |field: libc::c_char| (field as i32).to_string();
+        [
+            text(conventions.decimal_point),
+            text(conventions.thousands_sep),
+            text(conventions.grouping),
+            text(conventions.int_curr_symbol),
+            text(conventions.currency_symbol),
+            text(conventions.mon_decimal_point),
+            text(conventions.mon_thousands_sep),
+            text(conventions.mon_grouping),
+            text(conventions.positive_sign),
+            text(conventions.negative_sign),
+            number(conventions.int_frac_digits),
+            number(conventions.frac_digits),
+            number(conventions.p_cs_precedes),
+            number(conventions.p_sep_by_space),
+            number(conventions.n_cs_precedes),
+            number(conventions.n_sep_by_space),
+            number(conventions.p_sign_posn),
+            number(conventions.n_sign_posn),
+        ]
     };
-    let number = |field: libc::c_char| (field as i32).to_string();
-    let values = [
-        text(conventions.decimal_point),
-        text(conventions.thousands_sep),
-        text(conventions.grouping),
-        text(conventions.int_curr_symbol),
-        text(conventions.currency_symbol),
-        text(conventions.mon_decimal_point),
-        text(conventions.mon_thousands_sep),
-        text(conventions.mon_grouping),
-        text(conventions.positive_sign),
-        text(conventions.negative_sign),
-        number(conventions.int_frac_digits),
-        number(conventions.frac_digits),
-        number(conventions.p_cs_precedes),
-        number(conventions.p_sep_by_space),
-        number(conventions.n_cs_precedes),
-        number(conventions.n_sep_by_space),
-        number(conventions.p_sign_posn),
-        number(conventions.n_sign_posn),
-    ];
+    // The libc crate declares no `localeconv` for Windows, so it answers for the C locale.
+    #[cfg(not(unix))]
+    let values: [String; 18] = std::array::from_fn(|index| match index {
+        0 => ".".to_owned(),
+        10.. => "127".to_owned(),
+        _ => String::new(),
+    });
     let result = values::string_vector(&values)?;
     crate::heap().root(result);
     let names = values::string_vector(&[

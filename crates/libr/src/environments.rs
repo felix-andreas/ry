@@ -664,8 +664,12 @@ impl crate::boundary::Handout for BindingType {}
 impl crate::boundary::Handout for DotType {}
 
 unsafe fn binding_of_type(symbol: Sexp, env: Sexp, wanted: BindingType) -> ApiResult<Sexp> {
-    if binding_type(symbol, env)? != wanted {
+    let found = binding_type(symbol, env)?;
+    if found != wanted {
         return Err(error(match wanted {
+            BindingType::Active if found == BindingType::Unbound => {
+                format!("no binding for \"{}\"", symbol_name(symbol))
+            }
             BindingType::Active => {
                 format!("no active binding for \"{}\"", symbol_name(symbol))
             }
@@ -678,9 +682,7 @@ unsafe fn binding_of_type(symbol: Sexp, env: Sexp, wanted: BindingType) -> ApiRe
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn R_ActiveBindingFunction(symbol: Sexp, env: Sexp) -> Sexp {
-    enter(|| {
-        binding_of_type(symbol, env, BindingType::Active)
-    })
+    enter(|| binding_of_type(symbol, env, BindingType::Active))
 }
 
 #[unsafe(no_mangle)]
@@ -920,8 +922,10 @@ pub unsafe extern "C" fn R_DotsExist(env: Sexp) -> Rboolean {
     enter(|| {
         let env = environment(env, "dots")?;
         let value = frame_value(env, crate::globals::R_DotsSymbol.get());
-        Ok((value == runtime().heap.known().missing_arg || value.kind() == SexpType::Dots)
-            as Rboolean)
+        Ok(
+            (value == runtime().heap.known().missing_arg || value.kind() == SexpType::Dots)
+                as Rboolean,
+        )
     })
 }
 

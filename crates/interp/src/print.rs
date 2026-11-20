@@ -25,17 +25,35 @@ pub const BUILTINS: &[BuiltinDef] = &[
 /// `rowlab` and `collab` as its labels, and without the names of its dimnames.
 unsafe fn do_prmatrix(call: &Call<'_>) -> R<Sexp> {
     let x = call.arg(0);
-    let labels = |value: Sexp, what: &str| -> R<Sexp> {
+    let (rows, cols) = match values::dims(x).as_deref() {
+        Some(&[rows, cols]) => (rows, cols),
+        _ => return Err(call.error("invalid 'x' argument")),
+    };
+    // GNU R's `printMatrix` uses the first labels of a longer vector.
+    let labels = |value: Sexp, what: &str, count: usize| -> R<Sexp> {
         if length(value) == 0 {
             Ok(nil())
         } else if value.kind() != SexpType::String {
             Err(call.error(format!("invalid {what} labels")))
+        } else if length(value) < count {
+            Err(call.error(format!("too few {what} labels")))
+        } else if length(value) > count {
+            let strings: Vec<String> = (0..count)
+                .map(|index| {
+                    values::string_at(value, index)
+                        .map(|text| text.into_owned())
+                        .unwrap_or_default()
+                })
+                .collect();
+            values::string_vector(&strings)
         } else {
             Ok(value)
         }
     };
-    let row_labels = labels(call.arg(1), "row")?;
-    let column_labels = labels(call.arg(2), "column")?;
+    let row_labels = labels(call.arg(1), "row", rows)?;
+    crate::heap().root(row_labels);
+    let column_labels = labels(call.arg(2), "column", cols)?;
+    crate::heap().root(column_labels);
     let mut options = PrintOptions::defaults(call.env()?);
     options.quote = values::as_integer_scalar(call.arg(3)) != 0;
     options.right = values::as_integer_scalar(call.arg(4)) != 0;
@@ -50,10 +68,6 @@ unsafe fn do_prmatrix(call: &Call<'_>) -> R<Sexp> {
         options.na_string = text.clone();
         options.na_string_noquote = text;
     }
-    let (rows, cols) = match values::dims(x).as_deref() {
-        Some(&[rows, cols]) => (rows, cols),
-        _ => return Err(call.error("invalid 'x' argument")),
-    };
     let shown = values::shallow_duplicate(x)?;
     crate::heap().root(shown);
     let dimnames = if row_labels == nil() && column_labels == nil() {

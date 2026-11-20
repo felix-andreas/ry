@@ -238,7 +238,7 @@ unsafe fn cdqrls(call: &NativeCall<'_>) -> R<Sexp> {
     let check = values::as_logical_scalar(call.arg(3)) == 1;
     let (n, p) = matrix_shape(x);
     // `y` is an n-vector or an n x ny matrix, read by length alone as GNU R reads it.
-    let ny = if n > 0 { length(y) / n } else { 0 };
+    let ny = length(y).checked_div(n).unwrap_or(0);
     if check && n * ny != length(y) {
         return Err(call.error(format!(
             "dimensions of 'x' ({n},{p}) and 'y' ({}) do not match",
