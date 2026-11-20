@@ -35,6 +35,18 @@ one exception you have reviewed and should not hide findings in code written lat
 off everywhere, use [`ry.toml`](/reference/configuration), and to turn type checking off for one
 file, put `# typing: off` in it.
 
+Write `expect` instead of `allow` when the finding is the point, such as a test fixture or a
+known false report you want to hear about once it is fixed:
+
+```r
+# ry: expect(type-mismatch)
+bad <- f("a")
+```
+
+An `expect` suppresses exactly like `allow`, and when its line and the next carry no finding with a
+code it names, ry reports `unfulfilled-expect` at the comment, so a suppression cannot outlive the
+problem it hid. `expect(all)` asks for any finding at all.
+
 The marker is found by scanning the line for its first `#`, so `#ry:allow(x)` and
 `# roughly: allow(x)` work too, but a `#` inside a string earlier on the line hides it. Findings on
 `NAMESPACE`, `ry.toml`, and stub files cannot be suppressed, because they have no R line to carry the
@@ -231,6 +243,14 @@ missing or unreachable cases.
 
 ```text
 ! this record is ry syntax that R cannot run, and inline annotations are turned off (`[check] inline-annotations = false`) to keep code runnable by R. Rewrite it in plain R, or turn inline annotations back on
+```
+
+**`unfulfilled-expect`** (warning): a `# ry: expect(code)` comment whose line and the next have no
+`code` finding, either because the code was fixed or because ry stopped reporting it. Remove the
+code from the comment, or the whole comment once it names nothing else.
+
+```text
+! no `type-mismatch` finding is on this line or the next, so this expectation is stale. Remove `type-mismatch` from it
 ```
 
 **`config`** (error): invalid TOML or a value of the wrong type in `ry.toml`. The language server

@@ -52,8 +52,8 @@ lives in `compatible`.
 A type error inside `expect_error(f("bad type"))` is reported. Suppressing findings inside `expect_error`
 and its siblings would hide genuine test mistakes (a misspelled callee) and special-case an open-ended
 family (`expect_warning`, `expect_condition`, `expect_snapshot(error = TRUE)`, `tryCatch`, `try`). The
-mechanism is the general `# ry: allow(type-mismatch)` on the assertion. Worth revisiting: a
-TypeScript-style `@ts-expect-error` that reports when the expected finding is absent, for every code.
+mechanism is the general `# ry: allow(type-mismatch)` on the assertion, or `# ry: expect(type-mismatch)`,
+which also reports once the finding is gone (`ide-server.md`, "`# ry: expect(code)` reports when its finding is gone").
 
 ## Beta semantics: The type system is Hindley-Milner, and stays fast to check
 

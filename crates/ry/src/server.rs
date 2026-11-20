@@ -20,7 +20,9 @@ use {
             LINTR_FILE_NAME, suggested_table,
         },
         console_link::{ConsoleLink, identifier_at},
-        diagnostics::{apply_suppressions, document_diagnostics, first_wave_diagnostics},
+        diagnostics::{
+            apply_suppressions, document_diagnostics, first_wave_diagnostics, settle_suppressions,
+        },
         installed::{InstalledPackages, source_cache},
         namespace::namespace_import_problems,
         position::{LineColumn, LineIndex},
@@ -2184,7 +2186,7 @@ impl Worker {
         let &file = self.files.get(path)?;
         let config = self.config.clone();
         let text = self.text(file);
-        let published = apply_suppressions(document_diagnostics(&self.db, file, &config), &text);
+        let published = settle_suppressions(document_diagnostics(&self.db, file, &config), &text);
         let fixable = published
             .iter()
             .filter(|diagnostic| ide::has_quick_fix(diagnostic))

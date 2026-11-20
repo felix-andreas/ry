@@ -2313,13 +2313,6 @@ because it does not know the type. So only the stub spelling is unreachable.
 Decide whether a stub source should see a project's `@type` declarations at all, or whether the
 R-side declaration is simply the answer and the docs should say so.
 
-### The stronger suppression form
-
-A type error inside `expect_error(...)` stays reported, and `# ry: allow(type-mismatch)` is the
-answer. `decisions/syntax-semantics.md` holds the record and the diagnostics page documents it. The open follow-up is
-the stronger form, which is a suppression that reports when the expected finding does not appear,
-like `@ts-expect-error`. That is a feature for every code, not a special case.
-
 ### Smaller items, each with a one-line repro in the reports
 
 - A message leaks an unbound type variable, as `list[T] | T[]`, and expands an alias on only one

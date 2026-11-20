@@ -2,7 +2,7 @@ use {
     crate::{
         check_cache::{self, CacheUse, FileOutcome, Fingerprint, Plan},
         config,
-        diagnostics::{apply_suppressions, document_diagnostics},
+        diagnostics::{document_diagnostics, settle_suppressions},
         namespace,
         position::LineIndex,
     },
@@ -1000,7 +1000,7 @@ fn analyze_project_with(
         });
         for (index, diagnostics) in in_parallel(&db, workers, &checked_by_size, |db, index| {
             let rendered = document_diagnostics(db, files[index], &config);
-            apply_suppressions(rendered, files[index].text(db))
+            settle_suppressions(rendered, files[index].text(db))
         }) {
             per_file[index] = diagnostics;
         }
@@ -1263,7 +1263,7 @@ pub(crate) fn check_package_code(
     }
     for (index, diagnostics) in in_parallel(db, workers, &strict, |db, index| {
         let file = files[index].file;
-        apply_suppressions(document_diagnostics(db, file, config), file.text(db))
+        settle_suppressions(document_diagnostics(db, file, config), file.text(db))
     }) {
         files[index].diagnostics = diagnostics;
     }
