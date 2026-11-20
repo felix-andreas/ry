@@ -215,6 +215,49 @@ ok <- function(x) x + 1L
 #++++
 ok: <T: numeric> fn(x: T) -> T
 
+#---- a_logical_argument_binds_a_numeric_parameter_to_integer
+# R's arithmetic reads `TRUE` as `1L`, so `TRUE + TRUE` is the integer `2`.
+#: <N: numeric> fn(x: N) -> N
+twice <- function(x) x + x
+#: <N: integer | logical> fn(x: N) -> N
+also <- function(x) x + x
+one <- twice(TRUE)
+many <- twice(c(TRUE, FALSE))
+inferred <- (function(x) x * x)(TRUE)
+bump <- function(x) x + 1L
+bumped <- bump(TRUE)
+cost <- function(price, rate) price * rate
+priced <- cost(TRUE, 0.5)
+keep <- function(x) {
+  x + 0L
+  x
+}
+kept <- keep(TRUE)
+#: <N: numeric> fn(x: N[]) -> N[]
+dbl <- function(x) x + x
+doubled <- dbl(c(TRUE, FALSE))
+named <- dbl(c(a = TRUE))
+#: <N: integer | logical> fn(x: N[]) -> N[]
+both <- function(x) x + x
+#++++
+twice: <N: numeric> fn(x: N) -> N
+also: <N: integer | logical> fn(x: N) -> N
+one: integer
+many: integer[]
+inferred: integer
+bump: <T: numeric> fn(x: T) -> T
+bumped: integer
+cost: <T: numeric> fn(price: T, rate: T) -> T
+priced: double
+keep: <T: numeric> fn(x: T) -> T
+kept: integer
+dbl: <N: numeric> fn(x: N[]) -> N[]
+doubled: integer[]
+named: integer[]
+both: <N: integer | logical> fn(x: N[]) -> N[]
+193..198 error[type-mismatch] expected `N`, found `integer`
+639..644 error[type-mismatch] expected `N[]`, found `integer[]`
+
 #---- expanded_form
 #: @forall T: numeric
 #: @param x {T}

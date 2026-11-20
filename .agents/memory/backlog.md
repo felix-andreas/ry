@@ -714,31 +714,8 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 - **A statement reading a name before its defining statement** sees, on reload, the previous load's
   value (a fresh load fails on such code); documented as a limit.
 
-## Open: false reports and gaps found by the documentation review
+## Open: publish the Zed extension
 
-An adversarial review of every docs page ran each claim against the binary. The docs now state the
-behavior below truthfully, most of it under "Where correct code is reported" in
-the Limitations section of `reference/type-system.mdx`, so fixing an item means updating that page too.
-
-False reports on correct R, worst first:
-
-- **Platform-conditional `pkg::name` reads are reported "not exported".** 17 corpus reads, such as
-  `utils::shortPathName`, `utils::readRegistry` and `grDevices::win.metafile`, name Windows-only
-  exports the Linux-generated manifests lack, and `parallel::splitList` and `base::check_tzones`
-  are feature probes inside `try()` or `tryCatch()`. Adding the Windows-only exports to
-  `scripts/export-manifests.R` would fix the first class; a qualified read inside a `try()`
-  argument is a probe and could skip validation.
-
-Smaller gaps:
-
-- A string literal where a ry function's callback goes is not reported: `List.map([1L], "a")`
-  passes, because a string names a function for R's `match.fun`, which a ry function never calls.
-- **Arithmetic on a type parameter that admits `logical` returns the parameter.** `<N: numeric>`
-  and `<N: integer | logical>` both accept `TRUE`, and `function(x: N) -> N x + x` checks, so
-  `a(TRUE)` types as `logical` though R returns the integer `2`. `classify_numeric_operand` makes a
-  rigid that meets `Numeric` a `Flexible` operand whose result is the rigid itself. A sound result
-  promotes `logical` to `integer`, which needs either a constraint that excludes `logical` for
-  `N + N -> N` or a result type other than `N` when the bound admits `logical`.
 - The Zed extension is not in Zed's registry yet. It downloads the newest full release's archive
   (`editors/zed/src/lib.rs`), and the first full release is 0.4.4, so publish it to Zed's registry
   no earlier than 0.4.4 (before that it would serve 0.1.1), and 0.4.4 must ship every platform's
@@ -3502,14 +3479,19 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
 
 ## Open: false errors on real CRAN code
 
-`ry check R` on 25 packages from the benchmark dependency set (purrr, rlang, cli, httr2, zoo, xts, lubridate and others; sources fetched from CRAN, each with `[check] typing = true`) went from 669 errors to 175 after the call-checking, name-resolution and inference fixes (`decisions/syntax-semantics.md`). What remains, by message shape:
-- 38 "expected X, found Y" and 17 "expected a numeric value": mostly `T | NULL` results of functions that really can return NULL, vector `if` conditions, and parameters pinned by an unconditional write before a test (xts `Ops.xts.R:52`).
-- 26 "exported but this package defines no such top-level object": dynamic exports (cli `pb_*` through `makeActiveBinding`, rlang `ffi_` natives, lgr's `lgr`).
-- 20 "this call leaves out": formals the body does force on some path, worth a second look per site.
-- 17 "not a function": parameters named like a function and called (`log`, `serialize`, `format`, `lag`) where the parameter's own type is open.
-- 15 "expected a list": `$` on a value that is definitely NULL, and R6's metaprogrammed `generator_funs`.
-- 12 "expected a comparable value": `while (n && out)` pins a counter to logical now that comparisons no longer imply numeric (rlang `stack.R:99`).
-- 5 matrix indexing, a documented limitation.
+`ry check R` with `[check] typing = true` on the 25 benchmark-dependency packages reports 6 errors,
+all true bugs in the packages: DBI's `coerce(sqlvar, from, to)` leaves out the forced `to`
+(`R/data.R`, 5 sites) and httr's `revoke_oauth2.0` call leaves out `credentials`. Over 201
+packages (those plus their dependency closure and a statistics sample) there are 31, and every one
+read so far is a true bug (kernlab calls `ramloss` after `ramloss <- 0`, renv reads
+`diagnostics$suggestion`, gmp tests `if (log)`, and so on). Not yet read:
+- mclust `mclustda.R:719`: `classification = cl` (a factor) against `W | NULL` of
+  `mclust1Dplot`; `graphics.R` alone accepts it, so another file constrains `W`.
+- mgcv `bam.r:2623` (2), `efam.r:1475` and `gamlss.r:1193`: a local value unioned with a
+  same-named package function (`double[] | fn(...)`), and `integer | T` at a scalar numeric use.
+- A read inside `on.exit()` counts where `on.exit()` is registered, not where the exit action runs,
+  so `on.exit(run()); x <- 1` with `run <- function() x` reports "leaves out `x`" though the write
+  comes first at run time. Direct reads inside `on.exit()` behave the same.
 
 ## Check cache follow-ups
 

@@ -97,6 +97,13 @@ pub enum TypeErrorKind<'db> {
         nominal: Ty<'db>,
         found: Ty<'db>,
     },
+    /// A function's name where a function that takes a ry value expects a callback. Only R's
+    /// `match.fun` turns a name into a function, and a ry function never calls it.
+    FunctionName {
+        expected: Ty<'db>,
+        /// The name, when the argument is a string literal.
+        name: Option<String>,
+    },
     /// A value that may be `NULL` where `NULL` is not accepted, read through an expression no
     /// guard narrows (`x$a$b`, `x[["a"]]`, a call), so the message can say how to narrow it.
     UnnarrowedNull {
@@ -2553,6 +2560,12 @@ struct FormalUses {
     evaluated: FxHashSet<Symbol>,
     /// Names passed bare to `substitute()`, which reads the argument's code, not its value.
     substituted: FxHashSet<Symbol>,
+    /// For each local bound to a function literal, the formals its body forces on every path.
+    /// They count as forced where a call through the local runs the body.
+    closures: FxHashMap<Symbol, Rc<[Symbol]>>,
+    /// The expressions whose value the walked function returns. A closure there is a
+    /// factory's product, made to be called, so its reads count as forced.
+    results: Vec<ExprId>,
 }
 
 impl FormalUses {
@@ -2588,9 +2601,20 @@ impl FormalUses {
         }
     }
 
+    /// Any write rebinds the name, so a closure it held no longer runs through it.
     fn record_write(&mut self, name: Symbol) {
+        self.closures.remove(&name);
         if self.tracked.contains(&name) && !self.forced.contains(&name) {
             self.assigned.insert(name);
+        }
+    }
+
+    /// A call runs a closure whose body forces `forced`, unless this path wrote the name first.
+    fn record_closure_run(&mut self, forced: &[Symbol]) {
+        for &name in forced {
+            if !self.assigned.contains(&name) {
+                self.forced.insert(name);
+            }
         }
     }
 
@@ -2961,6 +2985,35 @@ fn operator_spelling(operator: BinaryOperator) -> Option<&'static str> {
         NotEqual => "!=",
         _ => return None,
     })
+}
+
+/// A `logical` scalar or vector as the `integer` one R's arithmetic reads it as.
+fn promote_logical<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Ty<'db>> {
+    let integer = scalar(db, Atomic::Integer);
+    match ty.kind(db) {
+        TyKind::Scalar(Atomic::Logical) => Some(integer),
+        TyKind::Vector(element) if matches!(element.kind(db), TyKind::Scalar(Atomic::Logical)) => {
+            Some(Ty::new(db, TyKind::Vector(integer)))
+        }
+        TyKind::NamedVector(element)
+            if matches!(element.kind(db), TyKind::Scalar(Atomic::Logical)) =>
+        {
+            Some(Ty::new(db, TyKind::NamedVector(integer)))
+        }
+        _ => None,
+    }
+}
+
+/// Whether some value of `ty` is a `logical` scalar or vector.
+fn admits_logical(db: &dyn Db, ty: Ty<'_>) -> bool {
+    match ty.kind(db) {
+        TyKind::Scalar(Atomic::Logical) => true,
+        TyKind::Vector(element) | TyKind::NamedVector(element) => {
+            matches!(element.kind(db), TyKind::Scalar(Atomic::Logical))
+        }
+        TyKind::Union(members) => members.iter().any(|&member| admits_logical(db, member)),
+        _ => false,
+    }
 }
 
 fn is_character(db: &dyn Db, ty: Ty<'_>) -> bool {
@@ -7179,10 +7232,16 @@ impl<'db, 'a> Checker<'db, 'a> {
     fn iteration_element(&mut self, resolved: Ty<'db>) -> Result<Ty<'db>, Ty<'db>> {
         match resolved.kind(self.db) {
             TyKind::Union(members) => {
+                // A `NULL` or `list()` member runs the body zero times, so it adds no element:
+                // `for (f in if (a) list(g))` binds `f` to `g`'s type, never `NULL`.
                 let mut elements = Vec::with_capacity(members.len());
                 for &member in members.iter() {
                     let element = self.iteration_element(member).map_err(|_| resolved)?;
-                    elements.push(element);
+                    if !matches!(member.kind(self.db), TyKind::Null)
+                        && !is_empty_list(self.db, member)
+                    {
+                        elements.push(element);
+                    }
                 }
                 Ok(union_of(self.db, elements))
             }
@@ -7332,11 +7391,16 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     /// Walks in evaluation order, so a read counts as forcing a formal only before the body
     /// first assigns that name. A nested function's `missing()` tests and writes cover its
-    /// own frame, but its reads of an outer formal count: the closure usually runs, and
-    /// when it does it forces the promise.
+    /// own frame, and its reads of an outer formal force it only where the body runs: an
+    /// inline call, a call through the local the literal is bound to, or the function's
+    /// result, since a factory's closure is made to be called. A callback handed to `lapply`
+    /// may run zero times, so passing a closure to a call forces nothing.
     fn formal_uses(&self, parameters: &[Formal], body: ExprId) -> FormalUses {
+        let mut results = Vec::new();
+        self.result_expressions(body, &mut results);
         let mut uses = FormalUses {
             tracked: parameters.iter().map(|parameter| parameter.name).collect(),
+            results,
             ..FormalUses::default()
         };
         self.collect_formal_uses(body, &mut uses);
@@ -7346,30 +7410,20 @@ impl<'db, 'a> Checker<'db, 'a> {
     fn collect_formal_uses(&self, id: ExprId, uses: &mut FormalUses) {
         let kind = self.module.kind(id);
         match kind {
-            ExpressionKind::Function { parameters, body } => {
-                let mut nested = uses.nested();
-                nested.assigned = self.module[parameters]
-                    .iter()
-                    .map(|parameter| parameter.name)
-                    .filter(|name| uses.tracked.contains(name))
-                    .collect();
-                self.collect_formal_uses(*body, &mut nested);
-                uses.evaluated.extend(
-                    nested
-                        .evaluated
-                        .iter()
-                        .filter(|name| !uses.assigned.contains(*name)),
-                );
-                uses.substituted.extend(nested.substituted.iter().copied());
-                for &name in &nested.forced {
-                    if nested.forces_on_every_path(name) && !uses.assigned.contains(&name) {
-                        uses.forced.insert(name);
-                    }
+            ExpressionKind::Function { .. } => {
+                let forced = self.closure_forced(id, uses);
+                if uses.results.contains(&id) {
+                    uses.record_closure_run(&forced);
                 }
                 return;
             }
             ExpressionKind::NameRef(name) => {
                 uses.record_read(*name);
+                if uses.results.contains(&id)
+                    && let Some(forced) = uses.closures.get(name).cloned()
+                {
+                    uses.record_closure_run(&forced);
+                }
                 return;
             }
             // `<<-` writes an enclosing frame, never the local formal, and reads its target
@@ -7403,8 +7457,17 @@ impl<'db, 'a> Checker<'db, 'a> {
             ExpressionKind::Assign { target, value, .. }
                 if let ExpressionKind::NameRef(name) = self.module.kind(*target) =>
             {
-                self.collect_formal_uses(*value, uses);
-                uses.record_write(*name);
+                if matches!(self.module.kind(*value), ExpressionKind::Function { .. }) {
+                    let forced = self.closure_forced(*value, uses);
+                    if uses.results.contains(value) {
+                        uses.record_closure_run(&forced);
+                    }
+                    uses.record_write(*name);
+                    uses.closures.insert(*name, forced);
+                } else {
+                    self.collect_formal_uses(*value, uses);
+                    uses.record_write(*name);
+                }
                 return;
             }
             ExpressionKind::Assign { target, value, .. } => {
@@ -7477,8 +7540,10 @@ impl<'db, 'a> Checker<'db, 'a> {
             // `local()` evaluates in a new frame, so its writes bind nothing here.
             ExpressionKind::Local { body } => {
                 let before = uses.assigned.clone();
+                let outer_closures = uses.closures.clone();
                 self.collect_formal_uses(*body, uses);
                 uses.assigned = before;
+                uses.closures = outer_closures;
                 return;
             }
             ExpressionKind::Match { scrutinee, arms } => {
@@ -7489,6 +7554,9 @@ impl<'db, 'a> Checker<'db, 'a> {
                 for arm in &self.module[arms] {
                     let mut entry = before.clone();
                     for &binding in &self.module[arm.bindings] {
+                        if let ExpressionKind::NameRef(name) = self.module.kind(binding) {
+                            uses.closures.remove(name);
+                        }
                         if let ExpressionKind::NameRef(name) = self.module.kind(binding)
                             && uses.tracked.contains(name)
                             && !uses.forced.contains(name)
@@ -7570,6 +7638,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                             .iter()
                             .filter_map(|argument| argument.value)
                         {
+                            self.result_expressions(value, &mut uses.results);
                             self.collect_formal_uses(value, uses);
                         }
                         uses.record_return();
@@ -7594,13 +7663,24 @@ impl<'db, 'a> Checker<'db, 'a> {
                         return;
                     }
                 }
+                let mut called = *callee;
+                while let ExpressionKind::Paren(inner) = self.module.kind(called) {
+                    called = *inner;
+                }
+                let runs = match self.module.kind(called) {
+                    ExpressionKind::Function { .. } => Some(self.closure_forced(called, uses)),
+                    ExpressionKind::NameRef(name) => uses.closures.get(name).cloned(),
+                    _ => None,
+                };
                 // `f(x = x)` hands the promise on unforced, and a closure the project defines
                 // decides for itself whether to read it, so forwarding a formal under its own
                 // name does not force it. A bare formal passed to a project parameter the callee
                 // may leave unread, as `fast.svd(m, tol)` passes `tol` to a callee that tests
                 // `missing(tol)`, is not forced either. A library function such as `list`
                 // forces every argument.
-                self.collect_formal_uses(*callee, uses);
+                if !matches!(self.module.kind(called), ExpressionKind::Function { .. }) {
+                    self.collect_formal_uses(*callee, uses);
+                }
                 let (forwards, optional_targets) = match self.module.kind(*callee) {
                     ExpressionKind::NameRef(name) => {
                         // A library function stubbed as `Any` (graphics' `rect`) declares no
@@ -7658,12 +7738,71 @@ impl<'db, 'a> Checker<'db, 'a> {
                     }
                     self.collect_formal_uses(value, uses);
                 }
+                if let Some(forced) = runs {
+                    uses.record_closure_run(&forced);
+                }
                 return;
             }
             _ => {}
         }
         let module = self.module;
         module.for_each_child(id, |child| self.collect_formal_uses(child, uses));
+    }
+
+    /// Collects the expressions whose value `id` yields: the last statement of a block, both
+    /// arms of an `if`, and the value of an assignment.
+    fn result_expressions(&self, id: ExprId, results: &mut Vec<ExprId>) {
+        match self.module.kind(id) {
+            ExpressionKind::Paren(inner) => self.result_expressions(*inner, results),
+            ExpressionKind::Assign { value, .. } => self.result_expressions(*value, results),
+            ExpressionKind::Block { statements } => {
+                if let Some(&last) = self.module[statements].last() {
+                    self.result_expressions(last, results);
+                }
+            }
+            ExpressionKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.result_expressions(*then_branch, results);
+                if let Some(else_branch) = else_branch {
+                    self.result_expressions(*else_branch, results);
+                }
+            }
+            _ => results.push(id),
+        }
+    }
+
+    /// Walks a nested function literal: its evaluations and `substitute()` reads of outer
+    /// formals count where it is written, and the formals its body forces on every path are
+    /// returned for the call that runs it. The literal's own parameters shadow outer formals.
+    fn closure_forced(&self, function: ExprId, uses: &mut FormalUses) -> Rc<[Symbol]> {
+        let ExpressionKind::Function { parameters, body } = self.module.kind(function) else {
+            return Rc::from([]);
+        };
+        let mut nested = uses.nested();
+        nested.assigned = self.module[parameters]
+            .iter()
+            .map(|parameter| parameter.name)
+            .filter(|name| uses.tracked.contains(name))
+            .collect();
+        self.collect_formal_uses(*body, &mut nested);
+        uses.evaluated.extend(
+            nested
+                .evaluated
+                .iter()
+                .filter(|name| !uses.assigned.contains(*name)),
+        );
+        uses.substituted.extend(nested.substituted.iter().copied());
+        let mut forced: Vec<Symbol> = nested
+            .forced
+            .iter()
+            .copied()
+            .filter(|&name| nested.forces_on_every_path(name))
+            .collect();
+        forced.sort_unstable();
+        Rc::from(forced)
     }
 
     /// For each argument of a call to the project function `name`, whether it binds a parameter the
@@ -7767,8 +7906,13 @@ impl<'db, 'a> Checker<'db, 'a> {
         // The branch starts from the names already forced, so a `return()` inside it
         // records every name its path has forced.
         let outer_forced = uses.forced.clone();
+        let outer_closures = uses.closures.clone();
         self.collect_formal_uses(id, uses);
         let forced = mem::replace(&mut uses.forced, outer_forced);
+        // A local closure bound on one branch only may be another value after the join.
+        let branch_closures = mem::replace(&mut uses.closures, outer_closures);
+        uses.closures
+            .retain(|name, forced| branch_closures.get(name) == Some(forced));
         let after = mem::take(&mut uses.assigned);
         ((!self.diverges(id)).then_some(after), forced)
     }
@@ -9214,7 +9358,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                 };
                 let mark = self.environment.mark();
                 self.apply_refinements(&edge);
-                self.expect_scalar_logical(rhs, ConditionSite::Operand);
+                // `ok || return()` leaves instead of yielding a value, so the operand is not one.
+                if self.diverges(rhs) {
+                    self.infer(rhs);
+                } else {
+                    self.expect_scalar_logical(rhs, ConditionSite::Operand);
+                }
                 // The right operand may not run, so its own assignments join with the state
                 // before it; the refinement itself ends with the operator.
                 let writes: Vec<(BindingId, Option<EnvEntry<'db>>)> = self
@@ -9247,7 +9396,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 let boolean = native_scalar(self.db, NativeScalar::Bool);
                 let [left_bool, right_bool] = [lhs, rhs].map(|operand| {
                     let ty = self.recorded_type(operand);
-                    self.structural(ty) == boolean
+                    self.structural(ty) == boolean || (operand == rhs && self.diverges(rhs))
                 });
                 let literal = match (left_bool, right_bool) {
                     (true, true) => return boolean,
@@ -10917,6 +11066,14 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
             }
             TyKind::Var(_) => NumericOperand::Flexible(resolved),
+            // R's arithmetic reads a logical as an integer, so a parameter bounded by
+            // `integer | logical` gives the bound's arithmetic, never itself.
+            TyKind::Rigid(name)
+                if let Some(&bound) = self.table.rigid_bounds.get(name)
+                    && admits_logical(self.db, bound) =>
+            {
+                self.classify_numeric_operand(bound)
+            }
             TyKind::Rigid(name) => {
                 match self
                     .table
@@ -10928,6 +11085,22 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             TyKind::Vector(element) | TyKind::NamedVector(element) => match element.kind(self.db) {
                 TyKind::Var(_) => NumericOperand::FlexibleVector(Some(*element)),
+                // `N[]` under `<N: integer | logical>` is a vector of one of the bound's members.
+                TyKind::Rigid(name)
+                    if let Some(&bound) = self.table.rigid_bounds.get(name)
+                        && admits_logical(self.db, bound) =>
+                {
+                    let single = [bound];
+                    let members: &[Ty<'db>] = match bound.kind(self.db) {
+                        TyKind::Union(members) => members,
+                        _ => &single,
+                    };
+                    let vectors = members.iter().map(|&member| match member.kind(self.db) {
+                        TyKind::Scalar(_) => Ty::new(self.db, TyKind::Vector(member)),
+                        _ => member,
+                    });
+                    self.classify_numeric_operand(union_of(self.db, vectors))
+                }
                 TyKind::Rigid(name)
                     if self
                         .table
@@ -14414,14 +14587,21 @@ impl<'db, 'a> Checker<'db, 'a> {
         let inferred: Vec<Ty<'db>> = supplied.iter().map(|&(_, _, ty)| ty).collect();
         if inferred
             .iter()
-            .any(|&ty| self.combined_list_element(ty).is_some())
+            .any(|&ty| self.push_combined_list_elements(ty, &mut Vec::new()))
         {
-            // `c()` drops `NULL`, so `c(if (a) list(1), if (a) list(2))` is a list.
-            let elements: Vec<Ty<'db>> = inferred
-                .iter()
-                .filter(|ty| !matches!(ty.kind(self.db), TyKind::Null))
-                .map(|&ty| self.combined_list_element(ty).unwrap_or(ty))
-                .collect();
+            // `c()` drops `NULL`, so `c(if (a) list(1), if (a) list(2))` is a list, and an
+            // empty list adds no element, so `c(list(), f)` is `list[fn]`.
+            let mut elements: Vec<Ty<'db>> = Vec::new();
+            for &ty in &inferred {
+                if !matches!(ty.kind(self.db), TyKind::Null)
+                    && !self.push_combined_list_elements(ty, &mut elements)
+                {
+                    elements.push(ty);
+                }
+            }
+            if elements.is_empty() {
+                return Ty::new(self.db, TyKind::Tuple(&[]));
+            }
             return Ty::new(self.db, TyKind::List(union_of(self.db, elements)));
         }
         // A class declaring `c.Class` keeps its class through concatenation (`c(d1, d2)`
@@ -14522,18 +14702,38 @@ impl<'db, 'a> Checker<'db, 'a> {
         )
     }
 
-    /// The element a list-shaped `c()` argument contributes; a `NULL` member of a union
-    /// contributes nothing, as `c()` drops it.
-    fn combined_list_element(&self, ty: Ty<'db>) -> Option<Ty<'db>> {
-        let TyKind::Union(members) = ty.kind(self.db) else {
-            return self.list_element_type(ty);
+    /// Pushes the elements a list-shaped `c()` argument contributes, and says whether it is
+    /// list-shaped. `NULL` and an empty list contribute nothing, so `c(if (a) list())` adds no
+    /// element.
+    fn push_combined_list_elements(&self, ty: Ty<'db>, elements: &mut Vec<Ty<'db>>) -> bool {
+        let single = [ty];
+        let members: &[Ty<'db>] = match ty.kind(self.db) {
+            TyKind::Union(members) => members,
+            TyKind::Null => return false,
+            _ => &single,
         };
-        let elements: Option<Vec<Ty<'db>>> = members
-            .iter()
-            .filter(|member| !matches!(member.kind(self.db), TyKind::Null))
-            .map(|&member| self.list_element_type(member))
-            .collect();
-        elements.map(|elements| union_of(self.db, elements))
+        let start = elements.len();
+        let mut list_shaped = false;
+        for &member in members {
+            if matches!(member.kind(self.db), TyKind::Null) {
+                continue;
+            }
+            if is_empty_list(self.db, member) {
+                list_shaped = true;
+                continue;
+            }
+            match self.list_element_type(member) {
+                Some(element) => {
+                    list_shaped = true;
+                    elements.push(element);
+                }
+                None => {
+                    elements.truncate(start);
+                    return false;
+                }
+            }
+        }
+        list_shaped
     }
 
     fn list_element_type(&self, ty: Ty<'db>) -> Option<Ty<'db>> {
@@ -17359,6 +17559,21 @@ impl<'db, 'a> Checker<'db, 'a> {
         verdict
     }
 
+    /// Whether `expected` is an open type variable that only a number fits, or a vector of
+    /// one.
+    fn numeric_parameter(&self, expected: Ty<'db>) -> bool {
+        let numeric = |ty: Ty<'db>| {
+            matches!(
+                self.table.open_constraint(self.db, ty),
+                Some(Constraint::Numeric | Constraint::ScalarNumeric)
+            )
+        };
+        match self.table.resolve(self.db, expected).kind(self.db) {
+            TyKind::Vector(element) | TyKind::NamedVector(element) => numeric(*element),
+            _ => numeric(expected),
+        }
+    }
+
     /// Compatibility, not unification, so parameter-position coercions apply. An
     /// `Unknown` argument is accepted: its cause was already diagnosed.
     fn check_argument(
@@ -17375,6 +17590,15 @@ impl<'db, 'a> Checker<'db, 'a> {
         let resolved_found = self.table.resolve(self.db, found);
         if matches!(resolved_found.kind(self.db), TyKind::Unknown)
             || value.is_some_and(|value| self.reads_null_placeholder(value, resolved_found))
+        {
+            return Ok(());
+        }
+        // R's arithmetic reads `TRUE` as `1L`, so a `numeric` type parameter, which the callee
+        // may do arithmetic on, takes a logical argument as `integer`: `twice(TRUE)` under
+        // `<N: numeric> fn(x: N) -> N` returns the integer `2`, never a logical.
+        if self.numeric_parameter(expected)
+            && let Some(promoted) = promote_logical(self.db, resolved_found)
+            && self.table.compatible(self.db, promoted, expected)
         {
             return Ok(());
         }
@@ -17402,11 +17626,27 @@ impl<'db, 'a> Checker<'db, 'a> {
         let resolved_expected = self.table.resolve(self.db, expected);
         // A function parameter of base R goes through `match.fun`, which also takes the
         // function's name, so `lapply(xs, "[[", "id")` and `apply(m, 1, "mean")` are
-        // idiomatic. The name is not resolved, so the call is accepted unchecked.
+        // idiomatic. The name is not resolved, so the call is accepted unchecked. A function
+        // that takes a ry value is ry's own and calls its callback directly.
         if matches!(resolved_expected.kind(self.db), TyKind::Function(_))
             && is_character(self.db, resolved_found)
         {
-            return Ok(());
+            if !self.ry_callee {
+                return Ok(());
+            }
+            let name = value.and_then(|value| match self.module.kind(value) {
+                ExpressionKind::Literal(LiteralKind::String(text)) => {
+                    Some(self.module[text].to_owned())
+                }
+                _ => None,
+            });
+            return Err(TypeError {
+                range,
+                kind: TypeErrorKind::FunctionName {
+                    expected: resolved_expected,
+                    name,
+                },
+            });
         }
         if let TyKind::Var(var) = resolved_expected.kind(self.db)
             && let Entry::Unbound {

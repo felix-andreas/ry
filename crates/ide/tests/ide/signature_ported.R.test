@@ -100,7 +100,7 @@ references: none
 rename: none
 signature: fn(count, wait = TRUE)
 parameters: count | [wait = TRUE]
-completion (40): wait = , while, warnErrList, warning, warningCondition, warnings, warpbreaks, weekdays
+completion (58): wait = , while, warnErrList, warning, warningCondition, warnings, warpbreaks, weekdays
 
 #---- r6_method_on_an_instance
 Pool <- R6::R6Class("Pool", public = list(
@@ -130,7 +130,7 @@ references: none
 rename: none
 signature: fn(x: double, [by]: double) -> double
 parameters: x: double | [[by]: double]
-completion (74): by = , by, break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot
+completion (75): by = , by, break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot
 hint @69by =
 
 #---- a_block_function_called_in_the_same_block
@@ -167,7 +167,7 @@ references: 59..60, 82..83*, 85..86
 rename: 3 edit(s)
 signature: fn(b)
 parameters: [b]
-completion (74): b, break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot, barplot.default
+completion (75): b, break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot, barplot.default
 hint @35: T
 hint @36 -> T
 hint @83: T

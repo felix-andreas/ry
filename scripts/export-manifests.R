@@ -100,6 +100,26 @@ source_exports <- function(namespace) {
   list(exports = unique(parsed$exports), version = version)
 }
 
+# R exports these names only on Windows (the `if (tools:::.OStype() == "windows")` blocks of
+# utils' and grDevices' NAMESPACE files, and base's Windows sources). Code calls them behind a
+# platform test, so a manifest lists them whatever platform generates it.
+windows_exports <- list(
+  base = c("shell", "shell.exec", "Sys.junction"),
+  utils = c(
+    "DLL.version", "Filters", "choose.dir", "choose.files", "getClipboardFormats",
+    "getIdentification", "getWindowsHandle", "getWindowsHandles", "getWindowTitle",
+    "loadRconsole", "readClipboard", "readRegistry", "setStatusBar", "setWindowTitle",
+    "shortPathName", "win.version", "winDialog", "winDialogString", "winMenuAdd",
+    "winMenuAddItem", "winMenuDel", "winMenuDelItem", "winMenuNames", "winMenuItems",
+    "writeClipboard", "winProgressBar", "getWinProgressBar", "setWinProgressBar",
+    "setInternet2", "zip.unpack", "arrangeWindows"
+  ),
+  grDevices = c(
+    "bringToTop", "msgWindow", "win.graph", "win.metafile", "win.print", "windows",
+    "windows.options", "windowsFont", "windowsFonts"
+  )
+)
+
 for (namespace in namespaces) {
   if (!requireNamespace(namespace, quietly = TRUE)) {
     from_source <- source_exports(namespace)
@@ -113,7 +133,7 @@ for (namespace in namespaces) {
     }
     next
   }
-  write_manifest(namespace, exports_of(namespace))
+  write_manifest(namespace, union(exports_of(namespace), windows_exports[[namespace]]))
 }
 if (length(requested) > 0) {
   quit(save = "no")

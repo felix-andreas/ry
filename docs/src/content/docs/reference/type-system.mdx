@@ -690,7 +690,9 @@ Written `fn(path: list[T] | T[]) -> list[T] | T[]`, the signature would return t
 every caller. The body may use the parameter wherever its bound fits, and an argument outside the
 bound, such as `normalize(sum)`, is a type error at the call. A bound whose every member meets a
 constraint meets it too, so under `<N: integer | double> fn(x: N) -> N` the body `x + x` is
-arithmetic and has the type `N`. `@forall T, U: list[T] | T[]` and
+arithmetic and has the type `N`. A bound with a `logical` member does its arithmetic as the bound
+itself, because R promotes the `logical` member: under `<N: integer | logical> fn(x: N) -> N`,
+`x + x` is `integer`, and returning it as `N` is a type error. `@forall T, U: list[T] | T[]` and
 `function<T, U: list[T] | T[]>(path: U) -> U` declare the same binders. A bound that is a single
 name reads as a constraint, so a type bound is a union or a compound type such as `list[T]`.
 
@@ -2324,11 +2326,11 @@ A `matrix` absorbs any number, logical or numeric vector the same way, because R
 matrix: with `weigh <- function(a, H) a * H`, both `weigh(2, m)` and `weigh(m, 2)` are `matrix`. A
 matrix's element type is not tracked, so a character matrix is absorbed too.
 
-When every argument a numeric parameter receives is `logical`, the result stays `logical`, so with
-`bump <- function(x) x + 1L`, `bump(TRUE)` is `logical` where R returns the integer `2L`. The
-signature `<T: numeric> fn(x: T) -> T` cannot say "the wider of `T` and `integer`", and binding `T`
-to `integer` instead would mistype a function that returns `x` itself. Neither choice causes a false
-error, because a `logical` fits wherever an `integer` is expected.
+A `logical` argument binds a numeric type parameter to `integer`, the type R's arithmetic reads it
+as, so with `bump <- function(x) x + 1L`, `bump(TRUE)` is `integer`, as in R. A function that
+returns its `logical` argument unchanged, such as `keep <- function(x) { x + 0L; x }`, is then
+reported to return `integer` where R returns the `logical`. That claim is safe, because a `logical`
+fits wherever an `integer` is expected, while the opposite claim would type R's `2L` as a flag.
 
 An argument that is itself still generic, such as the parameter `H` in
 `outer <- function(H) weigh(2, H)`, is constrained to be numeric rather than pinned to the literal's
@@ -2475,8 +2477,9 @@ turn out to be a `double`.
   `list[double]`.
 - When any argument is a list, `c` concatenates into a list-like `list[T]` whose element type is the
   join of every argument's elements, with an atomic argument contributing its own type:
-  `c(list(1L), "a")` is `list[integer | character]`. The atomic rules below apply only when no
-  argument is a list.
+  `c(list(1L), "a")` is `list[integer | character]`. An empty list adds no element, so
+  `c(list(), f)` is `list[fn]` and `c(list(), list())` is the empty list. The atomic rules below
+  apply only when no argument is a list.
 - An argument whose element type is not known statically, such as `Any`, `Unknown`, an unannotated
   parameter, or a union or vector that holds one (`T | NULL`, `T[]`), is tolerated, and the whole
   result is `Unknown`, because a concrete element type could
@@ -2695,7 +2698,9 @@ Arguments are checked for compatibility, not exact equality:
   `apply(m, 1, "mean")` idiomatic. At the base helpers that call `match.fun`, such as `lapply`,
   `sapply`, `vapply`, `Map`, `Filter`, `Reduce`, `do.call`, and `apply`, a string literal that names a
   known function is checked as that function, so `lapply(list(1, 2), "sqrt")` is `list[double]`.
-  Any other string is accepted unchecked. `match.fun` also looks a bare name up as a function, past
+  Any other string is accepted unchecked. A function that takes a ry value, such as `List.map`,
+  calls its callback directly, so a string there is an error: `List.map([1, 2], "toupper")` is
+  reported, with the hint to pass `toupper` itself. `match.fun` also looks a bare name up as a function, past
   a binding that holds something else, so after a mocking placeholder such as `nchar <- NULL`,
   `vapply(words, nchar, integer(1))` calls the library's `nchar`. A name the library does not
   export is still checked as the value it holds.
@@ -3141,8 +3146,13 @@ exceptions and additions:
   as a Reference Class field, never as the shipped function of the same name. In `t <<- t[-drop]`,
   `t` is `Unknown` rather than base `t`, so indexing it reports nothing, and strict mode reports the
   read. A project binding of that name still types the read.
-- A read inside a nested function forces the formal, because the closure may run, unless the
-  nested function has its own parameter or assignment of that name.
+- A read inside a nested function forces the formal only where the nested function certainly
+  runs, and only on every path through its body: when it is called inline, as in
+  `(function() x)()`, when it is bound to a local and called through that local, and when the
+  outer function returns it, because a factory's closure is made to be called. A function passed
+  to a call forces nothing, because `lapply()` over an empty vector never calls it, so
+  `function(items, x) lapply(items, function(item) c(x, item))` may be called without `x`. A
+  nested function's own parameter or assignment of the name shadows the formal.
 - A read inside another formal's default forces the formal only when that default runs, which is
   when the call omits the formal that owns it and the body forces that formal. So in
   `g <- function(x, y = x) y`, `x` is required exactly when `y` is left out: `g(y = 1)` and `g(2)`
@@ -3230,7 +3240,9 @@ That selection cannot be modelled statically, but the call is still checked in f
 - A tuple-like or record-like list iterates with the union of its item types, so
   `for (item in list(a = 1L, b = "two")) ...` binds `item` as `integer | character`. The empty list
   iterates with `NULL`, the union of zero item types.
-- A union of iterables iterates member by member.
+- A union of iterables iterates member by member, and a `NULL` or empty-list member adds no item
+  type, because it runs the body zero times: `for (f in if (a) list(g)) f()` binds `f` as `g`'s
+  type, not `NULL`.
 - `NULL` is iterable and runs zero times, which is legal R. It binds the variable as `NULL`.
 - `Any` iterates with `Any` items, and `Unknown` with `Unknown` items.
 - An opaque nominal iterates with `Any` items, because its element shape is not visible.
@@ -3433,6 +3445,14 @@ scoping.
 - An unknown namespace warns, and so does a known namespace that neither declares nor lists the name
   ("not exported"). An unknown namespace stays quiet when it belongs to the package's
   [declared universe](#package-imports-namespace-and-description).
+- A read that is the whole expression of `try()`, or of a `tryCatch()` with an `error` or
+  `condition` handler, is a feature probe, so a missing name is not reported there:
+  `try(parallel::splitList, silent = TRUE)` asks whether the running R has it, and so does a call
+  of the read, `try(pkg::f(x))`. A read anywhere else in the expression is ordinary code and is
+  checked.
+- R's own manifests list the Windows-only exports of `base`, `utils` and `grDevices` on every
+  platform, so `utils::readRegistry` and `grDevices::win.metafile` validate on Linux and macOS,
+  where code reaches them behind a platform test.
 - A [conditional namespace](#conditional-stub-namespaces-datatable-dplyr-ggplot2-and-testthat), and
   any shipped export manifest outside R's own packages, stays inactive until the project uses the
   package, and a `pkg::name` read does not count as use. The read is still accepted, because
