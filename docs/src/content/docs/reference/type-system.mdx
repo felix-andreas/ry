@@ -2477,8 +2477,9 @@ turn out to be a `double`.
   `list[double]`.
 - When any argument is a list, `c` concatenates into a list-like `list[T]` whose element type is the
   join of every argument's elements, with an atomic argument contributing its own type:
-  `c(list(1L), "a")` is `list[integer | character]`. The atomic rules below apply only when no
-  argument is a list.
+  `c(list(1L), "a")` is `list[integer | character]`. An empty list adds no element, so
+  `c(list(), f)` is `list[fn]` and `c(list(), list())` is the empty list. The atomic rules below
+  apply only when no argument is a list.
 - An argument whose element type is not known statically, such as `Any`, `Unknown`, an unannotated
   parameter, or a union or vector that holds one (`T | NULL`, `T[]`), is tolerated, and the whole
   result is `Unknown`, because a concrete element type could
@@ -3239,7 +3240,9 @@ That selection cannot be modelled statically, but the call is still checked in f
 - A tuple-like or record-like list iterates with the union of its item types, so
   `for (item in list(a = 1L, b = "two")) ...` binds `item` as `integer | character`. The empty list
   iterates with `NULL`, the union of zero item types.
-- A union of iterables iterates member by member.
+- A union of iterables iterates member by member, and a `NULL` or empty-list member adds no item
+  type, because it runs the body zero times: `for (f in if (a) list(g)) f()` binds `f` as `g`'s
+  type, not `NULL`.
 - `NULL` is iterable and runs zero times, which is legal R. It binds the variable as `NULL`.
 - `Any` iterates with `Any` items, and `Unknown` with `Unknown` items.
 - An opaque nominal iterates with `Any` items, because its element shape is not visible.
@@ -3442,6 +3445,11 @@ scoping.
 - An unknown namespace warns, and so does a known namespace that neither declares nor lists the name
   ("not exported"). An unknown namespace stays quiet when it belongs to the package's
   [declared universe](#package-imports-namespace-and-description).
+- A read inside the expression of `try()` or `tryCatch()` is a feature probe, so a missing name is
+  not reported there: `try(parallel::splitList, silent = TRUE)` asks whether the running R has it.
+- R's own manifests list the Windows-only exports of `base`, `utils` and `grDevices` on every
+  platform, so `utils::readRegistry` and `grDevices::win.metafile` validate on Linux and macOS,
+  where code reaches them behind a platform test.
 - A [conditional namespace](#conditional-stub-namespaces-datatable-dplyr-ggplot2-and-testthat), and
   any shipped export manifest outside R's own packages, stays inactive until the project uses the
   package, and a `pkg::name` read does not count as use. The read is still accepted, because

@@ -1937,3 +1937,25 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 
 - A self-referential value, such as a record whose fields return that record, builds a type whose tree grows exponentially while its hash-consed graph stays small. Building it costs graph nodes only, and every type stores its saturating tree size when built (`types::type_size`), so no cap is needed at construction; `Checker::record` widens a composite at `TYPE_SIZE_CEILING` to `Unknown`, the sound-by-refusal move a loop join makes for a structurally growing variable.
 - Folding into a recursive nominal is rejected: it would invent a type name the user never wrote, every message would show it, and two values folded apart would not be compatible. A user who wants the recursive shape declares it (`type Tree = list{left: Tree | NULL, ...}`), which checks precisely.
+
+## A `logical` argument binds a numeric type parameter to `integer`
+
+**Status:** built
+
+- `numeric` admits `integer` and `double`. A `logical` argument still satisfies it, because R promotes it, and binds the parameter to `integer`, the type R's arithmetic reads it as (`check_argument`, `promote_logical`). Leaving it `logical` typed `bump(TRUE)` under `<T: numeric> fn(x: T) -> T` as a flag where R returns `2L`, which a later `logical`-only use would accept unsoundly.
+- The cost is a pass-through: `keep <- function(x) { x + 0L; x }` claims `integer` where R returns the `logical`. That is safe, because a `logical` fits wherever an `integer` is expected.
+- A rigid whose declared bound admits `logical` does its arithmetic as its bound (`classify_numeric_operand`), so `<N: integer | logical> fn(x: N) -> N` with `x + x` is reported: the sum is `integer`, never `N`.
+
+## Feature probes, Windows-only exports and callback strings
+
+**Status:** built
+
+- A `pkg::name` read inside the expression of `try()` or `tryCatch()` is a probe of the running R (`NamespaceRead::probed`), so a missing name is not reported there. Only that argument counts; a handler or `finally` reading a missing name still warns.
+- `scripts/export-manifests.R` adds the Windows-only exports of base, utils and grDevices (from R's own NAMESPACE files) on every platform, because packages reach them behind a platform test and the manifests are generated on Linux. Per-platform manifests were rejected: a check does not know which platform the code will run on.
+- A character argument at a function-typed parameter of a function that takes ry values (`Checker::ry_callee`) is a type error with a "pass the function, not its name" hint, since ry functions call their callback directly and never `match.fun` it. R functions keep accepting a name.
+
+## An empty list adds no element to `c()` or a loop
+
+**Status:** built
+
+- `list()` is the empty tuple, and its element is the union of zero items, which `union_of` answers as `NULL`. `c()` and a `for` loop over a union skip `NULL` and empty-list members instead (`is_empty_list`), because they contribute no element: `c(list(), f)` is `list[fn]` and `for (f in actions)` over `list{} | list[fn]` binds a function. rmarkdown's exit-action loop was reported as calling a maybe-`NULL`.
