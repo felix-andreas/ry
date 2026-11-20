@@ -451,6 +451,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A vector kind has no `downcast`: the caller chooses `standard` or `dense`
 - glibc's malloc keeps freed package buffers (settled)
 - Profiles run over the start-up image
+- Native routines enter through the same safe entry as builtins
 
 ## C API, R home and packages
 

@@ -36,7 +36,8 @@ use {
         connections::write_output,
         distributions,
         format::format_g,
-        linalg, random,
+        handles::{self, Cx, Integer, List, Local, NativeArgs, Real, Str, Symbol},
+        linalg, random, safe,
         unwind::{R, error},
         values::{self, length, scalar_bool, scalar_integer, symbols},
     },
@@ -107,9 +108,9 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("Rsm", tukey_smooth),
     ("setsmu", setsmu),
     ("supsmu", supsmu),
-    ("setppr", ppr::setppr),
-    ("smart", ppr::smart),
-    ("pppred", ppr::pppred),
+    ("setppr", safe!(native ppr::setppr)),
+    ("smart", safe!(native ppr::smart)),
+    ("pppred", safe!(native ppr::pppred)),
     ("cutree", cluster::cutree),
     ("rWishart", r_wishart),
     ("loess_raw", loess::loess_raw),
@@ -165,17 +166,17 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("KalmanLike", arima::kalman_like),
     ("KalmanFore", arima::kalman_fore),
     ("KalmanSmooth", arima::kalman_smooth),
-    ("setup_starma", arma0::setup_starma),
-    ("free_starma", arma0::free_starma),
-    ("Starma_method", arma0::starma_method),
-    ("arma0fa", arma0::arma0fa),
-    ("get_s2", arma0::get_s2),
-    ("get_resid", arma0::get_resid),
-    ("Dotrans", arma0::dotrans_routine),
-    ("arma0_kfore", arma0::arma0_kfore),
-    ("Invtrans", arma0::invtrans),
-    ("Gradtrans", arma0::gradtrans),
-    ("set_trans", arma0::set_trans),
+    ("setup_starma", safe!(native arma0::setup_starma)),
+    ("free_starma", safe!(native arma0::free_starma)),
+    ("Starma_method", safe!(native arma0::starma_method)),
+    ("arma0fa", safe!(native arma0::arma0fa)),
+    ("get_s2", safe!(native arma0::get_s2)),
+    ("get_resid", safe!(native arma0::get_resid)),
+    ("Dotrans", safe!(native arma0::dotrans_routine)),
+    ("arma0_kfore", safe!(native arma0::arma0_kfore)),
+    ("Invtrans", safe!(native arma0::invtrans)),
+    ("Gradtrans", safe!(native arma0::gradtrans)),
+    ("set_trans", safe!(native arma0::set_trans)),
     ("LogLin", loglin),
     ("stl", stl),
     ("rbart", spline::rbart),
@@ -194,6 +195,74 @@ pub(crate) unsafe fn c_arguments(call: &NativeCall<'_>) -> R<Vec<Sexp>> {
 
 pub(crate) unsafe fn c_return(call: &NativeCall<'_>, arguments: &[Sexp]) -> R<Sexp> {
     c_result(call, arguments)
+}
+
+/// The result of a safe `.C` or `.Fortran` routine: a copy of each argument, or the vector the
+/// routine wrote in its place, named by the call's tags.
+pub(crate) fn fortran_result<'s>(
+    context: &mut Cx<'s>,
+    arguments: &NativeArgs<'_, 's>,
+    written: &[(usize, Local<'s>)],
+) -> R<Local<'s>> {
+    let count = arguments.len();
+    let mut result = context.alloc::<List>(count)?;
+    for index in 0..count {
+        let value = match written.iter().find(|&&(at, _)| at == index) {
+            Some(&(_, value)) => value,
+            None => handles::shallow_copy(context, arguments.value(index))?.finish(),
+        };
+        result.set(context, index, value);
+    }
+    if (0..count).any(|index| arguments.tag(index).r_type() != SexpType::Nil) {
+        let mut names = context.alloc::<Str>(count)?;
+        for index in 0..count {
+            match arguments.tag(index).downcast::<Symbol>() {
+                Some(symbol) => names.set(context, index, symbol.read(context).name()),
+                None => names.set(context, index, handles::blank()),
+            }
+        }
+        let names = names.finish().value();
+        handles::set_attribute_named(context, &mut result, "names", names)?;
+    }
+    Ok(result.finish().value())
+}
+
+/// The elements of `value` as doubles, coerced as `as.double` coerces.
+pub(crate) fn read_reals<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Vec<f64>> {
+    let coerced = handles::coerce(context, value, SexpType::Real)?;
+    let reals = handles::dense::<Real>(context, coerced)?
+        .ok_or_else(|| error("internal error: a coerced vector has no standard form"))?;
+    Ok(reals.as_slice(context).to_vec())
+}
+
+/// The elements of `value` as integers, coerced as `as.integer` coerces.
+pub(crate) fn read_integers<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Vec<i32>> {
+    let integers = handles::integer_vector(context, value)?;
+    Ok(integers.as_slice(context).to_vec())
+}
+
+/// A new double vector holding `data`.
+pub(crate) fn new_reals<'s>(context: &mut Cx<'s>, data: &[f64]) -> R<Local<'s>> {
+    let mut vector = context.alloc::<Real>(data.len())?;
+    vector.as_mut_slice().copy_from_slice(data);
+    Ok(vector.finish().value())
+}
+
+/// A new double matrix with `rows` rows holding `data` in column-major order.
+pub(crate) fn new_real_matrix<'s>(
+    context: &mut Cx<'s>,
+    data: &[f64],
+    rows: usize,
+    columns: usize,
+) -> R<Local<'s>> {
+    let mut matrix = context.alloc::<Real>(data.len())?;
+    matrix.as_mut_slice().copy_from_slice(data);
+    let mut dim = context.alloc::<Integer>(2)?;
+    dim.as_mut_slice()
+        .copy_from_slice(&[rows as i32, columns as i32]);
+    let dim = dim.finish().value();
+    handles::set_attribute_named(context, &mut matrix, "dim", dim)?;
+    Ok(matrix.finish().value())
 }
 
 /// `x` as a double vector (a fresh one if it had to be converted).

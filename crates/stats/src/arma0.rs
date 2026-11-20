@@ -23,27 +23,20 @@
 //! filter of Gardner, Harvey and Phillips (AS 154), the conditional sum of squares, and finite
 //! sample forecasts of an ARIMA process (AS 182).
 //!
-//! `setup_starma` returns an external pointer that owns the model state, which the other
-//! routines read and update. `free_starma` releases it and clears the pointer's address, so a
-//! later use is the error `bad Starma struct`; a pointer the collector reclaims without
-//! `free_starma` releases the state through its finalizer.
+//! `setup_starma` keeps the model state in a slot of [`MODELS`] and returns the slot's index as
+//! an integer, which the other routines take back and read and update the state through.
+//! `free_starma` empties the slot, so a later use is the error `bad Starma struct`. GNU R hands
+//! out an external pointer instead; its R code only passes the handle back and frees it on exit.
 
 use {
-    crate::routines::{integer_values, real_data, real_matrix},
-    heap::object::{NA_REAL, Sexp, SexpType},
+    crate::routines::{new_real_matrix, new_reals, read_integers, read_reals},
+    heap::object::NA_REAL,
     interp::{
-        builtin_libraries::NativeCall,
-        heap,
-        unwind::R,
-        values::{self, install, length, nil, scalar_real},
+        handles::{self, Cx, Integer, List, Local, NativeArgs, Real},
+        unwind::{R, Unwind},
     },
-    std::{cell::Cell, ffi::c_void},
+    std::cell::RefCell,
 };
-
-unsafe extern "C" {
-    // GNU R calls the C library's `atanh`, whose rounding `f64::atanh` does not reproduce.
-    fn atanh(x: f64) -> f64;
-}
 
 /// The model state. `p`, `q` and `r` are the orders of the expanded AR and MA polynomials and
 /// the state dimension `max(p, q + 1)`; `mp`, `mq`, `msp`, `msq` and `ns` are the nonseasonal
@@ -92,54 +85,23 @@ impl Starma {
 }
 
 thread_local! {
-    static TAG: Cell<Option<Sexp>> = const { Cell::new(None) };
-}
-
-/// The symbol that tags a Starma pointer. Symbols are never collected, so caching it is safe.
-unsafe fn starma_tag() -> R<Sexp> {
-    if let Some(tag) = TAG.with(Cell::get) {
-        return Ok(tag);
-    }
-    let tag = install("STARMA_TAG")?;
-    TAG.with(|cell| cell.set(Some(tag)));
-    Ok(tag)
-}
-
-/// The state a Starma pointer owns.
-///
-/// # Safety
-/// The reference must not outlive the routine call that holds `handle` as an argument.
-unsafe fn starma_of<'a>(call: &NativeCall<'_>, handle: Sexp) -> R<&'a mut Starma> {
-    let tagged = handle.kind() == SexpType::ExternalPtr
-        && TAG
-            .with(Cell::get)
-            .is_some_and(|tag| handle.external_tag() == tag);
-    if !tagged || handle.external_address().is_null() {
-        return Err(call.error("bad Starma struct"));
-    }
-    Ok(&mut *handle.external_address().cast::<Starma>())
-}
-
-unsafe extern "C" fn finalize(object: Sexp) {
-    let address = object.external_address();
-    if !address.is_null() {
-        object.set_external_address(std::ptr::null_mut());
-        drop(Box::from_raw(address.cast::<Starma>()));
-    }
+    /// The live models, indexed by handle. `free_starma` empties a slot, and `setup_starma`
+    /// fills the first empty one.
+    static MODELS: RefCell<Vec<Option<Starma>>> = const { RefCell::new(Vec::new()) };
 }
 
 /// `setup_starma(arma, x, n, xreg, m, delta, trans, ncond)`.
-pub unsafe fn setup_starma(call: &NativeCall<'_>) -> R<Sexp> {
-    let na = integer_values(call.arg(0))?;
-    let x = real_data(call.arg(1))?;
-    let n = values::as_integer_scalar(call.arg(2));
-    let xreg = real_data(call.arg(3))?;
-    let m = values::as_integer_scalar(call.arg(4));
-    let delta = values::as_real_scalar(call.arg(5));
-    let trans = values::as_integer_scalar(call.arg(6)) != 0;
-    let ncond = values::as_integer_scalar(call.arg(7));
+pub fn setup_starma<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let na = read_integers(context, arguments.value(0))?;
+    let x = read_reals(context, arguments.value(1))?;
+    let n = handles::integer_scalar(context, arguments.value(2));
+    let xreg = read_reals(context, arguments.value(3))?;
+    let m = handles::integer_scalar(context, arguments.value(4));
+    let delta = handles::real_scalar(context, arguments.value(5));
+    let trans = handles::integer_scalar(context, arguments.value(6)) != 0;
+    let ncond = handles::integer_scalar(context, arguments.value(7));
     if na.len() < 5 || na[..5].iter().any(|&order| order < 0) {
-        return Err(call.error("invalid ARMA orders"));
+        return Err(arguments.error("invalid ARMA orders"));
     }
     let (mp, mq, msp, msq, ns) = (
         na[0] as usize,
@@ -149,11 +111,11 @@ pub unsafe fn setup_starma(call: &NativeCall<'_>) -> R<Sexp> {
         na[4] as usize,
     );
     if n < 0 || x.len() < n as usize {
-        return Err(call.error("invalid series length"));
+        return Err(arguments.error("invalid series length"));
     }
     let n = n as usize;
     if m < 0 || xreg.len() < n * m as usize {
-        return Err(call.error("invalid regressors"));
+        return Err(arguments.error("invalid regressors"));
     }
     let m = m as usize;
     let ip = ns * msp + mp;
@@ -197,67 +159,213 @@ pub unsafe fn setup_starma(call: &NativeCall<'_>) -> R<Sexp> {
         resid: vec![0.0; n],
         reg,
     };
-    let address = Box::into_raw(Box::new(starma)).cast::<c_void>();
-    let tag = match starma_tag() {
-        Ok(tag) => tag,
-        Err(failure) => {
-            drop(Box::from_raw(address.cast::<Starma>()));
-            return Err(failure);
+    let index = MODELS.with_borrow_mut(|models| match models.iter().position(Option::is_none) {
+        Some(index) => {
+            models[index] = Some(starma);
+            index
         }
-    };
-    let heap = heap();
-    let object = match heap.alloc_external_ptr(address, tag, nil()) {
-        Ok(object) => object,
-        Err(failure) => {
-            drop(Box::from_raw(address.cast::<Starma>()));
-            return Err(failure.into());
+        None => {
+            models.push(Some(starma));
+            models.len() - 1
         }
-    };
-    heap.root(object);
-    heap.alloc_weak_ref(object, nil(), nil(), finalize as *const () as usize, false)?;
-    Ok(object)
+    });
+    let handle =
+        i32::try_from(index).map_err(|_| arguments.error("too many ARMA models are live"))?;
+    handles::integer(context, handle)
 }
 
 /// `free_starma(G)`.
-pub unsafe fn free_starma(call: &NativeCall<'_>) -> R<Sexp> {
-    let handle = call.arg(0);
-    starma_of(call, handle)?;
-    finalize(handle);
-    Ok(nil())
+pub fn free_starma<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let index = model_index(context, arguments);
+    let freed = MODELS.with_borrow_mut(|models| models.get_mut(index?)?.take());
+    freed.ok_or_else(|| bad_model(arguments))?;
+    Ok(handles::null())
 }
 
 /// `Starma_method(G, method)`: 1 selects the conditional sum of squares, 0 the exact
 /// likelihood.
-pub unsafe fn starma_method(call: &NativeCall<'_>) -> R<Sexp> {
-    let g = starma_of(call, call.arg(0))?;
-    g.method = values::as_integer_scalar(call.arg(1));
-    Ok(nil())
+pub fn starma_method<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let index = model_index(context, arguments);
+    let method = handles::integer_scalar(context, arguments.value(1));
+    with_model(arguments, index, |g| {
+        g.method = method;
+        Ok(())
+    })?;
+    Ok(handles::null())
 }
 
 /// `Dotrans(G, x)`: the parameters with the ARMA parts mapped to stationarity.
-pub unsafe fn dotrans_routine(call: &NativeCall<'_>) -> R<Sexp> {
-    let g = starma_of(call, call.arg(0))?;
-    let raw = parameters(call, call.arg(1), g.parameter_count())?;
-    let mut new = raw.to_vec();
-    dotrans(call, g, &raw, &mut new, true)?;
-    values::real_vector(&new)
+pub fn dotrans_routine<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let index = model_index(context, arguments);
+    let raw = parameters(context, arguments, index)?;
+    let new = with_model(arguments, index, |g| {
+        let mut new = raw.clone();
+        dotrans(arguments, g, &raw, &mut new, true)?;
+        Ok(new)
+    })?;
+    new_reals(context, &new)
 }
 
 /// `set_trans(G, trans)`.
-pub unsafe fn set_trans(call: &NativeCall<'_>) -> R<Sexp> {
-    let g = starma_of(call, call.arg(0))?;
-    g.trans = values::as_integer_scalar(call.arg(1)) != 0;
-    Ok(nil())
+pub fn set_trans<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let index = model_index(context, arguments);
+    let trans = handles::integer_scalar(context, arguments.value(1)) != 0;
+    with_model(arguments, index, |g| {
+        g.trans = trans;
+        Ok(())
+    })?;
+    Ok(handles::null())
 }
 
 /// `arma0fa(G, params)`: half the log of the innovations variance plus half the mean log
 /// prediction variance (the exact likelihood up to a constant), or half the log of the
 /// conditional sum of squares per term.
-pub unsafe fn arma0fa(call: &NativeCall<'_>) -> R<Sexp> {
-    let g = starma_of(call, call.arg(0))?;
-    let inparams = parameters(call, call.arg(1), g.parameter_count())?;
+pub fn arma0fa<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let index = model_index(context, arguments);
+    let inparams = parameters(context, arguments, index)?;
+    let ans = with_model(arguments, index, |g| likelihood(arguments, g, &inparams))?;
+    Ok(context.scalar::<Real>(ans)?.finish().value())
+}
+
+/// `get_s2(G)`: the innovations variance of the last evaluation.
+pub fn get_s2<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let index = model_index(context, arguments);
+    let s2 = with_model(arguments, index, |g| Ok(g.s2))?;
+    Ok(context.scalar::<Real>(s2)?.finish().value())
+}
+
+/// `get_resid(G)`: the standardized residuals of the last evaluation.
+pub fn get_resid<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let index = model_index(context, arguments);
+    let resid = with_model(arguments, index, |g| Ok(g.resid[..g.n].to_vec()))?;
+    new_reals(context, &resid)
+}
+
+/// `arma0_kfore(G, d, sd, n.ahead)`: forecasts and their mean square errors for the model
+/// differenced `d` times and seasonally `sd` times.
+pub fn arma0_kfore<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let index = model_index(context, arguments);
+    let dd = handles::integer_scalar(context, arguments.value(1));
+    let sd = handles::integer_scalar(context, arguments.value(2));
+    let il = handles::integer_scalar(context, arguments.value(3));
+    let (x, var) = with_model(arguments, index, |g| forecast(arguments, g, dd, sd, il))?;
+    let mut result = context.alloc::<List>(2)?;
+    let x = new_reals(context, &x)?;
+    result.set(context, 0, x);
+    let var = new_reals(context, &var)?;
+    result.set(context, 1, var);
+    Ok(result.finish().value())
+}
+
+/// `Invtrans(G, x)`: the inverse of `Dotrans`.
+pub fn invtrans<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let index = model_index(context, arguments);
+    let raw = parameters(context, arguments, index)?;
+    let new = with_model(arguments, index, |g| {
+        let mut new = raw.clone();
+        let mut v = 0;
+        for count in [g.mp, g.mq, g.msp, g.msq] {
+            invpartrans(arguments, &raw[v..v + count], &mut new[v..v + count])?;
+            v += count;
+        }
+        Ok(new)
+    })?;
+    new_reals(context, &new)
+}
+
+/// `Gradtrans(G, x)`: the Jacobian of `Dotrans`, by forward differences with step 1e-3.
+pub fn gradtrans<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    const EPS: f64 = 1e-3;
+    let index = model_index(context, arguments);
+    let raw = parameters(context, arguments, index)?;
+    let (jacobian, n) = with_model(arguments, index, |g| {
+        let n = g.parameter_count();
+        if raw.len() != n {
+            return Err(arguments.error("wrong number of parameters"));
+        }
+        let mut jacobian = vec![0.0; n * n];
+        for i in 0..n {
+            jacobian[i + i * n] = 1.0;
+        }
+        // GNU R writes the MA block's derivatives into the first columns rather than the
+        // block's own (column `j`, not `j + v`), and `arima0`'s standard errors depend on that.
+        let blocks = [
+            (0, g.mp, 0),
+            (g.mp, g.mq, 0),
+            (g.mp + g.mq, g.msp, g.mp + g.mq),
+            (g.mp + g.mq + g.msp, g.msq, g.mp + g.mq + g.msp),
+        ];
+        for (v, count, column) in blocks {
+            if count > 0 {
+                let mut w1 = raw[v..v + count].to_vec();
+                let mut w2 = vec![0.0; count];
+                let mut w3 = vec![0.0; count];
+                partrans(arguments, &w1, &mut w2)?;
+                for i in 0..count {
+                    w1[i] += EPS;
+                    partrans(arguments, &w1, &mut w3)?;
+                    for j in 0..count {
+                        jacobian[i + v + (j + column) * n] = (w3[j] - w2[j]) / EPS;
+                    }
+                    w1[i] -= EPS;
+                }
+            }
+        }
+        Ok((jacobian, n))
+    })?;
+    new_real_matrix(context, &jacobian, n, n)
+}
+
+/// The slot the handle argument names, `None` for a value that names no slot.
+fn model_index(context: &mut Cx<'_>, arguments: &NativeArgs<'_, '_>) -> Option<usize> {
+    let handle = arguments.value(0).standard::<Integer>()?;
+    match handle.as_slice(context) {
+        &[index] => usize::try_from(index).ok(),
+        _ => None,
+    }
+}
+
+/// Runs `body` on the live model in slot `index`. `body` must not reach R, which could run an
+/// `arima0` of its own and so borrow the models again.
+fn with_model<T>(
+    arguments: &NativeArgs<'_, '_>,
+    index: Option<usize>,
+    body: impl FnOnce(&mut Starma) -> R<T>,
+) -> R<T> {
+    MODELS.with_borrow_mut(|models| {
+        match index
+            .and_then(|index| models.get_mut(index))
+            .and_then(Option::as_mut)
+        {
+            Some(g) => body(g),
+            None => Err(bad_model(arguments)),
+        }
+    })
+}
+
+fn bad_model(arguments: &NativeArgs<'_, '_>) -> Unwind {
+    arguments.error("bad Starma struct")
+}
+
+/// The doubles of the parameter vector argument, which must hold at least as many as the
+/// model in slot `index` has parameters.
+fn parameters<'s>(
+    context: &mut Cx<'s>,
+    arguments: &NativeArgs<'_, 's>,
+    index: Option<usize>,
+) -> R<Vec<f64>> {
+    let count = with_model(arguments, index, |g| Ok(g.parameter_count()))?;
+    let x = arguments.value(1);
+    if handles::length(context, x) < count {
+        return Err(arguments.error("too few parameters"));
+    }
+    read_reals(context, x)
+}
+
+/// The body of `arma0fa` once the parameters are read.
+fn likelihood(arguments: &NativeArgs<'_, '_>, g: &mut Starma, inparams: &[f64]) -> R<f64> {
     let mut params = std::mem::take(&mut g.params);
-    let transformed = dotrans(call, g, &inparams, &mut params, g.trans);
+    let transformed = dotrans(arguments, g, inparams, &mut params, g.trans);
     g.params = params;
     transformed?;
 
@@ -307,7 +415,7 @@ pub unsafe fn arma0fa(call: &NativeCall<'_>) -> R<Sexp> {
         }
     }
 
-    let ans = if g.method == 1 {
+    if g.method == 1 {
         let p = mp + ns * msp;
         let q = mq + ns * msq;
         let ncond = g.ncond.min(g.n);
@@ -333,49 +441,37 @@ pub unsafe fn arma0fa(call: &NativeCall<'_>) -> R<Sexp> {
             }
         }
         g.s2 = ssq / nu as f64;
-        0.5 * g.s2.ln()
+        Ok(0.5 * g.s2.ln())
     } else {
         let ifault = starma(g);
         if ifault != 0 {
-            return Err(call.error(format!("starma error code {ifault}")));
+            return Err(arguments.error(format!("starma error code {ifault}")));
         }
         let mut sumlog = 0.0;
         let mut ssq = 0.0;
         let mut it = 0;
         karma(g, &mut sumlog, &mut ssq, 1, &mut it);
         g.s2 = ssq / g.nused as f64;
-        0.5 * ((ssq / g.nused as f64).ln() + sumlog / g.nused as f64)
-    };
-    scalar_real(ans)
+        Ok(0.5 * ((ssq / g.nused as f64).ln() + sumlog / g.nused as f64))
+    }
 }
 
-/// `get_s2(G)`: the innovations variance of the last evaluation.
-pub unsafe fn get_s2(call: &NativeCall<'_>) -> R<Sexp> {
-    let g = starma_of(call, call.arg(0))?;
-    scalar_real(g.s2)
-}
-
-/// `get_resid(G)`: the standardized residuals of the last evaluation.
-pub unsafe fn get_resid(call: &NativeCall<'_>) -> R<Sexp> {
-    let g = starma_of(call, call.arg(0))?;
-    values::real_vector(&g.resid[..g.n])
-}
-
-/// `arma0_kfore(G, d, sd, n.ahead)`: forecasts and their mean square errors for the model
-/// differenced `d` times and seasonally `sd` times.
-pub unsafe fn arma0_kfore(call: &NativeCall<'_>) -> R<Sexp> {
-    let g = starma_of(call, call.arg(0))?;
-    let dd = values::as_integer_scalar(call.arg(1));
-    let sd = values::as_integer_scalar(call.arg(2));
-    let il = values::as_integer_scalar(call.arg(3));
+/// The body of `arma0_kfore` once its arguments are read: the forecasts and their variances.
+fn forecast(
+    arguments: &NativeArgs<'_, '_>,
+    g: &mut Starma,
+    dd: i32,
+    sd: i32,
+    il: i32,
+) -> R<(Vec<f64>, Vec<f64>)> {
     if il < 0 {
-        return Err(call.error("negative length vectors are not allowed"));
+        return Err(arguments.error("negative length vectors are not allowed"));
     }
     let ns = g.ns;
     let d = i64::from(dd) + ns as i64 * i64::from(sd);
     if d < 0 || d > i64::from(i32::MAX) {
         let ifault = if il < 1 { 11 } else { 8 };
-        return Err(call.error(format!("forkal error code {ifault}")));
+        return Err(arguments.error(format!("forkal error code {ifault}")));
     }
     let d = d as usize;
 
@@ -401,82 +497,23 @@ pub unsafe fn arma0_kfore(call: &NativeCall<'_>) -> R<Sexp> {
     let il = il as usize;
     let mut x = vec![0.0; il];
     let mut var = vec![0.0; il];
-    forkal(call, g, d, il, &del[1..], &mut x, &mut var)?;
-    values::list_vector(&[values::real_vector(&x)?, values::real_vector(&var)?])
+    forkal(arguments, g, d, il, &del[1..], &mut x, &mut var)?;
+    Ok((x, var))
 }
 
-/// `Invtrans(G, x)`: the inverse of `Dotrans`.
-pub unsafe fn invtrans(call: &NativeCall<'_>) -> R<Sexp> {
-    let g = starma_of(call, call.arg(0))?;
-    let raw = parameters(call, call.arg(1), g.parameter_count())?;
-    let mut new = raw.to_vec();
-    let mut v = 0;
-    for count in [g.mp, g.mq, g.msp, g.msq] {
-        invpartrans(call, &raw[v..v + count], &mut new[v..v + count])?;
-        v += count;
-    }
-    values::real_vector(&new)
-}
-
-/// `Gradtrans(G, x)`: the Jacobian of `Dotrans`, by forward differences with step 1e-3.
-pub unsafe fn gradtrans(call: &NativeCall<'_>) -> R<Sexp> {
-    const EPS: f64 = 1e-3;
-    let g = starma_of(call, call.arg(0))?;
-    let n = g.parameter_count();
-    let raw = parameters(call, call.arg(1), n)?;
-    if raw.len() != n {
-        return Err(call.error("wrong number of parameters"));
-    }
-    let mut jacobian = vec![0.0; n * n];
-    for i in 0..n {
-        jacobian[i + i * n] = 1.0;
-    }
-    // GNU R writes the MA block's derivatives into the first columns rather than the block's
-    // own (column `j`, not `j + v`), and `arima0`'s standard errors depend on that.
-    let blocks = [
-        (0, g.mp, 0),
-        (g.mp, g.mq, 0),
-        (g.mp + g.mq, g.msp, g.mp + g.mq),
-        (g.mp + g.mq + g.msp, g.msq, g.mp + g.mq + g.msp),
-    ];
-    for (v, count, column) in blocks {
-        if count > 0 {
-            let mut w1 = raw[v..v + count].to_vec();
-            let mut w2 = vec![0.0; count];
-            let mut w3 = vec![0.0; count];
-            partrans(call, &w1, &mut w2)?;
-            for i in 0..count {
-                w1[i] += EPS;
-                partrans(call, &w1, &mut w3)?;
-                for j in 0..count {
-                    jacobian[i + v + (j + column) * n] = (w3[j] - w2[j]) / EPS;
-                }
-                w1[i] -= EPS;
-            }
-        }
-    }
-    real_matrix(&jacobian, n, n)
-}
-
-/// The doubles of a parameter vector, which must hold at least `count` of them.
-unsafe fn parameters(
-    call: &NativeCall<'_>,
-    x: Sexp,
-    count: usize,
-) -> R<std::borrow::Cow<'static, [f64]>> {
-    if length(x) < count {
-        return Err(call.error("too few parameters"));
-    }
-    real_data(x)
-}
-
-fn dotrans(call: &NativeCall<'_>, g: &Starma, raw: &[f64], new: &mut [f64], trans: bool) -> R<()> {
+fn dotrans(
+    arguments: &NativeArgs<'_, '_>,
+    g: &Starma,
+    raw: &[f64],
+    new: &mut [f64],
+    trans: bool,
+) -> R<()> {
     let n = g.parameter_count();
     new[..n].copy_from_slice(&raw[..n]);
     if trans {
         let mut v = 0;
         for count in [g.mp, g.mq, g.msp, g.msq] {
-            partrans(call, &raw[v..v + count], &mut new[v..v + count])?;
+            partrans(arguments, &raw[v..v + count], &mut new[v..v + count])?;
             v += count;
         }
     }
@@ -486,10 +523,10 @@ fn dotrans(call: &NativeCall<'_>, g: &Starma, raw: &[f64], new: &mut [f64], tran
 /// Maps unconstrained values to the coefficients of a stationary autoregression: `tanh` gives
 /// partial autocorrelations in (-1, 1), and the Durbin-Levinson recursion turns them into
 /// coefficients.
-fn partrans(call: &NativeCall<'_>, raw: &[f64], new: &mut [f64]) -> R<()> {
+fn partrans(arguments: &NativeArgs<'_, '_>, raw: &[f64], new: &mut [f64]) -> R<()> {
     let p = raw.len();
     if p > 100 {
-        return Err(call.error("can only transform 100 pars in arima0"));
+        return Err(arguments.error("can only transform 100 pars in arima0"));
     }
     if p == 0 {
         return Ok(());
@@ -509,10 +546,10 @@ fn partrans(call: &NativeCall<'_>, raw: &[f64], new: &mut [f64]) -> R<()> {
     Ok(())
 }
 
-fn invpartrans(call: &NativeCall<'_>, phi: &[f64], new: &mut [f64]) -> R<()> {
+fn invpartrans(arguments: &NativeArgs<'_, '_>, phi: &[f64], new: &mut [f64]) -> R<()> {
     let p = phi.len();
     if p > 100 {
-        return Err(call.error("can only transform 100 pars in arima0"));
+        return Err(arguments.error("can only transform 100 pars in arima0"));
     }
     if p == 0 {
         return Ok(());
@@ -530,10 +567,32 @@ fn invpartrans(call: &NativeCall<'_>, phi: &[f64], new: &mut [f64]) -> R<()> {
         new[..j].copy_from_slice(&work[..j]);
     }
     for value in new.iter_mut() {
-        // SAFETY: `atanh` is a pure C library function.
-        *value = unsafe { atanh(*value) };
+        *value = atanh(*value);
     }
     Ok(())
+}
+
+/// The C library's `atanh`, which GNU R calls and whose rounding `f64::atanh` does not
+/// reproduce: glibc's algorithm, over the platform's `log1p`.
+fn atanh(x: f64) -> f64 {
+    let magnitude = x.abs();
+    let half = if magnitude < 0.5 {
+        if magnitude < 2f64.powi(-28) {
+            return x;
+        }
+        let twice = magnitude + magnitude;
+        0.5 * (twice + twice * magnitude / (1.0 - magnitude)).ln_1p()
+    } else if magnitude < 1.0 {
+        0.5 * ((magnitude + magnitude) / (1.0 - magnitude)).ln_1p()
+    } else if magnitude > 1.0 {
+        // glibc's spelling of the processor's default NaN, whose sign differs between
+        // processors.
+        #[expect(clippy::eq_op)]
+        return (x - x) / (x - x);
+    } else {
+        return x / 0.0;
+    };
+    half.copysign(x)
 }
 
 /// AS 154: sets `V` and the initial state `a` and covariance `P` of the ARMA process from
@@ -871,7 +930,7 @@ fn karma(g: &mut Starma, sumlog: &mut f64, ssq: &mut f64, iupd: i32, nit: &mut u
 /// AS 182: finite sample predictions `y[0..il]` and their mean square errors `amse` for the
 /// ARIMA process whose differencing polynomial has coefficients `delta[0..d]`.
 fn forkal(
-    call: &NativeCall<'_>,
+    arguments: &NativeArgs<'_, '_>,
     g: &mut Starma,
     d: usize,
     il: usize,
@@ -900,7 +959,7 @@ fn forkal(
         ifault = 11;
     }
     if ifault != 0 {
-        return Err(call.error(format!("forkal error code {ifault}")));
+        return Err(arguments.error(format!("forkal error code {ifault}")));
     }
 
     if r == 1 {
@@ -910,19 +969,19 @@ fn forkal(
     } else {
         let ifault = starma(g);
         if ifault != 0 {
-            return Err(call.error(format!("forkal error code {ifault}")));
+            return Err(arguments.error(format!("forkal error code {ifault}")));
         }
     }
 
     if d > 0 && n < d + 1 {
-        return Err(call.error("too few observations to forecast"));
+        return Err(arguments.error("too few observations to forecast"));
     }
     let nt = n - d;
     if d > 0 {
         for j in 0..d {
             store[j] = g.w[n - j - 2];
             if store[j].is_nan() {
-                return Err(call.error(format!("missing value in last {d} observations")));
+                return Err(arguments.error(format!("missing value in last {d} observations")));
             }
         }
         for i in 0..nt {

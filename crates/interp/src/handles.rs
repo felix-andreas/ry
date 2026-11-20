@@ -14,9 +14,10 @@ pub use heap::handle::{
 };
 use {
     crate::{
-        builtins::Call,
+        builtin_libraries::NativeCall,
+        builtins::{Arg, Call},
         coerce::coerce_vector,
-        conditions,
+        conditions, connections,
         unwind::{R, Unwind, error},
         values,
     },
@@ -34,31 +35,40 @@ use {
 /// result are handles of the call's scope.
 pub type SafeFn = for<'s> fn(&mut Cx<'s>, &Args<'_, 's>) -> R<Local<'s>>;
 
-/// The raw entry of the safe builtin `$function`, for the builtin table.
+/// The raw entry of the safe builtin `$function`, for the builtin table, or with `native` of the
+/// safe native routine `$function`, for a builtin library's routine table.
+#[macro_export]
 macro_rules! safe {
-    ($function:path) => {{
-        unsafe fn entry(
-            call: &$crate::builtins::Call<'_>,
-        ) -> $crate::unwind::R<heap::object::Sexp> {
-            // SAFETY: the evaluator calls a builtin on the interpreter's thread, with the
-            // call's arguments rooted.
+    (native $function:path) => {
+        $crate::safe!(@entry $crate::builtin_libraries::NativeCall<'_>, $function)
+    };
+    ($function:path) => {
+        $crate::safe!(@entry $crate::builtins::Call<'_>, $function)
+    };
+    (@entry $call:ty, $function:path) => {{
+        unsafe fn entry(call: &$call) -> $crate::unwind::R<::heap::object::Sexp> {
+            // SAFETY: the evaluator calls a builtin, and a foreign call a native routine, on
+            // the interpreter's thread, with the call's arguments rooted.
             unsafe { $crate::handles::enter(call, $function) }
         }
         entry
     }};
 }
-pub(crate) use safe;
+pub use safe;
 
-/// Runs the safe builtin `body` for `call`.
+/// The arguments of the foreign call a safe native routine runs for.
+pub type NativeArgs<'a, 's> = Args<'a, 's, NativeCall<'a>>;
+
+/// Runs the safe builtin or native routine `body` for `call`.
 ///
 /// # Safety
 ///
 /// The caller is on the interpreter's thread, holds no reference into the heap, and keeps the
 /// call's arguments rooted until this returns.
 #[inline]
-pub unsafe fn enter(
-    call: &Call<'_>,
-    body: impl for<'s> FnOnce(&mut Cx<'s>, &Args<'_, 's>) -> R<Local<'s>>,
+pub unsafe fn enter<'a, C: Invocation>(
+    call: &'a C,
+    body: impl for<'s> FnOnce(&mut Cx<'s>, &Args<'a, 's, C>) -> R<Local<'s>>,
 ) -> R<Sexp> {
     // SAFETY: the interpreter's heap lives as long as the process, and `body` cannot keep the
     // context or anything of its scope, because it must accept every `'s`.
@@ -70,33 +80,90 @@ pub unsafe fn enter(
     body(&mut context, &arguments).map(Local::raw)
 }
 
-/// The arguments of the call a safe builtin runs for.
-pub struct Args<'a, 's> {
-    call: &'a Call<'a>,
+/// The call a safe routine runs for: a builtin's, or the foreign call of a native routine,
+/// whose arguments are the ones after `.NAME` and whose errors name the calling closure, as
+/// GNU R's do.
+pub trait Invocation {
+    fn arguments(&self) -> &[Arg];
+    fn error(&self, message: String) -> Unwind;
+}
+
+impl Invocation for Call<'_> {
+    fn arguments(&self) -> &[Arg] {
+        self.args
+    }
+
+    fn error(&self, message: String) -> Unwind {
+        Call::error(self, message)
+    }
+}
+
+impl Invocation for NativeCall<'_> {
+    fn arguments(&self) -> &[Arg] {
+        self.args
+    }
+
+    fn error(&self, message: String) -> Unwind {
+        NativeCall::error(self, message)
+    }
+}
+
+/// The arguments of the call a safe builtin or native routine runs for.
+pub struct Args<'a, 's, C = Call<'a>> {
+    call: &'a C,
     scope: PhantomData<fn(&'s ()) -> &'s ()>,
 }
 
-impl<'s> Args<'_, 's> {
+impl<'s, C: Invocation> Args<'_, 's, C> {
     pub fn len(&self) -> usize {
-        self.call.args.len()
+        self.call.arguments().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.call.args.is_empty()
+        self.call.arguments().is_empty()
     }
 
     /// The argument at `index`, or `NULL` past the last one.
     #[inline]
     pub fn value(&self, index: usize) -> Local<'s> {
-        // SAFETY: `enter`'s caller keeps every argument rooted for the call, which outlasts
-        // `'s`.
-        unsafe { Local::adopt(self.call.arg(index)) }
+        self.part(index, Part::Value)
+    }
+
+    /// The tag of the argument at `index`, `NULL` for an untagged one or past the last one.
+    #[inline]
+    pub fn tag(&self, index: usize) -> Local<'s> {
+        self.part(index, Part::Tag)
     }
 
     /// An error reported against the call.
     pub fn error(&self, message: impl Into<String>) -> Unwind {
-        self.call.error(message)
+        self.call.error(message.into())
     }
+
+    #[inline]
+    fn part(&self, index: usize, part: Part) -> Local<'s> {
+        let raw = match (self.call.arguments().get(index), part) {
+            (None, _) => values::nil(),
+            (Some(argument), Part::Value) => argument.value,
+            (Some(argument), Part::Tag) => argument.tag,
+        };
+        // SAFETY: `enter`'s caller keeps every argument rooted for the call, which outlasts
+        // `'s`, and a tag is a symbol or `NULL`, which the heap keeps for as long as it lives.
+        unsafe { Local::adopt(raw) }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Part {
+    Value,
+    Tag,
+}
+
+/// Writes `bytes` to the standard output connection, or to the sink that diverts it.
+pub fn write_output(_context: &mut Cx<'_>, bytes: &[u8]) {
+    // SAFETY: writing to a sink may allocate or run a connection's methods, which `&mut Cx`
+    // permits.
+    unsafe { connections::write_output(bytes) }
 }
 
 /// Whether `value` is the empty argument, as an empty symbol in a call evaluates.
@@ -1877,20 +1944,6 @@ pub unsafe fn with_result<T: crate::unwind::Rooted>(
         value.root();
     }
     result
-}
-
-impl<'s> Args<'_, 's> {
-    /// The tag of the argument at `index`, `NULL` for an untagged one or past the last one.
-    #[inline]
-    pub fn tag(&self, index: usize) -> Local<'s> {
-        let tag = self
-            .call
-            .args
-            .get(index)
-            .map_or(values::nil(), |argument| argument.tag);
-        // SAFETY: a tag is a symbol or `NULL`, which the heap keeps for as long as it lives.
-        unsafe { Local::adopt(tag) }
-    }
 }
 
 /// A copy of `value` with its own storage, for a caller that changes it where it is: GNU R's

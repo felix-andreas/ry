@@ -31,15 +31,12 @@
 
 use {
     crate::{
-        routines::{c_arguments, c_return, real_values, super_smooth},
+        routines::{fortran_result, new_reals, read_reals, super_smooth},
         spline::{SearchControl, Smoother},
     },
-    heap::object::Sexp,
     interp::{
-        builtin_libraries::NativeCall,
-        connections::write_output,
+        handles::{self, Cx, Local, NativeArgs},
         unwind::{R, check_user_interrupt, error},
-        values,
     },
     numeric::c_format::{c_general, push_fixed},
     std::cell::Cell,
@@ -90,21 +87,23 @@ const IFL: i32 = 6;
 
 /// `.Fortran(C_setppr, span, bass, optlevel, ism, df, gcvpen)`: the smoother and optimization
 /// level of the next `smart`. A negative `ism` is `-(method + 1)` with tracing.
-pub unsafe fn setppr(call: &NativeCall<'_>) -> R<Sexp> {
-    let arguments = c_arguments(call)?;
-    let ism = values::as_integer_scalar(arguments[3]);
+pub fn setppr<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let integer =
+        |context: &mut Cx<'s>, index| handles::integer_scalar(context, arguments.value(index));
+    let real = |context: &mut Cx<'s>, index| handles::real_scalar(context, arguments.value(index));
+    let ism = integer(context, 3);
     SETTINGS.set(Settings {
-        span: values::as_real_scalar(arguments[0]),
-        alpha: values::as_real_scalar(arguments[1]),
-        optlevel: values::as_integer_scalar(arguments[2]),
+        span: real(context, 0),
+        alpha: real(context, 1),
+        optlevel: integer(context, 2),
         smoother: SmootherSettings {
-            df: values::as_real_scalar(arguments[4]),
-            gcvpen: values::as_real_scalar(arguments[5]),
+            df: real(context, 4),
+            gcvpen: real(context, 5),
             method: if ism >= 0 { ism } else { -(ism + 1) },
             trace: ism < 0,
         },
     });
-    c_return(call, &arguments)
+    fortran_result(context, arguments, &[])
 }
 
 /// `setsmu`: `supsmu()` selects the super smoother and sets whether it traces.
@@ -151,16 +150,16 @@ pub(crate) fn supsmu(
 /// `smod` holds `m, p, q, n`, the number of terms fitted, the response means, the response
 /// scale, then the directions `a` (p by m), the response loadings `b` (q by m), the ridge
 /// functions `f` and projections `t` (n by m each), and the fit criteria `asr`.
-pub unsafe fn smart(call: &NativeCall<'_>) -> R<Sexp> {
-    let mut arguments = c_arguments(call)?;
-    let count = |index: usize| values::as_integer_scalar(arguments[index]).max(0) as usize;
+pub fn smart<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let mut count =
+        |index: usize| handles::integer_scalar(context, arguments.value(index)).max(0) as usize;
     let (m, mu, p, q, n) = (count(0), count(1), count(2), count(3), count(4));
-    let w = real_values(arguments[5])?;
-    let x = real_values(arguments[6])?;
-    let y = real_values(arguments[7])?;
-    let ww = real_values(arguments[8])?;
-    let mut smod = real_values(arguments[9])?;
-    let mut edf = real_values(arguments[15])?;
+    let w = read_reals(context, arguments.value(5))?;
+    let x = read_reals(context, arguments.value(6))?;
+    let y = read_reals(context, arguments.value(7))?;
+    let ww = read_reals(context, arguments.value(8))?;
+    let mut smod = read_reals(context, arguments.value(9))?;
+    let mut edf = read_reals(context, arguments.value(15))?;
     let model_length = q + 7 + m * (p + q + 2 * n) + m;
     if w.len() < n
         || x.len() < p * n
@@ -221,21 +220,20 @@ pub unsafe fn smart(call: &NativeCall<'_>) -> R<Sexp> {
         &mut scratch,
     );
     if !scratch.log.is_empty() {
-        write_output(scratch.log.as_bytes());
+        handles::write_output(context, scratch.log.as_bytes());
     }
     fitted?;
-    arguments[9] = values::real_vector(&smod)?;
-    arguments[15] = values::real_vector(&edf)?;
-    c_return(call, &arguments)
+    let smod = new_reals(context, &smod)?;
+    let edf = new_reals(context, &edf)?;
+    fortran_result(context, arguments, &[(9, smod), (15, edf)])
 }
 
 /// `.Fortran(C_pppred, np, x, smod, y, sc)`: the fitted model of `smod` at each of the `np` rows
 /// of `x`, written to `y` (np by q).
-pub unsafe fn pppred(call: &NativeCall<'_>) -> R<Sexp> {
-    let mut arguments = c_arguments(call)?;
-    let np = values::as_integer_scalar(arguments[0]).max(0) as usize;
-    let x = real_values(arguments[1])?;
-    let mut smod = real_values(arguments[2])?;
+pub fn pppred<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let np = handles::integer_scalar(context, arguments.value(0)).max(0) as usize;
+    let x = read_reals(context, arguments.value(1))?;
+    let mut smod = read_reals(context, arguments.value(2))?;
     let header = |index: usize| {
         smod.get(index)
             .map_or(0, |&value| (value + 0.1).max(0.0) as usize)
@@ -306,9 +304,9 @@ pub unsafe fn pppred(call: &NativeCall<'_>) -> R<Sexp> {
             y[output(i)] = ys * y[output(i)] + at(i + 5);
         }
     }
-    arguments[2] = values::real_vector(&smod)?;
-    arguments[3] = values::real_vector(&y)?;
-    c_return(call, &arguments)
+    let smod = new_reals(context, &smod)?;
+    let y = new_reals(context, &y)?;
+    fortran_result(context, arguments, &[(2, smod), (3, y)])
 }
 
 /// The `pprpar` and `pprz01` controls for one fit. `fulfit` lowers `cutmin` and `mitone`, and

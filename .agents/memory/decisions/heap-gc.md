@@ -551,3 +551,11 @@ GNU R finalizes an object at the first full `gc()` after its last reference goes
 - **Relink, not attach.** `attach()` copies an environment, so a package environment relinked by `set_enclosure` keeps its identity: `as.environment("package:stats")` is the namespace's own package environment, as after a slow start.
 - **Accepted differences from GNU R**, all because the image holds the default packages loaded: during a profile `loadedNamespaces()` lists them and their `.onLoad` options are set, and a default package a profile drops stays loaded as a namespace. Rejected: images per default-package set, which multiplies image size for a rare case; unloading a dropped namespace, which can run its `.onUnload` and leave a DLL registered.
 - **Startup warnings** print under GNU R's `During startup - ` (`conditions::DURING_STARTUP`), so the warning for a missing default package matches; a warning a profile raises prints after its expression without the heading, as GNU R's `R_ReplFile` does (`session::source_file`).
+
+## Native routines enter through the same safe entry as builtins
+
+**Status:** built for the stats routines of `arima0` (`arma0.rs`) and `ppr` (`ppr.rs`). Design: `development/design/memory-safety.md`, "Migration".
+
+- **Shape.** `handles::Args` is generic over an `Invocation` (a builtin's `Call` by default, or a `NativeCall`), so `NativeArgs` shares `value`, `tag` and `error` while the builtin-only methods (`matched`, `environment`, `warning`) exist only for `Call`. `safe!(native f)` makes the routine-table entry; both arms expand one internal arm, so the entry's `unsafe` text appears once. A native error names the calling closure, as GNU R's does.
+- **State behind a handle.** `arima0`'s model lives in a thread-local slab of `Option<Starma>`, and R holds the slot index as an integer where GNU R holds an external pointer. An external pointer with a finalizer needs the raw heap; GNU R's R code (`arima0`, `predict.arima0`, `ar.mle` through `arima0`) only passes the handle back and frees it in `on.exit`, so the slab loses nothing R code observes. A handle that names no live slot is "bad Starma struct".
+- **Impact.** Correctness: the routines cannot hold a value across a collection. Simplicity: a stats port needs no `unsafe`, so a new file's zero baseline holds.
