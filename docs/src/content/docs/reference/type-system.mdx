@@ -3317,8 +3317,8 @@ exceptions and additions:
 - A body that dispatches with `UseMethod()` forces none of its formals, because it hands them to a
   method unevaluated, and the method decides what it needs. So
   `describe <- function(x, ...) UseMethod("describe")` may be called as `describe()`. Forwarding a
-  formal into the generic's first formal, the one it dispatches on, is different: `UseMethod`
-  evaluates a supplied argument there to read its class, so after
+  formal into the formal the generic dispatches on (its first, or the one named by `UseMethod`'s
+  second argument) is different: `UseMethod` evaluates a supplied argument there to read its class, so after
   `f <- function(fit) persistence(fit)`, the call `f()` is reported as leaving out `fit`.
 - A read guarded by `missing(name)` does not make the formal required; see below.
 - An argument of `substitute()` or `quote()` is not evaluated, so a formal named only there is not
@@ -3514,8 +3514,8 @@ A top-level value name in a package is global across its files:
   `{ }` block, in an `if`, `for`, or `while` body, in a block passed to a call such as
   `suppressWarnings({ x <- f() })`, or in the value of another assignment. The exception is the
   body of a top-level `if (FALSE)`, which holds example code R never runs: its assignments bind
-  local scratch names that no other item sees and that are never reported unused, while its calls
-  are still checked.
+  local scratch names that no other item sees and that are never reported unused, `<<-` included,
+  while its calls are still checked.
 
 A reference from another file sees the binding's generalized exported type. Type information does not
 flow back into the exporting file, so a call in one file never changes the inferred type of a
@@ -3863,7 +3863,7 @@ Definite assignment follows four rules:
   binds `limit <- "all"`. A function outside does not join: a local variable that shares a
   function's name, such as `if (trace) t2 <- proc.time()` in a package that also defines a
   function `t2`, is a different thing that happens to have the same name, so the read types as the
-  local writes alone. The finding is off by default; turn it on with
+  local writes alone. A path that skips every write and reaches the function is not reported. The finding is off by default; turn it on with
   `[check] maybe-undefined = true`. Two conditions that always agree at run time are still two
   branches to the checker, so `if (ok) v <- …` followed by `if (ok) use(v)` is reported, although it
   is safe.

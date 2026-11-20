@@ -324,6 +324,22 @@ read_file <- function(path: character) {
 == R/main.R
 read_file: fn(path: character) -> character[]
 
+#---- a_closure_inside_an_exit_handler_reads_its_own_frame_in_order
+#~~~~ R/main.R
+f <- function(xs: list[double]) {
+  on.exit(lapply(xs, function(x) {
+    print(late)
+    late <- 1
+    x
+  }))
+  invisible(NULL)
+}
+#++++
+== R/main.R
+f: fn(xs: list[double]) -> NULL
+79..83 warning[unresolved] I could not resolve `late` in this package, its imports, or builtins. Did you mean `date`?
+89..93 warning[unused] `late` is assigned but never used.
+
 #---- literals_on_both_paths_read_as_r_types
 #~~~~ R/main.R
 limit <- "all"

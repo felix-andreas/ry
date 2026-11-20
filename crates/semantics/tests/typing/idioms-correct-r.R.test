@@ -271,7 +271,9 @@ f: fn(flag: logical) -> double[]
 
 #---- a_range_takes_a_local_over_an_enclosing_parameter
 # mgcv's `multinom`: the closure counts `lpi` when it has one, and otherwise
-# reads the enclosing `K`, which must then be a number.
+# reads the enclosing `K`, which must then be a number. R fails only when the
+# closure runs without `lpi`; a captured parameter's bound is checked at the
+# factory call, where the caller chooses `K`.
 multinom <- function(K = 1) {
   function(lpi = NULL) {
     if (!is.null(lpi)) K <- length(lpi)
@@ -284,7 +286,7 @@ named <- multinom("a")
 multinom: <T: scalar numeric, U> fn([K]: T) -> fn([lpi]: U | NULL) -> double[]
 counted: <T> fn([lpi]: T | NULL) -> double[]
 named: Unknown
-283..286 error[type-mismatch] expected a scalar numeric value (`integer` or `double`), found `character`
+428..431 error[type-mismatch] expected a scalar numeric value (`integer` or `double`), found `character`
 
 #---- calling_a_null_placeholder_field_is_unchecked
 registry <- NULL
@@ -2681,3 +2683,13 @@ both: list{}
 maybe: fn(a: logical) -> list{}
 mixed: fn(a: logical) -> list[integer]
 step: fn(a: logical) -> NULL
+
+#---- a_generic_dispatches_on_the_object_use_method_names
+# `UseMethod("gen", obj)` dispatches on `obj`, so `a` is never forced.
+gen <- function(a, obj) UseMethod("gen", obj)
+fwd <- function(a, obj) gen(a, obj)
+use_fwd <- function() fwd(obj = 1)
+#++++
+gen: <T, U> fn([a]: T, obj: U) -> Any
+fwd: <T, U> fn([a]: T, obj: U) -> Any
+use_fwd: fn() -> Any

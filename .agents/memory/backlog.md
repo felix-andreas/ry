@@ -799,6 +799,12 @@ false classes, largest first:
   declared optional `NULL` default should read as a placeholder too, or the renderer should mark
   it. Flag-selected returns (`p_dist`, `iam`) are listed there for the same reason: an annotation
   cannot say that a literal flag picks the branch.
+- **A local variable named like a function** (missed error). After `if (flag) t2 <- 5`, a read
+  `t2 + 1` types as the local writes alone when a project, enclosing or base function `t2`
+  exists, so the path that skips the write and reads the function is not reported, even with
+  `maybe-undefined = true` (naming counts the function as a fallback). Leaving the function out
+  cleared mgcv's guarded reads; reporting the unguarded one needs naming to tell a function
+  fallback from a value fallback.
 - **`m * tol` after `if (missing(tol)) tol <- 1e-8` leaves both parameters unbounded**, so
   `fast_svd("a", 1)` is not reported (missed error). The join of an open parameter and a value
   written on one path is `Unknown` (`join_written_values`), so that `omega <- omega + m %*% m` on

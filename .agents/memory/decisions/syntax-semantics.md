@@ -2037,7 +2037,8 @@ lowering path and a third way for two annotations to disagree, for no case `#:` 
   package globals, its writes joined other items' SCCs, the fixpoint failed to converge and pinned
   real functions to `Unknown`, which hid true reports in the same file.
 - `naming.rs` resolves the body in its own `Local` scope with a stable id, marked escaped so its
-  stores never report unused. Only the literal `FALSE` counts: any other condition may run.
+  stores never report unused, and `<<-` inside stops at that scope. Only the literal `FALSE`
+  counts: any other condition may run.
 - Its calls are still checked, because the example is usually how the package means to be called.
 
 ## S3 subsetting dispatches on the declared class first
@@ -2052,7 +2053,8 @@ lowering path and a third way for two annotations to disagree, for no case `#:` 
 
 **Status:** settled.
 
-- `FunctionType::dispatch` names the first formal of an inferred body that calls `UseMethod`.
+- `FunctionType::dispatch` names the formal an inferred body's `UseMethod` dispatches on: the
+  one its `object` argument names, else the first. Any other `object` expression gives none.
   A caller forwarding its own formal there makes that formal required, because `UseMethod`
   evaluates the supplied argument to read its class. A direct call may still omit it (R then
   dispatches on a missing object, and the method decides). Declared signatures carry no dispatch

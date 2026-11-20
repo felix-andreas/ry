@@ -287,6 +287,8 @@ pub fn resolve_item(
         quiet_depth: 0,
         probes: Vec::new(),
         deferred_depth: 0,
+        exit_frame: None,
+        example_scope: None,
         in_defaults: false,
         quoted_depth: 0,
         bracket_depth: 0,
@@ -421,6 +423,13 @@ struct Context<'a> {
     /// Inside an expression R evaluates later (`on.exit`): its reads see the final value, so
     /// they keep every write of the name alive.
     deferred_depth: u32,
+    /// The function depth whose `on.exit` expression is being resolved. Only that frame's
+    /// reads see its later writes; a closure written inside the handler reads its own frame
+    /// in order.
+    exit_frame: Option<usize>,
+    /// The depth of the scope a top-level `if (FALSE)` body resolves in. `<<-` inside it
+    /// stops there, since the example never runs to reach a package name.
+    example_scope: Option<usize>,
     /// Resolving a function's parameter defaults. R evaluates a default lazily in the
     /// function's own frame, so a name the body assigns is visible to it.
     in_defaults: bool,
@@ -926,7 +935,9 @@ impl Context<'_> {
                     // value and keep every write of those names alive.
                     Some("on.exit") => {
                         self.deferred_depth += 1;
+                        let enclosing_exit = self.exit_frame.replace(self.current_function_depth());
                         self.resolve_arguments(&module[arguments]);
+                        self.exit_frame = enclosing_exit;
                         self.deferred_depth -= 1;
                         return;
                     }
@@ -1122,6 +1133,7 @@ impl Context<'_> {
                     let scope_id = self.stable_scope_id(*then_branch);
                     // Its stores are scratch for stepping through by hand, so none is unused.
                     self.escaped_frames.insert(scope_id);
+                    let enclosing_example = self.example_scope.replace(self.scopes.len());
                     self.scopes.push(Scope {
                         id: scope_id,
                         kind: ScopeKind::Local,
@@ -1131,6 +1143,7 @@ impl Context<'_> {
                     self.premint_frame_assignments(*then_branch);
                     self.resolve(*then_branch);
                     self.scopes.pop();
+                    self.example_scope = enclosing_example;
                 } else {
                     self.resolve(*then_branch);
                 }
@@ -1654,7 +1667,8 @@ impl Context<'_> {
                 let &slot = scope.slots.get(&name)?;
                 let own_frame_later =
                     // A quoted read stays quiet: the quotation may never run.
-                    (self.in_defaults || (self.deferred_depth > 0 && self.quiet_depth == 0))
+                    (self.in_defaults
+                        || (self.exit_frame == Some(function_depth) && self.quiet_depth == 0))
                         && depth == function_depth;
                 (self.flow.contains_key(&slot) || depth < function_depth || own_frame_later)
                     .then_some((depth, slot))
@@ -1881,6 +1895,13 @@ impl Context<'_> {
             return;
         }
         let module = self.module;
+        let spelling = if spelling == AssignSpelling::Super
+            && self.example_scope == Some(self.scopes.len() - 1)
+        {
+            AssignSpelling::Local
+        } else {
+            spelling
+        };
         if spelling == AssignSpelling::Destructure {
             for leaf in destructure_leaves(module, target).unwrap_or_default() {
                 if let ExpressionKind::NameRef(name) = module.kind(leaf) {
@@ -1914,7 +1935,8 @@ impl Context<'_> {
                             self.record_write_site(assignment, name, range, slot, true);
                         }
                         None => {
-                            if self.emit {
+                            // In an example that never runs, the write reaches no global.
+                            if self.emit && self.example_scope.is_none() {
                                 self.naming.non_locals.insert(target, name);
                                 self.naming.super_globals.insert(name);
                             }
@@ -1991,7 +2013,7 @@ impl Context<'_> {
     /// depth. Bounded by the scope stack, not the enclosing function: `local()` scopes are not
     /// functions. `None` means the global environment.
     fn enclosing_slot(&self, name: Symbol) -> Option<(usize, BindingId)> {
-        (0..self.scopes.len() - 1)
+        (self.example_scope.unwrap_or(0)..self.scopes.len() - 1)
             .rev()
             .find_map(|depth| Some((depth, *self.scopes[depth].slots.get(&name)?)))
     }

@@ -2248,21 +2248,45 @@ fn fits_with_results<'db>(
         .collect()
 }
 
-/// The formal `UseMethod` dispatches on when the body calls it as a statement: the first one,
-/// unless that is `...`.
+/// The formal `UseMethod` dispatches on when the body calls it as a statement: the one named
+/// by its `object` argument, or else the first formal, unless that is `...`.
 fn dispatch_formal(module: &Module, body: ExprId, parameters: &[Formal]) -> Option<Symbol> {
-    let calls_use_method = |id: ExprId| {
-        matches!(module.kind(id), ExpressionKind::Call { callee, .. }
-            if matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "UseMethod"))
+    let use_method_arguments = |id: ExprId| match module.kind(id) {
+        ExpressionKind::Call { callee, arguments } if matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "UseMethod") => {
+            Some(&module[arguments])
+        }
+        _ => None,
     };
-    let dispatches = match module.kind(body) {
+    let arguments = match module.kind(body) {
         ExpressionKind::Block { statements } => module[statements]
             .iter()
-            .any(|&statement| calls_use_method(statement)),
-        _ => calls_use_method(body),
+            .find_map(|&statement| use_method_arguments(statement)),
+        _ => use_method_arguments(body),
+    }?;
+    let named = |formal: &str| {
+        arguments.iter().find(|argument| {
+            argument
+                .name
+                .is_some_and(|name| module.name(name) == formal)
+        })
     };
-    let first = parameters.first()?;
-    (dispatches && first.name != "...").then_some(first.name)
+    // Positional arguments fill `generic`, then `object`, whichever is not named.
+    let object = named("object").or_else(|| {
+        let skip = usize::from(named("generic").is_none());
+        arguments
+            .iter()
+            .filter(|argument| argument.name.is_none())
+            .nth(skip)
+    });
+    let name = match object {
+        // Any other expression dispatches on a value no formal names.
+        Some(argument) => match argument.value.map(|value| module.kind(value)) {
+            Some(ExpressionKind::NameRef(name)) => *name,
+            _ => return None,
+        },
+        None => parameters.first()?.name,
+    };
+    (name != "..." && parameters.iter().any(|parameter| parameter.name == name)).then_some(name)
 }
 
 /// The callee and `x` of a call `length(x)`.
@@ -5194,7 +5218,8 @@ impl<'db, 'a> Checker<'db, 'a> {
         // A function under a local variable, as base's `max` under `max <- 3` or a package's
         // `t2` under `if (trace) t2 <- proc.time()`, is left out: a variable named like a
         // function is the common case, a read guarded like its write never reaches the
-        // function, and a read that does is the opt-in `maybe-undefined` warning's to report.
+        // function. A read that does reach it goes unreported (`backlog.md`, "A local
+        // variable named like a function").
         let function = matches!(
             self.table.resolve(self.db, ty).kind(self.db),
             TyKind::Function(_)
