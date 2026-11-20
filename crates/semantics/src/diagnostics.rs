@@ -962,9 +962,17 @@ fn alias_cycle_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 *range,
                 Severity::Error,
                 "annotation",
-                format!(
-                    "the alias `{name}` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle."
-                ),
+                // A cycle through a record or function is a recursive type, which a nominal
+                // `@type` gives a name of its own; a bare alias chain is just a mistake.
+                if matches!(definition.body.kind(db), TyKind::Named(..)) {
+                    format!(
+                        "the alias `{name}` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle."
+                    )
+                } else {
+                    format!(
+                        "the alias `{name}` refers to itself, so its expansion never ends. A recursive type needs a name of its own: declare it as `@type {name} {{...}}` instead of `@alias`."
+                    )
+                },
             ));
         }
     }

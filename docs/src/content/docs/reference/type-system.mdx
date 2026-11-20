@@ -836,7 +836,9 @@ An alias is purely structural: writing its name is the same as writing the type 
 creates no new identity, and may appear anywhere a type may, including inside a larger type. An
 alias whose expansion reaches itself, directly or through other aliases, is an error reported at
 each declaration on the cycle, whether or not an annotation uses it. An annotation that uses such an
-alias checks nothing.
+alias checks nothing. A recursive type, such as a logger whose setters return the logger for
+chaining, is a nominal type instead: `#: @type Logger {list{set_threshold: fn(level: character) -> Logger}}`
+names the type, so `log$set_threshold("info")$set_threshold(3)` is checked at each call.
 
 <Tabs syncKey="annotation-style">
 <TabItem label="Inline">

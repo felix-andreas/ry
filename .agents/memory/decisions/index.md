@@ -140,6 +140,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A signature's type parameters are in scope in its body
 - `opaque` makes a type's representation private to its file
 - Open records are explicit, with no row variables
+- Recursive types are nominal; an alias never recurses
 
 ## Analysis core
 

@@ -2005,3 +2005,11 @@ lowering path and a third way for two annotations to disagree, for no case `#:` 
 - **Reads.** `$` and `[[` by name behave as on a closed record (exact, unique prefix, near-miss typo, else `Unknown`). Positional `[[` and `[` read `Unknown`, because an open record's listed fields are not its first ones.
 - **No row variables.** Roc's `{ a : A }*` and `{ a : A }r` pass the unlisted fields through a function; ry's `..` cannot, so a function returning its open argument returns only the listed fields. Add a row variable only when a corpus needs that round trip.
 - **Scope.** Only the R record shape is open. Frame types list every column, and native `Record{...}` stays closed until typed ry code needs extensible records.
+
+## Recursive types are nominal; an alias never recurses
+
+**Status:** built.
+
+- **Rule.** An `@alias` whose expansion reaches itself stays an error. A recursive type is a nominal `@type`, whose name stops the expansion, so `log$set_threshold("info")$info("hi")` types through `Logger`.
+- **Why.** A recursive structural alias is an equi-recursive type: comparing two of them needs coinductive equality over cyclic types, and every structural walk (`map_child_types`, rendering, `type_size`) would need cycle handling. A nominal type is iso-recursive and costs nothing new. Rust, Roc and Gleam make the same choice.
+- **Diagnostic.** A cycle through a record or function suggests `@type NAME {...}`; a bare alias chain (`A {B}`, `B {A}`) is a plain mistake and keeps the "write a type in place of one alias" wording.
