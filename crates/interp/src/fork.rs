@@ -4,9 +4,12 @@
 //!
 //! A forked child talks to its master over a pipe with GNU R's framing: each message is its
 //! length as a native-endian `R_xlen_t`, then that many bytes, and a zero length announces that
-//! the child is exiting. A second pipe feeds the child's standard input. The runtime starts no
-//! helper threads, so a fork copies the whole interpreter in a consistent state; what it must
-//! not copy is unwritten output, which is flushed first so it is not written twice.
+//! the child is exiting. A second pipe feeds the child's standard input. A fork copies the
+//! interpreter's memory but only the calling thread, so the runtime keeps its helper threads
+//! (the console and help servers, timers) out of what a child needs, and unwritten output is
+//! flushed first so it is not written twice. A thread pool is the exception: a child that hands
+//! work to a pool its parent started waits forever for workers it does not have, so the table
+//! builtins report that they may have started one (`system::note_thread_pool`).
 
 use {
     crate::{
@@ -242,6 +245,9 @@ unsafe fn exit(call: &NativeCall<'_>) -> R<Sexp> {
         close_fd(master);
     }
     flush_standard();
+    // A child that gave itself a temporary directory (a forked `ry test` worker) removes it;
+    // one that shares its parent's leaves it alone.
+    crate::system::remove_session_temp_dir();
     libc::_exit(if code == NA_INTEGER { 0 } else { code })
 }
 

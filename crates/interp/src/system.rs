@@ -6,6 +6,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Call, builtin, internal, special},
         coerce::parse_real,
+        handles::{self, Args, Cx, Local, safe},
         http::FetchError,
         interp,
         platform::{Iconv, IconvStop, convert_all},
@@ -26,11 +27,13 @@ use {
         borrow::Cow,
         num::NonZeroU32,
         path::{Path, PathBuf},
+        sync::atomic::{AtomicBool, Ordering},
         time::{Duration, Instant},
     },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
+    internal("ryThreadPoolStarted", 0, safe!(do_thread_pool_started)),
     builtin(".ry_view", 2, do_ry_view).invisible(),
     internal("internalsID", 0, |_| unsafe { scalar_string(INTERNALS_ID) }),
     internal("eSoftVersion", 0, do_esoft_version),
@@ -445,6 +448,21 @@ pub fn renew_session_temp_dir() -> Result<&'static str, String> {
         .as_ref()
         .map(|temp| temp.path.as_str())
         .map_err(Clone::clone)
+}
+
+static THREAD_POOL: AtomicBool = AtomicBool::new(false);
+
+/// Records that this process may have started a thread pool, such as the one Polars runs table
+/// queries on, so that `.Internal(ryThreadPoolStarted())` tells a caller a forked child cannot
+/// use it.
+pub fn note_thread_pool() {
+    THREAD_POOL.store(true, Ordering::Relaxed);
+}
+
+/// `.Internal(ryThreadPoolStarted())`: whether this process may have started a thread pool,
+/// which a forked child inherits only as memory, without its threads.
+fn do_thread_pool_started<'s>(context: &mut Cx<'s>, _arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    handles::logical_constant(context, i32::from(THREAD_POOL.load(Ordering::Relaxed)))
 }
 
 /// Removes the session's temporary directory. Only the process that created it does: a forked

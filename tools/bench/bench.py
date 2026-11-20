@@ -137,7 +137,7 @@ Usage: tools/bench/bench.py SUITE... | all [--release ARCHIVE | --ry PATH] [--rs
                             [--baseline-instructions FILE] [--functions N] [--save-dumps DIR]
 """
 import argparse, atexit, concurrent.futures, hashlib, json, math, os, pathlib, platform, random, re, shlex, shutil
-import statistics, subprocess, sys, tarfile, tempfile, threading, time, tomllib
+import signal, statistics, subprocess, sys, tarfile, tempfile, threading, time, tomllib
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parent.parent
@@ -852,20 +852,25 @@ print(f"TREE {status} {usage.ru_utime + usage.ru_stime:.3f} {wall:.3f}", file=sy
 TREE_TIMED = re.compile(r"^TREE (?P<status>-?\d+) (?P<cpu>[\d.]+) (?P<wall>[\d.]+)$", re.M)
 
 
-def spawn(command, env, cwd=None, timeout=PROGRAM_TIMEOUT, check_images=True, sample=True):
+def spawn(command, env, cwd=None, timeout=PROGRAM_TIMEOUT, check_images=True, sample=True, group=False):
     """Runs a process to the end and returns its exit status, output, wall seconds and peak
     memory in MiB (`MEMORY_PARTS`, from `sample_memory`; empty without `sample`). The status is
     None when the process timed out or, with `check_images`, when ry reported an image it could
-    not use: such a process timed a slow start, so its numbers do not count."""
+    not use: such a process timed a slow start, so its numbers do not count. With `group`, the
+    process leads a process group of its own, which a timeout kills whole."""
     with tempfile.TemporaryFile("w+") as stdout, tempfile.TemporaryFile("w+") as stderr:
         started = time.monotonic()
-        child = subprocess.Popen(command, stdout=stdout, stderr=stderr, text=True, env=env, cwd=cwd)
+        child = subprocess.Popen(command, stdout=stdout, stderr=stderr, text=True, env=env, cwd=cwd,
+                                 start_new_session=group)
         expired, finished = threading.Event(), threading.Event()
         memory = {}
 
         def expire():
             expired.set()
-            child.kill()
+            if group:
+                os.killpg(child.pid, signal.SIGKILL)
+            else:
+                child.kill()
 
         timer = threading.Timer(timeout, expire)
         sampler = threading.Thread(target=sample_memory, args=(child.pid, finished, memory)) if sample else None
@@ -1212,15 +1217,18 @@ class PackageRunner:
         for variable in ("no_proxy", "NO_PROXY"):
             env[variable] = corpus.LOCAL_HOSTS
         result = self.run_tests(engine, env, name, kind, tests)
-        if engine.key == "ry" and program.get("jobs") and result.get("seconds") is not None:
+        # The tree timer counts the workers' CPU through a Linux child subreaper.
+        if (engine.key == "ry" and program.get("jobs") and result.get("seconds") is not None
+                and sys.platform == "linux"):
             result["test_jobs"] = self.time_jobs(program, engine)
         self.network += [f"{name} on {engine.label}: {host}" for host in self.proxy.take()]
         return result
 
     def time_jobs(self, program, engine):
-        """Runs the package's suite from its source with `ry test --jobs 1`, then with
-        `--jobs N`, and returns the CPU and wall seconds of each, or None when a run fails. The CPU
-        time is the whole process tree's, the forked test workers' included."""
+        """Runs the package's suite from its source with `ry test --jobs 1` and with `--jobs N`,
+        twice each and alternating so that neither count runs only warm, and returns the lower CPU
+        and wall seconds of each, or None when a run fails. The CPU time is the whole process
+        tree's, the forked test workers' included."""
         name = program["id"]
         if name not in self.sources:
             self.sources[name] = corpus.unpack_source(name, self.versions[name], self.work)
@@ -1231,19 +1239,19 @@ class PackageRunner:
             env[variable] = self.proxy.url
         for variable in ("no_proxy", "NO_PROXY"):
             env[variable] = corpus.LOCAL_HOSTS
-        found = {"jobs": program["jobs"], "cpu": [], "wall": []}
-        for jobs in (1, program["jobs"]):
+        cpu, wall = {}, {}
+        for jobs in (1, program["jobs"], 1, program["jobs"]):
             command = [sys.executable, "-I", "-c", TREE_TIMER, engine.command[0], "test", "--jobs", str(jobs),
                        "--runtime", "ry", "--reporter", "silent"]
             status, out, err, _, _ = spawn(command, env, cwd=self.sources[name], timeout=corpus.SUITE_TIMEOUT,
-                                           sample=False)
+                                           sample=False, group=True)
             timed = TREE_TIMED.search(err or "")
             if status is None or not timed or int(timed["status"]) not in (0, 1):
                 print(f"  {name}: ry test --jobs {jobs} fails ({failure_reason(out, err)[:80]})", flush=True)
                 return None
-            found["cpu"].append(float(timed["cpu"]))
-            found["wall"].append(float(timed["wall"]))
-        return found
+            cpu[jobs] = min(cpu.get(jobs, math.inf), float(timed["cpu"]))
+            wall[jobs] = min(wall.get(jobs, math.inf), float(timed["wall"]))
+        return {"jobs": program["jobs"], "cpu": list(cpu.values()), "wall": list(wall.values())}
 
     def run_tests(self, engine, env, name, kind, tests):
         if kind == "scripts":

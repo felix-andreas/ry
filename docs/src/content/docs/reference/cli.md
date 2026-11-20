@@ -477,13 +477,20 @@ Without `--jobs`, testthat's own switches apply as they do under `devtools::test
 On Linux and macOS, each worker is forked from the `ry test` process after it has loaded testthat
 and the package, so a worker starts without loading either and shares their memory with the
 `ry test` process until it writes to it. The workers together then use little more CPU time than
-one process running every file, and the wall time falls with each worker added. A worker gets its own
-`tempdir()` and random seed, takes one file at a time, and sends its results back over a pipe, and
-what a file prints is reported under the file's name, as testthat's own workers report it. A
-worker that exits in the middle of a file stops the run with an error that names the file.
+one process running every file, so a suite of files that take similar time finishes several times
+faster. A worker gets its own `tempdir()` and random seed, runs the helpers and setup files, takes
+one file at a time, and sends its results back over a pipe. What a file prints through R's console
+is reported under the file's name, as testthat's own workers report it, while output that native
+code writes straight to the terminal is not captured. What the helpers and setup files print is
+shown only when they fail. Once every file has run, each worker runs the teardown files and exits.
+A worker that exits in the middle of a file stops the run with an error that names the file.
 
-On Windows, which cannot fork, the workers are testthat's callr processes, and each loads the
-package the way `ry test` itself does, lazily and under the project's `ry.toml`. Either way a run
+A forked process inherits a thread pool's memory but not its threads, so `ry test` starts
+testthat's callr workers instead of forking once it may have started one: after a `DataFrame`
+query, or with the polars package loaded.
+
+On Windows, which cannot fork, and in that case, the workers are testthat's callr processes, and
+each loads the package the way `ry test` itself does, lazily and under the project's `ry.toml`. Either way a run
 needs neither pkgload nor every package in `Imports` installed. With `--runtime gnu-r`, workers
 are testthat's own and load the package with `pkgload::load_all()`, as under testthat alone.
 
