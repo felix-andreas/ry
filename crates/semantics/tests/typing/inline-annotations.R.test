@@ -34,7 +34,7 @@ total <- function() {
   sum
 }
 #++++
-total: Unknown
+total: fn() -> double
 39..45 error[type-mismatch] expected `double`, found `character`
 
 #---- binding_with_a_function_type

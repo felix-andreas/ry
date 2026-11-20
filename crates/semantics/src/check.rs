@@ -7,7 +7,7 @@ use {
         annotations::Annotation,
         data_file_layout,
         dense::{Bitset, Column},
-        diagnostics::nearest_name,
+        diagnostics::{STANDARD_MODULES, nearest_name},
         exhaustiveness::{MatchFinding, match_findings},
         hir::{
             Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind,
@@ -873,6 +873,7 @@ fn check_item_in<'db>(
         column_misses: Column::new_in(arena, expressions),
         query_depth: 0,
         errors: Vec::new(),
+        contained_errors: FxHashSet::default(),
         record_strict_origins,
         strict_origins: Vec::new(),
         // A statement with its own annotation is typed by the annotation, as in a function.
@@ -1292,9 +1293,13 @@ fn check_item_in<'db>(
     }
     // A failed item exports `Unknown` so downstream items do not cascade off an
     // untrustworthy shape. Failing expressions record `Unknown`, so later checks inside
-    // the item read them as absent facts rather than cascading.
+    // the item read them as absent facts rather than cascading. An error whose slot took a
+    // fixed type anyway leaves the shape trustworthy.
     let mut errors = context.errors;
-    let scheme = if errors.is_empty() || scheme_is_declared {
+    let trusted = errors
+        .iter()
+        .all(|error| context.contained_errors.contains(&error.range));
+    let scheme = if trusted || scheme_is_declared {
         // Inference variables are table-scoped: a scheme crossing the item boundary must
         // never carry one.
         scheme.map(|scheme| close_scheme(db, &mut context.table, scheme))
@@ -1312,7 +1317,7 @@ fn check_item_in<'db>(
         let Some(entry) = context.environment.get(id) else {
             continue;
         };
-        let binding_scheme = if errors.is_empty() {
+        let binding_scheme = if trusted {
             let open = match entry {
                 EnvEntry::Mono(ty) | EnvEntry::MissingFormal(ty) => TypeScheme::monomorphic(ty),
                 EnvEntry::Scheme(index) => context.scheme_arena[index as usize].clone(),
@@ -1734,6 +1739,10 @@ struct Checker<'db, 'a> {
     /// that is no column still reads its global.
     query_depth: u32,
     errors: Vec<TypeError<'db>>,
+    /// The ranges of errors whose value was checked against a fixed type, an annotation's or a
+    /// ry record field's: the written slot takes that type whatever the value, so the error
+    /// leaves the item's export trustworthy.
+    contained_errors: FxHashSet<TextRange>,
     /// Off outside strict files, where nothing reports the origins.
     record_strict_origins: bool,
     strict_origins: Vec<StrictOrigin>,
@@ -4429,6 +4438,15 @@ impl<'db, 'a> Checker<'db, 'a> {
                 {
                     return;
                 }
+                // `List.length` spells a library function that does not exist, which the
+                // unresolved finding reports with the right name.
+                if name
+                    .as_str()
+                    .split_once('.')
+                    .is_some_and(|(module, _)| STANDARD_MODULES.contains(&module))
+                {
+                    return;
+                }
                 (name.as_str(), true)
             }
             ExpressionKind::Namespace {
@@ -4618,6 +4636,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         {
             let range = self.blame_range(value);
             let error = self.type_mismatch(range, declared.body, resolved_value, Some(value));
+            self.contained_errors.insert(error.range);
             self.errors.push(error);
         }
         declared.body
@@ -5640,6 +5659,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                             {
                                 let range = self.blame_range(value_expression);
                                 let kind = self.type_mismatch(range, field.ty, value, None).kind;
+                                self.contained_errors.insert(range);
                                 self.errors.push(TypeError { range, kind });
                             }
                         }
@@ -5650,6 +5670,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                                 } => module.name_range(*name),
                                 _ => module.range(lhs),
                             };
+                            self.contained_errors.insert(range);
                             self.errors.push(TypeError {
                                 range,
                                 kind: TypeErrorKind::FieldCannotBeAdded {

@@ -667,7 +667,7 @@ f <- function() {
   count
 }
 #++++
-f: Unknown
+f: fn() -> integer
 42..48 error[type-mismatch] expected `integer`, found `character`
 
 #---- trusted_local_overrides_unchecked
@@ -939,7 +939,7 @@ mapped <- lapply(xs, #: character
   1L)
 #++++
 xs: list{integer}
-mapped: Unknown
+mapped: list[Unknown]
 51..53 error[type-mismatch] expected `character`, found `integer`
 
 #---- a_blank_line_separates_an_argument_from_its_annotation
@@ -960,12 +960,12 @@ annotated_body <- function(x)
   #: character
   x + 1L
 #++++
-annotated_body: Unknown
+annotated_body: <T: numeric> fn(x: T) -> character
 208..214 error[type-mismatch] expected `character`, found `T`
 
 #---- a_parenthesised_expression_does_attach
 parenthesised <- ( #: character
   1L )
 #++++
-parenthesised: Unknown
+parenthesised: character
 34..36 error[type-mismatch] expected `character`, found `integer`

@@ -3594,14 +3594,18 @@ Definite assignment follows four rules:
   with no such binding stays `Unknown`.
 
 An item whose check reports an error exports `Unknown`, so one mistake does not cascade across a file.
-An item with a `#:` annotation is the exception: even when its body violates the annotation, every
-call site is still checked against the declared signature.
+Two kinds of item are exceptions. An item with a `#:` annotation keeps its declared signature, so even
+when its body violates the annotation, every call site is still checked against it. An item whose
+every error is a value that does not fit a fixed type, an annotated binding's (`x: integer <- "a"`) or
+a ry record field's (`point$x <- "a"`), keeps its type too, because the binding takes that fixed type
+whatever the value. After `point$x <- "a"`, a later `point[["w"]]` is still reported.
 
 #### Unused assignments
 
 With the `unused` check enabled, an assignment whose value no read can observe on any path reports
 `unused` on the assigned name. Top-level assignments visible to the package, parameters, `for`
-variables, and names starting with `.` or `_` are never reported.
+variables, and names starting with `.` or `_` are never reported, and neither is a column update such
+as `f[, y := v]` or `setnames(f, ...)`, which changes the table in place.
 
 A read inside a nested function is a *capture*. The closure runs after its frame has finished, so
 every write to the captured name stays observable, and none of them is a dead store. That holds only

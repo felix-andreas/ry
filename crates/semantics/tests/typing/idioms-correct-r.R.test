@@ -1974,7 +1974,7 @@ parts: fn() -> list[character]
 parts <- function() lapply(y ~ x + z, 42)
 #++++
 parts: Unknown
-38..40 error[type-mismatch] expected `fn(T) -> U`, found `double`
+38..40 error[type-mismatch] expected a function, found `double`
 
 #---- a_call_returns_the_arm_of_an_echoed_list_or_vector_parameter_it_passed
 normalize <- function(path) {

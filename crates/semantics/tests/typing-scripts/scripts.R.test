@@ -120,6 +120,18 @@ T
 62..78 error[type-mismatch] expected `integer`, found `character`
 98..101 error[type-mismatch] expected `character`, found `integer`
 
+#---- a_field_write_mismatch_keeps_the_record_type
+# The record keeps its type whatever the value, so later statements are still checked.
+point <- (x = 1, y = 2)
+point$x <- "a"
+point[["w"]]
+#++++
+point: Record{x: double, y: double}
+character
+Unknown
+122..125 error[type-mismatch] expected `double`, found `character`
+133..136 error[type-mismatch] field `w` does not exist in `Record{x: double, y: double}`
+
 #==== resolution
 #---- a_dangling_operator_reports_the_target_not_the_swallowed_names
 # The `+` makes the next line its right-hand operand, so `label <- "next"` is not
@@ -509,6 +521,14 @@ x: integer
 out: Any
 T
 
+#---- a_column_update_is_not_a_dead_store
+# `:=` updates the table in place, so the statement is no unused assignment.
+sales <- DataFrame(team = ["a", "b"], amount = [1, 2])
+sales[, amount := 3]
+#++++
+sales: DataFrame{team: character[], amount: List<I64>}
+DataFrame{team: character[], amount: List<I64>}
+
 #==== loop_carried_reads
 #---- rebinding_reads_the_nearest_earlier_binding
 p <- "word"
@@ -731,4 +751,24 @@ print(pieces)
 #++++
 pieces: Unknown
 T
-155..164 warning[unresolved] I could not resolve `Str.split` in this package, its imports, or builtins. Did you mean `Str.split_on`?
+155..164 warning[unresolved] ry's standard library has no function `split` in `Str`. Did you mean `Str.split_on`?
+
+#---- a_size_name_from_r_suggests_the_library_spelling
+# No small edit turns R's `length` into `List.len` or `Str.count_utf8_bytes`.
+n <- Str.lenght("abc")
+m <- List.length([1L])
+#++++
+n: Unknown
+m: Unknown
+78..79 warning[unused] `n` is assigned but never used.
+83..93 warning[unresolved] ry's standard library has no function `lenght` in `Str`. Did you mean `Str.count_utf8_bytes`?
+101..102 warning[unused] `m` is assigned but never used.
+106..117 warning[unresolved] ry's standard library has no function `length` in `List`. Did you mean `List.len`?
+
+#---- a_number_where_a_callback_goes_names_the_parameter_types
+# The callback's return type is undecided, so the message names only what is known.
+mapped <- Result.map(:Ok(1L), 3)
+#++++
+mapped: Unknown
+84..90 warning[unused] `mapped` is assigned but never used.
+114..115 error[type-mismatch] expected a function that takes `integer`, found `double`

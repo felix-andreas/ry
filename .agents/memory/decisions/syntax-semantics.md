@@ -1845,3 +1845,25 @@ Fixtures: `typing-strict/strict.R.test`, group `literal_decisions`.
   outer loop's.
 
 Fixtures: `typing/control.R.test` group `loops`, `naming/for-bindings.R.test`.
+
+## An error against a fixed type keeps the item's export
+
+**Status:** built.
+
+- A failed item exports `Unknown` so one mistake does not cascade. An error whose value was
+  checked against a fixed type, an annotated binding's or a ry record field's (including a field
+  the record lacks), leaves the slot holding that fixed type, so `Checker::contained_errors`
+  records its range and an item whose every error is contained keeps its export. Later statements
+  then still report their own mistakes, such as a field typo after an invalid field write.
+- A column update (`f[, y := v]`, `setnames`) writes the table in place and is never an unused
+  assignment, at top level either.
+- A non-function where a callback goes reports "expected a function that takes `integer`" rather
+  than a signature whose undecided types print as variables the reader never wrote.
+- A `Module.member` name of the standard library that does not exist says so, and R's size words
+  (`length`, `nchar`, `size`, `len`) suggest `List.len` or `Str.count_utf8_bytes`, which no small
+  edit reaches. Such a misspelled callee skips the native-argument check, whose complaint would
+  only restate the miss.
+
+Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_record_type`,
+`a_column_update_is_not_a_dead_store`, `a_size_name_from_r_suggests_the_library_spelling`,
+`a_number_where_a_callback_goes_names_the_parameter_types`).

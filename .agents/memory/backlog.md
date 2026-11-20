@@ -734,10 +734,8 @@ False reports on correct R, worst first:
 
 Smaller gaps:
 
-- Found in passing by the IDE work, not yet reproduced: `sales[, amount := "x"]` flags `sales` as
-  unused; `p2$x <- "a"` and `p2[["w"]]` go unreported after an earlier error in the same item; the
-  message for `Result.map(:Ok(1L), 3)` leaks the type variable `T`; `Str.lenght` gets no
-  "did you mean".
+- A string literal where a ry function's callback goes is not reported: `List.map([1L], "a")`
+  passes, because a string names a function for R's `match.fun`, which a ry function never calls.
 - Two broken annotations still cause follow-on findings: `#: Rec[]` over an alias of a record (also
   coded `type-mismatch` instead of as an annotation error), and `fn(integer, [character])`.
 - A `vapply` whose callback's return type disagrees with `FUN.VALUE` reports only the two types, as

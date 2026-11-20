@@ -32,7 +32,8 @@ use {
         types::{
             Atomic, Binder, Bound, Constraint, FrameKind, FunctionType, InferenceVar, Name,
             NativeField, QueryName, RecordField, Ty, TyKind, TypeScheme, array_element,
-            for_each_child_type, map_child_types, substitute_rigid, union_of,
+            contains_inference_var, for_each_child_type, map_child_types, substitute_rigid,
+            union_of,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -659,10 +660,16 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 .as_ref()
                 .map(|nearest| format!(" Did you mean `{nearest}`?"))
                 .unwrap_or_default();
-            diagnostics.push(with_name_fix(
-                Diagnostic::new(range, Severity::Warning, "unresolved", format!(
+            let message = match display.split_once('.') {
+                Some((module, member)) if STANDARD_MODULES.contains(&module) => {
+                    format!("ry's standard library has no function `{member}` in `{module}`.{hint}")
+                }
+                _ => format!(
                     "I could not resolve `{display}` in this package, its imports, or builtins.{hint}"
-                )),
+                ),
+            };
+            diagnostics.push(with_name_fix(
+                Diagnostic::new(range, Severity::Warning, "unresolved", message),
                 suggestion.as_deref(),
             ));
         }
@@ -2388,8 +2395,9 @@ fn project_typo_suggestion<'db>(
 #[salsa::tracked(returns(clone))]
 fn typo_suggestion<'db>(db: &'db dyn Db, name: QueryName<'db>) -> Option<String> {
     let library = stubs(db)?;
+    let text = name.name(db).text(db);
     nearest_name(
-        name.name(db).text(db),
+        text,
         library
             .schemes
             .keys()
@@ -2397,6 +2405,27 @@ fn typo_suggestion<'db>(db: &'db dyn Db, name: QueryName<'db>) -> Option<String>
             .filter(|candidate| !outside_prelude(db, library, candidate))
             .map(Symbol::as_str),
     )
+    .or_else(|| size_function(text))
+}
+
+/// The modules of ry's standard library, whose functions are spelled `Module.function`.
+pub(crate) const STANDARD_MODULES: [&str; 6] = ["List", "Str", "Num", "Result", "Dict", "Set"];
+
+/// R spells a size `length` or `nchar`, which no small edit turns into the standard library's
+/// `List.len` or `Str.count_utf8_bytes`.
+fn size_function(name: &str) -> Option<String> {
+    let (module, member) = name.split_once('.')?;
+    const SIZE_WORDS: [&str; 4] = ["length", "nchar", "size", "len"];
+    let size_like =
+        SIZE_WORDS.contains(&member) || nearest_name(member, SIZE_WORDS.into_iter()).is_some();
+    if !size_like {
+        return None;
+    }
+    match module {
+        "Str" => Some("Str.count_utf8_bytes".to_owned()),
+        "List" | "Dict" | "Set" => Some(format!("{module}.len")),
+        _ => None,
+    }
 }
 
 /// A misspelled parameter, field, or column is spelled somewhere inside the error's range, which
@@ -2487,9 +2516,9 @@ pub(crate) fn nearest_name<'a>(
     // A standard-library name such as `Str.split` is usually the start of a longer one
     // (`Str.split_on`), which is farther away by edit distance than an unrelated base function.
     let candidates: Vec<&str> = candidates.collect();
-    if ["List.", "Str.", "Num.", "Result.", "Dict.", "Set."]
-        .iter()
-        .any(|module| name.starts_with(module))
+    if name
+        .split_once('.')
+        .is_some_and(|(module, _)| STANDARD_MODULES.contains(&module))
     {
         let completion = candidates
             .iter()
@@ -2646,9 +2675,12 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 });
             }
         }
-        for binding in naming.bindings.values() {
+        let column_updates = &naming.extras().column_updates;
+        for (slot, binding) in naming.bindings.iter() {
+            // `f[, y := v]` updates the table in place, which is never a dead store.
             if binding.kind != BindingKind::TopLevel
                 || item_name.as_deref() == Some(binding.name.as_str())
+                || column_updates.values().any(|updated| updated == slot)
             {
                 continue;
             }
@@ -3002,6 +3034,37 @@ fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
 fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
     let mut renderer = TypeRenderer::default();
     match &error.kind {
+        TypeErrorKind::Mismatch { expected, found }
+            if let TyKind::Function(function) = expected.kind(db)
+                && contains_inference_var(db, *expected)
+                && !matches!(
+                    found.kind(db),
+                    TyKind::Function(_) | TyKind::Union(_) | TyKind::Var(_)
+                ) =>
+        {
+            // A value that is no function where a callback goes: the callback's undecided types
+            // would print as type variables the reader never wrote, so name only what is known.
+            let known_parameters = function.named.is_empty()
+                && function.variadic.is_none()
+                && !function.positional.is_empty()
+                && function
+                    .positional
+                    .iter()
+                    .all(|&parameter| !contains_inference_var(db, parameter));
+            let found = renderer.render(db, *found);
+            if !known_parameters {
+                return format!("expected a function, found `{found}`");
+            }
+            let parameters: Vec<String> = function
+                .positional
+                .iter()
+                .map(|&parameter| format!("`{}`", renderer.render(db, parameter)))
+                .collect();
+            format!(
+                "expected a function that takes {}, found `{found}`",
+                parameters.join(" and ")
+            )
+        }
         TypeErrorKind::Mismatch { expected, found } => {
             let mut message = format!(
                 "expected `{}`, found `{}`",

@@ -45,7 +45,6 @@ setnames(prices, "prce", "close")
 Any
 prices: DataFrame{id: integer[], price: double[]}
 DataFrame{id: integer[], price: double[]}
-79..85 warning[unused] `prices` is assigned but never used.
 87..93 error[type-mismatch] the frame `prices` has no column `prce`. Did you mean `price`?
 
 #---- skip_absent_ignores_a_missing_column
@@ -68,7 +67,6 @@ setnames(prices, c("key", "close", "extra"))
 Any
 prices: DataFrame{id: integer[], price: double[]}
 DataFrame
-79..85 warning[unused] `prices` is assigned but never used.
 87..113 error[type-mismatch] this frame has 2 columns, but 3 names are given
 
 #---- a_renamed_column_is_gone_under_its_old_name
@@ -93,7 +91,6 @@ setcolorder(prices, c("price", "ticker"))
 Any
 prices: DataFrame{id: integer[], ticker: character[], price: double[]}
 DataFrame{price: double[], ticker: character[], id: integer[]}
-109..115 warning[unused] `prices` is assigned but never used.
 
 #---- an_unknown_column_is_reported
 library(data.table)
@@ -103,7 +100,6 @@ setcolorder(prices, "close")
 Any
 prices: DataFrame{id: integer[], price: double[]}
 DataFrame{id: integer[], price: double[]}
-82..88 warning[unused] `prices` is assigned but never used.
 90..97 error[type-mismatch] the frame `prices` has no column `close`. Its columns are `id`, `price`
 
 #==== setkey_and_setorder
