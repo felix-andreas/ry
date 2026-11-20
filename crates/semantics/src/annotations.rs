@@ -5,7 +5,7 @@
 
 use {
     crate::{
-        Db,
+        Db, SourceFile,
         diagnostics::TypeRenderer,
         types::{
             Atomic, Binder, Bound, Constraint, FrameKind, FunctionType, Name, NativeField,
@@ -19,10 +19,10 @@ use {
     syntax::{
         NodeRef, SyntaxKind, SyntaxNode, TextRange,
         annotation::{
-            BlockRefusal, Declaration, Paired, assigned_function, block_refusal,
-            compact_declaration, directive_name, expanded_declaration, formals, has_token,
-            is_type_kind, misplaced_directives, name_text, pair_formals, signature_from,
-            written_function_type,
+            BlockRefusal, Declaration, Paired, assigned_function, attached_annotation,
+            block_refusal, compact_declaration, directive_name, expanded_declaration, formals,
+            has_token, is_definition_keyword, is_type_kind, misplaced_directives, name_text,
+            pair_formals, signature_from, written_function_type,
         },
         ast, is_inline_annotation_kind, node_text,
     },
@@ -79,11 +79,44 @@ pub struct NamedDefinition<'db> {
     /// Type parameters; the body references them as rigid variables.
     pub parameters: Vec<Name<'db>>,
     pub body: Ty<'db>,
+    /// Set on an `opaque` definition, whose representation only its home file sees.
+    pub opaque: Option<Opaque>,
+}
+
+/// `type`, `alias` or `opaque`: the word that declares `definition`.
+pub fn definition_keyword(definition: &NamedDefinition<'_>) -> &'static str {
+    match (definition.alias, definition.opaque) {
+        (true, _) => "alias",
+        (false, Some(_)) => "opaque",
+        (false, None) => "type",
+    }
+}
+
+/// Where an `opaque` definition lives. Every other file reads a copy whose body is `Unknown`
+/// and whose `hidden` is set, so the opaque-nominal rules apply there unchanged and the
+/// checker refuses `@new` and representation access on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::SalsaValue)]
+pub struct Opaque {
+    /// The declaring file, filled in by `file_type_definitions`; lowering sees one block.
+    pub home: Option<SourceFile>,
+    /// The declaration, in the home file's offsets.
+    pub site: TextRange,
+    pub hidden: bool,
 }
 
 pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'db> {
+    lower_annotation_within(db, node, &[])
+}
+
+/// [`lower_annotation`] inside signatures whose type parameters `outer` names, beyond those
+/// the block's own tree reaches (an item's own `#:` block sits outside the item's tree).
+pub fn lower_annotation_within<'db>(
+    db: &'db dyn Db,
+    node: &SyntaxNode,
+    outer: &[Name<'db>],
+) -> Annotation<'db> {
     debug_assert_eq!(node.kind(), SyntaxKind::ANNOTATION);
-    let mut lowering = Lowering::new(db);
+    let mut lowering = Lowering::within(db, node, outer);
     let mut annotation = Annotation::default();
     match block_refusal(node) {
         Some(BlockRefusal::FormMixing(message)) => {
@@ -111,10 +144,8 @@ pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'
             SyntaxKind::ANNOTATION_DIRECTIVE => {
                 let directive = directive_name(&child);
                 match directive.as_str() {
-                    "type" | "alias" => {
-                        if let Some(definition) =
-                            lowering.lower_named_definition(&child, directive == "alias")
-                        {
+                    keyword if is_definition_keyword(keyword) => {
+                        if let Some(definition) = lowering.lower_named_definition(&child, keyword) {
                             annotation.definitions.push(definition);
                             annotation.definition_sites.push(child.text_range());
                         }
@@ -229,13 +260,22 @@ pub fn is_inline_site_ref(node: NodeRef<'_>) -> bool {
 /// a checked annotation, and a function's signature as a compact `fn(...)` naming the
 /// annotated parameters, with an elided return inferred from the body.
 pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annotation<'db> {
+    lower_inline_annotation_within(db, site, &[])
+}
+
+/// [`lower_inline_annotation`] inside signatures whose type parameters `outer` names.
+pub fn lower_inline_annotation_within<'db>(
+    db: &'db dyn Db,
+    site: &SyntaxNode,
+    outer: &[Name<'db>],
+) -> Annotation<'db> {
     debug_assert!(is_inline_site(site));
-    let mut lowering = Lowering::new(db);
+    let mut lowering = Lowering::within(db, site, outer);
     let mut annotation = Annotation::default();
     match site.kind() {
         SyntaxKind::TYPE_DEFINITION => {
-            let alias = type_definition_keyword(site) == "alias";
-            if let Some(definition) = lowering.lower_named_definition(site, alias) {
+            let keyword = type_definition_keyword(site);
+            if let Some(definition) = lowering.lower_named_definition(site, &keyword) {
                 annotation.definitions.push(definition);
                 annotation.definition_sites.push(site.text_range());
             }
@@ -324,7 +364,57 @@ pub fn lower_inline_annotation<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Annot
     lowering.finish(annotation, inline_range(site))
 }
 
-/// `type` or `alias`, the word that opens an inline type definition.
+/// The type parameters of the signatures around `node`, innermost last: each enclosing
+/// function literal's own `<...>` and the `<...>` of the `#:` block on the statement binding
+/// it. An annotation in a function's body names them as its signature does.
+pub fn enclosing_type_parameters<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Vec<Name<'db>> {
+    let mut names = Vec::new();
+    for function in node
+        .ancestors()
+        .skip(1)
+        .filter(|ancestor| ancestor.kind() == SyntaxKind::FUNCTION_DEF)
+    {
+        let statement = function
+            .parent()
+            .filter(|parent| assigned_function(parent).as_ref() == Some(&function))
+            .unwrap_or_else(|| function.clone());
+        let mut written = attached_annotation(&statement)
+            .map(|block| block_type_parameters(db, &block))
+            .unwrap_or_default();
+        if let Some(list) = function
+            .children()
+            .find(|child| child.kind() == SyntaxKind::TYPE_BINDER_LIST)
+        {
+            written.extend(binder_names(db, &list));
+        }
+        written.extend(names);
+        names = written;
+    }
+    names
+}
+
+/// The type parameters a `#:` block's signature declares, in `<...>` or `@forall`.
+pub fn block_type_parameters<'db>(db: &'db dyn Db, block: &SyntaxNode) -> Vec<Name<'db>> {
+    block
+        .children()
+        .filter(|child| {
+            child.kind() == SyntaxKind::TYPE_BINDER_LIST
+                || (child.kind() == SyntaxKind::ANNOTATION_DIRECTIVE
+                    && directive_name(child) == "forall")
+        })
+        .flat_map(|list| binder_names(db, &list))
+        .collect()
+}
+
+/// The names of the `TYPE_BINDER`s of `list`.
+fn binder_names<'db>(db: &'db dyn Db, list: &SyntaxNode) -> Vec<Name<'db>> {
+    list.children()
+        .filter(|child| child.kind() == SyntaxKind::TYPE_BINDER)
+        .filter_map(|binder| Some(Name::new(db, name_text(&binder)?)))
+        .collect()
+}
+
+/// `type`, `alias` or `opaque`, the word that opens an inline type definition.
 pub fn type_definition_keyword(definition: &SyntaxNode) -> String {
     definition
         .first_token()
@@ -735,7 +825,7 @@ pub fn inline_slots<'db>(db: &'db dyn Db, site: &SyntaxNode) -> Vec<SlotType<'db
 /// blocks, function types and literals around it in scope. `None` when lowering it reports an
 /// error, which leaves the written type to the diagnostics.
 pub fn lower_written_type<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Option<Ty<'db>> {
-    let mut lowering = Lowering::new(db);
+    let mut lowering = Lowering::within(db, node, &[]);
     let mut bound = Vec::new();
     for ancestor in node.ancestors().skip(1) {
         for list in ancestor
@@ -829,6 +919,17 @@ struct Lowering<'db> {
 }
 
 impl<'db> Lowering<'db> {
+    /// A lowering of `node`, where the type parameters of the signatures around it are in
+    /// scope as rigid variables.
+    fn within(db: &'db dyn Db, node: &SyntaxNode, outer: &[Name<'db>]) -> Lowering<'db> {
+        let mut binders = outer.to_vec();
+        binders.extend(enclosing_type_parameters(db, node));
+        Lowering {
+            binders,
+            ..Lowering::new(db)
+        }
+    }
+
     fn new(db: &'db dyn Db) -> Lowering<'db> {
         Lowering {
             db,
@@ -972,7 +1073,7 @@ impl<'db> Lowering<'db> {
     fn lower_named_definition(
         &mut self,
         node: &SyntaxNode,
-        alias: bool,
+        keyword: &str,
     ) -> Option<NamedDefinition<'db>> {
         let name = name_text(node)?;
         let saved = self.binders.len();
@@ -990,11 +1091,16 @@ impl<'db> Lowering<'db> {
             .unwrap_or_else(|| unknown(self.db));
         self.binders.truncate(saved);
         Some(NamedDefinition {
-            alias,
+            alias: keyword == "alias",
             inline: node.kind() == SyntaxKind::TYPE_DEFINITION,
             name: Name::new(self.db, name),
             parameters: parameters.into_iter().map(|binder| binder.name).collect(),
             body,
+            opaque: (keyword == "opaque").then(|| Opaque {
+                home: None,
+                site: node.text_range(),
+                hidden: false,
+            }),
         })
     }
 
@@ -1158,6 +1264,18 @@ impl<'db> Lowering<'db> {
                     (false, true) => TyKind::NamedList(element),
                 };
                 Ty::new(self.db, kind)
+            }
+            SyntaxKind::TYPE_TUPLE | SyntaxKind::TYPE_RECORD
+                if name_text(node).as_deref() == Some("environment") =>
+            {
+                self.lower_environment(node)
+            }
+            SyntaxKind::TYPE_TUPLE | SyntaxKind::TYPE_RECORD
+                if node
+                    .children()
+                    .any(|c| c.kind() == SyntaxKind::TYPE_OTHER_TAGS) =>
+            {
+                self.lower_open_record(node)
             }
             SyntaxKind::TYPE_TUPLE | SyntaxKind::TYPE_RECORD
                 if node.children().any(|c| c.kind() == SyntaxKind::TYPE_FIELD)
@@ -1367,6 +1485,88 @@ impl<'db> Lowering<'db> {
             });
         }
         native_record(self.db, fields)
+    }
+
+    /// `list{a: A, ..}`: the fields a record must have at least. `..` stands for the rest, so
+    /// it pairs with named fields only.
+    fn lower_open_record(&mut self, node: &SyntaxNode) -> Ty<'db> {
+        if let Some(kind) = frame_kind(node) {
+            self.errors.push((
+                format!(
+                    "a `{}{{...}}` type lists every column, so it cannot end in `..`",
+                    kind.head()
+                ),
+                node.text_range(),
+            ));
+            return unknown(self.db);
+        }
+        match self.lower_named_fields(node, "`..` stands for more named fields, so every item of this `list{...}` type needs a name: write it as `name: TYPE`") {
+            Some(fields) => Ty::new(self.db, TyKind::OpenRecord(&fields)),
+            None => unknown(self.db),
+        }
+    }
+
+    /// `environment{count: integer}`: the bindings an environment holds, each with its type.
+    fn lower_environment(&mut self, node: &SyntaxNode) -> Ty<'db> {
+        if let Some(other) = node
+            .children()
+            .find(|c| c.kind() == SyntaxKind::TYPE_OTHER_TAGS)
+        {
+            self.errors.push((
+                "an `environment{...}` type lists every binding the environment may hold, so it cannot end in `..`. Write plain `environment` for one whose bindings are not typed".to_owned(),
+                other.text_range(),
+            ));
+            return unknown(self.db);
+        }
+        match self.lower_named_fields(
+            node,
+            "an `environment{...}` type names every binding: write it as `name: TYPE`",
+        ) {
+            Some(fields) => Ty::new(self.db, TyKind::Environment(&fields)),
+            None => unknown(self.db),
+        }
+    }
+
+    /// The `name: TYPE` fields of a brace type, or `None` after reporting an unnamed item.
+    fn lower_named_fields(
+        &mut self,
+        node: &SyntaxNode,
+        unnamed_message: &str,
+    ) -> Option<Vec<RecordField<'db>>> {
+        let mut seen = FxHashSet::default();
+        let mut fields = Vec::new();
+        for child in node.children() {
+            match child.kind() {
+                SyntaxKind::TYPE_OTHER_TAGS => {}
+                SyntaxKind::TYPE_FIELD => {
+                    let Some(name) = name_text(&child) else {
+                        continue;
+                    };
+                    if !seen.insert(name.clone()) {
+                        self.errors.push((
+                            format!("the field `{name}` appears twice in this type"),
+                            child.text_range(),
+                        ));
+                        continue;
+                    }
+                    let ty = self
+                        .lower_child_type(&child)
+                        .unwrap_or_else(|| unknown(self.db));
+                    fields.push(RecordField {
+                        name: Name::new(self.db, name),
+                        ty,
+                        optional: false,
+                    });
+                }
+                kind if is_type_kind(kind) => {
+                    self.errors
+                        .push((unnamed_message.to_owned(), child.text_range()));
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        Some(fields)
     }
 
     fn lower_type_ref(&mut self, node: &SyntaxNode) -> Ty<'db> {

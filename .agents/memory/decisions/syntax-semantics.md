@@ -210,7 +210,7 @@ Deliberate limits, for zero false positives:
   `character | character[]` would clash with scalar stub signatures); the one exception is `is.null`'s
   true edge on `Any`/`Unknown`, which becomes `NULL`.
 - **A statically undecidable member stays on both edges** (a variable, a flexible-element vector, an
-  opaque nominal: `is.list(data.frame)` is true).
+  abstract nominal: `is.list(data.frame)` is true).
 - **Only a local slot narrows** (a parameter, function local or script local), not a package global,
   which keeps winner semantics, or `x$field`.
 - The guarded key resolves exactly as a read resolves, so fixtures and production share one path.
@@ -391,7 +391,7 @@ superset dialect (next two entries).
 
 ## Shipping stack: The inline annotation syntax is a superset of R
 
-**Status:** built, except `declare(type(...))` as an annotation spelling: the checker does not read it.
+**Status:** built. `declare(type(...))` is not a spelling (see "Plain R comes from `ry build --plain-r`").
 
 The mandate (inline syntax on by default, a warning when off) only makes sense for a syntax GNU R cannot
 parse, so the inline form is a superset of R (costed in `development/design/inline-type-syntax.md`), and
@@ -1116,7 +1116,7 @@ goto-definition, but their errors and strict origins are dropped: they name mode
 **Status:** built.
 
 A stub or project method `$.class`, `[.class` or `[[.class` types the access on a value of nominal `class`
-(`subset_method_result` in `check.rs`), as S3 dispatch would, before the structural read, so an opaque type
+(`subset_method_result` in `check.rs`), as S3 dispatch would, before the structural read, so an abstract type
 gets typed field reads without exposing its representation
 (`a_dollar_method_types_field_reads_on_its_class` in `nominals.R.test`).
 
@@ -1959,3 +1959,103 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 **Status:** built
 
 - `list()` is the empty tuple, and its element is the union of zero items, which `union_of` answers as `NULL`. `c()` and a `for` loop over a union skip `NULL` and empty-list members instead (`is_empty_list`), because they contribute no element: `c(list(), f)` is `list[fn]` and `for (f in actions)` over `list{} | list[fn]` binds a function. rmarkdown's exit-action loop was reported as calling a maybe-`NULL`.
+
+## Shipping stack: Plain R comes from `ry build --plain-r`
+
+**Status:** built.
+
+Code that must run on GNU R (a CRAN submission) goes through `ry build --plain-r`, which writes the tarball's
+R files through `syntax::inline_annotations_to_comments`: each statement's inline annotations become a `#:`
+block above it, the rest erases as `erase_inline_annotations` does, and each annotation no block can carry
+(a lambda argument's signature, a `@Name(value)` inside an expression, an inline type on a statement that
+already has a block) is a warning. A flag, not the default, because the default tarball is the one ry's
+runtime installs, with its rewrites for the runtime; a plain tarball has none. ry code with no R spelling
+(records, tags, suffixed numbers, native functions) refuses the build. Pinned by
+`crates/syntax/tests/comments` and `build-plain-r.scenario`, and checked by hand to report the same findings
+on both spellings.
+
+`declare(type(...))` is not built as a third spelling. The `#:` comment is already the spelling that keeps a
+file valid R, and it covers every position (parameters, returns, binders, directives), which a call inside
+`declare()` cannot reach without inventing a grammar inside R call syntax. A third spelling would add a
+lowering path and a third way for two annotations to disagree, for no case `#:` misses.
+
+## A signature's type parameters are in scope in its body
+
+**Status:** built.
+
+- **Rule.** An annotation in a function's body may name the type parameters of every enclosing signature, outermost first (`annotations::enclosing_type_parameters`), whether the binder is inline (`function<T>`) or in a `#:` block. The body annotation reads the same rigid `T` the signature binds, so `#: T | NULL` widens it and `#: U` where `T` is expected is a mismatch.
+- **The root item's block.** An item's syntax window is detached from its own `#:` block, so `expression_annotations` passes that block's binders (`block_type_parameters`) in as the outer scope; a nested function's block is in the tree and is found by the ancestor walk.
+- **An inferred signature binds no name**, so a body annotation under an unannotated function still reports an unknown `T`.
+
+## `opaque` makes a type's representation private to its file
+
+**Status:** built.
+
+- **Rule.** `opaque Name = TYPE` (or `#: @opaque Name {TYPE}`) is a nominal type that only its declaring file may build (`@new`) or take apart (`$`, `[`, `[[`, their writes, `for`, a destructuring `match` arm, widening to the representation). Other files, test files included, name and pass it. Without this, `@new` anywhere in the project made a nominal type's invariant a convention.
+- **Why the file.** R has no module below the package, and a package's namespace is open to its own code, so the file is the one boundary a reader can see. Gleam's `pub opaque type` and Roc's opaque types draw the same line at the module.
+- **One gate.** `TypeDefinitions::get` returns `hidden_type_definition` (body `Unknown`, `Opaque::hidden`) when the definition's home is not the asking file, so every structural path (projection, widening, arithmetic) sees no representation without a check of its own. The explicit `refuse_hidden_representation` calls exist only so access reports the opaque type instead of an abstract nominal's silent `Unknown`.
+- **Not refused.** R functions over any value (`length`, `attr<-`, `unclass`) still reach it; they leave the type system for every type, and refusing them would make an opaque value unusable with base R. Nothing changes at run time.
+- **Naming.** A stub's bare `@type NAME`, which has no representation, was renamed from "opaque nominal" to "abstract nominal" in the docs, so one word names one thing. The stub attribute `@opaque(...)` on a function's parameters is a separate, stub-only spelling.
+
+## Open records are explicit, with no row variables
+
+**Status:** built.
+
+- **Rule.** `list{a: A, ..}` (`TyKind::OpenRecord`) accepts a record or open record carrying at least the listed fields, paired by name. A closed `list{a: A}` keeps exact field-set equality, so a surplus or misspelled field stays a finding. Implicit width subtyping on every record was rejected for that reason: record typos are the most common record finding.
+- **Reads.** `$` and `[[` by name behave as on a closed record (exact, unique prefix, near-miss typo, else `Unknown`). Positional `[[` and `[` read `Unknown`, because an open record's listed fields are not its first ones.
+- **No row variables.** Roc's `{ a : A }*` and `{ a : A }r` pass the unlisted fields through a function; ry's `..` cannot, so a function returning its open argument returns only the listed fields. Add a row variable only when a corpus needs that round trip.
+- **Scope.** Only the R record shape is open. Frame types list every column, and native `Record{...}` stays closed until typed ry code needs extensible records.
+
+## Recursive types are nominal; an alias never recurses
+
+**Status:** built.
+
+- **Rule.** An `@alias` whose expansion reaches itself stays an error. A recursive type is a nominal `@type`, whose name stops the expansion, so `log$set_threshold("info")$info("hi")` types through `Logger`.
+- **Why.** A recursive structural alias is an equi-recursive type: comparing two of them needs coinductive equality over cyclic types, and every structural walk (`map_child_types`, rendering, `type_size`) would need cycle handling. A nominal type is iso-recursive and costs nothing new. Rust, Roc and Gleam make the same choice.
+- **Diagnostic.** A cycle through a record or function suggests `@type NAME {...}`; a bare alias chain (`A {B}`, `B {A}`) is a plain mistake and keeps the "write a type in place of one alias" wording.
+
+## S4 is typed through a nominal wrapper, not from `setClass`
+
+**Status:** built.
+
+- **Rule.** `setClass` registers no type: a class name in an annotation is unknown unless a `@type` declares it, and `x@slot` is `Unknown` (a strict origin) except on an `Any` subject, where it is `Any` like `$`. A `setGeneric` generic's call gives `Any`, as an S3 generic's does.
+- **Why.** ry discourages S4 (a lint warns on it) and recommends records, so S4 gets the documented route only: a nominal `@type` with a record representation and a constructor wrapping `new(...)` with `@Name(...)`. Reading slot types from `representation()` would duplicate that path for a system users are steered away from, and dispatch over methods registered in any file has no single signature to give a generic.
+
+## A typed environment lists its bindings and never changes type
+
+**Status:** built.
+
+- **Rule.** `environment{count: integer}` (`TyKind::Environment`) types an environment's bindings. A `$<-` or `[[<-` write is checked against the binding and the variable keeps its type (`check_fixed_field_write`, shared with ry's `Record`); an unlisted name is an error on read and write. `new.env()`'s abstract `environment` fits any typed environment and the reverse, and two typed environments must match field for field in both directions, since they alias.
+- **Why not a record.** A record write builds a new record type (`x$a <- v` adds or retypes `a`), which is R's copy semantics for lists. An environment is shared by reference, so a write through one name is visible through every other, and only a fixed type is sound.
+- **Why closed.** An open environment could not check a write to an unlisted binding, and a typo in a write is the common mistake with environment state.
+
+## A top-level `if (FALSE)` body binds no package name
+
+**Status:** settled.
+
+- Packages keep example code in `if (FALSE) { ... }` at the top level (ff's `ordermerge.R`). As
+  package globals, its writes joined other items' SCCs, the fixpoint failed to converge and pinned
+  real functions to `Unknown`, which hid true reports in the same file.
+- `naming.rs` resolves the body in its own `Local` scope with a stable id, marked escaped so its
+  stores never report unused, and `<<-` inside stops at that scope. Only the literal `FALSE`
+  counts: any other condition may run.
+- Its calls are still checked, because the example is usually how the package means to be called.
+
+## S3 subsetting dispatches on the declared class first
+
+**Status:** settled.
+
+- `[`, `[[` on a nominal look up `[.class` for the declared class before the representation's,
+  because the declared class leads the class vector. An `xts` (`@type xts {zoo}`) took `[.zoo`
+  whenever zoo was imported and lost its `Arith.xts` methods.
+
+## A generic's dispatch formal is forced when an argument reaches it
+
+**Status:** settled.
+
+- `FunctionType::dispatch` names the formal an inferred body's `UseMethod` dispatches on: the
+  one its `object` argument names, else the first. Any other `object` expression gives none.
+  A caller forwarding its own formal there makes that formal required, because `UseMethod`
+  evaluates the supplied argument to read its class. A direct call may still omit it (R then
+  dispatches on a missing object, and the method decides). Declared signatures carry no dispatch
+  formal: an annotation states requiredness itself.

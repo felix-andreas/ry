@@ -291,6 +291,7 @@ fn main() -> ExitCode {
         path,
         output,
         no_vignettes,
+        plain_r,
         aot,
         exe,
         library,
@@ -321,7 +322,7 @@ fn main() -> ExitCode {
             }
             return run_install(path, library.as_deref(), None, *runtime);
         }
-        return run_build(path, output.as_deref(), !*no_vignettes, *runtime);
+        return run_build(path, output.as_deref(), !*no_vignettes, *plain_r, *runtime);
     }
 
     if let Command::Install {
@@ -966,6 +967,7 @@ fn run_build(
     path: &Path,
     output: Option<&Path>,
     vignettes: bool,
+    plain_r: bool,
     runtime: Option<Runtime>,
 ) -> ExitCode {
     let built = load::package_root(path)
@@ -980,7 +982,7 @@ fn run_build(
                     .ok_or_else(|| format!("{} has no parent directory", root.display()))?
                     .to_path_buf(),
             };
-            build_tarball(runtime, &home, &root, &output, vignettes)
+            build_tarball(runtime, &home, &root, &output, vignettes, plain_r)
         });
     match built {
         Ok(tarball) => {
@@ -1010,7 +1012,7 @@ fn run_install(
             fs::create_dir_all(&staging)
                 .map_err(|error| format!("cannot create {}: {error}", staging.display()))?;
             let result =
-                build_tarball(runtime, &home, &root, &staging, false).and_then(|tarball| {
+                build_tarball(runtime, &home, &root, &staging, false, false).and_then(|tarball| {
                     let mut command = std::process::Command::new(home.join("bin").join("R"));
                     command.args(["CMD", "INSTALL"]);
                     if let Some(library) = library {
@@ -1077,6 +1079,7 @@ fn build_tarball(
     root: &Path,
     output: &Path,
     vignettes: bool,
+    plain_r: bool,
 ) -> Result<PathBuf, String> {
     let description_path = root.join("DESCRIPTION");
     let description = rcmd::Description::parse(
@@ -1099,14 +1102,16 @@ fn build_tarball(
     let elaborated = match runtime {
         Runtime::Ry => {
             let config = Config::discover(root).map_err(|error| error.to_string())?;
-            preflight::elaborate_package(root, &config)
-                .map_err(|_| format!("{} was not built", root.display()))?
+            let elaborated = preflight::elaborate_package(root, &config)
+                .map_err(|_| format!("{} was not built", root.display()))?;
+            // Plain R carries no rewrites for ry's runtime, but strict mode still refuses it.
+            if plain_r { Vec::new() } else { elaborated }
         }
         Runtime::GnuR => Vec::new(),
     };
     // The copy lives in a fresh temporary directory, which goes away with `staging` on every
     // path out of this function.
-    let staging = (!elaborated.is_empty())
+    let staging = (plain_r || !elaborated.is_empty())
         .then(|| {
             tempfile::Builder::new()
                 .prefix("ry-build-")
@@ -1132,6 +1137,9 @@ fn build_tarball(
                 }
                 fs::write(&target, program)
                     .map_err(|error| format!("cannot write {}: {error}", target.display()))?;
+            }
+            if plain_r {
+                preflight::write_plain_r(&copy, root)?;
             }
             Some(copy)
         }

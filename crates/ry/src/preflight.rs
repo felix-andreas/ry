@@ -500,6 +500,107 @@ pub fn elaborate_package(
     })
 }
 
+/// `ry build --plain-r`: rewrites every R file in `copy`, a package's build copy, into plain R
+/// with each statement's inline annotations in `#:` comments, warning about each annotation no
+/// comment can carry. ry code with no R spelling, such as a record, a tag or `List.map`,
+/// refuses the build, naming the first one per file. Paths print relative to `root`.
+pub fn write_plain_r(copy: &Path, root: &Path) -> Result<(), String> {
+    let description_path = copy.join("DESCRIPTION");
+    let description = fs::read_to_string(&description_path)
+        .map_err(|error| format!("cannot read {}: {error}", description_path.display()))?;
+    let encoding = SourceEncoding::of(&description);
+    let mut pending = vec![copy.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(directory) = pending.pop() {
+        let entries = fs::read_dir(&directory)
+            .map_err(|error| format!("cannot read {}: {error}", directory.display()))?;
+        for entry in entries {
+            let path = entry
+                .map_err(|error| format!("cannot read {}: {error}", directory.display()))?
+                .path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "R" || extension == "r")
+            {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    let mut refused = 0;
+    for path in files {
+        let shown = root.join(path.strip_prefix(copy).unwrap_or(&path));
+        let bytes =
+            fs::read(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        // A file that is not text in the package's encoding is no R code to rewrite.
+        let Some(source) = encoding.decode(bytes) else {
+            continue;
+        };
+        let parsed = syntax::parse(&source);
+        let commented = syntax::inline_annotations_to_comments(&parsed);
+        let position = |text: &str, offset: syntax::TextSize| {
+            let before = &text[..usize::from(offset)];
+            let line = before.matches('\n').count() + 1;
+            let column = before.len() - before.rfind('\n').map_or(0, |at| at + 1) + 1;
+            format!("{}:{line}:{column}", shown.display())
+        };
+        for range in &commented.dropped {
+            crate::cli::warn(&format!(
+                "{}: `{}` has no `#:` spelling there, so the plain R leaves it out",
+                position(&source, range.start()),
+                source[*range].trim()
+            ));
+        }
+        if let Some(range) = first_unspellable(&syntax::parse(&commented.text).syntax_node()) {
+            crate::cli::error(&format!(
+                "{}: `{}` is ry code that plain R cannot spell; only annotations move into \
+                 comments",
+                position(&commented.text, range.start()),
+                commented.text[range]
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+            ));
+            refused += 1;
+            continue;
+        }
+        if commented.text == source {
+            continue;
+        }
+        let program = encoding.encode(&commented.text).ok_or_else(|| {
+            format!(
+                "{} cannot be written in the package's encoding",
+                shown.display()
+            )
+        })?;
+        fs::write(&path, program)
+            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    }
+    match refused {
+        0 => Ok(()),
+        count => Err(format!(
+            "plain R cannot spell the ry code in {count} file{} of {}",
+            if count == 1 { "" } else { "s" },
+            root.display()
+        )),
+    }
+}
+
+/// The first construct GNU R cannot run in a program with its annotations erased: a record,
+/// tuple, list, tag or `match`, a suffixed number, or a native function.
+fn first_unspellable(root: &SyntaxNode) -> Option<syntax::TextRange> {
+    root.descendants_with_tokens()
+        .find_map(|element| match element {
+            NodeOrToken::Node(node) => is_ry_syntax(node.kind()).then(|| node.text_range()),
+            NodeOrToken::Token(token) => (token.kind() == SyntaxKind::SUFFIXED_NUMBER
+                || (token.kind() == SyntaxKind::IDENT && is_native_function(token.text())))
+            .then(|| token.text_range()),
+        })
+}
+
 /// The code files R installs from `sources`, a package's `R/` directory: the files directly in
 /// it named `.R`, `.r`, `.S` or `.q`, in path order.
 fn installed_code_files(sources: &Path) -> Result<Vec<PathBuf>, (PathBuf, io::Error)> {

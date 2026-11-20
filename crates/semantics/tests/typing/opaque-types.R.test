@@ -1,0 +1,252 @@
+#==== opaque_types
+#---- the_home_file_sees_the_representation
+#~~~~ R/units.R
+opaque Meters = list{value: double}
+
+#: fn(value: double) -> Meters
+meters <- function(value) {
+  if (value < 0) stop("negative length")
+  @Meters(list(value = value))
+}
+
+#: fn(length: Meters) -> double
+in_feet <- function(length) length$value * 3.28
+
+#: fn(length: Meters, by: double) -> Meters
+stretch <- function(length, by) {
+  length$value <- length$value * by
+  length
+}
+#++++
+== R/units.R
+meters: fn(value: double) -> Meters
+in_feet: fn(length: Meters) -> double
+stretch: fn(length: Meters, by: double) -> Meters
+
+#---- another_file_uses_the_type_through_its_functions
+#~~~~ R/units.R
+opaque Meters = list{value: double}
+
+#: fn(value: double) -> Meters
+meters <- function(value) @Meters(list(value = value))
+
+#: fn(length: Meters) -> double
+in_feet <- function(length) length$value * 3.28
+#~~~~ R/use.R
+#: fn(lengths: list[Meters]) -> double[]
+all_in_feet <- function(lengths) vapply(lengths, in_feet, double(1))
+
+kept <- meters(2)
+in_feet(kept)
+#++++
+== R/units.R
+meters: fn(value: double) -> Meters
+in_feet: fn(length: Meters) -> double
+== R/use.R
+all_in_feet: fn(lengths: list[Meters]) -> double[]
+kept: Meters
+double
+
+#---- another_file_cannot_create_one
+#~~~~ R/units.R
+opaque Meters = list{value: double}
+#~~~~ R/use.R
+forged <- @Meters(list(value = -1))
+
+#: @new Meters
+forged_comment <- list(value = -1)
+#++++
+== R/units.R
+== R/use.R
+forged: Unknown
+forged_comment: Unknown
+18..34 error[type-mismatch] `Meters` is opaque, so only the file that declares it can create one
+  = 0..35 the type is declared opaque here
+70..86 error[type-mismatch] `Meters` is opaque, so only the file that declares it can create one
+  = 0..35 the type is declared opaque here
+
+#---- another_file_cannot_read_or_write_the_representation
+#~~~~ R/units.R
+opaque Meters = list{value: double}
+#~~~~ R/use.R
+#: fn(length: Meters) -> double
+read_field <- function(length) length$value
+
+#: fn(length: Meters) -> double
+read_element <- function(length) length[["value"]]
+
+#: fn(length: Meters) -> Meters
+overwrite <- function(length) {
+  length$value <- -1
+  length
+}
+
+#: fn(length: Meters) -> NULL
+walk <- function(length) {
+  for (item in length) print(item)
+  NULL
+}
+#++++
+== R/units.R
+== R/use.R
+read_field: fn(length: Meters) -> double
+read_element: fn(length: Meters) -> double
+overwrite: fn(length: Meters) -> Meters
+walk: fn(length: Meters) -> NULL
+63..69 error[type-mismatch] `Meters` is opaque, so its representation is hidden outside the file that declares it. Use that file's functions instead
+  = 0..35 the type is declared opaque here
+142..148 error[type-mismatch] `Meters` is opaque, so its representation is hidden outside the file that declares it. Use that file's functions instead
+  = 0..35 the type is declared opaque here
+227..233 error[type-mismatch] `Meters` is opaque, so its representation is hidden outside the file that declares it. Use that file's functions instead
+  = 0..35 the type is declared opaque here
+330..336 error[type-mismatch] `Meters` is opaque, so its representation is hidden outside the file that declares it. Use that file's functions instead
+  = 0..35 the type is declared opaque here
+
+#---- another_file_cannot_widen_it_to_the_representation
+#~~~~ R/units.R
+opaque Meters = list{value: double}
+#~~~~ R/use.R
+#: fn(length: Meters) -> list{value: double}
+widen <- function(length) length
+
+#: fn(length: Meters) -> double
+add <- function(length) length + 1
+#++++
+== R/units.R
+== R/use.R
+widen: fn(length: Meters) -> list{value: double}
+add: fn(length: Meters) -> double
+71..77 error[type-mismatch] expected `list{value: double}`, found `Meters`
+135..141 error[type-mismatch] expected a numeric value (`integer` or `double`), found `Meters`
+
+#---- an_optional_opaque_value_is_still_opaque
+#~~~~ R/units.R
+opaque Meters = list{value: double}
+#~~~~ R/use.R
+#: fn(length: Meters | NULL) -> double
+read_field <- function(length) if (is.null(length)) 0 else length$value
+#++++
+== R/units.R
+== R/use.R
+read_field: fn(length: Meters | NULL) -> double
+98..104 error[type-mismatch] `Meters` is opaque, so its representation is hidden outside the file that declares it. Use that file's functions instead
+  = 0..35 the type is declared opaque here
+
+#---- another_file_cannot_match_an_opaque_union
+#~~~~ R/shapes.R
+opaque Shape = :Circle(radius: double) | :Square(side: double)
+
+#: fn(radius: double) -> Shape
+circle <- function(radius) @Shape(:Circle(radius = radius))
+#~~~~ R/use.R
+#: fn(shape: Shape) -> double
+area <- function(shape) match (shape) {
+  :Circle(radius = r) => 3.14 * r * r
+  :Square(side = s) => s * s
+}
+#++++
+== R/shapes.R
+circle: fn(radius: double) -> Shape
+== R/use.R
+area: fn(shape: Shape) -> double
+61..66 error[type-mismatch] `Shape` is opaque, so its representation is hidden outside the file that declares it. Use that file's functions instead
+  = 0..62 the type is declared opaque here
+
+#---- a_generic_opaque_type_is_applied_anywhere
+#~~~~ R/stack.R
+opaque Stack<T> = list{items: T[]}
+
+#: <T> fn(items: T[]) -> Stack<T>
+stack <- function(items) @Stack(list(items = items))
+#~~~~ R/use.R
+numbers <- stack(c(1, 2))
+
+#: fn(numbers: Stack<double>) -> Stack<double>
+keep <- function(numbers) numbers
+#++++
+== R/stack.R
+stack: <T> fn(items: T[]) -> Stack<T>
+== R/use.R
+numbers: Stack<double>
+keep: fn(numbers: Stack<double>) -> Stack<double>
+
+#---- a_test_file_is_another_file
+#~~~~ R/units.R
+opaque Meters = list{value: double}
+
+#: fn(value: double) -> Meters
+meters <- function(value) @Meters(list(value = value))
+#~~~~ tests/testthat/test-units.R
+length <- meters(1)
+length$value
+#++++
+== R/units.R
+meters: fn(value: double) -> Meters
+== tests/testthat/test-units.R
+length: Meters
+Unknown
+20..26 error[type-mismatch] `Meters` is opaque, so its representation is hidden outside the file that declares it. Use that file's functions instead
+  = 0..35 the type is declared opaque here
+
+#---- the_comment_spelling_is_opaque_too
+#~~~~ R/units.R
+#: @opaque Meters {list{value: double}}
+
+#: fn(value: double) -> Meters
+meters <- function(value) {
+  #: @new Meters
+  length <- list(value = value)
+  length
+}
+#~~~~ R/use.R
+#: fn(length: Meters) -> double
+read_field <- function(length) length$value
+#++++
+== R/units.R
+meters: fn(value: double) -> Meters
+== R/use.R
+read_field: fn(length: Meters) -> double
+63..69 error[type-mismatch] `Meters` is opaque, so its representation is hidden outside the file that declares it. Use that file's functions instead
+  = 3..39 the type is declared opaque here
+
+#---- a_script_sees_its_own_opaque_type
+opaque Meters = list{value: double}
+
+length <- @Meters(list(value = 1))
+length$value
+#++++
+length: Meters
+double
+
+#---- an_inline_opaque_paired_with_a_comment_type_disagrees
+#: @type Meters {double}
+opaque Meters = double
+#++++
+32..38 warning[annotation-mismatch] the inline definition makes `Meters` an opaque type, but the `#:` comment declares it with `@type`. ry uses the inline definition; make the two agree, or delete one
+  = 3..24 the `#:` comment's definition is here
+
+#---- r_functions_still_reach_the_value
+#~~~~ R/units.R
+opaque Meters = list{value: double}
+
+#: fn(value: double) -> Meters
+meters <- function(value) @Meters(list(value = value))
+#~~~~ R/use.R
+#: fn(length: Meters) -> integer
+size <- function(length) length(length)
+
+#: fn(length: Meters) -> Meters
+with_unit <- function(length) {
+  attr(length, "unit") <- "m"
+  length
+}
+
+#: fn(length: Meters) -> Any
+peek <- function(length) unclass(length)$value
+#++++
+== R/units.R
+meters: fn(value: double) -> Meters
+== R/use.R
+size: fn(length: Meters) -> integer
+with_unit: fn(length: Meters) -> Meters
+peek: fn(length: Meters) -> Any

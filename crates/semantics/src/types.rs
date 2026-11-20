@@ -272,6 +272,12 @@ pub enum TyKind<'db> {
     Tuple(&'db [Ty<'db>]),
     /// `list{a: A, b: B}`; fields keep declaration order.
     Record(&'db [RecordField<'db>]),
+    /// `list{a: A, ..}`: a record-like list with at least these fields. A record with more
+    /// fits it, and only the listed fields can be read through it.
+    OpenRecord(&'db [RecordField<'db>]),
+    /// `environment{count: integer}`: an environment whose listed bindings keep their types.
+    /// It is mutable, so a write is checked against the field and never changes the type.
+    Environment(&'db [RecordField<'db>]),
     /// `Tuple{A, B}`: ry's native tuple, which is not a list and never fits a list type.
     NativeTuple(&'db [Ty<'db>]),
     /// `Record{a: A, b: B}`: ry's native record. Field order is not part of the type, so the
@@ -581,6 +587,10 @@ pub struct FunctionType<'db> {
     /// Formals the body reads only as the whole condition of an `if` or `while`, which takes a
     /// string through `as.logical`. Inferred only.
     pub condition_only: &'db [Name<'db>],
+    /// The formal an S3 generic's `UseMethod` dispatches on. Dispatch forces a supplied
+    /// argument, so forwarding a missing formal there fails even though a call may leave the
+    /// formal out. Inferred only.
+    pub dispatch: Option<Name<'db>>,
     /// The body returns `NULL` only through `if (!predicate(parameter)) return(NULL)`, so a
     /// call where the caller already showed `predicate` holds of its argument returns the
     /// other members alone. Inferred only.
@@ -614,6 +624,7 @@ impl<'db> FunctionType<'db> {
             default_reads: &[],
             missing_tested: &[],
             condition_only: &[],
+            dispatch: None,
             null_unless: None,
             reduces: None,
             from_calls: false,
@@ -1201,6 +1212,10 @@ fn rebuilt_type<'db>(
             Ty::new(db, TyKind::Tuple(&items))
         }
         TyKind::Record(fields) => Ty::new(db, TyKind::Record(&mapped_fields(fields, map))),
+        TyKind::OpenRecord(fields) => Ty::new(db, TyKind::OpenRecord(&mapped_fields(fields, map))),
+        TyKind::Environment(fields) => {
+            Ty::new(db, TyKind::Environment(&mapped_fields(fields, map)))
+        }
         TyKind::NativeTuple(items) => {
             let items: TypeList<'db> = items.iter().map(|&item| map(item)).collect();
             Ty::new(db, TyKind::NativeTuple(&items))
@@ -1285,9 +1300,10 @@ fn for_each_child<'db>(kind: &TyKind<'db>, visit: &mut impl FnMut(Ty<'db>)) {
         }
         TyKind::NativeRecord(fields) => fields.iter().for_each(|field| visit(field.ty)),
         TyKind::Tag(_, payload) => payload.iter().copied().for_each(visit),
-        TyKind::Record(fields) | TyKind::Frame(_, Some(fields)) => {
-            fields.iter().for_each(|field| visit(field.ty))
-        }
+        TyKind::Record(fields)
+        | TyKind::OpenRecord(fields)
+        | TyKind::Environment(fields)
+        | TyKind::Frame(_, Some(fields)) => fields.iter().for_each(|field| visit(field.ty)),
         TyKind::Frame(_, None) => {}
         TyKind::Function(function) => {
             function.positional.iter().copied().for_each(&mut *visit);
@@ -1314,6 +1330,11 @@ fn for_each_child<'db>(kind: &TyKind<'db>, visit: &mut impl FnMut(Ty<'db>)) {
 /// value cached across a rollback) must contain none.
 pub fn contains_inference_var<'db>(_db: &'db dyn Db, ty: Ty<'db>) -> bool {
     ty.bits.get() & HAS_VAR != 0
+}
+
+/// Whether `ty` names a type parameter of an enclosing signature.
+pub fn contains_rigid(ty: Ty<'_>) -> bool {
+    ty.bits.get() & HAS_RIGID != 0
 }
 
 /// Unmapped rigid variables are left intact. A name bound twice takes its last binding.
@@ -1510,6 +1531,8 @@ fn stored_kind<'a>(arena: &'a Bump, kind: TyKind<'a>) -> TyKind<'a> {
     match kind {
         TyKind::Tuple(items) => TyKind::Tuple(arena.alloc_slice_copy(items)),
         TyKind::Record(fields) => TyKind::Record(arena.alloc_slice_copy(fields)),
+        TyKind::OpenRecord(fields) => TyKind::OpenRecord(arena.alloc_slice_copy(fields)),
+        TyKind::Environment(fields) => TyKind::Environment(arena.alloc_slice_copy(fields)),
         TyKind::NativeTuple(items) => TyKind::NativeTuple(arena.alloc_slice_copy(items)),
         TyKind::NativeRecord(fields) => TyKind::NativeRecord(arena.alloc_slice_copy(fields)),
         TyKind::Frame(frame, Some(columns)) => {

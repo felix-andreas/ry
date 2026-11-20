@@ -43,7 +43,8 @@ package and cannot change its findings. A file matched by `exclude` is analyzed 
 it.
 
 `ry check` reads `.R` files and the R chunks of `.Rmd`, `.qmd`, and `.Rnw` documents. Findings go to
-stderr and the one-line summary to stdout. A terminal gets color and Unicode box drawing, `NO_COLOR`
+stderr and the one-line summary to stdout. The summary counts the problems and the files that have
+them, out of the files checked when some are clean, as in `2 problems in 1 of 3 files`. A terminal gets color and Unicode box drawing, `NO_COLOR`
 turns off only the color, and a pipe gets plain ASCII. [Diagnostic
 codes](/reference/diagnostic-codes) shows how to read a finding.
 
@@ -529,6 +530,7 @@ a package a link or an `@inherit` points at, edit the file or delete the cache, 
 ```sh
 ry build                  # write ../<package>_<version>.tar.gz
 ry build -o dist          # write it into dist/ instead
+ry build --plain-r        # write a tarball GNU R and CRAN read
 ry install                # install into the first library on .libPaths()
 ry install -l ~/rlib      # install into ~/rlib
 ry install --train tests  # train the package's code image on its tests
@@ -567,6 +569,31 @@ expanded and the package's own `type` definitions unfolded (`p: Point` becomes
 `p: Record{x: F64, y: F64}`). A type with no such spelling, such as the open record
 `Record{a: I64, ..}`, stays as written. Only the tarball changes, never the package directory, and a
 package that declares `Encoding: latin1` gets its rewritten files in latin1.
+
+`--plain-r` writes the package's R code as plain R instead, for GNU R, CRAN and every other R tool,
+with no rewrites for ry's runtime. Each statement's inline annotations move into a `#:` block above
+it, which ry reads as the same types (see [erasure to plain
+R](/reference/type-system#erasure-to-plain-r)):
+
+```r
+# R/scale.R in the package
+scale_by <- function<T: numeric>(values: T, scale: T = 1) -> T values * scale
+
+# R/scale.R in the tarball
+#: <T: numeric> fn(values: T, [scale]: T) -> T
+scale_by <- function(values, scale = 1)  values * scale
+```
+
+An annotation that no `#:` block can carry is left out with a warning: one on a function passed as
+an argument, a `@Name(value)` inside a larger expression, and an inline type on a statement that
+already has a `#:` block.
+
+```
+  ! /home/you/pkg/R/ids.R:2:26: `: integer` has no `#:` spelling there, so the plain R leaves it out
+```
+
+ry code that plain R cannot spell at all, such as a record, a tag, a suffixed number or `List.map`,
+stops the build with exit status 1, naming the first such construct in each file.
 
 ry's `R CMD INSTALL` and `R CMD SHLIB` run `make` with one job per processor unless `MAKEFLAGS`
 is set to a value. A package

@@ -26,7 +26,11 @@ pub struct StubSources {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
 pub struct StubLibrary<'db> {
+    /// Each name's winning declaration, which a bare reference reads.
     pub schemes: SymbolMap<Vec<TypeScheme<'db>>>,
+    /// Declarations a later namespace's declaration of the same name replaced in `schemes`, per
+    /// namespace, so `stats::sigma` reads stats' own `sigma` while rugarch's wins the bare name.
+    pub shadowed_schemes: SymbolMap<SymbolMap<Vec<TypeScheme<'db>>>>,
     pub nominals: SymbolSet,
     /// `@alias` and generic `@type` declarations, which the checker resolves exactly like a
     /// project's own; a project definition of the same name shadows one.
@@ -201,7 +205,20 @@ pub fn namespace_known(db: &dyn Db, package: &str) -> Option<bool> {
     stubs(db).map(|library| library.knows_namespace(package))
 }
 
-impl StubLibrary<'_> {
+impl<'db> StubLibrary<'db> {
+    /// The declaration `package::name` reads: the package's own, even when another namespace's
+    /// declaration of the name wins a bare reference.
+    pub fn namespace_schemes(
+        &self,
+        package: impl SymbolKey,
+        name: impl SymbolKey + Copy,
+    ) -> Option<&Vec<TypeScheme<'db>>> {
+        self.shadowed_schemes
+            .get(package)
+            .and_then(|shadowed| shadowed.get(name))
+            .or_else(|| self.schemes.get(name))
+    }
+
     pub fn knows_namespace(&self, package: &str) -> bool {
         self.exports_by_namespace.contains_key(package)
     }
@@ -365,6 +382,7 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
         }
     }
     let mut library = StubLibrary::default();
+    let mut scheme_namespaces: SymbolMap<Symbol> = SymbolMap::default();
     for (source_index, (namespace, text)) in sources.sources(db).iter().enumerate() {
         // A qualified-only namespace's typed declarations would also resolve bare names, so they
         // join only once the package is attached or declared, like a conditional namespace.
@@ -496,7 +514,20 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
                 } else {
                     library.documentation.insert(name, documentation.join("\n"));
                 }
-                library.schemes.insert(name, vec![scheme]);
+                let replaced = library.schemes.insert(name, vec![scheme]);
+                let previous_namespace = scheme_namespaces.insert(name, namespace_symbol);
+                if let (Some(replaced), Some(previous_namespace)) = (replaced, previous_namespace)
+                    && previous_namespace != namespace_symbol
+                {
+                    library
+                        .shadowed_schemes
+                        .entry(previous_namespace)
+                        .or_default()
+                        .insert(name, replaced);
+                }
+                if let Some(shadowed) = library.shadowed_schemes.get_mut(namespace_symbol) {
+                    shadowed.remove(name);
+                }
                 if let Some(range) = name_range(spelling) {
                     library.declarations.insert(
                         name,
@@ -841,7 +872,7 @@ fn collect_unknown_nominals<'db>(
 }
 
 /// The declared name of an `@alias` line, a generic `@type NAME<T, ...>` line, or a `@type NAME
-/// {TYPE}` line with a representation. A plain `@type NAME` is the older opaque form, handled on
+/// {TYPE}` line with a representation. A plain `@type NAME` is the older abstract form, handled on
 /// its own.
 fn definition_line_name(content: &str) -> Option<&str> {
     let rest = content.strip_prefix("@alias").or_else(|| {
@@ -856,7 +887,7 @@ fn definition_line_name(content: &str) -> Option<&str> {
 }
 
 /// An `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>` line, lowered through the
-/// annotation grammar a project's own `#: @alias` uses. A generic opaque type is a `@type` whose
+/// annotation grammar a project's own `#: @alias` uses. A generic abstract type is a `@type` whose
 /// representation is `Unknown`, which the checker already treats as having none.
 fn type_definition_line<'db>(db: &'db dyn Db, content: &str) -> Option<NamedDefinition<'db>> {
     definition_line_name(content)?;

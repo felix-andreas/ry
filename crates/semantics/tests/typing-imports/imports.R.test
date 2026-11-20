@@ -659,3 +659,82 @@ a: fn() -> Record{x: double, y: double}
 b: fn() -> Record{x: double, y: double}
 c: Unknown
 374..382 error[type-mismatch] `expect_equal` is an R function, and this value is a ry record, not an R object. Convert it with `as.list()` first
+
+#---- an_xts_series_is_a_zoo_series
+#namespace import(xts)
+#namespace import(zoo)
+#: fn(x: xts) -> zoo
+as_zoo <- function(x) x
+
+#: fn(x: zoo) -> xts
+as_xts <- function(x) x
+#++++
+as_zoo: fn(x: xts) -> zoo
+as_xts: fn(x: zoo) -> xts
+135..136 error[type-mismatch] expected `xts`, found `zoo`
+
+#---- a_qualified_call_reads_its_own_namespace_s_declaration
+#namespace import(rugarch)
+#: fn(fit: Any) -> double
+residual_scale <- function(fit) stats::sigma(fit)
+
+#: fn(fit: uGARCHfit) -> matrix
+volatility <- function(fit) sigma(fit)
+
+#: fn(fit: uGARCHfit) -> matrix
+qualified_volatility <- function(fit) rugarch::sigma(fit)
+#++++
+residual_scale: fn(fit: Any) -> double
+volatility: fn(fit: uGARCHfit) -> matrix
+qualified_volatility: fn(fit: uGARCHfit) -> matrix
+
+#---- a_foreach_body_sees_its_iterators
+#namespace import(foreach)
+#: fn(groups: list[integer[]]) -> integer[]
+totals <- function(groups) {
+  foreach(g = groups, .combine = c) %do% sum(g)
+}
+
+#: fn(groups: list[integer[]]) -> Any
+fields <- function(groups) {
+  foreach(g = groups) %do% g$name
+}
+
+#: fn(n: integer) -> list[list[integer]]
+pairs <- function(n) {
+  foreach(i = seq_len(n)) %:% when(i > 1L) %:% foreach(j = seq_len(i)) %do% (i + j)
+}
+
+#: fn(xs: double[]) -> double
+running <- function(xs) {
+  total <- 0
+  foreach(x = xs) %do% {
+    total <- total + x
+  }
+  total
+}
+
+#: fn(groups: list[double[]], weights: double[]) -> list[double]
+weighted <- function(groups, weights) {
+  foreach(g = groups, w = weights) %dopar% {
+    s <- sum(g)
+    s * w
+  }
+}
+#++++
+totals: fn(groups: list[integer[]]) -> integer[]
+fields: fn(groups: list[integer[]]) -> Any
+pairs: fn(n: integer) -> list[list[integer]]
+running: fn(xs: double[]) -> double
+weighted: fn(groups: list[double[]], weights: double[]) -> list[double]
+245..251 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `integer[]`. Extract an element with `[[` instead.
+
+#---- a_subclass_subsets_with_its_own_method_before_its_representation
+#namespace importFrom(xts, xts)
+#namespace importFrom(zoo, index)
+f <- function(x, at, n) {
+  series <- xts(x, at)
+  series[1:n] * series[1:n]
+}
+#++++
+f: <T, U, V: scalar numeric> fn(x: T, at: U, n: V) -> xts

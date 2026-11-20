@@ -7,13 +7,14 @@ use {
         dense::DenseId,
         hir::{
             Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind,
-            MatchArm, Module, NameSite, PatId, PatternKind, Symbol, UnaryOperator,
+            MatchArm, Module, NameId, NameSite, PatId, PatternKind, Symbol, UnaryOperator,
             destructure_leaves,
         },
         sorted::{SortedMap, SortedSet},
         stubs::{SymbolKey, SymbolMap},
     },
     rustc_hash::{FxHashMap, FxHashSet},
+    smallvec::SmallVec,
     std::{
         collections::{BTreeMap, BTreeSet, btree_map::Entry},
         mem,
@@ -286,6 +287,8 @@ pub fn resolve_item(
         quiet_depth: 0,
         probes: Vec::new(),
         deferred_depth: 0,
+        exit_frame: None,
+        example_scope: None,
         in_defaults: false,
         quoted_depth: 0,
         bracket_depth: 0,
@@ -420,6 +423,13 @@ struct Context<'a> {
     /// Inside an expression R evaluates later (`on.exit`): its reads see the final value, so
     /// they keep every write of the name alive.
     deferred_depth: u32,
+    /// The function depth whose `on.exit` expression is being resolved. Only that frame's
+    /// reads see its later writes; a closure written inside the handler reads its own frame
+    /// in order.
+    exit_frame: Option<usize>,
+    /// The depth of the scope a top-level `if (FALSE)` body resolves in. `<<-` inside it
+    /// stops there, since the example never runs to reach a package name.
+    example_scope: Option<usize>,
     /// Resolving a function's parameter defaults. R evaluates a default lazily in the
     /// function's own frame, so a name the body assigns is visible to it.
     in_defaults: bool,
@@ -624,6 +634,10 @@ impl Context<'_> {
                     self.naming.quiet_operator_reads.insert(*name);
                     // A local `%op%` needs its slot marked too, or it reads as a dead store.
                     self.mark_slot_read(*name);
+                }
+                if let Some(foreach) = foreach_loop(module, id) {
+                    self.resolve_foreach(id, &foreach);
+                    return;
                 }
                 match operator {
                     BinaryOperator::Help => {}
@@ -921,7 +935,9 @@ impl Context<'_> {
                     // value and keep every write of those names alive.
                     Some("on.exit") => {
                         self.deferred_depth += 1;
+                        let enclosing_exit = self.exit_frame.replace(self.current_function_depth());
                         self.resolve_arguments(&module[arguments]);
+                        self.exit_frame = enclosing_exit;
                         self.deferred_depth -= 1;
                         return;
                     }
@@ -1106,7 +1122,31 @@ impl Context<'_> {
             } => {
                 self.resolve(*condition);
                 let entry = self.flow.clone();
-                self.resolve(*then_branch);
+                // A top-level `if (FALSE) { ... }` holds example code R never runs, so its
+                // writes bind no global: as package names they would join other items' cycles.
+                let dead = self.current_scope().kind == ScopeKind::TopLevel
+                    && matches!(
+                        module.kind(*condition),
+                        ExpressionKind::Literal(LiteralKind::Logical(false))
+                    );
+                if dead {
+                    let scope_id = self.stable_scope_id(*then_branch);
+                    // Its stores are scratch for stepping through by hand, so none is unused.
+                    self.escaped_frames.insert(scope_id);
+                    let enclosing_example = self.example_scope.replace(self.scopes.len());
+                    self.scopes.push(Scope {
+                        id: scope_id,
+                        kind: ScopeKind::Local,
+                        slots: FxHashMap::default(),
+                        horizon: Horizon::Unbounded,
+                    });
+                    self.premint_frame_assignments(*then_branch);
+                    self.resolve(*then_branch);
+                    self.scopes.pop();
+                    self.example_scope = enclosing_example;
+                } else {
+                    self.resolve(*then_branch);
+                }
                 let after_then = mem::replace(&mut self.flow, entry);
                 if let Some(else_branch) = else_branch {
                     self.resolve(*else_branch);
@@ -1364,6 +1404,49 @@ impl Context<'_> {
         };
     }
 
+    /// `foreach(g = groups) %do% body` binds each iterator and evaluates the body once per
+    /// element in the calling frame, as a `for` loop does. A parallel backend (`%dopar%`)
+    /// evaluates it in an environment of its own, so its writes vanish with it. A nested stage
+    /// (`%:% foreach(...)`, `%:% when(...)`) reads the iterators of the stages before it.
+    fn resolve_foreach(&mut self, id: ExprId, foreach: &ForeachLoop) {
+        let module = self.module;
+        if !foreach.caller_frame {
+            let scope_id = self.stable_scope_id(id);
+            self.scopes.push(Scope {
+                id: scope_id,
+                kind: ScopeKind::Local,
+                slots: FxHashMap::default(),
+                horizon: Horizon::Unbounded,
+            });
+        }
+        let mut iterators: SmallVec<[BindingId; 2]> = SmallVec::new();
+        for &stage in &foreach.stages {
+            self.resolve(stage);
+            for (name, value) in foreach_iterators(module, stage) {
+                let NameSite { name, range } = module[name];
+                let slot = self.mint_binding(name, range, BindingKind::ForVariable);
+                if self.current_scope().kind == ScopeKind::TopLevel {
+                    self.naming.super_globals.insert(name);
+                    self.naming.loop_bound_slots.insert(slot);
+                }
+                self.current_scope().slots.insert(name, slot);
+                self.naming.for_variables.insert(value, slot);
+                self.record_write(slot, Reach::Implicit);
+                iterators.push(slot);
+            }
+        }
+        if foreach.caller_frame {
+            let depth = self.active_loop_variables.len();
+            self.active_loop_variables.extend(iterators);
+            self.walk_loop(id, foreach.body, None, true);
+            self.active_loop_variables.truncate(depth);
+        } else {
+            self.premint_frame_assignments(foreach.body);
+            self.resolve(foreach.body);
+            self.scopes.pop();
+        }
+    }
+
     fn resolve_arguments(&mut self, arguments: &[Argument]) {
         for argument in arguments {
             if let Some(value) = argument.value {
@@ -1532,6 +1615,21 @@ impl Context<'_> {
                 operator: UnaryOperator::Tilde | UnaryOperator::Help,
                 ..
             } => {}
+            // A parallel foreach body gets its own scope when it is resolved.
+            ExpressionKind::Binary { .. } if let Some(foreach) = foreach_loop(module, id) => {
+                for &stage in &foreach.stages {
+                    self.premint_frame_assignments(stage);
+                    if foreach.caller_frame {
+                        for (name, _) in foreach_iterators(module, stage) {
+                            let NameSite { name, range } = module[name];
+                            self.frame_slot(name, range, BindingKind::ForVariable);
+                        }
+                    }
+                }
+                if foreach.caller_frame {
+                    self.premint_frame_assignments(foreach.body);
+                }
+            }
             // A masked argument gets its own scope when it is resolved, so its assignments
             // mint nothing in this frame.
             ExpressionKind::Call { callee, arguments }
@@ -1567,12 +1665,17 @@ impl Context<'_> {
             .rev()
             .find_map(|(depth, scope)| {
                 let &slot = scope.slots.get(&name)?;
-                let own_frame_default = self.in_defaults && depth == function_depth;
-                (self.flow.contains_key(&slot) || depth < function_depth || own_frame_default)
+                let own_frame_later =
+                    // A quoted read stays quiet: the quotation may never run.
+                    (self.in_defaults
+                        || (self.exit_frame == Some(function_depth) && self.quiet_depth == 0))
+                        && depth == function_depth;
+                (self.flow.contains_key(&slot) || depth < function_depth || own_frame_later)
                     .then_some((depth, slot))
             })?;
-        // A default forced after the body assigned the name reads it like a closure would:
-        // the read comes before every write, and any of them may be the one it observes.
+        // A default forced after the body assigned the name, or an `on.exit` expression, reads
+        // it like a closure would: the read comes before every write, and any of them may be
+        // the one it observes.
         let forward = !self.flow.contains_key(&slot) && depth == function_depth;
         if forward {
             self.deferred_depth += 1;
@@ -1792,6 +1895,13 @@ impl Context<'_> {
             return;
         }
         let module = self.module;
+        let spelling = if spelling == AssignSpelling::Super
+            && self.example_scope == Some(self.scopes.len() - 1)
+        {
+            AssignSpelling::Local
+        } else {
+            spelling
+        };
         if spelling == AssignSpelling::Destructure {
             for leaf in destructure_leaves(module, target).unwrap_or_default() {
                 if let ExpressionKind::NameRef(name) = module.kind(leaf) {
@@ -1825,7 +1935,8 @@ impl Context<'_> {
                             self.record_write_site(assignment, name, range, slot, true);
                         }
                         None => {
-                            if self.emit {
+                            // In an example that never runs, the write reaches no global.
+                            if self.emit && self.example_scope.is_none() {
                                 self.naming.non_locals.insert(target, name);
                                 self.naming.super_globals.insert(name);
                             }
@@ -1902,7 +2013,7 @@ impl Context<'_> {
     /// depth. Bounded by the scope stack, not the enclosing function: `local()` scopes are not
     /// functions. `None` means the global environment.
     fn enclosing_slot(&self, name: Symbol) -> Option<(usize, BindingId)> {
-        (0..self.scopes.len() - 1)
+        (self.example_scope.unwrap_or(0)..self.scopes.len() - 1)
             .rev()
             .find_map(|depth| Some((depth, *self.scopes[depth].slots.get(&name)?)))
     }
@@ -2543,6 +2654,91 @@ fn collect_tail_assignments(module: &Module, id: ExprId, tails: &mut FxHashSet<E
         }
         _ => {}
     }
+}
+
+/// `foreach(...) %do% body`, also with `%dopar%` or doRNG's `%dorng%`, and with stages nested
+/// by `%:%`.
+pub(crate) struct ForeachLoop {
+    /// In order, each a `foreach()` or `when()` call, the first a `foreach()`.
+    pub stages: SmallVec<[ExprId; 2]>,
+    pub body: ExprId,
+    /// `%do%` evaluates the body in the calling frame; a parallel backend in an environment of
+    /// its own.
+    pub caller_frame: bool,
+}
+
+pub(crate) fn foreach_loop(module: &Module, id: ExprId) -> Option<ForeachLoop> {
+    let ExpressionKind::Binary {
+        operator: BinaryOperator::Special,
+        special_name: Some(name),
+        lhs,
+        rhs,
+    } = module.kind(id)
+    else {
+        return None;
+    };
+    if !matches!(name.as_str(), "%do%" | "%dopar%" | "%dorng%") {
+        return None;
+    }
+    let mut stages = SmallVec::new();
+    let mut pending = *lhs;
+    loop {
+        match module.kind(pending) {
+            ExpressionKind::Binary {
+                operator: BinaryOperator::Special,
+                special_name: Some(name),
+                lhs,
+                rhs,
+            } if name.as_str() == "%:%" => {
+                stages.push(*rhs);
+                pending = *lhs;
+            }
+            _ => {
+                stages.push(pending);
+                break;
+            }
+        }
+    }
+    stages.reverse();
+    let callee_is = |stage: ExprId, wanted: &str| match module.kind(stage) {
+        ExpressionKind::Call { callee, .. } => match module.kind(*callee) {
+            ExpressionKind::NameRef(name) => name.as_str() == wanted,
+            ExpressionKind::Namespace {
+                package: Some(package),
+                name: Some(name),
+                ..
+            } => package.as_str() == "foreach" && name.as_str() == wanted,
+            _ => false,
+        },
+        _ => false,
+    };
+    let first = *stages.first()?;
+    let shaped = callee_is(first, "foreach")
+        && stages
+            .iter()
+            .all(|&stage| callee_is(stage, "foreach") || callee_is(stage, "when"));
+    shaped.then_some(ForeachLoop {
+        stages,
+        body: *rhs,
+        caller_frame: name.as_str() == "%do%",
+    })
+}
+
+/// The iterators of a `foreach()` stage: its named arguments other than the dotted options
+/// (`.combine`, `.packages`, ...), each with its value.
+pub(crate) fn foreach_iterators(
+    module: &Module,
+    stage: ExprId,
+) -> impl Iterator<Item = (NameId, ExprId)> + '_ {
+    let arguments = match module.kind(stage) {
+        ExpressionKind::Call { arguments, .. } => &module[*arguments],
+        _ => &[],
+    };
+    arguments.iter().filter_map(move |argument| {
+        let name = argument.name?;
+        let value = argument.value?;
+        (!module[name].name.as_str().starts_with('.')).then_some((name, value))
+    })
 }
 
 /// The formals that hold the data; every other argument evaluates in the data's frame.

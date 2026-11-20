@@ -66,7 +66,7 @@ Most important first. Each line names the open item, and the detail is at its po
 - A cold check of a 300,000-line code base sits at the edge of its 1 s target with a flat profile ("Check cache follow-ups", "Benchmark code bases (measured)").
 - Data-oriented layouts and explicit allocators: the ranked audit is "Open: data-oriented layouts and explicit allocators".
 - Adoption findings, each with a minimal repro: "Open: what the adoption reviews left".
-- Editor: "Open: editor parity" and "Open: editor latency at 300,000 lines". `ry debug analysis-stats <path>` measures hover, definition, references and rename coverage.
+- Editor: "Open: editor parity". `ry debug analysis-stats <path>` measures hover, definition, references and rename coverage. Latency on finbench (4 cores) meets its budget everywhere: an open at startup settles in 35-55 ms, a hover in at most 17 ms, an edit in 2-5 ms (p50-p95). Measure with `tools/bench/tooling/lsp_latency.py --quiet 2` (a shorter quiet overlaps the startup check) and `crates/ry/examples/keystroke_probe.rs`.
 - Robustness: harness gaps in "Open: robustness harnesses", and test debt in "Open: test and fuzz architecture", whose "Judged fine" list is deliberate.
 
 **Releases and operations**

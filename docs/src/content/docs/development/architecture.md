@@ -528,9 +528,13 @@ selected overloads and callee targets, which only editor features and rewrites r
 reads expression types for its rewrites, so it analyses on `RootDatabase::for_command(true)`.
 
 A name being typed is a new top-level definition on every keystroke, so the folds that a new name
-changes are kept to one pass: `package_definition_index` folds each package file's definitions
-into the winners and, in the same loop, the names defined more than once. The duplicate check reads
-those through `duplicate_binding_map`, a copy that is empty in a healthy project and so backdates.
+changes are kept to one chunk. Each layer (package files, test helpers) splits its files into
+chunks of 32 in project order, and `definition_chunk` folds one chunk's definitions into its winners
+and the names it defines more than once. `definition_layer` reads every chunk's names once into a
+table that gives, per hash bucket, the last chunk defining a name there, so a lookup of an undefined
+name probes no chunk and a lookup of a defined one starts at its winning chunk. The duplicate check
+reads `file_duplicate_definitions`, which asks the layer for every definer of each name the file
+defines; it is empty in a healthy project and so backdates.
 Names in these maps are interned `Symbol`s whose hash was computed once at interning, so a fold
 hashes four bytes per name and never rereads the spelling.
 

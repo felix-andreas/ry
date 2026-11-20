@@ -352,7 +352,7 @@ impl<'db> InferenceTable<'db> {
         (resolved, clean)
     }
 
-    /// `None` for aliases, opaque nominals, and unknown names.
+    /// `None` for aliases, abstract nominals, and unknown names.
     pub fn representation(
         &self,
         db: &'db dyn Db,
@@ -585,7 +585,9 @@ impl<'db> InferenceTable<'db> {
                 }
                 Ok(())
             }
-            (TyKind::Record(left), TyKind::Record(right)) => {
+            (TyKind::Record(left), TyKind::Record(right))
+            | (TyKind::OpenRecord(left), TyKind::OpenRecord(right))
+            | (TyKind::Environment(left), TyKind::Environment(right)) => {
                 if left.len() != right.len()
                     || left
                         .iter()
@@ -1329,6 +1331,36 @@ impl<'db> InferenceTable<'db> {
             {
                 true
             }
+            // `new.env()` is an environment with no bindings yet, which an annotation then types;
+            // a typed environment is still an environment.
+            (TyKind::Named(name, _), TyKind::Environment(_))
+            | (TyKind::Environment(_), TyKind::Named(name, _))
+                if name.text(db) == "environment" =>
+            {
+                true
+            }
+            // An environment is mutable, so its bindings' types must match both ways.
+            (TyKind::Environment(actual_fields), TyKind::Environment(expected_fields)) => {
+                actual_fields.len() == expected_fields.len()
+                    && expected_fields.iter().all(|expected_field| {
+                        actual_fields
+                            .iter()
+                            .find(|field| field.name == expected_field.name)
+                            .is_some_and(|actual_field| {
+                                self.compatible_probe(
+                                    db,
+                                    actual_field.ty,
+                                    expected_field.ty,
+                                    depth + 1,
+                                ) && self.compatible_probe(
+                                    db,
+                                    expected_field.ty,
+                                    actual_field.ty,
+                                    depth + 1,
+                                )
+                            })
+                    })
+            }
             // An Array is an R vector at run time: a scalar item type makes it an atomic vector
             // and a ry-value item type a list, so it passes to R code as one, never the reverse.
             (
@@ -1411,6 +1443,18 @@ impl<'db> InferenceTable<'db> {
                     },
                 )
             }
+            // An open record asks for its fields and lets the rest through.
+            (
+                TyKind::Record(actual_fields) | TyKind::OpenRecord(actual_fields),
+                TyKind::OpenRecord(expected_fields),
+            ) => expected_fields.iter().all(|expected_field| {
+                actual_fields
+                    .iter()
+                    .find(|field| field.name == expected_field.name)
+                    .is_some_and(|actual_field| {
+                        self.compatible_probe(db, actual_field.ty, expected_field.ty, depth + 1)
+                    })
+            }),
             (TyKind::Record(actual_fields), TyKind::Record(expected_fields))
                 if actual_fields.len() == expected_fields.len() =>
             {
@@ -1646,12 +1690,17 @@ impl<'db> InferenceTable<'db> {
         expected: Ty<'db>,
         path: &mut Vec<String>,
     ) -> Option<RecordMismatch<'db>> {
-        let (TyKind::Record(actual_fields), TyKind::Record(expected_fields)) = (
+        let (
+            TyKind::Record(actual_fields) | TyKind::OpenRecord(actual_fields),
+            TyKind::Record(expected_fields) | TyKind::OpenRecord(expected_fields),
+        ) = (
             self.resolve(db, actual).kind(db),
             self.resolve(db, expected).kind(db),
-        ) else {
+        )
+        else {
             return None;
         };
+        let open = matches!(self.resolve(db, expected).kind(db), TyKind::OpenRecord(_));
         // Optionality is not compared: `compatible` does not compare it either.
         for expected_field in expected_fields.iter() {
             let name = expected_field.name.text(db);
@@ -1679,6 +1728,9 @@ impl<'db> InferenceTable<'db> {
                 found: self.resolve(db, actual_field.ty),
                 path: mem::take(path),
             });
+        }
+        if open {
+            return None;
         }
         // Surplus fields last: a wrong type in a shared field is the likelier mistake.
         for actual_field in actual_fields.iter() {
@@ -1936,7 +1988,7 @@ enum Variance {
 }
 
 fn parameter_variances<'db>(db: &'db dyn Db, definition: &NamedDefinition<'db>) -> Vec<Variance> {
-    // An opaque type (`@type Dict<K, V>`) hides its body, so its parameters are what tell two
+    // An abstract type (`@type Dict<K, V>`) hides its body, so its parameters are what tell two
     // values apart, and a `Dict<character, double>` must not pass for a `Dict<integer, double>`.
     if !definition.alias && matches!(definition.body.kind(db), TyKind::Unknown) {
         return vec![Variance::Invariant; definition.parameters.len()];

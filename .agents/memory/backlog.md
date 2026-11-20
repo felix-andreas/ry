@@ -799,15 +799,17 @@ false classes, largest first:
   declared optional `NULL` default should read as a placeholder too, or the renderer should mark
   it. Flag-selected returns (`p_dist`, `iam`) are listed there for the same reason: an annotation
   cannot say that a literal flag picks the branch.
-- **A generic's dispatch formal, forwarded, reads as optional** (missed error).
-  `f <- function(fit) persistence(fit)` over a `UseMethod` generic gives `f` an optional `fit`, yet
-  `f()` errors in R (`a_generic_does_not_require_the_formals_it_passes_on`).
+- **A local variable named like a function** (missed error). After `if (flag) t2 <- 5`, a read
+  `t2 + 1` types as the local writes alone when a project, enclosing or base function `t2`
+  exists, so the path that skips the write and reads the function is not reported, even with
+  `maybe-undefined = true` (naming counts the function as a fallback). Leaving the function out
+  cleared mgcv's guarded reads; reporting the unguarded one needs naming to tell a function
+  fallback from a value fallback.
 - **`m * tol` after `if (missing(tol)) tol <- 1e-8` leaves both parameters unbounded**, so
-  `fast_svd("a", 1)` is not reported (missed error).
-- **A number passed to a parameter tested as a condition.** `if (x)` and `!x` bind an open
-  parameter to `logical`, and R takes `0L` there. Bounding it by `scalar numeric` was tried and
-  rejected for hover readability; a call-site relaxation for an inferred `logical` is the likely
-  shape, but schemes do not record where the `logical` came from.
+  `fast_svd("a", 1)` is not reported (missed error). The join of an open parameter and a value
+  written on one path is `Unknown` (`join_written_values`), so that `omega <- omega + m %*% m` on
+  one path leaves a caller free to pass a plain vector. Keeping `U | double` instead would bound
+  `U` by the later use; it needs a rule for which uses of a joined parameter bound it.
 
 ## Open: where findings point, and what the type system still refuses
 
@@ -819,21 +821,6 @@ diagnostic that reads perfectly while blaming the wrong expression counted as a 
 
 Only the open findings are below. `test-user-reports.md` holds the closed ones with what each
 measurement showed.
-
-### Smaller open items
-
-- `@new` is unrestricted project-wide, so a nominal type's invariant holds only by convention. The
-  guide's step 4 says so conditionally ("put `@new` in one constructor"). An
-  encapsulation modifier would make it a guarantee.
-- Editor gaps left by the completeness pass against rust-analyzer (`ide/tests/ide/editor-completeness.R.test`
-  pins what works). `df$` on a base `data.frame` completes nothing, because its columns are not
-  typed (the `DataFrame` type is the typed alternative). A local whose
-  type is a generic parameter (`total <- a + b` inside `<T> fn(a: T, ...)`) gets no inlay hint,
-  because a bare `T` without its binder would mislead.
-- `development/design/r-runtime.md` section 8 keeps `declare(type(...))` as a third annotation
-  spelling for code that must stay valid R, and a strip step (`ry build`) that moves inline types
-  into `#:` comments. Neither exists yet; `syntax::erase_inline_annotations` is the starting point
-  for the strip step.
 
 ### What the round said overall
 
@@ -966,39 +953,7 @@ The rule ships (`decisions/syntax-semantics.md`, "A strict library file's top le
 
 Porting the synthetic finance benchmark to fully typed strict code hit these. Each repro is a project with `[check] strict = true` (and `Imports:` naming the packages it uses); the quoted output is what `ry check` prints.
 
-- **Stubs cannot declare a structural nominal or a subtype.** `@type DEoptim {list{bestmem: double[]}}` and `@type fs_path : character` both give `... is not a valid type name.`, so S3 list results become aliases that lose their class, and `xts` (class `c("xts", "zoo")`) is not a `zoo`: `#: fn(x: xts) -> zoo` over `f <- function(x) x` gives `` expected `zoo`, found `xts` ``. readr's `tbl_df` and fs's `fs_path` are declared as their parents for the same reason.
-- **One flat stub name map.** With rugarch imported, its `sigma` overloads replace `stats::sigma` even for a qualified call: `#: fn(fit: Any) -> double` over `f <- function(fit) stats::sigma(fit)` gives `` expected `double`, found `matrix` ``. Needs per-namespace stub tables.
-- **`!!!` splice is `Unknown`.** In the `...` position it should splice the elements' type. `httr2::req_url_query(httr2::request(url), !!!query)` with `query: list[named: Any]` reports `Unknown` on `!!!query`.
-- **foreach's `%do%` body does not see the iterator.** `foreach::foreach(g = groups, .combine = c) %do% sum(g)` with `groups: list[integer[]]` reports `Unknown` on `sum(g)`. A stub attribute that binds a call's named arguments in the right operand of `%do%`/`%dopar%` would fix it.
-- **A chained `$` is reported at the innermost access, and `@if-unknown` on the statement does not clear it.** The user ends up annotating an intermediate they never named.
-  ```r
-  #: fn(v: environment, name: character) -> character
-  get_secret <- function(v, name) {
-    #: @if-unknown character
-    out <- v$secrets$get(name)$value
-    out
-  }
-  ```
-  Reports `Unknown` on `v$secrets` only.
-- **The `NULL`-default suggestion prints an unparenthesized function type.** `-> character | NULL` parses as the return type, which is right, but the fix it suggests is unparseable and pasting it reproduces the error; the printer must write `(fn(x: character) -> character) | NULL` inside a union. `#: fn(x: character, [f]: fn(x: character) -> character | NULL) -> character` over `apply_or <- function(x, f = NULL) if (is.null(f)) x else f(x)` gives `` `f` defaults to `NULL`, which its declared type `fn(x: character) -> character | NULL` does not admit. ... Declare it `fn(x: character) -> character | | NULL | NULL` ``.
-- **zeallot `%<-%` targets are silently untyped.** The targets are neither typed from the right-hand side nor reported, so a wrong return type passes.
-  ```r
-  #: fn(x: double[]) -> character
-  spread <- function(x) {
-    c(lo, hi) %<-% list(1, 2)
-    hi - lo
-  }
-  ```
-  With `importFrom(zeallot, "%<-%")`: `1 file checked, no problems`.
-- **A body annotation cannot name the signature's type parameter.** Bring the enclosing signature's type parameters into scope for annotations in the body. `#: <T> fn(fn: fn() -> T) -> T | NULL` over a body with `#: T | NULL` above `result <- tryCatch(fn(), error = function(e) NULL)` gives `` I do not know the type `T`. ``
-- **No record width subtyping.** An injected fake with extra fields is refused, so a dependency cannot be typed as "any record with at least `tick`". `#: @alias Ticker {list{tick: fn() -> NULL}}` and a call `run(list(tick = function() NULL, finished = TRUE))` give `` this list has a field `finished`, which is not expected here ``.
-- **A mismatch message leaks an uninstantiated type variable.** Against a field typed `fn([len]: double) -> Any`, `list(tick = function() invisible())` gives `` expected `fn([len]: double) -> Any` for field `tick`, found `fn() -> T` ``; the found type should not print the bare `T` of `invisible`'s signature.
-- **Recursive aliases are refused**, so chaining methods (lgr setters, `progress` `tick()`) return `Any`. `#: @alias Logger {list{set_threshold: fn(level: character) -> Logger}}` gives `` Type alias `Logger` expands in a cycle. ``, filed under `type-mismatch` and underlining the whole function that uses it. Allow recursive record aliases, or a `Self` type for R6-style records.
-- **No typed mutable environment.** A counter in `new.env()` cannot declare its fields: `calls <- new.env(); calls$count <- 0L; calls$count <- calls$count + 1L` reports `Unknown` on each `calls$count` read.
-- **S4 slots and generics are untyped.** A slot read is `Unknown` even on `Any` (`out <- b@v` with `b: Any` gives `` could not determine the type of `out` ``), slots of a class with a `representation` are not typed, and a generic made by `setGeneric("scale_by", ...)` is silently `Any` at its call sites (`out <- scale_by(q, 2)` returned as `double` checks clean).
-- **R6 method bodies are unchecked.** In `R6::R6Class("Counter", public = list(add = function(k) { self$n <- self$n + k; private$check(); invisible(self) }))` the untyped `k`, `self` and `private` produce no strict report: `1 file checked, no problems`.
-- **The summary counts checked files, not files with problems.** A project with one finding in `R/a.R` and two clean files prints `1 problem in 3 files`.
-- **Vectorised math types are wrong.** `exp`, `sqrt` and `nchar` return a scalar for any input, and there is no `array` type (an `array` annotation suggests `Array`, ry's own type). `#: fn(x: double[]) -> double` over `exp(x)` or `sqrt(x)` checks clean, as does `#: fn(x: character[]) -> integer` over `nchar(x)`; `#: fn(rates: matrix) -> matrix` over `exp(-rates)` gives `` expected `matrix`, found `double` ``.
+- **Vectorised math types are wrong.** `exp`, `sqrt` and `nchar` return a scalar for any input, and there is no `array` type (an `array` annotation suggests `Array`, ry's own type). `#: fn(x: double[]) -> double` over `exp(x)` or `sqrt(x)` checks clean, as does `#: fn(x: character[]) -> integer` over `nchar(x)`; `#: fn(rates: matrix) -> matrix` over `exp(-rates)` gives `` expected `matrix`, found `double` ``. Overloads that keep the input's shape (`fn(x: double) -> double`, `fn(x: double[]) -> double[]`, `fn(x: Any) -> Any`) were tried and dropped: an unannotated wrapper such as `function(x) sqrt(x)` then matches several candidates that disagree, so the overload-set rules give it `Unknown` or a `numeric` bound, and inference regresses across the typing fixtures. The fix needs one shape-generic signature (a result with the shape of `x` and element type `double`) rather than an overload set.
 
 
 ## Open: the JIT
@@ -2220,7 +2175,7 @@ The message says to add a type annotation, and no annotation form silences it. `
   annotations with a blank line" when there is only one annotation.**
 - **The unknown-type and duplicate-definition messages name only `@type` or `@alias`**, although a
   definition may also be written inline as `type` or `alias`.
-- **A bodyless opaque type (`@type Dict<K, V>`) is a stub-format form only.** If project files ever
+- **A bodyless abstract type (`@type Dict<K, V>`) is a stub-format form only.** If project files ever
   accept it, the inline `type Name<K, V>` must accept a missing `= TYPE` in the same change, so the
   two spellings stay one grammar.
 - **"Add inferred type annotation" is offered on `x <- @UserId(1L)`**, where the constructor already
@@ -3347,7 +3302,7 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
 - The server keeps every tree. Bounding its tree memory would need eviction without salsa's
   per-read bookkeeping.
 - The cold check's remaining waits are salsa claims on project-wide queries
-  (`duplicate_binding_map`, `project_arithmetic_classes`, `project_type_definitions`) computed by
+  (`definition_layer`, `project_arithmetic_classes`, `project_type_definitions`) computed by
   one thread while the others need them; deriving them before the diagnostics pass, or as
   per-file folds, would let the pass run without them.
 - Interning names as `Symbol` added about 7 ms to the settled re-check (not isolated: `Symbol`
@@ -3458,19 +3413,6 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
   - Closing-brace hints (`} # fn_name`): cheap, worth adding once someone asks; long R functions
     are where they help.
   - Document highlight already exists.
-
-## Open: editor latency at 300,000 lines
-
-Measure with `python3 tools/bench/tooling/lsp_latency.py --ry target/release/ry --root .bench/finbench
---quiet 2` against the LSP, and with `ry debug analysis-stats` in process (its "editor requests"
-table). Generate the code bases with `tools/bench/tooling/generate.py --lines 300000`. A `--quiet` under
-about 2 s lets the first edit overlap the startup cold check and reports a false one-second spike.
-- Keystroke to settled diagnostics on finbench (4 cores, 40 runs) meets the targets (median at most
-  30 ms, 95th percentile at most 100 ms): a body edit settles at a 4 ms median and 6 ms p95, a
-  signature edit at 4 ms and 5 ms. The slow spots left are the first open below and a cold hover
-  (342 ms max, the first hover after startup).
-- A new top-level name still re-runs `package_definition_index` (one pass over every file's definitions), the `package_name` projections the edited file reads, and `project_typo_suggestion` for each unresolved name a re-checked file has (a scan of every project name of a similar length). About 4 to 6 ms on dsbench in `examples/keystroke_probe.rs`. Chunked per-file-group indexes would make the fold proportional to one chunk.
-- A file opened at startup settles 170 to 240 ms after the open on the three benchmarks (4 cores; `decisions/analysis-core.md`, "A file's check names only what its interface reaches"). What is left is parsing every package file in the warm-up (`warm_project_folds`) and the file's own check, about 0.25 s on one thread after parsing (`crates/ry/examples/cold_open_probe.rs` breaks it down per query). Earlier samples of the old naming warm-up showed about a fifth of helper time spinning on salsa 0.28's per-ingredient claim mutex (`SyncTable::syncs`) and another fifth in mimalloc's page slow path; re-sample the new warm-up before acting on that.
 
 ## Open: false errors on real CRAN code
 

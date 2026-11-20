@@ -250,6 +250,10 @@ pub enum Command {
         /// Ship the vignettes as they are instead of rebuilding them
         #[arg(long, default_value_t = false, conflicts_with = "aot")]
         no_vignettes: bool,
+        /// Write the package's R code as plain R that GNU R and its tools read, with each
+        /// statement's inline annotations moved into `#:` comments above it
+        #[arg(long, default_value_t = false, conflicts_with = "aot")]
+        plain_r: bool,
         /// Install the package with its typed functions compiled ahead of time into its typed
         /// code file, as `ry install` does
         #[arg(long, default_value_t = false)]

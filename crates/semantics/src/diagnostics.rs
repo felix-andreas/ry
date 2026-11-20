@@ -2,8 +2,8 @@ use {
     crate::{
         Db, DocumentKind, Item, ItemKind, ProjectFiles, SiteRole, SourceFile, TypeDefinitions,
         annotations::{
-            Annotation, Slot, comment_slots, inline_slots, lower_inline_annotation,
-            statement_inline_site,
+            Annotation, Slot, comment_slots, definition_keyword, inline_slots,
+            lower_inline_annotation, statement_inline_site,
         },
         check::{
             ExpressionNeeds, ItemCheck, LambdaContext, NativeValueKind, OperandExpectation,
@@ -32,7 +32,7 @@ use {
         types::{
             Atomic, Binder, Bound, Constraint, FrameKind, FunctionType, InferenceVar, Name,
             NativeField, QueryName, RecordField, Ty, TyKind, TypeScheme, array_element,
-            contains_inference_var, for_each_child_type, map_child_types, substitute_rigid,
+            contains_inference_var, for_each_child_type, map_child_types, null, substitute_rigid,
             union_of,
         },
     },
@@ -527,12 +527,22 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 "type-mismatch",
                 render_type_error_message(db, error),
             );
-            diagnostics.push(match misspelling_fix(file.text(db), range, &error.kind) {
+            let mut diagnostic = match misspelling_fix(file.text(db), range, &error.kind) {
                 Some((title, at, replacement)) => {
                     diagnostic.with_fix(Applicability::Unsafe, title, at, replacement)
                 }
                 None => diagnostic,
-            });
+            };
+            if let TypeErrorKind::OpaqueOutsideHome { opaque, .. } = &error.kind
+                && let Some(home) = opaque.home
+            {
+                diagnostic.related.push(RelatedLocation {
+                    file: home,
+                    range: opaque.site,
+                    message: "the type is declared opaque here",
+                });
+            }
+            diagnostics.push(diagnostic);
         }
         // Without inline annotations, records, tags and `match` are reported as `ry-syntax`
         // and their coverage is not counted.
@@ -814,7 +824,7 @@ struct ReadContext<'db> {
 
 /// The package's top-level definitions and its definitions made inside a condition.
 struct PackageDefinitions<'db> {
-    top_level: &'db FxHashMap<Symbol, Item<'db>>,
+    top_level: crate::Definitions<'db>,
     conditional: &'db FxHashMap<Symbol, Vec<Item<'db>>>,
 }
 
@@ -952,16 +962,24 @@ fn alias_cycle_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 *range,
                 Severity::Error,
                 "annotation",
-                format!(
-                    "the alias `{name}` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle."
-                ),
+                // A cycle through a record or function is a recursive type, which a nominal
+                // `@type` gives a name of its own; a bare alias chain is just a mistake.
+                if matches!(definition.body.kind(db), TyKind::Named(..)) {
+                    format!(
+                        "the alias `{name}` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle."
+                    )
+                } else {
+                    format!(
+                        "the alias `{name}` refers to itself, so its expansion never ends. A recursive type needs a name of its own: declare it as `@type {name} {{...}}` instead of `@alias`."
+                    )
+                },
             ));
         }
     }
     diagnostics
 }
 
-/// Without this, a misspelled type name would silently become an opaque nominal.
+/// Without this, a misspelled type name would silently become an abstract nominal.
 fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let references: Vec<&(String, TextRange)> = file_annotation_references(db, file)
         .iter()
@@ -1574,12 +1592,17 @@ fn definition_agreement_candidates<'db>(
         };
         let name_range = child_of(&inline_node, SyntaxKind::NAME)
             .map_or(inline_node.text_range(), |node| node.text_range());
-        if inline_definition.alias != comment_definition.alias {
-            let (inline_kind, comment_directive) = if inline_definition.alias {
-                ("an alias", "@type")
-            } else {
-                ("a nominal type", "@alias")
+        let (inline_keyword, comment_keyword) = (
+            definition_keyword(inline_definition),
+            definition_keyword(comment_definition),
+        );
+        if inline_keyword != comment_keyword {
+            let inline_kind = match inline_keyword {
+                "alias" => "an alias",
+                "opaque" => "an opaque type",
+                _ => "a nominal type",
             };
+            let comment_directive = format!("@{comment_keyword}");
             push(
                 name_range,
                 format!(
@@ -1829,15 +1852,6 @@ fn top_level_name_sites(db: &dyn Db, file: SourceFile) -> Vec<(String, TextRange
     sites
 }
 
-/// Near-empty in healthy projects, so its value-equality firewall holds: a new name that
-/// duplicates nothing leaves every file's duplicate check untouched.
-#[salsa::tracked(returns(ref))]
-fn duplicate_binding_map(db: &dyn Db, files: ProjectFiles) -> FxHashMap<Symbol, Vec<SourceFile>> {
-    crate::package_definition_index(db, files)
-        .duplicates
-        .clone()
-}
-
 /// Each site warns: per-site winner semantics make every earlier binding dead, unless code
 /// that runs before the later binding reads the earlier value. Ranges are read only for files
 /// involved in a duplication.
@@ -1845,24 +1859,12 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
     if *file.kind(db) != DocumentKind::Package {
         return Vec::new();
     }
-    let Some(files) = ProjectFiles::try_get(db) else {
-        return Vec::new();
-    };
-    let map = duplicate_binding_map(db, files);
-    if map.is_empty() {
-        return Vec::new();
-    }
-    let mut own_duplicated: Vec<Symbol> = Vec::new();
-    for &(name, _) in file_definitions(db, file) {
-        if map.contains_key(&name) && !own_duplicated.contains(&name) {
-            own_duplicated.push(name);
-        }
-    }
     let mut diagnostics = Vec::new();
-    for name in own_duplicated {
+    for (name, defining_files) in crate::file_duplicate_definitions(db, file) {
+        let name = *name;
         let mut sites: Vec<DefinitionSite> = Vec::new();
         let mut seen_files: Vec<SourceFile> = Vec::new();
-        for &site_file in &map[&name] {
+        for &site_file in defining_files {
             if seen_files.contains(&site_file) {
                 continue;
             }
@@ -3269,6 +3271,11 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "`@if-unknown` applies only where the type is unknown, and this is already `{}`. Drop the annotation, or use `#:` to check the type or `@trust` to override it",
             renderer.render(db, *found)
         ),
+        TypeErrorKind::DestructureCount { names, items } => format!(
+            "this pattern unpacks {names} {}, but the value has {items} {}, so `%<-%` stops with an error. Match the count, skip a position with `.`, or collect the rest with `...rest`",
+            if *names == 1 { "value" } else { "values" },
+            if *items == 1 { "item" } else { "items" }
+        ),
         TypeErrorKind::AnnotationRequiredButDefaulted { name } => format!(
             "this annotation declares `{name}` as required, but the function gives it a default. Write `[{name}]` to declare it optional, or drop the default"
         ),
@@ -3277,9 +3284,11 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         ),
         TypeErrorKind::NullDefaultNotAdmitted { name, declared } => {
             let mut renderer = TypeRenderer::default();
+            // Rendered as one union so a function member is parenthesized in the suggestion.
+            let suggested = renderer.render(db, union_of(db, [*declared, null(db)]));
             let declared = renderer.render(db, *declared);
             format!(
-                "`{name}` defaults to `NULL`, which its declared type `{declared}` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `{declared} | NULL` and narrow with `is.null()`"
+                "`{name}` defaults to `NULL`, which its declared type `{declared}` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `{suggested}` and narrow with `is.null()`"
             )
         }
         TypeErrorKind::ConstraintViolation { constraint, found } => format!(
@@ -3410,6 +3419,16 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "position {position} does not exist in `{}`",
             renderer.render(db, *container)
         ),
+        TypeErrorKind::OpaqueOutsideHome { name, creating, .. } => {
+            let name = name.text(db);
+            if *creating {
+                format!("`{name}` is opaque, so only the file that declares it can create one")
+            } else {
+                format!(
+                    "`{name}` is opaque, so its representation is hidden outside the file that declares it. Use that file's functions instead"
+                )
+            }
+        }
         TypeErrorKind::FieldDoesNotExist {
             suggestion,
             field,
@@ -3638,10 +3657,19 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 "`{function}` is an R function, and this value is a ry {kind}, not an R object. Convert it with `{conversion}()` first"
             )
         }
-        TypeErrorKind::FieldCannotBeAdded { field, container } => format!(
-            "field `{field}` does not exist in `{}`, and assigning to it cannot add it, because a record's fields are fixed",
-            renderer.render(db, *container)
-        ),
+        TypeErrorKind::FieldCannotBeAdded { field, container } => {
+            if matches!(container.kind(db), TyKind::Environment(_)) {
+                format!(
+                    "`{field}` is not a binding of `{}`, whose type lists every binding it may hold. Add `{field}: TYPE` to the type to allow it",
+                    renderer.render(db, *container)
+                )
+            } else {
+                format!(
+                    "field `{field}` does not exist in `{}`, and assigning to it cannot add it, because a record's fields are fixed",
+                    renderer.render(db, *container)
+                )
+            }
+        }
         TypeErrorKind::ArrayItemsDiffer { first, found } => format!(
             "this item is `{}`, but the list's first item is `{}`. A `List`'s items share one type and are never converted into each other",
             renderer.render(db, *found),
@@ -3923,6 +3951,13 @@ impl<'db> TypeRenderer<'db> {
             TyKind::NamedList(element) => format!("list[named: {}]", self.render(db, *element)),
             TyKind::Tuple(items) => format!("list{{{}}}", self.render_items(db, items)),
             TyKind::Record(fields) => format!("list{{{}}}", self.render_fields(db, fields)),
+            TyKind::OpenRecord([]) => "list{..}".to_owned(),
+            TyKind::Environment(fields) => {
+                format!("environment{{{}}}", self.render_fields(db, fields))
+            }
+            TyKind::OpenRecord(fields) => {
+                format!("list{{{}, ..}}", self.render_fields(db, fields))
+            }
             TyKind::NativeTuple(items) => format!("Tuple{{{}}}", self.render_items(db, items)),
             TyKind::NativeRecord(fields) => {
                 format!("Record{{{}}}", self.render_native_fields(db, fields))

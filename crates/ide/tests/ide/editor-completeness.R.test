@@ -29,6 +29,75 @@ action: Add inferred type annotations for the whole file
 completion (2): region, units
 hint @5: DataFrame{region: character[], units: integer[]}
 
+#---- base_df_dollar_completion
+frame <- data.frame(region = c("eu", "us"), units = c(3L, 5L))
+frame$$0
+#++++
+hover 63..69: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": data.frame{region: character[], units: integer[]}"
+completion (2): region, units
+hint @5: data.frame{region: character[], units: integer[]}
+
+#---- a_local_letters_the_signatures_second_parameter_as_u
+compute <- function(x, y) {
+  dou$0bled <- y + y
+  doubled
+}
+#++++
+hover 30..37: doubled: U
+hover-definition: local 30..37
+definition 30..37
+references: 30..37*, 49..56
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `compute`
+  edit 0..0 -> "#: <T, U: numeric> fn([x]: T, y: U) -> U\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T, U: numeric> fn([x]: T, y: U) -> U\n"
+completion (26): doubled, double, stdout, as.double, as.double.difftime, as.double.POSIXlt, is.double, .__C__double
+hint @7: <T, U: numeric> fn([x]: T, y: U) -> U
+hint @37: U
+
+#---- a_declared_signatures_local_offers_its_t
+#: <T: numeric, U> fn(x: U, y: T) -> T
+compute <- function(x, y) {
+  dou$0bled <- y + y
+  doubled
+}
+#++++
+hover 69..76: doubled: T
+hover-definition: local 69..76
+definition 69..76
+references: 69..76*, 88..95
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `doubled`
+  edit 76..76 -> ": T"
+completion (26): doubled, double, stdout, as.double, as.double.difftime, as.double.POSIXlt, is.double, .__C__double
+hint @76: T
+
+#---- an_inline_signatures_local_offers_its_t
+compute <- function<T: numeric>(x: double, y: T) -> T {
+  dou$0bled <- y + y
+  doubled
+}
+#++++
+hover 58..65: doubled: T
+hover-definition: local 58..65
+definition 58..65
+references: 58..65*, 77..84
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `doubled`
+  edit 65..65 -> ": T"
+completion (26): doubled, double, stdout, as.double, as.double.difftime, as.double.POSIXlt, is.double, .__C__double
+hint @65: T
+
 #---- df_col_completion
 sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
 x <- sales |> DataFrame.select(Expr.col("$0"))
@@ -224,6 +293,7 @@ completion (128+): value, result, f, function, break, else, FALSE, for
 hint @13<T>
 hint @19: T
 hint @20 -> T
+hint @31: T
 
 #---- completion_skips_positionally_filled_parameter
 helper <- function(first, second = 2L, third = 3L) first

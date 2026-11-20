@@ -37,7 +37,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Shipping stack: Why salsa rather than an in-house engine
 - Shipping stack: Item granularity and item identity (planned)
 - Shipping stack: An annotation is one concept with pluggable spellings
-- Shipping stack: The inline annotation syntax is a superset of R (built, with exceptions)
+- Shipping stack: The inline annotation syntax is a superset of R
 - Shipping stack: How inline annotations are built
 - Shipping stack: Inline type definitions, coercions and nominal constructors
 - Shipping stack: Testing doctrine for `syntax`
@@ -136,6 +136,16 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A `logical` argument binds a numeric type parameter to `integer`
 - Feature probes, Windows-only exports and callback strings
 - An empty list adds no element to `c()` or a loop
+- Shipping stack: Plain R comes from `ry build --plain-r`
+- A signature's type parameters are in scope in its body
+- `opaque` makes a type's representation private to its file
+- Open records are explicit, with no row variables
+- Recursive types are nominal; an alias never recurses
+- S4 is typed through a nominal wrapper, not from `setClass`
+- A typed environment lists its bindings and never changes type
+- A top-level `if (FALSE)` body binds no package name (settled)
+- S3 subsetting dispatches on the declared class first (settled)
+- A generic's dispatch formal is forced when an argument reaches it (settled)
 
 ## Analysis core
 
@@ -152,7 +162,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Every host keeps every tree
 - `ry check` releases its trees once, and memoized records are compact (built, with exceptions)
 - HIR as struct-of-arrays, lowered from the green tree (built, with exceptions)
-- A new top-level name costs one project fold (built, with exceptions)
+- A new top-level name costs one chunk fold (built, with exceptions)
 - Typed checking costs per name, not per file
 - The cold check's per-call work: a bump arena, borrowed schemes, a token-only green builder (built, with exceptions)
 - The item check's working maps live in a pooled bump arena (built, with exceptions)
@@ -202,6 +212,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - An editor target is what the code means, and rename refuses what it cannot trace
 - `--annotate` and the code action write a lambda argument's signature
 - A cancellation flips the worker's token only inside an armed scope
+- A local typed by a signature's type parameter reads as that parameter
 
 ## Interpreter
 

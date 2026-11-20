@@ -148,6 +148,18 @@ config: I64
 port: Unknown
 21..32 error[strict] strict mode: could not determine the type of `port`; add a type annotation
 
+#---- a_slot_of_an_any_value_is_any
+# The value is already unchecked, so its slot is too, as with `$` on `Any`.
+#~~~~ R/main.R
+#: fn(b: Any) -> Any
+get_v <- function(b) {
+  out <- b@v
+  out
+}
+#++++
+== R/main.R
+get_v: fn(b: Any) -> Any
+
 #---- a_data_frame_column_read_is_a_strict_origin
 #~~~~ R/main.R
 #: fn(df: data.frame) -> double
