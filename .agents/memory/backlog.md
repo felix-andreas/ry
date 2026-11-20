@@ -820,12 +820,6 @@ diagnostic that reads perfectly while blaming the wrong expression counted as a 
 Only the open findings are below. `test-user-reports.md` holds the closed ones with what each
 measurement showed.
 
-### Smaller open items
-
-- `@new` is unrestricted project-wide, so a nominal type's invariant holds only by convention. The
-  guide's step 4 says so conditionally ("put `@new` in one constructor"). An
-  encapsulation modifier would make it a guarantee.
-
 ### What the round said overall
 
 Both testers who could reach a verdict said the core is real. They found genuine Hindley-Milner with
@@ -2210,7 +2204,7 @@ The message says to add a type annotation, and no annotation form silences it. `
   annotations with a blank line" when there is only one annotation.**
 - **The unknown-type and duplicate-definition messages name only `@type` or `@alias`**, although a
   definition may also be written inline as `type` or `alias`.
-- **A bodyless opaque type (`@type Dict<K, V>`) is a stub-format form only.** If project files ever
+- **A bodyless abstract type (`@type Dict<K, V>`) is a stub-format form only.** If project files ever
   accept it, the inline `type Name<K, V>` must accept a missing `= TYPE` in the same change, so the
   two spellings stay one grammar.
 - **"Add inferred type annotation" is offered on `x <- @UserId(1L)`**, where the constructor already

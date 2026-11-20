@@ -39,7 +39,7 @@ read as that note and its type dropped: write each annotation on its own line.
 
 A block is one of three kinds, which cannot be mixed: a single line in one of those forms, an
 [expanded function annotation](#expanded-function-annotations) written as `@param` and `@return`
-lines, or a definition block of `@type` and `@alias` lines.
+lines, or a definition block of `@type`, `@alias` and `@opaque` lines.
 
 <Tabs syncKey="annotation-style">
 <TabItem label="Inline">
@@ -117,7 +117,7 @@ happens when:
 - a plain `#` comment separates them, or no expression follows at all;
 - the block has no content beyond the `#:` marker.
 
-A definition block, one that contains only `@type` and `@alias` lines, attaches to nothing, and
+A definition block, one that contains only `@type`, `@alias` and `@opaque` lines, attaches to nothing, and
 neither does a `@strict` toggle, so the adjacency rules do not apply to them.
 
 ### Refused blocks
@@ -200,8 +200,8 @@ same annotation:
   [The formal list](#annotations-and-the-formal-list) rules apply unchanged, and an unannotated
   parameter keeps its inferred type.
 - A parameter with a default is optional, so the inline form never needs `[name]`.
-- `type` and `alias` definitions are the `@type` and `@alias` definitions of the same name, in the
-  same project-global namespace.
+- `type`, `alias` and `opaque` definitions are the `@type`, `@alias` and `@opaque` definitions of
+  the same name, in the same project-global namespace.
 - A binding's directive, as in `x: @trust integer <- v`, is the same directive in a `#:` block above
   the binding. `@Name(value)` is `(value)` with `#: @new Name` on it.
 - A function without `-> TYPE` infers its return type from its body, as an
@@ -226,8 +226,8 @@ reading of `y:integer` as an assignment target, which is reported as a syntax er
 continues onto the next line inside an open bracket, after a `|`, and onto a line that starts with
 `|`.
 
-`type` and `alias` start a definition only at the start of a statement and only when a name follows
-them on the same line, so `type <- "x"`, `alias(y)` and every other use of them as ordinary names
+`type`, `alias` and `opaque` start a definition only at the start of a statement and only when a
+name follows them on the same line, so `type <- "x"`, `alias(y)` and every other use of them as ordinary names
 keep their R meaning. A definition inside a function body or any other block parses, but is an
 `annotation` error: definitions belong at the top level of a file. A definition ends at the end of
 its line, and nothing but a comment may follow it there, so `type Id = integer; x <- 1` is a syntax
@@ -257,7 +257,7 @@ R's own parser rejects every inline annotation except a binding's, which R reads
 `name:TYPE` through a `` `:<-` `` replacement function that base R does not define. So no working R
 program contains one, and existing R code parses and behaves exactly as before.
 
-`type` and `alias` definitions and `@Name(value)` are not R either: a definition is two names in a
+`type`, `alias` and `opaque` definitions and `@Name(value)` are not R either: a definition is two names in a
 row, and `@` cannot start an R expression. At the start of a line, `@Name` reads as a constructor
 only when `(` or `<` follows the name, so a slot access broken across lines, `obj` then `@slot`,
 keeps R's own syntax error.
@@ -300,7 +300,7 @@ the formal it pairs with.
 A type definition pairs the same way. A `#:` definition directly above an inline definition of the
 same name, with nothing but a line break between them, is one definition written twice. It counts
 once, so it is not a duplicate, and the inline definition is the one that applies. When the two
-differ in kind (`@type` against `alias`), in the number of type parameters, in a constraint, or in
+differ in kind (`@type` against `alias` or `opaque`), in the number of type parameters, in a constraint, or in
 the type itself, ry reports `annotation-mismatch` at the inline definition, pointing at the comment.
 Type parameters pair by position, so `#: @alias Pair<T> {Tuple{T, T}}` and
 `alias Pair<U> = Tuple{U, U}` agree. A `#:` definition anywhere else in the project with the same
@@ -775,14 +775,16 @@ refused.
 
 #### Named types and generic application
 
-Named types are declared with `@type` and `@alias`, and either may take parameters, as in
+Named types are declared with `@type`, `@alias` and `@opaque`, and each may take parameters, as in
 `NAME<T, U>`:
 
 - `type NAME = TYPE`, or `#: @type NAME {TYPE}`, declares a *nominal type* whose representation is
   `TYPE`.
 - `alias NAME = TYPE`, or `#: @alias NAME {TYPE}`, declares a *structural alias* for `TYPE`.
+- `opaque NAME = TYPE`, or `#: @opaque NAME {TYPE}`, declares an [opaque type](#opaque-types): a
+  nominal type whose representation only the file that declares it can see.
 
-The two forms share one namespace, so reusing a name under either form is an error, except for a
+The three forms share one namespace, so reusing a name under any of them is an error, except for a
 `#:` definition paired with the inline one directly below it
 ([inline and comment annotations together](#inline-and-comment-annotations-together)). A definition
 is allowed only at the top level of a file. Definitions are project-global, so a reference need
@@ -847,8 +849,8 @@ representation. Its name may appear anywhere a type expression may.
 - A structural value is not compatible with a nominal type unless [`@new`](#nominal-introduction)
   introduces it.
 - A value of a nominal type *is* compatible with its representation type, so it can be passed to any
-  function written for the representation, while `@new` stays the only place the type's invariant is
-  established.
+  function written for the representation, while `@new` is the only place the type's invariant is
+  established. An [opaque type](#opaque-types) also restricts where `@new` may appear.
 - When an operator, an indexing form, or a loop needs a structural shape, a nominal value projects to
   its representation type. The result of the projection is structural, not nominal. A union of
   nominal types projects member by member, so `s$radus` on `Circle | Square` is checked against
@@ -906,9 +908,9 @@ Projection is what makes field access and arithmetic work on a nominal value. In
 `height + height` is `double`: arithmetic projects `Meters` to `double`, and the result does not keep
 the nominal identity.
 
-##### Opaque nominal types
+##### Abstract nominal types
 
-An *opaque* nominal type has no representation to project. The standard-library stubs declare
+An *abstract* nominal type has no representation to project. The standard-library stubs declare
 `factor`, `connection`, `Date`, and other types the grammar cannot describe structurally as a bare
 `@type NAME` (see [stubs](/development/authoring-stubs)). For these types:
 
@@ -920,7 +922,7 @@ An *opaque* nominal type has no representation to project. The standard-library 
   the matching [operator method](#operator-methods-on-a-class). The nominal identity itself checks
   like any other nominal type.
 
-`data.frame` is not opaque: the stubs declare it as `@type data.frame {list[named: Unknown]}`, the
+`data.frame` is not abstract: the stubs declare it as `@type data.frame {list[named: Unknown]}`, the
 named list of untyped columns it is at run time. A data frame is therefore accepted wherever a
 named list is, as in `lapply(frame, f)` and `vapply(frame, is.numeric, logical(1))`. The stubs also
 declare its methods, so `frame[rows, cols]` is `Any` (R keeps the frame or drops it to a column
@@ -945,6 +947,93 @@ A column takes its argument's name, or a bare variable's. An argument R spreads 
 `data.frame`: it passes to a `data.frame` parameter, and `[` and arithmetic dispatch on the class.
 A data frame built any other way, such as by `read.csv` or `merge`, has unknown columns, so a column
 read such as `frame$amount` is `Unknown`, and strict mode reports it where it is read.
+
+#### Opaque types
+
+An *opaque type* is a nominal type whose representation is private to the file that declares it.
+Inside that file it is an ordinary [nominal type](#nominal-types). In every other file, test files
+included, the type can be named, passed, returned and stored, but not built or taken apart, so the
+declaring file's functions are the only way to make or inspect one. Its invariant then holds
+everywhere, not only where `@new` is written.
+
+Outside the declaring file, each of these is a `type-mismatch` error that points back at the
+declaration:
+
+- `@new` of the type, or `@Name(value)`.
+- `$`, `[` and `[[`, read or written, including `x$value <- v`.
+- A `for` loop over the value.
+- A `match` arm that destructures the value. A wildcard or a bare name still matches it.
+- Passing the value where its representation is expected, and arithmetic on it, because the
+  representation is not visible to project it to.
+
+The check covers a value whose type is the opaque type itself, a union containing it, or `NULL` or
+an optional of it. R functions that take any value still accept it, so `length(x)`,
+`attr(x, "unit") <- "m"` and `unclass(x)` are allowed: they leave the type system, as they do for
+every other value. The restriction is static only. At run time an opaque value is its
+representation, like any nominal value.
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+# R/units.R
+opaque Meters = list{value: double}
+
+meters <- function(value: double) -> Meters {
+  if (value < 0) stop("negative length")
+  @Meters(list(value = value))
+}
+
+in_feet <- function(length: Meters) -> double length$value * 3.28
+
+# R/use.R
+in_feet(meters(2))                       # fine
+@Meters(list(value = -1))                # error: only the declaring file can create one
+read_it <- function(length: Meters) -> double length$value   # error: the representation is hidden
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+# R/units.R
+#: @opaque Meters {list{value: double}}
+
+#: fn(value: double) -> Meters
+meters <- function(value) {
+  if (value < 0) stop("negative length")
+  #: @new Meters
+  result <- list(value = value)
+  result
+}
+
+#: fn(length: Meters) -> double
+in_feet <- function(length) length$value * 3.28
+
+# R/use.R
+in_feet(meters(2))                       # fine
+
+#: fn(length: Meters) -> double
+read_it <- function(length) length$value # error: the representation is hidden
+```
+
+</TabItem>
+</Tabs>
+
+The error on `read_it` reads:
+
+```
+  x `Meters` is opaque, so its representation is hidden outside the file that declares it. Use that file's functions instead
+   --[R/use.R:2:29]
+ 1 | #: fn(length: Meters) -> double
+ 2 | read_it <- function(length) length$value
+   |                             ^^^^^^
+  `->   > the type is declared opaque here
+         --[R/units.R:1:1]
+```
+
+A script that declares an opaque type sees it like the declaring file does, because a script's
+definitions are its own.
 
 #### Type-argument variance
 
@@ -2191,7 +2280,7 @@ position or a missing name gives `NA` at run time, which is a property of the va
 `[[` with a missing name gives `NULL` on a list, which the rules below record as `| NULL`, and fails
 on a named vector, so there it gives the element type.
 
-`$name` behaves like `[["name"]]` on lists, on records, and on opaque nominals, and a backtick-quoted
+`$name` behaves like `[["name"]]` on lists, on records, and on abstract nominals, and a backtick-quoted
 name follows the same rule. `$` does not work on atomic vectors, because R rejects it on every atomic
 vector, named ones included: `c(foo = 1L)$foo` is a type error, while `c(foo = 1L)[["foo"]]` is
 `integer`: R stops with "subscript out of bounds" when the name is absent from an atomic vector,
@@ -2291,7 +2380,7 @@ operations erase names.
 parameter, give `Unknown` and leave the value unconstrained. So `function(node) node$value`,
 `function(x) x[[1L]]`, and `function(x) x[1L]` report nothing, and neither does indexing with several
 indices, as in `function(m, i, j) m[i, j]`. Ordinary R reads fields and slices off values whose shape
-nobody wrote down, so refusing here would report correct code. Like access on an opaque nominal, such
+nobody wrote down, so refusing here would report correct code. Like access on an abstract nominal, such
 an access is an unsupported construct under [strict mode](#strict-mode).
 
 Indexing a `matrix` follows R's `drop` rule. A matrix does not record its element type, so the
@@ -2396,7 +2485,7 @@ precise for each pairing of operands: subtracting two `Date` values gives a `dif
 one by a count gives a `Date`. A class that declares an operator but has no candidate that accepts
 the operands at hand is a `type-mismatch` error rather than a fall-through to the numeric rules, just
 as in R. A class that declares nothing does fall through to the numeric rules, so arithmetic on an
-opaque nominal is still a type error. An unannotated operand beside a class operand does not take
+abstract nominal is still a type error. An unannotated operand beside a class operand does not take
 the class from the first candidate, because R accepts a plain vector there too. It is only required
 to be numeric, so in `function(omega, v) omega + v %*% t(v)`, `omega` is a `T: numeric`, and a call
 with two plain vectors is accepted.
@@ -2424,7 +2513,7 @@ and the rest of a chain `result + a + b`, give `Unknown` and report nothing. Wit
 `c()` dispatches the same way. A class that declares a `c.Class` method keeps its class through
 concatenation, so `c(d1, d2)` on two `Date` values is a `Date`. A nominal with no such method loses
 its class but keeps its data, as R's default `c()` does, so two values of `@type Money {double}`
-combine to `double[]`. An opaque nominal has no representation, so combining it gives `Unknown`.
+combine to `double[]`. An abstract nominal has no representation, so combining it gives `Unknown`.
 
 `a %op% b` is the call `` `%op%`(a, b) ``. A `%…%` operator that the standard-library stubs declare
 is checked and typed as that call, so `"a" %in% valid` is `logical` and `m %*% m` is a `matrix`.
@@ -3025,7 +3114,7 @@ The details:
   for `character` and `character[]`. `is.list` covers every list shape, and `is.function` covers
   function types.
 - Narrowing filters union members. A member whose family cannot be decided statically, such as an
-  unannotated value or an opaque nominal, is kept on both edges.
+  unannotated value or an abstract nominal, is kept on both edges.
 - An unannotated parameter whose runtime type the body inspects is `Unknown`, because code that
   inspects a type uses the value as a different type on each branch, so no one type describes it.
   The inspections are `typeof()`, `class()`, `mode()`, `storage.mode()`, `inherits()`,
@@ -3285,7 +3374,7 @@ That selection cannot be modelled statically, but the call is still checked in f
   type, not `NULL`.
 - `NULL` is iterable and runs zero times, which is legal R. It binds the variable as `NULL`.
 - `Any` iterates with `Any` items, and `Unknown` with `Unknown` items.
-- An opaque nominal iterates with `Any` items, because its element shape is not visible.
+- An abstract nominal iterates with `Any` items, because its element shape is not visible.
 - Iterating does not constrain a value whose shape is undetermined, such as an unannotated
   parameter, because R iterates both vectors and lists. The loop variable becomes `Unknown`.
 - Any other source, such as a function, is an error, reported on the source expression.
@@ -3402,7 +3491,7 @@ upper_names <- function(x) {
 ```
 
 - A binding whose type is definitely not a function (`NULL`, an atomic vector, a list, a record, a
-  tuple, a tag, a frame, or an opaque nominal such as `matrix` or `Date`) is skipped. The lookup tries the enclosing frames' slots of the same name,
+  tuple, a tag, a frame, or an abstract nominal such as `matrix` or `Date`) is skipped. The lookup tries the enclosing frames' slots of the same name,
   then the package's top-level binding, then the library. A top-level `l10n_info <- NULL` therefore
   leaves `l10n_info()` calling base's function. In a package file the top level is the namespace
   itself, so past it only the library remains. A test file's top level encloses in the helpers'
@@ -3791,7 +3880,7 @@ unresolved-name warning for them everywhere.
 
 ### Type names
 
-`@type` and `@alias` declarations share one project-global namespace:
+`@type`, `@alias` and `@opaque` declarations share one project-global namespace:
 
 - A type reference may resolve to a declaration in the same file or another, and forward references
   are allowed.
@@ -3828,7 +3917,7 @@ bottom, so its top level is one sequential lexical scope, like a function body:
 Scripts are type-checked like package files, against the package-global values and project-global
 types, plus their own local bindings and type declarations:
 
-- A script may resolve package-global value names and project-global `@type` and `@alias` names.
+- A script may resolve package-global value names and project-global `@type`, `@alias` and `@opaque` names.
 - A script's top-level value bindings and type declarations are visible neither to package files nor
   to other scripts.
 - A package file and a script may reuse the same top-level value or type name without conflict.
@@ -3853,7 +3942,7 @@ test or helper file therefore reads the package's names but never adds to them:
   not change what `names` means under `R/`, and a package file reading a name that only a test
   defines is an unresolved name.
 - A test binding and a package binding of the same name are not duplicates, and neither are two test
-  bindings. Test files' `@type` and `@alias` declarations are file-local, like a script's.
+  bindings. Test files' `@type`, `@alias` and `@opaque` declarations are file-local, like a script's.
 
 ## Data frames and non-standard evaluation
 
@@ -4620,7 +4709,7 @@ A top-level statement of a library file is a definition when it is one of these:
 - A call that imports a package (`library`, `require`, `requireNamespace`, `loadNamespace`,
   `attachNamespace`) or only declares something (`globalVariables`, `suppressForeignCheck`,
   `delayedAssign`, `makeActiveBinding`, `.S3method`, `registerS3method`).
-- A `type` or `alias` definition, or an expression with no effect, such as `NULL`.
+- A `type`, `alias` or `opaque` definition, or an expression with no effect, such as `NULL`.
 - An `if` whose condition has no effect, or is an import call such as
   `requireNamespace("x", quietly = TRUE)` (negated or not), and whose branches are definitions, or a
   `{` block of definitions.

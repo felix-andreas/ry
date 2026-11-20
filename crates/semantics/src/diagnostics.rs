@@ -2,8 +2,8 @@ use {
     crate::{
         Db, DocumentKind, Item, ItemKind, ProjectFiles, SiteRole, SourceFile, TypeDefinitions,
         annotations::{
-            Annotation, Slot, comment_slots, inline_slots, lower_inline_annotation,
-            statement_inline_site,
+            Annotation, Slot, comment_slots, definition_keyword, inline_slots,
+            lower_inline_annotation, statement_inline_site,
         },
         check::{
             ExpressionNeeds, ItemCheck, LambdaContext, NativeValueKind, OperandExpectation,
@@ -527,12 +527,22 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 "type-mismatch",
                 render_type_error_message(db, error),
             );
-            diagnostics.push(match misspelling_fix(file.text(db), range, &error.kind) {
+            let mut diagnostic = match misspelling_fix(file.text(db), range, &error.kind) {
                 Some((title, at, replacement)) => {
                     diagnostic.with_fix(Applicability::Unsafe, title, at, replacement)
                 }
                 None => diagnostic,
-            });
+            };
+            if let TypeErrorKind::OpaqueOutsideHome { opaque, .. } = &error.kind
+                && let Some(home) = opaque.home
+            {
+                diagnostic.related.push(RelatedLocation {
+                    file: home,
+                    range: opaque.site,
+                    message: "the type is declared opaque here",
+                });
+            }
+            diagnostics.push(diagnostic);
         }
         // Without inline annotations, records, tags and `match` are reported as `ry-syntax`
         // and their coverage is not counted.
@@ -961,7 +971,7 @@ fn alias_cycle_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     diagnostics
 }
 
-/// Without this, a misspelled type name would silently become an opaque nominal.
+/// Without this, a misspelled type name would silently become an abstract nominal.
 fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let references: Vec<&(String, TextRange)> = file_annotation_references(db, file)
         .iter()
@@ -1574,12 +1584,17 @@ fn definition_agreement_candidates<'db>(
         };
         let name_range = child_of(&inline_node, SyntaxKind::NAME)
             .map_or(inline_node.text_range(), |node| node.text_range());
-        if inline_definition.alias != comment_definition.alias {
-            let (inline_kind, comment_directive) = if inline_definition.alias {
-                ("an alias", "@type")
-            } else {
-                ("a nominal type", "@alias")
+        let (inline_keyword, comment_keyword) = (
+            definition_keyword(inline_definition),
+            definition_keyword(comment_definition),
+        );
+        if inline_keyword != comment_keyword {
+            let inline_kind = match inline_keyword {
+                "alias" => "an alias",
+                "opaque" => "an opaque type",
+                _ => "a nominal type",
             };
+            let comment_directive = format!("@{comment_keyword}");
             push(
                 name_range,
                 format!(
@@ -3389,6 +3404,16 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "position {position} does not exist in `{}`",
             renderer.render(db, *container)
         ),
+        TypeErrorKind::OpaqueOutsideHome { name, creating, .. } => {
+            let name = name.text(db);
+            if *creating {
+                format!("`{name}` is opaque, so only the file that declares it can create one")
+            } else {
+                format!(
+                    "`{name}` is opaque, so its representation is hidden outside the file that declares it. Use that file's functions instead"
+                )
+            }
+        }
         TypeErrorKind::FieldDoesNotExist {
             suggestion,
             field,

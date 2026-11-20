@@ -196,10 +196,7 @@ fn ends_in_an_unattached_annotation(root: &SyntaxNode) -> bool {
     }
     let declares_a_type = block.children().any(|child| {
         child.kind() == SyntaxKind::ANNOTATION_DIRECTIVE
-            && matches!(
-                annotation::directive_name(&child).as_str(),
-                "type" | "alias"
-            )
+            && annotation::is_definition_keyword(&annotation::directive_name(&child))
     });
     let mut before = block.prev_sibling_or_token();
     while let Some(element) = &before
@@ -640,7 +637,7 @@ pub fn paired_comment_definition(definition: &SyntaxNode) -> Option<SyntaxNode> 
                             .children_with_tokens()
                             .nth(1)
                             .and_then(|element| element.into_token())
-                            .is_some_and(|word| matches!(word.text(), "type" | "alias"))
+                            .is_some_and(|word| annotation::is_definition_keyword(word.text()))
                     })
                     .any(|directive| definition_name(&directive).as_deref() == Some(name.as_str()));
                 return defines.then_some(comment);

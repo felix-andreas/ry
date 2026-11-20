@@ -14,6 +14,31 @@ SOURCE_FILE@0..21
     TYPE_REF@14..21
       IDENT@14..21 "integer"
 
+#---- opaque_definition
+opaque Meters = list{value: double}
+#++++
+SOURCE_FILE@0..35
+  TYPE_DEFINITION@0..35
+    IDENT@0..6 "opaque"
+    WHITESPACE@6..7 " "
+    NAME@7..13
+      IDENT@7..13 "Meters"
+    WHITESPACE@13..14 " "
+    EQ@14..15 "="
+    WHITESPACE@15..16 " "
+    TYPE_RECORD@16..35
+      NAME@16..20
+        IDENT@16..20 "list"
+      L_BRACE@20..21 "{"
+      TYPE_FIELD@21..34
+        NAME@21..26
+          IDENT@21..26 "value"
+        COLON@26..27 ":"
+        WHITESPACE@27..28 " "
+        TYPE_REF@28..34
+          IDENT@28..34 "double"
+      R_BRACE@34..35 "}"
+
 #---- generic_alias_spanning_lines
 alias Shape<T: numeric> = list{
   kind: character, # what it is

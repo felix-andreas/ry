@@ -145,3 +145,24 @@ action: Add inferred type annotations for the whole file
   edit 46..46 -> ": Money"
 completion (71): price, prcomp, precip, predict, predict.glm, predict.lm, preplot, presidents
 hint @46: Money
+
+#---- hover_on_an_opaque_definition
+opaque Met$0ers = list{value: double}
+f <- function(length: Meters) -> double length$value
+#++++
+hover 7..13: opaque Meters = list{value: double}
+definition 7..13
+references: 7..13*, 58..64
+rename: 2 edit(s)
+signature: none
+completion (1): Meters
+
+#---- hover_on_a_comment_opaque_definition
+#: @opaque Met$0ers {double}
+#++++
+hover 11..17: @opaque Meters {double}
+definition 11..17
+references: 11..17*
+rename: 1 edit(s)
+signature: none
+completion (1): Meters

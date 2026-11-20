@@ -841,7 +841,7 @@ fn collect_unknown_nominals<'db>(
 }
 
 /// The declared name of an `@alias` line, a generic `@type NAME<T, ...>` line, or a `@type NAME
-/// {TYPE}` line with a representation. A plain `@type NAME` is the older opaque form, handled on
+/// {TYPE}` line with a representation. A plain `@type NAME` is the older abstract form, handled on
 /// its own.
 fn definition_line_name(content: &str) -> Option<&str> {
     let rest = content.strip_prefix("@alias").or_else(|| {
@@ -856,7 +856,7 @@ fn definition_line_name(content: &str) -> Option<&str> {
 }
 
 /// An `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>` line, lowered through the
-/// annotation grammar a project's own `#: @alias` uses. A generic opaque type is a `@type` whose
+/// annotation grammar a project's own `#: @alias` uses. A generic abstract type is a `@type` whose
 /// representation is `Unknown`, which the checker already treats as having none.
 fn type_definition_line<'db>(db: &'db dyn Db, content: &str) -> Option<NamedDefinition<'db>> {
     definition_line_name(content)?;

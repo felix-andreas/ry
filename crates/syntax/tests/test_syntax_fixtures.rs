@@ -70,6 +70,11 @@ fn erasure_of_inline_forms() {
             "#: @type C {double}\ntype C = double\nx <- 1\n",
             "#: @type C {double}\n\nx <- 1\n",
         ),
+        (
+            "opaque Meters = list{value: double}\n",
+            "#: @opaque Meters {list{value: double}}\n",
+        ),
+        ("opaque <- 1\nopaque(2)\n", "opaque <- 1\nopaque(2)\n"),
         ("type <- 1\nalias(type)\n", "type <- 1\nalias(type)\n"),
         // A binding type spanning lines erases with its line breaks.
         ("count: integer\n  | NULL <- 1L\n", "count <- 1L\n"),

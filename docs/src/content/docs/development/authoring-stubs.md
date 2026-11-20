@@ -75,21 +75,21 @@ length : fn(x: Any) -> integer
 lapply : <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named: U]
 ```
 
-### Opaque types
+### Abstract types
 
-Besides values, a stub can declare a type. A line `@type NAME` declares an *opaque nominal type*: a
+Besides values, a stub can declare a type. A line `@type NAME` declares an *abstract nominal type*: a
 named type with no inspectable representation, for standard-library values the type grammar cannot
 describe structurally, such as `factor`, `connection`, or `Date`.
 
-An opaque nominal is compatible only with itself, and a value of it can only come from a function
+An abstract nominal is compatible only with itself, and a value of it can only come from a function
 declared to return it. So `Sys.Date()` is a `Date`, and passing it where a `factor` is expected is a
 type error. The functions that *consume* such values usually keep `Any` parameters, because R
-coerces liberally; the nominals exist to tighten return types. Using `$`, `[`, or `[[` on an opaque
+coerces liberally; the nominals exist to tighten return types. Using `$`, `[`, or `[[` on an abstract
 nominal gives `Unknown` rather than an error, so value-dependent access stays usable, and strict
 mode flags each such access. The [typing reference](/reference/type-system#nominal-types) has the
 full rules.
 
-An opaque type may take type parameters, as `@type Dict<K, V>` does in `types/std.Rtypes`. Its
+An abstract type may take type parameters, as `@type Dict<K, V>` does in `types/std.Rtypes`. Its
 parameters are invariant, so a `Dict<character, double>` is neither a `Dict<character, Any>` nor
 the other way around, and `Dict<K, V>` in a signature binds both parameters at a call.
 

@@ -210,7 +210,7 @@ Deliberate limits, for zero false positives:
   `character | character[]` would clash with scalar stub signatures); the one exception is `is.null`'s
   true edge on `Any`/`Unknown`, which becomes `NULL`.
 - **A statically undecidable member stays on both edges** (a variable, a flexible-element vector, an
-  opaque nominal: `is.list(data.frame)` is true).
+  abstract nominal: `is.list(data.frame)` is true).
 - **Only a local slot narrows** (a parameter, function local or script local), not a package global,
   which keeps winner semantics, or `x$field`.
 - The guarded key resolves exactly as a read resolves, so fixtures and production share one path.
@@ -1116,7 +1116,7 @@ goto-definition, but their errors and strict origins are dropped: they name mode
 **Status:** built.
 
 A stub or project method `$.class`, `[.class` or `[[.class` types the access on a value of nominal `class`
-(`subset_method_result` in `check.rs`), as S3 dispatch would, before the structural read, so an opaque type
+(`subset_method_result` in `check.rs`), as S3 dispatch would, before the structural read, so an abstract type
 gets typed field reads without exposing its representation
 (`a_dollar_method_types_field_reads_on_its_class` in `nominals.R.test`).
 
@@ -1986,3 +1986,13 @@ lowering path and a third way for two annotations to disagree, for no case `#:` 
 - **Rule.** An annotation in a function's body may name the type parameters of every enclosing signature, outermost first (`annotations::enclosing_type_parameters`), whether the binder is inline (`function<T>`) or in a `#:` block. The body annotation reads the same rigid `T` the signature binds, so `#: T | NULL` widens it and `#: U` where `T` is expected is a mismatch.
 - **The root item's block.** An item's syntax window is detached from its own `#:` block, so `expression_annotations` passes that block's binders (`block_type_parameters`) in as the outer scope; a nested function's block is in the tree and is found by the ancestor walk.
 - **An inferred signature binds no name**, so a body annotation under an unannotated function still reports an unknown `T`.
+
+## `opaque` makes a type's representation private to its file
+
+**Status:** built.
+
+- **Rule.** `opaque Name = TYPE` (or `#: @opaque Name {TYPE}`) is a nominal type that only its declaring file may build (`@new`) or take apart (`$`, `[`, `[[`, their writes, `for`, a destructuring `match` arm, widening to the representation). Other files, test files included, name and pass it. Without this, `@new` anywhere in the project made a nominal type's invariant a convention.
+- **Why the file.** R has no module below the package, and a package's namespace is open to its own code, so the file is the one boundary a reader can see. Gleam's `pub opaque type` and Roc's opaque types draw the same line at the module.
+- **One gate.** `TypeDefinitions::get` returns `hidden_type_definition` (body `Unknown`, `Opaque::hidden`) when the definition's home is not the asking file, so every structural path (projection, widening, arithmetic) sees no representation without a check of its own. The explicit `refuse_hidden_representation` calls exist only so access reports the opaque type instead of an abstract nominal's silent `Unknown`.
+- **Not refused.** R functions over any value (`length`, `attr<-`, `unclass`) still reach it; they leave the type system for every type, and refusing them would make an opaque value unusable with base R. Nothing changes at run time.
+- **Naming.** A stub's bare `@type NAME`, which has no representation, was renamed from "opaque nominal" to "abstract nominal" in the docs, so one word names one thing. The stub attribute `@opaque(...)` on a function's parameters is a separate, stub-only spelling.

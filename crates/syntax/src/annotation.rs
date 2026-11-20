@@ -552,7 +552,7 @@ pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
             SyntaxKind::ANNOTATION_DIRECTIVE => match directive_name(&child).as_str() {
                 // A flag on the function, not a type, so it fits beside any form.
                 "pure" => continue,
-                "type" | "alias" => BlockForm::Definition,
+                name if is_definition_keyword(name) => BlockForm::Definition,
                 "param" | "return" | "returns" | "forall" => BlockForm::Expanded,
                 _ => BlockForm::Compact,
             },
@@ -606,6 +606,12 @@ pub fn is_type_kind(kind: SyntaxKind) -> bool {
             | SyntaxKind::TYPE_TAG
             | SyntaxKind::TYPE_OTHER_TAGS
     )
+}
+
+/// The words that open a named type definition, as a `#:` directive (`@opaque`) or inline
+/// (`opaque Name = TYPE`).
+pub fn is_definition_keyword(word: &str) -> bool {
+    matches!(word, "type" | "alias" | "opaque")
 }
 
 /// The word after a directive's `@`. Adjacent tokens join, because `@if-unknown` lexes as `if`

@@ -4,7 +4,7 @@
 use {
     crate::{
         DataPath, Db, TypeDefinitions,
-        annotations::Annotation,
+        annotations::{Annotation, Opaque},
         data_file_layout,
         dense::{Bitset, Column},
         diagnostics::{STANDARD_MODULES, annotation_misuses_vocabulary, nearest_name},
@@ -205,6 +205,13 @@ pub enum TypeErrorKind<'db> {
         suggestion: Option<String>,
         field: String,
         container: Ty<'db>,
+    },
+    /// `@new` on, or access to the representation of, an `opaque` type outside the file that
+    /// declares it.
+    OpaqueOutsideHome {
+        name: Name<'db>,
+        opaque: Opaque,
+        creating: bool,
     },
     /// A column named by a literal (`f$x`, `f[["x"]]`, `by = "x"`, an `on` key) that the
     /// frame lacks. `frame` is the frame variable's name when there is one.
@@ -5643,7 +5650,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// An opaque nominal or a non-record representation admits nothing statically.
+    /// An abstract nominal or a non-record representation admits nothing statically.
     fn check_nominal_field_write(
         &mut self,
         nominal: Ty<'db>,
@@ -5856,6 +5863,13 @@ impl<'db, 'a> Checker<'db, 'a> {
     ) -> Ty<'db> {
         if matches!(step, ReplacementStep::Rewrite) {
             return unknown(self.db);
+        }
+        // `attr(x, "a") <- v` and other replacement calls stay R's escape hatch.
+        if !matches!(step, ReplacementStep::Other)
+            && let Some(target) = self.replacement_step(lhs).map(|(target, _)| target)
+            && self.refuse_hidden_representation(target, prior)
+        {
+            return prior;
         }
         // `names(f) <- v`, `f[, "w"] <- v` and `f[[i]] <- v` may rename, add or retype any
         // column of an R frame, so only a write to a named column keeps the columns known.
@@ -6311,7 +6325,17 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// Each arm checks from the state before the `match`, and the arms that complete join
     /// like the branches of an `if`. Pattern bindings are ordinary writes to the frame.
     fn infer_match(&mut self, range: TextRange, scrutinee: ExprId, arms: &[MatchArm]) -> Ty<'db> {
-        let scrutinee_ty = self.infer(scrutinee);
+        let mut scrutinee_ty = self.infer(scrutinee);
+        // A pattern with a shape reads the representation; a name or `_` does not.
+        let destructures = arms.iter().any(|arm| {
+            !matches!(
+                self.module.pattern(arm.pattern).kind,
+                PatternKind::Wildcard | PatternKind::Bind(_) | PatternKind::Missing
+            )
+        });
+        if destructures && self.refuse_hidden_representation(scrutinee, scrutinee_ty) {
+            scrutinee_ty = unknown(self.db);
+        }
         let resolved = self.table.shallow_resolve(self.db, scrutinee_ty);
         if matches!(resolved.kind(self.db), TyKind::Var(_))
             && let Some(shape) = self.scrutinee_shape(arms)
@@ -7150,14 +7174,18 @@ impl<'db, 'a> Checker<'db, 'a> {
         let sequence_range = self.blame_range(sequence);
         let inferred = self.infer(sequence);
         let resolved = self.structural(inferred);
-        let element = match self.iteration_element(resolved) {
-            Ok(element) => element,
-            Err(found) => {
-                self.errors.push(TypeError {
-                    range: sequence_range,
-                    kind: TypeErrorKind::NotIterable { found },
-                });
-                unknown(self.db)
+        let element = if self.refuse_hidden_representation(sequence, inferred) {
+            unknown(self.db)
+        } else {
+            match self.iteration_element(resolved) {
+                Ok(element) => element,
+                Err(found) => {
+                    self.errors.push(TypeError {
+                        range: sequence_range,
+                        kind: TypeErrorKind::NotIterable { found },
+                    });
+                    unknown(self.db)
+                }
             }
         };
         if variable_range.is_some() {
@@ -12820,7 +12848,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let resolved = self.structural(ty);
         match resolved.kind(self.db) {
             TyKind::Function(_) | TyKind::Any | TyKind::Unknown => Callable::Yes,
-            // A nominal left after projection is opaque (`matrix`, `Date`, `data.frame`): an R
+            // A nominal left after projection is abstract (`matrix`, `Date`, `data.frame`): an R
             // object with a class, never a closure, so R's function lookup skips it.
             TyKind::Named(..) | TyKind::Native(_) => Callable::No,
             TyKind::Rigid(_) => Callable::Untyped,
@@ -17707,6 +17735,22 @@ impl<'db, 'a> Checker<'db, 'a> {
         if definition.alias {
             return self.generalize(value_ty);
         }
+        if let Some(opaque) = definition.opaque.filter(|opaque| opaque.hidden) {
+            self.errors.push(TypeError {
+                range,
+                kind: TypeErrorKind::OpaqueOutsideHome {
+                    name,
+                    opaque,
+                    creating: true,
+                },
+            });
+            let arguments: Vec<Ty<'db>> = definition
+                .parameters
+                .iter()
+                .map(|_| unknown(self.db))
+                .collect();
+            return self.generalize(Ty::new(self.db, TyKind::Named(name, &arguments)));
+        }
         // An unapplied generic infers its arguments through the representation check;
         // argument variables live one level up so leftovers generalize into the scheme.
         self.table.level += 1;
@@ -17734,6 +17778,37 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         self.table.level -= 1;
         self.generalize(nominal)
+    }
+
+    /// Reports a read or write of an `opaque` type's representation outside its home file, where
+    /// the type has none, and says whether it did. A union reports its first such member.
+    fn refuse_hidden_representation(&mut self, subject: ExprId, ty: Ty<'db>) -> bool {
+        let resolved = self.table.resolve(self.db, ty);
+        let members = match resolved.kind(self.db) {
+            TyKind::Union(members) => &members[..],
+            _ => std::slice::from_ref(&resolved),
+        };
+        let Some(definitions) = self.table.definitions else {
+            return false;
+        };
+        let Some((name, opaque)) = members.iter().find_map(|member| {
+            let TyKind::Named(name, _) = member.kind(self.db) else {
+                return None;
+            };
+            let opaque = definitions.get(self.db, *name)?.opaque?;
+            opaque.hidden.then_some((*name, opaque))
+        }) else {
+            return false;
+        };
+        self.errors.push(TypeError {
+            range: self.blame_range(subject),
+            kind: TypeErrorKind::OpaqueOutsideHome {
+                name,
+                opaque,
+                creating: false,
+            },
+        });
+        true
     }
 
     /// An R frame as its class, for the rules that dispatch on a class (`Arith.data.frame`,
@@ -17806,6 +17881,9 @@ impl<'db, 'a> Checker<'db, 'a> {
         arguments: &[Argument],
     ) -> Ty<'db> {
         let target_ty = self.infer(target);
+        if self.refuse_hidden_representation(target, target_ty) {
+            return unknown(self.db);
+        }
         let subject = self.structural(target_ty);
         let is_query = !double
             && matches!(
@@ -19952,6 +20030,9 @@ impl<'db, 'a> Checker<'db, 'a> {
             && let Some(ty) = self.subset_method_result("$", class.text(self.db))
         {
             return ty;
+        }
+        if self.refuse_hidden_representation(target, target_ty) {
+            return unknown(self.db);
         }
         let subject = self.structural(target_ty);
         match self.dollar_result(id, range, name_range, subject, &name) {

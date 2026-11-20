@@ -608,8 +608,10 @@ type-mismatch
 
 With `alias` in place of `type`, both are the same record type and the call passes. `type` works
 over R values too: with `type UserId = character`, an `OrderId` string cannot pass for a `UserId`.
-When `@Email(...)` appears in one validating function only, every `Email` in the program has passed
-that validation. At run time, `@Name(x)` is just `x`.
+Declare it `opaque` (`opaque Email = character`) and only the file that declares it can call
+`@Email(...)` or look inside: every other file gets an `Email` from that file's functions, so every
+`Email` in the program has passed its validation
+([opaque types](/reference/type-system#opaque-types)). At run time, `@Name(x)` is just `x`.
 
 ### DataFrame
 

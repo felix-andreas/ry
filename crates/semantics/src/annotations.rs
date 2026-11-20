@@ -5,7 +5,7 @@
 
 use {
     crate::{
-        Db,
+        Db, SourceFile,
         diagnostics::TypeRenderer,
         types::{
             Atomic, Binder, Bound, Constraint, FrameKind, FunctionType, Name, NativeField,
@@ -21,8 +21,8 @@ use {
         annotation::{
             BlockRefusal, Declaration, Paired, assigned_function, attached_annotation,
             block_refusal, compact_declaration, directive_name, expanded_declaration, formals,
-            has_token, is_type_kind, misplaced_directives, name_text, pair_formals, signature_from,
-            written_function_type,
+            has_token, is_definition_keyword, is_type_kind, misplaced_directives, name_text,
+            pair_formals, signature_from, written_function_type,
         },
         ast, is_inline_annotation_kind, node_text,
     },
@@ -79,6 +79,29 @@ pub struct NamedDefinition<'db> {
     /// Type parameters; the body references them as rigid variables.
     pub parameters: Vec<Name<'db>>,
     pub body: Ty<'db>,
+    /// Set on an `opaque` definition, whose representation only its home file sees.
+    pub opaque: Option<Opaque>,
+}
+
+/// `type`, `alias` or `opaque`: the word that declares `definition`.
+pub fn definition_keyword(definition: &NamedDefinition<'_>) -> &'static str {
+    match (definition.alias, definition.opaque) {
+        (true, _) => "alias",
+        (false, Some(_)) => "opaque",
+        (false, None) => "type",
+    }
+}
+
+/// Where an `opaque` definition lives. Every other file reads a copy whose body is `Unknown`
+/// and whose `hidden` is set, so the opaque-nominal rules apply there unchanged and the
+/// checker refuses `@new` and representation access on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::SalsaValue)]
+pub struct Opaque {
+    /// The declaring file, filled in by `file_type_definitions`; lowering sees one block.
+    pub home: Option<SourceFile>,
+    /// The declaration, in the home file's offsets.
+    pub site: TextRange,
+    pub hidden: bool,
 }
 
 pub fn lower_annotation<'db>(db: &'db dyn Db, node: &SyntaxNode) -> Annotation<'db> {
@@ -121,10 +144,8 @@ pub fn lower_annotation_within<'db>(
             SyntaxKind::ANNOTATION_DIRECTIVE => {
                 let directive = directive_name(&child);
                 match directive.as_str() {
-                    "type" | "alias" => {
-                        if let Some(definition) =
-                            lowering.lower_named_definition(&child, directive == "alias")
-                        {
+                    keyword if is_definition_keyword(keyword) => {
+                        if let Some(definition) = lowering.lower_named_definition(&child, keyword) {
                             annotation.definitions.push(definition);
                             annotation.definition_sites.push(child.text_range());
                         }
@@ -253,8 +274,8 @@ pub fn lower_inline_annotation_within<'db>(
     let mut annotation = Annotation::default();
     match site.kind() {
         SyntaxKind::TYPE_DEFINITION => {
-            let alias = type_definition_keyword(site) == "alias";
-            if let Some(definition) = lowering.lower_named_definition(site, alias) {
+            let keyword = type_definition_keyword(site);
+            if let Some(definition) = lowering.lower_named_definition(site, &keyword) {
                 annotation.definitions.push(definition);
                 annotation.definition_sites.push(site.text_range());
             }
@@ -393,7 +414,7 @@ fn binder_names<'db>(db: &'db dyn Db, list: &SyntaxNode) -> Vec<Name<'db>> {
         .collect()
 }
 
-/// `type` or `alias`, the word that opens an inline type definition.
+/// `type`, `alias` or `opaque`, the word that opens an inline type definition.
 pub fn type_definition_keyword(definition: &SyntaxNode) -> String {
     definition
         .first_token()
@@ -1052,7 +1073,7 @@ impl<'db> Lowering<'db> {
     fn lower_named_definition(
         &mut self,
         node: &SyntaxNode,
-        alias: bool,
+        keyword: &str,
     ) -> Option<NamedDefinition<'db>> {
         let name = name_text(node)?;
         let saved = self.binders.len();
@@ -1070,11 +1091,16 @@ impl<'db> Lowering<'db> {
             .unwrap_or_else(|| unknown(self.db));
         self.binders.truncate(saved);
         Some(NamedDefinition {
-            alias,
+            alias: keyword == "alias",
             inline: node.kind() == SyntaxKind::TYPE_DEFINITION,
             name: Name::new(self.db, name),
             parameters: parameters.into_iter().map(|binder| binder.name).collect(),
             body,
+            opaque: (keyword == "opaque").then(|| Opaque {
+                home: None,
+                site: node.text_range(),
+                hidden: false,
+            }),
         })
     }
 

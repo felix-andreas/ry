@@ -5,6 +5,7 @@
 use {
     crate::{
         Classed, Lookahead, Parse, SyntaxError, Unexpected,
+        annotation::is_definition_keyword,
         kind::SyntaxKind::{self, *},
         lexer::{Token, lex},
         tree::{Checkpoint, TreeBuilder},
@@ -562,7 +563,7 @@ impl Parser<'_> {
             return;
         }
         match name.as_str() {
-            "type" | "alias" => {
+            "type" | "alias" | "opaque" => {
                 self.ann_trivia(end);
                 if self.ann_at(IDENT, end) {
                     self.wrap(NAME);
@@ -1560,11 +1561,11 @@ impl Parser<'_> {
         }
     }
 
-    /// `type Name` or `alias Name` at the start of a statement: two names side by side
-    /// on one line are a syntax error in R, so code that uses `type` or `alias` as an
-    /// ordinary name never has this shape.
+    /// `type Name`, `alias Name` or `opaque Name` at the start of a statement: two names side
+    /// by side on one line are a syntax error in R, so code that uses these words as ordinary
+    /// names never has this shape.
     fn type_definition_ahead(&self) -> bool {
-        if !self.at(IDENT) || !matches!(self.token_str(self.pos), "type" | "alias") {
+        if !self.at(IDENT) || !is_definition_keyword(self.token_str(self.pos)) {
             return false;
         }
         let kind_at = |pos: usize| self.kind_at(pos);
@@ -1578,8 +1579,8 @@ impl Parser<'_> {
         kind_at(pos) == Some(IDENT)
     }
 
-    /// `type Name<T> = TYPE` or `alias Name = TYPE`, the inline spelling of a
-    /// `#: @type` or `#: @alias` block.
+    /// `type Name<T> = TYPE`, `alias Name = TYPE` or `opaque Name = TYPE`, the inline
+    /// spelling of a `#: @type`, `#: @alias` or `#: @opaque` block.
     fn type_definition(&mut self) {
         self.start(TYPE_DEFINITION);
         let keyword = self.token_str(self.pos).to_owned();

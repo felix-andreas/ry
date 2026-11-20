@@ -1884,6 +1884,12 @@ pub fn file_type_definitions<'db>(
             _ => {}
         }
     }
+    for opaque in definitions
+        .iter_mut()
+        .filter_map(|definition| definition.opaque.as_mut())
+    {
+        opaque.home = Some(file);
+    }
     definitions
 }
 
@@ -3639,6 +3645,12 @@ impl<'db> TypeDefinitions<'db> {
         if let Some(files) = self.files
             && let Some(definition) = project_type_definition(db, files, name)
         {
+            if definition
+                .opaque
+                .is_some_and(|opaque| opaque.home != Some(self.file))
+            {
+                return hidden_type_definition(db, files, name).as_ref();
+            }
             return Some(definition);
         }
         self.library?.type_definitions.get(&name)
@@ -3654,6 +3666,19 @@ fn project_type_definition<'db>(
     name: types::Name<'db>,
 ) -> Option<annotations::NamedDefinition<'db>> {
     project_type_definitions(db, files).get(&name).cloned()
+}
+
+/// An `opaque` definition as every file but its home reads it: with no representation.
+#[salsa::tracked(returns(ref))]
+fn hidden_type_definition<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    name: types::Name<'db>,
+) -> Option<annotations::NamedDefinition<'db>> {
+    let mut definition = project_type_definition(db, files, name).cloned()?;
+    definition.body = types::unknown(db);
+    definition.opaque.as_mut()?.hidden = true;
+    Some(definition)
 }
 
 /// The classes with arithmetic methods a file sees: the stubs', the package's and the file's

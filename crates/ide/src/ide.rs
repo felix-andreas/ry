@@ -7,7 +7,7 @@ use {
     bumpalo::Bump,
     semantics::{
         Db, DocumentKind, Item, ItemKind, ProjectFiles, SourceFile, TypeDefinitions,
-        annotations::{statement_inline_site, type_definition_keyword},
+        annotations::{definition_keyword, statement_inline_site, type_definition_keyword},
         check::{ArgumentShape, ArgumentTarget, CalleeTarget, ItemCheck, argument_targets},
         diagnostics::{Applicability, Diagnostic, TypeRenderer, applicable_fixes},
         file_type_definitions, global_scheme,
@@ -41,7 +41,7 @@ use {
         SyntaxElement,
         SyntaxKind::{self, *},
         SyntaxNode, SyntaxToken, TextRange, TextSize, TokenAtOffset,
-        annotation::{argument_value, attached_annotation, block_refusal},
+        annotation::{argument_value, attached_annotation, block_refusal, is_definition_keyword},
         ast::BinaryExpr,
         highlight::{
             classify_r_name, classify_ry_token, classify_type_token, is_tag_node, tag_node_of,
@@ -3503,6 +3503,7 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
     {
         let (kind, detail) = match directive_name(&directive).as_deref() {
             Some("type") => (DocumentSymbolKind::TypeDefinition, "@type"),
+            Some("opaque") => (DocumentSymbolKind::TypeDefinition, "@opaque"),
             Some("alias") => (DocumentSymbolKind::AliasDefinition, "@alias"),
             _ => continue,
         };
@@ -4525,7 +4526,7 @@ fn directive_name(directive: &SyntaxNode) -> Option<String> {
 }
 
 fn is_type_directive(directive: &SyntaxNode) -> bool {
-    matches!(directive_name(directive).as_deref(), Some("type" | "alias"))
+    directive_name(directive).is_some_and(|name| is_definition_keyword(&name))
 }
 
 /// The type parameters a region's types may name: a `#:` block's or a type definition's
@@ -4855,11 +4856,11 @@ fn annotation_type_hover(db: &dyn Db, file: SourceFile, cursor: &AnnotationTypeC
                 .render_binder_prefix(db, &binders)
                 .unwrap_or_default();
             let body = renderer.render(db, definition.body);
-            match (definition.inline, definition.alias) {
-                (true, true) => format!("alias {}{parameters} = {body}", cursor.name),
-                (true, false) => format!("type {}{parameters} = {body}", cursor.name),
-                (false, true) => format!("@alias {}{parameters} {{{body}}}", cursor.name),
-                (false, false) => format!("@type {}{parameters} {{{body}}}", cursor.name),
+            let keyword = definition_keyword(&definition);
+            if definition.inline {
+                format!("{keyword} {}{parameters} = {body}", cursor.name)
+            } else {
+                format!("@{keyword} {}{parameters} {{{body}}}", cursor.name)
             }
         }
         None => cursor.name.clone(),
