@@ -10,7 +10,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 
 ## Syntax and semantics
 
-[`syntax-semantics.md`](syntax-semantics.md): The parser and syntax tree, the salsa analysis core, name resolution, and the type checker.
+[`syntax-semantics.md`](syntax-semantics.md): The parser and syntax tree, name resolution, and the type checker.
 
 - The standard library ships as declaration-only stub files
 - The beta semantics
@@ -60,12 +60,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The native pipe desugars at lowering
 - `@masked` is formal-aware, and dplyr is a conditional namespace
 - A vendored export manifest carries the name-level truth beside the typed stubs
-- One source of truth for where an item spells its name
-- A check reads per-name firewalls, never project-wide maps (built, with exceptions)
-- Cold-pass memory and time: interned names, compact HIR, parallel setup (built, with exceptions)
-- Syntax trees are evicted, and only small syntax facts are memoized (built, with exceptions)
 - A call's result drops unconstrained type-parameter members of a union
-- The cold check searches green trees and caches globals per item check
 - Call checking follows R's lazy argument and matching rules (built, with exceptions)
 - Called names are looked up as functions
 - testthat files mirror testthat's environments
@@ -76,14 +71,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `switch(typeof(x), ...)` narrows `x` per arm
 - Nested replacement rewrites the spine
 - A strict library file's top level holds only definitions, and purity is declared
-- Cold-check constant costs: one green walk per file, immortal interning, high durability (built, with exceptions)
-- Types and names are hash-consed outside salsa
 - The checker presumes R code is correct where R's semantics leave the question open
 - A computed function that may be `NULL` is called as the function
-- A file's check names only what its interface reaches (built, with exceptions)
-- Every host keeps every tree
-- `ry check` releases its trees once, and memoized records are compact (built, with exceptions)
-- HIR as struct-of-arrays, lowered from the green tree (built, with exceptions)
 - A function literal in a call argument is typed in context
 - Shipped stubs are whatever `types/` holds
 - Override-stub problems are computed after `PackageMetadata` exists
@@ -91,8 +80,6 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - An all-`Any` overload does not veto agreement among unchecked fits
 - A formula is the nominal `formula`, and its operands are not judged
 - `$`, `[` and `[[` dispatch to a class's subset method
-- A new top-level name costs one project fold (built, with exceptions)
-- Typed checking costs per name, not per file
 - A conditional write of a formal covers the paths that run it
 - `<<-` writes flow forward, and a NULL-initialized cache reads its own first write
 - The overload probe's unchecked-argument witness is a nominal no candidate declares
@@ -100,11 +87,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Corpus-driven stub and overload fixes
 - Strict-friction rules for matrices, unions, `...: Any` and `$` members
 - Inferred annotations follow the project's annotation style
-- The cold check's per-call work: a bump arena, borrowed schemes, a token-only green builder (built, with exceptions)
-- The item check's working maps live in a pooled bump arena (built, with exceptions)
 - `$` fields resolve through the values that built the receiver
 - Packages without stubs are read from the R library by the host, lazily
-- One-shot checks record coarse dependencies (superseded by "Every host resolves names through one path, and trees live in the host's store")
 - Inferred signatures carry body facts that a call reads
 - `Reduce` folds a named function instead of matching `fn(U, T) -> U`
 - References are checked against an independent resolver, and a replacement copy is its source
@@ -124,13 +108,6 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Overload probes reject by call shape first
 - `[[` by name on a named atomic vector is the element, not `T | NULL`
 - Correlated-path allowances added for the fresh sample
-- A cold check holds one parse tree per worker (built, with exceptions)
-- The one-shot check scans kind columns and overlaps its serial phases (built, with exceptions)
-- The checker's per-item facts are columns and bitsets indexed by dense id
-- Every host resolves names through one path, and trees live in the host's store
-- Types and symbols are four-byte ids into append-only columns (built, with exceptions)
-- An item's syntax has a stamp, so an edit lowers only the items it changed
-- The analysis core's per-item and per-file tables after the type store
 - A function has one signature, resolved in `syntax::annotation`
 - A splice reparse shares what the parser's recorded lookahead proves untouched
 - One syntax verdict, in the `syntax` crate, for `ry check` and the runtime
@@ -146,6 +123,35 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - An all-`logical` call of a numeric function keeps `logical` (settled)
 - A package's own `pkg::name` reads are checked against `NAMESPACE` and `data/` (settled)
 - A wrapper over a numeric overload set takes the `numeric` bound (settled)
+
+## Analysis core
+
+[`analysis-core.md`](analysis-core.md): The analysis core's incremental structure, memory layout and cold-check cost: item identity, firewalls, tree storage, interning and per-item tables.
+
+- One source of truth for where an item spells its name
+- A check reads per-name firewalls, never project-wide maps (built, with exceptions)
+- Cold-pass memory and time: interned names, compact HIR, parallel setup (built, with exceptions)
+- Syntax trees are evicted, and only small syntax facts are memoized (built, with exceptions)
+- The cold check searches green trees and caches globals per item check
+- Cold-check constant costs: one green walk per file, immortal interning, high durability (built, with exceptions)
+- Types and names are hash-consed outside salsa
+- A file's check names only what its interface reaches (built, with exceptions)
+- Every host keeps every tree
+- `ry check` releases its trees once, and memoized records are compact (built, with exceptions)
+- HIR as struct-of-arrays, lowered from the green tree (built, with exceptions)
+- A new top-level name costs one project fold (built, with exceptions)
+- Typed checking costs per name, not per file
+- The cold check's per-call work: a bump arena, borrowed schemes, a token-only green builder (built, with exceptions)
+- The item check's working maps live in a pooled bump arena (built, with exceptions)
+- One-shot checks record coarse dependencies (superseded by "Every host resolves names through one path, and trees live in the host's store")
+- A cold check holds one parse tree per worker (built, with exceptions)
+- The one-shot check scans kind columns and overlaps its serial phases (built, with exceptions)
+- The checker's per-item facts are columns and bitsets indexed by dense id
+- Every host resolves names through one path, and trees live in the host's store
+- Types and symbols are four-byte ids into append-only columns (built, with exceptions)
+- An item's syntax has a stamp, so an edit lowers only the items it changed
+- The analysis core's per-item and per-file tables after the type store
+- `item_links` resolves every name an item spells (settled)
 
 ## Editor and language server
 
@@ -182,6 +188,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The console's crossterm is patched to drain the terminal, and R reads console input one line per chunk
 - An editor target is what the code means, and rename refuses what it cannot trace
 - `--annotate` and the code action write a lambda argument's signature
+- A cancellation flips the worker's token only inside an armed scope
 
 ## Interpreter
 

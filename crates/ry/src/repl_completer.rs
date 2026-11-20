@@ -130,14 +130,14 @@ mod tests {
     #[test]
     fn manifest_only_exports_complete_undecorated() {
         let mut completer = AnalysisCompleter::new();
-        let line = "bitwAn";
+        let line = "bindingIsLock";
         let suggestions = completer.complete(line, line.len());
-        let bitw_and = suggestions
+        let binding_is_locked = suggestions
             .iter()
-            .find(|suggestion| suggestion.value == "bitwAnd")
+            .find(|suggestion| suggestion.value == "bindingIsLocked")
             .expect("manifest names complete");
         assert_eq!(
-            bitw_and.description.as_deref(),
+            binding_is_locked.description.as_deref(),
             Some("From the `base` package.")
         );
     }

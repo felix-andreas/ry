@@ -4,7 +4,7 @@
 use {
     crate::{
         Db, SiteRole, SourceFile, file_syntax_sites, parse,
-        stubs::{META_PACKAGE_MEMBERS, stubs},
+        stubs::{CONDITIONAL_NAMESPACES, META_PACKAGE_MEMBERS, QUALIFIED_ONLY_NAMESPACES, stubs},
         types::QueryName,
     },
     rustc_hash::FxHashMap,
@@ -318,6 +318,23 @@ pub fn own_qualified_names(db: &dyn Db) -> Option<&BTreeSet<String>> {
 #[salsa::tracked(returns(copy))]
 pub fn own_package_reaches<'db>(db: &'db dyn Db, name: QueryName<'db>) -> Option<bool> {
     own_qualified_names(db).map(|names| names.contains(name.name(db).text(db)))
+}
+
+/// Whether attaching `namespace` can change a finding. A gated namespace the project does not
+/// declare can, even when it is the project's own package, because the attach switches its
+/// shipped stubs on. Otherwise it cannot for the project's own package, nor for a namespace the
+/// stubs describe, which is active without the attach.
+pub fn attaching_changes_findings(db: &dyn Db, namespace: &str) -> bool {
+    let gated = CONDITIONAL_NAMESPACES.contains(&namespace)
+        || QUALIFIED_ONLY_NAMESPACES.contains(&namespace)
+        || META_PACKAGE_MEMBERS
+            .iter()
+            .any(|(meta, _)| *meta == namespace);
+    if gated && !declared_dependency(db, namespace) {
+        return true;
+    }
+    !is_own_package(db, namespace)
+        && !stubs(db).is_some_and(|library| library.knows_namespace(namespace))
 }
 
 pub fn is_own_package(db: &dyn Db, package: &str) -> bool {

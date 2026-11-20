@@ -48,9 +48,10 @@ use {
             project_fold_shares, warm_project_folds,
         },
         metadata::{
-            NativeSymbols, PackageMetadata, attached_union, file_attached_namespaces,
-            normalized_imports, parse_description_collate, parse_description_dependencies,
-            parse_description_package, parse_namespace, qualified_names,
+            NativeSymbols, PackageMetadata, attached_union, attaching_changes_findings,
+            file_attached_namespaces, normalized_imports, parse_description_collate,
+            parse_description_dependencies, parse_description_package, parse_namespace,
+            qualified_names,
         },
         project_global_names,
         stubs::{
@@ -159,38 +160,82 @@ struct CancelHandle {
 #[derive(Default)]
 struct CancelState {
     token: Option<salsa::CancellationToken>,
+    /// How many [`Worker::armed`] scopes the worker is inside. The token flips only while this
+    /// is positive, because a query fetch on a flipped token unwinds, and outside a scope
+    /// nothing catches the unwind: it would stop the worker. A read outside every scope runs
+    /// to completion instead.
+    armed: u32,
+    /// A cancellation that arrived while the worker was outside every scope. The next scope of
+    /// the same job flips the token as it opens, so the job still yields at its next read.
+    pending: bool,
     /// Whether the worker is running background work (the semantic wave, priming), which a
     /// request preempts. One lock covers both fields so a request can never cancel another
     /// request that started after the background unit ended.
     idle: bool,
     /// Tokens of the database clones a parallel background unit runs on. Salsa's tokens are
-    /// per handle, so cancelling the worker's own token would not stop them.
+    /// per handle, so cancelling the worker's own token would not stop them. A helper's reads
+    /// all run inside a catch of their own, so its token flips at any time.
     helpers: Vec<salsa::CancellationToken>,
+}
+
+impl CancelState {
+    fn cancel(&mut self) {
+        match self.token.as_ref() {
+            Some(token) if self.armed > 0 => token.cancel(),
+            _ => self.pending = true,
+        }
+        for helper in &self.helpers {
+            helper.cancel();
+        }
+    }
 }
 
 impl CancelHandle {
     fn cancel(&self) {
-        let state = self.state.lock().expect("cancel state lock");
-        if let Some(token) = state.token.as_ref() {
-            token.cancel();
-        }
-        for helper in &state.helpers {
-            helper.cancel();
-        }
+        self.state.lock().expect("cancel state lock").cancel();
     }
 
     /// A background unit is cancelled and requeued, so the request runs next instead of
     /// waiting for a whole file's settled diagnostics.
     fn preempt_idle(&self) {
-        let state = self.state.lock().expect("cancel state lock");
-        if state.idle
+        let mut state = self.state.lock().expect("cancel state lock");
+        if state.idle && state.token.is_some() {
+            state.cancel();
+        }
+    }
+
+    fn arm(&self) {
+        let mut state = self.state.lock().expect("cancel state lock");
+        state.armed += 1;
+        if state.pending
             && let Some(token) = state.token.as_ref()
         {
             token.cancel();
-            for helper in &state.helpers {
-                helper.cancel();
-            }
+            state.pending = false;
         }
+    }
+
+    /// Whether the token is left flipped as the outermost scope closes: the flip landed after
+    /// the scope's last query returned, so no read consumed it, and the worker must replace
+    /// its handle before reading outside a scope.
+    fn disarm(&self) -> bool {
+        let mut state = self.state.lock().expect("cancel state lock");
+        state.armed -= 1;
+        let left_flipped = state.armed == 0
+            && state
+                .token
+                .as_ref()
+                .is_some_and(salsa::CancellationToken::is_cancelled);
+        if left_flipped {
+            state.pending = true;
+        }
+        left_flipped
+    }
+
+    /// A job starts on the newest state, so what an earlier job was asked to abandon no
+    /// longer applies.
+    fn begin_job(&self) {
+        self.state.lock().expect("cancel state lock").pending = false;
     }
 
     /// Counted before the send, so a background unit never misses a job already on its way.
@@ -292,9 +337,9 @@ fn run_worker(seed: WorkerSeed, receiver: mpsc::Receiver<Job>) {
             run_job(&mut seed, &mut worker, job);
         }));
         if let Err(payload) = outcome {
-            // A read catches its own cancellation, so this is a coherence panic; serving a
-            // corrupted analysis state is worse than dying. A cancellation that escaped its
-            // read never reached the panic hook, so this line is the only place that names it.
+            // The token flips only inside an armed scope, which catches the unwind, so this is a
+            // coherence panic; serving a corrupted analysis state is worse than dying. A
+            // cancellation that escaped never reached the panic hook, so this line names it.
             let reason = match payload.downcast_ref::<salsa::Cancelled>() {
                 Some(cancelled) => format!("an uncaught cancellation ({cancelled:?})"),
                 None => "a panic".to_owned(),
@@ -330,9 +375,13 @@ fn run_job(seed: &mut Option<WorkerSeed>, worker: &mut Option<Worker>, job: Opti
         }
         job => match worker.as_mut() {
             Some(worker) => {
-                worker.refresh_cancellation();
                 match job {
-                    Some(Job::Run(work)) => work(worker),
+                    Some(Job::Run(work)) => {
+                        worker.cancel.begin_job();
+                        work(worker)
+                    }
+                    // A cancellation recorded since the queue was found empty belongs to a job
+                    // already on its way, so the idle unit keeps it and yields at its first read.
                     _ => {
                         worker.cancel.set_idle(true);
                         worker.run_idle_unit();
@@ -361,13 +410,12 @@ impl ServerState {
         let job = Job::Run(Box::new(move |worker| {
             // An edit that lands mid-request cancels its queries; the client asks again for the
             // new text, so the answer is `ContentModified` rather than a dead worker.
-            let response = salsa::Cancelled::catch(AssertUnwindSafe(|| build(worker)))
-                .unwrap_or_else(|_| {
-                    Err(ResponseError::new(
-                        ErrorCode::CONTENT_MODIFIED,
-                        "the document changed during the request",
-                    ))
-                });
+            let response = worker.armed(build).unwrap_or_else(|_| {
+                Err(ResponseError::new(
+                    ErrorCode::CONTENT_MODIFIED,
+                    "the document changed during the request",
+                ))
+            });
             // The receiver is gone only when the client cancelled the request.
             reply.send(response).ok();
         }));
@@ -390,8 +438,9 @@ impl ServerState {
         Box::pin(async move { receive.await.unwrap_or_else(|_| Err(worker_gone_error())) })
     }
 
-    /// Flips the cancellation token before enqueueing so an in-flight read abandons.
-    /// A send failure is unrecoverable.
+    /// Cancels before enqueueing: a read inside an armed scope abandons, and a job outside
+    /// every scope records the cancellation for its next scope. A send failure is
+    /// unrecoverable.
     fn notify<F>(&self, build: F) -> ControlFlow<async_lsp::Result<()>>
     where
         F: FnOnce(&mut Worker) + Send + 'static,
@@ -895,12 +944,27 @@ impl Worker {
             ),
             None => check_cache::Fingerprint::default(),
         };
-        let (record, stale) =
-            match check_cache::plan(Some(record), key, &paths, &contents, |_| true, surface_of) {
-                check_cache::Plan::Fresh => return HashMap::new(),
-                check_cache::Plan::Replay(record) => (record, vec![false; paths.len()]),
-                check_cache::Plan::Partial { previous, stale } => (previous, stale),
-            };
+        let attaches_of = |index: usize| {
+            let file = loaded.get(index).copied().flatten()?;
+            Some(file_attached_namespaces(&self.db, file))
+        };
+        let changes_findings = |namespace: &str| attaching_changes_findings(&self.db, namespace);
+        let plan = check_cache::plan(
+            Some(record),
+            key,
+            &paths,
+            &contents,
+            |_| true,
+            surface_of,
+            |index| loaded.get(index).is_some_and(Option::is_some),
+            attaches_of,
+            changes_findings,
+        );
+        let (record, stale) = match plan {
+            check_cache::Plan::Fresh => return HashMap::new(),
+            check_cache::Plan::Replay(record) => (record, vec![false; paths.len()]),
+            check_cache::Plan::Partial { previous, stale } => (previous, stale),
+        };
         let file_at = |index: usize| loaded.get(index).copied().flatten();
         loaded
             .iter()
@@ -963,14 +1027,13 @@ impl Worker {
         }
     }
 
-    /// An edit's cancellation flip is consumed by the query in flight when it
-    /// happened; every later job starts on a fresh uncancelled handle.
-    fn refresh_cancellation(&mut self) {
-        if self.current_token.is_cancelled() {
-            self.db = self.db.clone();
-            self.current_token = salsa::Database::cancellation_token(&self.db);
-            self.cancel.install(self.current_token.clone());
-        }
+    /// A token left flipped outside every scope would unwind the next read there, which nothing
+    /// catches, so a handle whose flip no read consumed is replaced by a fresh one on the same
+    /// storage.
+    fn replace_handle(&mut self) {
+        self.db = self.db.clone();
+        self.current_token = salsa::Database::cancellation_token(&self.db);
+        self.cancel.install(self.current_token.clone());
     }
 
     fn has_idle_work(&self) -> bool {
@@ -1170,19 +1233,35 @@ impl Worker {
         (done, rest)
     }
 
+    /// A unit of work an edit may interrupt. It is a checkpoint where the simulator lands an
+    /// edit, and its reads run [`armed`](Worker::armed).
     fn cancellable<T>(
         &mut self,
         body: impl FnOnce(&mut Worker) -> T,
     ) -> Result<T, salsa::Cancelled> {
-        if let Some(remaining) = self.cancel_at_checkpoint.as_mut() {
-            if *remaining == 0 {
-                self.cancel_at_checkpoint = None;
-                self.cancel.cancel();
-            } else {
-                *remaining -= 1;
+        self.armed(|worker| {
+            if let Some(remaining) = worker.cancel_at_checkpoint.as_mut() {
+                if *remaining == 0 {
+                    worker.cancel_at_checkpoint = None;
+                    worker.cancel.cancel();
+                } else {
+                    *remaining -= 1;
+                }
             }
+            body(worker)
+        })
+    }
+
+    /// Runs `body` with the cancellation token armed, so a queued job interrupts its reads, and
+    /// catches the unwind. Outside every such scope the token never flips, so a tracked read
+    /// there cannot stop the worker: it runs to completion.
+    fn armed<T>(&mut self, body: impl FnOnce(&mut Worker) -> T) -> Result<T, salsa::Cancelled> {
+        self.cancel.arm();
+        let result = salsa::Cancelled::catch(AssertUnwindSafe(|| body(self)));
+        if self.cancel.disarm() {
+            self.replace_handle();
         }
-        salsa::Cancelled::catch(AssertUnwindSafe(|| body(self)))
+        result
     }
 
     fn document_path(&mut self, uri: &lsp_types::Url) -> Option<PathBuf> {
@@ -1702,17 +1781,10 @@ impl Worker {
         changed || self.files.len() != before
     }
 
-    /// The literal paths `file` passes to `source()`. The loaded set must be complete, so a
-    /// request arriving mid-read retries the read on a fresh handle instead of abandoning it.
-    fn source_calls(&mut self, file: SourceFile) -> Vec<String> {
-        loop {
-            self.refresh_cancellation();
-            if let Ok(literals) = salsa::Cancelled::catch(AssertUnwindSafe(|| {
-                semantics::file_source_calls(&self.db, file).clone()
-            })) {
-                break literals;
-            }
-        }
+    /// The literal paths `file` passes to `source()`. The loaded set must be complete, so the
+    /// read runs outside every armed scope, where a queued job cannot abandon it.
+    fn source_calls(&self, file: SourceFile) -> Vec<String> {
+        semantics::file_source_calls(&self.db, file).clone()
     }
 
     /// Stubs and NAMESPACE are tracked as text, outside the analyzed project.

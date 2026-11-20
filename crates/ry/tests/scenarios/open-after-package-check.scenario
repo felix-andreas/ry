@@ -1,0 +1,35 @@
+# A package-only check, the one `ry load` runs, records findings the editor shows at once. The
+# record does not know what the tests attach, which the server does not load either, so the
+# tests' attach calls cannot hold the recorded findings back.
+
+client cold
+
+file DESCRIPTION
+| Package: shapes
+| Version: 0.1.0
+file NAMESPACE
+| export(area)
+| export(report)
+file ry.toml
+| [check]
+| typing = true
+file R/area.R
+| #: fn(width: double, height: double) -> double
+| area <- function(width, height) {
+|   width * height
+| }
+file R/report.R
+| report <- function() {
+|   area(2, "wide")
+| }
+file tests/testthat/test-area.R
+| library(shapes)
+| test_that("area multiplies", expect_equal(area(2, 3), 6))
+
+run ry check R
+expect exit 1
+expect stderr "R/report.R:2:11"
+
+open R/report.R
+expect early diagnostics R/report.R "type-mismatch"
+expect diagnostics R/report.R "type-mismatch"

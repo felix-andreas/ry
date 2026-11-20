@@ -51,7 +51,9 @@ LINE_LIMITS = {
 # Area file name, title, and what belongs there. The order is the index's order.
 AREAS = [
     ("syntax-semantics", "Syntax and semantics",
-     "The parser and syntax tree, the salsa analysis core, name resolution, and the type checker."),
+     "The parser and syntax tree, name resolution, and the type checker."),
+    ("analysis-core", "Analysis core",
+     "The analysis core's incremental structure, memory layout and cold-check cost: item identity, firewalls, tree storage, interning and per-item tables."),
     ("ide-server", "Editor and language server",
      "The language server, editor features, the formatter, lints, the check command's reporting, "
      "and the console and debugger."),
@@ -92,6 +94,54 @@ RECORD_PREFIX = "Decision record: "
 # Classification overrides by heading (after folding), for entries the keyword scores misplace or
 # score with low confidence. Pinned by reading each entry.
 OVERRIDES = {
+    'One source of truth for where an item spells its name':
+        "analysis-core",
+    'A check reads per-name firewalls, never project-wide maps':
+        "analysis-core",
+    'Cold-pass memory and time: interned names, compact HIR, parallel setup':
+        "analysis-core",
+    'Syntax trees are evicted, and only small syntax facts are memoized':
+        "analysis-core",
+    'The cold check searches green trees and caches globals per item check':
+        "analysis-core",
+    'Cold-check constant costs: one green walk per file, immortal interning, high durability':
+        "analysis-core",
+    'Types and names are hash-consed outside salsa':
+        "analysis-core",
+    "A file's check names only what its interface reaches":
+        "analysis-core",
+    'Every host keeps every tree':
+        "analysis-core",
+    '`ry check` releases its trees once, and memoized records are compact':
+        "analysis-core",
+    'HIR as struct-of-arrays, lowered from the green tree':
+        "analysis-core",
+    'A new top-level name costs one project fold':
+        "analysis-core",
+    'Typed checking costs per name, not per file':
+        "analysis-core",
+    "The cold check's per-call work: a bump arena, borrowed schemes, a token-only green builder":
+        "analysis-core",
+    "The item check's working maps live in a pooled bump arena":
+        "analysis-core",
+    'One-shot checks record coarse dependencies':
+        "analysis-core",
+    'A cold check holds one parse tree per worker':
+        "analysis-core",
+    'The one-shot check scans kind columns and overlaps its serial phases':
+        "analysis-core",
+    "The checker's per-item facts are columns and bitsets indexed by dense id":
+        "analysis-core",
+    "Every host resolves names through one path, and trees live in the host's store":
+        "analysis-core",
+    'Types and symbols are four-byte ids into append-only columns':
+        "analysis-core",
+    "An item's syntax has a stamp, so an edit lowers only the items it changed":
+        "analysis-core",
+    "The analysis core's per-item and per-file tables after the type store":
+        "analysis-core",
+    '`item_links` resolves every name an item spells':
+        "analysis-core",
     "The beta semantics":
         "syntax-semantics",
     "Beta semantics: A reported column counts characters, and caret art counts terminal cells":
@@ -496,6 +546,10 @@ OVERRIDES = {
 
 # Keyword weights per area. A heading hit counts HEADING_WEIGHT times a body hit.
 KEYWORDS = {
+    "analysis-core": [
+        "salsa", "cold check", "green tree", "hir", "intern", "firewall", "arena", "memoiz",
+        "item_links", "item_stamp", "tree store", "durability",
+    ],
     "syntax-semantics": [
         "parser", "syntax tree", "green tree", "lossless", "salsa", "hir", "lowering", "resolve",
         "resolution", "type checker", "checker", "inference", "unif", "hindley", "overload",

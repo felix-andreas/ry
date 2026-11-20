@@ -54,20 +54,6 @@ and symbols are four-byte ids into append-only columns", "An item's syntax has a
 lowers only the items it changed" and "The analysis core's per-item and per-file tables after the
 type store".
 
-- **`item_links` resolves every name an item's naming lists**, where a check that resolved a
-  name on first use would skip the names a body never reaches. On the finance
-  bench `item_links` with what it calls is 4.6% of a check's instructions, and its memos hold
-  10.5 MB at the heap peak, of which 3.9 MB is the dependency edges salsa records and 2.4 MB
-  the memo boxes. A smaller value does not move either: fewer memos or fewer edges would.
-- **A tracked read on the server's worker outside `Worker::cancellable` can stop the worker.**
-  A notification queued behind the running job flips the cancellation token, and the next
-  query fetch unwinds. One such read was found by an intermittent test failure and fixed.
-  Nothing structural prevents the next one: audit the worker's reads in `server.rs`, or make
-  the database handle the worker holds outside `cancellable` unable to run a query.
-- **An edit to one `#:` block re-runs `item_annotations` for every item of the file**, because
-  each reads the per-file `file_item_annotations` map, which changes as a whole. Each comes out
-  equal and backdates. A per-item stamp for the block, like the item's own, would cut it
-  before lowering.
 - **Edits at both ends of a file between two reads re-stamp every item between them**, so they
   lower again and backdate on `item_hir` equality. The store compares a prefix and a suffix
   with the previous tree and nothing else.
@@ -3438,12 +3424,12 @@ typing on:
 | data science | 1.5-1.65 s | 400 MiB | 2337 `object-system` | 2 / 41 ms | 2 / 39 ms |
 | biostatistics | 1.4-1.7 s | 403 MiB | 784 `object-system` | 1 / 41 ms | 1 / 40 ms |
 
-The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (about 4.2-5 s of CPU on four cores, about 3 times its wall time). The latest profile of the finance bench (1.4 s, 4.6-4.8 s of CPU): item checking is about a third of samples, parse about 12%, the interface reads about 8% (most of it frame lookups and top-level names), naming about 8%, and no function above about 4% exclusive. The syntax and check passes keep all four cores busy; about 0.1 s between the syntax pass and naming runs at half the cores. The struct-of-arrays HIR lowered from the green tree (`decisions/syntax-semantics.md`, "HIR as struct-of-arrays, lowered from the green tree") measured, in interleaved runs against the list-owning HIR, 7 to 12% less CPU, 6 to 10% less wall time and 23 to 35 MiB less peak RSS on all three code bases, with identical findings; the edit latencies did not move. Keeping literal text in a per-module buffer instead of interning it took off about another 0.1 s and 0.2 s of CPU; against a main build in the same interleaved runs the median cold check went from 1.74-1.86 s to 1.58-1.60 s, 5.3-5.7 s to 4.8-4.9 s of CPU, and 425-440 MiB to 399-403 MiB. After it, `item_hir` is about 9% of samples and parse about 12%, and parse is now the largest cost of the syntax pass. The machine was busier for these numbers than for the older rows below: in the same interleaved runs the build before hash-consed types measured 1.75-1.9 s, 5.1-5.6 s of CPU and 439-450 MiB. The profile is flat: item checking is about 35% of samples, then HIR lowering (13%), parse (11%), naming (8%), the syntax lints and the annotation queries, and the hash-consing table itself is about 3% exclusive. The syntax pass ran in batches with eviction between them and kept about 78% of the cores busy; it is now one parallel loop like the naming and check passes. Levers left toward 1 s: a cheaper parse (done since: the flat preorder tree replaced rowan, see "Check cache follow-ups"), re-interning names the HIR already holds as `Symbol` (naming's `mint_binding` and `GlobalEnv::scheme` take `&str` and intern again, about 2%), the `GlobalEnv::scheme` and `layers` lookups (about 11% inclusive), and the syntax pass's idle cores. Hashing `Symbol` by its index (ordering stays by spelling, so sorted output is unchanged) and the compact HIR (name sites in one side array, `NonZeroU32` ids, a 16-byte expression kind and an 8-byte argument; `decisions/syntax-semantics.md`, "HIR as struct-of-arrays, lowered from the green tree") together measured, in interleaved runs against a main build that already kept trees resident, medians of 1.52-1.58 s against 1.61-1.66 s, 5.0-5.3 s against 5.5 s of CPU, and 533-538 MiB against 563-568 MiB, with identical findings. After them the heap peak on finance is 490 MiB under the system allocator: resident green trees 127 MiB, HIR kinds 30 MiB and ranges 15 MiB, the `item_check` memos about 50 MiB, closed top-level schemes 21 MiB (2.3 million allocations, `check.rs` where `top_level_bindings` is built), and the expression-type tables 15 MiB. Tried without gain: a per-check cache of common scalar types, mimalloc's purge and huge-page options. A thread-local front cache for the type table measured no wall-time gain alone, but sampling showed the shard mutexes contended, so it is kept (`decisions/syntax-semantics.md`, "Every host keeps every tree"). Before the green-walk fusion, immortal interning, frame-binder query, one-batch passes and input durability, main measured 2.3-2.5 s, 6.4-7.0 s of CPU and 510-517 MiB on the same machine. Before tree
+The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (about 4.2-5 s of CPU on four cores, about 3 times its wall time). The latest profile of the finance bench (1.4 s, 4.6-4.8 s of CPU): item checking is about a third of samples, parse about 12%, the interface reads about 8% (most of it frame lookups and top-level names), naming about 8%, and no function above about 4% exclusive. The syntax and check passes keep all four cores busy; about 0.1 s between the syntax pass and naming runs at half the cores. The struct-of-arrays HIR lowered from the green tree (`decisions/analysis-core.md`, "HIR as struct-of-arrays, lowered from the green tree") measured, in interleaved runs against the list-owning HIR, 7 to 12% less CPU, 6 to 10% less wall time and 23 to 35 MiB less peak RSS on all three code bases, with identical findings; the edit latencies did not move. Keeping literal text in a per-module buffer instead of interning it took off about another 0.1 s and 0.2 s of CPU; against a main build in the same interleaved runs the median cold check went from 1.74-1.86 s to 1.58-1.60 s, 5.3-5.7 s to 4.8-4.9 s of CPU, and 425-440 MiB to 399-403 MiB. After it, `item_hir` is about 9% of samples and parse about 12%, and parse is now the largest cost of the syntax pass. The machine was busier for these numbers than for the older rows below: in the same interleaved runs the build before hash-consed types measured 1.75-1.9 s, 5.1-5.6 s of CPU and 439-450 MiB. The profile is flat: item checking is about 35% of samples, then HIR lowering (13%), parse (11%), naming (8%), the syntax lints and the annotation queries, and the hash-consing table itself is about 3% exclusive. The syntax pass ran in batches with eviction between them and kept about 78% of the cores busy; it is now one parallel loop like the naming and check passes. Levers left toward 1 s: a cheaper parse (done since: the flat preorder tree replaced rowan, see "Check cache follow-ups"), re-interning names the HIR already holds as `Symbol` (naming's `mint_binding` and `GlobalEnv::scheme` take `&str` and intern again, about 2%), the `GlobalEnv::scheme` and `layers` lookups (about 11% inclusive), and the syntax pass's idle cores. Hashing `Symbol` by its index (ordering stays by spelling, so sorted output is unchanged) and the compact HIR (name sites in one side array, `NonZeroU32` ids, a 16-byte expression kind and an 8-byte argument; `decisions/analysis-core.md`, "HIR as struct-of-arrays, lowered from the green tree") together measured, in interleaved runs against a main build that already kept trees resident, medians of 1.52-1.58 s against 1.61-1.66 s, 5.0-5.3 s against 5.5 s of CPU, and 533-538 MiB against 563-568 MiB, with identical findings. After them the heap peak on finance is 490 MiB under the system allocator: resident green trees 127 MiB, HIR kinds 30 MiB and ranges 15 MiB, the `item_check` memos about 50 MiB, closed top-level schemes 21 MiB (2.3 million allocations, `check.rs` where `top_level_bindings` is built), and the expression-type tables 15 MiB. Tried without gain: a per-check cache of common scalar types, mimalloc's purge and huge-page options. A thread-local front cache for the type table measured no wall-time gain alone, but sampling showed the shard mutexes contended, so it is kept (`decisions/analysis-core.md`, "Every host keeps every tree"). Before the green-walk fusion, immortal interning, frame-binder query, one-batch passes and input durability, main measured 2.3-2.5 s, 6.4-7.0 s of CPU and 510-517 MiB on the same machine. Before tree
 eviction, compact names and durability the same machine measured 3.4, 3.6, 2.8 s, about 790 MiB, and
 47 to 63 ms settled; before the cold-path work, 6.1, 6.7, 6.2 s, about 1 GiB, and 95 to 120 ms.
 
 Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. Remaining debt:
-- Peak RSS of `ry check` is 417-419 MiB on the benchmark code bases (`decisions/syntax-semantics.md`, "`ry check`
+- Peak RSS of `ry check` is 417-419 MiB on the benchmark code bases (`decisions/analysis-core.md`, "`ry check`
   releases its trees once, and memoized records are compact"). The largest heap holders left are
   HIR kinds (30 MB) and ranges (15 MB), salsa's dependency edges (about 30 MB), the naming and
   check memos, the source texts (20 MB) and mimalloc's overhead over glibc (about 45 MiB). A
@@ -3575,7 +3561,7 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
   signature edit at 4 ms and 5 ms. The slow spots left are the first open below and a cold hover
   (342 ms max, the first hover after startup).
 - A new top-level name still re-runs `package_definition_index` (one pass over every file's definitions), the `package_name` projections the edited file reads, and `project_typo_suggestion` for each unresolved name a re-checked file has (a scan of every project name of a similar length). About 4 to 6 ms on dsbench in `examples/keystroke_probe.rs`. Chunked per-file-group indexes would make the fold proportional to one chunk.
-- A file opened at startup settles 170 to 240 ms after the open on the three benchmarks (4 cores; `decisions/syntax-semantics.md`, "A file's check names only what its interface reaches"). What is left is parsing every package file in the warm-up (`warm_project_folds`) and the file's own check, about 0.25 s on one thread after parsing (`crates/ry/examples/cold_open_probe.rs` breaks it down per query). Earlier samples of the old naming warm-up showed about a fifth of helper time spinning on salsa 0.28's per-ingredient claim mutex (`SyncTable::syncs`) and another fifth in mimalloc's page slow path; re-sample the new warm-up before acting on that.
+- A file opened at startup settles 170 to 240 ms after the open on the three benchmarks (4 cores; `decisions/analysis-core.md`, "A file's check names only what its interface reaches"). What is left is parsing every package file in the warm-up (`warm_project_folds`) and the file's own check, about 0.25 s on one thread after parsing (`crates/ry/examples/cold_open_probe.rs` breaks it down per query). Earlier samples of the old naming warm-up showed about a fifth of helper time spinning on salsa 0.28's per-ingredient claim mutex (`SyncTable::syncs`) and another fifth in mimalloc's page slow path; re-sample the new warm-up before acting on that.
 
 ## Open: false errors on real CRAN code
 
@@ -3596,7 +3582,7 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
 - A cold check of the finance bench is about 1.48 s median on 4 cores (4.8 s of CPU, 431 MiB peak
   RSS), so the 1 s target still needs about a third less CPU work. Under callgrind it is 22.0 G
   instructions, after the one-shot check path, shared small green nodes, unaligned mimalloc entry
-  points and green walks in the annotation and lint passes (`decisions/syntax-semantics.md`, "One-shot checks record
+  points and green walks in the annotation and lint passes (`decisions/analysis-core.md`, "One-shot checks record
   coarse dependencies"). (The red nodes these figures counted are gone with rowan; see the flat-tree
   item below.) What is left is flat: item checking about 7.7 G
   inclusive, parse about 3.1 G (lexing 0.7 G, about 105 instructions per token in the tree builder
@@ -3604,7 +3590,7 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
   mimalloc about 1.5 G over 19 M allocations. A real third needs fewer allocations in the checker
   (`map_child_types`, `resolve_rec`, the `Ty` maps' rehashing) and a cheaper parse, not one cut.
 - The checker's working maps now live in a pooled bump arena and its names are interned
-  (`decisions/syntax-semantics.md`, "The item check's working maps live in a pooled bump arena"), which took the
+  (`decisions/analysis-core.md`, "The item check's working maps live in a pooled bump arena"), which took the
   finance bench from 19.78 M to 15.82 M mimalloc calls and 23.59 G to 22.68 G instructions,
   with wall time unchanged within noise (median about 1.34 s). The
   1 s target still needs about 35% less CPU, and no single function is above about 1.2% of
@@ -3617,7 +3603,7 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
     callgrind (from 23.6 G and 19.8 M), wall median 1.11-1.15 s against 1.35-1.45 s for the previous
     build in interleaved runs, 3.6-3.7 s of CPU and 371 MiB, with byte-identical findings. About 10% of wall time remains to the 1 s target.
   - Done: a cold check holds one parse tree per worker, skips the per-item syntax memos and the
-    editor-only check facts, and purges freed memory after 10 ms (`decisions/syntax-semantics.md`, "A cold check
+    editor-only check facts, and purges freed memory after 10 ms (`decisions/analysis-core.md`, "A cold check
     holds one parse tree per worker"). Peak RSS is 298-306 MiB on the three benches, under the
     300 MiB target, but with only 1-3 MiB of margin on finance and data science; wall time is
     1.1-1.3 s on a noisy 4-core machine, and instructions moved only 23.4 G to 23.0 G.
@@ -3627,7 +3613,7 @@ about 2 s lets the first edit overlap the startup cold check and reports a false
     a cut here is a cut for the server too. Salsa edges are about 29 MiB of the heap peak, 8 MiB
     of it `item_check`.
   - Done: kind-column scans, phase overlap, one-allocation HIR, memchr lexing and a one-pass tree
-    finish took finance to 17.6 G instructions and 222-228 MiB in release (`decisions/syntax-semantics.md`, "The
+    finish took finance to 17.6 G instructions and 222-228 MiB in release (`decisions/analysis-core.md`, "The
     one-shot check scans kind columns and overlaps its serial phases"). Left: the parser and
     `TreeBuilder` self cost (about 1.4 G), the lexer's ident scans and per-token work (about
     0.65 G), and salsa fetch overhead spread across queries.

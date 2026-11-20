@@ -726,6 +726,14 @@ fn analyze_project_with(
                         &project_fold_shares(&db, file),
                     )
                 },
+                analysed,
+                |index| {
+                    Some(semantics::metadata::file_attached_namespaces(
+                        &db,
+                        files[index],
+                    ))
+                },
+                |namespace| semantics::metadata::attaching_changes_findings(&db, namespace),
             )
         }
     };
@@ -888,7 +896,6 @@ fn analyze_project_with(
             .collect();
         in_parallel(&db, workers, &reused, |db, index| {
             semantics::diagnostics::warm_project_folds(db, files[index]);
-            semantics::metadata::file_attached_namespaces(db, files[index]);
         });
     }
     // A package-only run judges NAMESPACE by the package alone, as a fresh one would, so the
@@ -899,11 +906,11 @@ fn analyze_project_with(
         .filter(|(_, reached)| **reached)
         .flat_map(|(tokens, _)| tokens.iter().copied())
         .collect();
-    // Attach calls are part of every file's surface, so a partial run attaches what the
-    // recorded run did.
+    // A kept record carries the set this run's files attach, read from the record for the files
+    // whose text it saw.
     let attached = match previous {
-        Some(previous) if previous.analysed_every_file() => previous.attached(),
-        Some(_) | None => attached_union(&db, project),
+        Some(previous) => previous.attached(),
+        None => attached_union(&db, project),
     };
     if !attached.is_empty() {
         metadata.set_attached(&mut db).to(attached.clone());
@@ -1013,10 +1020,23 @@ fn analyze_project_with(
                         .filter_map(|file| positions.get(file).copied())
                         .collect(),
                 };
+                let unchanged = previous.is_some_and(|previous| {
+                    previous.content(index) == contents.get(index).copied()
+                });
+                let attaches = match previous.and_then(|previous| previous.attaches(index)) {
+                    Some(attaches) if unchanged => Some(attaches.to_vec()),
+                    _ if reached[index] => Some(
+                        semantics::metadata::file_attached_namespaces(&db, files[index])
+                            .into_iter()
+                            .collect(),
+                    ),
+                    _ => None,
+                };
                 FileOutcome {
                     path: &paths[index],
                     content: contents[index],
                     surface: surfaces[index],
+                    attaches,
                     dependencies,
                     tokens: file_tokens[index]
                         .iter()
@@ -3268,7 +3288,8 @@ mod tests {
                         "setClass(\"Point{}\", representation(x = \"numeric\"))",
                         random.below(2)
                     ),
-                    1 => "library(utils)".to_owned(),
+                    // A package no stub describes tolerates every bare read.
+                    1 => ["library(utils)", "library(zzqqpkg)"][random.below(2)].to_owned(),
                     2 => format!("CONSTANT_{} <- {}", random.below(2), random.below(3)),
                     _ => format!("f0_0(\"{}\")", random.below(2)),
                 };

@@ -76,3 +76,33 @@ expect stdout "no problems"
 
 run ry check R
 expect stderr "median"
+
+# A test that attaches a package no stub describes tolerates every bare read, in the package
+# too, but a package-only check never sees that attach. Each kind of run reports what a fresh
+# one would, whichever of them wrote the record the other reads.
+file NAMESPACE
+| export(area)
+file R/area.R
+| area <- function(width: F64, height: F64) -> F64 width * height
+| scaled <- function(x: F64) zzqq_scale(x)
+file tests/testthat/test-area.R
+| library(zzqqpkg)
+| stopifnot(area(2, 3) == expected_area)
+
+run ry check
+expect exit 1
+expect stderr "silent only because an attached package's exports are unknown"
+
+run ry check R
+expect exit 1
+expect stderr "zzqq_scale"
+expect stderr lacks "silent only because"
+
+run ry check R --no-cache
+expect exit 1
+expect stderr "zzqq_scale"
+expect stderr lacks "silent only because"
+
+run ry check
+expect exit 1
+expect stderr "silent only because an attached package's exports are unknown"
