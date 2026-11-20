@@ -103,7 +103,7 @@ set_sink <- wrap(sink_to, {
   mode <- if (append) "a" else "w"
 })
 #++++
-wrap: <T, U, V> fn(f: T, [pre]: U, [envir]: V) -> Any
+wrap: <T, U, V> fn([f]: T, [pre]: U, [envir]: V) -> Any
 sink_to: <T, U> fn([file]: T, [append]: U) -> NULL
 set_sink: Any
 
@@ -810,7 +810,7 @@ guarded <- function(expr, ..., finally) {
 }
 run <- function() guarded(1 + 1)
 #++++
-reduce: <T, U> fn(.x: list[T] | T[], .f: fn(U, T, ...: Any) -> U, ...: Any, [.init]: U) -> U
+reduce: <T, U> fn(.x: list[T] | T[], [.f]: fn(U, T, ...: Any) -> U, ...: Any, [.init]: U) -> U
 total: <T> fn(values: list[T] | T[]) -> Unknown
 guarded: <T, U> fn(expr: T, ...: Any, [finally]: U) -> T
 run: fn() -> double
@@ -2278,7 +2278,7 @@ locations <- function(sizes) {
 starts <- function() reduce(list(1L, 2L), function(total, item) total + item, .init = "zero")
 scaled <- function(xs) reduce(xs, function(total, item, scale) total + item * scale, 2, .init = 0)
 #++++
-reduce: <T, U> fn(.x: list[T] | T[], .f: fn(U, T, ...: Any) -> U, ...: Any, [.init]: U) -> U
+reduce: <T, U> fn(.x: list[T] | T[], [.f]: fn(U, T, ...: Any) -> U, ...: Any, [.init]: U) -> U
 locations: <T> fn(sizes: list[T] | T[]) -> list{double} | list[Unknown]
 starts: Unknown
 scaled: fn(xs: list[double] | double[]) -> double
@@ -2563,8 +2563,8 @@ enumerate <- function(x, f, FUN.VALUE = NULL) {
 }
 keep <- function(records, f) records[!enumerate(records, f, FUN.VALUE = logical(1))]
 #++++
-enumerate: <T> fn(x: T, f: fn(Unknown) -> Unknown, [FUN.VALUE]: Unknown) -> Unknown
-keep: <T> fn(records: T, f: fn(Unknown) -> Unknown) -> Unknown
+enumerate: <T> fn(x: T, [f]: fn(Unknown) -> Unknown, [FUN.VALUE]: Unknown) -> Unknown
+keep: <T> fn(records: T, [f]: fn(Unknown) -> Unknown) -> Unknown
 
 #---- identical_on_a_field_rules_out_null
 # renv: `info` is a record or `NULL`, and a field equal to a string proves it is the record.
@@ -2610,3 +2610,29 @@ twice: <T, U, V> fn([name]: T, [format_name]: U) -> character[] | character
 spread <- function(x, y, func) sweep(x, y, MARGIN = c(1, 2), FUN = func)
 #++++
 spread: <T, U, V> fn(x: T, y: U, func: V) -> Any
+
+#---- an_operand_that_returns_leaves_instead_of_yielding
+# DBI's tracing guard: `ok || return()` leaves the function when `ok` is `FALSE`.
+tracing <- FALSE
+f1 <- function(name) {
+  tracing || return()
+  name
+}
+f2 <- function(name) {
+  isTRUE(tracing) && return(NULL)
+  name
+}
+f3 <- function(name) {
+  is.character(name) || stop("`name` must be a string")
+  name
+}
+f4 <- function(name) {
+  if (!tracing) return()
+  name
+}
+#++++
+tracing: logical
+f1: <T> fn([name]: T) -> T | NULL
+f2: <T> fn([name]: T) -> T | NULL
+f3: fn(name: Unknown) -> Unknown
+f4: <T> fn([name]: T) -> T | NULL

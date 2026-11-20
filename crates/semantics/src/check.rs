@@ -2553,6 +2553,12 @@ struct FormalUses {
     evaluated: FxHashSet<Symbol>,
     /// Names passed bare to `substitute()`, which reads the argument's code, not its value.
     substituted: FxHashSet<Symbol>,
+    /// For each local bound to a function literal, the formals its body forces on every path.
+    /// They count as forced where a call through the local runs the body.
+    closures: FxHashMap<Symbol, Rc<[Symbol]>>,
+    /// The expressions whose value the walked function returns. A closure there is a
+    /// factory's product, made to be called, so its reads count as forced.
+    results: Vec<ExprId>,
 }
 
 impl FormalUses {
@@ -2591,6 +2597,15 @@ impl FormalUses {
     fn record_write(&mut self, name: Symbol) {
         if self.tracked.contains(&name) && !self.forced.contains(&name) {
             self.assigned.insert(name);
+        }
+    }
+
+    /// A call runs a closure whose body forces `forced`, unless this path wrote the name first.
+    fn record_closure_run(&mut self, forced: &[Symbol]) {
+        for &name in forced {
+            if !self.assigned.contains(&name) {
+                self.forced.insert(name);
+            }
         }
     }
 
@@ -7332,11 +7347,16 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     /// Walks in evaluation order, so a read counts as forcing a formal only before the body
     /// first assigns that name. A nested function's `missing()` tests and writes cover its
-    /// own frame, but its reads of an outer formal count: the closure usually runs, and
-    /// when it does it forces the promise.
+    /// own frame, and its reads of an outer formal force it only where the body runs: an
+    /// inline call, a call through the local the literal is bound to, or the function's
+    /// result, since a factory's closure is made to be called. A callback handed to `lapply`
+    /// may run zero times, so passing a closure to a call forces nothing.
     fn formal_uses(&self, parameters: &[Formal], body: ExprId) -> FormalUses {
+        let mut results = Vec::new();
+        self.result_expressions(body, &mut results);
         let mut uses = FormalUses {
             tracked: parameters.iter().map(|parameter| parameter.name).collect(),
+            results,
             ..FormalUses::default()
         };
         self.collect_formal_uses(body, &mut uses);
@@ -7346,30 +7366,20 @@ impl<'db, 'a> Checker<'db, 'a> {
     fn collect_formal_uses(&self, id: ExprId, uses: &mut FormalUses) {
         let kind = self.module.kind(id);
         match kind {
-            ExpressionKind::Function { parameters, body } => {
-                let mut nested = uses.nested();
-                nested.assigned = self.module[parameters]
-                    .iter()
-                    .map(|parameter| parameter.name)
-                    .filter(|name| uses.tracked.contains(name))
-                    .collect();
-                self.collect_formal_uses(*body, &mut nested);
-                uses.evaluated.extend(
-                    nested
-                        .evaluated
-                        .iter()
-                        .filter(|name| !uses.assigned.contains(*name)),
-                );
-                uses.substituted.extend(nested.substituted.iter().copied());
-                for &name in &nested.forced {
-                    if nested.forces_on_every_path(name) && !uses.assigned.contains(&name) {
-                        uses.forced.insert(name);
-                    }
+            ExpressionKind::Function { .. } => {
+                let forced = self.closure_forced(id, uses);
+                if uses.results.contains(&id) {
+                    uses.record_closure_run(&forced);
                 }
                 return;
             }
             ExpressionKind::NameRef(name) => {
                 uses.record_read(*name);
+                if uses.results.contains(&id)
+                    && let Some(forced) = uses.closures.get(name).cloned()
+                {
+                    uses.record_closure_run(&forced);
+                }
                 return;
             }
             // `<<-` writes an enclosing frame, never the local formal, and reads its target
@@ -7403,7 +7413,16 @@ impl<'db, 'a> Checker<'db, 'a> {
             ExpressionKind::Assign { target, value, .. }
                 if let ExpressionKind::NameRef(name) = self.module.kind(*target) =>
             {
-                self.collect_formal_uses(*value, uses);
+                if matches!(self.module.kind(*value), ExpressionKind::Function { .. }) {
+                    let forced = self.closure_forced(*value, uses);
+                    if uses.results.contains(value) {
+                        uses.record_closure_run(&forced);
+                    }
+                    uses.closures.insert(*name, forced);
+                } else {
+                    self.collect_formal_uses(*value, uses);
+                    uses.closures.remove(name);
+                }
                 uses.record_write(*name);
                 return;
             }
@@ -7570,6 +7589,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                             .iter()
                             .filter_map(|argument| argument.value)
                         {
+                            self.result_expressions(value, &mut uses.results);
                             self.collect_formal_uses(value, uses);
                         }
                         uses.record_return();
@@ -7594,13 +7614,24 @@ impl<'db, 'a> Checker<'db, 'a> {
                         return;
                     }
                 }
+                let mut called = *callee;
+                while let ExpressionKind::Paren(inner) = self.module.kind(called) {
+                    called = *inner;
+                }
+                let runs = match self.module.kind(called) {
+                    ExpressionKind::Function { .. } => Some(self.closure_forced(called, uses)),
+                    ExpressionKind::NameRef(name) => uses.closures.get(name).cloned(),
+                    _ => None,
+                };
                 // `f(x = x)` hands the promise on unforced, and a closure the project defines
                 // decides for itself whether to read it, so forwarding a formal under its own
                 // name does not force it. A bare formal passed to a project parameter the callee
                 // may leave unread, as `fast.svd(m, tol)` passes `tol` to a callee that tests
                 // `missing(tol)`, is not forced either. A library function such as `list`
                 // forces every argument.
-                self.collect_formal_uses(*callee, uses);
+                if !matches!(self.module.kind(called), ExpressionKind::Function { .. }) {
+                    self.collect_formal_uses(*callee, uses);
+                }
                 let (forwards, optional_targets) = match self.module.kind(*callee) {
                     ExpressionKind::NameRef(name) => {
                         // A library function stubbed as `Any` (graphics' `rect`) declares no
@@ -7658,12 +7689,71 @@ impl<'db, 'a> Checker<'db, 'a> {
                     }
                     self.collect_formal_uses(value, uses);
                 }
+                if let Some(forced) = runs {
+                    uses.record_closure_run(&forced);
+                }
                 return;
             }
             _ => {}
         }
         let module = self.module;
         module.for_each_child(id, |child| self.collect_formal_uses(child, uses));
+    }
+
+    /// Collects the expressions whose value `id` yields: the last statement of a block, both
+    /// arms of an `if`, and the value of an assignment.
+    fn result_expressions(&self, id: ExprId, results: &mut Vec<ExprId>) {
+        match self.module.kind(id) {
+            ExpressionKind::Paren(inner) => self.result_expressions(*inner, results),
+            ExpressionKind::Assign { value, .. } => self.result_expressions(*value, results),
+            ExpressionKind::Block { statements } => {
+                if let Some(&last) = self.module[statements].last() {
+                    self.result_expressions(last, results);
+                }
+            }
+            ExpressionKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.result_expressions(*then_branch, results);
+                if let Some(else_branch) = else_branch {
+                    self.result_expressions(*else_branch, results);
+                }
+            }
+            _ => results.push(id),
+        }
+    }
+
+    /// Walks a nested function literal: its evaluations and `substitute()` reads of outer
+    /// formals count where it is written, and the formals its body forces on every path are
+    /// returned for the call that runs it. The literal's own parameters shadow outer formals.
+    fn closure_forced(&self, function: ExprId, uses: &mut FormalUses) -> Rc<[Symbol]> {
+        let ExpressionKind::Function { parameters, body } = self.module.kind(function) else {
+            return Rc::from([]);
+        };
+        let mut nested = uses.nested();
+        nested.assigned = self.module[parameters]
+            .iter()
+            .map(|parameter| parameter.name)
+            .filter(|name| uses.tracked.contains(name))
+            .collect();
+        self.collect_formal_uses(*body, &mut nested);
+        uses.evaluated.extend(
+            nested
+                .evaluated
+                .iter()
+                .filter(|name| !uses.assigned.contains(*name)),
+        );
+        uses.substituted.extend(nested.substituted.iter().copied());
+        let mut forced: Vec<Symbol> = nested
+            .forced
+            .iter()
+            .copied()
+            .filter(|&name| nested.forces_on_every_path(name))
+            .collect();
+        forced.sort_unstable();
+        Rc::from(forced)
     }
 
     /// For each argument of a call to the project function `name`, whether it binds a parameter the
@@ -7767,8 +7857,13 @@ impl<'db, 'a> Checker<'db, 'a> {
         // The branch starts from the names already forced, so a `return()` inside it
         // records every name its path has forced.
         let outer_forced = uses.forced.clone();
+        let outer_closures = uses.closures.clone();
         self.collect_formal_uses(id, uses);
         let forced = mem::replace(&mut uses.forced, outer_forced);
+        // A local closure bound on one branch only may be another value after the join.
+        let branch_closures = mem::replace(&mut uses.closures, outer_closures);
+        uses.closures
+            .retain(|name, forced| branch_closures.get(name) == Some(forced));
         let after = mem::take(&mut uses.assigned);
         ((!self.diverges(id)).then_some(after), forced)
     }
@@ -9214,7 +9309,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                 };
                 let mark = self.environment.mark();
                 self.apply_refinements(&edge);
-                self.expect_scalar_logical(rhs, ConditionSite::Operand);
+                // `ok || return()` leaves instead of yielding a value, so the operand is not one.
+                if self.diverges(rhs) {
+                    self.infer(rhs);
+                } else {
+                    self.expect_scalar_logical(rhs, ConditionSite::Operand);
+                }
                 // The right operand may not run, so its own assignments join with the state
                 // before it; the refinement itself ends with the operator.
                 let writes: Vec<(BindingId, Option<EnvEntry<'db>>)> = self
@@ -9247,7 +9347,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 let boolean = native_scalar(self.db, NativeScalar::Bool);
                 let [left_bool, right_bool] = [lhs, rhs].map(|operand| {
                     let ty = self.recorded_type(operand);
-                    self.structural(ty) == boolean
+                    self.structural(ty) == boolean || (operand == rhs && self.diverges(rhs))
                 });
                 let literal = match (left_bool, right_bool) {
                     (true, true) => return boolean,

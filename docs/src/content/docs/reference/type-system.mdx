@@ -3141,8 +3141,13 @@ exceptions and additions:
   as a Reference Class field, never as the shipped function of the same name. In `t <<- t[-drop]`,
   `t` is `Unknown` rather than base `t`, so indexing it reports nothing, and strict mode reports the
   read. A project binding of that name still types the read.
-- A read inside a nested function forces the formal, because the closure may run, unless the
-  nested function has its own parameter or assignment of that name.
+- A read inside a nested function forces the formal only where the nested function certainly
+  runs, and only on every path through its body: when it is called inline, as in
+  `(function() x)()`, when it is bound to a local and called through that local, and when the
+  outer function returns it, because a factory's closure is made to be called. A function passed
+  to a call forces nothing, because `lapply()` over an empty vector never calls it, so
+  `function(items, x) lapply(items, function(item) c(x, item))` may be called without `x`. A
+  nested function's own parameter or assignment of the name shadows the formal.
 - A read inside another formal's default forces the formal only when that default runs, which is
   when the call omits the formal that owns it and the body forces that formal. So in
   `g <- function(x, y = x) y`, `x` is required exactly when `y` is left out: `g(y = 1)` and `g(2)`

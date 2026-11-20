@@ -822,7 +822,10 @@ in `standard-library.R.test`). Contract: `type-system.mdx`, "Union normalization
 - **Required formals.** A formal is optional unless the body may force it (`check::FormalUses`, in
   evaluation order): a read no write dominates forces; a loop body's or a `&&` operand's write never
   dominates, and `<<-` never assigns the local formal; `missing()`, `substitute()`, `quote()` arguments do
-  not force; reads in nested functions do; a forced default forces what it reads, to a fixpoint.
+  not force; reads in nested functions do only where the function runs (an inline call, a call
+  through its local, the returned value), never when it is passed to a call such as `lapply`, which
+  may not call it (httr2 reads `lifespan` only in a callback over a vector that is empty by
+  default); a forced default forces what it reads, to a fixpoint.
   Requiring every defaultless formal rejected valid R (`f(1)` for `function(x, unused) x`). Inferred and
   declared types share the walk, so a declared `[name]` is legal over an unforced formal, but laziness
   only relaxes inferred signatures: `fn(a: integer, b: character)` over `function(a, b) a` keeps `b`
