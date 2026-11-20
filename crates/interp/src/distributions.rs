@@ -2477,29 +2477,29 @@ pub fn rsignrank(deviates: &mut impl Deviates, n: f64) -> R<f64> {
     // Each rank joins the positive ranks with probability 1/2. Below 2^26 ranks every partial
     // sum is a whole number below 2^52, so an integer sum has the bits of GNU R's double one,
     // and for a deviate inside (0, 1) `floor(u + 0.5)` is the comparison `u + 0.5 >= 1`.
+    // A generator that offers no fill (a user-supplied one) may return any double, so it takes
+    // GNU R's double loop.
+    let mut whole_sum = 0u64;
+    let mut whole_ranks = 0u64;
     if n <= SIGNRANK_WHOLE_RANKS {
         let total = n as u64;
         let mut uniforms = [0.0f64; 256];
-        let mut sum = 0u64;
-        let mut rank = 0u64;
-        while rank < total {
-            let chunk = &mut uniforms[..(total - rank).min(256) as usize];
-            if deviates.fill_uniform(chunk)? {
-                for &uniform in chunk.iter() {
-                    rank += 1;
-                    sum += rank * u64::from(uniform + 0.5 >= 1.0);
-                }
-            } else {
-                for _ in 0..chunk.len() {
-                    rank += 1;
-                    sum += rank * (deviates.uniform()? + 0.5).floor() as u64;
-                }
+        while whole_ranks < total {
+            let chunk = &mut uniforms[..(total - whole_ranks).min(256) as usize];
+            if !deviates.fill_uniform(chunk)? {
+                break;
+            }
+            for &uniform in chunk.iter() {
+                whole_ranks += 1;
+                whole_sum += whole_ranks * u64::from(uniform + 0.5 >= 1.0);
             }
         }
-        return Ok(sum as f64);
+        if whole_ranks == total {
+            return Ok(whole_sum as f64);
+        }
     }
-    let mut sum = 0.0;
-    let mut rank = 1.0;
+    let mut sum = whole_sum as f64;
+    let mut rank = whole_ranks as f64 + 1.0;
     while rank <= n {
         sum += rank * (deviates.uniform()? + 0.5).floor();
         rank += 1.0;
