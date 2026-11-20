@@ -339,3 +339,54 @@ spend <- function(moves: List<Move>) -> F64 {
 }
 #++++
 spend: fn(moves: List<Move>) -> F64
+
+#---- a_string_item_literal_takes_the_str_beside_it
+alias Move = :Buy(name: Str, price: F64) | :Fee(amount: F64)
+spend <- function(moves: List<Move>) -> F64 {
+  total <- 0.0
+  for (move in moves) {
+    step <- match (move) {
+      :Buy(name = n, price = p) => (n, p)
+      :Fee(amount = a) => ("fee", a)
+    }
+    total <- total + step[[2]]
+  }
+  total
+}
+#++++
+spend: fn(moves: List<Move>) -> F64
+
+#---- a_tag_payload_literal_takes_the_ry_number_beside_it
+alias Move = :Buy(quantity: F64, price: F64) | :Fee(amount: F64)
+spend <- function(moves: List<Move>) -> F64 {
+  total <- 0.0
+  for (move in moves) {
+    step <- match (move) {
+      :Buy(quantity = q, price = p) => :Step(q, p)
+      :Fee(amount = a) => :Step(0, a)
+    }
+    total <- total + match (step) {
+      :Step(x, y) => x * y
+    }
+  }
+  total
+}
+#++++
+spend: fn(moves: List<Move>) -> F64
+
+#---- an_item_literal_the_number_cannot_hold_is_a_mismatch_at_the_literal
+alias Move = :Buy(quantity: I64, price: F64) | :Fee(amount: F64)
+spend <- function(moves: List<Move>) -> F64 {
+  total <- 0.0
+  for (move in moves) {
+    step <- match (move) {
+      :Buy(quantity = q, price = p) => (q, p)
+      :Fee(amount = a) => (2.5, a)
+    }
+    total <- total + step[[2]]
+  }
+  total
+}
+#++++
+spend: fn(moves: List<Move>) -> F64
+250..253 error[type-mismatch] this literal does not fit `I64`, which cannot hold its value exactly

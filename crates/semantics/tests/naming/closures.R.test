@@ -620,6 +620,26 @@ ranked <- function(dt) {
   masked-subset 27..67
   masked-subset 27..82
 
+#---- a_bracket_on_a_vector_query_is_base_indexing
+# `.N` and a column read give a vector, so the second `[` indexes it in the caller's scope.
+counted <- function(dt, idx) {
+  dt[, .N][idx]
+  dt[, amount][idx]
+}
+#++++
+# counted
+  b0 dt parameter 20..22
+  b1 idx parameter 24..27
+  b2 counted top-level 0..7
+  0..7 counted <- b2
+  33..35 dt -> b0
+  38..40 .N -> quiet deferred
+  42..45 idx -> b1
+  49..51 dt -> b0
+  54..60 amount -> non-local deferred
+  62..65 idx -> b1
+  masked-subset 33..41
+
 #---- walrus_on_a_global_inside_a_function_binds_nothing
 add_flag <- function() {
   dt[, flag := TRUE]

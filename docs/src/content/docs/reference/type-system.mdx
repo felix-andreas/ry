@@ -1291,10 +1291,12 @@ A string or `TRUE`/`FALSE` bound to a variable is decided the same way, as `Str`
 and `Bool` or `logical`. A ry number that a call leaves open is decided by an annotation as well,
 so `total: F64 <- List.sum([3])` sums a `List<F64>`.
 
-A tuple item or record field written with a literal in one branch of an `if` or `match` is decided
-by the item in the same place of another branch. In the arms `:Buy(quantity = q, price = p) => (q, p)`
-and `:Fee(amount = a) => (0, a)`, the `0` is an `F64` when `q` is an `F64` and R's `double` when `q`
-is a `double`, so a variable the `match` writes in a loop has one type on every iteration.
+A tuple item, record field or tag payload item written with a literal in one branch of an `if` or
+`match` is decided by the item in the same place of another branch. In the arms
+`:Buy(quantity = q, price = p) => (q, p)` and `:Fee(amount = a) => (0, a)`, the `0` is an `F64` when
+`q` is an `F64` and R's `double` when `q` is a `double`, so a variable the `match` writes in a loop
+has one type on every iteration. A string or `TRUE`/`FALSE` beside a `Str` or `Bool` is decided the
+same way, and `(2.5, a)` beside `(q, p)` with `q: I64` is a `type-mismatch` at the `2.5`.
 
 A literal the type cannot hold exactly, such as `2.5` as an `I64`, is a
 `type-mismatch` at the literal:

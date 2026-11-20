@@ -1797,13 +1797,15 @@ Each trades a narrow class of missed errors for a class of false reports seen on
 
 **Status:** built.
 
-A data.table query returns a table, and `[` on it dispatches to the same method, so every later
-link of a chain such as `dt[, .(total = sum(amount)), by = group][order(-total)]` evaluates in the
-table's frame. Naming marks a `[` as a masked subset when its target already is one, with no
-data.table special case: the rule is the structural one the first link uses, applied to the target.
-A lone `dt[order(-total)]` without query syntax stays base indexing, where `total` must be a
-variable. Without the rule the untyped data-science benchmark reported about 1,000 false
-`unresolved` findings, one per column a chained link named.
+A data.table query that gives a table dispatches `[` on its result to the same method, so every
+later link of a chain such as `dt[, .(total = sum(amount)), by = group][order(-total)]` evaluates
+in the table's frame. Naming marks a `[` as a masked subset when its target is one that gives a
+table (`query_gives_table`: it groups, has no `j`, passes `with`, or its `j` is a `.()`, `list()`,
+`:=` or `lapply` call or reads `.SD`), with no data.table special case. A `j` such as `.N` or a
+column gives a vector, so `dt[, .N][idx]` indexes it in the caller's scope and an undefined `idx`
+is reported. A lone `dt[order(-total)]` without query syntax is base indexing, where `total` must
+be a variable. The untyped data-science benchmark has one such chain per generated file, about
+1,000 column references in all.
 Fixtures: `naming/closures.R.test` and `typing/project-values.R.test`.
 
 ## Branches decide each other's literal items, and `c()` decides a literal as R's type
@@ -1811,14 +1813,18 @@ Fixtures: `naming/closures.R.test` and `typing/project-values.R.test`.
 **Status:** built.
 
 - A tuple item or record field written with a literal in one branch of an `if` or `match` takes
-  the type of the item in the same place of the other branch: a ry number unifies with it (a
-  literal the number cannot hold stays open), and an R type decides the literal as R's own type.
-  A loop pass writes fresh literal variables, so before this rule `(0, a)` beside `(q, p)` left
-  `step` open on each pass and the loop fixpoint reported that it does not stabilize.
-- `join_writes` treats two loop passes whose writes resolve to the same type as equal, because
-  each pass writes fresh variables for its literals.
+  the type of the item in the same place of the other branch (`decide_item_literals`): a ry
+  scalar unifies with it, an R atomic type decides it as R's own type, and a literal of another
+  kind, such as `"a"` beside an `F64`, stays open for a use. A literal the number cannot hold is
+  a `type-mismatch` at the literal. A loop pass writes fresh literal variables, so an open item
+  would differ on each pass and the loop fixpoint would report that `step` does not stabilize.
+- A tag payload's literals are decided as the tag is inferred, because tags join by payload
+  type, so `:Step(0, a)` beside `:Step(q, p)` adapts through `adapt_literal`, as a payload
+  written only with literals does. A ry literal such as `7i64` does not adapt to `F64`.
+- `join_writes` treats two writes that resolve to the same type as equal, because each loop pass
+  writes fresh variables for its literals.
 - `c` is an R function, so `infer_combine` decides a variable written with a literal as R's type,
-  as any other read does. `bounds <- 1; bounds <- c(bounds, x)` was otherwise an undetermined
-  `bounds` in strict mode.
+  as any other read does, and `bounds <- 1; bounds <- c(bounds, x)` is a `double[]` in strict
+  mode.
 
 Fixtures: `typing-strict/strict.R.test`, group `literal_decisions`.

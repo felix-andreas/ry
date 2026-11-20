@@ -825,9 +825,14 @@ impl Context<'_> {
                 if !*double {
                     self.bracket_depth += 1;
                 }
-                // A query returns a table, and `[` on it dispatches to the same method, so a
-                // chain's later links evaluate in the table's frame as the first does.
-                let queries_a_query = self.naming.masked_subsets.contains(target);
+                // A query that gives a table dispatches `[` on its result to the same method, so
+                // a chain's later links evaluate in the table's frame as the first does.
+                let queries_a_query = self.naming.masked_subsets.contains(target)
+                    && matches!(
+                        module.kind(*target),
+                        ExpressionKind::Index { arguments, .. }
+                            if query_gives_table(module, &module[*arguments])
+                    );
                 if !*double && (queries_a_query || data_table_signature(module, &module[arguments]))
                 {
                     self.naming.masked_subsets.insert(id);
@@ -1979,6 +1984,34 @@ fn data_table_signature(module: &Module, arguments: &[Argument]) -> bool {
             .value
             .is_some_and(|value| data_table_marker(module, value))
     })
+}
+
+/// Whether a query gives a table: one that groups, has no `j`, selects with `with = FALSE`, or
+/// whose `j` builds a list, updates by reference or reads `.SD`. Any other `j`, such as `.N` or
+/// a column, gives a vector, so a `[` on that result is base indexing.
+fn query_gives_table(module: &Module, arguments: &[Argument]) -> bool {
+    if arguments.iter().any(|argument| {
+        matches!(
+            module.argument_name(argument).as_deref(),
+            Some("by" | "keyby" | "with")
+        )
+    }) {
+        return true;
+    }
+    let (_, j) = query_index_arguments(module, arguments);
+    let Some(j) = j.and_then(|argument| argument.value) else {
+        return true;
+    };
+    let names_sd = |value: ExprId| matches!(module.kind(value), ExpressionKind::NameRef(name) if name == ".SD");
+    match module.kind(j) {
+        ExpressionKind::NameRef(_) => names_sd(j),
+        ExpressionKind::Index { target, .. } => names_sd(*target),
+        ExpressionKind::Call { callee, .. } => matches!(
+            module.kind(*callee),
+            ExpressionKind::NameRef(name) if matches!(name.as_str(), "." | "list" | ":=" | "lapply")
+        ),
+        _ => false,
+    }
 }
 
 /// The variable a data.table `..name` read inside `[` refers to: `name`, looked up in the

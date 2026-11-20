@@ -19493,7 +19493,7 @@ impl<'db, 'a> Checker<'db, 'a> {
     ) -> Ty<'db> {
         let other = self.table.resolve(self.db, other);
         let resolved = self.table.resolve(self.db, branch_ty);
-        self.decide_item_literals(resolved, other);
+        self.decide_item_literals(Some(branch), resolved, other);
         // `:Ok(x) => x` with `x` the undecided item of `[1]`, beside a `7i64` arm, is decided
         // by that arm, as a use would decide it.
         if matches!(self.ry_number_class(resolved), Some(RyClass::Open(_)))
@@ -19506,7 +19506,10 @@ impl<'db, 'a> Checker<'db, 'a> {
         // literal as well.
         let ry_other = holds_ry_scalar(self.db, other)
             || matches!(self.ry_number_class(other), Some(RyClass::Open(_)));
-        if !ry_other || holds_ry_scalar(self.db, resolved) {
+        // A tag's payload literals are decided as it is inferred, so `:Step(0, a)` beside
+        // `:Step(q, p)` adapts its `0` here, as a payload written only with literals does.
+        let payload = matches!(resolved.kind(self.db), TyKind::Tag(_, Some(_)));
+        if !ry_other || (holds_ry_scalar(self.db, resolved) && !payload) {
             return branch_ty;
         }
         match self.adapt_literal(branch, other) {
@@ -19515,44 +19518,84 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// A tuple item or record field written with a literal, such as the `0` of `(0, a)` beside
-    /// a branch giving `(q, p)` with `q: F64`, is decided by the ry number in the same place of
-    /// the other branch, as a whole branch written with a literal is, and as R's type beside an
-    /// R type.
-    fn decide_item_literals(&mut self, branch: Ty<'db>, other: Ty<'db>) {
-        let pairs: Vec<(Ty<'db>, Ty<'db>)> = match (branch.kind(self.db), other.kind(self.db)) {
+    /// A tuple item or record field written with a literal, such as the `0` of
+    /// `(0, a)` beside a branch giving `(q, p)` with `q: F64`, is decided by the ry type in the
+    /// same place of the other branch, as a whole branch written with a literal is, and is R's
+    /// type beside an R type. `branch` is the expression written there, when it is one.
+    fn decide_item_literals(&mut self, branch: Option<ExprId>, branch_ty: Ty<'db>, other: Ty<'db>) {
+        let module = self.module;
+        let mut branch = branch;
+        while let Some(ExpressionKind::Paren(inner)) = branch.map(|id| module.kind(id)) {
+            branch = Some(*inner);
+        }
+        let branch_kind = branch.map(|id| module.kind(id));
+        let mut pairs: SmallVec<[(Option<ExprId>, Ty<'db>, Ty<'db>); 4]> = SmallVec::new();
+        match (branch_ty.kind(self.db), other.kind(self.db)) {
             (TyKind::NativeTuple(items), TyKind::NativeTuple(others))
                 if items.len() == others.len() =>
             {
-                items.iter().copied().zip(others.iter().copied()).collect()
-            }
-            (TyKind::NativeRecord(fields), TyKind::NativeRecord(others)) => fields
-                .iter()
-                .filter_map(|field| {
-                    let matching = others
-                        .iter()
-                        .find(|candidate| candidate.name == field.name)?;
-                    Some((field.ty, matching.ty))
-                })
-                .collect(),
-            _ => return,
-        };
-        for (item, other_item) in pairs {
-            let other_item = self.table.resolve(self.db, other_item);
-            if self.open_literal_var(item) {
-                // A literal the number cannot hold, such as `2.5` beside an `I64`, fails to
-                // unify and stays open for a use to decide.
-                match other_item.kind(self.db) {
-                    TyKind::Native(native) if native.is_number() => {
-                        self.table.unify(self.db, item, other_item).ok();
+                let expressions = match branch_kind {
+                    Some(ExpressionKind::Tuple(expressions))
+                        if module[*expressions].len() == items.len() =>
+                    {
+                        &module[*expressions]
                     }
-                    // Beside an R type, such as a `double` field, the literal is R's own type.
-                    TyKind::Native(_) | TyKind::Var(_) => {}
-                    _ => self.default_literal_var(item, false),
+                    _ => &[],
+                };
+                for (index, (&item, &other_item)) in items.iter().zip(others.iter()).enumerate() {
+                    pairs.push((expressions.get(index).copied(), item, other_item));
                 }
-            } else {
+            }
+            (TyKind::NativeRecord(fields), TyKind::NativeRecord(others)) => {
+                let expressions = match branch_kind {
+                    Some(ExpressionKind::Record(expressions)) => &module[*expressions],
+                    _ => &[],
+                };
+                for field in fields.iter() {
+                    let Some(matching) = others.iter().find(|other| other.name == field.name)
+                    else {
+                        continue;
+                    };
+                    let expression = expressions
+                        .iter()
+                        .find(|written| Name::new(self.db, written.name) == field.name)
+                        .map(|written| written.value);
+                    pairs.push((expression, field.ty, matching.ty));
+                }
+            }
+            _ => return,
+        }
+        for (expression, item, other_item) in pairs {
+            let other_item = self.table.resolve(self.db, other_item);
+            if !self.open_literal_var(item) {
                 let item = self.table.resolve(self.db, item);
-                self.decide_item_literals(item, other_item);
+                self.decide_item_literals(expression, item, other_item);
+                continue;
+            }
+            match other_item.kind(self.db) {
+                TyKind::Native(_) => {
+                    // A literal the type cannot hold, such as `2.5` beside an `I64`, is a
+                    // mismatch at the literal, and the item stops there instead of repeating
+                    // the mismatch at each use.
+                    let fit = match expression {
+                        Some(expression) => self.adapt_literal(expression, other_item),
+                        None => LiteralFit::NotLiteral,
+                    };
+                    let decided = match fit {
+                        LiteralFit::OutOfRange => unknown(self.db),
+                        LiteralFit::Fits | LiteralFit::NotLiteral => other_item,
+                    };
+                    // A literal of another kind, such as `"a"` beside an `F64`, stays open for a
+                    // use to decide.
+                    if self.table.unify(self.db, item, decided).is_err() {
+                        continue;
+                    }
+                }
+                // Beside an R type, such as a `double` field, the literal is R's own type.
+                TyKind::Scalar(_) | TyKind::Vector(_) | TyKind::NamedVector(_) => {
+                    self.default_literal_var(item, false);
+                }
+                _ => {}
             }
         }
     }
@@ -19755,8 +19798,8 @@ impl<'db, 'a> Checker<'db, 'a> {
             if current.is_none() && branch_entry.is_some() {
                 current = self.materialize_pre_state(slot, true).map(EnvEntry::Mono);
             }
-            // A pass writes fresh variables for its literals, so two passes that decided them
-            // alike differ only before resolution.
+            // Each loop pass writes fresh variables for its literals, so two writes that
+            // decided them alike differ only before resolution.
             let same_resolved = match (current, branch_entry) {
                 (Some(EnvEntry::Mono(a)), Some(EnvEntry::Mono(b))) if a != b => {
                     self.table.resolve(self.db, a) == self.table.resolve(self.db, b)
