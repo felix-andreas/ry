@@ -3657,10 +3657,19 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 "`{function}` is an R function, and this value is a ry {kind}, not an R object. Convert it with `{conversion}()` first"
             )
         }
-        TypeErrorKind::FieldCannotBeAdded { field, container } => format!(
-            "field `{field}` does not exist in `{}`, and assigning to it cannot add it, because a record's fields are fixed",
-            renderer.render(db, *container)
-        ),
+        TypeErrorKind::FieldCannotBeAdded { field, container } => {
+            if matches!(container.kind(db), TyKind::Environment(_)) {
+                format!(
+                    "`{field}` is not a binding of `{}`, whose type lists every binding it may hold. Add `{field}: TYPE` to the type to allow it",
+                    renderer.render(db, *container)
+                )
+            } else {
+                format!(
+                    "field `{field}` does not exist in `{}`, and assigning to it cannot add it, because a record's fields are fixed",
+                    renderer.render(db, *container)
+                )
+            }
+        }
         TypeErrorKind::ArrayItemsDiffer { first, found } => format!(
             "this item is `{}`, but the list's first item is `{}`. A `List`'s items share one type and are never converted into each other",
             renderer.render(db, *found),
@@ -3943,6 +3952,9 @@ impl<'db> TypeRenderer<'db> {
             TyKind::Tuple(items) => format!("list{{{}}}", self.render_items(db, items)),
             TyKind::Record(fields) => format!("list{{{}}}", self.render_fields(db, fields)),
             TyKind::OpenRecord([]) => "list{..}".to_owned(),
+            TyKind::Environment(fields) => {
+                format!("environment{{{}}}", self.render_fields(db, fields))
+            }
             TyKind::OpenRecord(fields) => {
                 format!("list{{{}, ..}}", self.render_fields(db, fields))
             }

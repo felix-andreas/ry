@@ -1266,6 +1266,11 @@ impl<'db> Lowering<'db> {
                 Ty::new(self.db, kind)
             }
             SyntaxKind::TYPE_TUPLE | SyntaxKind::TYPE_RECORD
+                if name_text(node).as_deref() == Some("environment") =>
+            {
+                self.lower_environment(node)
+            }
+            SyntaxKind::TYPE_TUPLE | SyntaxKind::TYPE_RECORD
                 if node
                     .children()
                     .any(|c| c.kind() == SyntaxKind::TYPE_OTHER_TAGS) =>
@@ -1495,6 +1500,39 @@ impl<'db> Lowering<'db> {
             ));
             return unknown(self.db);
         }
+        match self.lower_named_fields(node, "`..` stands for more named fields, so every item of this `list{...}` type needs a name: write it as `name: TYPE`") {
+            Some(fields) => Ty::new(self.db, TyKind::OpenRecord(&fields)),
+            None => unknown(self.db),
+        }
+    }
+
+    /// `environment{count: integer}`: the bindings an environment holds, each with its type.
+    fn lower_environment(&mut self, node: &SyntaxNode) -> Ty<'db> {
+        if let Some(other) = node
+            .children()
+            .find(|c| c.kind() == SyntaxKind::TYPE_OTHER_TAGS)
+        {
+            self.errors.push((
+                "an `environment{...}` type lists every binding the environment may hold, so it cannot end in `..`. Write plain `environment` for one whose bindings are not typed".to_owned(),
+                other.text_range(),
+            ));
+            return unknown(self.db);
+        }
+        match self.lower_named_fields(
+            node,
+            "an `environment{...}` type names every binding: write it as `name: TYPE`",
+        ) {
+            Some(fields) => Ty::new(self.db, TyKind::Environment(&fields)),
+            None => unknown(self.db),
+        }
+    }
+
+    /// The `name: TYPE` fields of a brace type, or `None` after reporting an unnamed item.
+    fn lower_named_fields(
+        &mut self,
+        node: &SyntaxNode,
+        unnamed_message: &str,
+    ) -> Option<Vec<RecordField<'db>>> {
         let mut seen = FxHashSet::default();
         let mut fields = Vec::new();
         for child in node.children() {
@@ -1506,7 +1544,7 @@ impl<'db> Lowering<'db> {
                     };
                     if !seen.insert(name.clone()) {
                         self.errors.push((
-                            format!("the field `{name}` appears twice in this `list{{...}}` type"),
+                            format!("the field `{name}` appears twice in this type"),
                             child.text_range(),
                         ));
                         continue;
@@ -1521,16 +1559,14 @@ impl<'db> Lowering<'db> {
                     });
                 }
                 kind if is_type_kind(kind) => {
-                    self.errors.push((
-                        "`..` stands for more named fields, so every item of this `list{...}` type needs a name: write it as `name: TYPE`".to_owned(),
-                        child.text_range(),
-                    ));
-                    return unknown(self.db);
+                    self.errors
+                        .push((unnamed_message.to_owned(), child.text_range()));
+                    return None;
                 }
                 _ => {}
             }
         }
-        Ty::new(self.db, TyKind::OpenRecord(&fields))
+        Some(fields)
     }
 
     fn lower_type_ref(&mut self, node: &SyntaxNode) -> Ty<'db> {

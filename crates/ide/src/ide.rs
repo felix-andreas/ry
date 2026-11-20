@@ -6658,7 +6658,11 @@ fn value_shapes<'db>(db: &'db dyn Db, ty: Ty<'db>, shapes: &mut Vec<ValueShape<'
                 .iter()
                 .all(|member| value_shapes(db, *member, shapes));
         }
-        TyKind::Any | TyKind::Unknown | TyKind::Var(_) | TyKind::Rigid(_) => return false,
+        TyKind::Any
+        | TyKind::Unknown
+        | TyKind::Var(_)
+        | TyKind::Rigid(_)
+        | TyKind::Environment(_) => return false,
     };
     shapes.push(shape);
     true
@@ -7332,11 +7336,12 @@ fn is_hintable(db: &dyn Db, ty: Ty<'_>, variables_allowed: bool) -> bool {
         TyKind::Tuple(items) => items
             .iter()
             .all(|&item| is_hintable(db, item, variables_allowed)),
-        TyKind::Record(fields) | TyKind::OpenRecord(fields) | TyKind::Frame(_, Some(fields)) => {
-            fields
-                .iter()
-                .all(|field| is_hintable(db, field.ty, variables_allowed))
-        }
+        TyKind::Record(fields)
+        | TyKind::OpenRecord(fields)
+        | TyKind::Environment(fields)
+        | TyKind::Frame(_, Some(fields)) => fields
+            .iter()
+            .all(|field| is_hintable(db, field.ty, variables_allowed)),
         TyKind::Frame(_, None) => true,
         TyKind::Union(members) => members
             .iter()

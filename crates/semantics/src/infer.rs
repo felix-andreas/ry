@@ -586,7 +586,8 @@ impl<'db> InferenceTable<'db> {
                 Ok(())
             }
             (TyKind::Record(left), TyKind::Record(right))
-            | (TyKind::OpenRecord(left), TyKind::OpenRecord(right)) => {
+            | (TyKind::OpenRecord(left), TyKind::OpenRecord(right))
+            | (TyKind::Environment(left), TyKind::Environment(right)) => {
                 if left.len() != right.len()
                     || left
                         .iter()
@@ -1329,6 +1330,36 @@ impl<'db> InferenceTable<'db> {
                 if arguments.is_empty() && kind.class() == Some(name.text(db)) =>
             {
                 true
+            }
+            // `new.env()` is an environment with no bindings yet, which an annotation then types;
+            // a typed environment is still an environment.
+            (TyKind::Named(name, _), TyKind::Environment(_))
+            | (TyKind::Environment(_), TyKind::Named(name, _))
+                if name.text(db) == "environment" =>
+            {
+                true
+            }
+            // An environment is mutable, so its bindings' types must match both ways.
+            (TyKind::Environment(actual_fields), TyKind::Environment(expected_fields)) => {
+                actual_fields.len() == expected_fields.len()
+                    && expected_fields.iter().all(|expected_field| {
+                        actual_fields
+                            .iter()
+                            .find(|field| field.name == expected_field.name)
+                            .is_some_and(|actual_field| {
+                                self.compatible_probe(
+                                    db,
+                                    actual_field.ty,
+                                    expected_field.ty,
+                                    depth + 1,
+                                ) && self.compatible_probe(
+                                    db,
+                                    expected_field.ty,
+                                    actual_field.ty,
+                                    depth + 1,
+                                )
+                            })
+                    })
             }
             // An Array is an R vector at run time: a scalar item type makes it an atomic vector
             // and a ry-value item type a list, so it passes to R code as one, never the reverse.

@@ -951,8 +951,6 @@ The rule ships (`decisions/syntax-semantics.md`, "A strict library file's top le
 
 Porting the synthetic finance benchmark to fully typed strict code hit these. Each repro is a project with `[check] strict = true` (and `Imports:` naming the packages it uses); the quoted output is what `ry check` prints.
 
-- **No typed mutable environment.** A counter in `new.env()` cannot declare its fields: `calls <- new.env(); calls$count <- 0L; calls$count <- calls$count + 1L` reports `Unknown` on each `calls$count` read.
-- **R6 method bodies are unchecked.** In `R6::R6Class("Counter", public = list(add = function(k) { self$n <- self$n + k; private$check(); invisible(self) }))` the untyped `k`, `self` and `private` produce no strict report: `1 file checked, no problems`.
 - **Vectorised math types are wrong.** `exp`, `sqrt` and `nchar` return a scalar for any input, and there is no `array` type (an `array` annotation suggests `Array`, ry's own type). `#: fn(x: double[]) -> double` over `exp(x)` or `sqrt(x)` checks clean, as does `#: fn(x: character[]) -> integer` over `nchar(x)`; `#: fn(rates: matrix) -> matrix` over `exp(-rates)` gives `` expected `matrix`, found `double` ``. Overloads that keep the input's shape (`fn(x: double) -> double`, `fn(x: double[]) -> double[]`, `fn(x: Any) -> Any`) were tried and dropped: an unannotated wrapper such as `function(x) sqrt(x)` then matches several candidates that disagree, so the overload-set rules give it `Unknown` or a `numeric` bound, and inference regresses across the typing fixtures. The fix needs one shape-generic signature (a result with the shape of `x` and element type `double`) rather than an overload set.
 
 

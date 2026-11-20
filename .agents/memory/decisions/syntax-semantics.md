@@ -2020,3 +2020,11 @@ lowering path and a third way for two annotations to disagree, for no case `#:` 
 
 - **Rule.** `setClass` registers no type: a class name in an annotation is unknown unless a `@type` declares it, and `x@slot` is `Unknown` (a strict origin) except on an `Any` subject, where it is `Any` like `$`. A `setGeneric` generic's call gives `Any`, as an S3 generic's does.
 - **Why.** ry discourages S4 (a lint warns on it) and recommends records, so S4 gets the documented route only: a nominal `@type` with a record representation and a constructor wrapping `new(...)` with `@Name(...)`. Reading slot types from `representation()` would duplicate that path for a system users are steered away from, and dispatch over methods registered in any file has no single signature to give a generic.
+
+## A typed environment lists its bindings and never changes type
+
+**Status:** built.
+
+- **Rule.** `environment{count: integer}` (`TyKind::Environment`) types an environment's bindings. A `$<-` or `[[<-` write is checked against the binding and the variable keeps its type (`check_fixed_field_write`, shared with ry's `Record`); an unlisted name is an error on read and write. `new.env()`'s abstract `environment` fits any typed environment and the reverse, and two typed environments must match field for field in both directions, since they alias.
+- **Why not a record.** A record write builds a new record type (`x$a <- v` adds or retypes `a`), which is R's copy semantics for lists. An environment is shared by reference, so a write through one name is visible through every other, and only a fixed type is sound.
+- **Why closed.** An open environment could not check a write to an unlisted binding, and a typo in a write is the common mistake with environment state.

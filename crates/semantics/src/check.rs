@@ -4899,15 +4899,30 @@ impl<'db, 'a> Checker<'db, 'a> {
                 continue;
             }
             // A lambda passed as an argument gets its parameters' types from the call, which
-            // unifies only after the lambda is inferred, so it is not judged here.
-            let is_argument = self.module.kinds().iter().any(|kind| {
-                matches!(
-                    kind,
-                    ExpressionKind::Call { arguments, .. } | ExpressionKind::Index { arguments, .. }
-                        if self.module[arguments].iter().any(|argument| argument.value == Some(function))
-                )
-            });
-            if is_argument {
+            // unifies only after the lambda is inferred, so it is not judged here. An R6 method
+            // gets no types from `R6Class`, so it is judged like a definition.
+            let enclosing_call = |value: ExprId| {
+                self.module.kinds().iter().find_map(|kind| match kind {
+                    ExpressionKind::Call { callee, arguments }
+                        if self.module[*arguments]
+                            .iter()
+                            .any(|argument| argument.value == Some(value)) =>
+                    {
+                        Some(Some(*callee))
+                    }
+                    ExpressionKind::Index { arguments, .. }
+                        if self.module[*arguments]
+                            .iter()
+                            .any(|argument| argument.value == Some(value)) =>
+                    {
+                        Some(None)
+                    }
+                    _ => None,
+                })
+            };
+            if let Some(callee) = enclosing_call(function)
+                && !self.is_r6_method(callee, enclosing_call)
+            {
                 return;
             }
             let origin = StrictOrigin {
@@ -4919,6 +4934,41 @@ impl<'db, 'a> Checker<'db, 'a> {
                 self.strict_origins.push(origin);
             }
         }
+    }
+
+    /// Whether a lambda whose call is `callee` is an R6 method: an item of a `list(...)` that is
+    /// itself an argument of `R6Class(...)`.
+    fn is_r6_method(
+        &self,
+        callee: Option<ExprId>,
+        enclosing_call: impl Fn(ExprId) -> Option<Option<ExprId>>,
+    ) -> bool {
+        let names = |callee: Option<ExprId>, wanted: &str| {
+            callee.is_some_and(|callee| match self.module.kind(callee) {
+                ExpressionKind::NameRef(name) => name == wanted,
+                ExpressionKind::Namespace { name, .. } => name.as_deref() == Some(wanted),
+                _ => false,
+            })
+        };
+        if !names(callee, "list") {
+            return false;
+        }
+        let Some(list) = callee.and_then(|callee| {
+            self.module
+                .kinds()
+                .iter()
+                .enumerate()
+                .find_map(|(index, kind)| match kind {
+                    ExpressionKind::Call {
+                        callee: list_callee,
+                        ..
+                    } if *list_callee == callee => Some(ExprId::new(index)),
+                    _ => None,
+                })
+        }) else {
+            return false;
+        };
+        enclosing_call(list).is_some_and(|outer| names(outer, "R6Class"))
     }
 
     /// Annotating is exactly what a strict finding asks for, so it clears the origins inside
@@ -5942,6 +5992,54 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
+    /// A write into a field whose type is fixed: checked against it, or refused when the field
+    /// does not exist.
+    fn check_fixed_field_write(
+        &mut self,
+        lhs: ExprId,
+        field_name: String,
+        field: Option<Ty<'db>>,
+        value_expression: ExprId,
+        value: Ty<'db>,
+        prior: Ty<'db>,
+    ) {
+        let module = self.module;
+        let kind = module.kind(lhs);
+        match field {
+            // A literal written into the field takes the field's type, as one
+            // written into a list's item does.
+            Some(field_ty) => {
+                if self.adapt_literal(value_expression, field_ty) == LiteralFit::NotLiteral
+                    && !(self.open_literal_var(value)
+                        && self.table.unify(self.db, value, field_ty).is_ok())
+                    && !matches!(value.kind(self.db), TyKind::Unknown)
+                    && !self.table.compatible(self.db, value, field_ty)
+                {
+                    let range = self.blame_range(value_expression);
+                    let kind = self.type_mismatch(range, field_ty, value, None).kind;
+                    self.contained_errors.push(self.errors.len());
+                    self.errors.push(TypeError { range, kind });
+                }
+            }
+            None => {
+                let range = match kind {
+                    ExpressionKind::Field {
+                        name: Some(name), ..
+                    } => module.name_range(*name),
+                    _ => module.range(lhs),
+                };
+                self.contained_errors.push(self.errors.len());
+                self.errors.push(TypeError {
+                    range,
+                    kind: TypeErrorKind::FieldCannotBeAdded {
+                        field: field_name,
+                        container: prior,
+                    },
+                });
+            }
+        }
+    }
+
     /// The type an intermediate container of a replacement spine holds before the write.
     fn project_replacement(&self, expression: ExprId, base: ExprId, prior: Ty<'db>) -> Ty<'db> {
         if expression == base {
@@ -5953,7 +6051,10 @@ impl<'db, 'a> Checker<'db, 'a> {
         let container = self.project_replacement(target, base, prior);
         let container = self.table.resolve(self.db, container);
         match (step, container.kind(self.db)) {
-            (ReplacementStep::Field(name), TyKind::Record(fields)) => fields
+            (
+                ReplacementStep::Field(name),
+                TyKind::Record(fields) | TyKind::Environment(fields),
+            ) => fields
                 .iter()
                 .find(|field| field.name.text(self.db) == name)
                 .map_or_else(|| null(self.db), |field| field.ty),
@@ -6080,46 +6181,36 @@ impl<'db, 'a> Checker<'db, 'a> {
                         optional: false,
                     }]),
                 ),
-                // A ry record's fields are fixed, so the write is checked against the field and
-                // the record keeps its type.
+                // A ry record's fields and a typed environment's bindings are fixed, so the write
+                // is checked against the field and the value keeps its type.
                 TyKind::NativeRecord(fields) => {
-                    match fields
+                    let field = fields
                         .iter()
                         .find(|field| field.name.text(self.db) == field_name)
-                    {
-                        // A literal written into the field takes the field's type, as one
-                        // written into a list's item does.
-                        Some(field) => {
-                            if self.adapt_literal(value_expression, field.ty)
-                                == LiteralFit::NotLiteral
-                                && !(self.open_literal_var(value)
-                                    && self.table.unify(self.db, value, field.ty).is_ok())
-                                && !matches!(value.kind(self.db), TyKind::Unknown)
-                                && !self.table.compatible(self.db, value, field.ty)
-                            {
-                                let range = self.blame_range(value_expression);
-                                let kind = self.type_mismatch(range, field.ty, value, None).kind;
-                                self.contained_errors.push(self.errors.len());
-                                self.errors.push(TypeError { range, kind });
-                            }
-                        }
-                        None => {
-                            let range = match kind {
-                                ExpressionKind::Field {
-                                    name: Some(name), ..
-                                } => module.name_range(*name),
-                                _ => module.range(lhs),
-                            };
-                            self.contained_errors.push(self.errors.len());
-                            self.errors.push(TypeError {
-                                range,
-                                kind: TypeErrorKind::FieldCannotBeAdded {
-                                    field: field_name,
-                                    container: prior,
-                                },
-                            });
-                        }
-                    }
+                        .map(|field| field.ty);
+                    self.check_fixed_field_write(
+                        lhs,
+                        field_name,
+                        field,
+                        value_expression,
+                        value,
+                        prior,
+                    );
+                    prior
+                }
+                TyKind::Environment(fields) => {
+                    let field = fields
+                        .iter()
+                        .find(|field| field.name.text(self.db) == field_name)
+                        .map(|field| field.ty);
+                    self.check_fixed_field_write(
+                        lhs,
+                        field_name,
+                        field,
+                        value_expression,
+                        value,
+                        prior,
+                    );
                     prior
                 }
                 // A nominal's representation is fixed (that makes `@type` an invariant), so the
@@ -13084,6 +13175,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             | TyKind::Tuple(_)
             | TyKind::Record(_)
             | TyKind::OpenRecord(_)
+            | TyKind::Environment(_)
             | TyKind::NativeTuple(_)
             | TyKind::NativeRecord(_)
             | TyKind::Tag(..)
@@ -20076,7 +20168,28 @@ impl<'db, 'a> Checker<'db, 'a> {
             },
             // An open record lists only some of its fields, in no fixed order, so it answers
             // only a read by name.
-            TyKind::OpenRecord(_) if literal_position.is_some() || literal_name.is_none() => {
+            TyKind::Environment(fields) if let Some(name) = &literal_name => {
+                match fields
+                    .iter()
+                    .find(|field| field.name.text(self.db) == *name)
+                {
+                    Some(field) => Ok(field.ty),
+                    None => Err(TypeError {
+                        range: key_range,
+                        kind: TypeErrorKind::FieldDoesNotExist {
+                            suggestion: nearest_name(
+                                name,
+                                fields.iter().map(|field| field.name.text(self.db)),
+                            ),
+                            field: name.clone(),
+                            container: subject,
+                        },
+                    }),
+                }
+            }
+            TyKind::OpenRecord(_) | TyKind::Environment(_)
+                if literal_position.is_some() || literal_name.is_none() =>
+            {
                 self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
                 Ok(unknown(self.db))
             }
@@ -20241,6 +20354,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             | TyKind::Tuple(_)
             | TyKind::Record(_)
             | TyKind::OpenRecord(_)
+            | TyKind::Environment(_)
             | TyKind::NativeTuple(_)
             | TyKind::NativeRecord(_)
             | TyKind::Tag(..)
@@ -20511,6 +20625,23 @@ impl<'db, 'a> Checker<'db, 'a> {
                         self.record_strict_origin(origin, StrictOriginKind::UnsupportedConstruct);
                         Ok(unknown(self.db))
                     }
+                }
+            }
+            // An environment's typed bindings are all declared, so an unlisted name is a mistake.
+            TyKind::Environment(fields) => {
+                match fields.iter().find(|field| field.name.text(self.db) == name) {
+                    Some(field) => Ok(field.ty),
+                    None => Err(TypeError {
+                        range: name_range,
+                        kind: TypeErrorKind::FieldDoesNotExist {
+                            suggestion: nearest_name(
+                                name,
+                                fields.iter().map(|field| field.name.text(self.db)),
+                            ),
+                            field: name.to_owned(),
+                            container: subject,
+                        },
+                    }),
                 }
             }
             TyKind::NativeRecord(fields) => {
@@ -21732,6 +21863,7 @@ fn is_row_index<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
         | TyKind::Tuple(_)
         | TyKind::Record(_)
         | TyKind::OpenRecord(_)
+        | TyKind::Environment(_)
         | TyKind::NativeTuple(_)
         | TyKind::NativeRecord(_)
         | TyKind::Tag(..)

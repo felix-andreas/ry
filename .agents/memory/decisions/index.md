@@ -142,6 +142,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Open records are explicit, with no row variables
 - Recursive types are nominal; an alias never recurses
 - S4 is typed through a nominal wrapper, not from `setClass`
+- A typed environment lists its bindings and never changes type
 
 ## Analysis core
 

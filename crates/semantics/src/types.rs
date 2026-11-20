@@ -275,6 +275,9 @@ pub enum TyKind<'db> {
     /// `list{a: A, ..}`: a record-like list with at least these fields. A record with more
     /// fits it, and only the listed fields can be read through it.
     OpenRecord(&'db [RecordField<'db>]),
+    /// `environment{count: integer}`: an environment whose listed bindings keep their types.
+    /// It is mutable, so a write is checked against the field and never changes the type.
+    Environment(&'db [RecordField<'db>]),
     /// `Tuple{A, B}`: ry's native tuple, which is not a list and never fits a list type.
     NativeTuple(&'db [Ty<'db>]),
     /// `Record{a: A, b: B}`: ry's native record. Field order is not part of the type, so the
@@ -1205,6 +1208,9 @@ fn rebuilt_type<'db>(
         }
         TyKind::Record(fields) => Ty::new(db, TyKind::Record(&mapped_fields(fields, map))),
         TyKind::OpenRecord(fields) => Ty::new(db, TyKind::OpenRecord(&mapped_fields(fields, map))),
+        TyKind::Environment(fields) => {
+            Ty::new(db, TyKind::Environment(&mapped_fields(fields, map)))
+        }
         TyKind::NativeTuple(items) => {
             let items: TypeList<'db> = items.iter().map(|&item| map(item)).collect();
             Ty::new(db, TyKind::NativeTuple(&items))
@@ -1289,9 +1295,10 @@ fn for_each_child<'db>(kind: &TyKind<'db>, visit: &mut impl FnMut(Ty<'db>)) {
         }
         TyKind::NativeRecord(fields) => fields.iter().for_each(|field| visit(field.ty)),
         TyKind::Tag(_, payload) => payload.iter().copied().for_each(visit),
-        TyKind::Record(fields) | TyKind::OpenRecord(fields) | TyKind::Frame(_, Some(fields)) => {
-            fields.iter().for_each(|field| visit(field.ty))
-        }
+        TyKind::Record(fields)
+        | TyKind::OpenRecord(fields)
+        | TyKind::Environment(fields)
+        | TyKind::Frame(_, Some(fields)) => fields.iter().for_each(|field| visit(field.ty)),
         TyKind::Frame(_, None) => {}
         TyKind::Function(function) => {
             function.positional.iter().copied().for_each(&mut *visit);
@@ -1520,6 +1527,7 @@ fn stored_kind<'a>(arena: &'a Bump, kind: TyKind<'a>) -> TyKind<'a> {
         TyKind::Tuple(items) => TyKind::Tuple(arena.alloc_slice_copy(items)),
         TyKind::Record(fields) => TyKind::Record(arena.alloc_slice_copy(fields)),
         TyKind::OpenRecord(fields) => TyKind::OpenRecord(arena.alloc_slice_copy(fields)),
+        TyKind::Environment(fields) => TyKind::Environment(arena.alloc_slice_copy(fields)),
         TyKind::NativeTuple(items) => TyKind::NativeTuple(arena.alloc_slice_copy(items)),
         TyKind::NativeRecord(fields) => TyKind::NativeRecord(arena.alloc_slice_copy(fields)),
         TyKind::Frame(frame, Some(columns)) => {

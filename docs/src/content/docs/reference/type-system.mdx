@@ -610,6 +610,31 @@ empty, so any element read from `list{}` is `Unknown`: `out <- list(); out[[1]]`
 `opts <- list(); opts$force` are not reported. Inside a union, an empty-list member contributes
 `NULL` to a field read instead, as [`$` on a union](#indexing) describes.
 
+### Environments
+
+`new.env()`, `environment()` and `globalenv()` have the type `environment`, whose bindings are not
+typed: `$` on it reads `Unknown`. An `environment{name: TYPE, ...}` type lists the bindings an
+environment may hold, which types the mutable state R code keeps in one, such as a counter or a
+cache:
+
+```r
+count <- function() -> integer {
+  #: environment{count: integer}
+  calls <- new.env()
+  calls$count <- 0L
+  calls$count <- calls$count + 1L
+  calls$count            # integer
+}
+```
+
+`new.env()` fits any `environment{...}` type, and a typed environment passes wherever an
+`environment` is expected. An environment is mutable, so a write never changes its type:
+`calls$count <- "many"` is an error against `integer`, and a binding the type does not list can be
+neither written nor read (`calls$total <- 1L` is an error that asks to add `total: TYPE`). `$` and
+`[[` with a literal name read the listed bindings. Two typed environments fit each other only when
+they list the same bindings with the same types, because a write through either one changes both.
+The type lists every binding, so it cannot end in `..`.
+
 ### `NULL`
 
 The literal `NULL` has the type `NULL`, which is the unit type of this type system and is
@@ -4877,7 +4902,9 @@ A type variable that the signature mentions twice is genuine polymorphism, so `f
 (`<T> fn(x: T) -> T`) and `function(flag, a, b) if (flag) a else b` are not reported. Neither is a
 constrained variable such as `<T: numeric>`, a variable tied to an enclosing function, such as the
 inner `x` in `function(f) function(x) f(x)`. A lambda passed as an argument is not judged at all,
-because the call gives its parameters their types only after the lambda is inferred. A `...` formal is
+because the call gives its parameters their types only after the lambda is inferred. An R6 method,
+a function inside a `list(...)` passed to `R6Class`, is the exception: `R6Class` gives it no types,
+so it is judged like any other definition. A `...` formal is
 never reported, and a default does not count as a type, because an unannotated parameter takes its
 type from its uses. Annotate a parameter that really accepts anything as `Any`, which strict mode
 treats as a deliberate choice.
