@@ -249,11 +249,12 @@ then parses the file again, and its reader depends on the file's text like any o
 the tree. Under `enable_invariants()` every read of a stamp compares the subtree it names with the
 item's node in the file as it stands.
 
-A `#:` block is a sibling of its item in the file's tree, not part of the item's node. One query
-per file (`file_item_annotations`) attaches the blocks to their items and stores detached copies
-of their subtrees (`syntax::SyntaxNode::detached_subtree`), so an annotation never keeps the whole
-file's tree alive either. It runs again after every edit to the file and comes out equal while no
-block changed, because a detached subtree compares by content and not by position.
+A `#:` block is a sibling of its item in the file's tree, not part of the item's node. It is a
+top-level node of its own, so it carries a stamp like the item's, and `item_spans` records the
+stamp of the block attached to each item. `item_annotation_stamp` projects it per item, so an
+edit inside one block lowers only that item's annotations, and an edit to an item's body leaves
+its annotations alone. The block's syntax is read from the store by its stamp, like the item's,
+so no memo keeps an annotation's subtree.
 
 Every query that reads a tree is a memoized query whose result is small: the item HIR and
 annotations, `parse_stage_diagnostics`, `file_error_ranges`, the annotation references and
@@ -363,14 +364,24 @@ milliseconds. Any other change checks every file.
 
 A package-only run, such as `ry check R` or the strict check of `ry load`, analyses only the
 package files. Tests and scripts read the package namespace but add nothing to it, so leaving
-them unparsed changes no package finding. They stay in the record: a file the run left unanalysed
-keeps its recorded content, surface, findings and imports used while its text is unchanged. When
+them unparsed changes no package finding, with one exception: a `library()` call. Attached
+packages are project-wide, and attaching a package no stub describes tolerates every bare read,
+so the record keeps the namespaces each file attaches and the set its findings were computed
+under. A run whose analysed files attach a set that differs in a namespace that can change a
+finding checks every file. Attaching the project's own package, or a described package that is
+active without the attach (a declared dependency, such as testthat in `Suggests`), changes
+nothing, so `ry load` and `ry check` share the record in the usual case. The exception is a
+package whose shipped stubs the attach switches on, such as data.table checking itself. The
+language server counts only the files it loaded, because only their attach calls reach its
+analysis. Unanalysed files stay in the record: a file the run left unanalysed keeps its recorded
+content, surface, findings and imports used while its text is unchanged. When
 its text did change, the record keeps no surface for it and marks every unanalysed file
 unchecked, so the next run that analyses them checks them all. The `NAMESPACE` findings read only
 the imports the analysed files use, so a package-only run and a full run can disagree on them
 (an import only the tests use is unused to the first and used to the second). A replay therefore
-recomputes them when the package files' imports differ from all files' imports. On the benches, a file's dependency closure has a median size of 0 and a maximum of 1, so
-an edit inside a body rechecks one or two files.
+recomputes them when the package files' imports differ from all files' imports. On the benches,
+a file's dependency closure has a median size of 0 and a maximum of 1, so an edit inside a body
+rechecks one or two files.
 
 A partial run still parses every file, because the project-wide maps fold every file's items. So
 it warms those folds across all cores, and that parse, about 0.3 s of the 0.45 s total, is its

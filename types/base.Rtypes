@@ -263,6 +263,8 @@ endsWith : @pure fn(x: Any, suffix: Any) -> logical
 trimws : @pure fn(x: Any, [which]: character, [whitespace]: character) -> character
 strrep : @pure fn(x: Any, times: Any) -> character
 chartr : @pure fn(old: character, new: character, x: Any) -> character
+utf8ToInt : @pure fn(x: character) -> integer[]
+intToUtf8 : @pure fn(x: Any, [multiple]: logical, [allow_surrogate_pairs]: logical) -> character[]
 toString : @pure fn(x: Any, ...: Any, [sep]: character) -> character
 sQuote : @pure fn(x: Any, [q]: Any) -> character
 dQuote : @pure fn(x: Any, [q]: Any) -> character
@@ -739,6 +741,7 @@ within : @pure fn(data: Any, ...: Any) -> Any
 library : fn([package]: Any, [help]: Any, [pos]: Any, [lib.loc]: Any, [character.only]: logical, [logical.return]: logical, [warn.conflicts]: logical, [quietly]: logical, [verbose]: logical) -> Any
 require : fn([package]: Any, [lib.loc]: Any, [quietly]: logical, [warn.conflicts]: logical, [character.only]: logical) -> logical
 requireNamespace : fn(package: Any, ...: Any, [quietly]: logical) -> logical
+sys.source : fn(file: character, [envir]: Any, [chdir]: logical, [keep.source]: logical, [keep.parse.data]: logical, [toplevel.env]: Any) -> NULL
 source : fn([file]: Any, [local]: Any, [echo]: logical, [print.eval]: logical, [exprs]: Any, [spaced]: logical, [verbose]: logical, [prompt.echo]: character, [max.deparse.length]: Any, [width.cutoff]: Any, [deparseCtrl]: Any, [chdir]: logical, [catch.aborts]: logical, [encoding]: Any, [continue.echo]: character, [skip.echo]: Any, [keep.source]: logical) -> Any
 getOption : fn(x: character, [default]: Any) -> Any
 # `options(warn = 1, digits = 7)`: arbitrary option names as named arguments.
@@ -805,6 +808,8 @@ julian : @pure Any
 
 # System and session.
 Sys.time : fn() -> POSIXct
+# A `proc_time` is a named double vector: user, system and elapsed seconds.
+proc.time : fn() -> double[]
 Sys.Date : fn() -> Date
 Sys.getenv : fn([x]: Any, [unset]: Any, [names]: logical) -> character
 # `Sys.setenv(VAR = "v")`: arbitrary variable names as named arguments.
@@ -838,6 +843,8 @@ traceback : fn([x]: Any, [max.lines]: Any) -> Any
 # The S4 dispatch primitive lives in base, not methods.
 standardGeneric : fn(f: character, [fdef]: Any) -> Any
 getwd : fn() -> character
+# The previous working directory, invisibly.
+setwd : fn(dir: character) -> character
 system.file : fn(...: Any, [package]: character, [lib.loc]: Any, [mustWork]: logical) -> character
 asNamespace : fn(ns: Any, [base.OK]: logical) -> environment
 loadNamespace : fn(package: character, ...: Any) -> environment

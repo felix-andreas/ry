@@ -41,7 +41,7 @@ use {
     },
     syntax::{
         NodeOrToken, NodeRef, Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, Tree,
-        annotation::{AnnotationTarget, formals, statement_annotations},
+        annotation::{AnnotationTarget, attached_annotation, formals, statement_annotations},
         ast::{BinaryExpr, is_expression_kind, name_text},
         matching_nodes, node_text, paired_comment_definition,
     },
@@ -566,6 +566,9 @@ pub struct ItemSpan<'db> {
     /// The defined name's range, read with the item's identity from the same walk.
     pub name_range: Option<TextRange>,
     stamp: SyntaxStamp,
+    /// The stamp of the `#:` block attached to the item, [`NO_STAMP`] without one. The block is
+    /// a top-level node of its own, so it carries a stamp like the item's.
+    annotation_stamp: SyntaxStamp,
 }
 
 /// One memoized walk; a per-item lookup would re-classify the file per item.
@@ -575,10 +578,19 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
     let root = parse.syntax_node();
     let mut counts: FxHashMap<(ItemKind, Option<Symbol>), u32> = FxHashMap::default();
     let mut spans = Vec::new();
+    let mut previous_annotation: Option<(TextRange, SyntaxStamp)> = None;
     for (node, &stamp) in root.children().zip(stamps.iter()) {
+        if node.kind() == SyntaxKind::ANNOTATION {
+            previous_annotation = Some((node.text_range(), stamp));
+            continue;
+        }
         if !is_expression_kind(node.kind()) && node.kind() != SyntaxKind::ERROR {
             continue;
         }
+        let annotation_stamp = match (attached_annotation(&node), previous_annotation) {
+            (Some(block), Some((range, stamp))) if block.text_range() == range => stamp,
+            _ => NO_STAMP,
+        };
         let (kind, name, name_range) = match top_level_definition(&node) {
             Some(definition) => (
                 definition.kind,
@@ -598,6 +610,7 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
             range: node.text_range(),
             name_range,
             stamp,
+            annotation_stamp,
         });
     }
     spans
@@ -1060,36 +1073,40 @@ pub fn package_scheme_exists_in(
     })
 }
 
-/// Annotations are siblings of the item in the file tree, so they attach here, not in
-/// `item_syntax`. One walk per file attaches them all. An edit to the file repeats the walk,
-/// and it comes out equal while no `#:` block changed, so a reader of an item's annotations
-/// runs again only when some block of its file did.
+/// The item's `#:` block, item-relative like [`item_syntax`]. Like it, the read depends on a
+/// stamp alone ([`item_annotation_stamp`]), so an edit to one block runs again only the readers
+/// of that block's item.
 pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
-    file_item_annotations(db, *item.file(db))
-        .get(&item)
-        .cloned()
+    let stamp = item_annotation_stamp(db, item);
+    if stamp == NO_STAMP {
+        return None;
+    }
+    let tree = match db.trees().stamped(*item.file(db), stamp) {
+        Some(tree) => tree,
+        None => attached_annotation(&item_node(db, item)?)?.subtree(),
+    };
+    Some(ItemSyntax(Arc::new(tree)))
 }
 
-/// Matches targets to `item_spans` by range, so top-level classification lives in one place.
-#[salsa::tracked(returns(ref))]
-fn file_item_annotations<'db>(
-    db: &'db dyn Db,
-    file: SourceFile,
-) -> FxHashMap<Item<'db>, ItemSyntax> {
-    let item_by_range: FxHashMap<TextRange, Item<'db>> = item_spans(db, file)
-        .iter()
-        .map(|span| (span.range, span.item))
-        .collect();
-    let parse = parse(db, file);
-    statement_annotations(&parse.syntax_node())
-        .into_iter()
-        .filter_map(|(annotation, target)| match target {
-            AnnotationTarget::Attached(node) => item_by_range
-                .get(&node.text_range())
-                .map(|&item| (item, ItemSyntax(Arc::new(annotation.detached_subtree())))),
-            _ => None,
-        })
-        .collect()
+/// The stamp of the item's `#:` block, [`NO_STAMP`] without one. It runs again for every item
+/// of an edited file and comes out equal for each item whose block the edit left alone.
+#[salsa::tracked(returns(copy))]
+fn item_annotation_stamp<'db>(db: &'db dyn Db, item: Item<'db>) -> SyntaxStamp {
+    let Some(span) = item_span(db, item) else {
+        return NO_STAMP;
+    };
+    let file = *item.file(db);
+    if syntax::testing::invariants_enabled()
+        && let Some(stamped) = db.trees().stamped(file, span.annotation_stamp)
+    {
+        assert!(
+            span_node(db, file, span)
+                .and_then(|node| attached_annotation(&node))
+                .is_some_and(|block| block.subtree() == stamped),
+            "the annotation stamp of an item names another node's syntax"
+        );
+    }
+    span.annotation_stamp
 }
 
 /// An item's lowered annotations, item-relative like `item_syntax`.
@@ -3215,7 +3232,7 @@ fn code_rewritten_later<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
 /// The names a top-level `body(name) <-` of the file rewrites. It
 /// backdates on every edit that adds or removes no such write.
 #[salsa::tracked(returns(ref))]
-fn file_code_rewrites<'db>(db: &'db dyn Db, file: SourceFile) -> ThinVec<Symbol> {
+fn file_code_rewrites(db: &dyn Db, file: SourceFile) -> ThinVec<Symbol> {
     let mut names: ThinVec<Symbol> = item_tree(db, file)
         .iter()
         .filter(|&&item| item_syntax_flags(db, item).rewrites_code)

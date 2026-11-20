@@ -15,7 +15,10 @@ use {
         testing::{ProbeDatabase, render_semantics},
         types::{Atomic, scalar},
     },
-    std::{collections::{BTreeMap, BTreeSet}, thread},
+    std::{
+        collections::{BTreeMap, BTreeSet},
+        thread,
+    },
 };
 
 fn settle(db: &ProbeDatabase, files: &[SourceFile]) {
@@ -510,9 +513,8 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_trees() {
 
 /// An item keeps the stamp of its syntax while that syntax is unchanged, wherever the item
 /// moves in its file. Its stamp is read again after every edit to the file and comes out
-/// equal, so nothing derived from the item's syntax runs again. The `#:` block of an item is
-/// a sibling of the item, attached by a per-file walk that comes out equal while no block
-/// changes, so the annotated item's annotations stay memoized too.
+/// equal, so nothing derived from the item's syntax runs again. The `#:` block of an item has
+/// a stamp of its own, so the annotated item's annotations stay memoized too.
 #[test]
 fn an_edit_lowers_only_the_items_whose_syntax_changed() {
     let mut db = ProbeDatabase::default();
@@ -586,6 +588,39 @@ fn an_edit_lowers_only_the_items_whose_syntax_changed() {
         [4, 4, 4, 4, 2],
         "edits at both ends of the file leave one changed region that spans it, so every item \
          lowers again, and the two in the middle lower to what they were"
+    );
+}
+
+/// An edit to one `#:` block lowers the annotations of that block's item alone, and an
+/// edit that detaches a block from its item lowers that item's.
+#[test]
+fn an_edit_to_one_annotation_block_lowers_only_its_items_annotations() {
+    let mut db = ProbeDatabase::default();
+    let source = |first: &str, gap: &str| {
+        format!(
+            "#: {first}\nfirst <- function(x) x\n#: fn(x: integer) -> integer\n\
+             second <- function(x) x\n#: fn(x: double) -> double\n{gap}third <- function(x) x\n"
+        )
+    };
+    let files = db.project(&[&source("fn(x: integer) -> integer", "")]);
+    let derived = ["item_annotation_stamp", "item_annotations", "item_hir"];
+    settle(&db, &files);
+    assert_eq!(db.executions_since(&derived), [3, 3, 3]);
+
+    db.edit(files[0], source("fn(x: double) -> double", ""));
+    settle(&db, &files);
+    assert_eq!(
+        db.executions_since(&derived),
+        [3, 1, 0],
+        "an edit inside the first block"
+    );
+
+    db.edit(files[0], source("fn(x: double) -> double", "\n"));
+    settle(&db, &files);
+    assert_eq!(
+        db.executions_since(&derived),
+        [3, 1, 0],
+        "a blank line that detaches the last block"
     );
 }
 

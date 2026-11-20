@@ -273,3 +273,13 @@ The Zed extension bundles no binary: it locates `ry` at run time through the LSP
 
 - **A function literal passed as an argument that writes no type gets its whole signature** when every type in it is settled (`lambda_annotations` in `ide.rs`): from the parameter it is passed to or from its body. A type variable, `Unknown` or `Any` leaves it alone, so `apply`'s `Any` lambdas and `tryCatch` handlers stay for a person. Inline it fills the header; with inline annotations off it writes a `#:` line above the argument, which needs the argument to start its line. The R6 method inside `list(...)` qualifies by its body, which is the signature strict mode asks for anyway.
 - **The command asks for editor facts** (`Purpose::Rewrites`), because a lambda's type lives only in the per-expression types the editor reads.
+
+## A cancellation flips the worker's token only inside an armed scope
+
+**Status:** built.
+
+- **Previous shape.** Every tracked read on the worker had to run inside `Worker::cancellable`, because a queued job flipped the token at any time and a fetch outside the catch unwound through `run_job` and stopped the worker. The rule was a convention: `source_calls` retried in a loop, and a missed wrap killed the worker about one run in ten under load.
+- **Shape.** `CancelState` counts armed scopes. `CancelHandle::cancel` flips the token only while one is open; otherwise it records `pending`, and the next scope of the same job flips the token as it opens, so the job still yields at its next armed read. `Worker::armed` arms, catches `Cancelled`, and disarms; `Worker::cancellable` and request reads use it. A read outside every scope runs to completion, so a stray read can delay a queued job but never stop the worker. An idle unit keeps a `pending` recorded since the queue was found empty, since only a job's start clears it. A flip that lands inside a scope as a top-level query returns is lost to salsa's uncancel, so a background unit also polls `has_queued_jobs` between units.
+- **A flip that outlives its scope.** Salsa's tokens expose only `cancel` and `is_cancelled`, and a fetch on a flipped token unwinds. A flip landing after a scope's last query returned leaves the token set, so the outermost disarm replaces the handle (`db.clone()`, which carries a fresh token) and records `pending`.
+- **Jobs.** `run_job` clears `pending` as a job starts: the job runs on the newest state, so what an earlier job was asked to abandon no longer applies.
+- **Helpers** (parallel clones) keep flipping at any time: every read of theirs runs inside a catch of their own.
