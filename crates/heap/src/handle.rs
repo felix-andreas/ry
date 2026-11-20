@@ -3,7 +3,6 @@
 //!
 //! The examples, which are doc tests of what the borrow checker refuses, are in `handle.md`.
 #![doc = include_str!("handle.md")]
-
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use {
