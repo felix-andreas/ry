@@ -125,6 +125,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A wrapper over a numeric overload set takes the `numeric` bound (settled)
 - A `[` on a query's result is a query
 - Branches decide each other's literal items, and `c()` decides a literal as R's type
+- A loop's `break`s and `next`s join where they land
 
 ## Analysis core
 

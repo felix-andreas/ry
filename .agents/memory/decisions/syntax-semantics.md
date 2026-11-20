@@ -1828,3 +1828,20 @@ Fixtures: `naming/closures.R.test` and `typing/project-values.R.test`.
   mode.
 
 Fixtures: `typing-strict/strict.R.test`, group `literal_decisions`.
+
+## A loop's `break`s and `next`s join where they land
+
+**Status:** built.
+
+- Each loop pass keeps a `LoopJumps` frame. A `break` or `next` snapshots the slots written so far
+  in the pass: a `next`'s state joins the loop head beside the end of the body, and a `break`'s
+  state joins the state after the loop. Naming mirrors this with `loop_nexts` beside
+  `loop_exits`, so a write read only by the next iteration is not unused.
+- A `repeat` leaves only through its `break`s, so the state after it is the union of the break
+  states over the converged loop head (`leave_through_breaks`), never the end of the body.
+- A nested `for` over an enclosing active loop's variable reuses that variable's slot, because R
+  writes the same variable. The checker finds each loop's slot through
+  `NamingExtras::for_variables`, keyed by the loop expression, since a reused slot's range is the
+  outer loop's.
+
+Fixtures: `typing/control.R.test` group `loops`, `naming/for-bindings.R.test`.

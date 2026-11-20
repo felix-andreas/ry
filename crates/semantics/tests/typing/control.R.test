@@ -688,6 +688,58 @@ f <- function() {
 #++++
 f: fn() -> logical
 
+#---- a_write_before_break_reaches_the_code_after_the_loop
+f <- function(xs) {
+  x <- 1
+  for (i in xs) {
+    x <- 1L
+    if (i) break
+    x <- "a"
+  }
+  x
+}
+#++++
+f: <T> fn(xs: T) -> double | character | integer
+
+#---- a_write_before_next_reaches_the_following_iteration
+f <- function(xs) {
+  n <- 1
+  out <- 0
+  for (i in xs) {
+    if (i) {
+      n <- 1L
+      next
+    }
+    out <- n
+    n <- "a"
+  }
+  out
+}
+#++++
+f: <T> fn(xs: T) -> double | character | integer
+
+#---- a_repeat_leaves_with_the_state_at_its_break
+f <- function(stop) {
+  repeat {
+    s <- "a"
+    if (stop) break
+    s <- 1L
+  }
+  s
+}
+#++++
+f: fn(stop: logical) -> character
+
+#---- a_nested_loop_over_the_outer_variable_writes_the_outer_variable
+f <- function() {
+  for (m in c(0.5, 1.5)) {
+    for (m in 1:2) {}
+  }
+  m
+}
+#++++
+f: fn() -> double | integer | NULL
+
 #==== switch
 #---- branches_union_with_null
 f <- function(x) switch(x, a = 1L, b = "s")

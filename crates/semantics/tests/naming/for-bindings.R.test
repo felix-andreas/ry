@@ -1,4 +1,20 @@
 #==== for_loops
+#---- a_nested_loop_over_the_outer_variable_writes_the_outer_slot
+f <- function(xs) {
+  for (m in xs) {
+    for (m in 1:2) {}
+  }
+  m
+}
+#++++
+# f
+  b0 xs parameter 14..16
+  b1 m for-variable 27..28
+  b2 f top-level 0..1
+  0..1 f <- b2
+  32..34 xs -> b0
+  66..67 m -> b1
+
 #---- for_variable_introduces_fresh_binding
 for (x in list(1L)) {
   x

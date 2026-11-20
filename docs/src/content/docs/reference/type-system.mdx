@@ -3209,8 +3209,10 @@ body does not carry over into the next iteration.
 
 After the loop, R keeps the variable's last value, or sets it to `NULL` when the source was empty.
 A read there is therefore the element type joined with `NULL`, and with the variable's type at the
-end of the body when the body assigns it. A write that a `break` or `next` cuts off from the end of
-the body is not counted, which is a known gap, and so is a nested loop that reuses the name. A `from:to` range always has at least one element, so after
+end of the body when the body assigns it. A `break` leaves the loop with the state it saw and a
+`next` starts the next iteration with it, so a write that one cuts off from the end of the body still
+counts. A nested loop over the same name writes the outer loop's variable, so the outer variable's
+type after the loop includes the inner loop's elements. A `from:to` range always has at least one element, so after
 `for (i in 1:n) {}` the variable `i` is `integer`, while after `for (value in x) {}` with
 `x: double[]` it is `double | NULL`. A loop at the top level of a file leaves its variable bound
 like a top-level assignment, so a later statement or item reads the same type. When the item also
@@ -3223,8 +3225,10 @@ so reads in the condition see the loop's joined state. The loop evaluates to `NU
 
 ### `repeat`
 
-A `repeat` loop has no condition and runs its body at least once, so a variable written in the body is
-definitely assigned after the loop. It evaluates to `NULL`. A `repeat` that no `break` leaves never
+A `repeat` loop has no condition and is left only through a `break`, so after the loop a variable
+holds the union of the types it had at each `break`. In
+`repeat { s <- "a"; if (done) break; s <- 1L }`, `s` is `character` afterwards. It evaluates to
+`NULL`. A `repeat` that no `break` leaves never
 completes, so code after it is unreachable and a function body ending in it contributes no trailing
 value.
 

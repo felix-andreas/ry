@@ -102,6 +102,9 @@ pub struct NamingExtras {
     /// The variables of top-level `for` loops. They stay bound in the global environment like
     /// a top-level assignment, so the item exports their type.
     pub loop_bound_slots: SortedSet<BindingId>,
+    /// Each `for` loop's variable slot. A nested loop over an enclosing loop's variable writes
+    /// the enclosing slot, so the slot's own range does not identify the loop.
+    pub for_variables: SortedMap<ExprId, BindingId>,
     /// data.table `[`s: indexes evaluate in the data's frame, and the bracket types `Unknown`.
     pub masked_subsets: SortedSet<ExprId>,
     /// `f[, y := v]` statements whose subject the current scope owns: ry models the update as
@@ -171,6 +174,7 @@ struct NamingDraft {
     used_top_level_names: BTreeSet<Symbol>,
     captured_slots: BTreeSet<BindingId>,
     loop_bound_slots: BTreeSet<BindingId>,
+    for_variables: BTreeMap<ExprId, BindingId>,
     masked_subsets: BTreeSet<ExprId>,
     column_updates: BTreeMap<ExprId, BindingId>,
     run_time_writes: BTreeMap<ExprId, BindingId>,
@@ -192,6 +196,7 @@ impl NamingDraft {
             unused_parameters: ThinVec::from(self.unused_parameters),
             captured_slots: self.captured_slots.into(),
             loop_bound_slots: self.loop_bound_slots.into(),
+            for_variables: self.for_variables.into(),
             masked_subsets: self.masked_subsets.into(),
             column_updates: self.column_updates.into(),
             run_time_writes: self.run_time_writes.into(),
@@ -256,6 +261,8 @@ pub fn resolve_item(
         scope_ids: FxHashMap::default(),
         flow: FlowState::new(),
         loop_exits: Vec::new(),
+        loop_nexts: Vec::new(),
+        active_loop_variables: Vec::new(),
         writes: Vec::new(),
         write_by_expression: FxHashMap::default(),
         read_parameter_slots: BTreeSet::new(),
@@ -342,6 +349,10 @@ struct Context<'a> {
     /// Flow state at each `break` of the innermost loop. A loop that cannot be skipped exits
     /// only through these; joining the loop head would keep first-iteration paths alive.
     loop_exits: Vec<FlowState>,
+    /// Flow state at each `next` of the innermost loop, which reaches the next iteration.
+    loop_nexts: Vec<FlowState>,
+    /// The variables of the `for` loops being walked, innermost last.
+    active_loop_variables: Vec<BindingId>,
     quiet_depth: u32,
     /// Inside an expression R evaluates later (`on.exit`): its reads see the final value, so
     /// they keep every write of the name alive.
@@ -456,8 +467,9 @@ impl Context<'_> {
     fn resolve(&mut self, id: ExprId) {
         let module = self.module;
         match module.kind(id) {
-            ExpressionKind::Missing | ExpressionKind::Next => {}
+            ExpressionKind::Missing => {}
             ExpressionKind::Break => self.loop_exits.push(self.flow.clone()),
+            ExpressionKind::Next => self.loop_nexts.push(self.flow.clone()),
             // glue and cli evaluate `{...}` inside a string in the caller's frame, and so does
             // any wrapper that forwards `parent.frame()`, so a name there keeps its binding
             // alive. It is never an unresolved read, because the string may be plain text.
@@ -938,15 +950,31 @@ impl Context<'_> {
                     } = self.module[variable];
                     // A top-level loop leaves its variable bound in the global environment, so
                     // later statements read the type it exports.
-                    let slot = self.mint_binding(variable, range, BindingKind::ForVariable);
+                    // A nested loop over an enclosing loop's variable writes that same variable,
+                    // so what the outer loop leaves behind includes the inner loop's values.
+                    let enclosing = self
+                        .current_scope()
+                        .slots
+                        .get(&variable)
+                        .copied()
+                        .filter(|slot| self.active_loop_variables.contains(slot));
+                    let slot = match enclosing {
+                        Some(slot) => slot,
+                        None => self.mint_binding(variable, range, BindingKind::ForVariable),
+                    };
                     if self.current_scope().kind == ScopeKind::TopLevel {
                         self.naming.super_globals.insert(variable);
                         self.naming.loop_bound_slots.insert(slot);
                     }
                     self.current_scope().slots.insert(variable, slot);
+                    self.naming.for_variables.insert(id, slot);
                     self.record_write(slot, Reach::Implicit);
+                    self.active_loop_variables.push(slot);
+                    self.loop_body(*body, None, true);
+                    self.active_loop_variables.pop();
+                } else {
+                    self.loop_body(*body, None, true);
                 }
-                self.loop_body(*body, None, true);
             }
             ExpressionKind::While { condition, body } => {
                 self.resolve(*condition);
@@ -1213,10 +1241,14 @@ impl Context<'_> {
         let entry = self.flow.clone();
         let saved_emit = self.emit;
         let enclosing_exits = mem::take(&mut self.loop_exits);
+        let enclosing_nexts = mem::take(&mut self.loop_nexts);
         self.emit = false;
         loop {
             let before = self.flow.clone();
             self.resolve(body);
+            for next in mem::take(&mut self.loop_nexts) {
+                join_flow(&mut self.flow, &next);
+            }
             if let Some(condition) = condition {
                 self.resolve(condition);
             }
@@ -1229,6 +1261,9 @@ impl Context<'_> {
         // Only the final pass's `break` states describe the converged loop.
         self.loop_exits.clear();
         self.resolve(body);
+        for next in mem::replace(&mut self.loop_nexts, enclosing_nexts) {
+            join_flow(&mut self.flow, &next);
+        }
         if let Some(condition) = condition {
             // The condition's own effects were recorded before the loop; this read only marks
             // the body's writes it sees as used.

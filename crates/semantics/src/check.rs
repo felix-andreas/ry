@@ -890,6 +890,7 @@ fn check_item_in<'db>(
         capture_repass_needed: false,
         superassign_seeds: SmallVec::new(),
         pre_materialized: Column::new_in(arena, bindings),
+        loop_jumps: Vec::new(),
         no_default_formals: Bitset::new_in(arena, bindings),
         defaulted_formals: Bitset::new_in(arena, bindings),
         missing_path_functions: Bitset::new_in(arena, bindings),
@@ -1775,6 +1776,8 @@ struct Checker<'db, 'a> {
     /// Top-level slots whose unwritten path read the cross-item binding: a pre-state
     /// that loop passes re-establish after their rollback.
     pre_materialized: Column<'a, BindingId, Ty<'db>>,
+    /// Per loop pass being checked, innermost last: the states `break` and `next` leave.
+    loop_jumps: Vec<LoopJumps<'db>>,
     no_default_formals: Bitset<'a, BindingId>,
     /// Unannotated formals with a default; a condition on one does not pin its type.
     defaulted_formals: Bitset<'a, BindingId>,
@@ -1982,6 +1985,17 @@ enum CalleeSource {
 enum JoinEdge {
     Branch,
     LoopBack,
+}
+
+/// The writes a loop pass's `break`s and `next`s carry: a `break` leaves the loop with them and a
+/// `next` starts the next iteration with them, so each joins where its jump lands rather than
+/// at the end of the body. `mark` is the pass's environment mark; `breaks` keeps one state per
+/// `break`, because a `repeat` leaves with exactly the states its `break`s saw.
+#[derive(Default)]
+struct LoopJumps<'db> {
+    mark: usize,
+    breaks: Vec<Vec<(BindingId, Option<EnvEntry<'db>>)>>,
+    nexts: Vec<(BindingId, Option<EnvEntry<'db>>)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4319,7 +4333,18 @@ impl<'db, 'a> Checker<'db, 'a> {
                 last
             }
             ExpressionKind::Paren(inner) => self.infer(*inner),
-            ExpressionKind::Break | ExpressionKind::Next => unknown(self.db),
+            ExpressionKind::Break | ExpressionKind::Next => {
+                if let Some(mark) = self.loop_jumps.last().map(|jumps| jumps.mark) {
+                    let state = self.environment.writes_since(mark);
+                    if let Some(jumps) = self.loop_jumps.last_mut() {
+                        match module.kind(id) {
+                            ExpressionKind::Break => jumps.breaks.push(state),
+                            _ => jumps.nexts.extend(state),
+                        }
+                    }
+                }
+                unknown(self.db)
+            }
             ExpressionKind::Tuple(items) => {
                 let items = *items;
                 let items = module[items]
@@ -6805,13 +6830,12 @@ impl<'db, 'a> Checker<'db, 'a> {
             self.recorded_loop_variables
                 .insert(loop_expression, element);
         }
-        let loop_slot = variable_range.and_then(|variable_range| {
-            self.naming
-                .bindings
-                .iter()
-                .find(|(_, info)| info.range == variable_range)
-                .map(|(id, _)| *id)
-        });
+        let loop_slot = self
+            .naming
+            .extras()
+            .for_variables
+            .get(&loop_expression)
+            .copied();
         let variable_written = self.check_loop_body(
             loop_expression,
             None,
@@ -6843,6 +6867,37 @@ impl<'db, 'a> Checker<'db, 'a> {
             self.environment.set(slot, EnvEntry::Mono(after));
         }
         null(self.db)
+    }
+
+    /// A `repeat` leaves only through its `break`s, so the state after it is the union of the
+    /// states they saw: each `break`'s writes over the converged loop-head state.
+    fn leave_through_breaks(&mut self, breaks: &[Vec<(BindingId, Option<EnvEntry<'db>>)>]) {
+        let mut slots: Vec<BindingId> = breaks.iter().flatten().map(|(slot, _)| *slot).collect();
+        slots.sort_unstable();
+        slots.dedup();
+        let head: Vec<_> = slots
+            .iter()
+            .map(|&slot| (slot, self.environment.get(slot)))
+            .collect();
+        for (index, taken) in breaks.iter().enumerate() {
+            if index > 0 {
+                let state: Vec<_> = head
+                    .iter()
+                    .map(|&(slot, at_head)| {
+                        let written = taken.iter().find(|(written, _)| *written == slot);
+                        (slot, written.map_or(at_head, |(_, entry)| *entry))
+                    })
+                    .collect();
+                self.join_writes(&state, JoinEdge::Branch);
+                continue;
+            }
+            // A slot the first `break` did not write already holds its head state.
+            for (slot, entry) in taken {
+                if let Some(entry) = *entry {
+                    self.environment.set(*slot, entry);
+                }
+            }
+        }
     }
 
     fn iteration_element(&mut self, resolved: Ty<'db>) -> Result<Ty<'db>, Ty<'db>> {
@@ -6885,7 +6940,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         loop_expression: ExprId,
         condition: Option<ExprId>,
         body: ExprId,
-        runs_at_least_once: bool,
+        leaves_only_by_break: bool,
         loop_variable: Option<(BindingId, Ty<'db>)>,
     ) -> Option<Ty<'db>> {
         const LOOP_PASS_CAP: usize = 3;
@@ -6901,24 +6956,38 @@ impl<'db, 'a> Checker<'db, 'a> {
             if let Some(condition) = condition {
                 self.expect_scalar_logical(condition, ConditionSite::IfOrWhile);
             }
+            self.loop_jumps.push(LoopJumps {
+                mark,
+                ..LoopJumps::default()
+            });
             self.infer(body);
-            let mut variable_written = None;
-            let writes: Vec<(BindingId, Option<EnvEntry<'db>>)> = self
-                .environment
-                .writes_since(mark)
-                .into_iter()
-                .filter(|(slot, entry)| {
-                    let is_variable =
-                        loop_variable.is_some_and(|(loop_slot, _)| *slot == loop_slot);
-                    if is_variable {
-                        variable_written = Some(match entry {
-                            Some(EnvEntry::Mono(ty) | EnvEntry::MissingFormal(ty)) => *ty,
-                            Some(EnvEntry::Scheme(_)) | None => unknown(self.db),
-                        });
+            let mut writes = self.environment.writes_since(mark);
+            let jumps = self.loop_jumps.pop().unwrap_or_default();
+            // The loop variable's own writes are what the body leaves it holding after the loop.
+            let mut variable_written: Option<Ty<'db>> = None;
+            let mut take_variable = |writes: &mut Vec<(BindingId, Option<EnvEntry<'db>>)>| {
+                let Some((loop_slot, _)) = loop_variable else {
+                    return;
+                };
+                writes.retain(|(slot, entry)| {
+                    if *slot != loop_slot {
+                        return true;
                     }
-                    !is_variable
-                })
-                .collect();
+                    let ty = match entry {
+                        Some(EnvEntry::Mono(ty) | EnvEntry::MissingFormal(ty)) => *ty,
+                        Some(EnvEntry::Scheme(_)) | None => unknown(self.db),
+                    };
+                    variable_written = Some(match variable_written {
+                        Some(earlier) => union_of(self.db, [earlier, ty]),
+                        None => ty,
+                    });
+                    false
+                });
+            };
+            let (mut breaks, mut nexts) = (jumps.breaks, jumps.nexts);
+            take_variable(&mut writes);
+            take_variable(&mut nexts);
+            breaks.iter_mut().for_each(&mut take_variable);
             self.environment.rollback(mark);
             // A read this pass discovered the slot's pre-loop state through the cross-item
             // binding; establish it so the body's writes join into it.
@@ -6927,13 +6996,16 @@ impl<'db, 'a> Checker<'db, 'a> {
                     self.environment.set(slot, EnvEntry::Mono(ty));
                 }
             }
-            let changed = self.join_writes(&writes, JoinEdge::LoopBack);
+            let mut changed = self.join_writes(&writes, JoinEdge::LoopBack);
+            changed.extend(self.join_writes(&nexts, JoinEdge::LoopBack));
             if changed.is_empty() {
-                if runs_at_least_once {
-                    for (slot, entry) in writes {
-                        if let Some(entry) = entry {
-                            self.environment.set(slot, entry);
-                        }
+                if leaves_only_by_break {
+                    self.leave_through_breaks(&breaks);
+                } else {
+                    // A `break` leaves with what it saw, beside the state the loop exits with
+                    // at its head.
+                    for taken in &breaks {
+                        self.join_writes(taken, JoinEdge::Branch);
                     }
                 }
                 return variable_written;
