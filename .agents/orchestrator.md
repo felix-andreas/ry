@@ -45,16 +45,13 @@ The goal, the mandate and the benchmark are in `AGENTS.md`. On top of them:
 
 ## In flight
 
-Release: the next release may be cut without asking once the call-setup slot-frames PR is merged and the oracle is green (#589, source files, the JIT abort are merged; user). `.github/pending/` is not required for it.
+No release unless the user asks (user). Fable sessions wait for the weekly limit until Mon Nov 23 10:00 UTC; until then at most two Opus high sessions run, on work that does not conflict (user).
 
-- session_0111kWqC7RFhwr7cUXCLb1kD (Fable high, call setup): closure call setup end shape; #579 merged. Resumed after its weekly limit; replacement-call reification forwarded to it.
-- session_0111kWqEuykBqAFmDRUX18Uv (Fable high + up to 2 Opus high subagents, a user's package-suite kernels k1-k14): #584, #586, #587, #590, #595 (parse), #597 (base closure prologues), #598 (lazy-load fetch) merged. Next: data.table under testthat, k2/k8.
-- session_0111kWqBMmAzH7BQL9wcvEQ4 (Opus high, broken on main): done (#588, #589 merged); idle.
-- session_0111kWqAnTx97virE5EiXtV1 (Opus high): #523, #591, #592, #593, #596 (JIT handle-mark abort) merged. Now: make compiled element ops cheaper than tier 0 (test_tiers `element_ops_cost_no_more_than_tier_zero`, 986 vs 860 instructions per iteration).
-- session_0111kWqB22GkB9yjpoxGpSxo (Fable, low-signal test cut): PR #594.
-- session_0111kWqBDx8gHzkTxw2tx3iw (developer experience): agent memory layout and context cost (`dx/memory-structure`).
+- session_0111kWqCHzz5KgPTQQvkUSXS (Opus high, checker): #681, #684 merged. Now: ry-lang `test_release_metadata`/`test_perf` on main, then false errors on real CRAN code, the last doc-review items, check-cache speed.
+- session_0111kWqE86VPq98yVE2JgLVm (Opus high, kernels and package correctness): #682, #683 merged. Now: the `run-with-a-profile-over-the-start-image` scenario on main, then install.packages with several packages, withr DESCRIPTION, data.table divergences, rlang tests, failing builtins.
+- Paused until Mon Nov 23 (trigger trig_01SZ4mDi9FXTEzqTdFKB7yEQ resumes them and re-enables check-in trig_01LuX97P7ZbAg4TRxYu7c1tu): session_0111kWqEyHh2WBFnP93ZvPEM (JIT), session_0111kWqD8G8GVR8fbHetepcc (calls), session_0111kWqDs8aQ1MWFmKMxX9HQ (fuzz, IDE oracles).
 
-User-only items (never ask; note in the final report): the Marketplace trusted-publishing policy, the Zed listing, a real Windows run, deleting remote branches `feat/runtime-stats` and `runtime-packages-round4`, moving staged files from `.github/pending/`.
+User-only items (never ask; note in the final report): a history rewrite dropping an old customer-project name, the Marketplace trusted-publishing policy, the Zed listing, a real Windows run, deleting remote branches `feat/runtime-stats` and `runtime-packages-round4`.
 
 ## Open asks to the user
 
