@@ -130,6 +130,9 @@ pub struct NamingExtras {
     /// editor treats it as the variable it copies, since renaming one without the other breaks
     /// the code.
     pub replacement_copies: SortedMap<BindingId, CopySource>,
+    /// Reads of a function's own slot that some path reaches unassigned, each with the
+    /// enclosing function's slot R reads on that path instead.
+    pub enclosing_fallbacks: SortedMap<ExprId, BindingId>,
 }
 
 static NO_EXTRAS: LazyLock<NamingExtras> = LazyLock::new(NamingExtras::default);
@@ -185,6 +188,7 @@ struct NamingDraft {
     callee_fallbacks: BTreeMap<ExprId, CalleeFallback>,
     native_routine_reads: BTreeSet<ExprId>,
     replacement_copies: BTreeMap<BindingId, CopySource>,
+    enclosing_fallbacks: BTreeMap<ExprId, BindingId>,
 }
 
 impl NamingDraft {
@@ -205,6 +209,7 @@ impl NamingDraft {
             or_pattern_mismatches: ThinVec::from(self.or_pattern_mismatches),
             native_routine_reads: self.native_routine_reads.into(),
             replacement_copies: self.replacement_copies.into(),
+            enclosing_fallbacks: self.enclosing_fallbacks.into(),
         };
         ItemNaming {
             bindings: self.bindings.into(),
@@ -317,6 +322,17 @@ enum Reach {
 }
 
 type FlowState = BTreeMap<BindingId, BTreeSet<Reach>>;
+
+/// What a read finds on a path that reaches it before any write of its slot.
+#[derive(Clone, Copy)]
+enum Unassigned {
+    /// Every path writes the slot first.
+    Never,
+    /// Nothing in the item binds the name outside the slot's frame.
+    Undefined,
+    /// The enclosing function's slot of the same name.
+    Enclosing(BindingId),
+}
 
 struct AssignmentWrite {
     name: Symbol,
@@ -1372,7 +1388,7 @@ impl Context<'_> {
     /// Separate from [`Self::resolve_read`] because a `%op%` read is a token with no expression
     /// id. A slot resolves when a write reaches the read or the read crosses a function
     /// boundary (a capture); an unassignable slot does not shadow.
-    fn mark_slot_read(&mut self, name: Symbol) -> Option<(BindingId, bool)> {
+    fn mark_slot_read(&mut self, name: Symbol) -> Option<(BindingId, Unassigned)> {
         let function_depth = self.current_function_depth();
         let (depth, slot) = self
             .scopes
@@ -1391,22 +1407,22 @@ impl Context<'_> {
         if forward {
             self.deferred_depth += 1;
         }
-        let maybe_undefined = self.mark_slot_reached(name, depth, slot, function_depth);
+        let unassigned = self.mark_slot_reached(name, depth, slot, function_depth);
         if forward {
             self.deferred_depth -= 1;
         }
-        Some((slot, maybe_undefined))
+        Some((slot, unassigned))
     }
 
-    /// Records that a read at the current point observes `slot`, which lives at scope `depth`;
-    /// true when some path reaches the read with the slot still unassigned.
+    /// Records that a read at the current point observes `slot`, which lives at scope `depth`,
+    /// and says what the read finds on a path that reaches it with the slot unassigned.
     fn mark_slot_reached(
         &mut self,
         name: Symbol,
         depth: usize,
         slot: BindingId,
         function_depth: usize,
-    ) -> bool {
+    ) -> Unassigned {
         match self.naming.bindings.get(&slot).map(|binding| binding.kind) {
             Some(BindingKind::Parameter) => {
                 self.read_parameter_slots.insert(slot);
@@ -1438,7 +1454,23 @@ impl Context<'_> {
                 }
             }
         }
-        maybe_undefined
+        if !maybe_undefined {
+            return Unassigned::Never;
+        }
+        // On a path that leaves a function's own slot unassigned, R looks the name up in the
+        // enclosing frames, so an enclosing function's binding serves the read there.
+        let enclosing = self.scopes[..function_depth]
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(depth, scope)| Some((depth, *scope.slots.get(&name)?)));
+        match enclosing {
+            Some((enclosing_depth, enclosing_slot)) => {
+                self.mark_slot_reached(name, enclosing_depth, enclosing_slot, function_depth);
+                Unassigned::Enclosing(enclosing_slot)
+            }
+            None => Unassigned::Undefined,
+        }
     }
 
     /// Every enclosing slot that could serve the call is marked read, since the checker may
@@ -1482,10 +1514,18 @@ impl Context<'_> {
             _ => name,
         };
         match self.mark_slot_read(name) {
-            Some((slot, maybe_undefined)) => {
+            Some((slot, unassigned)) => {
                 self.naming.resolutions.insert(id, slot);
-                if maybe_undefined && self.emit {
-                    self.naming.maybe_undefined.insert(id);
+                if self.emit {
+                    match unassigned {
+                        Unassigned::Never => {}
+                        Unassigned::Undefined => {
+                            self.naming.maybe_undefined.insert(id);
+                        }
+                        Unassigned::Enclosing(enclosing) => {
+                            self.naming.enclosing_fallbacks.insert(id, enclosing);
+                        }
+                    }
                 }
             }
             // A method's object frame sits between its body and the namespace, so a field or

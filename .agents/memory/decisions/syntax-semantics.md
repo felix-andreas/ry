@@ -1885,3 +1885,21 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
   the generic argument check.
 - Hover on a top-level name renders the item's exported scheme only when the item assigns that
   name; in `m$amount <- 5` the scheme is the value's.
+
+## An unassigned path reads the name outside the function
+
+**Status:** built.
+
+- R looks a name up in the enclosing frames when the function's own frame has no binding yet, so a
+  read that some path reaches before any local write (`if (ok) limit <- 5L; limit`) reads the
+  outer `limit` on that path. Naming (`mark_slot_reached`) returns what that path finds:
+  nothing, or an enclosing function's slot, which it records in `enclosing_fallbacks` and marks
+  read. A name bound outside the item (another file, an import, base R) is judged where the
+  project's names are known: `maybe-undefined` asks `classify_name_read` as a deferred read, and
+  the unused check counts the read as a deferred read of the top-level name.
+- The checker unions the fallback's type into the read (`unassigned_path_read`), because either
+  value reaches it. Reporting only the local writes' type would blame correct code.
+- An annotation on a value that is not a function literal (a trusted coercion, `#: fn(integer)`
+  on `g <- f`) has no body to infer an elided `->` from, so the return comes from the value's own
+  function type, called with the written parameter types (`elided_return_from_value`). Parameters
+  pair by position, as a call binds them, because the written signature names no formals.

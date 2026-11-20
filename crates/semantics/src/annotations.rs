@@ -1013,7 +1013,11 @@ impl<'db> Lowering<'db> {
                 } else {
                     annotation.if_unknown = true;
                 }
-                if let Some(body) = self.lower_child_type(node) {
+                // A coercion's own type is a definition's: an elided `->` takes the value's return.
+                self.definition_type = true;
+                let body = self.lower_child_type(node);
+                self.definition_type = false;
+                if let Some(body) = body {
                     annotation.declared = Some(TypeScheme::monomorphic(body));
                 }
             }

@@ -75,3 +75,16 @@ NULL
 }
 #++++
 .onLoad: fn(libname: character, [pkgname]: character) -> Any
+
+#==== broken_statements
+#---- a_statement_with_a_syntax_error_reports_no_untyped_parameter
+#~~~~ R/main.R
+f <- function(x) {
+  z <- x +
+}
+g <- function(y) y + 1L
+#++++
+== R/main.R
+f: <T> fn(x: T) -> Unknown
+g: <T: numeric> fn(y: T) -> T
+28..29 error[syntax-error] expected an expression after `+`

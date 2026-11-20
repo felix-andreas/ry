@@ -593,8 +593,10 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 ),
             ));
         }
-        // R errors on a read with no prior write. Local slots only: a top-level
-        // variable's unwritten path falls through to the enclosing environment.
+        // R errors on a read with no prior write. A top-level variable's unwritten path falls
+        // through to the enclosing environment, and so does a function's when a binding of the
+        // name exists outside it (an enclosing function's slot never reaches this list).
+        let context = OnceCell::new();
         for expression in &naming.maybe_undefined {
             let Some(binding) = naming
                 .resolutions
@@ -604,6 +606,18 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 continue;
             };
             if binding.kind == BindingKind::TopLevel {
+                continue;
+            }
+            let fallback = classify_name_read(
+                db,
+                context.get_or_init(|| read_context(db, file)),
+                item_index,
+                naming,
+                binding.name,
+                true,
+                false,
+            );
+            if !matches!(fallback, NonLocalRead::Unresolved { .. }) {
                 continue;
             }
             let range = module.range(*expression) + offset;
@@ -675,7 +689,6 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
         // A name inside a frame query is a column first, and R falls back to the enclosing
         // scope only for a non-column, so a miss is reported only when nothing defines it.
-        let context = OnceCell::new();
         for (expression, miss) in check.column_misses.iter() {
             let Some(name) = naming
                 .non_locals
@@ -836,29 +849,40 @@ fn classify_non_local_read(
     expression: &ExprId,
     symbol: Symbol,
 ) -> NonLocalRead {
-    let name = symbol.as_str();
     if check.masked_reads.contains(expression) {
         return NonLocalRead::Resolvable;
     }
+    let deferred = naming.deferred_non_locals.contains(expression)
+        || naming.extras().deferred_quiet_reads.contains(expression);
+    let native = naming.extras().native_routine_reads.contains(expression);
+    classify_name_read(db, context, item_index, naming, symbol, deferred, native)
+}
+
+/// How a read of `symbol` that no slot of the item serves resolves: `deferred` when it runs
+/// after the file's frame settled (inside a function), `native` when it names a routine.
+fn classify_name_read(
+    db: &dyn Db,
+    context: &ReadContext<'_>,
+    item_index: usize,
+    naming: &ItemNaming,
+    symbol: Symbol,
+    deferred: bool,
+    native: bool,
+) -> NonLocalRead {
+    let name = symbol.as_str();
     let file = context.file;
     if let Some(&earliest) = context.positions.get(&symbol)
-        && (earliest < item_index
-            || naming.deferred_non_locals.contains(expression)
-            || naming.extras().deferred_quiet_reads.contains(expression))
+        && (earliest < item_index || deferred)
     {
         return NonLocalRead::Resolvable;
     }
     if R6_INJECTED_BINDINGS.contains(&name) && *file_defines_r6_class(db, file) {
         return NonLocalRead::Resolvable;
     }
-    if DISPATCH_VARIABLES.contains(&name) && naming.deferred_non_locals.contains(expression) {
+    if DISPATCH_VARIABLES.contains(&name) && deferred {
         return NonLocalRead::Resolvable;
     }
-    if native_symbol(
-        db,
-        name,
-        naming.extras().native_routine_reads.contains(expression),
-    ) {
+    if native_symbol(db, name, native) {
         return NonLocalRead::Resolvable;
     }
     let files = context.files;
@@ -872,13 +896,7 @@ fn classify_non_local_read(
         || test_files.is_some_and(|_| crate::name_layer(db, symbol, true).binds())
         || context.super_globals.contains(&symbol)
         || crate::sourced_definition(db, file, symbol).is_some()
-        || crate::session::resolves(
-            db,
-            file,
-            symbol,
-            naming.deferred_non_locals.contains(expression)
-                || naming.extras().deferred_quiet_reads.contains(expression),
-        )
+        || crate::session::resolves(db, file, symbol, deferred)
         || files.is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
         || imported_by_name(db, name)
     {
@@ -2728,7 +2746,8 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         for name in &naming.extras().quiet_operator_reads {
             reads.push((index, *name, true));
         }
-        // A loop's first iteration reads the earlier binding of its carried variable.
+        // A loop's first iteration reads the earlier binding of its carried variable, and a
+        // function's path that leaves a local unassigned reads the top-level one when it runs.
         for expression in &naming.maybe_undefined {
             let Some(slot) = naming.resolutions.get(expression) else {
                 continue;
@@ -2736,9 +2755,7 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let Some(binding) = naming.bindings.get(slot) else {
                 continue;
             };
-            if binding.kind == BindingKind::TopLevel {
-                reads.push((index, binding.name, false));
-            }
+            reads.push((index, binding.name, binding.kind != BindingKind::TopLevel));
         }
     }
     for (read_index, name, deferred) in &reads {
@@ -2791,14 +2808,18 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     if !crate::file_is_strict(db, file) {
         return diagnostics;
     }
+    // An item a syntax error touches reports nothing here, as in the ordinary check: its
+    // statement boundaries are a guess, so its types are too.
+    let broken_ranges = file_error_ranges(db, file);
+    let is_broken = |range: TextRange| {
+        broken_ranges
+            .iter()
+            .any(|error| error.start() <= range.end() && range.start() <= error.end())
+    };
     // Reads silenced by an unknowable export set are undetermined, which is what
     // strict mode reports.
-    let broken_ranges = file_error_ranges(db, file);
     for (item_index, span) in item_spans(db, file).iter().enumerate() {
-        if broken_ranges
-            .iter()
-            .any(|error| error.start() <= span.range.end() && span.range.start() <= error.end())
-        {
+        if is_broken(span.range) {
             continue;
         }
         let item = span.item;
@@ -2817,6 +2838,9 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
     }
     for span in item_spans(db, file) {
+        if is_broken(span.range) {
+            continue;
+        }
         let item = span.item;
         let offset = span.range.start();
         let Some(check) = item_check(db, item) else {

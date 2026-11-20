@@ -755,11 +755,24 @@ out: Unknown
 113..119 error[type-mismatch] expected `integer`, found `character`
 
 #==== elided_returns
-#---- a_trusted_elided_return_is_null
+#---- a_trusted_elided_return_comes_from_the_value
 #: @trust fn(count: integer)
 log_count <- function(count) count
 #++++
-log_count: fn(count: integer) -> NULL
+log_count: fn(count: integer) -> integer
+
+#---- an_elided_return_on_a_function_value_comes_from_the_value
+f <- function(x) x + 1L
+
+#: fn(integer)
+g <- f
+
+#: @trust fn(integer)
+h <- f
+#++++
+f: <T: numeric> fn(x: T) -> T
+g: fn(integer) -> integer
+h: fn(integer) -> integer
 
 #---- elided_callback_return_means_null
 #: @param cb {fn(integer)}

@@ -1648,8 +1648,9 @@ or a compact `fn(...)` without `-> RETURN_TYPE`. An elided return is not the sam
 - In a nested function type, such as a callback parameter written `@param cb {fn(integer)}`, the
   elided return means `NULL`, which matches R functions called for their side effects.
 - In a [trusted coercion](#trusted-coercions), and in an annotation on a value that is not a function
-  literal, such as `#: fn(integer)` on `g <- f`, the elided return is `Unknown`, so a call's result
-  goes unchecked even when `f`'s return type is known. This is a known gap.
+  literal, the return comes from the value's own type, called with the written parameter types.
+  With `f <- function(x) x + 1L`, `#: fn(integer)` on `g <- f` types `g` as
+  `fn(integer) -> integer`. When the value's return is not known, it is `Unknown`.
 
 A function that really does return `NULL` can say so with `@returns {NULL}` or `-> NULL`. The
 explicit form is enforced, so a body that returns anything else is then a type error.
@@ -2138,8 +2139,8 @@ scalar condition admits:
 
 `[[` extracts a single element, and `[` is R's general subsetting operator. `[` with an out-of-range
 position or a missing name gives `NA` at run time, which is a property of the value, not of its type.
-`[[` with a missing name gives `NULL` on a list, which the rules below record as `| NULL`; they
-record the same for a named vector, where R instead fails at run time.
+`[[` with a missing name gives `NULL` on a list, which the rules below record as `| NULL`, and fails
+on a named vector, so there it gives the element type.
 
 `$name` behaves like `[["name"]]` on lists, on records, and on opaque nominals, and a backtick-quoted
 name follows the same rule. `$` does not work on atomic vectors, because R rejects it on every atomic
@@ -3281,7 +3282,8 @@ a scope holds one variable per name, and assignment mutates it.
 - An assignment inside a branch or a loop body writes the enclosing frame's slot, because braces and
   control flow do not create scopes.
 - A slot shadows an outer or package-global binding of the same name. But a slot that no write reaches
-  at a given read does not shadow, and the read resolves outward, just as R's lookup would.
+  at a given read does not shadow, and the read resolves outward, just as R's lookup would. A slot
+  that only some paths write resolves outward on the others, so the read takes both types.
 - `for` introduces a loop-local slot, re-initialized from the source on every iteration.
 - `local(expr)` evaluates `expr` in a fresh child scope and takes its type. Assignments inside are
   local, while references still see the enclosing names.
@@ -3584,8 +3586,11 @@ Definite assignment follows four rules:
 
 - A read that some path reaches with no prior write reports
   [`maybe-undefined`](/reference/diagnostic-codes), because R raises `object 'x' not found` on that
-  path. Inside a function, a binding of the same name outside the function would be read instead,
-  which this check does not yet consider. The finding is off by default; turn it on with
+  path. Inside a function, R reads a binding of the same name outside the function on that path
+  instead (in an enclosing function, the package, or base R), so the read is reported only when no
+  such binding exists, and otherwise types as the union of the local writes and that binding:
+  after `if (ok) limit <- 5L`, a function reads `limit` as `integer | character` when the package
+  binds `limit <- "all"`. The finding is off by default; turn it on with
   `[check] maybe-undefined = true`. Two conditions that always agree at run time are still two
   branches to the checker, so `if (ok) v <- …` followed by `if (ok) use(v)` is reported, although it
   is safe.
@@ -4926,13 +4931,13 @@ function to the interpreter carries the code `interpreted` and is a warning, so 
 ## Syntax errors
 
 A file with syntax errors is still analyzed, under one rule: a broken region reports its syntax error
-and, strict mode aside, nothing else, because the checker draws no conclusions from source it could
-not read.
+and nothing else, strict mode included, because the checker draws no conclusions from source it
+could not read.
 
 - Every well-formed statement in the file is analyzed normally. Definitions keep their exports,
   references resolve, and a genuine type error outside the broken region still surfaces.
 - A broken statement contributes nothing: no names, no reads, and no diagnostics beyond the syntax
-  error covering it. Strict mode is the exception, and can still report an undetermined type there.
+  error covering it.
 - An unterminated argument or parameter list ends at the next statement, so the mistake stays on the
   line that made it. A list that runs onto the next line is ordinary R, and a fragment there such as
   `beta)` really is a forgotten separator and is reported as one. But a line that assigns is the next

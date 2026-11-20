@@ -1008,7 +1008,7 @@ fn check_item_in<'db>(
                         // The value flows into the declaration like an argument into a parameter, but a
                         // declared nominal still rejects a structural value (`@new` is the only nominal
                         // introduction).
-                        Some(declared) => {
+                        Some(mut declared) => {
                             context.table.enter_rigid_binders(&declared.binders);
                             context.record_expectation(*value, declared.body);
                             if annotation.is_some_and(|a| !a.trusted)
@@ -1048,6 +1048,8 @@ fn check_item_in<'db>(
                                     context.errors.push(error);
                                 }
                             }
+                            declared.body =
+                                context.elided_return_from_value(declared.body, value_ty);
                             scheme_is_declared = true;
                             Some(declared)
                         }
@@ -4579,6 +4581,48 @@ impl<'db, 'a> Checker<'db, 'a> {
         matches!(declared.body.kind(self.db), TyKind::Function(_)).then_some(declared)
     }
 
+    /// An annotation on a value that is not a function literal has no body to infer an elided
+    /// `->` from, so the return comes from the value's own function type: `#: fn(integer)` on
+    /// `g <- f` returns what `f` returns for an `integer`. An open return stays `Unknown`.
+    fn elided_return_from_value(&mut self, declared: Ty<'db>, value_ty: Ty<'db>) -> Ty<'db> {
+        let db = self.db;
+        let TyKind::Function(function) = declared.kind(db) else {
+            return declared;
+        };
+        let TyKind::Function(value) = self.table.resolve(db, value_ty).kind(db) else {
+            return declared;
+        };
+        if !matches!(function.ret.kind(db), TyKind::Unknown) {
+            return declared;
+        }
+        // Parameters pair by position, as a call binds them: `fn(integer)` names no formal.
+        let declared_parameters = parameter_types(function);
+        let value_parameters = parameter_types(value);
+        if declared_parameters.len() > value_parameters.len() {
+            return declared;
+        }
+        let snapshot = self.table.snapshot();
+        let fits = declared_parameters
+            .iter()
+            .zip(&value_parameters)
+            .all(|(&written, &formal)| self.table.unify(db, formal, written).is_ok());
+        let returned = self.table.resolve(db, value.ret);
+        self.table.rollback(snapshot);
+        if !fits
+            || contains_inference_var(db, returned)
+            || matches!(returned.kind(db), TyKind::Unknown)
+        {
+            return declared;
+        }
+        Ty::new(
+            db,
+            TyKind::Function(&FunctionType {
+                ret: returned,
+                ..**function
+            }),
+        )
+    }
+
     fn inline_parameters(&self, annotated: ExprId) -> Vec<String> {
         self.expression_annotations
             .get(annotated)
@@ -4606,7 +4650,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             return value_ty;
         };
         if annotation.trusted {
-            return declared.body;
+            return self.elided_return_from_value(declared.body, value_ty);
         }
         // `@if-unknown` must report when the type is known: an annotation that silently
         // outlived a changed inferred type would be indistinguishable from a stale one.
@@ -4779,7 +4823,14 @@ impl<'db, 'a> Checker<'db, 'a> {
         let Some(&slot) = self.naming.resolutions.get(&id) else {
             return self.read_non_local(id);
         };
-        let ty = self.read_slot(id, slot);
+        let mut ty = self.read_slot(id, slot);
+        if let Some(fallback) = self.unassigned_path_read(id, slot) {
+            let db = self.db;
+            ty = union_of(
+                db,
+                [self.table.resolve(db, ty), self.table.resolve(db, fallback)],
+            );
+        }
         // Only an operand whose other operand is a ry number may still decide a variable
         // written with a literal; every other read makes it R's type.
         if !self.literal_reads.contains(id) && self.open_literal_var(ty) {
@@ -4872,6 +4923,24 @@ impl<'db, 'a> Checker<'db, 'a> {
             );
         }
         unknown(self.db)
+    }
+
+    /// What a function's read of its own `slot` finds on a path that has not written the slot:
+    /// R looks the name up outside the function, in an enclosing function or the package.
+    fn unassigned_path_read(&mut self, id: ExprId, slot: BindingId) -> Option<Ty<'db>> {
+        let naming = self.naming;
+        if let Some(&enclosing) = naming.extras().enclosing_fallbacks.get(&id) {
+            return Some(self.read_slot(id, enclosing));
+        }
+        if !naming.maybe_undefined.contains(&id) {
+            return None;
+        }
+        let binding = naming.bindings.get(&slot)?;
+        if binding.kind == BindingKind::TopLevel {
+            return None;
+        }
+        let scheme = self.globals?.scheme(binding.name, true)?;
+        Some(self.instantiate(&scheme))
     }
 
     /// The value `slot` holds at the read `id`.
@@ -20992,6 +21061,16 @@ fn refused_by_vocabulary<'db>(
     let no_nominals = SymbolSet::default();
     let stub_nominals = stubs(db).map_or(&no_nominals, |library| &library.nominals);
     annotation_misuses_vocabulary(db, annotation, globals.type_definitions(), stub_nominals)
+}
+
+/// A signature's parameter types in the order a call binds positional arguments.
+fn parameter_types<'db>(function: &FunctionType<'db>) -> SmallVec<[Ty<'db>; 4]> {
+    function
+        .positional
+        .iter()
+        .copied()
+        .chain(function.named.iter().map(|parameter| parameter.ty))
+        .collect()
 }
 
 pub(crate) fn alias_cycle_walk<'db>(

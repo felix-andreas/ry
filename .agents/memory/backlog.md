@@ -736,17 +736,6 @@ Smaller gaps:
 
 - A string literal where a ry function's callback goes is not reported: `List.map([1L], "a")`
   passes, because a string names a function for R's `match.fun`, which a ry function never calls.
-- From the final type-system review, each now documented as a known gap in the reference:
-  - an elided return in a trusted coercion or on a non-literal value (`#: fn(integer)` on `g <- f`)
-    is `Unknown` rather than `f`'s known return;
-  - assignments in a bare top-level `{ }` block are invisible to other package files;
-  - an optional `[label]` parameter over a formal with no default is checked in annotations but not
-    at an argument position;
-  - a bare read satisfied only by an import or manifest is not a strict origin, while a qualified
-    one is;
-  - `maybe-undefined` ignores a binding of the same name outside the function, which R would read;
-  - `[[` with a missing name on a named atomic vector is typed `| NULL`, where R fails;
-  - strict mode can still report inside a statement that failed to parse.
 - Console completion: `df$` offers only `df`, and an unclosed `x[["` completes keywords instead of
   fields.
 - The Zed extension is not in Zed's registry yet. It downloads the newest full release's archive
