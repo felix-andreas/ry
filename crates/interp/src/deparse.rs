@@ -315,6 +315,8 @@ struct Deparser {
     /// since `f(a = b)` would read as a named argument.
     argument: bool,
     incomplete: bool,
+    /// `options(scipen)`, read at the first double, since GNU R writes numbers under it.
+    scipen: Option<i32>,
     /// The first error GNU R's deparser would raise. Deparsing goes on with the plain value, so
     /// callers that cannot fail still get text.
     failure: Option<Unwind>,
@@ -338,8 +340,15 @@ impl Deparser {
             left_of: None,
             argument: false,
             incomplete: false,
+            scipen: None,
             failure: None,
         }
+    }
+
+    unsafe fn scipen(&mut self) -> i32 {
+        *self
+            .scipen
+            .get_or_insert_with(|| format::Settings::current_scipen())
     }
 
     fn finish(mut self) -> Vec<String> {
@@ -1516,7 +1525,7 @@ impl Deparser {
                     } else if self.opts & options::DIGITS17 != 0 && value.is_finite() {
                         format::c_general(value, 17, false)
                     } else {
-                        format::format_real_alone(value, 15)
+                        format::format_real_alone_scipen(value, 15, self.scipen())
                     }
                 }
                 SexpType::Complex => {
@@ -1533,13 +1542,14 @@ impl Deparser {
                         // parts together, and an `NA` in either leaves no digits for the other,
                         // which is then rounded to an integer.
                         let has_na = is_na_real(value.r) || is_na_real(value.i);
+                        let scipen = self.scipen();
                         let part = |part: f64| {
                             if is_na_real(part) {
                                 "NA".to_owned()
                             } else if has_na && part.is_finite() {
                                 format!("{part:.0}")
                             } else {
-                                format::format_real_alone(part, 15)
+                                format::format_real_alone_scipen(part, 15, scipen)
                             }
                         };
                         format!(
@@ -1567,7 +1577,7 @@ impl Deparser {
                             format::c_general(value.r, 17, false)
                         )
                     } else {
-                        format::format_complex_alone(value, 15)
+                        format::format_complex_alone(value, 15, self.scipen())
                     }
                 }
                 SexpType::String => {

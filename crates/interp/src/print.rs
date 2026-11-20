@@ -2,12 +2,13 @@
 
 use {
     crate::{
+        attribute_access::expand_row_names,
         builtins::{BuiltinDef, Call, internal},
         coerce::integer_scalar,
         deparse,
         eval::{self, value_of},
         format::{self, Settings, display_width, encode_element, encode_string, pad},
-        interp,
+        handles, interp, scope,
         unwind::{R, error},
         values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
         write_console,
@@ -635,7 +636,7 @@ pub unsafe fn print_matrix(
     top: bool,
 ) -> R<()> {
     if !top {
-        return print_matrix_rows(matrix, rows, cols, rows, options);
+        return print_matrix_rows(matrix, rows, cols, rows, true, options);
     }
     // GNU R prints whole rows only, as many as fit within `max` entries. R 4.5 also stops at
     // `max` columns, and then prints at least one row.
@@ -652,7 +653,7 @@ pub unsafe fn print_matrix(
     if cols > shown_cols && shown < 1 && rows > 0 {
         shown = 1;
     }
-    print_matrix_rows(matrix, rows, shown_cols, shown, options)?;
+    print_matrix_rows(matrix, rows, shown_cols, shown, true, options)?;
     if truncates_columns && (shown < rows || shown_cols < cols) {
         let mut note = max_reached_prefix().to_owned();
         if shown < rows {
@@ -682,9 +683,10 @@ unsafe fn print_matrix_rows(
     rows: usize,
     cols: usize,
     shown: usize,
+    cells: bool,
     options: &PrintOptions,
 ) -> R<()> {
-    if rows == 0 && cols == 0 {
+    if rows == 0 && cols == 0 && cells {
         out("<0 x 0 matrix>\n");
         return Ok(());
     }
@@ -759,7 +761,10 @@ unsafe fn print_matrix_rows(
             }
         })
         .collect();
-    let columns = matrix_columns(matrix, rows, shown, cols, options)?;
+    let columns = match cells {
+        true => matrix_columns(matrix, rows, shown, cols, options)?,
+        false => vec![Vec::new(); cols],
+    };
     let is_string = matrix.kind() == SexpType::String;
     let right = !is_string || options.right;
     let col_labels: Vec<String> = (0..cols)
@@ -825,6 +830,10 @@ unsafe fn print_matrix_rows(
         text.push('\n');
         for row in 0..shown {
             text.push_str(&row_labels[row]);
+            if !cells {
+                text.push('\n');
+                continue;
+            }
             for col in start..end {
                 text.push_str(&" ".repeat(options.gap));
                 let (item, measure) = &columns[col][row];
@@ -872,6 +881,24 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
     } else {
         (slices, rows, cols)
     };
+    if slices == 0 {
+        // GNU R names the shape of an array with no slices, then prints the labels of its first
+        // two dimensions with no cells.
+        let shape: Vec<String> = dims.iter().map(usize::to_string).collect();
+        out(&format!(
+            "<{} array of {}>\n",
+            shape.join(" x "),
+            array.kind().name()
+        ));
+        let matrix = values::alloc(array.kind(), 0)?;
+        if dimnames.kind() == SexpType::List {
+            let leading = leading_dimnames(dimnames, dimnames_names)?;
+            values::set_attr(matrix, symbols().dimnames, leading)?;
+        }
+        print_matrix_rows(matrix, rows, cols, rows, false, options)?;
+        out("\n");
+        return Ok(());
+    }
     for index in 0..shown_slices {
         let mut label = String::from(", , ");
         let mut remainder = index;
@@ -907,22 +934,15 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
         let dim = values::integer_vector(&[rows as i32, cols as i32])?;
         values::set_attr(matrix, symbols().dim, dim)?;
         if dimnames.kind() == SexpType::List {
-            let sub = values::list_vector(&[dimnames.element(0), dimnames.element(1)])?;
-            if dimnames_names != nil() {
-                let titles = values::string_vector(&[
-                    &values::string_at(dimnames_names, 0).unwrap_or_default(),
-                    &values::string_at(dimnames_names, 1).unwrap_or_default(),
-                ])?;
-                values::set_attr(sub, symbols().names, titles)?;
-            }
-            values::set_attr(matrix, symbols().dimnames, sub)?;
+            let leading = leading_dimnames(dimnames, dimnames_names)?;
+            values::set_attr(matrix, symbols().dimnames, leading)?;
         }
         let (shown, shown_cols) = if index + 1 == shown_slices {
             (last_rows, last_cols)
         } else {
             (rows, cols)
         };
-        print_matrix_rows(matrix, rows, shown_cols, shown, options)?;
+        print_matrix_rows(matrix, rows, shown_cols, shown, true, options)?;
         out("\n");
     }
     if max_reached && truncates_columns {
@@ -952,6 +972,19 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
         ));
     }
     Ok(())
+}
+
+/// The dimnames of an array's first two dimensions, with their titles.
+unsafe fn leading_dimnames(dimnames: Sexp, dimnames_names: Sexp) -> R<Sexp> {
+    let leading = values::list_vector(&[dimnames.element(0), dimnames.element(1)])?;
+    if dimnames_names != nil() {
+        let titles = values::string_vector(&[
+            &values::string_at(dimnames_names, 0).unwrap_or_default(),
+            &values::string_at(dimnames_names, 1).unwrap_or_default(),
+        ])?;
+        values::set_attr(leading, symbols().names, titles)?;
+    }
+    Ok(leading)
 }
 
 unsafe fn print_list_array(list: Sexp, dims: &[usize], options: &PrintOptions) -> R<()> {
@@ -1120,8 +1153,15 @@ unsafe fn print_attributes(value: Sexp, options: &PrintOptions, tag: &mut String
             out(&format!("{tag}\n"));
             let attribute = cell.car();
             if name == symbols.row_names {
-                let expanded = crate::subset::subset(attribute, &[], false, nil())?;
-                print_value(expanded, options, tag)?;
+                // Compact row names (`c(NA, -n)`) print as `1:n`, as `getAttrib` reads them.
+                let expanded = handles::with(|context| {
+                    let stored = handles::held(context, attribute);
+                    Ok(expand_row_names(context, stored)?.raw())
+                })?;
+                scope(|| {
+                    crate::heap().root(expanded);
+                    print_value(expanded, options, tag)
+                })?;
             } else if attribute.is_object() {
                 print_dispatch(attribute, options, tag)?;
             } else {

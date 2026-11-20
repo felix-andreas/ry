@@ -1923,11 +1923,18 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
     Ok(list)
 }
 
+/// The `tz` argument of the date-time internals: one string, where GNU R reads `NA` as the zone
+/// named "NA".
+unsafe fn zone_name(argument: Sexp) -> R<String> {
+    if argument.kind() != SexpType::String || length(argument) != 1 {
+        return Err(error("invalid 'tz' value"));
+    }
+    Ok(values::first_string(argument).map_or_else(|| "NA".to_owned(), |text| text.into_owned()))
+}
+
 unsafe fn do_as_posixlt(call: &Call<'_>) -> R<Sexp> {
     let times = crate::coerce::coerce_vector(call.arg(0), SexpType::Real)?;
-    let tz = values::first_string(call.arg(1))
-        .map(|text| text.into_owned())
-        .unwrap_or_default();
+    let tz = zone_name(call.arg(1))?;
     let seconds: Vec<f64> = values::reals(times).to_vec();
     let result = posixlt_from_seconds(&seconds, &tz)?;
     set_year_names(result, values::names(call.arg(0)))?;
@@ -2204,9 +2211,7 @@ unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp>
 
 /// `as.POSIXct(x, tz)`: the instants a POSIXlt names in the zone `tz`.
 unsafe fn do_as_posixct(call: &Call<'_>) -> R<Sexp> {
-    let tz = values::first_string(call.arg(1))
-        .map(|text| text.into_owned())
-        .unwrap_or_default();
+    let tz = zone_name(call.arg(1))?;
     let seconds = posixlt_instants(call.arg(0), &tz)?;
     let result = values::real_vector(&seconds)?;
     set_names_from_year(call.arg(0), result)?;
@@ -2454,13 +2459,21 @@ struct ParsedTime {
     whole: f64,
     fraction: f64,
     offset: Option<i64>,
+    /// A `%s` filled the fields from an instant, so its UTC offset is known.
+    from_instant: bool,
 }
 
-/// Parses `text` with a `strptime` format.
-fn parse_time(text: &str, format: &str, warnings: &mut Vec<String>) -> R<Option<ParsedTime>> {
+/// Parses `text` with a `strptime` format, where `tz` is the zone a `%s` breaks its instant down
+/// in.
+fn parse_time(
+    text: &str,
+    format: &str,
+    tz: &str,
+    warnings: &mut Vec<String>,
+) -> R<Option<ParsedTime>> {
     let mut fields = Parsed::default();
     let mut input = text;
-    let matched = parse_with(&mut fields, &mut input, format);
+    let matched = parse_with(&mut fields, &mut input, format, tz);
     // Like GNU R, a `%Z` is an error only once parsing reaches it, and an out-of-range `%z`
     // warns, so a text that fails earlier stays a quiet NA.
     if fields.zone_requested {
@@ -2565,6 +2578,7 @@ fn resolve_fields(mut fields: Parsed, warnings: &mut Vec<String>) -> Option<Pars
             + whole_second,
         fraction: fields.second - whole_second,
         offset: fields.offset,
+        from_instant: fields.from_instant,
     })
 }
 
@@ -2588,12 +2602,13 @@ struct Parsed {
     week: Option<(i64, bool)>,
     zone_requested: bool,
     offset_out_of_range: bool,
+    from_instant: bool,
 }
 
 /// Matches `input` against `format`, advancing `input` past what matched. Whitespace in the
-/// format matches any run of whitespace, including none, and numeric fields skip leading blanks,
-/// as in glibc's `strptime`.
-fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()> {
+/// format matches any run of whitespace, including none, while numeric fields and `%z` skip
+/// only leading spaces, as in GNU R's own `strptime`.
+fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str, tz: &str) -> Option<()> {
     let mut characters = format.chars();
     while let Some(character) = characters.next() {
         if character.is_whitespace() {
@@ -2685,13 +2700,12 @@ fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()>
             'S' => fields.second = number(input, 2)? as f64,
             'j' => fields.yearday = Some(number(input, 3)?),
             'p' | 'P' => {
-                let lower = input.trim_start().to_ascii_lowercase();
-                fields.afternoon = Some(match lower.get(..2) {
-                    Some("am") => false,
-                    Some("pm") => true,
+                fields.afternoon = Some(match input.get(..2).map(str::to_ascii_lowercase) {
+                    Some(text) if text == "am" => false,
+                    Some(text) if text == "pm" => true,
                     _ => return None,
                 });
-                *input = &input.trim_start()[2..];
+                *input = &input[2..];
             }
             'B' | 'b' | 'h' => {
                 let found = match_name(input, &MONTHS)?;
@@ -2720,15 +2734,38 @@ fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()>
                 fields.zone_requested = true;
                 return None;
             }
+            's' => {
+                let digits = input.bytes().take_while(u8::is_ascii_digit).count();
+                if digits == 0 {
+                    return None;
+                }
+                let seconds = input[..digits].parse::<i64>().ok()?;
+                *input = &input[digits..];
+                let instant = seconds as f64;
+                let (offset, _, _) = resolve_zone(tz).offset_at(instant);
+                let wall = broken_down(instant + f64::from(offset));
+                // GNU R's `localtime` fails once the year leaves the range of a C `int`.
+                i32::try_from(wall.year - 1900).ok()?;
+                *fields = Parsed {
+                    year: Some(wall.year),
+                    month: Some(wall.month),
+                    day: Some(wall.day),
+                    hour: wall.hour,
+                    minute: wall.minute,
+                    second: wall.second,
+                    from_instant: true,
+                    ..Parsed::default()
+                };
+            }
             'n' | 't' => *input = input.trim_start(),
-            '%' => *input = input.trim_start().strip_prefix('%')?,
-            'F' => parse_with(fields, input, "%Y-%m-%d")?,
-            'T' | 'X' => parse_with(fields, input, "%H:%M:%S")?,
-            'D' => parse_with(fields, input, "%m/%d/%y")?,
-            'x' => parse_with(fields, input, "%y/%m/%d")?,
-            'R' => parse_with(fields, input, "%H:%M")?,
-            'r' => parse_with(fields, input, "%I:%M:%S %p")?,
-            'c' => parse_with(fields, input, "%a %b %e %H:%M:%S %Y")?,
+            '%' => *input = input.strip_prefix('%')?,
+            'F' => parse_with(fields, input, "%Y-%m-%d", tz)?,
+            'T' | 'X' => parse_with(fields, input, "%H:%M:%S", tz)?,
+            // GNU R's `strptime` reads `%D` as `%y/%m/%d`, not the `%m/%d/%y` of POSIX.
+            'D' | 'x' => parse_with(fields, input, "%y/%m/%d", tz)?,
+            'R' => parse_with(fields, input, "%H:%M", tz)?,
+            'r' => parse_with(fields, input, "%I:%M:%S %p", tz)?,
+            'c' => parse_with(fields, input, "%a %b %e %H:%M:%S %Y", tz)?,
             _ => return None,
         }
     }
@@ -2738,7 +2775,7 @@ fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()>
 /// A month or weekday name, in full or abbreviated to three letters, ignoring case. Returns its
 /// position in `names`.
 fn match_name(input: &mut &str, names: &[&str]) -> Option<usize> {
-    let trimmed = input.trim_start();
+    let trimmed = *input;
     let lower = trimmed.to_ascii_lowercase();
     let full = names
         .iter()
@@ -2756,9 +2793,9 @@ fn match_name(input: &mut &str, names: &[&str]) -> Option<usize> {
     Some(position)
 }
 
-/// A field of at most `max_digits` digits, after leading blanks.
+/// A field of at most `max_digits` digits, after leading spaces.
 fn number(input: &mut &str, max_digits: usize) -> Option<i64> {
-    let trimmed = input.trim_start();
+    let trimmed = input.trim_start_matches(' ');
     let digits = trimmed
         .chars()
         .take(max_digits)
@@ -2774,7 +2811,7 @@ fn number(input: &mut &str, max_digits: usize) -> Option<i64> {
 /// A `%z` offset in seconds. The error is true when the offset is well formed but beyond
 /// +/-1400, which GNU R warns about.
 fn parse_offset(input: &mut &str) -> Result<i64, bool> {
-    let trimmed = input.trim_start();
+    let trimmed = input.trim_start_matches(' ');
     let sign = match trimmed.chars().next() {
         Some('+') => 1,
         Some('-') => -1,
@@ -2805,9 +2842,7 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
     if formats.kind() != SexpType::String || length(formats) == 0 {
         return Err(error("invalid 'format' argument"));
     }
-    let tz = values::first_string(call.arg(2))
-        .map(|text| text.into_owned())
-        .unwrap_or_default();
+    let tz = zone_name(call.arg(2))?;
     // GNU R recycles `x` and `format` to the longer of the two, unless `x` is empty.
     let count = match length(texts) {
         0 => 0,
@@ -2827,7 +2862,7 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
         let format = values::string_at(formats, index % length(formats))
             .map_or_else(|| "NA".to_owned(), |text| text.into_owned());
         parsed.push(match values::string_at(texts, index % length(texts)) {
-            Some(text) => parse_time(&text, &format, &mut warnings)?,
+            Some(text) => parse_time(&text, &format, &tz, &mut warnings)?,
             None => None,
         });
     }
@@ -2852,8 +2887,11 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
             continue;
         }
         // GNU R's strptime fills the fields from the text rather than from an instant, so the
-        // UTC offset stays unknown outside UTC, and a time with an explicit offset carries no
-        // abbreviation either.
+        // UTC offset stays unknown outside UTC unless a `%s` gave the instant, and a time with an
+        // explicit offset carries no abbreviation either.
+        if time.from_instant {
+            continue;
+        }
         values::ints_mut(fields[10])[index] = NA_INTEGER;
         if time.offset.is_some() {
             values::set_elt(fields[9], index, values::mkchar("")?);
@@ -2881,9 +2919,6 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
             values::ints_mut(fields[8])[index] = dst;
             values::set_elt(fields[9], index, values::mkchar(abbreviation.as_str())?);
         }
-    }
-    if !utc {
-        values::ints_mut(fields[10]).fill(NA_INTEGER);
     }
     let mut names = values::names(texts);
     if names != nil() && count > length(texts) {
@@ -2974,7 +3009,8 @@ pub(crate) enum DateFromText {
 /// zone `tz`: GMT is known here, the session's zone is left to the R code.
 pub(crate) fn date_from_text(text: &str, format: &str, gmt: bool) -> DateFromText {
     let mut warnings = Vec::new();
-    let Ok(parsed) = parse_time(text, format, &mut warnings) else {
+    let tz = if gmt { "GMT" } else { "" };
+    let Ok(parsed) = parse_time(text, format, tz, &mut warnings) else {
         return DateFromText::Unsupported;
     };
     if !warnings.is_empty() {

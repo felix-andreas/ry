@@ -24,7 +24,10 @@
 //! GNU R to the last printed digit.
 
 use {
-    crate::{arima, cluster, deriv, hypothesis_tests, loess, models, nlm, optimize, port, spline},
+    crate::{
+        arima, arma0, cluster, deriv, hypothesis_tests, loess, models, nlm, optimize, port, ppr,
+        spline,
+    },
     heap::object::{NA_INTEGER, NA_REAL, Sexp, SexpType},
     interp::{
         arith,
@@ -104,6 +107,9 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("Rsm", tukey_smooth),
     ("setsmu", setsmu),
     ("supsmu", supsmu),
+    ("setppr", ppr::setppr),
+    ("smart", ppr::smart),
+    ("pppred", ppr::pppred),
     ("cutree", cluster::cutree),
     ("rWishart", r_wishart),
     ("loess_raw", loess::loess_raw),
@@ -159,6 +165,17 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("KalmanLike", arima::kalman_like),
     ("KalmanFore", arima::kalman_fore),
     ("KalmanSmooth", arima::kalman_smooth),
+    ("setup_starma", arma0::setup_starma),
+    ("free_starma", arma0::free_starma),
+    ("Starma_method", arma0::starma_method),
+    ("arma0fa", arma0::arma0fa),
+    ("get_s2", arma0::get_s2),
+    ("get_resid", arma0::get_resid),
+    ("Dotrans", arma0::dotrans_routine),
+    ("arma0_kfore", arma0::arma0_kfore),
+    ("Invtrans", arma0::invtrans),
+    ("Gradtrans", arma0::gradtrans),
+    ("set_trans", arma0::set_trans),
     ("LogLin", loglin),
     ("stl", stl),
     ("rbart", spline::rbart),
@@ -2816,11 +2833,6 @@ unsafe fn eureka(call: &NativeCall<'_>) -> R<Sexp> {
     c_return(call, &arguments)
 }
 
-std::thread_local! {
-    /// Whether `supsmu` reports each running-lines smooth, as `setsmu` last set it.
-    static SUPSMU_TRACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
 /// The three spans the cross-validated super smoother chooses between. GNU R 4.6's `ppr.f`
 /// writes them as double-precision constants, but `big`, `sml` and `eps` beside them are
 /// single-precision ones, so those three carry `f32` rounding.
@@ -2832,7 +2844,7 @@ const SUPSMU_EPS: f64 = 1.0e-3_f32 as f64;
 /// `.Fortran(C_setsmu, trace)`: whether the next `supsmu` traces its smooths.
 unsafe fn setsmu(call: &NativeCall<'_>) -> R<Sexp> {
     let arguments = c_arguments(call)?;
-    SUPSMU_TRACE.set(values::as_integer_scalar(arguments[0]) != 0);
+    ppr::set_supsmu(values::as_integer_scalar(arguments[0]) != 0);
     c_return(call, &arguments)
 }
 
@@ -2855,16 +2867,17 @@ unsafe fn supsmu(call: &NativeCall<'_>) -> R<Sexp> {
     let iper = values::as_integer_scalar(arguments[4]);
     let span = values::as_real_scalar(arguments[5]);
     let alpha = values::as_real_scalar(arguments[6]);
-    let trace = SUPSMU_TRACE.get();
+    let settings = ppr::smoother_settings();
     let mut smo = vec![0.0; n];
     let mut log = String::new();
-    let cross_validated = super_smooth(x, y, w, iper, span, alpha, trace, &mut smo, &mut log);
+    let edf = ppr::supsmu(x, y, w, iper, span, alpha, &settings, &mut smo, &mut log);
     if !log.is_empty() {
         write_output(log.as_bytes());
     }
+    let edf = edf?;
     arguments[7] = values::real_vector(&smo)?;
-    if cross_validated {
-        arguments[9] = values::real_vector(&[0.0])?;
+    if let Some(edf) = edf {
+        arguments[9] = values::real_vector(&[edf])?;
     }
     c_return(call, &arguments)
 }
@@ -2872,7 +2885,7 @@ unsafe fn supsmu(call: &NativeCall<'_>) -> R<Sexp> {
 /// The super smoother of [`supsmu`], writing the fit to `smo`; whether the span was chosen by
 /// cross-validation.
 #[allow(clippy::too_many_arguments)]
-fn super_smooth(
+pub(crate) fn super_smooth(
     x: &[f64],
     y: &[f64],
     w: &[f64],

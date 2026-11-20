@@ -2602,7 +2602,7 @@ unsafe fn cat_element(vector: Sexp, index: usize, settings: crate::format::Setti
             if !is_na_real(value.r) && !is_na_real(value.i) {
                 crate::format::warn_decimal_width(2)?;
             }
-            crate::format::localize_decimal(crate::format::format_complex_alone(value, 7))
+            crate::format::localize_decimal(crate::format::format_complex_alone(value, 7, 0))
         }
         _ => crate::coerce::element_as_charsxp(vector, index)
             .map(|charsxp| {
