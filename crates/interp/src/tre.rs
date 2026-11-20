@@ -657,11 +657,13 @@ fn class_of(ranges: impl IntoIterator<Item = (u32, u32)>) -> ClassUnicode {
         } else {
             high
         };
+        if low > high {
+            return None;
+        }
         Some(ClassUnicodeRange::new(
             char::from_u32(low)?,
             char::from_u32(high.min(CHAR_MAX))?,
         ))
-        .filter(|_| low <= high)
     }))
 }
 

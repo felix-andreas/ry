@@ -155,7 +155,6 @@ stats::KalmanRun
 stats::KalmanSmooth
 stats::StructTS
 stats::aov
-stats::ar.mle
 stats::bw.SJ
 stats::bw.bcv
 stats::contr.helmert
