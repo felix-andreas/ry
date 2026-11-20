@@ -599,6 +599,27 @@ add_revenue <- function(dt) {
   56..64 quantity -> quiet deferred
   masked-subset 32..65
 
+#---- a_query_on_a_query_masks_its_column_references
+# The first query returns a table, so the second `[` is a query too, and `total` names the column
+# the first one made.
+ranked <- function(dt) {
+  dt[, .(total = sum(amount)), by = group][order(-total)]
+}
+#++++
+# ranked
+  b0 dt parameter 19..21
+  b1 ranked top-level 0..6
+  0..6 ranked <- b1
+  27..29 dt -> b0
+  32..33 . -> quiet deferred
+  42..45 sum -> quiet deferred
+  46..52 amount -> quiet deferred
+  61..66 group -> quiet deferred
+  68..73 order -> quiet deferred
+  75..80 total -> quiet deferred
+  masked-subset 27..67
+  masked-subset 27..82
+
 #---- walrus_on_a_global_inside_a_function_binds_nothing
 add_flag <- function() {
   dt[, flag := TRUE]

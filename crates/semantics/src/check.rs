@@ -13995,6 +13995,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             .filter_map(|argument| {
                 let value = argument.value?;
                 let ty = self.infer(value);
+                // `c` is an R function, so it decides a variable written with a literal as
+                // R's type, as any other read does.
+                if self.open_literal_var(ty) {
+                    self.default_literal_var(ty, false);
+                }
                 Some((argument, value, self.structural(ty)))
             })
             .collect();
@@ -19488,6 +19493,7 @@ impl<'db, 'a> Checker<'db, 'a> {
     ) -> Ty<'db> {
         let other = self.table.resolve(self.db, other);
         let resolved = self.table.resolve(self.db, branch_ty);
+        self.decide_item_literals(resolved, other);
         // `:Ok(x) => x` with `x` the undecided item of `[1]`, beside a `7i64` arm, is decided
         // by that arm, as a use would decide it.
         if matches!(self.ry_number_class(resolved), Some(RyClass::Open(_)))
@@ -19506,6 +19512,48 @@ impl<'db, 'a> Checker<'db, 'a> {
         match self.adapt_literal(branch, other) {
             LiteralFit::Fits => other,
             LiteralFit::OutOfRange | LiteralFit::NotLiteral => branch_ty,
+        }
+    }
+
+    /// A tuple item or record field written with a literal, such as the `0` of `(0, a)` beside
+    /// a branch giving `(q, p)` with `q: F64`, is decided by the ry number in the same place of
+    /// the other branch, as a whole branch written with a literal is, and as R's type beside an
+    /// R type.
+    fn decide_item_literals(&mut self, branch: Ty<'db>, other: Ty<'db>) {
+        let pairs: Vec<(Ty<'db>, Ty<'db>)> = match (branch.kind(self.db), other.kind(self.db)) {
+            (TyKind::NativeTuple(items), TyKind::NativeTuple(others))
+                if items.len() == others.len() =>
+            {
+                items.iter().copied().zip(others.iter().copied()).collect()
+            }
+            (TyKind::NativeRecord(fields), TyKind::NativeRecord(others)) => fields
+                .iter()
+                .filter_map(|field| {
+                    let matching = others
+                        .iter()
+                        .find(|candidate| candidate.name == field.name)?;
+                    Some((field.ty, matching.ty))
+                })
+                .collect(),
+            _ => return,
+        };
+        for (item, other_item) in pairs {
+            let other_item = self.table.resolve(self.db, other_item);
+            if self.open_literal_var(item) {
+                // A literal the number cannot hold, such as `2.5` beside an `I64`, fails to
+                // unify and stays open for a use to decide.
+                match other_item.kind(self.db) {
+                    TyKind::Native(native) if native.is_number() => {
+                        self.table.unify(self.db, item, other_item).ok();
+                    }
+                    // Beside an R type, such as a `double` field, the literal is R's own type.
+                    TyKind::Native(_) | TyKind::Var(_) => {}
+                    _ => self.default_literal_var(item, false),
+                }
+            } else {
+                let item = self.table.resolve(self.db, item);
+                self.decide_item_literals(item, other_item);
+            }
         }
     }
 
@@ -19707,7 +19755,16 @@ impl<'db, 'a> Checker<'db, 'a> {
             if current.is_none() && branch_entry.is_some() {
                 current = self.materialize_pre_state(slot, true).map(EnvEntry::Mono);
             }
+            // A pass writes fresh variables for its literals, so two passes that decided them
+            // alike differ only before resolution.
+            let same_resolved = match (current, branch_entry) {
+                (Some(EnvEntry::Mono(a)), Some(EnvEntry::Mono(b))) if a != b => {
+                    self.table.resolve(self.db, a) == self.table.resolve(self.db, b)
+                }
+                _ => false,
+            };
             let joined = match (current, branch_entry) {
+                (Some(entry), Some(_)) if same_resolved => Some(entry),
                 (Some(EnvEntry::Mono(a)), Some(EnvEntry::Mono(b))) if a != b => {
                     self.default_join_literals(a, b);
                     let unknown_side = [a, b].into_iter().any(|ty| {

@@ -38,12 +38,12 @@ visit_schedule_@ID@ <- function(enrolment: Enrolment@ID@, visits: integer = @VIS
 }
 
 #@ typed
-visits_per_month_@ID@ <- function(schedule: Schedule@ID@) -> DataFrame{month: Date, N: integer[]} {
-  DataFrame.sort(GroupBy.agg(DataFrame.group_by(DataFrame(month = lubridate::floor_date(schedule$due, "month")), "month"), N = Expr.len()), "month")
+visits_per_month_@ID@ <- function(schedule: Schedule@ID@, unit: character = "month") -> DataFrame{month: Date, N: integer[]} {
+  DataFrame.sort(GroupBy.agg(DataFrame.group_by(DataFrame(month = lubridate::floor_date(schedule$due, unit)), "month"), N = Expr.len()), "month")
 }
 #@ untyped
-visits_per_month_@ID@ <- function(schedule: Schedule@ID@) -> data.table{month: Date, N: integer[]} {
-  schedule[, .N, by = .(month = lubridate::floor_date(due, "month"))][order(month)]
+visits_per_month_@ID@ <- function(schedule: Schedule@ID@, unit: character = "month") -> data.table{month: Date, N: integer[]} {
+  schedule[, .N, by = .(month = lubridate::floor_date(due, unit))][order(month)]
 }
 #@ end
 

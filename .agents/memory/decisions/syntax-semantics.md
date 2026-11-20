@@ -1792,3 +1792,33 @@ Each trades a narrow class of missed errors for a class of false reports seen on
 - **`NULL` is not a number.** `abs(NULL)` is an error in R. The cumulative functions take `NULL` as an empty vector, so their stubs declare a `NULL` candidate and their wrappers impose nothing; admitting `NULL` in the constraint instead turns a `NULL`-default argument used in arithmetic into an `Unknown` result.
 - **Known gap.** A class with only `Math.<class>` or `abs.<class>` methods and no arithmetic is rejected by an `abs` wrapper. `Math.` is not an arithmetic prefix because that set also drives operator dispatch.
 - **Not covered.** `sum` has no fallback and its candidates include `difftime` and `data.frame`, so a `sum` wrapper stays `fn(x: Unknown) -> Unknown`.
+
+## A `[` on a query's result is a query
+
+**Status:** built.
+
+A data.table query returns a table, and `[` on it dispatches to the same method, so every later
+link of a chain such as `dt[, .(total = sum(amount)), by = group][order(-total)]` evaluates in the
+table's frame. Naming marks a `[` as a masked subset when its target already is one, with no
+data.table special case: the rule is the structural one the first link uses, applied to the target.
+A lone `dt[order(-total)]` without query syntax stays base indexing, where `total` must be a
+variable. Without the rule the untyped data-science benchmark reported about 1,000 false
+`unresolved` findings, one per column a chained link named.
+Fixtures: `naming/closures.R.test` and `typing/project-values.R.test`.
+
+## Branches decide each other's literal items, and `c()` decides a literal as R's type
+
+**Status:** built.
+
+- A tuple item or record field written with a literal in one branch of an `if` or `match` takes
+  the type of the item in the same place of the other branch: a ry number unifies with it (a
+  literal the number cannot hold stays open), and an R type decides the literal as R's own type.
+  A loop pass writes fresh literal variables, so before this rule `(0, a)` beside `(q, p)` left
+  `step` open on each pass and the loop fixpoint reported that it does not stabilize.
+- `join_writes` treats two loop passes whose writes resolve to the same type as equal, because
+  each pass writes fresh variables for its literals.
+- `c` is an R function, so `infer_combine` decides a variable written with a literal as R's type,
+  as any other read does. `bounds <- 1; bounds <- c(bounds, x)` was otherwise an undetermined
+  `bounds` in strict mode.
+
+Fixtures: `typing-strict/strict.R.test`, group `literal_decisions`.

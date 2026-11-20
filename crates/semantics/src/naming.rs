@@ -825,7 +825,11 @@ impl Context<'_> {
                 if !*double {
                     self.bracket_depth += 1;
                 }
-                if !*double && data_table_signature(module, &module[arguments]) {
+                // A query returns a table, and `[` on it dispatches to the same method, so a
+                // chain's later links evaluate in the table's frame as the first does.
+                let queries_a_query = self.naming.masked_subsets.contains(target);
+                if !*double && (queries_a_query || data_table_signature(module, &module[arguments]))
+                {
                     self.naming.masked_subsets.insert(id);
                     self.quiet_depth += 1;
                     self.resolve_arguments(&module[arguments]);
