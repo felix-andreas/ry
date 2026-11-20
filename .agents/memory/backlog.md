@@ -2225,16 +2225,12 @@ Three independent black-box adoption reviews simulated real projects from the do
 only, with no source access. They were an analysis-script user, a CRAN package author and a
 numerical-computing user, and they converged on the same walls. What remains is below, ranked by how often a real user hits it.
 
-### The apply family is unblocked but still untyped where its result shape depends on a value
+### The apply family's result shape depends on a value
 
-Overload selection with a flexible argument works now, through fact-versus-guess probing that
-`decisions/syntax-semantics.md` records. `sapply`, `mapply`, `Map` and `tapply` stay `Any`, because `simplify = FALSE`
-and a vector-returning callback change the result shape without changing any argument type, so no
-overload set can discriminate them.
-
-The reachable win is typing only their parameters and leaving the return `Any`. That costs R's
-function-name-as-string form, so `sapply(x, "length")` would be rejected, as it already is for
-`lapply`.
+`sapply`, `mapply` and `tapply` return `Any`, because `simplify = FALSE` and a vector-returning
+callback change the result shape without changing any argument type, so no overload set can
+discriminate them. Their parameters are typed (callbacks, `match.fun` strings), and `Map` returns
+`list[Any]`.
 
 ### The three object systems, re-measured
 

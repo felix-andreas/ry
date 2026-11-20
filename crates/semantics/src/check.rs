@@ -15968,7 +15968,19 @@ impl<'db, 'a> Checker<'db, 'a> {
                 .filter(|(blame, _)| **blame == Some(deepest))
                 .map(|(_, error)| error)
             && let Some(first) = furthest.next()
-            && furthest.all(|error| error == first)
+            // Candidates that all want a function where the argument is none (`sapply(xs, 4)`
+            // fails `fn(T) -> U` and the fallback's `fn(Any) -> Any`) agree on what is wrong.
+            && furthest.all(|error| {
+                let not_a_function = |kind: &TypeErrorKind<'db>| {
+                    matches!(kind, TypeErrorKind::Mismatch { expected, found }
+                        if matches!(expected.kind(self.db), TyKind::Function(_))
+                            && !matches!(found.kind(self.db), TyKind::Function(_)))
+                };
+                error == first
+                    || error.range == first.range
+                        && not_a_function(&error.kind)
+                        && not_a_function(&first.kind)
+            })
         {
             Some(first)
         } else {
@@ -17683,11 +17695,16 @@ impl<'db, 'a> Checker<'db, 'a> {
         argument: &CallArgument<'db>,
         inferred_signature: bool,
     ) -> Option<Ty<'db>> {
+        // `tapply`'s `FUN` is a function or `NULL`, and `"sum"` still names the function.
+        let expects_function = |ty: Ty<'db>| match ty.kind(self.db) {
+            TyKind::Function(_) => true,
+            TyKind::Union(members) => members
+                .iter()
+                .any(|member| matches!(member.kind(self.db), TyKind::Function(_))),
+            _ => false,
+        };
         if let Some(named) = argument.named_function
-            && matches!(
-                self.table.shallow_resolve(self.db, expected).kind(self.db),
-                TyKind::Function(_)
-            )
+            && expects_function(self.table.shallow_resolve(self.db, expected))
         {
             return Some(named);
         }

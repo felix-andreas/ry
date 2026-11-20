@@ -904,6 +904,29 @@ f <- function() lapply(list(mean, sd), function(g) g(1:3))
 #++++
 f: fn() -> list[double]
 
+#---- the_apply_family_checks_its_callback_and_leaves_the_shape_open
+# `sapply` and `mapply` simplify by what the callback returns, so their result is `Any`;
+# the callback still takes `X`'s elements, and a function named by a string is that function.
+xs <- list(1, 2)
+lengths_of <- sapply(xs, "length")
+plus_text <- sapply(xs, function(v) v + "a")
+not_a_function <- sapply(xs, 4)
+sums <- mapply(function(a, b) a + b, 1:3, 4:6)
+pairs <- Map(function(a, b) a + b, 1:3, 4:6)
+totals <- tapply(c(1, 2, 3), c("a", "b", "a"), "sum")
+groups <- tapply(c(1, 2, 3), c("a", "b", "a"))
+#++++
+xs: list{double, double}
+lengths_of: Any
+plus_text: Unknown
+not_a_function: Unknown
+sums: Any
+pairs: list[Any]
+totals: Any
+groups: Any
+275..278 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+309..310 error[type-mismatch] expected a function that takes `double`, found `double`
+
 #==== exported_constraints
 #---- higher_order_result_keeps_its_constraint_across_items
 invoke <- function(f) function(x) f(x + 1L)

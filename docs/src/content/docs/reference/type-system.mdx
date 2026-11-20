@@ -2075,6 +2075,17 @@ arguments and a fixed-arity function cannot receive them. Between two variadic t
 element types are contravariant like any parameter, and both sides must declare the same number of
 parameters before `...`. This rejects some safe pairings, but never admits an unsound one.
 
+`sapply`, `mapply` and `tapply` give `Any`, because whether R simplifies their results to a vector,
+a matrix or a list depends on what the callback returns. Their callbacks are still checked:
+`sapply`'s takes the elements of `X`, as `lapply`'s does, so `sapply(xs, function(v) v + "a")` over
+numbers is an error, and so is `sapply(xs, 4)`:
+
+```text
+expected a function that takes `double`, found `double`
+```
+
+`Map` always gives a list, `list[Any]`.
+
 The base functions that take a function argument and resolve it with `match.fun` (`lapply`,
 `sapply`, `vapply`, `mapply`, `Map`, `Filter`, `Find`, `Position`, `Reduce`, `do.call`, `outer`,
 `apply`, `tapply`, `sweep`, `rapply`, `eapply`, `Vectorize`, `Negate`, `aggregate`, and `match.fun`
@@ -3039,8 +3050,9 @@ to such a name is resolved separately at each call site:
 - When no candidate accepts the arguments, the call is a type error. Normally the error names the
   overloaded callee and how many signatures were tried, and gives the first candidate's failure as a
   hint. One candidate's own finding is reported instead, at its own argument range, when every
-  candidate rejects the call for the same reason, or when one candidate got strictly further into the
-  argument list than all the others.
+  candidate rejects the call for the same reason, or when the candidates that got furthest into the
+  argument list all reject the same argument for the same reason, including all wanting a function
+  where the argument is not one.
 - Passing an overloaded name as a value, or hovering over it, sees the *last* declaration, which by
   convention is the most general. Go-to-definition jumps to the *first* declaration.
 - The exception is an overloaded name passed by name to `lapply`, `sapply`, `vapply` or `Reduce`.
