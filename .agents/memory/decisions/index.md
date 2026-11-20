@@ -648,6 +648,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Session commands read the user profile, as Rscript does
 - A package `ry load` loaded counts as a pkgload dev package
 - Typed benchmark templates do R-level work in boundary functions
+- ry test forks its workers
 
 ## Docs, process and positioning
 

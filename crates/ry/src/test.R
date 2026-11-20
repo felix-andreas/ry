@@ -93,9 +93,248 @@ local({
               "package with pkgload.")
       return(invisible())
     }
-    unlockBinding("queue_setup", namespace)
-    assign("queue_setup", setup, envir = namespace)
-    lockBinding("queue_setup", namespace)
+    replace_binding(namespace, "queue_setup", setup)
+  }
+
+  replace_binding <- function(namespace, name, value) {
+    unlockBinding(name, namespace)
+    assign(name, value, envir = namespace)
+    lockBinding(name, namespace)
+  }
+
+  # On Unix, testthat's worker queue is replaced by workers forked from this process, which has
+  # testthat and the package loaded already, so a worker starts without loading either and
+  # without a callr session. Each worker runs `queue_process_setup()` (helpers, setup files) and
+  # then takes one file at a time from its standard input, as a callr worker does, and sends the
+  # reporter events back over its pipe, a test at a time. It gets its own `tempdir()` and random
+  # seed, as a callr worker would, and once every file has run, the queue's teardown asks each
+  # idle worker to run the teardown and exit. The callr workers stay for a testthat whose
+  # internals differ from the ones driven here, and for a process that may have started a thread
+  # pool (a table builtin's Polars query, or the polars package), which a forked child inherits
+  # without its threads and would wait on forever.
+  # (`decisions/tooling-bench-ci.md`, "ry test forks its workers")
+  fork_workers <- function() {
+    namespace <- asNamespace("testthat")
+    setup <- get0("queue_setup", envir = namespace, mode = "function", inherits = FALSE)
+    arguments <- c("test_paths", "test_package", "test_dir", "num_workers", "load_helpers",
+                   "load_package", "shuffle")
+    internals <- c("queue_process_setup", "queue_task", "queue_teardown", "PROCESS_MSG",
+                   "PROCESS_OUTPUT")
+    if (is.null(setup) || !identical(names(formals(setup)), arguments) ||
+        !all(vapply(internals, exists, NA, envir = namespace, inherits = FALSE))) {
+      return(invisible())
+    }
+    teardown <- get("queue_teardown", envir = namespace)
+    replace_binding(namespace, "queue_setup", function(test_paths, test_package, test_dir,
+                                                       num_workers, load_helpers, load_package,
+                                                       shuffle = FALSE) {
+      if (.Internal(ryThreadPoolStarted()) || "polars" %in% loadedNamespaces()) {
+        return(setup(test_paths, test_package, test_dir, num_workers, load_helpers,
+                     load_package, shuffle))
+      }
+      fork_queue(test_paths, test_package %||% Sys.getenv("TESTTHAT_PKG"), test_dir,
+                 num_workers, load_package, shuffle)
+    })
+    replace_binding(namespace, "queue_teardown", function(queue) {
+      if (inherits(queue, "ry_fork_queue")) queue$teardown() else teardown(queue)
+    })
+  }
+
+  fork_queue <- function(paths, test_package, test_dir, workers, load_package, shuffle) {
+    testthat <- asNamespace("testthat")
+    hyperlinks <- cli::ansi_has_hyperlink_support()
+    # A worker's file: `NA` while it starts, its file while it runs one, and "" once no file is
+    # left for it.
+    files <- character()
+    pids <- integer()
+    temps <- character()
+    next_path <- 1L
+    teardown_error <- NULL
+    child <- function() {
+      # Whatever ends the worker, it never returns into the parent's code it was forked from.
+      on.exit(parallel:::mcexit(1L))
+      status <- tryCatch({
+        work(test_package, test_dir, load_package, shuffle, hyperlinks)
+        0L
+      }, error = function(e) 1L, interrupt = function(e) 1L)
+      parallel:::mcexit(status)
+    }
+    stop_worker <- function(index) {
+      tools::pskill(pids[[index]], tools::SIGTERM)
+      parallel:::rmChild(pids[[index]])
+      pids[[index]] <<- NA_integer_
+      if (!is.na(temps[[index]])) unlink(temps[[index]], recursive = TRUE)
+    }
+    forked <- FALSE
+    on.exit(if (!forked) for (index in which(!is.na(pids))) stop_worker(index))
+    for (index in seq_len(workers)) {
+      process <- parallel:::mcfork()
+      if (inherits(process, "masterProcess")) child()
+      pids[[index]] <- process$pid
+      files[[index]] <- NA_character_
+      temps[[index]] <- NA_character_
+    }
+    forked <- TRUE
+    assign_next <- function(index) {
+      if (next_path > length(paths)) {
+        files[[index]] <<- ""
+        return()
+      }
+      files[[index]] <<- paths[[next_path]]
+      next_path <<- next_path + 1L
+      parallel:::sendChildStdin(pids[[index]], paste0(files[[index]], "\n"))
+    }
+    failed <- function(index, error, output = character()) {
+      file <- files[[index]]
+      if (is.na(file)) {
+        output <- gsub("}", "}}", gsub("{", "{{", output, fixed = TRUE), fixed = TRUE)
+        cli::cli_abort(c("testthat subprocess failed to start.", " " = "{conditionMessage(error)}",
+                         structure(output, names = rep(" ", length(output)))),
+                       test_file = NULL, class = c("testthat_process_error", "testthat_error"),
+                       call = NULL)
+      }
+      cli::cli_abort("testthat subprocess exited in file {.file {file}}.", test_file = file,
+                     parent = error, class = c("testthat_process_error", "testthat_error"),
+                     call = NULL)
+    }
+    receive <- function(index) {
+      message <- parallel:::readChild(pids[[index]])
+      if (!is.raw(message)) {
+        exited <- pids[[index]]
+        pids[[index]] <<- NA_integer_
+        if (!identical(files[[index]], "")) {
+          failed(index, simpleError(paste("the worker process", exited, "exited")))
+        }
+        return(list())
+      }
+      message <- unserialize(message)
+      if (identical(message$kind, "ready")) temps[[index]] <<- message$temp %||% NA_character_
+      if (!is.null(message$error)) {
+        if (identical(message$kind, "teardown")) {
+          teardown_error <<- teardown_error %||% message$error
+        } else {
+          failed(index, message$error, message$output)
+        }
+      }
+      if (identical(message$kind, "ready")) {
+        assign_next(index)
+        return(list())
+      }
+      events <- lapply(message$events, function(event) {
+        list(code = testthat$PROCESS_MSG, message = event)
+      })
+      if (length(message$output)) {
+        events[[length(events) + 1L]] <- structure(
+          list(code = testthat$PROCESS_OUTPUT, message = message$output,
+               path = files[[index]]),
+          class = "testthat_message"
+        )
+      }
+      if (identical(message$kind, "done")) assign_next(index)
+      events
+    }
+    queue <- new.env(parent = emptyenv())
+    queue$poll <- function(timeout = 0) {
+      limit <- proc.time()[[3L]] + timeout
+      repeat {
+        alive <- pids[!is.na(pids)]
+        if (!length(alive)) return(list())
+        wait <- if (is.finite(timeout)) max(limit - proc.time()[[3L]], 0) else -1
+        ready <- parallel:::selectChildren(alive, wait)
+        if (!is.integer(ready)) return(list())
+        events <- unlist(lapply(match(ready, pids), receive), recursive = FALSE)
+        if (length(events)) return(events)
+        if (is.finite(timeout) && proc.time()[[3L]] >= limit) return(list())
+      }
+    }
+    queue$is_idle <- function() all(is.na(pids) | (!is.na(files) & files == ""))
+    queue$list_tasks <- function() data.frame()
+    # As testthat's own teardown: an idle worker runs the teardown, with a second's grace for
+    # all of them, and a worker still busy, after an error, is stopped.
+    queue$teardown <- function() {
+      for (index in which(!is.na(pids))) {
+        if (identical(files[[index]], "")) {
+          tryCatch(parallel:::sendChildStdin(pids[[index]], "\n"),
+                   error = function(e) stop_worker(index))
+        } else {
+          stop_worker(index)
+        }
+      }
+      limit <- proc.time()[[3L]] + 1
+      repeat {
+        alive <- pids[!is.na(pids)]
+        wait <- limit - proc.time()[[3L]]
+        if (!length(alive) || wait <= 0) break
+        ready <- parallel:::selectChildren(alive, wait)
+        if (!is.integer(ready)) break
+        for (index in match(ready, pids)) receive(index)
+      }
+      for (index in which(!is.na(pids))) stop_worker(index)
+      if (!is.null(teardown_error)) {
+        cli::cli_abort("At least one parallel worker failed to run teardown",
+                       parent = teardown_error)
+      }
+    }
+    class(queue) <- "ry_fork_queue"
+    queue
+  }
+
+  # The body of a forked worker. Its reporter events are sent a test at a time, and what a file
+  # writes to the console is sent with the file's last batch, as callr's workers report it. What
+  # the setup writes is shown only when it fails, and what the teardown writes is dropped, as
+  # testthat does with its own workers.
+  work <- function(test_package, test_dir, load_package, shuffle, hyperlinks) {
+    testthat <- asNamespace("testthat")
+    send <- function(kind, events = list(), output = character(), error = NULL, temp = NULL) {
+      message <- list(kind = kind, events = events, output = output, error = error, temp = temp)
+      parallel:::sendMaster(serialize(message, NULL, xdr = FALSE))
+    }
+    capture <- function(code) {
+      output <- textConnection(NULL, "w", local = TRUE)
+      sink(output)
+      sink(output, type = "message")
+      error <- tryCatch({
+        code
+        NULL
+      }, error = function(e) e)
+      sink(type = "message")
+      sink()
+      lines <- textConnectionValue(output)
+      close(output)
+      list(error = error, lines = lines)
+    }
+    if (exists(".Random.seed", envir = globalenv(), inherits = FALSE)) {
+      rm(".Random.seed", envir = globalenv())
+    }
+    temp <- NULL
+    setup <- capture({
+      temp <- .Internal(ryWorkerTempDir())
+      if (identical(load_package, "installed")) library(test_package, character.only = TRUE)
+      options(cli.hyperlink = hyperlinks, cli.hyperlink_run = hyperlinks)
+      testthat$queue_process_setup(test_package = test_package, test_dir = test_dir,
+                                   load_helpers = TRUE, load_package = "none")
+    })
+    send("ready", output = setup$lines, error = setup$error, temp = temp)
+    if (!is.null(setup$error)) return(invisible())
+    input <- file("stdin")
+    open(input)
+    repeat {
+      path <- readLines(input, n = 1L)
+      if (!length(path) || !nzchar(path)) break
+      events <- list()
+      record <- function(event) {
+        events[[length(events) + 1L]] <<- event
+        if (event$cmd %in% c("end_test", "end_context")) {
+          send("events", events)
+          events <<- list()
+        }
+      }
+      task <- capture(withCallingHandlers(testthat$queue_task(path, shuffle),
+                                          testthat_message = record))
+      send("done", events, task$lines, task$error)
+    }
+    teardown <- capture(withr::deferred_run(.GlobalEnv))
+    send("teardown", error = teardown$error)
   }
 
   failed <- function(results) {
@@ -137,6 +376,7 @@ local({
     if (!nzchar(Sys.getenv("NOT_CRAN"))) Sys.setenv(NOT_CRAN = "true")
     if (choose_workers(root, jobs, cores) && !is.null(.ry_attach_call)) {
       load_workers_with_ry(switches)
+      if (.Platform$OS.type == "unix") fork_workers()
     }
     selected <- function() {
       files <- test_files(root)

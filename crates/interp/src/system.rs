@@ -6,6 +6,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Call, builtin, internal, special},
         coerce::parse_real,
+        handles::{self, Args, Cx, Local, safe},
         http::FetchError,
         interp,
         platform::{Iconv, IconvStop, convert_all},
@@ -26,11 +27,13 @@ use {
         borrow::Cow,
         num::NonZeroU32,
         path::{Path, PathBuf},
+        sync::atomic::{AtomicBool, Ordering},
         time::{Duration, Instant},
     },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
+    internal("ryThreadPoolStarted", 0, safe!(do_thread_pool_started)),
     builtin(".ry_view", 2, do_ry_view).invisible(),
     internal("internalsID", 0, |_| unsafe { scalar_string(INTERNALS_ID) }),
     internal("eSoftVersion", 0, do_esoft_version),
@@ -426,6 +429,9 @@ fn find_r_home() -> Result<String, String> {
 /// `TMP` and `TEMP` that names a writable directory, created on first use and removed when the
 /// session ends.
 pub fn session_temp_dir() -> Result<&'static str, String> {
+    if let Some(Ok(renewed)) = RENEWED_SESSION_TEMP.get() {
+        return Ok(renewed.path.as_str());
+    }
     SESSION_TEMP
         .get_or_init(create_session_temp_dir)
         .as_ref()
@@ -433,10 +439,39 @@ pub fn session_temp_dir() -> Result<&'static str, String> {
         .map_err(Clone::clone)
 }
 
+/// Gives a forked process a session temporary directory of its own, which it then owns and
+/// removes, so that a worker's files cannot collide with its siblings'. The directory it
+/// inherited stays its parent's. A process renews it once; a second call returns the same one.
+pub fn renew_session_temp_dir() -> Result<&'static str, String> {
+    RENEWED_SESSION_TEMP
+        .get_or_init(create_session_temp_dir)
+        .as_ref()
+        .map(|temp| temp.path.as_str())
+        .map_err(Clone::clone)
+}
+
+static THREAD_POOL: AtomicBool = AtomicBool::new(false);
+
+/// Records that this process may have started a thread pool, such as the one Polars runs table
+/// queries on, so that `.Internal(ryThreadPoolStarted())` tells a caller a forked child cannot
+/// use it.
+pub fn note_thread_pool() {
+    THREAD_POOL.store(true, Ordering::Relaxed);
+}
+
+/// `.Internal(ryThreadPoolStarted())`: whether this process may have started a thread pool,
+/// which a forked child inherits only as memory, without its threads.
+fn do_thread_pool_started<'s>(context: &mut Cx<'s>, _arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    handles::logical_constant(context, i32::from(THREAD_POOL.load(Ordering::Relaxed)))
+}
+
 /// Removes the session's temporary directory. Only the process that created it does: a forked
 /// child shares the path but must leave the directory to its parent.
 pub fn remove_session_temp_dir() {
-    let Some(Ok(temp)) = SESSION_TEMP.get() else {
+    let renewed = RENEWED_SESSION_TEMP
+        .get()
+        .and_then(|temp| temp.as_ref().ok());
+    let Some(temp) = renewed.or_else(|| SESSION_TEMP.get()?.as_ref().ok()) else {
         return;
     };
     if temp.owner != std::process::id() {
@@ -483,6 +518,8 @@ struct SessionTemp {
 }
 
 static SESSION_TEMP: std::sync::OnceLock<Result<SessionTemp, String>> = std::sync::OnceLock::new();
+static RENEWED_SESSION_TEMP: std::sync::OnceLock<Result<SessionTemp, String>> =
+    std::sync::OnceLock::new();
 
 fn create_session_temp_dir() -> Result<SessionTemp, String> {
     let root = ["R_TMPDIR", "TMPDIR", "TMP", "TEMP"]

@@ -957,22 +957,16 @@ pub enum Action<'a> {
         src: usize,
         ty: Ty,
     },
-    /// A call of a closure known at compile time whose body, planned as `callee`, runs inside
-    /// this compiled code on registers of its own but without a call frame. `steps` evaluate
-    /// the arguments that have no effect, and the callee reads each one where it first loads
-    /// the formal ([`Passing`]), which is where a promise would be forced. The callee's code
-    /// runs nothing that could look at the missing frame: every point where it would hands
-    /// the call to tier 0 through a frame state, which gives the call its real frame first.
-    /// The value arrives in `dst` with the type every `Return` of the callee agrees on.
-    ///
-    /// `args[i]` is what formal `i` gets, and `positions[i]` the position of its argument in
-    /// the call, as tier 0 matches them (`interp::eval::direct_sources`), or a negative
-    /// number when the call leaves the formal out.
-    ///
-    /// `forces[i]` is a bitset, by position, of the planning body's own formals whose promises
-    /// the callee's first read of its formal `i` forces: the argument is that formal, or an
-    /// expression that always reads it. Only a body that is itself inlined records them,
-    /// because its formals are bound to no promise that could record the force itself.
+    /// A call of a closure known at compile time whose body, planned as `callee`, runs here on
+    /// registers of its own but without a call frame. `steps` evaluate the arguments that have
+    /// no effect, and the callee reads each where it first loads the formal ([`Passing`]). Any
+    /// point that could look at the missing frame hands the call to tier 0 through a frame
+    /// state, which gives it its real frame first. `dst` gets the type every `Return` agrees on.
+    /// `args[i]` is what formal `i` gets; `positions[i]` its argument's position as tier 0
+    /// matches them (`interp::eval::direct_sources`), negative when the call leaves it out.
+    /// `forces[i]` is a bitset of the planning body's own formals whose promises the callee's
+    /// first read of formal `i` forces. Only an inlined body records them, because its formals
+    /// are bound to no promise that could record the force itself.
     Frame {
         steps: &'a [(Action<'a>, StateId)],
         callee: &'a Plan<'a>,

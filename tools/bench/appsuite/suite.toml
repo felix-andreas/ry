@@ -6,7 +6,7 @@ A workload modelled on the test suite of a large business application, which a t
 GNU R and ry. It has 13 sections, one per kind of code the suite spends its time in, and each section
 runs a number of rounds chosen so that its share of GNU R's time is the share that kind of code has
 in the suite. The score is the workload's total time, because in a test suite time adds up. Beside it,
-236 patterns reduced from the same suite time one kind of call each, in nanoseconds per call.
+248 patterns reduced from the same suite time one kind of call each, in nanoseconds per call.
 """
 
 [[groups]]

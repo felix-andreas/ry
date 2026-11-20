@@ -222,6 +222,16 @@ def unpack_tests(name, version, work):
         return "scripts", package / "tests"
     return None
 
+def unpack_source(name, version, work):
+    """Extracts the package's whole source from its locked tarball, for `ry test`, which loads the
+    package from its source, and returns the package's directory."""
+    digest = next(digest for locked_name, locked_version, digest in locked() if (locked_name, locked_version) == (name, version))
+    target = work / "source"
+    with tarfile.open(source_tarball(name, version, digest)) as archive:
+        archive.extractall(target, filter="data")
+    return target / name
+
+
 def driver(name, kind, tests):
     """The R script that runs a testthat or tinytest suite on the installed package and prints
     `RESULT <passed> <failed> <skipped> <errors>`."""

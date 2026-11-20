@@ -137,17 +137,14 @@ impl SyntaxError {
 
 /// The console's rule for reading another line instead of running what it has.
 ///
-/// R's own rule is that input is unfinished when every error its grammar meets says that the
-/// input ended too early. A check R makes when a construct closes (a repeated parameter, a pipe's
-/// right side, a stray placeholder, an empty string as a name) refuses nothing until the command
-/// is whole, so R reads on past one and reports it with the finished command. A broken `#:`
-/// comment is only a comment to R, so it never holds input back.
+/// R's rule: input is unfinished when every grammar error says the input ended too early. Checks
+/// R makes when a construct closes (a repeated parameter, a stray placeholder) refuse nothing
+/// until the command is whole, and a broken `#:` comment never holds input back.
 ///
-/// ry adds one case: input that ends in a `#:` block on its own lines is unfinished, because the
-/// block annotates the expression on the line after it and means nothing alone. A blank line
-/// after the block ends the wait, exactly as it detaches the block in a file, so `text` must
-/// end with the line break of its last line for the blank line to be seen. A `@type` or `@alias`
-/// block declares a type by itself and is finished.
+/// ry adds one case: input ending in a `#:` block on its own lines is unfinished, because the
+/// block annotates the next expression. A blank line after it ends the wait, as it detaches the
+/// block in a file, so `text` must end with its last line break. A `@type` or `@alias` block
+/// declares a type by itself and is finished.
 pub fn input_is_unfinished(text: &str) -> bool {
     let parse = parse(text);
     let end = TextSize::of(text.trim_end());

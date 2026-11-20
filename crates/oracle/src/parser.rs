@@ -2,31 +2,22 @@
 //! parses to, or the error it is rejected with, printed in full.
 //!
 //! A program is a prelude and one `p_("<fragment>")` statement per fragment, so the reducer
-//! shrinks a finding to the one line that shows it. `p_` prints the number of expressions and a
-//! structural dump of each: a call as `(head argument ...)` with its argument names, a symbol by
-//! name, a string by its bytes and encoding mark, and a number by its type and bits. Deparsed
-//! text would hide exactly what a parser gets wrong (an integer read as a double, the grouping of
-//! `-a^b`, an escape decoded to another byte), and it would add the deparser's own differences.
+//! shrinks a finding to one line. `p_` prints a structural dump of each expression: a call as
+//! `(head argument ...)` with argument names, a symbol by name, a string by its bytes and encoding
+//! mark, a number by its type and bits. Deparsed text would hide what a parser gets wrong (an
+//! integer read as a double, the grouping of `-a^b`, an escape decoded to another byte).
 //!
-//! A fragment comes from one [`FragmentFamily`], and a seed enables a random subset of them. Most
-//! families write text that should parse (operator chains without parentheses, nested constructs,
-//! literals, names, the same constructs across line breaks), and two damage such text by one
-//! token or draw tokens blindly, because a parser's two answers, the tree and the refusal, are
-//! checked by different inputs.
+//! A seed enables a random subset of [`FragmentFamily`]s. Most write text that should parse, and
+//! two damage it by one token or draw tokens blindly, so both the tree and the refusal are tested.
 //!
-//! ry's own syntax is text GNU R rejects by design. A fragment with an inline annotation is not
-//! generated, and one where ry's parser finds a record, a tuple or another ry construct is passed
-//! in the mode `"extension"`: `p_` then prints only that R rejects it, on ry always and on GNU R
-//! when the parse fails. Text GNU R accepts and ry reads as its own syntax still differs, which
-//! is the one difference such a fragment can show.
+//! A fragment with an inline annotation is not generated, and one where ry's parser finds a
+//! record, a tuple or another ry construct is passed in the mode `"extension"`, where `p_` prints
+//! only that R rejects it. Text GNU R accepts and ry reads as its own syntax still differs.
 //!
-//! A rejected fragment prints its whole error message (the line, the column, the token the
-//! parser stopped at and the lines it quotes) only in the mode `"message"`, which the string and
-//! number families use, because there the lexer is what refuses. One message loses its location:
-//! GNU R prints an uninitialized line number after "invalid \u{xxxx} sequence". Every other
-//! family prints the fact that the fragment was rejected, because the token a parser names for
-//! arbitrary damaged text is not what those families ask about. A rejected fragment prints no
-//! warnings.
+//! A rejected fragment prints its whole error message only in the mode `"message"`, which the
+//! string and number families use, because there the lexer refuses; GNU R prints an
+//! uninitialized line number after "invalid \u{xxxx} sequence", so that message loses its
+//! location. Other families print only that the fragment was rejected, and no warnings.
 
 use {
     std::iter::successors,

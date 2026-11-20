@@ -4282,18 +4282,9 @@ unsafe fn leave_levels(levels: &[Level], mut result: R<Sexp>, one_statements: Se
 }
 
 /// The rest of `tryCatchOne`'s body in the frame at `index` once `doTryCatch` has returned
-/// `caught`, the condition, its call and the handler:
-///
-/// ```r
-/// if (is.null(value[[1L]])) {
-///     msg <- .Internal(geterrmessage())
-///     call <- value[[2L]]
-///     cond <- simpleError(msg, call)
-/// } else if (is.character(value[[1L]])) {
-///     ...
-/// } else cond <- value[[1L]]
-/// value[[3L]](cond)
-/// ```
+/// `caught`, the condition, its call and the handler: it rebuilds the condition from
+/// `value[[1L]]` (an error message when that is `NULL` or a string) and calls
+/// `value[[3L]](cond)`.
 unsafe fn call_exiting_handler(index: usize, caught: Sexp, statements: Sexp) -> R<Sexp> {
     let names = symbols();
     bind_local(index, names.value, caught)?;

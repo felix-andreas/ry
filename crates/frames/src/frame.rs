@@ -48,11 +48,13 @@ use {
 };
 
 /// A builtin that works on tables, wrapped so the allocator asks for huge pages while it runs
-/// (`heap::large::huge_pages` has the reason). The wrapper is a closure without captures, which
-/// is still a plain function pointer in the builtin table.
+/// (`heap::large::huge_pages` has the reason) and so a later fork knows Polars may have started
+/// its thread pool (`interp::system::note_thread_pool`). The wrapper is a closure without
+/// captures, which is still a plain function pointer in the builtin table.
 macro_rules! table_work {
     ($function:path) => {
         |call| {
+            interp::system::note_thread_pool();
             let _pages = heap::large::huge_pages();
             // SAFETY: the builtin's caller upholds the contract of the function it registered.
             unsafe { $function(call) }
