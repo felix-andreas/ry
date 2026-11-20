@@ -600,7 +600,7 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 
 `tools/bench/builtins/slower.txt` lists every export of base, stats and utils that the builtins sweep finds slower than GNU R (or failing) in at least one case; `sweep.py ratchet --update` shrinks it as fixes land, and `sweep.py weights` orders the work by call frequency in the code bases and the oracle corpus.
 
-- **Largest gap left:** `rpois` with a large or vector `mu` (about 0.6x, unexplained: `decisions/builtins.md`), then `dsignrank` on a scalar (0.71x); `slower.txt` has the rest. `cumprod` of products that underflow a double pays an x87 store assist per element, as GNU R does; skipping that store would beat it.
+- **Largest gap left:** `rpois` with a vector `mu` (about 0.85x) and `rgeom` (about 0.9x), both unexplained (`decisions/builtins.md`); `slower.txt` has the rest. `cumprod` of products that underflow a double pays an x87 store assist per element, as GNU R does; skipping that store would beat it.
 - **Failing on ry in the sweep:** `R_compiled_by`, `aregexec`, `rsmirnov`, `ppr`, `arima0` and others; `sweep.py compare` prints the full list.
 - **POSIX repeated groups:** `(a)?(ab)?b*` on "abb" fills the first optional group where TRE fills the second (`strings__posix_repeated_group`, a known failure).
 

@@ -192,7 +192,6 @@ stats::rhyper
 stats::rmultinom
 stats::rnbinom
 stats::rpois
-stats::rsignrank
 stats::rsmirnov
 stats::rstandard
 stats::rstudent
