@@ -36,7 +36,7 @@ A check must never read a project-wide map directly, because then every edit any
 - **One structural map rewrites types: `types::map_child_types`.** New `TyKind`, `FunctionType` or `Parameter` members go there only, because a second hand-written walk misses one.
 - **Every type the checker prints must parse back** (`test_roundtrip.rs`), so a new constraint or `TyKind` includes its grammar side.
 - **Every mismatch report goes through `Checker::type_mismatch`**, which narrows to the failing field or position. A finding underlines the smallest expression its message is about (`name_range`).
-- **Every finding inside an item is reported; only the item's export is cut to `Unknown` when it fails.**
+- **Every finding inside an item is reported; only the item's export is cut to `Unknown` when it fails**, unless every error is in `contained_errors` (a value checked against a fixed annotation or ry field type, which the slot takes regardless).
 - **Do not `table.resolve` a type you display as written** (it expands aliases), and use one `TypeRenderer` across everything that shares variable names.
 - **A `#:` annotation declares parameter types, never the parameter list.** The export is always the formals, and `check_declared_function` reconciles, so a call is never blamed for an annotation's mistake.
 - **An inline type definition pairs with a `#:` definition directly above it**, so read definitions through `file_type_definitions`, never by walking the tree for one spelling.

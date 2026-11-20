@@ -125,10 +125,11 @@ neither does a `@strict` toggle, so the adjacency rules do not apply to them.
 A block is refused as a whole when it mixes forms, orders its directives wrongly, declares a
 duplicate or unknown type parameter, or gives `@new` a payload that is not nominal. A refused block
 reports its error and carries no typing payload, so a broken annotation does not cause follow-on
-findings. Two known exceptions still do: a `[]` vector whose element type is not atomic or is not
-declared (`Rec[]`), and a bare optional positional parameter (`fn(integer, [character])`). A block
-the annotation grammar could not read at all is refused silently, because the parse error has
-already said what was wrong.
+findings. An annotation that names an undeclared type, or writes `X[]` over an element that is not
+atomic (`Rec[]` with `Rec` a record alias), is refused the same way, so the code it covers is
+typed as if it had no annotation. A block the annotation grammar could not read at all, such as
+the bare optional parameter in `fn(integer, [character])`, is refused silently, because the parse
+error has already said what was wrong.
 
 ## Inline annotation syntax
 
@@ -656,7 +657,12 @@ A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
   `List.from_r` uses it to type a `list[T]` argument.
 
 Any other constraint name is an annotation error, and the error lists the ones that exist. An
-argument whose type violates a constraint is a type error at the call. A union satisfies a
+argument whose type violates a constraint is a type error at the call, and the message names the
+constraint: `middle("a")` under `<N: scalar numeric>` reports "expected a scalar numeric value
+(`integer` or `double`), found `character`". A printed signature names a declared type parameter
+as the annotation spells it, and an inferred one `T`, `U` and so on in order of appearance. A
+call's message prints the parameter as the fresh variable the call instantiated, so `wrap(gh)`
+under `<R> fn(f: fn(...: double) -> R) -> R` expects `fn(...: double) -> T`. A union satisfies a
 constraint when every member does, so `double | integer` satisfies `numeric`. A vector `U[]`
 satisfies `numeric` when its element is a number, and an undetermined element becomes a
 `scalar numeric` one. A constrained value that meets a union takes the union whole when the
@@ -682,7 +688,9 @@ many <- normalize(list("a", "b"))  # list{character, character}
 
 Written `fn(path: list[T] | T[]) -> list[T] | T[]`, the signature would return the whole union to
 every caller. The body may use the parameter wherever its bound fits, and an argument outside the
-bound, such as `normalize(sum)`, is a type error at the call. `@forall T, U: list[T] | T[]` and
+bound, such as `normalize(sum)`, is a type error at the call. A bound whose every member meets a
+constraint meets it too, so under `<N: integer | double> fn(x: N) -> N` the body `x + x` is
+arithmetic and has the type `N`. `@forall T, U: list[T] | T[]` and
 `function<T, U: list[T] | T[]>(path: U) -> U` declare the same binders. A bound that is a single
 name reads as a constraint, so a type bound is a union or a compound type such as `list[T]`.
 
@@ -1647,8 +1655,9 @@ or a compact `fn(...)` without `-> RETURN_TYPE`. An elided return is not the sam
 - In a nested function type, such as a callback parameter written `@param cb {fn(integer)}`, the
   elided return means `NULL`, which matches R functions called for their side effects.
 - In a [trusted coercion](#trusted-coercions), and in an annotation on a value that is not a function
-  literal, such as `#: fn(integer)` on `g <- f`, the elided return is `Unknown`, so a call's result
-  goes unchecked even when `f`'s return type is known. This is a known gap.
+  literal, the return comes from the value's own type, called with the written parameter types.
+  With `f <- function(x) x + 1L`, `#: fn(integer)` on `g <- f` types `g` as
+  `fn(integer) -> integer`. When the value's return is not known, it is `Unknown`.
 
 A function that really does return `NULL` can say so with `@returns {NULL}` or `-> NULL`. The
 explicit form is enforced, so a body that returns anything else is then a type error.
@@ -1873,7 +1882,13 @@ The base functions that take a function argument and resolve it with `match.fun`
 `apply`, `tapply`, `sweep`, `rapply`, `eapply`, `Vectorize`, `Negate`, `aggregate`, and `match.fun`
 itself) also accept the function's name as a string. A string literal that names a known function
 checks as that function, so `vapply(words, "toupper", numeric(1))` is an error because `toupper`
-returns `character`. Any other string, such as `"[["` or a computed name, is `Unknown` and
+returns `character`. The finding sits on the template and names the callback:
+
+```text
+`toupper` returns `character`, but this `FUN.VALUE` asks for `double[]`
+```
+
+Any other string, such as `"[["` or a computed name, is `Unknown` and
 unchecked. A string reaches a function-typed parameter only at these callees: a project function
 that calls its `callback` parameter does not accept `"toupper"`.
 
@@ -2131,8 +2146,8 @@ scalar condition admits:
 
 `[[` extracts a single element, and `[` is R's general subsetting operator. `[` with an out-of-range
 position or a missing name gives `NA` at run time, which is a property of the value, not of its type.
-`[[` with a missing name gives `NULL` on a list, which the rules below record as `| NULL`; they
-record the same for a named vector, where R instead fails at run time.
+`[[` with a missing name gives `NULL` on a list, which the rules below record as `| NULL`, and fails
+on a named vector, so there it gives the element type.
 
 `$name` behaves like `[["name"]]` on lists, on records, and on opaque nominals, and a backtick-quoted
 name follows the same rule. `$` does not work on atomic vectors, because R rejects it on every atomic
@@ -2918,9 +2933,9 @@ a local variable or parameter, or an assignment to a local written inside the te
   `url` as the filled record. The false branch also drops `NULL` from the field itself, in each
   record that names it exactly, so after `if (is.null(cfg$limit)) return("")` a later
   `cfg$limit` reads `character` where the field is declared `character | NULL`, until the code
-  writes `cfg` or that field, directly or from a closure with `<<-`. A nominal type's field is not
-  narrowed: the narrowed record would no longer be that type, so after
-  `if (is.null(node$left)) stop()` on a `Tree`, `node$left` still reads `Tree | NULL`.
+  writes `cfg` or that field, directly or from a closure with `<<-`. A nominal type's field
+  narrows the same way while the value keeps its type: after `if (is.null(node$left)) stop()` on
+  a `Tree`, `node$left` reads `Tree` and `node` is still a `Tree`.
 - `length(x)` as a condition, or `length(x)` compared with a numeric literal, removes `NULL` from `x`'s union
   in whichever branch a length of zero cannot reach. So after
   `if (length(range) != 2) return(0L)`, `range` is no longer `NULL`, and `if (length(range))` or
@@ -3007,6 +3022,26 @@ The details:
 - A read from inside a closure narrows when the guard is in the same statement, just as a local
   does. The guard's own subject must not itself be a deferred read: that body runs later, so the test
   proves nothing about the value it will see then.
+- A closure may run after the rest of its frame, so it reads an enclosing variable as it stands
+  where the closure is defined, joined with every later write the closure can still see when it
+  runs, in the frame or in another closure. After
+  `if (is.null(x)) return(""); get <- function() x; x <- NULL`, the call `get()` is
+  `character | NULL`, and the same holds for a narrowed field (`get <- function() cfg$limit`
+  followed by `cfg$limit <- NULL`). When the closure runs decides which writes it sees:
+
+  | The closure | Sees writes up to |
+  | --- | --- |
+  | called inline, `(function() x)()` | the call |
+  | passed to a function that calls it before returning (`lapply`, `vapply` and the rest of the apply family, `do.call`, `tryCatch`) | the call |
+  | bound with `get <- function() x` and only called | its last call |
+  | called inside a loop | the end of that loop |
+  | read in any other way: returned, stored, passed to another function | the end of the frame |
+
+  So `out <- get(); x <- NULL; out` keeps `out` a `character`, and a write on the other branch of an
+  `if` is never seen. A later R literal with the same default type as the read changes nothing, a
+  literal with another default joins (`x <- 1L; get <- function() x; x <- 2.5` makes `get()`
+  `integer | double`), and the closure's own `<<-` writes are joined as described under
+  [the assignment operator](#assignment-operator--).
 - Guards compose across `&&` and `||`. The right operand of `&&` runs only on the left's true edge,
   so it is checked under that refinement, and the whole condition refines its true edge by both
   tests: `!is.null(x) && length(x) > 0L` reads a non-`NULL` `x`. `||` does the same on the false
@@ -3209,8 +3244,10 @@ body does not carry over into the next iteration.
 
 After the loop, R keeps the variable's last value, or sets it to `NULL` when the source was empty.
 A read there is therefore the element type joined with `NULL`, and with the variable's type at the
-end of the body when the body assigns it. A write that a `break` or `next` cuts off from the end of
-the body is not counted, which is a known gap, and so is a nested loop that reuses the name. A `from:to` range always has at least one element, so after
+end of the body when the body assigns it. A `break` leaves the loop with the state it saw and a
+`next` starts the next iteration with it, so a write that one cuts off from the end of the body still
+counts. A nested loop over the same name writes the outer loop's variable, so the outer variable's
+type after the loop includes the inner loop's elements. A `from:to` range always has at least one element, so after
 `for (i in 1:n) {}` the variable `i` is `integer`, while after `for (value in x) {}` with
 `x: double[]` it is `double | NULL`. A loop at the top level of a file leaves its variable bound
 like a top-level assignment, so a later statement or item reads the same type. When the item also
@@ -3223,8 +3260,10 @@ so reads in the condition see the loop's joined state. The loop evaluates to `NU
 
 ### `repeat`
 
-A `repeat` loop has no condition and runs its body at least once, so a variable written in the body is
-definitely assigned after the loop. It evaluates to `NULL`. A `repeat` that no `break` leaves never
+A `repeat` loop has no condition and is left only through a `break`, so after the loop a variable
+holds the union of the types it had at each `break`. In
+`repeat { s <- "a"; if (done) break; s <- 1L }`, `s` is `character` afterwards. It evaluates to
+`NULL`. A `repeat` that no `break` leaves never
 completes, so code after it is unreachable and a function body ending in it contributes no trailing
 value.
 
@@ -3270,7 +3309,8 @@ a scope holds one variable per name, and assignment mutates it.
 - An assignment inside a branch or a loop body writes the enclosing frame's slot, because braces and
   control flow do not create scopes.
 - A slot shadows an outer or package-global binding of the same name. But a slot that no write reaches
-  at a given read does not shadow, and the read resolves outward, just as R's lookup would.
+  at a given read does not shadow, and the read resolves outward, just as R's lookup would. A slot
+  that only some paths write resolves outward on the others, so the read takes both types.
 - `for` introduces a loop-local slot, re-initialized from the source on every iteration.
 - `local(expr)` evaluates `expr` in a fresh child scope and takes its type. Assignments inside are
   local, while references still see the enclosing names.
@@ -3573,8 +3613,11 @@ Definite assignment follows four rules:
 
 - A read that some path reaches with no prior write reports
   [`maybe-undefined`](/reference/diagnostic-codes), because R raises `object 'x' not found` on that
-  path. Inside a function, a binding of the same name outside the function would be read instead,
-  which this check does not yet consider. The finding is off by default; turn it on with
+  path. Inside a function, R reads a binding of the same name outside the function on that path
+  instead (in an enclosing function, the package, or base R), so the read is reported only when no
+  such binding exists, and otherwise types as the union of the local writes and that binding:
+  after `if (ok) limit <- 5L`, a function reads `limit` as `integer | character` when the package
+  binds `limit <- "all"`. The finding is off by default; turn it on with
   `[check] maybe-undefined = true`. Two conditions that always agree at run time are still two
   branches to the checker, so `if (ok) v <- …` followed by `if (ok) use(v)` is reported, although it
   is safe.
@@ -3590,14 +3633,18 @@ Definite assignment follows four rules:
   with no such binding stays `Unknown`.
 
 An item whose check reports an error exports `Unknown`, so one mistake does not cascade across a file.
-An item with a `#:` annotation is the exception: even when its body violates the annotation, every
-call site is still checked against the declared signature.
+Two kinds of item are exceptions. An item with a `#:` annotation keeps its declared signature, so even
+when its body violates the annotation, every call site is still checked against it. An item whose
+every error is a value that does not fit a fixed type, an annotated binding's (`x: integer <- "a"`) or
+a ry record field's (`point$x <- "a"`), keeps its type too, because the binding takes that fixed type
+whatever the value. After `point$x <- "a"`, a later `point[["w"]]` is still reported.
 
 #### Unused assignments
 
 With the `unused` check enabled, an assignment whose value no read can observe on any path reports
 `unused` on the assigned name. Top-level assignments visible to the package, parameters, `for`
-variables, and names starting with `.` or `_` are never reported.
+variables, and names starting with `.` or `_` are never reported, and neither is a column update such
+as `f[, y := v]` or `setnames(f, ...)`, which changes the table in place.
 
 A read inside a nested function is a *capture*. The closure runs after its frame has finished, so
 every write to the captured name stays observable, and none of them is a dead store. That holds only
@@ -4911,13 +4958,13 @@ function to the interpreter carries the code `interpreted` and is a warning, so 
 ## Syntax errors
 
 A file with syntax errors is still analyzed, under one rule: a broken region reports its syntax error
-and, strict mode aside, nothing else, because the checker draws no conclusions from source it could
-not read.
+and nothing else, strict mode included, because the checker draws no conclusions from source it
+could not read.
 
 - Every well-formed statement in the file is analyzed normally. Definitions keep their exports,
   references resolve, and a genuine type error outside the broken region still surfaces.
 - A broken statement contributes nothing: no names, no reads, and no diagnostics beyond the syntax
-  error covering it. Strict mode is the exception, and can still report an undetermined type there.
+  error covering it.
 - An unterminated argument or parameter list ends at the next statement, so the mistake stays on the
   line that made it. A list that runs onto the next line is ordinary R, and a fragment there such as
   `beta)` really is a forgotten separator and is reported as one. But a line that assigns is the next
@@ -4973,6 +5020,3 @@ Known bugs, where correct code is reported:
 - **A later top-level write in a package.** A closure in a package reads a top-level name as its
   definition, so a later top-level `x$a <- v` is not seen there. Reads at top level and in a
   script see the write.
-- **A generic function passed inline as an argument.** `lapply(xs, function<T>(v: T) -> T v)` is
-  reported, because type parameters on a function that is not bound to a name are not
-  instantiated. Leave the function's types off, or bind it to a name first.

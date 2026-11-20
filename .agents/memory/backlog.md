@@ -734,32 +734,14 @@ False reports on correct R, worst first:
 
 Smaller gaps:
 
-- **Writes cut off by `break` or `next` are lost at loop joins.** `x <- "a"; if (c) break; x <- 1L` in a loop body leaves `x` without `character` after the loop, for loop-carried variables and for the loop variable alike (`check_loop_body` joins only the end-of-body state). Naming also calls the write before `next` unused. A nested loop that reuses its outer loop's variable name drops the outer loop's `NULL` (`for (m in xs) { for (m in 1:2) {} }; m` is `integer`).
-- Found in passing by the IDE work, not yet reproduced: `sales[, amount := "x"]` flags `sales` as
-  unused; `p2$x <- "a"` and `p2[["w"]]` go unreported after an earlier error in the same item; the
-  message for `Result.map(:Ok(1L), 3)` leaks the type variable `T`; `Str.lenght` gets no
-  "did you mean".
-- Two broken annotations still cause follow-on findings: `#: Rec[]` over an alias of a record (also
-  coded `type-mismatch` instead of as an annotation error), and `fn(integer, [character])`.
-- A `vapply` whose callback's return type disagrees with `FUN.VALUE` reports only the two types, as
-  `vapply(words, toupper, numeric(1))` gives "expected `character[] | character`, found `double[]`"
-  on `numeric(1)`, whether the callback is a name or a `match.fun` string. Naming the callback needs
-  the generic argument check to carry which argument fixed the type variable.
-- After an invalid field write, a later field typo on the same record goes
-  unreported. Hover on `m2` in `m2$amount <- 5` shows `double` instead of the nominal type.
-- From the final type-system review, each now documented as a known gap in the reference:
-  - an elided return in a trusted coercion or on a non-literal value (`#: fn(integer)` on `g <- f`)
-    is `Unknown` rather than `f`'s known return;
-  - assignments in a bare top-level `{ }` block are invisible to other package files;
-  - an optional `[label]` parameter over a formal with no default is checked in annotations but not
-    at an argument position;
-  - a bare read satisfied only by an import or manifest is not a strict origin, while a qualified
-    one is;
-  - `maybe-undefined` ignores a binding of the same name outside the function, which R would read;
-  - `[[` with a missing name on a named atomic vector is typed `| NULL`, where R fails;
-  - strict mode can still report inside a statement that failed to parse.
-- Console completion: `df$` offers only `df`, and an unclosed `x[["` completes keywords instead of
-  fields.
+- A string literal where a ry function's callback goes is not reported: `List.map([1L], "a")`
+  passes, because a string names a function for R's `match.fun`, which a ry function never calls.
+- **Arithmetic on a type parameter that admits `logical` returns the parameter.** `<N: numeric>`
+  and `<N: integer | logical>` both accept `TRUE`, and `function(x: N) -> N x + x` checks, so
+  `a(TRUE)` types as `logical` though R returns the integer `2`. `classify_numeric_operand` makes a
+  rigid that meets `Numeric` a `Flexible` operand whose result is the rigid itself. A sound result
+  promotes `logical` to `integer`, which needs either a constraint that excludes `logical` for
+  `N + N -> N` or a result type other than `N` when the bound admits `logical`.
 - The Zed extension is not in Zed's registry yet. It downloads the newest full release's archive
   (`editors/zed/src/lib.rs`), and the first full release is 0.4.4, so publish it to Zed's registry
   no earlier than 0.4.4 (before that it would serve 0.1.1), and 0.4.4 must ship every platform's
@@ -874,21 +856,6 @@ measurement showed.
   typed (the `DataFrame` type is the typed alternative). A local whose
   type is a generic parameter (`total <- a + b` inside `<T> fn(a: T, ...)`) gets no inlay hint,
   because a bare `T` without its binder would mislead.
-- A closure reads a captured variable's narrowing as it stands where the closure is defined, so
-  `if (is.null(x)) return(""); get <- function() x; x <- NULL; use(get())` is silent, for a
-  variable and for a narrowed field (`get <- function() cfg$limit`). A write after the definition
-  should widen the captured read, as `capture_joins` does for reads before any write.
-- A nominal type's field is not narrowed by `is.null(node$left)`, because `field_null_guard` can
-  only rewrite the variable's type and a narrowed record is no longer the nominal. A narrowing fact
-  keyed on (slot, field), rather than a rewritten type, would cover `Tree`-style recursion.
-- A generic function literal bound to a local name keeps its rigid parameters:
-  `id <- function<T>(v: T) -> T v; id(1); id("a")` inside a function reports "expected `T`, found
-  `double`". A literal used directly (an argument, inside `list()`, called at once) instantiates;
-  a bound one should generalize to its declared scheme.
-- Signature help's formals for an untyped callee (`ide::bound_function`) take the last function
-  literal the item assigns to the name and, for a script's global, the first definition across
-  files, so a name defined twice can show the other definition's formals. It should prefer the
-  definition that reaches the call.
 - `development/design/r-runtime.md` section 8 keeps `declare(type(...))` as a third annotation
   spelling for code that must stay valid R, and a strip step (`ry build`) that moves inline types
   into `#:` comments. Neither exists yet; `syntax::erase_inline_annotations` is the starting point
@@ -2852,34 +2819,6 @@ Three things are left for the user, because an agent should not decide them.
   does not redirect an identifier, so publishing under it creates a new listing and starts installs
   and ratings from zero. Revert that one field if keeping the listing matters more.
 - **Registering `ry-lang` on crates.io, and `ry-lang.org`.**
-
-## Open: a size bound on a constructed type, and a decision on recursion widening
-
-`TYPE_SIZE_CEILING` caps a type at the point it is recorded, which stops the pathology. The general
-question is still open: nothing caps how large one constructed type may get in the first place.
-
-Widening past a bound to `Unknown` is the sound-by-refusal move the loop join already makes for a
-variable whose type keeps growing structurally. The alternative is folding to a recursive nominal.
-Choosing between them is a semantics design decision rather than an optimization, so it wants a
-decision record.
-
-Computing the size cheaply needs care. The graph is small while the tree is enormous, so a
-distinct-node count will not see the problem and a naive tree count is itself exponential. It wants
-a memoized size where the size of a node is one plus the sum of its children's sizes, which is
-linear in the graph and yields the true tree magnitude. `types::type_size` already has that shape.
-
-## Open: a cross-file cycle panics salsa's backdate check
-
-`fuzz_multi_file` (`crates/semantics/tests/test_fuzz.rs`) panics in salsa's
-`backdate.rs` ("returned the same value, but the previous execution changed at R2 and the new
-execution changed at R1") for `global_scheme`. Minimal repro, with salsa 0.28.0 and 0.28.5 alike:
-file one is `g <- rev(g)` then `f <- g$x`, file two is `g <- g + 1L`; empty file two, render both,
-restore it, render again. `sort`, `List.reverse` and `as.Array` in place of `rev` panic too,
-`unlist` and `as.vector` do not. Every execution of the scheme is `Unknown`, so the result is
-deterministic: the panic comes from deep verification re-executing a cycle head
-(`maybe_changed_after_cold`) outside its fixpoint, where it reads only backdated cycle members.
-The Array fuzz templates reached it first; it predates Arrays. Fix the cycle shape (or report it to
-salsa with this repro), then pin the repro in `test_incremental.rs`.
 
 ## Open: neither cycle fix has end-to-end coverage
 

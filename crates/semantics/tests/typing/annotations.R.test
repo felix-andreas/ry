@@ -528,14 +528,43 @@ h: double
 #: fn(x: Person[]) -> NULL
 f <- function(x) NULL
 #++++
-f: fn(x: Person[]) -> NULL
+f: <T> fn([x]: T) -> NULL
 51..59 error[type-mismatch] the element of a `[]` vector type must be an atomic type, found `Person`. For a list of these, write `list[Person]`
+
+#---- a_refused_vector_annotation_causes_no_follow_on_findings
+#: @alias Rec {list{name: character, n: integer}}
+
+#: fn(xs: Rec[]) -> integer
+count_all <- function(xs) length(xs)
+total <- count_all(list())
+#++++
+count_all: <T> fn(xs: T) -> integer
+total: integer
+61..66 error[type-mismatch] the element of a `[]` vector type must be an atomic type, found `Rec`. For a list of these, write `list[Rec]`
+
+#---- an_undeclared_vector_element_causes_no_follow_on_findings
+#: fn(xs: Undeclared[]) -> integer
+count_all <- function(xs) length(xs)
+total <- count_all(list())
+#++++
+count_all: <T> fn(xs: T) -> integer
+total: integer
+10..20 error[annotation] I do not know the type `Undeclared`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+
+#---- a_bare_optional_parameter_causes_no_follow_on_findings
+#: fn(integer, [character]) -> integer
+f <- function(n, label = "x") n + 1L
+y <- f(1L)
+#++++
+f: <T: numeric, U> fn(n: T, [label]: U) -> T
+y: integer
+26..27 error[annotation] expected `:` after `[name]` in an optional parameter
 
 #---- structural_vector_element_is_refused
 #: fn(x: list{name: character}[]) -> NULL
 f <- function(x) NULL
 #++++
-f: fn(x: list{name: character}[]) -> NULL
+f: <T> fn([x]: T) -> NULL
 9..32 error[type-mismatch] the element of a `[]` vector type must be an atomic type, found `list{name: character}`. For a list of these, write `list[list{name: character}]`
 
 #---- atomic_alias_and_binder_vector_elements_are_fine
@@ -667,7 +696,7 @@ f <- function() {
   count
 }
 #++++
-f: Unknown
+f: fn() -> integer
 42..48 error[type-mismatch] expected `integer`, found `character`
 
 #---- trusted_local_overrides_unchecked
@@ -726,11 +755,24 @@ out: Unknown
 113..119 error[type-mismatch] expected `integer`, found `character`
 
 #==== elided_returns
-#---- a_trusted_elided_return_is_null
+#---- a_trusted_elided_return_comes_from_the_value
 #: @trust fn(count: integer)
 log_count <- function(count) count
 #++++
-log_count: fn(count: integer) -> NULL
+log_count: fn(count: integer) -> integer
+
+#---- an_elided_return_on_a_function_value_comes_from_the_value
+f <- function(x) x + 1L
+
+#: fn(integer)
+g <- f
+
+#: @trust fn(integer)
+h <- f
+#++++
+f: <T: numeric> fn(x: T) -> T
+g: fn(integer) -> integer
+h: fn(integer) -> integer
 
 #---- elided_callback_return_means_null
 #: @param cb {fn(integer)}
@@ -939,7 +981,7 @@ mapped <- lapply(xs, #: character
   1L)
 #++++
 xs: list{integer}
-mapped: Unknown
+mapped: list[Unknown]
 51..53 error[type-mismatch] expected `character`, found `integer`
 
 #---- a_blank_line_separates_an_argument_from_its_annotation
@@ -960,12 +1002,12 @@ annotated_body <- function(x)
   #: character
   x + 1L
 #++++
-annotated_body: Unknown
+annotated_body: <T: numeric> fn(x: T) -> character
 208..214 error[type-mismatch] expected `character`, found `T`
 
 #---- a_parenthesised_expression_does_attach
 parenthesised <- ( #: character
   1L )
 #++++
-parenthesised: Unknown
+parenthesised: character
 34..36 error[type-mismatch] expected `character`, found `integer`

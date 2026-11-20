@@ -1588,7 +1588,8 @@ flags: <T> fn(words: list[T] | T[]) -> logical[]
 counts <- function(words) vapply(words, function(word) paste(word, collapse = " "), numeric(1))
 #++++
 counts: Unknown
-84..94 error[type-mismatch] expected `character[] | character`, found `double[]`
+84..94 error[type-mismatch] the function returns `character`, but this `FUN.VALUE` asks for `double[]`
+
 #---- a_returned_closure_with_named_parameters_fits_a_dots_only_callback
 #: <R> fn(f: fn(...: Any) -> R) -> R
 wrap <- function(f) f()
@@ -1601,7 +1602,7 @@ use <- function(tr) {
   wrap(gh)
 }
 #++++
-wrap: <T> fn(f: fn(...: Any) -> T) -> T
+wrap: <R> fn(f: fn(...: Any) -> R) -> R
 maker: <T, U> fn(tr: T) -> fn(endpoint: U, ...: Any) -> character
 use: <T> fn(tr: T) -> character
 
@@ -1617,10 +1618,11 @@ use <- function(tr) {
   wrap(gh)
 }
 #++++
-wrap: <T> fn(f: fn(...: double) -> T) -> T
+wrap: <R> fn(f: fn(...: double) -> R) -> R
 maker: <T, U, V> fn(tr: T) -> fn(endpoint: U, [other]: V, ...: Any) -> character
 use: Unknown
 208..210 error[type-mismatch] expected `fn(...: double) -> T`, found `fn(endpoint: U, [other]: V, ...: Any) -> character`
+
 #---- months_of_a_date_is_its_name_and_months_of_anything_else_is_a_package_method
 name <- months(Sys.Date())
 period <- months(3L)
@@ -1661,7 +1663,7 @@ memoize <- function(fun) {
   dec
 }
 #++++
-memoize: <T> fn([fun]: fn() -> T) -> fn() -> T
+memoize: <T> fn([fun]: fn() -> T) -> fn() -> T | logical
 
 #---- a_closure_reads_back_the_value_it_just_superassigned
 once <- function(fun) {
@@ -1974,7 +1976,7 @@ parts: fn() -> list[character]
 parts <- function() lapply(y ~ x + z, 42)
 #++++
 parts: Unknown
-38..40 error[type-mismatch] expected `fn(T) -> U`, found `double`
+38..40 error[type-mismatch] expected a function, found `double`
 
 #---- a_call_returns_the_arm_of_an_echoed_list_or_vector_parameter_it_passed
 normalize <- function(path) {

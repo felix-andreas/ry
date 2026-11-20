@@ -125,6 +125,14 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A wrapper over a numeric overload set takes the `numeric` bound (settled)
 - A `[` on a query's result is a query
 - Branches decide each other's literal items, and `c()` decides a literal as R's type
+- A loop's `break`s and `next`s join where they land
+- An error against a fixed type keeps the item's export
+- An annotation that misuses the type vocabulary carries no payload
+- An unassigned path reads the name outside the function
+- A declared type parameter keeps its name in messages
+- A closure's read sees the writes after its definition
+- A nominal field narrows through a fact, not a rewritten type
+- A type past the size ceiling widens to `Unknown`, never to a recursive nominal (settled)
 
 ## Analysis core
 

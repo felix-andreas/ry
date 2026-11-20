@@ -272,8 +272,8 @@ signature: <T> fn(X: list[T] | T[], FUN: fn(T) -> double[] | integer[] | logical
 parameters: X: list[T] | T[] | [FUN: fn(T) -> double[] | integer[] | logical[]] | FUN.VALUE: double | ...: Any | [USE.NAMES]: logical
 signature: <T> fn(X: list[T] | T[], FUN: fn(T) -> character[], FUN.VALUE: character[] | character, ...: Any, [USE.NAMES]: logical) -> character[]
 parameters: X: list[T] | T[] | [FUN: fn(T) -> character[]] | FUN.VALUE: character[] | character | ...: Any | [USE.NAMES]: logical
-signature: <T, U> fn(X: list[T] | T[], FUN: fn(T) -> U, FUN.VALUE: U[] | U, ...: Any, [USE.NAMES]: logical) -> U[]
-parameters: X: list[T] | T[] | [FUN: fn(T) -> U] | FUN.VALUE: U[] | U | ...: Any | [USE.NAMES]: logical
+signature: <T, V> fn(X: list[T] | T[], FUN: fn(T) -> V, FUN.VALUE: V[] | V, ...: Any, [USE.NAMES]: logical) -> V[]
+parameters: X: list[T] | T[] | [FUN: fn(T) -> V] | FUN.VALUE: V[] | V | ...: Any | [USE.NAMES]: logical
 signature: <T> fn(X: list[T] | T[], FUN: fn(T) -> matrix, FUN.VALUE: Any, ...: Any, [USE.NAMES]: logical) -> matrix
 parameters: X: list[T] | T[] | [FUN: fn(T) -> matrix] | FUN.VALUE: Any | ...: Any | [USE.NAMES]: logical
 action: Add the inferred signature of the function passed to `vapply`

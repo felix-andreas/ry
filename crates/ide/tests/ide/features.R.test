@@ -154,6 +154,33 @@ hint @200 -> double
 hint @221: double
 hint @225: double
 
+#---- a_local_named_argument_goes_to_the_write_before_the_call
+g <- function() {
+  h <- function(a) a
+  h(a$0 = 1)
+  h <- function(b, a) b
+  h
+}
+#++++
+hover 43..44: a: double
+definition 34..35
+references: 34..35*, 37..38, 43..44
+rename: 3 edit(s)
+signature: fn(a: double) -> double
+parameters: [a: double]
+action: Add inferred type annotation for `g`
+  edit 13..13 -> "<T, U>"
+  edit 15..15 -> " -> fn(b: T, [a]: U) -> T"
+action: Add inferred type annotations for the whole file
+  edit 13..13 -> "<T, U>"
+  edit 15..15 -> " -> fn(b: T, [a]: U) -> T"
+completion (128+): a, abbreviate, ability.cov, abline, abs, acf, acf2AR, acos
+hint @13<T, U>
+hint @15 -> fn(b: T, [a]: U) -> T
+hint @35: T
+hint @36 -> T
+hint @53: fn(b: T, [a]: U) -> T
+
 #==== references
 #---- slot_reads_and_writes
 f <- function() {
@@ -684,6 +711,7 @@ rename: 2 edit(s)
 type-definition 9..14
 signature: none
 completion (1): Score
+hint @42 -> Score
 
 #---- declaration_name_is_target
 #: @type Sco$0re {double}
@@ -699,6 +727,7 @@ references: 9..14*, 49..54
 rename: 2 edit(s)
 signature: none
 completion (1): Score
+hint @41 -> Score
 
 #---- annotation_completion_types
 #: @type UserId {integer}
@@ -883,6 +912,34 @@ action: Add inferred type annotations for the whole file
   edit 5..5 -> ": integer"
 completion (55): count, count.fields, Num.count_leading_zero_bits, Num.count_one_bits, Num.count_trailing_zero_bits, Str.count_utf8_bytes, Expr.count, List.count_if
 hint @5: integer
+
+#---- an_unclosed_string_subscript_completes_fields
+config <- list(alpha = 1, beta = "b")
+config[["al$0
+#++++
+hover 46..49: character
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 6..6 -> ": list{alpha: double, beta: character}"
+completion (1): alpha
+hint @6: list{alpha: double, beta: character}
+
+#---- a_dollar_with_no_field_name_completes_no_receiver_name
+frame <- read.csv("f.csv")
+frame$$0
+#++++
+hover 27..33: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": data.frame"
+completion: none
+hint @5: data.frame
 
 #---- string_subscript_fields
 config <- list(alpha = 1, beta = "b")

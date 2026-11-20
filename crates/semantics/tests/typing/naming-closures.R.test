@@ -125,3 +125,164 @@ x: integer
   = 0..1 the earlier binding is here.
 == R/c.R
 f: fn() -> fn() -> integer
+#==== late_capture_writes
+#---- a_write_after_a_closure_undoes_the_narrowing_it_reads
+f <- function(x: character | NULL) -> character {
+  if (is.null(x)) return("")
+  get <- function() x
+  x <- NULL
+  get()
+}
+#++++
+f: fn(x: character | NULL) -> character
+115..120 error[type-mismatch] expected `character`, found `character | NULL`
+
+#---- a_literal_written_after_a_closure_joins_its_default
+f <- function(x: character | NULL) -> character {
+  if (is.null(x)) return("")
+  get <- function() x
+  x <- 5
+  get()
+}
+#++++
+f: fn(x: character | NULL) -> character
+112..117 error[type-mismatch] expected `character`, found `character | double`
+
+#---- a_field_write_after_a_closure_undoes_the_field_narrowing
+f <- function(cfg: list{limit: double | NULL}) -> double {
+  if (is.null(cfg$limit)) return(0)
+  get <- function() cfg$limit
+  cfg$limit <- NULL
+  get()
+}
+#++++
+f: fn(cfg: list{limit: double | NULL}) -> double
+147..152 error[type-mismatch] expected `double`, found `double | NULL`
+
+#---- a_sibling_closure_write_reaches_an_earlier_closure
+f <- function(x: character | NULL) -> character {
+  if (is.null(x)) return("")
+  get <- function() x
+  clear <- function() x <<- NULL
+  clear()
+  get()
+}
+#++++
+f: fn(x: character | NULL) -> character
+146..151 error[type-mismatch] expected `character`, found `character | NULL`
+
+#---- writes_before_the_closure_keep_the_narrowing
+f <- function(x: character | NULL) -> character {
+  x <- NULL
+  x <- "a"
+  get <- function() x
+  get()
+}
+#++++
+f: fn(x: character | NULL) -> character
+#---- a_write_after_a_closure_undoes_a_nominal_field_narrowing
+type Tree = list{left: Tree | NULL, value: double}
+f <- function(node: Tree) -> double {
+  if (is.null(node$left)) return(0)
+  get <- function() node$left$value
+  node$left <- NULL
+  get()
+}
+#++++
+f: fn(node: Tree) -> double
+183..188 error[type-mismatch] expected `double`, found `double | NULL`
+
+#---- a_later_double_reaches_an_integer_closure_read
+f <- function() -> integer {
+  x <- 1L
+  get <- function() x
+  x <- 2.5
+  get()
+}
+#++++
+f: fn() -> integer
+74..79 error[type-mismatch] expected `integer`, found `integer | double`
+
+#---- a_closure_called_before_the_write_keeps_the_narrowing
+f <- function(x: character | NULL) -> character {
+  if (is.null(x)) return("")
+  get <- function() x
+  out <- get()
+  x <- NULL
+  out
+}
+#++++
+f: fn(x: character | NULL) -> character
+
+#---- an_eager_callback_keeps_the_narrowing
+f <- function(xs: double, label: character | NULL) -> character[] {
+  if (is.null(label)) return(character())
+  out <- vapply(xs, function(v) label, character(1))
+  label <- NULL
+  out
+}
+#++++
+f: fn(xs: double, label: character | NULL) -> character[]
+
+#---- an_inline_call_keeps_the_narrowing
+f <- function(x: character | NULL) -> character {
+  if (is.null(x)) return("")
+  out <- (function() x)()
+  x <- NULL
+  out
+}
+#++++
+f: fn(x: character | NULL) -> character
+
+#---- a_write_on_the_other_branch_is_not_seen
+f <- function(x: character | NULL, flag: logical) -> character {
+  if (is.null(x)) return("")
+  if (flag) {
+    get <- function() x
+    out <- get()
+  } else {
+    x <- NULL
+    out <- ""
+  }
+  out
+}
+#++++
+f: fn(x: character | NULL, flag: logical) -> character
+
+#---- a_callback_in_a_loop_sees_a_write_later_in_the_loop
+f <- function(x: character | NULL, n: integer) -> character[] {
+  if (is.null(x)) return("")
+  out <- character()
+  for (i in seq_len(n)) {
+    out <- vapply(1:2, function(v) x, character(1))
+    x <- NULL
+  }
+  out
+}
+#++++
+f: fn(x: character | NULL, n: integer) -> character[]
+212..215 error[type-mismatch] expected `character[]`, found `character[] | (character | NULL)[]`
+
+#---- a_returned_closure_sees_every_later_write
+f <- function(x: character | NULL) {
+  if (is.null(x)) return(function() "")
+  get <- function() x
+  x <- NULL
+  get
+}
+#++++
+f: fn(x: character | NULL) -> (fn() -> character) | (fn() -> character | NULL)
+
+#---- an_outer_read_on_an_unassigned_path_sees_the_later_write
+f <- function() -> integer | character {
+  inner <- "start"
+  g <- function(flag: logical) -> integer | character {
+    if (flag) inner <- 2L
+    inner
+  }
+  inner <- NULL
+  g(FALSE)
+}
+#++++
+f: fn() -> integer | character
+146..151 error[type-mismatch] expected `integer | character`, found `integer | character | NULL`

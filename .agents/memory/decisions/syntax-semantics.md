@@ -1828,3 +1828,109 @@ Fixtures: `naming/closures.R.test` and `typing/project-values.R.test`.
   mode.
 
 Fixtures: `typing-strict/strict.R.test`, group `literal_decisions`.
+
+## A loop's `break`s and `next`s join where they land
+
+**Status:** built.
+
+- Each loop pass keeps a `LoopJumps` frame. A `break` or `next` snapshots the slots written so far
+  in the pass: a `next`'s state joins the loop head beside the end of the body, and a `break`'s
+  state joins the state after the loop. Naming mirrors this with `loop_nexts` beside
+  `loop_exits`, so a write read only by the next iteration is not unused.
+- A `repeat` leaves only through its `break`s, so the state after it is the union of the break
+  states over the converged loop head (`leave_through_breaks`), never the end of the body.
+- A nested `for` over an enclosing active loop's variable reuses that variable's slot, because R
+  writes the same variable. The checker finds each loop's slot through
+  `NamingExtras::for_variables`, keyed by the loop expression, since a reused slot's range is the
+  outer loop's.
+
+Fixtures: `typing/control.R.test` group `loops`, `naming/for-bindings.R.test`.
+
+## An error against a fixed type keeps the item's export
+
+**Status:** built.
+
+- A failed item exports `Unknown` so one mistake does not cascade. An error whose value was
+  checked against a fixed type, an annotated binding's or a ry record field's (including a field
+  the record lacks), leaves the slot holding that fixed type, so `Checker::contained_errors`
+  records its range and an item whose every error is contained keeps its export. Later statements
+  then still report their own mistakes, such as a field typo after an invalid field write.
+- A column update (`f[, y := v]`, `setnames`) writes the table in place and is never an unused
+  assignment, at top level either.
+- A non-function where a callback goes reports "expected a function that takes `integer`" rather
+  than a signature whose undecided types print as variables the reader never wrote.
+- A `Module.member` name of the standard library that does not exist says so, and R's size words
+  (`length`, `nchar`, `size`, `len`) suggest `List.len` or `Str.count_utf8_bytes`, which no small
+  edit reaches. Such a misspelled callee skips the native-argument check, whose complaint would
+  only restate the miss.
+
+Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_record_type`,
+`a_column_update_is_not_a_dead_store`, `a_size_name_from_r_suggests_the_library_spelling`,
+`a_number_where_a_callback_goes_names_the_parameter_types`).
+
+## An annotation that misuses the type vocabulary carries no payload
+
+**Status:** built.
+
+- An annotation that names an undeclared type or writes `X[]` over a non-atomic element is
+  refused in the checker (`refused_by_vocabulary`, beside the alias-cycle refusal), not in
+  lowering, because both judgments need the project's type vocabulary, which lowering does not
+  read. The code is then typed as if unannotated, so the one annotation finding is the only one.
+  The `[]` finding keeps the `type-mismatch` code so it disappears when typing is off.
+- A malformed optional parameter (`[character]` with no `: TYPE`) leaves an empty `ERROR` node, so
+  the block is `Unparsed` and refused like any unreadable block.
+- `vapply`'s generic candidate fixes `V` from the callback before it reaches `FUN.VALUE`, so the
+  mismatch lands on the template as `V[] | V`. The call rewrites that finding to name the callback
+  (`TemplateDisagreesWithCallback`) rather than threading which argument fixed a variable through
+  the generic argument check.
+- Hover on a top-level name renders the item's exported scheme only when the item assigns that
+  name; in `m$amount <- 5` the scheme is the value's.
+
+## An unassigned path reads the name outside the function
+
+**Status:** built.
+
+- R looks a name up in the enclosing frames when the function's own frame has no binding yet, so a
+  read that some path reaches before any local write (`if (ok) limit <- 5L; limit`) reads the
+  outer `limit` on that path. Naming (`mark_slot_reached`) returns what that path finds:
+  nothing, or an enclosing function's slot, which it records in `enclosing_fallbacks` and marks
+  read. A name bound outside the item (another file, an import, base R) is judged where the
+  project's names are known: `maybe-undefined` asks `classify_name_read` as a deferred read, and
+  the unused check counts the read as a deferred read of the top-level name.
+- The checker unions the fallback's type into the read (`unassigned_path_read`), because either
+  value reaches it. Reporting only the local writes' type would blame correct code.
+- An annotation on a value that is not a function literal (a trusted coercion, `#: fn(integer)`
+  on `g <- f`) has no body to infer an elided `->` from, so the return comes from the value's own
+  function type, called with the written parameter types (`elided_return_from_value`). Parameters
+  pair by position, as a call binds them, because the written signature names no formals.
+
+## A declared type parameter keeps its name in messages
+
+**Status:** built
+
+- `TypeRenderer` prints a rigid binder whose name is an identifier as written (`<N: numeric>` gives `N`), so a report on a user's signature uses the user's names. Generated binders are named `#0`, `#R1` (`abstract_vars`, the closer), which no identifier spells, and the renderer letters them `T`, `U`, ... in order of appearance, skipping a name already taken.
+- A local `id <- function<T>(...)` instantiates its checked signature one level up, so the binding generalizes to the declared scheme, as an unbound literal instantiates at its use.
+- A rigid binder meets a constraint through its declared constraint or its type bound (`InferenceTable::rigid_satisfies`), so `<N: integer | double>` is numeric for an operator.
+
+## A closure's read sees the writes after its definition
+
+**Status:** built
+
+- Naming marks every read that crosses a function boundary (`NamingExtras::captured_reads`). Where such a read finds an environment entry, the checker joins it with each write to the slot positioned after the read (`Checker::capture_writes`, by source offset), so a narrowing at the definition does not survive a later `x <- NULL`, whether from the frame or from a sibling closure's `<<-`.
+- The reading body's own `<<-` writes are left to its superassignment seeds. A later R literal is skipped when the read is an open literal with the same default, or a non-literal open variable, or a ry scalar its constraint admits, so `step <- 2` after `step <- 1` stays `I64` in typed code while `x <- 2.5` after `x <- 1L` joins `double`.
+- Each captured read carries a horizon, the last offset whose write it can see (`naming::Horizon`). An inline call and a literal passed to an eager caller (`EAGER_CALLERS`: the apply family, `do.call`, `tryCatch`, purrr's `map` family) run before the call returns, so their horizon is the call's end. A literal bound with `name <- function` reaches its latest own-frame call through the slot, extended to the end of the outermost enclosing loop; any other read of the slot makes it escape, and an escaping closure sees every later write. Without horizons a vapply callback or a closure called once before a reset was blamed for writes it never sees. A write on the other `if` arm lies after the arm's last call, so position alone leaves it out. Signature help (`bound_function`) picks the callee bound by the same horizon.
+- A newly seen later write records the read's position in `late_triggers`; the function body whose range holds it re-checks once, so a write in a nested closure re-checks the frame that defined the reading closure. Late writes join with `join_closure_write`, which keeps a callback's open result generic (`memoize` returns `T | logical` after a `cache <<- TRUE` reset).
+
+## A nominal field narrows through a fact, not a rewritten type
+
+**Status:** built
+
+- `is.null(x$field)` narrows a structural record by rewriting the slot's type, but a rewritten `Tree` representation is no longer a `Tree`. For a slot whose remaining members are all nominals naming the field exactly, the false edge establishes `Fact::FieldNarrowed { slot, field, ty }` instead, and `Checker::infer_field` reads `x$field` from it. The slot keeps its nominal type.
+- A fact dies with any write to the slot (`Environment::set` forgets it), and a non-diverging `if` retracts its false-edge field facts (`retract_false_facts`), since only a diverging then branch makes the false edge hold afterwards. A closure's read ignores the fact when a later write to the slot exists.
+
+## A type past the size ceiling widens to `Unknown`, never to a recursive nominal
+
+**Status:** settled
+
+- A self-referential value, such as a record whose fields return that record, builds a type whose tree grows exponentially while its hash-consed graph stays small. Building it costs graph nodes only, and every type stores its saturating tree size when built (`types::type_size`), so no cap is needed at construction; `Checker::record` widens a composite at `TYPE_SIZE_CEILING` to `Unknown`, the sound-by-refusal move a loop join makes for a structurally growing variable.
+- Folding into a recursive nominal is rejected: it would invent a type name the user never wrote, every message would show it, and two values folded apart would not be compatible. A user who wants the recursive shape declares it (`type Tree = list{left: Tree | NULL, ...}`), which checks precisely.

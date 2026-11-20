@@ -20,7 +20,7 @@ use {
         item_name_range, item_naming, item_node, item_tree,
         metadata::{PackageMetadata, is_own_package},
         naming::{BindingId, BindingInfo, BindingKind, CopySource, ItemNaming, dot_dot_variable},
-        package_definitions, project_global_names, project_type_definitions,
+        package_definitions, project_global_names, project_type_definitions, reaching_writer,
         stubs::{
             NATIVE_NAMESPACES, StubSources, declaring_namespace, exporting_namespaces,
             outside_prelude, stub_declaration, stubs,
@@ -269,16 +269,17 @@ fn typed_hover(
     {
         // With neither a project nor a stub declaration, the caller attaches the installed
         // package's documentation instead.
-        let (lines, definition) = match referenced_scheme(db, files, name, check, innermost) {
-            Some(mut scheme) => {
-                scheme.body = without_impossible_vectors(db, scheme.body);
-                (
-                    hover_lines(db, name, &scheme),
-                    hover_definition(db, files, position.item, innermost, name),
-                )
-            }
-            None => (vec![name.to_string()], None),
-        };
+        let (lines, definition) =
+            match referenced_scheme(db, files, name, (position.item, check), innermost) {
+                Some(mut scheme) => {
+                    scheme.body = without_impossible_vectors(db, scheme.body);
+                    (
+                        hover_lines(db, name, &scheme),
+                        hover_definition(db, files, position.item, innermost, name),
+                    )
+                }
+                None => (vec![name.to_string()], None),
+            };
         return Some(Hover {
             range: trim_trailing_trivia(file.text(db), hir.range(innermost) + position.item_offset),
             lines,
@@ -325,9 +326,13 @@ fn typed_hover(
     let (lines, definition) = match &hir.kind(expression) {
         ExpressionKind::NameRef(name) => {
             // The item's own top-level name renders the exported scheme, not the initializer's
-            // type: `#: @new` brands the scheme even when the initializer is `Unknown`.
+            // type: `#: @new` brands the scheme even when the initializer is `Unknown`. Only the
+            // name the item assigns does: in `m$amount <- 5` the scheme is the value's.
             let naming = item_naming(db, position.item).as_ref();
-            let exported = naming.and_then(|naming| {
+            let defines_item = hir.root.is_some_and(|root| {
+                matches!(hir.kind(root), ExpressionKind::Assign { target, .. } if *target == expression)
+            });
+            let exported = naming.filter(|_| defines_item).and_then(|naming| {
                 let binding = naming.resolutions.get(&expression)?;
                 (naming.bindings.get(binding)?.kind == BindingKind::TopLevel).then_some(())?;
                 check.scheme.clone()
@@ -337,7 +342,7 @@ fn typed_hover(
             let referenced = || {
                 naming.filter(|naming| naming.non_locals.contains_key(&expression))?;
                 contains_inference_var(db, ty).then_some(())?;
-                referenced_scheme(db, files, name, check, expression)
+                referenced_scheme(db, files, name, (position.item, check), expression)
             };
             // Render the whole scheme so the `<T>` prefix explains `T`, matching the inlay hint.
             let mut scheme = exported
@@ -815,6 +820,24 @@ fn declaring_item<'db>(db: &'db dyn Db, files: ProjectFiles, name: &str) -> Opti
         .or_else(|| project_declarations(db, files).get(name).copied())
 }
 
+/// The item whose top-level write of `name` the read `reference` in `item` reaches, as the checker
+/// resolves it: the nearest earlier writer in the file for a read at top level, and for a read
+/// inside a function the file's last writer in a script or the package's definition.
+fn reaching_item<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    item: Item<'db>,
+    reference: ExprId,
+    name: &str,
+) -> Option<Item<'db>> {
+    let deferred = inside_function(item_hir(db, item).as_ref()?, reference);
+    let package_wide = deferred && *item.file(db).kind(db) == DocumentKind::Package;
+    (!package_wide)
+        .then(|| reaching_writer(db, item, name, deferred))
+        .flatten()
+        .or_else(|| declaring_item(db, files, name))
+}
+
 /// The first function or value item of each name across every project file, scripts and tests
 /// included. Field resolution asks for every library call head it follows, and a miss would
 /// otherwise scan every file's items.
@@ -836,11 +859,11 @@ fn referenced_scheme<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
     name: &str,
-    check: &ItemCheck<'db>,
+    (item, check): (Item<'db>, &ItemCheck<'db>),
     reference: ExprId,
 ) -> Option<TypeScheme<'db>> {
-    if let Some(item) = declaring_item(db, files, name) {
-        return Some(global_scheme(db, item));
+    if let Some(writer) = reaching_item(db, files, item, reference, name) {
+        return Some(global_scheme(db, writer));
     }
     if hidden_by_prelude(db, name) {
         return None;
@@ -1842,7 +1865,7 @@ pub fn signature_help_with(
         && naming.is_some_and(|naming| naming.non_locals.contains_key(&callee))
         && contains_inference_var(db, function)
         && let Some(files) = ProjectFiles::try_get(db)
-        && let Some(scheme) = referenced_scheme(db, files, &name, check, callee)
+        && let Some(scheme) = referenced_scheme(db, files, &name, (position.item, check), callee)
     {
         scheme
     } else {
@@ -1951,7 +1974,7 @@ fn untyped_formals(
         // A function in code the checker leaves untyped, such as R6's helpers that
         // `encapsulate({...})` evaluates elsewhere, still has the formals it was written with.
         target @ (Target::Global(_) | Target::Slot { .. }) => {
-            let (declaring, function) = bound_function(db, files, &target)?;
+            let (declaring, function) = bound_function(db, files, &target, (item, callee))?;
             literal_formals(db, declaring, function)
         }
         _ => None,
@@ -2314,14 +2337,17 @@ pub fn completion_with(
         return annotation_completion(db, files, file, &query);
     }
     // R value names never resolve inside string content; only record-field subscripts complete
-    // there.
+    // there. A string still being typed (`x[["al`) ends at its line break, so the cursor at its
+    // end is inside it.
     if let Some(string_token) = root
         .descendants_with_tokens()
         .filter_map(SyntaxElement::into_token)
         .find(|token| {
+            let range = token.text_range();
             token.kind() == STRING
-                && token.text_range().start() < offset
-                && offset < token.text_range().end()
+                && range.start() < offset
+                && (offset < range.end()
+                    || offset == range.end() && !is_closed_string(token.text()))
         })
     {
         return string_subscript_completion(db, file, offset, &string_token);
@@ -4900,6 +4926,23 @@ fn type_name_occurrences(db: &dyn Db, files: ProjectFiles, name: &str) -> Vec<Oc
     result
 }
 
+/// Whether a string token ends with the quote it opened with, unescaped. A raw string's body
+/// takes no escapes, and its lexer stops it only at its closer.
+fn is_closed_string(text: &str) -> bool {
+    if let Some(raw) = text.strip_prefix(['r', 'R']) {
+        return raw.len() > 2 && raw.ends_with(['"', '\'']);
+    }
+    let mut characters = text.chars();
+    let (Some(open), Some(close)) = (characters.next(), characters.next_back()) else {
+        return false;
+    };
+    let escapes = characters
+        .rev()
+        .take_while(|&character| character == '\\')
+        .count();
+    open == close && escapes % 2 == 0
+}
+
 fn string_subscript_completion(
     db: &dyn Db,
     file: SourceFile,
@@ -5319,8 +5362,14 @@ fn spelled_names(db: &dyn Db, file: SourceFile) -> SpelledNames {
         {
             spelled.tags.push(name.text().to_string());
         }
-        // The lhs is an expression node, so the last bare NAME child is the spelled name.
-        let Some(name) = node.children().filter(|child| child.kind() == NAME).last() else {
+        // The spelled name is the NAME after the operator; the receiver can be a NAME too, and is
+        // the only one while the name after `$` is still unwritten.
+        let Some(name) = node
+            .children_with_tokens()
+            .skip_while(|element| !matches!(element.kind(), DOLLAR | AT | COLON2 | COLON3))
+            .filter_map(SyntaxElement::into_node)
+            .find(|child| child.kind() == NAME)
+        else {
             continue;
         };
         let name = name.text().to_string();
@@ -7560,7 +7609,7 @@ fn parameter_target<'db>(
     };
     match callee {
         Target::Global(_) | Target::Slot { .. } => {
-            let (item, function) = bound_function(db, files, &callee)?;
+            let (item, function) = bound_function(db, files, &callee, (item, argument.callee))?;
             function_parameter(db, item, function, argument.name)
         }
         library @ (Target::StubGlobal(_) | Target::Package(_)) => Some(library),
@@ -7619,19 +7668,24 @@ fn function_parameter<'db>(
     })
 }
 
-/// The function literal a call through `target` runs, with the item that holds it: the one last
-/// assigned to a local binding, or to a global. A function a top-level block assigns, as in
-/// `local({ helper <- function(...) })`, is no item of its own, so its item is found from the
-/// declaration, as definition finds it.
+/// The function literal a call at `call` (an item and its callee) runs through `target`, with the
+/// item that holds it. A global is the writer the call reaches: the nearest earlier one in the file
+/// for a call at top level, and for a call inside a function the file's last one in a script or the
+/// package's definition. Within the item that holds the call, the write is the last one before it,
+/// or the last one at all when none precedes it (a closure defined above the write). A function a
+/// top-level block assigns, as in `local({ helper <- function(...) })`, is no item of its own, so
+/// its item is found from the declaration, as definition finds it.
 fn bound_function<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
     target: &Target<'db>,
+    call: (Item<'db>, ExprId),
 ) -> Option<(Item<'db>, ExprId)> {
+    let (calling, callee) = call;
     let (item, binding) = match target {
         Target::Slot { item, binding } => (*item, *binding),
         Target::Global(name) => {
-            let item = declaring_item(db, files, name).or_else(|| {
+            let item = reaching_item(db, files, calling, callee, name).or_else(|| {
                 let declaration = occurrences(db, files, target)
                     .into_iter()
                     .find(|occurrence| occurrence.is_declaration)?;
@@ -7649,19 +7703,42 @@ fn bound_function<'db>(
     };
     let hir = item_hir(db, item).as_ref()?;
     let naming = item_naming(db, item).as_ref()?;
-    let function = hir
-        .expressions()
-        .filter_map(|expression| match expression.kind {
-            ExpressionKind::Assign { target, value, .. }
-                if naming.resolutions.get(target) == Some(&binding)
-                    && matches!(hir.kind(*value), ExpressionKind::Function { .. }) =>
-            {
-                Some(*value)
-            }
-            _ => None,
-        })
-        .last()?;
-    Some((item, function))
+    // A call inside a closure runs later, so it reaches the last definition the closure may
+    // still see, not the one written before it.
+    let call_start = (item == calling).then(|| {
+        naming
+            .extras()
+            .captured_reads
+            .get(&callee)
+            .copied()
+            .unwrap_or_else(|| hir.range(callee).start())
+    });
+    let (mut before_call, mut last) = (None, None);
+    for expression in hir.expressions() {
+        let ExpressionKind::Assign { target, value, .. } = expression.kind else {
+            continue;
+        };
+        if naming.resolutions.get(target) != Some(&binding)
+            || !matches!(hir.kind(*value), ExpressionKind::Function { .. })
+        {
+            continue;
+        }
+        if call_start.is_some_and(|start| hir.range(*value).end() <= start) {
+            before_call = Some(*value);
+        }
+        last = Some(*value);
+    }
+    Some((item, before_call.or(last)?))
+}
+
+/// Whether `expression` sits inside a function literal of its item, so a read there runs when the
+/// function is called rather than where it is written.
+fn inside_function(hir: &Module, expression: ExprId) -> bool {
+    let range = hir.range(expression);
+    hir.expressions().enumerate().any(|(index, candidate)| {
+        matches!(candidate.kind, ExpressionKind::Function { .. })
+            && hir.range(ExprId::new(index)).contains_range(range)
+    })
 }
 
 /// The named arguments that fill a parameter at the calls of its function, so a rename of the

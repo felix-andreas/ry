@@ -3593,6 +3593,17 @@ fn file_binders<'db>(db: &'db dyn Db, file: SourceFile) -> ThinVec<(Symbol, u32,
     ThinVec::from(binders)
 }
 
+/// The item whose top-level write of `name` a read in `item` sees, as [`frame_binder`] decides
+/// it, for editor features that follow a read to the value it finds.
+pub fn reaching_writer<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+    name: &str,
+    deferred: bool,
+) -> Option<Item<'db>> {
+    frame_binder(db, item, types::Name::new(db, name), deferred)
+}
+
 /// An immediate read sees the nearest earlier writer in the file (R sources top-down).
 /// A deferred read (inside a closure) sees the file's last writer in a script; in a
 /// package it sees the project-wide winner instead, so callers skip this query. In a test

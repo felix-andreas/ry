@@ -1363,6 +1363,20 @@ shifted <- function(n: I64) -> I64 {
 shifted: fn(n: I64) -> I64
 0..7 warning[unused] `shifted` is assigned but never used.
 
+#---- local_function_that_reads_a_name_rewritten_later
+#~~~~ script.R
+shifted <- function(n: I64) -> I64 {
+  step <- 1
+  add <- function(a: I64) -> I64 a + step
+  step <- 2
+  add(n)
+}
+#++++
+== script.R
+shifted: fn(n: I64) -> I64
+0..7 warning[unused] `shifted` is assigned but never used.
+93..102 warning[interpreted] this function runs in the interpreter, because `step` holds values of different types, which is not compiled natively yet: a native variable keeps one type. Use a new name for the second value
+
 #---- operator_on_an_aliased_table_expression
 #~~~~ script.R
 alias Rule = Expr

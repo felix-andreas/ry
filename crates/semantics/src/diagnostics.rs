@@ -32,7 +32,8 @@ use {
         types::{
             Atomic, Binder, Bound, Constraint, FrameKind, FunctionType, InferenceVar, Name,
             NativeField, QueryName, RecordField, Ty, TyKind, TypeScheme, array_element,
-            for_each_child_type, map_child_types, substitute_rigid, union_of,
+            contains_inference_var, for_each_child_type, map_child_types, substitute_rigid,
+            union_of,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -592,8 +593,10 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 ),
             ));
         }
-        // R errors on a read with no prior write. Local slots only: a top-level
-        // variable's unwritten path falls through to the enclosing environment.
+        // R errors on a read with no prior write. A top-level variable's unwritten path falls
+        // through to the enclosing environment, and so does a function's when a binding of the
+        // name exists outside it (an enclosing function's slot never reaches this list).
+        let context = OnceCell::new();
         for expression in &naming.maybe_undefined {
             let Some(binding) = naming
                 .resolutions
@@ -603,6 +606,18 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 continue;
             };
             if binding.kind == BindingKind::TopLevel {
+                continue;
+            }
+            let fallback = classify_name_read(
+                db,
+                context.get_or_init(|| read_context(db, file)),
+                item_index,
+                naming,
+                binding.name,
+                true,
+                false,
+            );
+            if !matches!(fallback, NonLocalRead::Unresolved { .. }) {
                 continue;
             }
             let range = module.range(*expression) + offset;
@@ -659,16 +674,21 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 .as_ref()
                 .map(|nearest| format!(" Did you mean `{nearest}`?"))
                 .unwrap_or_default();
-            diagnostics.push(with_name_fix(
-                Diagnostic::new(range, Severity::Warning, "unresolved", format!(
+            let message = match display.split_once('.') {
+                Some((module, member)) if STANDARD_MODULES.contains(&module) => {
+                    format!("ry's standard library has no function `{member}` in `{module}`.{hint}")
+                }
+                _ => format!(
                     "I could not resolve `{display}` in this package, its imports, or builtins.{hint}"
-                )),
+                ),
+            };
+            diagnostics.push(with_name_fix(
+                Diagnostic::new(range, Severity::Warning, "unresolved", message),
                 suggestion.as_deref(),
             ));
         }
         // A name inside a frame query is a column first, and R falls back to the enclosing
         // scope only for a non-column, so a miss is reported only when nothing defines it.
-        let context = OnceCell::new();
         for (expression, miss) in check.column_misses.iter() {
             let Some(name) = naming
                 .non_locals
@@ -829,29 +849,40 @@ fn classify_non_local_read(
     expression: &ExprId,
     symbol: Symbol,
 ) -> NonLocalRead {
-    let name = symbol.as_str();
     if check.masked_reads.contains(expression) {
         return NonLocalRead::Resolvable;
     }
+    let deferred = naming.deferred_non_locals.contains(expression)
+        || naming.extras().deferred_quiet_reads.contains(expression);
+    let native = naming.extras().native_routine_reads.contains(expression);
+    classify_name_read(db, context, item_index, naming, symbol, deferred, native)
+}
+
+/// How a read of `symbol` that no slot of the item serves resolves: `deferred` when it runs
+/// after the file's frame settled (inside a function), `native` when it names a routine.
+fn classify_name_read(
+    db: &dyn Db,
+    context: &ReadContext<'_>,
+    item_index: usize,
+    naming: &ItemNaming,
+    symbol: Symbol,
+    deferred: bool,
+    native: bool,
+) -> NonLocalRead {
+    let name = symbol.as_str();
     let file = context.file;
     if let Some(&earliest) = context.positions.get(&symbol)
-        && (earliest < item_index
-            || naming.deferred_non_locals.contains(expression)
-            || naming.extras().deferred_quiet_reads.contains(expression))
+        && (earliest < item_index || deferred)
     {
         return NonLocalRead::Resolvable;
     }
     if R6_INJECTED_BINDINGS.contains(&name) && *file_defines_r6_class(db, file) {
         return NonLocalRead::Resolvable;
     }
-    if DISPATCH_VARIABLES.contains(&name) && naming.deferred_non_locals.contains(expression) {
+    if DISPATCH_VARIABLES.contains(&name) && deferred {
         return NonLocalRead::Resolvable;
     }
-    if native_symbol(
-        db,
-        name,
-        naming.extras().native_routine_reads.contains(expression),
-    ) {
+    if native_symbol(db, name, native) {
         return NonLocalRead::Resolvable;
     }
     let files = context.files;
@@ -865,13 +896,7 @@ fn classify_non_local_read(
         || test_files.is_some_and(|_| crate::name_layer(db, symbol, true).binds())
         || context.super_globals.contains(&symbol)
         || crate::sourced_definition(db, file, symbol).is_some()
-        || crate::session::resolves(
-            db,
-            file,
-            symbol,
-            naming.deferred_non_locals.contains(expression)
-                || naming.extras().deferred_quiet_reads.contains(expression),
-        )
+        || crate::session::resolves(db, file, symbol, deferred)
         || files.is_some_and(|files| project_global_variable_declarations(db, files).contains(name))
         || imported_by_name(db, name)
     {
@@ -1718,6 +1743,23 @@ fn canonical_type<'db>(
     })
 }
 
+/// Whether an annotation names a type the vocabulary lacks or writes `X[]` over an element that
+/// is not atomic. Both are reported here, so the checker drops such an annotation's payload
+/// rather than check code against a type the author did not mean.
+pub(crate) fn annotation_misuses_vocabulary<'db>(
+    db: &'db dyn Db,
+    annotation: &Annotation<'db>,
+    definitions: TypeDefinitions<'db>,
+    stub_nominals: &SymbolSet,
+) -> bool {
+    annotation.nominal_references.iter().any(|(name, _)| {
+        !stub_nominals.contains(name.as_str()) && definitions.get(db, Name::new(db, name)).is_none()
+    }) || annotation
+        .vector_elements
+        .iter()
+        .any(|(element, _)| !vector_element_atomic(db, *element, definitions, stub_nominals))
+}
+
 /// Rigid binders count (their use adds the atomic bound); nominals never do, and
 /// undeclared names stay silent because the unknown-type error reports them.
 fn vector_element_atomic<'db>(
@@ -2388,8 +2430,9 @@ fn project_typo_suggestion<'db>(
 #[salsa::tracked(returns(clone))]
 fn typo_suggestion<'db>(db: &'db dyn Db, name: QueryName<'db>) -> Option<String> {
     let library = stubs(db)?;
+    let text = name.name(db).text(db);
     nearest_name(
-        name.name(db).text(db),
+        text,
         library
             .schemes
             .keys()
@@ -2397,6 +2440,27 @@ fn typo_suggestion<'db>(db: &'db dyn Db, name: QueryName<'db>) -> Option<String>
             .filter(|candidate| !outside_prelude(db, library, candidate))
             .map(Symbol::as_str),
     )
+    .or_else(|| size_function(text))
+}
+
+/// The modules of ry's standard library, whose functions are spelled `Module.function`.
+pub(crate) const STANDARD_MODULES: [&str; 6] = ["List", "Str", "Num", "Result", "Dict", "Set"];
+
+/// R spells a size `length` or `nchar`, which no small edit turns into the standard library's
+/// `List.len` or `Str.count_utf8_bytes`.
+fn size_function(name: &str) -> Option<String> {
+    let (module, member) = name.split_once('.')?;
+    const SIZE_WORDS: [&str; 4] = ["length", "nchar", "size", "len"];
+    let size_like =
+        SIZE_WORDS.contains(&member) || nearest_name(member, SIZE_WORDS.into_iter()).is_some();
+    if !size_like {
+        return None;
+    }
+    match module {
+        "Str" => Some("Str.count_utf8_bytes".to_owned()),
+        "List" | "Dict" | "Set" => Some(format!("{module}.len")),
+        _ => None,
+    }
 }
 
 /// A misspelled parameter, field, or column is spelled somewhere inside the error's range, which
@@ -2487,9 +2551,9 @@ pub(crate) fn nearest_name<'a>(
     // A standard-library name such as `Str.split` is usually the start of a longer one
     // (`Str.split_on`), which is farther away by edit distance than an unrelated base function.
     let candidates: Vec<&str> = candidates.collect();
-    if ["List.", "Str.", "Num.", "Result.", "Dict.", "Set."]
-        .iter()
-        .any(|module| name.starts_with(module))
+    if name
+        .split_once('.')
+        .is_some_and(|(module, _)| STANDARD_MODULES.contains(&module))
     {
         let completion = candidates
             .iter()
@@ -2646,9 +2710,12 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 });
             }
         }
-        for binding in naming.bindings.values() {
+        let column_updates = &naming.extras().column_updates;
+        for (slot, binding) in naming.bindings.iter() {
+            // `f[, y := v]` updates the table in place, which is never a dead store.
             if binding.kind != BindingKind::TopLevel
                 || item_name.as_deref() == Some(binding.name.as_str())
+                || column_updates.values().any(|updated| updated == slot)
             {
                 continue;
             }
@@ -2679,7 +2746,8 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         for name in &naming.extras().quiet_operator_reads {
             reads.push((index, *name, true));
         }
-        // A loop's first iteration reads the earlier binding of its carried variable.
+        // A loop's first iteration reads the earlier binding of its carried variable, and a
+        // function's path that leaves a local unassigned reads the top-level one when it runs.
         for expression in &naming.maybe_undefined {
             let Some(slot) = naming.resolutions.get(expression) else {
                 continue;
@@ -2687,9 +2755,7 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let Some(binding) = naming.bindings.get(slot) else {
                 continue;
             };
-            if binding.kind == BindingKind::TopLevel {
-                reads.push((index, binding.name, false));
-            }
+            reads.push((index, binding.name, binding.kind != BindingKind::TopLevel));
         }
     }
     for (read_index, name, deferred) in &reads {
@@ -2742,14 +2808,18 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     if !crate::file_is_strict(db, file) {
         return diagnostics;
     }
+    // An item a syntax error touches reports nothing here, as in the ordinary check: its
+    // statement boundaries are a guess, so its types are too.
+    let broken_ranges = file_error_ranges(db, file);
+    let is_broken = |range: TextRange| {
+        broken_ranges
+            .iter()
+            .any(|error| error.start() <= range.end() && range.start() <= error.end())
+    };
     // Reads silenced by an unknowable export set are undetermined, which is what
     // strict mode reports.
-    let broken_ranges = file_error_ranges(db, file);
     for (item_index, span) in item_spans(db, file).iter().enumerate() {
-        if broken_ranges
-            .iter()
-            .any(|error| error.start() <= span.range.end() && span.range.start() <= error.end())
-        {
+        if is_broken(span.range) {
             continue;
         }
         let item = span.item;
@@ -2768,6 +2838,9 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
     }
     for span in item_spans(db, file) {
+        if is_broken(span.range) {
+            continue;
+        }
         let item = span.item;
         let offset = span.range.start();
         let Some(check) = item_check(db, item) else {
@@ -3002,6 +3075,47 @@ fn plural<'a>(count: usize, one: &'a str, many: &'a str) -> &'a str {
 fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
     let mut renderer = TypeRenderer::default();
     match &error.kind {
+        TypeErrorKind::Mismatch { expected, found }
+            if let TyKind::Function(function) = expected.kind(db)
+                && contains_inference_var(db, *expected)
+                && !matches!(
+                    found.kind(db),
+                    TyKind::Function(_) | TyKind::Union(_) | TyKind::Var(_)
+                ) =>
+        {
+            // A value that is no function where a callback goes: the callback's undecided types
+            // would print as type variables the reader never wrote, so name only what is known.
+            // A required parameter takes an argument whether it is positional or named.
+            let required: Vec<Ty<'_>> = function
+                .positional
+                .iter()
+                .copied()
+                .chain(
+                    function
+                        .named
+                        .iter()
+                        .filter(|parameter| !parameter.optional)
+                        .map(|parameter| parameter.ty),
+                )
+                .collect();
+            let known_parameters = function.variadic.is_none()
+                && !required.is_empty()
+                && required
+                    .iter()
+                    .all(|&parameter| !contains_inference_var(db, parameter));
+            let found = renderer.render(db, *found);
+            if !known_parameters {
+                return format!("expected a function, found `{found}`");
+            }
+            let parameters: Vec<String> = required
+                .iter()
+                .map(|&parameter| format!("`{}`", renderer.render(db, parameter)))
+                .collect();
+            format!(
+                "expected a function that takes {}, found `{found}`",
+                parameters.join(" and ")
+            )
+        }
         TypeErrorKind::Mismatch { expected, found } => {
             let mut message = format!(
                 "expected `{}`, found `{}`",
@@ -3045,6 +3159,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         ),
         TypeErrorKind::MissingFormalRead { name } => format!(
             "reading `{name}` here would fail at run time: this branch runs only when `{name}` is missing, and it has no default."
+        ),
+        TypeErrorKind::TemplateDisagreesWithCallback {
+            callback,
+            returns,
+            template,
+        } => format!(
+            "{callback} returns `{}`, but this `FUN.VALUE` asks for `{}`",
+            renderer.render(db, *returns),
+            renderer.render(db, *template)
         ),
         TypeErrorKind::NotAFunction { found } => {
             format!(
@@ -3749,7 +3872,7 @@ fn missing_arms_fix(
 /// across every type in a message: a fresh one restarts the numbering.
 #[derive(Default)]
 pub struct TypeRenderer<'db> {
-    names: Vec<RenderedVar<'db>>,
+    names: Vec<(RenderedVar<'db>, String)>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -3759,6 +3882,15 @@ enum RenderedVar<'db> {
 }
 
 impl<'db> TypeRenderer<'db> {
+    /// `[]` binds tighter than `|` and `->`, so a union or function element is parenthesized.
+    fn render_postfix_operand(&mut self, db: &'db dyn Db, element: Ty<'db>) -> String {
+        let rendered = self.render(db, element);
+        match element.kind(db) {
+            TyKind::Union(_) | TyKind::Function(_) => format!("({rendered})"),
+            _ => rendered,
+        }
+    }
+
     pub fn render(&mut self, db: &'db dyn Db, ty: Ty<'db>) -> String {
         match ty.kind(db) {
             TyKind::Any => "Any".to_owned(),
@@ -3766,8 +3898,10 @@ impl<'db> TypeRenderer<'db> {
             TyKind::Null => "NULL".to_owned(),
             TyKind::Scalar(atomic) => atomic_name(*atomic).to_owned(),
             TyKind::Native(native) => native.name().to_owned(),
-            TyKind::Vector(element) => format!("{}[]", self.render(db, *element)),
-            TyKind::NamedVector(element) => format!("{}[named]", self.render(db, *element)),
+            TyKind::Vector(element) => format!("{}[]", self.render_postfix_operand(db, *element)),
+            TyKind::NamedVector(element) => {
+                format!("{}[named]", self.render_postfix_operand(db, *element))
+            }
             TyKind::List(element) => format!("list[{}]", self.render(db, *element)),
             TyKind::NamedList(element) => format!("list[named: {}]", self.render(db, *element)),
             TyKind::Tuple(items) => format!("list{{{}}}", self.render_items(db, items)),
@@ -3827,8 +3961,8 @@ impl<'db> TypeRenderer<'db> {
                     format!("{}<{}>", name.text(db), arguments.join(", "))
                 }
             }
-            TyKind::Var(var) => self.variable_name(RenderedVar::Inference(*var)),
-            TyKind::Rigid(name) => self.variable_name(RenderedVar::Rigid(*name)),
+            TyKind::Var(var) => self.variable_name(db, RenderedVar::Inference(*var)),
+            TyKind::Rigid(name) => self.variable_name(db, RenderedVar::Rigid(*name)),
         }
     }
 
@@ -3852,7 +3986,7 @@ impl<'db> TypeRenderer<'db> {
         let binders: Vec<String> = binders
             .iter()
             .map(|binder| {
-                let rendered = self.variable_name(RenderedVar::Rigid(binder.name));
+                let rendered = self.variable_name(db, RenderedVar::Rigid(binder.name));
                 match binder.bound {
                     Bound::Type(bound) => format!("{rendered}: {}", self.render(db, bound)),
                     Bound::Constraint(constraint) => match constraint.spelling() {
@@ -3932,21 +4066,39 @@ impl<'db> TypeRenderer<'db> {
         format!("fn({}) -> {}", parameters.join(", "), ret)
     }
 
-    fn variable_name(&mut self, var: RenderedVar<'db>) -> String {
-        let index = match self.names.iter().position(|existing| *existing == var) {
-            Some(index) => index,
-            None => {
-                self.names.push(var);
-                self.names.len() - 1
-            }
-        };
-        let letter = (b'T' + (index as u8 % 7)) as char;
-        let suffix = index / 7;
-        if suffix == 0 {
-            letter.to_string()
-        } else {
-            format!("{letter}{suffix}")
+    /// A declared type parameter keeps the name its signature gives it, so `<N: numeric>` reads
+    /// as `N` in a message; other variables take the next free letter.
+    fn variable_name(&mut self, db: &'db dyn Db, var: RenderedVar<'db>) -> String {
+        if let Some((_, name)) = self.names.iter().find(|(existing, _)| *existing == var) {
+            return name.clone();
         }
+        let declared = match var {
+            RenderedVar::Rigid(name) => Some(name.text(db))
+                .filter(|text| text.starts_with(|first: char| first.is_ascii_alphabetic())),
+            RenderedVar::Inference(_) => None,
+        };
+        let taken = |names: &[(RenderedVar<'db>, String)], candidate: &str| {
+            names.iter().any(|(_, name)| name == candidate)
+        };
+        let name = match declared {
+            Some(text) if !taken(&self.names, text) => text.to_owned(),
+            Some(text) => (1..)
+                .map(|suffix| format!("{text}{suffix}"))
+                .find(|candidate| !taken(&self.names, candidate))
+                .unwrap_or_default(),
+            None => (0..)
+                .map(|index| {
+                    let letter = (b'T' + (index % 7) as u8) as char;
+                    match index / 7 {
+                        0 => letter.to_string(),
+                        suffix => format!("{letter}{suffix}"),
+                    }
+                })
+                .find(|candidate| !taken(&self.names, candidate))
+                .unwrap_or_default(),
+        };
+        self.names.push((var, name.clone()));
+        name
     }
 }
 
@@ -4002,8 +4154,8 @@ mod tests {
         let mut renderer = TypeRenderer::default();
         let t = Ty::new(&db, TyKind::Rigid(Name::new(&db, "A")));
         let u = Ty::new(&db, TyKind::Rigid(Name::new(&db, "B")));
-        assert_eq!(renderer.render(&db, t), "T");
-        assert_eq!(renderer.render(&db, u), "U");
-        assert_eq!(renderer.render(&db, t), "T");
+        assert_eq!(renderer.render(&db, t), "A");
+        assert_eq!(renderer.render(&db, u), "B");
+        assert_eq!(renderer.render(&db, t), "A");
     }
 }

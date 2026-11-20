@@ -86,6 +86,24 @@ action: Add inferred type annotations for the whole file
 completion (128+): value, result, break, else, FALSE, for, function, if
 hint @5: integer
 
+#---- a_named_argument_goes_to_the_file_definition_the_call_reaches
+#~~~~ a.R
+f <- function(width) width
+#~~~~ b.R
+f <- function(height, width) height
+f(wid$0th = 1)
+#++++
+hover 38..43: [width]: U
+definition b.R:22..27
+references: b.R:22..27*, b.R:38..43
+rename: 2 edit(s)
+signature: <T, U> fn(height: T, [width]: U) -> T
+parameters: height: T | [[width]: U]
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T, U> fn(height: T, [width]: U) -> T\n"
+completion (26): width, strwidth, bandwidth.kernel, glyphWidth, glyphWidthLeft, DataFrame.width, warningCondition, weighted.mean
+hint @1: <T, U> fn(height: T, [width]: U) -> T
+
 #==== definition_workspace
 #---- updates_after_edit_before_edit
 #~~~~ R/def.R

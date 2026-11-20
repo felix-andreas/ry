@@ -142,7 +142,7 @@ f: Future
 #: Instument
 x <- 1L
 #++++
-x: Instument
+x: integer
 3..12 error[annotation] I do not know the type `Instument`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 
 #---- forward_reference_resolves_and_needs_new
@@ -157,7 +157,7 @@ origin: Point
 #: Pair<integer>
 x <- 1L
 #++++
-x: Pair<integer>
+x: integer
 3..7 error[annotation] I do not know the type `Pair`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 
 #---- stub_class_resolves

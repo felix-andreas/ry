@@ -821,6 +821,17 @@ impl<'db> InferenceTable<'db> {
         }
     }
 
+    /// Whether a type parameter of the signature being checked meets a constraint, through its
+    /// declared constraint or its type bound.
+    pub fn rigid_satisfies(
+        &self,
+        db: &'db dyn Db,
+        name: Name<'db>,
+        constraint: Constraint,
+    ) -> bool {
+        constraint_rejects(db, self, constraint, Ty::new(db, TyKind::Rigid(name))).is_none()
+    }
+
     pub fn open_constraint(&self, db: &'db dyn Db, ty: Ty<'db>) -> Option<Constraint> {
         let resolved = self.resolve(db, ty);
         let TyKind::Var(var) = resolved.kind(db) else {
@@ -2017,7 +2028,7 @@ fn nullable_single_member<'db>(db: &'db dyn Db, members: &[Ty<'db>]) -> Option<T
 /// Beyond atoms: a class declaring an arithmetic operator method is numeric
 /// (`a + b` is legal R for it), and a rigid binder is admitted when its declared
 /// bound is at least as strong (self-recursive calls unify it with a fresh variable).
-fn constraint_rejects<'db>(
+pub(crate) fn constraint_rejects<'db>(
     db: &'db dyn Db,
     table: &InferenceTable<'db>,
     constraint: Constraint,
@@ -2027,12 +2038,17 @@ fn constraint_rejects<'db>(
     let declares_arithmetic = |name: &Name<'db>| {
         arithmetic_classes.is_some_and(|classes| classes.contains(name.symbol()))
     };
-    // The declared bound implies the required one when joining does not strengthen it.
+    // The declared bound implies the required one when joining does not strengthen it, and a
+    // type bound does when every type it admits does (`<N: integer | double>` is numeric).
     let binder_implies = |name: &Name<'db>| {
         table
             .rigid_constraints
             .get(name)
             .is_some_and(|declared| declared.join(constraint) == Some(*declared))
+            || table
+                .rigid_bounds
+                .get(name)
+                .is_some_and(|&bound| constraint_rejects(db, table, constraint, bound).is_none())
     };
     // A union satisfies a bound when every member does: `double | integer` is a number either way.
     if let TyKind::Union(members) = ty.kind(db) {

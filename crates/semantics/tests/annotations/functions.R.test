@@ -148,7 +148,6 @@ fn(count: integer, [label]: character) -> integer
 #---- compact_optional_parameter_without_name_is_rejected
 fn(integer, [character]) -> integer
 #++++
-fn(integer, [character]: Unknown) -> integer
 syntax error: expected `:` after `[name]` in an optional parameter
 
 #---- compact_optional_parameter_missing_colon_is_rejected
@@ -175,7 +174,7 @@ foo.bar
 #---- dotted_binder_is_one_name
 <T.x> fn(T) -> T
 #++++
-<T> fn(T) -> T
+<T.x> fn(T) -> T
 
 #==== variadic
 #---- bare_rest_parameter

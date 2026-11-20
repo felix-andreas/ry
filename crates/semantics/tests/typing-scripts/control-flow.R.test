@@ -542,6 +542,7 @@ integer | character
 x <- 1L
 repeat {
   x <- x / 2
+  if (x < 0.1) break
 }
 x
 #++++

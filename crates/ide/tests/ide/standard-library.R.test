@@ -83,7 +83,7 @@ completion (1): Result
 #: fn(r: Res$0ult<integer, character>) -> integer
 unwrap <- function(r) Result.with_default(r, 0L)
 #++++
-hover 9..15: @alias Result<T, U> {:Ok(T) | :Err(U)}
+hover 9..15: @alias Result<T, E> {:Ok(T) | :Err(E)}
 hover-definition: package std (0 declaration(s), declared in stub source std at `Result`)
 definition: stub source std at `Result`
 references: 9..15

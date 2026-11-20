@@ -212,7 +212,7 @@ value: list[integer]
 #: @if-unknown user_id
 value <- some_unknown
 #++++
-value: user_id
+value: Unknown
 15..22 error[annotation] I do not know the type `user_id`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 32..44 warning[unresolved] I could not resolve `some_unknown` in this package, its imports, or builtins.
 

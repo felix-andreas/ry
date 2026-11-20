@@ -52,7 +52,7 @@ value: list{value: integer}
 #: user_id
 value <- 1L
 #++++
-value: user_id
+value: integer
 3..10 error[annotation] I do not know the type `user_id`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 
 #==== expanded_typing_comments
@@ -80,7 +80,7 @@ render: fn(count: list{length: integer}) -> list{length: integer}
 #: @param count {user_id}
 render <- function(count) count
 #++++
-render: fn(count: user_id) -> user_id
+render: <T> fn(count: T) -> T
 17..24 error[annotation] I do not know the type `user_id`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 
 #==== mixed_typing_comments
