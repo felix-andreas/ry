@@ -3489,6 +3489,9 @@ read so far is a true bug (kernlab calls `ramloss` after `ramloss <- 0`, renv re
   `mclust1Dplot`; `graphics.R` alone accepts it, so another file constrains `W`.
 - mgcv `bam.r:2623` (2), `efam.r:1475` and `gamlss.r:1193`: a local value unioned with a
   same-named package function (`double[] | fn(...)`), and `integer | T` at a scalar numeric use.
+- A read inside `on.exit()` counts where `on.exit()` is registered, not where the exit action runs,
+  so `on.exit(run()); x <- 1` with `run <- function() x` reports "leaves out `x`" though the write
+  comes first at run time. Direct reads inside `on.exit()` behave the same.
 
 ## Check cache follow-ups
 

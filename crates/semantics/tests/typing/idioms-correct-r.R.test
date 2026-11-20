@@ -2646,10 +2646,14 @@ make <- function(flag) {
   actions
 }
 both <- c(list(), list())
+maybe <- function(a) c(if (a) list())
+mixed <- function(a) c(if (a) list(), list(1L))
 step <- function(a) {
   for (x in if (a) c(1, 2)) print(x + 1)
 }
 #++++
 make: fn(flag: logical) -> list{} | list[fn() -> double]
 both: list{}
+maybe: fn(a: logical) -> list{}
+mixed: fn(a: logical) -> list[integer]
 step: fn(a: logical) -> NULL

@@ -3445,8 +3445,11 @@ scoping.
 - An unknown namespace warns, and so does a known namespace that neither declares nor lists the name
   ("not exported"). An unknown namespace stays quiet when it belongs to the package's
   [declared universe](#package-imports-namespace-and-description).
-- A read inside the expression of `try()` or `tryCatch()` is a feature probe, so a missing name is
-  not reported there: `try(parallel::splitList, silent = TRUE)` asks whether the running R has it.
+- A read that is the whole expression of `try()`, or of a `tryCatch()` with an `error` or
+  `condition` handler, is a feature probe, so a missing name is not reported there:
+  `try(parallel::splitList, silent = TRUE)` asks whether the running R has it, and so does a call
+  of the read, `try(pkg::f(x))`. A read anywhere else in the expression is ordinary code and is
+  checked.
 - R's own manifests list the Windows-only exports of `base`, `utils` and `grDevices` on every
   platform, so `utils::readRegistry` and `grDevices::win.metafile` validate on Linux and macOS,
   where code reaches them behind a platform test.

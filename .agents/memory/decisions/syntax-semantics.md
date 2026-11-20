@@ -1950,7 +1950,7 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 
 **Status:** built
 
-- A `pkg::name` read inside the expression of `try()` or `tryCatch()` is a probe of the running R (`NamespaceRead::probed`), so a missing name is not reported there. Only that argument counts; a handler or `finally` reading a missing name still warns.
+- A `pkg::name` read that is the whole expression of `try()` or of a `tryCatch()` with an `error` or `condition` handler, or that expression's callee, is a probe of the running R (`NamespaceRead::probed`), so a missing name is not reported there. Any other read in the expression stays checked, because code that wraps a whole body in `tryCatch()` (the tryCatchLog style) would otherwise lose export checking.
 - `scripts/export-manifests.R` adds the Windows-only exports of base, utils and grDevices (from R's own NAMESPACE files) on every platform, because packages reach them behind a platform test and the manifests are generated on Linux. Per-platform manifests were rejected: a check does not know which platform the code will run on. The names therefore also resolve unqualified (`shell()` in a Windows branch) and appear in completion.
 - A character argument at a function-typed parameter of a function that takes ry values (`Checker::ry_callee`) is a type error with a "pass the function, not its name" hint, since ry functions call their callback directly and never `match.fun` it. R functions keep accepting a name.
 

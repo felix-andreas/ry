@@ -2601,7 +2601,9 @@ impl FormalUses {
         }
     }
 
+    /// Any write rebinds the name, so a closure it held no longer runs through it.
     fn record_write(&mut self, name: Symbol) {
+        self.closures.remove(&name);
         if self.tracked.contains(&name) && !self.forced.contains(&name) {
             self.assigned.insert(name);
         }
@@ -2992,6 +2994,11 @@ fn promote_logical<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Ty<'db>> {
         TyKind::Scalar(Atomic::Logical) => Some(integer),
         TyKind::Vector(element) if matches!(element.kind(db), TyKind::Scalar(Atomic::Logical)) => {
             Some(Ty::new(db, TyKind::Vector(integer)))
+        }
+        TyKind::NamedVector(element)
+            if matches!(element.kind(db), TyKind::Scalar(Atomic::Logical)) =>
+        {
+            Some(Ty::new(db, TyKind::NamedVector(integer)))
         }
         _ => None,
     }
@@ -7455,12 +7462,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                     if uses.results.contains(value) {
                         uses.record_closure_run(&forced);
                     }
+                    uses.record_write(*name);
                     uses.closures.insert(*name, forced);
                 } else {
                     self.collect_formal_uses(*value, uses);
-                    uses.closures.remove(name);
+                    uses.record_write(*name);
                 }
-                uses.record_write(*name);
                 return;
             }
             ExpressionKind::Assign { target, value, .. } => {
@@ -7533,8 +7540,10 @@ impl<'db, 'a> Checker<'db, 'a> {
             // `local()` evaluates in a new frame, so its writes bind nothing here.
             ExpressionKind::Local { body } => {
                 let before = uses.assigned.clone();
+                let outer_closures = uses.closures.clone();
                 self.collect_formal_uses(*body, uses);
                 uses.assigned = before;
+                uses.closures = outer_closures;
                 return;
             }
             ExpressionKind::Match { scrutinee, arms } => {
@@ -7545,6 +7554,9 @@ impl<'db, 'a> Checker<'db, 'a> {
                 for arm in &self.module[arms] {
                     let mut entry = before.clone();
                     for &binding in &self.module[arm.bindings] {
+                        if let ExpressionKind::NameRef(name) = self.module.kind(binding) {
+                            uses.closures.remove(name);
+                        }
                         if let ExpressionKind::NameRef(name) = self.module.kind(binding)
                             && uses.tracked.contains(name)
                             && !uses.forced.contains(name)
@@ -11073,6 +11085,22 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             TyKind::Vector(element) | TyKind::NamedVector(element) => match element.kind(self.db) {
                 TyKind::Var(_) => NumericOperand::FlexibleVector(Some(*element)),
+                // `N[]` under `<N: integer | logical>` is a vector of one of the bound's members.
+                TyKind::Rigid(name)
+                    if let Some(&bound) = self.table.rigid_bounds.get(name)
+                        && admits_logical(self.db, bound) =>
+                {
+                    let single = [bound];
+                    let members: &[Ty<'db>] = match bound.kind(self.db) {
+                        TyKind::Union(members) => members,
+                        _ => &single,
+                    };
+                    let vectors = members.iter().map(|&member| match member.kind(self.db) {
+                        TyKind::Scalar(_) => Ty::new(self.db, TyKind::Vector(member)),
+                        _ => member,
+                    });
+                    self.classify_numeric_operand(union_of(self.db, vectors))
+                }
                 TyKind::Rigid(name)
                     if self
                         .table
@@ -14559,17 +14587,18 @@ impl<'db, 'a> Checker<'db, 'a> {
         let inferred: Vec<Ty<'db>> = supplied.iter().map(|&(_, _, ty)| ty).collect();
         if inferred
             .iter()
-            .any(|&ty| self.combined_list_element(ty).is_some())
+            .any(|&ty| self.push_combined_list_elements(ty, &mut Vec::new()))
         {
             // `c()` drops `NULL`, so `c(if (a) list(1), if (a) list(2))` is a list, and an
             // empty list adds no element, so `c(list(), f)` is `list[fn]`.
-            let elements: Vec<Ty<'db>> = inferred
-                .iter()
-                .filter(|&&ty| {
-                    !matches!(ty.kind(self.db), TyKind::Null) && !is_empty_list(self.db, ty)
-                })
-                .map(|&ty| self.combined_list_element(ty).unwrap_or(ty))
-                .collect();
+            let mut elements: Vec<Ty<'db>> = Vec::new();
+            for &ty in &inferred {
+                if !matches!(ty.kind(self.db), TyKind::Null)
+                    && !self.push_combined_list_elements(ty, &mut elements)
+                {
+                    elements.push(ty);
+                }
+            }
             if elements.is_empty() {
                 return Ty::new(self.db, TyKind::Tuple(&[]));
             }
@@ -14673,20 +14702,38 @@ impl<'db, 'a> Checker<'db, 'a> {
         )
     }
 
-    /// The element a list-shaped `c()` argument contributes; a `NULL` or empty-list member
-    /// of a union contributes nothing, as `c()` adds nothing for it.
-    fn combined_list_element(&self, ty: Ty<'db>) -> Option<Ty<'db>> {
-        let TyKind::Union(members) = ty.kind(self.db) else {
-            return self.list_element_type(ty);
+    /// Pushes the elements a list-shaped `c()` argument contributes, and says whether it is
+    /// list-shaped. `NULL` and an empty list contribute nothing, so `c(if (a) list())` adds no
+    /// element.
+    fn push_combined_list_elements(&self, ty: Ty<'db>, elements: &mut Vec<Ty<'db>>) -> bool {
+        let single = [ty];
+        let members: &[Ty<'db>] = match ty.kind(self.db) {
+            TyKind::Union(members) => members,
+            TyKind::Null => return false,
+            _ => &single,
         };
-        let elements: Option<Vec<Ty<'db>>> = members
-            .iter()
-            .filter(|&&member| {
-                !matches!(member.kind(self.db), TyKind::Null) && !is_empty_list(self.db, member)
-            })
-            .map(|&member| self.list_element_type(member))
-            .collect();
-        elements.map(|elements| union_of(self.db, elements))
+        let start = elements.len();
+        let mut list_shaped = false;
+        for &member in members {
+            if matches!(member.kind(self.db), TyKind::Null) {
+                continue;
+            }
+            if is_empty_list(self.db, member) {
+                list_shaped = true;
+                continue;
+            }
+            match self.list_element_type(member) {
+                Some(element) => {
+                    list_shaped = true;
+                    elements.push(element);
+                }
+                None => {
+                    elements.truncate(start);
+                    return false;
+                }
+            }
+        }
+        list_shaped
     }
 
     fn list_element_type(&self, ty: Ty<'db>) -> Option<Ty<'db>> {
@@ -17512,16 +17559,23 @@ impl<'db, 'a> Checker<'db, 'a> {
         verdict
     }
 
-    /// Compatibility, not unification, so parameter-position coercions apply. An
-    /// `Unknown` argument is accepted: its cause was already diagnosed.
-    /// Whether `expected` is an open type variable that only a number fits.
+    /// Whether `expected` is an open type variable that only a number fits, or a vector of
+    /// one.
     fn numeric_parameter(&self, expected: Ty<'db>) -> bool {
-        matches!(
-            self.table.open_constraint(self.db, expected),
-            Some(Constraint::Numeric | Constraint::ScalarNumeric)
-        )
+        let numeric = |ty: Ty<'db>| {
+            matches!(
+                self.table.open_constraint(self.db, ty),
+                Some(Constraint::Numeric | Constraint::ScalarNumeric)
+            )
+        };
+        match self.table.resolve(self.db, expected).kind(self.db) {
+            TyKind::Vector(element) | TyKind::NamedVector(element) => numeric(*element),
+            _ => numeric(expected),
+        }
     }
 
+    /// Compatibility, not unification, so parameter-position coercions apply. An
+    /// `Unknown` argument is accepted: its cause was already diagnosed.
     fn check_argument(
         &mut self,
         expected: Ty<'db>,

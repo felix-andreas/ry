@@ -233,6 +233,12 @@ keep <- function(x) {
   x
 }
 kept <- keep(TRUE)
+#: <N: numeric> fn(x: N[]) -> N[]
+dbl <- function(x) x + x
+doubled <- dbl(c(TRUE, FALSE))
+named <- dbl(c(a = TRUE))
+#: <N: integer | logical> fn(x: N[]) -> N[]
+both <- function(x) x + x
 #++++
 twice: <N: numeric> fn(x: N) -> N
 also: <N: integer | logical> fn(x: N) -> N
@@ -245,7 +251,12 @@ cost: <T: numeric> fn(price: T, rate: T) -> T
 priced: double
 keep: <T: numeric> fn(x: T) -> T
 kept: integer
+dbl: <N: numeric> fn(x: N[]) -> N[]
+doubled: integer[]
+named: integer[]
+both: <N: integer | logical> fn(x: N[]) -> N[]
 193..198 error[type-mismatch] expected `N`, found `integer`
+639..644 error[type-mismatch] expected `N[]`, found `integer[]`
 
 #---- expanded_form
 #: @forall T: numeric
