@@ -120,9 +120,7 @@ pub fn lower_annotation_within<'db>(
     let mut annotation = Annotation::default();
     match block_refusal(node) {
         Some(BlockRefusal::FormMixing(message)) => {
-            annotation
-                .errors
-                .push((message.to_owned(), node.text_range()));
+            annotation.errors.push((message, node.text_range()));
             return annotation;
         }
         Some(BlockRefusal::Unparsed) => return annotation,

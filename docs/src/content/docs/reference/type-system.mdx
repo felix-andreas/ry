@@ -115,6 +115,8 @@ happens when:
 
 - a blank line separates the block from the expression;
 - a plain `#` comment separates them, or no expression follows at all;
+- the block follows code on its own line, as in `x <- 1 #: integer`, which would otherwise read as
+  an annotation on the next line's statement;
 - the block has no content beyond the `#:` marker.
 
 A definition block, one that contains only `@type`, `@alias` and `@opaque` lines, attaches to nothing, and
@@ -122,7 +124,7 @@ neither does a `@strict` toggle, so the adjacency rules do not apply to them.
 
 ### Refused blocks
 
-A block is refused as a whole when it mixes forms, orders its directives wrongly, declares a
+A block is refused as a whole when it mixes forms, repeats a directive other than `@param`, orders its directives wrongly, declares a
 duplicate or unknown type parameter, or gives `@new` a payload that is not nominal. A refused block
 reports its error and carries no typing payload, so a broken annotation does not cause follow-on
 findings. An annotation that names an undeclared type, or writes `X[]` over an element that is not

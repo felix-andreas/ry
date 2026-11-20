@@ -34,7 +34,7 @@ value <- list(name = "bob")
 #++++
 == R/a.R
 value: list{name: character}
-3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
 == scripts/local.R
 
 #---- package_and_script_can_reuse_type_name

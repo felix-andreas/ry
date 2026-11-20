@@ -331,7 +331,7 @@ outer: fn() -> integer
 count: Integr <- 1L
 #++++
 count: integer
-7..13 error[annotation] I do not know the type `Integr`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+7..13 error[annotation] I do not know the type `Integr`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
 
 #---- generic_without_arguments
 #: @type Box<T> {list{value: T}}

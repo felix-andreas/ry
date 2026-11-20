@@ -205,14 +205,14 @@ x: Outer<character>
 f <- list(instrument = list(isin = "DE1"), expiry = "2026-12")
 #++++
 f: Future
-79..88 error[annotation] I do not know the type `Instument`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs. Did you mean `Instrument`?
+79..88 error[annotation] I do not know the type `Instument`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs. Did you mean `Instrument`?
 
 #---- unknown_type_in_a_checked_annotation
 #: Instument
 x <- 1L
 #++++
 x: integer
-3..12 error[annotation] I do not know the type `Instument`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+3..12 error[annotation] I do not know the type `Instument`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
 
 #---- forward_reference_resolves_and_needs_new
 #: Point
@@ -227,7 +227,7 @@ origin: Point
 x <- 1L
 #++++
 x: integer
-3..7 error[annotation] I do not know the type `Pair`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+3..7 error[annotation] I do not know the type `Pair`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
 
 #---- stub_class_resolves
 #: data.frame

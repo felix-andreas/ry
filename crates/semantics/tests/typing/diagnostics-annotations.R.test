@@ -135,7 +135,7 @@ boxed: Box<integer>
 person <- list(name = "bob")
 #++++
 person: list{name: character}
-8..14 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+8..14 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
 
 #---- new_already_nominal
 #: @type Person {list{name: character}}
@@ -228,7 +228,7 @@ value: list[integer]
 value <- some_unknown
 #++++
 value: Unknown
-15..22 error[annotation] I do not know the type `user_id`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+15..22 error[annotation] I do not know the type `user_id`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
 32..44 warning[unresolved] I could not resolve `some_unknown` in this package, its imports, or builtins.
 
 #---- new_wrong_arity

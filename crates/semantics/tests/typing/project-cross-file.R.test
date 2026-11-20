@@ -249,11 +249,11 @@ r: integer
 #: @alias Shape {character}
 #++++
 == R/a.R
-3..24 error[annotation] the type name `Shape` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
-  = 3..27 another declaration of this name is here.
+3..24 error[annotation] The type name `Shape` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+  = 3..27 another definition of this name is here
 == R/b.R
-3..27 error[annotation] the type name `Shape` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
-  = 3..24 another declaration of this name is here.
+3..27 error[annotation] The type name `Shape` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+  = 3..24 another definition of this name is here
 
 #==== cross_file_scripts
 #---- script_polymorphic_package_function

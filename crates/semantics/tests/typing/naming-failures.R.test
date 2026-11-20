@@ -72,14 +72,14 @@ x: integer
 #: @alias Person {character}
 #++++
 == R/a.R
-3..25 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
-  = 3..24 another declaration of this name is here.
+3..25 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+  = 3..24 another definition of this name is here
 == R/b.R
-3..24 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
-  = 3..25 another declaration of this name is here.
+3..24 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+  = 3..25 another definition of this name is here
 == R/c.R
-3..28 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
-  = 3..24 another declaration of this name is here.
+3..28 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+  = 3..24 another definition of this name is here
 
 #==== mixed_package_failures
 #---- later_package_winner_does_not_beat_local_shadow
@@ -115,7 +115,7 @@ x
 x: integer
 == R/b.R
 integer
-3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
 
 #==== package_and_scripts
 #---- package_and_script_diagnostics_render_on_both_sides
@@ -130,7 +130,7 @@ Unknown
 0..1 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
 == inst/scripts/helper.R
 value: integer
-3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
 10..15 warning[unused] `value` is assigned but never used.
 
 #==== namespace_reads

@@ -172,10 +172,10 @@ f: Unknown
 value <- 1L
 #++++
 value: integer
-3..39 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
-  = 43..66 another declaration of this name is here.
-43..66 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
-  = 3..39 another declaration of this name is here.
+3..39 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+  = 43..66 another definition of this name is here
+43..66 error[annotation] The type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+  = 3..39 another definition of this name is here
 
 #---- recovery_unknown_no_cascade
 #: fn(count: integer) -> integer
@@ -206,7 +206,7 @@ NULL
 value <- list(name = "bob")
 #++++
 value: list{name: character}
-8..15 error[annotation] I do not know the type `Missing`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+8..15 error[annotation] I do not know the type `Missing`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
 
 #---- assignment_list_field_mismatch
 #: list{a: integer}

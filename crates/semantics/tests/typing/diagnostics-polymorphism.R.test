@@ -243,7 +243,7 @@ twice <- function(y) {
 }
 #++++
 twice: <T: numeric> fn(y: T) -> T
-28..29 error[annotation] I do not know the type `T`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+28..29 error[annotation] I do not know the type `T`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
 
 #---- a_body_annotation_widens_the_signatures_type_parameter
 #: <T> fn(fn: fn() -> T) -> T | NULL

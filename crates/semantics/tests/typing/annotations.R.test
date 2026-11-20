@@ -337,7 +337,7 @@ f: fn(x: integer) -> character
 n <- 1L
 #++++
 n: integer
-0..50 error[annotation] `@type` and `@alias` declarations need their own `#:` block. Separate them from other annotations with a blank line.
+0..50 error[annotation] A type definition needs its own `#:` block. Separate it from other annotations with a blank line.
 
 #---- definition_mixed_with_expanded_is_refused
 #: @type Person {list{name: character}}
@@ -346,7 +346,7 @@ n: integer
 make <- function(count) list(name = "a")
 #++++
 make: <T> fn([count]: T) -> list{name: character}
-0..85 error[annotation] `@type` and `@alias` declarations need their own `#:` block. Separate them from other annotations with a blank line.
+0..85 error[annotation] A type definition needs its own `#:` block. Separate it from other annotations with a blank line.
 
 #---- compact_mixed_with_expanded_is_refused
 #: fn(x: integer) -> integer
@@ -354,7 +354,22 @@ make: <T> fn([count]: T) -> list{name: character}
 f <- function(x) x
 #++++
 f: <T> fn(x: T) -> T
-0..49 error[annotation] a `#:` block uses either one compact annotation or `@param`/`@return` lines, not both. Separate the two forms with a blank line.
+0..49 error[annotation] A `#:` block uses either one compact annotation or `@param`/`@return` lines, not both. Separate the two forms with a blank line.
+
+#---- a_repeated_compact_directive_is_named
+#: @new Money
+#: @new Money
+price <- 2
+#++++
+price: double
+0..27 error[annotation] `@new` appears more than once in this `#:` block. Keep one.
+
+#---- square_brackets_after_a_type_name_point_to_angle_brackets
+#: Box[integer]
+items <- list(1L)
+#++++
+items: list{integer}
+6..15 error[annotation] Type arguments go in angle brackets, as `Box<...>`. Only `list` takes its element type in square brackets.
 
 #---- multiple_compact_annotations_are_refused
 #: integer
@@ -362,7 +377,7 @@ f: <T> fn(x: T) -> T
 n <- 1L
 #++++
 n: integer
-0..20 error[annotation] only one compact annotation fits in a `#:` block. Separate the annotations with a blank line so each gets its own block.
+0..20 error[annotation] Only one compact annotation fits in a `#:` block. Separate the annotations with a blank line so each gets its own block.
 
 #---- declared_return_mismatch_blames_the_tail_expression
 #: fn(x: integer) -> character
@@ -383,10 +398,10 @@ f: fn(x: integer) -> character
 origin <- list(v = 1)
 #++++
 origin: list{v: double}
-3..32 error[annotation] the type name `Point` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
-  = 37..59 another declaration of this name is here.
-37..59 error[annotation] the type name `Point` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
-  = 3..32 another declaration of this name is here.
+3..32 error[annotation] The type name `Point` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+  = 37..59 another definition of this name is here
+37..59 error[annotation] The type name `Point` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project.
+  = 3..32 another definition of this name is here
 
 #==== form
 #---- param_after_return_is_refused
@@ -526,6 +541,24 @@ value <- 1L
 #++++
 value: integer
 
+#---- an_annotation_after_code_on_its_line_annotates_nothing
+total <- 1 #: integer
+count <- 2
+type Score = Record{x: double} #: integer
+rate <- 0.5
+f <- function() {
+  inner <- 1 #: character
+  inner
+}
+#++++
+total: I64
+count: I64
+rate: F64
+f: fn() -> double
+11..21 error[annotation] This `#:` comment follows code on its line, so it annotates nothing. Put it on its own line, directly above the expression it describes.
+64..74 error[annotation] This `#:` comment follows code on its line, so it annotates nothing. Put it on its own line, directly above the expression it describes.
+118..130 error[annotation] This `#:` comment follows code on its line, so it annotates nothing. Put it on its own line, directly above the expression it describes.
+
 #---- pure_marks_only_a_top_level_binding
 #: @pure
 cat("loading\n")
@@ -592,7 +625,7 @@ total <- count_all(list())
 #++++
 count_all: <T> fn(xs: T) -> integer
 total: integer
-10..20 error[annotation] I do not know the type `Undeclared`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+10..20 error[annotation] I do not know the type `Undeclared`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
 
 #---- a_bare_optional_parameter_causes_no_follow_on_findings
 #: fn(integer, [character]) -> integer

@@ -71,7 +71,7 @@ value <- 1L
 #++++
 == R/main.R
 value: integer
-3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
 == inst/scripts/helper.R
 
 #---- script_type_does_not_contribute_to_other_script
@@ -84,7 +84,7 @@ value <- 1L
 == inst/scripts/a.R
 == inst/scripts/b.R
 value: integer
-3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.
 10..15 warning[unused] `value` is assigned but never used.
 
 #---- package_and_script_same_type_name_do_not_conflict

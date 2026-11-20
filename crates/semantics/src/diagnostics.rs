@@ -40,7 +40,10 @@ use {
     std::{cell::OnceCell, collections::BTreeSet, mem, ops::Range},
     syntax::{
         SyntaxKind, SyntaxNode, TextRange, TextSize,
-        annotation::{AnnotationTarget, directive_name, is_type_kind, statement_annotations},
+        annotation::{
+            AnnotationTarget, annotation_target, directive_name, is_type_kind,
+            statement_annotations,
+        },
         ast::{BinaryExpr, is_expression_kind},
         is_syntactic_name, node_text, paired_comment_definition,
     },
@@ -342,6 +345,25 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
             }
         }
     }
+    // A `#:` trailing code, as in `x <- 1 #: integer`, parses inside that code's node, so no
+    // sequence above lists it.
+    for node in sites.nodes(&root, SiteRole::Annotation) {
+        let in_sequence = node.parent().is_some_and(|parent| {
+            matches!(
+                parent.kind(),
+                SyntaxKind::SOURCE_FILE | SyntaxKind::BRACE_EXPR | SyntaxKind::ARGUMENT_LIST
+            )
+        });
+        if in_sequence {
+            continue;
+        }
+        let target = annotation_target(&node);
+        if matches!(target, AnnotationTarget::AfterCode)
+            && let Some(diagnostic) = dangling_annotation_diagnostic(db, file, &node, target)
+        {
+            diagnostics.push(diagnostic);
+        }
+    }
     diagnostics
 }
 
@@ -408,6 +430,9 @@ fn dangling_annotation_diagnostic(
         }
         AnnotationTarget::BlankLineSeparated => {
             "A `#:` typing comment cannot be separated from its expression by an empty line."
+        }
+        AnnotationTarget::AfterCode => {
+            "This `#:` comment follows code on its line, so it annotates nothing. Put it on its own line, directly above the expression it describes."
         }
         AnnotationTarget::Dangling => {
             // Almost always a `#:` block placed above a roxygen2 block, so name the fix.
@@ -1036,7 +1061,7 @@ fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 .map(|nearest| format!(" Did you mean `{nearest}`?"))
                 .unwrap_or_default();
             let diagnostic = Diagnostic::new(range, Severity::Error, "annotation", format!(
-                    "I do not know the type `{name}`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.{hint}"
+                    "I do not know the type `{name}`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs.{hint}"
                 ));
             match suggestion {
                 Some(nearest) => {
@@ -2143,13 +2168,13 @@ fn duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> 
                 severity: Severity::Error,
                 code: "annotation",
                 message: format!(
-                    "the type name `{name}` is declared more than once. `@type` and `@alias` declarations share one project-global namespace."
+                    "The type name `{name}` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project."
                 ),
                 fix: None,
                 related: vec![RelatedLocation {
                     file: neighbour_file,
                     range: neighbour_range,
-                    message: "another declaration of this name is here.",
+                    message: "another definition of this name is here",
                 }],
             });
         }
@@ -2175,13 +2200,13 @@ fn script_duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagn
             severity: Severity::Error,
             code: "annotation",
             message: format!(
-                "the type name `{name}` is declared more than once. `@type` and `@alias` declarations share one namespace, which for a script is this file."
+                "The type name `{name}` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace, which for a script is this file."
             ),
             fix: None,
             related: vec![RelatedLocation {
                 file,
                 range: neighbour_range,
-                message: "another declaration of this name is here.",
+                message: "another definition of this name is here",
             }],
         });
     }
