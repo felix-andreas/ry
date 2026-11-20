@@ -20264,6 +20264,13 @@ impl<'db, 'a> Checker<'db, 'a> {
     ) -> Ty<'db> {
         let target_ty = self.infer(target);
         if at {
+            // Slots are untyped, but a slot of an `Any` value is as unchecked as the value.
+            if matches!(
+                self.table.shallow_resolve(self.db, target_ty).kind(self.db),
+                TyKind::Any
+            ) {
+                return any(self.db);
+            }
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
             return unknown(self.db);
         }

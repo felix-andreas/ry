@@ -141,6 +141,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `opaque` makes a type's representation private to its file
 - Open records are explicit, with no row variables
 - Recursive types are nominal; an alias never recurses
+- S4 is typed through a nominal wrapper, not from `setClass`
 
 ## Analysis core
 

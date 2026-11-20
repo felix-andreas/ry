@@ -2013,3 +2013,10 @@ lowering path and a third way for two annotations to disagree, for no case `#:` 
 - **Rule.** An `@alias` whose expansion reaches itself stays an error. A recursive type is a nominal `@type`, whose name stops the expansion, so `log$set_threshold("info")$info("hi")` types through `Logger`.
 - **Why.** A recursive structural alias is an equi-recursive type: comparing two of them needs coinductive equality over cyclic types, and every structural walk (`map_child_types`, rendering, `type_size`) would need cycle handling. A nominal type is iso-recursive and costs nothing new. Rust, Roc and Gleam make the same choice.
 - **Diagnostic.** A cycle through a record or function suggests `@type NAME {...}`; a bare alias chain (`A {B}`, `B {A}`) is a plain mistake and keeps the "write a type in place of one alias" wording.
+
+## S4 is typed through a nominal wrapper, not from `setClass`
+
+**Status:** built.
+
+- **Rule.** `setClass` registers no type: a class name in an annotation is unknown unless a `@type` declares it, and `x@slot` is `Unknown` (a strict origin) except on an `Any` subject, where it is `Any` like `$`. A `setGeneric` generic's call gives `Any`, as an S3 generic's does.
+- **Why.** ry discourages S4 (a lint warns on it) and recommends records, so S4 gets the documented route only: a nominal `@type` with a record representation and a constructor wrapping `new(...)` with `@Name(...)`. Reading slot types from `representation()` would duplicate that path for a system users are steered away from, and dispatch over methods registered in any file has no single signature to give a generic.

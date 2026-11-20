@@ -4623,8 +4623,10 @@ out of the parts decided at run time from a value's class attribute:
 - `structure(list(...), class = "dog")` keeps the argument's type, because a `class` attribute is
   data, not a type, so the record's fields stay checkable. A `dim` attribute is the exception: it
   makes the value an array, whose shape is not tracked, so such a value is `Unknown`.
-- `setClass`, `setGeneric`, `setMethod`, and `new` are not modeled, so `new(...)` is `Unknown`.
-- `x@slot` reads an S4 slot and types as `Unknown`, and is a strict-mode origin. The subject
+- `setClass`, `setGeneric`, `setMethod`, and `new` are not modeled, so `new(...)` is `Unknown`, and
+  a call to a generic made by `setGeneric` gives `Any`, like a call to an S3 generic.
+- `x@slot` reads an S4 slot and types as `Unknown`, and is a strict-mode origin, except on an `Any`
+  subject, whose slots are `Any` like its `$` fields. The subject
   expression is still inferred and counts as a read for naming, the unused check, references, and
   rename. A slot write `x@slot <- v` is an ordinary
   [replacement-form assignment](#replacement-form-assignment) of its base variable.
