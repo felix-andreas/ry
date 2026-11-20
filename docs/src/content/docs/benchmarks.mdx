@@ -75,6 +75,11 @@ The suite also counts the tests that pass, fail and raise errors on each engine.
 counts differ between the engines is flagged, and a package whose tests do not run to the end on an
 engine is marked as failing there and has no speed-up.
 
+In each round, ry also runs lgr's test suite from its source with `ry test --jobs 1` and
+`ry test --jobs 4`. The Test workers table compares the two: the CPU time of every process in the
+run, the workers' included, shows what parallel workers cost beyond the tests themselves, and the
+wall time shows how much faster the run finishes.
+
 <SpeedChart suite="packages" />
 
 <details>
@@ -193,7 +198,7 @@ Tracked table follows four things:
 
 - **The profile summary's cost**: ry's total with `RY_PROFILE_SUMMARY` set, over its total without.
 - **Compiled code**: the share of that profiled run spent in JIT-compiled code.
-- **Patterns**: 236 calls reduced from the same test suite, each timed in a loop of its own (the
+- **Patterns**: 248 calls reduced from the same test suite, each timed in a loop of its own (the
   files in `tools/bench/appsuite/patterns/`), and how many of them ry runs at under 1.5 times and
   under 1 times GNU R's speed. The Patterns table gives each one's time per call.
 - **Contention**: the test user's CI runs one test process per core, so the suite also starts one

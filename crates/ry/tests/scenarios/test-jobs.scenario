@@ -1,8 +1,10 @@
 # A package author runs the suite on several cores with `ry test --jobs`. Each test file runs in
-# a worker process that loads the package the way `ry test` itself does, so the package needs
-# neither pkgload nor its uninstalled import, and the project's `ry.toml` holds in the workers.
+# a worker process forked from `ry test` after it loaded the package, so the run needs
+# neither callr nor the package's uninstalled import, and the project's `ry.toml` holds in the
+# workers. Each worker runs the setup files and their teardown, and what a file prints reaches
+# the report.
 
-requires ry-runtime r-package:testthat>=3.3.0 r-package:callr
+requires ry-runtime r-package:testthat>=3.3.0
 
 file DESCRIPTION
 | Package: shapes
@@ -25,20 +27,25 @@ file tests/testthat/helper-worker.R
 |   }, error = function(e) "refused")
 |   paste0(
 |     "worker=", testthat::is_parallel(),
-|     " pkgload=", "pkgload" %in% loadedNamespaces(),
+|     " callr=", "callr" %in% loadedNamespaces(),
 |     " loader_masks_utils=", match("tools:ry", search()) < match("package:utils", search()),
 |     " classes=", classes
 |   )
 | }
+file tests/testthat/setup-teardown.R
+| log <- normalizePath("../../teardown.txt", mustWork = FALSE)
+| withr::defer(cat("torn down\n", file = log, append = TRUE), teardown_env())
 file tests/testthat/test-area.R
 | test_that("area multiplies", {
+|   cat("printed by a worker\n")
+|   expect_true(dir.exists(tempdir()))
 |   expect_equal(area(2, 3), 6)
-|   expect_equal(worker_facts(), "worker=TRUE pkgload=FALSE loader_masks_utils=TRUE classes=refused")
+|   expect_equal(worker_facts(), "worker=TRUE callr=FALSE loader_masks_utils=TRUE classes=refused")
 | })
 file tests/testthat/test-square.R
 | test_that("a square's area", {
 |   expect_equal(area(2, 2), 4)
-|   expect_equal(worker_facts(), "worker=TRUE pkgload=FALSE loader_masks_utils=TRUE classes=refused")
+|   expect_equal(worker_facts(), "worker=TRUE callr=FALSE loader_masks_utils=TRUE classes=refused")
 | })
 file tests/testthat/test-wrong.R
 | test_that("a wrong expectation fails the run", expect_equal(area(2, 2), 5))
@@ -60,6 +67,8 @@ expect stdout "area: .."
 expect stdout "square: .."
 expect stdout "wrong: 1"
 expect stdout "Expected `area(2, 2)` to equal 5."
+expect stdout "> test-area.R: printed by a worker"
+expect file teardown.txt "torn down"
 
 # One job runs the files in the `ry test` process, whatever the package declares. The helper
 # then reports no worker, so the files that expect one fail.
@@ -68,6 +77,13 @@ expect exit 1
 expect stderr lacks "test processes"
 expect stdout "worker=FALSE"
 expect stdout "wrong: 3"
+
+# A worker that exits in the middle of a file stops the run and names the file.
+file tests/testthat/test-exit.R
+| test_that("quits", quit(save = "no", status = 3))
+run ry test --jobs 2 --runtime ry
+expect exit 1
+expect stderr "testthat subprocess exited in file 'test-exit.R'."
 
 # A profile summary describes one process, so it cannot cover workers.
 run ry test --jobs 2 --runtime ry --profile-summary summary.txt

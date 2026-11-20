@@ -59,6 +59,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("ryLoaderWaitEdits", 2, do_wait_edits),
     internal("ryLoaderCompile", 2, do_compile).invisible(),
     internal("ryLoaderAttach", 0, do_attach).invisible(),
+    internal("ryWorkerTempDir", 0, do_worker_temp_dir).invisible(),
 ];
 
 /// Attaches the loader's R side as `tools:ry`, which gives the session `load_all()`: the
@@ -98,6 +99,14 @@ unsafe fn do_attach(_call: &Call<'_>) -> R<Sexp> {
         Ok(())
     })?;
     Ok(nil())
+}
+
+/// `.Internal(ryWorkerTempDir())`: gives a test worker forked from `ry test` a `tempdir()` of
+/// its own, which native code sees as `R_TempDir` too.
+unsafe fn do_worker_temp_dir(call: &Call<'_>) -> R<Sexp> {
+    let path = interp::system::renew_session_temp_dir().map_err(|message| call.error(message))?;
+    crate::embed::start_frontend();
+    values::scalar_string(path)
 }
 
 static ATTACHED_BY_PROFILE: AtomicBool = AtomicBool::new(false);

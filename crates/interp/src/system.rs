@@ -426,7 +426,21 @@ fn find_r_home() -> Result<String, String> {
 /// `TMP` and `TEMP` that names a writable directory, created on first use and removed when the
 /// session ends.
 pub fn session_temp_dir() -> Result<&'static str, String> {
+    if let Some(Ok(renewed)) = RENEWED_SESSION_TEMP.get() {
+        return Ok(renewed.path.as_str());
+    }
     SESSION_TEMP
+        .get_or_init(create_session_temp_dir)
+        .as_ref()
+        .map(|temp| temp.path.as_str())
+        .map_err(Clone::clone)
+}
+
+/// Gives a forked process a session temporary directory of its own, which it then owns and
+/// removes, so that a worker's files cannot collide with its siblings'. The directory it
+/// inherited stays its parent's. A process renews it once; a second call returns the same one.
+pub fn renew_session_temp_dir() -> Result<&'static str, String> {
+    RENEWED_SESSION_TEMP
         .get_or_init(create_session_temp_dir)
         .as_ref()
         .map(|temp| temp.path.as_str())
@@ -436,7 +450,10 @@ pub fn session_temp_dir() -> Result<&'static str, String> {
 /// Removes the session's temporary directory. Only the process that created it does: a forked
 /// child shares the path but must leave the directory to its parent.
 pub fn remove_session_temp_dir() {
-    let Some(Ok(temp)) = SESSION_TEMP.get() else {
+    let renewed = RENEWED_SESSION_TEMP
+        .get()
+        .and_then(|temp| temp.as_ref().ok());
+    let Some(temp) = renewed.or_else(|| SESSION_TEMP.get()?.as_ref().ok()) else {
         return;
     };
     if temp.owner != std::process::id() {
@@ -483,6 +500,8 @@ struct SessionTemp {
 }
 
 static SESSION_TEMP: std::sync::OnceLock<Result<SessionTemp, String>> = std::sync::OnceLock::new();
+static RENEWED_SESSION_TEMP: std::sync::OnceLock<Result<SessionTemp, String>> =
+    std::sync::OnceLock::new();
 
 fn create_session_temp_dir() -> Result<SessionTemp, String> {
     let root = ["R_TMPDIR", "TMPDIR", "TMP", "TEMP"]

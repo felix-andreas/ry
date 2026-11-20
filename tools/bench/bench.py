@@ -8,7 +8,7 @@ The suites, each described by the suite.toml in its directory:
   packages      Package test suites: the pinned CRAN packages of packages/lock.tsv.
   kernels       Numeric kernels: our loops, recursion, arrays and numeric math.
   applications  Application workloads: our calls, dispatch, conditions, records and tables.
-  appsuite      Application test suite: a test user's workload of 13 sections and its 236 patterns.
+  appsuite      Application test suite: a test user's workload of 13 sections and its 248 patterns.
   codebases     The three 300,000-line benchmark code bases, each running its test suite.
   hot           Hot package entries: the package calls that dominate the code bases, replayed in a loop.
   typed         Typed ry against Rust: every typed kernel and application beside its Rust twin.
@@ -746,6 +746,8 @@ def run_suite(suite, manifest, missing, args, meta):
         print_table(results, table)
     if suite == APP_SUITE:
         print_appsuite(results)
+    if suite == "packages":
+        print_test_jobs(results)
     if suite == HOT_SUITE:
         print_hot(results)
     for key, found in results["worst"].items():
@@ -828,6 +830,27 @@ def duration(seconds):
 
 
 # Running one program on one engine.
+
+# Runs a command as a child subreaper, so the processes it forks are reparented to this script
+# when they outlive it and their CPU time is counted once they are reaped, then prints the
+# command's exit status, the CPU seconds of every process in its tree and its wall seconds.
+TREE_TIMER = """
+import ctypes, os, resource, subprocess, sys, time
+PR_SET_CHILD_SUBREAPER = 36
+ctypes.CDLL(None, use_errno=True).prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+started = time.monotonic()
+status = subprocess.call(sys.argv[1:])
+wall = time.monotonic() - started
+while True:
+    try:
+        os.wait()
+    except ChildProcessError:
+        break
+usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+print(f"TREE {status} {usage.ru_utime + usage.ru_stime:.3f} {wall:.3f}", file=sys.stderr)
+"""
+TREE_TIMED = re.compile(r"^TREE (?P<status>-?\d+) (?P<cpu>[\d.]+) (?P<wall>[\d.]+)$", re.M)
+
 
 def spawn(command, env, cwd=None, timeout=PROGRAM_TIMEOUT, check_images=True, sample=True):
     """Runs a process to the end and returns its exit status, output, wall seconds and peak
@@ -1170,6 +1193,7 @@ class PackageRunner:
         self.network = []
         self.work = pathlib.Path(tempfile.mkdtemp(prefix="ry-bench-packages-"))
         self.unpacked = {}
+        self.sources = {}
 
     def run(self, program, engine):
         name = program["id"]
@@ -1188,8 +1212,38 @@ class PackageRunner:
         for variable in ("no_proxy", "NO_PROXY"):
             env[variable] = corpus.LOCAL_HOSTS
         result = self.run_tests(engine, env, name, kind, tests)
+        if engine.key == "ry" and program.get("jobs") and result.get("seconds") is not None:
+            result["test_jobs"] = self.time_jobs(program, engine)
         self.network += [f"{name} on {engine.label}: {host}" for host in self.proxy.take()]
         return result
+
+    def time_jobs(self, program, engine):
+        """Runs the package's suite from its source with `ry test --jobs 1`, then with
+        `--jobs N`, and returns the CPU and wall seconds of each, or None when a run fails. The CPU
+        time is the whole process tree's, the forked test workers' included."""
+        name = program["id"]
+        if name not in self.sources:
+            self.sources[name] = corpus.unpack_source(name, self.versions[name], self.work)
+        env = dict(engine.env, _R_CHECK_FORCE_SUGGESTS_="false")
+        for variable in ("NOT_CRAN", "TESTTHAT_PARALLEL", "TESTTHAT_CPUS"):
+            env.pop(variable, None)
+        for variable in ("http_proxy", "https_proxy", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
+            env[variable] = self.proxy.url
+        for variable in ("no_proxy", "NO_PROXY"):
+            env[variable] = corpus.LOCAL_HOSTS
+        found = {"jobs": program["jobs"], "cpu": [], "wall": []}
+        for jobs in (1, program["jobs"]):
+            command = [sys.executable, "-I", "-c", TREE_TIMER, engine.command[0], "test", "--jobs", str(jobs),
+                       "--runtime", "ry", "--reporter", "silent"]
+            status, out, err, _, _ = spawn(command, env, cwd=self.sources[name], timeout=corpus.SUITE_TIMEOUT,
+                                           sample=False)
+            timed = TREE_TIMED.search(err or "")
+            if status is None or not timed or int(timed["status"]) not in (0, 1):
+                print(f"  {name}: ry test --jobs {jobs} fails ({failure_reason(out, err)[:80]})", flush=True)
+                return None
+            found["cpu"].append(float(timed["cpu"]))
+            found["wall"].append(float(timed["wall"]))
+        return found
 
     def run_tests(self, engine, env, name, kind, tests):
         if kind == "scripts":
@@ -2094,7 +2148,41 @@ def summarize(suite, manifest, programs, table, state, args, meta, runner):
         builtins_summary(results, manifest, table)
     if suite == APP_SUITE:
         appsuite_summary(results, programs, table, state, args)
+    if suite == "packages":
+        packages_summary(results, programs, state, args)
     return results
+
+
+def packages_summary(results, programs, state, args):
+    """Adds `tracked.test_jobs` for the package whose suite ry also runs with `ry test --jobs N`:
+    the CPU time of N workers over one job's, which is the CPU the workers cost beyond the tests
+    themselves, and the speed-up of the wall time, each as the median of the per-round ratios."""
+    for program in programs:
+        if not program.get("jobs"):
+            continue
+        runs = [found for round_ in state["rounds"]
+                if (found := round_.get(program["id"], {}).get("ry", {}).get("test_jobs"))]
+        if not runs:
+            continue
+        quote = lambda ratios: dict(zip(("median", "low", "high"), (round(value, 4) for value in interval(ratios, args.seed))))
+        results.setdefault("tracked", {})["test_jobs"] = {
+            "package": program["display"],
+            "jobs": program["jobs"],
+            "cpu": quote([run["cpu"][1] / run["cpu"][0] for run in runs]),
+            "speedup": quote([run["wall"][0] / run["wall"][1] for run in runs]),
+            "seconds": {"cpu": [round(statistics.median(run["cpu"][index] for run in runs), 3) for index in (0, 1)],
+                        "wall": [round(statistics.median(run["wall"][index] for run in runs), 3) for index in (0, 1)]},
+        }
+
+
+def print_test_jobs(results):
+    found = results.get("tracked", {}).get("test_jobs")
+    if not found:
+        return
+    quote = lambda value: f"{value['median']:.3f}x ({value['low']:.3f} to {value['high']:.3f})"
+    print(f"\nry test on {found['package']}: --jobs {found['jobs']} takes {quote(found['cpu'])} the CPU time of "
+          f"--jobs 1 ({found['seconds']['cpu'][1]:.2f} s over {found['seconds']['cpu'][0]:.2f} s) and runs "
+          f"{quote(found['speedup'])} as fast ({found['seconds']['wall'][1]:.2f} s against {found['seconds']['wall'][0]:.2f} s)")
 
 
 def appsuite_summary(results, programs, table, state, args):

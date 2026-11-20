@@ -675,14 +675,14 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
   sources them once, because it loads with `helpers = FALSE`. `load_all()` takes `helpers` for
   the workers already; the main process's load (`crates/ry/src/load.rs`) and the watch reload
   need it too, without losing the reload's "a helper changed" signal.
-- **Each `ry test --jobs N` worker costs about 0.3 s of CPU before its first test**, although
-  its start loads the image (about 0.05 s for a callr child): loading testthat, its imports and the
-  package in every worker is the rest. On an eight-file toy package, four jobs took about 2.4 s of
-  CPU against 1.2 s for one, the same ratio a test user reported on a real suite. Unprofiled
-  (`RY_PROFILE_SUMMARY_DIR` names each worker's split).
-- **`ry test --watch --jobs N` restarts its workers on every rerun.** testthat's parallel runner
-  starts workers per `test_dir()` call, so each rerun pays worker startup and a lazy load per
-  worker. Keeping the workers alive across reruns needs a queue of our own.
+- **On Windows, each `ry test --jobs N` worker costs about 0.3 s of CPU before its first test**:
+  Windows cannot fork, so its workers are testthat's callr processes, each loading testthat, its
+  imports and the package (Unix forks them, `decisions/tooling-bench-ci.md`, "ry test forks its
+  workers"). A spawned worker started from a saved heap of the loaded parent would close it.
+- **`ry test --watch --jobs N` forks new workers on every rerun.** testthat's parallel runner
+  starts workers per `test_dir()` call, so each rerun's workers pay the first-call costs (lazy-load
+  fetches, closure compilation) again. Forking is cheap; keeping warm workers across reruns would
+  need them to reload changed code themselves.
 - **Every rebuild of a shared library maps one more copy** on ry's runtime: `dyn.unload` keeps
   the retired library mapped (`libr` `unloaded_dlls`) so a stale pointer into it does not crash.
 - **`ry document`'s warm run is dominated by reading the block cache**: about 3 s of a 11 s no-op
