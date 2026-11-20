@@ -160,4 +160,24 @@ mod tests {
             .expect("aspell suggestion");
         assert_eq!(aspell.span, Span { start: 7, end: 12 });
     }
+
+    #[test]
+    fn fields_complete_after_dollar_and_in_an_unclosed_subscript() {
+        let labels = |setup: &str, line: &str| {
+            let mut completer = AnalysisCompleter::new();
+            completer.accept(setup);
+            completer
+                .complete(line, line.len())
+                .into_iter()
+                .map(|suggestion| (suggestion.value, suggestion.span.start))
+                .collect::<Vec<_>>()
+        };
+        let frame = "df <- data.frame(alpha = 1, beta = 2)";
+        let fields = vec![("alpha".to_owned(), 3), ("beta".to_owned(), 3)];
+        assert_eq!(labels(frame, "df$"), fields);
+        let list = "x <- list(alpha = 1, beta = 2)";
+        assert_eq!(labels(list, "x[[\"al"), vec![("alpha".to_owned(), 4)]);
+        // Fields nothing declares complete nothing, rather than the receiver's own name.
+        assert_eq!(labels("df <- read.csv(\"f.csv\")", "df$"), Vec::new());
+    }
 }

@@ -2318,14 +2318,17 @@ pub fn completion_with(
         return annotation_completion(db, files, file, &query);
     }
     // R value names never resolve inside string content; only record-field subscripts complete
-    // there.
+    // there. A string still being typed (`x[["al`) ends at its line break, so the cursor at its
+    // end is inside it.
     if let Some(string_token) = root
         .descendants_with_tokens()
         .filter_map(SyntaxElement::into_token)
         .find(|token| {
+            let range = token.text_range();
             token.kind() == STRING
-                && token.text_range().start() < offset
-                && offset < token.text_range().end()
+                && range.start() < offset
+                && (offset < range.end()
+                    || offset == range.end() && !is_closed_string(token.text()))
         })
     {
         return string_subscript_completion(db, file, offset, &string_token);
@@ -4904,6 +4907,23 @@ fn type_name_occurrences(db: &dyn Db, files: ProjectFiles, name: &str) -> Vec<Oc
     result
 }
 
+/// Whether a string token ends with the quote it opened with, unescaped. A raw string's body
+/// takes no escapes, and its lexer stops it only at its closer.
+fn is_closed_string(text: &str) -> bool {
+    if let Some(raw) = text.strip_prefix(['r', 'R']) {
+        return raw.len() > 2 && raw.ends_with(['"', '\'']);
+    }
+    let mut characters = text.chars();
+    let (Some(open), Some(close)) = (characters.next(), characters.next_back()) else {
+        return false;
+    };
+    let escapes = characters
+        .rev()
+        .take_while(|&character| character == '\\')
+        .count();
+    open == close && escapes % 2 == 0
+}
+
 fn string_subscript_completion(
     db: &dyn Db,
     file: SourceFile,
@@ -5323,8 +5343,14 @@ fn spelled_names(db: &dyn Db, file: SourceFile) -> SpelledNames {
         {
             spelled.tags.push(name.text().to_string());
         }
-        // The lhs is an expression node, so the last bare NAME child is the spelled name.
-        let Some(name) = node.children().filter(|child| child.kind() == NAME).last() else {
+        // The spelled name is the NAME after the operator; the receiver can be a NAME too, and is
+        // the only one while the name after `$` is still unwritten.
+        let Some(name) = node
+            .children_with_tokens()
+            .skip_while(|element| !matches!(element.kind(), DOLLAR | AT | COLON2 | COLON3))
+            .filter_map(SyntaxElement::into_node)
+            .find(|child| child.kind() == NAME)
+        else {
             continue;
         };
         let name = name.text().to_string();

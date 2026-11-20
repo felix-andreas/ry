@@ -736,8 +736,6 @@ Smaller gaps:
 
 - A string literal where a ry function's callback goes is not reported: `List.map([1L], "a")`
   passes, because a string names a function for R's `match.fun`, which a ry function never calls.
-- Console completion: `df$` offers only `df`, and an unclosed `x[["` completes keywords instead of
-  fields.
 - The Zed extension is not in Zed's registry yet. It downloads the newest full release's archive
   (`editors/zed/src/lib.rs`), and the first full release is 0.4.4, so publish it to Zed's registry
   no earlier than 0.4.4 (before that it would serve 0.1.1), and 0.4.4 must ship every platform's
