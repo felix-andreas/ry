@@ -486,3 +486,11 @@ User page: `reference/package-loading.md`; design: `development/design/r-runtime
 **Status:** built (not taken; the measurement stands).
 
 - Inflating whole records with one `libdeflate_zlib_decompress` call in `serialize::decompress_record` (a record states its decompressed length) saves 1.1% of testthat (41.5M to 18.3M Ir), under the 2% bar. Only GNU R-installed packages benefit (ry-installed ones read records uncompressed from the code image), and it adds a C dependency. The branch `perf/libdeflate-records` holds the change, a size check against deflate's 1032:1 expansion, and a bounded fuzz test.
+
+## Extracted runtimes and base trees are pruned by a ledger and held by locks
+
+**Status:** built.
+
+- `repl::extract_runtime` and `repl::extract_base` hold their copy (`rcmd::hold_extracted`, a shared lock on its `.lock` for the life of the process) and, after extracting a new one, call `rcmd::prune_extracted`, which keeps the current copy and the two others the parent's `.ledger` lists as most recent (`rcmd::KEPT_EXTRACTED`). Copies the ledger lacks, such as those of an ry without locks, count as oldest.
+- The order comes from the ledger, not file times, as with start-up images (`rcmd::images::prune`), because copying or unpacking a cache resets times. Keeping three means switching between a few installed versions extracts each once rather than on every switch.
+- A pruner renames a copy away before deleting it and only after taking its lock exclusively, so a process that opened the lock first finds no copy once it gets the lock and extracts again. On Windows the rename fails while any process has a file in the copy open, so a copy in use is never moved (unverified on Windows).

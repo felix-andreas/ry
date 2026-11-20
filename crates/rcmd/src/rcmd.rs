@@ -945,6 +945,137 @@ fn prune_stale_homes(cache: &Path, current: &Path, _cache_lock: &File) {
     }
 }
 
+/// How many directories of one kind ry extracts into the cache (`ry/runtime/<key>/` and
+/// `ry/base/<key>/`) stay there: the current one and the others extracted most recently, so
+/// switching between a few installed versions of ry extracts each only once.
+pub const KEPT_EXTRACTED: usize = 3;
+
+/// The ledger of a directory of extracted copies: their keys, oldest extraction first.
+const EXTRACTED_LEDGER: &str = ".ledger";
+
+/// Takes a shared lock on `directory`, a copy ry extracted into the cache, and holds it until
+/// the process exits, so no pruner removes the copy while this process uses it. Returns false,
+/// holding nothing, when the directory is not in place or `complete` says it is unfinished.
+pub fn hold_extracted(directory: &Path, complete: impl Fn() -> bool) -> io::Result<bool> {
+    let path = directory.join(LOCK_FILE);
+    let lock = match File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+    {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    lock.lock_shared()?;
+    // A pruner moves a copy away before it deletes it, so one still in place once the lock is
+    // taken stays until this process exits.
+    if !directory.join(LOCK_FILE).exists() || !complete() {
+        return Ok(false);
+    }
+    hold(lock);
+    Ok(true)
+}
+
+/// Records `key` as the newest copy in `parent` (`ry/runtime` or `ry/base` of the cache), then
+/// removes every copy but `key` and the [`KEPT_EXTRACTED`] `- 1` others extracted most
+/// recently, unless a process holds it ([`hold_extracted`]). Copies the ledger does not list,
+/// such as those of an older ry, count as oldest, in the order of their names. Returns the
+/// removed copies in that order.
+///
+/// The order comes from the ledger, never from file times, and the ledger changes only under
+/// `parent`'s lock, by renaming a complete file over it. Removal is best effort: a copy left
+/// behind costs only disk, and the next extraction tries again.
+pub fn prune_extracted(parent: &Path, key: &str) -> io::Result<Vec<PathBuf>> {
+    let parent_lock = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(parent.join(LOCK_FILE))?;
+    parent_lock.lock()?;
+    let mut copies = Vec::new();
+    let mut leftovers = Vec::new();
+    for entry in fs::read_dir(parent)? {
+        let path = entry?.path();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        if !path.is_dir() {
+            continue;
+        }
+        if name.starts_with(REMOVING) {
+            leftovers.push(path);
+        } else if !name.starts_with('.') && name != key {
+            copies.push(name);
+        }
+    }
+    copies.sort();
+    let ledger = parent.join(EXTRACTED_LEDGER);
+    let recorded = match fs::read_to_string(&ledger) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    // Oldest first: unrecorded copies by name, then the ledger's order.
+    let recorded: Vec<&str> = recorded
+        .lines()
+        .filter(|line| *line != key && copies.iter().any(|copy| copy == line))
+        .collect();
+    let mut order: Vec<&str> = copies
+        .iter()
+        .map(String::as_str)
+        .filter(|copy| !recorded.contains(copy))
+        .collect();
+    order.extend(&recorded);
+    let mut removed = Vec::new();
+    let doomed_count = order.len().saturating_sub(KEPT_EXTRACTED - 1);
+    for copy in &order[..doomed_count] {
+        let path = parent.join(copy);
+        // A copy from an ry that takes no locks has no lock file to take.
+        let lock = match File::options().write(true).open(path.join(LOCK_FILE)) {
+            Ok(lock) => match lock.try_lock() {
+                Ok(()) => Some(lock),
+                Err(TryLockError::WouldBlock) => continue,
+                Err(TryLockError::Error(error)) => return Err(error),
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        // Moved out of its place first, so a process that opened the lock file before this one
+        // took it finds no copy there once it gets its lock, and extracts its own.
+        let doomed = parent.join(format!("{REMOVING}{}", staging_suffix()));
+        let mut moved = fs::rename(&path, &doomed).is_ok();
+        drop(lock);
+        if !moved {
+            // Windows renames no directory that holds an open file, the lock included; with
+            // the lock closed, the rename succeeds only if no process has the copy open.
+            moved = fs::rename(&path, &doomed).is_ok();
+        }
+        if moved {
+            removed.push(path);
+            leftovers.push(doomed);
+        }
+    }
+    let staging = parent.join(format!(".{EXTRACTED_LEDGER}.{}", staging_suffix()));
+    let mut text: String = order
+        .iter()
+        .filter(|copy| !removed.contains(&parent.join(copy)))
+        .map(|copy| format!("{copy}\n"))
+        .collect();
+    text.push_str(key);
+    text.push('\n');
+    fs::write(&staging, text)?;
+    fs::rename(&staging, &ledger)?;
+    for leftover in leftovers {
+        // Windows refuses to delete a library some process still maps; the next prune retries.
+        drop(fs::remove_dir_all(&leftover));
+    }
+    Ok(removed)
+}
+
 /// Whether the files `home` was built from would no longer name it.
 fn is_stale(home: &Path) -> bool {
     let Ok(record) = fs::read_to_string(home.join(".libr")) else {
@@ -3643,6 +3774,41 @@ PATH="${R_CUSTOM_TOOLS_PATH:-${R_RTOOLS45_PATH}};${PATH}/"
         let unix = makeconf(Path::new("/r"), &Toolchain::default(), Platform::Linux);
         assert!(unix.contains("SHLIB_EXPORTS =\n") && SHLIB_MK.contains("$(SHLIB_EXPORTS)"));
         fs::remove_dir_all(&directory).expect("remove directory");
+    }
+
+    /// Pruning extracted copies keeps the current one and the two extracted most recently,
+    /// counts copies the ledger lacks as oldest, spares a copy a process holds, and finishes the
+    /// removal a pruner left behind.
+    #[test]
+    fn pruning_extracted_copies_keeps_the_recent_and_the_held() {
+        let parent = std::env::temp_dir().join(format!("ry-rcmd-extracted-{}", std::process::id()));
+        drop(fs::remove_dir_all(&parent));
+        for copy in ["a", "b", "c", "d", "e", ".removing-1-000000001"] {
+            fs::create_dir_all(parent.join(copy)).expect("create copy");
+        }
+        fs::write(parent.join(EXTRACTED_LEDGER), "c\nb\nvanished\n").expect("write ledger");
+        let held = File::create(parent.join("a").join(LOCK_FILE)).expect("create lock");
+        held.lock_shared().expect("hold copy");
+        let removed = prune_extracted(&parent, "e").expect("prune");
+        assert_eq!(removed, vec![parent.join("d")]);
+        let mut left: Vec<String> = fs::read_dir(&parent)
+            .expect("list copies")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        left.sort();
+        assert_eq!(left, [".ledger", ".lock", "a", "b", "c", "e"]);
+        let ledger = fs::read_to_string(parent.join(EXTRACTED_LEDGER)).expect("read ledger");
+        assert_eq!(ledger, "a\nc\nb\ne\n");
+        assert!(hold_extracted(&parent.join("e"), || true).expect("hold current"));
+        assert!(!hold_extracted(&parent.join("d"), || true).expect("hold removed"));
+        drop(held);
+        drop(fs::remove_dir_all(&parent));
     }
 
     /// A new home removes every stale home and abandoned staging directory that no process

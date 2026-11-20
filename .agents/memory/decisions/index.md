@@ -501,6 +501,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Hot C API entry points take a direct success path
 - Measured and not taken: a builtin path for `Rf_eval` and a cheaper protect stack
 - Measured and not taken: libdeflate for lazy-load records
+- Extracted runtimes and base trees are pruned by a ledger and held by locks
 
 ## Typed ry and the standard library
 

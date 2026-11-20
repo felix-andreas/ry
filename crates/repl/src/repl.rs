@@ -676,9 +676,6 @@ fn extract_base(base: &EmbeddedBase) -> Result<PathBuf, ReplError> {
     })?;
     let parent = cache.join("ry").join("base");
     let directory = parent.join(base.key);
-    if rcmd::base::is_complete(&directory) {
-        return Ok(directory);
-    }
     let failed = |path: &Path, error: io::Error| {
         ReplError(format!(
             "cannot extract ry's base R to {}: {error}; set XDG_CACHE_HOME to a writable \
@@ -686,7 +683,37 @@ fn extract_base(base: &EmbeddedBase) -> Result<PathBuf, ReplError> {
             path.display()
         ))
     };
+    let hold = || {
+        rcmd::hold_extracted(&directory, || rcmd::base::is_complete(&directory))
+            .map_err(|error| failed(&directory, error))
+    };
+    if hold()? {
+        return Ok(directory);
+    }
     fs::create_dir_all(&parent).map_err(|error| failed(&parent, error))?;
+    // A pruner of another version may remove the tree between its rename into place and the
+    // lock; the extraction is then repeated.
+    for _ in 0..3 {
+        unpack_into_place(base, &parent, &directory, &failed)?;
+        if hold()? {
+            rcmd::prune_extracted(&parent, base.key).map_err(|error| failed(&parent, error))?;
+            return Ok(directory);
+        }
+    }
+    Err(failed(
+        &directory,
+        io::Error::other("another process kept removing the directory"),
+    ))
+}
+
+/// Unpacks `base` into a staging directory in `parent` and renames it to `directory`, unless a
+/// concurrent run renamed its own copy there first.
+fn unpack_into_place(
+    base: &EmbeddedBase,
+    parent: &Path,
+    directory: &Path,
+    failed: &impl Fn(&Path, io::Error) -> ReplError,
+) -> Result<(), ReplError> {
     let staging = parent.join(format!(".{}-{}", base.key, rcmd::staging_suffix()));
     let written = unpack_base(base, &staging);
     if let Err(error) = written {
@@ -701,15 +728,15 @@ fn extract_base(base: &EmbeddedBase) -> Result<PathBuf, ReplError> {
         }
         return Err(ReplError(message));
     }
-    if let Err(error) = fs::rename(&staging, &directory) {
+    if let Err(error) = fs::rename(&staging, directory) {
         // Another process renamed its copy into place first.
         let removed = fs::remove_dir_all(&staging);
-        if !rcmd::base::is_complete(&directory) {
-            return Err(failed(&directory, error));
+        if !rcmd::base::is_complete(directory) {
+            return Err(failed(directory, error));
         }
         removed.map_err(|error| failed(&staging, error))?;
     }
-    Ok(directory)
+    Ok(())
 }
 
 fn corrupt_archive() -> io::Error {
@@ -791,14 +818,12 @@ fn extract_runtime(runtime: &EmbeddedRuntime) -> Result<PathBuf, ReplError> {
                 .to_owned(),
         )
     })?;
-    let directory = cache.join("ry").join("runtime").join(runtime.key);
+    let parent = cache.join("ry").join("runtime");
+    let directory = parent.join(runtime.key);
     let library_path = directory.join(library.name);
     let complete = |path: &Path, file: &EmbeddedFile| {
         fs::metadata(path).is_ok_and(|metadata| metadata.len() == file.size)
     };
-    if complete(&library_path, library) {
-        return Ok(library_path);
-    }
     let failed = |path: &Path, error: io::Error| {
         ReplError(format!(
             "cannot extract ry's runtime to {}: {error}; set XDG_CACHE_HOME to a writable \
@@ -806,7 +831,24 @@ fn extract_runtime(runtime: &EmbeddedRuntime) -> Result<PathBuf, ReplError> {
             path.display()
         ))
     };
-    fs::create_dir_all(&directory).map_err(|error| failed(&directory, error))?;
+    let held = rcmd::hold_extracted(&directory, || complete(&library_path, library))
+        .map_err(|error| failed(&directory, error))?;
+    if held {
+        return Ok(library_path);
+    }
+    // The directory is held before its files are written, so a pruner of another version
+    // cannot remove it halfway; one that removed it before the lock was taken is retried.
+    let mut attempts = 0;
+    while !rcmd::hold_extracted(&directory, || true).map_err(|error| failed(&directory, error))? {
+        attempts += 1;
+        if attempts > 3 {
+            return Err(failed(
+                &directory,
+                io::Error::other("another process kept removing the directory"),
+            ));
+        }
+        fs::create_dir_all(&directory).map_err(|error| failed(&directory, error))?;
+    }
     for file in runtime.files.iter().rev() {
         let path = directory.join(file.name);
         if file.name != library.name && complete(&path, file) {
@@ -837,6 +879,7 @@ fn extract_runtime(runtime: &EmbeddedRuntime) -> Result<PathBuf, ReplError> {
             removed.map_err(|error| failed(&staging, error))?;
         }
     }
+    rcmd::prune_extracted(&parent, runtime.key).map_err(|error| failed(&parent, error))?;
     Ok(library_path)
 }
 
