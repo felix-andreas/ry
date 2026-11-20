@@ -1,0 +1,129 @@
+[stdout]
+| [[1]]
+| [1] 3
+| attr(,"match.length")
+| [1] 4
+| 
+| [[2]]
+| [1] NA
+| attr(,"match.length")
+| [1] NA
+| 
+| [[3]]
+| [1] -1
+| attr(,"match.length")
+| [1] -1
+| 
+| [[1]]
+| [1] 3 3 7
+| attr(,"match.length")
+| [1] 5 4 1
+| 
+| [[1]]
+| [1] 3 3 0
+| attr(,"match.length")
+| [1] 4 4 0
+| 
+| [[1]]
+| [1] 3
+| attr(,"match.length")
+| [1] 3
+| 
+| [[1]]
+| [1] "lazy"
+| 
+| [[2]]
+| character(0)
+| 
+| [[3]]
+| character(0)
+| 
+| [[1]]
+| [1] "lazy" "laz"  "y"   
+| 
+| [[2]]
+| character(0)
+| 
+| [[3]]
+| [1] "LAZY" "LAZ"  "Y"   
+| 
+| [[1]]
+| [1] 2
+| attr(,"match.length")
+| [1] 3
+| 
+| [[1]]
+| [1] 2
+| attr(,"match.length")
+| [1] 3
+| 
+| [[1]]
+| [1] 2
+| attr(,"match.length")
+| [1] 1
+| attr(,"useBytes")
+| [1] TRUE
+| 
+| [1] "'pattern' must be a non-empty character string"
+| [[1]]
+| [1] "abcd" "ab"   "cd"  
+| 
+| [[2]]
+| [1] "xbcd" "xb"   "cd"  
+| 
+| [[3]]
+| [1] "aXcd" "aX"   "cd"  
+| 
+| [[4]]
+| character(0)
+| 
+| [[5]]
+| [1] "abcd" "ab"   "cd"  
+| 
+| [[6]]
+| [1] "bcd" "b"   "cd" 
+| 
+| [[1]]
+| [1] "bcd" "b"   "c"   "d"  
+| 
+| [[2]]
+| [1] "bcd" "b"   "c"   "d"  
+| 
+| [[3]]
+| [1] "aXcd" "a"    "Xc"   "d"   
+| 
+| [[4]]
+| [1] "ab" "a"  "b"  ""  
+| 
+| [[5]]
+| [1] "bcd" "b"   "c"   "d"  
+| 
+| [[6]]
+| [1] "bcd" "b"   "c"   "d"  
+| 
+| [[1]]
+| [1] "bcde" "b"    "cd"   "e"   
+| 
+| [[2]]
+| [1] "bcdy" "b"    "cd"   "y"   
+| 
+| [[3]]
+| [1] "Xcde" "X"    "cd"   "e"   
+| 
+| [[4]]
+| character(0)
+| 
+| [[5]]
+| [1] "bcde" "b"    "cd"   "e"   
+| 
+| [[6]]
+| [1] "bcd" "b"   "cd"  ""   
+| 
+[messages]
+[warnings]
+[errors]
+[value]
+list
+| list(c("bcde", "b", "cd", "e"), c("bcdy", "b", "cd", "y"), c("Xcde", 
+| "X", "cd", "e"), character(0), c("bcde", "b", "cd", "e"), c("bcd", 
+| "b", "cd", ""))

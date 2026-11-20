@@ -695,6 +695,39 @@ pub unsafe fn fisher_sim(call: &NativeCall<'_>) -> R<Sexp> {
     values::real_vector(&statistics)
 }
 
+/// `Smirnov_sim(sr, sc, B, twosided)`: for `B` random tables with row sums `sr` (the tie counts
+/// of the merged sample, in order) and the two sample sizes `sc` as column sums, the largest gap
+/// between the two samples' empirical distribution functions, `rsmirnov`'s deviates.
+pub unsafe fn smirnov_sim(call: &NativeCall<'_>) -> R<Sexp> {
+    if values::length(call.arg(1)) != 2 {
+        return Err(call.error("Smirnov statistic only defined for two groups"));
+    }
+    let margins = TableMargins::read(call, call.arg(0), call.arg(1))?;
+    let replicates = values::as_integer_scalar(call.arg(2)).max(0) as usize;
+    let two_sided = values::as_integer_scalar(call.arg(3)) != 0;
+    let log_factorials = log_factorials(margins.total);
+    let rows = margins.rows.len();
+    let [first, second] = [margins.columns[0] as f64, margins.columns[1] as f64];
+    let mut statistics = Vec::with_capacity(replicates);
+    random::get_rng_state()?;
+    for _ in 0..replicates {
+        let table = random_table(call, &margins, &log_factorials)?;
+        let (mut below_first, mut below_second, mut statistic) = (0, 0, 0.0f64);
+        for row in 0..rows {
+            below_first += table[row];
+            below_second += table[rows + row];
+            let gap = f64::from(below_first) / first - f64::from(below_second) / second;
+            let gap = if two_sided { gap.abs() } else { gap };
+            if gap > statistic {
+                statistic = gap;
+            }
+        }
+        statistics.push(statistic);
+    }
+    random::put_rng_state()?;
+    values::real_vector(&statistics)
+}
+
 /// `Fexact(x, pars, workspace, mult)`: the p-value of Fisher's exact test for an r x c table, the
 /// total probability of the tables with the observed margins that are at most `1 + 1e-7` times as
 /// likely as the observed one. It is always exact; `pars`'s hybrid approximation and the workspace

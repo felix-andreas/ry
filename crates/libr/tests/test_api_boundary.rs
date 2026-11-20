@@ -1,7 +1,8 @@
 //! The hot API functions' direct success paths (`boundary::direct`). A differential fuzz runs
 //! each operation on its direct path and again with every function forced down its slow path,
 //! under collection pressure, and requires the same result, the same error and the same
-//! attributes in the same order. An instruction-count test pins what one call of each costs.
+//! attributes in the same order. An instruction-count test pins what one call of each costs, and
+//! the environment accessors' errors are pinned to GNU R's.
 
 #![cfg(unix)]
 
@@ -80,6 +81,61 @@ fn fuzz_direct_paths_match_slow_paths() {
         }
         r.release_to(mark);
     });
+}
+
+/// The `...` and binding accessors reject what they were not asked for with GNU R's messages,
+/// and a string where a symbol belongs is an error, not a crash.
+#[test]
+fn environment_accessors_reject_the_wrong_kind_with_gnu_r_messages() {
+    let r = r_with_base();
+    rytest(&r);
+    r.eval_text(
+        "accessor <- function(op, env, x) .Call(\"rytest_env_accessor\", op, env, x)
+         values <- new.env()
+         values$b <- 1
+         values$... <- 1",
+    )
+    .expect("define the accessor");
+    let errors = [
+        (
+            "(function(...) { force(..1); accessor(0L, environment(), 1L) })(1 + 1)",
+            "not a delayed ... element",
+        ),
+        (
+            "(function(...) { force(..1); accessor(1L, environment(), 1L) })(1 + 1)",
+            "not a delayed ... element",
+        ),
+        (
+            "(function(...) accessor(2L, environment(), 1L))(1 + 1)",
+            "not a forced ... element",
+        ),
+        (
+            "(function(x) { force(x); accessor(4L, environment(), quote(x)) })(1 + 1)",
+            "not a delayed binding",
+        ),
+        (
+            "(function(x) accessor(5L, environment(), quote(x)))(1 + 1)",
+            "not a forced binding",
+        ),
+        (
+            "accessor(6L, values, quote(b))",
+            "no active binding for \"b\"",
+        ),
+        (
+            "accessor(6L, values, quote(unbound))",
+            "no binding for \"unbound\"",
+        ),
+        ("accessor(4L, values, \"b\")", "not a symbol"),
+        ("accessor(7L, values, \"b\")", "not a symbol"),
+    ];
+    for (code, message) in errors {
+        let error = r.eval_text(code).expect_err(code);
+        assert!(error.contains(message), "{code}: {error}");
+    }
+    let exists = r
+        .eval_text("accessor(3L, values, NULL)")
+        .expect("R_DotsExist");
+    assert_eq!(r.integers(exists), vec![0]);
 }
 
 /// A copy made on the slow path, so a direct path bug cannot reach both runs through their input.

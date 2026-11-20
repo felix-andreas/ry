@@ -4154,74 +4154,107 @@ fn reals_identical(left: f64, right: f64, flags: &IdenticalFlags) -> bool {
 
 /// `.Internal(merge(xinds, yinds, all.x, all.y))`: `merge.data.frame` codes each row by its key's
 /// position among the keys both sides share (0 for none), and this pairs the rows with equal
-/// codes, in order of the `x` row and then the `y` row. With `all.x` (`all.y`) the rows of that
-/// side that matched nothing are listed too.
+/// codes, in order of the code. With `all.x` (`all.y`) the rows of that side that matched
+/// nothing are listed too.
 unsafe fn do_merge(call: &Call<'_>) -> R<Sexp> {
     let x_codes = call.arg(0);
     let y_codes = call.arg(1);
-    if x_codes.kind() != SexpType::Integer || y_codes.kind() != SexpType::Integer {
-        return Err(call.error("invalid 'xinds' or 'yinds' argument"));
+    if x_codes.kind() != SexpType::Integer || length(x_codes) == 0 {
+        return Err(call.error("invalid 'xinds' argument"));
+    }
+    if y_codes.kind() != SexpType::Integer || length(y_codes) == 0 {
+        return Err(call.error("invalid 'yinds' argument"));
     }
     let all_x = as_logical_scalar(call.arg(2));
-    let all_y = as_logical_scalar(call.arg(3));
-    if all_x == NA_LOGICAL || all_y == NA_LOGICAL {
+    if all_x == NA_LOGICAL {
         return Err(call.error("'all.x' must be TRUE or FALSE"));
     }
-    let x = values::ints(x_codes);
-    let y = values::ints(y_codes);
-    // The y rows sorted by code, row order kept within a code, so each code's rows are one
-    // range found by binary search; the result vectors are sized by a counting pass, so nothing
-    // but the results grows with the matches.
-    let mut y_by_code: Vec<(i32, i32)> = y
-        .iter()
-        .enumerate()
-        .filter(|(_, code)| **code > 0)
-        .map(|(row, &code)| (code, row as i32 + 1))
-        .collect();
-    y_by_code.sort_unstable();
-    let matches_of = |code: i32| -> &[(i32, i32)] {
-        if code <= 0 {
-            return &[];
-        }
-        let start = y_by_code.partition_point(|&(other, _)| other < code);
-        let end = start + y_by_code[start..].partition_point(|&(other, _)| other == code);
-        &y_by_code[start..end]
-    };
-    let pairs: usize = x.iter().map(|&code| matches_of(code).len()).sum();
+    let all_y = as_logical_scalar(call.arg(3));
+    if all_y == NA_LOGICAL {
+        return Err(call.error("'all.y' must be TRUE or FALSE"));
+    }
+    // Both sides sorted by code with GNU R's Shell sort, which is not stable: the order of the
+    // rows within a code is the order `merge()` returns them in, so it must be the same sort.
+    let (x, x_rows_sorted) = shell_sort_with_rows(values::ints(x_codes));
+    let (y, y_rows_sorted) = shell_sort_with_rows(values::ints(y_codes));
+    let x_lone = x.partition_point(|&code| code <= 0);
+    let y_lone = y.partition_point(|&code| code <= 0);
+    // The rows of each code that both sides share, as a range of each sorted side.
+    let mut groups = Vec::new();
+    let (mut i, mut j) = (x_lone, y_lone);
+    while i < x.len() {
+        let code = x[i];
+        let x_end = i + x[i..].partition_point(|&other| other == code);
+        j += y[j..].partition_point(|&other| other < code);
+        let y_end = j + y[j..].partition_point(|&other| other == code);
+        groups.push((i..x_end, j..y_end));
+        i = x_end;
+        j = y_end;
+    }
+    let pairs: usize = groups.iter().map(|(xs, ys)| xs.len() * ys.len()).sum();
     let x_rows = alloc(SexpType::Integer, pairs)?;
+    crate::heap().root(x_rows);
     let y_rows = alloc(SexpType::Integer, pairs)?;
+    crate::heap().root(y_rows);
     {
         let x_slots = values::ints_mut(x_rows);
         let y_slots = values::ints_mut(y_rows);
         let mut next = 0;
-        for (row, &code) in x.iter().enumerate() {
-            for &(_, y_row) in matches_of(code) {
-                x_slots[next] = row as i32 + 1;
-                y_slots[next] = y_row;
-                next += 1;
+        for (xs, ys) in groups {
+            for x_index in xs {
+                for y_index in ys.clone() {
+                    x_slots[next] = x_rows_sorted[x_index];
+                    y_slots[next] = y_rows_sorted[y_index];
+                    next += 1;
+                }
             }
         }
     }
-    let alone = |codes: &[i32], wanted: bool| -> R<Sexp> {
-        if !wanted {
-            return Ok(nil());
-        }
-        let rows: Vec<i32> = codes
-            .iter()
-            .enumerate()
-            .filter(|(_, code)| **code <= 0)
-            .map(|(row, _)| row as i32 + 1)
-            .collect();
-        values::integer_vector(&rows)
+    let x_alone = if all_x == 1 {
+        values::integer_vector(&x_rows_sorted[..x_lone])?
+    } else {
+        nil()
     };
-    let x_alone = alone(x, all_x == 1)?;
-    let y_alone = alone(y, all_y == 1)?;
+    crate::heap().root(x_alone);
+    let y_alone = if all_y == 1 {
+        values::integer_vector(&y_rows_sorted[..y_lone])?
+    } else {
+        nil()
+    };
+    crate::heap().root(y_alone);
     values::named_list(&[
         ("xi", x_rows),
         ("yi", y_rows),
         ("x.alone", x_alone),
         ("y.alone", y_alone),
     ])
+}
+
+/// GNU R's `isort_with_index`: `codes` sorted by Shell sort with the gaps 1, 4, 13, ..., with
+/// the 1-based row each sorted code came from.
+fn shell_sort_with_rows(codes: &[i32]) -> (Vec<i32>, Vec<i32>) {
+    let mut sorted = codes.to_vec();
+    let mut rows: Vec<i32> = (1..=codes.len() as i32).collect();
+    let count = sorted.len();
+    let mut gap = 1;
+    while gap <= count / 9 {
+        gap = 3 * gap + 1;
+    }
+    while gap > 0 {
+        for start in gap..count {
+            let (code, row) = (sorted[start], rows[start]);
+            let mut index = start;
+            while index >= gap && sorted[index - gap] > code {
+                sorted[index] = sorted[index - gap];
+                rows[index] = rows[index - gap];
+                index -= gap;
+            }
+            sorted[index] = code;
+            rows[index] = row;
+        }
+        gap /= 3;
+    }
+    (sorted, rows)
 }
 
 #[cfg(test)]

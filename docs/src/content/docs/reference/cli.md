@@ -757,6 +757,10 @@ directory cannot hold a library (read-only, or mounted `noexec`), set `XDG_CACHE
 directory, or `RY_LIBR` to a runtime you placed yourself. A runtime beside `ry`, in `deps/`, or in
 `../lib/ry/` takes precedence over the built-in one.
 
+Each release extracts its own copies, and the cache keeps those of the three releases that
+extracted theirs most recently. When a release extracts its copies, it removes older ones, except
+those a running `ry` still uses.
+
 `ry R` and `--runtime gnu-r` run GNU R itself: the R in `R_HOME` if it is set, and otherwise the one
 `R RHOME` reports on your `PATH`. It must be built as a shared library, as the CRAN builds are, and
 on Windows it must be R 4.2 or newer.

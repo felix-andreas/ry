@@ -103,10 +103,24 @@ pub unsafe fn eval_symbol_reporting(
     if let Some(index) = dot_dot_index(symbol) {
         return dot_dot_value(index, env, lexical, reader);
     }
-    // The empty symbol is `R_MissingArg`, whose value in GNU R is itself, so evaluating it is
-    // a missing argument without a name rather than an unbound object.
+    // The empty symbol is `R_MissingArg`, which GNU R's base frame binds to itself, so
+    // evaluating it is a missing argument without a name where the lookup reaches base, and
+    // an unbound object below an environment that does not (rlang's empty quosure).
     let value = if symbol == missing_arg() {
-        symbol
+        let known = crate::heap().known();
+        let mut scope = env;
+        while scope != known.empty_env
+            && scope != known.global_env
+            && scope != known.base_env
+            && scope != known.base_namespace
+        {
+            scope = scope.enclosure();
+        }
+        if scope == known.empty_env {
+            unbound()
+        } else {
+            symbol
+        }
     } else {
         find_variable(symbol, env, true)?
     };

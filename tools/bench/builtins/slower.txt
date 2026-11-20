@@ -27,7 +27,6 @@ base::Ops.factor
 base::Ops.numeric_version
 base::Position
 base::R.Version
-base::R_compiled_by
 base::[
 base::[.AsIs
 base::[.Date
@@ -102,14 +101,12 @@ base::levels<-
 base::levels<-.factor
 base::lfactorial
 base::memCompress
-base::memDecompress
 base::mget
 base::months
 base::months.Date
 base::months.POSIXt
 base::oldClass<-
 base::order
-base::prmatrix
 base::psigamma
 base::pushBack
 base::qr.Q
@@ -192,7 +189,6 @@ stats::rhyper
 stats::rmultinom
 stats::rnbinom
 stats::rpois
-stats::rsmirnov
 stats::rstandard
 stats::rstudent
 stats::runmed

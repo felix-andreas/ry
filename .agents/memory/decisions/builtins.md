@@ -102,7 +102,14 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 
 - `strings::parse_bound` ports `tre_parse_bound`, so counts, settings and errors agree with GNU R, including `{,n}` allowing `n + 1` copies (`{,1}` exactly one) and an approximate bound needing copies (`{2+}`, `{1,2#}`) being "Invalid contents of {}".
 - A pattern with settings and no backreference compiles to `Matcher::Approximate` (`approximate::ApproximateRegex`), a port of `tre_tnfa_run_approx` over a position automaton; scopes are named groups (`SCOPE_GROUP`) that become parameter changes on transitions. With a backreference TRE's backtracker ignores the settings, and so does ry.
-- Observed details: nesting depth is counted in `{` order, and more than three scopes trip TRE's `value <= 3` assertion only when a match reaches the fourth; an unset cost is free inside its scope yet counts 1 overall; ties go to the earlier start; minimal repetition is ignored; later `gsub`/`gregexpr` searches use `REG_NOTBOL`. `strings__tre_bounds` pins it.
+- Observed details: nesting depth is counted in `{` order, and more than three scopes trip TRE's `value <= 3` assertion only when a match reaches the fourth; an unset cost is free inside its scope yet counts 1 overall; ties go to the earlier start, then by the POSIX subexpression rule over the capture slots (the first differing group starts earlier and ends later), which reproduces TRE's tag order on `aregexec("(lay)(sy)", "1 lazy", max.distance = 2)` (`"laz"`, `"y"`); minimal repetition is ignored; later `gsub`/`gregexpr` searches use `REG_NOTBOL`. `strings__tre_bounds` pins it.
+
+## aregexec and compilerVersion
+
+**Status:** built.
+
+- `aregexec` compiles its pattern as an `ApproximateRegex` and searches with whole-pattern parameters from `max.distance` and `costs`, ported from `amatch_regaparams`, which swaps two bounds: R's `ins` bound limits TRE's deletions and `del` its insertions. A bound below 1 is a fraction of the pattern length, rounded up. `strings__aregexec` pins it.
+- `.Internal(compilerVersion())` (behind `tools:::R_compiled_by()`) gives `c(C = "", Fortran = "")`: ry's runtime is Rust, built by neither compiler, and the empty strings keep the names and type that callers index by.
 
 ## TRE minimal repetitions over alternatives
 

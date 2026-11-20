@@ -18,10 +18,67 @@ use {
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("print.default", 3, do_print_default).invisible(),
     internal("print.function", 3, do_print_function).invisible(),
-    internal("prmatrix", 6, |call| {
-        Err(call.error("prmatrix is not supported"))
-    }),
+    internal("prmatrix", 6, do_prmatrix).invisible(),
 ];
+
+/// `.Internal(prmatrix(x, rowlab, collab, quote, right, na.print))`: `x` printed as a matrix with
+/// `rowlab` and `collab` as its labels, and without the names of its dimnames.
+unsafe fn do_prmatrix(call: &Call<'_>) -> R<Sexp> {
+    let x = call.arg(0);
+    let (rows, cols) = match values::dims(x).as_deref() {
+        Some(&[rows, cols]) => (rows, cols),
+        _ => return Err(call.error("invalid 'x' argument")),
+    };
+    // GNU R's `printMatrix` uses the first labels of a longer vector.
+    let labels = |value: Sexp, what: &str, count: usize| -> R<Sexp> {
+        if length(value) == 0 {
+            Ok(nil())
+        } else if value.kind() != SexpType::String {
+            Err(call.error(format!("invalid {what} labels")))
+        } else if length(value) < count {
+            Err(call.error(format!("too few {what} labels")))
+        } else if length(value) > count {
+            let strings: Vec<String> = (0..count)
+                .map(|index| {
+                    values::string_at(value, index)
+                        .map(|text| text.into_owned())
+                        .unwrap_or_default()
+                })
+                .collect();
+            values::string_vector(&strings)
+        } else {
+            Ok(value)
+        }
+    };
+    let row_labels = labels(call.arg(1), "row", rows)?;
+    crate::heap().root(row_labels);
+    let column_labels = labels(call.arg(2), "column", cols)?;
+    crate::heap().root(column_labels);
+    let mut options = PrintOptions::defaults(call.env()?);
+    options.quote = values::as_integer_scalar(call.arg(3)) != 0;
+    options.right = values::as_integer_scalar(call.arg(4)) != 0;
+    let na_print = call.arg(5);
+    if na_print != nil() {
+        if na_print.kind() != SexpType::String || length(na_print) == 0 {
+            return Err(call.error("invalid 'na.print' specification"));
+        }
+        let text = values::first_string(na_print)
+            .map(|text| text.into_owned())
+            .unwrap_or_default();
+        options.na_string = text.clone();
+        options.na_string_noquote = text;
+    }
+    let shown = values::shallow_duplicate(x)?;
+    crate::heap().root(shown);
+    let dimnames = if row_labels == nil() && column_labels == nil() {
+        nil()
+    } else {
+        values::list_vector(&[row_labels, column_labels])?
+    };
+    values::set_attr(shown, symbols().dimnames, dimnames)?;
+    print_matrix(shown, rows, cols, &options, true)?;
+    Ok(x)
+}
 
 /// Print settings, from `print.default`'s arguments and the options.
 #[derive(Clone)]

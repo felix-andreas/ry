@@ -33,6 +33,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("agrep", 8, |call| unsafe { agrep(call, false) }),
     internal("agrepl", 8, |call| unsafe { agrep(call, true) }),
     internal("adist", 8, |call| unsafe { adist(call) }),
+    internal("aregexec", 7, |call| unsafe { aregexec(call) }),
 ];
 
 /// `.Internal(agrep(pattern, x, ignore.case, value, costs, bounds, useBytes, fixed))`, and
@@ -419,6 +420,124 @@ fn align(
         distance,
         operations,
     }
+}
+
+/// `.Internal(aregexec(pattern, text, bounds, costs, ignore.case, fixed, useBytes))`: for each
+/// text, the start and the length of the best approximate match and of each group in it, as
+/// TRE's `regaexec` finds them with `bounds` and `costs` applying to the whole pattern. A group
+/// the match leaves unset starts at 0 with length 0, and a text without a match gets -1.
+unsafe fn aregexec(call: &Call<'_>) -> R<Sexp> {
+    let pattern = call.arg(0);
+    let text = call.arg(1);
+    let mut ignore_case = flag(call.arg(4));
+    let fixed = flag(call.arg(5));
+    let use_bytes = flag(call.arg(6));
+    if fixed && ignore_case {
+        warning("argument 'ignore.case = TRUE' will be ignored")?;
+        ignore_case = false;
+    }
+    if pattern.kind() != SexpType::String || length(pattern) < 1 {
+        return Err(call.error("invalid 'pattern' argument"));
+    }
+    let Some(pattern_text) = subject_at(pattern, 0, use_bytes) else {
+        return Err(call.error("invalid 'pattern' argument"));
+    };
+    if length(pattern) > 1 {
+        warning("argument 'pattern' has length > 1 and only the first element will be used")?;
+    }
+    if text.kind() != SexpType::String {
+        return Err(call.error("invalid 'text' argument"));
+    }
+    if pattern_text.is_empty() {
+        return Err(call.error("'pattern' must be a non-empty character string"));
+    }
+    let (expression, scopes) = if fixed {
+        (regex_syntax::escape(&pattern_text), Vec::new())
+    } else {
+        let translated = translate(&pattern_text);
+        if let Some(problem) = translated.problem {
+            return Err(call.error(format!("regcomp error: '{problem}'")));
+        }
+        (translated.pattern, translated.scopes)
+    };
+    let regex = ApproximateRegex::compile(&expression, &scopes, ignore_case)
+        .map_err(|reason| call.error(format!("regcomp error: '{reason}'")))?;
+    let params = whole_pattern_params(call.arg(2), call.arg(3), pattern_text.chars().count())?;
+    let match_length = values::install("match.length")?;
+    let count = length(text);
+    let result = alloc(SexpType::List, count)?;
+    crate::heap().root(result);
+    for index in 0..count {
+        let charsxp = text.element(index);
+        let (starts, lengths) = if charsxp == values::na_string() {
+            (vec![NA_INTEGER], vec![NA_INTEGER])
+        } else {
+            let characters: Vec<char> = if use_bytes {
+                charsxp
+                    .bytes()
+                    .iter()
+                    .map(|&byte| char::from(byte))
+                    .collect()
+            } else {
+                values::char_str(charsxp).chars().collect()
+            };
+            match regex.search_with(&characters, false, &params)? {
+                Some((start, end, groups)) => std::iter::once(Some((start, end)))
+                    .chain(groups)
+                    .map(|span| match span {
+                        Some((start, end)) => (start as i32 + 1, (end - start) as i32),
+                        None => (0, 0),
+                    })
+                    .unzip(),
+                None => (vec![-1], vec![-1]),
+            }
+        };
+        let found = starts.len() > 1 || starts[0] > 0;
+        let positions = values::integer_vector(&starts)?;
+        set_elt(result, index, positions);
+        set_attr(positions, match_length, values::integer_vector(&lengths)?)?;
+        if use_bytes && found {
+            set_attr(
+                positions,
+                values::install("useBytes")?,
+                values::scalar_bool(true)?,
+            )?;
+        }
+    }
+    Ok(result)
+}
+
+/// GNU R's `amatch_regaparams`: the edit costs, and the bounds of `.amatch_bounds` (the cost,
+/// insertions, deletions, substitutions and all edits, `NA` for none), a bound below 1 being a
+/// fraction of the pattern length (times the largest cost, for the cost) rounded up. GNU R reads
+/// the insertion bound as TRE's bound on deletions and the deletion bound as its bound on
+/// insertions, and so does this.
+unsafe fn whole_pattern_params(bounds: Sexp, costs: Sexp, pattern_length: usize) -> R<Params> {
+    if costs.kind() != SexpType::Integer || length(costs) < 3 || length(bounds) < 5 {
+        return Err(error("invalid 'costs' or 'bounds' argument"));
+    }
+    let cost_at = |index: usize| i64::from(values::ints(costs)[index]);
+    let (insertion, deletion, substitution) = (cost_at(0), cost_at(1), cost_at(2));
+    let largest = insertion.max(deletion).max(substitution) as f64;
+    let length = pattern_length as f64;
+    let bound_at = |index: usize, scale: f64| -> i64 {
+        let bound = real_at(bounds, index);
+        if is_na_real(bound) {
+            return UNBOUNDED;
+        }
+        let bound = if bound < 1.0 { bound * scale } else { bound };
+        bound.ceil().clamp(f64::from(i32::MIN), UNBOUNDED as f64) as i64
+    };
+    Ok(Params {
+        insertion_cost: Some(insertion),
+        deletion_cost: Some(deletion),
+        substitution_cost: Some(substitution),
+        cost_limit: bound_at(0, length * largest),
+        deletions: bound_at(1, length),
+        insertions: bound_at(2, length),
+        substitutions: bound_at(3, length),
+        edits: bound_at(4, length),
+    })
 }
 
 /// The edit costs and the bounds a match must stay within.
@@ -930,8 +1049,8 @@ pub(crate) struct ApproximateSettings {
 /// as transitions.
 ///
 /// Two of TRE's accidents are not reproduced. Nested scopes combine their settings in path
-/// order, where TRE can read uninitialized memory, and ties between equally costly paths go to
-/// the earlier start alone, where TRE compares every capture tag.
+/// order, where TRE can read uninitialized memory, and ties between equally costly paths follow
+/// the POSIX subexpression rule over the capture slots, where TRE compares the tags it places.
 pub(crate) struct ApproximateRegex {
     positions: Vec<Position>,
     initial: Vec<Transition>,
@@ -1000,7 +1119,7 @@ const EDITS: usize = 4;
 
 /// The settings in force on a path: TRE's `regaparams_t`.
 #[derive(Clone, Copy)]
-struct Params {
+pub(crate) struct Params {
     insertion_cost: Option<i64>,
     deletion_cost: Option<i64>,
     substitution_cost: Option<i64>,
@@ -1107,6 +1226,17 @@ impl ApproximateRegex {
     /// one that starts first, then the one that ends last. `not_bol` keeps `^` from matching at
     /// the start, as `REG_NOTBOL` does for the searches after the first in `gsub`.
     pub(crate) fn search(&self, text: &[char], not_bol: bool) -> R<Option<ApproximateMatch>> {
+        self.search_with(text, not_bol, &DEFAULT_PARAMS)
+    }
+
+    /// [`search`](Self::search) as TRE's `regaexec` runs it, with `defaults` as the settings
+    /// of the whole pattern, which its approximate scopes start from.
+    pub(crate) fn search_with(
+        &self,
+        text: &[char],
+        not_bol: bool,
+        defaults: &Params,
+    ) -> R<Option<ApproximateMatch>> {
         let count = self.positions.len();
         let slot_count = 2 * self.group_count;
         let mut reach = vec![UNREACHED; count];
@@ -1138,10 +1268,11 @@ impl ApproximateRegex {
                     *entry = Reach {
                         at: here,
                         start: here,
+                        params: *defaults,
                         ..UNREACHED
                     };
                     if let Some(settings) = &transition.settings {
-                        apply_settings(entry, settings)?;
+                        apply_settings(entry, settings, defaults)?;
                     }
                     let target_slots = &mut slots_next[target * slot_count..][..slot_count];
                     target_slots.fill(-1);
@@ -1155,7 +1286,7 @@ impl ApproximateRegex {
             }
             // An insertion skips a text character and stays at the same position.
             for id in 0..count {
-                let source = reach[id];
+                let source = &reach[id];
                 if source.at != previous {
                     continue;
                 }
@@ -1169,14 +1300,22 @@ impl ApproximateRegex {
                     continue;
                 }
                 let total = if depth > 0 {
-                    source.costs[0][COST] + source.params.insertion_cost.unwrap_or(DEFAULT_COST)
+                    source.costs[0][COST]
+                        + source
+                            .params
+                            .insertion_cost
+                            .or(defaults.insertion_cost)
+                            .unwrap_or(DEFAULT_COST)
                 } else {
                     cost
                 };
                 if reach_next[id].at == here && total >= reach_next[id].costs[0][COST] {
                     continue;
                 }
-                let mut entry = Reach { at: here, ..source };
+                let mut entry = Reach {
+                    at: here,
+                    ..*source
+                };
                 count_edit(&mut entry, depth, cost, total, INSERTIONS, 1);
                 reach_next[id] = entry;
                 slots_next[id * slot_count..][..slot_count]
@@ -1198,24 +1337,38 @@ impl ApproximateRegex {
                     continue;
                 }
                 let total = if depth > 0 {
-                    source.costs[0][COST] + source.params.deletion_cost.unwrap_or(DEFAULT_COST)
+                    source.costs[0][COST]
+                        + source
+                            .params
+                            .deletion_cost
+                            .or(defaults.deletion_cost)
+                            .unwrap_or(DEFAULT_COST)
                 } else {
                     cost
                 };
                 for transition in &self.positions[id].transitions {
                     let target = transition.target;
-                    if assertions_fail(transition.assertions, text, position, not_bol)
-                        || loses(&reach_next[target], here, total, source.start)
-                    {
+                    if assertions_fail(transition.assertions, text, position, not_bol) {
                         continue;
                     }
                     path_slots.copy_from_slice(&slots_next[id * slot_count..][..slot_count]);
                     for &slot in &transition.saves {
                         path_slots[slot] = here;
                     }
+                    let target_slots = &slots_next[target * slot_count..][..slot_count];
+                    if loses(
+                        &reach_next[target],
+                        here,
+                        total,
+                        source.start,
+                        &path_slots,
+                        target_slots,
+                    ) {
+                        continue;
+                    }
                     let mut entry = Reach { at: here, ..source };
                     if let Some(settings) = &transition.settings {
-                        apply_settings(&mut entry, settings)?;
+                        apply_settings(&mut entry, settings, defaults)?;
                     }
                     // TRE takes the new settings but stays at the nesting level it came from.
                     entry.depth = depth;
@@ -1238,7 +1391,7 @@ impl ApproximateRegex {
             std::mem::swap(&mut slots, &mut slots_next);
             // Each reached position consumes the character, exactly or as a substitution.
             for id in 0..count {
-                let source = reach[id];
+                let source = &reach[id];
                 if source.at < previous {
                     continue;
                 }
@@ -1260,7 +1413,11 @@ impl ApproximateRegex {
                     }
                     let total = if depth > 0 {
                         source.costs[0][COST]
-                            + source.params.substitution_cost.unwrap_or(DEFAULT_COST)
+                            + source
+                                .params
+                                .substitution_cost
+                                .or(defaults.substitution_cost)
+                                .unwrap_or(DEFAULT_COST)
                     } else {
                         cost
                     };
@@ -1268,18 +1425,30 @@ impl ApproximateRegex {
                 };
                 for transition in &self.positions[id].transitions {
                     let target = transition.target;
-                    if assertions_fail(transition.assertions, text, position, not_bol)
-                        || loses(&reach_next[target], here, total, source.start)
-                    {
+                    if assertions_fail(transition.assertions, text, position, not_bol) {
                         continue;
                     }
                     path_slots.copy_from_slice(&slots[id * slot_count..][..slot_count]);
                     for &slot in &transition.saves {
                         path_slots[slot] = here;
                     }
-                    let mut entry = Reach { at: here, ..source };
+                    let target_slots = &slots_next[target * slot_count..][..slot_count];
+                    if loses(
+                        &reach_next[target],
+                        here,
+                        total,
+                        source.start,
+                        &path_slots,
+                        target_slots,
+                    ) {
+                        continue;
+                    }
+                    let mut entry = Reach {
+                        at: here,
+                        ..*source
+                    };
                     if let Some(settings) = &transition.settings {
-                        apply_settings(&mut entry, settings)?;
+                        apply_settings(&mut entry, settings, defaults)?;
                     }
                     count_edit(&mut entry, depth, cost, total, SUBSTITUTIONS, error);
                     reach_next[target] = entry;
@@ -1326,12 +1495,35 @@ impl Best {
     }
 }
 
-/// Whether a path costing `total` from a match start of `start` loses to the entry already at
-/// the target: a costlier path loses, and so does an equally costly one that starts no earlier.
-fn loses(existing: &Reach, here: i64, total: i64, start: i64) -> bool {
-    existing.at == here
-        && (total > existing.costs[0][COST]
-            || (total == existing.costs[0][COST] && start >= existing.start))
+/// Whether a path costing `total` from a match start of `start`, with capture slots `slots`,
+/// loses to the entry already at the target: a costlier path loses, and so does an equally
+/// costly one that starts later. Between equal starts the POSIX subexpression rule decides, as
+/// TRE's tag order does: the first group that differs should start earlier and end later.
+fn loses(
+    existing: &Reach,
+    here: i64,
+    total: i64,
+    start: i64,
+    slots: &[i64],
+    existing_slots: &[i64],
+) -> bool {
+    if existing.at != here {
+        return false;
+    }
+    let known = existing.costs[0][COST];
+    if total != known {
+        return total > known;
+    }
+    if start != existing.start {
+        return start > existing.start;
+    }
+    for (index, (&new, &old)) in slots.iter().zip(existing_slots).enumerate() {
+        if new != old {
+            let is_start = index % 2 == 0;
+            return if is_start { new > old } else { new < old };
+        }
+    }
+    true
 }
 
 /// Charges an edit of kind `kind` (`count` of them, 0 or 1) at nesting level `depth`, whose cost
@@ -1351,7 +1543,11 @@ fn count_edit(entry: &mut Reach, depth: usize, cost: i64, total: i64, kind: usiz
 /// (TRE stores the unset marker as the cost), while they still count at the default cost
 /// overall. TRE asserts that settings nest at most three deep, and R reports a failed
 /// assertion as an error.
-fn apply_settings(entry: &mut Reach, settings: &[Setting; SETTING_COUNT]) -> R<()> {
+fn apply_settings(
+    entry: &mut Reach,
+    settings: &[Setting; SETTING_COUNT],
+    defaults: &Params,
+) -> R<()> {
     let depth = match settings[DEPTH] {
         Setting::Value(depth) => depth.max(0) as usize,
         Setting::Unset | Setting::Default => entry.depth,
@@ -1376,44 +1572,40 @@ fn apply_settings(entry: &mut Reach, settings: &[Setting; SETTING_COUNT]) -> R<(
     params.insertion_cost = cost(
         settings[COST_INSERTION],
         params.insertion_cost,
-        DEFAULT_PARAMS.insertion_cost,
+        defaults.insertion_cost,
     );
     params.deletion_cost = cost(
         settings[COST_DELETION],
         params.deletion_cost,
-        DEFAULT_PARAMS.deletion_cost,
+        defaults.deletion_cost,
     );
     params.substitution_cost = cost(
         settings[COST_SUBSTITUTION],
         None,
-        DEFAULT_PARAMS.substitution_cost,
+        defaults.substitution_cost,
     );
     let limit = |setting: Setting, current: i64, default: i64| match setting {
         Setting::Default => default,
         Setting::Unset => current,
         Setting::Value(value) => value,
     };
-    params.cost_limit = limit(
-        settings[COST_LIMIT],
-        params.cost_limit,
-        DEFAULT_PARAMS.cost_limit,
-    );
+    params.cost_limit = limit(settings[COST_LIMIT], params.cost_limit, defaults.cost_limit);
     params.insertions = limit(
         settings[MOST_INSERTIONS],
         params.insertions,
-        DEFAULT_PARAMS.insertions,
+        defaults.insertions,
     );
     params.deletions = limit(
         settings[MOST_DELETIONS],
         params.deletions,
-        DEFAULT_PARAMS.deletions,
+        defaults.deletions,
     );
     params.substitutions = limit(
         settings[MOST_SUBSTITUTIONS],
         params.substitutions,
-        DEFAULT_PARAMS.substitutions,
+        defaults.substitutions,
     );
-    params.edits = limit(settings[MOST_EDITS], params.edits, DEFAULT_PARAMS.edits);
+    params.edits = limit(settings[MOST_EDITS], params.edits, defaults.edits);
     Ok(())
 }
 

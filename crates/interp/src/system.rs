@@ -73,8 +73,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("isdebugged", 1, |call| unsafe {
         scalar_bool(debugged_function(call)?.has_gp(gp::CLOSURE_DEBUG))
     }),
-    internal("debugOnOff", 1, |_| unsafe { scalar_bool(false) }),
-    internal("traceOnOff", 1, |call| unsafe { do_trace_on_off(call) }),
+    internal("debugOnOff", 1, |call| unsafe {
+        toggle_state(call, &DEBUGGING, "debuggingState")
+    }),
+    internal("traceOnOff", 1, |call| unsafe {
+        toggle_state(call, &TRACING, "tracingState")
+    }),
     internal("browserText", 1, |call| {
         Err(call.error("no browser context to query"))
     }),
@@ -220,10 +224,22 @@ pub const BUILTINS: &[BuiltinDef] = &[
         scalar_integer(std::process::id() as i32)
     }),
     internal("Sys.info", 0, do_sys_info),
+    // `R_compiled_by()`: GNU R reports the C and Fortran compilers that built it, and "" for
+    // one it does not know. ry's runtime is Rust, built by neither.
+    internal("compilerVersion", 0, |_| unsafe {
+        let result = values::string_vector(&["", ""])?;
+        crate::heap().root(result);
+        values::set_attr(
+            result,
+            symbols().names,
+            values::string_vector(&["C", "Fortran"])?,
+        )?;
+        Ok(result)
+    }),
     internal("Sys.setlocale", 2, do_sys_setlocale),
     internal("Sys.getlocale", 1, do_sys_getlocale),
     internal("l10n_info", 0, do_l10n_info),
-    internal("Sys.localeconv", 0, |_| unsafe { values::named_list(&[]) }),
+    internal("Sys.localeconv", 0, |_| unsafe { do_sys_localeconv() }),
     internal("Sys.sleep", 1, |call| unsafe {
         {
             let seconds = values::as_real_scalar(call.arg(0));
@@ -5125,6 +5141,12 @@ thread_local! {
     /// Whether `trace()`'s inserted calls run. `.doTrace` turns it off while a tracer runs,
     /// so a tracer that calls the traced function does not recurse.
     static TRACING: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// Whether a function `debug()` flagged stops at its entry: `debuggingState()`.
+    static DEBUGGING: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+pub(crate) fn debugging_enabled() -> bool {
+    DEBUGGING.with(|debugging| debugging.get())
 }
 
 /// The function `debug()` and its relatives flag: their first argument, or the function a
@@ -5141,19 +5163,93 @@ unsafe fn debugged_function(call: &Call<'_>) -> R<Sexp> {
     }
 }
 
-/// `.Internal(traceOnOff(state))`: the previous tracing state, after setting it to `state`
-/// unless that is `NULL`.
-unsafe fn do_trace_on_off(call: &Call<'_>) -> R<Sexp> {
+/// `.Internal(traceOnOff(state))` and `.Internal(debugOnOff(state))`: the previous state,
+/// after setting it to `state` unless that is `NULL`.
+unsafe fn toggle_state(
+    call: &Call<'_>,
+    cell: &'static std::thread::LocalKey<std::cell::Cell<bool>>,
+    name: &str,
+) -> R<Sexp> {
     let state = call.arg(0);
-    let previous = TRACING.with(|tracing| tracing.get());
+    let previous = cell.with(|current| current.get());
     if state != nil() {
         let value = values::as_logical_scalar(state);
         if value == NA_LOGICAL {
-            return Err(call.error("Value for 'tracingState' must be TRUE or FALSE"));
+            return Err(call.error(format!("Value for '{name}' must be TRUE or FALSE")));
         }
-        TRACING.with(|tracing| tracing.set(value != 0));
+        cell.with(|current| current.set(value != 0));
     }
     scalar_bool(previous)
+}
+
+/// `Sys.localeconv()`: the C library's `localeconv` for the current locale, its numbers as
+/// strings, where `127` (`CHAR_MAX`) means the locale does not say.
+unsafe fn do_sys_localeconv() -> R<Sexp> {
+    #[cfg(unix)]
+    let values = {
+        let conventions = &*libc::localeconv();
+        let text = |field: *const libc::c_char| {
+            if field.is_null() {
+                String::new()
+            } else {
+                std::ffi::CStr::from_ptr(field)
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        };
+        let number = |field: libc::c_char| (field as i32).to_string();
+        [
+            text(conventions.decimal_point),
+            text(conventions.thousands_sep),
+            text(conventions.grouping),
+            text(conventions.int_curr_symbol),
+            text(conventions.currency_symbol),
+            text(conventions.mon_decimal_point),
+            text(conventions.mon_thousands_sep),
+            text(conventions.mon_grouping),
+            text(conventions.positive_sign),
+            text(conventions.negative_sign),
+            number(conventions.int_frac_digits),
+            number(conventions.frac_digits),
+            number(conventions.p_cs_precedes),
+            number(conventions.p_sep_by_space),
+            number(conventions.n_cs_precedes),
+            number(conventions.n_sep_by_space),
+            number(conventions.p_sign_posn),
+            number(conventions.n_sign_posn),
+        ]
+    };
+    // The libc crate declares no `localeconv` for Windows, so it answers for the C locale.
+    #[cfg(not(unix))]
+    let values: [String; 18] = std::array::from_fn(|index| match index {
+        0 => ".".to_owned(),
+        10.. => "127".to_owned(),
+        _ => String::new(),
+    });
+    let result = values::string_vector(&values)?;
+    crate::heap().root(result);
+    let names = values::string_vector(&[
+        "decimal_point",
+        "thousands_sep",
+        "grouping",
+        "int_curr_symbol",
+        "currency_symbol",
+        "mon_decimal_point",
+        "mon_thousands_sep",
+        "mon_grouping",
+        "positive_sign",
+        "negative_sign",
+        "int_frac_digits",
+        "frac_digits",
+        "p_cs_precedes",
+        "p_sep_by_space",
+        "n_cs_precedes",
+        "n_sep_by_space",
+        "p_sign_posn",
+        "n_sign_posn",
+    ])?;
+    values::set_attr(result, symbols().names, names)?;
+    Ok(result)
 }
 
 /// `Sys.glob` calls the C library's `glob`, as GNU R does, so wildcards work in every path
