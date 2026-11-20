@@ -47,7 +47,7 @@ The goal, the mandate and the benchmark are in `AGENTS.md`. On top of them:
 
 No release unless the user asks (user). Fable sessions wait for the weekly limit until Mon Nov 23 10:00 UTC; until then at most two Opus high sessions run, on work that does not conflict (user).
 
-- session_0111kWqCHzz5KgPTQQvkUSXS (Opus high, checker): #684, #686, #687 merged. Now: editor latency at 300k lines, `df$` completion on base data.frames, generic inlay hints, strict-mode friction, remaining CRAN false errors.
+- session_0111kWqCHzz5KgPTQQvkUSXS (Opus high, checker): #684, #686, #687, #688 merged. Now (branch feat/type-system-adoption): backlog "adoption reviews", "second simulated-user round", "semantics" and "diagnostic wording" sections.
 - session_0111kWqE86VPq98yVE2JgLVm (Opus high, kernels and package correctness): #685 merged; main hotfixes f444e23 (unsafe baseline), 8383db7 (C locale in a scenario). Now: arima0/ar.mle/ppr ports, TRE match fixes, base kernel correctness, locale-fallback warning. Stays out of the JIT, calls and semantics/ide.
 - Paused until Mon Nov 23 (trigger trig_01SZ4mDi9FXTEzqTdFKB7yEQ resumes them and re-enables check-in trig_01LuX97P7ZbAg4TRxYu7c1tu): session_0111kWqEyHh2WBFnP93ZvPEM (JIT), session_0111kWqD8G8GVR8fbHetepcc (calls), session_0111kWqDs8aQ1MWFmKMxX9HQ (fuzz, IDE oracles).
 
