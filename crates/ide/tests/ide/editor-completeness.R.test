@@ -182,7 +182,7 @@ action: Add inferred type annotations for the whole file
   edit 24..24 -> ": T"
   edit 32..32 -> ": U"
   edit 38..38 -> " -> T"
-completion (81): second = , se.contrast, sealClass, search, searchpaths, seek, seek.connection, segments
+completion (85): second = , se.contrast, sealClass, search, searchpaths, seek, seek.connection, segments
 hint @18<T, U>
 hint @24: T
 hint @32: U
@@ -411,7 +411,7 @@ action: Add inferred type annotation for `outer`
   edit 19..19 -> " -> double"
 action: Add inferred type annotations for the whole file
   edit 19..19 -> " -> double"
-completion (73): by, break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot, barplot.default
+completion (74): by, break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot, barplot.default
 hint @19 -> double
 hint @43: T
 hint @47: T
@@ -460,7 +460,7 @@ references: none
 rename: none
 signature: fn(...: Any) -> list[named: Unknown]
 parameters: [...: Any]
-completion (47): fifo, file, file.access, file.append, file.choose, file.copy, file.create, file.edit
+completion (48): fifo, file, file.access, file.append, file.choose, file.copy, file.create, file.edit
 
 #---- qualified_library_name_navigates_to_its_stub
 x <- base::past$0e("a", "b")
