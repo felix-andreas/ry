@@ -89,7 +89,7 @@ third: Unknown
 f <- function(x) x + 1L
 #++++
 typing mode: Strict
-f: <T: numeric> fn(x: T) -> T
+f: <T: arithmetic> fn(x: T) -> T
 
 #---- last_directive_wins
 # typing: strict
@@ -177,8 +177,8 @@ fact: fn(n: integer) -> integer
 even <- function(n) if (n == 0L) TRUE else odd(n - 1L)
 odd <- function(n) if (n == 0L) FALSE else even(n - 1L)
 #++++
-even: <T: numeric> fn(n: T) -> logical
-odd: <T: numeric> fn(n: T) -> logical
+even: <T: arithmetic> fn(n: T) -> logical
+odd: <T: arithmetic> fn(n: T) -> logical
 
 #---- annotated_recursion_has_no_origin
 #: fn(n: integer) -> integer
@@ -208,9 +208,7 @@ earliest <- function() {
   min(d)
 }
 #++++
-earliest: fn() -> Any
-367..373 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
-
+earliest: fn() -> Date
 
 #---- an_overload_left_ambiguous_by_a_declared_any_is_any
 # Every `sum` candidate accepts an `Any`, and they disagree on the result. The `Any` is the

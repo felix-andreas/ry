@@ -237,11 +237,11 @@ type its body allows, which the editor shows on hover:
 
 ```r
 identity2 <- function(x) x           # <T> fn(x: T) -> T
-increment <- function(x) x + 1L      # <T: numeric> fn(x: T) -> T
+increment <- function(x) x + 1L      # <T: arithmetic> fn(x: T) -> T
 ```
 
-`T` is any type, and `T: numeric` is `integer` or `double`, so `increment(2.5)` is a `double` and
-`increment("a")` is an error. Argument names are part of a function's type, because R matches
+`T` is any type, and `T: arithmetic` is `integer`, `double` or a class with arithmetic such as
+`Date`, so `increment(2.5)` is a `double` and `increment("a")` is an error. Argument names are part of a function's type, because R matches
 arguments by name as often as by position:
 
 ```r

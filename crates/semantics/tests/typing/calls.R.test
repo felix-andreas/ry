@@ -152,7 +152,7 @@ g <- function(x, total) {
 }
 f <- function() g(1)
 #++++
-g: <T: numeric, U> fn(x: T, [total]: U) -> double
+g: <T: arithmetic, U> fn(x: T, [total]: U) -> double
 f: fn() -> double
 
 #---- a_formal_assigned_on_one_branch_only_may_be_omitted
@@ -172,7 +172,7 @@ g <- function(x, flag) {
 }
 f <- function() g(flag = FALSE)
 #++++
-g: <T: numeric> fn(x: T, flag: logical) -> Unknown
+g: <T: arithmetic> fn(x: T, flag: logical) -> Unknown
 f: Unknown
 70..71 error[type-mismatch] this call leaves out `x`, which the function requires
 
@@ -220,7 +220,7 @@ g <- function(x, n) {
 }
 f <- function() g(n = 2)
 #++++
-g: <T, U: numeric> fn([x]: T, n: U) -> Unknown
+g: <T, U: arithmetic> fn([x]: T, n: U) -> Unknown
 f: fn() -> Unknown
 
 #---- a_super_assignment_does_not_assign_the_formal
@@ -912,9 +912,9 @@ mixed_apply <- invoke(mirror)
 bad <- mixed_apply("ok")
 ok <- mixed_apply(2L)
 #++++
-invoke: <T: numeric, U> fn(f: fn(T) -> U) -> fn(x: T) -> U
+invoke: <T: arithmetic, U> fn(f: fn(T) -> U) -> fn(x: T) -> U
 mirror: <T> fn(x: T) -> T
-mixed_apply: <T: numeric> fn(x: T) -> T
+mixed_apply: <T: arithmetic> fn(x: T) -> T
 bad: Unknown
 ok: integer
 117..121 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
@@ -932,8 +932,8 @@ larger <- function(x, y) pmax(x, y)
 whole <- magnitude(-1L)
 word <- magnitude("a")
 #++++
-magnitude: <T: numeric> fn(x: T) -> T
-larger: <T: numeric, U: numeric> fn(x: T, y: U) -> Any
+magnitude: <T: arithmetic> fn(x: T) -> T
+larger: <T: arithmetic, U: arithmetic> fn(x: T, y: U) -> Any
 whole: integer
 word: Unknown
 234..237 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
@@ -947,7 +947,7 @@ empty <- running(NULL)
 frame <- magnitude(data.frame(a = 1))
 negated <- -data.frame(a = 1)
 #++++
-magnitude: <T: numeric> fn(x: T) -> T
+magnitude: <T: arithmetic> fn(x: T) -> T
 running: <T> fn(x: T) -> Any
 empty: Any
 frame: data.frame{a: double[]}
@@ -991,7 +991,7 @@ m <- magnitude(money(1L))
 #++++
 money: fn(cents: integer) -> money
 Ops.money: fn(e1: money, e2: money) -> money
-magnitude: <T: numeric> fn(x: T) -> T
+magnitude: <T: arithmetic> fn(x: T) -> T
 m: money
 
 #---- a_summary_method_on_the_first_argument_takes_over_the_generic
@@ -1085,7 +1085,7 @@ f: <T> fn(x: T) -> double
 half <- function(n) n / 2
 f <- function() "text" |> half()
 #++++
-half: <T: numeric> fn(n: T) -> double
+half: <T: arithmetic> fn(n: T) -> double
 f: Unknown
 42..48 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
@@ -1094,7 +1094,7 @@ scale_by <- function(value, factor) value * factor
 f <- function(x) x |> scale_by(2, factor = _)
 #++++
 scale_by: <T: numeric> fn(value: T, factor: T) -> T
-f: <T: numeric> fn(x: T) -> double
+f: <T: arithmetic> fn(x: T) -> double
 
 #---- placeholder_without_the_piped_first_argument_is_missing_an_argument
 scale_by <- function(value, factor) value * factor

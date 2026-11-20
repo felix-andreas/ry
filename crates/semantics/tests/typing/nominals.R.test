@@ -133,6 +133,57 @@ double_it <- function(m) m * 2
 double_it: fn(m: Meters) -> Meters
 78..83 error[type-mismatch] expected `Meters`, found `double`. The value has the right shape, but `Meters` is a nominal type, so only `@Meters(...)` or `#: @new Meters` creates one
 
+#---- a_nominal_over_a_class_extends_it
+#: @type TradeDate {Date}
+
+as_trade <- function(x: Date) -> TradeDate @TradeDate(x)
+trade <- as_trade(Sys.Date())
+gap <- trade - trade
+later <- trade + 2L
+before <- trade < trade
+#: fn(x: Date) -> character
+show_date <- function(x) format(x)
+shown <- show_date(trade)
+#++++
+as_trade: fn(x: Date) -> TradeDate
+trade: TradeDate
+gap: difftime
+later: Date
+before: logical
+show_date: fn(x: Date) -> character
+shown: character
+
+#---- a_date_survives_the_vector_functions
+# R keeps the class through subsetting and the order and summary functions, and strips
+# it in a `for` loop, whose variable is the bare number.
+dates <- as.Date(c("2024-01-02", "2024-03-04"))
+one <- dates[1L]
+masked <- dates[dates > dates[1L]]
+earliest <- min(dates)
+latest <- max(dates)
+sorted <- sort(dates)
+reversed <- rev(dates)
+distinct <- unique(dates)
+last <- tail(dates, 1L)
+span <- range(dates)
+combined <- c(dates[1L], dates[2L])
+looped <- 0
+for (d in dates) looped <- d
+#++++
+dates: Date
+one: Date
+masked: Date
+earliest: Date
+latest: Date
+sorted: Date
+reversed: Date
+distinct: Date
+last: Date
+span: Date
+combined: Date
+looped: double
+NULL
+
 #==== unknown_names
 #---- a_refused_alias_still_declares_its_name
 #: @alias Wrap<T> {list{v: T}}
@@ -369,7 +420,7 @@ print(bump(price))
 #++++
 +.Money: <T, U> fn(e1: T, [e2]: U) -> T
 price: Money
-bump: <T: numeric> fn(x: T) -> T
+bump: <T: arithmetic> fn(x: T) -> T
 Money
 
 #---- a_class_with_no_arithmetic_method_is_still_refused
@@ -383,7 +434,7 @@ bump <- function(x) x + 1L
 print(bump(label))
 #++++
 label: Tag
-bump: <T: numeric> fn(x: T) -> T
+bump: <T: arithmetic> fn(x: T) -> T
 T
 158..163 error[type-mismatch] expected a numeric value (`integer` or `double`), found `Tag`
 
@@ -400,8 +451,8 @@ recursive <- function(k) {
 }
 not_recursive <- function() shift(Sys.Date())
 #++++
-shift: <T: numeric> fn(x: T) -> double
-recursive: <T: numeric> fn(k: T) -> double
+shift: <T: arithmetic> fn(x: T) -> double
+recursive: <T: arithmetic> fn(k: T) -> double
 not_recursive: fn() -> double
 
 #---- every_arithmetic_operator_method_makes_its_class_arithmetic
@@ -440,7 +491,7 @@ pw: Pow
 md: Mod
 dv: Div
 tg: Tag
-bump: <T: numeric> fn(x: T) -> double
+bump: <T: arithmetic> fn(x: T) -> double
 double
 double
 double

@@ -732,8 +732,16 @@ signature only ry inferred binds no name, so `#: T` in an unannotated function i
 A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
 `<T: numeric> fn(values: T) -> T`. These are the constraints:
 
-- `numeric` admits `integer` and `double`, scalar or vector, and any class that declares an
-  arithmetic [operator method](#operator-methods-on-a-class).
+- `numeric` admits `integer` and `double`, scalar or vector, and any class whose arithmetic takes
+  two of its values, which an [operator method](#operator-methods-on-a-class) such as
+  `"+.Money" <- function(e1: Money, e2: Money)` declares. It is what `a + b` asks of two values of
+  one type, so `function(a, b) a + b` is `<T: numeric> fn(a: T, b: T) -> T`.
+- `arithmetic` admits everything `numeric` does and any class that declares an arithmetic operator
+  method at all, such as `Date`, whose `+.Date` adds a number to a date. It is what `x + 1` asks of
+  `x`, so `function(x) x + 1` is `<T: arithmetic> fn(x: T) -> double` and accepts a `Date`, while
+  `add_them(day, day)` under `<T: numeric> fn(a: T, b: T) -> T` reports "expected a numeric value
+  (`integer` or `double`) or a class with arithmetic between two of its values, found `Date`", as R
+  stops on `day + day`.
 - `atomic` admits one of the six atomic scalar types: `logical`, `integer`, `double`, `complex`,
   `character`, and `raw`.
 - `key` admits a scalar `logical`, `integer`, `double` or `character`, the types a dictionary key
@@ -796,7 +804,10 @@ constrained parameters, `a / b` under `<T: numeric, U: numeric> fn(a: T, b: U) -
 `double`, R's widest numeric, because neither parameter's type fixes the other's. The same holds for
 any two distinct type parameters, and for an unannotated parameter that a scalar use bounds, such as
 `n` in `for (i in 1:n)`: `x + n` is `double`, so a call passing `1L` and `2.5` checks. A body under a plain `<T>` that
-does arithmetic is a type error, and `atomic` does not imply `numeric`.
+does arithmetic is a type error, and `atomic` does not imply `numeric`. Under
+`<T: arithmetic> fn(x: T) -> T`, `x + 1` checks and `x + x` is a type error that says to declare
+`<T: numeric>`, because a `T` such as `Date` adds a number and not another `Date`. Unary minus asks
+`numeric` too, as R has no `-` on a single `Date`.
 
 Using a type parameter as a vector element, `T[]`, imposes the `atomic` bound, because a vector holds
 only atomic elements. This is what makes element-preserving signatures possible. With
@@ -900,6 +911,11 @@ representation. Its name may appear anywhere a type expression may.
 - A value of a nominal type *is* compatible with its representation type, so it can be passed to any
   function written for the representation, while `@new` is the only place the type's invariant is
   established. An [opaque type](#opaque-types) also restricts where `@new` may appear.
+- A nominal type whose representation is another nominal type extends it, the way R's class vector
+  `c("TradeDate", "Date")` does. With `@type TradeDate {Date}`, a `TradeDate` passes wherever a
+  `Date` is expected, and its operators and `[` dispatch to `TradeDate`'s own methods first and then
+  to `Date`'s, so `trade - trade` is a `difftime` through `-.Date`. The stubs declare `data.table`
+  over `data.frame` and `ggplot` over `gg` the same way.
 - When an operator, an indexing form, or a loop needs a structural shape, a nominal value projects to
   its representation type. The result of the projection is structural, not nominal. A union of
   nominal types projects member by member, so `s$radus` on `Circle | Square` is checked against
@@ -1879,11 +1895,11 @@ p_dist <- function(q, valueOnly = TRUE) {
   prob <- q * 2
   if (valueOnly) prob else list(value = prob, error = prob)
 }
-# p_dist: <T: numeric, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
+# p_dist: <T: arithmetic, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
 gap <- function(x, p) p_dist(x) - p
-# gap: <T: numeric, U: numeric> fn(x: T, p: U) -> double
+# gap: <T: arithmetic, U: arithmetic> fn(x: T, p: U) -> double
 full <- function(x) p_dist(x, valueOnly = FALSE)$error
-# full: <T: numeric> fn(x: T) -> double
+# full: <T: arithmetic> fn(x: T) -> double
 ```
 
 Any other flag argument, such as a variable, returns the union. A call that forwards `...` selects
@@ -2474,15 +2490,17 @@ For example, `double * integer[]` is `double[]`, `integer[named] + integer` is `
 #### Unannotated values in arithmetic
 
 An unannotated value used as an arithmetic operand is *required to be numeric* rather than rejected:
-it must end up as `integer` or `double`, in any vector shape, or as a class that declares an
-arithmetic operator method.
+it must end up as `integer` or `double`, in any vector shape, or as a class with arithmetic. Beside
+a number it takes the [`arithmetic` constraint](#constraints), and two operands of one type take
+`numeric`, because a class such as `Date` adds a number but not another value of its own.
 
-- `function(x) x + 1L` is `<T: numeric> fn(x: T) -> T`, and calling it with `"oops"` is a type error.
-- `function(x) x / 2` is `<T: numeric> fn(x: T) -> double`.
+- `function(x) x + 1L` is `<T: arithmetic> fn(x: T) -> T`, and calling it with `"oops"` is a type
+  error.
+- `function(x) x / 2` is `<T: arithmetic> fn(x: T) -> double`.
 - `function(a, b) a + b` is `<T: numeric> fn(a: T, b: T) -> T`.
 
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
-vector, so `f <- function(x) x + c(1L, 2L)` is `<T: numeric> fn(x: T) -> double[]` and accepts
+vector, so `f <- function(x) x + c(1L, 2L)` is `<T: arithmetic> fn(x: T) -> double[]` and accepts
 `f(TRUE)` and `f(c(1, 2))` alike. When the other operand is a union, the unannotated operand is pinned
 to a scalar `double`, which matches how R treats bare numbers. An operand whose shape is still unknown
 counts as scalar-like here and in comparisons, by the same claim that
@@ -2549,9 +2567,10 @@ whole.
 
 Your own classes count. A method declared anywhere the global scope reaches, which includes a
 package's `R/` sources and a script's own top level, makes its class support that operator exactly as
-a shipped stub does. That is also how the class satisfies the numeric requirement: passing a `Money`
-to `function(x) x + 1L` is accepted when the project defines `+.Money`, and refused when it defines
-no arithmetic method.
+a shipped stub does. That is also how the class satisfies the arithmetic requirement: passing a
+`Money` to `function(x) x + 1L` is accepted when the project defines `+.Money`, and refused when it
+defines no arithmetic method. Passing two to `function(a, b) a + b` needs a method whose first two
+operands both take a `Money`, as `function(e1: Money, e2: Money)` does.
 
 R also dispatches on a class that `class(x) <- "string"` sets on a plain list, and no type tracks
 that attribute. So when the project defines an arithmetic or `Ops` method for a class that no type
@@ -2560,7 +2579,11 @@ and the rest of a chain `result + a + b`, give `Unknown` and report nothing. Wit
 `list(a = 1) + 1` is a type error, as it is in R.
 
 `c()` dispatches the same way. A class that declares a `c.Class` method keeps its class through
-concatenation, so `c(d1, d2)` on two `Date` values is a `Date`. A nominal with no such method loses
+concatenation, so `c(d1, d2)` on two `Date` values is a `Date`. The stubs keep `Date` and `POSIXct`
+through `[`, `min`, `max`, `range`, `sort`, `rev`, `unique`, `head` and `tail`, as R's methods do.
+A `for` loop over dates gives its variable the type `double`, because R strips the class there.
+`Reduce(f, dates)` is a type error, because `Reduce` takes a `list[T] | T[]` and a `Date` vector
+has no element type to write. A nominal with no such method loses
 its class but keeps its data, as R's default `c()` does, so two values of `@type Money {double}`
 combine to `double[]`. An abstract nominal has no representation, so combining it gives `Unknown`.
 
@@ -2964,9 +2987,9 @@ to such a name is resolved separately at each call site:
 - A wrapper over a numeric set is the exception. When the `Any` fallback is the only candidate that
   leaves a parameter open, and every other candidate narrows it to a number (`logical`, `integer`,
   `double` or `complex`, scalar or vector), the call needs a number whichever candidate a caller
-  picks, so the parameter takes the `numeric` bound. `function(x) abs(x)` infers
-  `<T: numeric> fn(x: T) -> T`, and calling it with a string or `NULL` is an error, as `abs` is in
-  R. A class with an arithmetic method (`Ops.<class>`, `Arith.<class>` or an operator method)
+  picks, so the parameter takes the `arithmetic` bound. `function(x) abs(x)` infers
+  `<T: arithmetic> fn(x: T) -> T`, and calling it with a string or `NULL` is an error, as `abs` is
+  in R. A class with an arithmetic method (`Ops.<class>`, `Arith.<class>` or an operator method)
   satisfies the bound, as it does for an operator, and so does a data frame. A set that also
   accepts other values imposes nothing: `max` takes `character`, `cumsum` takes `NULL` and `sweep`
   takes any `matrix`, so `function(x) max(x)` stays `<T> fn(x: T) -> Any`.

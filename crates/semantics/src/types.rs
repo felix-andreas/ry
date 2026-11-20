@@ -676,7 +676,13 @@ pub struct RestParameter<'db> {
 pub enum Constraint {
     #[default]
     Unconstrained,
+    /// A number, or a class whose arithmetic takes two of it (`Money + Money`), so `a + b` on
+    /// two values of the type is legal R.
     Numeric,
+    /// A number, or a class that declares any arithmetic method: `Date + 1` is legal R, while
+    /// `Date + Date` is not. It is what `x + 1` asks of `x`, and two values of it combine only
+    /// once it is `Numeric`.
+    Arithmetic,
     AtomicElement,
     /// A dictionary key or set element: a `logical`, `integer`, `double` or `character` scalar.
     /// `complex` and `raw` are left out because they have no total order or hash that the
@@ -713,8 +719,9 @@ pub enum Constraint {
 impl Constraint {
     /// Shared by rendering and parsing, so every constraint the checker prints can
     /// be written back in an annotation.
-    pub const SPELLINGS: [(&'static str, Constraint); 7] = [
+    pub const SPELLINGS: [(&'static str, Constraint); 8] = [
         ("numeric", Constraint::Numeric),
+        ("arithmetic", Constraint::Arithmetic),
         ("atomic", Constraint::AtomicElement),
         ("key", Constraint::Key),
         ("scalar numeric", Constraint::ScalarNumeric),
@@ -741,6 +748,23 @@ impl Constraint {
     /// is never a ry number, and an integer type is never a fraction type.
     pub fn join(self, other: Constraint) -> Option<Constraint> {
         use Constraint::*;
+        // `arithmetic` meets everything as `numeric` does, and only `numeric` itself or a
+        // stronger constraint makes the result closed.
+        let loosen = |joined: Option<Constraint>| match joined {
+            Some(Numeric) if self != Numeric && other != Numeric => Some(Arithmetic),
+            joined => joined,
+        };
+        let tighten = |constraint: Constraint| match constraint {
+            Arithmetic => Numeric,
+            constraint => constraint,
+        };
+        if self == Arithmetic || other == Arithmetic {
+            return match (self, other) {
+                (Unconstrained | Eq | Arithmetic, Arithmetic)
+                | (Arithmetic, Unconstrained | Eq) => Some(Arithmetic),
+                _ => loosen(tighten(self).join(tighten(other))),
+            };
+        }
         Some(match (self, other) {
             (Unconstrained, c) | (c, Unconstrained) => c,
             (a, b) if a == b => a,

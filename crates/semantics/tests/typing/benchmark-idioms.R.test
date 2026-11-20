@@ -126,7 +126,7 @@ accepts <- function() {
 }
 #++++
 weigh: <T: numeric> fn(a: T, H: T) -> T
-outer: <T: numeric> fn(H: T) -> double
+outer: <T: arithmetic> fn(H: T) -> double
 whole: double
 accepts: fn() -> NULL
 

@@ -3291,6 +3291,23 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 "`{name}` defaults to `NULL`, which its declared type `{declared}` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `{suggested}` and narrow with `is.null()`"
             )
         }
+        // `Date` has arithmetic with a number, so the message says what it lacks.
+        TypeErrorKind::ConstraintViolation {
+            constraint: Constraint::Numeric,
+            found,
+        } if matches!(found.kind(db), TyKind::Named(..)) => format!(
+            "expected a numeric value (`integer` or `double`) or a class with arithmetic between two of its values, found `{}`",
+            renderer.render(db, *found)
+        ),
+        TypeErrorKind::ConstraintViolation {
+            constraint: Constraint::Numeric,
+            found,
+        } if matches!(found.kind(db), TyKind::Rigid(_)) => {
+            let found = renderer.render(db, *found);
+            format!(
+                "expected a numeric value (`integer` or `double`), found `{found}`. Declare `<{found}: numeric>` to combine two of its values, because `arithmetic` admits classes such as `Date` that only add a number"
+            )
+        }
         TypeErrorKind::ConstraintViolation { constraint, found } => format!(
             "expected {}, found `{}`",
             constraint_description(*constraint),
@@ -4167,6 +4184,7 @@ fn constraint_description(constraint: Constraint) -> &'static str {
     match constraint {
         Constraint::Unconstrained => "a value",
         Constraint::Numeric => "a numeric value (`integer` or `double`)",
+        Constraint::Arithmetic => "a numeric value (`integer` or `double`)",
         Constraint::AtomicElement => {
             "an atomic value (`logical`, `integer`, `double`, `complex`, `character`, or `raw`)"
         }

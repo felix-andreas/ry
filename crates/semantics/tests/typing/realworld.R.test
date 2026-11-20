@@ -171,8 +171,8 @@ use_all <- function() {
 }
 #++++
 fill_default: <T, U> fn(name: T, [punct]: U) -> character
-require_x: <T: numeric> fn([x]: T) -> T
-pick: <T: numeric> fn([x]: T) -> T | integer
+require_x: <T: arithmetic> fn([x]: T) -> T
+pick: <T: arithmetic> fn([x]: T) -> T | integer
 use_all: fn() -> character
 
 #==== control_flow
@@ -192,7 +192,7 @@ collatz_steps <- function(n) {
 
 run <- function() collatz_steps(27L)
 #++++
-collatz_steps: <T: numeric> fn(n: T) -> integer
+collatz_steps: <T: arithmetic> fn(n: T) -> integer
 run: fn() -> integer
 
 #---- repeat_with_early_return_is_clean
@@ -235,8 +235,8 @@ is_odd <- function(n) if (n == 0L) FALSE else is_even(n - 1L)
 
 run <- function() list(even = is_even(10L), odd = is_odd(7L))
 #++++
-is_even: <T: numeric> fn(n: T) -> logical
-is_odd: <T: numeric> fn(n: T) -> logical
+is_even: <T: arithmetic> fn(n: T) -> logical
+is_odd: <T: arithmetic> fn(n: T) -> logical
 run: fn() -> list{even: logical, odd: logical}
 
 #==== stateful_closures
@@ -357,7 +357,7 @@ run <- function() {
   list(depth = depth, hello = hello, hi = hi, bounded = bounded, out = inc_then_double(5L))
 }
 #++++
-countdown: <T: numeric> fn(n: T) -> integer
+countdown: <T: arithmetic> fn(n: T) -> integer
 greet: <T, U> fn(name: T, [greeting]: U) -> character
 clamp: <T> fn(x: T, lo: T, [hi]: T) -> T
 compose: <T, U, V> fn(f: fn(T) -> U, g: fn(V) -> T) -> fn(x: V) -> U
@@ -1035,7 +1035,7 @@ report_interval <- function() {
 }
 #++++
 bootstrap_means: fn(observed: double[], n_boot: integer) -> double[]
-interval: <T, U: numeric> fn(means: T, [level]: U) -> list{lower: double, upper: double}
+interval: <T, U: arithmetic> fn(means: T, [level]: U) -> list{lower: double, upper: double}
 report_interval: fn() -> character
 
 #==== simulation_bugs

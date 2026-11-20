@@ -454,7 +454,7 @@ join: fn(...: Any) -> NULL
 wrap <- function(x, ...) x + 1L
 wrap(1L, "extra", TRUE)
 #++++
-wrap: <T: numeric> fn(x: T, ...: Any) -> T
+wrap: <T: arithmetic> fn(x: T, ...: Any) -> T
 integer
 
 #---- pre_dots_formal_still_matches_by_name

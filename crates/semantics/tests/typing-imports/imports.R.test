@@ -147,6 +147,15 @@ build <- function(frame) ggplot(frame) + geom_poimt()
 build: <T> fn(frame: T) -> ggplot
 71..81 warning[unresolved] I could not resolve `geom_poimt` in this package, its imports, or builtins. Did you mean `geom_point`?
 
+#---- a_plot_is_a_component
+#description Imports: ggplot2
+#: fn(component: gg) -> gg
+keep <- function(component) component
+kept <- function(df) keep(ggplot(df))
+#++++
+keep: fn(component: gg) -> gg
+kept: <T> fn(df: T) -> gg
+
 #---- a_non_component_is_not_addable_to_a_plot
 #description Imports: ggplot2
 build <- function(frame) ggplot(frame) + 1L
@@ -221,7 +230,7 @@ f: <T> fn(d: T) -> T
 defer <- function(x) x + 1L
 call_it <- function() withr::defer(2L)
 #++++
-defer: <T: numeric> fn(x: T) -> T
+defer: <T: arithmetic> fn(x: T) -> T
 call_it: fn() -> integer
 
 #---- an_own_package_name_with_no_definition_in_view_stays_quiet
@@ -422,6 +431,21 @@ wrong <- function(path) as.data.table(read.csv(path))[, .(m = 1)]
 wrong: fn(path: character) -> integer
 91..132 error[type-mismatch] expected `integer`, found `data.table`
 
+#---- a_data_table_is_a_data_frame_and_not_the_reverse
+#namespace import(data.table)
+#: fn(x: data.frame) -> integer
+needs_df <- function(x) nrow(x)
+#: fn(x: data.table) -> integer
+needs_dt <- function(x) nrow(x)
+fine <- needs_df(data.table(a = 1L))
+wrong <- needs_dt(data.frame(a = 1L))
+#++++
+needs_df: fn(x: data.frame) -> integer
+needs_dt: fn(x: data.table) -> integer
+fine: integer
+wrong: Unknown
+213..231 error[type-mismatch] expected `data.table`, found `data.frame{a: integer[]}`
+
 #==== dplyr
 #---- verbs_mask_columns_and_preserve_the_class
 #description Imports: dplyr
@@ -567,7 +591,7 @@ qp <- function(sigma) {
   solve.QP(Dmat = 2 * sigma, dvec = rep(0, n), Amat = diag(n), bvec = rep(0, n))
 }
 #++++
-qp: <T: numeric> fn(sigma: T) -> list{solution: double[], value: double, unconstrained.solution: double[], iterations: integer[], Lagrangian: double[], iact: integer[]}
+qp: <T: arithmetic> fn(sigma: T) -> list{solution: double[], value: double, unconstrained.solution: double[], iterations: integer[], Lagrangian: double[], iact: integer[]}
 
 #---- arithmetic_on_a_known_number_is_still_not_a_matrix
 #namespace import(quadprog)
@@ -583,7 +607,7 @@ business_days <- function(start, days = 45L) {
   candidates[!wday(candidates) %in% c(1L, 7L)]
 }
 #++++
-business_days: <T, U: numeric> fn(start: T, [days]: U) -> Unknown
+business_days: <T, U: arithmetic> fn(start: T, [days]: U) -> Unknown
 
 #---- a_string_plus_a_period_is_still_an_error
 #namespace import(lubridate)
@@ -604,7 +628,7 @@ f <- function(x) {
   d < as.Date("2021-01-01")
 }
 #++++
-f: <T: numeric> fn(x: T) -> logical
+f: <T: arithmetic> fn(x: T) -> logical
 
 #---- polars_members_are_typed
 library(polars)

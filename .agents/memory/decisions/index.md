@@ -146,6 +146,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A top-level `if (FALSE)` body binds no package name (settled)
 - S3 subsetting dispatches on the declared class first (settled)
 - A generic's dispatch formal is forced when an argument reaches it (settled)
+- A nominal over a nominal extends it (settled)
+- `numeric` is closed under arithmetic, `arithmetic` is not (settled)
 
 ## Analysis core
 

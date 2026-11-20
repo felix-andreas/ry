@@ -39,7 +39,7 @@ second_use: fn() -> integer
 double_it <- function(n) n * 2L
 result <- double_it(21L)
 #++++
-double_it: <T: numeric> fn(n: T) -> T
+double_it: <T: arithmetic> fn(n: T) -> T
 result: integer
 32..38 warning[unused] `result` is assigned but never used.
 
@@ -86,7 +86,7 @@ helper <- function(count) {
   count + 1L
 }
 #++++
-helper: <T: numeric> fn(count: T) -> T
+helper: <T: arithmetic> fn(count: T) -> T
 0..6 warning[unused] `helper` is assigned but never used.
 
 #---- unused_super_assignment_marks_the_name

@@ -381,15 +381,20 @@ sum : fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) ->
 min : @pure fn(...: integer[] | logical[], [na.rm]: logical) -> integer
 min : fn(...: double[], [na.rm]: logical) -> double
 min : fn(...: character[], [na.rm]: logical) -> character
+min : fn(...: Date, [na.rm]: logical) -> Date
+min : fn(...: POSIXct, [na.rm]: logical) -> POSIXct
 min : fn(...: Any, [na.rm]: logical) -> Any
 max : @pure fn(...: integer[] | logical[], [na.rm]: logical) -> integer
 max : fn(...: double[], [na.rm]: logical) -> double
 max : fn(...: character[], [na.rm]: logical) -> character
+max : fn(...: Date, [na.rm]: logical) -> Date
+max : fn(...: POSIXct, [na.rm]: logical) -> POSIXct
 max : fn(...: Any, [na.rm]: logical) -> Any
 range : @pure fn(...: integer[] | logical[], [na.rm]: logical) -> integer[]
 range : fn(...: double[], [na.rm]: logical) -> double[]
 range : fn(...: character[], [na.rm]: logical) -> character[]
 range : fn(...: Date, [na.rm]: logical) -> Date
+range : fn(...: POSIXct, [na.rm]: logical) -> POSIXct
 range : fn(...: Any, [na.rm]: logical) -> Any
 pmin : @pure fn(...: integer[] | logical[], [na.rm]: logical) -> integer[]
 pmin : fn(...: double[], [na.rm]: logical) -> double[]
@@ -459,6 +464,8 @@ trunc : @pure fn(x: Any, ...: Any) -> double
 sort : fn(x: Any, [decreasing]: logical, [na.last]: Any, [method]: character, index.return: logical, ...: Any) -> Any
 sort : @pure <T> fn(x: T[], [decreasing]: logical, ...: Any, [na.last]: Any, [method]: character, [index.return]: logical, [partial]: Any) -> T[]
 sort : fn(x: factor, [decreasing]: logical, ...: Any) -> factor
+sort : fn(x: Date, [decreasing]: logical, ...: Any) -> Date
+sort : fn(x: POSIXct, [decreasing]: logical, ...: Any) -> POSIXct
 sort : fn(x: Any, [decreasing]: logical, ...: Any, [na.last]: Any, [method]: character, [index.return]: logical, [partial]: Any) -> Any
 order : @pure fn(...: Any, [na.last]: Any, [decreasing]: logical, [method]: character) -> integer[]
 rank : @pure fn(x: Any, [na.last]: Any, [ties.method]: character) -> Any
@@ -466,12 +473,16 @@ rank : @pure fn(x: Any, [na.last]: Any, [ties.method]: character) -> Any
 # ahead of the plain list one — otherwise `rev(opts)$timeout` is reported as a
 # missing field on code R runs.
 rev : @pure fn(x: factor) -> factor
+rev : fn(x: Date) -> Date
+rev : fn(x: POSIXct) -> POSIXct
 rev : <T> fn(x: T[]) -> T[]
 rev : <T> fn(x: list[named: T]) -> list[named: T]
 rev : <T> fn(x: list[T]) -> list[T]
 rev : fn(x: Any) -> Any
 unique : @pure <T> fn(x: T[], [incomparables]: Any, ...: Any, [fromLast]: logical, [nmax]: Any) -> T[]
 unique : fn(x: factor, [incomparables]: Any, ...: Any) -> factor
+unique : fn(x: Date, [incomparables]: Any, ...: Any) -> Date
+unique : fn(x: POSIXct, [incomparables]: Any, ...: Any) -> POSIXct
 unique : <T> fn(x: list[named: T], [incomparables]: Any, ...: Any, [fromLast]: logical, [nmax]: Any) -> list[named: T]
 unique : <T> fn(x: list[T], [incomparables]: Any, ...: Any, [fromLast]: logical, [nmax]: Any) -> list[T]
 # The fallback candidate is variadic because `unique` is a generic and its

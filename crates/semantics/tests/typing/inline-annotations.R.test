@@ -63,7 +63,7 @@ add: fn(x: integer, y: integer) -> integer
 #---- partial_parameters_infer_the_rest
 add <- function(x: integer, y) x + y
 #++++
-add: <T: numeric> fn(x: integer, y: T) -> T
+add: <T: arithmetic> fn(x: integer, y: T) -> T
 
 #---- elided_return_is_inferred
 half <- function(x: double) x / 2

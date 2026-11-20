@@ -496,7 +496,7 @@ f <- function(x) {
   x + 1L
 }
 #++++
-f: <T: numeric> fn(x: T | NULL) -> T
+f: <T: arithmetic> fn(x: T | NULL) -> T
 
 #---- a_length_test_rules_out_null
 #: fn(flag: logical) -> integer[] | NULL
@@ -1030,7 +1030,7 @@ f <- function(n) {
   even(n)
 }
 #++++
-f: <T: numeric> fn(n: T) -> logical
+f: <T: arithmetic> fn(n: T) -> logical
 
 #---- forward_capture_sees_the_frame_write
 f <- function() {

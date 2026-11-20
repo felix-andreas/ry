@@ -67,9 +67,9 @@ mirror <- function(x) x
 mixed_apply <- invoke(mirror)
 mixed_apply("ok")
 #++++
-invoke: <T: numeric, U> fn(f: fn(T) -> U) -> fn(x: T) -> U
+invoke: <T: arithmetic, U> fn(f: fn(T) -> U) -> fn(x: T) -> U
 mirror: <T> fn(x: T) -> T
-mixed_apply: <T: numeric> fn(x: T) -> T
+mixed_apply: <T: arithmetic> fn(x: T) -> T
 Unknown
 110..114 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
@@ -78,7 +78,7 @@ increment <- function(x) x + 1L
 a <- increment(2L)
 b <- increment(2.5)
 #++++
-increment: <T: numeric> fn(x: T) -> T
+increment: <T: arithmetic> fn(x: T) -> T
 a: integer
 b: double
 
@@ -86,7 +86,7 @@ b: double
 increment <- function(x) x + 1L
 bad <- increment("oops")
 #++++
-increment: <T: numeric> fn(x: T) -> T
+increment: <T: arithmetic> fn(x: T) -> T
 bad: Unknown
 49..55 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
@@ -119,6 +119,42 @@ result <- pick(:Ok(1L), :Err(:Missing))
 pick: <T> fn(a: T, b: T) -> T
 color: :Red | :Green
 result: :Ok(integer) | :Err(:Missing)
+
+#---- a_numeric_bound_needs_arithmetic_between_two_of_the_class
+# `Date + 1` is legal R and `Date + Date` is not, so `x + 1` asks only `arithmetic` of
+# `x`, while `a + b` on two values of one type asks `numeric`, which `Date` lacks and
+# `difftime` (`gap + gap`) has. A one-line helper must not launder the direct error.
+#: <T: numeric> fn(a: T, b: T) -> T
+add_them <- function(a, b) a + b
+add_inferred <- function(a, b) a + b
+shift <- function(x) x + 1
+negate <- function(x) -x
+#: <T: arithmetic> fn(x: T) -> T
+twice <- function(x) x + x
+day <- as.Date("2024-01-02")
+dates <- add_them(day, day)
+inferred <- add_inferred(day, day)
+gaps <- add_them(day - day, day - day)
+shifted <- shift(day)
+negated <- negate(day)
+#++++
+add_them: <T: numeric> fn(a: T, b: T) -> T
+add_inferred: <T: numeric> fn(a: T, b: T) -> T
+shift: <T: arithmetic> fn(x: T) -> double
+negate: <T: numeric> fn(x: T) -> T
+twice: <T: arithmetic> fn(x: T) -> T
+day: Date
+dates: Unknown
+inferred: Unknown
+gaps: difftime
+shifted: double
+negated: Unknown
+470..475 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T`. Declare `<T: numeric>` to combine two of its values, because `arithmetic` admits classes such as `Date` that only add a number
+523..526 error[type-mismatch] expected a numeric value (`integer` or `double`) or a class with arithmetic between two of its values, found `Date`
+528..531 error[type-mismatch] expected a numeric value (`integer` or `double`) or a class with arithmetic between two of its values, found `Date`
+558..561 error[type-mismatch] expected a numeric value (`integer` or `double`) or a class with arithmetic between two of its values, found `Date`
+563..566 error[type-mismatch] expected a numeric value (`integer` or `double`) or a class with arithmetic between two of its values, found `Date`
+647..650 error[type-mismatch] expected a numeric value (`integer` or `double`) or a class with arithmetic between two of its values, found `Date`
 
 #---- a_shared_parameter_promotes_numbers_like_r
 add <- function(a, b) a + b

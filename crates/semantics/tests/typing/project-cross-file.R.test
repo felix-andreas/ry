@@ -36,7 +36,7 @@ add_one <- function(x) x + 1L
 r <- add_one(2L)
 #++++
 == R/a.R
-add_one: <T: numeric> fn(x: T) -> T
+add_one: <T: arithmetic> fn(x: T) -> T
 == R/b.R
 r: integer
 
@@ -47,7 +47,7 @@ add_one <- function(x) x + 1L
 r <- add_one("x")
 #++++
 == R/a.R
-add_one: <T: numeric> fn(x: T) -> T
+add_one: <T: arithmetic> fn(x: T) -> T
 == R/b.R
 r: Unknown
 13..16 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
@@ -106,7 +106,7 @@ f: <T> fn(value: T) -> T
 0..1 warning[duplicate] Top-level binding `f` is overwritten by a later top-level binding in this package.
   = 0..1 the later binding is here.
 == R/b.R
-f: <T: numeric> fn(x: T) -> T
+f: <T: arithmetic> fn(x: T) -> T
 0..1 warning[duplicate] Top-level binding `f` overwrites an earlier top-level binding in this package.
   = 0..1 the earlier binding is here.
 == R/c.R
@@ -281,7 +281,7 @@ add_one <- function(x) x + 1L
 r <- add_one("x")
 #++++
 == R/a.R
-add_one: <T: numeric> fn(x: T) -> T
+add_one: <T: arithmetic> fn(x: T) -> T
 == scripts/use.R
 r: Unknown
 0..1 warning[unused] `r` is assigned but never used.

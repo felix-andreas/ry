@@ -1510,7 +1510,9 @@ fn erase_residual_vars_at<'db>(
     }
     if !closer.abstracted.contains(&table.find(var)) {
         return match constraint {
-            Constraint::Numeric | Constraint::ScalarNumeric => scalar(db, Atomic::Double),
+            Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric => {
+                scalar(db, Atomic::Double)
+            }
             Constraint::WholeLiteral { .. }
             | Constraint::FracLiteral
             | Constraint::StrLiteral
@@ -9360,19 +9362,21 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .collect();
                 union_of(self.db, members)
             }
+            // R has no unary `-` on a `Date`, which only adds a number, so the operand needs
+            // the arithmetic a class has with its own values.
             NumericOperand::Flexible(ty) => {
-                self.constrain_numeric_flexible(operand_range, ty);
+                self.constrain_operand(operand_range, ty, Constraint::Numeric);
                 ty
             }
             NumericOperand::FlexibleVector(element) => {
                 if let Some(element) = element {
-                    self.constrain_numeric_flexible(operand_range, element);
+                    self.constrain_operand(operand_range, element, Constraint::Numeric);
                 }
                 resolved
             }
             NumericOperand::OpenUnion(open) => {
                 for member in open {
-                    self.constrain_numeric_flexible(operand_range, member);
+                    self.constrain_operand(operand_range, member, Constraint::Numeric);
                 }
                 unknown(self.db)
             }
@@ -10524,6 +10528,26 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
+    /// The S3 class vector a nominal stands for: the type itself, then each nominal its
+    /// representation names, so `data.table` over `data.frame` is `c("data.table",
+    /// "data.frame")`. Resolved fully, so an alias of a class is the class it names; empty for
+    /// a type that is not nominal.
+    fn class_chain(&self, ty: Ty<'db>) -> SmallVec<[Name<'db>; 2]> {
+        let mut chain: SmallVec<[Name<'db>; 2]> = SmallVec::new();
+        let mut current = self.table.resolve(self.db, ty);
+        while let TyKind::Named(name, arguments) = current.kind(self.db) {
+            if chain.contains(name) {
+                break;
+            }
+            chain.push(*name);
+            let Some(representation) = self.table.representation(self.db, *name, arguments) else {
+                break;
+            };
+            current = self.table.resolve(self.db, representation);
+        }
+        chain
+    }
+
     /// Dispatches as R does: `+.Date`, then the group generic (`Arith.Date`), then
     /// `Ops.Date`, left operand's class first. `None` when no nominal operand declares
     /// anything, so the ordinary operator rules apply.
@@ -10630,7 +10654,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 TyKind::Rigid(name)
                     if self
                         .table
-                        .rigid_satisfies(self.db, *name, Constraint::Numeric) =>
+                        .rigid_satisfies(self.db, *name, Constraint::Arithmetic) =>
                 {
                     scalar(self.db, Atomic::Double)
                 }
@@ -10640,15 +10664,17 @@ impl<'db, 'a> Checker<'db, 'a> {
             self.operand_argument(lhs, probe_operand(left)),
             self.operand_argument(rhs, probe_operand(right)),
         ];
-        // Resolved fully, so an alias of a class dispatches as the class it names.
-        let class_of = |ty: Ty<'db>| match self.table.resolve(self.db, ty).kind(self.db) {
-            TyKind::Named(name, _) => Some(name.text(self.db).to_owned()),
-            _ => None,
-        };
-        let mut classes: Vec<String> = [class_of(left), class_of(right)]
-            .into_iter()
-            .flatten()
-            .collect();
+        // Each operand's whole class vector, left first: a `TradeDate` over `Date` takes
+        // `+.Date` when it declares no `+` of its own.
+        let mut classes: Vec<String> = Vec::new();
+        for operand in [left, right] {
+            for class in self.class_chain(operand) {
+                let class = class.text(self.db);
+                if !classes.iter().any(|known| known == class) {
+                    classes.push(class.to_owned());
+                }
+            }
+        }
         // An untyped operand (`omega + v %*% w` on a parameter) must not take the first
         // candidate's class, which would reject the plain vector R accepts there. It is
         // only required to be numeric, and the call types when every fit agrees.
@@ -10916,11 +10942,12 @@ impl<'db, 'a> Checker<'db, 'a> {
             // A value already required to be numeric (`if (n %% 2L)`) coerces like a number.
             TyKind::Var(_) => matches!(
                 self.table.open_constraint(self.db, ty),
-                Some(Constraint::Numeric | Constraint::ScalarNumeric)
+                Some(Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric)
             ),
-            TyKind::Rigid(name) => self
-                .table
-                .rigid_satisfies(self.db, *name, Constraint::Numeric),
+            TyKind::Rigid(name) => {
+                self.table
+                    .rigid_satisfies(self.db, *name, Constraint::Arithmetic)
+            }
             _ => false,
         }
     }
@@ -11022,6 +11049,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
 
         let mut flexible: Option<Ty<'db>> = None;
+        let mut tied = false;
         for operand in [&left, &right] {
             if let NumericOperand::Flexible(ty) = operand {
                 match flexible {
@@ -11034,7 +11062,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                             && [existing, *ty].into_iter().all(|side| {
                                 matches!(
                                     self.table.variable_constraint(self.db, side),
-                                    None | Some(Constraint::Numeric | Constraint::ScalarNumeric)
+                                    None | Some(
+                                        Constraint::Numeric
+                                            | Constraint::Arithmetic
+                                            | Constraint::ScalarNumeric
+                                    )
                                 )
                             }) =>
                     {
@@ -11055,13 +11087,18 @@ impl<'db, 'a> Checker<'db, 'a> {
                             self.report_unify(range, error);
                             return unknown(self.db);
                         }
+                        tied = true;
                     }
                     None => flexible = Some(*ty),
                 }
             }
         }
         if let Some(ty) = flexible {
-            self.constrain_numeric_flexible(range, ty);
+            let constraint = match tied {
+                true => Constraint::Numeric,
+                false => Constraint::Arithmetic,
+            };
+            self.constrain_operand(range, ty, constraint);
         }
         // Combined with its existing atomic-element bound, an arithmetic `T[]` element
         // becomes scalar-numeric.
@@ -11399,23 +11436,25 @@ impl<'db, 'a> Checker<'db, 'a> {
         results
     }
 
-    /// A rigid satisfies the numeric constraint only when its declaration promised it.
     fn constrain_numeric_flexible(&mut self, range: TextRange, ty: Ty<'db>) {
+        self.constrain_operand(range, ty, Constraint::Arithmetic);
+    }
+
+    /// Two operands of one type (`a + b` on `a: T, b: T`) need arithmetic between two of its
+    /// values, which `Date` lacks although `Date + 1` is legal. A rigid satisfies a constraint
+    /// only when its declaration promised it.
+    fn constrain_operand(&mut self, range: TextRange, ty: Ty<'db>, constraint: Constraint) {
         match ty.kind(self.db) {
             TyKind::Var(var) => {
-                if let Err(error) = self.table.constrain(self.db, *var, Constraint::Numeric) {
+                if let Err(error) = self.table.constrain(self.db, *var, constraint) {
                     self.report_unify(range, error);
                 }
             }
-            TyKind::Rigid(name)
-                if !self
-                    .table
-                    .rigid_satisfies(self.db, *name, Constraint::Numeric) =>
-            {
+            TyKind::Rigid(name) if !self.table.rigid_satisfies(self.db, *name, constraint) => {
                 self.errors.push(TypeError {
                     range,
                     kind: TypeErrorKind::ConstraintViolation {
-                        constraint: Constraint::Numeric,
+                        constraint,
                         found: ty,
                     },
                 });
@@ -11483,7 +11522,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             TyKind::Rigid(name) => {
                 match self
                     .table
-                    .rigid_satisfies(self.db, *name, Constraint::Numeric)
+                    .rigid_satisfies(self.db, *name, Constraint::Arithmetic)
                 {
                     true => NumericOperand::Flexible(resolved),
                     false => NumericOperand::Invalid,
@@ -11510,7 +11549,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 TyKind::Rigid(name)
                     if self
                         .table
-                        .rigid_satisfies(self.db, *name, Constraint::Numeric) =>
+                        .rigid_satisfies(self.db, *name, Constraint::Arithmetic) =>
                 {
                     NumericOperand::FlexibleVector(Some(*element))
                 }
@@ -15426,7 +15465,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             let snapshot = self.table.snapshot();
             if self
                 .table
-                .constrain(self.db, *var, Constraint::Numeric)
+                .constrain(self.db, *var, Constraint::Arithmetic)
                 .is_err()
             {
                 // A variable an earlier use made non-numeric keeps that finding to itself.
@@ -18046,7 +18085,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let numeric = |ty: Ty<'db>| {
             matches!(
                 self.table.open_constraint(self.db, ty),
-                Some(Constraint::Numeric | Constraint::ScalarNumeric)
+                Some(Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric)
             )
         };
         match self.table.resolve(self.db, expected).kind(self.db) {
@@ -18464,13 +18503,19 @@ impl<'db, 'a> Checker<'db, 'a> {
         } else {
             (self.frame_as_class(subject), self.frame_as_class(target_ty))
         };
+        // A class that extends `data.table` queries as one.
+        let data_table = !double
+            && self
+                .class_chain(target_ty)
+                .iter()
+                .any(|name| name.text(self.db) == "data.table");
         let unseen_frame = !double
-            && (self.naming.extras().masked_subsets.contains(&id)
-                || match self.table.resolve(self.db, subject).kind(self.db) {
-                    TyKind::Unknown | TyKind::Any | TyKind::Var(_) => true,
-                    TyKind::Named(name, _) => name.text(self.db) == "data.table",
-                    _ => false,
-                });
+            && (data_table
+                || self.naming.extras().masked_subsets.contains(&id)
+                || matches!(
+                    self.table.resolve(self.db, subject).kind(self.db),
+                    TyKind::Unknown | TyKind::Any | TyKind::Var(_)
+                ));
         if unseen_frame {
             self.unseen_frames += 1;
         }
@@ -18485,16 +18530,14 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         // A declared `data.table` subject makes `[` a query: index arguments evaluate in
         // the data's frame (masked column reads), and the `j` syntax decides the result class.
-        if !double
-            && matches!(subject.kind(self.db), TyKind::Named(name, _) if name.text(self.db) == "data.table")
-        {
+        if data_table {
             for argument in arguments {
                 if let Some(value) = argument.value {
                     self.mask_column_reads(value);
                 }
             }
             return if data_table_keeps_class(self.module, arguments) {
-                subject
+                self.table.resolve(self.db, target_ty)
             } else {
                 self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
                 unknown(self.db)
@@ -18505,25 +18548,20 @@ impl<'db, 'a> Checker<'db, 'a> {
         if self.naming.extras().masked_subsets.contains(&id) {
             return unknown(self.db);
         }
-        // R dispatches `[` and `[[` on the class before any shape rule applies, so a stub's
-        // `[.factor` or `[[.Date` gives the result type. The declared class comes first,
-        // because it leads the class vector: an `xts` subsets with `[.xts`, not with the
-        // `[.zoo` of its representation.
-        if let TyKind::Named(name, _) = self.table.resolve(self.db, target_ty).kind(self.db)
-            && let Some(ty) = self.index_method_result(name.text(self.db), double)
-        {
-            return ty;
-        }
-        if let TyKind::Named(name, _) = subject.kind(self.db)
-            && name.text(self.db) == "matrix"
-            && let Some(ty) = self.matrix_index(double, arguments, &index_types)
-        {
-            return ty;
-        }
-        if let TyKind::Named(name, _) = subject.kind(self.db)
-            && let Some(ty) = self.index_method_result(name.text(self.db), double)
-        {
-            return ty;
+        // R dispatches `[` and `[[` on the class vector before any shape rule applies, so a
+        // stub's `[.factor` or `[[.Date` gives the result type, and an `xts` subsets with
+        // `[.xts` before the `[.zoo` of the class it extends.
+        let chain = self.class_chain(target_ty);
+        let subject_chain = self.class_chain(subject);
+        for name in chain.iter().chain(subject_chain.iter()) {
+            if name.text(self.db) == "matrix"
+                && let Some(ty) = self.matrix_index(double, arguments, &index_types)
+            {
+                return ty;
+            }
+            if let Some(ty) = self.index_method_result(name.text(self.db), double) {
+                return ty;
+            }
         }
         if let Some(element) = array_element(self.db, subject) {
             return self.array_index(range, double, subject, element, arguments, &index_types);

@@ -3686,9 +3686,24 @@ fn hidden_type_definition<'db>(
 #[derive(Debug, Clone, Copy)]
 pub struct ArithmeticClasses<'db> {
     layers: [Option<&'db stubs::SymbolSet>; 3],
+    /// The stubs' classes whose declared arithmetic takes the class on both sides.
+    stub_closed: &'db stubs::SymbolSet,
 }
 
 impl<'db> ArithmeticClasses<'db> {
+    /// Whether `C + C` is arithmetic for the class, which is what a `numeric` bound promises
+    /// its type: `Date` declares `+.Date` for a date and a number, never for two dates. A
+    /// project's own method is unannotated, so its class counts as closed.
+    pub fn closed_under_arithmetic(self, class: impl stubs::SymbolKey) -> bool {
+        class.symbol().is_some_and(|class| {
+            self.stub_closed.contains(class)
+                || self.layers[1..]
+                    .iter()
+                    .flatten()
+                    .any(|layer| layer.contains(class))
+        })
+    }
+
     pub fn contains(self, class: impl stubs::SymbolKey) -> bool {
         class.symbol().is_some_and(|class| {
             self.layers
@@ -3724,6 +3739,7 @@ fn visible_arithmetic_classes(db: &dyn Db, file: SourceFile) -> ArithmeticClasse
             ProjectFiles::try_get(db).map(|files| project_arithmetic_classes(db, files)),
             Some(file_arithmetic_classes(db, file)),
         ],
+        stub_closed: stub_closed_arithmetic_classes(db),
     }
 }
 
@@ -4144,6 +4160,64 @@ fn stub_arithmetic_classes(db: &dyn Db) -> stubs::SymbolSet {
         return stubs::SymbolSet::default();
     };
     arithmetic_classes_among(library.schemes.keys())
+}
+
+/// The stub classes with a `+` method candidate whose two operands both take the class,
+/// directly, through a class it extends, or as `Any`.
+#[salsa::tracked(returns(ref))]
+fn stub_closed_arithmetic_classes(db: &dyn Db) -> stubs::SymbolSet {
+    let Some(library) = stubs::stubs(db) else {
+        return stubs::SymbolSet::default();
+    };
+    // `+` stands for the arithmetic a bound promises: `-.Date` takes two dates, and their
+    // difference is a `difftime`, not a date.
+    let prefixes = ["+.", "Arith.", "Ops."];
+    let mut closed = stubs::SymbolSet::default();
+    for class in stub_arithmetic_classes(db).iter() {
+        let mut chain: Vec<types::Name<'_>> = vec![types::Name::new(db, class)];
+        while let Some(definition) = chain
+            .last()
+            .and_then(|name| library.type_definitions.get(name))
+            && let types::TyKind::Named(parent, _) = definition.body.kind(db)
+            && !chain.contains(parent)
+        {
+            chain.push(*parent);
+        }
+        let takes_class = |ty: types::Ty<'_>| {
+            let admits = |member: types::Ty<'_>| match member.kind(db) {
+                types::TyKind::Any | types::TyKind::Unknown | types::TyKind::Rigid(_) => true,
+                types::TyKind::Named(name, _) => chain.contains(name),
+                _ => false,
+            };
+            match ty.kind(db) {
+                types::TyKind::Union(members) => members.iter().any(|&member| admits(member)),
+                _ => admits(ty),
+            }
+        };
+        let is_closed = chain.iter().any(|ancestor| {
+            prefixes.iter().any(|prefix| {
+                let method = Symbol::new(&format!("{prefix}{}", ancestor.text(db)));
+                library.schemes.get(method).is_some_and(|schemes| {
+                    schemes.iter().any(|scheme| match scheme.body.kind(db) {
+                        types::TyKind::Function(function) => {
+                            let mut operands = function
+                                .positional
+                                .iter()
+                                .copied()
+                                .chain(function.named.iter().map(|parameter| parameter.ty));
+                            operands.next().is_some_and(takes_class)
+                                && operands.next().is_some_and(takes_class)
+                        }
+                        _ => false,
+                    })
+                })
+            })
+        });
+        if is_closed {
+            closed.insert(class);
+        }
+    }
+    closed
 }
 
 /// A union of the per-file sets, which are almost always empty, rather than a scan of every

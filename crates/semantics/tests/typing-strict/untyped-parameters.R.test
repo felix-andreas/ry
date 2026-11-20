@@ -26,7 +26,7 @@ choose: <T> fn(flag: logical, [a]: T, [b]: T) -> T
 #---- a_constrained_parameter_is_typed
 increment <- function(x) x + 1L
 #++++
-increment: <T: numeric> fn(x: T) -> T
+increment: <T: arithmetic> fn(x: T) -> T
 
 #---- partial_annotation_reports_the_rest
 add <- function(x: integer, unused) x
@@ -104,5 +104,5 @@ g <- function(y) y + 1L
 #++++
 == R/main.R
 f: <T> fn(x: T) -> Unknown
-g: <T: numeric> fn(y: T) -> T
+g: <T: arithmetic> fn(y: T) -> T
 28..29 error[syntax-error] expected an expression after `+`

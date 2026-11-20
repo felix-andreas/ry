@@ -2074,47 +2074,16 @@ Two holes of that kind are still open.
   package made 19 `data.table::` calls unresolved while bare `fread` still resolved, and it made
   `data.table` unusable as an annotation type name, which silently suppressed a real type error.
 
-### The traits tripwire, tripped a fifth time
-
-A `<T: numeric>` bound admits a `Date`, and the body's arithmetic then fails in R. A helper
-annotated `#: <T: numeric> fn(a: T, b: T) -> T` and called as `add_them(d1, d2)` is accepted, while
-the direct `d1 + d2` is correctly rejected with ``\`+\` is not defined between \`Date\` and \`Date\```.
-A one-line helper therefore launders a real error.
-
-The mechanism is the `declares_arithmetic` relaxation: a class that declares any arithmetic method
-satisfies `Numeric` wholesale. That does not follow. `Date` declares `+.Date` for `Date + integer`
-and has no `Date + Date`.
-
-A constraint meaning "supports this operator with these operands" replaces both this relaxation and
-the operand tie. Do not patch it again. Design it.
-
-One related leak: `sort`, `head` and `rev` on dates report ``found \`T[]\```, which leaks an unbound
-type variable.
-
-### Nominal subtyping, which is the same deferred design as S4 and R6 inheritance
-
-`data.table` is rejected where `data.frame` is expected, and the wrong direction is accepted.
-`needs_df(data.table(a = 1L))` is legal R and reports `expected data.frame, found data.table`, while
-`needs_dt(data.frame(a = 1L))`, the direction that really is wrong, reports nothing. R's class vector
-for a data.table is `c("data.table", "data.frame")`.
-
-`TyKind::Named` matches by exact name and nothing in the compatibility relation carries a hierarchy.
-The tractable corner is a declared, acyclic nominal-extends-nominal relation in the stub vocabulary.
-Do it as that design, not as a data.table special case.
-
 ### `Date` does not survive real code
 
-It survives `d + 1L`, `d2 - d1`, `d1 < d2`, `format`, `seq.Date` and a `while` cursor. It is lost to
-`Unknown` through `dates[i]`, `dates[mask]`, `for (d in dates)` and `Reduce`. It is wrong through
-`min` and `max`. The same bug is therefore caught in one place and missed in another: `cursor + cursor`
-after a `while` loop is flagged, and the identical `d + d` inside `for (d in dates)` is not. No doc
-describes this boundary.
+`[`, `min`, `max`, `sort`, `rev`, `unique`, `head`, `tail`, `range` and `c` keep `Date`, and a `for`
+loop's variable is `double`, as R strips the class there. `Reduce(f, dates)` is still rejected
+(``expected `list[T] | T[]`, found `Date` ``): a `Date` overload on `Reduce` makes every wrapper over
+an open argument lose its type, because two candidates then fit, so it waits for `Date[]`.
 
-Two related gaps. `#: @type TradeDate {Date}` disables all Date arithmetic, so `settle - trade` is
-rejected, which kills the guide's own recipe for domain types over dates. The working route is a
-project `.Rtypes` declaring `-.SettleDate`, which the guide never mentions, and a stub cannot see an
-inline `@type` anyway. Separately, `Date[]` is inexpressible, and `Days + Days` yields `double`, so a
-units tag dies on arithmetic.
+`Date[]` is inexpressible, and `Days + Days` yields `double`, so a units tag dies on
+arithmetic. `sort`, `head` and `rev` on dates report ``found \`T[]\```, which leaks an unbound
+type variable.
 
 ### Strict mode's own advice does not work
 

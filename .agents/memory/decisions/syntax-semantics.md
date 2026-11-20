@@ -2059,3 +2059,35 @@ lowering path and a third way for two annotations to disagree, for no case `#:` 
   evaluates the supplied argument to read its class. A direct call may still omit it (R then
   dispatches on a missing object, and the method decides). Declared signatures carry no dispatch
   formal: an annotation states requiredness itself.
+
+## A nominal over a nominal extends it
+
+**Status:** settled.
+
+- `@type TradeDate {Date}` makes a `TradeDate` a `Date`: compatibility projects a nominal to its
+  representation (one source of truth, no separate hierarchy table), and operator and `[`
+  dispatch walk that chain (`Checker::class_chain`), as R's class vector `c("TradeDate", "Date")`
+  does. The reverse direction stays an error.
+- The stubs declare `data.table {data.frame}` and `ggplot {gg}`, which replaces the exact-name
+  match that rejected `needs_df(data.table(...))` and accepted the wrong direction.
+- Acyclic by construction: a chain stops at a name it has seen.
+
+## `numeric` is closed under arithmetic, `arithmetic` is not
+
+**Status:** settled.
+
+- R defines `Date + 1` and not `Date + Date`, so "the class declares an arithmetic method" does
+  not imply "two values of it combine". One constraint for both let `add_them(d1, d2)` under
+  `<T: numeric> fn(a: T, b: T)` launder the error the direct `d1 + d2` reports.
+- `arithmetic` (loose) admits numbers and any class with an arithmetic method. It is what one
+  flexible operand beside a number asks (`x + 1`), and what a numeric-only stub set asks
+  (`abs(x)`), so no legal call is rejected.
+- `numeric` (closed) admits numbers and a class with a `+.C`, `Arith.C` or `Ops.C` method whose
+  first two operands both take the class (`ArithmeticClasses::closed_under_arithmetic`). It is
+  what two operands tied to one type ask (`a + b`, `x * x`) and what unary minus asks.
+  `numeric` keeps the spelling users write, so a declared `<T: numeric>` means what it reads as.
+- `join` treats `arithmetic` as `numeric` against every other constraint and keeps it loose
+  unless the other side is `numeric`, so no lattice pair is new.
+- Rejected: operator-specific constraints (`T: Add<T>`), which are traits by another name and are
+  declined (`development/design/open-questions.md`, section 3).
+

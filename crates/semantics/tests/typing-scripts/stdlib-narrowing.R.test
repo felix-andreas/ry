@@ -206,7 +206,7 @@ f <- function(x) {
   x + 1L
 }
 #++++
-f: <T: numeric> fn(x: T | NULL) -> integer | T
+f: <T: arithmetic> fn(x: T | NULL) -> integer | T
 0..1 warning[unused] `f` is assigned but never used.
 
 #---- negated_guard_shapes_too
@@ -223,5 +223,5 @@ f <- function(x) {
   x + 1L
 }
 #++++
-f: <T: numeric> fn(x: T | NULL) -> T
+f: <T: arithmetic> fn(x: T | NULL) -> T
 0..1 warning[unused] `f` is assigned but never used.
