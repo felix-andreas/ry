@@ -1926,3 +1926,10 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 
 - `is.null(x$field)` narrows a structural record by rewriting the slot's type, but a rewritten `Tree` representation is no longer a `Tree`. For a slot whose remaining members are all nominals naming the field exactly, the false edge establishes `Fact::FieldNarrowed { slot, field, ty }` instead, and `Checker::infer_field` reads `x$field` from it. The slot keeps its nominal type.
 - A fact dies with any write to the slot (`Environment::set` forgets it), and a non-diverging `if` retracts its false-edge field facts (`retract_false_facts`), since only a diverging then branch makes the false edge hold afterwards. A closure's read ignores the fact when a later write to the slot exists.
+
+## A type past the size ceiling widens to `Unknown`, never to a recursive nominal
+
+**Status:** settled
+
+- A self-referential value, such as a record whose fields return that record, builds a type whose tree grows exponentially while its hash-consed graph stays small. Building it costs graph nodes only, and every type stores its saturating tree size when built (`types::type_size`), so no cap is needed at construction; `Checker::record` widens a composite at `TYPE_SIZE_CEILING` to `Unknown`, the sound-by-refusal move a loop join makes for a structurally growing variable.
+- Folding into a recursive nominal is rejected: it would invent a type name the user never wrote, every message would show it, and two values folded apart would not be compatible. A user who wants the recursive shape declares it (`type Tree = list{left: Tree | NULL, ...}`), which checks precisely.

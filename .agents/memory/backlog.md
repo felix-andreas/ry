@@ -2814,34 +2814,6 @@ Three things are left for the user, because an agent should not decide them.
   and ratings from zero. Revert that one field if keeping the listing matters more.
 - **Registering `ry-lang` on crates.io, and `ry-lang.org`.**
 
-## Open: a size bound on a constructed type, and a decision on recursion widening
-
-`TYPE_SIZE_CEILING` caps a type at the point it is recorded, which stops the pathology. The general
-question is still open: nothing caps how large one constructed type may get in the first place.
-
-Widening past a bound to `Unknown` is the sound-by-refusal move the loop join already makes for a
-variable whose type keeps growing structurally. The alternative is folding to a recursive nominal.
-Choosing between them is a semantics design decision rather than an optimization, so it wants a
-decision record.
-
-Computing the size cheaply needs care. The graph is small while the tree is enormous, so a
-distinct-node count will not see the problem and a naive tree count is itself exponential. It wants
-a memoized size where the size of a node is one plus the sum of its children's sizes, which is
-linear in the graph and yields the true tree magnitude. `types::type_size` already has that shape.
-
-## Open: a cross-file cycle panics salsa's backdate check
-
-`fuzz_multi_file` (`crates/semantics/tests/test_fuzz.rs`) panics in salsa's
-`backdate.rs` ("returned the same value, but the previous execution changed at R2 and the new
-execution changed at R1") for `global_scheme`. Minimal repro, with salsa 0.28.0 and 0.28.5 alike:
-file one is `g <- rev(g)` then `f <- g$x`, file two is `g <- g + 1L`; empty file two, render both,
-restore it, render again. `sort`, `List.reverse` and `as.Array` in place of `rev` panic too,
-`unlist` and `as.vector` do not. Every execution of the scheme is `Unknown`, so the result is
-deterministic: the panic comes from deep verification re-executing a cycle head
-(`maybe_changed_after_cold`) outside its fixpoint, where it reads only backdated cycle members.
-The Array fuzz templates reached it first; it predates Arrays. Fix the cycle shape (or report it to
-salsa with this repro), then pin the repro in `test_incremental.rs`.
-
 ## Open: neither cycle fix has end-to-end coverage
 
 Neither the non-convergence fix nor the missing cycle recovery has a fixture. The failing inputs are
