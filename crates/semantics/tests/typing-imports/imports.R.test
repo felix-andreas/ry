@@ -687,3 +687,44 @@ qualified_volatility <- function(fit) rugarch::sigma(fit)
 residual_scale: fn(fit: Any) -> double
 volatility: fn(fit: uGARCHfit) -> matrix
 qualified_volatility: fn(fit: uGARCHfit) -> matrix
+
+#---- a_foreach_body_sees_its_iterators
+#namespace import(foreach)
+#: fn(groups: list[integer[]]) -> integer[]
+totals <- function(groups) {
+  foreach(g = groups, .combine = c) %do% sum(g)
+}
+
+#: fn(groups: list[integer[]]) -> Any
+fields <- function(groups) {
+  foreach(g = groups) %do% g$name
+}
+
+#: fn(n: integer) -> list[list[integer]]
+pairs <- function(n) {
+  foreach(i = seq_len(n)) %:% when(i > 1L) %:% foreach(j = seq_len(i)) %do% (i + j)
+}
+
+#: fn(xs: double[]) -> double
+running <- function(xs) {
+  total <- 0
+  foreach(x = xs) %do% {
+    total <- total + x
+  }
+  total
+}
+
+#: fn(groups: list[double[]], weights: double[]) -> list[double]
+weighted <- function(groups, weights) {
+  foreach(g = groups, w = weights) %dopar% {
+    s <- sum(g)
+    s * w
+  }
+}
+#++++
+totals: fn(groups: list[integer[]]) -> integer[]
+fields: fn(groups: list[integer[]]) -> Any
+pairs: fn(n: integer) -> list[list[integer]]
+running: fn(xs: double[]) -> double
+weighted: fn(groups: list[double[]], weights: double[]) -> list[double]
+245..251 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `integer[]`. Extract an element with `[[` instead.

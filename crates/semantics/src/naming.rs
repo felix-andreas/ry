@@ -7,13 +7,14 @@ use {
         dense::DenseId,
         hir::{
             Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind,
-            MatchArm, Module, NameSite, PatId, PatternKind, Symbol, UnaryOperator,
+            MatchArm, Module, NameId, NameSite, PatId, PatternKind, Symbol, UnaryOperator,
             destructure_leaves,
         },
         sorted::{SortedMap, SortedSet},
         stubs::{SymbolKey, SymbolMap},
     },
     rustc_hash::{FxHashMap, FxHashSet},
+    smallvec::SmallVec,
     std::{
         collections::{BTreeMap, BTreeSet, btree_map::Entry},
         mem,
@@ -624,6 +625,10 @@ impl Context<'_> {
                     self.naming.quiet_operator_reads.insert(*name);
                     // A local `%op%` needs its slot marked too, or it reads as a dead store.
                     self.mark_slot_read(*name);
+                }
+                if let Some(foreach) = foreach_loop(module, id) {
+                    self.resolve_foreach(id, &foreach);
+                    return;
                 }
                 match operator {
                     BinaryOperator::Help => {}
@@ -1364,6 +1369,49 @@ impl Context<'_> {
         };
     }
 
+    /// `foreach(g = groups) %do% body` binds each iterator and evaluates the body once per
+    /// element in the calling frame, as a `for` loop does. A parallel backend (`%dopar%`)
+    /// evaluates it in an environment of its own, so its writes vanish with it. A nested stage
+    /// (`%:% foreach(...)`, `%:% when(...)`) reads the iterators of the stages before it.
+    fn resolve_foreach(&mut self, id: ExprId, foreach: &ForeachLoop) {
+        let module = self.module;
+        if !foreach.caller_frame {
+            let scope_id = self.stable_scope_id(id);
+            self.scopes.push(Scope {
+                id: scope_id,
+                kind: ScopeKind::Local,
+                slots: FxHashMap::default(),
+                horizon: Horizon::Unbounded,
+            });
+        }
+        let mut iterators: SmallVec<[BindingId; 2]> = SmallVec::new();
+        for &stage in &foreach.stages {
+            self.resolve(stage);
+            for (name, value) in foreach_iterators(module, stage) {
+                let NameSite { name, range } = module[name];
+                let slot = self.mint_binding(name, range, BindingKind::ForVariable);
+                if self.current_scope().kind == ScopeKind::TopLevel {
+                    self.naming.super_globals.insert(name);
+                    self.naming.loop_bound_slots.insert(slot);
+                }
+                self.current_scope().slots.insert(name, slot);
+                self.naming.for_variables.insert(value, slot);
+                self.record_write(slot, Reach::Implicit);
+                iterators.push(slot);
+            }
+        }
+        if foreach.caller_frame {
+            let depth = self.active_loop_variables.len();
+            self.active_loop_variables.extend(iterators);
+            self.walk_loop(id, foreach.body, None, true);
+            self.active_loop_variables.truncate(depth);
+        } else {
+            self.premint_frame_assignments(foreach.body);
+            self.resolve(foreach.body);
+            self.scopes.pop();
+        }
+    }
+
     fn resolve_arguments(&mut self, arguments: &[Argument]) {
         for argument in arguments {
             if let Some(value) = argument.value {
@@ -1532,6 +1580,21 @@ impl Context<'_> {
                 operator: UnaryOperator::Tilde | UnaryOperator::Help,
                 ..
             } => {}
+            // A parallel foreach body gets its own scope when it is resolved.
+            ExpressionKind::Binary { .. } if let Some(foreach) = foreach_loop(module, id) => {
+                for &stage in &foreach.stages {
+                    self.premint_frame_assignments(stage);
+                    if foreach.caller_frame {
+                        for (name, _) in foreach_iterators(module, stage) {
+                            let NameSite { name, range } = module[name];
+                            self.frame_slot(name, range, BindingKind::ForVariable);
+                        }
+                    }
+                }
+                if foreach.caller_frame {
+                    self.premint_frame_assignments(foreach.body);
+                }
+            }
             // A masked argument gets its own scope when it is resolved, so its assignments
             // mint nothing in this frame.
             ExpressionKind::Call { callee, arguments }
@@ -2543,6 +2606,91 @@ fn collect_tail_assignments(module: &Module, id: ExprId, tails: &mut FxHashSet<E
         }
         _ => {}
     }
+}
+
+/// `foreach(...) %do% body`, also with `%dopar%` or doRNG's `%dorng%`, and with stages nested
+/// by `%:%`.
+pub(crate) struct ForeachLoop {
+    /// In order, each a `foreach()` or `when()` call, the first a `foreach()`.
+    pub stages: SmallVec<[ExprId; 2]>,
+    pub body: ExprId,
+    /// `%do%` evaluates the body in the calling frame; a parallel backend in an environment of
+    /// its own.
+    pub caller_frame: bool,
+}
+
+pub(crate) fn foreach_loop(module: &Module, id: ExprId) -> Option<ForeachLoop> {
+    let ExpressionKind::Binary {
+        operator: BinaryOperator::Special,
+        special_name: Some(name),
+        lhs,
+        rhs,
+    } = module.kind(id)
+    else {
+        return None;
+    };
+    if !matches!(name.as_str(), "%do%" | "%dopar%" | "%dorng%") {
+        return None;
+    }
+    let mut stages = SmallVec::new();
+    let mut pending = *lhs;
+    loop {
+        match module.kind(pending) {
+            ExpressionKind::Binary {
+                operator: BinaryOperator::Special,
+                special_name: Some(name),
+                lhs,
+                rhs,
+            } if name.as_str() == "%:%" => {
+                stages.push(*rhs);
+                pending = *lhs;
+            }
+            _ => {
+                stages.push(pending);
+                break;
+            }
+        }
+    }
+    stages.reverse();
+    let callee_is = |stage: ExprId, wanted: &str| match module.kind(stage) {
+        ExpressionKind::Call { callee, .. } => match module.kind(*callee) {
+            ExpressionKind::NameRef(name) => name.as_str() == wanted,
+            ExpressionKind::Namespace {
+                package: Some(package),
+                name: Some(name),
+                ..
+            } => package.as_str() == "foreach" && name.as_str() == wanted,
+            _ => false,
+        },
+        _ => false,
+    };
+    let first = *stages.first()?;
+    let shaped = callee_is(first, "foreach")
+        && stages
+            .iter()
+            .all(|&stage| callee_is(stage, "foreach") || callee_is(stage, "when"));
+    shaped.then_some(ForeachLoop {
+        stages,
+        body: *rhs,
+        caller_frame: name.as_str() == "%do%",
+    })
+}
+
+/// The iterators of a `foreach()` stage: its named arguments other than the dotted options
+/// (`.combine`, `.packages`, ...), each with its value.
+pub(crate) fn foreach_iterators(
+    module: &Module,
+    stage: ExprId,
+) -> impl Iterator<Item = (NameId, ExprId)> + '_ {
+    let arguments = match module.kind(stage) {
+        ExpressionKind::Call { arguments, .. } => &module[*arguments],
+        _ => &[],
+    };
+    arguments.iter().filter_map(move |argument| {
+        let name = argument.name?;
+        let value = argument.value?;
+        (!module[name].name.as_str().starts_with('.')).then_some((name, value))
+    })
 }
 
 /// The formals that hold the data; every other argument evaluates in the data's frame.

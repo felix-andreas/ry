@@ -21,8 +21,8 @@ use {
         },
         metadata::{imported_by_name, imports_every_name, is_own_package, own_package_reaches},
         naming::{
-            BindingId, BindingKind, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable,
-            is_column_update, query_index_arguments,
+            BindingId, BindingKind, ForeachLoop, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable,
+            foreach_iterators, foreach_loop, is_column_update, query_index_arguments,
         },
         native::{Judged, NativeBlocker, has_r_bound, native_blockers},
         sorted::{SortedMap, SortedSet},
@@ -9430,6 +9430,10 @@ impl<'db, 'a> Checker<'db, 'a> {
         rhs: ExprId,
     ) -> Ty<'db> {
         use BinaryOperator::*;
+        if let Some(foreach) = foreach_loop(self.module, id) {
+            let result = self.infer_foreach(id, &foreach);
+            return self.record(id, result);
+        }
         if operator == Special
             && let Some(name) = special_name
             && let Some(result) = self.infer_declared_operator(range, name, lhs, rhs)
@@ -10221,6 +10225,101 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     /// Only stub-declared `%op%`s are typed as calls: a project's own may quote its
     /// right operand (magrittr's `%>%`), and checking it as a call would reject correct code.
+    /// `foreach(g = groups) %do% body`: the body runs once per element with each iterator
+    /// bound to an element of its value, and `.combine` folds the body's values. Under `%do%`
+    /// the body is a loop in the calling frame; under a parallel backend its writes vanish.
+    fn infer_foreach(&mut self, id: ExprId, foreach: &ForeachLoop) -> Ty<'db> {
+        let module = self.module;
+        let pending_mark = self.pending_enclosing_writes.len();
+        let mark = self.environment.mark();
+        let mut iterators: SmallVec<[(BindingId, Ty<'db>); 2]> = SmallVec::new();
+        for &stage in &foreach.stages {
+            self.infer(stage);
+            for (_, value) in foreach_iterators(module, stage) {
+                let Some(&slot) = self.naming.extras().for_variables.get(&value) else {
+                    continue;
+                };
+                let sequence = self.recorded_type(value);
+                let element = if self.refuse_hidden_representation(value, sequence) {
+                    unknown(self.db)
+                } else {
+                    let resolved = self.structural(sequence);
+                    // An iterator object (`icount()`, `iter(m, by = "row")`) is not a
+                    // vector, and foreach's own iteration decides its element.
+                    self.iteration_element(resolved)
+                        .unwrap_or_else(|_| unknown(self.db))
+                };
+                self.environment.set(slot, EnvEntry::Mono(element));
+                iterators.push((slot, element));
+            }
+        }
+        let value = if foreach.caller_frame {
+            self.check_loop_body(id, None, foreach.body, false, None);
+            // doSEQ leaves each iterator at its last element, and unset when there was none.
+            for &(slot, element) in &iterators {
+                let last = match self.environment.get(slot) {
+                    Some(EnvEntry::Mono(ty)) => ty,
+                    _ => element,
+                };
+                let after = union_of(self.db, [last, null(self.db)]);
+                self.environment.set(slot, EnvEntry::Mono(after));
+            }
+            self.recorded_type(foreach.body)
+        } else {
+            let value = self.infer(foreach.body);
+            self.environment.rollback(mark);
+            self.reapply_enclosing_writes(pending_mark);
+            value
+        };
+        let mut result = self.settle_literals(value);
+        for &stage in foreach.stages.iter().rev() {
+            if let ExpressionKind::Call { arguments, .. } = module.kind(stage)
+                && foreach_iterators(module, stage).next().is_some()
+            {
+                result = self.foreach_combined(&module[*arguments], result);
+            }
+        }
+        result
+    }
+
+    /// What one `foreach()` stage gives for body values of type `value`: a list without
+    /// `.combine`, a vector under `.combine = c` of scalars or vectors, and `Any` for every
+    /// other fold.
+    fn foreach_combined(&mut self, arguments: &[Argument], value: Ty<'db>) -> Ty<'db> {
+        let module = self.module;
+        let option = |name: &str| {
+            arguments
+                .iter()
+                .find(|argument| {
+                    module
+                        .argument_name(argument)
+                        .is_some_and(|found| found == name)
+                })
+                .and_then(|argument| argument.value)
+        };
+        if option(".final").is_some() || option(".init").is_some() {
+            return any(self.db);
+        }
+        let Some(combine) = option(".combine") else {
+            return Ty::new(self.db, TyKind::List(value));
+        };
+        let concatenates = match module.kind(combine) {
+            ExpressionKind::NameRef(name) => {
+                name == "c" && !self.naming.resolutions.contains_key(&combine)
+            }
+            ExpressionKind::Literal(LiteralKind::String(text)) => &module[*text] == "c",
+            _ => false,
+        };
+        let resolved = self.table.resolve(self.db, value);
+        match resolved.kind(self.db) {
+            TyKind::Scalar(atomic) if concatenates => {
+                Ty::new(self.db, TyKind::Vector(scalar(self.db, *atomic)))
+            }
+            TyKind::Vector(_) if concatenates => resolved,
+            _ => any(self.db),
+        }
+    }
+
     fn infer_declared_operator(
         &mut self,
         range: TextRange,

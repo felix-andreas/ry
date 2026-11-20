@@ -3406,6 +3406,30 @@ type after the loop includes the inner loop's elements. A `from:to` range always
 like a top-level assignment, so a later statement or item reads the same type. When the item also
 binds the name in another way, the name exports as `Unknown`.
 
+### foreach loops
+
+`foreach(g = groups) %do% body` from the foreach package is a loop too. Each named argument of
+`foreach()` that does not start with a dot is an iterator, and the body sees it bound to the element
+type of its value, by the rules of `for` above. An iterator object such as `icount()` binds an
+`Unknown` iterator. `foreach(i = xs) %:% when(i > 0) %:% foreach(j = ys) %do% body` nests the
+stages, and a later stage and the body read every earlier stage's iterators.
+
+`%do%` runs the body in the calling frame, as a `for` loop does, so a write there is visible after
+the loop and each iterator is left at its element type joined with `NULL`. A parallel backend
+(`%dopar%`, doRNG's `%dorng%`) runs the body in an environment of its own, so its writes do not
+reach the caller.
+
+The result follows each stage's `.combine`, innermost stage first:
+
+| `foreach()` options | Result for a body of type `T` |
+|---|---|
+| no `.combine` | `list[T]` |
+| `.combine = c` (or `"c"`) and `T` an atomic scalar or vector | the vector of `T`'s element |
+| any other `.combine`, `.init` or `.final` | `Any` |
+
+So `foreach(g = groups, .combine = c) %do% sum(g)` with `groups: list[integer[]]` is
+`integer[]`.
+
 ### `while`
 
 A `while` loop takes a [scalar condition](#conditions), which is re-evaluated before every iteration,
