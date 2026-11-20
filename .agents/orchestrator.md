@@ -48,7 +48,7 @@ The goal, the mandate and the benchmark are in `AGENTS.md`. On top of them:
 No release unless the user asks (user). Fable sessions wait for the weekly limit until Mon Nov 23 10:00 UTC; until then at most two Opus high sessions run, on work that does not conflict (user).
 
 - session_0111kWqCHzz5KgPTQQvkUSXS (Opus high, checker): #684, #686, #687, #688 merged. Now (branch feat/type-system-adoption): backlog "adoption reviews", "second simulated-user round", "semantics" and "diagnostic wording" sections.
-- session_0111kWqE86VPq98yVE2JgLVm (Opus high, kernels and package correctness): #685, #689 merged. Now (branch fix/package-suites): the 59 pinned CRAN packages' test suites, rpois/rgeom/ar.mle/tstrsplit speed, the C-locale UTF-8 item. Stays out of the JIT, calls, the builtin calling convention and semantics/ide.
+- session_0111kWqCXYKiR937Au74eL55 (Opus high, kernels; replaced the archived session_0111kWqE86VPq98yVE2JgLVm, whose disk filled after #685, #689, #690): branch fix/dependency-suites, test-suite parity for the benchmark dependency set beyond the 27 pinned packages, and load-index cache eviction. Stays out of the JIT, calls, the builtin calling convention and semantics/ide.
 - Paused until Mon Nov 23 (trigger trig_01SZ4mDi9FXTEzqTdFKB7yEQ resumes them and re-enables check-in trig_01LuX97P7ZbAg4TRxYu7c1tu): session_0111kWqEyHh2WBFnP93ZvPEM (JIT), session_0111kWqD8G8GVR8fbHetepcc (calls), session_0111kWqDs8aQ1MWFmKMxX9HQ (fuzz, IDE oracles).
 
 User-only items (never ask; note in the final report): a history rewrite dropping an old customer-project name, the Marketplace trusted-publishing policy, the Zed listing, a real Windows run, deleting remote branches `feat/runtime-stats` and `runtime-packages-round4`.
