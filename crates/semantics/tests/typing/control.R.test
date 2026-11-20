@@ -445,15 +445,48 @@ f <- function(cfg: list{limit: character | NULL}, flag: logical) -> integer {
 f: fn(cfg: list{limit: character | NULL}, flag: logical) -> integer
 133..136 error[type-mismatch] expected `integer`, found `list{limit: character | NULL}`
 
-#---- a_nominal_field_is_not_narrowed
+#---- a_nominal_field_is_narrowed_and_the_value_keeps_its_type
 type Tree = list{ left: Tree | NULL, value: double }
 f <- function(node: Tree) -> double {
   if (is.null(node$left)) stop()
   node$left$value
 }
+same <- function(node: Tree) -> Tree {
+  if (is.null(node$left)) stop()
+  node
+}
 #++++
 f: fn(node: Tree) -> double
-126..141 error[type-mismatch] expected `double`, found `double | NULL`
+same: fn(node: Tree) -> Tree
+
+#---- a_nominal_field_narrowing_ends_with_a_branch_that_falls_through
+type Tree = list{ left: Tree | NULL, value: double }
+f <- function(node: Tree) -> double {
+  if (is.null(node$left)) message("leaf")
+  node$left$value
+}
+#++++
+f: fn(node: Tree) -> double
+135..150 error[type-mismatch] expected `double`, found `double | NULL`
+
+#---- a_nominal_field_narrowing_ends_at_a_write
+type Tree = list{ left: Tree | NULL, value: double }
+f <- function(node: Tree) -> double {
+  if (is.null(node$left)) return(0)
+  node$left <- NULL
+  node$left$value
+}
+#++++
+f: fn(node: Tree) -> double
+149..164 error[type-mismatch] expected `double`, found `double | NULL`
+
+#---- a_nominal_field_narrows_inside_a_not_null_branch
+type Tree = list{ left: Tree | NULL, value: double }
+f <- function(node: Tree) -> logical {
+  !is.null(node$left) && node$left$value > 0
+}
+#++++
+f: fn(node: Tree) -> logical
 
 #---- arithmetic_on_a_null_tested_value_follows_r
 f <- function(x) {

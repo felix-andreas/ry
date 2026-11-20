@@ -1562,6 +1562,13 @@ enum Fact<'db> {
         condition: ExprId,
         negated: bool,
     },
+    /// After `if (is.null(node$left)) stop()` on a nominal `node`, `node$left` reads `ty`. A
+    /// narrowed representation would no longer be the nominal, so the slot keeps its type.
+    FieldNarrowed {
+        slot: BindingId,
+        field: Symbol,
+        ty: Ty<'db>,
+    },
 }
 
 impl Fact<'_> {
@@ -1573,6 +1580,7 @@ impl Fact<'_> {
                 slot: written, key, ..
             } => written == slot || key == slot,
             Fact::KeyDomain { key, .. } => key == slot,
+            Fact::FieldNarrowed { slot: narrowed, .. } => narrowed == slot,
         }
     }
 }
@@ -6096,6 +6104,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             // `nm(x, value)` to `attr(x, name) <- value` and so `x` to `value`.
             (false, false) if discarded => {
                 self.retract_false_domain(condition);
+                self.retract_false_facts(guard.as_ref());
                 let correlations = self.branch_correlations(condition, &then_writes, false_mark);
                 self.join_writes(&then_writes, JoinEdge::Branch);
                 for fact in correlations {
@@ -6131,6 +6140,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     !normalizes
                 });
                 self.retract_false_domain(condition);
+                self.retract_false_facts(guard.as_ref());
                 let correlations = self.branch_correlations(condition, &then_writes, false_mark);
                 self.join_writes(&then_writes, JoinEdge::Branch);
                 for fact in correlations {
@@ -7917,6 +7927,15 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     /// After an `if` whose branches both continue, the false edge's view of a tested local
     /// does not hold.
+    /// A false-edge fact holds after the `if` only when the then branch diverged.
+    fn retract_false_facts(&mut self, guard: Option<&GuardRefinement<'db>>) {
+        for refinement in guard.into_iter().flat_map(|guard| &guard.false_edge) {
+            if let SlotRefinement::Establish(fact @ Fact::FieldNarrowed { .. }) = *refinement {
+                self.environment.retract(fact);
+            }
+        }
+    }
+
     fn retract_false_domain(&mut self, condition: ExprId) {
         if let Some(test) = key_test(self.module, &self.naming.resolutions, condition) {
             self.environment.retract(Fact::KeyDomain {
@@ -8397,7 +8416,9 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// false edge drops each member of `x` that cannot carry it: `NULL`, an empty `list()`
     /// placeholder, and a record with no field the name could partially match. It also drops
     /// `NULL` from the field itself in each record that names it exactly, so `x$field` reads
-    /// non-`NULL` there. The true edge keeps every member, since a field may itself hold `NULL`.
+    /// non-`NULL` there. A nominal member keeps its identity, so for a nominal the edge records
+    /// the narrowed field as a fact of the slot instead. The true edge keeps every member, since
+    /// a field may itself hold `NULL`.
     fn field_null_guard(&mut self, target: ExprId, field: &str) -> Option<GuardRefinement<'db>> {
         if !matches!(self.module.kind(target), ExpressionKind::NameRef(_)) {
             return None;
@@ -8433,13 +8454,52 @@ impl<'db, 'a> Checker<'db, 'a> {
                 _ => self.without_null_field(member, field),
             })
             .collect();
-        if kept.is_empty() || kept.as_slice() == members.as_slice() {
+        if kept.is_empty() {
             return None;
         }
-        Some(GuardRefinement {
+        let mut false_edge = Vec::new();
+        if let Some(narrowed) = self.nominal_field_without_null(&kept, field) {
+            false_edge.push(SlotRefinement::Establish(Fact::FieldNarrowed {
+                slot,
+                field: Symbol::new(field),
+                ty: narrowed,
+            }));
+        }
+        if kept.as_slice() != members.as_slice() {
+            false_edge.push(SlotRefinement::Narrow(slot, union_of(self.db, kept)));
+        }
+        (!false_edge.is_empty()).then_some(GuardRefinement {
             true_edge: Vec::new(),
-            false_edge: vec![SlotRefinement::Narrow(slot, union_of(self.db, kept))],
+            false_edge,
         })
+    }
+
+    /// The type of field `field` without `NULL` when every member is a nominal whose
+    /// representation names the field exactly and lets it hold `NULL`.
+    fn nominal_field_without_null(&mut self, members: &[Ty<'db>], field: &str) -> Option<Ty<'db>> {
+        let mut present = Vec::new();
+        let mut had_null = false;
+        for &member in members {
+            if !matches!(member.kind(self.db), TyKind::Named(..)) {
+                return None;
+            }
+            let representation = self.structural(member);
+            let TyKind::Record(fields) = representation.kind(self.db) else {
+                return None;
+            };
+            let candidate = fields
+                .iter()
+                .find(|candidate| candidate.name.text(self.db) == field)?;
+            let field_ty = self.table.resolve(self.db, candidate.ty);
+            for &field_member in guard_members(self.db, field_ty).iter() {
+                if matches!(field_member.kind(self.db), TyKind::Null) {
+                    had_null = true;
+                } else {
+                    present.push(field_member);
+                }
+            }
+        }
+        (had_null && !present.is_empty()).then(|| union_of(self.db, present))
     }
 
     /// `record` with `NULL` dropped from its field `field` and the field made present, or
@@ -19603,12 +19663,41 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         let subject = self.structural(target_ty);
         match self.dollar_result(id, range, name_range, subject, &name) {
-            Ok(ty) => ty,
+            Ok(ty) => self.narrowed_field(target, name).unwrap_or(ty),
             Err(error) => {
                 self.errors.push(name_frame(error, self.module, target));
                 unknown(self.db)
             }
         }
+    }
+
+    /// The type a dominating `is.null(x$field)` test showed `x$field` to have.
+    fn narrowed_field(&self, target: ExprId, name: Symbol) -> Option<Ty<'db>> {
+        if !matches!(self.module.kind(target), ExpressionKind::NameRef(_)) {
+            return None;
+        }
+        let &slot = self.naming.resolutions.get(&target)?;
+        // A closure may run after a later write has undone the test.
+        if self.naming.extras().captured_reads.contains(&target) {
+            let position = self.module.range(target).start();
+            let rewritten = self
+                .capture_writes
+                .get(slot)
+                .into_iter()
+                .flatten()
+                .any(|(at, _)| *at > position && !self.body_range.contains(*at));
+            if rewritten {
+                return None;
+            }
+        }
+        self.environment.facts.iter().find_map(|fact| match *fact {
+            Fact::FieldNarrowed {
+                slot: narrowed,
+                field,
+                ty,
+            } if narrowed == slot && field == name => Some(ty),
+            _ => None,
+        })
     }
 
     fn dollar_result(

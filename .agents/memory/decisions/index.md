@@ -131,6 +131,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - An unassigned path reads the name outside the function
 - A declared type parameter keeps its name in messages
 - A closure's read sees the writes after its definition
+- A nominal field narrows through a fact, not a rewritten type
 
 ## Analysis core
 

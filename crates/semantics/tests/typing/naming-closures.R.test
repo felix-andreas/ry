@@ -180,3 +180,14 @@ f <- function(x: character | NULL) -> character {
 }
 #++++
 f: fn(x: character | NULL) -> character
+#---- a_write_after_a_closure_undoes_a_nominal_field_narrowing
+type Tree = list{left: Tree | NULL, value: double}
+f <- function(node: Tree) -> double {
+  if (is.null(node$left)) return(0)
+  get <- function() node$left$value
+  node$left <- NULL
+  get()
+}
+#++++
+f: fn(node: Tree) -> double
+183..188 error[type-mismatch] expected `double`, found `double | NULL`

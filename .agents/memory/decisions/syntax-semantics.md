@@ -1919,3 +1919,10 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - Naming marks every read that crosses a function boundary (`NamingExtras::captured_reads`). Where such a read finds an environment entry, the checker joins it with each write to the slot positioned after the read (`Checker::capture_writes`, by source offset), so a narrowing at the definition does not survive a later `x <- NULL`, whether from the frame or from a sibling closure's `<<-`.
 - The reading body's own `<<-` writes are left to its superassignment seeds, and an R literal written later takes the read's type when its constraint admits it (or the read is still open), so `step <- 2` after `step <- 1` stays `I64` in typed code.
 - A newly seen later write records the read's position in `late_triggers`; the function body whose range holds it re-checks once, so a write in a nested closure re-checks the frame that defined the reading closure. Late writes join with `join_closure_write`, which keeps a callback's open result generic (`memoize` returns `T | logical` after a `cache <<- TRUE` reset).
+
+## A nominal field narrows through a fact, not a rewritten type
+
+**Status:** built
+
+- `is.null(x$field)` narrows a structural record by rewriting the slot's type, but a rewritten `Tree` representation is no longer a `Tree`. For a slot whose remaining members are all nominals naming the field exactly, the false edge establishes `Fact::FieldNarrowed { slot, field, ty }` instead, and `Checker::infer_field` reads `x$field` from it. The slot keeps its nominal type.
+- A fact dies with any write to the slot (`Environment::set` forgets it), and a non-diverging `if` retracts its false-edge field facts (`retract_false_facts`), since only a diverging then branch makes the false edge hold afterwards. A closure's read ignores the fact when a later write to the slot exists.
