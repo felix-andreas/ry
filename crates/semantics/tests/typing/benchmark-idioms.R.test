@@ -53,8 +53,47 @@ swap <- function(values) {
   low
 }
 #++++
-span: <T> fn(dates: T) -> list{first: Unknown, last: Unknown}
-swap: <T> fn(values: T) -> Unknown
+span: <T> fn(dates: T) -> list{first: Any, last: Any}
+swap: <T> fn(values: T) -> Any
+
+#---- zeallot_targets_take_the_types_of_their_positions
+#: fn(x: double[]) -> character
+spread <- function(x) {
+  c(lo, hi) %<-% list(1, 2)
+  hi - lo
+}
+
+#: fn() -> character
+labels <- function() {
+  c(name, c(code, .)) %<-% list(name = "a", pair = list("b", 1L))
+  paste(name, code)
+}
+
+#: fn(values: double[]) -> double
+first_of <- function(values) {
+  c(head, ...rest) %<-% values
+  head
+}
+
+#: fn() -> character
+ends <- function() {
+  c(first, ...middle, last) %<-% list(1, 2L, TRUE, "z")
+  last
+}
+
+#: fn() -> double
+too_many <- function() {
+  c(a, b) %<-% list(1, 2, 3)
+  a
+}
+#++++
+spread: fn(x: double[]) -> character
+labels: fn() -> character
+first_of: fn(values: double[]) -> double
+ends: fn() -> character
+too_many: fn() -> double
+86..93 error[type-mismatch] expected `character`, found `double`
+489..496 error[type-mismatch] this pattern unpacks 2 values, but the value has 3 items, so `%<-%` stops with an error. Match the count, skip a position with `.`, or collect the rest with `...rest`
 
 #---- widening_meets_a_scalar_and_a_vector
 scale <- function(a, b) a * b

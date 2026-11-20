@@ -435,3 +435,14 @@ models <- function(df) {
 #++++
 io: <T> fn(dir: T) -> list{character[], character, character, character, character, character, POSIXct, Date, POSIXct, character, Any, logical, environment, environment, logical, character, Any}
 models: <T> fn(df: T) -> list{Any, Any}
+
+#---- invisible_without_an_argument_is_null
+quiet <- function() invisible()
+loud <- function(x) invisible(x)
+
+#: fn() -> NULL
+nothing <- function() quiet()
+#++++
+quiet: fn() -> NULL
+loud: <T> fn(x: T) -> T
+nothing: fn() -> NULL

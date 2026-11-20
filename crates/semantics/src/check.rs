@@ -12,8 +12,8 @@ use {
         hir::{
             Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind,
             MatchArm, Module, NaAtom, NameSite, Parameter as Formal, PatId, PatternKind,
-            RecordField as HirRecordField, Rest, Symbol, UnaryOperator, destructure_leaves,
-            integer_literal_position, is_whole_number_double,
+            RecordField as HirRecordField, Rest, Symbol, UnaryOperator, integer_literal_position,
+            is_whole_number_double,
         },
         infer::{
             Entry, FunctionMismatch, InferenceTable, RecordMismatch, UNCHECKED_WITNESS, UnifyError,
@@ -151,6 +151,12 @@ pub enum TypeErrorKind<'db> {
     },
     KnownTypeUnderIfUnknown {
         found: Ty<'db>,
+    },
+    /// zeallot's `%<-%` with a pattern whose name count differs from the value's item count,
+    /// which zeallot stops on.
+    DestructureCount {
+        names: usize,
+        items: usize,
     },
     /// R decides optionality, so a defaulted formal annotated as required is an
     /// annotation error, reported once here rather than at every caller.
@@ -5383,6 +5389,95 @@ impl<'db, 'a> Checker<'db, 'a> {
         Some(instantiated)
     }
 
+    /// zeallot's `c(a, b) %<-% value` gives each name the item at its position: a tuple's or
+    /// record's item, a list's element, or an atomic vector's element. `.` skips a position, and a
+    /// `...rest` name takes what is left (names after it read from the end), so with one the item
+    /// count is not checked. A shape with
+    /// no positions to read leaves the names `Unknown`, which strict mode reports at each name.
+    fn destructure(&mut self, pattern: ExprId, value_ty: Ty<'db>) {
+        let db = self.db;
+        let ExpressionKind::Call { arguments, .. } = self.module.kind(pattern) else {
+            return;
+        };
+        let elements: SmallVec<[ExprId; 4]> = self.module[arguments]
+            .iter()
+            .filter_map(|argument| argument.value)
+            .collect();
+        let rest_at = elements.iter().position(|&element| {
+            matches!(self.module.kind(element), ExpressionKind::NameRef(name) if name.starts_with("..."))
+        });
+        let items: Option<SmallVec<[Ty<'db>; 4]>> = match value_ty.kind(db) {
+            TyKind::Tuple(items) => Some(items.iter().copied().collect()),
+            TyKind::Record(fields) => Some(fields.iter().map(|field| field.ty).collect()),
+            _ => None,
+        };
+        if let Some(items) = &items
+            && rest_at.is_none()
+            && items.len() != elements.len()
+        {
+            self.errors.push(TypeError {
+                range: self.module.range(pattern),
+                kind: TypeErrorKind::DestructureCount {
+                    names: elements.len(),
+                    items: items.len(),
+                },
+            });
+        }
+        for (position, &element) in elements.iter().enumerate() {
+            let past_rest = rest_at.is_some_and(|rest| position >= rest);
+            let ty = match (&items, value_ty.kind(db)) {
+                (_, TyKind::Unknown | TyKind::Any) => value_ty,
+                (Some(items), _) => match rest_at {
+                    Some(rest) if position == rest => {
+                        let trailing = elements.len() - rest - 1;
+                        let taken = items.get(rest..items.len().saturating_sub(trailing));
+                        taken.map_or_else(|| unknown(db), |taken| Ty::new(db, TyKind::Tuple(taken)))
+                    }
+                    Some(_) if past_rest => (items.len() + position)
+                        .checked_sub(elements.len())
+                        .and_then(|index| items.get(index).copied())
+                        .unwrap_or_else(|| unknown(db)),
+                    _ => items.get(position).copied().unwrap_or_else(|| unknown(db)),
+                },
+                (None, TyKind::List(element) | TyKind::NamedList(element)) if !past_rest => {
+                    *element
+                }
+                (None, TyKind::Vector(element) | TyKind::NamedVector(element)) if !past_rest => {
+                    *element
+                }
+                (None, TyKind::Scalar(_)) if !past_rest => value_ty,
+                (
+                    None,
+                    TyKind::List(_)
+                    | TyKind::NamedList(_)
+                    | TyKind::Vector(_)
+                    | TyKind::NamedVector(_),
+                ) if rest_at == Some(position) => value_ty,
+                _ => unknown(db),
+            };
+            match self.module.kind(element) {
+                ExpressionKind::NameRef(name) if name == "." => {}
+                ExpressionKind::NameRef(_) => {
+                    if let Some(&slot) = self.naming.resolutions.get(&element) {
+                        self.environment.set(slot, EnvEntry::Mono(ty));
+                        self.note_captured_write(element, slot, ty);
+                    }
+                    self.recorded.insert(element, ty);
+                    if matches!(ty.kind(db), TyKind::Unknown)
+                        && !matches!(value_ty.kind(db), TyKind::Unknown)
+                    {
+                        self.record_strict_origin(element, StrictOriginKind::UnsupportedConstruct);
+                    }
+                }
+                ExpressionKind::Call { .. } => {
+                    let ty = self.table.resolve(db, ty);
+                    self.destructure(element, ty);
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn write_target(
         &mut self,
         spelling: AssignSpelling,
@@ -5391,14 +5486,8 @@ impl<'db, 'a> Checker<'db, 'a> {
         value_ty: Ty<'db>,
     ) {
         if spelling == AssignSpelling::Destructure {
-            let unchecked = unknown(self.db);
-            for leaf in destructure_leaves(self.module, target).unwrap_or_default() {
-                if let Some(&slot) = self.naming.resolutions.get(&leaf) {
-                    self.environment.set(slot, EnvEntry::Mono(unchecked));
-                    self.note_captured_write(leaf, slot, unchecked);
-                }
-                self.recorded.insert(leaf, unchecked);
-            }
+            let value_ty = self.table.resolve(self.db, value_ty);
+            self.destructure(target, value_ty);
             return;
         }
         if let ExpressionKind::NameRef(_) = self.module.kind(target) {

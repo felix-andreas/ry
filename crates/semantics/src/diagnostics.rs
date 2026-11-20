@@ -3263,6 +3263,11 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "`@if-unknown` applies only where the type is unknown, and this is already `{}`. Drop the annotation, or use `#:` to check the type or `@trust` to override it",
             renderer.render(db, *found)
         ),
+        TypeErrorKind::DestructureCount { names, items } => format!(
+            "this pattern unpacks {names} {}, but the value has {items} {}, so `%<-%` stops with an error. Match the count, skip a position with `.`, or collect the rest with `...rest`",
+            if *names == 1 { "value" } else { "values" },
+            if *items == 1 { "item" } else { "items" }
+        ),
         TypeErrorKind::AnnotationRequiredButDefaulted { name } => format!(
             "this annotation declares `{name}` as required, but the function gives it a default. Write `[{name}]` to declare it optional, or drop the default"
         ),

@@ -2658,6 +2658,12 @@ type `integer`. When the assignment carries an annotation, `expr` is checked by 
   `if (is.null(cached)) cached <<- dir("css"); cached` therefore reads as `character[]`. A read
   before that first write already fixes the type, so a first write of another type is an error:
   after `y <- if (is.null(x)) 0 else x + 1`, the write `x <<- "a"` is reported.
+- zeallot's `c(a, b) %<-% value` gives each name the type of its position. For a tuple or record
+  value that is the item's type, so after `c(lo, hi) %<-% list(1, 2)` both are `double`. For a
+  `list[T]` it is `T`, and for a vector it is the element type. A nested `c(...)` destructures its
+  position the same way, `.` skips a position, and `...rest` takes the remaining items. When a tuple
+  or record has a different number of items than the pattern has names and the pattern has no
+  `...rest`, the assignment is an error, because zeallot stops at run time.
 
 #### Recursion
 

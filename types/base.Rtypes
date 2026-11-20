@@ -609,7 +609,8 @@ Reduce : @pure(f) <T, U> fn(f: fn(U, T) -> U, x: list[T] | T[], [init]: U, [righ
 # `identity : <T> fn(x: T) -> T` and `apply : Any` are deliberately NOT declared yet: many existing
 # fixtures bind those names as local helpers, and a stub declaration makes each such binding fire the
 # (by-design) builtin-shadow warning. Rename the fixture helpers first, then declare both.
-invisible : @pure <T> fn([x]: T) -> T
+invisible : @pure fn() -> NULL
+invisible : @pure <T> fn(x: T) -> T
 # The checker types `list(...)` and `c(...)` from their arguments; these declare what a
 # call takes, for signature help, and what the function is as a value.
 list : @pure fn(...: Any) -> list[Any]
