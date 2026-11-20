@@ -659,3 +659,16 @@ a: fn() -> Record{x: double, y: double}
 b: fn() -> Record{x: double, y: double}
 c: Unknown
 374..382 error[type-mismatch] `expect_equal` is an R function, and this value is a ry record, not an R object. Convert it with `as.list()` first
+
+#---- an_xts_series_is_a_zoo_series
+#namespace import(xts)
+#namespace import(zoo)
+#: fn(x: xts) -> zoo
+as_zoo <- function(x) x
+
+#: fn(x: zoo) -> xts
+as_xts <- function(x) x
+#++++
+as_zoo: fn(x: xts) -> zoo
+as_xts: fn(x: zoo) -> xts
+135..136 error[type-mismatch] expected `xts`, found `zoo`

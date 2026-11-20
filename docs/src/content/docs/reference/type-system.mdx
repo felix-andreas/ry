@@ -2805,6 +2805,12 @@ When an argument is the enclosing function's bare `...`, as in a wrapper
 call skips both arity checks, and the `...` argument itself matches no parameter. The call's other
 arguments are still checked as usual.
 
+rlang's splice `!!!x` passes each element of `x` as an argument, so it forwards an unknown number
+of arguments the same way. Each element is checked against the rest parameter's element type: for a
+`list[T]` or a vector that is `T`, and for a tuple or record every item. So `join(!!!parts)` on
+`fn(...: character)` with `parts: list[double]` reports `` expected `character`, found `double` ``
+at the splice. The argument types as that element, never `Unknown`.
+
 #### Argument compatibility
 
 Arguments are checked for compatibility, not exact equality:

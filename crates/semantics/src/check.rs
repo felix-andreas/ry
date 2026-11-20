@@ -2686,6 +2686,28 @@ fn join_forced(branches: impl IntoIterator<Item = FxHashSet<Symbol>>) -> FxHashS
         .unwrap_or_default()
 }
 
+/// The `x` of rlang's splice `!!!x`: exactly three negations, since `!!x` injects one value.
+fn splice_operand(module: &Module, value: ExprId) -> Option<ExprId> {
+    let mut operand = value;
+    for _ in 0..3 {
+        let ExpressionKind::Unary {
+            operator: UnaryOperator::Not,
+            operand: inner,
+        } = module.kind(operand)
+        else {
+            return None;
+        };
+        operand = *inner;
+    }
+    match module.kind(operand) {
+        ExpressionKind::Unary {
+            operator: UnaryOperator::Not,
+            ..
+        } => None,
+        _ => Some(operand),
+    }
+}
+
 /// What argument matching needs to know about one argument of a call.
 #[derive(Debug, Clone, Copy)]
 pub struct ArgumentShape<'a> {
@@ -15846,6 +15868,10 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             call_arguments[index].ty = if quoted.contains(index) {
                 Some(unknown(self.db))
+            } else if let Some(value) = argument.value
+                && let Some(operand) = splice_operand(self.module, value)
+            {
+                Some(self.infer_splice(value, operand))
             } else {
                 argument.value.map(|value| {
                     let ty = self.infer(value);
@@ -15914,6 +15940,31 @@ impl<'db, 'a> Checker<'db, 'a> {
         quoted
     }
 
+    /// rlang's `!!!x` in a call passes each element of `x` as its own argument, so the argument
+    /// types as the element every one of them has.
+    fn infer_splice(&mut self, id: ExprId, operand: ExprId) -> Ty<'db> {
+        let db = self.db;
+        let spliced = self.infer(operand);
+        let spliced = self.structural(spliced);
+        let element = match spliced.kind(db) {
+            TyKind::Unknown | TyKind::Any => spliced,
+            TyKind::List(element)
+            | TyKind::NamedList(element)
+            | TyKind::Vector(element)
+            | TyKind::NamedVector(element) => *element,
+            TyKind::Tuple(items) if !items.is_empty() => union_of(db, items.iter().copied()),
+            TyKind::Record(fields) if !fields.is_empty() => {
+                union_of(db, fields.iter().map(|field| field.ty))
+            }
+            TyKind::Tuple(_) | TyKind::Record(_) | TyKind::Null => any(db),
+            _ => {
+                self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
+                unknown(db)
+            }
+        };
+        self.record(id, element)
+    }
+
     fn call_argument(
         &self,
         range: TextRange,
@@ -15937,7 +15988,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 matches!(
                     &self.module.expression(value).kind,
                     ExpressionKind::NameRef(name) if name == "..."
-                )
+                ) || splice_operand(self.module, value).is_some()
             });
         CallArgument {
             name: self
@@ -17013,6 +17064,15 @@ impl<'db, 'a> Checker<'db, 'a> {
         // An unknown name throws off positional accounting, so its arity verdict would be noise.
         let mut unknown_name = false;
         for (index, argument) in arguments.iter().enumerate() {
+            if let Some(element) = variadic_element
+                && let Some(ty) = argument.ty
+                && argument
+                    .value
+                    .is_some_and(|value| splice_operand(self.module, value).is_some())
+                && let Err(error) = self.check_argument(element, ty, argument.range, false, None)
+            {
+                findings.push(error);
+            }
             let Some(target) = targets.get(index).and_then(Option::as_ref) else {
                 continue;
             };

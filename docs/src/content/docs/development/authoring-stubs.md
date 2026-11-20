@@ -93,6 +93,11 @@ An abstract type may take type parameters, as `@type Dict<K, V>` does in `types/
 parameters are invariant, so a `Dict<character, double>` is neither a `Dict<character, Any>` nor
 the other way around, and `Dict<K, V>` in a signature binds both parameters at a call.
 
+`@type NAME {TYPE}` gives the nominal a representation, as a project's `#: @type` does. A value of
+it then passes wherever its representation is expected, never the other way around, which is how a
+stub declares an S3 subclass: `@type xts {zoo}` lets an `xts` series reach a parameter typed `zoo`,
+while a plain `zoo` is still not an `xts`.
+
 A stub can also declare a structural alias, written exactly like a project's `#: @alias`:
 
 ```

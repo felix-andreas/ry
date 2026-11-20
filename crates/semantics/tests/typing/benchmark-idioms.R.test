@@ -129,3 +129,22 @@ weigh: <T: numeric> fn(a: T, H: T) -> T
 outer: <T: numeric> fn(H: T) -> double
 whole: double
 accepts: fn() -> NULL
+
+#---- a_splice_passes_each_element_to_the_dots
+#: fn(...: character) -> character
+join <- function(...) paste(...)
+
+#: fn(parts: list[named: character]) -> character
+joined <- function(parts) join(!!!parts)
+
+#: fn(parts: list[double]) -> character
+mixed <- function(parts) join(!!!parts)
+
+#: fn() -> character
+literal <- function() join(!!!list("a", "b"))
+#++++
+join: fn(...: character) -> character
+joined: fn(parts: list[named: character]) -> character
+mixed: fn(parts: list[double]) -> character
+literal: fn() -> character
+231..239 error[type-mismatch] expected `character`, found `double`
