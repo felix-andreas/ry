@@ -154,6 +154,33 @@ hint @200 -> double
 hint @221: double
 hint @225: double
 
+#---- a_local_named_argument_goes_to_the_write_before_the_call
+g <- function() {
+  h <- function(a) a
+  h(a$0 = 1)
+  h <- function(b, a) b
+  h
+}
+#++++
+hover 43..44: a: double
+definition 34..35
+references: 34..35*, 37..38, 43..44
+rename: 3 edit(s)
+signature: fn(a: double) -> double
+parameters: [a: double]
+action: Add inferred type annotation for `g`
+  edit 13..13 -> "<T, U>"
+  edit 15..15 -> " -> fn(b: T, [a]: U) -> T"
+action: Add inferred type annotations for the whole file
+  edit 13..13 -> "<T, U>"
+  edit 15..15 -> " -> fn(b: T, [a]: U) -> T"
+completion (128+): a, abbreviate, ability.cov, abline, abs, acf, acf2AR, acos
+hint @13<T, U>
+hint @15 -> fn(b: T, [a]: U) -> T
+hint @35: T
+hint @36 -> T
+hint @53: fn(b: T, [a]: U) -> T
+
 #==== references
 #---- slot_reads_and_writes
 f <- function() {

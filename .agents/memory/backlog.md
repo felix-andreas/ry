@@ -857,10 +857,6 @@ measurement showed.
 - A nominal type's field is not narrowed by `is.null(node$left)`, because `field_null_guard` can
   only rewrite the variable's type and a narrowed record is no longer the nominal. A narrowing fact
   keyed on (slot, field), rather than a rewritten type, would cover `Tree`-style recursion.
-- Signature help's formals for an untyped callee (`ide::bound_function`) take the last function
-  literal the item assigns to the name and, for a script's global, the first definition across
-  files, so a name defined twice can show the other definition's formals. It should prefer the
-  definition that reaches the call.
 - `development/design/r-runtime.md` section 8 keeps `declare(type(...))` as a third annotation
   spelling for code that must stay valid R, and a strip step (`ry build`) that moves inline types
   into `#:` comments. Neither exists yet; `syntax::erase_inline_annotations` is the starting point
