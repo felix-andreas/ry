@@ -1033,3 +1033,11 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 
 - Overload resolution probes each candidate and rolls the inference table back, on the rule that matching is a pure function of the table. Types recorded on expressions during a probe broke that rule: a number literal adapted in one probe kept a type naming a variable the rollback discarded, and the next probe read it (`List.to_r([1, 2])` indexed past the table). While a probe runs, every write of a recorded type or a recorded expectation is logged, and rolling the probe back restores both with the table; the winner is re-probed to commit, so nothing a probe recorded is lost.
 - A call whose open argument is an undecided literal picks the candidate the literal's default would pick, so `List.to_r([1, 2])` is `integer[] | double[]` like `counts <- [1, 2]; List.to_r(counts)`. Every other caller variable must stay open in that candidate. The usual rule, the first candidate leaving the caller's variables open, would pick the generic `List<T> -> list[T]`, which a guess about R code needs but a literal does not: its default is known.
+
+## A nominal record updates with `..` and keeps its nominal type
+
+**Status:** built (`Checker::infer_record_update` in `crates/semantics/src/check.rs`; `native-syntax.R.test` group `record_update`; `typed-ry-values.scenario`; `reference/type-system.mdx`, "Record update").
+
+- `(..point, y = 3)` on `point: Point` with `type Point = Record{x: F64, y: F64}` checks against the representation and has type `Point`, the same rule as a field write on a nominal record. A replaced field keeps its declared type, so `(..point, y = "far")` is a `type-mismatch` and a field the representation lacks is one too. Giving the copy a structural type instead would silently drop the nominal type at every update, which makes a nominal record useless in a loop that updates it.
+- An opaque type outside its home file is refused like any other look through it. A nominal tuple is not updatable, as no tuple is.
+- The runtime needs no change: a nominal value is erased to its representation, so the interpreter's `.ry_update` and the typed core's record update already produce the right value.

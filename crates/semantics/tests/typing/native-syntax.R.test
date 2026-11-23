@@ -114,6 +114,35 @@ n: I64
 q: Unknown
 16..17 error[type-mismatch] only a record can be updated with `..`, but this is `I64`
 
+#---- a_nominal_record_updates_and_keeps_its_type
+type Point = Record{x: F64, y: F64}
+moved <- function(point: Point) -> Point {
+  (..point, y = 3)
+}
+p <- @Point(x = 1, y = 2)
+q <- (..p, x = 0)
+#++++
+moved: fn(point: Point) -> Point
+p: Point
+q: Point
+
+#---- a_nominal_record_update_keeps_each_field_type
+type Point = Record{x: F64, y: F64}
+renamed <- function(point: Point) (..point, y = "far")
+widened <- function(point: Point) (..point, z = 1)
+#++++
+renamed: fn(point: Point) -> Point
+widened: fn(point: Point) -> Point
+84..89 error[type-mismatch] expected `F64`, found `character`
+135..136 error[type-mismatch] field `z` does not exist in `Point`
+
+#---- a_nominal_tuple_does_not_update
+type Pair = Tuple{F64, F64}
+f <- function(pair: Pair) (..pair, x = 1)
+#++++
+f: fn(pair: Pair) -> Unknown
+57..61 error[type-mismatch] only a record can be updated with `..`, but this is `Pair`
+
 #==== list_patterns
 #---- list_items_bind_the_item_type
 describe <- function(xs: List<Str>) {

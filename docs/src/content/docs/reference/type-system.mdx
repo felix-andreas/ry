@@ -1291,6 +1291,8 @@ this section needs the value's shape, the nominal value projects to its represen
 - `$`, `[[` and field writes follow the record and tuple rules above. A field write keeps the
   nominal type, its value must fit the field's type, and a field the representation lacks is a
   `type-mismatch`.
+- A [record update](#record-update) `(..point, y = 3)` on a nominal record follows the same rule:
+  the copy keeps the nominal type, so each replaced field keeps its declared type.
 - A `match` checks its patterns and its [coverage](#exhaustiveness) against the representation, so a
   nominal tag union, including a recursive generic one such as
   `type Tree<T> = :Leaf | :Node(left: Tree<T>, value: T, right: Tree<T>)`, must be matched
@@ -1316,7 +1318,10 @@ type-mismatch
   x field `z` does not exist in `Record{x: double, y: double}`
 ```
 
-Only a record can be updated this way, and `$<-` is the statement form of the same change.
+Only a record, or a nominal type whose representation is a record, can be updated this way, and
+`$<-` is the statement form of the same change. A nominal record's copy keeps the nominal type, so
+with `type Point = Record{x: F64, y: F64}`, `(..point, y = 3)` is a `Point`, and replacing `y` with a
+`Str` is a `type-mismatch` rather than a change of type.
 
 ### `match`
 

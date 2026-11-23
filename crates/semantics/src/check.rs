@@ -7837,7 +7837,15 @@ impl<'db, 'a> Checker<'db, 'a> {
         let base_range = self.blame_range(base);
         let inferred = self.infer(base);
         let resolved = self.table.resolve(self.db, inferred);
-        let native = match resolved.kind(self.db) {
+        if self.refuse_hidden_representation(base, inferred) {
+            for field in fields {
+                self.infer(field.value);
+            }
+            return unknown(self.db);
+        }
+        // A nominal record updates through its representation and keeps its nominal type, so
+        // each field keeps its declared type, as a field write on it does.
+        let native = match self.structural(inferred).kind(self.db) {
             TyKind::NativeRecord(native) => Some(*native),
             TyKind::Unknown | TyKind::Any | TyKind::Var(_) => None,
             _ => {

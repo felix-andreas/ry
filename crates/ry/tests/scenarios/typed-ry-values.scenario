@@ -1,0 +1,39 @@
+# Typed code works on ry's own values natively. A nominal record updates with `..` and stays its
+# nominal type, so a loop that moves a `Point` compiles as one native function, with `--aot` as
+# without, and the interpreter gives the same answer.
+
+requires ry-runtime
+
+file update.R
+| # typing: strict
+| type Point = Record{x: F64, y: F64}
+| moved <- function(point: Point) -> Point {
+|   (..point, y = point$y + 1)
+| }
+| walk <- function(n: I64) -> F64 {
+|   point <- @Point(x = 1, y = 2)
+|   for (i in List.range(1, n)) point <- moved(point)
+|   point$x + point$y
+| }
+| print(walk(10))
+| print(moved(@Point(x = 1, y = 2)))
+
+run ry check update.R
+expect exit 0
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry update.R
+expect exit 0
+expect stdout "[1] 13\n(x = 1, y = 3)\n"
+expect stderr "typed: compiled for [I64] -> Dbl"
+
+run ry run --runtime ry --aot update.R
+expect exit 0
+expect stdout "[1] 13\n(x = 1, y = 3)\n"
+expect stderr "typed: compiled 1 function ahead of time in "
+
+unset RY_TYPED_LOG
+env RY_JIT off
+run ry run --runtime ry update.R
+expect exit 0
+expect stdout "[1] 13\n(x = 1, y = 3)\n"
