@@ -45,8 +45,9 @@ The goal, the mandate and the benchmark are in `AGENTS.md`. On top of them:
 
 ## In flight
 
-No release unless the user asks (user). User 2026-11-23 16:15Z: land all unfinished work, start nothing new, then discuss next steps with the user (Fable weekly usage at 30%). Every session was told to land, record the rest in the backlog and go idle. The weekly limit reset Mon Nov 23 10:00 UTC; all five sessions resumed. Check-in trig_01LuX97P7ZbAg4TRxYu7c1tu is enabled again.
+No release unless the user asks (user). User 2026-11-23: sessions finish their current items in full and land them, but get no new work for now; next steps are discussed with the user (Fable weekly usage at 30%). One Opus high session handles the test user's 2026-11-23 feedback.
 
+- session_0111kWqDhzuJBe41777RLh3T (Opus high, feedback): the test user's 2026-11-23 feedback (GC crash in typed List free, recursion-group Unknown at 16+, unchecked as.DataFrame, table functions, native-function limits, open table/record types); branch claude/feedback-tables-native. Point 1.3 (column partial match) is the fuzz session's.
 - session_0111kWqCHzz5KgPTQQvkUSXS (Opus high, checker): #692, #695, #697 merged (fresh sample 1,449 to 112 reports). IDLE, all work landed; the review gaps, edit re-stamping and code-base latency are in the backlog.
 - session_0111kWqCXYKiR937Au74eL55 (Opus high, kernels; replaced the archived session_0111kWqE86VPq98yVE2JgLVm, whose disk filled after #685, #689, #690): branch fix/dependency-suites, test-suite parity for the benchmark dependency set beyond the 27 pinned packages, and load-index cache eviction. Stays out of the JIT, calls, the builtin calling convention and semantics/ide. The user approved its commit/push; landing.
 - session_0111kWqEyHh2WBFnP93ZvPEM (Fable, JIT): draft #691 (claude/generic-tier-calls): compile-time growth, mean.default, call-storm and merge() slowdown (test user requests 2, 3) fixed via an exit profile. Now trimming forced-mode overhead; then proposes a compiled-to-compiled call interface directly to the calls session.
