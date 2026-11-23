@@ -647,7 +647,7 @@ because only the runtime reads such bytes. Its inputs are the source fragments o
 edits of generated programs. Each input is checked a second time with `#: ` before every line:
 that text is all comments to R, so both must accept it. `crates/jit/tests/test_tiers.rs` does the
 same one tier up: it runs random loop, branch and vector programs as closure bodies under tier 0 and under the JIT
-forced on (`jit::Mode::Force`, which compiles a body on its second call and a loop on its first
+forced on (`jit::Mode::Stress`, which compiles a body on its second call and a loop on its first
 backward jump), and every call must give the same value or error. Most generated programs must run
 to a value, so a generator that drifts into erroring early fails the test instead of passing
 without comparing anything. The test interpreter has no base R closures (`numeric`, `as.list`,

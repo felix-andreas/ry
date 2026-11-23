@@ -1544,6 +1544,10 @@ pub mod profile {
     /// tier compiles or records feedback for: it runs without a call frame, and the tiers' frames
     /// and their resume points assume one. Negative, so the optimizing tier treats it as refused.
     pub const TIER_OFF: i32 = i32::MIN;
+    /// The one flag of a non-negative [`TIER_STATE`] that a code image keeps. The optimizing
+    /// tier sets it on a body it decided to compile, and reads it in a session started from the
+    /// image as that decision.
+    pub const TIER_TRAINED: i32 = 1 << 26;
     /// Nonzero while tier 0 records type feedback for this code, which only happens with the
     /// optimizing tier installed and while the code has no optimized code: during the first
     /// activation of a body with a loop, over the last eighth of the entry threshold
@@ -2490,6 +2494,10 @@ pub mod feedback {
     pub const INTEGER_SEQUENCE: u32 = 1 << 15;
     /// An attribute-free compact double sequence, such as `as.double(1:n)`.
     pub const DOUBLE_SEQUENCE: u32 = 1 << 16;
+    /// Compiled code kept handing the instruction to tier 0, so the optimizing tier compiles
+    /// it as tier 0's step. Compiled code records it, and the bit says nothing about the
+    /// value's type.
+    pub const HANDED_OFF: u32 = 1 << 17;
 }
 
 /// The feedback tier 0 recorded at `pc` of the byte code `code`: the [`feedback`] kinds of the
@@ -13634,7 +13642,7 @@ unsafe fn op_for_init(state: &mut Activation<'_, '_>, instruction: Instruction) 
     };
     let count = match sequence.kind() {
         SexpType::Nil => 0,
-        SexpType::Pairlist | SexpType::Language => values::pairlist_length(sequence),
+        SexpType::Pairlist => values::pairlist_length(sequence),
         kind if kind.is_vector() => values::length(sequence),
         _ => return Err(error_in(call, "invalid for() loop sequence")),
     };

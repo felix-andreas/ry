@@ -440,6 +440,14 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A loop compiles when its backward jumps repay the body
 - A back edge is counted in tier 0's fast jump handler
 - A load that reaches the runtime writes dirty variables back first
+- A write-back of several variables is one call driven by a record
+- A builtin call from compiled code defers its signals
+- Type predicates and `length` compile to a test of the value's header
+- An exit that keeps handing off compiles its instruction as a step
+- Forced compilation keeps the steady-state tests, and `stress` compiles everything
+- A hot `for` loop whose runs are short is not entered
+- A `for` loop over a boxed sequence compiles, and a pairlist loop stays in tier 0
+- The cost model charges each variable written back before a step
 
 ## Heap and collector
 

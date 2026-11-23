@@ -19,10 +19,14 @@ use {
     interp::{
         Signalling, arith,
         builtins::Arg,
-        bytecode::{self, LoopState, Machine, PROFILE, StepEnd, Stepper, TIER1, profile},
+        bytecode::{
+            self, FEEDBACK, LoopState, Machine, PROFILE, StepEnd, Stepper, TIER1, feedback, profile,
+        },
+        coerce,
         eval::{self, Entering},
         heap, moves,
         standard_library::{self, CompiledKey},
+        subset,
         unwind::{R, Unwind, error},
         values,
     },
@@ -166,6 +170,21 @@ pub mod outcome {
     /// Load results: the slot's new status, or one of these.
     pub const LOAD_FAILED: i32 = 0;
     pub const LOAD_INVALIDATED: i32 = 4;
+    /// [`jit_call_builtin`] ran nothing: the builtin could run R code for an argument, so
+    /// compiled code steps the call with the frame written back.
+    pub const OBSERVED: i32 = 7;
+}
+
+/// How [`jit_step`] runs its instruction.
+pub mod stepping {
+    /// The instruction runs no R code, so its signals wait ([`Signalling`]) and nothing needs
+    /// validating.
+    pub const QUIET: i32 = 0;
+    /// The instruction may run R code, so the speculations are checked afterwards.
+    pub const VALIDATED: i32 = 1;
+    /// The instruction signals where it raises, and the code after it relies on no speculation
+    /// it could break.
+    pub const PLAIN: i32 = 2;
 }
 
 /// What [`jit_element_step`] did with an element read or store.
@@ -224,6 +243,12 @@ pub struct Compiled {
     /// Each deoptimization point's write-back, indexed by the number compiled code passes to
     /// [`jit_deopt_exit`].
     pub exits: Box<[Exit]>,
+    /// The write-back records the machine code embeds the addresses of ([`jit_write_back`]).
+    #[expect(
+        dead_code,
+        reason = "owned for the machine code, which reads the records"
+    )]
+    pub writes: Box<[Box<[u32]>]>,
     /// How often an inlined call could not start without its frame for a reason that is not
     /// the callee's: the stack was near its limit, or something observes every call. When that
     /// is frequent ([`frequent`]) the code is discarded and the body marked [`NO_FRAMES`].
@@ -305,8 +330,8 @@ pub struct Inlined {
     /// How often the call started without a frame or tried to.
     pub entries: Cell<u32>,
     /// How often the call needed its real frame because of what the callee is or does: it
-    /// handed an instruction to tier 0, or the closure is being debugged or has another body
-    /// by now. When that is frequent ([`frequent`]) the code is discarded and the callee is
+    /// handed an instruction to tier 0, an instruction of it had a condition to signal, or
+    /// the closure is being debugged or has another body by now. When that is frequent ([`frequent`]) the code is discarded and the callee is
     /// no longer inlined ([`NO_ELISION`]).
     pub handoffs: Cell<u32>,
 }
@@ -363,8 +388,23 @@ pub struct Exit {
     /// Slots that may be dirty: one cell for the status, then the value cells as for a
     /// register, none for a [`representation::BOXED`] slot.
     pub slots: Box<[(u32, i32)]>,
-    /// The loops around `pc`, [`LOOP_WORDS`] cells each.
+    /// The loops around `pc`, [`LOOP_WORDS`] cells each, outermost first.
     pub loops: Box<[u32]>,
+    pub handoffs: Handoffs,
+}
+
+/// How often a deoptimization point of a body's own frame handed its instruction to tier 0
+/// ([`count_exit`]).
+#[derive(Default)]
+pub struct Handoffs {
+    count: Cell<u32>,
+    /// The body's entry count when `count` started.
+    since: Cell<i32>,
+    /// How many iterations the innermost `for` loop around the point ran between the
+    /// hand-offs counted.
+    iterations: Cell<u32>,
+    /// That loop's index at the last hand-off.
+    index: Cell<i64>,
 }
 
 /// Whether every function lookup compiled code assumed still resolves the same way for an
@@ -551,6 +591,20 @@ pub const UNFORCED_FORMALS: i32 = 1 << 24;
 /// such call left compiled code, so the compiler no longer inlines calls with frames of their
 /// own in the body, and its closure calls are tier 0's.
 pub const NO_FRAMES: i32 = 1 << 25;
+
+/// A tier state flag, the one a code image keeps: the body compiled in the default mode, where
+/// the compile had to pass every test of what it repays. Those tests measure how often the body
+/// is called and how long its loops run. A session started from a trained image has measured
+/// neither when the body arrives hot at its first call, so the flag stands for them ([`repaid`]).
+pub const TRAINED: i32 = profile::TIER_TRAINED;
+
+const _: () = assert!(TRAINED > NO_FRAMES);
+
+/// Whether a body the tier may still compile passed the tests of what its compile repays once
+/// already: it compiled in this session, or in the one that trained its code image.
+pub fn repaid(state: i32) -> bool {
+    state >= 0 && (compiles(state) > 0 || state & TRAINED != 0)
+}
 
 /// The tier state of a body the tier no longer compiles and whose calls it no longer inlines
 /// without a frame either.
@@ -764,13 +818,18 @@ unsafe fn slot_cell(activation: &Activation, slot: i64) -> *mut Sexp {
     }
 }
 
-/// Runs `step`, one tier-0 instruction of an activation. In a closure call without a frame,
-/// which `inlined` says the activation is, the instruction signals nothing ([`Signalling`]): an error it raises comes back unsignalled, and
-/// the exit it takes builds the call's frame and signals it there. `None` says the instruction
-/// gave up before a signal that runs R code, so the exit must carry no error, which makes
-/// tier 0 run the instruction again in the call's frame. The instruction runs no R code, so
-/// nothing nests.
-fn step_unsignalled<T>(inlined: bool, step: impl FnOnce() -> T) -> Option<T> {
+/// Runs `step`, one tier-0 instruction of an activation. When `deferred` is set the
+/// instruction signals nothing ([`Signalling`]): an error it raises comes back unsignalled, and
+/// tier 0 signals it after the exit the error takes. `None` says the instruction gave up before
+/// a signal that runs R code, so the exit must carry no error, which makes tier 0 run the
+/// instruction again. The instruction runs no R code, so nothing nests.
+///
+/// A closure call without a frame always defers, because a handler would see a stack without
+/// the call. A body's own frame defers where the instruction runs no R code otherwise: a
+/// handler reads the frame, so the variables compiled code holds must be written back first,
+/// which the exit does and which a write-back before every such instruction would cost each
+/// time.
+fn step_unsignalled<T>(deferred: bool, step: impl FnOnce() -> T) -> Option<T> {
     struct Restore;
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -778,7 +837,7 @@ fn step_unsignalled<T>(inlined: bool, step: impl FnOnce() -> T) -> Option<T> {
         }
     }
     // `step` runs from one call site, so that it inlines into the caller.
-    let restore = inlined.then(|| {
+    let restore = deferred.then(|| {
         interp::interp().signalling = Signalling::Deferred;
         Restore
     });
@@ -788,17 +847,18 @@ fn step_unsignalled<T>(inlined: bool, step: impl FnOnce() -> T) -> Option<T> {
     (!abandoned).then_some(result)
 }
 
-/// Runs the tier-0 instruction at `pc`, then checks the speculations when `validate` is set.
-pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate: i32) -> i32 {
+/// Runs the tier-0 instruction at `pc` as `mode` says, one of [`stepping`]'s.
+pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, mode: i32) -> i32 {
     unsafe {
         checked(activation, outcome::FAILED, |activation| {
             let machine = machine(activation);
             let heap = heap();
             let epoch = heap.binding_epoch();
             let mark = heap.handle_mark();
-            let inlined = layout(activation).inlined.is_some();
+            let deferred = mode == stepping::QUIET || layout(activation).inlined.is_some();
+            let validate = mode == stepping::VALIDATED;
             let stepper = &mut activation.stepper;
-            let stepped = step_unsignalled(inlined, || {
+            let stepped = step_unsignalled(deferred, || {
                 bytecode::step_one(stepper, machine, pc as usize)
             });
             if heap.handle_mark() < mark {
@@ -807,7 +867,7 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
             heap.release_handles(mark);
             match stepped {
                 Some(StepEnd::Next)
-                    if validate != 0 && !still_valid(compiled(activation), machine, epoch) =>
+                    if validate && !still_valid(compiled(activation), machine, epoch) =>
                 {
                     outcome::INVALIDATED
                 }
@@ -829,9 +889,11 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
     }
 }
 
-/// Runs the builtin call at `pc` ([`bytecode::call_builtin_step`]), which compiled code calls
-/// only where the call runs no R code, so nothing needs validating: [`outcome::OK`] or
-/// [`outcome::FAILED`]. A nonzero `record` records the result's type.
+/// Runs the call at `pc` of a builtin that runs no R code for plain arguments
+/// ([`bytecode::call_builtin_step`]), so nothing needs validating: [`outcome::OK`] or
+/// [`outcome::FAILED`]. An argument the builtin could run R code for ([`observed`]) declines
+/// the call with [`outcome::OBSERVED`] before anything ran. A nonzero `record` records the
+/// result's type.
 pub unsafe extern "C" fn jit_call_builtin(
     activation: *mut Activation,
     pc: i64,
@@ -840,9 +902,15 @@ pub unsafe extern "C" fn jit_call_builtin(
     unsafe {
         checked(activation, outcome::FAILED, |activation| {
             let machine = machine(activation);
-            let inlined = layout(activation).inlined.is_some();
+            let code = machine.code.car().data().cast::<i32>().cast_const();
+            let first = *code.add(pc as usize + 4) as usize;
+            let count = *code.add(pc as usize + 5) as usize;
+            let arguments = std::slice::from_raw_parts(activation.registers.add(first), count);
+            if arguments.iter().any(|&argument| observed(argument)) {
+                return outcome::OBSERVED;
+            }
             let stepper = &mut activation.stepper;
-            let called = step_unsignalled(inlined, || {
+            let called = step_unsignalled(true, || {
                 scoped(|| bytecode::call_builtin_step(stepper, machine, pc as usize, record != 0))
             });
             match called {
@@ -854,6 +922,17 @@ pub unsafe extern "C" fn jit_call_builtin(
                 None => outcome::FAILED,
             }
         })
+    }
+}
+
+/// Whether a builtin that runs no R code for plain arguments could run some for `value`: an
+/// object's method, an environment's active binding, or the methods of an ALTREP class, which
+/// a package may write in R. A compact sequence is an ALTREP vector of ry's own classes.
+unsafe fn observed(value: Sexp) -> bool {
+    unsafe {
+        value.is_object()
+            || value.kind() == SexpType::Environment
+            || (value.is_altrep() && values::compact_sequence(value).is_none())
     }
 }
 
@@ -877,11 +956,9 @@ pub unsafe extern "C" fn jit_element_step(activation: *mut Activation, pc: i64, 
         }
         checked(activation, element::FAILED, |activation| {
             let machine = machine(activation);
-            let inlined = layout(activation).inlined.is_some();
             let stepper = &mut activation.stepper;
-            let stepped = step_unsignalled(inlined, || {
-                bytecode::quiet_step(stepper, machine, pc as usize)
-            });
+            let stepped =
+                step_unsignalled(true, || bytecode::quiet_step(stepper, machine, pc as usize));
             match stepped {
                 Some(None) => element::DECLINED,
                 Some(Some(Ok(()))) => element::STEPPED,
@@ -1281,8 +1358,10 @@ pub unsafe extern "C" fn jit_deopt_exit(
             });
         }
         write_back(activation, exit, scratch);
-        if exit.why == reason::PENDING || exit.why == reason::HANDOFF {
+        if exit.why == reason::PENDING && (*(*activation).parked).pending.is_some() {
             count_leave(compiled);
+        } else if exit.why == reason::PENDING || exit.why == reason::HANDOFF {
+            count_exit(&*activation, compiled, exit);
         }
         jit_deopt(activation, exit.pc as i64, exit.why)
     }
@@ -1453,7 +1532,10 @@ unsafe fn materialize(
                 let counters = values::ints_mut(inlined_of(innermost).code.cdr().element(PROFILE));
                 std::mem::replace(&mut counters[profile::RECORDING], 1)
             });
-        if innermost.why == reason::HANDOFF {
+        // A condition the callee has to signal under its frame is the callee's doing as much
+        // as an instruction it hands to tier 0: a builtin that warns under a calling handler
+        // on every call would otherwise leave every time.
+        if innermost.why == reason::HANDOFF || innermost.why == reason::PENDING {
             count_handoff(compiled, inlined_of(innermost));
         }
 
@@ -1713,6 +1795,96 @@ unsafe fn count_handoff(compiled: &Compiled, inlined: &Inlined) {
             ..0 => NEVER_ELIDED,
             _ => state | NO_ELISION,
         };
+        retire(compiled, 0);
+    }
+}
+
+/// Counts a time the body's own frame handed the instruction of `exit` to tier 0, or gave
+/// it up before a signal. A hand-off costs several times what a step of the instruction
+/// does, so once the hand-offs are frequent ([`frequent`]) among the body's entries and the
+/// iterations of the loop around the instruction, the instruction is marked
+/// ([`feedback::HANDED_OFF`]) and the code discarded: the recompile makes the instruction
+/// tier 0's step, which never leaves. Otherwise the count starts again, so only hand-offs
+/// close together mark it.
+///
+/// Compiled code counts no iterations, so those between two hand-offs come from the loop's
+/// index: its advance since the last one, or the index itself where the loop started again.
+unsafe fn count_exit(activation: &Activation, compiled: &Compiled, exit: &Exit) {
+    if compiled.retired.get() {
+        return;
+    }
+    unsafe {
+        let constants = compiled.code.cdr();
+        let entered = values::ints(constants.element(PROFILE))[profile::ENTRIES];
+        let handoffs = &exit.handoffs;
+        let count = handoffs.count.get().saturating_add(1);
+        handoffs.count.set(count);
+        let index = match exit.loops.last() {
+            Some(&innermost) => *activation.loops.add(LOOP_WORDS * innermost as usize),
+            None => 0,
+        };
+        let last = handoffs.index.replace(index);
+        if count == 1 {
+            handoffs.since.set(entered.saturating_sub(1));
+            handoffs.iterations.set(0);
+        } else {
+            let advance = if index > last { index - last } else { index };
+            let advance = u32::try_from(advance).unwrap_or(u32::MAX);
+            handoffs
+                .iterations
+                .set(handoffs.iterations.get().saturating_add(advance));
+        }
+        if count < MAX_FRAME_HANDOFFS {
+            return;
+        }
+        // Code a failed speculation discarded keeps running in the activations that entered
+        // it, and the body's entries then count for the code that replaced it.
+        let tier1 = constants.element(TIER1);
+        if tier1 == values::nil()
+            || !std::ptr::eq(tier1.external_address().cast::<Compiled>(), compiled)
+        {
+            return;
+        }
+        let work = |handoffs: &Handoffs| {
+            let entries = entered.saturating_sub(handoffs.since.get());
+            u64::try_from(entries).unwrap_or(0) + u64::from(handoffs.iterations.get())
+        };
+        if !frequent(count, work(handoffs)) {
+            handoffs.count.set(0);
+            return;
+        }
+        let bits = values::ints_mut(constants.element(FEEDBACK));
+        let marked = bits
+            .get(exit.pc)
+            .is_none_or(|&bits| bits as u32 & feedback::HANDED_OFF != 0);
+        if crate::logging() {
+            eprintln!(
+                "jit: {} handed pc {} to tier 0 {count} times{}",
+                crate::describe(compiled.code),
+                exit.pc,
+                if marked { " as a step" } else { "" },
+            );
+        }
+        // The instruction is already what the mark asks for, so no recompile keeps it in
+        // compiled code, and the body is cheaper in tier 0.
+        if marked {
+            retire(compiled, 0);
+            let counters = values::ints_mut(constants.element(PROFILE));
+            counters[profile::TIER_STATE] = refused(counters[profile::TIER_STATE]);
+            counters[profile::RECORDING] = 0;
+            return;
+        }
+        // One recompile serves every point that is on its way to the same verdict.
+        for other in &compiled.exits {
+            let halfway = other.handoffs.count.get() * 2 >= MAX_FRAME_HANDOFFS
+                && u64::from(other.handoffs.count.get()) * 8 > work(&other.handoffs);
+            if other.parent.is_none()
+                && (std::ptr::eq(other, exit) || halfway)
+                && let Some(bits) = bits.get_mut(other.pc)
+            {
+                *bits |= feedback::HANDED_OFF as i32;
+            }
+        }
         retire(compiled, 0);
     }
 }
@@ -2088,6 +2260,129 @@ pub unsafe extern "C" fn jit_flush(
     }
 }
 
+/// How many words of a write-back record precede its entries: the entry count, and the byte
+/// offset of the homes from the frame's statuses.
+pub const RECORD_HEADER: usize = 2;
+
+/// A write-back record's entry for `slot`, whose value has the [`representation`] `kind`.
+pub fn record_entry(slot: usize, kind: i32) -> u32 {
+    (slot as u32) << 3 | kind as u32
+}
+
+/// Writes every dirty slot `record` lists back to the environment and marks it clean. A site
+/// that writes many slots back passes one record instead of testing and flushing each slot in
+/// its own code, which is what made a large loop body's code grow with sites times slots.
+/// `statuses` is the frame's status cells, and the homes that follow them hold the values of
+/// the slots compiled code keeps unboxed, which the site stored there. Returns 1 on success.
+pub unsafe extern "C" fn jit_write_back(
+    activation: *mut Activation,
+    statuses: *mut i32,
+    record: *const u32,
+) -> i32 {
+    unsafe { i32::from(write_record(activation, statuses, record, false)) }
+}
+
+/// [`jit_load`] after writing the dirty slots of `record` back, because the load can force a
+/// promise whose code looks at the frame. An unboxed slot stays dirty, as
+/// `crate::analysis::State::exposed` says, unless the load hands the activation to tier 0:
+/// the exit writes dirty variables back, which would undo what the promise assigned to one.
+pub unsafe extern "C" fn jit_load_exposed(
+    activation: *mut Activation,
+    pc: i64,
+    slot: i64,
+    statuses: *mut i32,
+    record: *const u32,
+) -> i32 {
+    unsafe {
+        if !write_record(activation, statuses, record, true) {
+            return outcome::LOAD_FAILED;
+        }
+        let result = jit_load(activation, pc, slot);
+        settle_record(statuses, record, result);
+        result
+    }
+}
+
+/// [`jit_load_slot`] after writing the dirty slots of `record` back, as [`jit_load_exposed`].
+pub unsafe extern "C" fn jit_load_slot_exposed(
+    activation: *mut Activation,
+    slot: i64,
+    statuses: *mut i32,
+    record: *const u32,
+) -> i32 {
+    unsafe {
+        if !write_record(activation, statuses, record, true) {
+            return outcome::LOAD_FAILED;
+        }
+        let result = jit_load_slot(activation, slot);
+        settle_record(statuses, record, result);
+        result
+    }
+}
+
+/// Writes the dirty slots of `record` back. A written slot becomes clean, except an unboxed
+/// one when `exposing`. Returns whether every write succeeded; a failure is parked.
+unsafe fn write_record(
+    activation: *mut Activation,
+    statuses: *mut i32,
+    record: *const u32,
+    exposing: bool,
+) -> bool {
+    unsafe {
+        let homes = statuses.cast::<u8>().add(*record.add(1) as usize);
+        for index in 0..*record as usize {
+            let entry = *record.add(RECORD_HEADER + index);
+            let slot = (entry >> 3) as usize;
+            let status = statuses.add(slot);
+            if i64::from(*status) != status::RUNTIME_DIRTY {
+                continue;
+            }
+            let home = homes.add(16 * slot);
+            let (kind, bits) = match (entry & 7) as i32 {
+                representation::BOXED => (representation::BOXED, 0),
+                representation::DOUBLE => (representation::DOUBLE, home.cast::<i64>().read()),
+                representation::NUM => {
+                    let double = home.cast::<f64>().read();
+                    if home.add(8).cast::<i32>().read() == 0 {
+                        (representation::DOUBLE, double.to_bits() as i64)
+                    } else if double.is_nan() {
+                        (representation::INTEGER, i64::from(NA_INTEGER))
+                    } else {
+                        (representation::INTEGER, i64::from(double as i32))
+                    }
+                }
+                kind => (kind, i64::from(home.cast::<i32>().read())),
+            };
+            if jit_flush(activation, slot as i64, kind, bits) == 0 {
+                return false;
+            }
+            if kind == representation::BOXED || !exposing {
+                *status = status::RUNTIME_LOCAL as i32;
+            }
+        }
+        true
+    }
+}
+
+/// Marks the unboxed slots an exposing [`write_record`] left dirty as clean when the load's
+/// `result` hands the activation to tier 0.
+unsafe fn settle_record(statuses: *mut i32, record: *const u32, result: i32) {
+    unsafe {
+        if result != outcome::LOAD_FAILED && result != outcome::LOAD_INVALIDATED {
+            return;
+        }
+        for index in 0..*record as usize {
+            let entry = *record.add(RECORD_HEADER + index);
+            let status = statuses.add((entry >> 3) as usize);
+            if (entry & 7) as i32 != representation::BOXED
+                && i64::from(*status) == status::RUNTIME_DIRTY
+            {
+                *status = status::RUNTIME_LOCAL as i32;
+            }
+        }
+    }
+}
+
 /// [`jit_flush`] for every write-back but a boxed value into a slot frame. Kept out of line so
 /// that the store's path saves no registers for it.
 #[inline(never)]
@@ -2300,10 +2595,10 @@ pub unsafe extern "C" fn jit_store_list_element(
 /// the loop reads the sequence's storage), as in tier 0's [`LoopState`].
 pub const LOOP_WORDS: usize = 4;
 
-/// Prepares an ALTREP `for` loop sequence as tier 0's `ForInit` does: a compact sequence is
-/// returned as it is, with its first element and increment stored in loop `index`'s words,
-/// and any other ALTREP vector is expanded into an ordinary one, with an increment of 0. The
-/// sequence's length goes in the loop's count word.
+/// Prepares a `for` loop sequence as tier 0's `ForInit` does: a factor becomes its labels, a
+/// compact sequence is returned as it is, with its first element and increment stored in loop
+/// `index`'s words, and any other ALTREP vector is expanded into an ordinary one, with an
+/// increment of 0. The sequence's length goes in the loop's count word.
 pub unsafe extern "C" fn jit_loop_sequence(
     activation: *mut Activation,
     value: *mut Header,
@@ -2312,7 +2607,10 @@ pub unsafe extern "C" fn jit_loop_sequence(
     unsafe {
         let words = (*activation).loops.add(LOOP_WORDS * index as usize);
         boxed(activation, || match Sexp::from_raw(value) {
-            Some(value) => {
+            Some(mut value) => {
+                if values::inherits(value, "factor") {
+                    value = coerce::factor_as_character(value)?;
+                }
                 let steps = values::compact_sequence(value).map(|(_, first, step)| (first, step));
                 let (first, step) = steps.unwrap_or((0.0, 0.0));
                 let sequence = match steps {
@@ -2325,6 +2623,55 @@ pub unsafe extern "C" fn jit_loop_sequence(
                 Ok(sequence)
             }
             None => Ok(values::nil()),
+        })
+    }
+}
+
+/// Element `index` of the sequence a `for` loop of unknown element type steps through, as tier
+/// 0's `ForStep` reads it: a list's element as it is, a compact sequence's computed from its
+/// first element and increment, and any other atomic vector's as a new length-one vector. Null
+/// without an error for a sequence tier 0 steps another way, such as a pairlist, which a loop
+/// entered at its header may hold, and that hands the step to tier 0.
+pub unsafe extern "C" fn jit_loop_element(
+    activation: *mut Activation,
+    sequence: *mut Header,
+    index: i64,
+) -> *mut Header {
+    unsafe {
+        guarded(activation, std::ptr::null_mut(), |activation| {
+            let Some(sequence) = Sexp::from_raw(sequence) else {
+                return std::ptr::null_mut();
+            };
+            let index = index as usize;
+            let element = match (sequence.kind(), values::compact_sequence(sequence)) {
+                (SexpType::Integer, Some((count, first, step))) if index < count => {
+                    scoped(|| values::scalar_integer((first + step * index as f64) as i32))
+                }
+                (SexpType::Real, Some((count, first, step))) if index < count => {
+                    scoped(|| values::scalar_real(first + step * index as f64))
+                }
+                _ if sequence.is_altrep() || index >= sequence.length() as usize => {
+                    return std::ptr::null_mut();
+                }
+                (SexpType::List | SexpType::Expression, _) => Ok(sequence.element(index)),
+                (
+                    SexpType::Logical
+                    | SexpType::Integer
+                    | SexpType::Real
+                    | SexpType::Complex
+                    | SexpType::String
+                    | SexpType::Raw,
+                    _,
+                ) => scoped(|| subset::vector_element(sequence, index)),
+                _ => return std::ptr::null_mut(),
+            };
+            match element {
+                Ok(element) => element.as_ptr(),
+                Err(unwind) => {
+                    park(activation, unwind);
+                    std::ptr::null_mut()
+                }
+            }
         })
     }
 }
@@ -2798,11 +3145,6 @@ pub unsafe extern "C" fn jit_colon(activation: *mut Activation, from: f64, to: f
             }
         })
     }
-}
-
-/// Whether a calling handler is established, so a warning would run R code.
-pub extern "C" fn jit_handlers_present() -> i32 {
-    interp::interp().handlers.is_some() as i32
 }
 
 /// How many closure calls may still nest before R's expression depth limit, which a native

@@ -17,13 +17,13 @@
 use {
     crate::{
         analysis::{
-            self, Action, Argument, Effect, Fast, Fold, Intrinsic, Numeric, Passing, Plan, Refusal,
-            StateId, StateRef, Store, Ty, jump_target, status,
+            self, Action, Argument, Effect, Fast, Fold, Inspection, Intrinsic, Numeric, Passing,
+            Plan, Refusal, StateId, StateRef, Store, Ty, jump_target, status,
         },
         native,
         runtime::{
-            self, Activation, ArgumentSource, Exit, Inlined, Layout, element, offset, outcome,
-            reason, representation,
+            self, Activation, ArgumentSource, Exit, Handoffs, Inlined, Layout, element, offset,
+            outcome, reason, representation, stepping,
         },
     },
     heap::{
@@ -40,8 +40,8 @@ use {
         bytecode::{self, Arith, Op, interp_layout},
         values,
     },
-    rustc_hash::FxHashMap,
-    smallvec::SmallVec,
+    rustc_hash::{FxHashMap, FxHashSet},
+    smallvec::{SmallVec, smallvec},
     ssa::{
         AbiParam, Allocator, Block as Label, Builder, CallConv, FloatCC, FrameState, Ieee64, IntCC,
         MemFlagsData, SigRef, Signature, Source, StackSlot, StackSlotData, StackSlotKind, Type,
@@ -71,6 +71,15 @@ const ALTREP_FLAG: i64 = 1 << 1;
 const ARRAY_FLAG: i64 = 1 << 4;
 pub(crate) const OBJECT_FLAG: i64 = 1 << 0;
 
+/// Whether the code after a tier-0 step forgets the variables it holds.
+#[derive(Clone, Copy)]
+enum Forget {
+    Never,
+    Always,
+    /// When this value, the step's mode, is not [`stepping::QUIET`].
+    When(Value),
+}
+
 /// The subscripts of an element assignment: one position, or a matrix's row and column.
 #[derive(Clone, Copy)]
 enum Subscript {
@@ -93,6 +102,8 @@ pub struct Generated {
     pub exits: Box<[Exit]>,
     /// The body's own frame, then the frame of each closure call inlined in it.
     pub frames: Box<[Layout]>,
+    /// The write-back records the machine code holds the addresses of.
+    pub writes: Box<[Box<[u32]>]>,
     /// The size of the machine code in bytes.
     pub size: u32,
 }
@@ -149,6 +160,7 @@ pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<Generated, Refusal> {
         entry,
         exits,
         frames,
+        writes: translator.writes.into_iter().collect(),
         size,
     })
 }
@@ -177,6 +189,10 @@ struct Translator<'p> {
     exits: Vec<Exit>,
     /// The frames translated so far, the body's own first.
     layouts: Vec<Layout>,
+    /// The write-back records made so far ([`runtime::jit_write_back`]). Sites that write the
+    /// same slots back share one, and the machine code holds each record's address, which
+    /// moving the box does not change.
+    writes: FxHashSet<Box<[u32]>>,
     /// Whether the actions being translated evaluate an inlined call's arguments ahead of the
     /// call. Their reads of a formal force nothing: the callee's own read of the argument is
     /// where R forces what the argument mentions ([`Action::Frame`]'s `forces`).
@@ -202,7 +218,9 @@ struct Frame<'p> {
     /// than in a variable because nearly every slot's status is live across the whole body,
     /// so as variables they gave every merge a parameter per slot: construction and register
     /// allocation then grew with merges times slots, which dominated the compile time of
-    /// large bodies.
+    /// large bodies. The homes follow the statuses, 16 bytes per slot: where a site that
+    /// writes many slots back stores the values held in variables for the helper to read
+    /// ([`Translator::save_dirty`]).
     statuses: StackSlot,
     labels: Vec<Option<Label>>,
     edges: Vec<PendingEdge>,
@@ -278,6 +296,11 @@ fn exit_kind(ty: Ty) -> i32 {
     }
 }
 
+/// Where a frame of `slots` slots keeps its homes, in bytes from its statuses.
+fn homes_offset(slots: usize) -> usize {
+    (4 * slots).next_multiple_of(8)
+}
+
 fn flags() -> MemFlagsData {
     MemFlagsData::trusted()
 }
@@ -347,6 +370,7 @@ impl<'p> Translator<'p> {
             loop_steps,
             exits: Vec::new(),
             layouts: Vec::new(),
+            writes: FxHashSet::default(),
             evaluating_arguments: false,
             nil: values::nil().as_ptr() as i64,
         }
@@ -440,10 +464,11 @@ impl<'p> Translator<'p> {
         for variable in self.frame.doubles.iter().chain(&self.frame.slot_doubles) {
             self.builder.def_var(*variable, zero_double);
         }
+        let slots = self.frame.plan.slots.len();
         self.frame.statuses = self.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
-            (4 * self.frame.plan.slots.len()).max(4) as u32,
-            2,
+            (homes_offset(slots) + 16 * slots).max(8) as u32,
+            3,
         ));
         for slot in 0..self.frame.plan.slots.len() {
             self.set_status(slot, zero32);
@@ -566,8 +591,30 @@ impl<'p> Translator<'p> {
                 .entry
                 .ok_or(Refusal("an unreachable loop header"))?,
         );
+        // SAFETY: the code object is rooted while it compiles, and its loop table is an
+        // integer vector.
+        let table = unsafe { values::ints(self.frame.code.cdr().element(bytecode::LOOPS)) };
+        let header_pc = self.frame.plan.insts[self.frame.plan.blocks[header].start].pc;
         for (register, &ty) in entry.registers.iter().enumerate() {
-            if matches!(ty, Ty::Bottom | Ty::Boxed) {
+            if ty == Ty::Bottom {
+                continue;
+            }
+            if ty == Ty::Boxed {
+                // A loop of unknown element type that tier 0 started may step through a
+                // pairlist, whose position only tier 0's loop state holds.
+                let running = sequences.iter().any(|&(src, index)| {
+                    src == register
+                        && table.get(4 * index..4 * index + 2).is_none_or(|range| {
+                            (range[0] as usize..=range[1] as usize).contains(&header_pc)
+                        })
+                });
+                if running {
+                    let value = self.load_register(register);
+                    let fits = self.steppable(value, false);
+                    let next = self.builder.create_block();
+                    self.builder.ins().brif(fits, next, &[], declined, &[]);
+                    self.builder.switch_to_block(next);
+                }
                 continue;
             }
             let value = self.load_register(register);
@@ -927,8 +974,11 @@ impl<'p> Translator<'p> {
                 self.box_reads(position, &before);
                 let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
                 self.flush_all(&before, failed);
-                let validate = self.builder.ins().iconst(I32, 1);
-                let result = self.call_step(pc, validate)?;
+                let validated = self
+                    .builder
+                    .ins()
+                    .iconst(I32, i64::from(stepping::VALIDATED));
+                let result = self.call_step(pc, validated)?;
                 let after = self.after_with_boxed(position, Some(dst))?;
                 let next = self.next_pc(position)?;
                 let invalidated =
@@ -1199,7 +1249,10 @@ impl<'p> Translator<'p> {
                             // rejects, so the helper prepares it as tier 0 does: it keeps a
                             // compact sequence and stores its first element and increment in
                             // the loop's words, and expands any other ALTREP vector.
-                            let fits = self.check(value, expected);
+                            let fits = match expected {
+                                Ty::Boxed => self.steppable(value, true),
+                                _ => self.check(value, expected),
+                            };
                             let prepare = self.builder.create_block();
                             let join = self.builder.create_block();
                             for ty in [I64, I64, F64, F64] {
@@ -1231,11 +1284,18 @@ impl<'p> Translator<'p> {
                                 self.builder
                                     .ins()
                                     .load(F64, flags(), self.loops, words + 24);
-                            let fits = self.check(prepared, expected);
-                            let compact = self.compact_sequence_fits(prepared, expected, step);
-                            let fits = self.builder.ins().bor(fits, compact);
-                            let failed =
-                                self.deopt(pc, before.id, None, position, reason::SPECULATION);
+                            // A loop of unknown element type has no narrower type to fall
+                            // back from, so what it cannot step is tier 0's.
+                            let (fits, why) = match expected {
+                                Ty::Boxed => (self.steppable(prepared, false), reason::HANDOFF),
+                                _ => {
+                                    let fits = self.check(prepared, expected);
+                                    let compact =
+                                        self.compact_sequence_fits(prepared, expected, step);
+                                    (self.builder.ins().bor(fits, compact), reason::SPECULATION)
+                                }
+                            };
+                            let failed = self.deopt(pc, before.id, None, position, why);
                             self.guard(fits, failed);
                             self.store_register(src, prepared);
                             self.builder
@@ -1286,7 +1346,6 @@ impl<'p> Translator<'p> {
                 let scaled = self.builder.ins().imul_imm_s(current, width);
                 let address = self.builder.ins().iadd(sequence, scaled);
                 let next_index = self.builder.ins().iadd_imm_s(current, 1);
-                self.builder.def_var(self.loop_indexes[index], next_index);
                 match before.registers[src] {
                     Ty::IntVec | Ty::DblVec => {
                         // A compact sequence computes its element from the first element and
@@ -1328,8 +1387,25 @@ impl<'p> Translator<'p> {
                         let element = self.builder.ins().load(I64, flags(), address, DATA);
                         self.assign_slot(&before, slot, Ty::Boxed, element);
                     }
+                    Ty::Boxed => {
+                        let element = self
+                            .call(
+                                runtime::jit_loop_element as *const () as usize,
+                                &[I64, I64, I64],
+                                Some(I64),
+                                &[self.frame.activation, sequence, current],
+                            )
+                            .ok_or(Refusal("a helper without a result"))?;
+                        // The index advances only after the exit, which hands tier 0 this
+                        // step.
+                        let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
+                        let read = self.builder.ins().icmp_imm_s(IntCC::NotEqual, element, 0);
+                        self.guard(read, failed);
+                        self.assign_slot(&before, slot, Ty::Boxed, element);
+                    }
                     _ => return Err(Refusal("a loop over a sequence of unknown type")),
                 }
+                self.builder.def_var(self.loop_indexes[index], next_index);
                 let next = self.next_pc(position)?;
                 let label = self.edge(position, next)?;
                 self.builder.ins().jump(label, &[]);
@@ -1457,13 +1533,55 @@ impl<'p> Translator<'p> {
             self.hand_off(position, before);
             return Ok(true);
         }
+        let inspected = match (fast, dst) {
+            (
+                Fast::Inspect {
+                    argument,
+                    inspection,
+                },
+                Some((register, _)),
+            ) => {
+                // An unboxed scalar has no class and one element, so its answer is a constant.
+                let answer = match (inspection, before.registers[argument]) {
+                    (Inspection::Length, Ty::Int | Ty::Dbl | Ty::Lgl) => Some(1),
+                    (Inspection::Kind { kinds, .. }, Ty::Int) => {
+                        Some(kinds >> SexpType::Integer as u32 & 1)
+                    }
+                    (Inspection::Kind { kinds, .. }, Ty::Dbl) => {
+                        Some(kinds >> SexpType::Real as u32 & 1)
+                    }
+                    (Inspection::Kind { kinds, .. }, Ty::Lgl) => {
+                        Some(kinds >> SexpType::Logical as u32 & 1)
+                    }
+                    _ => None,
+                };
+                if let Some(answer) = answer {
+                    let answer = self.builder.ins().iconst(I32, i64::from(answer));
+                    self.def_register(register, inspection.result(), answer);
+                    self.set_visible(before, true);
+                    return Ok(false);
+                }
+                Some((argument, inspection, register))
+            }
+            _ => None,
+        };
         self.box_reads(position, before);
         let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
+        let done = self.builder.create_block();
+        if let Some((argument, inspection, register)) = inspected {
+            let builtin = self.builder.create_block();
+            self.builder.set_cold_block(builtin);
+            let answer = self.inspect(argument, inspection, builtin);
+            self.def_register(register, inspection.result(), answer);
+            self.set_visible(before, true);
+            self.builder.ins().jump(done, &[]);
+            self.builder.switch_to_block(builtin);
+        }
         // Tier 0's fast handler runs no R code, so where it applies the step needs none of the
         // write-back, validation and reload below, and the compiled op costs no more than
         // tier 0's.
         let refining = self.builder.create_block();
-        if fast != Fast::No {
+        if matches!(fast, Fast::Read | Fast::Store(_)) {
             if let Fast::Store(slot) = fast {
                 self.flush_slot(before, slot, failed);
             }
@@ -1486,34 +1604,53 @@ impl<'p> Translator<'p> {
             self.builder.ins().jump(refining, &[]);
             self.builder.switch_to_block(generic);
         }
-        let validate = match effect {
-            Effect::Pure => Some(self.builder.ins().iconst(I32, 0)),
+        // How the instruction steps, and whether the variables are forgotten after it: a step
+        // that may have run R code forgets them, and one that ran none keeps them.
+        let step = match effect {
+            Effect::Pure => {
+                let mode = self.builder.ins().iconst(I32, i64::from(stepping::PLAIN));
+                Some((mode, Forget::Never))
+            }
             Effect::Opaque => {
                 self.flush_all(before, failed);
-                Some(self.builder.ins().iconst(I32, 1))
+                let mode = self
+                    .builder
+                    .ins()
+                    .iconst(I32, i64::from(stepping::VALIDATED));
+                Some((mode, Forget::Always))
+            }
+            // A builtin call that runs no R code needs none of the step's write-back,
+            // validation and reload, so it runs tier 0's handler body directly, and the
+            // helper declines an argument the builtin could run R code for.
+            Effect::PureUnlessObserved if op == Op::CallBuiltin => {
+                // `refine` records the result's type when its check fails, but it checks no
+                // unrefined type, so then the step records it.
+                let record = dst.is_some_and(|(_, ty)| !refined(ty));
+                self.call_builtin_quietly(pc, record, refining, failed)?;
+                if inlined {
+                    // A call without a frame runs no R code, so tier 0 takes the call in the
+                    // frame the exit builds.
+                    self.hand_off(position, before);
+                    None
+                } else {
+                    self.flush_all(before, failed);
+                    let mode = self
+                        .builder
+                        .ins()
+                        .iconst(I32, i64::from(stepping::VALIDATED));
+                    Some((mode, Forget::Always))
+                }
             }
             Effect::PureUnlessObserved => {
-                // An instruction run for an inlined call signals nothing while the call has
-                // no frame, so there only an operand that dispatches could run R code.
-                let mut any = if inlined {
-                    self.builder.ins().iconst(I32, 0)
-                } else {
-                    self.call(
-                        runtime::jit_handlers_present as *const () as usize,
-                        &[],
-                        Some(I32),
-                        &[],
-                    )
-                    .ok_or(Refusal("a helper without a result"))?
-                };
+                let quiet = self.builder.ins().iconst(I32, i64::from(stepping::QUIET));
+                let mut any = None;
                 for &register in objects {
                     let value = self.load_register(register);
                     let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
-                    let observed = self
+                    let mut observed = self
                         .builder
                         .ins()
                         .band_imm_u(bits, OBJECT_FLAG | ALTREP_FLAG);
-                    any = self.builder.ins().bor(any, observed);
                     let kind = self.builder.ins().uload8(I32, flags(), value, KIND);
                     let environment = self.builder.ins().icmp_imm_s(
                         IntCC::Equal,
@@ -1521,70 +1658,61 @@ impl<'p> Translator<'p> {
                         SexpType::Environment as i64,
                     );
                     let environment = self.builder.ins().uextend(I32, environment);
-                    any = self.builder.ins().bor(any, environment);
+                    observed = self.builder.ins().bor(observed, environment);
+                    any = Some(match any {
+                        Some(any) => self.builder.ins().bor(any, observed),
+                        None => observed,
+                    });
                 }
-                let zero = self.builder.ins().iconst(I32, 0);
-                // A builtin call that runs no R code needs none of the step's write-back,
-                // validation and reload, so it runs tier 0's handler body directly.
-                let call = op == Op::CallBuiltin;
-                // `refine` records the result's type when its check fails, but it checks no
-                // unrefined type, so then the step records it.
-                let record = dst.is_some_and(|(_, ty)| !refined(ty));
-                if inlined {
-                    let unobserved = self.builder.ins().icmp_imm_s(IntCC::Equal, any, 0);
-                    self.hand_off_unless(position, before, unobserved);
-                    if call {
-                        self.call_builtin_quietly(pc, record, failed)?;
-                        self.builder.ins().jump(refining, &[]);
-                        None
-                    } else {
-                        Some(zero)
+                match any {
+                    None => Some((quiet, Forget::Never)),
+                    // An instruction run for an inlined call runs no R code while the call
+                    // has no frame.
+                    Some(any) if inlined => {
+                        let unobserved = self.builder.ins().icmp_imm_s(IntCC::Equal, any, 0);
+                        self.hand_off_unless(position, before, unobserved);
+                        Some((quiet, Forget::Never))
                     }
-                } else if call {
-                    let quiet = self.builder.create_block();
-                    let dispatching = self.builder.create_block();
-                    self.builder.ins().brif(any, dispatching, &[], quiet, &[]);
-                    self.builder.switch_to_block(quiet);
-                    self.call_builtin_quietly(pc, record, failed)?;
-                    self.builder.ins().jump(refining, &[]);
-                    self.builder.switch_to_block(dispatching);
-                    self.flush_all(before, failed);
-                    Some(self.builder.ins().iconst(I32, 1))
-                } else {
-                    let dispatching = self.builder.create_block();
-                    let join = self.builder.create_block();
-                    self.builder.append_block_param(join, I32);
-                    self.builder
-                        .ins()
-                        .brif(any, dispatching, &[], join, &[zero]);
-                    self.builder.switch_to_block(dispatching);
-                    self.flush_all(before, failed);
-                    let one = self.builder.ins().iconst(I32, 1);
-                    self.builder.ins().jump(join, &[one]);
-                    self.builder.switch_to_block(join);
-                    Some(self.builder.block_params(join)[0])
+                    Some(any) => {
+                        let dispatching = self.builder.create_block();
+                        let join = self.builder.create_block();
+                        self.builder.append_block_param(join, I32);
+                        self.builder
+                            .ins()
+                            .brif(any, dispatching, &[], join, &[quiet]);
+                        self.builder.switch_to_block(dispatching);
+                        self.flush_all(before, failed);
+                        let validated = self
+                            .builder
+                            .ins()
+                            .iconst(I32, i64::from(stepping::VALIDATED));
+                        self.builder.ins().jump(join, &[validated]);
+                        self.builder.switch_to_block(join);
+                        let mode = self.builder.block_params(join)[0];
+                        Some((mode, Forget::When(mode)))
+                    }
                 }
             }
         };
-        if let Some(validate) = validate {
-            let result = self.call_step(pc, validate)?;
+        if let Some((mode, forget)) = step {
+            let result = self.call_step(pc, mode)?;
             let after = self.after_with_boxed(position, dst.map(|(register, _)| register))?;
             let next = self.next_pc(position)?;
             let invalidated = self.deopt(next, after.0, after.1, position + 1, reason::SPECULATION);
             let continued = self.builder.create_block();
             self.branch_on_outcome(result, continued, failed, invalidated);
             self.builder.switch_to_block(continued);
-            match effect {
-                Effect::Pure => {}
-                Effect::Opaque => self.forget_slots(before),
-                Effect::PureUnlessObserved if inlined => {}
-                Effect::PureUnlessObserved => {
+            match forget {
+                Forget::Never => {}
+                Forget::Always => self.forget_slots(before),
+                // [`stepping::QUIET`] is zero.
+                Forget::When(validated) => {
                     let forgetting = self.builder.create_block();
                     let joined = self.builder.create_block();
                     self.builder.set_cold_block(forgetting);
                     self.builder
                         .ins()
-                        .brif(validate, forgetting, &[], joined, &[]);
+                        .brif(validated, forgetting, &[], joined, &[]);
                     self.builder.switch_to_block(forgetting);
                     self.forget_slots(before);
                     self.builder.ins().jump(joined, &[]);
@@ -1599,7 +1727,108 @@ impl<'p> Translator<'p> {
             let after = self.after_with_boxed(position, Some(register))?;
             self.refine(register, ty, next, after, position + 1);
         }
+        self.builder.ins().jump(done, &[]);
+        self.builder.switch_to_block(done);
         Ok(false)
+    }
+
+    /// The answer of `inspection` for the boxed value in register `argument`. A value the
+    /// inspection leaves to the builtin goes to `declined`.
+    fn inspect(&mut self, argument: usize, inspection: Inspection, declined: Label) -> Value {
+        const NATIVE: u32 = 1 << SexpType::Record as u32 | 1 << SexpType::I64 as u32;
+        const SIZED: u32 = 1 << SexpType::Nil as u32
+            | 1 << SexpType::Logical as u32
+            | 1 << SexpType::Integer as u32
+            | 1 << SexpType::Real as u32
+            | 1 << SexpType::Complex as u32
+            | 1 << SexpType::String as u32
+            | 1 << SexpType::List as u32
+            | 1 << SexpType::Expression as u32
+            | 1 << SexpType::Raw as u32;
+        let value = self.load_register(argument);
+        let kind = self.builder.ins().uload8(I32, flags(), value, KIND);
+        let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
+        let answered = self.builder.create_block();
+        match inspection {
+            Inspection::Kind { kinds, unclassed } => {
+                let mut left = self.kind_in(kind, NATIVE);
+                if unclassed {
+                    let object = self.builder.ins().band_imm_u(bits, OBJECT_FLAG);
+                    left = self.builder.ins().bor(left, object);
+                }
+                self.builder.ins().brif(left, declined, &[], answered, &[]);
+                self.builder.switch_to_block(answered);
+                self.kind_in(kind, kinds)
+            }
+            Inspection::Length => {
+                let sized = self.kind_in(kind, SIZED);
+                let special = self
+                    .builder
+                    .ins()
+                    .band_imm_u(bits, OBJECT_FLAG | ALTREP_FLAG);
+                // `sized` is 1 or 0, so it exceeds the flag bits only for a sized value with
+                // neither flag.
+                let plain = self
+                    .builder
+                    .ins()
+                    .icmp(IntCC::UnsignedGreaterThan, sized, special);
+                let measured = self.builder.create_block();
+                self.builder.ins().brif(plain, measured, &[], declined, &[]);
+                self.builder.switch_to_block(measured);
+                let length = self.builder.ins().load(I64, flags(), value, LENGTH);
+                // Longer vectors have a double length, which the builtin makes.
+                let fits = self.builder.ins().icmp_imm_s(
+                    IntCC::SignedLessThanOrEqual,
+                    length,
+                    i32::MAX as i64,
+                );
+                self.builder.ins().brif(fits, answered, &[], declined, &[]);
+                self.builder.switch_to_block(answered);
+                // `NULL` has the field, as tier 0 reads it, but it need not hold zero.
+                let null = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, kind, SexpType::Nil as i64);
+                let count = self.builder.ins().ireduce(I32, length);
+                let zero = self.builder.ins().iconst(I32, 0);
+                self.builder.ins().select(null, zero, count)
+            }
+        }
+    }
+
+    /// Whether a `for` loop of unknown element type can step through `value` with
+    /// [`runtime::jit_loop_element`]: an atomic vector or a list. With `plain` it must also be
+    /// one the loop's start need not prepare, which a factor and an ALTREP vector are not.
+    fn steppable(&mut self, value: Value, plain: bool) -> Value {
+        const STEPPED: u32 = 1 << SexpType::Logical as u32
+            | 1 << SexpType::Integer as u32
+            | 1 << SexpType::Real as u32
+            | 1 << SexpType::Complex as u32
+            | 1 << SexpType::String as u32
+            | 1 << SexpType::List as u32
+            | 1 << SexpType::Expression as u32
+            | 1 << SexpType::Raw as u32;
+        let kind = self.builder.ins().uload8(I32, flags(), value, KIND);
+        let stepped = self.kind_in(kind, STEPPED);
+        let special = if plain {
+            let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
+            self.builder
+                .ins()
+                .band_imm_u(bits, OBJECT_FLAG | ALTREP_FLAG)
+        } else {
+            self.builder.ins().iconst(I32, 0)
+        };
+        // `stepped` is 1 or 0, so it exceeds the flag bits only for a vector with neither flag.
+        self.builder
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThan, stepped, special)
+    }
+
+    /// Whether `kind`, a value's type code, is in the bit set `kinds`: 1 or 0.
+    fn kind_in(&mut self, kind: Value, kinds: u32) -> Value {
+        let kinds = self.builder.ins().iconst(I32, i64::from(kinds));
+        let shifted = self.builder.ins().ushr(kinds, kind);
+        self.builder.ins().band_imm_u(shifted, 1)
     }
 
     /// Runs a fused pass in tier 0. When it computes the expression, its value in `dst` is
@@ -3441,16 +3670,13 @@ impl<'p> Translator<'p> {
             let loaded = self.builder.create_block();
             self.builder.ins().brif(unloaded, load, &[], loaded, &[]);
             self.builder.switch_to_block(load);
-            self.expose_all(before, failed);
             let slot_constant = iconst(&mut self.builder, slot);
-            let result = self
-                .call(
-                    runtime::jit_load_slot as *const () as usize,
-                    &[I64, I64],
-                    Some(I32),
-                    &[self.frame.activation, slot_constant],
-                )
-                .ok_or(Refusal("a helper without a result"))?;
+            let result = self.exposed_load(
+                before,
+                runtime::jit_load_slot as *const () as usize,
+                runtime::jit_load_slot_exposed as *const () as usize,
+                &[self.frame.activation, slot_constant],
+            )?;
             let error =
                 self.builder
                     .ins()
@@ -3460,8 +3686,6 @@ impl<'p> Translator<'p> {
                 result,
                 outcome::LOAD_INVALIDATED as i64,
             );
-            let leaving = self.builder.ins().bor(error, invalid);
-            self.settle_exposed(before, leaving);
             let not_error = self.builder.create_block();
             self.builder.ins().brif(error, failed, &[], not_error, &[]);
             self.builder.switch_to_block(not_error);
@@ -3655,8 +3879,8 @@ impl<'p> Translator<'p> {
         self.builder.ins().jump(done, &[]);
         self.builder.switch_to_block(stepping);
         self.flush_all(before, failed);
-        let zero = self.builder.ins().iconst(I32, 0);
-        let result = self.call_step(pc, zero)?;
+        let plain = self.builder.ins().iconst(I32, i64::from(stepping::PLAIN));
+        let result = self.call_step(pc, plain)?;
         let ok = self
             .builder
             .ins()
@@ -4002,17 +4226,14 @@ impl<'p> Translator<'p> {
             self.probe_variable(symbol, lookup, slow, merged);
             self.builder.switch_to_block(slow);
         }
-        self.expose_all(before, failed);
         let pc_constant = iconst(&mut self.builder, pc);
         let slot_constant = iconst(&mut self.builder, slot);
-        let result = self
-            .call(
-                runtime::jit_load as *const () as usize,
-                &[I64, I64, I64],
-                Some(I32),
-                &[self.frame.activation, pc_constant, slot_constant],
-            )
-            .ok_or(Refusal("a helper without a result"))?;
+        let result = self.exposed_load(
+            before,
+            runtime::jit_load as *const () as usize,
+            runtime::jit_load_exposed as *const () as usize,
+            &[self.frame.activation, pc_constant, slot_constant],
+        )?;
         let error =
             self.builder
                 .ins()
@@ -4021,8 +4242,6 @@ impl<'p> Translator<'p> {
             self.builder
                 .ins()
                 .icmp_imm_s(IntCC::Equal, result, outcome::LOAD_INVALIDATED as i64);
-        let leaving = self.builder.ins().bor(error, invalid);
-        self.settle_exposed(before, leaving);
         let not_error = self.builder.create_block();
         self.builder.ins().brif(error, failed, &[], not_error, &[]);
         self.builder.switch_to_block(not_error);
@@ -4734,46 +4953,99 @@ impl<'p> Translator<'p> {
 
     /// Writes every dirty slot back to the environment.
     unsafe fn flush_all(&mut self, state: &StateRef<'p>, failed: Label) {
-        for slot in 0..state.slots.len() {
-            self.flush_slot(state, slot, failed);
+        let mut dirty =
+            (0..state.slots.len()).filter(|&slot| state.slots[slot].may_be(status::DIRTY));
+        let (first, second) = (dirty.next(), dirty.next());
+        let Some(first) = first else {
+            return;
+        };
+        if second.is_none() {
+            return self.flush_slot(state, first, failed);
         }
+        let record = self.save_dirty(state);
+        let statuses = self.builder.ins().stack_addr(I64, self.frame.statuses, 0);
+        let Some(result) = self.call(
+            runtime::jit_write_back as *const () as usize,
+            &[I64, I64, I64],
+            Some(I32),
+            &[self.frame.activation, statuses, record],
+        ) else {
+            unreachable!("a call with a result type has a result");
+        };
+        let ok = self.builder.ins().icmp_imm_s(IntCC::NotEqual, result, 0);
+        self.guard(ok, failed);
     }
 
-    /// Writes every dirty slot back before a load that reaches the runtime, where a forced
-    /// promise's code can look at the frame. A scalar held in variables stays dirty, as
-    /// [`crate::analysis::State`]'s `exposed` says.
-    unsafe fn expose_all(&mut self, state: &StateRef<'p>, failed: Label) {
-        for slot in 0..state.slots.len() {
-            self.write_slot(state, slot, failed, !state.slots[slot].ty.in_variables());
+    /// Calls the load helper `plain` with `arguments`, or `exposed` when a slot may be dirty:
+    /// a load that reaches the runtime can force a promise whose code looks at the frame, so
+    /// `exposed` writes the dirty slots back first ([`runtime::jit_load_exposed`]). A scalar
+    /// held in variables stays dirty, as [`crate::analysis::State`]'s `exposed` says.
+    unsafe fn exposed_load(
+        &mut self,
+        state: &StateRef<'p>,
+        plain: usize,
+        exposed: usize,
+        arguments: &[Value],
+    ) -> Result<Value, Refusal> {
+        let mut values: SmallVec<[Value; 6]> = SmallVec::from_slice(arguments);
+        let mut address = plain;
+        if state.slots.iter().any(|slot| slot.may_be(status::DIRTY)) {
+            let record = self.save_dirty(state);
+            values.push(self.builder.ins().stack_addr(I64, self.frame.statuses, 0));
+            values.push(record);
+            address = exposed;
         }
+        let params: SmallVec<[Type; 6]> = values.iter().map(|_| I64).collect();
+        self.call(address, &params, Some(I32), &values)
+            .ok_or(Refusal("a helper without a result"))
     }
 
-    /// Marks the scalars [`Self::expose_all`] wrote back and left dirty as clean when the load
-    /// hands the activation to tier 0: the exit writes dirty variables back, which would undo
-    /// what a forced promise assigned to one.
-    fn settle_exposed(&mut self, state: &StateRef<'p>, leaving: Value) {
+    /// Stores the value of every slot that may be dirty and is held in variables into its
+    /// home, and returns the address of the record that lists the slots that may be dirty,
+    /// which a write-back helper takes ([`runtime::jit_write_back`]).
+    unsafe fn save_dirty(&mut self, state: &StateRef<'p>) -> Value {
+        let slots = state.slots.len();
+        let homes = homes_offset(slots);
+        let mut record: SmallVec<[u32; 32]> = smallvec![0, homes as u32];
         for (slot, current) in state.slots.iter().enumerate() {
-            if !current.may_be(status::DIRTY) || !current.ty.in_variables() {
+            if !current.may_be(status::DIRTY) {
                 continue;
             }
-            let status = self.status(slot);
-            let dirty = self
-                .builder
-                .ins()
-                .icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
-            let written = self.builder.ins().band(dirty, leaving);
-            let local = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
-            let settled = self.builder.ins().select(written, local, status);
-            self.set_status(slot, settled);
+            record.push(runtime::record_entry(slot, exit_kind(current.ty)));
+            let home = (homes + 16 * slot) as i32;
+            if matches!(current.ty, Ty::Int | Ty::Lgl | Ty::Num) {
+                let value = self.builder.use_var(self.frame.slot_integers[slot]);
+                let offset = if current.ty == Ty::Num {
+                    home + 8
+                } else {
+                    home
+                };
+                self.builder
+                    .ins()
+                    .stack_store(I64, value, self.frame.statuses, offset);
+            }
+            if matches!(current.ty, Ty::Dbl | Ty::Num) {
+                let value = self.builder.use_var(self.frame.slot_doubles[slot]);
+                self.builder
+                    .ins()
+                    .stack_store(I64, value, self.frame.statuses, home);
+            }
         }
+        record[0] = (record.len() - runtime::RECORD_HEADER) as u32;
+        let address = match self.writes.get(&record[..]) {
+            Some(existing) => existing.as_ptr(),
+            None => {
+                let record: Box<[u32]> = record.as_slice().into();
+                let address = record.as_ptr();
+                self.writes.insert(record);
+                address
+            }
+        };
+        self.builder.ins().iconst(I64, address as i64)
     }
 
+    /// Writes `slot` back if it is dirty, and marks it clean.
     unsafe fn flush_slot(&mut self, state: &StateRef<'p>, slot: usize, failed: Label) {
-        self.write_slot(state, slot, failed, true);
-    }
-
-    /// Writes `slot` back if it is dirty, and marks it clean when `clean` is set.
-    unsafe fn write_slot(&mut self, state: &StateRef<'p>, slot: usize, failed: Label, clean: bool) {
         let current = state.slots[slot];
         if !current.may_be(status::DIRTY) {
             return;
@@ -4790,10 +5062,8 @@ impl<'p> Translator<'p> {
         let result = self.call_flush(slot, current.ty);
         let ok = self.builder.ins().icmp_imm_s(IntCC::NotEqual, result, 0);
         self.guard(ok, failed);
-        if clean {
-            let local = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
-            self.set_status(slot, local);
-        }
+        let local = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
+        self.set_status(slot, local);
         self.builder.ins().jump(done, &[]);
         self.builder.switch_to_block(done);
     }
@@ -5126,6 +5396,7 @@ impl<'p> Translator<'p> {
             registers,
             slots,
             loops,
+            handoffs: Handoffs::default(),
         });
         frame_state
     }
@@ -5693,12 +5964,15 @@ impl<'p> Translator<'p> {
         Ok([handled, stepped, declined])
     }
 
-    /// Runs the builtin call at `pc` through [`runtime::jit_call_builtin`], where it runs no R
-    /// code, recording the result's type when `record` is set. An error leaves through `failed`.
+    /// Runs the builtin call at `pc` through [`runtime::jit_call_builtin`], recording the
+    /// result's type when `record` is set, and goes on at `called`. An error leaves through
+    /// `failed`. The block this leaves the builder in is reached when the helper declined the
+    /// call, so nothing ran.
     fn call_builtin_quietly(
         &mut self,
         pc: usize,
         record: bool,
+        called: Label,
         failed: Label,
     ) -> Result<(), Refusal> {
         let pc = iconst(&mut self.builder, pc);
@@ -5715,18 +5989,27 @@ impl<'p> Translator<'p> {
             .builder
             .ins()
             .icmp_imm_s(IntCC::Equal, result, outcome::OK as i64);
-        self.guard(ok, failed);
+        let declined = self.builder.create_block();
+        self.builder.set_cold_block(declined);
+        self.builder.ins().brif(ok, called, &[], declined, &[]);
+        self.builder.switch_to_block(declined);
+        let observed =
+            self.builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, result, outcome::OBSERVED as i64);
+        self.guard(observed, failed);
         Ok(())
     }
 
-    /// Runs the tier-0 instruction at `pc` through [`runtime::jit_step`].
-    fn call_step(&mut self, pc: usize, validate: Value) -> Result<Value, Refusal> {
+    /// Runs the tier-0 instruction at `pc` through [`runtime::jit_step`] in `mode`, one of
+    /// [`stepping`]'s.
+    fn call_step(&mut self, pc: usize, mode: Value) -> Result<Value, Refusal> {
         let pc = iconst(&mut self.builder, pc);
         self.call(
             runtime::jit_step as *const () as usize,
             &[I64, I64, I32],
             Some(I32),
-            &[self.frame.activation, pc, validate],
+            &[self.frame.activation, pc, mode],
         )
         .ok_or(Refusal("a helper without a result"))
     }

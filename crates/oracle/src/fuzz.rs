@@ -1,7 +1,7 @@
 //! Random R programs for differential fuzzing, one per seed.
 //!
 //! A program is a sequence of independent blocks, each a shape the runtime has to get right:
-//! hot functions with scalar and vector loops (so `RY_JIT=force` compiles them), element reads
+//! hot functions with scalar and vector loops (so `RY_JIT=stress` compiles them), element reads
 //! and writes, closures, lazy arguments, S3 dispatch, `switch`, `repeat`, `Recall`, environments,
 //! attributes, NA propagation, integer overflow, recycling and condition handling. Most blocks
 //! are well-typed and print what they compute, so a difference shows up in stdout as well as in
@@ -455,7 +455,7 @@ impl Generator {
     /// the argument. Compiled code runs such calls without frames and may evaluate the argument
     /// ahead of the call, so when the branch runs, the frames it rebuilds must bind each formal
     /// forced or unforced exactly as the calls left it. Each callee runs alone first, because
-    /// `RY_JIT=force` compiles the root at its second call and inlines only callees it knows.
+    /// `RY_JIT=stress` compiles the root at its second call and inlines only callees it knows.
     fn lazy_arguments(&mut self) -> String {
         let k = self.block;
         let argument = ["x", "x * 2", "x + 1"][self.rng.below(3)];

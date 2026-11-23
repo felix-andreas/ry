@@ -348,7 +348,7 @@ const TIERINGS: [Tiering; 5] = [
     },
     Tiering {
         name: "compiled ahead, tier 1 forced",
-        environment: &[("RY_JIT", "force")],
+        environment: &[("RY_JIT", "stress")],
         ahead: true,
     },
 ];
