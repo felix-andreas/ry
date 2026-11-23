@@ -308,6 +308,106 @@ fn dormant_exports(db: &dyn Db, sources: StubSources, package: Symbol) -> Option
     Some(names)
 }
 
+/// The declarations of `package::name` when `package` is a shipped namespace the project has not
+/// activated. `::` loads a package without attaching it, so a qualified call such as
+/// `data.table::fifelse(...)` types from the package's stubs while its bare names stay out of
+/// scope. `None` for a name no such declaration covers.
+pub fn dormant_namespace_schemes<'db>(
+    db: &'db dyn Db,
+    package: &str,
+    name: &str,
+) -> Option<&'db Vec<TypeScheme<'db>>> {
+    let sources = StubSources::try_get(db)?;
+    dormant_schemes(db, sources, Symbol::new(package)).get(name)
+}
+
+/// A dormant namespace's declarations, without the ones the namespace's activation would also
+/// change: a type a dormant namespace defines (`data.table`, or another package's `xts`) joins
+/// only with it, so a declaration that names one is left out, and so is one with a marker the
+/// checker reads from the active library (`@masked`, `@opaque`, `@elementwise`). Those names stay
+/// `Unknown` through `::`.
+#[salsa::tracked(returns(ref))]
+fn dormant_schemes<'db>(
+    db: &'db dyn Db,
+    sources: StubSources,
+    package: Symbol,
+) -> SymbolMap<Vec<TypeScheme<'db>>> {
+    let package = package.as_str();
+    let mut schemes: SymbolMap<Vec<TypeScheme<'db>>> = SymbolMap::default();
+    let texts_of = |wanted: &dyn Fn(&str) -> bool| -> Vec<&str> {
+        sources
+            .sources(db)
+            .iter()
+            .filter(|(namespace, _)| wanted(namespace))
+            .map(|(_, text)| text.as_str())
+            .collect()
+    };
+    let lines_of = |texts: &[&'db str]| -> Vec<&'db str> {
+        texts
+            .iter()
+            .flat_map(|text| text.lines())
+            .filter(|line| !line.trim_start().starts_with("#'"))
+            .map(|line| strip_comment(line).trim())
+            .collect()
+    };
+    let lines = lines_of(&texts_of(&|namespace| namespace == package));
+    // Every namespace that is not active defines types the checker does not know yet: this
+    // one, and another dormant package's, such as the `xts` a qualified call may return.
+    let dormant_lines = lines_of(&texts_of(&|namespace| {
+        namespace == package
+            || ((CONDITIONAL_NAMESPACES.contains(&namespace)
+                || QUALIFIED_ONLY_NAMESPACES.contains(&namespace))
+                && !namespace_active(db, namespace))
+    }));
+    let dormant_types: FxHashSet<&str> = dormant_lines
+        .iter()
+        .filter_map(|content| {
+            let rest =
+                after_keyword(content, "@type").or_else(|| after_keyword(content, "@alias"))?;
+            let rest = rest.trim_start();
+            let end = rest
+                .find(|character: char| !is_identifier_character(character))
+                .unwrap_or(rest.len());
+            Some(&rest[..end]).filter(|name| !name.is_empty())
+        })
+        .collect();
+    for &content in &lines {
+        if content.starts_with('@') {
+            continue;
+        }
+        let Some(separator) = top_level_colon(content) else {
+            continue;
+        };
+        let spelling = content[..separator].trim();
+        if spelling.is_empty() || !is_stub_name(spelling) {
+            continue;
+        }
+        let markers = declaration_markers(content[separator + 1..].trim());
+        let names_dormant_type = markers
+            .type_text
+            .split(|character: char| !is_identifier_character(character))
+            .any(|word| dormant_types.contains(word));
+        if markers.masked
+            || markers.opaque.is_some()
+            || markers.elementwise.is_some()
+            || names_dormant_type
+        {
+            continue;
+        }
+        if let Some(scheme) = lower_type_text(db, markers.type_text) {
+            schemes
+                .entry(Symbol::new(spelling))
+                .or_default()
+                .push(scheme);
+        }
+    }
+    schemes
+}
+
+fn is_identifier_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '.' || character == '_'
+}
+
 /// The namespace of ry's standard library (`Result.map`, `Dict.get`, ...). Its names are in scope
 /// bare unless `[check] prelude` is off, and always as `std::Name`.
 pub const STANDARD_LIBRARY: &str = "std";

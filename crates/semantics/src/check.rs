@@ -16,8 +16,8 @@ use {
             is_whole_number_double,
         },
         infer::{
-            Entry, FunctionMismatch, InferenceTable, RecordMismatch, UNCHECKED_WITNESS, UnifyError,
-            apply_definition, constraint_rejects, numeric_join,
+            Entry, FunctionMismatch, InferenceTable, RecordMismatch, Snapshot, UNCHECKED_WITNESS,
+            UnifyError, apply_definition, constraint_rejects, numeric_join,
         },
         metadata::{
             imported_by_name, imports_every_name, is_own_package, own_package_reaches,
@@ -29,7 +29,10 @@ use {
         },
         native::{Judged, NativeBlocker, has_r_bound, native_blockers},
         sorted::{SortedMap, SortedSet},
-        stubs::{NATIVE_NAMESPACES, StubLibrary, SymbolSet, is_ry_type, lower_type_text, stubs},
+        stubs::{
+            NATIVE_NAMESPACES, StubLibrary, SymbolSet, dormant_namespace_schemes, is_ry_type,
+            lower_type_text, stubs,
+        },
         top_level::super_assigned_names,
         types::{
             Atomic, Binder, Bound, Constraint, DefaultRead, FlagReturn, FrameKind, FunctionType,
@@ -735,19 +738,36 @@ impl<'db> FromIterator<Option<Ty<'db>>> for ExpressionTypes<'db> {
 }
 
 /// The checker's working copy of [`ExpressionTypes`], before the inference table resolves it.
-struct RecordedTypes<'db>(Vec<Option<Ty<'db>>>);
+/// The type recorded on each expression. While an overload probe runs, every write is logged, so
+/// rolling the probe back restores the types it recorded along with the inference table: a type
+/// recorded in a probe may name a variable the rollback discards.
+struct RecordedTypes<'db> {
+    types: Vec<Option<Ty<'db>>>,
+    undo: Vec<(ExprId, Option<Ty<'db>>)>,
+    probes: u32,
+}
+
+/// The state an overload probe returns to when it is rolled back.
+struct Probe {
+    table: Snapshot,
+    records: usize,
+    expectations: usize,
+}
 
 impl<'db> RecordedTypes<'db> {
     fn get(&self, id: &ExprId) -> Option<&Ty<'db>> {
-        self.0.get(id.index())?.as_ref()
+        self.types.get(id.index())?.as_ref()
     }
 
     fn insert(&mut self, id: ExprId, ty: Ty<'db>) {
         let slot = self
-            .0
+            .types
             .get_mut(id.index())
             .unwrap_or_else(|| panic!("recorded type for {id:?} outside the item's module"));
-        *slot = Some(ty);
+        let previous = slot.replace(ty);
+        if self.probes > 0 {
+            self.undo.push((id, previous));
+        }
     }
 }
 
@@ -787,6 +807,13 @@ pub enum StrictOriginKind {
     /// `frame` is the queried variable's name, when the frame is a plain variable.
     UnknownColumns {
         frame: Option<String>,
+        column: String,
+    },
+    /// A frame whose columns are unknown, where the expected type lists columns, so nothing
+    /// checks them. `source` names the variable the frame comes from and the head it is
+    /// spelled with, and `column` is the first column the expected type lists.
+    UnlistedColumns {
+        source: Option<(String, &'static str)>,
         column: String,
     },
     /// An unannotated parameter nothing constrains, so it accepts any value unchecked.
@@ -941,9 +968,14 @@ fn check_item_in<'db>(
         },
         scheme_arena: Vec::new(),
         literal_reads: Bitset::new_in(arena, expressions),
-        recorded: RecordedTypes(vec![None; expressions]),
+        recorded: RecordedTypes {
+            types: vec![None; expressions],
+            undo: Vec::new(),
+            probes: 0,
+        },
         recorded_patterns: Column::new_in(arena, module.pattern_count()),
         recorded_expectations: Column::new_in(arena, expressions),
+        expectation_undo: Vec::new(),
         recorded_loop_variables: Column::new_in(arena, expressions),
         root_binders: FxHashMap::default(),
         selected_overloads: Column::new_in(arena, expressions),
@@ -1151,7 +1183,7 @@ fn check_item_in<'db>(
         }
     }
     context.default_literal_vars();
-    let recorded = mem::take(&mut context.recorded.0);
+    let recorded = mem::take(&mut context.recorded.types);
     let i64_literals = recorded
         .iter()
         .enumerate()
@@ -1952,6 +1984,8 @@ struct Checker<'db, 'a> {
     recorded: RecordedTypes<'db>,
     recorded_patterns: Column<'a, PatId, Ty<'db>>,
     recorded_expectations: Column<'a, ExprId, Ty<'db>>,
+    /// The expectations an overload probe overwrote, restored when it is rolled back.
+    expectation_undo: Vec<(ExprId, Option<Ty<'db>>)>,
     recorded_loop_variables: Column<'a, ExprId, Ty<'db>>,
     /// The variables the item's own generalization turned into binders, so a local the
     /// signature's `T` types reads as that `T` in the editor rather than as a fresh variable.
@@ -3508,6 +3542,19 @@ fn is_number_value(module: &Module, id: ExprId) -> bool {
 
 /// Whether `id` is a logical expression of literals alone: `TRUE`, `!`, `&&` and `||` over such
 /// expressions, or a comparison of number literals or literal arithmetic.
+/// Whether `id` is a literal, or operators and parentheses over literals alone.
+fn made_of_literals(module: &Module, id: ExprId) -> bool {
+    match module.kind(id) {
+        ExpressionKind::Literal(_) => true,
+        ExpressionKind::Paren(inner) => made_of_literals(module, *inner),
+        ExpressionKind::Unary { operand, .. } => made_of_literals(module, *operand),
+        ExpressionKind::Binary { lhs, rhs, .. } => {
+            made_of_literals(module, *lhs) && made_of_literals(module, *rhs)
+        }
+        _ => false,
+    }
+}
+
 fn is_literal_logic(module: &Module, id: ExprId) -> bool {
     match module.kind(id) {
         ExpressionKind::Paren(inner) => is_literal_logic(module, *inner),
@@ -4028,10 +4075,16 @@ impl<'db, 'a> Checker<'db, 'a> {
             module.kind(inner),
             ExpressionKind::Record(_) | ExpressionKind::Tuple(_) | ExpressionKind::Tag { .. }
         );
-        if is_literal {
-            self.recorded_expectations.insert(inner, expected);
+        let key = if is_literal {
+            inner
         } else if inner != value {
-            self.recorded_expectations.insert(value, expected);
+            value
+        } else {
+            return;
+        };
+        let previous = self.recorded_expectations.insert(key, expected);
+        if self.recorded.probes > 0 {
+            self.expectation_undo.push((key, previous));
         }
     }
 
@@ -4514,11 +4567,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     if reaches_project {
                         globals.namespace_scheme(name)
                     } else {
-                        let package = (*package)?;
-                        self.library?
-                            .namespace_schemes(package, name)?
-                            .last()
-                            .cloned()
+                        self.qualified_schemes((*package)?, name)?.last().cloned()
                     }
                 }) {
                     Some(namespace_scheme) => self.instantiate(&namespace_scheme),
@@ -5185,6 +5234,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         self.table.enter_rigid_binders(&declared.binders);
         self.record_expectation(value, declared.body);
+        self.note_unlisted_columns(value, value_ty, declared.body);
         if self.adapt_literal(value, declared.body) != LiteralFit::NotLiteral {
             return declared.body;
         }
@@ -12474,6 +12524,9 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }) {
                     continue;
                 }
+                if let Some(value) = value {
+                    self.note_unlisted_columns(value, returned, declared.ret);
+                }
                 if !matches!(returned.kind(self.db), TyKind::Unknown)
                     && !self.table.compatible(self.db, returned, declared.ret)
                 {
@@ -12495,6 +12548,10 @@ impl<'db, 'a> Checker<'db, 'a> {
                 _ => *body,
             };
             let body_range = self.blame_range(blamed);
+            for &leaf in &leaves {
+                let found = self.recorded_type(leaf);
+                self.note_unlisted_columns(leaf, found, declared.ret);
+            }
             // The trailing value alone: early returns already reported themselves.
             let resolved_body = self.table.resolve(self.db, trailing_ty);
             let tail_adapts = !leaves.is_empty()
@@ -14172,11 +14229,12 @@ impl<'db, 'a> Checker<'db, 'a> {
             "setkeyv" | "setorderv" => TableFunction::SetKeyOrOrderNamed,
             "rbindlist" => TableFunction::RbindList,
             "fifelse" => TableFunction::Fifelse,
+            "ifelse" => TableFunction::Ifelse,
             "melt" => TableFunction::Melt,
             _ => return None,
         };
         let home = match function {
-            TableFunction::Construct(FrameKind::RDataFrame) => "base",
+            TableFunction::Construct(FrameKind::RDataFrame) | TableFunction::Ifelse => "base",
             _ => "data.table",
         };
         match package {
@@ -14582,6 +14640,81 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         let frame = variable_name(module, subject).map(|name| name.to_string());
         self.record_strict_origin(subject, StrictOriginKind::UnknownColumns { frame, column });
+    }
+
+    /// Strict mode reports a frame whose columns are unknown where the expected type lists
+    /// columns: the frame is accepted as any frame, so nothing checks the names and types the
+    /// type promises. The finding names the variable the frame was converted from, looking
+    /// through conversions such as `as.DataFrame(frame)`.
+    fn note_unlisted_columns(&mut self, value: ExprId, found: Ty<'db>, expected: Ty<'db>) {
+        if !self.record_strict_origins {
+            return;
+        }
+        let db = self.db;
+        if !matches!(self.structural(found).kind(db), TyKind::Frame(_, None)) {
+            return;
+        }
+        let expected = self.structural(expected);
+        let single = [expected];
+        let members: &[Ty<'db>] = match expected.kind(db) {
+            TyKind::Union(members) => members,
+            _ => &single,
+        };
+        // A member that is itself a frame of unknown columns (`Rows | DataFrame`) admits it.
+        if members.iter().any(|&member| {
+            matches!(self.structural(member).kind(db), TyKind::Frame(_, None))
+                && self.table.compatible(db, found, member)
+        }) {
+            return;
+        }
+        let Some(column) =
+            members
+                .iter()
+                .find_map(|&member| match self.structural(member).kind(db) {
+                    TyKind::Frame(_, Some([first, ..])) => Some(first.name.text(db).to_owned()),
+                    _ => None,
+                })
+        else {
+            return;
+        };
+        let module = self.module;
+        let mut inner = value;
+        let source = loop {
+            while let ExpressionKind::Paren(expression) = module.kind(inner) {
+                inner = *expression;
+            }
+            match module.kind(inner) {
+                ExpressionKind::NameRef(name) => {
+                    let ty = self.recorded.get(&inner).copied().unwrap_or(unknown(db));
+                    let class = self.class_chain(ty).first().map(|class| class.text(db));
+                    let head = match (class, self.structural(ty).kind(db)) {
+                        (Some("data.table"), _) => "data.table",
+                        (Some("data.frame"), _) => "data.frame",
+                        (_, TyKind::Frame(kind, _)) => kind.head(),
+                        _ => "DataFrame",
+                    };
+                    break Some((name.to_string(), head));
+                }
+                ExpressionKind::Call { callee, arguments }
+                    if self.dataframe_verb(*callee).is_some() =>
+                {
+                    // A subject whose columns are known did not bring the unknown ones, which
+                    // came from another argument, such as the right side of a join.
+                    let subject = module[arguments].first().and_then(|first| first.value);
+                    let known = subject
+                        .and_then(|subject| self.recorded.get(&subject).copied())
+                        .is_some_and(|ty| {
+                            matches!(self.structural(ty).kind(db), TyKind::Frame(_, Some(_)))
+                        });
+                    match subject {
+                        Some(subject) if !known => inner = subject,
+                        _ => break None,
+                    }
+                }
+                _ => break None,
+            }
+        };
+        self.record_strict_origin(value, StrictOriginKind::UnlistedColumns { source, column });
     }
 
     /// `DataFrame.join(left, right, on = "id")` has the left's columns, then the right's columns
@@ -15302,6 +15435,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             Some(TableFunction::RbindList) => Some(self.rbind_list_type(arguments)),
             Some(TableFunction::Melt) => self.melt_type(arguments),
             Some(TableFunction::Fifelse) => self.fifelse_type(arguments),
+            Some(TableFunction::Ifelse) => self.ifelse_type(arguments),
         };
         // `setnames` and `setcolorder` change the subject by reference, which ry models as a
         // new write of its slot. Naming records the write from the callee's name alone, so a
@@ -15854,6 +15988,53 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         let (atomic, _, _) = shared?;
         Some(Ty::new(db, TyKind::Vector(scalar(db, atomic))))
+    }
+
+    /// `ifelse(test, yes, no)` fills a logical vector as long as `test` from `yes` and `no`, so
+    /// it is a vector of the wider of their types in R's coercion order (`logical`, `integer`,
+    /// `double`, `complex`, `character`), where a bare `NA` fits either. A `yes` or `no` that is
+    /// not a plain vector, such as a factor whose class `ifelse` drops, keeps the stub's type.
+    fn ifelse_type(&mut self, arguments: &[Argument]) -> Option<Ty<'db>> {
+        let module = self.module;
+        let db = self.db;
+        let matched = match_formals(self.module, arguments, &["test", "yes", "no"]);
+        let test = matched[0]?;
+        let scalar_test = match self.structural(*self.recorded.get(&test)?).kind(db) {
+            // A comparison on a matrix, and `is.na` of one, type as a scalar (`Compare.matrix`),
+            // and any value may hold such a test, so a scalar test is a scalar only when it is
+            // made of literals.
+            TyKind::Scalar(_) if made_of_literals(module, test) => true,
+            TyKind::Vector(element) if matches!(element.kind(db), TyKind::Scalar(_)) => false,
+            TyKind::Unknown | TyKind::Any | TyKind::Var(_) => false,
+            _ => return None,
+        };
+        let mut branches: SmallVec<[Ty<'db>; 2]> = SmallVec::new();
+        for value in [matched[1], matched[2]].into_iter().flatten() {
+            if matches!(
+                module.kind(value),
+                ExpressionKind::Literal(LiteralKind::Na(NaAtom::Logical))
+            ) {
+                continue;
+            }
+            let ty = *self.recorded.get(&value)?;
+            let ty = self.structural(ty);
+            let element = column_element(db, ty);
+            let TyKind::Scalar(atomic) = element.kind(db) else {
+                return None;
+            };
+            if *atomic == Atomic::Raw {
+                return None;
+            }
+            branches.push(if scalar_test {
+                element
+            } else {
+                Ty::new(db, TyKind::Vector(element))
+            });
+        }
+        if branches.is_empty() {
+            return None;
+        }
+        Some(union_of(db, branches))
     }
 
     /// `idcol` holds each piece's name when the list names them all, and its position
@@ -16516,7 +16697,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let mut fits = Vec::new();
         let mut fit_results = Vec::new();
         for (index, scheme) in schemes.iter().enumerate() {
-            let probe = self.table.snapshot();
+            let probe = self.begin_probe();
             if let Ok((_, function)) = self.probe_overload_candidate(callee, scheme, &probed, false)
             {
                 fit_results.push(self.table.resolve(self.db, function.ret));
@@ -16527,7 +16708,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     vec![narrowed],
                 ));
             }
-            self.table.rollback(probe);
+            self.end_probe(probe, false);
         }
         let preserved = self.preserved_caller_variable(&caller_entries, &fits, &fit_results);
         self.table.rollback(snapshot);
@@ -16556,6 +16737,20 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
+    /// The declarations `package::name` reads: an active namespace's from the library, and a
+    /// dormant shipped namespace's from its own stubs.
+    fn qualified_schemes(
+        &self,
+        package: Symbol,
+        name: Symbol,
+    ) -> Option<&'db Vec<TypeScheme<'db>>> {
+        let library = self.library?;
+        if library.knows_namespace(package.as_str()) {
+            return library.namespace_schemes(package, name);
+        }
+        dormant_namespace_schemes(self.db, package.as_str(), name.as_str())
+    }
+
     fn try_overloaded_call(
         &mut self,
         id: ExprId,
@@ -16579,7 +16774,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 let name =
                     validated_namespace_name(self.db, self.library, *internal, package, name)?;
                 if !namespace_reaches_project(self.db, package) {
-                    let schemes = self.library?.namespace_schemes((*package)?, name)?;
+                    let schemes = self.qualified_schemes((*package)?, name)?;
                     if schemes.len() < 2 {
                         return None;
                     }
@@ -16607,7 +16802,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
 
         // Arguments infer once, before any probe: the probe snapshot does not reverse
-        // environment or recorded-type writes.
+        // environment writes.
         let callees = self.hinting_callees(schemes, arguments);
         let mut call_arguments = self.infer_call_arguments_against(range, arguments, &callees);
         self.resolve_match_fun_arguments(callee, &mut call_arguments);
@@ -16756,17 +16951,18 @@ impl<'db, 'a> Checker<'db, 'a> {
         let mut fitting_courtesy = false;
         for &courtesy in rounds {
             for (index, scheme) in schemes.iter().enumerate() {
-                let snapshot = self.table.snapshot();
+                let probe = self.begin_probe();
                 match self.probe_overload_candidate(callee, scheme, call_arguments, courtesy) {
                     Ok((resolved, function)) => {
                         if unchecked_argument {
                             let result = self.table.resolve(self.db, function.ret);
-                            self.table.rollback(snapshot);
+                            self.end_probe(probe, false);
                             fits.push((index, true, vec![result]));
                             fitting_courtesy = courtesy;
                             continue;
                         }
                         if caller_entries.is_empty() {
+                            self.end_probe(probe, true);
                             self.recorded.insert(callee, resolved);
                             self.selected_overloads.insert(callee, index);
                             return self.committed_overload_return(id, function.ret);
@@ -16786,12 +16982,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                                     .resolve(self.db, Ty::new(self.db, TyKind::Var(*var))),
                             })
                             .collect();
-                        self.table.rollback(snapshot);
+                        self.end_probe(probe, false);
                         fits.push((index, free, narrowing));
                         fitting_courtesy = courtesy;
                     }
                     Err(outcome) => {
-                        self.table.rollback(snapshot);
+                        self.end_probe(probe, false);
                         if let Some(error) = outcome.into_iter().next()
                             && !courtesy
                         {
@@ -16860,13 +17056,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                 if let Some(&(first_index, _, _)) = fits.first()
                     && let Some(scheme) = schemes.get(first_index)
                 {
-                    let snapshot = self.table.snapshot();
-                    if self
+                    let probe = self.begin_probe();
+                    let fits = self
                         .probe_overload_candidate(callee, scheme, call_arguments, fitting_courtesy)
-                        .is_err()
-                    {
-                        self.table.rollback(snapshot);
-                    }
+                        .is_ok();
+                    self.end_probe(probe, fits);
                 }
                 return self.undecided_overload_result(id, call_arguments);
             }
@@ -16884,9 +17078,29 @@ impl<'db, 'a> Checker<'db, 'a> {
         {
             return Ty::new(self.db, TyKind::Var(var));
         }
-        let winner = fits
-            .iter()
-            .find(|(_, free, _)| *free)
+        // An undecided literal (`List.to_r([1, 2])`) takes the candidate its default picks, as
+        // the same literal bound to a variable first would, rather than the one leaving it open.
+        // Any other caller variable must stay open, as the free fit would leave it.
+        let literal_defaults = if fits.len() > 1 {
+            self.literal_defaults(&caller_entries)
+        } else {
+            Vec::new()
+        };
+        let literal_fit = literal_defaults.iter().any(Option::is_some).then(|| {
+            fits.iter().find(|(_, _, narrowing)| {
+                narrowing
+                    .iter()
+                    .zip(&literal_defaults)
+                    .zip(&caller_entries)
+                    .all(|((&narrowed, default), &(var, _))| match default {
+                        Some(default) => narrowed == *default,
+                        None => narrowed == Ty::new(self.db, TyKind::Var(var)),
+                    })
+            })
+        });
+        let winner = literal_fit
+            .flatten()
+            .or_else(|| fits.iter().find(|(_, free, _)| *free))
             .or_else(|| {
                 let (_, _, first) = fits.first()?;
                 fits.iter()
@@ -16929,14 +17143,15 @@ impl<'db, 'a> Checker<'db, 'a> {
         if let Some(&(index, _, _)) = winner
             && let Some(scheme) = schemes.get(index)
         {
-            let snapshot = self.table.snapshot();
+            let probe = self.begin_probe();
             match self.probe_overload_candidate(callee, scheme, call_arguments, fitting_courtesy) {
                 Ok((resolved, function)) => {
+                    self.end_probe(probe, true);
                     self.recorded.insert(callee, resolved);
                     self.selected_overloads.insert(callee, index);
                     return self.committed_overload_return(id, function.ret);
                 }
-                Err(_) => self.table.rollback(snapshot),
+                Err(_) => self.end_probe(probe, false),
             }
         }
 
@@ -17121,11 +17336,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             let Some(scheme) = schemes.get(*index) else {
                 return false;
             };
-            let snapshot = self.table.snapshot();
+            let probe = self.begin_probe();
             let fits = self
                 .probe_overload_candidate(callee, scheme, &witnessed, false)
                 .is_ok();
-            self.table.rollback(snapshot);
+            self.end_probe(probe, false);
             if !fits {
                 return false;
             }
@@ -17198,6 +17413,59 @@ impl<'db, 'a> Checker<'db, 'a> {
             Ok((resolved, *function))
         } else {
             Err(outcome)
+        }
+    }
+
+    /// The type each literal variable among `caller_entries` defaults to, `None` for any other
+    /// variable.
+    fn literal_defaults(
+        &mut self,
+        caller_entries: &[(InferenceVar, Entry<'db>)],
+    ) -> Vec<Option<Ty<'db>>> {
+        caller_entries
+            .iter()
+            .map(|&(var, _)| {
+                let (_, native) = self.table.literal_of(self.table.find(var))?;
+                let probe = self.begin_probe();
+                let ty = Ty::new(self.db, TyKind::Var(var));
+                self.default_literal_var(ty, native);
+                let default = self.table.resolve(self.db, ty);
+                self.end_probe(probe, false);
+                (!matches!(default.kind(self.db), TyKind::Var(_))).then_some(default)
+            })
+            .collect()
+    }
+
+    fn begin_probe(&mut self) -> Probe {
+        self.recorded.probes += 1;
+        Probe {
+            table: self.table.snapshot(),
+            records: self.recorded.undo.len(),
+            expectations: self.expectation_undo.len(),
+        }
+    }
+
+    /// Ends a probe, undoing what it did to the table, the recorded types and the recorded
+    /// expectations unless `keep`.
+    fn end_probe(&mut self, probe: Probe, keep: bool) {
+        if !keep {
+            self.table.rollback(probe.table);
+            for (id, previous) in self.recorded.undo.drain(probe.records..).rev() {
+                if let Some(slot) = self.recorded.types.get_mut(id.index()) {
+                    *slot = previous;
+                }
+            }
+            for (id, previous) in self.expectation_undo.drain(probe.expectations..).rev() {
+                match previous {
+                    Some(ty) => self.recorded_expectations.insert(id, ty),
+                    None => self.recorded_expectations.remove(id),
+                };
+            }
+        }
+        self.recorded.probes -= 1;
+        if self.recorded.probes == 0 {
+            self.recorded.undo.clear();
+            self.expectation_undo.clear();
         }
     }
 
@@ -19496,6 +19764,7 @@ impl<'db, 'a> Checker<'db, 'a> {
     ) -> Result<(), TypeError<'db>> {
         if let Some(value) = value {
             self.record_expectation(value, expected);
+            self.note_unlisted_columns(value, found, expected);
         }
         let resolved_found = self.table.resolve(self.db, found);
         if matches!(resolved_found.kind(self.db), TyKind::Unknown)
@@ -23336,6 +23605,7 @@ enum TableFunction {
     RbindList,
     Melt,
     Fifelse,
+    Ifelse,
 }
 
 /// Each formal's argument, matched as R matches them: exact names first, then the unnamed
@@ -23911,7 +24181,9 @@ fn validated_namespace_name(
     }
     match library.map(|library| library.knows_namespace(package.as_str())) {
         None => Some(name),
-        Some(false) => None,
+        Some(false) => dormant_namespace_schemes(db, package.as_str(), name.as_str())
+            .is_some()
+            .then_some(name),
         Some(true) => {
             if internal
                 || library.is_some_and(|library| library.exports(package.as_str(), name.as_str()))

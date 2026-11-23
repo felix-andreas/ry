@@ -71,8 +71,7 @@ Counter <- R6::R6Class("Counter", public = list(
   }
 ))
 #++++
-Counter: Unknown
-124..135 error[strict] strict mode: `R6Class` has no declared type, so the code that uses it is not checked. Declare it in a `.Rtypes` stub, or annotate the result with `#: @if-unknown TYPE`
+Counter: Any
 179..180 error[strict] strict mode: parameter `k` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `k: TYPE`
 
 #---- package_hooks_take_the_arguments_r_passes

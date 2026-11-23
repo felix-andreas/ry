@@ -77,17 +77,23 @@ interface group therefore resolves through an explicit canonical fixpoint in
   cap), condensed in canonical order (file order, then item order); only cyclic groups (more than one
   member, or a self-edge) are recorded. A winner-only graph that missed statement items, earlier writers,
   script and test files and conditional writers was the bug that surfaced this rule.
-- `scc_exports` runs Jacobi iteration: all members start at `Unknown` and each round re-checks every member
-  against the previous round's table, so order cannot matter. A group still changing at the round cap
-  (`SCHEME_ROUND_CAP`, 16, shared with the backstop) pins all members to `Unknown`. Member checks run
-  through `SalsaGlobals`, so no salsa cycle forms.
+- `scc_exports` runs Gauss-Seidel iteration in a solve order fixed by the group alone (a depth-first
+  post-order of its edges from its first member, so callees come first): all members start at `Unknown`,
+  and each member reads the exports its predecessors wrote earlier in the same round. Reading only the
+  previous round's table (Jacobi iteration) needs one round per link, so a cycle longer than the cap (a
+  chain of 16 small functions through one annotated function) would end at `Unknown` although its types
+  are fully determined; in callee-first order such a chain settles in one or two rounds. A group still
+  changing at the round cap (`SCHEME_ROUND_CAP`, 16, shared with the backstop) pins all members to
+  `Unknown`; a member whose exports keep growing is widened first (see "A recursive group widens an
+  export that keeps growing"). Member checks run through `SalsaGlobals`, so no salsa cycle forms.
 - `item_check` adopts the canonical exports as a member's scheme, and `global_scheme` reads only
   `item_check`, so there is one source of truth.
 - Salsa cycle recovery (`item_check_recover`, `global_scheme_recover`) is a backstop, and reaching it is a
   bug: salsa never backdates a cycle member, so restoring a recovered cycle panics
   (`removing_a_cross_file_cycle_and_restoring_it_revalidates` in `test_incremental.rs`).
 
-Pinned by `cyclic_group_answers_are_forcing_order_independent` in `crates/semantics/tests/test_parallel.rs`.
+Pinned by `cyclic_group_answers_are_forcing_order_independent` in `crates/semantics/tests/test_parallel.rs`
+and the fixture `recursion__a_long_recursive_chain_settles_through_its_annotation`.
 
 ## There is no third constraint kind, so two flexible comparison operands stay unconstrained
 
@@ -984,3 +990,46 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - **An open callback passed to a library function with `...` is variadic even where the call forwards nothing** (`a_callback_parameter_is_variadic_even_where_the_library_call_forwards_nothing`). raster's `apply(x, 1, fun)` came before `fun(x, na.rm = na.rm)`, and the first call fixed the arity. The callee must be declared (a stub or an annotated function), since an inferred function's `...` may go elsewhere; a declared project function whose `...` does go elsewhere widens the callback too.
 - **Completion offers every name R creates in the global environment as a side effect** (`a_top_level_loop_variable_completes_after_the_loop`, `a_global_written_by_superassignment_completes`): `global_names` reads `super_globals`, the same set unresolved-name checking reads, so a top-level loop's variable and a `<<-` target with no enclosing binding complete like any global.
 - **Each name of a zeallot pattern is a declaration for references** (`a_zeallot_pattern_name_is_a_declaration`; `slot_occurrences` reads `destructure_leaves`), as the left side of `<-` is.
+
+## `ifelse` types as the union of its branches, and an all-`NA` logical arrives as `character`
+
+**Status:** built (`Checker::ifelse_type` in `crates/semantics/src/check.rs`, `converted` in `crates/interp/src/annotations.rs`; `stdlib-base.R.test` group `ifelse`, `test_records.rs`).
+
+- R builds the result from `test` (an empty test gives `logical(0)`) and drops attributes, so a stub `Any` let `-> character[]` over `ifelse(x > 0, "a", "b")` check clean and fail at run time.
+- Typing: the union of the branches' element types, each in the shape of the test: a vector for a vector test, a scalar only when the test is made of literals, and a vector for a test of unknown shape. Any other test that types as a scalar gives `Any`, because a comparison on a matrix and `is.na` of one type as a scalar (`Compare.matrix`) and a variable may hold one, while R keeps the matrix's dimensions. A bare `NA` branch fits the other one. Not a widening to the wider type, because R keeps each element's own branch type only when both agree; a union is what a reader can rely on. A branch that is not a plain atomic vector (a factor, a list, raw) keeps `Any`, because a factor becomes its codes.
+- Run time: the checker lets `NA` and an all-`NA` logical stand for any atomic type, so the boundary agrees. `integer`, `double` and `complex` masks admit logical storage; a non-`Array` `character` annotation converts a logical vector of only `NA` (empty included) with `coerce_vector`, keeping attributes, in the same `converted` step as the `I64` conversion. Rejected: admitting the logical unchanged, because a compiled body or a later `-> character` caller would see logical storage under a `character` type. The same rule makes `f(NA)` for `x: character` run, as `ry check` accepts it.
+- The compilers' storage predicates (`storage_admits`) refuse logical for `character`, so a compiled call with such a value falls back to the interpreter, which converts.
+
+## A qualified call reads a dormant namespace's declarations
+
+**Status:** built (`dormant_namespace_schemes` in `crates/semantics/src/stubs.rs`, `Checker::qualified_schemes` and `validated_namespace_name` in `crates/semantics/src/check.rs`; `stdlib-base.R.test` group `dormant_namespaces`; `reference/type-system.mdx`, "Conditional stub namespaces").
+
+- R loads a namespace for `::` whether or not the project declares it, so `data.table::fifelse(...)` in a script without a `DESCRIPTION` types from the package's declarations.
+- A per-namespace tracked query lowers that namespace's declarations on demand, read only through `pkg::name`. Bare names stay out of scope, so the rule that dormant names never mask a typo holds, and stub assembly parses no extra source for projects that never write `pkg::`.
+- Left out, so they stay `Unknown`: a declaration that names a type any dormant namespace defines (`as.data.table -> data.table`, or `PerformanceAnalytics::Return.calculate -> xts` while `xts` is inactive), because a type definition and its supertypes join only with their namespace and a bare nominal would fail every `data.frame` parameter; and one with `@masked`, `@opaque` or `@elementwise`, which the checker reads from the active library by bare name.
+- `warning` is declared (the stub grammar accepts the trailing-dot `[call.]`) and returns `character`. `stop` is `Any` because the checker has no `Never`.
+
+## A recursive group widens an export that keeps growing
+
+**Status:** built (`WIDENING_ROUND`, `Widening`, `widen` and `exports_grew` in `crates/semantics/src/semantics.rs`; `strict.R.test` cases `recursion__a_group_whose_results_nest_each_other_widens_the_growing_result` and `recursion__a_finite_result_reached_late_in_a_group_is_not_widened`).
+
+- Functions in one recursion group that return a record holding the group's own results (`list(value = ..., parts = list(a, b))`) nest the record one level deeper per round, about tenfold in size, until `TYPE_SIZE_CEILING` cuts it to `Unknown`, after which the readers shrink and grow again. Such a group never settles: 400 members ran all 16 rounds on types near the ceiling (18.6 s on one core) and ended at `Unknown` anyway.
+- From round 2 on (`WIDENING_ROUND`), a member whose exports grew is widened and stays widened for the rest of the solve, so the group cannot oscillate. The first widening sets a function's result to `Unknown` and keeps its parameters; from then on the whole function is measured, so parameters that keep growing widen every export to `Unknown`. The same 400 members check in 0.35 s.
+- Growth compares `type_size` of a function's result (or a binding's type) with the previous round's, and counts only when the previous one was larger than a leaf. A finite result can arrive late, after several back edges, and arriving from the seed's `Unknown` (size 1) is not growth; a self-nesting result grows from one built type to a larger one every round. A structural nesting test does not work, because a generic result is instantiated afresh each round.
+- Strict mode reports a widened member as defined recursively, the same finding as a self-nesting binding, and an annotation on it fixes the type.
+- Rejected: lowering `TYPE_SIZE_CEILING` (it bounds one type, not the rounds, and still oscillates) and recursive types (the checker has no `μ` types; a widened `Unknown` is the honest answer).
+
+## Strict mode reports a frame of unknown columns where a type lists columns
+
+**Status:** built (`Checker::note_unlisted_columns`, `StrictOriginKind::UnlistedColumns` in `crates/semantics/src/check.rs`; `dataframes.R.test` group `strict_columns`; `reference/type-system.mdx`, "Tables in typed code" just above).
+
+- A frame with unknown columns (`Frame(_, None)`) is gradual and compatible with every frame type, so `load <- function(frame: data.frame) -> Rows as.DataFrame(frame)` would return frames of wrong types, missing columns or extra columns as `Rows` without a finding.
+- Strict mode records an origin wherever such a frame meets a frame type that lists columns, at a declared return (each early return and tail leaf), an argument (`check_argument`) and an annotated binding. The finding names the variable the frame was converted from, looking through table verbs such as `as.DataFrame(frame)` (but not into a verb's subject whose columns are known: in a join, the unknown columns came from the other side, so the finding underlines the frame and names no variable), and suggests listing its columns. A union expected type (`Rows | NULL`) checks against its frame member, unless another member is itself a frame of unknown columns (`Rows | DataFrame`), which admits the value. Outside strict mode the flow stays gradual, as every bare frame does.
+- Not done: a run-time check of a `DataFrame{...}` annotation. Its mask is 0 because the table lives behind an external pointer in the `frames` crate, which `interp` does not link, and an alias such as `Rows` is not checked at run time anyway. Extra columns and column order are width subtyping, which the open-table-type design decides.
+
+## An overload probe rolls back the types it recorded, and an undecided literal takes its default's candidate
+
+**Status:** built (`RecordedTypes`, `Checker::begin_probe`, `end_probe` and `literal_defaults` in `crates/semantics/src/check.rs`; `native-syntax.R.test` case `conversions__an_unsuffixed_list_literal_converts_through_the_overloads`).
+
+- Overload resolution probes each candidate and rolls the inference table back, on the rule that matching is a pure function of the table. Types recorded on expressions during a probe broke that rule: a number literal adapted in one probe kept a type naming a variable the rollback discarded, and the next probe read it (`List.to_r([1, 2])` indexed past the table). While a probe runs, every write of a recorded type or a recorded expectation is logged, and rolling the probe back restores both with the table; the winner is re-probed to commit, so nothing a probe recorded is lost.
+- A call whose open argument is an undecided literal picks the candidate the literal's default would pick, so `List.to_r([1, 2])` is `integer[] | double[]` like `counts <- [1, 2]; List.to_r(counts)`. Every other caller variable must stay open in that candidate. The usual rule, the first candidate leaving the caller's variables open, would pick the generic `List<T> -> list[T]`, which a guess about R code needs but a literal does not: its default is known.

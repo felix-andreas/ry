@@ -1347,17 +1347,38 @@ fn views_borrow_foreign_items() {
     unsafe {
         let view = ry_list_view(DBL as u32, foreign.as_mut_ptr() as *mut u8, 3);
         assert_eq!(live(), before, "a view is not counted");
-        let doubled = ry_arith_vs(MUL, DBL as u32, view, 1, 2f64.to_bits());
+        let doubled = ry_arith_vs(MUL, DBL as u32, view, 0, 2f64.to_bits());
         assert_ne!(doubled, view, "a view is never written");
         assert_eq!(read(doubled), Model::Dbl(vec![2.0, 4.0, 6.0]));
         let copy = ry_list_unshare(view, 0);
         assert_ne!(copy, view);
-        ry_list_drop(view);
         ry_view_release(view);
         ry_list_drop(doubled);
         ry_list_drop(copy);
     }
     assert_eq!(foreign, vec![1.0, 2.0, 3.0]);
+    assert_eq!(live(), before);
+}
+
+#[test]
+fn a_view_kept_past_its_loan_gets_its_own_items() {
+    let before = live();
+    let mut foreign = vec![1.0f64, 2.0, 3.0];
+    unsafe {
+        let view = ry_list_view(DBL as u32, foreign.as_mut_ptr() as *mut u8, 3);
+        // A record field or a list item that keeps the view counts it.
+        ry_list_dup(view);
+        ry_view_release(view);
+        foreign.fill(0.0);
+        assert_eq!(read(view), Model::Dbl(vec![1.0, 2.0, 3.0]));
+        assert_eq!(live(), before + 1, "the kept view is a list of its own");
+        ry_list_drop(view);
+        let empty = ry_list_view(DBL as u32, foreign.as_mut_ptr() as *mut u8, 0);
+        ry_list_dup(empty);
+        ry_view_release(empty);
+        assert_eq!(read(empty), Model::Dbl(vec![]));
+        ry_list_drop(empty);
+    }
     assert_eq!(live(), before);
 }
 

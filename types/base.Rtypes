@@ -30,9 +30,8 @@
 #   `structure(x, my_attr = 1)`, plotting `par(...)` sinks) stay `Any` values unless their result
 #   type is known: their keyword arguments are data, not formals. An `...: Any` rest absorbs them,
 #   which is how `data.frame(x = 1)` returns `data.frame`.
-# - Functions with trailing-dot formals (`stop`/`warning` take `call.`) stay `Any`: parameter names
-#   allow interior dots only, so the signature is not yet writable. `stop`'s `Any` also stands in for a
-#   missing `Never` type: `x <- if (ok) 1L else stop("bad")` must not force a `NULL` join.
+# - `stop` stays `Any`, standing in for a missing `Never` type: `x <- if (ok) 1L else stop("bad")`
+#   must not force a `NULL` join.
 #
 # The arithmetic and comparison operators and the `c` / `list` constructors are NOT stubbed here: their
 # result type is an algorithm over the argument types (numeric promotion, `NULL`-dropping combination,
@@ -335,14 +334,14 @@ strsplit : @pure fn(x: Any, split: character[] | NULL, [fixed]: logical, [perl]:
 
 # Output and messages. `print` returns its argument invisibly, so it is a genuine `<T> -> T`; its named
 # formals cover the common method arguments (`digits`, `n`, `row.names`, ...) that would otherwise be
-# false "unknown named argument" errors. `stop`/`warning` stay `Any` (trailing-dot `call.` formal +
-# missing `Never`, see header); `message`'s formals are expressible. `print.default` reads `quote` with
-# R's logical coercion, which takes the strings "FALSE" and "TRUE" as well.
+# false "unknown named argument" errors. `stop` stays `Any` (missing `Never`, see header); `warning`
+# returns its message invisibly. `print.default` reads `quote` with R's logical coercion, which takes
+# the strings "FALSE" and "TRUE" as well.
 print : <T> fn(x: T, ...: Any, [digits]: Any, [quote]: logical | character, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> T
 cat : fn(...: Any, [file]: Any, [sep]: character, [fill]: Any, [labels]: Any, [append]: logical) -> NULL
 message : fn(...: Any, [domain]: Any, [appendLF]: logical) -> NULL
 stop : Any
-warning : Any
+warning : fn(...: Any, [call.]: logical, [immediate.]: logical, [noBreaks.]: logical, [domain]: Any) -> character
 # `stopifnot(exprs = ...)` matches by name; string-labelled conditions (`"must be" = x > 0`) pass
 # through the rest parameter. An identifier-labelled condition (`ok = x > 0`) still falsely errors —
 # that needs named-into-rest absorption.
@@ -500,6 +499,7 @@ intersect : @pure <T> fn(x: T[], y: T[]) -> T[]
 intersect : fn(x: Any, y: Any) -> Any
 setdiff : @pure <T> fn(x: T[], y: T[]) -> T[]
 setdiff : fn(x: Any, y: Any) -> Any
+setequal : @pure fn(x: Any, y: Any) -> logical
 append : @pure <T> fn(x: T[], values: T[], [after]: integer) -> T[]
 append : fn(x: Any, values: Any, [after]: Any) -> Any
 replace : @pure <T> fn(x: T[], list: Any, values: T[]) -> T[]
@@ -584,6 +584,10 @@ merge : @pure fn(...: Any) -> Any
 # matrix, even for a plain vector.
 scale : @pure fn(x: Any, [center]: Any, [scale]: Any) -> matrix
 tabulate : @pure fn(bin: Any, [nbins]: Any) -> integer[]
+findInterval : @pure fn(x: Any, vec: Any, [rightmost.closed]: logical, [all.inside]: logical, [left.open]: logical) -> integer[]
+# `rowsum` sums the rows of `x` by group: a data frame gives a data frame, anything else a matrix.
+rowsum : @pure fn(x: data.frame, group: Any, [reorder]: logical, [na.rm]: logical, ...: Any) -> data.frame
+rowsum : @pure fn(x: Any, group: Any, [reorder]: logical, [na.rm]: logical, ...: Any) -> matrix
 rowSums : @pure fn(x: Any, [na.rm]: logical, [dims]: Any) -> double[]
 colSums : @pure fn(x: Any, [na.rm]: logical, [dims]: Any) -> double[]
 rowMeans : @pure fn(x: Any, [na.rm]: logical, [dims]: Any) -> double[]
@@ -828,6 +832,8 @@ julian : @pure Any
 Sys.time : fn() -> POSIXct
 # A `proc_time` is a named double vector: user, system and elapsed seconds.
 proc.time : fn() -> double[]
+gc : fn([verbose]: logical, [reset]: logical, [full]: logical) -> matrix
+isS4 : @pure fn(object: Any) -> logical
 Sys.Date : fn() -> Date
 Sys.getenv : fn([x]: Any, [unset]: Any, [names]: logical) -> character
 # `Sys.setenv(VAR = "v")`: arbitrary variable names as named arguments.

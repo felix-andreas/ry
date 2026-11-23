@@ -421,6 +421,22 @@ these rules:
   installed package, an alias is checked as the type it stands for, because ry's runtime reads
   each one-line annotation there with its aliases expanded. A check therefore fails only on a value that really does not
   have the annotated type.
+- **A logical vector holding only `NA` arrives as `character` where the type is `character`.** A
+  bare `NA` and a vector computed from no data, such as `ifelse()` over an empty test, are `logical`
+  in R, but the checker lets them stand for any atomic type. `integer`, `double` and `complex`
+  admit `logical` storage as it is, while a `character` parameter or return value converts such a
+  value, keeping its attributes, so `typeof()` on it says `"character"` where GNU R running the
+  erasure says `"logical"`. Every other check passes the value through unchanged, except the `I64`
+  conversion described under [number literals](#number-literals).
+
+  ```r
+  label <- function(x: double[]) -> character[] ifelse(x > 0, "positive", "other")
+  label(double())
+  ```
+
+  ```text ry run runtime=ry
+  character(0)
+  ```
 - **An installed typed package's signatures name the types, not their aliases.** `ry install` and
   `ry build` on ry's runtime write each one-line parameter and return annotation of a typed package
   as the type it stands for ([CLI reference](/reference/cli#build-and-install)), so an installed
@@ -2142,6 +2158,13 @@ expected a function that takes `double`, found `double`
 
 `Map` is `mapply` with `SIMPLIFY = FALSE`, so it gives `list[T]` for a callback that returns `T`, and
 `list[Any]` when the return is undetermined.
+
+`ifelse(test, yes, no)` takes the shape of `test` and is either branch's type, so
+`ifelse(x > 0, 1L, 2.5)` is `integer[] | double[]` for a vector `x`, and `ifelse(TRUE, 1L, 2L)`, whose
+test is made of literals, is `integer`. A bare `NA` fits the other branch, so
+`ifelse(x > 0, "positive", NA)` is `character[]`. A branch that is not a plain vector, such as a
+factor, whose class `ifelse` drops, gives `Any`, and so does any other test that types as a scalar,
+because a comparison on a matrix types as one and the result keeps the matrix's dimensions.
 
 The base functions that take a function argument and resolve it with `match.fun` (`lapply`,
 `sapply`, `vapply`, `mapply`, `Map`, `Filter`, `Find`, `Position`, `Reduce`, `do.call`, `outer`,
@@ -4484,6 +4507,25 @@ reported once, at its first step that names a column: a later step is not report
 step that names no column, such as `DataFrame.head(5L)` or `DataFrame.lazy()`, neither reports nor
 hides a report.
 
+A frame whose columns are unknown also passes wherever a frame type that lists columns is
+expected, so outside strict mode `as.DataFrame(frame)` on a plain `data.frame` satisfies any
+`DataFrame{...}`. In strict mode that is an error at each return, argument and annotated binding
+where it happens, naming the variable the frame was converted from:
+
+```r
+alias Rows = DataFrame{a: character, n: double}
+load <- function(frame: data.frame) -> Rows {
+  as.DataFrame(frame)
+}
+```
+
+```text ry check strict
+  x strict mode: the columns of `frame` are unknown, so nothing checks them against the columns this type lists. Give `frame` a type that lists its columns, as in `frame: data.frame{a: TYPE}`
+```
+
+With `frame: data.frame{a: character, n: double}`, a call passing a frame of other columns is a
+type error at the call.
+
 #### Tables in typed code
 
 A typed function holds a `DataFrame`, `LazyFrame`, `GroupBy`, `LazyGroupBy` or `Expr` as one opaque
@@ -4868,7 +4910,13 @@ in projects that never use them. So a conditional namespace activates only when:
   `loadNamespace()` call whose package argument is a literal name or string; or
 - the project ships its own `stubs/<pkg>.Rtypes` override for the namespace.
 
-While a namespace is inactive, it behaves exactly like any package the stubs do not describe.
+While a namespace is inactive, its bare names behave exactly like those of any package the stubs do
+not describe. A qualified call still reads its declarations, because `::` loads a package without
+attaching it, so `data.table::fifelse(test, 1, 2)` is `double[]` in a script that never declares
+data.table. A declaration that names a type an inactive namespace defines, such as
+`as.data.table`'s `data.table` result, or `PerformanceAnalytics::Return.calculate`'s `xts` while
+xts is inactive, or that carries `@masked`, `@opaque` or `@elementwise`, needs the namespace
+active and is `Unknown` through `::` until then.
 
 The shipped dplyr verbs preserve their data argument's class, as `<T> fn(.data: T, ...) -> T`, so a
 native-pipe chain keeps its class from end to end: `fread(path) |> mutate(r = a / b)` stays a

@@ -186,6 +186,99 @@ fact <- function(n) if (n <= 1L) 1L else n * fact(n - 1L)
 #++++
 fact: fn(n: integer) -> integer
 
+#---- a_long_recursive_chain_settles_through_its_annotation
+# A cycle of any length through one annotated function settles: each round solves
+# the group callee first, so the chain's types flow through it in one pass.
+f <- function(x: integer) -> integer {
+  if (x <= 0L) 0L else g1(x - 1L)
+}
+g1 <- function(x) g2(x)
+g2 <- function(x) g3(x)
+g3 <- function(x) g4(x)
+g4 <- function(x) g5(x)
+g5 <- function(x) g6(x)
+g6 <- function(x) g7(x)
+g7 <- function(x) g8(x)
+g8 <- function(x) g9(x)
+g9 <- function(x) g10(x)
+g10 <- function(x) g11(x)
+g11 <- function(x) g12(x)
+g12 <- function(x) g13(x)
+g13 <- function(x) g14(x)
+g14 <- function(x) g15(x)
+g15 <- function(x) g16(x)
+g16 <- function(x) g17(x)
+g17 <- function(x) g18(x)
+g18 <- function(x) g19(x)
+g19 <- function(x) g20(x)
+g20 <- function(x) f(x)
+#++++
+f: fn(x: integer) -> integer
+g1: fn(x: integer) -> integer
+g2: fn(x: integer) -> integer
+g3: fn(x: integer) -> integer
+g4: fn(x: integer) -> integer
+g5: fn(x: integer) -> integer
+g6: fn(x: integer) -> integer
+g7: fn(x: integer) -> integer
+g8: fn(x: integer) -> integer
+g9: fn(x: integer) -> integer
+g10: fn(x: integer) -> integer
+g11: fn(x: integer) -> integer
+g12: fn(x: integer) -> integer
+g13: fn(x: integer) -> integer
+g14: fn(x: integer) -> integer
+g15: fn(x: integer) -> integer
+g16: fn(x: integer) -> integer
+g17: fn(x: integer) -> integer
+g18: fn(x: integer) -> integer
+g19: fn(x: integer) -> integer
+g20: fn(x: integer) -> integer
+
+#---- a_group_whose_results_nest_each_other_widens_the_growing_result
+# Each result holds the group's own results, so the record nests one level deeper
+# every round. The fixpoint widens a result still growing after the group has had
+# its rounds to settle, and the parameters keep their types.
+f <- function(x, depth) {
+  if (depth <= 0) return(list(value = x, parts = list()))
+  a <- g(x + 1, depth - 1)
+  b <- h(x * 2, depth - 1)
+  list(value = a$value + b$value, parts = list(a, b))
+}
+g <- function(x, depth) {
+  if (depth <= 0) return(list(value = x, parts = list()))
+  a <- h(x - 1, depth - 1)
+  b <- f(x, depth - 1)
+  list(value = a$value * b$value, parts = list(a, b))
+}
+h <- function(x, depth) {
+  if (depth <= 0) return(list(value = x, parts = list()))
+  a <- f(x, depth - 1)
+  b <- g(x, depth - 1)
+  list(value = a$value - b$value, parts = list(a, b))
+}
+#++++
+f: <T: arithmetic, U: arithmetic> fn(x: T, depth: U) -> list{value: T, parts: list{}} | list{value: Unknown, parts: list{Unknown, Unknown}}
+g: <T: arithmetic, U: arithmetic> fn(x: T, depth: U) -> Unknown
+h: <T: arithmetic, U: arithmetic> fn(x: T, depth: U) -> Unknown
+225..418 error[strict] strict mode: could not determine the full type of `f`, because it is defined recursively. Add a type annotation
+419..608 error[strict] strict mode: could not determine the full type of `g`, because it is defined recursively. Add a type annotation
+609..794 error[strict] strict mode: could not determine the full type of `h`, because it is defined recursively. Add a type annotation
+
+#---- a_finite_result_reached_late_in_a_group_is_not_widened
+# The base case reaches `B`, `C` and `D` only after several back edges, so their
+# results first change from the seed's `Unknown` in a later round. The result is
+# finite, so nothing is widened.
+A <- function(n: integer) { if (n <= 0L) list(k = 1L) else B(n - 1L) }
+B <- function(n: integer) C(n)
+C <- function(n: integer) { if (n > 5L) A(n - 1L) else D(n) }
+D <- function(n: integer) B(n - 1L)
+#++++
+A: fn(n: integer) -> list{k: integer}
+B: fn(n: integer) -> list{k: integer}
+C: fn(n: integer) -> list{k: integer}
+D: fn(n: integer) -> list{k: integer}
+
 #---- growing_recursion_is_attributed
 x <- list(v = 1, w = x)
 #++++
