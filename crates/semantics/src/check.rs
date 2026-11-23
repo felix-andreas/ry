@@ -939,6 +939,7 @@ fn check_item_in<'db>(
         loop_jumps: Vec::new(),
         no_default_formals: Bitset::new_in(arena, bindings),
         defaulted_formals: Bitset::new_in(arena, bindings),
+        value_defaulted_formals: Bitset::new_in(arena, bindings),
         missing_path_functions: Bitset::new_in(arena, bindings),
         non_local_slots: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
         string_values: Column::new_in(arena, bindings),
@@ -1867,6 +1868,9 @@ struct Checker<'db, 'a> {
     no_default_formals: Bitset<'a, BindingId>,
     /// Unannotated formals with a default; a condition on one does not pin its type.
     defaulted_formals: Bitset<'a, BindingId>,
+    /// Formals whose default is a string, number or logical literal: R's call lookup skips
+    /// such a value, so `cor = "cor"` and a call `cor(x, y)` reach `stats::cor`.
+    value_defaulted_formals: Bitset<'a, BindingId>,
     /// Formals given a function on their `missing()` path, which the branch join reads as a
     /// default rather than a rewrite.
     missing_path_functions: Bitset<'a, BindingId>,
@@ -4426,6 +4430,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                         } else {
                             self.defaulted_formals.insert(slot);
                         }
+                        if parameter
+                            .default
+                            .is_some_and(|default| is_value_literal(self.module, default))
+                        {
+                            self.value_defaulted_formals.insert(slot);
+                        }
                     }
                     // Inferred only now: a default may read its own and earlier parameters' slots.
                     if let Some(default) = parameter.default {
@@ -6399,6 +6409,23 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         match prior.kind(self.db) {
             TyKind::Tuple([]) => Ty::new(self.db, TyKind::NamedList(value)),
+            // `d <- list(n); d[[2]] <- v` grows the tuple, and a write under a computed index
+            // (`for (i in 1:n) d[[i]] <- density(x[, i])`) may replace any item or add one.
+            TyKind::Tuple(items) if matches!(value.kind(self.db), TyKind::Null) => Ty::new(
+                self.db,
+                TyKind::List(union_of(self.db, items.iter().copied())),
+            ),
+            TyKind::Tuple(items) => match &step {
+                ReplacementStep::Position(position) if *position == items.len() => {
+                    let mut items = TypeList::from_slice(items);
+                    items.push(value);
+                    Ty::new(self.db, TyKind::Tuple(&items))
+                }
+                _ => Ty::new(
+                    self.db,
+                    TyKind::List(union_of(self.db, items.iter().copied().chain([value]))),
+                ),
+            },
             // `globals[[key]] <- value` under a computed key may add a field or replace any
             // one, so the record's fields are no longer known and a later `globals[[key]]` may
             // be `value` as much as an original field.
@@ -11149,6 +11176,9 @@ impl<'db, 'a> Checker<'db, 'a> {
             TyKind::Vector(element) | TyKind::NamedVector(element) => {
                 self.condition_coerces(*element)
             }
+            // A matrix carries neither its element type nor its length, so `if (!m[i, j])`
+            // passes as a vector of unknown length does.
+            TyKind::Named(class, _) if class.text(self.db) == "matrix" => true,
             TyKind::Union(members) => members.iter().all(|&member| self.condition_coerces(member)),
             // A value already required to be numeric (`if (n %% 2L)`) coerces like a number.
             TyKind::Var(_) => matches!(
@@ -12004,6 +12034,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                     self.no_default_formals.insert(slot);
                 } else {
                     self.defaulted_formals.insert(slot);
+                }
+                if parameter
+                    .default
+                    .is_some_and(|default| is_value_literal(self.module, default))
+                {
+                    self.value_defaulted_formals.insert(slot);
                 }
             }
             if let Some(default) = parameter.default {
@@ -13494,7 +13530,9 @@ impl<'db, 'a> Checker<'db, 'a> {
         // function. One that is also read as a value (`dir <- path; dir(dir)`) is as likely a
         // plain value whose call R resolves past it, so a same-named function leaves the call
         // undetermined.
-        let ambiguous = nearest_callable == Callable::Untyped && self.read_as_value(nearest_slot);
+        let ambiguous = nearest_callable == Callable::Untyped
+            && (self.value_defaulted_formals.contains(nearest_slot)
+                || self.read_as_value(nearest_slot));
         let mut reaches_top_level = self.is_top_level_slot(nearest_slot);
         for slot in outer {
             reaches_top_level |= self.is_top_level_slot(slot);
@@ -17937,6 +17975,8 @@ impl<'db, 'a> Checker<'db, 'a> {
                     if let Some(&expected) = function.positional.get(*slot)
                         && let Some(ty) =
                             self.argument_type_for(expected, argument, function.inferred)
+                        && let expected =
+                            self.forwarded_callback_shape(expected, ty, &forwarded_argument_indexes)
                         && let Err(error) = self.check_argument(
                             expected,
                             ty,
@@ -18004,6 +18044,8 @@ impl<'db, 'a> Checker<'db, 'a> {
                     if let Some(expected) = function.named.get(*formal).map(|field| field.ty)
                         && let Some(ty) =
                             self.argument_type_for(expected, argument, function.inferred)
+                        && let expected =
+                            self.forwarded_callback_shape(expected, ty, &forwarded_argument_indexes)
                         && let Err(error) = self.check_argument(
                             expected,
                             ty,
@@ -18491,6 +18533,36 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// R's apply family calls `FUN(element, ...)`, so a callback with extra formals is
     /// correct when the caller forwards the difference (`lapply(x, gsub, pattern = "a")`).
     /// Simulates that invocation as a probe whose bindings commit only on success.
+    /// The function type an open callback (`apply(v, 2, FUN = fun, na.rm = na.rm)`) takes.
+    /// The library calls it with the arguments its `...` received as well, so the callback is
+    /// variadic, and a later `fun(v, na.rm = na.rm)` in the same body is no wrong call.
+    fn forwarded_callback_shape(
+        &self,
+        expected: Ty<'db>,
+        actual: Ty<'db>,
+        forwarded_argument_indexes: &[usize],
+    ) -> Ty<'db> {
+        if forwarded_argument_indexes.is_empty()
+            || !self.is_open_parameter(self.table.shallow_resolve(self.db, actual))
+        {
+            return expected;
+        }
+        match self.table.resolve(self.db, expected).kind(self.db) {
+            TyKind::Function(callback) if callback.variadic.is_none() => Ty::new(
+                self.db,
+                TyKind::Function(&FunctionType {
+                    variadic: Some(RestParameter {
+                        element: any(self.db),
+                        preceding_named: callback.named.len(),
+                    }),
+                    inferred: true,
+                    ..**callback
+                }),
+            ),
+            _ => expected,
+        }
+    }
+
     fn forwarding_callback_probe(
         &mut self,
         expected_parameter: Ty<'db>,
@@ -23242,4 +23314,20 @@ fn mentions_tag<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
         found = found || mentions_tag(db, child)
     });
     found
+}
+
+/// A string, number or logical literal, which a call never reaches through R's function lookup.
+/// `NULL` is left out: `f = NULL` is the usual default of an optional callback.
+fn is_value_literal(module: &Module, expression: ExprId) -> bool {
+    let mut expression = expression;
+    loop {
+        match module.kind(expression) {
+            ExpressionKind::Paren(inner) => expression = *inner,
+            ExpressionKind::Unary { operand, .. } => expression = *operand,
+            ExpressionKind::Literal(literal) => {
+                return !matches!(literal, LiteralKind::Null);
+            }
+            _ => return false,
+        }
+    }
 }

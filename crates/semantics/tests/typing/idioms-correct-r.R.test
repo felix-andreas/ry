@@ -2829,3 +2829,49 @@ size <- function(ncontrols = NULL, ncases = NULL, kappa = 1) {
 #++++
 solve_z: <T: numeric> fn(nd: T, v0: T) -> double
 size: <T: numeric, U: numeric> fn([ncontrols]: T | NULL, [ncases]: U | NULL, [kappa]: T) -> double
+
+#---- a_list_grown_by_element_writes_holds_what_was_written
+# `list(n)` is a one-item tuple that a write at the next position grows, and a write under a
+# computed index turns into a list of every item type.
+grown <- function() {
+  d <- list(3L)
+  d[[2]] <- list(x = 1, y = 2)
+  d[[2]]$y
+}
+filled <- function(n) {
+  d <- list(n)
+  for (i in seq_len(n)) d[[i]] <- list(x = i, y = 2)
+  d[[1]]
+}
+#++++
+grown: fn() -> double
+filled: <T> fn(n: T) -> T | list{x: integer, y: double}
+
+#---- a_callback_parameter_takes_the_arguments_a_library_forwards_to_it
+# `apply` calls `FUN(x, ...)`, so the callback also takes the forwarded `na.rm`.
+summarise <- function(v, fun = NULL, na.rm = FALSE) {
+  if (is.null(fun)) return(v)
+  if (is.matrix(v)) apply(v, 2, FUN = fun, na.rm = na.rm) else fun(v, na.rm = na.rm)
+}
+#++++
+summarise: <T> fn(v: Unknown, [fun]: (fn(Any, ...: Any) -> Any) | NULL, [na.rm]: T) -> Unknown
+
+#---- a_parameter_with_a_string_default_is_skipped_by_the_call_lookup
+# R's call lookup skips a value that is no function, so `cor(r, r)` calls `stats::cor` while
+# `cor` holds its default.
+correlate <- function(r, cor = "cor", use = "pairwise") {
+  cor(r, use = use)
+  cor(r, r, use = use)
+}
+#++++
+correlate: <T, U, V> fn(r: T, [cor]: U, [use]: V) -> Unknown
+
+#---- a_matrix_element_picked_by_computed_indices_is_a_condition
+available <- function(model, rcp) {
+  m <- matrix(c(0, 1, 1, 0), ncol = 2)
+  i <- m[which(model == c("a", "b")), which(rcp == c(26, 45))]
+  if (!i) return(NULL)
+  i
+}
+#++++
+available: <T, U> fn(model: T, rcp: U) -> matrix | NULL
