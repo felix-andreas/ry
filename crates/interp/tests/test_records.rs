@@ -446,6 +446,23 @@ const PRINTS: &[(&str, &str)] = &[
         "{ q <- (..point, y = 5); list(q, point) }",
         "[[1]]\n(x = 1, y = 5)\n\n[[2]]\n(x = 1, y = 2)\n\n",
     ),
+    // A nominal record updates the same way, since its value is its representation.
+    (
+        "{ p <- @Point(x = 1, y = 2); (..p, y = 3) }",
+        "(x = 1, y = 3)\n",
+    ),
+    // `==` and `!=` compare records, tuples and tags structurally.
+    ("point == (x = 1, y = 2)", "[1] TRUE\n"),
+    ("point != (x = 1, y = 3)", "[1] TRUE\n"),
+    ("pair == (1L, \"b\")", "[1] FALSE\n"),
+    (
+        "c(circle == :Circle(radius = 2), circle == :Empty)",
+        "[1]  TRUE FALSE\n",
+    ),
+    (":Some((1, \"a\")) == :Some((1, \"a\"))", "[1] TRUE\n"),
+    ("point == 1", "[1] FALSE\n"),
+    ("[:A, :B, :A] == [:A, :A, :A]", "[TRUE, FALSE, TRUE]\n"),
+    ("[point, (x = 0, y = 2)] != point", "[FALSE, TRUE]\n"),
     // List patterns match by length, and `..name` binds the items in between.
     (
         "{ f <- function(xs) match (xs) { [] => \"none\", [a] => a, [a, ..middle, b] => middle }; list(f([]), f([\"x\"]), f([\"x\", \"y\", \"z\", \"w\"]), f([\"x\", \"y\"])) }",

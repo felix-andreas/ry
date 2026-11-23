@@ -194,6 +194,7 @@ All => values::ry_all,
     Arith => values::ry_arith,
     ArithSv => values::ry_arith_sv,
     ArithVs => values::ry_arith_vs,
+    BoxEqual => values::ry_box_equal,
     BoxNew => values::ry_box_new,
     Compare => values::ry_compare,
     CompareSv => values::ry_compare_sv,
@@ -1173,8 +1174,16 @@ impl Emitter<'_> {
                         let compared = self.logical(compared);
                         self.na_or(na, compared)
                     }
+                    Item::Record(_) | Item::Tag(_) if matches!(op, Compare::Eq | Compare::Ne) => {
+                        let (x, y) = (self.one(*a)?, self.one(*b)?);
+                        let equal = self.call(Helper::BoxEqual, &[I64; 2], &[I32], &[x, y])[0];
+                        match op {
+                            Compare::Eq => equal,
+                            _ => self.builder.ins().bxor_imm_s(equal, 1),
+                        }
+                    }
                     Item::Record(_) | Item::Tag(_) | Item::Array(_) => {
-                        return Err(Refusal::new("a comparison of records, tags or lists"));
+                        return Err(Refusal::new("an ordering of records, tags or lists"));
                     }
                 };
                 SmallVec::from_slice(&[value])

@@ -1323,6 +1323,41 @@ Only a record, or a nominal type whose representation is a record, can be update
 with `type Point = Record{x: F64, y: F64}`, `(..point, y = 3)` is a `Point`, and replacing `y` with a
 `Str` is a `type-mismatch` rather than a change of type.
 
+### Equality of records, tuples and tags
+
+`==` and `!=` compare two records, tuples or tags structurally and give a `Bool`. Two values are
+equal when they have the same shape (the same fields, or the same tag with the same payload shape)
+and every field or payload item is equal, compared the same way. A `List` of them compares item by
+item, as the [list operators](#list-operators) do.
+
+```r ry run runtime=ry strict
+type Point = Record{x: F64, y: F64}
+p <- @Point(x = 1, y = 2)
+p == @Point(x = 1, y = 2)
+#> [1] TRUE
+:Some((1i64, "a")) != :Some((1i64, "b"))
+#> [1] TRUE
+```
+
+The two sides must have types that can hold one value, so comparing values whose types never meet
+is a `type-mismatch`:
+
+```r
+isOther <- function(kind: :Bond | :Cash) kind == :Other
+```
+
+```text ry check typing
+type-mismatch
+
+  x `==` is not defined between `:Bond | :Cash` and `:Other`, because a value of one type never equals a value of the other
+```
+
+- A number field is equal when it holds the same number, as `identical` decides, so a field holding
+  `NaN` equals one holding `NaN`, unlike `==` on two `F64` values.
+- An R value never equals one of these values, so comparing one with an R value is a
+  `type-mismatch`.
+- `<`, `<=`, `>` and `>=` are not defined on records, tuples or tags.
+
 ### `match`
 
 `match (EXPR) { ARMS }` is a `match` expression only when the `{` is on the line of the closing `)`,
@@ -1599,9 +1634,9 @@ code changes meaning.
 
 ### Crossing between R and ry scalars
 
-`Num.from_r` turns an R `double` into an `F64` and an R `integer` into an `I64`, and `Str.from_r`
-turns a `character` into a `Str`. Each stops with an error on `NA`, on a length other than one, and
-on attributes. `Num.to_r` goes the other way: an `I64` becomes R's `integer` when it fits in 32
+`Num.from_r` turns an R `double` into an `F64` and an R `integer` into an `I64`, `Str.from_r` turns
+a `character` into a `Str`, and `Bool.from_r` turns a `logical` into a `Bool`. Each stops with an
+error on `NA`, on a length other than one, and on attributes. `Num.to_r` goes the other way: an `I64` becomes R's `integer` when it fits in 32
 bits and a `double` otherwise.
 
 No R type represents an `I64`, or a `List` whose items are not `F64`, `Bool` or `Str`, so passing
@@ -1623,6 +1658,20 @@ type-mismatch
 An `F64`, `Bool` or `Str`, and a `List` of one of them, shares the representation of R's `double`,
 `logical` or `character` (vector), so it passes to R code unconverted: `sqrt(2.0)` and
 `mean([1.5, 2.5])` need no conversion.
+
+An operator never converts between the two sides, so comparing a ry scalar with an R value is a
+`type-mismatch` that names the conversion for the R side: `Str.from_r()` for a `character`,
+`Bool.from_r()` for a `logical` and `Num.from_r()` for a number.
+
+```r
+same <- function(a: Str, b: character) -> Bool a == b
+```
+
+```text ry check typing
+type-mismatch
+
+  x `==` is not defined between `Str` and `character`. A ry value meets an R value only through a conversion: convert the R side with `Str.from_r()`
+```
 
 ## Lists
 
@@ -2723,7 +2772,9 @@ accepted, because R answers an empty `logical` vector instead of failing, as
 [union operands](#operators-over-union-operands) describe. A list compared with an atomic value
 is accepted, because R compares it element by element when each element is a length-one atomic,
 so `parts[parts != "null"]` on a parsed list and `lapply(xs, anyDuplicated) > 0` are not reported.
-Two lists never compare, so `list(1L) == list(1L)` is a type error, as it is in R.
+Two lists never compare, so `list(1L) == list(1L)` is a type error, as it is in R. ry's records,
+tuples and tags compare only for equality, structurally, as
+[their equality](#equality-of-records-tuples-and-tags) describes.
 
 An unannotated operand is left unconstrained, whatever the other operand is, so
 `function(x) x > 0` is `<T> fn(x: T) -> logical` and `function(a, b) a < b` is

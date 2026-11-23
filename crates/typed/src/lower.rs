@@ -6139,6 +6139,23 @@ impl Lowering<'_> {
                 "a comparison of something other than scalars or vectors",
             ));
         };
+        // Records, tuples, tags and lists as items compare structurally, and only for equality.
+        let object = |item: Item| matches!(item, Item::Record(_) | Item::Tag(_) | Item::Array(_));
+        if object(ia) || object(ib) {
+            if !(object(ia) && object(ib)) || !matches!(op, Compare::Eq | Compare::Ne) {
+                return Err(Refusal::new(
+                    "an ordering of records, tags or lists, or one beside another value",
+                ));
+            }
+            if !vectors {
+                return Ok(self.builder.emit(Type::Bool, Op::Compare(op, ia, a, b)));
+            }
+            let result = Type::Vector {
+                item: Item::Lgl,
+                array: true,
+            };
+            return Ok(self.builder.emit(result, Op::VectorCompare(op, ia, a, b)));
+        }
         let item = match (ia, ib) {
             (Item::Str, Item::Str) => Item::Str,
             (Item::Str, _) | (_, Item::Str) => {

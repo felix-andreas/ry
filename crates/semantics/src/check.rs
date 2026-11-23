@@ -418,12 +418,15 @@ pub enum TypeErrorKind<'db> {
         left: Ty<'db>,
         right: Ty<'db>,
     },
-    /// An operator on ry scalars whose operands differ in type, or whose type it does not take
-    /// (`"a" + "b"` on `Str`, `-x` on a `Bool`). `right` is `None` for a unary operator.
+    /// An operator on ry values whose operands differ in type, or whose type it does not take
+    /// (`"a" + "b"` on `Str`, `-x` on a `Bool`). `right` is `None` for a unary operator, and
+    /// `r_side` is the operand that is an R value, which meets a ry value only through a
+    /// conversion.
     NumberOperands {
         operator: &'static str,
         left: Ty<'db>,
         right: Option<Ty<'db>>,
+        r_side: Option<Ty<'db>>,
     },
     /// `/` on a ry integer type, which has no exact quotient.
     IntegerDivision {
@@ -9995,6 +9998,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         operator: "-",
                         left: resolved,
                         right: None,
+                        r_side: None,
                     },
                 });
                 return unknown(self.db);
@@ -10286,6 +10290,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                 if let Some(result) = self.infer_native_operator(operator, lhs, rhs, left, right) {
                     return result;
                 }
+                if let Some(result) =
+                    self.infer_ry_value_equality(range, operator, (lhs, rhs), left, right)
+                {
+                    return result;
+                }
                 // Arithmetic on two undecided literals is itself an undecided literal, so
                 // `2 * 3.14159 * r` adapts to `r` as a lone literal would. `/` makes it a
                 // fraction; `^` and `%/%` are left out because R gives `double` and `integer` for
@@ -10502,6 +10511,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     operator: spelling,
                     left: known_side,
                     right: None,
+                    r_side: None,
                 },
             });
             return Some(unknown(self.db));
@@ -10529,12 +10539,14 @@ impl<'db, 'a> Checker<'db, 'a> {
         if !fits {
             let left = self.settle_literals(left);
             let right = self.settle_literals(right);
+            let r_side = r_operand(self.db, left, right);
             self.errors.push(TypeError {
                 range,
                 kind: TypeErrorKind::NumberOperands {
                     operator: spelling,
                     left,
                     right: Some(right),
+                    r_side,
                 },
             });
             return Some(unknown(self.db));
@@ -10582,11 +10594,72 @@ impl<'db, 'a> Checker<'db, 'a> {
                         operator: spelling,
                         left,
                         right: Some(right),
+                        r_side: None,
                     },
                 });
                 Some(unknown(self.db))
             }
         }
+    }
+
+    /// `==` and `!=` on ry's records, tuples and tags compare the two values structurally and
+    /// give `Bool`. The two sides must be able to hold one value, so `:Bond == 1` and a `Point`
+    /// beside another record type are errors, and an R value never equals one: it meets ry's
+    /// types only through a conversion. `None` when neither operand is such a value, or when one
+    /// is a `List`, which compares item by item.
+    fn infer_ry_value_equality(
+        &mut self,
+        range: TextRange,
+        operator: BinaryOperator,
+        (lhs, rhs): (ExprId, ExprId),
+        left: Ty<'db>,
+        right: Ty<'db>,
+    ) -> Option<Ty<'db>> {
+        if !matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual) {
+            return None;
+        }
+        let left_shape = self.structural(left);
+        let right_shape = self.structural(right);
+        let composite = |db: &'db dyn Db, ty: Ty<'db>| {
+            matches!(
+                native_value_kind(db, ty),
+                Some(NativeValueKind::Record | NativeValueKind::Tuple | NativeValueKind::Tag)
+            )
+        };
+        if !(composite(self.db, left_shape) || composite(self.db, right_shape))
+            || array_element(self.db, left_shape).is_some()
+            || array_element(self.db, right_shape).is_some()
+        {
+            return None;
+        }
+        let boolean = native_scalar(self.db, NativeScalar::Bool);
+        let gradual =
+            |db: &'db dyn Db, ty: Ty<'db>| matches!(ty.kind(db), TyKind::Any | TyKind::Unknown);
+        if gradual(self.db, left_shape) || gradual(self.db, right_shape) {
+            return Some(boolean);
+        }
+        let left = self.table.resolve(self.db, left);
+        let right = self.table.resolve(self.db, right);
+        let fits = self.adapt_literal(rhs, left) == LiteralFit::Fits
+            || self.adapt_literal(lhs, right) == LiteralFit::Fits
+            || self.table.compatible(self.db, right, left)
+            || self.table.compatible(self.db, left, right);
+        if !fits {
+            let left = self.settle_literals(left);
+            let right = self.settle_literals(right);
+            let r_side = r_operand(self.db, left_shape, right_shape);
+            self.errors.push(TypeError {
+                range,
+                kind: TypeErrorKind::NumberOperands {
+                    operator: operator_spelling(operator)?,
+                    left,
+                    right: Some(right),
+                    r_side,
+                },
+            });
+            return Some(unknown(self.db));
+        }
+        Some(boolean)
     }
 
     /// What decides a ry operator: a ry scalar, or a number variable that only a ry number type
@@ -10984,9 +11057,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                 self.table.rollback(snapshot);
             }
         }
+        // Equality compares any ry items structurally, records, tuples and tags included.
         let item_kind = match item.kind(self.db) {
             TyKind::Native(native) => Some(*native),
             TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Any | TyKind::Unknown => None,
+            _ if matches!(operator, Equal | NotEqual) => None,
             _ => return reject(self),
         };
         let boolean = native_scalar(self.db, NativeScalar::Bool);
@@ -24799,6 +24874,18 @@ fn literal_overlaps<'db>(
 /// R's `Summary` group generic, which a class's `Summary.<class>` method implements for all
 /// of these at once.
 const SUMMARY_GROUP: [&str; 7] = ["all", "any", "sum", "prod", "min", "max", "range"];
+
+/// The operand of an operator on ry values that is an R value instead, if one is, for a report
+/// that names the conversion it needs.
+fn r_operand<'db>(db: &'db dyn Db, left: Ty<'db>, right: Ty<'db>) -> Option<Ty<'db>> {
+    [right, left].into_iter().find(|&operand| {
+        !is_ry_value_type(db, operand)
+            && !matches!(
+                operand.kind(db),
+                TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Any | TyKind::Unknown
+            )
+    })
+}
 
 /// The kind of ry value `ty` is, when every value it describes is one.
 fn native_value_kind(db: &dyn Db, ty: Ty<'_>) -> Option<NativeValueKind> {

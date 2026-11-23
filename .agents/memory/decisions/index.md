@@ -176,6 +176,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Strict mode reports a frame of unknown columns where a type lists columns
 - An overload probe rolls back the types it recorded, and an undecided literal takes its default's candidate
 - A nominal record updates with `..` and keeps its nominal type
+- `==` on ry's records, tuples and tags is structural, and a crossing names the R side's conversion
 
 ## Analysis core
 

@@ -43,6 +43,8 @@ pub const ACCEPTS_NATIVE: &[&str] = &[
     "deparse",
     "dput",
     "identical",
+    "==",
+    "!=",
     "length",
     "[[",
     "[[<-",

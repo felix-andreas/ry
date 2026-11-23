@@ -190,6 +190,50 @@ xs: List<F64>
 ys: Unknown
 21..30 error[type-mismatch] `*` is not defined between `List<F64>` and `I64`. Both sides must have one item type, and number types are never converted into each other
 
+#==== ry_value_equality
+#---- records_tuples_and_tags_compare_structurally
+type Point = Record{x: F64, y: F64}
+isBond <- function(kind: :Bond | :Cash) kind == :Bond
+same <- function(a: Point, b: Point) a == b
+apart <- function(a: Tuple{I64, Str}, b: Tuple{I64, Str}) a != b
+two <- function(value: :Some(I64) | :None) value == :Some(2)
+other <- function(a: Point, b) a != b
+kinds <- function(a: List<:A | :B>, b: List<:A | :B>) a == b
+#++++
+isBond: fn(kind: :Bond | :Cash) -> Bool
+same: fn(a: Point, b: Point) -> Bool
+apart: fn(a: Tuple{I64, Str}, b: Tuple{I64, Str}) -> Bool
+two: fn(value: :Some(I64) | :None) -> Bool
+other: fn(a: Point, b: Point) -> Bool
+kinds: fn(a: List<:A | :B>, b: List<:A | :B>) -> List<Bool>
+
+#---- an_r_value_beside_a_ry_value_names_its_conversion
+text <- function(a: Str, b: character) a == b
+flag <- function(a: Bool, b: logical) a != b
+count <- function(a: F64, b: double) a == b
+kind <- function(a: :Bond | :Cash, b: character) a == b
+#++++
+text: fn(a: Str, b: character) -> Unknown
+flag: fn(a: Bool, b: logical) -> Unknown
+count: fn(a: F64, b: double) -> Unknown
+kind: fn(a: :Bond | :Cash, b: character) -> Unknown
+39..45 error[type-mismatch] `==` is not defined between `Str` and `character`. A ry value meets an R value only through a conversion: convert the R side with `Str.from_r()`
+84..90 error[type-mismatch] `!=` is not defined between `Bool` and `logical`. A ry value meets an R value only through a conversion: convert the R side with `Bool.from_r()`
+128..134 error[type-mismatch] `==` is not defined between `F64` and `double`. A ry value meets an R value only through a conversion: convert the R side with `Num.from_r()`
+184..190 error[type-mismatch] `==` is not defined between `:Bond | :Cash` and `character`. A ry value never equals an R value: convert the R value into ry's types first
+
+#---- values_whose_types_never_meet_do_not_compare
+kind <- function(a: :Bond | :Cash) a == 1i64
+other <- function(a: :Bond | :Cash) a == :Other
+fields <- function(a: Record{x: I64}, b: Record{y: I64}) a == b
+#++++
+kind: fn(a: :Bond | :Cash) -> Unknown
+other: fn(a: :Bond | :Cash) -> Unknown
+fields: fn(a: Record{x: I64}, b: Record{y: I64}) -> Unknown
+35..44 error[type-mismatch] `==` is not defined between `:Bond | :Cash` and `I64`, because a value of one type never equals a value of the other
+81..92 error[type-mismatch] `==` is not defined between `:Bond | :Cash` and `:Other`, because a value of one type never equals a value of the other
+150..156 error[type-mismatch] `==` is not defined between `Record{x: I64}` and `Record{y: I64}`, because a value of one type never equals a value of the other
+
 #==== declared_result_literals
 #---- match_arm_literals_take_the_declared_result_type
 rate <- function(region: :North | :South) -> F64 {

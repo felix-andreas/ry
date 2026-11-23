@@ -4056,6 +4056,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             operator,
             left,
             right: None,
+            ..
         } => format!(
             "`{operator}` is not defined on `{}`. It takes a number",
             renderer.render(db, *left)
@@ -4064,6 +4065,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             operator,
             left,
             right: Some(right),
+            r_side,
         } => {
             let head = format!(
                 "`{operator}` is not defined between `{}` and `{}`",
@@ -4074,6 +4076,29 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 TyKind::Native(native) => Some(*native),
                 _ => None,
             };
+            let equality = matches!(*operator, "==" | "!=");
+            if let Some(r_side) = r_side {
+                // The conversion that turns the R side into the ry scalar beside it.
+                let conversion = match r_side.kind(db) {
+                    _ if native(*left).is_none() && native(*right).is_none() => None,
+                    TyKind::Scalar(Atomic::Character) => Some("Str.from_r()"),
+                    TyKind::Scalar(Atomic::Logical) => Some("Bool.from_r()"),
+                    TyKind::Scalar(Atomic::Integer | Atomic::Double) => Some("Num.from_r()"),
+                    TyKind::Vector(_) => Some("List.from_r()"),
+                    _ => None,
+                };
+                return match conversion {
+                    Some(conversion) => format!(
+                        "{head}. A ry value meets an R value only through a conversion: convert the R side with `{conversion}`"
+                    ),
+                    None if equality => format!(
+                        "{head}. A ry value never equals an R value: convert the R value into ry's types first"
+                    ),
+                    None => format!(
+                        "{head}. A ry value meets an R value only through a conversion such as `Num.from_r()`"
+                    ),
+                };
+            }
             match (native(*left), native(*right)) {
                 (Some(left), Some(right)) if left != right && left.is_number() && right.is_number() => {
                     format!(
@@ -4081,10 +4106,8 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                         left.name().to_lowercase()
                     )
                 }
-                (Some(_), Some(_)) => head,
-                _ => format!(
-                    "{head}. A ry value meets an R value only through a conversion such as `Num.from_r()`"
-                ),
+                _ if equality => format!("{head}, because a value of one type never equals a value of the other"),
+                _ => head,
             }
         }
         TypeErrorKind::IntegerDivision { ty } => format!(
