@@ -31,7 +31,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".expr_column", 1, table_work!(do_column)),
     builtin(".expr_literal", 1, table_work!(do_literal)),
     builtin(".expr_operator", 4, table_work!(do_operator)),
-    builtin(".expr_aggregate", 2, table_work!(do_aggregate)),
+    builtin(".expr_aggregate", 3, table_work!(do_aggregate)),
     builtin(".expr_len", 0, table_work!(do_len)),
     builtin(".expr_alias", 2, table_work!(do_alias)),
     builtin(".expr_if_else", 3, table_work!(do_if_else)),
@@ -62,16 +62,16 @@ pub const PACKAGE: &str = r#"
 Expr.col <- function(name) .expr_column(name)
 Expr.lit <- function(value) .expr_literal(value)
 Expr.alias <- function(expr, name) .expr_alias(expr, name)
-Expr.sum <- function(expr) .expr_aggregate(expr, "sum")
-Expr.mean <- function(expr) .expr_aggregate(expr, "mean")
-Expr.min <- function(expr) .expr_aggregate(expr, "min")
-Expr.max <- function(expr) .expr_aggregate(expr, "max")
-Expr.first <- function(expr) .expr_aggregate(expr, "first")
-Expr.last <- function(expr) .expr_aggregate(expr, "last")
-Expr.median <- function(expr) .expr_aggregate(expr, "median")
-Expr.std <- function(expr) .expr_aggregate(expr, "std")
-Expr.var <- function(expr) .expr_aggregate(expr, "var")
-Expr.count <- function(expr) .expr_aggregate(expr, "count")
+Expr.sum <- function(expr, na_rm = TRUE) .expr_aggregate(expr, "sum", na_rm)
+Expr.mean <- function(expr, na_rm = TRUE) .expr_aggregate(expr, "mean", na_rm)
+Expr.min <- function(expr, na_rm = TRUE) .expr_aggregate(expr, "min", na_rm)
+Expr.max <- function(expr, na_rm = TRUE) .expr_aggregate(expr, "max", na_rm)
+Expr.first <- function(expr) .expr_aggregate(expr, "first", FALSE)
+Expr.last <- function(expr) .expr_aggregate(expr, "last", FALSE)
+Expr.median <- function(expr, na_rm = TRUE) .expr_aggregate(expr, "median", na_rm)
+Expr.std <- function(expr, na_rm = TRUE) .expr_aggregate(expr, "std", na_rm)
+Expr.var <- function(expr, na_rm = TRUE) .expr_aggregate(expr, "var", na_rm)
+Expr.count <- function(expr) .expr_aggregate(expr, "count", FALSE)
 Expr.head <- function(expr, n = 10L) .expr_head(expr, n, sys.call())
 Expr.is_null <- function(expr) .expr_operator("is_null", expr, NULL, TRUE)
 Expr.len <- function() .expr_len()
@@ -343,7 +343,8 @@ unsafe fn do_operator(call: &Call<'_>) -> R<Sexp> {
     expr(Expr::Binary(op, Box::new(left), Box::new(right)))
 }
 
-/// An aggregation skips `NA`s, as Polars' does.
+/// `.expr_aggregate(expr, function, na_rm)`. An aggregation skips `NA`s, as Polars' does, unless
+/// `na_rm = FALSE` asks for R's rule, under which one `NA` makes the result `NA`.
 unsafe fn do_aggregate(call: &Call<'_>) -> R<Sexp> {
     let arg = expression(call.arg(0), call.call)?;
     let function = match values::require_str(call.arg(1), "function")?.as_ref() {
@@ -356,7 +357,7 @@ unsafe fn do_aggregate(call: &Call<'_>) -> R<Sexp> {
         "median" => Aggregate::Median,
         "std" => Aggregate::Sd,
         "var" => Aggregate::Var,
-        "count" => Aggregate::Length,
+        "count" => Aggregate::Count,
         other => {
             return Err(error_in(
                 call.call,
@@ -364,10 +365,7 @@ unsafe fn do_aggregate(call: &Call<'_>) -> R<Sexp> {
             ));
         }
     };
-    let na_rm = !matches!(
-        function,
-        Aggregate::First | Aggregate::Last | Aggregate::Length
-    );
+    let na_rm = values::require_flag(call.arg(2), "na_rm")?;
     wrap(Object::Expr(Named {
         alias: arg.alias,
         expr: Expr::Aggregate {

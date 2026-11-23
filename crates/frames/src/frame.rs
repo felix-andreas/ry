@@ -296,6 +296,20 @@ unsafe fn r_vector(vector: RVector) -> R<Sexp> {
             set_attr(vector, symbols().class, scalar_string("Date")?)?;
             vector
         }
+        RVector::Datetime { seconds, zone } => {
+            let vector = values::real_vector(&seconds)?;
+            set_attr(
+                vector,
+                symbols().class,
+                string_vector(&["POSIXct".to_string(), "POSIXt".to_string()])?,
+            )?;
+            set_attr(
+                vector,
+                install("tzone")?,
+                scalar_string(zone.as_deref().unwrap_or(""))?,
+            )?;
+            vector
+        }
     })
 }
 
@@ -312,6 +326,12 @@ unsafe fn column_contents(value: Sexp) -> R<Option<RVector>> {
             RVector::Factor {
                 codes: values::ints(value).to_vec(),
                 levels,
+            }
+        }
+        SexpType::Real | SexpType::Integer if values::inherits(value, "POSIXct") => {
+            RVector::Datetime {
+                seconds: datetime_seconds(value),
+                zone: time_zone(value),
             }
         }
         SexpType::Integer if values::inherits(value, "Date") => RVector::Date(
@@ -348,6 +368,30 @@ unsafe fn column_contents(value: Sexp) -> R<Option<RVector>> {
         }
         _ => return Ok(None),
     }))
+}
+
+/// A `POSIXct` vector's seconds, with [`convert::NA_REAL`] for `NA`.
+unsafe fn datetime_seconds(value: Sexp) -> Vec<f64> {
+    if value.kind() == SexpType::Integer {
+        return values::ints(value)
+            .iter()
+            .map(|seconds| match *seconds {
+                NA_INTEGER => convert::NA_REAL,
+                seconds => f64::from(seconds),
+            })
+            .collect();
+    }
+    values::reals(value).to_vec()
+}
+
+/// The time zone of a `POSIXct` vector's `tzone` attribute; an empty one means the session's.
+unsafe fn time_zone(value: Sexp) -> Option<String> {
+    let Ok(symbol) = install("tzone") else {
+        return None;
+    };
+    values::string_at(values::get_attr(value, symbol), 0)
+        .map(|zone| zone.to_string())
+        .filter(|zone| !zone.is_empty())
 }
 
 /// `value` as a column of `height` rows, recycling a single value.
@@ -402,6 +446,10 @@ fn recycle(contents: RVector, height: usize) -> Option<RVector> {
         RVector::Integer(items) => RVector::Integer(vec![items[0]; height]),
         RVector::Double(items) => RVector::Double(vec![items[0]; height]),
         RVector::Date(items) => RVector::Date(vec![items[0]; height]),
+        RVector::Datetime { seconds, zone } => RVector::Datetime {
+            seconds: vec![seconds[0]; height],
+            zone,
+        },
         RVector::Character(items) => RVector::Character(vec![items[0].clone(); height]),
         RVector::Factor { codes, levels } => RVector::Factor {
             codes: vec![codes[0]; height],
@@ -1022,6 +1070,7 @@ unsafe fn render(table: &mut Table) -> R<String> {
             ColumnType::Character => "<char>",
             ColumnType::Factor => "<fctr>",
             ColumnType::Date => "<Date>",
+            ColumnType::Datetime => "<POSc>",
         };
         let cell_width = cells
             .iter()
@@ -1050,6 +1099,15 @@ unsafe fn render(table: &mut Table) -> R<String> {
 unsafe fn format_cells(column: &Column, kind: ColumnType) -> R<Vec<String>> {
     let vector = column_value(column)?;
     Ok(match kind {
+        // R's own `format()` picks the layout from every value and reads the session's zone
+        // for a column without one.
+        ColumnType::Datetime => {
+            heap().root(vector);
+            values::strings(call_function("format", &[vector])?)
+                .into_iter()
+                .map(|value| value.unwrap_or_else(|| "<NA>".to_string()))
+                .collect()
+        }
         ColumnType::Double => {
             let data = values::reals(vector);
             let settings = Settings {
@@ -2319,6 +2377,17 @@ pub(crate) unsafe fn literal(value: Sexp) -> Option<Expr> {
                 Expr::Na(ColumnType::Date)
             } else {
                 Expr::Date(days.floor() as i32)
+            }
+        }
+        SexpType::Real | SexpType::Integer if values::inherits(value, "POSIXct") => {
+            let micros = (datetime_seconds(value)[0] * 1e6).round();
+            if micros.is_finite() && micros.abs() < 9.2e18 {
+                Expr::Datetime {
+                    micros: micros as i64,
+                    zone: time_zone(value).map(Into::into),
+                }
+            } else {
+                Expr::Na(ColumnType::Datetime)
             }
         }
         SexpType::Logical => match values::ints(value)[0] {

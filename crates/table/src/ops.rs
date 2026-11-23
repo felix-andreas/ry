@@ -1283,8 +1283,8 @@ fn order_digits(column: &Column, descending: bool) -> Result<Option<Digit>> {
     if u32::try_from(column.len()).is_err() {
         return Ok(None);
     }
-    // A date orders as its day number.
-    if matches!(column.dtype(), DataType::Date) {
+    // A date orders as its day number, and a date-time as its microseconds.
+    if matches!(column.dtype(), DataType::Date | DataType::Datetime(..)) {
         return order_digits(&column.to_physical_repr(), descending);
     }
     let digit = |codes: Vec<u64>, top: u64| Digit {
@@ -1964,7 +1964,7 @@ fn recycle(name: &str, column: &Column, length: usize) -> Result<Column> {
 fn fill_empty(values: Series, function: Aggregate) -> Result<Series> {
     let mask = values.is_not_null();
     let empty = match function {
-        Aggregate::Sum | Aggregate::Length => 0.0,
+        Aggregate::Sum | Aggregate::Length | Aggregate::Count => 0.0,
         Aggregate::Mean => f64::NAN,
         _ => return Ok(values),
     };
@@ -1985,6 +1985,7 @@ fn type_name(dtype: &DataType) -> &'static str {
         Some(ColumnType::Character) => "character",
         Some(ColumnType::Factor) => "factor",
         Some(ColumnType::Date) => "Date",
+        Some(ColumnType::Datetime) => "POSIXct",
         None => "unsupported",
     }
 }

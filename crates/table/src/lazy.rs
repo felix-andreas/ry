@@ -227,6 +227,7 @@ pub fn output_name(expr: &Expr) -> PlSmallStr {
             Expr::IfElse(test, yes, no) => first_column(yes)
                 .or_else(|| first_column(no))
                 .or_else(|| first_column(test)),
+            Expr::Call(_, args) => args.iter().find_map(first_column),
             _ => None,
         }
     }
@@ -432,6 +433,10 @@ fn map_columns(expr: &Expr, rename: &dyn Fn(&PlSmallStr) -> Expr) -> Expr {
                 })
                 .collect(),
         ),
+        Expr::Call(function, args) => Expr::Call(
+            function.clone(),
+            args.iter().map(|arg| map_columns(arg, rename)).collect(),
+        ),
         other => other.clone(),
     }
 }
@@ -444,7 +449,9 @@ fn contains_aggregate(expr: &Expr) -> bool {
         | Expr::Head(..)
         | Expr::Correlation(..)
         | Expr::Rank { .. }
-        | Expr::Window(..) => true,
+        | Expr::Window(..)
+        | Expr::Values(_) => true,
+        Expr::Call(_, args) => args.iter().any(contains_aggregate),
         Expr::Unary(_, arg) => contains_aggregate(arg),
         Expr::Binary(_, left, right) => contains_aggregate(left) || contains_aggregate(right),
         Expr::IfElse(test, yes, no) => {
@@ -463,10 +470,12 @@ fn reads_order(expr: &Expr) -> bool {
             ..
         }
         | Expr::Head(..)
-        | Expr::Rank { .. } => true,
+        | Expr::Rank { .. }
+        | Expr::Values(_) => true,
         Expr::Unary(_, arg) | Expr::Aggregate { arg, .. } | Expr::Window(arg, _) => {
             reads_order(arg)
         }
+        Expr::Call(_, args) => args.iter().any(reads_order),
         Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
             reads_order(left) || reads_order(right)
         }
@@ -477,6 +486,7 @@ fn reads_order(expr: &Expr) -> bool {
         | Expr::Logical(_)
         | Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime { .. }
         | Expr::Na(_)
         | Expr::Count => false,
     }
@@ -824,7 +834,8 @@ fn execute(table: &mut Table, query: Query, warnings: &mut Vec<Warning>) -> Resu
 /// Joins `left` with `right`. An inner or left equi join runs as data.table's `right[left, on]`
 /// on the engine's join kernel, then has its columns renamed and reordered into Polars' layout:
 /// the left columns, then the right's other columns, a name the left side has taking `suffix`.
-/// A full, semi or anti join runs as a Polars join.
+/// A full, semi or anti join runs as a Polars join. Every kind matches a missing key with a
+/// missing key.
 fn join(
     left: Table,
     right: Table,
@@ -912,9 +923,12 @@ fn join(
                 How::Semi => JoinType::Semi,
                 _ => JoinType::Anti,
             };
-            let args = JoinArgs::new(join_type)
+            let mut args = JoinArgs::new(join_type)
                 .with_coalesce(JoinCoalesce::CoalesceColumns)
                 .with_suffix(Some(PlSmallStr::from(suffix)));
+            // A missing key matches a missing key in every kind of join, as in R's `merge()`
+            // and data.table, and as the engine's own kernel does for inner and left joins.
+            args.nulls_equal = true;
             let left_keys: Vec<_> = left_on.iter().map(|name| col(name.clone())).collect();
             let right_keys: Vec<_> = right_on.iter().map(|name| col(name.clone())).collect();
             let frame = left
@@ -1059,6 +1073,20 @@ impl fmt::Display for Expr {
             Expr::Logical(false) => formatter.write_str("FALSE"),
             Expr::Character(value) => write!(formatter, "{value:?}"),
             Expr::Date(days) => write!(formatter, "date({days})"),
+            Expr::Datetime { micros, .. } => write!(formatter, "datetime({micros})"),
+            Expr::Values(values) => write!(formatter, "lit(<{} values>)", values.0.len()),
+            Expr::Call(function, args) => {
+                let mut args = args.iter();
+                match args.next() {
+                    Some(first) => write!(formatter, "{}.{}(", Receiver(first), function.name())?,
+                    None => write!(formatter, "{}(", function.name())?,
+                }
+                for (index, arg) in args.enumerate() {
+                    let separator = if index == 0 { "" } else { ", " };
+                    write!(formatter, "{separator}{arg}")?;
+                }
+                formatter.write_str(")")
+            }
             Expr::Na(_) => formatter.write_str("NA"),
             Expr::Unary(UnaryOp::Negate, arg) => write!(formatter, "-{arg}"),
             Expr::Unary(UnaryOp::Not, arg) => write!(formatter, "!{arg}"),
@@ -1100,7 +1128,8 @@ impl fmt::Display for Expr {
                     Aggregate::Median => "median",
                     Aggregate::Sd => "std",
                     Aggregate::Var => "var",
-                    Aggregate::Length => "count",
+                    Aggregate::Length => "len",
+                    Aggregate::Count => "count",
                 };
                 write!(formatter, "{}.{name}()", Receiver(arg))
             }

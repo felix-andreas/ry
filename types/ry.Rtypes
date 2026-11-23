@@ -67,21 +67,21 @@ LazyGroupBy.agg : fn(group: LazyGroupBy, ...: Expr) -> LazyFrame
 
 # Arithmetic, comparison and logic on an expression build a bigger expression, and a plain value
 # on the other side is a literal.
-Ops.Expr : fn(e1: Expr, e2: Expr | double | integer | character | logical | Date) -> Expr
-Ops.Expr : fn(e1: double | integer | character | logical | Date, e2: Expr) -> Expr
+Ops.Expr : fn(e1: Expr, e2: Expr | double | integer | character | logical | Date | POSIXct) -> Expr
+Ops.Expr : fn(e1: double | integer | character | logical | Date | POSIXct, e2: Expr) -> Expr
 
 Expr.col : fn(name: character) -> Expr
 Expr.lit : fn(value: Any) -> Expr
 Expr.alias : fn(expr: Expr, name: character) -> Expr
-Expr.sum : fn(expr: Expr) -> Expr
-Expr.mean : fn(expr: Expr) -> Expr
-Expr.min : fn(expr: Expr) -> Expr
-Expr.max : fn(expr: Expr) -> Expr
+Expr.sum : fn(expr: Expr, [na_rm]: logical) -> Expr
+Expr.mean : fn(expr: Expr, [na_rm]: logical) -> Expr
+Expr.min : fn(expr: Expr, [na_rm]: logical) -> Expr
+Expr.max : fn(expr: Expr, [na_rm]: logical) -> Expr
 Expr.first : fn(expr: Expr) -> Expr
 Expr.last : fn(expr: Expr) -> Expr
-Expr.median : fn(expr: Expr) -> Expr
-Expr.std : fn(expr: Expr) -> Expr
-Expr.var : fn(expr: Expr) -> Expr
+Expr.median : fn(expr: Expr, [na_rm]: logical) -> Expr
+Expr.std : fn(expr: Expr, [na_rm]: logical) -> Expr
+Expr.var : fn(expr: Expr, [na_rm]: logical) -> Expr
 Expr.count : fn(expr: Expr) -> Expr
 Expr.head : fn(expr: Expr, [n]: integer | double) -> Expr
 Expr.is_null : fn(expr: Expr) -> Expr

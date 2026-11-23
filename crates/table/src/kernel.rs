@@ -190,7 +190,10 @@ impl Vector {
                 values: Buffer::from(vec![0.0; len]),
                 validity,
             },
-            ColumnType::Character | ColumnType::Factor | ColumnType::Date => return None,
+            ColumnType::Character
+            | ColumnType::Factor
+            | ColumnType::Date
+            | ColumnType::Datetime => return None,
         })
     }
 }
@@ -304,7 +307,12 @@ impl Evaluator<'_> {
             Expr::Na(ColumnType::Logical) => Value::Scalar(Scalar::Logical(None)),
             Expr::Na(ColumnType::Integer) => Value::Scalar(Scalar::Integer(None)),
             Expr::Na(ColumnType::Double) => Value::Scalar(Scalar::Double(None)),
-            Expr::Na(_) | Expr::Character(_) | Expr::Date(_) => return None,
+            Expr::Na(_)
+            | Expr::Character(_)
+            | Expr::Date(_)
+            | Expr::Datetime { .. }
+            | Expr::Values(_)
+            | Expr::Call(..) => return None,
             Expr::Unary(UnaryOp::Not, arg) => not(logicals(self.eval(arg)?, len)?),
             Expr::Unary(UnaryOp::IsNa, arg) => is_na(self.eval(arg)?, len),
             Expr::Unary(UnaryOp::Negate, arg) => {

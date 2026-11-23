@@ -986,6 +986,9 @@ pub(crate) fn rewrite(expr: &Expr, aggregates: &mut Vec<Expr>) -> Option<Expr> {
         Expr::Integer(_) | Expr::Double(_) | Expr::Logical(_) | Expr::Na(_) => expr.clone(),
         Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime { .. }
+        | Expr::Values(_)
+        | Expr::Call(..)
         | Expr::Column(_)
         | Expr::Head(..)
         | Expr::Rank { .. }
@@ -1100,6 +1103,8 @@ impl Aggregation {
             Aggregate::First => Function::First,
             Aggregate::Last => Function::Last,
             Aggregate::Length => Function::Count,
+            // Counting the values that are not missing is left to Polars' `count`.
+            Aggregate::Count => return None,
             Aggregate::Median => Function::Median,
             Aggregate::Sd => Function::Sd,
             Aggregate::Var => Function::Var,

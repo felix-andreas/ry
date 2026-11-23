@@ -3791,7 +3791,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             left,
             right,
         } => format!(
-            "`{operator}` is not defined between `{}` and `{}`. A date adds or subtracts a number of days, subtracting two dates gives the days between them, and dates compare only with dates",
+            "`{operator}` is not defined between `{}` and `{}`. A date adds or subtracts a number of days and a date-time a number of seconds, subtracting two of the same kind gives the time between them, and each compares only with its own kind",
             renderer.render(db, *left),
             renderer.render(db, *right)
         ),

@@ -14799,7 +14799,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 {
                     return None;
                 }
-                if is_date_column(db, left.ty) || is_date_column(db, right.ty) {
+                if temporal_column(db, left.ty).is_some() || temporal_column(db, right.ty).is_some() {
                     let ty =
                         self.date_operation(value, *operator, (*lhs, &left), (*rhs, &right))?;
                     return Some(ComputedColumn {
@@ -14859,9 +14859,11 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// Types a binary operator with a `Date` operand, which the engine stores as whole days: a
-    /// date plus or minus a number of days is a date, one date minus another is the integer
-    /// number of days between them, and two dates compare. Anything else on a date is reported,
+    /// Types a binary operator with a `Date` or `POSIXct` operand. The engine stores a date as
+    /// whole days and a date-time as an instant: a date plus or minus a number of days is a date
+    /// and a date-time plus or minus a number of seconds is a date-time, one date minus another
+    /// is the integer number of days between them and one date-time minus another the double
+    /// number of seconds, and two values of the same kind compare. Anything else is reported,
     /// and gives `None` so that the enclosing expression is not reported again.
     fn date_operation(
         &mut self,
@@ -14871,15 +14873,23 @@ impl<'db, 'a> Checker<'db, 'a> {
         (rhs, right): (ExprId, &ComputedColumn<'db>),
     ) -> Option<Ty<'db>> {
         let db = self.db;
-        let is_date = |ty| is_date_column(db, ty);
-        let days =
-            |ty| matches!(join_class(db, ty), None | Some(JoinClass::Number)) && !is_date(ty);
+        let left_kind = temporal_column(db, left.ty);
+        let right_kind = temporal_column(db, right.ty);
+        let number = |ty| {
+            matches!(join_class(db, ty), None | Some(JoinClass::Number))
+                && temporal_column(db, ty).is_none()
+        };
+        let same_kind = left_kind.is_some() && left_kind == right_kind;
         let result = match operator {
-            BinaryOperator::Add if is_date(left.ty) && days(right.ty) => Some(left.ty),
-            BinaryOperator::Add if days(left.ty) && is_date(right.ty) => Some(right.ty),
-            BinaryOperator::Subtract if is_date(left.ty) && days(right.ty) => Some(left.ty),
-            BinaryOperator::Subtract if is_date(left.ty) && is_date(right.ty) => {
-                Some(Ty::new(db, TyKind::Vector(scalar(db, Atomic::Integer))))
+            BinaryOperator::Add if left_kind.is_some() && number(right.ty) => Some(left.ty),
+            BinaryOperator::Add if number(left.ty) && right_kind.is_some() => Some(right.ty),
+            BinaryOperator::Subtract if left_kind.is_some() && number(right.ty) => Some(left.ty),
+            BinaryOperator::Subtract if same_kind => {
+                let difference = match left_kind {
+                    Some(Temporal::Date) => Atomic::Integer,
+                    _ => Atomic::Double,
+                };
+                Some(Ty::new(db, TyKind::Vector(scalar(db, difference))))
             }
             BinaryOperator::Less
             | BinaryOperator::Greater
@@ -14887,7 +14897,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             | BinaryOperator::GreaterEq
             | BinaryOperator::Equal
             | BinaryOperator::NotEqual
-                if is_date(left.ty) && is_date(right.ty) =>
+                if same_kind =>
             {
                 Some(Ty::new(db, TyKind::Vector(scalar(db, Atomic::Logical))))
             }
@@ -23253,8 +23263,19 @@ fn element_atomic(db: &dyn Db, ty: Ty<'_>) -> Option<Atomic> {
     }
 }
 
-fn is_date_column(db: &dyn Db, ty: Ty<'_>) -> bool {
-    matches!(column_element(db, ty).kind(db), TyKind::Named(name, _) if name.text(db) == "Date")
+/// The kinds of time a frame column holds, each with its own arithmetic.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Temporal {
+    Date,
+    Datetime,
+}
+
+fn temporal_column(db: &dyn Db, ty: Ty<'_>) -> Option<Temporal> {
+    match column_element(db, ty).kind(db) {
+        TyKind::Named(name, _) if name.text(db) == "Date" => Some(Temporal::Date),
+        TyKind::Named(name, _) if name.text(db) == "POSIXct" => Some(Temporal::Datetime),
+        _ => None,
+    }
 }
 
 fn is_expr_type(db: &dyn Db, ty: Ty<'_>) -> bool {

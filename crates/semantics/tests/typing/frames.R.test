@@ -1251,6 +1251,15 @@ visits: DataFrame{id: integer[], day: Date}
 later: DataFrame{id: integer[], day: Date, due: Date, waited: integer[]}
 recent: DataFrame{id: integer[], day: Date}
 
+#---- date_time_columns_shift_by_seconds
+calls <- DataFrame(id = 1:2, at = as.POSIXct("2024-01-01 09:00:00", tz = "UTC") + c(0, 60))
+later <- calls |> DataFrame.with_columns(due = Expr.col("at") + 3600, waited = Expr.col("at") - Expr.col("at"))
+recent <- calls |> DataFrame.filter(Expr.col("at") >= as.POSIXct("2024-01-01 09:01:00", tz = "UTC"))
+#++++
+calls: DataFrame{id: integer[], at: POSIXct}
+later: DataFrame{id: integer[], at: POSIXct, due: POSIXct, waited: double[]}
+recent: DataFrame{id: integer[], at: POSIXct}
+
 #---- a_cross_join_appends_the_right_columns
 patients <- DataFrame(id = 1:2)
 visits <- DataFrame(visit = 1:3)
@@ -1337,7 +1346,15 @@ twice <- visits |> DataFrame.with_columns(x = Expr.col("day") * 2)
 #++++
 visits: DataFrame{day: Date}
 twice: Unknown
-101..120 error[type-mismatch] `*` is not defined between `Date` and `double`. A date adds or subtracts a number of days, subtracting two dates gives the days between them, and dates compare only with dates
+101..120 error[type-mismatch] `*` is not defined between `Date` and `double`. A date adds or subtracts a number of days and a date-time a number of seconds, subtracting two of the same kind gives the time between them, and each compares only with its own kind
+
+#---- a_date_time_column_compares_only_with_date_times
+calls <- DataFrame(at = as.POSIXct("2024-01-01 09:00:00", tz = "UTC"), day = as.Date("2024-01-01"))
+mixed <- calls |> DataFrame.filter(Expr.col("at") > Expr.col("day"))
+#++++
+calls: DataFrame{at: POSIXct, day: Date}
+mixed: Unknown
+135..167 error[type-mismatch] `>` is not defined between `POSIXct` and `Date`. A date adds or subtracts a number of days and a date-time a number of seconds, subtracting two of the same kind gives the time between them, and each compares only with its own kind
 
 #==== dataframe_expression_types
 #---- arithmetic_on_a_string_column_is_reported
