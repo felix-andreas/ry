@@ -2441,23 +2441,23 @@ fn forced_compilation_refuses_a_body_that_costs_more_than_tier_zero() {
     }
 }
 
-/// A `for` loop turns hot in a body whose calls stay in tier 0, and each call would enter
-/// compiled code at the loop's backward jump. With one pass left that costs more than the pass
-/// saves, so the body waits, and it compiles when the loop runs long.
+/// A `for` loop turns hot in a body whose calls stay in tier 0. Its runs are one pass long,
+/// which saves less than entering compiled code costs, so the body waits, and it compiles when
+/// the loop runs long.
 #[test]
-fn a_hot_loop_with_few_passes_left_waits_for_a_long_run() {
+fn a_hot_loop_whose_runs_are_short_waits_for_a_long_run() {
     with_interpreter(|| unsafe {
         use interp::bytecode::{PROFILE, profile};
         jit::install_mode(Mode::Force);
         run(concat!(
-            "check <- function(a, b, ...) {\n",
-            "  oldClass(a); oldClass(b); n <- 0L\n",
-            "  for (v in c(a, b)) n <- n + v * 2L + 1L\n",
+            "check <- function(a, ...) {\n",
+            "  oldClass(a); n <- 0L\n",
+            "  for (v in a) n <- n + v * 2L + 1L\n",
             "  n\n",
             "}",
         ));
         for _ in 0..200 {
-            assert_eq!(run("check(1L, 2L)"), "8L");
+            assert_eq!(run("check(1L)"), "3L");
         }
         let function = values::install("check")
             .and_then(|symbol| eval::eval(symbol, values::global_env()))
@@ -2465,15 +2465,39 @@ fn a_hot_loop_with_few_passes_left_waits_for_a_long_run() {
         let counters = values::ints(function.cdr().cdr().element(PROFILE)).to_vec();
         assert!(
             !has_compiled_code("check"),
-            "check compiled for a loop of two passes: {counters:?}"
+            "check compiled for a loop of one pass: {counters:?}"
         );
         assert!(
             counters[profile::TIER_STATE] >= 0,
             "check was refused for good: {counters:?}"
         );
-        assert_eq!(run("check(1:2000, 1:2000)"), "8008000L");
+        assert_eq!(run("check(1:2000)"), "4004000L");
         assert!(has_compiled_code("check"), "check did not compile");
-        assert_eq!(run("check(1L, 2L)"), "8L");
+        assert_eq!(run("check(1L)"), "3L");
+        jit::install_mode(Mode::Off);
+    });
+}
+
+/// A loop of ten passes repays an entry on every call, whichever pass its backward jumps turn
+/// hot on. The body takes ten backward jumps per call, so the threshold falls on the last pass
+/// of a call, where the running activation has nothing left to gain.
+#[test]
+fn a_short_loop_that_repays_an_entry_compiles_on_its_last_pass() {
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::On);
+        let threshold = interp::bytecode::tier().map_or(0, |tier| tier.back_edge_threshold);
+        run(concat!(
+            "fill <- function(x) {\n",
+            "  oldClass(x)\n",
+            "  for (k in seq_along(x)) x[k] <- k * 2\n",
+            "  x\n",
+            "}",
+        ));
+        run("ten <- c(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)");
+        for _ in 0..threshold / 10 + 100 {
+            assert_eq!(run("fill(ten)[10]"), "20");
+        }
+        assert!(has_compiled_code("fill"), "fill did not compile");
         jit::install_mode(Mode::Off);
     });
 }

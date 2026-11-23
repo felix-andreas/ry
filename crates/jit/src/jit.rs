@@ -106,8 +106,9 @@ const COMPILE_PER_WORD: u64 = 50_000;
 /// plan has them.
 ///
 /// An instruction compiled code hands back to tier 0 costs about [`STEP_COST`] more than the
-/// same instruction in the dispatch loop: the helper call with its panic guard, the dirty
-/// slots written back before it and the registers read again after it.
+/// same instruction in the dispatch loop: the helper call with its panic guard and the
+/// registers read again after it. Each variable written back before it costs about
+/// [`WRITE_BACK_COST`] more than tier 0's assignment, which stores into the frame as it goes.
 ///
 /// `development/design/generic-tier.md` holds the measurements behind these numbers.
 const ENTRY_COST: u64 = 560;
@@ -116,6 +117,7 @@ const SAVING_PER_NATIVE: u64 = 130;
 const SAVING_PER_CALL: u64 = 1000;
 const SAVING_PER_FRAME: u64 = 600;
 const STEP_COST: u64 = 180;
+const WRITE_BACK_COST: u64 = 170;
 /// A body's expected calls are its share of the closure calls the session made over its
 /// recording window, times this many calls. The session's call count measures how much
 /// interpreted work ran between two calls of the body: it is deterministic and does not move
@@ -310,10 +312,23 @@ unsafe fn worth_recording(machine: &Machine<'_>) -> bool {
 /// at [`ENTRY_COST`]: zero when handing instructions back costs more than the native work
 /// saves.
 fn saving(work: Work) -> u64 {
-    (SAVING_PER_NATIVE * work.native as u64
+    saved(work).saturating_sub(handed_back(work))
+}
+
+/// What running `work` once in compiled code is expected to cost over tier 0: zero when the
+/// native work saves more than handing instructions back costs.
+fn lost(work: Work) -> u64 {
+    handed_back(work).saturating_sub(saved(work))
+}
+
+fn saved(work: Work) -> u64 {
+    SAVING_PER_NATIVE * work.native as u64
         + SAVING_PER_CALL * work.calls as u64
-        + SAVING_PER_FRAME * work.frames as u64)
-        .saturating_sub(STEP_COST * work.steps as u64)
+        + SAVING_PER_FRAME * work.frames as u64
+}
+
+fn handed_back(work: Work) -> u64 {
+    STEP_COST * work.steps as u64 + WRITE_BACK_COST * work.writes as u64
 }
 
 /// What one call of a body with loops is expected to save when tier 0 enters its compiled code
@@ -425,27 +440,34 @@ unsafe fn unpaid_loop(machine: &Machine<'_>, hot: Work) -> Option<&'static str> 
     }
 }
 
-/// Why a body does not compile for the hot `for` loop at `target`, whose one pass does `hot`:
-/// the passes the running activation has left save less than entering compiled code costs
-/// ([`ENTRY_COST`]), as in a loop over a call's two arguments that turns hot because the
-/// call does. A refusal is [`analysis::SHORT_LOOP`] and waits for as many backward jumps again
-/// as the body has taken, so a loop that sometimes runs long is asked about again while the
-/// attempts stay few. A `while` or `repeat` loop does not say how long it runs, and is not
-/// asked.
+/// Why a body does not compile for the hot `for` loop at `target`: a call of the body would
+/// cost more compiled than in tier 0, as in a loop over a call's two arguments that turns hot
+/// because the call does. The loop's running activation says how many passes one run of it
+/// takes, and a call is priced as the work around the loops (`outside`) plus that many passes
+/// of `hot`, less the entry. A refusal is [`analysis::SHORT_LOOP`] and waits for as many
+/// backward jumps again as the body has taken, so a loop that sometimes runs long is asked
+/// about again while the attempts stay few. A `while` or `repeat` loop does not say how long
+/// it runs and is not asked, and neither is a loop inside another, whose passes the outer
+/// loop multiplies.
 unsafe fn short_loop(
     machine: &Machine<'_>,
     plan: &analysis::Plan<'_>,
     target: usize,
+    outside: Work,
     hot: Work,
 ) -> Option<&'static str> {
     unsafe {
         let step = plan.insts.iter().find(|inst| inst.pc == target)?;
-        if step.op != Op::ForStep {
+        let nested = plan
+            .insts
+            .iter()
+            .any(|inst| inst.op == Op::Jump && inst.operand(0) < target && target <= inst.pc);
+        if step.op != Op::ForStep || nested {
             return None;
         }
-        let state = machine.loops.get(step.operand(0))?;
-        let passes = state.count.saturating_sub(state.index) as u64;
-        if passes.saturating_mul(saving(hot)) > ENTRY_COST {
+        let passes = machine.loops.get(step.operand(0))?.count as u64;
+        let saved = saving(outside) + passes.saturating_mul(saving(hot));
+        if saved > lost(outside) + ENTRY_COST + LOAD_COST * outside.loads as u64 {
             return None;
         }
         let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
@@ -838,7 +860,7 @@ unsafe fn compile_in<'a>(
             } else if saving(work.looped) == 0 {
                 Some(analysis::STEPPING_LOOP)
             } else if let Some(target) = hot {
-                short_loop(machine, &plan, target, work.hot)
+                short_loop(machine, &plan, target, work.outside, work.hot)
                     .or_else(|| payback.then(|| unpaid_loop(machine, work.hot)).flatten())
             } else if work.outside.steps > 0 && saving(work.outside) == 0 {
                 Some(analysis::MOSTLY_TIER0)
@@ -850,6 +872,7 @@ unsafe fn compile_in<'a>(
                     calls: work.whole.calls.saturating_sub(work.outside.calls),
                     frames: work.whole.frames.saturating_sub(work.outside.frames),
                     steps: work.whole.steps.saturating_sub(work.outside.steps),
+                    writes: work.whole.writes.saturating_sub(work.outside.writes),
                     loads: 0,
                 };
                 unpaid(
@@ -867,8 +890,14 @@ unsafe fn compile_in<'a>(
             if let Some(reason) = reason {
                 if logging() {
                     eprintln!(
-                        "jit: {} would leave to tier 0: {}",
+                        "jit: {} would leave to tier 0 ({} native, {} calls, {} frames, {} steps, \
+                         {} writes): {}",
                         describe(machine.code),
+                        work.whole.native,
+                        work.whole.calls,
+                        work.whole.frames,
+                        work.whole.steps,
+                        work.whole.writes,
                         tier0_steps(&plan, machine.code)
                     );
                 }
@@ -920,7 +949,7 @@ unsafe fn compile_in<'a>(
         if logging() {
             let steps = tier0_steps(&plan, machine.code);
             eprintln!(
-                "jit: compiled {} ({trigger:?}, {} words) in {} us (analysis {} us, codegen {} us; {size} bytes; {} speculations{}; {} native, {} calls, {} steps, {} inlined, {} frames, {} loops; tier 0 runs: {})",
+                "jit: compiled {} ({trigger:?}, {} words) in {} us (analysis {} us, codegen {} us; {size} bytes; {} speculations{}; {} native, {} calls, {} steps, {} writes, {} inlined, {} frames, {} loops; tier 0 runs: {})",
                 describe(machine.code),
                 values::ints(machine.code.car()).len(),
                 (planned + generated).as_micros(),
@@ -931,6 +960,7 @@ unsafe fn compile_in<'a>(
                 work.whole.native,
                 work.whole.calls + work.whole.frames,
                 work.whole.steps,
+                work.whole.writes,
                 plan.actions
                     .iter()
                     .filter(|action| matches!(action, analysis::Action::Inline { .. }))

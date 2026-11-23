@@ -1392,6 +1392,9 @@ pub struct Work {
     pub frames: usize,
     /// The instructions compiled code hands to tier 0 one at a time.
     pub steps: usize,
+    /// The variables compiled code writes back to the frame before those instructions: one
+    /// for each variable that may differ from the frame before each step that can read it.
+    pub writes: usize,
     /// The variables compiled code reads from the frame outside the body's loops, where each
     /// call reads them once. A variable first read inside a loop is read from the frame on the
     /// first pass only, so it is not counted.
@@ -1428,6 +1431,7 @@ impl Shape {
             calls: self.calls,
             frames: self.frames,
             steps: 0,
+            writes: 0,
             loads: 0,
         }
     }
@@ -1608,9 +1612,9 @@ impl Plan<'_> {
                 work.outside.loads += 1;
                 work.whole.loads += 1;
             }
-            let (native, calls, frames, steps) = match action {
+            let (native, calls, frames, steps, writes) = match action {
                 Action::Inline { .. } | Action::Traverse { .. } | Action::NativeCall { .. } => {
-                    (0, 1, 0, 0)
+                    (0, 1, 0, 0, 0)
                 }
                 Action::Frame {
                     callee, function, ..
@@ -1622,7 +1626,13 @@ impl Plan<'_> {
                             .work(values::ints(constants.element(FEEDBACK)), None)
                             .whole
                     };
-                    (inner.native, inner.calls, inner.frames + 1, inner.steps)
+                    (
+                        inner.native,
+                        inner.calls,
+                        inner.frames + 1,
+                        inner.steps,
+                        inner.writes,
+                    )
                 }
                 Action::Step { .. }
                     if matches!(inst.op, Op::CallGeneric | Op::CallBuiltin | Op::Internal)
@@ -1646,7 +1656,7 @@ impl Plan<'_> {
                 Action::Step {
                     fast: Fast::Inspect { .. },
                     ..
-                } => (1, 0, 0, 0),
+                } => (1, 0, 0, 0, 0),
                 // A step that runs tier 0's fast handler, or a builtin's direct entry, makes
                 // no round trip through the stepping helper, so it costs what tier 0 pays.
                 Action::Step { effect, fast, .. }
@@ -1656,8 +1666,22 @@ impl Plan<'_> {
                 {
                     continue;
                 }
-                Action::Step { .. } => (0, 0, 0, 1),
-                action if native(action) || backward(inst) => (1, 0, 0, 0),
+                // A step that may run R code writes back every variable that may be dirty.
+                Action::Step {
+                    effect: Effect::Opaque,
+                    ..
+                } => {
+                    let dirty = self.before(position).map_or(0, |state| {
+                        state
+                            .slots
+                            .iter()
+                            .filter(|slot| slot.may_be(status::DIRTY))
+                            .count()
+                    });
+                    (0, 0, 0, 1, dirty)
+                }
+                Action::Step { .. } => (0, 0, 0, 1, 0),
+                action if native(action) || backward(inst) => (1, 0, 0, 0, 0),
                 _ => continue,
             };
             let (part, weight) = match depth.checked_sub(1) {
@@ -1683,6 +1707,7 @@ impl Plan<'_> {
                 part.calls += weight * calls;
                 part.frames += weight * frames;
                 part.steps += weight * steps;
+                part.writes += weight * writes;
             }
         }
         work

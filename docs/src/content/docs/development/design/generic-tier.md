@@ -70,7 +70,7 @@ often costs more than the callee's body.
 
 Each number is a difference in callgrind instructions between the compiled path and tier 0's path
 for the same work. The cost model's constants (`crates/jit/src/jit.rs`) follow these numbers:
-`ENTRY_COST`, `LOAD_COST`, `STEP_COST` and `SAVING_PER_FRAME` are measured, and
+`ENTRY_COST`, `LOAD_COST`, `STEP_COST`, `WRITE_BACK_COST` and `SAVING_PER_FRAME` are measured, and
 `SAVING_PER_NATIVE` and `SAVING_PER_CALL` are the model's estimates for work that varies with the
 instruction.
 
@@ -78,7 +78,8 @@ instruction.
 |---|---|---|
 | Entering compiled code instead of starting the body in the dispatch loop | About 560 more: the tier's entry (246), the scheduled entry's dispatch and return path (107), the register window (36 to 53), the caller's feedback (55) and the code's prologue. End to end, two bodies that differ by four native instructions (`a + a + a + a + a` and the same with nine operands, each called through a closure made on every call) differ by 550, and the smaller one runs 132 more compiled than in tier 0 | `ENTRY_COST` |
 | A variable read from the frame, against one kept in a machine register | About 30 more when the inline probe answers, about 125 more when the runtime forces an argument's promise. A body that adds five arguments runs 130 more than one that adds one argument five times | `LOAD_COST` (60) |
-| An instruction handed to tier 0 (a step) | 60 to 70 more for the helper call alone; about 180 with the variables written back before it and reloaded after it | `STEP_COST` |
+| An instruction handed to tier 0 (a step) | 60 to 70 more for the helper call alone; about 180 with the registers reloaded after it | `STEP_COST` |
+| A variable written back to the frame before a step that can run R code | About 170 to 210 more than tier 0's assignment, which stores into the frame as it goes. In a body of 20 lines whose plan has seven such write-backs, the write-back path (the flush, the boxed scalar, the assignment) runs 1,940 instructions a call against 435 for tier 0's assignments | `WRITE_BACK_COST` |
 | A call inlined with a frame, no arguments | About 600 fewer. The functions involved account for 585: tier 0's call (368) and return (459), less the first start (152), the start (12), the register window (40) and the compiled code (38). The `f()` row of "Measured" with the entry added back gives about 640 | `SAVING_PER_FRAME` |
 | A call inlined with a frame, three arguments | 510 to 630 fewer | |
 | The first start of an inlined call in an entry | 152, once per entry of the compiled body for each call | |
@@ -223,6 +224,7 @@ the compile (`jit.rs`, `unpaid`). The saving is counted in tier-0 instructions t
 | An inlined body, a native call, a traversal | `SAVING_PER_CALL` |
 | A native instruction | `SAVING_PER_NATIVE` |
 | A step | Minus `STEP_COST` |
+| A variable that may differ from the frame before a step that can run R code | Minus `WRITE_BACK_COST` |
 | The entry | Minus `ENTRY_COST` |
 | A variable read from the frame outside the loops | Minus `LOAD_COST` |
 
@@ -266,13 +268,17 @@ its passes save, and most sessions never run that many. Waiting until tier 0 has
 the loss, because the compile then costs at most what tier 0 has spent on the saving it would have
 made.
 
-A hot `for` loop also says how many passes its running activation has left, and entering
-compiled code in the middle of it costs an entry. A loop over a call's two arguments turns hot
-because the call does, and each activation enters compiled code for one remaining pass. So the
-loop's request is refused while the passes left save less than `ENTRY_COST` (`jit.rs`,
+A hot `for` loop also says how many passes one run of it takes, and entering compiled code in
+the middle of it costs an entry. A loop over a call's two arguments turns hot because the call
+does, and each activation enters compiled code for a pass or two. So the model prices one call
+of the body from the running loop: the work around the loops once, plus the loop's run length in
+passes, less the entry. The loop's request is refused while that saves nothing (`jit.rs`,
 `short_loop`), and the loop asks again after as many backward jumps again as the body has taken,
-which a loop that sometimes runs long reaches soon. A `while` or `repeat` loop does not say how
-long it runs and is not asked.
+which a loop that sometimes runs long reaches soon. The run length decides, not the passes left
+at the request: a loop of ten passes reaches the threshold on the same pass of every call, often
+its last, and it repays the entry on the next call all the same. A `while` or `repeat` loop does
+not say how long it runs and is not asked, and neither is a loop nested in another, whose passes
+the outer loop multiplies.
 
 A body with loops can also turn hot by its calls. Its profile holds the backward jumps it has
 taken and the entries it has counted, so the model prices one call by measurement: the work
@@ -324,15 +330,15 @@ Consecutive steps run as one stretch: compiled code writes back the variables on
 dispatch loop runs from the first instruction to the last, and compiled code reloads once. A body
 whose plan is one stretch is not compiled.
 
-The measurements that motivate stretches come from a body of the app-suite workload that
-compiles in the default mode: two inlined frames, two native calls, six steps and a loop over
-strings. Compiled, it runs at about tier 0's cost. What the inlined frames save (tier 0's call
-and return) is spent on the steps' helper calls, on writing the variables back before each step
-that can read the frame, and on tier 0's own call for the callees that keep their frame. The
-model credits the frames and charges `STEP_COST` per step, which undercounts the write-back
-traffic of a body whose steps alternate with native work. One write-back and one reload per
-stretch is the structural answer, and a direct call from compiled code into a callee's compiled
-code (stage 4) removes the entry that every compiled callee pays today.
+The measurements that motivate stretches come from the "helper of 20 lines" body of
+`r15_plain_function_bodies.R`: two inlined frames, ten native instructions, four steps that can
+run R code and a loop over strings. Compiled, it runs within 1% of tier 0's instructions. What
+the inlined frames and the native instructions save is spent on the entry, on the steps' helper
+calls, and above all on writing the variables back before each step that can read the frame. The
+model charges each of those write-backs, so the body stays in tier 0 in every mode but `stress`.
+One write-back and one reload per stretch is the structural answer for such a body, and a direct
+call from compiled code into a callee's compiled code (stage 4) removes the entry that every
+compiled callee pays.
 
 ### Forced compilation costs no more than tier 0
 
@@ -472,8 +478,10 @@ the per-pattern instruction counts above, and the kernels, public and code-bases
 2. **Partly built.** Type predicates and `length` on the value's header, builtin calls with
    deferred signals, loops over boxed sequences, boxed arithmetic inside inlined frames, the exit
    profile that turns an instruction that keeps leaving into a step, a body with loops priced by
-   its measured passes per call, and forced compilation held to tier 0's cost per body. Planned:
+   its measured passes per call, write-backs charged in the model, and forced compilation held
+   to tier 0's cost per body. Planned:
    the other native forms in the table.
 3. Planned. Stretches of tier-0 instructions.
-4. Planned. Calls with a frame made from an inlined frame, `...` passed through, and argument
-   expressions that are effect-free builtin calls.
+4. Planned. Calls with a frame made from an inlined frame, a direct call from compiled code
+   into a callee's compiled code, `...` passed through, and argument expressions that are
+   effect-free builtin calls.
