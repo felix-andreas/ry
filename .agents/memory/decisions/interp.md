@@ -385,7 +385,7 @@ Design and measurements: `development/design/slot-frames.md`.
   reference is not forced twice. A call passing `...` has the single plan `MATCH_PER_CALL`
   (`call_matching`). Tier 1 lowers a direct call's argument code in the caller's frame, so
   `lower_block` refuses an assignment there (`Lowering.inlined`), which would drop the caller's
-  write (`RY_JIT=force` showed `n <- 0; twice({ n <- n + 1; n }); n` giving 0).
+  write (`RY_JIT=stress` showed `n <- 0; twice({ n <- n + 1; n }); n` giving 0).
 - **No separate call path for builtin wrappers.** A closure whose body is one builtin call is an
   ordinary callee of `bytecode::call_fast` (`PLAN_FAST_BY_NAME` covers callers with an
   environment). A dedicated wrapper path was deleted: it was a second source of truth for argument

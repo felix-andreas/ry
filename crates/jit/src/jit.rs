@@ -52,7 +52,13 @@ use {
 pub enum Mode {
     Off,
     On,
+    /// Compiles a body at its second entry and a loop at its first backward jump, whatever the
+    /// compile costs, but only a body whose compiled code the cost model expects to run no
+    /// slower than tier 0 ([`compile_in`]).
     Force,
+    /// Compiles everything that compiles, at the same points. The differential tests run it,
+    /// so they cover the code that glues tier 0's steps together, which no other mode keeps.
+    Stress,
 }
 
 impl Mode {
@@ -61,6 +67,7 @@ impl Mode {
         match std::env::var("RY_JIT").as_deref() {
             Ok("off" | "0" | "false") => Mode::Off,
             Ok("force") => Mode::Force,
+            Ok("stress") => Mode::Stress,
             _ => Mode::On,
         }
     }
@@ -184,7 +191,7 @@ pub fn install_mode(mode: Mode) {
         Mode::On => (ENTRY_THRESHOLD, BACK_EDGE_THRESHOLD),
         // Compiling on the second run rather than the first gives the compiled code the type
         // feedback of one interpreted run, so forced compilation exercises the specialized paths.
-        Mode::Force => (2, 1),
+        Mode::Force | Mode::Stress => (2, 1),
     };
     let (entries, back_edges) = thresholds_override().unwrap_or((entries, back_edges));
     MODE.with(|current| current.set(mode));
@@ -278,12 +285,13 @@ unsafe fn specialized<'a>(machine: &Machine<'_>) -> Option<&'a Compiled> {
 }
 
 /// Refuses a body for good, before it records, when no profile could give its compiled code
-/// anything to run natively. Forced compilation keeps such bodies, as [`compile_in`] does.
+/// anything to run natively. [`Mode::Stress`] keeps such bodies, as [`compile_in`] does.
 unsafe fn worth_recording(machine: &Machine<'_>) -> bool {
     unsafe {
         let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
         profile[profile::WINDOW] = clock();
-        if MODE.with(Cell::get) == Mode::Force || analysis::shape(machine.code).may_run_natively() {
+        if MODE.with(Cell::get) == Mode::Stress || analysis::shape(machine.code).may_run_natively()
+        {
             return true;
         }
         if logging() {
@@ -308,6 +316,27 @@ fn saving(work: Work) -> u64 {
         .saturating_sub(STEP_COST * work.steps as u64)
 }
 
+/// What one call of a body with loops is expected to save when tier 0 enters its compiled code
+/// at the top: the work around the loops once, and `pass`, the mean pass through one of its
+/// `loops`, for each backward jump the body has taken per entry so far. A body whose loops end
+/// after a pass or two is thereby priced by its calls, not as if its loops ran long. The
+/// entries are those the counter holds, which leaves out the ones a wait took back, so the
+/// passes per call are an upper bound.
+unsafe fn saving_per_call_with_loops(
+    machine: &Machine<'_>,
+    outside: Work,
+    pass: Work,
+    loops: usize,
+) -> u64 {
+    unsafe {
+        let profile = values::ints(machine.code.cdr().element(PROFILE));
+        let entries = u64::try_from(profile[profile::ENTRIES]).unwrap_or(0).max(1);
+        let jumps = runtime::back_edges_seen(profile);
+        let looped = jumps.saturating_mul(saving(pass)) / (entries * loops.max(1) as u64);
+        (saving(outside) + looped).saturating_sub(ENTRY_COST + LOAD_COST * outside.loads as u64)
+    }
+}
+
 /// What one call of a body is expected to save when tier 0 enters its compiled code: zero when
 /// entering costs more than the body's work saves.
 fn saving_per_call(work: Work) -> u64 {
@@ -320,15 +349,18 @@ unsafe fn compile_cost(machine: &Machine<'_>) -> u64 {
     COMPILE_FIXED + COMPILE_PER_WORD * words
 }
 
-/// Why a loop-free body that just turned hot does not compile for the `work` its compiled code
-/// would do, by the model at [`COMPILE_FIXED`], or `None` when it is expected to repay its
-/// compilation. A body that saves too little per call to repay it even if every call of the
-/// session were its own is [`analysis::SMALL`], for good; one that is only called too rarely
-/// is [`analysis::RARE`], and is asked again later. A body that compiled before passed the
-/// second test once already.
-unsafe fn unpaid(machine: &Machine<'_>, work: Work) -> Option<&'static str> {
+/// Why a body that just turned hot by its calls does not compile when its compiled code saves
+/// `per_call` on each, by the model at [`COMPILE_FIXED`], or `None` when it is expected to
+/// repay its compilation. A body that saves too little per call to repay it even if every call
+/// of the session were its own is [`analysis::SMALL`], for good; one that is only called too
+/// rarely is [`analysis::RARE`], and is asked again later. A body that compiled before passed
+/// the second test once already. Outside the default mode the compile's cost does not count,
+/// so only a body that saves nothing per call is refused.
+unsafe fn unpaid(machine: &Machine<'_>, per_call: u64) -> Option<&'static str> {
     unsafe {
-        let per_call = saving_per_call(work);
+        if MODE.with(Cell::get) != Mode::On {
+            return (per_call == 0).then_some(analysis::SMALL);
+        }
         let cost = compile_cost(machine);
         if HORIZON_CALLS * per_call < cost {
             return Some(analysis::SMALL);
@@ -390,6 +422,41 @@ unsafe fn unpaid_loop(machine: &Machine<'_>, hot: Work) -> Option<&'static str> 
             i32::try_from(start.max(i64::from(i32::MIN / 2))).unwrap_or(i32::MIN / 2),
         );
         Some(analysis::UNPAID_LOOP)
+    }
+}
+
+/// Why a body does not compile for the hot `for` loop at `target`, whose one pass does `hot`:
+/// the passes the running activation has left save less than entering compiled code costs
+/// ([`ENTRY_COST`]), as in a loop over a call's two arguments that turns hot because the
+/// call does. A refusal is [`analysis::SHORT_LOOP`] and waits for as many backward jumps again
+/// as the body has taken, so a loop that sometimes runs long is asked about again while the
+/// attempts stay few. A `while` or `repeat` loop does not say how long it runs, and is not
+/// asked.
+unsafe fn short_loop(
+    machine: &Machine<'_>,
+    plan: &analysis::Plan<'_>,
+    target: usize,
+    hot: Work,
+) -> Option<&'static str> {
+    unsafe {
+        let step = plan.insts.iter().find(|inst| inst.pc == target)?;
+        if step.op != Op::ForStep {
+            return None;
+        }
+        let state = machine.loops.get(step.operand(0))?;
+        let passes = state.count.saturating_sub(state.index) as u64;
+        if passes.saturating_mul(saving(hot)) > ENTRY_COST {
+            return None;
+        }
+        let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
+        let seen = runtime::back_edges_seen(profile).max(1);
+        let threshold = bytecode::tier().map_or(0, |tier| tier.back_edge_threshold);
+        let start = i64::from(threshold) - i64::try_from(seen).unwrap_or(i64::MAX);
+        runtime::restart_back_edges(
+            profile,
+            i32::try_from(start.max(i64::from(i32::MIN / 2))).unwrap_or(i32::MIN / 2),
+        );
+        Some(analysis::SHORT_LOOP)
     }
 }
 
@@ -603,7 +670,7 @@ unsafe fn compiled_for<'a>(
                     // The loop restarts recording when its counter reaches half the threshold
                     // again, which a counter already past that point would never do.
                     runtime::restart_back_edges(counters, 0);
-                } else if reason == analysis::UNPAID_LOOP {
+                } else if reason == analysis::UNPAID_LOOP || reason == analysis::SHORT_LOOP {
                     // The refusal set the wait, which reopens the recording window on the way
                     // back to the threshold.
                     counters[profile::RECORDING] = 0;
@@ -713,12 +780,17 @@ unsafe fn compile_in<'a>(
 ) -> Result<&'a Compiled, Refusal> {
     unsafe {
         let enclosure = machine.enclosure();
-        let forced = MODE.with(Cell::get) == Mode::Force;
+        // The tests of what one compiled activation costs against tier 0's hold in every mode
+        // but `Stress`. The tests of whether the body runs often enough to repay its compile
+        // hold only in the default mode.
+        let mode = MODE.with(Cell::get);
+        let every = mode == Mode::Stress;
+        let payback = mode == Mode::On;
         let shape = analysis::shape(machine.code);
-        if !forced && !shape.may_run_natively() {
+        if !every && !shape.may_run_natively() {
             return Err(Refusal(analysis::NEVER_NATIVE));
         }
-        if !forced
+        if !every
             && trigger == Trigger::HotEntry
             && !shape.loops
             && machine.function.has_gp(gp::NATIVE_ENTRY)
@@ -728,11 +800,11 @@ unsafe fn compile_in<'a>(
         // Without a closure call, the shape bounds what any plan of the body could save, so
         // it decides before the plan is made. A call may be inlined with a frame, whose callee
         // adds its own work, so only the plan says what such a body saves.
-        if !forced
+        if !every
             && trigger == Trigger::HotEntry
             && !shape.loops
             && shape.frames == 0
-            && let Some(reason) = unpaid(machine, shape.work())
+            && let Some(reason) = unpaid(machine, saving_per_call(shape.work()))
         {
             return Err(Refusal(reason));
         }
@@ -749,8 +821,6 @@ unsafe fn compile_in<'a>(
             state >= 0 && state & runtime::SHARED != 0,
         )?;
         let planned = started.elapsed();
-        // Forced compilation keeps such bodies, so the differential tests cover the code that
-        // glues tier 0's steps together.
         // Entering a body with loops at the top or at a loop costs about the same, so what
         // decides between the two is the work around the loops alone.
         let hot = match trigger {
@@ -758,23 +828,23 @@ unsafe fn compile_in<'a>(
             Trigger::FirstCall | Trigger::HotEntry => None,
         };
         let work = plan.work(values::ints(machine.code.cdr().element(FEEDBACK)), hot);
-        if !forced {
+        if !every {
             let reason = if !plan.runs_natively() {
                 Some(analysis::NOTHING_NATIVE)
             } else if plan.loop_headers.is_empty() {
                 (trigger == Trigger::HotEntry)
-                    .then(|| unpaid(machine, work.whole))
+                    .then(|| unpaid(machine, saving_per_call(work.whole)))
                     .flatten()
             } else if saving(work.looped) == 0 {
                 Some(analysis::STEPPING_LOOP)
-            } else if hot.is_some() {
-                unpaid_loop(machine, work.hot)
+            } else if let Some(target) = hot {
+                short_loop(machine, &plan, target, work.hot)
+                    .or_else(|| payback.then(|| unpaid_loop(machine, work.hot)).flatten())
             } else if work.outside.steps > 0 && saving(work.outside) == 0 {
                 Some(analysis::MOSTLY_TIER0)
             } else if trigger == Trigger::HotEntry {
                 // A backward jump of the body is a pass through one of its loops, so the mean
-                // pass is what one is expected to save. A body whose loops would compile it
-                // at the back-edge threshold compiles for its calls too.
+                // pass is what one is expected to save.
                 let pass = Work {
                     native: work.whole.native.saturating_sub(work.outside.native),
                     calls: work.whole.calls.saturating_sub(work.outside.calls),
@@ -782,23 +852,15 @@ unsafe fn compile_in<'a>(
                     steps: work.whole.steps.saturating_sub(work.outside.steps),
                     loads: 0,
                 };
-                let per_pass = saving(pass) / plan.loop_headers.len() as u64;
-                if HORIZON_EDGES.saturating_mul(per_pass) >= compile_cost(machine) {
-                    None
-                } else {
-                    // A call does the work around the loops and the loops' own, at the
-                    // weight the plan gives them.
-                    unpaid(
+                unpaid(
+                    machine,
+                    saving_per_call_with_loops(
                         machine,
-                        Work {
-                            native: work.outside.native + work.looped.native,
-                            calls: work.outside.calls + work.looped.calls,
-                            frames: work.outside.frames + work.looped.frames,
-                            steps: work.outside.steps + work.looped.steps,
-                            loads: work.outside.loads,
-                        },
-                    )
-                }
+                        work.outside,
+                        pass,
+                        plan.loop_headers.len(),
+                    ),
+                )
             } else {
                 None
             };
@@ -812,7 +874,7 @@ unsafe fn compile_in<'a>(
                 }
                 return Err(Refusal(reason));
             }
-            if trigger == Trigger::FirstCall && !plan.may_run_long() {
+            if trigger == Trigger::FirstCall && payback && !plan.may_run_long() {
                 return Err(Refusal(analysis::BRIEF));
             }
         }

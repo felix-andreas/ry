@@ -416,6 +416,9 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A builtin call from compiled code defers its signals
 - Type predicates and `length` compile to a test of the value's header
 - An exit that keeps handing off compiles its instruction as a step
+- Forced compilation keeps the steady-state tests, and `stress` compiles everything
+- A hot `for` loop with too few passes left is not entered
+- A `for` loop over a boxed sequence compiles, and a pairlist loop stays in tier 0
 
 ## Heap and collector
 

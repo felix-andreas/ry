@@ -22,9 +22,11 @@ use {
         bytecode::{
             self, FEEDBACK, LoopState, Machine, PROFILE, StepEnd, Stepper, TIER1, feedback, profile,
         },
+        coerce,
         eval::{self, Entering},
         heap, moves,
         standard_library::{self, CompiledKey},
+        subset,
         unwind::{R, Unwind, error},
         values,
     },
@@ -2579,10 +2581,10 @@ pub unsafe extern "C" fn jit_store_list_element(
 /// the loop reads the sequence's storage), as in tier 0's [`LoopState`].
 pub const LOOP_WORDS: usize = 4;
 
-/// Prepares an ALTREP `for` loop sequence as tier 0's `ForInit` does: a compact sequence is
-/// returned as it is, with its first element and increment stored in loop `index`'s words,
-/// and any other ALTREP vector is expanded into an ordinary one, with an increment of 0. The
-/// sequence's length goes in the loop's count word.
+/// Prepares a `for` loop sequence as tier 0's `ForInit` does: a factor becomes its labels, a
+/// compact sequence is returned as it is, with its first element and increment stored in loop
+/// `index`'s words, and any other ALTREP vector is expanded into an ordinary one, with an
+/// increment of 0. The sequence's length goes in the loop's count word.
 pub unsafe extern "C" fn jit_loop_sequence(
     activation: *mut Activation,
     value: *mut Header,
@@ -2591,7 +2593,10 @@ pub unsafe extern "C" fn jit_loop_sequence(
     unsafe {
         let words = (*activation).loops.add(LOOP_WORDS * index as usize);
         boxed(activation, || match Sexp::from_raw(value) {
-            Some(value) => {
+            Some(mut value) => {
+                if values::inherits(value, "factor") {
+                    value = coerce::factor_as_character(value)?;
+                }
                 let steps = values::compact_sequence(value).map(|(_, first, step)| (first, step));
                 let (first, step) = steps.unwrap_or((0.0, 0.0));
                 let sequence = match steps {
@@ -2604,6 +2609,55 @@ pub unsafe extern "C" fn jit_loop_sequence(
                 Ok(sequence)
             }
             None => Ok(values::nil()),
+        })
+    }
+}
+
+/// Element `index` of the sequence a `for` loop of unknown element type steps through, as tier
+/// 0's `ForStep` reads it: a list's element as it is, a compact sequence's computed from its
+/// first element and increment, and any other atomic vector's as a new length-one vector. Null
+/// without an error for a sequence tier 0 steps another way, such as a pairlist, which a loop
+/// entered at its header may hold, and that hands the step to tier 0.
+pub unsafe extern "C" fn jit_loop_element(
+    activation: *mut Activation,
+    sequence: *mut Header,
+    index: i64,
+) -> *mut Header {
+    unsafe {
+        guarded(activation, std::ptr::null_mut(), |activation| {
+            let Some(sequence) = Sexp::from_raw(sequence) else {
+                return std::ptr::null_mut();
+            };
+            let index = index as usize;
+            let element = match (sequence.kind(), values::compact_sequence(sequence)) {
+                (SexpType::Integer, Some((count, first, step))) if index < count => {
+                    scoped(|| values::scalar_integer((first + step * index as f64) as i32))
+                }
+                (SexpType::Real, Some((count, first, step))) if index < count => {
+                    scoped(|| values::scalar_real(first + step * index as f64))
+                }
+                _ if sequence.is_altrep() || index >= sequence.length() as usize => {
+                    return std::ptr::null_mut();
+                }
+                (SexpType::List | SexpType::Expression, _) => Ok(sequence.element(index)),
+                (
+                    SexpType::Logical
+                    | SexpType::Integer
+                    | SexpType::Real
+                    | SexpType::Complex
+                    | SexpType::String
+                    | SexpType::Raw,
+                    _,
+                ) => scoped(|| subset::vector_element(sequence, index)),
+                _ => return std::ptr::null_mut(),
+            };
+            match element {
+                Ok(element) => element.as_ptr(),
+                Err(unwind) => {
+                    park(activation, unwind);
+                    std::ptr::null_mut()
+                }
+            }
         })
     }
 }

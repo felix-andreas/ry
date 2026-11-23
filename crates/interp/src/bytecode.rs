@@ -13410,7 +13410,7 @@ unsafe fn op_for_init(state: &mut Activation<'_, '_>, instruction: Instruction) 
     };
     let count = match sequence.kind() {
         SexpType::Nil => 0,
-        SexpType::Pairlist | SexpType::Language => values::pairlist_length(sequence),
+        SexpType::Pairlist => values::pairlist_length(sequence),
         kind if kind.is_vector() => values::length(sequence),
         _ => return Err(error_in(call, "invalid for() loop sequence")),
     };

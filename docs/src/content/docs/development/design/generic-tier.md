@@ -266,11 +266,21 @@ its passes save, and most sessions never run that many. Waiting until tier 0 has
 the loss, because the compile then costs at most what tier 0 has spent on the saving it would have
 made.
 
-A body with loops can also turn hot by its calls. It compiles then when the mean pass through its
-loops meets the first row, because any of its loops would compile it at the back-edge threshold.
-Otherwise it is asked `unpaid` with the work around its loops plus the work of its loops, each
-weighted by its nesting depth as for a loop's request, so a call cannot compile what its loops
-would not, and a refusal leaves its loops free to ask.
+A hot `for` loop also says how many passes its running activation has left, and entering
+compiled code in the middle of it costs an entry. A loop over a call's two arguments turns hot
+because the call does, and each activation enters compiled code for one remaining pass. So the
+loop's request is refused while the passes left save less than `ENTRY_COST` (`jit.rs`,
+`short_loop`), and the loop asks again after as many backward jumps again as the body has taken,
+which a loop that sometimes runs long reaches soon. A `while` or `repeat` loop does not say how
+long it runs and is not asked.
+
+A body with loops can also turn hot by its calls. Its profile holds the backward jumps it has
+taken and the entries it has counted, so the model prices one call by measurement: the work
+around the loops once, plus the mean pass through a loop for each backward jump the body takes
+per entry, less the entry (`jit.rs`, `saving_per_call_with_loops`). That saving is asked the
+same question as a loop-free body's (`unpaid`). A body whose loops run two passes per call is
+thereby priced as the short body it is, and a body whose work around the loops is steps that
+save nothing is left to its loops (`MOSTLY_TIER0`), which enter compiled code past those steps.
 
 ### Native forms on boxed values (stage 2, partly built)
 
@@ -283,6 +293,7 @@ speculated function has:
 |---|---|---|
 | `is.null(x)`, `is.list(x)`, `is.character(x)`, `is.function(x)` and the other type predicates | A test of the kind byte against a set of kinds | Built |
 | `length(x)` on a vector that is neither an object nor ALTREP | A load of the length | Built |
+| `for (v in x)` over a character vector, a vector with attributes or a factor | The loop's counter in a register; the start prepares the sequence as tier 0 does, and each pass reads one element through tier 0's reader | Built |
 | `x$name`, `x[["name"]]` on a plain list | The position cached for the list's names, then a load | Planned |
 | `a == b`, `a != b` on string scalars | A pointer compare of the interned strings, `NA` aside | Planned |
 | `missing(x)` in an inlined call | The call's own passing record, a constant | Planned |
@@ -291,6 +302,15 @@ speculated function has:
 A value the test cannot answer (an object, where a method or a class decides, or an ALTREP
 vector) calls the builtin on a cold path of the same code, not an exit, so a call site that sees
 both keeps its compiled code.
+
+A `for` loop over a pairlist stays in tier 0, because only tier 0's loop state holds the
+position in the list: the loop's start hands the instruction to tier 0, and an entry in the
+middle of such a loop is declined.
+
+Arithmetic and comparison on boxed operands, such as `a == b` on strings or `x + y` on vectors
+with attributes, runs as tier 0's step. The step dispatches only when an operand is an object,
+which it tests, so in a call inlined without its frame it needs no frame and the callee keeps its
+inlined form. An operand whose type the planner does not know keeps the step opaque.
 
 Every other builtin call from compiled code is one helper call with its signals deferred. The
 helper tests the arguments itself for a value that could run R code, and a builtin that has a
@@ -304,10 +324,31 @@ Consecutive steps run as one stretch: compiled code writes back the variables on
 dispatch loop runs from the first instruction to the last, and compiled code reloads once. A body
 whose plan is one stretch is not compiled.
 
-`RY_JIT=force` compiles every body at its second entry, so its total time includes every compile.
-The rule it must meet is per compiled body: in the steady state a compiled activation runs at most
-the instructions tier 0 runs for it. The "Forced" columns below measure that directly. The rows
-above tier 0 there are bodies of steps, and stretches are designed to bring them to tier 0's cost.
+The measurements that motivate stretches come from a body of the app-suite workload that
+compiles in the default mode: two inlined frames, two native calls, six steps and a loop over
+strings. Compiled, it runs at about tier 0's cost. What the inlined frames save (tier 0's call
+and return) is spent on the steps' helper calls, on writing the variables back before each step
+that can read the frame, and on tier 0's own call for the callees that keep their frame. The
+model credits the frames and charges `STEP_COST` per step, which undercounts the write-back
+traffic of a body whose steps alternate with native work. One write-back and one reload per
+stretch is the structural answer, and a direct call from compiled code into a callee's compiled
+code (stage 4) removes the entry that every compiled callee pays today.
+
+### Forced compilation costs no more than tier 0
+
+`RY_JIT=force` asks for compiled code as early as possible: a body is asked about at its second
+entry and a loop at its first backward jump. It skips the model's payback tests, which weigh the
+compile against the calls a body expects, and keeps the steady-state tests: a body or loop whose
+compiled activation the model prices above tier 0's is refused in this mode too (`SMALL` for a
+saving per call of zero, `STEPPING_LOOP`, `MOSTLY_TIER0`, `SHORT_LOOP`). The rule forced
+compilation meets is therefore per compiled body: in the steady state a compiled activation runs
+at most the instructions tier 0 runs for it. The "Forced" columns below measure that. The
+session's total time includes every compile, which is the cost the mode is asked to pay.
+
+`RY_JIT=stress` compiles every body that compiles at all, whatever the model says. The
+differential tests, the everything-compiled oracle engine and the fuzzers run it, because their
+subject is whether compiled code agrees with tier 0, and the bodies the model refuses reach the
+most exits.
 
 ## Measured
 
@@ -429,8 +470,10 @@ the per-pattern instruction counts above, and the kernels, public and code-bases
    handlers, the profile summary), tier 0's own call in place of compiled code's, steps on a kept
    view, the leaner entry, retiring code that keeps leaving, and the cost model in saved work.
 2. **Partly built.** Type predicates and `length` on the value's header, builtin calls with
-   deferred signals, and the exit profile that turns an instruction that keeps leaving into a
-   step. Planned: the other native forms in the table.
-3. Planned. Stretches of tier-0 instructions, and forced compilation checked per body.
+   deferred signals, loops over boxed sequences, boxed arithmetic inside inlined frames, the exit
+   profile that turns an instruction that keeps leaving into a step, a body with loops priced by
+   its measured passes per call, and forced compilation held to tier 0's cost per body. Planned:
+   the other native forms in the table.
+3. Planned. Stretches of tier-0 instructions.
 4. Planned. Calls with a frame made from an inlined frame, `...` passed through, and argument
    expressions that are effect-free builtin calls.

@@ -2952,7 +2952,8 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
   another image.
 - **A training run with other types than real use makes a trained image slower.** The JIT
   compiles at the first call from the trained feedback, deoptimizes on the new type, then refuses
-  the recompile ("a for loop over something other than a plain vector") for the merged feedback,
+  the recompile ("the loops would hand too many instructions to tier 0": the loop steps through
+  a sequence of either type, but its arithmetic on the element has no native form) for the merged feedback,
   so the body stays in tier 0 for the session: a loop trained on `1:50` and run on doubles took
   72 ms against 45 ms without the image. The same refusal happens without an image when a session
   calls with integers first, so the fix is in the JIT (recompile for the widened type after a

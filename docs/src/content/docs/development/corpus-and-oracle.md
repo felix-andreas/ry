@@ -95,14 +95,14 @@ to stdout, and must write the JSON report that `crates/oracle/src/driver.R` defi
 `warnings`, `errors`, and `value` with `kind` and `deparsed`). ry's runtime is `--engine ry`:
 it runs the driver through `ry run --runtime ry` with the workspace's debug build (or the binary in
 `ORACLE_RY`, which must be an absolute path because each case runs in its own directory), so
-build `ry` and `libr` first. `--engine ry-jit` is the same runtime with `RY_JIT=force`, which runs
+build `ry` and `libr` first. `--engine ry-jit` is the same runtime with `RY_JIT=stress`, which runs
 every body that is called twice and every loop through the JIT, so comparing it against GNU R checks
 the compiled tier on every case. A JIT helper or tier-0 step that releases handles compiled code
 holds fails an assertion that is on in release builds too, so the case reports as `CRASHED`.
 `ry-tier0` runs with `RY_JIT=off`, and `ry-gctorture` runs with
 `RY_GC_STRESS=1`, which collects before every allocation once the script starts, and
 `ry-gctorture-young` with `RY_GC_STRESS=young`, which also keeps the survivors collectable.
-`ry-jit-gctorture` combines `RY_JIT=force` with `RY_GC_STRESS=1`, so it checks that compiled code
+`ry-jit-gctorture` combines `RY_JIT=stress` with `RY_GC_STRESS=1`, so it checks that compiled code
 keeps every object it holds rooted. `ry-gctorture-seeded` runs with `RY_GC_STRESS=seed:0` and
 `RY_GC_VERIFY=1`, which collects at random gaps and checks the heap's invariants before each
 collection ([Robustness](/development/robustness) lists the modes).

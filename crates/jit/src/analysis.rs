@@ -1208,6 +1208,11 @@ pub const STEPPING_LOOP: &str = "the loops would hand too many instructions to t
 /// it has.
 pub const UNPAID_LOOP: &str = "the loop has not run long enough to repay compiling the body";
 
+/// The refusal for a body whose hot `for` loop has too few passes left in the running
+/// activation for what compiled code saves on each to repay entering it. Like [`UNPAID_LOOP`]
+/// it is not final: the loop asks again once the body has taken as many backward jumps again.
+pub const SHORT_LOOP: &str = "the loop ends too soon to repay entering compiled code";
+
 /// The refusal for compiling a fully typed closure at its first call when the call cannot run
 /// long: the body has no loop and calls no closure or native function directly, so the
 /// activation ends after a few instructions. Compiling costs about a millisecond, a thousand
@@ -3167,21 +3172,22 @@ impl<'a> Builder<'a> {
                             // and a wrong guess deoptimizes and recompiles with real feedback.
                             Ty::IntVec
                         };
-                        if !matches!(
-                            speculated,
+                        match speculated {
                             Ty::IntVec
-                                | Ty::DblVec
-                                | Ty::LglVec
-                                | Ty::List
-                                | Ty::Int
-                                | Ty::Dbl
-                                | Ty::Lgl
-                        ) {
-                            return Err(Refusal(
-                                "a for loop over something other than a plain vector",
-                            ));
+                            | Ty::DblVec
+                            | Ty::LglVec
+                            | Ty::List
+                            | Ty::Int
+                            | Ty::Dbl
+                            | Ty::Lgl => Some(speculated.vector()),
+                            Ty::Bottom => {
+                                return Err(Refusal("a for loop over a sequence of unknown type"));
+                            }
+                            // A character vector, a vector with attributes, a factor: the
+                            // loop's start prepares the sequence as tier 0 does and its step
+                            // reads each element through tier 0's reader.
+                            _ => Some(Ty::Boxed),
                         }
-                        Some(speculated.vector())
                     }
                 };
                 // From here on the register is only the loop's sequence, which `ForStep` reads
@@ -4828,12 +4834,19 @@ impl<'a> Builder<'a> {
         } else {
             Ty::Boxed
         };
-        let effect = if a.is_plain() && b.is_plain() && !handed_off {
-            Effect::PureUnlessObserved
+        // An operand of unknown type dispatches only when it is an object, which the step
+        // checks, so comparing strings or adding plain vectors needs no frame.
+        let unknown = |ty: Ty| matches!(ty, Ty::Bottom | Ty::Closure(..));
+        let (effect, objects) = if handed_off || unknown(a) || unknown(b) {
+            (Effect::Opaque, &[][..])
         } else {
-            Effect::Opaque
+            let boxed = [(left, a), (right, b)]
+                .into_iter()
+                .filter(|&(_, ty)| ty == Ty::Boxed)
+                .map(|(register, _)| register);
+            (Effect::PureUnlessObserved, self.slice(boxed))
         };
-        let action = self.opaque_step(state, Some((dst, ty)), &[], effect);
+        let action = self.opaque_step(state, Some((dst, ty)), objects, effect);
         state.visible = Some(true);
         Ok(action)
     }

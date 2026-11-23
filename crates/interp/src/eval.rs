@@ -5588,7 +5588,7 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
     };
     let count = match sequence.kind() {
         SexpType::Nil => 0,
-        SexpType::Pairlist | SexpType::Language => values::pairlist_length(sequence),
+        SexpType::Pairlist => values::pairlist_length(sequence),
         SexpType::I64 if !sequence.is_array() => {
             return Err(crate::records::boundary_error(
                 sequence,

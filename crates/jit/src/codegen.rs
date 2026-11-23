@@ -591,8 +591,30 @@ impl<'p> Translator<'p> {
                 .entry
                 .ok_or(Refusal("an unreachable loop header"))?,
         );
+        // SAFETY: the code object is rooted while it compiles, and its loop table is an
+        // integer vector.
+        let table = unsafe { values::ints(self.frame.code.cdr().element(bytecode::LOOPS)) };
+        let header_pc = self.frame.plan.insts[self.frame.plan.blocks[header].start].pc;
         for (register, &ty) in entry.registers.iter().enumerate() {
-            if matches!(ty, Ty::Bottom | Ty::Boxed) {
+            if ty == Ty::Bottom {
+                continue;
+            }
+            if ty == Ty::Boxed {
+                // A loop of unknown element type that tier 0 started may step through a
+                // pairlist, whose position only tier 0's loop state holds.
+                let running = sequences.iter().any(|&(src, index)| {
+                    src == register
+                        && table.get(4 * index..4 * index + 2).is_none_or(|range| {
+                            (range[0] as usize..=range[1] as usize).contains(&header_pc)
+                        })
+                });
+                if running {
+                    let value = self.load_register(register);
+                    let fits = self.steppable(value, false);
+                    let next = self.builder.create_block();
+                    self.builder.ins().brif(fits, next, &[], declined, &[]);
+                    self.builder.switch_to_block(next);
+                }
                 continue;
             }
             let value = self.load_register(register);
@@ -1227,7 +1249,10 @@ impl<'p> Translator<'p> {
                             // rejects, so the helper prepares it as tier 0 does: it keeps a
                             // compact sequence and stores its first element and increment in
                             // the loop's words, and expands any other ALTREP vector.
-                            let fits = self.check(value, expected);
+                            let fits = match expected {
+                                Ty::Boxed => self.steppable(value, true),
+                                _ => self.check(value, expected),
+                            };
                             let prepare = self.builder.create_block();
                             let join = self.builder.create_block();
                             for ty in [I64, I64, F64, F64] {
@@ -1259,11 +1284,18 @@ impl<'p> Translator<'p> {
                                 self.builder
                                     .ins()
                                     .load(F64, flags(), self.loops, words + 24);
-                            let fits = self.check(prepared, expected);
-                            let compact = self.compact_sequence_fits(prepared, expected, step);
-                            let fits = self.builder.ins().bor(fits, compact);
-                            let failed =
-                                self.deopt(pc, before.id, None, position, reason::SPECULATION);
+                            // A loop of unknown element type has no narrower type to fall
+                            // back from, so what it cannot step is tier 0's.
+                            let (fits, why) = match expected {
+                                Ty::Boxed => (self.steppable(prepared, false), reason::HANDOFF),
+                                _ => {
+                                    let fits = self.check(prepared, expected);
+                                    let compact =
+                                        self.compact_sequence_fits(prepared, expected, step);
+                                    (self.builder.ins().bor(fits, compact), reason::SPECULATION)
+                                }
+                            };
+                            let failed = self.deopt(pc, before.id, None, position, why);
                             self.guard(fits, failed);
                             self.store_register(src, prepared);
                             self.builder
@@ -1314,7 +1346,6 @@ impl<'p> Translator<'p> {
                 let scaled = self.builder.ins().imul_imm_s(current, width);
                 let address = self.builder.ins().iadd(sequence, scaled);
                 let next_index = self.builder.ins().iadd_imm_s(current, 1);
-                self.builder.def_var(self.loop_indexes[index], next_index);
                 match before.registers[src] {
                     Ty::IntVec | Ty::DblVec => {
                         // A compact sequence computes its element from the first element and
@@ -1356,8 +1387,25 @@ impl<'p> Translator<'p> {
                         let element = self.builder.ins().load(I64, flags(), address, DATA);
                         self.assign_slot(&before, slot, Ty::Boxed, element);
                     }
+                    Ty::Boxed => {
+                        let element = self
+                            .call(
+                                runtime::jit_loop_element as *const () as usize,
+                                &[I64, I64, I64],
+                                Some(I64),
+                                &[self.frame.activation, sequence, current],
+                            )
+                            .ok_or(Refusal("a helper without a result"))?;
+                        // The index advances only after the exit, which hands tier 0 this
+                        // step.
+                        let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
+                        let read = self.builder.ins().icmp_imm_s(IntCC::NotEqual, element, 0);
+                        self.guard(read, failed);
+                        self.assign_slot(&before, slot, Ty::Boxed, element);
+                    }
                     _ => return Err(Refusal("a loop over a sequence of unknown type")),
                 }
+                self.builder.def_var(self.loop_indexes[index], next_index);
                 let next = self.next_pc(position)?;
                 let label = self.edge(position, next)?;
                 self.builder.ins().jump(label, &[]);
@@ -1746,6 +1794,34 @@ impl<'p> Translator<'p> {
                 self.builder.ins().select(null, zero, count)
             }
         }
+    }
+
+    /// Whether a `for` loop of unknown element type can step through `value` with
+    /// [`runtime::jit_loop_element`]: an atomic vector or a list. With `plain` it must also be
+    /// one the loop's start need not prepare, which a factor and an ALTREP vector are not.
+    fn steppable(&mut self, value: Value, plain: bool) -> Value {
+        const STEPPED: u32 = 1 << SexpType::Logical as u32
+            | 1 << SexpType::Integer as u32
+            | 1 << SexpType::Real as u32
+            | 1 << SexpType::Complex as u32
+            | 1 << SexpType::String as u32
+            | 1 << SexpType::List as u32
+            | 1 << SexpType::Expression as u32
+            | 1 << SexpType::Raw as u32;
+        let kind = self.builder.ins().uload8(I32, flags(), value, KIND);
+        let stepped = self.kind_in(kind, STEPPED);
+        let special = if plain {
+            let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
+            self.builder
+                .ins()
+                .band_imm_u(bits, OBJECT_FLAG | ALTREP_FLAG)
+        } else {
+            self.builder.ins().iconst(I32, 0)
+        };
+        // `stepped` is 1 or 0, so it exceeds the flag bits only for a vector with neither flag.
+        self.builder
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThan, stepped, special)
     }
 
     /// Whether `kind`, a value's type code, is in the bit set `kinds`: 1 or 0.
