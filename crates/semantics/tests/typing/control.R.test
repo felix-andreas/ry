@@ -17,10 +17,28 @@ fmt: fn(x: Unknown) -> Unknown
 a: Unknown
 b: Unknown
 
-#---- two_open_branches_still_tie_to_each_other
+#---- two_independent_open_branches_join_by_union
 coalesce <- function(value, fallback) if (is.null(value)) fallback else value
 #++++
-coalesce: <T> fn(value: T | NULL, [fallback]: T) -> T
+coalesce: <T, U> fn(value: T | NULL, [fallback]: U) -> U | T
+
+#---- a_project_coalesce_operator_takes_any_fallback
+`%||%` <- function(x, y) if (is.null(x)) y else x
+f <- function(options) {
+  enabled <- options$enabled %||% FALSE
+  extra <- options$extra %||% list()
+  if (enabled) length(extra) else 0L
+}
+g <- function() NULL %||% "none"
+#++++
+%||%: <T, U> fn(x: T | NULL, [y]: U) -> U | T
+f: <T> fn(options: T) -> integer
+g: fn() -> character
+
+#---- a_callback_ties_its_two_open_parameters
+best <- function(rates) Reduce(function(best, rate) if (rate > best) rate else best, rates, 0)
+#++++
+best: fn(rates: list[double] | double[]) -> double
 
 #---- a_constrained_branch_may_unify_so_recursion_converges
 fact <- function(n) if (n <= 1L) 1L else n * fact(n - 1L)
@@ -299,7 +317,7 @@ f: fn(x: integer | NULL) -> integer
 #---- coalesce_idiom_shapes
 coalesce <- function(value, fallback) if (is.null(value)) fallback else value
 #++++
-coalesce: <T> fn(value: T | NULL, [fallback]: T) -> T
+coalesce: <T, U> fn(value: T | NULL, [fallback]: U) -> U | T
 
 #---- family_guard_filters
 f <- function(flag) {

@@ -901,8 +901,8 @@ greet <- function(name, punct) {
 }
 greet("ada")
 #++++
-greet: <T> fn([name]: T, [punct]: T) -> T
-character
+greet: <T, U> fn([name]: T, [punct]: U) -> T | U
+Unknown
 
 #---- unguarded_formal_stays_required
 join2 <- function(left, right) {

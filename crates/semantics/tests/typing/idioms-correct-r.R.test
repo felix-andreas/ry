@@ -382,9 +382,9 @@ by_hash <- function() delete_token(hash = "abc")
 known <- function() or_default(1)
 #++++
 delete_token: <T, U, V> fn([resource]: T, [tenant]: U, [hash]: V | NULL) -> Unknown
-or_default: <T> fn(x: T | NULL, [y]: T) -> T
+or_default: <T, U> fn(x: T | NULL, [y]: U) -> U | T
 by_hash: fn() -> Unknown
-known: fn() -> double
+known: fn() -> Unknown
 
 #---- forwarding_a_formal_under_its_own_name_leaves_it_to_the_callee
 inner <- function(x, finally) {
@@ -393,9 +393,9 @@ inner <- function(x, finally) {
 outer <- function(x, finally) inner(x, finally = finally)
 run <- function() outer(1)
 #++++
-inner: <T> fn([x]: T, [finally]: T) -> T
-outer: <T> fn([x]: T, [finally]: T) -> T
-run: fn() -> double
+inner: <T, U> fn([x]: T, [finally]: U) -> T | U
+outer: <T, U> fn([x]: T, [finally]: U) -> T | U
+run: fn() -> Unknown
 
 #---- vapply_promotes_an_integer_result_under_a_double_template
 lengths_of <- function(xs) vapply(xs, length, numeric(1))
@@ -514,7 +514,7 @@ get_flag <- function(config, default = NULL) {
 }
 use <- function(config) if (get_flag(config, default = FALSE)) "on" else "off"
 #++++
-get_flag: <T> fn(config: T | NULL, [default]: T) -> T
+get_flag: <T, U> fn(config: T | NULL, [default]: U) -> U | T
 use: fn(config: logical) -> character
 
 #---- arithmetic_on_a_list_may_dispatch_to_a_project_method

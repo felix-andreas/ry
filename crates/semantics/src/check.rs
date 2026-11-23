@@ -875,6 +875,7 @@ fn check_item_in<'db>(
         library: stubs(db),
         table,
         frame_level: 0,
+        callback_frame_level: None,
         discarded_if: None,
         parameter_hints: Column::new_in(arena, expressions),
         hinted_parameters: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
@@ -1760,6 +1761,10 @@ struct Checker<'db, 'a> {
     /// its binding; a stored monotype lowers back to this level, or a later
     /// generalization in the frame would quantify a variable the environment still holds.
     frame_level: u32,
+    /// The frame level of the innermost anonymous function passed as a call argument. Its
+    /// parameters are values the callee supplies, so the callee's signature, not the body,
+    /// decides whether two of them are independent.
+    callback_frame_level: Option<u32>,
     /// The `if` statement about to infer whose value its block discards.
     discarded_if: Option<ExprId>,
     /// Parameter types an unannotated function literal takes from the function type its call
@@ -4346,9 +4351,9 @@ impl<'db, 'a> Checker<'db, 'a> {
                 // the two together. A ry hint applies alone, because a ry operator passes its
                 // type to an open operand: in `List.walk(xs, 0, \(acc, x) acc + x)`, `x` is the
                 // item type and `acc + x` makes the accumulator that type too.
-                let hints: Vec<Option<Ty<'db>>> = self
-                    .parameter_hints
-                    .remove(id)
+                let hints_entry = self.parameter_hints.remove(id);
+                let is_callback = hints_entry.is_some();
+                let hints: Vec<Option<Ty<'db>>> = hints_entry
                     .filter(|hints| {
                         hints.iter().flatten().any(|&hint| {
                             let hint = self.table.resolve(self.db, hint);
@@ -4365,6 +4370,10 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .unwrap_or_default();
                 self.table.level += 1;
                 let enclosing_frame_level = mem::replace(&mut self.frame_level, self.table.level);
+                let enclosing_callback_frame_level = match is_callback {
+                    true => self.callback_frame_level.replace(self.table.level),
+                    false => self.callback_frame_level,
+                };
                 let pending_mark = self.pending_enclosing_writes.len();
                 let mark = self.environment.mark();
                 let uses = self.formal_uses(&module[parameters], *body);
@@ -4483,6 +4492,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 self.environment.rollback(mark);
                 self.reapply_enclosing_writes(pending_mark);
                 self.frame_level = enclosing_frame_level;
+                self.callback_frame_level = enclosing_callback_frame_level;
                 self.table.level -= 1;
                 Ty::new(
                     self.db,
@@ -10532,7 +10542,9 @@ impl<'db, 'a> Checker<'db, 'a> {
             return None;
         }
         let scheme = globals.scheme(symbol, false)?;
+        let first_var = self.table.next_var().0;
         let instantiated = self.instantiate(&scheme);
+        let instantiated_vars = first_var..self.table.next_var().0;
         let resolved = self.table.shallow_resolve(self.db, instantiated);
         let TyKind::Function(function) = resolved.kind(self.db) else {
             return None;
@@ -10550,7 +10562,12 @@ impl<'db, 'a> Checker<'db, 'a> {
         ];
         let findings = self.match_arguments(range, function, &arguments);
         self.errors.extend(findings);
-        Some(function.ret)
+        let candidates =
+            self.supplied_parameter_variables(resolved, &arguments, instantiated_vars.clone());
+        if candidates.is_empty() {
+            return Some(function.ret);
+        }
+        Some(self.drop_unconstrained_members(function.ret, &candidates, instantiated_vars))
     }
 
     fn operand_argument(&self, value: ExprId, ty: Ty<'db>) -> CallArgument<'db> {
@@ -12819,11 +12836,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             self.module.kind(callee),
             ExpressionKind::NameRef(_) | ExpressionKind::Namespace { .. }
         );
-        let callback_outputs = if named_callee {
-            self.callback_outputs(callee_ty, first_var..self.table.next_var().0)
-        } else {
-            Vec::new()
-        };
+        let instantiated = first_var..self.table.next_var().0;
         if self.is_null_placeholder(self.table.resolve(self.db, callee_ty)) {
             self.infer_call_arguments(range, arguments);
             self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
@@ -12875,18 +12888,30 @@ impl<'db, 'a> Checker<'db, 'a> {
                 return unknown(self.db);
             }
         }
-        if callback_outputs.is_empty() {
+        let valueless_candidates = if named_callee {
+            self.supplied_parameter_variables(callee_ty, &call_arguments, instantiated.clone())
+        } else {
+            Vec::new()
+        };
+        if valueless_candidates.is_empty() {
             return result;
         }
-        self.drop_unconstrained_members(result, &callback_outputs, first_var)
+        self.drop_unconstrained_members(result, &valueless_candidates, instantiated)
     }
 
-    /// The callee's freshly instantiated type parameters (`instantiated`) that its parameter
-    /// types mention only as what a callback returns, such as `F` in `Result.and_then`'s
-    /// `f: fn(A) -> Result<B, F>`. Only those can stand for no value after the call: a
-    /// parameter an argument fills directly, or one that appears only in the result, means
-    /// "any value" when it stays open.
-    fn callback_outputs(&self, callee_ty: Ty<'db>, instantiated: Range<u32>) -> Vec<InferenceVar> {
+    /// The callee's freshly instantiated type parameters (`instantiated`) that the types of the
+    /// parameters the call supplies mention, directly or as what a callback returns. Only those
+    /// can stand for no value after the call: `T` in `fn(value: T | NULL, fallback: U) -> T | U`
+    /// is open when the caller passes `NULL`, as `F` in `Result.and_then`'s
+    /// `f: fn(A) -> Result<B, F>` is when the step never fails. A parameter the call leaves out
+    /// may stand for a value the callee stored earlier (a getter and setter), and one that
+    /// appears only in the result means "any value", so both keep their meaning.
+    fn supplied_parameter_variables(
+        &self,
+        callee_ty: Ty<'db>,
+        arguments: &[CallArgument<'db>],
+        instantiated: Range<u32>,
+    ) -> Vec<InferenceVar> {
         let db = self.db;
         if instantiated.is_empty() {
             return Vec::new();
@@ -12894,53 +12919,48 @@ impl<'db, 'a> Checker<'db, 'a> {
         let TyKind::Function(function) = self.table.shallow_resolve(db, callee_ty).kind(db) else {
             return Vec::new();
         };
-        let mut direct = FxHashSet::default();
-        let mut outputs = FxHashSet::default();
-        let parameter_types = function
-            .positional
-            .iter()
-            .copied()
-            .chain(function.named.iter().map(|parameter| parameter.ty))
-            .chain(function.variadic.iter().map(|rest| rest.element));
-        for ty in parameter_types {
-            match ty.kind(db) {
-                TyKind::Function(callback) => {
-                    collect_vars(db, callback.ret, &mut outputs);
-                    let inputs = callback
-                        .positional
-                        .iter()
-                        .copied()
-                        .chain(callback.named.iter().map(|parameter| parameter.ty))
-                        .chain(callback.variadic.iter().map(|rest| rest.element));
-                    for input in inputs {
-                        collect_vars(db, input, &mut direct);
-                    }
+        let arena = self.arena;
+        let targets = &*argument_targets(db, arena, function, argument_shapes(arena, arguments));
+        let mut mentioned = FxHashSet::default();
+        for target in targets.iter().flatten() {
+            let ty = match target {
+                ArgumentTarget::Positional(slot) => function.positional.get(*slot).copied(),
+                ArgumentTarget::Named(formal) => {
+                    function.named.get(*formal).map(|parameter| parameter.ty)
                 }
-                _ => collect_vars(db, ty, &mut direct),
+                ArgumentTarget::Rest => function.variadic.map(|rest| rest.element),
+                _ => None,
+            };
+            if let Some(ty) = ty {
+                collect_vars(db, ty, &mut mentioned);
             }
         }
-        outputs
+        mentioned
             .into_iter()
-            .filter(|var| instantiated.contains(&var.0) && !direct.contains(var))
+            .filter(|var| instantiated.contains(&var.0))
             .collect()
     }
 
-    /// A callback output that no argument constrained stands for no value, so as a member of a
+    /// A type parameter that no argument constrained stands for no value, so as a member of a
     /// union in the result it adds nothing: `Result.and_then`'s `Result<B, E | F>` is `:Err(E)`
-    /// when the step never fails. A union of nothing but such parameters stays as it is, and a
-    /// parameter that a variable from before the call reaches (an unannotated outer parameter
-    /// passed as the callback) stays too, because its value is decided by that outer code.
+    /// when the step never fails, and `or_else(NULL, "x")` is `character`. A union of nothing but
+    /// such parameters stays as it is, and a parameter that a variable from outside the
+    /// instantiation reaches (an unannotated outer parameter, or an argument's own open value)
+    /// stays too, because its value is decided by that code.
     fn drop_unconstrained_members(
         &mut self,
         result: Ty<'db>,
-        callback_outputs: &[InferenceVar],
-        first_var: u32,
+        candidates: &[InferenceVar],
+        instantiated: Range<u32>,
     ) -> Ty<'db> {
         let db = self.db;
-        let mut open: FxHashSet<InferenceVar> = callback_outputs
+        let mut open: FxHashSet<InferenceVar> = candidates
             .iter()
             .map(|&var| self.table.find(var))
-            .filter(|&root| matches!(self.table.entry(root), Entry::Unbound { .. }))
+            .filter(|&root| {
+                instantiated.contains(&root.0)
+                    && matches!(self.table.entry(root), Entry::Unbound { .. })
+            })
             .collect();
         if open.is_empty() {
             return result;
@@ -12952,18 +12972,27 @@ impl<'db, 'a> Checker<'db, 'a> {
         if open.is_empty() {
             return resolved;
         }
-        for outer in 0..first_var {
-            let outer = InferenceVar(outer);
+        // A variable from before the call, or one an argument created, decides its own value.
+        let outside = (0..instantiated.start).chain(instantiated.end..self.table.next_var().0);
+        for outer in outside {
+            let root = self.table.find(InferenceVar(outer));
             let mut reached = FxHashSet::default();
-            match self.table.entry(outer) {
-                Entry::Unbound { .. } => {
-                    reached.insert(self.table.find(outer));
+            match self.table.entry(root) {
+                // An open argument's bound names the callee's parameters it fills.
+                Entry::Unbound {
+                    bound: Some(bound), ..
+                } => {
+                    reached.insert(root);
+                    let bound = self.table.resolve(db, *bound);
+                    collect_vars(db, bound, &mut reached);
+                }
+                Entry::Unbound { .. } | Entry::Redirect(_) => {
+                    reached.insert(root);
                 }
                 Entry::Bound { ty, .. } => {
                     let ty = self.table.resolve(db, *ty);
                     collect_vars(db, ty, &mut reached);
                 }
-                Entry::Redirect(_) => {}
             }
             open.retain(|var| !reached.contains(var));
             if open.is_empty() {
@@ -17442,9 +17471,31 @@ impl<'db, 'a> Checker<'db, 'a> {
                 collect_vars(self.db, self.table.resolve(self.db, ty), &mut bound);
             }
         }
+        // A variable only a supplied parameter mentions got its value from that argument, so
+        // when the argument binds nothing to it (`NULL` passed to `T | NULL`) it stands for no
+        // value, and the call's own result narrowing drops it.
+        let mut supplied = FxHashSet::default();
+        for ty in function
+            .positional
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| supplied_positional.contains(*slot))
+            .map(|(_, ty)| *ty)
+            .chain(
+                function
+                    .named
+                    .iter()
+                    .enumerate()
+                    .filter(|(formal, _)| supplied_named.contains(*formal))
+                    .map(|(_, parameter)| parameter.ty),
+            )
+        {
+            collect_vars(self.db, self.table.resolve(self.db, ty), &mut supplied);
+        }
         if members.iter().any(|member| {
             matches!(member.kind(self.db), TyKind::Var(var)
-                if (omitted.contains(var) || var.0 >= self.call_first_var)
+                if (omitted.contains(var)
+                    || (var.0 >= self.call_first_var && !supplied.contains(var)))
                     && !bound.contains(var))
         }) {
             return unknown(self.db);
@@ -21167,7 +21218,8 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     /// Differing openness joins by union, never unification: the concrete branch would
     /// pin the other (`function(flag, x) if (flag) x else "s"` would demand
-    /// `x: character`). Two open branches do tie, which types the coalesce idiom.
+    /// `x: character`). Two branches open in variables of their own join by union too, and
+    /// only a callback's two open parameters tie.
     fn join_branch_values(&mut self, left: Ty<'db>, right: Ty<'db>) -> Ty<'db> {
         self.default_join_literals(left, right);
         let left_resolved = self.table.resolve(self.db, left);
@@ -21213,6 +21265,41 @@ impl<'db, 'a> Checker<'db, 'a> {
                     None => false,
                 }
             }) {
+                return union_of(self.db, [left_resolved, right_resolved]);
+            }
+        }
+        // Two independent open values (`x %||% y`) are two values a caller chooses separately,
+        // so tying them would make `default(FALSE)` wrong for a body that writes `x %||% list()`.
+        // Only variables this function generalizes are the caller's, and a callback's
+        // parameters (`Reduce(function(acc, x) if (x > acc) x else acc, xs)`) are the callee's.
+        if left_open
+            && right_open
+            && left_resolved != right_resolved
+            && self.callback_frame_level != Some(self.frame_level)
+        {
+            let level = self.table.level;
+            let unconstrained = |ty: Ty<'db>, vars: &mut FxHashSet<_>| {
+                self.table.collect_unbound_vars(self.db, ty, vars);
+            };
+            let mut left_vars = FxHashSet::default();
+            let mut right_vars = FxHashSet::default();
+            unconstrained(left_resolved, &mut left_vars);
+            unconstrained(right_resolved, &mut right_vars);
+            let free = |vars: &FxHashSet<_>, others: &FxHashSet<_>| {
+                vars.iter().any(|var| {
+                    !others.contains(var)
+                        && matches!(
+                            self.table.entry(self.table.find(*var)),
+                            Entry::Unbound { level: var_level, .. } if *var_level >= level
+                        )
+                        && matches!(
+                            self.table
+                                .open_constraint(self.db, Ty::new(self.db, TyKind::Var(*var))),
+                            Some(Constraint::Unconstrained)
+                        )
+                })
+            };
+            if free(&left_vars, &right_vars) && free(&right_vars, &left_vars) {
                 return union_of(self.db, [left_resolved, right_resolved]);
             }
         }

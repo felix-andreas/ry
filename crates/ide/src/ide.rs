@@ -4799,10 +4799,7 @@ fn at_inline_type_start(root: &SyntaxNode, offset: TextSize) -> bool {
         };
         token = previous;
     }
-    if let Some(region) = token
-        .parent_ancestors()
-        .find(is_inline_annotation)
-    {
+    if let Some(region) = token.parent_ancestors().find(is_inline_annotation) {
         // A word after a function's complete return type starts the body.
         return !(word
             && spaced

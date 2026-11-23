@@ -247,7 +247,7 @@ twiceapply: <T> fn(f: fn(T) -> T) -> fn(x: T) -> T
 #---- chooser_unifies_branch_variables
 pick <- function(cond, a, b) if (cond) a else b
 #++++
-pick: <T> fn(cond: logical, [a]: T, [b]: T) -> T
+pick: <T, U> fn(cond: logical, [a]: T, [b]: U) -> T | U
 
 #---- null_else_branch_keeps_variable_polymorphic
 maybe <- function(flag, value) if (flag) value else NULL

@@ -1164,9 +1164,11 @@ way. Every union, written or inferred, is normalized:
   path's type, so a later use of it is still checked.
 - Otherwise, a union with an `Unknown` member is `Unknown`.
 
-A call's result drops a union member that is a type parameter of the called function when the
-callee's parameters mention it only as what a callback returns and the call left it unconstrained,
-because the callback then never produces such a value. `Result.and_then` returns
+A call's result drops a union member that is a type parameter of the called function when a
+parameter the call supplies mentions it and the call left it unconstrained, because no argument then
+produces such a value. With `or_else <- function(value, fallback) if (is.null(value)) fallback else value`,
+typed `<T, U> fn(value: T | NULL, [fallback]: U) -> U | T`, the call `or_else(NULL, "x")` is
+`character`: the `NULL` fills nothing of `T`. `Result.and_then` returns
 `Result<B, E | F>`, where `F` is the error type of the step, so a step that never fails leaves `F`
 unconstrained and the result keeps the error `E` alone:
 
@@ -3141,8 +3143,7 @@ so a `NULL` body stays `NULL`, a nullable body stays a single `T | NULL`, and an
 An `if ... else` takes a [scalar condition](#conditions) and joins the types of its two branches. The
 join does not merge or coerce branch types beyond unification; it records the alternatives:
 
-- Branches that unify share that type. `if (flag) 1L else 2L` is `integer`, and `if (cond) a else b`
-  over two unconstrained values keeps them unified as one polymorphic type.
+- Branches that unify share that type. `if (flag) 1L else 2L` is `integer`.
 - A `NULL` branch joins by union without constraining the other branch, so `if (flag) NULL else 2L`
   is `integer | NULL`.
 - Branches with genuinely different types give their union: `if (flag) 1L else "foo"` is
@@ -3159,9 +3160,14 @@ join does not merge or coerce branch types beyond unification; it records the al
 - A branch whose variable the body has already constrained may unify with the other branch, because
   that adds nothing the program did not already require. That is how the recursive `fact` above
   converges to `fn(n: integer) -> integer`.
-- Two branches that are both still open are tied to each other.
+- Two branches that are open in variables of their own, such as two parameters, give their union,
+  because a caller chooses the two values separately.
   `function(value, fallback) if (is.null(value)) fallback else value` is
-  `<T> fn(value: T | NULL, [fallback]: T) -> T`.
+  `<T, U> fn(value: T | NULL, [fallback]: U) -> U | T`, so `x %||% list()` and `default %||% FALSE`
+  are both fine. The parameters of a function passed as a call argument are the exception: the
+  callee supplies them, so its signature decides how they relate, and two open branches over them
+  are tied. In `Reduce(function(best, x) if (x > best) x else best, xs, 0)` the callback returns
+  the accumulator's type.
 - An `Unknown` branch makes the whole conditional `Unknown`, so `if (flag) 1L else df$count` is
   `Unknown`. The exception is a branch whose `Unknown` comes from a recursive call the checker is
   still working out: it joins as the other branch, which is how `fact` converges.
