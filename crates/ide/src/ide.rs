@@ -13,7 +13,7 @@ use {
         file_type_definitions, global_scheme,
         hir::{
             Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind, Module,
-            NameSite, PatId, PatternKind, Symbol, UnaryOperator,
+            NameSite, PatId, PatternKind, Symbol, UnaryOperator, destructure_leaves,
         },
         infer::apply_definition,
         inline_annotations_enabled, item_annotation_syntax, item_annotations, item_check, item_hir,
@@ -5360,8 +5360,17 @@ fn global_names<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<GlobalName<'db>> 
         // A function's body binds locals only; any other item's code runs at the top level, so
         // an assignment nested in it (`total <- sum(parts <- c(1, 2))`) binds a global too.
         let kind = *item.kind(db);
+        let naming = item_naming(db, item);
+        // So does a `<<-` with no enclosing binding, anywhere, and a top-level loop's variable.
+        if let Some(naming) = &naming {
+            names.extend(naming.extras().super_globals.iter().map(|name| GlobalName {
+                name: name.to_string(),
+                is_function: false,
+                item: None,
+            }));
+        }
         if kind != ItemKind::Function
-            && let Some(naming) = item_naming(db, item)
+            && let Some(naming) = &naming
         {
             names.extend(
                 naming
@@ -8278,6 +8287,12 @@ fn slot_occurrences(db: &dyn Db, item: Item<'_>, binding: BindingId, result: &mu
     let targets: BTreeSet<ExprId> = hir
         .expressions()
         .flat_map(|expression| match &expression.kind {
+            // zeallot's `c(a, b) %<-% value` declares each name of its pattern.
+            ExpressionKind::Assign {
+                spelling: AssignSpelling::Destructure,
+                target,
+                ..
+            } => destructure_leaves(hir, *target).unwrap_or_default(),
             ExpressionKind::Assign { target, .. } => vec![*target],
             ExpressionKind::Match { arms, .. } => hir[arms]
                 .iter()

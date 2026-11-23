@@ -57,8 +57,8 @@ use {
         },
         project_global_names,
         stubs::{
-            StubSources, after_keyword, namespace_exports, namespace_known, shipped_export_manifests,
-            shipped_stub_sources, stub_source_problems,
+            StubSources, after_keyword, namespace_exports, namespace_known,
+            shipped_export_manifests, shipped_stub_sources, stub_source_problems,
         },
     },
     simulation::Outgoing,

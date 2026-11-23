@@ -788,18 +788,17 @@ constraint now fills a vector parameter. The forms once seen in ks `kfe.1d`, pra
 
 The top 100 CRAN packages by reverse dependencies that are not in the corpus (99 checked,
 1,210,157 lines, sources only) first gave 1,449 errors, of which 1,384 were false (114 per 100,000
-lines). They now give 119, about 39 of them true bugs (psych about 23, `parent.env` misuse in
-Hmisc, XML and rgl, survival, survey, VGAM's `qt` with a numeric `lower.tail`), so about 80 are
-false (7 per 100,000 lines). Remaining false classes, largest first:
+lines). They give 112 with the fourth pass. VGAM, psych, raster and ggplot2 are classified in full, and every report
+left there is a true bug except these limitations:
 
-- VGAM (14, not classified in detail): `new("vglmff", link = ...)` slots, `binomialff(dispersion =
-  ...)` with arguments its formals lack (possibly true), `qt(u, nu, 1, 0)` inside `if (FALSE)`.
-- psych (about 7 of 30): a function used as a condition or compared (`summary.psych.R` 377,
-  `print.psych.R` 14) and a function where a number is expected (`ICLUST.graph.R` 24).
-- raster (6): `calc` and `extractPolygons`.
-- ggplot2 (5): quick-plot, `guide-axis-stack`'s `lapply`, a missing `x` in `utilities-checks`.
-- One or two each in about 25 packages (gt formatter callbacks, reticulate's conda paths, forecast,
-  igraph, sandwich, spatstat's missing `f`, lavaan, pROC, boot).
+- VGAM's `eval(code)` in the running frame rewrites locals the checker still holds as `NULL`
+  (`cqo.fit.q` 505); modeling it would rewrite every visible local's slot at the call.
+- VGAM's `OriginC` after `match.arg` is one of two strings that both branches replace, but no
+  string literal type carries that (`family.rrr.R` 2910). VGAM's `family.bivariate.R` 2050 does
+  not reproduce in isolation.
+- raster's `extractPolygons` reads a captured `fun` whose join keeps the `NULL` default.
+- One or two each in about 25 other packages (gt formatter callbacks, reticulate's conda paths,
+  forecast, igraph, sandwich, spatstat's missing `f`, lavaan, pROC, boot), not reclassified.
 
 ### Checker gaps found in review
 

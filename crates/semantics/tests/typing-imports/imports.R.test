@@ -844,3 +844,10 @@ mpfr_from_bigz: <T, U> fn(x: T, [precBits]: U, ...: Any) -> T
 mpfr_from_text: <T> fn(text: T, ...: Any) -> T
 mpfr.is.0: <T> fn(x: T) -> logical
 298..302 warning[s3-method-signature] this method of `mpfr` takes `text` where the generic takes `x`, so a call that passes `x` by name fails for this class. Rename it to `x`
+
+#---- rlang_exprs_quotes_its_arguments
+# `exprs()` returns its arguments as code, so `lapply(guides, f)` inside it is never called.
+#namespace import(rlang)
+hashables <- function(title, guides, f) exprs(title, lapply(guides, f), sum("a"))
+#++++
+hashables: <T, U, V> fn(title: T, guides: U, f: V) -> Any

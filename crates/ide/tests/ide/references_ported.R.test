@@ -63,3 +63,29 @@ hint @5: integer
 hint @18: integer
 hint @48 -> integer
 hint @58: integer
+
+#---- a_zeallot_pattern_name_is_a_declaration
+swap <- function(values) {
+  range(values) %->% c(low, hi$0gh)
+  high
+}
+#++++
+hover 55..59: high: Any
+hover-definition: local 55..59
+definition 55..59
+references: 55..59*, 63..67
+rename: 2 edit(s)
+signature: fn(...: Any, [recursive]: logical, [use.names]: logical) -> Any
+parameters: [...: Any] | [recursive]: logical | [use.names]: logical
+action: Add inferred type annotation for `swap`
+  edit 16..16 -> "<T>"
+  edit 23..23 -> ": T"
+  edit 24..24 -> " -> Any"
+action: Add inferred type annotations for the whole file
+  edit 16..16 -> "<T>"
+  edit 23..23 -> ": T"
+  edit 24..24 -> " -> Any"
+completion (4): high, hist, hist.default, history
+hint @16<T>
+hint @23: T
+hint @24 -> Any
