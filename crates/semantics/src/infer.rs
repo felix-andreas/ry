@@ -925,13 +925,7 @@ impl<'db> InferenceTable<'db> {
         let mut returns = Vec::with_capacity(members.len());
         for &member in members {
             let ret = self.fresh_ty(db, Constraint::Unconstrained);
-            let each = Ty::new(
-                db,
-                TyKind::Function(&FunctionType {
-                    ret,
-                    ..*target
-                }),
-            );
+            let each = Ty::new(db, TyKind::Function(&FunctionType { ret, ..*target }));
             if !self.compatible_probe(db, member, each, depth + 1) {
                 self.rollback(snapshot);
                 return false;

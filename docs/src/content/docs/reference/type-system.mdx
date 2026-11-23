@@ -3354,7 +3354,9 @@ The details:
   values too. The false edge keeps every member, since an object may lack the class, except for
   `"error"` and `"condition"`, which drop a `condition` member there: in
   `tryCatch(f(), error = function(e) e)` the handler's value is a condition, so
-  `if (!inherits(res, "error")) res + 1` reads the expression's value.
+  `if (!inherits(res, "error")) res + 1` reads the expression's value. Every condition has the
+  one type `condition`, so a `warning = function(w) w` handler's value is dropped by an `"error"`
+  test too, and `res + 1` after it is not reported although R fails there.
 - An unannotated parameter whose runtime type the body inspects is `Unknown`, because code that
   inspects a type uses the value as a different type on each branch, so no one type describes it.
   The inspections are `typeof()`, `class()`, `mode()`, `storage.mode()`, `inherits()`,
@@ -3489,14 +3491,15 @@ exceptions and additions:
   nothing either, because no declaration says what it reads.
 - Passing the formal bare, under any name or position, to a project function's parameter that the
   callee may leave unread does not force it either. Such a parameter is optional without a default,
-  or tested with `missing()` in the callee's body. A missing formal passed on does not take the
-  callee's default, so in `table_of <- function(x, format) pick_format(format)`, `format` is
-  optional when `pick_format <- function(format = NULL)` tests `missing(format)`, and required when
-  `pick_format` never tests it. A caller that omits such an optional formal sees the type of the
-  callee's default, whether declared or written on its `missing()` path, so
-  `inverse <- function(m) pseudoinverse(m)` over `pseudoinverse <- function(m, tol) fast_svd(m, tol)`
-  returns `tol` as `double`. As for a formal's own `missing()` test, the order of the test and the
-  reads is not checked.
+  or tested with `missing()` in the callee's body. In R the callee sees the argument as missing, and
+  a declared default does not fill it in: in `table_of <- function(x, format) pick_format(format)`,
+  `format` is optional when `pick_format <- function(format = NULL)` tests `missing(format)`, and
+  required when `pick_format` never tests it, because reading it would stop. A caller that omits such
+  an optional formal sees the type of the callee's default. When the callee writes the value on its
+  `missing()` path, that is the value R reaches, so `inverse <- function(m) pseudoinverse(m)` over
+  `pseudoinverse <- function(m, tol) fast_svd(m, tol)` returns `tol` as `double`. A declared default
+  describes only a call that fails. As for a formal's own `missing()` test, the order of the test and
+  the reads is not checked.
 - Passing the formal bare to a function read from a field or a list element, as in
   `dist$quantile(p, parms)` or `handlers[[1]](p, parms)`, does not force it, because the checker
   cannot see what that function reads.

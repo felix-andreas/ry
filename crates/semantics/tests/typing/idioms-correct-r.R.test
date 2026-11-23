@@ -767,6 +767,20 @@ omitted: <T> fn(m: T) -> list{T, double}
 broken: Unknown
 430..433 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
+#---- a_missing_path_default_ends_with_its_if
+# A `missing()` branch that returns skips the join, so the later write under another test is a
+# rewrite of the formal, not a default that would keep `tol` bounded by `m * tol`.
+f <- function(m, tol) {
+  if (missing(tol)) {
+    tol <- 1
+    return(m * tol)
+  }
+  if (m > 3) tol <- "x"
+  m * tol
+}
+#++++
+f: <T: arithmetic, U> fn(m: T, [tol]: U) -> Unknown
+
 #---- forwarding_a_formal_to_a_required_parameter_still_requires_it
 scale_by <- function(m, factor) m * factor
 rescale <- function(m, factor) scale_by(m, factor)
@@ -1615,6 +1629,18 @@ why <- function(x) valid(x, verbose = TRUE)
 valid: <T> fn(x: Unknown, [verbose]: T) -> logical | character[]
 use: <T> fn(x: T) -> double
 why: <T> fn(x: T) -> logical | character[]
+
+#---- a_return_nested_in_the_tail_joins_the_unset_branch
+# The tail's own early return is one more value when `raw` is unset.
+pick <- function(x, raw = FALSE) {
+  if (raw) return(x)
+  if (is.null(x)) return("none") else length(x)
+}
+use <- function() pick(NULL) + 1
+#++++
+pick: <T, U> fn(x: T | NULL, [raw]: U) -> T | character | integer | NULL
+use: Unknown
+193..203 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character | integer`
 
 #---- a_second_guard_of_the_same_flag_selects_the_same_returns
 lookup <- function(table, key, both = FALSE) {

@@ -4505,15 +4505,18 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .expect("return frames stay balanced around body inference");
                 let return_ty = self.join_early_returns(&early_returns, trailing_ty, *body);
                 for (parameter, slot) in named.iter_mut().zip(&formal_slots) {
-                    if parameter.default.is_some() || !parameter.optional {
-                        continue;
-                    }
                     let writes: SmallVec<[Ty<'db>; 2]> = self
                         .missing_path_values
                         .iter()
                         .filter(|(written_slot, _)| Some(*written_slot) == *slot)
                         .map(|&(_, ty)| ty)
                         .collect();
+                    // Consumed, so a literal inferred again after a rolled-back probe starts over.
+                    self.missing_path_values
+                        .retain(|(written_slot, _)| Some(*written_slot) != *slot);
+                    if parameter.default.is_some() || !parameter.optional {
+                        continue;
+                    }
                     parameter.default = writes
                         .into_iter()
                         .reduce(|a, b| self.join_written_values(a, b));
@@ -4602,7 +4605,20 @@ impl<'db, 'a> Checker<'db, 'a> {
                 let (condition, then_branch, else_branch) =
                     (*condition, *then_branch, *else_branch);
                 let discarded = self.discarded_if.take() == Some(id);
-                self.infer_if(condition, then_branch, else_branch, discarded)
+                let defaults_before: SmallVec<[BindingId; 2]> =
+                    self.missing_path_defaults.iter().collect();
+                let ty = self.infer_if(condition, then_branch, else_branch, discarded);
+                // A diverging branch skips the join that reads the mark, and a later `if`
+                // writing the same formal must not take its write for a default.
+                let stale: SmallVec<[BindingId; 2]> = self
+                    .missing_path_defaults
+                    .iter()
+                    .filter(|slot| !defaults_before.contains(slot))
+                    .collect();
+                for slot in stale {
+                    self.missing_path_defaults.remove(slot);
+                }
+                ty
             }
             ExpressionKind::For {
                 variable,
@@ -9162,8 +9178,6 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// The refinement that drops `NULL` from a slot whose union holds it. A value of no known
-    /// shape is left alone, since a length test says nothing else about it.
     /// The edge where `slot` holds one element: each `T[]` member reads as `T` and `NULL` drops.
     /// `None` without a vector member, which leaves a `T | NULL` to the non-`NULL` edge.
     fn length_one_edge(&mut self, slot: BindingId) -> Option<Vec<SlotRefinement<'db>>> {
@@ -9189,6 +9203,8 @@ impl<'db, 'a> Checker<'db, 'a> {
         vector.then(|| vec![SlotRefinement::Narrow(slot, union_of(self.db, narrowed))])
     }
 
+    /// The refinement that drops `NULL` from a slot whose union holds it. A value of no known
+    /// shape is left alone, since a length test says nothing else about it.
     fn non_null_edge(&mut self, slot: BindingId) -> Option<Vec<SlotRefinement<'db>>> {
         let EnvEntry::Mono(current) = self.environment.get(slot)? else {
             return None;
@@ -12447,7 +12463,15 @@ impl<'db, 'a> Checker<'db, 'a> {
                     Some(value) => value?,
                     None => tail,
                 };
-                (name, negated, guard_ty, *self.recorded.get(&tail_value)?)
+                // A return nested in the tail (`if (is.null(x)) return("none") else n`) is one
+                // more value of the unset branch.
+                let tail_ty = *self.recorded.get(&tail_value)?;
+                let nested: Vec<EarlyReturn<'db>> = rest
+                    .into_iter()
+                    .filter(|early| returned(tail).is_none() || early.range != tail_range)
+                    .collect();
+                let unset_ty = self.join_early_returns(&nested, tail_ty, tail);
+                (name, negated, guard_ty, unset_ty)
             }
         };
         let formal = parameters.iter().find(|formal| formal.name == name)?;
@@ -18249,10 +18273,14 @@ impl<'db, 'a> Checker<'db, 'a> {
             let Some(default) = function.named.get(*formal).and_then(|field| field.default) else {
                 continue;
             };
+            // A call matched inside a probe is rolled back, but this list is not, so only a
+            // default free of inference variables is kept.
+            let default = self.table.resolve(self.db, default);
             if let Some(value) = argument.value
                 && let ExpressionKind::NameRef(_) = self.module.kind(value)
                 && let Some(&slot) = self.naming.resolutions.get(&value)
                 && self.no_default_formals.contains(slot)
+                && !contains_inference_var(self.db, default)
             {
                 self.missing_path_values.push((slot, default));
             }
@@ -18808,9 +18836,6 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// R's apply family calls `FUN(element, ...)`, so a callback with extra formals is
-    /// correct when the caller forwards the difference (`lapply(x, gsub, pattern = "a")`).
-    /// Simulates that invocation as a probe whose bindings commit only on success.
     /// The function type an open callback (`apply(v, 2, FUN = fun, na.rm = na.rm)`) takes.
     /// The library calls it with the arguments its `...` received as well, so the callback is
     /// variadic, and a later `fun(v, na.rm = na.rm)` in the same body is no wrong call.
@@ -18841,6 +18866,9 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
+    /// R's apply family calls `FUN(element, ...)`, so a callback with extra formals is
+    /// correct when the caller forwards the difference (`lapply(x, gsub, pattern = "a")`).
+    /// Simulates that invocation as a probe whose bindings commit only on success.
     fn forwarding_callback_probe(
         &mut self,
         expected_parameter: Ty<'db>,

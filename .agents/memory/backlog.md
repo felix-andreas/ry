@@ -776,6 +776,20 @@ false (7 per 100,000 lines). Remaining false classes, largest first:
 - One or two each in about 25 packages (gt formatter callbacks, reticulate's conda paths, forecast,
   igraph, sandwich, spatstat's missing `f`, lavaan, pROC, boot).
 
+### Checker gaps found in review
+
+- **A default is never checked against the bound the body puts on its formal**:
+  `function(m, tol = "abc") m * tol` and the same default written on the `missing()` path both
+  type as `<T: numeric> fn(m: T, [tol]: T) -> T`, and an omitted call returns `double`. The default
+  loop after the body skips a settled type that still holds a variable; checking a literal default
+  against the bound would report at the default.
+- **`class_fallback` reads a list, record or tuple as possibly classed**, so `1:chain_count(list(1))`
+  keeps no `NULL`. A list literal and a record or tuple type carry no class.
+- **The `inherits()` true edge drops vector members**, but stubs type some classed values as plain
+  vectors (`table` returns `integer[]`), and so does a `class(x) <- "k"` write.
+- **A formal passed to a field or `[[` callee is never forced** (`self$m(x)`, `handlers[[k]](x)`),
+  so a call that leaves it out is never reported.
+
 ## Open: where findings point, and what the type system still refuses
 
 Three simulated users probed the type checker itself rather than package coverage, working from the
