@@ -3114,7 +3114,7 @@ fn native_fix(
                 title: format!("Compute `{computed}` into `{name}` first"),
                 range: TextRange::new(TextSize::try_from(start).ok()?, range.end()),
                 replacement: format!("{name} <- {computed}{separator}{between}{name}"),
-                applicability: Applicability::Safe,
+                applicability: Applicability::Unsafe,
             })
         }
     }

@@ -1446,7 +1446,13 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
     // An effect-free call changes nothing a second run would see unless it warns, so only then
     // does it count as a call the code cannot make again. A replayed call counts, since running
     // the code again must give it the same value.
-    let effect_free = site.effect_free && replayed.is_none();
+    // A call R evaluates among the arguments may have an effect of its own, so the site is
+    // replayed, though it may still stand among another call's arguments.
+    let effect_free = site.effect_free
+        && replayed.is_none()
+        && !site.arguments.iter().any(|argument| {
+            matches!(argument.passed, Passed::Code) && argument.code.kind() == SexpType::Language
+        });
     let warnings = interp::conditions::warnings_raised();
     let heap = interp::heap();
     let mark = heap.handle_mark();
@@ -1504,11 +1510,8 @@ unsafe fn read_global(site: &RCall, ty: Type, out: *mut u64) -> Result<bool, Unw
         Global::Value(value) => value,
         // R forces a promise where the variable is read, such as a package variable's lazy-load
         // promise, which code attached from a typed code file meets on its first call.
-        Global::Promise(promise) => {
-            let value = interp::eval::force_promise(promise)?;
-            interp::heap().root(value);
-            value
-        }
+        // The forced promise keeps its value, so the binding keeps it alive.
+        Global::Promise(promise) => interp::eval::force_promise(promise)?,
         Global::Unbound | Global::Enclosing | Global::Active => {
             return Ok(false);
         }

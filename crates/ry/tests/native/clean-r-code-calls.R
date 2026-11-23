@@ -1,5 +1,5 @@
 # An argument of an R call made only of R code (literals, variables from outside the function,
-# and calls of R functions on them) is a promise R evaluates when the call asks for it.
+# and calls of base R functions on them) is a promise R evaluates when the call asks for it.
 alias Days = DataFrame{day: Date, v: double}
 #: character
 start <- "2026-01-01"
@@ -12,9 +12,13 @@ fixed <- function(rows: Days) -> Days {
 shout <- function(word: Str) -> Str {
   Str.from_r(paste(word, toupper(trimws(start)), nchar(rep(start, 2L)), sep = "|", collapse = ","))
 }
+member <- function(word: Str) -> Str {
+  Str.from_r(paste(word, any(start %in% month.name)))
+}
 rows <- DataFrame(day = as.Date(c("2025-12-31", "2026-01-02")), v = c(1, 2))
 print(since(rows))
 start <- "2025-01-01"
 print(since(rows))
 print(fixed(rows))
 cat(shout("a"), "\n")
+cat(member("b"), "\n")

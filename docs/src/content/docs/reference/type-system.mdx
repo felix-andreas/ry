@@ -5399,11 +5399,13 @@ Each argument of such a call is one of these:
 - an R literal, such as `42L`, `NA`, `NA_real_` or `2i`, which R evaluates itself;
 - a variable from outside the function that the function never assigns, such as a global. R reads
   it when the call runs, so the call sees the binding as it is then;
-- a call of an R function whose own arguments are only such literals, variables and calls, as in
-  `Expr.col("day") >= as.Date(start)`. R evaluates it lazily, when the outer call reads the
-  argument, as it would without ry. A function that reads the frame it is called from, such as
-  `get`, `assign`, `environment`, `parent.frame` or `sys.call`, cannot stand there, and neither can
-  an index such as `month.name[1L]`.
+- a call of a base R function, or a `%op%` operator of base R such as `%in%`, whose own arguments
+  are only such literals, variables and calls, as in `Expr.col("day") >= as.Date(start)`. R
+  evaluates it lazily, when the outer call reads the argument, as it would without ry. A function
+  that looks at the frame it is called from cannot stand there: `get`, `assign`, `environment`,
+  `parent.frame`, `sys.call`, `match.call`, `do.call`, `with`, `subset`, `stop`, `warning` and the
+  like. Neither can another package's function, which may look at that frame as `glue::glue` does
+  to find the variables it interpolates, nor an index such as `month.name[1L]`.
 
 The arguments of a table function follow the same rule, and so do the operands of an operator that
 builds an `Expr`, as in `Expr.col("units") >= Num.to_r(least)` or `Expr.col("price") > limit`; they
@@ -5482,7 +5484,9 @@ native
     into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
 ```
 
-`ry check --fix` makes that rewrite. It computes the inner call, converted, into a new variable on
+`ry check --fix --unsafe-fixes` makes that rewrite. It is unsafe because the outer function may
+read the argument late, more than once or not at all, and computed first the inner call runs once,
+before the statement. It computes the inner call, converted, into a new variable on
 a line of its own just before the statement, above any `#:` lines of the statement, and passes the
 variable. The variable is `value`, or `value2` and on when the function already uses that name:
 

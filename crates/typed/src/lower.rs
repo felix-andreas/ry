@@ -1307,25 +1307,33 @@ impl Lowering<'_> {
             SexpType::Symbol => {
                 self.lookup(code).is_none()
                     && !assigns(interp::bytecode::closure_body(self.closure), code)
+                    && !self
+                        .inlining
+                        .iter()
+                        .any(|&function| assigns(interp::bytecode::closure_body(function), code))
             }
-            // A call of an R function on such code, which R evaluates lazily, as the interpreter
-            // would. The checker accepts the same calls (`is_r_code` in `semantics::native`).
+            // A call of a base R function on such code, which R evaluates lazily, as the
+            // interpreter would. The checker accepts the same calls (`is_r_code` in
+            // `semantics::native`).
             SexpType::Language => {
                 let head = code.car();
                 let callable = if head.kind() == SexpType::Symbol {
                     let name = rvalues::symbol_name(head);
-                    (takes_r_arguments(&name) || name == "(")
-                        && !is_language_keyword(&name)
-                        && !reads_its_frame(&name)
+                    (name == "("
+                        || (takes_r_arguments(&name)
+                            && !is_language_keyword(&name)
+                            && !reads_its_frame(&name)))
                         && self.passes_code(head)
+                        && self.binds_in_base(head)
                 } else {
-                    // `pkg::f`, which R resolves when the promise runs.
+                    // `base::f`, which R resolves when the promise runs.
                     head.kind() == SexpType::Language
                         && head.car().kind() == SexpType::Symbol
                         && matches!(&*rvalues::symbol_name(head.car()), "::" | ":::")
                         && match rvalues::pairlist_items(head.cdr())[..] {
                             [(_, package), (_, function)] => {
                                 package.kind() == SexpType::Symbol
+                                    && &*rvalues::symbol_name(package) == "base"
                                     && function.kind() == SexpType::Symbol
                                     && !reads_its_frame(&rvalues::symbol_name(function))
                             }
@@ -1339,6 +1347,23 @@ impl Lowering<'_> {
             }
             _ => false,
         }
+    }
+
+    /// Whether R finds `symbol` from the function's environment in base R, whose functions do not
+    /// look at the frame they are called from unless `reads_its_frame` names them. A function of
+    /// another package may, as `glue::glue` does, and from a promise it would see the function's
+    /// enclosing environment instead of its frame.
+    unsafe fn binds_in_base(&self, symbol: Sexp) -> bool {
+        let heap = interp::heap();
+        let known = heap.known();
+        let mut env = self.env;
+        while env != known.empty_env {
+            if heap.frame_cell(env, symbol).is_some() {
+                return env == known.base_env || env == known.base_namespace;
+            }
+            env = env.enclosure();
+        }
+        false
     }
 
     /// Whether only R can evaluate the argument `code` of a base function: a literal with no ry
@@ -7181,8 +7206,6 @@ pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation>
     None
 }
 
-/// Walks from `start` to the binding a variable lookup of `symbol` finds, giving up at a promise
-/// or an active binding. The speculation's `function` is the bound value.
 /// What a read of a variable from outside a typed function finds.
 pub enum Global {
     /// The value of a binding in the global environment, a namespace or a package on the
@@ -7203,10 +7226,12 @@ pub unsafe fn global_binding(symbol: Sexp, start: Sexp) -> Global {
     let heap = interp::heap();
     let known = heap.known();
     let mut env = start;
+    // A namespace's parent is its imports environment, which binds what the package imports.
+    let mut imports = false;
     while env != known.empty_env {
+        let namespace = interp::envir::is_namespace(env);
         if let Some(cell) = heap.frame_cell(env, symbol) {
-            if env != known.global_env && !interp::envir::is_namespace(env) && !on_search_path(env)
-            {
+            if env != known.global_env && !namespace && !imports && !on_search_path(env) {
                 return Global::Enclosing;
             }
             if cell.has_gp(heap::object::gp::ACTIVE_BINDING) {
@@ -7221,6 +7246,7 @@ pub unsafe fn global_binding(symbol: Sexp, start: Sexp) -> Global {
             }
             return Global::Value(value.car());
         }
+        imports = namespace;
         env = env.enclosure();
     }
     Global::Unbound
@@ -7251,6 +7277,8 @@ pub fn reads_globally(ty: Type) -> bool {
     }
 }
 
+/// Walks from `start` to the binding a variable lookup of `symbol` finds, giving up at a promise
+/// or an active binding. The speculation's `function` is the bound value.
 pub unsafe fn resolve_value(symbol: Sexp, start: Sexp) -> Option<Speculation> {
     let heap = interp::heap();
     let mut env = start;

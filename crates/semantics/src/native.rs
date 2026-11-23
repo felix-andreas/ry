@@ -21,7 +21,7 @@ use {
             PatId, PatternKind, Symbol, UnaryOperator,
         },
         naming::{BindingKind, ItemNaming},
-        stubs::{is_native_function, is_ry_type},
+        stubs::{declaring_namespace, is_native_function, is_ry_type},
         types::{
             Atomic, Constraint, FunctionType, Name, NativeScalar, Ty, TyKind, TypeScheme,
             array_element, dict_entries,
@@ -71,6 +71,8 @@ pub enum NativeBlockerKind {
         outer: Symbol,
         inner: Symbol,
         conversion: Option<Conversion>,
+        /// The conversion gives an integer, which R takes back only through `to_r`.
+        integer: bool,
     },
     /// A read of a variable from outside the function that holds an R value.
     RVariable {
@@ -205,8 +207,15 @@ impl NativeBlockerKind {
                 outer,
                 inner,
                 conversion,
+                integer,
             } => {
                 let fix = match conversion {
+                    Some(conversion) if integer => format!(
+                        "Compute the inner call into a variable first, as in \
+                         `value <- {module}.from_r({inner}(...))`, and pass \
+                         `{module}.to_r(value)`",
+                        module = conversion.module()
+                    ),
                     Some(conversion) => format!(
                         "Compute the inner call into a variable first, as in \
                          `value <- {}.from_r({inner}(...))`, and pass the variable",
@@ -2134,14 +2143,15 @@ impl<'a, 'db> Judge<'a, 'db> {
                     if let Some(outer) = self.r_arguments
                         && let Some(inner) = self.r_function(value)
                     {
-                        let conversion = self.ty(id).and_then(|ty| self.conversion(ty));
-                        let fix = self.hoist_fix(conversion, true);
+                        let (conversion, integer) = self.nested_conversion(id);
+                        let fix = self.hoist_fix(conversion, true).filter(|_| !integer);
                         self.block_with_fix(
                             id,
                             NativeBlockerKind::NestedRCall {
                                 outer,
                                 inner,
                                 conversion,
+                                integer,
                             },
                             fix,
                         );
@@ -2281,8 +2291,8 @@ impl<'a, 'db> Judge<'a, 'db> {
     }
 
     /// Whether `id` is R code that R can evaluate in the function's enclosing environment just as
-    /// in its frame: a literal, a variable from outside the function, or a call of an R function
-    /// on such code. The typed core passes it as a promise, so it runs when R asks for it.
+    /// in its frame: a literal, a variable from outside the function, or a call of a base R
+    /// function on such code. The typed core passes it as a promise, so it runs when R asks for it.
     fn is_r_code(&self, id: ExprId) -> bool {
         let module = self.judged.module;
         match *module.kind(id) {
@@ -2292,15 +2302,38 @@ impl<'a, 'db> Judge<'a, 'db> {
                 self.lookup(name).is_none() && !self.locals.contains(&name)
             }
             ExpressionKind::Call { callee, arguments } => {
-                matches!(self.callee(callee), Callee::R(name, origin)
-                    if origin != ROrigin::Table && !reads_its_frame(name.as_str()))
-                    && named_values(module, &module[arguments]).all(|(_, value)| {
-                        matches!(*module.kind(value), ExpressionKind::Missing)
-                            || self.is_r_code(value)
-                    })
+                let base = match *module.kind(callee) {
+                    ExpressionKind::NameRef(name) => {
+                        matches!(self.callee(callee), Callee::R(_, ROrigin::Library))
+                            && self.is_base_function(name)
+                    }
+                    ExpressionKind::Namespace {
+                        package: Some(package),
+                        name: Some(name),
+                        ..
+                    } => package == "base" && !reads_its_frame(name.as_str()),
+                    _ => false,
+                };
+                base && named_values(module, &module[arguments]).all(|(_, value)| {
+                    matches!(*module.kind(value), ExpressionKind::Missing) || self.is_r_code(value)
+                })
             }
+            ExpressionKind::Binary {
+                operator: BinaryOperator::Special,
+                special_name: Some(name),
+                lhs,
+                rhs,
+            } => self.is_base_function(name) && self.is_r_code(lhs) && self.is_r_code(rhs),
             _ => false,
         }
+    }
+
+    /// Whether `name` is a function of base R that does not look at the frame it is called from.
+    /// A function of another package may, as `glue::glue` does to find the variables it
+    /// interpolates, and from a promise it would see the function's enclosing environment.
+    fn is_base_function(&self, name: Symbol) -> bool {
+        !reads_its_frame(name.as_str())
+            && declaring_namespace(self.judged.db, name.as_str()) == Some("base")
     }
 
     /// The R function `id` calls, when `id` is a call of one.
@@ -2331,13 +2364,15 @@ impl<'a, 'db> Judge<'a, 'db> {
         match usage {
             Use::Unused | Use::Converted => {}
             Use::Argument(outer) => {
-                let fix = self.hoist_fix(conversion, false);
+                let (conversion, integer) = self.nested_conversion(id);
+                let fix = self.hoist_fix(conversion, false).filter(|_| !integer);
                 self.block_with_fix(
                     id,
                     NativeBlockerKind::NestedRCall {
                         outer,
                         inner: function,
                         conversion,
+                        integer,
                     },
                     fix,
                 );
@@ -2355,12 +2390,47 @@ impl<'a, 'db> Judge<'a, 'db> {
     }
 
     fn column_read(&mut self, id: ExprId, usage: Use) {
-        if !matches!(usage, Use::Unused | Use::Converted) {
-            self.block_with_fix(
-                id,
-                NativeBlockerKind::ColumnRead,
-                Some(NativeFix::Convert(Conversion::List)),
-            );
+        if matches!(usage, Use::Unused | Use::Converted) {
+            return;
+        }
+        let fix = self
+            .ty(id)
+            .is_some_and(|ty| {
+                matches!(self.peel(ty).kind(self.judged.db), TyKind::Vector(_))
+                    && self.converts_plainly(ty, matches!(usage, Use::Argument(_)))
+            })
+            .then_some(NativeFix::Convert(Conversion::List));
+        self.block_with_fix(id, NativeBlockerKind::ColumnRead, fix);
+    }
+
+    /// The conversion that gives the value of `id`, an R call among another R call's arguments,
+    /// a ry type, and whether that type is an integer, which R takes back only through `to_r`.
+    fn nested_conversion(&self, id: ExprId) -> (Option<Conversion>, bool) {
+        let Some(ty) = self.ty(id) else {
+            return (None, false);
+        };
+        let conversion = self.conversion(ty);
+        (
+            conversion,
+            conversion.is_some() && !self.converts_plainly(ty, true),
+        )
+    }
+
+    /// Whether `from_r` takes the R value of type `ty` to a plain ry number, string, flag or list
+    /// of them, which `into_r` requires R to take back as it is: R's integers arrive as `I64`,
+    /// which crosses back only through `Num.to_r`.
+    fn converts_plainly(&self, ty: Ty<'db>, into_r: bool) -> bool {
+        let db = self.judged.db;
+        let scalar = |ty: Ty<'db>| match ty.kind(db) {
+            TyKind::Scalar(Atomic::Double | Atomic::Character | Atomic::Logical)
+            | TyKind::Native(NativeScalar::F64 | NativeScalar::Str | NativeScalar::Bool) => true,
+            TyKind::Scalar(Atomic::Integer) | TyKind::Native(NativeScalar::I64) => !into_r,
+            _ => false,
+        };
+        let ty = self.peel(ty);
+        match ty.kind(db) {
+            TyKind::Vector(item) | TyKind::NamedVector(item) => scalar(self.peel(*item)),
+            _ => scalar(ty) || array_element(db, ty).is_some_and(|item| scalar(self.peel(item))),
         }
     }
 

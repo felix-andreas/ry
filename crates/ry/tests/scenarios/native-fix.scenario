@@ -1,6 +1,7 @@
-# A user's native function calls R inside the arguments of a table function. `ry check --fix`
-# computes the inner call into a variable before the statement, the check comes back clean, and
-# the function runs.
+# A user's native function calls R inside the arguments of a table function. `ry check --fix
+# --unsafe-fixes` computes the inner call into a variable before the statement, the check comes
+# back clean, and the function runs. The fix is unsafe because R evaluates an argument only when
+# the function reads it, so computing it first can change when or whether it runs.
 
 requires ry-runtime
 
@@ -16,15 +17,15 @@ file keyed.R
 run ry check keyed.R
 expect exit 1
 expect stderr "this calls R's `toupper` inside the arguments of R's `DataFrame.filter`"
-expect stdout "1 fixable with `ry check --fix`"
+expect stdout "1 fixable with `ry check --fix --unsafe-fixes`"
 
-run ry check --fix keyed.R
+run ry check --fix --unsafe-fixes keyed.R
 expect exit 0
 expect stdout "applied 1 fix"
 expect file keyed.R "  value <- Str.from_r(toupper(key))\n  rows |> DataFrame.filter(Expr.col(\"k\") == value)"
 
 # The fix leaves nothing to fix, so a second pass changes nothing.
-run ry check --fix keyed.R
+run ry check --fix --unsafe-fixes keyed.R
 expect exit 0
 expect stdout "1 file checked, no problems"
 

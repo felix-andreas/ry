@@ -28,7 +28,7 @@ cat(announce(1.5), "\n")
 announce: fn(amount: F64) -> F64
 NULL
 117..143 error[native] this calls R's `format` inside the arguments of R's `cat`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
-  safe fix 113..143 "value <- Str.from_r(format(amount, nsmall = 2))\n  cat(value"
+  unsafe fix 113..143 "value <- Str.from_r(format(amount, nsmall = 2))\n  cat(value"
 
 #---- global_that_holds_an_r_value
 #~~~~ script.R
@@ -1057,9 +1057,10 @@ labels: fn(label: Str) -> Str
 
 #---- r_calls_on_r_code_as_r_arguments
 #~~~~ script.R
-# A call of an R function on literals and outside variables is R code too, which R evaluates
-# lazily among another call's arguments. A call on a local, or of a function that reads its
-# caller's frame, is not.
+# A call of a base R function on literals and outside variables is R code too, which R evaluates
+# lazily among another call's arguments. A call on a local, of a function that reads its caller's
+# frame, or of another package's function, which may read it as `str_glue` does, is not. The fix
+# for an inner call whose result is an integer would pass an `I64` to R, so there is none.
 alias Days = DataFrame{day: Date, v: double}
 #: character
 start <- "2026-01-01"
@@ -1075,6 +1076,15 @@ local_inner <- function(word: Str) -> Str {
 frame_inner <- function(word: Str) -> Str {
   Str.from_r(paste(word, get("start")))
 }
+member <- function(word: Str) -> Bool {
+  Bool.from_r(all(start %in% letters))
+}
+interpolated <- function(word: Str) -> Str {
+  Str.from_r(paste(word, stringr::str_glue("{start}")))
+}
+counted <- function(word: Str) -> Str {
+  Str.from_r(paste(word, nchar(word)))
+}
 #++++
 == script.R
 start: character
@@ -1082,13 +1092,22 @@ since: fn(rows: Days) -> Days
 shout: fn(word: Str) -> Str
 local_inner: fn(word: Str) -> Str
 frame_inner: fn(word: Str) -> Str
-291..296 warning[unused] `since` is assigned but never used
-395..400 warning[unused] `shout` is assigned but never used
-505..516 warning[unused] `local_inner` is assigned but never used
-586..597 warning[unused] `frame_inner` is assigned but never used
-568..581 error[native] this calls R's `toupper` inside the arguments of R's `paste`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(toupper(...))`, and pass the variable
-  safe fix 551..581 "value <- Str.from_r(toupper(word))\n  Str.from_r(paste(value"
-655..667 error[native] this calls R's `get` inside the arguments of R's `paste`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Call `get` in a statement of its own if only its effect matters, or make both calls in a function with an R type in its signature
+member: fn(word: Str) -> Bool
+interpolated: fn(word: Str) -> Str
+counted: fn(word: Str) -> Str
+463..468 warning[unused] `since` is assigned but never used
+567..572 warning[unused] `shout` is assigned but never used
+677..688 warning[unused] `local_inner` is assigned but never used
+758..769 warning[unused] `frame_inner` is assigned but never used
+844..850 warning[unused] `member` is assigned but never used
+925..937 warning[unused] `interpolated` is assigned but never used
+1028..1035 warning[unused] `counted` is assigned but never used
+740..753 error[native] this calls R's `toupper` inside the arguments of R's `paste`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(toupper(...))`, and pass the variable
+  unsafe fix 723..753 "value <- Str.from_r(toupper(word))\n  Str.from_r(paste(value"
+827..839 error[native] this calls R's `get` inside the arguments of R's `paste`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Call `get` in a statement of its own if only its effect matters, or make both calls in a function with an R type in its signature
+995..1012 error[strict] strict mode: `str_glue` has no declared type, so the code that uses it is not checked. Declare it in a `.Rtypes` stub, or annotate the result with `#: @if-unknown TYPE`
+995..1023 error[native] this calls R's `str_glue` inside the arguments of R's `paste`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Call `str_glue` in a statement of its own if only its effect matters, or make both calls in a function with an R type in its signature
+1093..1104 error[native] this calls R's `nchar` inside the arguments of R's `paste`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Num.from_r(nchar(...))`, and pass `Num.to_r(value)`
 
 #---- each_function_is_reported_where_the_value_first_appears
 #~~~~ script.R
@@ -1377,9 +1396,9 @@ ahead: fn(amount: F64) -> F64
 115..120 warning[unused] `table` is assigned but never used
 256..261 warning[unused] `ahead` is assigned but never used
 58..96 error[native] this calls R's `format` inside the arguments of R's `cat`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
-  safe fix 45..96 "value <- Str.from_r(format(amount, nsmall = 2))\n  cat(\"value\", value"
+  unsafe fix 45..96 "value <- Str.from_r(format(amount, nsmall = 2))\n  cat(\"value\", value"
 181..201 error[native] this calls R's `c` inside the arguments of R's `DataFrame`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- List.from_r(c(...))`, and pass the variable
-  safe fix 159..201 "value <- List.from_r(c(1, 2))\n  made <- DataFrame(a = value"
+  unsafe fix 159..201 "value <- List.from_r(c(1, 2))\n  made <- DataFrame(a = value"
 
 #---- table_forms_the_typed_core_does_not_compile
 #~~~~ script.R
@@ -1501,7 +1520,7 @@ with_key <- function(rows: Rows, key: Str) -> Rows {
 with_key: fn(rows: Rows, key: Str) -> Rows
 48..56 warning[unused] `with_key` is assigned but never used
 145..169 error[native] this calls R's `toupper` inside the arguments of R's `DataFrame.filter`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(toupper(...))`, and pass the variable
-  safe fix 103..169 "value <- Str.from_r(toupper(key))\n  rows |> DataFrame.filter(Expr.col(\"k\") == value"
+  unsafe fix 103..169 "value <- Str.from_r(toupper(key))\n  rows |> DataFrame.filter(Expr.col(\"k\") == value"
 
 #---- a_moved_call_takes_a_name_the_function_does_not_use
 #~~~~ script.R
@@ -1516,9 +1535,9 @@ labelled <- function(amount: F64, value: Str) -> Str {
 labelled: fn(amount: F64, value: Str) -> Str
 0..8 warning[unused] `labelled` is assigned but never used
 97..123 error[native] this calls R's `format` inside the arguments of R's `cat`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
-  safe fix 93..123 "value3 <- Str.from_r(format(amount, nsmall = 2))\n  cat(value3"
+  unsafe fix 93..123 "value3 <- Str.from_r(format(amount, nsmall = 2))\n  cat(value3"
 145..171 error[native] this calls R's `format` inside the arguments of R's `cat`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
-  safe fix 133..171 "value4 <- Str.from_r(format(amount, nsmall = 3))\n  cat(value2, value4"
+  unsafe fix 133..171 "value4 <- Str.from_r(format(amount, nsmall = 3))\n  cat(value2, value4"
 
 #---- a_moved_call_goes_above_the_annotation_of_its_statement
 #~~~~ script.R
@@ -1533,7 +1552,7 @@ kept <- function(rows: Rows, key: Str) -> Rows {
 kept: fn(rows: Rows, key: Str) -> Rows
 48..52 warning[unused] `kept` is assigned but never used
 159..183 error[native] this calls R's `toupper` inside the arguments of R's `DataFrame.filter`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(toupper(...))`, and pass the variable
-  safe fix 99..183 "value <- Str.from_r(toupper(key))\n  #: Rows\n  picked <- DataFrame.filter(rows, Expr.col(\"k\") == value"
+  unsafe fix 99..183 "value <- Str.from_r(toupper(key))\n  #: Rows\n  picked <- DataFrame.filter(rows, Expr.col(\"k\") == value"
 
 #---- a_moved_call_on_a_line_with_other_statements_ends_with_a_semicolon
 #~~~~ script.R
@@ -1543,7 +1562,7 @@ shown <- function(amount: F64) -> F64 { cat(format(amount), "\n"); amount }
 shown: fn(amount: F64) -> F64
 0..5 warning[unused] `shown` is assigned but never used
 44..58 error[native] this calls R's `format` inside the arguments of R's `cat`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
-  safe fix 40..58 "value <- Str.from_r(format(amount)); cat(value"
+  unsafe fix 40..58 "value <- Str.from_r(format(amount)); cat(value"
 
 #---- a_nested_r_call_that_might_not_run_is_not_moved
 #~~~~ script.R
@@ -1618,4 +1637,4 @@ long <- function(amount: F64) -> Bool {
 long: fn(amount: F64) -> Bool
 92..96 warning[unused] `long` is assigned but never used
 155..169 error[native] this calls R's `format` inside the arguments of R's `nchar`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
-  safe fix 134..169 "value <- Str.from_r(format(amount))\n  if (Num.from_r(nchar(value"
+  unsafe fix 134..169 "value <- Str.from_r(format(amount))\n  if (Num.from_r(nchar(value"
