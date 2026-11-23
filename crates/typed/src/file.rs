@@ -3140,19 +3140,21 @@ unsafe fn build_site_inner(
 ) -> Result<RCall, &'static str> {
     const UNBUILT: &str = "the session cannot build an R call it makes";
     const UNPLACED: &str = "an R call it makes is not where the file says in its function's body";
-    let placed =
-        |place: &Place, resolved: &mut FxHashMap<u32, Speculation>| -> Result<Sexp, &'static str> {
-            let holder = match place.holder {
-                None => closure,
-                Some(lookup) => found(mapped, resolved, lookup)?.function,
-            };
-            if holder.kind() != SexpType::Closure {
-                return Err(UNPLACED);
-            }
-            follow(bytecode::closure_body(holder), &place.steps)
-                .filter(|call| call.kind() == SexpType::Language)
-                .ok_or(UNPLACED)
+    let placed = |place: &Place,
+                  resolved: &mut FxHashMap<u32, Speculation>,
+                  kind: SexpType|
+     -> Result<Sexp, &'static str> {
+        let holder = match place.holder {
+            None => closure,
+            Some(lookup) => found(mapped, resolved, lookup)?.function,
         };
+        if holder.kind() != SexpType::Closure {
+            return Err(UNPLACED);
+        }
+        follow(bytecode::closure_body(holder), &place.steps)
+            .filter(|code| code.kind() == kind)
+            .ok_or(UNPLACED)
+    };
     let heap = interp::heap();
     let strings = &mapped.parsed.strings;
     // Everything the site holds lives as long as the code that may use it, which is the session.
@@ -3165,7 +3167,7 @@ unsafe fn build_site_inner(
      -> Result<Conversion, &'static str> {
         let function = found(mapped, resolved, conversion.function)?.function;
         Ok(Conversion {
-            call: placed(&conversion.call, resolved)?,
+            call: placed(&conversion.call, resolved, SexpType::Language)?,
             function,
             checked: conversion.checked.map(|item| live_item(item, &mapped.live)),
             default: conversion.default.map(|ty| live_type(ty, &mapped.live)),
@@ -3206,9 +3208,15 @@ unsafe fn build_site_inner(
         Some(lookup) => found(mapped, resolved, lookup)?.function,
         None => rvalues::nil(),
     };
+    // A global's site is the variable the body reads, not a call.
+    let read = match site.result {
+        SiteResult::Global(_) => SexpType::Symbol,
+        _ => SexpType::Language,
+    };
+    let call = placed(&site.call, resolved, read)?;
     Ok(RCall {
         function,
-        call: placed(&site.call, resolved)?,
+        call,
         env: live_env(mapped, &site.env)
             .ok_or("an R call it makes runs in a missing environment")?,
         arguments,

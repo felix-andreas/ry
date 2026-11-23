@@ -1502,7 +1502,14 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
 unsafe fn read_global(site: &RCall, ty: Type, out: *mut u64) -> Result<bool, Unwind> {
     let value = match lower::global_binding(site.call, site.env) {
         Global::Value(value) => value,
-        Global::Unbound | Global::Enclosing | Global::Promise(_) | Global::Active => {
+        // R forces a promise where the variable is read, such as a package variable's lazy-load
+        // promise, which code attached from a typed code file meets on its first call.
+        Global::Promise(promise) => {
+            let value = interp::eval::force_promise(promise)?;
+            interp::heap().root(value);
+            value
+        }
+        Global::Unbound | Global::Enclosing | Global::Active => {
             return Ok(false);
         }
     };
@@ -1637,10 +1644,7 @@ unsafe fn apply_r(site: &RCall, mut words: *const u64, env: Sexp) -> Result<Sexp
         let promise = match argument.passed {
             // A literal is its own value, as the interpreter passes it.
             Passed::Code
-                if !matches!(
-                    argument.code.kind(),
-                    SexpType::Symbol | SexpType::Language
-                ) =>
+                if !matches!(argument.code.kind(), SexpType::Symbol | SexpType::Language) =>
             {
                 interp::eval::forced_promise(argument.code, argument.code)?
             }
