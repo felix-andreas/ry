@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    for path in files_with_suffix(&crates_root, ".Rtypes")? {
+    for path in files_with_suffix(&repo_root.join("types"), ".Rtypes")? {
         sources.push(read_text_lossy(&path)?);
     }
 

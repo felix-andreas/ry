@@ -210,6 +210,15 @@ impl<'db> InferenceTable<'db> {
         }
     }
 
+    /// Whether `var` is a variable of this table that nothing has bound or merged, which is
+    /// the only kind a resolved type may still hold.
+    pub fn is_unbound_root(&self, var: InferenceVar) -> bool {
+        matches!(
+            self.entries.get(var.0 as usize),
+            Some(Entry::Unbound { .. })
+        )
+    }
+
     pub fn entry(&self, var: InferenceVar) -> &Entry<'db> {
         &self.entries[self.find(var).0 as usize]
     }

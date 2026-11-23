@@ -697,6 +697,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A package `ry load` loaded counts as a pkgload dev package
 - Typed benchmark templates do R-level work in boundary functions
 - ry test forks its workers
+- Analysis oracles compare two computations that must agree
 - `ry debug type FILE:LINE:COLUMN` prints the hover at a position
 
 ## Docs, process and positioning

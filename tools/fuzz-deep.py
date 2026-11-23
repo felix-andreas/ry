@@ -64,7 +64,13 @@ TEST = re.compile(r"#\[test\]\s*((?:#\[[^\]]*\]\s*)*)fn (\w+)\(\)\s*\{")
 # A `harness = false` test binary's own `main`, which runs its seeds when started bare.
 MAIN = re.compile(r"\bfn (main)\(\)[^{]*\{")
 FUNCTION = re.compile(r"\bfn (\w+)\s*(?:<[^>]*>)?\([^)]*\)[^{;]*\{")
-SEEDED = re.compile(r"\b(?:for_each_seed|for_each_session|fuzz_seeds|fuzz_iterations)\(")
+SEEDED = re.compile(
+    r"\b(?:for_each_seed|for_each_seed_on_named_threads|for_each_session|for_each_stub_source"
+    r"|fuzz_seeds|fuzz_iterations)\("
+)
+# Packages whose harnesses run no `ry` binary and no runtime from `target/debug`, so they build
+# with `[profile.fuzz]`: optimized, with debug assertions and overflow checks.
+FUZZ_PROFILE_PACKAGES = {"syntax", "semantics", "ide", "format", "sniff"}
 REPLAY = re.compile(r"replay with\n\s+(.+)")
 
 
@@ -260,6 +266,8 @@ def build(harnesses):
     executables = {}
     for package, names in sorted(targets.items()):
         command = ["cargo", "test", "-q", "-p", package, "--no-run", "--message-format=json"]
+        if package in FUZZ_PROFILE_PACKAGES:
+            command += ["--profile", "fuzz"]
         for name in sorted(names, key=lambda name: name or ""):
             command += ["--lib"] if name is None else ["--test", name]
         built = subprocess.run(command, cwd=ROOT, env=environment, check=True,

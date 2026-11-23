@@ -1,5 +1,5 @@
-//! Each generated case is one seed of [`for_each_seed`], so `FUZZ_SEED` replays a failure and
-//! `FUZZ_ITERS` sets the budget.
+//! Each generated case is one seed of [`for_each_seed_on_named_threads`], so `FUZZ_SEED`
+//! replays a failure and `FUZZ_ITERS` sets the budget.
 
 use {
     format::{Config, check_format_invariants, check_range_format_invariants, format},
@@ -7,8 +7,9 @@ use {
     syntax::{
         parse,
         testing::{
-            SplitMix64, corpus_sample, fixture_case_sources, for_each_seed, generate_program,
-            mutate_bytes, mutate_seed, program_corpus_sources, small_edit, token_soup,
+            SplitMix64, corpus_sample, fixture_case_sources, for_each_seed_on_named_threads,
+            generate_program, mutate_bytes, mutate_seed, program_corpus_sources, small_edit,
+            token_soup,
         },
     },
 };
@@ -262,14 +263,20 @@ fn fuzz_fixture_edits() {
 
 #[test]
 fn fuzz_corpus_seeded() {
-    let Some(files) = corpus_sample(48) else {
-        eprintln!("fuzz_corpus_seeded: corpus not fetched; skipping");
-        return;
-    };
+    // Without the fetched corpus the arm runs on the in-tree programs, so it never passes
+    // without checking anything.
+    let files = corpus_sample(48).unwrap_or_else(|| {
+        eprintln!("fuzz_corpus_seeded: corpus not fetched; mutating the in-tree programs");
+        program_corpus_sources()
+            .into_iter()
+            .map(|(_, source)| source)
+            .collect()
+    });
+    assert!(!files.is_empty(), "fuzz_corpus_seeded: no source to mutate");
     for source in &files {
         check_invariants(source);
     }
-    for_each_seed(ITERATIONS / 3, |seed| {
+    for_each_seed_on_named_threads(ITERATIONS / 3, |seed| {
         let mut rng = SplitMix64(0xF0_44_A7 ^ seed);
         let source = &files[rng.below(files.len())];
         check_invariants(&String::from_utf8_lossy(&mutate_bytes(&mut rng, source)));
@@ -287,21 +294,21 @@ fn fuzz_deep() {
 }
 
 fn run_token_soup(budget: usize) {
-    for_each_seed(budget, |seed| {
+    for_each_seed_on_named_threads(budget, |seed| {
         let mut rng = SplitMix64(0xF0_50_42 ^ seed);
         check_invariants(&token_soup(&mut rng, ALPHABET));
     });
 }
 
 fn run_seed_mutations(budget: usize) {
-    for_each_seed(budget, |seed| {
+    for_each_seed_on_named_threads(budget, |seed| {
         let mut rng = SplitMix64(0xF0_5E_ED ^ seed);
         check_invariants(&mutate_seed(&mut rng, SEEDS, 16));
     });
 }
 
 fn run_generated_programs(budget: usize) {
-    for_each_seed(budget, |seed| {
+    for_each_seed_on_named_threads(budget, |seed| {
         let mut rng = SplitMix64(0xF0_6E_4E ^ seed);
         let program = generate_program(&mut rng);
         let donor = SEEDS[rng.below(SEEDS.len())];
@@ -318,7 +325,7 @@ fn run_generated_programs(budget: usize) {
 
 fn run_fixture_edits(budget: usize) {
     let cases = fixture_case_sources();
-    for_each_seed(budget, |seed| {
+    for_each_seed_on_named_threads(budget, |seed| {
         let mut rng = SplitMix64(0xF0_F1_C5 ^ seed);
         let (_, source) = &cases[rng.below(cases.len())];
         let (_, donor) = &cases[rng.below(cases.len())];

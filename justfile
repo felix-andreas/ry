@@ -103,7 +103,8 @@ ci-stress seed="0":
     FUZZ_SEED={{ seed }} just gc-torture repeat
     just fuzz-differential $(({{ seed }} * 300)) 300 ry-tier0,ry-jit,ry-repeat-gctorture-seeded
 
-# Workspace tests; `zed_ry` needs a wasm toolchain, so it is excluded.
+# Workspace tests; `zed_ry` needs a wasm toolchain, so it is excluded. They build with the dev
+# profile, not `[profile.fuzz]`, because the runtime suites run `target/debug/ry` and its `libR`.
 battery *args:
     cargo test --workspace --exclude zed_ry {{ args }}
 

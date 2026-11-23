@@ -57,7 +57,7 @@ use {
         },
         project_global_names,
         stubs::{
-            StubSources, namespace_exports, namespace_known, shipped_export_manifests,
+            StubSources, after_keyword, namespace_exports, namespace_known, shipped_export_manifests,
             shipped_stub_sources, stub_source_problems,
         },
     },
@@ -4036,7 +4036,7 @@ fn stub_semantic_tokens(text: &str, encoding: PositionEncoding) -> Vec<lsp_types
                 class,
             ));
         };
-        if let Some(rest) = trimmed.strip_prefix("@type") {
+        if let Some(rest) = after_keyword(trimmed, "@type") {
             push(&mut spans, indent, "@type".len(), SemanticClass::Decorator);
             let name = rest.trim_start();
             if !name.is_empty() {
@@ -4185,7 +4185,7 @@ fn stub_type_definition(text: &str, offset: TextSize) -> Option<TextRange> {
     let index = LineIndex::new(text);
     for (line_number, raw_line) in text.lines().enumerate() {
         let trimmed = raw_line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("@type")
+        if let Some(rest) = after_keyword(trimmed, "@type")
             && rest.trim() == word
         {
             let indent = raw_line.len() - trimmed.len();
