@@ -732,7 +732,7 @@ impl<'db> RecordedTypes<'db> {
             .types
             .get_mut(id.index())
             .unwrap_or_else(|| panic!("recorded type for {id:?} outside the item's module"));
-        let previous = mem::replace(slot, Some(ty));
+        let previous = slot.replace(ty);
         if self.probes > 0 {
             self.undo.push((id, previous));
         }
@@ -15765,23 +15765,34 @@ impl<'db, 'a> Checker<'db, 'a> {
         let matched = match_formals(self.module, arguments, &["test", "yes", "no"]);
         let test = matched[0]?;
         let scalar_test = match self.structural(*self.recorded.get(&test)?).kind(db) {
-            // A comparison on a matrix types as a scalar (`Compare.matrix`), so a scalar test
-            // counts only when its operands are scalars too.
+            // A comparison on anything but scalars and plain vectors types as a scalar
+            // (`Compare.matrix`), so a scalar test is a scalar only over scalar operands, a
+            // vector over vector operands or ones of unknown shape, and undetermined over a
+            // matrix.
             TyKind::Scalar(_) => {
                 let operands: SmallVec<[ExprId; 2]> = match module.kind(test) {
                     ExpressionKind::Unary { operand, .. } => smallvec![*operand],
                     ExpressionKind::Binary { lhs, rhs, .. } => smallvec![*lhs, *rhs],
                     _ => SmallVec::new(),
                 };
+                let mut scalar = true;
                 for operand in operands {
                     let ty = *self.recorded.get(&operand)?;
-                    if !matches!(self.structural(ty).kind(db), TyKind::Scalar(_)) {
-                        return None;
+                    match self.structural(ty).kind(db) {
+                        TyKind::Scalar(_) => {}
+                        TyKind::Vector(element)
+                            if matches!(element.kind(db), TyKind::Scalar(_)) =>
+                        {
+                            scalar = false;
+                        }
+                        TyKind::Unknown | TyKind::Any | TyKind::Var(_) => scalar = false,
+                        _ => return None,
                     }
                 }
-                true
+                scalar
             }
             TyKind::Vector(element) if matches!(element.kind(db), TyKind::Scalar(_)) => false,
+            TyKind::Unknown | TyKind::Any | TyKind::Var(_) => false,
             _ => return None,
         };
         let mut branches: SmallVec<[Ty<'db>; 2]> = SmallVec::new();
