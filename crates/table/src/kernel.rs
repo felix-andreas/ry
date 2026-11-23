@@ -844,6 +844,48 @@ fn integer_arithmetic(
     }))
 }
 
+/// R's `%%` on doubles, as GNU R's `myfmod` computes it: `NaN` for a zero divisor, the
+/// dividend itself (or the sum of both when their signs differ) for a divisor so large that
+/// `x / y` loses the quotient, such as an infinite one, and otherwise the remainder that takes the
+/// divisor's sign.
+pub(crate) fn r_modulo(x1: f64, x2: f64) -> f64 {
+    if x2 == 0.0 {
+        return f64::NAN;
+    }
+    if x2.abs() * f64::EPSILON > 1.0 && x1.is_finite() && x1.abs() <= x2.abs() {
+        return if x1.abs() == x2.abs() {
+            0.0
+        } else if (x1 < 0.0 && x2 > 0.0) || (x2 < 0.0 && x1 > 0.0) {
+            x1 + x2
+        } else {
+            x1
+        };
+    }
+    // GNU R computes both differences in long double; a fused multiply-add rounds each once, as
+    // closely, so `5 %% 0.1` keeps the representation error of `0.1` (0.0999...) as R's does.
+    let rest = (-(x1 / x2).floor()).mul_add(x2, x1);
+    (-(rest / x2).floor()).mul_add(x2, rest)
+}
+
+/// R's `%/%` on doubles, as GNU R's `myfloor` computes it: the plain quotient where it is not
+/// finite or too large to floor, `-1` or `0` where it is smaller than one in magnitude, and
+/// otherwise the floored quotient corrected by the remainder.
+pub(crate) fn r_floor_divide(x1: f64, x2: f64) -> f64 {
+    let quotient = x1 / x2;
+    if x2 == 0.0 || quotient.abs() * f64::EPSILON > 1.0 || !quotient.is_finite() {
+        return quotient;
+    }
+    if quotient.abs() < 1.0 {
+        return if quotient < 0.0 || (x1 < 0.0 && x2 > 0.0) || (x1 > 0.0 && x2 < 0.0) {
+            -1.0
+        } else {
+            0.0
+        };
+    }
+    let rest = (-quotient.floor()).mul_add(x2, x1);
+    quotient.floor() + (rest / x2).floor()
+}
+
 fn double_arithmetic(
     op: BinaryOp,
     left: Operand<f64>,
@@ -863,9 +905,8 @@ fn double_arithmetic(
         // of R's `NA_real_`, which a null slot may still hold, so both cases are decided here.
         BinaryOp::Power if lhs == 1.0 || rhs == 0.0 => 1.0,
         BinaryOp::Power => lhs.powf(rhs),
-        BinaryOp::IntegerDivide => (lhs / rhs).floor(),
-        // R's `%%` takes the sign of the divisor.
-        BinaryOp::Modulo => lhs - (lhs / rhs).floor() * rhs,
+        BinaryOp::IntegerDivide => r_floor_divide(lhs, rhs),
+        BinaryOp::Modulo => r_modulo(lhs, rhs),
         _ => f64::NAN,
     };
     if !matches!(
@@ -880,19 +921,20 @@ fn double_arithmetic(
     ) {
         return None;
     }
-    // `NA^0` and `1^NA` are 1 in R, so a power is known whenever a known side decides it.
-    let power_decides =
-        |side: &Side<f64>, validity: &Option<Bitmap>, decides: fn(f64) -> bool| match side {
-            Side::Scalar(Some(value)) => Some(Bitmap::new_with_value(decides(*value), len)),
-            Side::Scalar(None) => Some(Bitmap::new_zeroed(len)),
-            Side::Array(values) => {
-                let hits = pack_map(len, values, decides);
-                Some(match validity {
-                    Some(validity) => &hits & validity,
-                    None => hits,
-                })
-            }
-        };
+    // A known side may decide the result whatever the other holds: `NA^0` and `1^NA` are 1 in R,
+    // and `NA %% 0` is `NaN`.
+    let decides = |side: &Side<f64>, validity: &Option<Bitmap>, decides: fn(f64) -> bool| match side
+    {
+        Side::Scalar(Some(value)) => Some(Bitmap::new_with_value(decides(*value), len)),
+        Side::Scalar(None) => Some(Bitmap::new_zeroed(len)),
+        Side::Array(values) => {
+            let hits = pack_map(len, values, decides);
+            Some(match validity {
+                Some(validity) => &hits & validity,
+                None => hits,
+            })
+        }
+    };
     if scalar {
         let (lhs, rhs) = match (&left.side, &right.side) {
             (Side::Scalar(lhs), Side::Scalar(rhs)) => (*lhs, *rhs),
@@ -902,6 +944,7 @@ fn double_arithmetic(
             (Some(lhs), Some(rhs)) => Some(apply(lhs, rhs)),
             (Some(lhs), None) if op == BinaryOp::Power && lhs == 1.0 => Some(1.0),
             (None, Some(rhs)) if op == BinaryOp::Power && rhs == 0.0 => Some(1.0),
+            (None, Some(rhs)) if op == BinaryOp::Modulo && rhs == 0.0 => Some(f64::NAN),
             _ => None,
         };
         return Some(Value::Scalar(Scalar::Double(value)));
@@ -920,9 +963,12 @@ fn double_arithmetic(
         };
         let both = &side_validity(&left) & &side_validity(&right);
         if op == BinaryOp::Power {
-            let one = power_decides(&left.side, &left.validity, |value| value == 1.0)?;
-            let zero = power_decides(&right.side, &right.validity, |value| value == 0.0)?;
+            let one = decides(&left.side, &left.validity, |value| value == 1.0)?;
+            let zero = decides(&right.side, &right.validity, |value| value == 0.0)?;
             Some(&(&both | &one) | &zero)
+        } else if op == BinaryOp::Modulo {
+            let zero = decides(&right.side, &right.validity, |value| value == 0.0)?;
+            Some(&both | &zero)
         } else {
             Some(both)
         }

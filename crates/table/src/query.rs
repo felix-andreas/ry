@@ -13,7 +13,7 @@ use {
         ColumnType, Error, Result, RowIndex, Schema, Table,
         factor::{self, Levels},
         group, join,
-        kernel::{Evaluator, Vector, scatter, scatters, selected_rows},
+        kernel::{self, Evaluator, Vector, scatter, scatters, selected_rows},
     },
     polars::prelude::{
         AnyValue, AsOfOptions, AsofStrategy, ChunkAgg, Column, DataFrame, DataType, ExplodeOptions,
@@ -3438,18 +3438,15 @@ impl Lowering<'_> {
                     .then(lit(polars::prelude::Null {}).cast(DataType::Int32))
                     .otherwise(l.floor_div(r))
             }
-            BinaryOp::IntegerDivide => self
-                .numeric(left, kind)?
-                .floor_div(self.numeric(right, kind)?),
-            BinaryOp::Modulo => {
-                // R's `%%` takes the sign of the divisor: x - floor(x / y) * y.
-                let (l, r) = (
-                    self.numeric(left, ColumnType::Double)?,
-                    self.numeric(right, ColumnType::Double)?,
-                );
-                let value = l.clone() - l.floor_div(r.clone()) * r;
-                value.cast(dtype(kind))
-            }
+            BinaryOp::IntegerDivide => r_floor_divide(
+                self.numeric(left, ColumnType::Double)?,
+                self.numeric(right, ColumnType::Double)?,
+            ),
+            BinaryOp::Modulo => r_modulo(
+                self.numeric(left, ColumnType::Double)?,
+                self.numeric(right, ColumnType::Double)?,
+            )
+            .cast(dtype(kind)),
             BinaryOp::Equal
             | BinaryOp::NotEqual
             | BinaryOp::Less
@@ -3481,6 +3478,48 @@ impl Lowering<'_> {
             BinaryOp::Or => self.logical(left)?.or(self.logical(right)?),
         })
     }
+}
+
+/// R's `%%` on doubles, [`kernel::r_modulo`] on every row.
+fn r_modulo(x1: PolarsExpr, x2: PolarsExpr) -> PolarsExpr {
+    rowwise_double(x1, x2, kernel::r_modulo, true)
+}
+
+/// R's `%/%` on doubles, [`kernel::r_floor_divide`] on every row.
+fn r_floor_divide(x1: PolarsExpr, x2: PolarsExpr) -> PolarsExpr {
+    rowwise_double(x1, x2, kernel::r_floor_divide, false)
+}
+
+/// `apply` on each row of two double columns, either of which may be a single value. A row with a
+/// missing value is missing, except that with `zero_decides` a zero divisor gives `NaN` whatever
+/// the dividend, as R's `NA %% 0` does. The kernel's lowering of the same operators shares
+/// `apply`, so the two never disagree on R's edge cases.
+fn rowwise_double(
+    x1: PolarsExpr,
+    x2: PolarsExpr,
+    apply: fn(f64, f64) -> f64,
+    zero_decides: bool,
+) -> PolarsExpr {
+    x1.map_many(
+        move |columns: &mut [Column]| {
+            let left = columns[0].as_materialized_series().f64()?.clone();
+            let right = columns[1].as_materialized_series().f64()?.clone();
+            let len = left.len().max(right.len());
+            let at = |values: &Float64Chunked, row: usize| {
+                values.get(if values.len() == 1 { 0 } else { row })
+            };
+            let values: Float64Chunked = (0..len)
+                .map(|row| match (at(&left, row), at(&right, row)) {
+                    (Some(lhs), Some(rhs)) => Some(apply(lhs, rhs)),
+                    (None, Some(rhs)) if zero_decides && rhs == 0.0 => Some(f64::NAN),
+                    _ => None,
+                })
+                .collect();
+            Ok(values.with_name(left.name().clone()).into_column())
+        },
+        &[x2],
+        |_, fields| Ok(Field::new(fields[0].name().clone(), DataType::Float64)),
+    )
 }
 
 /// An `Int64` result narrowed to `Int32`, with `NA` where it does not fit, as R's integer

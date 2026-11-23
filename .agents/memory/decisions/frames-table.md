@@ -277,3 +277,23 @@ The table is a Polars `DataFrame` held by the `table` crate; this entry holds th
 - **Columns come from the constructor's arguments** (`constructed_frame`): a named argument or a bare variable is one column when its type makes exactly one (`makes_one_column`). A list, matrix, frame or record spreads into several, so it, a forwarded `...`, a repeated or non-syntactic name (R mangles it), and `stringsAsFactors`/`keep.rownames` not literally `FALSE` give unknown columns rather than a guess.
 - **Writes:** `f$x <- v` and `f[["x"]] <- v` update one column; any other replacement step forgets the columns, because `names<-`, `[<-` and positional `[[<-` may rename or retype any of them. By-reference `setDT`/`setDF` rebind with the new class and the same columns, and `set`/`setattr` forget them (`refine_table_call`, recorded as writes in `naming.rs` and `semantics.rs`).
 - **Only base's or data.table's own constructor counts:** a project's `data.frame` function is an ordinary call, and `data.table::data.table` sharpens only when the project declares data.table (otherwise its stubs are not loaded and the callee is `Unknown`).
+
+## A verb taking columns through `...` has no formal before them
+
+**Status:** built.
+
+- **`DataFrame.select`, `with_columns`, `filter`, `group_by`, `sort`, `GroupBy.agg` and `Expr.over`** (and their `LazyFrame.`/`LazyGroupBy.` aliases) are `function(...)`, plus an exact-match `descending` after `...` on `sort`. The table, group or expression is the first element of `...`, taken by position (`subject` in `crates/frames/src/dataframe.rs`). With `function(df, ...)`, R's partial matching bound a column named `d` to `df` (and `g` to `group`), and a column named exactly `df` could never be written. Per-verb renames of the formal (`.df`) would only move the collision, so no formal precedes the columns at all.
+- `types/ry.Rtypes` keeps `df`/`group`/`expr` as the first parameter's name: it documents the position, and naming it still binds the first argument.
+
+## `Expr` `%%` and `%/%` on doubles are GNU R's `myfmod` and `myfloor`
+
+**Status:** built.
+
+- The eager kernel and the lazy lowering share `r_modulo` and `r_floor_divide` (`crates/table/src/kernel.rs`); the lowering runs them row-wise through `map_many` because Polars' own `%`/floor division gives `NaN` for an infinite divisor and differs on signs. A zero divisor gives `NaN` for `%%` even with an `NA` dividend (`NA %% 0` is `NaN` in R); integer columns keep R's `NA` for a zero divisor.
+- R computes the remainder in long double; `mul_add` reproduces it while the quotient stays below 2^52. Beyond that (`5 %% 1e-300`) R warns "probable complete loss of accuracy" and its value depends on the platform's long double, so ry does not chase it and the frame fuzz kind keeps quotients small.
+
+## The frame fuzz kind's reference is a base-R model of the documented contract
+
+**Status:** built.
+
+- `oracle fuzz --kind frame` runs one program on GNU R and ry; under GNU R a prelude (`crates/oracle/src/frame_model.R`) defines `DataFrame.*`, `Expr.*` and `GroupBy.*` in plain base R from `reference/dataframes.mdx`. The reference is the contract, not Polars, so a Polars default the docs do not state shows up as a difference to decide rather than as the expected answer, and GNU R needs no Polars. Shapes the docs leave open are not generated (the report lists them); row order is compared only where a verb defines it.
