@@ -165,16 +165,10 @@ pub unsafe fn swilk(call: &NativeCall<'_>) -> R<Sexp> {
     values::real_vector(&[w, p])
 }
 
-/// `pKolmogorov2x(statistic, n)`: the exact distribution function of the one-sample
-/// two-sided Kolmogorov statistic, by Marsaglia, Tsang and Wang's matrix power ("Evaluating
-/// Kolmogorov's distribution", Journal of Statistical Software, 2003).
-pub unsafe fn p_kolmogorov_2x(call: &NativeCall<'_>) -> R<Sexp> {
-    let d = values::as_real_scalar(call.arg(0));
-    let n = values::as_integer_scalar(call.arg(1)).max(1) as usize;
-    values::scalar_real(kolmogorov_exact(d, n))
-}
-
-/// R 4.4's `pkolmogorov_two_exact(q, n)`: [`p_kolmogorov_2x`] over a vector of statistics.
+/// R 4.4's `pkolmogorov_two_exact(q, n)`, and the scalar `pKolmogorov2x(statistic, n)` before
+/// it: the exact distribution function of the one-sample two-sided Kolmogorov statistic, by
+/// Marsaglia, Tsang and Wang's matrix power ("Evaluating Kolmogorov's distribution", Journal of
+/// Statistical Software, 2003).
 pub unsafe fn p_kolmogorov_two_exact(call: &NativeCall<'_>) -> R<Sexp> {
     let statistics = real_values(call.arg(0))?;
     let n = values::as_integer_scalar(call.arg(1)).max(1) as usize;
@@ -690,6 +684,39 @@ pub unsafe fn fisher_sim(call: &NativeCall<'_>) -> R<Sexp> {
                 .map(|&cell| log_factorials[cell as usize])
                 .sum::<f64>(),
         );
+    }
+    random::put_rng_state()?;
+    values::real_vector(&statistics)
+}
+
+/// `Smirnov_sim(sr, sc, B, twosided)`: for `B` random tables with row sums `sr` (the tie counts
+/// of the merged sample, in order) and the two sample sizes `sc` as column sums, the largest gap
+/// between the two samples' empirical distribution functions, `rsmirnov`'s deviates.
+pub unsafe fn smirnov_sim(call: &NativeCall<'_>) -> R<Sexp> {
+    if values::length(call.arg(1)) != 2 {
+        return Err(call.error("Smirnov statistic only defined for two groups"));
+    }
+    let margins = TableMargins::read(call, call.arg(0), call.arg(1))?;
+    let replicates = values::as_integer_scalar(call.arg(2)).max(0) as usize;
+    let two_sided = values::as_integer_scalar(call.arg(3)) != 0;
+    let log_factorials = log_factorials(margins.total);
+    let rows = margins.rows.len();
+    let [first, second] = [margins.columns[0] as f64, margins.columns[1] as f64];
+    let mut statistics = Vec::with_capacity(replicates);
+    random::get_rng_state()?;
+    for _ in 0..replicates {
+        let table = random_table(call, &margins, &log_factorials)?;
+        let (mut below_first, mut below_second, mut statistic) = (0, 0, 0.0f64);
+        for row in 0..rows {
+            below_first += table[row];
+            below_second += table[rows + row];
+            let gap = f64::from(below_first) / first - f64::from(below_second) / second;
+            let gap = if two_sided { gap.abs() } else { gap };
+            if gap > statistic {
+                statistic = gap;
+            }
+        }
+        statistics.push(statistic);
     }
     random::put_rng_state()?;
     values::real_vector(&statistics)

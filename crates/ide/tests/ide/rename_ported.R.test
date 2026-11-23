@@ -11,8 +11,6 @@ definition 20..25
 references: 20..25*, 51..56, 59..64
 rename: 3 edit(s)
 signature: none
-action: Add inferred type annotation for `inner`
-  edit 50..50 -> " -> T"
 action: Add inferred type annotation for `wrapper`
   edit 19..19 -> "<T>"
   edit 25..25 -> ": T"

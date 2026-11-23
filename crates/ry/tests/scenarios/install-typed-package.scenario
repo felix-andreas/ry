@@ -238,7 +238,10 @@ expect stderr "typed: compiled for [I64] -> I64"
 expect stderr "typed: attached `weight` for [I64] -> I64 from shapepkg's code file"
 
 # A reinstall in a running session replaces the file, and a function fetched before it compiles
-# in the session instead of attaching code written for the new sources.
+# in the session instead of attaching code written for the new sources. `install.packages` runs
+# `R.home("bin")/R`, which is GNU R's when `R_HOME` names a GNU R (as on CI), and GNU R's parser
+# rejects ry syntax, so the session runs in ry's own R home.
+unset R_HOME
 file reinstall.R
 | library(shapepkg, lib.loc = "library")
 | before <- weight

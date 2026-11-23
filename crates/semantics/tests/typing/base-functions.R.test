@@ -303,7 +303,7 @@ rownames(df) <- df$name
 dim(b13) <- c(4, 2)
 #++++
 m: matrix
-df: data.frame
+df: data.frame{id: integer[], name: character[]}
 b1: Any
 b2: matrix
 b3: Any
@@ -329,7 +329,7 @@ b22: Any
 b23: data.frame
 b24: data.frame
 character[]
-Unknown
+character[]
 double[]
 
 #---- control
@@ -435,3 +435,14 @@ models <- function(df) {
 #++++
 io: <T> fn(dir: T) -> list{character[], character, character, character, character, character, POSIXct, Date, POSIXct, character, Any, logical, environment, environment, logical, character, Any}
 models: <T> fn(df: T) -> list{Any, Any}
+
+#---- invisible_without_an_argument_is_null
+quiet <- function() invisible()
+loud <- function(x) invisible(x)
+
+#: fn() -> NULL
+nothing <- function() quiet()
+#++++
+quiet: fn() -> NULL
+loud: <T> fn(x: T) -> T
+nothing: fn() -> NULL

@@ -88,6 +88,9 @@ display = "lgr"
 version = "0.5.2"
 runner = "testthat"
 summary = "A logging framework built on R6 classes, with appenders, layouts and filters"
+# ry also runs this package's suite from its source with `ry test --jobs 1` and `--jobs 4`, which
+# the suite tracks as the CPU cost and the wall-time speed-up of parallel test workers.
+jobs = 4
 
 [[programs]]
 id = "lubridate"

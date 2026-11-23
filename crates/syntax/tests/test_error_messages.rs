@@ -111,6 +111,24 @@ fn a_console_reads_on_only_when_the_input_ended_too_early() {
     }
 }
 
+// A fixture's source ends at its last code, so the cases with trailing line breaks live here.
+#[test]
+fn an_error_at_the_end_after_a_line_break_points_past_the_last_code() {
+    for text in [
+        "answer <- if (ready)\n",
+        "answer <- if (ready)\n\n\n",
+        "answer <- if (ready)  \n  \n",
+    ] {
+        let parsed = parse(text);
+        let [error] = parsed.errors() else {
+            panic!("one error in {text:?}: {:?}", parsed.errors());
+        };
+        assert_eq!(u32::from(error.range.start()), 20, "{text:?}");
+        assert!(error.range.is_empty(), "{text:?}");
+        assert!(error.incomplete, "{text:?}");
+    }
+}
+
 // A fixture file is text, so the NUL cases live here.
 #[test]
 fn a_nul_byte_is_an_error_in_a_string_only() {

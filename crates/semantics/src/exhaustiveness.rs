@@ -107,7 +107,7 @@ pub fn match_findings<'db>(
 /// A named type's cases are its definition's, so a nominal tag union is checked like the
 /// union it wraps. Only the head and a union's members unfold, which keeps a recursive
 /// definition such as `Tree<T>` from unfolding forever; deeper positions unfold when the
-/// search reaches them. An opaque nominal, which has no definition body, stays named.
+/// search reaches them. An abstract nominal, which has no definition body, stays named.
 fn structural<'db>(db: &'db dyn Db, definitions: Definitions<'db>, ty: Ty<'db>) -> Ty<'db> {
     let unfold = |ty: Ty<'db>| {
         let mut current = ty;
@@ -141,7 +141,7 @@ fn structural<'db>(db: &'db dyn Db, definitions: Definitions<'db>, ty: Ty<'db>) 
     }
 }
 
-/// A scrutinee whose type makes no claim (an unknown, an unsolved variable, an opaque
+/// A scrutinee whose type makes no claim (an unknown, an unsolved variable, an abstract
 /// nominal whose values ry cannot enumerate) has no cases to count.
 fn opaque(db: &dyn Db, subject: Ty<'_>) -> bool {
     matches!(

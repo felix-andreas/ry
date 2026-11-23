@@ -2110,9 +2110,11 @@ unsafe fn write_element(
             15,
             settings.scipen,
         )),
-        SexpType::Complex => {
-            with_decimal(format_complex_alone(values::complexes(vector)[index], 15))
-        }
+        SexpType::Complex => with_decimal(format_complex_alone(
+            values::complexes(vector)[index],
+            15,
+            settings.scipen,
+        )),
         SexpType::Raw => format!("{:02x}", values::raws(vector)[index]).into_bytes(),
         _ => {
             let element = crate::subset::list_or_vector_element(vector, index)?;

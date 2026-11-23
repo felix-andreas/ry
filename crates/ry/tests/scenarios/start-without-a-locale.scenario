@@ -1,0 +1,25 @@
+# A session whose environment names no locale, or the C locale without LC_ALL, starts with
+# LC_CTYPE in C.UTF-8, so the C library agrees with the string builtins, which read native strings
+# as UTF-8. An explicit LC_ALL=C keeps the C locale.
+
+requires ry-runtime
+
+file locale.R
+| cat("locale:", Sys.getlocale("LC_CTYPE"), l10n_info()[["UTF-8"]], toupper("h\u00e9"), "\n")
+
+unset LC_ALL
+unset LC_CTYPE
+unset LANG
+run ry run locale.R
+expect exit 0
+expect stdout "locale: C.UTF-8 TRUE HÉ \n"
+
+env LANG C
+run ry run locale.R
+expect exit 0
+expect stdout "locale: C.UTF-8 TRUE HÉ \n"
+
+env LC_ALL C
+run ry run locale.R
+expect exit 0
+expect stdout "locale: C FALSE HÉ \n"

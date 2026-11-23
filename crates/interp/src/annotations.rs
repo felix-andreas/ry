@@ -336,39 +336,6 @@ pub unsafe fn entry_for(function: Sexp, kinds: &[Option<SexpType>]) -> Entry {
     Entry::Checked(Some(signature))
 }
 
-/// Checks the plain values a call binds to a closure's leading formals in order, as a direct
-/// call from compiled code does, straight from the values instead of reading them back from the
-/// frame. A typed formal left to its default, or a typed `...`, may hold a promise only [`enter`]
-/// can register, so such a call stays [`Entry::Unchecked`].
-pub unsafe fn enter_positional(call: Sexp, function: Sexp, values: &[Sexp]) -> R<Entry> {
-    let Some(signature) = signature_of(function) else {
-        return Ok(Entry::Checked(None));
-    };
-    let masks = signature.element(MASKS);
-    let mut formal = function.car();
-    let mut slot = FIRST_FORMAL_SLOT;
-    while formal.kind() == SexpType::Pairlist {
-        let index = slot - FIRST_FORMAL_SLOT;
-        if mask_at(masks, slot) != 0 {
-            match values.get(index) {
-                Some(&value) if formal.tag() != values::symbols().dots => {
-                    // A value the check converts must replace the one the caller binds, which
-                    // only `enter` can do.
-                    if value != values::missing_arg()
-                        && check_value(call, signature, slot, value)? != value
-                    {
-                        return Ok(Entry::Unchecked);
-                    }
-                }
-                _ => return Ok(Entry::Unchecked),
-            }
-        }
-        formal = formal.cdr();
-        slot += 1;
-    }
-    Ok(Entry::Checked(Some(signature)))
-}
-
 /// Checks a typed closure's value, and returns the value the call returns (see [`check_value`]).
 pub unsafe fn check_return(call: Sexp, signature: Sexp, value: Sexp) -> R<Sexp> {
     let mask = mask_at(signature.element(MASKS), RETURN_SLOT);

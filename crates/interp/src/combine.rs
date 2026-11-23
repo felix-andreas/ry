@@ -55,10 +55,11 @@ unsafe fn do_c(call: &Call<'_>) -> R<Sexp> {
         .filter(|arg| arg.tag != symbols.recursive && arg.tag != symbols.use_names)
         .copied()
         .collect();
-    if recursive && args.iter().all(|arg| arg.tag == nil()) {
-        if let Some(result) = flatten_plain(&args)? {
-            return Ok(result);
-        }
+    if recursive
+        && args.iter().all(|arg| arg.tag == nil())
+        && let Some(result) = flatten_plain(&args)?
+    {
+        return Ok(result);
     }
     combine_items(Items::Args(&args), recursive, use_names)
 }

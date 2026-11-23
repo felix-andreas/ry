@@ -16,6 +16,25 @@ fn tree_sitter_r_corpus_fixtures() {
     run_fixture_suite(&suite, &|source| parse(source).debug_dump());
 }
 
+/// Each statement's inline annotations moved into a `#:` block above it, and the annotations
+/// no block can carry.
+#[test]
+fn comment_spelling_fixtures() {
+    let suite = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/comments");
+    run_fixture_suite(&suite, &|source| {
+        let parse = parse(source);
+        let commented = syntax::inline_annotations_to_comments(&parse);
+        let mut rendered = commented.text;
+        if !rendered.ends_with('\n') {
+            rendered.push('\n');
+        }
+        for range in commented.dropped {
+            rendered.push_str(&format!("#> dropped: {}\n", &source[range]));
+        }
+        rendered
+    });
+}
+
 /// The plain R each inline form erases to, as the type system reference documents it.
 #[test]
 fn erasure_of_inline_forms() {
@@ -51,6 +70,11 @@ fn erasure_of_inline_forms() {
             "#: @type C {double}\ntype C = double\nx <- 1\n",
             "#: @type C {double}\n\nx <- 1\n",
         ),
+        (
+            "opaque Meters = list{value: double}\n",
+            "#: @opaque Meters {list{value: double}}\n",
+        ),
+        ("opaque <- 1\nopaque(2)\n", "opaque <- 1\nopaque(2)\n"),
         ("type <- 1\nalias(type)\n", "type <- 1\nalias(type)\n"),
         // A binding type spanning lines erases with its line breaks.
         ("count: integer\n  | NULL <- 1L\n", "count <- 1L\n"),

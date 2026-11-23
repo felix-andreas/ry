@@ -77,7 +77,10 @@ def jobs(ry, tier, scratch, image_touch):
 
 def run(name, command, cwd, env):
     try:
-        child = subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True, timeout=TIMEOUT)
+        # A program may print bytes that are not UTF-8 (an oracle case writing raw bytes), so the
+        # output only feeds a failure message and decodes leniently.
+        child = subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True,
+                               errors="replace", timeout=TIMEOUT)
     except subprocess.TimeoutExpired:
         return name, f"timed out after {TIMEOUT} s"
     if child.returncode != 0:
@@ -110,7 +113,7 @@ def main():
         script.write(probe)
         script.flush()
         child = subprocess.run([args.ry, "run", "--runtime", "ry", script.name], env=base,
-                               capture_output=True, text=True, timeout=TIMEOUT)
+                               capture_output=True, text=True, errors="replace", timeout=TIMEOUT)
     missing = child.stdout.split()
     if child.returncode != 0 or missing:
         sys.exit(f"train: the workloads need {', '.join(missing) or 'packages that do not load'}; "

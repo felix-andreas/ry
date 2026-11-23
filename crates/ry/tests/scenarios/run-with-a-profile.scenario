@@ -1,0 +1,60 @@
+# A project's `.Rprofile` sets the time zone that its package's `.onLoad` requires. Every command
+# that starts a session runs the profile once base R has loaded, as Rscript does:
+# `R_PROFILE_USER` names it when set, and otherwise `./.Rprofile`, else `~/.Rprofile`.
+# `--no-init-file`, or its alias `--vanilla`, starts without it.
+
+requires ry-runtime r-package:testthat
+
+file DESCRIPTION
+| Package: clock
+| Version: 0.1.0
+file NAMESPACE
+| export(zone)
+file .Rprofile
+| Sys.setenv(TZ = "UTC")
+file R/zone.R
+| zone <- function() Sys.getenv("TZ")
+| .onLoad <- function(libname, pkgname) {
+|   if (!nzchar(Sys.getenv("TZ"))) stop("set TZ before loading clock")
+| }
+file report.R
+| cat("zone", Sys.getenv("TZ"), "\n")
+file other-profile.R
+| Sys.setenv(TZ = "Europe/Berlin")
+file tests/testthat/test-zone.R
+| test_that("the profile set the zone", expect_equal(zone(), "UTC"))
+
+unset TZ
+run ry run report.R
+expect exit 0
+expect stdout "zone UTC"
+
+run ry run --vanilla report.R
+expect exit 0
+expect stdout "zone  "
+
+run ry run --no-init-file report.R
+expect exit 0
+expect stdout "zone  "
+
+env R_PROFILE_USER other-profile.R
+run ry run report.R
+expect exit 0
+expect stdout "zone Europe/Berlin"
+
+unset R_PROFILE_USER
+run ry load --runtime ry -e "cat('loaded', zone(), '\\n')"
+expect exit 0
+expect stdout "loaded UTC"
+
+run ry load --runtime ry --vanilla -e "cat('loaded', zone(), '\\n')"
+expect exit 1
+expect stderr "set TZ before loading clock"
+
+run ry test --runtime ry --reporter summary
+expect exit 0
+expect stdout "zone: ."
+
+run ry test --runtime ry --vanilla --reporter summary
+expect exit 1
+expect stderr "set TZ before loading clock"

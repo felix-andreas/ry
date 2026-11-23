@@ -103,6 +103,16 @@ export type Tracked = {
   // Each engine's contended total over its own, by CPU time and by wall time.
   contention?: Contention;
   contention_wall?: Contention;
+  // The packages suite: one package's suite under `ry test --jobs N` and `--jobs 1`, N's CPU time
+  // over one job's and one job's wall time over N's, with the median seconds of each.
+  test_jobs?: TestJobs;
+};
+export type TestJobs = {
+  package: string;
+  jobs: number;
+  cpu: Interval;
+  speedup: Interval;
+  seconds: { cpu: [number, number]; wall: [number, number] };
 };
 export type BuiltinFunction = {
   id: string;
@@ -681,6 +691,20 @@ export function tableViews(suite: Suite): TableView[] {
         }),
       ]),
       note: `Each test block is timed on its own. The speed-up is the geometric mean over the blocks that GNU R runs in 1 ms or more of GNU R's median time over the engine's, so it weighs every test alike, where the Time table weighs the tests by how long they take.${worstNote === '' ? '' : ` The slowest code base against the mean of the suite: ${worstNote}.`}`,
+    });
+  }
+  const jobs = suite.results?.tracked?.test_jobs;
+  if (jobs !== undefined) {
+    views.push({
+      label: 'Test workers',
+      columns: ['measure', 'value'],
+      rows: [
+        [`CPU time of ry test --jobs ${jobs.jobs} over --jobs 1`, formatInterval(jobs.cpu)],
+        [`Speed-up of the wall time with ${jobs.jobs} workers`, formatInterval(jobs.speedup)],
+        ['CPU seconds, --jobs 1 and --jobs ' + jobs.jobs, `${seconds(jobs.seconds.cpu[0])}, ${seconds(jobs.seconds.cpu[1])}`],
+        ['Wall seconds, --jobs 1 and --jobs ' + jobs.jobs, `${seconds(jobs.seconds.wall[0])}, ${seconds(jobs.seconds.wall[1])}`],
+      ],
+      note: `ry runs ${jobs.package}'s test suite from its source with ry test, once in one process and once with ${jobs.jobs} workers. The CPU time counts every process, the workers' included, so its ratio is what the workers cost beyond the tests themselves. Medians of the per-round ratios, with their 95% intervals.`,
     });
   }
   return views;

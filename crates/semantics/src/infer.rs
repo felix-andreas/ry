@@ -9,9 +9,10 @@ use {
         diagnostics::nearest_name,
         stubs::stubs,
         types::{
-            Atomic, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeScalar, Ty,
-            TyKind, array_element, contains_inference_var, for_each_child_type, is_ry_value_type,
-            map_child_types, native_scalar, scalar, substitute_rigid, union_of, unknown,
+            Atomic, Binder, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeScalar,
+            Ty, TyKind, array_element, contains_inference_var, for_each_child_type,
+            is_ry_value_type, map_child_types, native_scalar, scalar, substitute_rigid, union_of,
+            unknown,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -27,6 +28,10 @@ pub enum Entry<'db> {
     Unbound {
         level: u32,
         constraint: Constraint,
+        /// The type every binding must fit, from an open argument passed where a union is
+        /// expected (`vapply(path, ...)`): the variable keeps naming the argument's own type,
+        /// where binding it to the union would hand every caller back the whole union.
+        bound: Option<Ty<'db>>,
     },
     /// `numeric` records that the variable was numeric-constrained when it bound, which
     /// lets a later, wider numeric argument rebind it (`f(1L, 0.5)`).
@@ -68,6 +73,9 @@ pub struct InferenceTable<'db> {
     /// Declared bounds of rigid binders in scope (`<T: numeric>`): a rigid `T` is
     /// not a numeric atom, so constraint admission needs its declared bound.
     pub rigid_constraints: FxHashMap<Name<'db>, Constraint>,
+    /// Declared type bounds of rigid binders in scope (`<U: list[T] | T[]>`): a rigid `U`
+    /// fits wherever its bound does.
+    pub rigid_bounds: FxHashMap<Name<'db>, Ty<'db>>,
     named_types: RefCell<NamedTypes<'db>>,
 }
 
@@ -125,6 +133,7 @@ impl<'db> InferenceTable<'db> {
         self.entries.push(Entry::Unbound {
             level: self.level,
             constraint,
+            bound: None,
         });
         var
     }
@@ -343,7 +352,7 @@ impl<'db> InferenceTable<'db> {
         (resolved, clean)
     }
 
-    /// `None` for aliases, opaque nominals, and unknown names.
+    /// `None` for aliases, abstract nominals, and unknown names.
     pub fn representation(
         &self,
         db: &'db dyn Db,
@@ -367,11 +376,21 @@ impl<'db> InferenceTable<'db> {
         if !self.walk_unbound_vars(db, ty, &mut |found| found != representative) {
             return Err(UnifyError::Occurs(representative, ty));
         }
-        let Entry::Unbound { level, constraint } = *self.entry(representative) else {
+        let Entry::Unbound {
+            level,
+            constraint,
+            bound,
+        } = *self.entry(representative)
+        else {
             unreachable!("bind target is always unbound after find");
         };
         if let Some(error) = constraint_rejects(db, self, constraint, ty) {
             return Err(error);
+        }
+        if let Some(bound) = bound
+            && !self.compatible(db, ty, bound)
+        {
+            return Err(UnifyError::Mismatch(ty, bound));
         }
         if constraint == Constraint::Numeric
             && let TyKind::Vector(element) | TyKind::NamedVector(element) = ty.kind(db)
@@ -381,6 +400,7 @@ impl<'db> InferenceTable<'db> {
             if let Entry::Unbound {
                 level: element_level,
                 constraint: element_constraint,
+                bound: element_bound,
             } = *self.entry(element)
             {
                 self.set(
@@ -390,6 +410,7 @@ impl<'db> InferenceTable<'db> {
                         constraint: element_constraint
                             .join(Constraint::ScalarNumeric)
                             .unwrap_or(element_constraint),
+                        bound: element_bound,
                     },
                 );
             }
@@ -412,10 +433,21 @@ impl<'db> InferenceTable<'db> {
             if let Entry::Unbound {
                 level: var_level,
                 constraint,
+                bound,
             } = *self.entry(representative)
                 && var_level > level
             {
-                self.set(representative, Entry::Unbound { level, constraint });
+                self.set(
+                    representative,
+                    Entry::Unbound {
+                        level,
+                        constraint,
+                        bound,
+                    },
+                );
+                if let Some(bound) = bound {
+                    self.adjust_levels(db, level, bound);
+                }
             }
             return;
         }
@@ -445,6 +477,7 @@ impl<'db> InferenceTable<'db> {
                 let Entry::Unbound {
                     level: left_level,
                     constraint: left_constraint,
+                    bound: left_bound,
                 } = *self.entry(left)
                 else {
                     unreachable!("shallow resolve leaves only unbound variables")
@@ -452,6 +485,7 @@ impl<'db> InferenceTable<'db> {
                 let Entry::Unbound {
                     level: right_level,
                     constraint: right_constraint,
+                    bound: right_bound,
                 } = *self.entry(right)
                 else {
                     unreachable!("shallow resolve leaves only unbound variables")
@@ -473,19 +507,57 @@ impl<'db> InferenceTable<'db> {
                 let Some(constraint) = left_constraint.join(right_constraint) else {
                     return Err(UnifyError::Mismatch(a, b));
                 };
+                // A variable holds a constraint or a bound, never both, and a bound never names
+                // its own variable. A meet that would break either settles each bounded
+                // variable to its bound and unifies what is left.
+                let bound = match (left_bound, right_bound) {
+                    (None, None) => None,
+                    _ if constraint != Constraint::Unconstrained => {
+                        return self.unify_settled(db, a, b, left, right);
+                    }
+                    (Some(left_bound), Some(right_bound)) => {
+                        match self.meet_bounds(db, left_bound, right_bound, 0) {
+                            Some(bound) => Some(bound),
+                            None => return Err(UnifyError::Mismatch(a, b)),
+                        }
+                    }
+                    (bound, None) | (None, bound) => bound,
+                };
+                if bound.is_some_and(|bound| {
+                    !self.walk_unbound_vars(db, bound, &mut |found| found != left && found != right)
+                }) {
+                    return self.unify_settled(db, a, b, left, right);
+                }
                 let (winner, loser) = if left.0 <= right.0 {
                     (left, right)
                 } else {
                     (right, left)
                 };
+                let level = left_level.min(right_level);
                 self.set(
                     winner,
                     Entry::Unbound {
-                        level: left_level.min(right_level),
+                        level,
                         constraint,
+                        bound: None,
                     },
                 );
                 self.set(loser, Entry::Redirect(winner));
+                if let Some(bound) = bound {
+                    self.adjust_levels(db, level, bound);
+                    if !matches!(bound.kind(db), TyKind::Union(_)) {
+                        // A bound of one type leaves the variable nothing else to be.
+                        return self.bind(db, winner, bound);
+                    }
+                    self.set(
+                        winner,
+                        Entry::Unbound {
+                            level,
+                            constraint,
+                            bound: Some(bound),
+                        },
+                    );
+                }
                 Ok(())
             }
             (TyKind::Var(var), _) => self.bind(db, *var, b),
@@ -513,7 +585,9 @@ impl<'db> InferenceTable<'db> {
                 }
                 Ok(())
             }
-            (TyKind::Record(left), TyKind::Record(right)) => {
+            (TyKind::Record(left), TyKind::Record(right))
+            | (TyKind::OpenRecord(left), TyKind::OpenRecord(right))
+            | (TyKind::Environment(left), TyKind::Environment(right)) => {
                 if left.len() != right.len()
                     || left
                         .iter()
@@ -645,6 +719,121 @@ impl<'db> InferenceTable<'db> {
         Err(UnifyError::Mismatch(a, b))
     }
 
+    /// Gives a fresh variable the bound its scheme binder declares.
+    pub fn set_bound(&mut self, var: InferenceVar, bound: Ty<'db>) {
+        let representative = self.find(var);
+        if let Entry::Unbound {
+            level, constraint, ..
+        } = *self.entry(representative)
+        {
+            self.set(
+                representative,
+                Entry::Unbound {
+                    level,
+                    constraint,
+                    bound: Some(bound),
+                },
+            );
+        }
+    }
+
+    /// Where two bounds meet: the narrower one, else the members of `existing` that fit
+    /// `incoming` (`integer | logical` then `character | logical` leaves `logical`), else
+    /// nothing.
+    fn meet_bounds(
+        &mut self,
+        db: &'db dyn Db,
+        existing: Ty<'db>,
+        incoming: Ty<'db>,
+        depth: usize,
+    ) -> Option<Ty<'db>> {
+        if self.compatible_probe(db, existing, incoming, depth + 1) {
+            return Some(existing);
+        }
+        if self.compatible_probe(db, incoming, existing, depth + 1) {
+            return Some(incoming);
+        }
+        let TyKind::Union(members) = existing.kind(db) else {
+            return None;
+        };
+        let fitting: Vec<Ty<'db>> = members
+            .iter()
+            .copied()
+            .filter(|&member| self.compatible_probe(db, member, incoming, depth + 1))
+            .collect();
+        (!fitting.is_empty()).then(|| union_of(db, fitting))
+    }
+
+    /// Binds a bounded variable to its bound, giving up the argument's own type where a
+    /// constraint or a cycle would need the variable to hold both.
+    pub fn settle_bound(
+        &mut self,
+        db: &'db dyn Db,
+        var: InferenceVar,
+    ) -> Result<(), UnifyError<'db>> {
+        let representative = self.find(var);
+        let Entry::Unbound {
+            level,
+            constraint,
+            bound: Some(bound),
+        } = *self.entry(representative)
+        else {
+            return Ok(());
+        };
+        self.set(
+            representative,
+            Entry::Unbound {
+                level,
+                constraint,
+                bound: None,
+            },
+        );
+        self.bind(db, representative, bound)
+    }
+
+    fn unify_settled(
+        &mut self,
+        db: &'db dyn Db,
+        a: Ty<'db>,
+        b: Ty<'db>,
+        left: InferenceVar,
+        right: InferenceVar,
+    ) -> Result<(), UnifyError<'db>> {
+        self.settle_bound(db, left)?;
+        self.settle_bound(db, right)?;
+        self.unify(db, a, b)
+    }
+
+    /// The bound of an unbound variable, when it has one.
+    pub fn bound_of(&self, var: InferenceVar) -> Option<Ty<'db>> {
+        match *self.entry(self.find(var)) {
+            Entry::Unbound { bound, .. } => bound,
+            _ => None,
+        }
+    }
+
+    /// Puts a declared scheme's binders in scope while its body is checked.
+    pub fn enter_rigid_binders(&mut self, binders: &[Binder<'db>]) {
+        for binder in binders {
+            self.rigid_constraints
+                .insert(binder.name, binder.constraint());
+            if let Some(bound) = binder.type_bound() {
+                self.rigid_bounds.insert(binder.name, bound);
+            }
+        }
+    }
+
+    /// Whether a type parameter of the signature being checked meets a constraint, through its
+    /// declared constraint or its type bound.
+    pub fn rigid_satisfies(
+        &self,
+        db: &'db dyn Db,
+        name: Name<'db>,
+        constraint: Constraint,
+    ) -> bool {
+        constraint_rejects(db, self, constraint, Ty::new(db, TyKind::Rigid(name))).is_none()
+    }
+
     pub fn open_constraint(&self, db: &'db dyn Db, ty: Ty<'db>) -> Option<Constraint> {
         let resolved = self.resolve(db, ty);
         let TyKind::Var(var) = resolved.kind(db) else {
@@ -665,9 +854,14 @@ impl<'db> InferenceTable<'db> {
     ) -> Result<(), UnifyError<'db>> {
         let representative = self.find(var);
         match *self.entry(representative) {
+            Entry::Unbound { bound: Some(_), .. } if constraint != Constraint::Unconstrained => {
+                self.settle_bound(db, representative)?;
+                self.constrain(db, representative, constraint)
+            }
             Entry::Unbound {
                 level,
                 constraint: existing,
+                bound,
             } => {
                 let Some(joined) = existing.join(constraint) else {
                     return Err(UnifyError::ConstraintRejected(
@@ -681,6 +875,7 @@ impl<'db> InferenceTable<'db> {
                         Entry::Unbound {
                             level,
                             constraint: joined,
+                            bound,
                         },
                     );
                 }
@@ -715,6 +910,12 @@ impl<'db> InferenceTable<'db> {
         let verdict = depth < DEPTH_LIMIT && self.compatible_inner(db, actual, expected, depth);
         if !verdict {
             self.rollback(snapshot);
+            // A rigid binder declared with a type bound fits wherever its bound does.
+            if let TyKind::Rigid(name) = self.shallow_resolve(db, actual).kind(db)
+                && let Some(&bound) = self.rigid_bounds.get(name)
+            {
+                return self.compatible_probe(db, bound, expected, depth + 1);
+            }
         }
         verdict
     }
@@ -892,12 +1093,53 @@ impl<'db> InferenceTable<'db> {
                 .iter()
                 .any(|&member| self.compatible_probe(db, actual, member, depth + 1));
         }
+        // An open argument where a union is expected keeps naming its own type, bounded by the
+        // union: `function(path) { vapply(path, f, logical(1)); path }` returns what it is
+        // given, where binding `path` to `list[T] | T[]` would return that union to every caller.
+        if let (TyKind::Var(var), TyKind::Union(_)) = (actual.kind(db), expected.kind(db))
+            && let representative = self.find(*var)
+            && let Entry::Unbound {
+                level,
+                constraint: Constraint::Unconstrained,
+                bound,
+            } = *self.entry(representative)
+            && self.walk_unbound_vars(db, expected, &mut |found| found != representative)
+        {
+            let bound = match bound {
+                None => expected,
+                Some(existing) => match self.meet_bounds(db, existing, expected, depth) {
+                    Some(bound) => bound,
+                    None => return false,
+                },
+            };
+            if !matches!(bound.kind(db), TyKind::Union(_)) {
+                return self.bind(db, representative, bound).is_ok();
+            }
+            self.adjust_levels(db, level, bound);
+            self.set(
+                representative,
+                Entry::Unbound {
+                    level,
+                    constraint: Constraint::Unconstrained,
+                    bound: Some(bound),
+                },
+            );
+            return true;
+        }
         // A scalar is a length-one vector in R, so a variable that a scalar use bounded (`1:n`)
-        // fills a vector parameter as its element, as a scalar argument does.
+        // or a literal wrote (`p <- "a"`) fills a vector parameter as its element, as a scalar
+        // argument does.
         if let (TyKind::Var(var), TyKind::Vector(element) | TyKind::NamedVector(element)) =
             (actual.kind(db), expected.kind(db))
             && let Entry::Unbound {
-                constraint: Constraint::ScalarNumeric | Constraint::AtomicElement | Constraint::Key,
+                constraint:
+                    Constraint::ScalarNumeric
+                    | Constraint::AtomicElement
+                    | Constraint::Key
+                    | Constraint::WholeLiteral { .. }
+                    | Constraint::FracLiteral
+                    | Constraint::StrLiteral
+                    | Constraint::BoolLiteral,
                 ..
             } = self.entry(self.find(*var))
         {
@@ -1082,12 +1324,42 @@ impl<'db> InferenceTable<'db> {
                         }
                     })
             }
-            // `data.table{...}` is the `data.table` nominal with its columns known, so the two
-            // fit each other both ways.
-            (TyKind::Named(name, arguments), TyKind::Frame(FrameKind::DataTable, _))
-                if arguments.is_empty() && name.text(db) == "data.table" =>
+            // `data.table{...}` is the `data.table` class with its columns known, so the two fit
+            // each other both ways, as `data.frame{...}` and `data.frame` do.
+            (TyKind::Named(name, arguments), TyKind::Frame(kind, _))
+                if arguments.is_empty() && kind.class() == Some(name.text(db)) =>
             {
                 true
+            }
+            // `new.env()` is an environment with no bindings yet, which an annotation then types;
+            // a typed environment is still an environment.
+            (TyKind::Named(name, _), TyKind::Environment(_))
+            | (TyKind::Environment(_), TyKind::Named(name, _))
+                if name.text(db) == "environment" =>
+            {
+                true
+            }
+            // An environment is mutable, so its bindings' types must match both ways.
+            (TyKind::Environment(actual_fields), TyKind::Environment(expected_fields)) => {
+                actual_fields.len() == expected_fields.len()
+                    && expected_fields.iter().all(|expected_field| {
+                        actual_fields
+                            .iter()
+                            .find(|field| field.name == expected_field.name)
+                            .is_some_and(|actual_field| {
+                                self.compatible_probe(
+                                    db,
+                                    actual_field.ty,
+                                    expected_field.ty,
+                                    depth + 1,
+                                ) && self.compatible_probe(
+                                    db,
+                                    expected_field.ty,
+                                    actual_field.ty,
+                                    depth + 1,
+                                )
+                            })
+                    })
             }
             // An Array is an R vector at run time: a scalar item type makes it an atomic vector
             // and a ry-value item type a list, so it passes to R code as one, never the reverse.
@@ -1171,6 +1443,18 @@ impl<'db> InferenceTable<'db> {
                     },
                 )
             }
+            // An open record asks for its fields and lets the rest through.
+            (
+                TyKind::Record(actual_fields) | TyKind::OpenRecord(actual_fields),
+                TyKind::OpenRecord(expected_fields),
+            ) => expected_fields.iter().all(|expected_field| {
+                actual_fields
+                    .iter()
+                    .find(|field| field.name == expected_field.name)
+                    .is_some_and(|actual_field| {
+                        self.compatible_probe(db, actual_field.ty, expected_field.ty, depth + 1)
+                    })
+            }),
             (TyKind::Record(actual_fields), TyKind::Record(expected_fields))
                 if actual_fields.len() == expected_fields.len() =>
             {
@@ -1207,10 +1491,8 @@ impl<'db> InferenceTable<'db> {
                         })
                 })
             }
-            // `data.table{...}` is the `data.table` nominal with its columns known, so the two
-            // fit each other both ways.
-            (TyKind::Frame(FrameKind::DataTable, _), TyKind::Named(name, arguments))
-                if arguments.is_empty() && name.text(db) == "data.table" =>
+            (TyKind::Frame(kind, _), TyKind::Named(name, arguments))
+                if arguments.is_empty() && kind.class() == Some(name.text(db)) =>
             {
                 true
             }
@@ -1316,6 +1598,12 @@ impl<'db> InferenceTable<'db> {
                 }
                 _ => false,
             },
+            // Past the column-wise arms, an R frame passes wherever its class does:
+            // `data.frame{...}` is a `data.frame` to `merge` and `sum`.
+            (TyKind::Frame(kind, _), _) if let Some(class) = kind.class() => {
+                let nominal = Ty::new(db, TyKind::Named(Name::new(db, class), &[]));
+                self.compatible_probe(db, nominal, expected, depth + 1)
+            }
             _ => false,
         }
     }
@@ -1402,12 +1690,17 @@ impl<'db> InferenceTable<'db> {
         expected: Ty<'db>,
         path: &mut Vec<String>,
     ) -> Option<RecordMismatch<'db>> {
-        let (TyKind::Record(actual_fields), TyKind::Record(expected_fields)) = (
+        let (
+            TyKind::Record(actual_fields) | TyKind::OpenRecord(actual_fields),
+            TyKind::Record(expected_fields) | TyKind::OpenRecord(expected_fields),
+        ) = (
             self.resolve(db, actual).kind(db),
             self.resolve(db, expected).kind(db),
-        ) else {
+        )
+        else {
             return None;
         };
+        let open = matches!(self.resolve(db, expected).kind(db), TyKind::OpenRecord(_));
         // Optionality is not compared: `compatible` does not compare it either.
         for expected_field in expected_fields.iter() {
             let name = expected_field.name.text(db);
@@ -1435,6 +1728,9 @@ impl<'db> InferenceTable<'db> {
                 found: self.resolve(db, actual_field.ty),
                 path: mem::take(path),
             });
+        }
+        if open {
+            return None;
         }
         // Surplus fields last: a wrong type in a shared field is the likelier mistake.
         for actual_field in actual_fields.iter() {
@@ -1692,7 +1988,7 @@ enum Variance {
 }
 
 fn parameter_variances<'db>(db: &'db dyn Db, definition: &NamedDefinition<'db>) -> Vec<Variance> {
-    // An opaque type (`@type Dict<K, V>`) hides its body, so its parameters are what tell two
+    // An abstract type (`@type Dict<K, V>`) hides its body, so its parameters are what tell two
     // values apart, and a `Dict<character, double>` must not pass for a `Dict<integer, double>`.
     if !definition.alias && matches!(definition.body.kind(db), TyKind::Unknown) {
         return vec![Variance::Invariant; definition.parameters.len()];
@@ -1784,7 +2080,7 @@ fn nullable_single_member<'db>(db: &'db dyn Db, members: &[Ty<'db>]) -> Option<T
 /// Beyond atoms: a class declaring an arithmetic operator method is numeric
 /// (`a + b` is legal R for it), and a rigid binder is admitted when its declared
 /// bound is at least as strong (self-recursive calls unify it with a fresh variable).
-fn constraint_rejects<'db>(
+pub(crate) fn constraint_rejects<'db>(
     db: &'db dyn Db,
     table: &InferenceTable<'db>,
     constraint: Constraint,
@@ -1794,12 +2090,17 @@ fn constraint_rejects<'db>(
     let declares_arithmetic = |name: &Name<'db>| {
         arithmetic_classes.is_some_and(|classes| classes.contains(name.symbol()))
     };
-    // The declared bound implies the required one when joining does not strengthen it.
+    // The declared bound implies the required one when joining does not strengthen it, and a
+    // type bound does when every type it admits does (`<N: integer | double>` is numeric).
     let binder_implies = |name: &Name<'db>| {
         table
             .rigid_constraints
             .get(name)
             .is_some_and(|declared| declared.join(constraint) == Some(*declared))
+            || table
+                .rigid_bounds
+                .get(name)
+                .is_some_and(|&bound| constraint_rejects(db, table, constraint, bound).is_none())
     };
     // A union satisfies a bound when every member does: `double | integer` is a number either way.
     if let TyKind::Union(members) = ty.kind(db) {
@@ -1834,6 +2135,10 @@ fn constraint_rejects<'db>(
                 _ => false,
             },
             TyKind::Named(name, _) => declares_arithmetic(name),
+            // A frame with known columns carries its class like a nominal one does.
+            TyKind::Frame(kind, _) => kind.class().is_some_and(|class| {
+                arithmetic_classes.is_some_and(|classes| classes.contains(class))
+            }),
             TyKind::Rigid(name) => binder_implies(name),
             _ => false,
         },

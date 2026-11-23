@@ -1052,7 +1052,8 @@ pub unsafe fn search_path() -> impl Iterator<Item = Sexp> {
     })
 }
 
-unsafe fn search_name<'a>(env: Sexp) -> Cow<'a, str> {
+/// The name `search()` shows for `env`, an environment on the search path.
+pub(crate) unsafe fn search_name<'a>(env: Sexp) -> Cow<'a, str> {
     if env == global_env() {
         return Cow::Borrowed(".GlobalEnv");
     }

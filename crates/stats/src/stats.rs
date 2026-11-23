@@ -28,6 +28,7 @@
 )]
 
 pub mod arima;
+pub mod arma0;
 pub mod cluster;
 pub mod deriv;
 pub mod hypothesis_tests;
@@ -38,6 +39,7 @@ pub mod nlm;
 pub mod optimize;
 pub mod port;
 pub mod port_minimizer;
+pub mod ppr;
 pub mod routines;
 pub mod spline;
 

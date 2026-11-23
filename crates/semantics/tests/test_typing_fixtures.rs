@@ -14,7 +14,7 @@ use {
         item_check, item_hir, item_spans, item_tree,
         metadata::{
             PackageMetadata, attached_union, normalized_imports, parse_description_dependencies,
-            parse_description_package, parse_namespace,
+            parse_description_package, parse_namespace, qualified_names,
         },
         stubs::{
             StubSources, install_shipped_stubs, shipped_export_manifests, shipped_stub_sources,
@@ -101,9 +101,11 @@ fn render_with_metadata(source: &str) -> String {
 }
 
 fn has_metadata(source: &str) -> bool {
-    source
-        .lines()
-        .any(|line| line.starts_with("#namespace ") || line.starts_with("#description "))
+    source.lines().any(|line| {
+        line.starts_with("#namespace ")
+            || line.starts_with("#description ")
+            || line.starts_with("#dataset ")
+    })
 }
 
 /// Reads the package's NAMESPACE and DESCRIPTION from `#namespace `/`#description ` lines
@@ -111,8 +113,11 @@ fn has_metadata(source: &str) -> bool {
 fn install_metadata(db: &mut RootDatabase, source: &str, files: &[SourceFile]) {
     let mut namespace_source = String::new();
     let mut description_source = String::new();
+    let mut datasets = Vec::new();
     for line in source.lines() {
-        if let Some(rest) = line.strip_prefix("#namespace ") {
+        if let Some(rest) = line.strip_prefix("#dataset ") {
+            datasets.push(rest.trim().to_owned());
+        } else if let Some(rest) = line.strip_prefix("#namespace ") {
             namespace_source.push_str(rest);
             namespace_source.push('\n');
         } else if let Some(rest) = line.strip_prefix("#description ") {
@@ -121,6 +126,11 @@ fn install_metadata(db: &mut RootDatabase, source: &str, files: &[SourceFile]) {
         }
     }
     let namespace_file = parse_namespace(&namespace_source);
+    // A case without `#namespace ` lines has no `NAMESPACE`, so its own exports are unknowable.
+    let qualified = qualified_names(
+        (!namespace_source.is_empty()).then_some(&namespace_file),
+        Some(datasets),
+    );
     let metadata = PackageMetadata::new(
         &*db,
         normalized_imports(&namespace_file.imports),
@@ -128,6 +138,7 @@ fn install_metadata(db: &mut RootDatabase, source: &str, files: &[SourceFile]) {
         Default::default(),
         parse_description_package(&description_source),
         namespace_file.native_symbols,
+        qualified,
     );
     let attached = attached_union(&*db, files.iter().copied());
     if !attached.is_empty() {
@@ -264,6 +275,7 @@ fn render_with_data_files(source: &str) -> String {
         Default::default(),
         None,
         Default::default(),
+        None,
     );
     metadata.set_attached(&mut db).to(attached);
     let mut output = String::new();
@@ -344,6 +356,7 @@ fn render_top_level_case(source: &str) -> String {
         Default::default(),
         None,
         Default::default(),
+        None,
     );
     let attached = attached_union(&db, sources.iter().map(|(_, file)| *file));
     metadata.set_attached(&mut db).to(attached);
@@ -396,21 +409,26 @@ fn render_stub_source(source: &str) -> String {
     for (name, _) in names {
         for scheme in library.schemes.get(name).into_iter().flatten() {
             let rendered = TypeRenderer::default().render_scheme(&db, scheme);
-            let pure = if library
+            let pure = match library
                 .pure_by_namespace
                 .get("base")
-                .is_some_and(|names| names.contains(name))
+                .and_then(|names| names.get(name))
             {
-                "@pure "
-            } else {
-                ""
+                Some(callbacks) if callbacks.is_empty() => "@pure ".to_owned(),
+                Some(callbacks) => format!("@pure({}) ", callbacks.join(", ")),
+                None => String::new(),
             };
             let masked = if library.masked.contains_key(name) {
                 "@masked "
             } else {
                 ""
             };
-            output.push_str(&format!("{name} : {pure}{masked}{rendered}\n"));
+            let opaque = library
+                .opaque
+                .get(name)
+                .map(|parameters| format!("@opaque({}) ", parameters.join(", ")))
+                .unwrap_or_default();
+            output.push_str(&format!("{name} : {pure}{masked}{opaque}{rendered}\n"));
         }
     }
     for problem in stub_source_problems(&db, source) {

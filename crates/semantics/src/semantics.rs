@@ -41,8 +41,8 @@ use {
     },
     syntax::{
         NodeOrToken, NodeRef, Parse, SyntaxKind, SyntaxNode, TextRange, TextSize, Tree,
-        annotation::{AnnotationTarget, formals, statement_annotations},
-        ast::{is_expression_kind, name_text},
+        annotation::{AnnotationTarget, attached_annotation, formals, statement_annotations},
+        ast::{BinaryExpr, is_expression_kind, name_text},
         matching_nodes, node_text, paired_comment_definition,
     },
     thin_vec::ThinVec,
@@ -566,6 +566,9 @@ pub struct ItemSpan<'db> {
     /// The defined name's range, read with the item's identity from the same walk.
     pub name_range: Option<TextRange>,
     stamp: SyntaxStamp,
+    /// The stamp of the `#:` block attached to the item, [`NO_STAMP`] without one. The block is
+    /// a top-level node of its own, so it carries a stamp like the item's.
+    annotation_stamp: SyntaxStamp,
 }
 
 /// One memoized walk; a per-item lookup would re-classify the file per item.
@@ -575,10 +578,19 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
     let root = parse.syntax_node();
     let mut counts: FxHashMap<(ItemKind, Option<Symbol>), u32> = FxHashMap::default();
     let mut spans = Vec::new();
+    let mut previous_annotation: Option<(TextRange, SyntaxStamp)> = None;
     for (node, &stamp) in root.children().zip(stamps.iter()) {
+        if node.kind() == SyntaxKind::ANNOTATION {
+            previous_annotation = Some((node.text_range(), stamp));
+            continue;
+        }
         if !is_expression_kind(node.kind()) && node.kind() != SyntaxKind::ERROR {
             continue;
         }
+        let annotation_stamp = match (attached_annotation(&node), previous_annotation) {
+            (Some(block), Some((range, stamp))) if block.text_range() == range => stamp,
+            _ => NO_STAMP,
+        };
         let (kind, name, name_range) = match top_level_definition(&node) {
             Some(definition) => {
                 // A jump to a definition lands on this range, so it is the name's own token.
@@ -614,6 +626,7 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
             range: node.text_range(),
             name_range,
             stamp,
+            annotation_stamp,
         });
     }
     spans
@@ -720,7 +733,7 @@ pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
     let annotated = root.any_kind(|kind| kind == SyntaxKind::ANNOTATION);
     let candidate = |kind: SyntaxKind| match kind {
         SyntaxKind::BINARY_EXPR | SyntaxKind::FUNCTION_DEF => typed,
-        SyntaxKind::BRACE_EXPR | SyntaxKind::SOURCE_FILE => annotated,
+        SyntaxKind::BRACE_EXPR | SyntaxKind::SOURCE_FILE | SyntaxKind::ARGUMENT_LIST => annotated,
         SyntaxKind::TYPE_DEFINITION
         | SyntaxKind::NEW_EXPR
         | SyntaxKind::CALL_EXPR
@@ -755,7 +768,7 @@ pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
         if syntax::is_inline_annotation_kind(kind, node.parent().map(NodeRef::kind)) {
             roles |= SiteRole::InlineAnnotation.bit();
         }
-        if (node == root || kind == SyntaxKind::BRACE_EXPR)
+        if (node == root || kind == SyntaxKind::BRACE_EXPR || kind == SyntaxKind::ARGUMENT_LIST)
             && node.has_child(SyntaxKind::ANNOTATION)
         {
             roles |= SiteRole::AnnotatedSequence.bit();
@@ -1096,36 +1109,40 @@ pub fn package_scheme_exists_in(
     })
 }
 
-/// Annotations are siblings of the item in the file tree, so they attach here, not in
-/// `item_syntax`. One walk per file attaches them all. An edit to the file repeats the walk,
-/// and it comes out equal while no `#:` block changed, so a reader of an item's annotations
-/// runs again only when some block of its file did.
+/// The item's `#:` block, item-relative like [`item_syntax`]. Like it, the read depends on a
+/// stamp alone ([`item_annotation_stamp`]), so an edit to one block runs again only the readers
+/// of that block's item.
 pub fn item_annotation_syntax<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<ItemSyntax> {
-    file_item_annotations(db, *item.file(db))
-        .get(&item)
-        .cloned()
+    let stamp = item_annotation_stamp(db, item);
+    if stamp == NO_STAMP {
+        return None;
+    }
+    let tree = match db.trees().stamped(*item.file(db), stamp) {
+        Some(tree) => tree,
+        None => attached_annotation(&item_node(db, item)?)?.subtree(),
+    };
+    Some(ItemSyntax(Arc::new(tree)))
 }
 
-/// Matches targets to `item_spans` by range, so top-level classification lives in one place.
-#[salsa::tracked(returns(ref))]
-fn file_item_annotations<'db>(
-    db: &'db dyn Db,
-    file: SourceFile,
-) -> FxHashMap<Item<'db>, ItemSyntax> {
-    let item_by_range: FxHashMap<TextRange, Item<'db>> = item_spans(db, file)
-        .iter()
-        .map(|span| (span.range, span.item))
-        .collect();
-    let parse = parse(db, file);
-    statement_annotations(&parse.syntax_node())
-        .into_iter()
-        .filter_map(|(annotation, target)| match target {
-            AnnotationTarget::Attached(node) => item_by_range
-                .get(&node.text_range())
-                .map(|&item| (item, ItemSyntax(Arc::new(annotation.detached_subtree())))),
-            _ => None,
-        })
-        .collect()
+/// The stamp of the item's `#:` block, [`NO_STAMP`] without one. It runs again for every item
+/// of an edited file and comes out equal for each item whose block the edit left alone.
+#[salsa::tracked(returns(copy))]
+fn item_annotation_stamp<'db>(db: &'db dyn Db, item: Item<'db>) -> SyntaxStamp {
+    let Some(span) = item_span(db, item) else {
+        return NO_STAMP;
+    };
+    let file = *item.file(db);
+    if syntax::testing::invariants_enabled()
+        && let Some(stamped) = db.trees().stamped(file, span.annotation_stamp)
+    {
+        assert!(
+            span_node(db, file, span)
+                .and_then(|node| attached_annotation(&node))
+                .is_some_and(|block| block.subtree() == stamped),
+            "the annotation stamp of an item names another node's syntax"
+        );
+    }
+    span.annotation_stamp
 }
 
 /// An item's lowered annotations, item-relative like `item_syntax`.
@@ -1317,6 +1334,11 @@ fn expression_annotations<'db>(
             targets.push((statement, None));
         }
     }
+    // The item's own `#:` block is outside its tree, so its signature's type parameters come
+    // from the block itself.
+    let outer = item_annotation_syntax(db, item)
+        .map(|block| annotations::block_type_parameters(db, &block.syntax_node()))
+        .unwrap_or_default();
     let mut attachments = Vec::new();
     for (statement, comment) in targets {
         let range = hir::significant_range(&statement);
@@ -1325,11 +1347,12 @@ fn expression_annotations<'db>(
         };
         let written_signature =
             annotations::has_written_signature(&statement, comment.as_ref(), inline_enabled);
-        let comment = comment.map(|comment| annotations::lower_annotation(db, &comment));
+        let comment =
+            comment.map(|comment| annotations::lower_annotation_within(db, &comment, &outer));
         let site = annotations::statement_inline_site(&statement).filter(|_| inline_enabled);
         let inline = site
             .as_ref()
-            .map(|site| annotations::lower_inline_annotation(db, site));
+            .map(|site| annotations::lower_inline_annotation_within(db, site, &outer));
         let Some(mut lowered) = annotations::merge_annotations(db, comment, inline, site.as_ref())
         else {
             continue;
@@ -1897,6 +1920,12 @@ pub fn file_type_definitions<'db>(
             _ => {}
         }
     }
+    for opaque in definitions
+        .iter_mut()
+        .filter_map(|definition| definition.opaque.as_mut())
+    {
+        opaque.home = Some(file);
+    }
     definitions
 }
 
@@ -2158,58 +2187,203 @@ fn statement_binding_recover<'db>(
 }
 
 /// The last top-level definition of each name across the package files.
-pub fn package_definitions<'db>(
-    db: &'db dyn Db,
-    files: ProjectFiles,
-) -> &'db FxHashMap<Symbol, Item<'db>> {
-    &package_definition_index(db, files).winners
-}
-
-/// The package files' definitions, folded once: a new top-level name re-runs this fold on
-/// every keystroke until the name is complete, so the duplicate check shares its pass.
-#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
-pub struct DefinitionIndex<'db> {
-    pub winners: FxHashMap<Symbol, Item<'db>>,
-    /// Every file that defines a name the package defines more than once, one entry per
-    /// definition, in project order. Near-empty in a healthy project.
-    pub duplicates: FxHashMap<Symbol, Vec<SourceFile>>,
-}
-
-#[salsa::tracked(returns(ref))]
-pub fn package_definition_index<'db>(db: &'db dyn Db, files: ProjectFiles) -> DefinitionIndex<'db> {
-    winners_of(db, files, DocumentKind::Package)
+pub fn package_definitions<'db>(db: &'db dyn Db, files: ProjectFiles) -> Definitions<'db> {
+    Definitions {
+        db,
+        layer: definition_layer(db, files, false),
+    }
 }
 
 /// The last top-level definition of each name across the helper files, which testthat
 /// sources into the one environment every test file runs in.
-#[salsa::tracked(returns(ref))]
-pub fn test_definitions<'db>(db: &'db dyn Db, files: ProjectFiles) -> FxHashMap<Symbol, Item<'db>> {
-    winners_of(db, files, DocumentKind::TestHelper).winners
+pub fn test_definitions<'db>(db: &'db dyn Db, files: ProjectFiles) -> Definitions<'db> {
+    Definitions {
+        db,
+        layer: definition_layer(db, files, true),
+    }
 }
 
-fn winners_of<'db>(
+/// One layer's top-level definitions, read through its chunks. A lookup of a name that no
+/// file of the layer defines probes no chunk, and one of a defined name starts at the chunk
+/// that wins it.
+#[derive(Clone, Copy)]
+pub struct Definitions<'db> {
     db: &'db dyn Db,
-    files: ProjectFiles,
-    kind: DocumentKind,
-) -> DefinitionIndex<'db> {
-    let mut index = DefinitionIndex::default();
-    for &file in files.files(db) {
-        if *file.kind(db) != kind {
-            continue;
+    layer: &'db DefinitionLayer<'db>,
+}
+
+impl<'db> Definitions<'db> {
+    pub fn get(&self, name: &Symbol) -> Option<&'db Item<'db>> {
+        let last = self.layer.last_chunk(*name);
+        self.layer.chunks[..last]
+            .iter()
+            .rev()
+            .find_map(|&chunk| definition_chunk(self.db, chunk).winners.get(name))
+    }
+
+    pub fn contains_key(&self, name: &Symbol) -> bool {
+        self.get(name).is_some()
+    }
+
+    /// Every defined name, once per chunk that defines it.
+    pub fn keys(self) -> impl Iterator<Item = &'db Symbol> + 'db {
+        let db = self.db;
+        self.layer
+            .chunks
+            .iter()
+            .flat_map(move |&chunk| definition_chunk(db, chunk).winners.keys())
+    }
+
+    /// Every file that defines `name`, one entry per definition, in project order.
+    pub fn defining_files(&self, name: Symbol) -> SmallVec<[SourceFile; 2]> {
+        let last = self.layer.last_chunk(name);
+        let mut files = SmallVec::new();
+        for &chunk in &self.layer.chunks[..last] {
+            let definitions = definition_chunk(self.db, chunk);
+            match definitions.repeated.get(&name) {
+                Some(repeated) => files.extend(repeated.iter().copied()),
+                None => files.extend(
+                    definitions
+                        .winners
+                        .get(&name)
+                        .map(|item| *item.file(self.db)),
+                ),
+            }
         }
-        let definitions = file_definitions(db, file);
-        index.winners.reserve(definitions.len());
-        for &(name, item) in definitions {
-            if let Some(previous) = index.winners.insert(name, item) {
-                index
-                    .duplicates
+        files
+    }
+}
+
+/// Files per definition chunk. A new top-level name re-folds its own chunk alone, and a lookup
+/// probes at most one chunk per this many files.
+const DEFINITION_CHUNK_FILES: usize = 32;
+
+/// A run of a layer's files, in project order, whose definitions fold together.
+#[salsa::interned(debug)]
+pub struct DefinitionChunk<'db> {
+    #[returns(ref)]
+    pub files: Box<[SourceFile]>,
+}
+
+/// A layer's chunks and, per hash bucket of names, one more than the index of the last chunk
+/// that defines a name in the bucket (0 when none does). Building it reads each chunk's names
+/// once and inserts nothing into a map, which is what a new name costs on every keystroke
+/// until it is complete.
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct DefinitionLayer<'db> {
+    chunks: Vec<DefinitionChunk<'db>>,
+    last_chunk: Box<[u32]>,
+}
+
+impl DefinitionLayer<'_> {
+    fn bucket(&self, name: Symbol) -> usize {
+        let shift = u32::BITS - self.last_chunk.len().trailing_zeros();
+        (name.index().wrapping_mul(0x9E37_79B9) >> shift) as usize
+    }
+
+    fn last_chunk(&self, name: Symbol) -> usize {
+        match self.last_chunk.is_empty() {
+            true => 0,
+            false => self.last_chunk[self.bucket(name)] as usize,
+        }
+    }
+}
+
+#[salsa::tracked(returns(ref))]
+fn definition_layer<'db>(db: &'db dyn Db, files: ProjectFiles, test: bool) -> DefinitionLayer<'db> {
+    let kind = match test {
+        true => DocumentKind::TestHelper,
+        false => DocumentKind::Package,
+    };
+    let members: Vec<SourceFile> = files
+        .files(db)
+        .iter()
+        .copied()
+        .filter(|file| *file.kind(db) == kind)
+        .collect();
+    let chunks: Vec<DefinitionChunk<'db>> = members
+        .chunks(DEFINITION_CHUNK_FILES)
+        .map(|run| DefinitionChunk::new(db, Box::<[SourceFile]>::from(run)))
+        .collect();
+    let names: usize = chunks
+        .iter()
+        .map(|&chunk| definition_chunk(db, chunk).winners.len())
+        .sum();
+    if names == 0 {
+        return DefinitionLayer {
+            chunks,
+            last_chunk: Box::default(),
+        };
+    }
+    // Twice as many buckets as names keeps most lookups of an undefined name at one probe.
+    let buckets = (names * 2).next_power_of_two().max(64);
+    let mut layer = DefinitionLayer {
+        chunks,
+        last_chunk: vec![0; buckets].into_boxed_slice(),
+    };
+    for (index, &chunk) in layer.chunks.iter().enumerate() {
+        let Ok(bound) = u32::try_from(index + 1) else {
+            panic!("definition_layer: more chunks than u32::MAX");
+        };
+        for &name in definition_chunk(db, chunk).winners.keys() {
+            let bucket = layer.bucket(name);
+            layer.last_chunk[bucket] = bound;
+        }
+    }
+    layer
+}
+
+/// One chunk's definitions: the last one of each name, and every defining file of the names
+/// the chunk defines more than once.
+#[derive(Debug, Clone, PartialEq, Eq, Default, salsa::SalsaValue)]
+pub struct ChunkDefinitions<'db> {
+    pub winners: FxHashMap<Symbol, Item<'db>>,
+    /// One entry per definition, in project order; near-empty in a healthy project.
+    pub repeated: FxHashMap<Symbol, Vec<SourceFile>>,
+}
+
+#[salsa::tracked(returns(ref))]
+fn definition_chunk<'db>(db: &'db dyn Db, chunk: DefinitionChunk<'db>) -> ChunkDefinitions<'db> {
+    let mut definitions = ChunkDefinitions::default();
+    for &file in chunk.files(db).iter() {
+        let own = file_definitions(db, file);
+        definitions.winners.reserve(own.len());
+        for &(name, item) in own {
+            if let Some(previous) = definitions.winners.insert(name, item) {
+                definitions
+                    .repeated
                     .entry(name)
                     .or_insert_with(|| vec![*previous.file(db)])
                     .push(file);
             }
         }
     }
-    index
+    definitions
+}
+
+/// The names `file` defines that the package defines more than once, each with every
+/// defining file in project order. Per file, so a new name elsewhere costs each reading file
+/// one probe per name it defines, and the value backdates while nothing duplicates.
+#[salsa::tracked(returns(ref))]
+pub fn file_duplicate_definitions(
+    db: &dyn Db,
+    file: SourceFile,
+) -> Vec<(Symbol, SmallVec<[SourceFile; 2]>)> {
+    let Some(files) = ProjectFiles::try_get(db) else {
+        return Vec::new();
+    };
+    let definitions = package_definitions(db, files);
+    let mut duplicated: Vec<(Symbol, SmallVec<[SourceFile; 2]>)> = Vec::new();
+    for &(name, _) in file_definitions(db, file) {
+        if duplicated.iter().any(|(seen, _)| *seen == name) {
+            continue;
+        }
+        let defining = definitions.defining_files(name);
+        if defining.len() > 1 {
+            duplicated.push((name, defining));
+        }
+    }
+    duplicated
 }
 
 /// The file's named function and value items in item order, the candidates for
@@ -2765,6 +2939,9 @@ pub struct ItemSyntaxFlags {
     /// It binds a function marked `@pure function`, which counts only while inline
     /// annotations are enabled.
     pub inline_pure: bool,
+    /// It may be a `body(name) <-` write, which replaces a function's code. It may overcount;
+    /// `file_code_rewrites` reads the item's HIR to confirm.
+    pub rewrites_code: bool,
 }
 
 #[salsa::tracked(returns(copy))]
@@ -2789,6 +2966,14 @@ pub fn item_syntax_flags<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemSyntaxFla
         binds_only_own_name: binds_only_own_name(db, item, &root),
         comment_pure,
         inline_pure,
+        rewrites_code: BinaryExpr::cast(root.clone()).is_some_and(|assignment| {
+            [assignment.lhs(), assignment.rhs()]
+                .into_iter()
+                .flatten()
+                .filter(|side| side.kind() == SyntaxKind::CALL_EXPR)
+                .filter_map(|side| side.first_child())
+                .any(|callee| matches!(callee.text().to_string().as_str(), "body" | "base::body"))
+        }),
     }
 }
 
@@ -2841,7 +3026,7 @@ fn write_tokens(node: &SyntaxNode) -> usize {
             SyntaxKind::SPECIAL => matches!(token.text(), "%<-%" | "%->%"),
             SyntaxKind::IDENT | SyntaxKind::STRING => matches!(
                 token.text().trim_matches(['`', '"', '\'']),
-                ":=" | "setnames" | "setcolorder"
+                ":=" | "setnames" | "setcolorder" | "set" | "setattr" | "setDT" | "setDF"
             ),
             _ => true,
         })
@@ -3214,7 +3399,67 @@ fn check_item_against<'db>(
         Some(globals),
         file_is_strict(db, *item.file(db)),
         *file_holds_ry_values(db, *item.file(db)),
+        code_rewritten_later(db, item),
     ))
+}
+
+/// Whether the file's last top-level write of the item's name is `body(name) <- ...` in another
+/// item, so the item's value is a template whose code R replaces before anything calls it.
+/// `formals(name) <-` keeps the body, so that body still runs as written.
+fn code_rewritten_later<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
+    if *item.kind(db) != ItemKind::Value {
+        return false;
+    }
+    let Some(name) = item.name(db) else {
+        return false;
+    };
+    // The file's list is empty almost always, so an ordinary value never reads the file's
+    // binders, which change whenever an item is inserted.
+    if !file_code_rewrites(db, *item.file(db)).contains(&name) {
+        return false;
+    }
+    frame_binder(db, item, types::Name::new(db, name), true)
+        .is_some_and(|writer| writer != item && code_rewrite_target(db, writer) == Some(name))
+}
+
+/// The names a top-level `body(name) <-` of the file rewrites. It
+/// backdates on every edit that adds or removes no such write.
+#[salsa::tracked(returns(ref))]
+fn file_code_rewrites(db: &dyn Db, file: SourceFile) -> ThinVec<Symbol> {
+    let mut names: ThinVec<Symbol> = item_tree(db, file)
+        .iter()
+        .filter(|&&item| item_syntax_flags(db, item).rewrites_code)
+        .filter_map(|&item| code_rewrite_target(db, item))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+fn code_rewrite_target<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<Symbol> {
+    let module = item_hir(db, item).as_ref()?;
+    let ExpressionKind::Assign { target, .. } = module.kind(module.root?) else {
+        return None;
+    };
+    let ExpressionKind::Call { callee, arguments } = module.kind(*target) else {
+        return None;
+    };
+    let replaces_body = match *module.kind(*callee) {
+        ExpressionKind::NameRef(head) => head.as_str() == "body",
+        ExpressionKind::Namespace {
+            package: Some(package),
+            name: Some(name),
+            ..
+        } => package.as_str() == "base" && name.as_str() == "body",
+        _ => false,
+    };
+    if !replaces_body {
+        return None;
+    }
+    match module.kind(module[arguments].first()?.value?) {
+        ExpressionKind::NameRef(read) => Some(*read),
+        _ => None,
+    }
 }
 
 /// Always `item_check`'s scheme, so export and hover share one source of truth.
@@ -3436,6 +3681,12 @@ impl<'db> TypeDefinitions<'db> {
         if let Some(files) = self.files
             && let Some(definition) = project_type_definition(db, files, name)
         {
+            if definition
+                .opaque
+                .is_some_and(|opaque| opaque.home != Some(self.file))
+            {
+                return hidden_type_definition(db, files, name).as_ref();
+            }
             return Some(definition);
         }
         self.library?.type_definitions.get(&name)
@@ -3451,6 +3702,19 @@ fn project_type_definition<'db>(
     name: types::Name<'db>,
 ) -> Option<annotations::NamedDefinition<'db>> {
     project_type_definitions(db, files).get(&name).cloned()
+}
+
+/// An `opaque` definition as every file but its home reads it: with no representation.
+#[salsa::tracked(returns(ref))]
+fn hidden_type_definition<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    name: types::Name<'db>,
+) -> Option<annotations::NamedDefinition<'db>> {
+    let mut definition = project_type_definition(db, files, name).cloned()?;
+    definition.body = types::unknown(db);
+    definition.opaque.as_mut()?.hidden = true;
+    Some(definition)
 }
 
 /// The classes with arithmetic methods a file sees: the stubs', the package's and the file's
@@ -3539,6 +3803,17 @@ fn file_binders<'db>(db: &'db dyn Db, file: SourceFile) -> ThinVec<(Symbol, u32,
     }
     binders.sort_unstable_by_key(|&(name, index, _)| (name.index(), index));
     ThinVec::from(binders)
+}
+
+/// The item whose top-level write of `name` a read in `item` sees, as [`frame_binder`] decides
+/// it, for editor features that follow a read to the value it finds.
+pub fn reaching_writer<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+    name: &str,
+    deferred: bool,
+) -> Option<Item<'db>> {
+    frame_binder(db, item, types::Name::new(db, name), deferred)
 }
 
 /// An immediate read sees the nearest earlier writer in the file (R sources top-down).

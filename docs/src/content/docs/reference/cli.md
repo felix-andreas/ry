@@ -43,7 +43,8 @@ package and cannot change its findings. A file matched by `exclude` is analyzed 
 it.
 
 `ry check` reads `.R` files and the R chunks of `.Rmd`, `.qmd`, and `.Rnw` documents. Findings go to
-stderr and the one-line summary to stdout. A terminal gets color and Unicode box drawing, `NO_COLOR`
+stderr and the one-line summary to stdout. The summary counts the problems and the files that have
+them, out of the files checked when some are clean, as in `2 problems in 1 of 3 files`. A terminal gets color and Unicode box drawing, `NO_COLOR`
 turns off only the color, and a pipe gets plain ASCII. [Diagnostic
 codes](/reference/diagnostic-codes) shows how to read a finding.
 
@@ -64,10 +65,12 @@ error is left unchanged, because its fixes were worked out on a guess at what th
 The editor offers the same fixes as quick fixes.
 
 `--annotate` writes the inferred type of each unannotated top-level function and binding in the
-named files, inline or as a `#:` comment as [`inline-annotations`](/reference/configuration#inline-annotations)
-says, prints how many it added, and then reports what is left.
+named files, and the signature of each unannotated function passed as an argument, such as the
+`function(v) v * 2` of a `vapply` call. It writes them inline or as `#:` comments as
+[`inline-annotations`](/reference/configuration#inline-annotations) says (a lambda's `#:` line
+needs the argument to start its own line), prints how many it added, and then reports what is left.
 [Strict mode](/guide#strict-mode) shows it at work. A binding
-whose type inference cannot write down, such as one involving `Unknown`, is skipped.
+or lambda whose type inference cannot write down, such as one involving `Unknown`, is skipped.
 
 ### The check cache
 
@@ -281,7 +284,8 @@ your code and no data. It lists:
 - the time split after start-up: tier-0 bytecode, the AST evaluator, closure call setup, variable
   lookups past the inline caches, builtins, S3 and S4 method lookup, native code, condition
   handling, frame introspection (`sys.call`, `parent.frame`, `match.call`), garbage collection,
-  JIT compilation and JIT-compiled code. The summary's own work, counting each collection's freed
+  JIT compilation and JIT-compiled code. A call that compiled code inlines into its caller
+  counts as JIT-compiled code. The summary's own work, counting each collection's freed
   objects by type, is listed apart as "profile summary bookkeeping" rather than in garbage
   collection;
 - base R's builtins by time and by number of calls;
@@ -374,6 +378,19 @@ time where many objects outlive a collection: on a generated package's 1,907 tes
 runs 48 full collections instead of 5, and collecting takes 3.8 s of the 23 s instead of 0.7 s.
 A value outside a variable's range is ignored, as on GNU R.
 
+### Profiles
+
+Every command that starts a session (`ry run` with a script or a console, `ry load`, `ry test`,
+`ry document`, and the debug adapter) sources the user profile once base R has loaded, as Rscript
+does: the file `R_PROFILE_USER` names when it is set, else `./.Rprofile`, else `~/.Rprofile`. So
+a project's `.Rprofile` that sets `TZ` or an option holds before its package loads.
+
+`--no-init-file`, or its alias `--vanilla`, starts a script, a console, `ry load -e`/`-f` code, a
+test run or `ry document` without it. These commands source no site profile, and ry reads no
+`.Renviron`; `R` and `Rscript` in ry's R home source the site profile unless given `--vanilla`.
+Under GNU R (`ry R`, or `--runtime gnu-r`) either flag passes `--no-init-file`, which skips only
+the user profile. An executable from `ry build --aot --exe` reads no profile.
+
 ### Start-up image
 
 ry's base R tree ships an image of the session as it stands once base R and the default packages
@@ -386,11 +403,19 @@ in it, and the tree keeps those of the four builds that wrote theirs most recent
 a running session uses.
 
 Each start still runs the steps that read the environment: the C-level options, base R's profile,
-and the `.onLoad` hooks of utils, grDevices and stats. So `EDITOR`, `R_LIBS`, `_R_RNG_VERSION_`
-and the other variables they read take effect on every run, as they do on GNU R. A start runs the
-slow way, with the same result, when it is interactive, sources a site or user profile (which
-`ry run` never does and ry's `Rscript` does when one exists), or sets a variable that changes which
-packages load or how: `R_DEFAULT_PACKAGES`, `R_TESTS`, `R_KEEP_PKG_SOURCE=yes`,
+the `.onLoad` hooks of utils, grDevices and stats, and the site and user [profiles](#profiles). So
+`EDITOR`, `R_LIBS`, `_R_RNG_VERSION_` and the other variables they read take effect on every run,
+as they do on GNU R. A profile sees the search path GNU R shows it, with only `methods`,
+`Autoloads` and base attached, plus ry's `package:ry` in front of base so that a profile can load a
+package with ry's loader. `.First()` runs after it, and then the packages left in
+`options(defaultPackages=)` are attached in front of whatever the profile attached, so a default
+package the profile drops is not attached and one it adds is. Because the image holds the default
+packages already loaded, three things differ from GNU R: `loadedNamespaces()` lists them while a
+profile runs, the options their `.onLoad` hooks set are already set, and a default package the
+profile drops stays loaded, though not attached.
+
+A start runs the slow way, with the same result, when it is interactive or sets a variable that
+changes which packages load or how: `R_DEFAULT_PACKAGES`, `R_TESTS`, `R_KEEP_PKG_SOURCE=yes`,
 `_R_TRACE_LOADNAMESPACE_`, `_R_NO_REPORT_MISSING_NAMESPACES_`, `_R_METHODS_DONT_CHECKSUBCLASSES`
 or `RY_METHODS_NATIVE`.
 
@@ -450,9 +475,25 @@ Without `--jobs`, testthat's own switches apply as they do under `devtools::test
 `TESTTHAT_PARALLEL` environment variable overrides `DESCRIPTION`, and `TESTTHAT_CPUS` or
 `options(Ncpus =)` sets the worker count in place of the core count.
 
-A worker loads the package the way `ry test` itself does, lazily and under the project's
-`ry.toml`, so it needs neither pkgload nor every package in `Imports` installed. With
-`--runtime gnu-r`, workers load the package with `pkgload::load_all()`, as under testthat alone.
+On Linux and macOS, each worker is forked from the `ry test` process after it has loaded testthat
+and the package, so a worker starts without loading either and shares their memory with the
+`ry test` process until it writes to it. The workers together then use little more CPU time than
+one process running every file, so a suite of files that take similar time finishes several times
+faster. A worker gets its own `tempdir()` and random seed, runs the helpers and setup files, takes
+one file at a time, and sends its results back over a pipe. What a file prints through R's console
+is reported under the file's name, as testthat's own workers report it, while output that native
+code writes straight to the terminal is not captured. What the helpers and setup files print is
+shown only when they fail. Once every file has run, each worker runs the teardown files and exits.
+A worker that exits in the middle of a file stops the run with an error that names the file.
+
+A forked process inherits a thread pool's memory but not its threads, so `ry test` starts
+testthat's callr workers instead of forking once it may have started one: after a `DataFrame`
+query, or with the polars package loaded.
+
+On Windows, which cannot fork, and in that case, the workers are testthat's callr processes, and
+each loads the package the way `ry test` itself does, lazily and under the project's `ry.toml`. Either way a run
+needs neither pkgload nor every package in `Imports` installed. With `--runtime gnu-r`, workers
+are testthat's own and load the package with `pkgload::load_all()`, as under testthat alone.
 
 `--profile-summary` measures one process, so it runs the files without workers, and combining it
 with more than one job is an error.
@@ -489,6 +530,7 @@ a package a link or an `@inherit` points at, edit the file or delete the cache, 
 ```sh
 ry build                  # write ../<package>_<version>.tar.gz
 ry build -o dist          # write it into dist/ instead
+ry build --plain-r        # write a tarball GNU R and CRAN read
 ry install                # install into the first library on .libPaths()
 ry install -l ~/rlib      # install into ~/rlib
 ry install --train tests  # train the package's code image on its tests
@@ -527,6 +569,31 @@ expanded and the package's own `type` definitions unfolded (`p: Point` becomes
 `p: Record{x: F64, y: F64}`). A type with no such spelling, such as the open record
 `Record{a: I64, ..}`, stays as written. Only the tarball changes, never the package directory, and a
 package that declares `Encoding: latin1` gets its rewritten files in latin1.
+
+`--plain-r` writes the package's R code as plain R instead, for GNU R, CRAN and every other R tool,
+with no rewrites for ry's runtime. Each statement's inline annotations move into a `#:` block above
+it, which ry reads as the same types (see [erasure to plain
+R](/reference/type-system#erasure-to-plain-r)):
+
+```r
+# R/scale.R in the package
+scale_by <- function<T: numeric>(values: T, scale: T = 1) -> T values * scale
+
+# R/scale.R in the tarball
+#: <T: numeric> fn(values: T, [scale]: T) -> T
+scale_by <- function(values, scale = 1)  values * scale
+```
+
+An annotation that no `#:` block can carry is left out with a warning: one on a function passed as
+an argument, a `@Name(value)` inside a larger expression, and an inline type on a statement that
+already has a `#:` block.
+
+```
+  ! /home/you/pkg/R/ids.R:2:26: `: integer` has no `#:` spelling there, so the plain R leaves it out
+```
+
+ry code that plain R cannot spell at all, such as a record, a tag, a suffixed number or `List.map`,
+stops the build with exit status 1, naming the first such construct in each file.
 
 ry's `R CMD INSTALL` and `R CMD SHLIB` run `make` with one job per processor unless `MAKEFLAGS`
 is set to a value. A package
@@ -716,6 +783,10 @@ ry's runtime itself (`libR.so`, `libR.dylib` or `R.dll`) is built into `ry` and 
 directory cannot hold a library (read-only, or mounted `noexec`), set `XDG_CACHE_HOME` to another
 directory, or `RY_LIBR` to a runtime you placed yourself. A runtime beside `ry`, in `deps/`, or in
 `../lib/ry/` takes precedence over the built-in one.
+
+Each release extracts its own copies, and the cache keeps those of the three releases that
+extracted theirs most recently. When a release extracts its copies, it removes older ones, except
+those a running `ry` still uses.
 
 `ry R` and `--runtime gnu-r` run GNU R itself: the R in `R_HOME` if it is set, and otherwise the one
 `R RHOME` reports on your `PATH`. It must be built as a shared library, as the CRAN builds are, and

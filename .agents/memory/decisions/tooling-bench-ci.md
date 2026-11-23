@@ -386,3 +386,43 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 - **Known differences live in `known_difference`,** which keeps a fragment out of every program, and in the backlog ("Differences the fuzz kinds report", *Parser*). Without the list each run reports the same handful and hides the new one; with the list in the generator, the default arm passes and an entry is deleted with its fix. Rejected: an allow-list of expected output lines (it pins GNU R's wording per fragment and rots).
 - **What GNU R's lexer decides, ry's parser decides at the same place.** The differences the first runs found were contextual lexing: a function, loop or branch body ends before an infix `?`; a lambda's `\` reads across a line break only where the lexer is skipping line breaks (after an operator or a head, inside parentheses, right after `{`), so `\` at a statement start must have its `(` on the same line; a line break after `::` ends the statement; `...` and `..1` are loop variables; a hex literal takes a fraction without a `p` exponent; `1e`, `0x1.8p` and `0x1..2` are one refused token, not a number and a name; `.5.5` is two numbers, because a number that starts with its `.` has read its fraction. GNU R reads a line break at the end of its input whether or not the text has one, so a `::` outside parentheses or a statement's `\` at the end is "unexpected end of line" (`Unexpected::EndOfLine`), where `$`, an operator and an open `(` are "unexpected end of input". `crates/oracle/cases/parse__grammar_corners.R` pins them.
 - **A lexer error names what R's parser did not expect** (`SyntaxError::unexpected`): the refused token for a stray character or a malformed number, nothing for a ry rule such as an unknown number suffix, whose message ry keeps. The default was the end of the input, so every stray character ran as "unexpected end of input". An error on a line break is reported at column 0 of the next line, where GNU R's lexer stands, and the lines quoted for a refused number reach one character past ry's token, because GNU R's lexer has read the character that shows the number to be malformed (`grammar_error_report`, `crates/interp/src/lower.rs`).
+
+## Session commands read the user profile, as Rscript does
+
+**Status:** built.
+
+- **Rule.** `ry run` (script and console), `ry load`, `ry test`, `ry document` and the debug adapter source the user profile once base R has loaded: `R_PROFILE_USER` when set (even when the file is missing), else `./.Rprofile`, else `~/.Rprofile`. `--no-init-file`, with the alias `--vanilla`, skips it (`StartupArguments` in `crates/ry/src/command_line.rs`; `RuntimeFlags::user_profile`, bit `1 << 4`). `ry R` and the GNU R runtime get `--no-init-file`, which skips only the user profile: GNU R still reads its `.Renviron` and site profile. On ry's runtime a script session sources no site profile and ry reads no `.Renviron`, so there `--vanilla` means `--no-init-file`.
+- **Why.** A project's `.Rprofile` is where users set what their package's `.onLoad` needs (a test user's sets `TZ`), and the GNU R equivalents (`Rscript`, `devtools::load_all()` in an R session, `devtools::test()`) all run after it. A command that skipped it ran different code than the user's R.
+- **Not read:** executables from `ry build --aot --exe` (a shipped program does not depend on the directory it starts in) and `ry check`, which runs nothing. `ry test` workers on Unix are forked after the profile ran, so they carry its effects; on Windows they read whatever callr's profile sources (the project's `.Rprofile` too), not the parent's flag.
+- **Cost.** None beyond the profile itself: profiles run over the start-up image (`decisions/heap-gc.md`, "Profiles run over the start-up image").
+
+## A package `ry load` loaded counts as a pkgload dev package
+
+**Status:** built.
+
+- **Rule.** `.ry_new_package` (`crates/loader/src/runtime.R`) sets `ns$.__DEVTOOLS__` to an environment, the marker pkgload's `create_dev_meta` sets, and `.ry_stoplist` keeps it out of `export_all`.
+- **Why.** testthat's `local_mocked_bindings()` outside a test run finds the package to mock in through `pkgload::dev_packages()`, which lists the namespaces that carry the marker. Without it `ry load -f test-file.R` stopped with "No packages loaded with pkgload", while `ry test` passed because testthat knows the package it is testing.
+
+## Typed benchmark templates do R-level work in boundary functions
+
+**Status:** built.
+
+The typed benchmark packages check in strict mode with zero findings, so a template whose typed
+function needs R semantics declares an R type in its signature, which makes it a boundary function
+that the native rules do not judge. `with_workers` forces a lazy argument after `on.exit`, so it
+takes `<T: numeric>` rather than an unbounded `T`. `visits_per_month` buckets dates with
+`lubridate::floor_date`, which has no table-expression equivalent, so it takes the period as
+`unit: character = "month"`. The checker is not relaxed for these: the native rules are the
+contract in the type-system reference.
+
+## ry test forks its workers
+
+**Status:** built (Unix; Windows keeps testthat's callr workers).
+
+- **What was weak.** `ry test --jobs N` ran testthat's callr queue: N fresh processes, each starting the runtime and loading testthat and the package (about 0.3 s each), and a parent that spent about 1 s of CPU in processx and callr relaying one message per expectation. On lgr's suite `--jobs 4` used about 1.4 times the CPU of `--jobs 1`; a test user saw 2 times on a larger suite.
+- **Shape.** `crates/ry/src/test.R` replaces testthat's `queue_setup` and `queue_teardown` with a queue of workers forked (`parallel:::mcfork`) after the parent loaded testthat and the package. A worker gets its own `tempdir()` (`.Internal(ryWorkerTempDir())`, which also sets `R_TempDir` for native code) and drops `.Random.seed`, runs `queue_process_setup()` (helpers, setup files), then reads one path at a time from its stdin pipe and sends each test's reporter events as one serialized message; the parent blocks in `selectChildren` and hands testthat's event loop the same `PROCESS_MSG`/`PROCESS_OUTPUT` messages callr workers produce, so testthat's reporters, `start-first` ordering and error classes are unchanged. A worker that runs out of files waits; the queue's teardown asks each idle worker to run `withr::deferred_run()` and exit (one second's grace, as testthat's own), so no teardown runs while a sibling still tests. Setup output is kept only for a setup error. testthat internals the queue drives (`queue_process_setup`, `queue_task`, `PROCESS_MSG`, `PROCESS_OUTPUT`, `queue_setup`'s formals) are checked first, and a mismatch keeps the callr workers.
+- **Result.** Pages are shared copy-on-write, so `--jobs 4` on lgr costs about 1.1 times the CPU of `--jobs 1` and runs about 2.9 times as fast. The packages suite tracks both ratios (`tracked.test_jobs`, the Test workers table), counting every worker's CPU through a child-subreaper wrapper (`TREE_TIMER` in `tools/bench/bench.py`).
+- **Thread pools.** A forked child inherits a pool's memory but not its threads, so a Polars query in a child of a parent that ran one hangs. `table_work!` (`crates/frames/src/frame.rs`) sets `interp::system::note_thread_pool()`, and `queue_setup` falls back to the callr workers when `.Internal(ryThreadPoolStarted())` is set or the polars package is loaded. Rejected: refusing `mcfork` itself (it breaks `mclapply` code that never touches a pool) and counting threads (cli's tick thread is always there and is harmless).
+- **Temp directories.** `mc_exit` removes a renewed session temp directory (the owner check leaves a shared one alone), and the parent unlinks the directory of a worker it had to kill.
+- **What remains.** Each worker pays first-call costs for the code its files reach (lazy-load fetches, closure compilation, about 0.1 s per worker on stringr), so a short suite costs relatively more. Warming that code in the parent before forking cost as much wall time as it saved CPU, so it was rejected.
+- **Rejected:** long-lived callr workers (they already were; the cost was the per-worker start and the relay), and forking per file (each file would pay the warm-up again).

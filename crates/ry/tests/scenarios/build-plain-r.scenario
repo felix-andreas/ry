@@ -1,0 +1,43 @@
+# A user publishes a typed package to CRAN: `ry build --plain-r` writes a tarball whose R code
+# GNU R reads, with each inline annotation moved into a `#:` comment ry still checks.
+
+requires ry-runtime
+
+file pkg/DESCRIPTION
+| Package: typed
+| Version: 0.1.0
+| Title: Typed code for GNU R
+| Description: A typed package built as plain R.
+| Authors@R: person("Ada", "Lovelace", email = "ada@example.org", role = c("aut", "cre"))
+| License: MIT
+file pkg/NAMESPACE
+| export(scale_by, labels)
+file pkg/R/scale.R
+| scale_by <- function<T: numeric>(values: T, scale: T = 1) -> T {
+|   total: T <- values * scale
+|   total
+| }
+file pkg/R/labels.R
+| labels <- function(ids) lapply(ids, function(id: integer) format(id))
+
+run ry build --plain-r pkg -o dist
+expect exit 0
+expect stdout "dist/typed_0.1.0.tar.gz"
+expect stderr "R/labels.R:1:48: `: integer` has no `#:` spelling there, so the plain R leaves it out"
+
+file show.R
+| untar("dist/typed_0.1.0.tar.gz", exdir = "unpacked")
+| cat(readLines("unpacked/typed/R/scale.R"), sep = "\n")
+| cat(readLines("unpacked/typed/R/labels.R"), sep = "\n")
+
+run ry run --runtime ry show.R
+expect exit 0
+expect stdout "#: <T: numeric> fn(values: T, [scale]: T) -> T\nscale_by <- function(values, scale = 1)  {\n  #: T\n  total <- values * scale"
+expect stdout "labels <- function(ids) lapply(ids, function(id) format(id))"
+
+file pkg/R/point.R
+| origin <- (x = 0, y = 0)
+
+run ry build --plain-r pkg -o dist
+expect exit 1
+expect stderr "R/point.R:1:11: `(x = 0, y = 0)` is ry code that plain R cannot spell"

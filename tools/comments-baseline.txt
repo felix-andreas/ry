@@ -18,7 +18,6 @@
 1 crates/interp/src/format.rs
 1 crates/interp/src/kernels.rs
 6 crates/interp/src/linalg.rs
-1 crates/interp/src/lower.rs
 4 crates/interp/src/methods.rs
 4 crates/interp/src/methods_core.rs
 1 crates/interp/src/moves.rs

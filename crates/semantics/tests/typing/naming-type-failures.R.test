@@ -106,7 +106,7 @@ value: integer
 value <- 1L
 #++++
 == R/main.R
-value: Person
+value: integer
 3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 
 #---- annotation_unknown_field_type_underlines_only_the_name
@@ -115,7 +115,7 @@ value: Person
 record <- list(age = 1L)
 #++++
 == R/main.R
-record: list{age: intgr}
+record: list{age: integer}
 13..18 error[annotation] I do not know the type `intgr`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 
 #---- annotation_unknown_type_nested_in_generic_argument
@@ -126,7 +126,7 @@ record: list{age: intgr}
 value <- list(value = 1L)
 #++++
 == R/main.R
-value: Box<Person>
+value: list{value: integer}
 42..48 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 
 #---- annotation_wrong_type_argument_arity

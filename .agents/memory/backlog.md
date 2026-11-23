@@ -54,20 +54,6 @@ and symbols are four-byte ids into append-only columns", "An item's syntax has a
 lowers only the items it changed" and "The analysis core's per-item and per-file tables after the
 type store".
 
-- **`item_links` resolves every name an item's naming lists**, where a check that resolved a
-  name on first use would skip the names a body never reaches. On the finance
-  bench `item_links` with what it calls is 4.6% of a check's instructions, and its memos hold
-  10.5 MB at the heap peak, of which 3.9 MB is the dependency edges salsa records and 2.4 MB
-  the memo boxes. A smaller value does not move either: fewer memos or fewer edges would.
-- **A tracked read on the server's worker outside `Worker::cancellable` can stop the worker.**
-  A notification queued behind the running job flips the cancellation token, and the next
-  query fetch unwinds. One such read was found by an intermittent test failure and fixed.
-  Nothing structural prevents the next one: audit the worker's reads in `server.rs`, or make
-  the database handle the worker holds outside `cancellable` unable to run a query.
-- **An edit to one `#:` block re-runs `item_annotations` for every item of the file**, because
-  each reads the per-file `file_item_annotations` map, which changes as a whole. Each comes out
-  equal and backdates. A per-item stamp for the block, like the item's own, would cut it
-  before lowering.
 - **Edits at both ends of a file between two reads re-stamp every item between them**, so they
   lower again and backdate on `item_hir` equality. The store compares a prefix and a suffix
   with the previous tree and nothing else.
@@ -112,12 +98,17 @@ type store".
 With the JIT on, thirteen of the fifteen `just bench applications` programs run 0.01% to 0.55% more instructions than with it off, and `orders` and `bond_book` run 37% and 23% fewer (callgrind). The remainder is the entry and back-edge counters, one recording window per hot body and the compiles themselves. Tier 1 compiles a body only when its native work covers what compiled code costs (`decisions/jit-ssa.md`, "A body compiles only when its native work covers what compiled code costs"), so most application bodies stay in tier 0: their instructions are builtin calls on boxed values, which compiled code can only step through tier 0. What is left, in order of expected gain:
 
 - The benchmark code bases gain nothing from tier 1. On every tenth test file of each code base JIT on runs slightly more instructions than JIT off: 0.28% more on finbench (64,500M instructions), 0.36% on biobench (38,100M) and 0.22% on dsbench (36,200M). On the dsbench sample (50 files) cache misses and branch mispredictions agree within 0.7% (callgrind with cache and branch simulation), and the wall times agree within the noise of six alternating runs. One body compiles there (`tryCatch`), about 200 are planned and refused: 129 run too rarely to repay a compile, 34 have no instruction that could run natively, 26 do too little natively. Their work is calls of builtins and of small closures tier 1 cannot inline yet, so the levers are the ones below (wider frames, native forms for builtins on boxed values) and the call path itself. Measure with `RY_JIT_LOG=1` on a sample of test files and group the refusal lines.
-- The hot bodies of a package's test suite gain nothing from tier 1 either (`just bench-ci`, kernels `k3`, `k4` and `k5`: scalar calls of `ifelse`, `isTRUE` and `unname`, an argument checker over `list(...)`, `%in%` and `which` on a small vector). Tier 1 plans every hot body and compiles none, so JIT on runs 0.1% to 0.7% more instructions than JIT off (callgrind at `SCALE=0.1`: 999.6M against 993.4M, 618.2M against 614.0M, 602.0M against 601.2M). `RY_JIT_LOG=1` gives the refusals. The bodies do too little or nothing natively, because their instructions are `class`, `[`, `==`, `is.na`, `isS4` and `seq_along` on boxed values and calls of closures. The callees cannot be inlined: `ifelse` is too long, `is`, `which` and `is.data.frame` have no type feedback, the checker collects `...` and calls `delayedAssign`, and any callee with a builtin call is refused. The loops around them would step every instruction. Until "Wider frames" and native forms for builtins on boxed values exist, such code gets faster only through tier 0, native entries and prologues (`base_fast_paths.rs`).
+- The hot bodies of a package's test suite gain nothing from tier 1 either (`just bench-ci`, kernels `k3`, `k4` and `k5`: scalar calls of `ifelse`, `isTRUE` and `unname`, an argument checker over `list(...)`, `%in%` and `which` on a small vector). Tier 1 plans every hot body and compiles none, so JIT on runs 0.1% to 0.7% more instructions than JIT off (callgrind at `SCALE=0.1`: 999.6M against 993.4M, 618.2M against 614.0M, 602.0M against 601.2M). `RY_JIT_LOG=1` gives the refusals. The bodies do too little or nothing natively, because their instructions are `class`, `[`, `==`, `is.na`, `isS4` and `seq_along` on boxed values and calls of closures. The callees cannot be inlined: `ifelse` is too long, the checker collects `...` and calls `delayedAssign`, and a callee whose builtin call has no native form is refused. The loops around them would step every instruction. Until "Wider frames" and native forms for builtins on boxed values exist, such code gets faster only through tier 0, native entries and prologues (`base_fast_paths.rs`).
+- **A forced promise that assigns into a frame with an environment is not seen by compiled code.** A load that forces an argument's promise notices a slot frame whose variables moved into its environment and continues in tier 0, but a frame that has its environment before the load gives no signal, so `assign("n", 2L, envir = frame)` from the promise leaves compiled code with the old `n` (`decisions/jit-ssa.md`, "A load that reaches the runtime writes dirty variables back first"). A fix needs a write signal on function-frame bindings that costs tier 0 nothing, or treating every variable as forgotten after a load that ran code.
 - Compare JIT on against JIT off by instruction counts, not wall time. Two alternating wall-time runs of a whole code base showed JIT on 2% slower on all three, and six alternating runs of a 50-file sample on a quiet machine showed no difference; the instruction counts differ by 0.2%.
-- **Why the code bases gain nothing (finbench, measured).** Three causes, each enough alone. (1) testthat runs every block under `withCallingHandlers`, so `jit_enter_frame` declines every inlined frame (`calling_handler_established()`), tier 0's eager binding is off and pure steps write back. (2) The hot bodies are thin wrappers (`expect_equal` and its helpers, argument checkers) whose compiled entry and steps cost more than tier 0: a loop calling two builtins runs 2,395 instructions per iteration compiled against 1,627 in tier 0, of which about 400 are entry (`jit::run` 230, `enter` 67, `entry_event` 50, register growth 36, the handler check 18) and 80 more per builtin call. (3) `just bench hot` warms with one batch, so a body called 20 times per batch (`expect_equal`) never reaches the threshold and the suite measures tier 0. Admitting every body (zero `ENTRY_COST` and `STEP_COST`) ran 4.9% more instructions on finbench, so the refusals are right until compiled code gets cheaper. The full suite (`oracle bench --ry-only`, 9,592 tests) shows the same: ry/R 1.99x JIT on against 2.00x off on finbench, 1.87x against 1.86x on dsbench, 1.85x against 1.90x on biobench.
+- **Why the code bases gain nothing (finbench, measured).** Three causes, each enough alone. (1) testthat runs every block under `withCallingHandlers`, so tier 0's eager binding is off and a pure step of a compiled body's own frame writes back. (2) The hot bodies are thin wrappers (`expect_equal` and its helpers, argument checkers) whose compiled entry and steps cost more than tier 0: a loop calling two builtins runs 2,395 instructions per iteration compiled against 1,627 in tier 0, of which about 400 are entry (`jit::run` 230, `enter` 67, `entry_event` 50, register growth 36, the handler check 18) and 80 more per builtin call. (3) `just bench hot` warms with one batch, so a body called 20 times per batch (`expect_equal`) never reaches the threshold and the suite measures tier 0. Admitting every body (zero `ENTRY_COST` and `STEP_COST`) ran 4.9% more instructions on finbench, so the refusals are right until compiled code gets cheaper. The full suite (`oracle bench --ry-only`, 9,592 tests) shows the same: ry/R 1.99x JIT on against 2.00x off on finbench, 1.87x against 1.86x on dsbench, 1.85x against 1.90x on biobench.
+- **Small data.table calls run in tier 0 (a test user's suite, `tools/bench/appsuite/patterns/r16_data_table_calls.R`).** ry runs these calls on a 20-row table only 1.3 to 2.3 times as fast as GNU R, against 3 to 4 times for the rest of that suite. For `dt[key1 %chin% keys]` (549 against GNU R's 730 µs per call) the profile summary gives tier 0 44%, builtins 22% (none above 1.2%), native code 16% and call setup 11%, with tier 1 at 0% on all 84 bodies entered 3,000 times or more. `RY_JIT_LOG=1` shows every hot body declined: "compiled code would run nothing natively" or "does too little natively to repay entering compiled code", because each is a run of builtin and generic calls (`is.factor`, `sys.call`, `.Call`, `attr`) that leave to tier 0. Speeding these calls needs builtin and generic calls that run natively from compiled code (see *A cheaper builtin call* below) and cheaper closure call setup, not kernel work.
 - **Next for the code bases, before the list below, cheapest first.**
-  - *Inlined frames under a calling handler.* Drop the `calling_handler_established()` decline in `jit_enter_frame` and rely on deferred signalling: a warning whose signalling runs R code is abandoned (`step_unsignalled`, `Signalling::Abandoned`) and the frames are rebuilt before the handler runs. Run a root `PureUnlessObserved` step `Deferred` too, so it exits on a warning instead of writing back at every step. Needs oracle cases with `withCallingHandlers` around inlined frames that warn, signal and `invokeRestart`.
-  - *Lean entry.* Code pointer in the code header, the register window pre-sized, the handler check folded into the state word, an unboxed scalar return: about 400 instructions per entry. Then recalibrate `ENTRY_COST` and `STEP_COST` on the application programs and `just bench hot`, and retry zero-cost admission as the upper bound.
+  - *Root steps under a calling handler.* Run a root `PureUnlessObserved` step `Deferred`, as an inlined call's steps run, so it exits on a warning instead of writing back at every step. Needs oracle cases with `withCallingHandlers` around compiled roots that warn, signal and `invokeRestart`.
+  - *Lean entry.* A scheduled entry goes straight to the code and costs about `ENTRY_COST` over tier 0's in-place entry: the activation record, the register window of the root cells and the boxed result. A pre-sized window and an unboxed scalar return are the cuts left. Recalibrate `ENTRY_COST` after each, and retry zero-cost admission as the upper bound.
+  - *Profile samples inside inlined frames.* The profile summary files an inlined callee's time under its caller as JIT-compiled code. Attribute a sample to the inlined frame it lies in from the frame states compiled code keeps for its exits (`Compiled.frames`), so a callee's time is its own row whether or not it was inlined.
+  - *Retiring a loop body that keeps leaving.* `runtime::count_leave` exempts a body with a loop, because its entries do not say how much its code ran, so a loop body that leaves compiled code on every call keeps the code and pays an exit per call. Count its leaves against the backward jumps its code took instead. Better: record the hand-off at its instruction (base R's `apply` hands off at one native call on every entry) and recompile with that instruction as a step, so the rest of the body keeps its code.
+  - *Compiling only the paths a body took.* Codegen emits every planned instruction, so a large base R body costs about as much to compile as its word count (`COMPILE_PER_WORD`), whatever it ran. Emit an exit for a branch `Plan::ran` never saw, which cuts the compile of such a body to the paths it runs and lets `unpaid_loop` admit it sooner.
   - *A cheaper builtin call from compiled code.* `jit_call_builtin` costs about 125 instructions against tier 0's 85: call the direct entry from codegen when the builtin is known at compile time.
   - *Inlining through `...`* (see "Wider frames" below). Read tier 0's spread plan for the site rather than a second representation: a `CallPlans` row flagged `PLAN_SPREAD` (`bytecode.rs`), whose id is in the call instruction's feedback word, holds the callee-slot sources and the spread words (`SPREAD_AT`, `SPREAD_SLOT`, `SPREAD_COUNT`, the tags). A plan with `PLAN_PREPARED` and misses below `PLAN_MISSES` means the site has one shape. The plan can be replaced or freed, so compiled code copies the count, tags and sources at compile time and guards on the `...` chain (exactly that many `Dots` cells with those tags, none empty) and on the callee, exiting on a mismatch, as `spread_holds` does (decision "A call site that passes `...` keeps a plan for what `...` held", `interp.md`). It needs a public accessor in `interp` for `sources`, `spread` and the `SPREAD_*` constants.
   - *Inlining a tier-0-only callee* (see "Wider frames" below): materialize the callee's frame, run it in tier 0, and resume compiled code in the caller.
@@ -131,8 +122,7 @@ With the JIT on, thirteen of the fifteen `just bench applications` programs run 
   - *A live slot frame as the callee's environment.* A closure made in a slot frame has an environment flagged `PENDING_FRAME` for as long as that frame runs on its slots, and `plan_callee` refuses such a callee ("may not outlive"). `eval_A` in `spectralnorm_alt_3` is in that state during the whole loop, which is why the benchmark takes about 1.1 s instead of 0.11 s. Lifting the owner frame before planning (`eval::lift_frame` on the enclosure from `plan_callee`, dropping the refusal for slot frames) was tried and is not enough: with `RY_JIT_LOG=1` the first compile of `eval_A_times_u`'s loops reports `0 inlined, 1 frames`, the code is dropped, and the recompile is refused because the loops would hand too many instructions to tier 0. The steps left are `GetFun eval_A` (not speculated from the enclosure), the `eval_A` call (`CallBuiltin`/`CallGeneric`), `SubAssignMatrix(Int, Int, Boxed)`, and `matrix`; `eval_A`'s own body `eval_A_cache[[i, j]]` is refused alone because `intrinsic_for` handles a one-index `[[` only. So the fix needs three parts: the callee's free variables read from the owner frame's slots (`eval::slot_binding`, `Heap::slot_owner`) or a lift that keeps the speculation valid; `speculate` resolving a function through a slot frame's environment; and a two-index `[[` intrinsic on a matrix. Check `spectralnorm_alt_3` with `RY_JIT_LOG=1` after any change to when a slot frame gets its environment.
   - *Tests.* An oracle case and a `test_tiers` case each for: a factory called twice (two enclosures, one body, a sibling callee); the callee rebound or shadowed between and during entries; `environment(f) <-`; another closure with the same code; the callee replaced by a builtin or by a closure with other code. Extend the cross-tier fuzz generator with shared bodies.
 - *The inline back-edge count.* A tier-0 loop pays for an installed tier at every backward jump. `jump_fast` hands each backward jump to the out-of-line `jump` while a tier is installed, which counts the back edge there (`crates/interp/src/bytecode.rs`). `mandelbrot_ascii` (public suite) compiles nothing, because its loops are refused for good, and runs about 10% slower with the JIT on than off (0.65 against 0.59 s), and `jump` is the largest single item of the JIT-on excess on the dsbench sample (13.5M of about 80M instructions). That the jump explains the whole 10% is unverified. Design: `jump_fast` runs `back_edge_due` itself when a tier is installed (one increment and two comparisons on the profile words, no call) and returns `None` only when the count is due or an interrupt is requested. A body refused for good already parks its count at `i32::MIN` (`back_edge`), so it never leaves the fast path again. Done means `mandelbrot_ascii` costs the same instructions with the JIT on and off (callgrind), and the JIT-on excess on a code-base sample drops by the `jump` share.
-- *Wider frames.* An inlined frame is refused for a callee without type feedback, one that takes or is passed `...`, and one with an instruction only tier 0 runs; on the code bases these are the hot small closures (`plan_callee` in `analysis.rs` lists every refusal, and `RY_JIT_LOG=1` prints them per call site). By expected gain:
-  - *No type feedback.* Tier 0 records only near a body's thresholds and never in a small closure it runs without an activation, so a hot one-line callee can have none. Plan such a callee from its caller's argument types instead of refusing: every instruction without feedback gets a guarded generic form whose failure hands off, and the first hand-off storm retires the code through the existing `count_handoff` path, after which the callee has run in tier 0 with recording on. The alternative, opening a recording window for the callee when the caller's plan refuses it and retrying the caller, needs a tier-0 change and a second compile.
+- *Wider frames.* An inlined frame is refused for a callee that takes or is passed `...` and one with an instruction only tier 0 runs; on the code bases these are the hot small closures (`plan_callee` in `analysis.rs` lists every refusal, and `RY_JIT_LOG=1` prints them per call site). By expected gain:
   - *`...`.* Two cases. A callee that only forwards `...` to a call the plan steps can bind it as tier 0 does: the frame's `...` slot holds the caller's argument references (`eval::direct_sources` already plans named and omitted arguments). A caller that passes its own `...` needs the length and names at compile time, which a shared plan does not have, so guard the `...` length at the frame start and hand off on a mismatch.
   - *Tier-0-only instructions in the callee.* A callee whose plan contains a step is refused when the step needs the frame. Let the step build the frame through the frame state (`enter_inlined` does this for a deoptimization) and continue in tier 0 to the callee's return, then resume compiled code in the caller through the resume record a stepped call already leaves. The cost model must charge such a frame as a call that is not removed.
 - After those, native forms for the hot builtins on boxed values ("Cheaper steps" below).
@@ -144,7 +134,7 @@ With the JIT on, thirteen of the fifteen `just bench applications` programs run 
 - Tier-1 handoffs: compiled code hands arithmetic it did not specialize back to tier 0 through
   `jit_step` (158,500 times in one `functional` body). Loads probe the frame inline
   (`decisions/jit-ssa.md`, "Tier 1 probes the frame inline for a variable load").
-- Cheaper steps. An instruction compiled code hands to tier 0 costs about 300 machine
+- Cheaper steps. An instruction compiled code hands to tier 0 costs about 180 machine
   instructions more than tier 0 running it (`STEP_COST`, `crates/jit/src/jit.rs`), so a loop
   that mostly steps is refused (`STEPPING_LOOP`): the `vasicek` kernel's loop (`stats::rnorm`,
   `rates[t, ]`, six vector operators), and the loops of `team_scores`, `records`, `report`
@@ -169,23 +159,18 @@ With the JIT on, thirteen of the fifteen `just bench applications` programs run 
   hot body over the compile threshold shows up as a few MB of peak RSS. Levers: a lighter first
   tier that does not start Cranelift, or code layout that keeps the code generator's pages
   together (function ordering).
-- Calls from tier-1 code while calling handlers are established, instead
-  of falling back to tier 0, pinned in `crates/jit/tests/test_tiers.rs` with a body hot under
-  `withCallingHandlers`.
 - Inlined closure calls without a frame are built (`decisions/jit-ssa.md`, "Tier 1 leaves compiled code
   through frame states", "An inlined call starts with one leaf helper call"). They pay where a
   compiled loop calls a small closure (`spectralnorm_alt_3`, `orders`), and nowhere else yet,
   because a call is only inlined into a caller tier 1 compiles. In order of expected gain:
-  - A lean entry from the dispatch loop into compiled code. An entry costs about 570 machine
-    instructions more than starting the body in tier 0 (`count_entry`, `entry_event`,
-    `jit::enter`, `compiled_for`, `jit::run`, the register file, the boxed result), which is why
-    a loop-free body under five native instructions is refused (`decisions/jit-ssa.md`, "A body
-    compiles only when its native work covers what compiled code costs"). The end
+  - A lean entry from the dispatch loop into compiled code. An entry costs about 380 machine
+    instructions more than starting the body in tier 0 (`ENTRY_COST`; the table "What compiled
+    code costs against tier 0" in `development/design/generic-tier.md`). The end
     shape jumps from the call instruction to a code pointer in the code header. Recalibrate
     `ENTRY_COST` (`crates/jit/src/jit.rs`) when it lands.
-  - Evaluate more arguments before an inlined call. An argument is computed eagerly only when
-    `lower_expression` can produce it as an unboxed scalar without a failure; anything else stays
-    a promise, and the frame is refused when the callee reads it ("an argument the callee reads
+  - Evaluate more arguments before an inlined call. An argument expression is computed eagerly only when
+    `lower_expression` can produce it as an unboxed scalar without a failure (a constant and a
+    variable are passed as they are); any other expression stays a promise, and the frame is refused when the callee reads it ("an argument the callee reads
     that may have an effect"). A pure expression that can fail (`x[[i]]`, `a / b` on vectors) or
     yields a boxed value can still run before the call, with an exit at the call instruction
     when it fails. An argument that mentions one of the callee's formals under a condition stays
@@ -196,16 +181,7 @@ With the JIT on, thirteen of the fifteen `just bench applications` programs run 
     boxed values, vector operators and calls of closures with `...`. Each needs a native form
     in tier 1 before removing the calls between them can pay.
   - Callees tier 1 cannot inline yet: one with `...`, a loop, a default that is code and is
-    read, a recursive call, a call that needs its own frame, and a callee without type feedback
-    (tier 0 runs the smallest closures without an activation and records nothing for them;
-    plan those from the argument types at the call).
-  - A direct call from compiled code when an inlined frame cannot start. `jit_enter_frame`
-    declines while a calling handler is established, the call instruction then deoptimizes the
-    whole root activation, and a root where that is frequent is recompiled without frames
-    (`NO_FRAMES`). A root that mostly runs under `withCallingHandlers` or `suppressWarnings`,
-    which includes every testthat expectation, therefore calls for real. Calling the callee
-    through the direct-call path instead keeps the root compiled with frames and makes
-    `NO_FRAMES` unnecessary.
+    read, a recursive call, and a call that needs its own frame.
   - Start an inlined frame without the one remaining helper call (`jit_enter_frame`, a leaf of
     about 50 instructions), then delete `Action::Inline` and `effects::effect_free_lookups`,
     which exist only because the frame path costs that call.
@@ -246,6 +222,7 @@ With the JIT on, thirteen of the fifteen `just bench applications` programs run 
 - **A stray tag from R in a non-tail `match`.** A `match` whose value is not the function's result (`y <- match (t) {...}`) has no declared type to judge its arms by, so an arm that a stray shape from R (`:One(2.5)` against `:One(I64)`) gives another type still makes the arms disagree, and the function refuses for the rest of the session. A tail `match` is handled (`lower::tail_matches`).
 - **Mutual recursion caches a refusal.** A typed closure that calls one still being compiled refuses, and the refusal is remembered, so mutually recursive typed functions always take the native path.
 - **Names a branch creates.** A name set in only one branch, or with different types in the two, is out of scope after the `if`, so reading it refuses; a loop body's names are out of scope after the loop. Local functions defined or rebound in a branch or loop refuse.
+- **Typed `spectralnorm_math` under `RY_JIT=off` outlasts training's 900 s limit.** `RY_JIT=off` also turns off the typed core, so `tools/bench/public/shootout/spectralnorm_math.typed.R` runs its O(n³) eigenvalue loops in the interpreter: 0.45 s at n = 100, 3.4 s at 200 and 26 s at 400 (0.04 s at n = 200 with the JIT on, and GNU R's untyped version 0.5 s at n = 400), so n = 1000 needs several minutes alone and passes 900 s beside training's parallel jobs. It is slow, not hung. Each of `tools/layout/optimize.sh`'s three training passes waits out the timeout (about 15 minutes) and reports `nojit:public/shootout/spectralnorm_math.typed` as failed. Either run typed ports only in the `jit` tier of `tools/layout/train.py`, or make the interpreter's typed list indexing (`a[[(i - 1) * n + k]]` in a loop) fast enough.
 
 ### Typed ry against Rust: where the next steps are
 
@@ -342,6 +319,10 @@ Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomat
 - **macOS has not run it.** `sign` calls `codesign --force --sign -` on the output; run the `build-exe` scenario on a macOS machine or CI job when one is available.
 - **Sourced files compile at run time.** A file the script sources is read from disk and compiles as under `ry run --aot`. Embed sourced strict files when a real program ships as an executable with them.
 
+### Study
+
+- **Porffor** compiles JavaScript ahead of time through C or Wasm into small standalone binaries. Study its dynamic typing strategy, garbage collector and `eval` handling for `--aot` and `ry build --aot --exe` (`docs/src/content/docs/development/design/prior-art.md`, "Porffor").
+
 ### Not planned
 
 - **Machine code for untyped hot bodies.** Trained code images already carry the profile, so tier 1 compiles a hot body at its first calls. Storing its machine code too has a start condition, which the untyped decision names: the applications suite showing tier 1 winning, and its compile showing in a cold run.
@@ -380,26 +361,22 @@ Unverified until a Windows release smoke test runs:
 
 ## Open: what bundling base R left undone
 
-- **Start-up image follow-ups.** An empty `ry run` takes about 29 ms from the mapped image (48M instructions, 7M of them the image load, of which `Frame::from_image` is the largest part; about 4,300 page faults against 368 for `ry --version`, most of them lazy faults on mapped image pages, `decisions/heap-gc.md`, "The start-up image is the heap's pages at a fixed address, mapped in place"), of which about 3 ms re-runs base R's profile and the utils, grDevices and stats hooks (`decisions/heap-gc.md`, "The start-up image is build output of the base tree, and every start re-reads the environment"; installed packages get no image, "Installed packages load through native fast paths"). Next: the first S3 dispatch of each generic costs about 0.3 ms against 6 µs for a plain closure call (`UseMethod` lookup); `.expand_R_libs_env_var` costs about 0.2 ms warm and could run natively; utils' `.onLoad` reads `etc/repositories` with `read.delim` (0.73 ms against GNU R's 0.41 ms) and `file_test` builds a data.frame through `file.info` (72 µs against 12 µs); spilled frames rebuilt per start (`Frame::from_image`, 1.2M instructions) could be laid out in the pages too; ship images for other default-package sets (`R_DEFAULT_PACKAGES=NULL` with methods starts slowly, 63 ms); let interactive consoles and sessions with profiles load the image and run the profiles after it; let `ry_start_session` embedders and `ry load` use it; CI could check that a release's embedded image matches its runtime identity.
+- **Start-up image follow-ups.** An empty `ry run` takes about 29 ms from the mapped image (48M instructions, 7M of them the image load, of which `Frame::from_image` is the largest part; about 4,300 page faults against 368 for `ry --version`, most of them lazy faults on mapped image pages, `decisions/heap-gc.md`, "The start-up image is the heap's pages at a fixed address, mapped in place"), of which about 3 ms re-runs base R's profile and the utils, grDevices and stats hooks (`decisions/heap-gc.md`, "The start-up image is build output of the base tree, and every start re-reads the environment"; installed packages get no image, "Installed packages load through native fast paths"). Next: the first S3 dispatch of each generic costs about 0.3 ms against 6 µs for a plain closure call (`UseMethod` lookup); `.expand_R_libs_env_var` costs about 0.2 ms warm and could run natively; utils' `.onLoad` reads `etc/repositories` with `read.delim` (0.73 ms against GNU R's 0.41 ms) and `file_test` builds a data.frame through `file.info` (72 µs against 12 µs); spilled frames rebuilt per start (`Frame::from_image`, 1.2M instructions) could be laid out in the pages too; ship images for other default-package sets (`R_DEFAULT_PACKAGES=NULL` with methods starts slowly, 63 ms); let interactive consoles load the image; let `ry_start_session` embedders and `ry load` use it; CI could check that a release's embedded image matches its runtime identity.
 - **Windows linear algebra comes from the building machine's GNU R.** No system LAPACK exists there, so `tools/base-r/lapack.sh` copies GNU R's `Rblas.dll` and `Rlapack.dll` beside the runtime and the base tree keeps them in `bin/x64`. Building R's reference BLAS and LAPACK (`src/extra/blas`, `src/modules/lapack`) instead would need a Fortran compiler in the release workflow.
 - **CI must run GNU R 4.6.2.** The oracle's expectations are GNU R 4.6.2 output (`development/corpus-and-oracle.md`, "The reference GNU R"); CI runs `nix develop .#ci -c just ci`, and the flake's `ci` shell provides that release. Without GNU R, `oracle compare --engine ry` and `--engine ry-jit` pass 251 of 251 and skip the 12 cases whose packages ry's bundled library lacks (data.table, bit64, rlang, knitr, rmarkdown, ragg, lattice). Those 12 expectations print what the packages' CRAN releases printed when recorded, so a package release can change them.
 - **Nix.** `flake.nix` fetches the tarball as a fixed-output derivation and builds the base in `postInstall`; `nix build` has not been run yet.
-- **Old base trees stay in the cache after an upgrade**, as runtimes do (see below).
 
 ## Open: the benchmark packages under ry's runtime
 
 `just bench-compare` gives the current numbers; "Measured state at the full benchmark size" below records the last ones.
 
-- **xts peaks 34% above GNU R.** In the packages suite (`tools/bench/packages/results.json`), xts's tests peak at 451.7 MiB on ry against 338.0 MiB on GNU R, the only package far above GNU R's peak. Owner: B4 (xts and zoo), after ALTREP. Start with what xts allocates that GNU R shares or frees earlier: index copies through `[.xts`, attribute duplication, and survivors the collector promotes.
+- **xts peaks 17% above GNU R** (its tinytest suite in one process: 372 MiB against 318 MiB; `tools/bench/packages/results.json` holds an older 451.7 against 338.0). The peak is `test-endpoints.R` (358 against 328 MiB when run alone under tinytest, 339 against 330 as a plain script). It builds a 2.1-million-row series, and each step (`seq.POSIXct`, `.xts`, `storage.mode<-`, `endpoints` by days, weeks and months) peaks below GNU R in isolation, so the rest is when collections fall, not what stays live. Every other test file is at parity. A dev build without `libRblas.so` beside its libR (`tools/base-r/lapack.sh`, which needs the full R source tree) cannot load quadprog, so tseries and `test-irts.R` are skipped silently and the suite runs 4,034 assertions instead of 4,038.
 
 - **Package install speed.** `R CMD INSTALL` of Matrix takes 39 s on ry against GNU R's 177 s (74 s with `MAKEFLAGS=-j4`), and almost all of it is the compiler (`decisions/libr-rcmd.md`, "Package builds run `make` in parallel and link BLAS and LAPACK by versioned file"). The R half is about 10% slower than GNU R's on the same `tools` calls: MASS's Rd objects take 0.55 s and help indices 0.27 s; Matrix's S4 sourcing takes 2.7 s. Levers: Rd parsing (`tools:::.install_package_Rd_objects`), and the separate test-load process (about 0.2 s per package).
 
 - **Quoted byte strings with a quote character.** GNU R prints a quoted `"bytes"` string that contains `"` with a stray trailing `\0` (`"q\"\\xff\0"`), an artifact of its escape buffer. ry prints it without the `\0`; this is deliberate.
 - **Per-test time.** With the JIT off, finbench's tests take 1.15x GNU R's time. `sd(x)` on 20 doubles costs about 104.5k instructions against GNU R's 70.6k. Measure GNU R marginally (a run of N2 calls minus a run of N1, both above zero): GNU R byte-compiles a closure on its first calls, so subtracting an empty baseline charges that compilation to the loop and roughly doubles small per-item costs. ry's cost is spread over bytecode `execute_code` (its self cost is level with GNU R's `bcEval`), function lookups (93 per `sd`, through `frame_cell` and `cached_cell`), allocation (`allocate_uncollected`, `alloc_triple_keeping`, `define_formals`, `root`, the write barrier) and `mk_char`. A suite profile (`perf record` over `oracle/src/bench.R` with `RY_BENCH_FILTER`) is flat: `execute_code` 12%, `frame_cell` 4%, `allocate_uncollected` 4%, `Heap::drain` 3.4%, `mk_char` 2.7%. Promise code is compiled (`decisions/heap-gc.md`, the promise paragraph in "The runtime's object model, collector and native boundary"), but `sd` passes few compiled arguments, so it gains little there; arithmetic arguments run about 1.6x faster. `execute_code`'s self cost per `sd` grew by about 4.4k instructions when the record and `match` opcodes joined `step`, at the same instruction counts; a profile with debug info (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`) should show whether the larger dispatch or register pressure in `step` is the cause. Next levers: fewer lookups per call (about 79 `lookup_function` calls per `sd`), fewer cells and promises per call (`define_formals`, `allocate_with`), and the callers of `mk_char` in the test code. The untyped stdlib templates (`tools/bench/tooling/templates`) show the same gap: the ledger fold costs about 15.8k instructions per fill on ry against about 6.1k on GNU R (both marginal), and readings generation about 7.4k per reading against 4.5k, now that compiled `out[[i]] <- v` updates a local vector in place (`assign_element_in_place`) instead of running `complex_assign`. `apply(m, 1, f)` on a 4-column matrix costs about 13.8k instructions per row against GNU R's 16.8k, after the `m[, j]` column fast path; the kernels session measured it at 1.9x GNU R's time before that, and xts `period.apply` (about 33k closure calls through `[.xts` and `mean.default`) at 1.3x, which is still to be re-measured. In the ledger fold, `frame_cell` runs about 25 times per fill for about 14 variable and 7 function lookups, because `lookup_variable` searches the local frame before consulting its cache; the per-instruction dispatch lines (opcode fetch, operand decoding, the handle-mark check) cost about as much as the work. `frame_cell`'s cost per `sd` moved by about 1k instructions between two builds at the same call counts; the likely cause is that the frame filter hashes symbol addresses, so its collisions change when allocation does (unconfirmed).
 
-- **`install.packages()` with several packages installs nothing.** On ry, `install.packages(c("a", "b"), lib = ...)` returns without installing any of them and without an error; one package per call works, so the benchmark library was installed one package at a time in dependency order.
-
-- **Old runtimes stay in the cache after an upgrade.** Each release extracts its runtime into a new `ry/runtime/<key>/` (tens of MB), and nothing removes the previous release's directory. R homes are pruned already (`rcmd::cached_home` removes stale homes no process holds); runtimes need the same treatment, without removing one a running session still maps.
 - **Measured state at the full benchmark size** (`generate.py --lines 300000 --files 500`, about 306,000 lines each; the `codebases` suite, one round, release build). With the dependency closure installed except `polars`, `Rblpapi` and `esgtoolkit`, ry matches GNU R on every test (finbench 9,592, dsbench 9,416, biobench 8,927) and the suite times are 1.48x, 1.59x and 1.53x faster than GNU R's (135.3 s against 199.6 s, 63.0 s against 99.9 s, 73.8 s against 113.2 s); per-test geometric means are 1.44x, 1.59x and 1.57x. The JIT is within 3% of `RY_JIT=off` (131.5 s, 62.6 s, 73.5 s), because profitability gates keep it from compiling bodies that would mostly hand back to tier 0 (`decisions/jit-ssa.md`, "Bodies that would mostly hand back to tier 0 compile only for loops"). The earlier figure of 1.21x to 1.35x slower, from a run with 10,000 or more tests per suite, predates these and is not reproduced; whether the cause is the library, the test set or the interpreter work since is not isolated.
 - **The scoreboard** is the `codebases` suite (`tools/bench/codebases/`, `just bench codebases`; it needs `cargo build --release -p oracle` and the library from `just corpus`, read from `RY_CORPUS_DIR` or `.corpus/library`). `--profile-summary` splits time by the entry count of the innermost closure body; `big-levers.md`, "Where the full-size code bases spend their time", has the three splits. Snapshot code that calls an entry point R 4.6's headers no longer declare (`ATTRIB`, `Rf_findVar`, `Rf_findVarInFrame`) truncates the returned pointer to an `int` and aborts under GNU R 4.6.2 too (xts's `x[2:4]`, Matrix's `Cholesky`), so `tools/corpus/install.R` reinstalls every package whose shared object imports such a function from the newest CRAN source (`MEMORY.md`, Long-term, "Testing").
 - **Corpus packages that still fail to load under GNU R 4.6.2.** Missing system libraries: udunits2, proj, gsl, netcdf, Magick++, mysqlclient, protobuf and tesseract (add them to `tools/corpus/system-packages.txt`), plus rJava. spatstat.random's newest source needs spatstat.data >= 3.1.9. `tools/corpus/install.R` upgrades a dependency that fails an installed package's version constraint from CRAN, but it does not rebuild the packages already compiled against the old version of an upgraded `LinkingTo` dependency.
@@ -420,11 +397,11 @@ A wider tier 1 is not first: JIT-compiled code is 1.3% of finbench and 0.1% to 0
 
 `just bench-packages install` then `run` (`tools/bench/packages/`, 59 pinned packages). `fs` needs `USE_BUNDLED_LIBUV=1` where libuv's headers are absent. First run (one repeat, with a build competing for the cores): 17 packages pass on both engines at a geometric mean of 0.99x GNU R's speed (lgr 0.60x, cli 0.89x the slowest); foreach and snakecase fail on both.
 
-- **Re-run rlang's tests** since the S4 `[[` fallback crash was fixed (purrr passes 718 of 718 on ry).
 - **ALTREP reads on hot paths.** Two open items. First, the JIT extern element reader: the JIT reads compact integer and double sequences inline but side exits on every other ALTREP read (deferred strings, wrappers, package classes) until it calls `ry_altrep_int_elt` and the real and string forms on the cold side of its `OBJECT|ALTREP` guard, with the plain read unchanged in cost. Second, a compact read in tier 0 within 20 Ir of a plain one (today about 110 to 190 Ir more; with the JIT off, `for (i in seq_along(x)) x[i]` over `x <- as.double(1:n)` costs about 850 Ir per iteration against 750 for a plain `x`). Arithmetic on a wrapper over attributed data materializes and copies. `decisions/r-compat.md`, "Runtime semantics settled by the corpus package tests", item "ALTREP vectors are first-class at GNU R's thresholds".
   - Known divergence: `match()`, `unique()`, `duplicated()` and `split()` expand a compact sequence argument in place, through `values::materialize` in `crates/interp/src/sort.rs`, so `.Internal(inspect(x))` reports `(expanded)` afterwards where GNU R reports `(compact)`. Peak memory is below GNU R's (13.3 MB against 17.6 MB for `match(1:1e6, 5e5:1e6)`), and only `inspect()` shows the difference, so it stays as is. A fix would read through `values::read_contents`, a transient copy on every call, which costs instructions for no visible gain.
 - **Compact-sequence reads in JIT loops.** A compact read costs a flag test, the info pointer, three loads and the element arithmetic, so convolution runs at about 1.06 to 1.08x the Ir of plain vectors. A preheader hoist of the sequence info (defined on the OSR entry path too, which enters with unloaded slots), loop-variable provenance for the index, and strength reduction of `x[j]` to a carried induction value should bring it to about 1.0x. Each is a single pass, which fits the compile-time budget. `decisions/r-compat.md`, "Runtime semantics settled by the corpus package tests", item "ALTREP vectors are first-class at GNU R's thresholds".
-- **data.table on ry** (main.R, after the `as.name(NA)`, empty-rowname `rbind` and `na.print` fixes, not yet re-run): a factor join column returned as factor instead of character (1483.51/55/71); no error for `:=` when `.datatable.aware = FALSE` (2252.1); `:= NULL` on an unserialized data.table keeps the column (2351.1); and the 2306 group (`sort_by`, `selfrefok`, "unimplemented type 'list' in 'orderVector1'"), which runs only because ry reports R 4.6 where GNU R 4.3 skips it.
+- **withr skips one test on ry** that GNU R runs ("warns if LC_ALL=C"), because ry's `capabilities("NLS")` is FALSE: ry has no message translations, so this is not a bug.
+- **rlang runs one assertion fewer on ry** (env_poke() with unrepresentable characters): ry keeps native strings UTF-8 in a Latin-1 locale (`decisions/interp.md`), so `enc2native` changes no string and the test skips; not a bug.
 - **jsonlite passes 10 more tests on ry** because ry's datasets package is R 4.6's (`gait`, `penguins`, `penguins_raw`, `sunspot.m2014`); not a bug.
 - **The progress dashboard's package datasets are thin.** `cran_popular` is empty until a test run over popular CRAN packages exists, and per-dependency test results are recorded only for data.table, RcppSimdJson, xts and PerformanceAnalytics (`development/releasing.md`, "The progress dashboard").
 
@@ -539,7 +516,6 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - **Pin `TESTTHAT_PARALLEL=false` for collection counts and Ir comparisons.** A package whose DESCRIPTION sets `Config/testthat/parallel: true` (vctrs, rlang) runs its tests in testthat worker processes, which share the `RY_GC_LOG` file and which callgrind does not follow without `--trace-children=yes`. Collection counts then differ between runs, and a profile of the parent misses the tests. With the runner off, two vctrs runs give identical logs.
 - **After-marking work is 1.45% of testthat_full** (weak references, returned frames, sweep: two thirds of the collector's time in minor collections; `decisions/heap-gc.md`, "Escalation prediction and the dense precious set", item "Minor-collection cost by source"). Revisit if the collector's share of the run grows.
 - **`strings__repeated_pieces` dominates the `ry-gctorture-young` oracle run.** Under `RY_GC_STRESS=young` the case runs for more than 240 s (it passes; the rest of the engine's cases take about 15 min together). It builds several character vectors of 200,000 elements. The likely cause is that young stress retraces every untenured object at each allocation, so the cost grows with the live young set times the allocations (unconfirmed). Options: shrink `n` in the case if it keeps covering the substr and formatC sharing thresholds, or make young stress cheaper on large live sets.
-- **String-heavy C code is bound by memory traffic** (`str_split`, see "Package kernels" below): suspects are the heap's allocation slow path and string-table probes that miss cache with about 2e7 live CHARSXPs. A character subset of 1e6 unique strings takes 0.012 s against GNU R's 0.003 s.
 - **Peak RSS is sensitive to when collections run**: report +3.8 MB from inlined base wrappers (gc() max-used unchanged, fixed offset), array_map from tier-1 loop state. One owner should look at the GC trigger policy for both.
 - **Freed large vectors reach the OS only after mimalloc's purge delay** (owner: the GC and heap track). The heap frees a large vector through `release_large_memory`, which calls `std::alloc::dealloc` into mimalloc, and mimalloc keeps the pages resident until its purge delay runs out, so a change that frees more large vectors can raise peak RSS while live data falls, depending on when collections run. Freeing a shared tier-0 body's instruction vectors with its last closure (`decisions/jit-ssa.md`, "Closures made at one site share compiled code") showed it: on one build of main the testthat_full peak rose from 41.55 to 41.97 MiB under the default policy but fell from 40.53 to 40.38 MiB with `MIMALLOC_PURGE_DELAY=0`, with an old generation 0.3 to 0.4 MB smaller in `RY_GC_LOG`. On a later main the same change measures 41.71 to 41.62 MiB under the default policy and 40.67 to 40.68 with purge 0 (median peak anonymous RSS of 5 rounds at `RY_BENCH_REPEAT=2`). Release every freed large vector promptly (decommit or purge on free above a size threshold, or an explicit purge after a major collection), then remeasure the default-policy peak.
 - **Closures that share a tier-0 body share its lookup hints, so R6-style objects miss them.** Every closure over one `function` expression runs the same code object, and each R6-style object's methods have their own enclosure, so `lookup_function` misses the inline cache that another object's closure filled. Against the main it merged into, shared bodies run the objects workload at +0.21% instructions (7,637.1M to 7,653.3M at `RY_BENCH_REPEAT=2`) and +0.35 MiB peak anonymous RSS (42.64 to 42.99 MiB, median of 5 rounds). By function, on a slightly older main (+0.13%, +10.2M): about 5.9M is `lookup_function` with unchanged code, and 3.4M is `hash_shape`, the check that a body was not changed in place before a new closure takes its code. What the extra resident memory holds is not yet attributed; the `Bodies` columns and the shared code that lives as long as any closure over its body are the suspects. A call protocol that keeps lookup hints per closure or per enclosure, rather than per code object, would recover the first part.
@@ -608,7 +584,6 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 - **The AST evaluator makes about one closure call for every six from compiled code** (`apply_call`: 0.9M beside 5.5M), for promise code that is not compiled against the frame's slots, run-once bodies and `eval`. 85% of them use the site's plan.
 
 ## Open: a string `switch` without the linear name scan
-## Open: one probe to intern a new string (B4)
 
 - **A compiled `switch` on a string selector scans its arm names on every call.** `switch_arm` in `crates/interp/src/bytecode.rs` goes through `eval::switch_selector`, then compares the interned selector against each name in the table by identity, and compares text only if none matches (a missing name, or another encoding). On the expr_tree workload, `switch_arm` and `switch_selector` together are at most 3.6% of warm Ir under callgrind, which bounds the gain. The likely shape is a selector-to-arm map built once with the table, or a dense string id (below) indexing it, plus inlining the string case of `switch_selector` before its generic vector checks. It touches `bytecode.rs` call sites, so coordinate with whoever is rewriting them.
 
@@ -621,32 +596,25 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 
 `tools/bench/builtins/slower.txt` lists every export of base, stats and utils that the builtins sweep finds slower than GNU R (or failing) in at least one case; `sweep.py ratchet --update` shrinks it as fixes land, and `sweep.py weights` orders the work by call frequency in the code bases and the oracle corpus.
 
-- **Largest gap left:** `dsignrank` on a scalar (0.71x); `slower.txt` has the rest. `cumprod` of products that underflow a double pays an x87 store assist per element, as GNU R does; skipping that store would beat it.
-- **Failing on ry in the sweep:** `R_compiled_by`, `aregexec`, `rsmirnov`, `ppr`, `arima0` and others; `sweep.py compare` prints the full list.
-- **POSIX repeated groups:** `(a)?(ab)?b*` on "abb" fills the first optional group where TRE fills the second (`strings__posix_repeated_group`, a known failure).
+- **`rpois` with a vector `mu` and `rgeom` measure at GNU R's speed within noise** (0.95x to 1.3x over repeated sweeps); they stay in `slower.txt` until a sweep clears them. `slower.txt` has the rest. `cumprod` of products that underflow a double pays an x87 store assist per element, as GNU R does; skipping that store would beat it.
+- **`aregexec` is 1.4 to 2.5x GNU R's wall time on long patterns at about TRE's instruction count** (`"lazy"` with `max.distance = 0.1` over 1,000 sentences: 25M instructions per call in `search_levels` against 22M in `tre_tnfa_run_approx`, with as many mispredicted branches; `"qu(i|a)ck"` is faster than GNU R). Entries are 32 bytes (`Reach<1>`, settings by index into `ParamsTable`), so the remaining gap is not entry copies or instruction count; measure cycles with a hardware profiler (no `perf` in the cloud container) before redesigning.
 
 ## Open: base R kernels against GNU R
 
 `just bench-base` times base R's kernels against GNU R with checksums (`tools/bench/internal/base`). Kernels that take a few milliseconds swing by 2x between runs, so judge them with `--rows 1e7`. At 1e7 rows these are still slower:
 
 - **Instruction counts on the application workloads vary between runs, mostly from data.table's threads.** Under callgrind with default threads, a data.table script's Ir varies run to run from libgomp scheduling and spin-waits in data.table's OpenMP regions, and turning ASLR off (`setarch -R`) does not remove it. With `OMP_NUM_THREADS=1` and `R_DATATABLE_NUM_THREADS=1` a data.table micro script spreads by about 1e-5, like a pure-R script (2e-5), but the full `tables` workload still spreads by 0.04% warm and 0.02% cold over five runs; that remainder is not yet attributed. Pin both variables for any Ir comparison that touches data.table, and report the median and the range of several runs; nothing under `tools/bench` pins them yet.
-- **Strings:** everything measured is at or below GNU R (`paste(collapse =)` 0.80, `format` 0.90, `sub` 0.93, `grepl(fixed = TRUE)` 0.97). `as.character(double)` is deferred on both, so it is timed forced. data.table's `tstrsplit(s, "_", fixed = TRUE)` on 2e6 strings took 1.1 s against GNU R's 0.46 s (one thread); re-measure.
-- **Grouping:** `order` on two keys runs at 0.88 of GNU R's time at 1e6 rows. Carrying the second key's values through the first key's scatter would avoid the random gather that dominates it.
+- **Strings:** everything measured is at or below GNU R (`paste(collapse =)` 0.80, `format` 0.90, `sub` 0.93, `grepl(fixed = TRUE)` 0.97). `as.character(double)` is deferred on both, so it is timed forced. data.table's `tstrsplit(s, "_", fixed = TRUE)` on 2e6 strings runs below GNU R's time on one thread.
 - **Matrix and time series:** xts `period.apply(xt, endpoints(xt, "hours"), function(x) mean(x))` on 2e6 minutes (33,335 periods) takes 1.4 to 1.5 s against GNU R's 0.89 s, at 250k instructions per period against 204k, so part of the gap is not instruction count. Callgrind's cache simulation (`--cache-sim=yes`, marginal over two run counts) puts it in the instruction cache: about 7,040 L1 instruction misses per period against GNU R's 3,716, while data misses are close (2,382 against 1,872 reads, 700 against 822 writes). The extra misses cost roughly 0.4 s. They are spread thinly (`execute_code` about 460 per period, then `run_closure`, `native_call`, `bind_arguments`, `match_args` and `mk_char` at 120 to 190 each), so outlining cold arms of `step` alone has little room; the open lever is function ordering and keeping cold paths out of the whole call path. The release build's PGO and BOLT layout (`decisions/heap-gc.md`, "The runtime's object model, collector and native boundary", item "The Linux release build is profile-guided") cut misses from 5,450 to about 3,050 and instructions from 185k to 160k per period, and period.apply 2e6 from 0.70 s to 0.56 s, measured on a faster machine than the figures above, which come from an earlier run of the plain build. The bench recipes measure the plain build. Closure-call overhead is a broader target than this one case: a closure call costs 0.75 µs against GNU R's 0.35 µs and `vapply` 8.2 µs against 3.4, and this per-call cost is why ggplot2, lattice and PerformanceAnalytics take 1.2 to 1.9x GNU R's time to render. The aim is a closure call at or below GNU R, measured with `oracle gallery` (149 timed figures) beside period.apply. Two more levers are queued: the `frame_cell` lookups in the fill loop of the finance benchmark's `ledger` template (`tools/bench/tooling/templates/finance/ledger.R`, cost not yet measured in isolation), and the S4 metadata-cache-miss path (`slot<-`, `list()`, `possibleExtends`; see the start-up item in `MEMORY.md`). The remaining instruction cost is spread: `execute_code` 27.5k (level with GNU R's `bcEval`), `method_symbol` formatting and interning about 21 method names per period (4.3k), `is_top_env` probing `.packageName` (2.4k), and xts' own `Rf_install` calls (4.4k). `apply` over rows is below GNU R per row; zoo `rollmean` 1.4x.
 - **Array subscripts with an empty dimension:** `X[, , k]` reads walk the selected offsets without listing them (`ArrayOffsets` in `crates/interp/src/subset.rs`), and `X[, , k] <- W` takes the slab write path, so both beat GNU R on a 1000 x 1000 x 20 double array. An empty subscript still resolves to a position list as long as its extent, which a range selection that never materializes would avoid.
-- **Printing an array with a zero extent:** `array(integer(0), c(2, 3, 0))` prints nothing in ry; GNU R prints `<2 x 3 x 0 array of integer>` and the empty row and column headers (`print_array` in `crates/interp/src/print.rs`).
-- **Dates, `pmin`/`pmax` and `attributes<-` differ from GNU R on rare inputs**, with and without the prologues. `strptime("1700000000", "%s", tz = "UTC")` gives NA (GNU R parses the epoch seconds). `%D` reads as `%m/%d/%y`, and GNU R's own parser reads it as `%y/%m/%d`. `as.Date("\t2024-01-02")` parses, and GNU R stops with "character string is not in a standard unambiguous format". `strptime(x, f, tz = NA)` is accepted (GNU R: "invalid 'tz' value"). `pmax(1:3, integer(0), 2)` gives `numeric(0)` (GNU R `integer(0)`) and `pmin(NULL)` gives `integer(0)` (GNU R `NULL`). `attributes(x) <- list(comment = 1)` is accepted (GNU R: "attempt to set invalid 'comment' attribute"), and `attributes(y) <- list(row.names = 1:3)` stores the compact form `c(NA, -3L)` where GNU R stores `c(NA, 3L)`.
-- **A warning raised under `NextMethod` names the default method as its call.** With `"[<-.tagged" <- function(x, i, value) NextMethod("[<-")`, a recycling `x[] <- c(1, 2)` on a three-element object warns `In \`[<-.default\`(\`*tmp*\`, , value = c(1, 2))` where GNU R prints `In NextMethod("[<-")`. zoo's and xts's `[<-` methods show the same label.
-- **`||` and `&&` accept an operand GNU R 4.6.2 rejects.** `FALSE || NULL`, `NULL || TRUE` and `TRUE && NULL` give `NA` or `TRUE`, and `FALSE || "TRUE"` gives `TRUE`, where GNU R reports `invalid 'y' type in 'x || y'` (or `'x'`) with the operator call. `sort(x, na.last = NULL)` reaches it through `is.na(na.last) || na.last`.
-- **Small condition and binding gaps:** base bindings are not locked (`assign("toupper", 1, envir = baseenv())` succeeds; GNU R: "cannot change value of locked binding"). `typeof(rep)`, `typeof(log)` and `typeof(round)` are "builtin" (GNU R: "special"). Infinite recursion is a `simpleError` (GNU R: `CStackOverflowError`). A failed `UseMethod("zz")` names the enclosing call.
+- **`ppr` with the spline smoother on fewer than four rows** errors "too few observations for the spline smoother"; GNU R runs `sbart` with fewer knots than the cubic basis needs and returns a fit whose values depend on memory the Fortran never set.
+- **`typeof(rep)`, `typeof(log)` and `typeof(round)` are "builtin"** (GNU R: "special"). Making them specials changes how their arguments reach them, so it belongs with the builtin calling convention.
 - **Collation gaps** (`sort.rs`): ICU4X always normalizes, so text not in FCD form (`"ê"` + U+0323) ties where GNU R's ICU orders it. ICU locale keywords other than `collation=` (`en@colNumeric=yes`, `en-u-kn`) are dropped. U+10FF80 to U+10FFFF collate as U+FFFD. `icuGetCollate()` echoes the requested name, and `french_collation` errors. Mixed-encoding strings in the C locale; `<` on `bytes` strings compares where GNU R errors.
 - **Small calls at or above GNU R's time** in a survey of about 110 one-line base calls (the rest run 1.3x to 10x faster): `Sys.time()` 2.3 µs against 1.5, `split(1:10, g)` 13.5 against 9.3 (the R body of `as.factor`), `Reduce("+", 1:10)` with the function named by a string 7.8 against 7.3 (the prologue declines it). At parity: `iris[2, "Sepal.Length"]`, `rbind(df, df)`, `do.call(rbind, dfs)`, `tapply`, `apply(m, 1, sum)` and `is.element`, all flat interpretation of base R closures with no single hot builtin.
 - **Matrix products** (`linalg.rs`, `real_product`) are ry's own kernels in reference BLAS's summation order (`decisions/builtins.md`, "Base R's linear algebra"), so they run at reference BLAS's speed, not OpenBLAS's; not yet timed against a GNU R on OpenBLAS. A faster kernel may block over rows and columns and thread across columns, but must keep each entry's sum sequential in the inner index and use no FMA, or the bits move. CI has only OpenBLAS (setup-r installs it), so `test_linalg.rs` compares its LAPACK cases there with live GNU R; adding `libblas3 liblapack3` to the workflow's apt line (a human edit: workflow scope) would make CI check the pinned reference bits too.
-- **Package kernels** (`kernels.R`, zoo, xts, lubridate, stringr, jsonlite, readr) at 1e7 rows: `rollmean`, `rollapply`, `na.locf`, `endpoints`, `to.period`, `str_detect`, `str_replace_all` and `read_csv` are at or below GNU R. Still slower: `str_split` 1.54x, xts `period.apply` 1.39x (per-call interpreter cost, tier-0 work), `ymd` 1.29x, `fromJSON` 1.26x and `toJSON` 1.20x. `str_split` executes only 1.14x GNU R's instructions, so the rest of its gap is memory traffic in `allocVector` and `mkCharLenCE` (the heap's allocation path and string table). The jsonlite simplify step and lubridate's format training are R-level interpreter cost. At 1e6 rows these ratios swing by 30% between runs.
-- **Bessel and polygamma ports differ in the last bits.** `besselJ(2, 1)` is `0.57672480775687351` against GNU R's `0.5767248077568734`, and `psigamma(0.5, 0)` `-1.9635100260214227` against `-1.9635100260214231` (`sprintf("%.17g")`); `besselJ(1:5, c(0, 1))` differs at 16 significant digits in two of five values. `distributions__vector_paths.R` prints them at 12 digits until the ports follow GNU R's operation order.
-- **Deparse ignores `scipen`.** `options(scipen = -10)` warns `invalid 'scipen' -10, used -9` on both, but GNU R deparses the call as `options(scipen = -1e+01)`, because its deparse formats numbers under the scipen in force, and ry prints `-10`.
-- **Complex printing** does not share significant digits between the two parts as GNU R's `formatComplex` does: `print((1+2i)^0.5)` gives `1.27202+0.7861514i` against GNU R's `1.27202+0.786151i`, and `print((-1+0i)^0.5)` gives `6.123234e-17+1i` against `0+1i`. The values are bit-identical; only the formatter differs.
-- **Peak memory** (`run.py --memory`) at 1e6 rows is within 1.13 times GNU R's for every kernel (`decisions/frames-table.md`, "String keys sort by rank, and merge pairs come from sorted codes"). The highest are `unsplit` 1.13 (184 MB against 163), `gsub(perl = TRUE)` 1.08, `xts period.apply` and `as.character(double)` 1.07. `make.unique` on 1e6 names peaks at 127 MB against GNU R's 92 MB; names that are not ASCII still take the `String` path.
+- **Package kernels** (`kernels.R`, zoo, xts, lubridate, stringr, jsonlite, readr) at 1e7 rows are at or below GNU R except xts `period.apply` (per-call interpreter cost, tier-0 work). Single runs swing by 30%, mostly with when collections fall: `str_split` read 1.1 to 1.5x in single runs but costs 1.10 s per repetition against GNU R's 1.31 s at 2e6 strings over five repetitions, collections included.
+- **Unscaled `besselI` is 10 to 20% slower than GNU R at large x** (1e6 points, x in [0, 50]) although callgrind counts the same instructions; scaled I, J, Y and K are at parity.
+- **Peak memory** (`run.py --memory`) at 1e6 rows is within 1.13 times GNU R's for every kernel (`decisions/frames-table.md`, "String keys sort by rank, and merge pairs come from sorted codes"). The highest are `unsplit` 1.13 (184 MB against 163), `gsub(perl = TRUE)` 1.08, `xts period.apply` and `as.character(double)` 1.07. `make.unique` on 1e6 non-ASCII names peaks at 182 MB against GNU R's 177 MB.
 - **`mkChar` on the C API boundary's direct path is measured and not taken.** Interning `mkChar`, `mkCharCE`, `mkCharLen` and `mkCharLenCE` without leaving the direct path, with the string-table probe inlined, cuts a 16-byte `Rf_mkCharLenCE` from 868 to 765 instructions (fresh) and 376 to 288 (re-interned), and the marginal cost of `str_split(s, "_")` on 1e6 strings by 4.1%. Whole package runs move by less than the bar (single process, `TESTTHAT_PARALLEL=false`): testthat -0.25%, purrr -0.17%, rlang -0.11%, and it adds about 40 lines. Revisit if a profile shows `mkChar*` call overhead above a few percent.
 - **Long strings through `mkCharLenCE` are measured and not taken.** processx hands it chunks of 45 to 95 KB, about 2.2G instructions in vctrs' test run (1.7%). Per byte of a 64 KB string under callgrind, ry re-interns an existing string in 1.7 instructions (1.57 in the one pass that does the NUL test, the ASCII test and the hash, 0.14 in the `memcmp` of the hit) and creates a new one in 4.0 (the same pass, a 1.0 copy and the allocation), against GNU R's 14.1 and 15.6. A 32-byte NUL and ASCII test with the copy folded in, plus hashing only a sample of a long string, might bring the pass to about 0.15 (an estimate), which would save under 1% of that run. Hashing a sample would also chain strings that share their ends in one bucket.
 
@@ -668,43 +636,28 @@ Rule and order: `development/design/memory-safety.md`, "Migration".
   per-operation table (`just bench-mechanisms`) shows no row for it.
 - **Raised `unsafe` counts** (`tools/unsafe.py check` reads them), until the helpers migrate:
   - `crates/interp/src/handles.rs` 107 to 149: `alloc_with_room`, `array_subassign`, `array_subset`, `array_subset2`, `call_environment`, `call_value`, `classed_error`, `compact_sequence`, `copy_attributes_to`, `copy_elements`, `copy_most_attributes`, `define`, `dispatch_builtin`, `element_text`, `evaluate`, `force`, `frame_value`, `generated_call`, `holds_elements`, `install_bytes`, `int_element`, `is_altrep`, `item`, `list_to_pairlist`, `mark_shared`, `missing_argument`, `move_elements`, `owned_names`, `pairlist_to_list`, `permanent`, `reaching_environment`, `real_element`, `record_dollar`, `record_dollar_assign`, `record_subassign2`, `record_subset2`, `resize_in_place`, `scalar_subset`, `shallow_copy`, `store_item`, `stored`, `tag`, `type_name`, `warning_in`, `with_result`.
-  - `crates/interp/src/interp.rs` 47 to 48: `altrep_storage`, the hook's type.
-  - `crates/interp/src/bytecode.rs` 409 to 411: `assign_element`, `assign_matrix_element_in_place`, `assign_slot_matrix_element`, `load_declines`, `op_subscript`, `subscript_unbound`.
+  - `crates/interp/src/interp.rs` 47 to 49: `altrep_storage` (the hook's type), `resolve_samples_before_truncating`.
+  - `crates/interp/src/bytecode.rs` 409 to 432: `assign_element`, `assign_matrix_element_in_place`, `assign_slot_matrix_element`, `load_declines`, `op_subscript`, `subscript_unbound`, `assign_enclosed_element`, `call_declined`, `call_generic_hooked`, `call_summarized`, `clear_dead`, `count_body_entry`, `count_code_entry`, `enclosed_cell`, `enclosed_element_assignment`, `fast_call_rebinding`, `generic_call_handler`, `has_slot_table`, `leave_summarized`, `may_dispatch_replacement`, `op_super_sub_assign`, `return_hooked`, `setter_call`, `shared_body`, `shared_slot_code`, `take_body_entries`, `track_body_entries`.
   - `crates/interp/src/conditions.rs` 50 to 51: `c_error`.
   - `crates/interp/src/connections.rs` 175 to 180: `drop_unconvertible`, `output_bytes`, `read_fixed_strings`, `text_encoding`, `translated_bytes`, `warn_unsigned`.
   - `crates/interp/src/deparse.rs` 44 to 45: `argument_at`, `deparse_lines_checked`, `parenthesize_caller`, `unused_arguments`.
   - `crates/interp/src/envir.rs` 125 to 127: `binding_environment`, `simple_as_environment`.
-  - `crates/interp/src/eval.rs` 266 to 267: `switch_empty_default`.
+  - `crates/interp/src/eval.rs` 266 to 271: `switch_empty_default`, `call_builtin_observed`, `enters_slot_frames`, `profiled_entry`, `returning_summarized`.
   - `crates/interp/src/serialize.rs` 69 to 70: `do_load`.
-  - `crates/interp/src/session.rs` 26 to 27: `lock_base_bindings`.
+  - `crates/interp/src/session.rs` 26 to 28: `lock_base_bindings`, `source_base`.
   - `crates/interp/src/sort.rs` 44 to 48: `collation_locale`, `do_icu_get_collate`, `do_icu_set_collate`, `in_order`, `incomparable_keys_given`, `rank_keys`, `strcoll`.
   - `crates/interp/src/utils.rs` 68 to 81: `character_factor`, `comment_char`, `count_argument`, `extract_item`, `first_byte_separator`, `first_bytes`, `is_missing`, `pad_record`, `parse_complex_prefix`, `parse_double_prefix`, `quote_set`, `read_string`, `rule_out`, `scan_decimal`, `scan_frame`, `scan_separator`, `scan_vector`, `write_element`, `write_string`.
   - `crates/interp/src/values.rs` 110 to 111: `as_integer_scalar_warning`, `as_real_scalar_warning`.
-
-## Open: failing tests on main
-
-`just ci` stops at the first failing test binary. With `--no-fail-fast` (and GNU R's
-`lib/` on `LD_LIBRARY_PATH` for the `gnu-r` runtime tests), these are the only tests that fail:
-
-- **`test_load`: `held_back_s4_definitions_behave_as_if_run_eagerly` and
-  `a_lazy_generic_whose_held_back_definitions_fail_reports_the_failure_on_every_use`.** The first
-  use of a held-back class or generic stops with `could not find function ".ry_force_s4"`. That
-  happens only after a `load_all(full = TRUE)` reload with `options(ry.load.lazy_s4 = TRUE)` in
-  the same session. A first load, a reload with lazy S4 off and a non-full reload all work, and
-  neither the JIT nor GC timing matters. The `force` closure that `.ry_defer_s4` hands to
-  `ryLoaderDefer` cannot see the loader environment, although `environment(load_all)` binds
-  `.ry_force_s4`. The likely cause, unverified: the full reload's `.ry_new_package` registers
-  the new definitions under the same root key while something from the old load's state stays
-  reachable, or the closure's enclosing frame is rewired once `.ry_defer_s4` returns. A plain R
-  closure that a function stores and a later call runs keeps its enclosure. Reproduce with the
-  `SHAPES` package from `test_load.rs`: `ry load DIR -e "options(ry.load.lazy_s4 = TRUE);
-  load_all('DIR', full = TRUE)" -e "isVirtualClass('Sq')"`.
+  - `crates/interp/src/base_fast_paths.rs` 139 to 144: `all_bound`, `bind_local`, `call_exiting_handler`, `defines_prologue`, `leave_levels`, `push_frame`, `push_levels`, `try_catch_chain`, `variable_reference`.
+  - `crates/interp/src/profile_summary.rs` 17 to 27: `count_inlined_call`, `entering`, `finish`, `frame_identity`, `resolve_samples`.
+  - `crates/interp/src/testing.rs` 28 to 29: `check_saved_prologues_replaced`, `refusal`.
 
 ## Open: the package loader
 
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
 `docs/.../guide.mdx`, step 3). Gaps, roughly in order of how often a real package hits them:
 
+- **The load-index cache never evicts.** `loader::index_cache` writes one `~/.cache/ry/load-index/<hash of root>.bin` per package root, and nothing removes an entry whose root is gone, so temporary roots (test and benchmark checkouts) pile up: one container held 782 entries, 1.9 GB. Store the root in the entry and drop entries whose root no longer exists, as the stale runtime directories are dropped.
 - **`ry test` workers under `--runtime gnu-r` still load with pkgload**, eagerly and without
   `ry.toml`'s switches, because a GNU R worker has no `.Internal(ryLoaderAttach())`. Attaching the
   GNU R loader in the worker hook (source `gnur.R` from the binary) would close it.
@@ -713,9 +666,14 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
   sources them once, because it loads with `helpers = FALSE`. `load_all()` takes `helpers` for
   the workers already; the main process's load (`crates/ry/src/load.rs`) and the watch reload
   need it too, without losing the reload's "a helper changed" signal.
-- **`ry test --watch --jobs N` restarts its workers on every rerun.** testthat's parallel runner
-  starts workers per `test_dir()` call, so each rerun pays worker startup and a lazy load per
-  worker. Keeping the workers alive across reruns needs a queue of our own.
+- **On Windows, each `ry test --jobs N` worker costs about 0.3 s of CPU before its first test**:
+  Windows cannot fork, so its workers are testthat's callr processes, each loading testthat, its
+  imports and the package (Unix forks them, `decisions/tooling-bench-ci.md`, "ry test forks its
+  workers"). A spawned worker started from a saved heap of the loaded parent would close it.
+- **`ry test --watch --jobs N` forks new workers on every rerun.** testthat's parallel runner
+  starts workers per `test_dir()` call, so each rerun's workers pay the first-call costs (lazy-load
+  fetches, closure compilation) again. Forking is cheap; keeping warm workers across reruns would
+  need them to reload changed code themselves.
 - **Every rebuild of a shared library maps one more copy** on ry's runtime: `dyn.unload` keeps
   the retired library mapped (`libr` `unloaded_dlls`) so a stale pointer into it does not crash.
 - **`ry document`'s warm run is dominated by reading the block cache**: about 3 s of a 11 s no-op
@@ -750,49 +708,8 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 - **A statement reading a name before its defining statement** sees, on reload, the previous load's
   value (a fresh load fails on such code); documented as a limit.
 
-## Open: false reports and gaps found by the documentation review
+## Open: publish the Zed extension
 
-An adversarial review of every docs page ran each claim against the binary. The docs now state the
-behavior below truthfully, most of it under "Where correct code is reported" in
-the Limitations section of `reference/type-system.mdx`, so fixing an item means updating that page too.
-
-False reports on correct R, worst first:
-
-- **Platform-conditional `pkg::name` reads are reported "not exported".** 17 corpus reads, such as
-  `utils::shortPathName`, `utils::readRegistry` and `grDevices::win.metafile`, name Windows-only
-  exports the Linux-generated manifests lack, and `parallel::splitList` and `base::check_tzones`
-  are feature probes inside `try()` or `tryCatch()`. Adding the Windows-only exports to
-  `scripts/export-manifests.R` would fix the first class; a qualified read inside a `try()`
-  argument is a probe and could skip validation.
-
-Smaller gaps:
-
-- **Writes cut off by `break` or `next` are lost at loop joins.** `x <- "a"; if (c) break; x <- 1L` in a loop body leaves `x` without `character` after the loop, for loop-carried variables and for the loop variable alike (`check_loop_body` joins only the end-of-body state). Naming also calls the write before `next` unused. A nested loop that reuses its outer loop's variable name drops the outer loop's `NULL` (`for (m in xs) { for (m in 1:2) {} }; m` is `integer`).
-- Found in passing by the IDE work, not yet reproduced: `sales[, amount := "x"]` flags `sales` as
-  unused; `p2$x <- "a"` and `p2[["w"]]` go unreported after an earlier error in the same item; the
-  message for `Result.map(:Ok(1L), 3)` leaks the type variable `T`; `Str.lenght` gets no
-  "did you mean".
-- Two broken annotations still cause follow-on findings: `#: Rec[]` over an alias of a record (also
-  coded `type-mismatch` instead of as an annotation error), and `fn(integer, [character])`.
-- A `vapply` whose callback's return type disagrees with `FUN.VALUE` reports only the two types, as
-  `vapply(words, toupper, numeric(1))` gives "expected `character[] | character`, found `double[]`"
-  on `numeric(1)`, whether the callback is a name or a `match.fun` string. Naming the callback needs
-  the generic argument check to carry which argument fixed the type variable.
-- After an invalid field write, a later field typo on the same record goes
-  unreported. Hover on `m2` in `m2$amount <- 5` shows `double` instead of the nominal type.
-- From the final type-system review, each now documented as a known gap in the reference:
-  - an elided return in a trusted coercion or on a non-literal value (`#: fn(integer)` on `g <- f`)
-    is `Unknown` rather than `f`'s known return;
-  - assignments in a bare top-level `{ }` block are invisible to other package files;
-  - an optional `[label]` parameter over a formal with no default is checked in annotations but not
-    at an argument position;
-  - a bare read satisfied only by an import or manifest is not a strict origin, while a qualified
-    one is;
-  - `maybe-undefined` ignores a binding of the same name outside the function, which R would read;
-  - `[[` with a missing name on a named atomic vector is typed `| NULL`, where R fails;
-  - strict mode can still report inside a statement that failed to parse.
-- Console completion: `df$` offers only `df`, and an unclosed `x[["` completes keywords instead of
-  fields.
 - The Zed extension is not in Zed's registry yet. It downloads the newest full release's archive
   (`editors/zed/src/lib.rs`), and the first full release is 0.4.4, so publish it to Zed's registry
   no earlier than 0.4.4 (before that it would serve 0.1.1), and 0.4.4 must ship every platform's
@@ -801,13 +718,13 @@ Smaller gaps:
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-gives 39 errors: 25 true package bugs, 2 known limitations and 12 false reports on correct R. The
+gives 28 errors: 26 true package bugs and 2 known limitations, and no false report on correct R. The
 three generated benchmark packages (`tools/bench/tooling/generate.py`) report nothing. To reproduce, give
 each package a `ry.toml` with `[check]` `typing = true` (typing is off by default) and run
 `ry check --output json R` inside it. A fix also deletes its line here and, for a user-visible
 gap, in the Limitations section of `reference/type-system.mdx`.
 
-### True bugs, left reported (25)
+### True bugs, left reported (26)
 
 - DBI `data.R` (5): coerce calls that leave out the required `to`.
 - GeneralizedHyperbolic `nigFit.R` 99 and 110: `llfunc(paramStart, x)` on a one-parameter `llfunc`.
@@ -824,36 +741,16 @@ gap, in the Limitations section of `reference/type-system.mdx`.
 - kernlab `gausspr.R` 194: passes a `double` where the callee multiplies a `matrix`.
 - mclust `toremove.R` 259: leaves out `k`.
 - processx `process.R` 748: `new_not_implemented_error` without `call`.
+- renv `r.R` 137: `diagnostics$suggestion` reads the list of records where the loop variable
+  `diagnostic` was meant.
 - rugarch `rugarch-startpars.R` 518: reads `temph` for `tmph`.
 
 ### Known limitation (2)
 
 - devtools `test.R` 72 and knitr `citation.R` 163: a vector of statically unknown length
   (`p[file.exists(p)]` returned through a function) reaches a stub's scalar `character` parameter.
-  The value has length one at run time, but no type says so.
-
-### False reports (12), one cause each
-
-- PerformanceAnalytics `legend.R` 293: a missing `angle` is passed to `rect(angle = angle)`, which
-  forces it only when `density` is not `NULL`. Laziness that depends on a value.
-- PerformanceAnalytics `PortfolioRisk.R` 387: `VAR$VaR` on a value inferred as a tuple.
-- Rsolnp `benchmarks.R` 470: `eqB = NULL` to a project parameter typed numeric from a use outside
-  the callee's `is.null()` test.
-- bit64 `highlevel64.R` 309: an `if` joining `table()` and a list return reaches a stub union.
-- diffobj `diff.R` 654: a one-parameter callback against an interface that names more parameters.
-- ks `kdde.R` 304: a rigid `T` meets `double[] | integer[]`; not reduced.
-- ks `kdde.R` 568: `if (missing(col.fun)) col.fun <- function(n) ...` binds the lambda's `n` to
-  the first call's `integer`, so a later `double` fails.
-- renv `python.R` 109: a union parameter that flows to the return keeps every member at the call
-  (`path: list[T] | T[]` from `map_lgl(path, ...)`). Needs a bounded variable so the return names
-  the argument's own type.
-- renv `r.R` 137: a callback of a project `lapply` wrapper receives the whole tuple of records
-  instead of one element.
-- renv `use.R` 100: `records[!compat]` where `compat` is a named list from a project `enum_lgl`.
-- roxygen2 `rd-usage.R` 88: `format_name(name)` after `identical(format_name, identity)` sees an
-  over-wide `name`.
-- snakecase `to_any_case.R` 266: `vapply` over a union with a `factor` member, which the stub's
-  `list[T] | T[]` does not accept.
+  The value has length one at run time, but no type says so, and no sound rule can say so
+  (`decisions/syntax-semantics.md`, "Corpus false reports: the narrowing and overload rules that cleared them").
 
 ### Scalar-claim chains
 
@@ -875,7 +772,8 @@ false classes, largest first:
   that are now checked).
 - Dead code after `stop()` still binds names that shadow outer ones (psych, 44).
 - An unannotated parameter over-inferred from one use, a default or one branch (21).
-- A variable correlated with a flag tested elsewhere (20).
+- A variable correlated with a flag tested elsewhere (20, measured before tests of the same local
+  were correlated; not re-measured).
 - A union of function types where a function is expected (lme4, kableExtra, 18).
 - A missing argument forwarded to `[` or to a callee that tests `missing()` (flextable, 10).
 - An element write `d[[i]] <- v` does not update the container type (psych, 10).
@@ -895,15 +793,17 @@ false classes, largest first:
   declared optional `NULL` default should read as a placeholder too, or the renderer should mark
   it. Flag-selected returns (`p_dist`, `iam`) are listed there for the same reason: an annotation
   cannot say that a literal flag picks the branch.
-- **A generic's dispatch formal, forwarded, reads as optional** (missed error).
-  `f <- function(fit) persistence(fit)` over a `UseMethod` generic gives `f` an optional `fit`, yet
-  `f()` errors in R (`a_generic_does_not_require_the_formals_it_passes_on`).
+- **A local variable named like a function** (missed error). After `if (flag) t2 <- 5`, a read
+  `t2 + 1` types as the local writes alone when a project, enclosing or base function `t2`
+  exists, so the path that skips the write and reads the function is not reported, even with
+  `maybe-undefined = true` (naming counts the function as a fallback). Leaving the function out
+  cleared mgcv's guarded reads; reporting the unguarded one needs naming to tell a function
+  fallback from a value fallback.
 - **`m * tol` after `if (missing(tol)) tol <- 1e-8` leaves both parameters unbounded**, so
-  `fast_svd("a", 1)` is not reported (missed error).
-- **A number passed to a parameter tested as a condition.** `if (x)` and `!x` bind an open
-  parameter to `logical`, and R takes `0L` there. Bounding it by `scalar numeric` was tried and
-  rejected for hover readability; a call-site relaxation for an inferred `logical` is the likely
-  shape, but schemes do not record where the `logical` came from.
+  `fast_svd("a", 1)` is not reported (missed error). The join of an open parameter and a value
+  written on one path is `Unknown` (`join_written_values`), so that `omega <- omega + m %*% m` on
+  one path leaves a caller free to pass a plain vector. Keeping `U | double` instead would bound
+  `U` by the later use; it needs a rule for which uses of a joined parameter bound it.
 
 ## Open: where findings point, and what the type system still refuses
 
@@ -915,115 +815,6 @@ diagnostic that reads perfectly while blaming the wrong expression counted as a 
 
 Only the open findings are below. `test-user-reports.md` holds the closed ones with what each
 measurement showed.
-
-### Placement
-
-Caret placement is good for ordinary nesting, which covers four-deep calls, multi-line arguments,
-lambdas and pipes. The renderer is display-width aware while JSON stays in codepoints. Every failure
-found was the same shape, which is a collapse to the outermost node, and one rule now covers them in
-the reference under "Where a finding points": a finding underlines the smallest expression its
-message is about. Comparison operators, a return-type mismatch with an `if` and `else` tail, `$` and
-`[[`, a surplus positional argument, a record mismatch and an annotation range ending at
-end-of-line all follow it now.
-
-**One shape is still open.** A parse error was reported past the end of the file. The filed shape,
-which was line 10 of a 9-line file, does not reproduce. An unterminated `f <- function(x,` in a
-one-line file reports at `1:14-1:15`, which is in range. Either an earlier fix covered it or the
-note was imprecise. This needs a fresh reproduction before it can be worked, and it should be
-re-derived rather than trusted.
-
-### Should strict mode report a binding whose exported type contains `Unknown`?
-
-This is a design question, not a bug fix, and it needs volume measured before it is chosen.
-
-The gap is real. `g <- f` closes to `g: fn(p: Unknown) -> Unknown`, which the
-`aliased_function_reference_exports_closed` fixture pins, and strict reports nothing. Calls through
-`g` are therefore unchecked while the run looks like a pass.
-
-Two earlier diagnoses of it were wrong, and the measurements are the keepable part.
-
-- **`Any` is not what blinds strict mode.** Changing `do.call`'s return from `Any` to `Unknown`
-  produces no strict finding at all. This was tried: the stub was edited, the binary rebuilt, and a
-  strict project run over `do.call(fun, args)`. Nothing.
-- **Strict mode has no binding-level `Unknown` test to widen.** It reports origins recorded at
-  construct sites, which are `UnsupportedConstruct`, `UndeterminedReference`, `LoopWidened` and
-  `RecursiveUnknown`. Nothing inspects a finished type.
-- **`Any` in the corpus is deliberate.** The shipped stubs declare 176 entries whose return is
-  `Any`, across nine files rather than just `base`, and none returning `Unknown`. The stub header
-  names each compromise.
-- The one behavioral difference between them is that `@if-unknown` coerces an `Unknown` and is
-  refused on an `Any`, saying that the value is already `Any` so the annotation should be dropped.
-
-Measure before deciding. Strict mode already emits 2879 findings on dplyr and 2458 on shiny with
-typing and strict forced on, and `erase_residual_vars` gives every aliased function `Unknown`
-parameters, so a containment sweep would fire on `g <- f`, an idiom ordinary R uses constantly.
-Decide it as a design note with numbers, not as a one-line widening.
-
-### Promotion needs to live in the type, not in the binding
-
-Two findings are the same missing piece, and they should be designed together.
-
-**A `logical` is accepted at a declared `integer` parameter and refused at an inferred numeric one.**
-Both halves reproduce. `bump <- function(x) x + 1L; bump(TRUE)` is refused, and the same body under
-`#: fn(n: integer) -> integer` accepts it. R does promote, because `TRUE + 1L` is `2L`, and the
-checker's own arithmetic rules say so. Verified against R 4.3.3.
-
-Do not just widen the constraint. The obvious repair is to bind the numeric variable to `integer`
-when a `logical` argument arrives, which is exactly R's promotion, and it is wrong. The
-counter-example is ordinary R.
-
-```r
-bump    <- function(x) x + 1L                          # R: bump(TRUE) is 2L, integer
-checked <- function(x) { stopifnot(x + 1L > 0L); x }   # R: checked(TRUE) is TRUE, logical
-```
-
-Both infer `<T: numeric> fn(x: T) -> ...`. One binding of `T` cannot be `integer` for the first and
-`logical` for the second, so the promotion produces a wrong return type. This project ranks a wrong
-answer below a refusal, because a gap means checks are skipped rather than that wrong answers are
-produced.
-
-**A numeric variable shared by two parameters refuses ordinary mixed arithmetic.**
-`add <- function(a, b) a + b` infers `<T: numeric> fn(a: T, b: T) -> T`, which ties both operands to
-one variable, so `add(1L, 1.5)` reports ``expected `integer`, found `double` `` where R gives `2.5`.
-That is a false positive on about as plain a piece of R as exists. The operand types need a numeric
-join, where `integer` with `double` is `double`, rather than unification.
-
-Closing either properly needs a scheme like `<T: numeric> fn(x: T) -> promote(T)`, which is a
-type-level function the annotation language does not have.
-
-### Smaller open items
-
-- `@new` is unrestricted project-wide, so a nominal type's invariant holds only by convention. The
-  guide's step 4 says so conditionally ("put `@new` in one constructor"). An
-  encapsulation modifier would make it a guarantee.
-- A narrowing failure on a field, or behind `&&`, produces a message byte-identical to the one for
-  writing no guard at all. The docs know the fix, which is to lift the value into a local first. The
-  diagnostic should say it.
-- A nominal union is unchecked through `$` while a structural union is exact. There is also no
-  discriminator for a nominal type, because `is.list` is true of both arms, so a tagged union cannot
-  be narrowed at all.
-- A generic lambda passed as an argument keeps its binders rigid, so
-  `lapply(xs, function<T>(v: T) -> T v)` reports `its parameter v accepts T`. An inline signature
-  on a function that is not bound should instantiate its binders like a call does.
-- A call that fails against a generic signature types its statement as the leaked rigid name, so
-  `twice("a")` against `<T: numeric> fn(x: T) -> T` renders `T` in the typing fixtures. It should
-  be `Unknown`.
-- Signature help misses R6's own helpers (`assign_func_envs`, `merge_vectors`, `list2env2`),
-  which R6 defines inside `encapsulate({...})` blocks; go-to-definition already finds them.
-- httr2's argument-name definition role (about 90%) counts arguments collected into `...` and
-  passed on to a list or a form body (`req_body_form(req, scope = scope)`), which have no
-  definition site; the role should leave them out rather than count them as misses.
-- The add-annotation code action writes a `#:` comment even in a project that uses inline
-  annotations. It could offer the inline form where inline annotations are on.
-- Editor gaps left by the completeness pass against rust-analyzer (`ide/tests/ide/editor-completeness.R.test`
-  pins what works). `df$` on a base `data.frame` completes nothing, because its columns are not
-  typed (the `DataFrame` type is the typed alternative). A local whose
-  type is a generic parameter (`total <- a + b` inside `<T> fn(a: T, ...)`) gets no inlay hint,
-  because a bare `T` without its binder would mislead.
-- `development/design/r-runtime.md` section 8 keeps `declare(type(...))` as a third annotation
-  spelling for code that must stay valid R, and a strip step (`ry build`) that moves inline types
-  into `#:` comments. Neither exists yet; `syntax::erase_inline_annotations` is the starting point
-  for the strip step.
 
 ### What the round said overall
 
@@ -1148,91 +939,27 @@ protects construction but nothing after it.
 
 ## Open: strict mode's top-level rule
 
-The rule ships (`decisions/syntax-semantics.md`, "A strict library file's top level holds only definitions, and purity is declared"). Follow-ups:
+The rule ships (`decisions/syntax-semantics.md`, "A strict library file's top level holds only definitions, and purity is declared"). Follow-up:
 
-- **Higher-order calls.** `lapply(1:3, function(i) i * 2)` is refused, because `lapply` is not pure for every callback. A constant could accept a higher-order call whose function arguments are pure, which needs a per-parameter marker in stubs.
-- **Calls to functions bound inside `local()`** are effects today, even when the local function is pure. Accept them when the local binding is a function literal whose body has no effect.
-- **`@pure` on a non-binding** (`#: @pure` above `cat(1)`) is ignored silently; warn instead.
 - **Evaluate pure constants once and cache them** with the bytecode, as Roc evaluates top-level constants at compile time.
 
 ## Open: strict-mode friction from typing finbench
 
 Porting the synthetic finance benchmark to fully typed strict code hit these. Each repro is a project with `[check] strict = true` (and `Imports:` naming the packages it uses); the quoted output is what `ry check` prints.
 
-- **A call returning a record inside `expect_error` is an error.** With `g <- function(n: integer) -> Record{x: integer}`, `expect_error(g(-1L), "neg")` reports "`expect_error` is an R function, and this value is a ry record, not an R object", although `expect_error` only evaluates the expression and never keeps its value. The typed bench tests work around it with `expect_error({ g(-1L); NULL })`. The fix is to let a parameter the callee only evaluates or quotes accept native values (testthat's `expect_error`, `expect_warning`, `expect_message`, `expect_silent`).
-
-- **`data.frame` and `data.table` columns are `Unknown`.** Both constructors type as their opaque nominal, so every `$` read is reported, and an annotation on the enclosing binding does not cover a read inside it; each column needs its own annotated binding, the largest annotation cost in typed tests. Track columns as `DataFrame{...}` does.
-  ```r
-  #: fn() -> double
-  f <- function() {
-    dt <- data.table::data.table(pnl = c(1, 2))
-    sum(dt$pnl)
-  }
-  ```
-  Reports `Unknown` twice, on `dt$pnl` and on the `sum(...)` around it.
-- **`ry check --annotate` writes top-level functions and bindings only.** A lambda passed as an argument (`vapply(x, function(v) v * 2, numeric(1))`) keeps no annotation, so the last unannotated functions in the benchmark code bases, nearly all callbacks to `vapply`, `lapply`, `tryCatch` and `purrr`, were annotated by hand. Write the lambda's contextual signature when the callee's parameter type fixes it.
-- **The stats distribution functions return `double[]`.** `pchisq`, `pnorm`, `dnorm` and their siblings in `types/stats.Rtypes` claim a vector, unlike base's scalar-claim convention, so `function(q: double) -> double stats::pchisq(q, df = 1)` is a `type-mismatch` (`expected double, found double[]`) and a p-value lambda must return `double[]`. Moving them to the scalar claim needs the corpus false-report count.
-- **An annotation cannot attach to a lambda argument** in `#:` comments (inline syntax can annotate one). Every callback whose parameter needs a type, or whose callee types it `Any` (`apply`, `uniroot`), must first become its own binding. Let a `#:` line inside an argument list annotate the argument that follows.
-  ```r
-  #: fn(m: matrix) -> Any
-  f <- function(m) apply(
-    m, 1,
-    #: fn(row: double[]) -> double
-    function(row) sum(row)
-  )
-  ```
-  Gives `` A `#:` typing comment annotates the statement that follows it, and an argument is not a statement, so this one annotates nothing. `` plus the `Unknown` on `sum(row)`.
-- **A lambda default gets no type from its declared parameter.** The parameter's declared function type should be the context for its default, as it is for a call argument.
-  ```r
-  #: fn(dsn: character, [connector]: fn(dsn: character) -> character) -> character
-  connect <- function(dsn, connector = function(dsn) toupper(dsn)) connector(dsn)
-  ```
-  Gives `` strict mode: parameter `dsn` has no type. `` on the lambda's `dsn`.
-- **Stubs cannot declare a structural nominal or a subtype.** `@type DEoptim {list{bestmem: double[]}}` and `@type fs_path : character` both give `... is not a valid type name.`, so S3 list results become aliases that lose their class, and `xts` (class `c("xts", "zoo")`) is not a `zoo`: `#: fn(x: xts) -> zoo` over `f <- function(x) x` gives `` expected `zoo`, found `xts` ``. readr's `tbl_df` and fs's `fs_path` are declared as their parents for the same reason.
-- **One flat stub name map.** With rugarch imported, its `sigma` overloads replace `stats::sigma` even for a qualified call: `#: fn(fit: Any) -> double` over `f <- function(fit) stats::sigma(fit)` gives `` expected `double`, found `matrix` ``. Needs per-namespace stub tables.
-- **`!!!` splice is `Unknown`.** In the `...` position it should splice the elements' type. `httr2::req_url_query(httr2::request(url), !!!query)` with `query: list[named: Any]` reports `Unknown` on `!!!query`.
-- **foreach's `%do%` body does not see the iterator.** `foreach::foreach(g = groups, .combine = c) %do% sum(g)` with `groups: list[integer[]]` reports `Unknown` on `sum(g)`. A stub attribute that binds a call's named arguments in the right operand of `%do%`/`%dopar%` would fix it.
-- **A chained `$` is reported at the innermost access, and `@if-unknown` on the statement does not clear it.** The user ends up annotating an intermediate they never named.
-  ```r
-  #: fn(v: environment, name: character) -> character
-  get_secret <- function(v, name) {
-    #: @if-unknown character
-    out <- v$secrets$get(name)$value
-    out
-  }
-  ```
-  Reports `Unknown` on `v$secrets` only.
-- **The `NULL`-default suggestion prints an unparenthesized function type.** `-> character | NULL` parses as the return type, which is right, but the fix it suggests is unparseable and pasting it reproduces the error; the printer must write `(fn(x: character) -> character) | NULL` inside a union. `#: fn(x: character, [f]: fn(x: character) -> character | NULL) -> character` over `apply_or <- function(x, f = NULL) if (is.null(f)) x else f(x)` gives `` `f` defaults to `NULL`, which its declared type `fn(x: character) -> character | NULL` does not admit. ... Declare it `fn(x: character) -> character | | NULL | NULL` ``.
-- **zeallot `%<-%` targets are silently untyped.** The targets are neither typed from the right-hand side nor reported, so a wrong return type passes.
-  ```r
-  #: fn(x: double[]) -> character
-  spread <- function(x) {
-    c(lo, hi) %<-% list(1, 2)
-    hi - lo
-  }
-  ```
-  With `importFrom(zeallot, "%<-%")`: `1 file checked, no problems`.
-- **A body annotation cannot name the signature's type parameter.** Bring the enclosing signature's type parameters into scope for annotations in the body. `#: <T> fn(fn: fn() -> T) -> T | NULL` over a body with `#: T | NULL` above `result <- tryCatch(fn(), error = function(e) NULL)` gives `` I do not know the type `T`. ``
-- **No record width subtyping.** An injected fake with extra fields is refused, so a dependency cannot be typed as "any record with at least `tick`". `#: @alias Ticker {list{tick: fn() -> NULL}}` and a call `run(list(tick = function() NULL, finished = TRUE))` give `` this list has a field `finished`, which is not expected here ``.
-- **A mismatch message leaks an uninstantiated type variable.** Against a field typed `fn([len]: double) -> Any`, `list(tick = function() invisible())` gives `` expected `fn([len]: double) -> Any` for field `tick`, found `fn() -> T` ``; the found type should not print the bare `T` of `invisible`'s signature.
-- **Recursive aliases are refused**, so chaining methods (lgr setters, `progress` `tick()`) return `Any`. `#: @alias Logger {list{set_threshold: fn(level: character) -> Logger}}` gives `` Type alias `Logger` expands in a cycle. ``, filed under `type-mismatch` and underlining the whole function that uses it. Allow recursive record aliases, or a `Self` type for R6-style records.
-- **No typed mutable environment.** A counter in `new.env()` cannot declare its fields: `calls <- new.env(); calls$count <- 0L; calls$count <- calls$count + 1L` reports `Unknown` on each `calls$count` read.
-- **S4 slots and generics are untyped.** A slot read is `Unknown` even on `Any` (`out <- b@v` with `b: Any` gives `` could not determine the type of `out` ``), slots of a class with a `representation` are not typed, and a generic made by `setGeneric("scale_by", ...)` is silently `Any` at its call sites (`out <- scale_by(q, 2)` returned as `double` checks clean).
-- **R6 method bodies are unchecked.** In `R6::R6Class("Counter", public = list(add = function(k) { self$n <- self$n + k; private$check(); invisible(self) }))` the untyped `k`, `self` and `private` produce no strict report: `1 file checked, no problems`.
-- **The summary counts checked files, not files with problems.** A project with one finding in `R/a.R` and two clean files prints `1 problem in 3 files`.
-- **Vectorised math types are wrong.** `exp`, `sqrt` and `nchar` return a scalar for any input, and there is no `array` type (an `array` annotation suggests `Array`, ry's own type). `#: fn(x: double[]) -> double` over `exp(x)` or `sqrt(x)` checks clean, as does `#: fn(x: character[]) -> integer` over `nchar(x)`; `#: fn(rates: matrix) -> matrix` over `exp(-rates)` gives `` expected `matrix`, found `double` ``.
+- **Vectorised math types are wrong.** `exp`, `sqrt` and `nchar` return a scalar for any input, and there is no `array` type (an `array` annotation suggests `Array`, ry's own type). `#: fn(x: double[]) -> double` over `exp(x)` or `sqrt(x)` checks clean, as does `#: fn(x: character[]) -> integer` over `nchar(x)`; `#: fn(rates: matrix) -> matrix` over `exp(-rates)` gives `` expected `matrix`, found `double` ``. Overloads that keep the input's shape (`fn(x: double) -> double`, `fn(x: double[]) -> double[]`, `fn(x: Any) -> Any`) were tried and dropped: an unannotated wrapper such as `function(x) sqrt(x)` then matches several candidates that disagree, so the overload-set rules give it `Unknown` or a `numeric` bound, and inference regresses across the typing fixtures. The fix needs one shape-generic signature (a result with the shape of `x` and element type `double`) rather than an overload set.
 
 
 ## Open: the JIT
 
 `crates/jit` compiles hot bodies and loops (`decisions/jit-ssa.md`, "The JIT tier"). In priority order:
 
-- **Tried and dropped: wider direct calls and pure inlined internals.** Accepting more argument
-  shapes in tier 1's direct calls (constants, pass-through variables, `list(...)` arguments) and
-  letting pure `.Internal`s such as `paste0` and `match` keep the frame's variables moved no
-  workload by 3% Ir: report +1.08%, functional -0.38%, testthat +0.11%. The native-share census
-  says why: package time sits in bodies that run too rarely to repay compiling, not in refused
-  direct calls. Raising native share there means compiling more bodies cheaply, not widening plans.
+- **Hot-loop compiles of a body with a loop target cost twice as much.** A `HotLoop { target }` compile of the same body takes about twice the codegen time and emits more code than the plain `HotLoop` compile before it. Fannkuch-redux, scalar swaps (1618 words): codegen 43 to 84 ms, code 109 to 157 KB, `jit::compile` 386M to 840M instructions (callgrind), which makes the whole program 0.81x of ry 0.5.0. The AWFY mandelbrot loop: 11 to 21 ms. Find what the loop-target entry duplicates and cut it back. Measure with `RY_JIT_LOG=1` on both programs.
+
+- **Tried and dropped: pure inlined internals.** Letting pure `.Internal`s such as `paste0` and
+  `match` keep the frame's variables moved no workload by 3% Ir. The native-share census says
+  why: package time sits in bodies that run too rarely to repay compiling. Raising native share
+  there means compiling more bodies cheaply (`development/design/generic-tier.md`).
 
 - **An optimizing layer for LuaJIT-class loops (not queued; starts only on the orchestrator's go,
   after the call-setup enter/leave contract lands).** The current tracks (call setup, tier-0 lexical
@@ -1267,13 +994,13 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
 - **Compiled-to-compiled calls of general functions.** A closure whose body is scalar arithmetic,
   comparisons, `if` and calls to other such closures compiles to a frameless native function
   (`decisions/jit-ssa.md`, "Native scalar functions: frameless calls with checks proven at compile time"), so `fib(30)` runs in 0.007 s against 1.12 s on GNU R.
-  Every other call from compiled code still goes through `jit_call`: an environment, a binding cell
+  Every other call from compiled code, apart from an inlined frame, is tier 0's own call
+  instruction: an environment, a binding cell
   per formal and the boxed arguments, and about 440 instructions per formal read (`jit_load`).
   Natives now loop, read plain vectors and inline small native callees (`decisions/jit-ssa.md`, "Native
   functions loop, read vectors, and inline small callees"). Next: local closures (`Ty::Closure` is
   only inlined today), vector results and `Array<T>` arguments (`annotations::plain_admits` rejects
-  an Array mask), then a direct entry with no environment for non-native compiled callees whose
-  frame cannot escape.
+  an Array mask), then inlined frames for the callees `development/design/generic-tier.md` lists under stage 4.
 - **Native function cache lifetime** (`crates/jit/src/native.rs`, `native_for`). A native roots
   its closure for the session, so a helper defined inside a function keeps that function's frame
   (and every large local in it) alive. A recompile after `still_resolves` fails leaks the old
@@ -1312,10 +1039,7 @@ Porting the synthetic finance benchmark to fully typed strict code hit these. Ea
   two-expectation `test_that` block about 60 ms against 28. The likely wins, in order: no binding
   cell or promise per argument for a closure whose frame cannot escape, a cached global function
   lookup, and less `Heap::root` and handle traffic per call.
-- **Static types as early profiles** (`r-runtime.md`, "How the static types feed the JIT"). A
-  direct call's result type comes from the callee's declared return type when the call site has no
-  feedback yet (`call_result_at` in `crates/jit/src/analysis.rs`), so typed `fib` compiles on its
-  first try, and typed Arrays compile to direct item loads and stores (`decisions/jit-ssa.md`, "The JIT tier", item "Arrays are their own JIT types"). A native call skips the argument and return checks because its
+- **Static types as early profiles** (`r-runtime.md`, "How the static types feed the JIT"). Typed Arrays compile to direct item loads and stores (`decisions/jit-ssa.md`, "The JIT tier", item "Arrays are their own JIT types"). A native call skips the argument and return checks because its
   parameter types satisfy the callee's masks at compile time (`annotations::return_admits`); other
   compiled calls still run `annotations::enter` and `check_return`. Typed and untyped code run
   equally fast: the profile proves the same facts the annotations do.
@@ -1610,9 +1334,8 @@ overhead, not allocation.
   note = "hi"))` is 3 on GNU R and -3 on ry, because ry's `attributes<-` keeps row names compact;
   `.Call("crc64", "x", PACKAGE = "utils")` errors on GNU R (utils registers its routines with
   symbol lookup off) but runs on ry.
-- Bench environment: a multi-package `install.packages()` call under ry installs nothing without
-  an error, `ry R CMD INSTALL` fails with "cannot read CMD", and the testthat workload fails on
-  both engines with testthat 3.3.2 ("attempt to use zero-length variable name").
+- Bench environment: the testthat workload fails on both engines with testthat 3.3.2 ("attempt
+  to use zero-length variable name").
 - Uncompiled calls of `vector("nope", 1L)` and `choose("a", 1)` report their error against the
   internal's call (`vector(mode, length)`, `choose(n, k)`), where GNU R names the closure's call,
   because those internals use `call.error` and GNU R's use `error()`. Compiled sites inline the
@@ -1691,7 +1414,7 @@ calls, `lookup_function` 4.4k, `alloc_vector` 4.8k, 117 function guards.
 
 ### Argument lists collected into `eval::Args`
 
-- Collecting into the `SmallVec<[Arg; 10]>` costs about sixty instructions a call in capacity checks, before any work. `eval::with_positional_args` writes up to eight untagged arguments into a stack array instead; the positional builtin handler and `jit::runtime::jit_call` use it (`decisions/builtins.md`, "Positional builtin calls read their arguments from the registers").
+- Collecting into the `SmallVec<[Arg; 10]>` costs about sixty instructions a call in capacity checks, before any work. `eval::with_positional_args` writes up to eight untagged arguments into a stack array instead; the positional builtin handler uses it (`decisions/builtins.md`, "Positional builtin calls read their arguments from the registers").
 - `bytecode::slot_subject_call` still collects into `eval::Args` (0.42% of bond_book_full in SmallVec code). It needs a different shape: its arguments carry tags, their count is known only after walking the call, and it stops early and drops the refcounts it took. Owned by the call path.
 
 ### Small-vector base builtins (open, tier 0)
@@ -1902,6 +1625,9 @@ coverage is unmeasured: the figures on record (`parser.rs` 87%, 60 diagnostic sh
 
 ### Smaller items, each with its measurement
 
+- **The differential generator writes every string as a literal** (`crates/oracle/src/fuzz.rs`).
+  Build equal names by coercion, `paste0`, `sprintf` and `deparse`, and read them by name:
+  deferred strings are ALTREP, and lookups have missed them.
 - **Coverage-guided fuzzing covers 15 of 17 targets, shallowly on the slow ones.**
   `just fuzz-all 60 runtime` runs them, locally or in the staged `test.yml` once it is accepted and
   someone starts it or tags a release. What it leaves open:
@@ -2430,7 +2156,7 @@ The message says to add a type annotation, and no annotation form silences it. `
   annotations with a blank line" when there is only one annotation.**
 - **The unknown-type and duplicate-definition messages name only `@type` or `@alias`**, although a
   definition may also be written inline as `type` or `alias`.
-- **A bodyless opaque type (`@type Dict<K, V>`) is a stub-format form only.** If project files ever
+- **A bodyless abstract type (`@type Dict<K, V>`) is a stub-format form only.** If project files ever
   accept it, the inline `type Name<K, V>` must accept a missing `= TYPE` in the same change, so the
   two spellings stay one grammar.
 - **"Add inferred type annotation" is offered on `x <- @UserId(1L)`**, where the constructor already
@@ -2839,53 +2565,6 @@ self-consistency checks.
 They remain content-blind in the sense the three injected bugs demonstrate. A uniformly wrong answer
 is deterministic, incremental and in-bounds.
 
-## Open: a package's own `pkg::name` reads are not validated
-
-The project's own package, taken from `DESCRIPTION`'s `Package` field, is a known namespace whatever
-the stubs say. `withr::defer()` inside `withr` therefore reads the project's own definition and has
-its type instead of `Unknown`. The own package also wins over a stub namespace of the same name,
-matching the rule that a package binding shadows a stub name.
-
-The name itself is still not checked, so `withr::typoed_name()` reports nothing. Validating it
-against the project's definitions was implemented, measured and removed, because across the CRAN
-corpus every candidate report was a false positive. A package's export set is not the set of names
-its sources bind. Five shapes showed up.
-
-- A re-export. `shiny` has `importFrom(htmltools, validateCssUnit)` beside
-  `export(validateCssUnit)`, so the name is exported with no definition in the package.
-- An S4 generic from `setGeneric("raster", ...)`, which S4 opacity already covers.
-- A lazy-loaded dataset under `data/`. `survival::survexp.us` lives in `data/survexp.rda`.
-- A binding installed by `.onLoad`, such as `cli`'s `symbol`.
-- An S3 generic re-exported from another package, such as `broom`'s `glance`, from `generics`.
-
-Closing this needs the package's real export set, which means reading `NAMESPACE` `export()` and
-resolving re-exports, plus a decision about `exportPattern`. That last one is a regex over names, so
-it makes the set unknowable and must fall back to silence. It is worth doing, because a typo in a
-self-qualified call is otherwise invisible, but it is a namespace-model slice rather than a one-line
-check.
-
-## Open: a stdlib wrapper loses all type information
-
-`function(x) abs(x)` infers `fn(x: T) -> Any`, and the same holds for `sum`, `cumsum` and every
-other overload set. Wrapping a standard-library numeric function in one of your own throws the types
-away. `sum` no longer has an `Any` fallback (it rejects strings), so a `sum` wrapper gives `Unknown`
-rather than `Any`.
-
-The cause is the fact-beats-guess rule. The `Any` fallback fits while binding nothing, so it beats
-every candidate that would narrow `x`.
-
-The rule is right in general and the fallback is load-bearing. A nominal with an `Arith.` or `+.`
-method satisfies the numeric constraint, so forcing `x` numeric would reject a user's S3 class that
-legitimately defines `abs.myclass`. Any fix has to keep that working, which is why this is a design
-slice rather than a tweak. The candidate shape is that if every non-fallback candidate imposes the
-same constraint, imposing it is a fact rather than a guess. That needs a decision record and
-adversarial review before it is written.
-
-One thing is worth knowing before that slice starts. The escape hatch it depends on is only now
-actually general, because `declares_arithmetic` used to consult the stub library alone while
-operator dispatch resolves a method through the global scope. Any measurement of how often
-constraining `x` would reject real code, taken before that was fixed, overstates the cost.
-
 ## Open: an ignored config key is a warning, and a warning can be missed
 
 A key written at the top level that belongs under a table now names the table, saying that it is
@@ -3049,34 +2728,6 @@ Three things are left for the user, because an agent should not decide them.
   does not redirect an identifier, so publishing under it creates a new listing and starts installs
   and ratings from zero. Revert that one field if keeping the listing matters more.
 - **Registering `ry-lang` on crates.io, and `ry-lang.org`.**
-
-## Open: a size bound on a constructed type, and a decision on recursion widening
-
-`TYPE_SIZE_CEILING` caps a type at the point it is recorded, which stops the pathology. The general
-question is still open: nothing caps how large one constructed type may get in the first place.
-
-Widening past a bound to `Unknown` is the sound-by-refusal move the loop join already makes for a
-variable whose type keeps growing structurally. The alternative is folding to a recursive nominal.
-Choosing between them is a semantics design decision rather than an optimization, so it wants a
-decision record.
-
-Computing the size cheaply needs care. The graph is small while the tree is enormous, so a
-distinct-node count will not see the problem and a naive tree count is itself exponential. It wants
-a memoized size where the size of a node is one plus the sum of its children's sizes, which is
-linear in the graph and yields the true tree magnitude. `types::type_size` already has that shape.
-
-## Open: a cross-file cycle panics salsa's backdate check
-
-`fuzz_multi_file` (`crates/semantics/tests/test_fuzz.rs`) panics in salsa's
-`backdate.rs` ("returned the same value, but the previous execution changed at R2 and the new
-execution changed at R1") for `global_scheme`. Minimal repro, with salsa 0.28.0 and 0.28.5 alike:
-file one is `g <- rev(g)` then `f <- g$x`, file two is `g <- g + 1L`; empty file two, render both,
-restore it, render again. `sort`, `List.reverse` and `as.Array` in place of `rev` panic too,
-`unlist` and `as.vector` do not. Every execution of the scheme is `Unknown`, so the result is
-deterministic: the panic comes from deep verification re-executing a cycle head
-(`maybe_changed_after_cold`) outside its fixpoint, where it reads only backdated cycle members.
-The Array fuzz templates reached it first; it predates Arrays. Fix the cycle shape (or report it to
-salsa with this repro), then pin the repro in `test_incremental.rs`.
 
 ## Open: neither cycle fix has end-to-end coverage
 
@@ -3425,8 +3076,6 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
   GNU R passes 79 and ry passes 78 of them once QuickJSR's library is reinstalled with the ry under
   test (below); sandwich is the one real failure. Of GNU R's failures there: units, sf, terra and ggplot2's `coord_sf` tests need system libraries
   (udunits, GDAL) the container lacks, and parallelly and future.apply fail on both.
-  - Run the suites with `LC_ALL=C.UTF-8`, as the oracle does: in the C locale, desc reports
-    "Duplicate DESCRIPTION fields" on ry, a false failure.
   - QuickJSR fails only when ry prints its notice about packages installed by another ry build on
     a subprocess's stderr, which the test compares. Reinstall the library with the ry under test.
   - sandwich, `vcovPL.R` (runs since plm loads): collapse reaches into GNU R's object layout
@@ -3500,8 +3149,9 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 - **Approximate matching has two engines.** POSIX patterns with TRE bounds such as `{+}` run on
   `ApproximateRegex` (`decisions/builtins.md`, "TRE approximate regular expressions"), but `agrep`,
   `agrepl` and `adist` still use the older edit-cost NFA in `crates/interp/src/approximate.rs`.
-  Move them onto `ApproximateRegex`, which already has TRE's cost model. `aregexec` is not
-  implemented at all ("there is no .Internal function 'aregexec'").
+  Move them onto `ApproximateRegex`, which already has TRE's cost model (`aregexec` runs on it).
+  Ties between equally costly paths follow the POSIX subexpression rule over the capture slots
+  rather than TRE's tag order.
 - **`strptime` drops a leap second.** `strptime("2020-01-01 10:59:60.5", "%Y-%m-%d %H:%M:%OS")`
   gives 11:00:00.5 where GNU R keeps `sec = 60.5`, because the parsed time is stored as epoch
   seconds before the `POSIXlt` fields are built.
@@ -3615,27 +3265,22 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
 table; `tools/bench/tooling/lsp_latency.py` drives `ry server` over stdio. Release build, 4-core container,
 typing on:
 
-| code base | cold check | peak RSS | findings | body edit first / settled | signature edit first / settled |
-|---|---:|---:|---|---:|---:|
-| finance | 1.36-1.6 s | 406 MiB | 1005 `unused` (genuine), 848 `object-system` | 1 / 44 ms | 2 / 39 ms |
-| data science | 1.5-1.65 s | 400 MiB | 2337 `object-system` | 2 / 41 ms | 2 / 39 ms |
-| biostatistics | 1.4-1.7 s | 403 MiB | 784 `object-system` | 1 / 41 ms | 1 / 40 ms |
+| code base | cold check | CPU | peak RSS | findings | body edit first / settled | signature edit first / settled |
+|---|---:|---:|---:|---|---:|---:|
+| finance | 0.84-0.94 s | 3.0-3.3 s | 240 MiB | none | 2 / 3 ms | 2 / 3 ms |
+| data science | 0.74-0.80 s | 2.7-3.0 s | 233 MiB | none | 2 / 3 ms | 1 / 2 ms |
+| biostatistics | 0.72-0.79 s | 2.6-2.9 s | 231 MiB | none | 1 / 2 ms | 1 / 2 ms |
 
-The `object-system` warnings are the intended lint on the generated R6 and S4 classes. The cold check is CPU-bound (about 4.2-5 s of CPU on four cores, about 3 times its wall time). The latest profile of the finance bench (1.4 s, 4.6-4.8 s of CPU): item checking is about a third of samples, parse about 12%, the interface reads about 8% (most of it frame lookups and top-level names), naming about 8%, and no function above about 4% exclusive. The syntax and check passes keep all four cores busy; about 0.1 s between the syntax pass and naming runs at half the cores. The struct-of-arrays HIR lowered from the green tree (`decisions/syntax-semantics.md`, "HIR as struct-of-arrays, lowered from the green tree") measured, in interleaved runs against the list-owning HIR, 7 to 12% less CPU, 6 to 10% less wall time and 23 to 35 MiB less peak RSS on all three code bases, with identical findings; the edit latencies did not move. Keeping literal text in a per-module buffer instead of interning it took off about another 0.1 s and 0.2 s of CPU; against a main build in the same interleaved runs the median cold check went from 1.74-1.86 s to 1.58-1.60 s, 5.3-5.7 s to 4.8-4.9 s of CPU, and 425-440 MiB to 399-403 MiB. After it, `item_hir` is about 9% of samples and parse about 12%, and parse is now the largest cost of the syntax pass. The machine was busier for these numbers than for the older rows below: in the same interleaved runs the build before hash-consed types measured 1.75-1.9 s, 5.1-5.6 s of CPU and 439-450 MiB. The profile is flat: item checking is about 35% of samples, then HIR lowering (13%), parse (11%), naming (8%), the syntax lints and the annotation queries, and the hash-consing table itself is about 3% exclusive. The syntax pass ran in batches with eviction between them and kept about 78% of the cores busy; it is now one parallel loop like the naming and check passes. Levers left toward 1 s: a cheaper parse (done since: the flat preorder tree replaced rowan, see "Check cache follow-ups"), re-interning names the HIR already holds as `Symbol` (naming's `mint_binding` and `GlobalEnv::scheme` take `&str` and intern again, about 2%), the `GlobalEnv::scheme` and `layers` lookups (about 11% inclusive), and the syntax pass's idle cores. Hashing `Symbol` by its index (ordering stays by spelling, so sorted output is unchanged) and the compact HIR (name sites in one side array, `NonZeroU32` ids, a 16-byte expression kind and an 8-byte argument; `decisions/syntax-semantics.md`, "HIR as struct-of-arrays, lowered from the green tree") together measured, in interleaved runs against a main build that already kept trees resident, medians of 1.52-1.58 s against 1.61-1.66 s, 5.0-5.3 s against 5.5 s of CPU, and 533-538 MiB against 563-568 MiB, with identical findings. After them the heap peak on finance is 490 MiB under the system allocator: resident green trees 127 MiB, HIR kinds 30 MiB and ranges 15 MiB, the `item_check` memos about 50 MiB, closed top-level schemes 21 MiB (2.3 million allocations, `check.rs` where `top_level_bindings` is built), and the expression-type tables 15 MiB. Tried without gain: a per-check cache of common scalar types, mimalloc's purge and huge-page options. A thread-local front cache for the type table measured no wall-time gain alone, but sampling showed the shard mutexes contended, so it is kept (`decisions/syntax-semantics.md`, "Every host keeps every tree"). Before the green-walk fusion, immortal interning, frame-binder query, one-batch passes and input durability, main measured 2.3-2.5 s, 6.4-7.0 s of CPU and 510-517 MiB on the same machine. Before tree
-eviction, compact names and durability the same machine measured 3.4, 3.6, 2.8 s, about 790 MiB, and
-47 to 63 ms settled; before the cold-path work, 6.1, 6.7, 6.2 s, about 1 GiB, and 95 to 120 ms.
+The cold check is CPU-bound, at about 3.5 times its wall time on four cores. Its profile and the levers left are under "Check cache follow-ups".
 
 Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. Remaining debt:
-- Peak RSS of `ry check` is 417-419 MiB on the benchmark code bases (`decisions/syntax-semantics.md`, "`ry check`
-  releases its trees once, and memoized records are compact"). The largest heap holders left are
-  HIR kinds (30 MB) and ranges (15 MB), salsa's dependency edges (about 30 MB), the naming and
-  check memos, the source texts (20 MB) and mimalloc's overhead over glibc (about 45 MiB). A
-  typed, strict finance bench peaks at about 712 MiB, because strict origins are recorded there;
-  that table is the next memory target for strict projects.
+- A typed, strict finance bench peaks far above the untyped one (about 712 MiB when last
+  measured), because strict origins are recorded there; that table is the next memory target for
+  strict projects.
 - The server keeps every tree. Bounding its tree memory would need eviction without salsa's
   per-read bookkeeping.
 - The cold check's remaining waits are salsa claims on project-wide queries
-  (`duplicate_binding_map`, `project_arithmetic_classes`, `project_type_definitions`) computed by
+  (`definition_layer`, `project_arithmetic_classes`, `project_type_definitions`) computed by
   one thread while the others need them; deriving them before the diagnostics pass, or as
   per-file folds, would let the pass run without them.
 - Interning names as `Symbol` added about 7 ms to the settled re-check (not isolated: `Symbol`
@@ -3747,78 +3392,55 @@ Before the fixes the same code bases reported 3514, 2421 and 1185 false errors. 
     are where they help.
   - Document highlight already exists.
 
-## Open: editor latency at 300,000 lines
-
-Measure with `python3 tools/bench/tooling/lsp_latency.py --ry target/release/ry --root .bench/finbench
---quiet 2` against the LSP, and with `ry debug analysis-stats` in process (its "editor requests"
-table). Generate the code bases with `tools/bench/tooling/generate.py --lines 300000`. A `--quiet` under
-about 2 s lets the first edit overlap the startup cold check and reports a false one-second spike.
-- Keystroke to settled diagnostics on finbench (4 cores, 40 runs) meets the targets (median at most
-  30 ms, 95th percentile at most 100 ms): a body edit settles at a 4 ms median and 6 ms p95, a
-  signature edit at 4 ms and 5 ms. The slow spots left are the first open below and a cold hover
-  (342 ms max, the first hover after startup).
-- A new top-level name still re-runs `package_definition_index` (one pass over every file's definitions), the `package_name` projections the edited file reads, and `project_typo_suggestion` for each unresolved name a re-checked file has (a scan of every project name of a similar length). About 4 to 6 ms on dsbench in `examples/keystroke_probe.rs`. Chunked per-file-group indexes would make the fold proportional to one chunk.
-- A file opened at startup settles 170 to 240 ms after the open on the three benchmarks (4 cores; `decisions/syntax-semantics.md`, "A file's check names only what its interface reaches"). What is left is parsing every package file in the warm-up (`warm_project_folds`) and the file's own check, about 0.25 s on one thread after parsing (`crates/ry/examples/cold_open_probe.rs` breaks it down per query). Earlier samples of the old naming warm-up showed about a fifth of helper time spinning on salsa 0.28's per-ingredient claim mutex (`SyncTable::syncs`) and another fifth in mimalloc's page slow path; re-sample the new warm-up before acting on that.
-
 ## Open: false errors on real CRAN code
 
-`ry check R` on 25 packages from the benchmark dependency set (purrr, rlang, cli, httr2, zoo, xts, lubridate and others; sources fetched from CRAN, each with `[check] typing = true`) went from 669 errors to 175 after the call-checking, name-resolution and inference fixes (`decisions/syntax-semantics.md`). What remains, by message shape:
-- 38 "expected X, found Y" and 17 "expected a numeric value": mostly `T | NULL` results of functions that really can return NULL, vector `if` conditions, and parameters pinned by an unconditional write before a test (xts `Ops.xts.R:52`).
-- 26 "exported but this package defines no such top-level object": dynamic exports (cli `pb_*` through `makeActiveBinding`, rlang `ffi_` natives, lgr's `lgr`).
-- 20 "this call leaves out": formals the body does force on some path, worth a second look per site.
-- 17 "not a function": parameters named like a function and called (`log`, `serialize`, `format`, `lag`) where the parameter's own type is open.
-- 15 "expected a list": `$` on a value that is definitely NULL, and R6's metaprogrammed `generator_funs`.
-- 12 "expected a comparable value": `while (n && out)` pins a counter to logical now that comparisons no longer imply numeric (rlang `stack.R:99`).
-- 5 matrix indexing, a documented limitation.
+`ry check R` with `[check] typing = true` on the 25 benchmark-dependency packages reports 6 errors,
+all true bugs in the packages: DBI's `coerce(sqlvar, from, to)` leaves out the forced `to`
+(`R/data.R`, 5 sites) and httr's `revoke_oauth2.0` call leaves out `credentials`. Over 201
+packages (those plus their dependency closure and a statistics sample) there are 31, and every one
+read so far is a true bug (kernlab calls `ramloss` after `ramloss <- 0`, renv reads
+`diagnostics$suggestion`, gmp tests `if (log)`, and so on). Not yet read:
+- mclust `mclustda.R:719`: `classification = cl` (a factor) against `W | NULL` of
+  `mclust1Dplot`; `graphics.R` alone accepts it, so another file constrains `W`.
+- mgcv `bam.r:2623` (2), `efam.r:1475` and `gamlss.r:1193`: a local value unioned with a
+  same-named package function (`double[] | fn(...)`), and `integer | T` at a scalar numeric use.
+- A read inside `on.exit()` counts where `on.exit()` is registered, not where the exit action runs,
+  so `on.exit(run()); x <- 1` with `run <- function() x` reports "leaves out `x`" though the write
+  comes first at run time. Direct reads inside `on.exit()` behave the same.
 
 ## Check cache follow-ups
 
 - A partial `ry check` still parses every file (about 0.3 s of its 0.45 s on 4 cores), because
   `package_definitions` and the other project-wide folds read every file's item tree. Persisting
   each file's share of those folds next to its findings would remove that floor.
-- A cold check of the finance bench is about 1.48 s median on 4 cores (4.8 s of CPU, 431 MiB peak
-  RSS), so the 1 s target still needs about a third less CPU work. Under callgrind it is 22.0 G
-  instructions, after the one-shot check path, shared small green nodes, unaligned mimalloc entry
-  points and green walks in the annotation and lint passes (`decisions/syntax-semantics.md`, "One-shot checks record
-  coarse dependencies"). (The red nodes these figures counted are gone with rowan; see the flat-tree
-  item below.) What is left is flat: item checking about 7.7 G
-  inclusive, parse about 3.1 G (lexing 0.7 G, about 105 instructions per token in the tree builder
-  and 300 per node), naming 1.9 G, interface edges and reads about 3 G, the syntax lints 1.7 G, and
-  mimalloc about 1.5 G over 19 M allocations. A real third needs fewer allocations in the checker
-  (`map_child_types`, `resolve_rec`, the `Ty` maps' rehashing) and a cheaper parse, not one cut.
-- The checker's working maps now live in a pooled bump arena and its names are interned
-  (`decisions/syntax-semantics.md`, "The item check's working maps live in a pooled bump arena"), which took the
-  finance bench from 19.78 M to 15.82 M mimalloc calls and 23.59 G to 22.68 G instructions,
-  with wall time unchanged within noise (median about 1.34 s). The
-  1 s target still needs about 35% less CPU, and no single function is above about 1.2% of
-  self cost. What is left is structural:
-  - Done: rowan is replaced by ry's own flat preorder tree with windowed item trees, one-shot name
-    lookups read the project maps once per query, unlisted frame binders are built once per item,
-    and overload probes reject by call shape before instantiating (`decisions/syntax-semantics.md`, "The syntax
-    tree is ry's own flat preorder arena" and "Overload probes reject by call shape first"). The
-    finance bench is now 22.5 G instructions and 11.1 M `mi_malloc` calls under whole-process
-    callgrind (from 23.6 G and 19.8 M), wall median 1.11-1.15 s against 1.35-1.45 s for the previous
-    build in interleaved runs, 3.6-3.7 s of CPU and 371 MiB, with byte-identical findings. About 10% of wall time remains to the 1 s target.
-  - Done: a cold check holds one parse tree per worker, skips the per-item syntax memos and the
-    editor-only check facts, and purges freed memory after 10 ms (`decisions/syntax-semantics.md`, "A cold check
-    holds one parse tree per worker"). Peak RSS is 298-306 MiB on the three benches, under the
-    300 MiB target, but with only 1-3 MiB of margin on finance and data science; wall time is
-    1.1-1.3 s on a noisy 4-core machine, and instructions moved only 23.4 G to 23.0 G.
-  - salsa's per-query edge bookkeeping that remains is per item, behind the firewalls
-    `test_incremental.rs` pins. Every host runs the same queries (`decisions/syntax-semantics.md`, "Decision
-    record: every host resolves names through one path, and trees live in the host's store"), so
-    a cut here is a cut for the server too. Salsa edges are about 29 MiB of the heap peak, 8 MiB
-    of it `item_check`.
-  - Done: kind-column scans, phase overlap, one-allocation HIR, memchr lexing and a one-pass tree
-    finish took finance to 17.6 G instructions and 222-228 MiB in release (`decisions/syntax-semantics.md`, "The
-    one-shot check scans kind columns and overlaps its serial phases"). Left: the parser and
-    `TreeBuilder` self cost (about 1.4 G), the lexer's ident scans and per-token work (about
-    0.65 G), and salsa fetch overhead spread across queries.
-  - checker work itself: `infer_ordinary_call` is still the largest inclusive cost; `match_arguments`
-    and type instantiation dominate it.
-  - small `Vec` growth spread across many sites (`map_child_types` alone reserves about 88k
-    times on the slice), which a small-buffer type would absorb.
+- A cold check meets the 1 s target on 4 cores, with little margin on finance. Measured with
+  `tools/bench/tooling/check.py` on freshly generated code bases (500 files, about 305,000 lines,
+  release build): finance 0.84-0.94 s wall, 3.0-3.3 s of CPU, 240 MiB peak; data science
+  0.74-0.80 s; biostatistics 0.72-0.79 s. Under whole-process callgrind finance is 18.8 G
+  instructions (17.6 G before the checker grew the rules for real CRAN code). The profile is flat,
+  and no function is above 2.2% of self cost: item checking about 45% inclusive
+  (`infer_ordinary_call` 25%, `match_arguments` 11%, `InferenceTable::resolve` 9%), parse about
+  16% (lexing 4%), naming about 8%, HIR lowering about 6%. More headroom needs fewer allocations
+  in the checker (`map_child_types`, `resolve_rec`, the `Ty` maps' rehashing, small `Vec` growth
+  that a small-buffer type would absorb), the parser's and `TreeBuilder`'s self cost, and salsa
+  fetch overhead spread across queries. The settled history of this work is in
+  `decisions/analysis-core.md` ("The one-shot check scans kind columns and overlaps its serial
+  phases" and the entries it names).
+- salsa's per-query edge bookkeeping that remains is per item, behind the firewalls
+  `test_incremental.rs` pins. Every host runs the same queries, so a cut here is a cut for the
+  server too. Salsa edges are about 29 MiB of the heap peak, 8 MiB of it `item_check`.
 
 ## Open: the VS Code extension has no eslint configuration
 
 `bun run lint` in `editors/code` fails because there is no `eslint.config.js` (eslint 9 needs one); no config has ever been committed. Add one before relying on the lint script.
+
+## Open: oracle cases near the collection-stress limit
+
+`just gc-torture` kills a case after 1800 s, and the CI runner's speed varies by about 2x, so a case whose worst time is past half the limit fails a stress seed sooner or later. Trim these together, keeping each one's coverage (a smaller loop or shape, not fewer constructs), instead of one per failed run. Worst and typical times over the last eight CI runs:
+
+| Case | Worst | Typical |
+| --- | --- | --- |
+| `base__for_over_compact_sequences` (top-level `for` over `1:3000000`) | 1217 s | 690 s |
+| `jit__inlined_closures_over_running_frames` | 604 s | 310 s |
+
+`matrices__permute_and_scalar_index` (1800 s, then about 260 s) and `conditions__rlang_trace_back_generated` (1800 s, now 50 stacks) were trimmed after they hit the limit. Every case slower than 60 s is printed in the stress job's log.

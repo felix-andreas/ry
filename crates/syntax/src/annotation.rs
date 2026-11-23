@@ -421,6 +421,14 @@ pub fn annotation_target(annotation: &SyntaxNode) -> AnnotationTarget {
                     {
                         AnnotationTarget::Attached(node)
                     }
+                    // In an argument list a block types the argument's value, which is how a
+                    // lambda passed to `apply` gets a signature.
+                    NodeOrToken::Node(node) if kind == SyntaxKind::ARGUMENT => {
+                        match argument_value(&node) {
+                            Some(value) => AnnotationTarget::Attached(value),
+                            None => AnnotationTarget::Dangling,
+                        }
+                    }
                     _ => AnnotationTarget::Dangling,
                 };
             }
@@ -445,7 +453,12 @@ pub fn statement_annotations(parent: &SyntaxNode) -> Vec<(SyntaxNode, Annotation
 /// The `#:` block attached to `statement`, found by walking back from it, so that a lowering
 /// which meets one statement at a time does not rescan the statement's whole sequence.
 pub fn attached_annotation(statement: &SyntaxNode) -> Option<SyntaxNode> {
-    let mut previous = statement.prev_sibling_or_token();
+    // An argument's block sits before the whole argument, name and all.
+    let anchor = statement
+        .parent()
+        .filter(|parent| argument_value(parent).as_ref() == Some(statement))
+        .unwrap_or_else(|| statement.clone());
+    let mut previous = anchor.prev_sibling_or_token();
     while let Some(element) = previous {
         match element.kind() {
             SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE => {
@@ -462,6 +475,25 @@ pub fn attached_annotation(statement: &SyntaxNode) -> Option<SyntaxNode> {
         }
     }
     None
+}
+
+/// The value of the `ARGUMENT` node `argument`: what follows `=` in `name = value`, or the whole
+/// argument. `None` for a node of another kind and for an argument with a name and no value.
+pub fn argument_value(argument: &SyntaxNode) -> Option<SyntaxNode> {
+    if argument.kind() != SyntaxKind::ARGUMENT {
+        return None;
+    }
+    let tagged = argument
+        .children_with_tokens()
+        .any(|element| element.kind() == SyntaxKind::EQ);
+    let mut expressions = argument
+        .children()
+        .filter(|child| is_expression_kind(child.kind()));
+    if tagged {
+        expressions.nth(1)
+    } else {
+        expressions.next()
+    }
 }
 
 pub enum BlockRefusal {
@@ -520,7 +552,7 @@ pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
             SyntaxKind::ANNOTATION_DIRECTIVE => match directive_name(&child).as_str() {
                 // A flag on the function, not a type, so it fits beside any form.
                 "pure" => continue,
-                "type" | "alias" => BlockForm::Definition,
+                name if is_definition_keyword(name) => BlockForm::Definition,
                 "param" | "return" | "returns" | "forall" => BlockForm::Expanded,
                 _ => BlockForm::Compact,
             },
@@ -574,6 +606,12 @@ pub fn is_type_kind(kind: SyntaxKind) -> bool {
             | SyntaxKind::TYPE_TAG
             | SyntaxKind::TYPE_OTHER_TAGS
     )
+}
+
+/// The words that open a named type definition, as a `#:` directive (`@opaque`) or inline
+/// (`opaque Name = TYPE`).
+pub fn is_definition_keyword(word: &str) -> bool {
+    matches!(word, "type" | "alias" | "opaque")
 }
 
 /// The word after a directive's `@`. Adjacent tokens join, because `@if-unknown` lexes as `if`

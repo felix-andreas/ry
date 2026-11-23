@@ -36,7 +36,7 @@ use {
 pub struct Speculation {
     pub symbol: Sexp,
     /// The environment the lookup starts from, which differs from the compiled body's enclosure
-    /// for a function an inlined or directly called closure looks up from its own environment.
+    /// for a function an inlined closure looks up from its own environment.
     pub env: Sexp,
     /// The binding cell the lookup found.
     pub cell: Sexp,
@@ -251,19 +251,6 @@ pub unsafe fn effect_free_for_epoch(function: Sexp) -> R<(bool, bool)> {
 
 /// The function lookups a proof rests on: a body calls only a few functions.
 pub type Lookups = SmallVec<[Speculation; 8]>;
-
-/// The function lookups the effect-free fact of `function` rests on, or `None` when it is not
-/// effect-free. Each lookup's symbol and cell are watched, so rebinding either moves the
-/// symbol's stamp.
-pub unsafe fn effect_free_lookups(function: Sexp) -> R<Option<Lookups>> {
-    let mut found = Lookups::new();
-    if bytecode::compiled_body(function)?.is_err()
-        || !resolve(function, &mut found, &mut SmallVec::new())?
-    {
-        return Ok(None);
-    }
-    Ok(Some(found))
-}
 
 /// Whether a calling handler is established, which could run R code in the middle of a call
 /// and look at, or assign, what an argument reads before the callee forces it.

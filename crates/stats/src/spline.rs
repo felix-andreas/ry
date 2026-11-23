@@ -173,22 +173,23 @@ pub unsafe fn bvalus(call: &NativeCall<'_>) -> R<Sexp> {
     let x = values::reals(arguments[4]).to_vec();
     let values_out = values::reals_mut(arguments[5]);
     for (index, &point) in x.iter().enumerate().take(n) {
-        values_out[index] = bvalue(&knots, &coefficients, count, 4, point, order);
+        values_out[index] = bvalue(&knots, &coefficients, count, point, order);
     }
     c_return(call, &arguments)
 }
 
-struct SearchControl {
-    lower: f64,
-    upper: f64,
-    tolerance: f64,
-    eps: f64,
-    max_iterations: i32,
+/// The bounds, tolerances and iteration limit of `sbart`'s search for `spar`.
+pub(crate) struct SearchControl {
+    pub(crate) lower: f64,
+    pub(crate) upper: f64,
+    pub(crate) tolerance: f64,
+    pub(crate) eps: f64,
+    pub(crate) max_iterations: i32,
 }
 
 /// The state `sbart` and `sslvrg` share, kept between evaluations because a failed evaluation
 /// leaves the previous criterion in place and the search reads it.
-struct Smoother<'a> {
+pub(crate) struct Smoother<'a> {
     x: &'a [f64],
     y: &'a [f64],
     /// The square roots of the observation weights.
@@ -212,15 +213,20 @@ struct Smoother<'a> {
     /// The band of the inverse's inner products, in the same storage.
     inner_products: Vec<f64>,
     coef: Vec<f64>,
-    fitted: Vec<f64>,
-    leverage: Vec<f64>,
+    pub(crate) fitted: Vec<f64>,
+    pub(crate) leverage: Vec<f64>,
+    /// Each point prepared for evaluating the spline, which the criterion does once per lambda.
+    points: Vec<Option<CubicPoint>>,
+    /// Each point's first coefficient index and the values there of the four B-splines that do
+    /// not vanish, for the leverages.
+    bases: Vec<(usize, [f64; 4])>,
     crit: f64,
-    info: i32,
+    pub(crate) info: i32,
 }
 
 impl<'a> Smoother<'a> {
     #[allow(clippy::too_many_arguments)]
-    fn new(
+    pub(crate) fn new(
         x: &'a [f64],
         y: &'a [f64],
         weights: &'a [f64],
@@ -252,13 +258,16 @@ impl<'a> Smoother<'a> {
             coef: vec![0.0; count],
             fitted: vec![0.0; x.len()],
             leverage: vec![0.0; x.len()],
+            points: Vec::new(),
+            bases: Vec::new(),
             crit: 0.0,
             info: 0,
         }
     }
 
-    /// `sgram` and `stxwx`, and the trace ratio that scales lambda.
-    fn setup(&mut self) {
+    /// `sgram` and `stxwx`, the trace ratio that scales lambda, and the points prepared for the
+    /// fits.
+    pub(crate) fn setup(&mut self) {
         self.penalty_matrix = roughness_matrix(self.knots, self.count);
         let (xwy, gram) = normal_equations(self.x, self.y, self.weights, self.knots, self.count);
         self.xwy = xwy;
@@ -271,6 +280,33 @@ impl<'a> Smoother<'a> {
             }
             self.ratio = gram_trace / penalty_trace;
         }
+        let (knots, count) = (self.knots, self.count);
+        self.points = self
+            .x
+            .iter()
+            .map(|&point| CubicPoint::new(knots, count, point))
+            .collect();
+        if self.criterion_code < 1 {
+            return;
+        }
+        let eps = 1e-11;
+        self.bases = self
+            .x
+            .iter()
+            .map(|&point| {
+                let mut x = point;
+                let (mut left, flag) = find_interval(&knots[..count + 1], x);
+                if flag == -1 {
+                    left = 4;
+                    x = knots[3] + eps;
+                } else if flag == 1 {
+                    left = count;
+                    x = knots[count] - eps;
+                }
+                let basis = bsplvd(knots, 4, x, left, 1);
+                (left - 3, [basis[0], basis[1], basis[2], basis[3]])
+            })
+            .collect();
     }
 
     /// The `SSPLINE_COMP` macro: lambda from `spar`, then the fit and criterion for it.
@@ -285,7 +321,7 @@ impl<'a> Smoother<'a> {
 
     /// Brent's minimizer in the form `sbart` inlines, over `spar`. Returns the abscissa and the
     /// number of iterations.
-    fn minimize(&mut self, search: &SearchControl) -> (f64, i32) {
+    pub(crate) fn minimize(&mut self, search: &SearchControl) -> (f64, i32) {
         let (mut a, mut b) = (search.lower, search.upper);
         let mut iterations = 0;
         let mut v = a + GOLDEN * (b - a);
@@ -406,29 +442,17 @@ impl<'a> Smoother<'a> {
         }
         dpbsl(&self.abd, count, &mut self.coef);
 
-        for (index, &point) in self.x.iter().enumerate() {
-            self.fitted[index] = bvalue(self.knots, &self.coef, count, 4, point, 0);
+        for (fitted, point) in self.fitted.iter_mut().zip(&self.points) {
+            *fitted = point
+                .as_ref()
+                .map_or(0.0, |point| point.value(&self.coef, 0));
         }
         if self.criterion_code < 1 {
             return;
         }
 
         sinerp(&self.abd, count, &mut self.inner_products);
-        let eps = 1e-11;
-        let knots = self.knots;
-        for (index, &point) in self.x.iter().enumerate() {
-            let mut x = point;
-            let (mut left, flag) = find_interval(&knots[..count + 1], x);
-            if flag == -1 {
-                left = 4;
-                x = knots[3] + eps;
-            } else if flag == 1 {
-                left = count;
-                x = knots[count] - eps;
-            }
-            let j = left - 3;
-            let basis = bsplvd(knots, 4, x, left, 1);
-            let (b0, b1, b2, b3) = (basis[0], basis[1], basis[2], basis[3]);
+        for (index, &(j, [b0, b1, b2, b3])) in self.bases.iter().enumerate() {
             let p = |row: usize, column: usize| self.inner_products[at(row, column)];
             self.leverage[index] = (p(4, j) * (b0 * b0)
                 + 2.0 * p(3, j) * b0 * b1
@@ -494,7 +518,9 @@ fn r_pow(base: f64, exponent: f64) -> f64 {
     } else if exponent == 2.0 {
         base * base
     } else {
-        base.powf(exponent)
+        // With the constant base 16 inlined, LLVM rewrites `pow(16, y)` as `exp2(4 * y)`, which
+        // can differ from C's `pow` in the last bit; the opaque base keeps the `pow` call.
+        std::hint::black_box(base).powf(exponent)
     }
 }
 
@@ -786,75 +812,99 @@ fn bsplvd(t: &[f64], k: usize, x: f64, left: usize, nderiv: usize) -> Vec<f64> {
     dbiatx
 }
 
-/// `bvalue`: the `jderiv`-th derivative at `x` of the order `k` spline with `n` coefficients,
-/// continuous from the right; 0 outside the knots.
-fn bvalue(t: &[f64], bcoef: &[f64], n: usize, k: usize, x: f64, jderiv: usize) -> f64 {
-    if jderiv >= k {
+/// `bvalue` for a cubic spline (order 4): the `jderiv`-th derivative at `x` of the spline with
+/// `n` coefficients, continuous from the right; 0 outside the knots.
+fn bvalue(t: &[f64], bcoef: &[f64], n: usize, x: f64, jderiv: usize) -> f64 {
+    if jderiv >= 4 {
         return 0.0;
     }
-    let i = if x != t[n] || t[n] != t[n + k - 1] {
-        let (interval, flag) = find_interval(&t[..n + k], x);
-        if flag != 0 {
-            return 0.0;
-        }
-        interval
-    } else {
-        n
-    };
-    let km1 = k - 1;
-    if km1 == 0 {
-        return bcoef[i - 1];
+    match CubicPoint::new(t, n, x) {
+        Some(point) => point.value(bcoef, jderiv),
+        None => 0.0,
     }
-    let mut aj = [0.0; 20];
-    let mut dm = [0.0; 20];
-    let mut dp = [0.0; 20];
-    let mut jcmin = 1;
-    let imk = i as isize - k as isize;
-    if imk >= 0 {
-        for j in 1..=km1 {
-            dm[j - 1] = x - t[i - j];
+}
+
+/// What `bvalue` computes from the point and the knots alone, before it reads a coefficient:
+/// the knot interval and the distances to the knots around it. The smoothing parameter search
+/// evaluates the spline at the same points for every trial lambda, so it prepares them once.
+struct CubicPoint {
+    /// The 1-based interval: the spline reads coefficients `i - 4 + jcmin ..= i - 4 + jcmax`.
+    i: usize,
+    jcmin: usize,
+    jcmax: usize,
+    dm: [f64; 3],
+    dp: [f64; 3],
+}
+
+impl CubicPoint {
+    /// `None` outside the knots, where the spline is 0.
+    fn new(t: &[f64], n: usize, x: f64) -> Option<Self> {
+        const K: usize = 4;
+        let i = if x != t[n] || t[n] != t[n + K - 1] {
+            let (interval, flag) = find_interval(&t[..n + K], x);
+            if flag != 0 {
+                return None;
+            }
+            interval
+        } else {
+            n
+        };
+        let mut point = Self {
+            i,
+            jcmin: 1,
+            jcmax: K,
+            dm: [0.0; 3],
+            dp: [0.0; 3],
+        };
+        if i >= K {
+            for j in 1..K {
+                point.dm[j - 1] = x - t[i - j];
+            }
+        } else {
+            point.jcmin = 1 + K - i;
+            for j in 1..=i {
+                point.dm[j - 1] = x - t[i - j];
+            }
+            for j in i..K {
+                point.dm[j - 1] = point.dm[i - 1];
+            }
         }
-    } else {
-        jcmin = (1 - imk) as usize;
-        for j in 1..=i {
-            dm[j - 1] = x - t[i - j];
+        if n >= i {
+            for j in 1..K {
+                point.dp[j - 1] = t[i + j - 1] - x;
+            }
+        } else {
+            point.jcmax = K + n - i;
+            for j in 1..=point.jcmax {
+                point.dp[j - 1] = t[i + j - 1] - x;
+            }
+            for j in point.jcmax..K {
+                point.dp[j - 1] = point.dp[point.jcmax - 1];
+            }
         }
-        for j in i..=km1 {
-            aj[k - j - 1] = 0.0;
-            dm[j - 1] = dm[i - 1];
-        }
+        Some(point)
     }
-    let mut jcmax = k;
-    let nmi = n as isize - i as isize;
-    if nmi >= 0 {
-        for j in 1..=km1 {
-            dp[j - 1] = t[i + j - 1] - x;
+
+    /// The spline's `jderiv`-th derivative (below 4) at the point, by de Boor's recurrence.
+    fn value(&self, bcoef: &[f64], jderiv: usize) -> f64 {
+        const K: usize = 4;
+        let Self { dm, dp, .. } = self;
+        // Coefficients beyond either end of the spline count as 0.
+        let mut aj = [0.0; K];
+        for jc in self.jcmin..=self.jcmax {
+            aj[jc - 1] = bcoef[self.i + jc - K - 1];
         }
-    } else {
-        jcmax = (k as isize + nmi) as usize;
-        for j in 1..=jcmax {
-            dp[j - 1] = t[i + j - 1] - x;
+        for j in 1..=jderiv {
+            let kmj = K - j;
+            let fkmj = kmj as f64;
+            let mut ilo = kmj;
+            for jj in 1..=kmj {
+                aj[jj - 1] = ((aj[jj] - aj[jj - 1]) / (dm[ilo - 1] + dp[jj - 1])) * fkmj;
+                ilo -= 1;
+            }
         }
-        for j in jcmax..=km1 {
-            aj[j] = 0.0;
-            dp[j - 1] = dp[jcmax - 1];
-        }
-    }
-    for jc in jcmin..=jcmax {
-        aj[jc - 1] = bcoef[(imk + jc as isize - 1) as usize];
-    }
-    for j in 1..=jderiv {
-        let kmj = k - j;
-        let fkmj = kmj as f64;
-        let mut ilo = kmj;
-        for jj in 1..=kmj {
-            aj[jj - 1] = ((aj[jj] - aj[jj - 1]) / (dm[ilo - 1] + dp[jj - 1])) * fkmj;
-            ilo -= 1;
-        }
-    }
-    if jderiv != km1 {
-        for j in jderiv + 1..=km1 {
-            let kmj = k - j;
+        for j in jderiv + 1..K {
+            let kmj = K - j;
             let mut ilo = kmj;
             for jj in 1..=kmj {
                 aj[jj - 1] =
@@ -862,6 +912,6 @@ fn bvalue(t: &[f64], bcoef: &[f64], n: usize, k: usize, x: f64, jderiv: usize) -
                 ilo -= 1;
             }
         }
+        aj[0]
     }
-    aj[0]
 }

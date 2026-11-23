@@ -103,10 +103,24 @@ pub unsafe fn eval_symbol_reporting(
     if let Some(index) = dot_dot_index(symbol) {
         return dot_dot_value(index, env, lexical, reader);
     }
-    // The empty symbol is `R_MissingArg`, whose value in GNU R is itself, so evaluating it is
-    // a missing argument without a name rather than an unbound object.
+    // The empty symbol is `R_MissingArg`, which GNU R's base frame binds to itself, so
+    // evaluating it is a missing argument without a name where the lookup reaches base, and
+    // an unbound object below an environment that does not (rlang's empty quosure).
     let value = if symbol == missing_arg() {
-        symbol
+        let known = crate::heap().known();
+        let mut scope = env;
+        while scope != known.empty_env
+            && scope != known.global_env
+            && scope != known.base_env
+            && scope != known.base_namespace
+        {
+            scope = scope.enclosure();
+        }
+        if scope == known.empty_env {
+            unbound()
+        } else {
+            symbol
+        }
     } else {
         find_variable(symbol, env, true)?
     };
@@ -497,8 +511,8 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     {
         panic!("a promise was forced after its last counted reference was released");
     }
-    // A reference only reads a variable of another frame; forcing the promise it reaches records
-    // the code that runs.
+    // A reference records the code it runs itself (`force_reference`): reading another frame's
+    // variable runs none, and forcing the promise it reaches records the code that runs.
     let result = if promise.has_gp(gp::ARGUMENT_REFERENCE) {
         force_reference(promise)
     } else {
@@ -1193,7 +1207,10 @@ pub(crate) unsafe fn reference_target(reference: Sexp) -> (usize, u32) {
 /// as a promise of the variable's name in that frame would read it.
 unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
     let symbol = reference.cdr();
+    // An environment or code reference runs its caller's code as the promise it stands for
+    // would, so the boundary-call recorder sees that code as it sees a promise's.
     if let Some(env) = reference_env(reference) {
+        let _recorded = crate::capture::evaluating(|| env);
         let code = reference.attrib();
         if code.kind() == SexpType::Bytecode {
             return bytecode::run_promise(code, env);
@@ -1203,7 +1220,9 @@ unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
     let (owner, slot) = reference_target(reference);
     let frame = &interp().frames[owner];
     if let Some(code) = reference_code(reference) {
-        return bytecode::run_promise_on_slots(code, frame.function, owner, frame.slots as usize);
+        let (function, slots) = (frame.function, frame.slots as usize);
+        let _recorded = crate::capture::evaluating(|| function.tag());
+        return bytecode::run_promise_on_slots(code, function, owner, slots);
     }
     if frame.env != nil() {
         return eval(symbol, frame.env);
@@ -2735,7 +2754,7 @@ pub unsafe fn apply_closure_entering(
             header,
             missing,
             promised,
-            true,
+            Entering::Start,
         );
     }
     let value = run_on_heap_frame(call, function, args, sys_parent, supplied, Entry::Unchecked)?;
@@ -3204,7 +3223,7 @@ pub unsafe fn bind_plan(
         header as u32,
         missing,
         promised,
-        true,
+        Entering::Start,
     )
 }
 
@@ -3233,10 +3252,7 @@ pub unsafe fn run_inlined(
     let mut hooks = crate::profile_summary::enter_closure(call, function, sys_parent, &[], nil());
     let state = interp();
     if state.frames.len() as u32 >= state.max_depth {
-        return Err(error_in(
-            call,
-            "evaluation nested too deeply: infinite recursion / options(expressions=)?",
-        ));
+        return Err(crate::unwind::expression_stack_overflow());
     }
     let caller = if sys_parent == nil() {
         state.slot_owner
@@ -3680,7 +3696,7 @@ pub unsafe fn run_frame(
         header,
         missing,
         promised,
-        true,
+        Entering::Start,
     )?;
     if entered.header == crate::NO_SLOTS {
         return Ok(entered.value);
@@ -3710,10 +3726,22 @@ pub struct Entered {
     pub depth: u32,
 }
 
+/// Where a call stands when [`enter`] pushes its frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Entering {
+    /// The call starts, so one that needs the general path can run whole.
+    Start,
+    /// The call is half run: compiled code rebuilds the frame of an inlined call, whose start
+    /// already refused what the general path would have refused and already counted the call
+    /// for a profile summary. The frame is pushed whatever the session records or debugs.
+    Midway,
+}
+
 /// Pushes the frame of a call of `function` on the slot frame at `header`, whose arguments are
 /// already bound, without running its body, so an interpreter loop can run the body in place
-/// rather than recursing. A call that needs what only the general path does (the boundary-call
-/// recorder, the debugger, the object-system refusal, a namespace load) runs whole here.
+/// rather than recursing. A call that starts and needs what only the general path does (the
+/// boundary-call recorder, the debugger, the object-system refusal, a namespace load) runs
+/// whole here.
 ///
 /// From a successful return until [`leave`], the frame is the slot owner. The slot frame's
 /// registers belong to the call: [`leave`] releases them, and so does `enter` itself on an
@@ -3728,13 +3756,14 @@ pub unsafe fn enter(
     header: u32,
     missing: u64,
     promised: u64,
-    counted: bool,
+    entering: Entering,
 ) -> R<Entered> {
     let state = interp();
     // A set hook covers the recorder, the debugger and the object-system refusal, so a call
     // that nothing watches makes one test for the three.
     let hooks = activity::hooks();
-    if (hooks != 0 || function == state.namespace_loader)
+    if entering == Entering::Start
+        && (hooks != 0 || function == state.namespace_loader)
         && (hooks & activity::CAPTURE != 0
             || !state.object_systems
             || function == state.namespace_loader
@@ -3762,10 +3791,7 @@ pub unsafe fn enter(
     }
     if state.frames.len() as u32 >= state.max_depth {
         release_window(header);
-        return Err(error_in(
-            call,
-            "evaluation nested too deeply: infinite recursion / options(expressions=)?",
-        ));
+        return Err(crate::unwind::expression_stack_overflow());
     }
     // A `NULL` `sys_parent` comes from byte code running on a slot frame's slots, the caller.
     let caller = if sys_parent == nil() {
@@ -3783,7 +3809,7 @@ pub unsafe fn enter(
         header,
         missing,
         caller,
-        counted,
+        entering == Entering::Start,
     );
     let defaults = sampled.and_then(|()| match promised {
         0 => Ok(()),
@@ -3939,10 +3965,7 @@ unsafe fn run_frame_general(
     }
     let state = interp();
     if state.frames.len() as u32 >= state.max_depth {
-        return Err(error_in(
-            call,
-            "evaluation nested too deeply: infinite recursion / options(expressions=)?",
-        ));
+        return Err(crate::unwind::expression_stack_overflow());
     }
     // A `NULL` `sys_parent` comes from byte code running on a slot frame's slots, the caller.
     let caller = if sys_parent == nil() {

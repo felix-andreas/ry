@@ -100,7 +100,7 @@ action: Add inferred type annotation for `f`
   edit 15..15 -> " -> double"
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> double"
-completion (128+): total, prototype, NLSstAsymptotic, NLSstLfAsymptote, NLSstRtAsymptote, defaultPrototype, makePrototypeFromClassDef, .__C__classPrototypeDef
+completion (128+): total, prototype, NLSstAsymptotic, NLSstLfAsymptote, NLSstRtAsymptote, bringToTop, defaultPrototype, makePrototypeFromClassDef
 hint @15 -> double
 hint @25: double
 
@@ -123,7 +123,7 @@ action: Add inferred type annotations for the whole file
   edit 20..20 -> ": T"
   edit 21..21 -> " -> T"
   edit 44..44 -> " -> double"
-completion (29): helper, help, help.request, help.search, help.start, contr.helmert, HairEyeColor, heat.colors
+completion (32): helper, help, help.request, help.search, help.start, shell, shell.exec, contr.helmert
 hint @18<T>
 hint @20: T
 hint @21 -> T
@@ -149,10 +149,37 @@ action: Add inferred type annotations for the whole file
   edit 200..200 -> " -> double"
   edit 203..203 -> "#: double\n"
   edit 225..225 -> ": double"
-completion (128+): total, prototype, NLSstAsymptotic, NLSstLfAsymptote, NLSstRtAsymptote, defaultPrototype, makePrototypeFromClassDef, .__C__classPrototypeDef
+completion (128+): total, prototype, NLSstAsymptotic, NLSstLfAsymptote, NLSstRtAsymptote, bringToTop, defaultPrototype, makePrototypeFromClassDef
 hint @200 -> double
 hint @221: double
 hint @225: double
+
+#---- a_local_named_argument_goes_to_the_write_before_the_call
+g <- function() {
+  h <- function(a) a
+  h(a$0 = 1)
+  h <- function(b, a) b
+  h
+}
+#++++
+hover 43..44: a: double
+definition 34..35
+references: 34..35*, 37..38, 43..44
+rename: 3 edit(s)
+signature: fn(a: double) -> double
+parameters: [a: double]
+action: Add inferred type annotation for `g`
+  edit 13..13 -> "<T, U>"
+  edit 15..15 -> " -> fn(b: T, [a]: U) -> T"
+action: Add inferred type annotations for the whole file
+  edit 13..13 -> "<T, U>"
+  edit 15..15 -> " -> fn(b: T, [a]: U) -> T"
+completion (128+): a, abbreviate, ability.cov, abline, abs, acf, acf2AR, acos
+hint @13<T, U>
+hint @15 -> fn(b: T, [a]: U) -> T
+hint @35: T
+hint @36 -> T
+hint @53: fn(b: T, [a]: U) -> T
 
 #==== references
 #---- slot_reads_and_writes
@@ -251,7 +278,7 @@ action: Add inferred type annotations for the whole file
   edit 20..20 -> ": T"
   edit 21..21 -> " -> T"
   edit 44..44 -> " -> double"
-completion (29): helper, help, help.request, help.search, help.start, contr.helmert, HairEyeColor, heat.colors
+completion (32): helper, help, help.request, help.search, help.start, shell, shell.exec, contr.helmert
 hint @18<T>
 hint @20: T
 hint @21 -> T
@@ -305,7 +332,7 @@ action: Add inferred type annotations for the whole file
   edit 20..20 -> ": T"
   edit 21..21 -> " -> T"
   edit 39..39 -> " -> double"
-completion (29): helper, help, help.request, help.search, help.start, contr.helmert, HairEyeColor, heat.colors
+completion (32): helper, help, help.request, help.search, help.start, shell, shell.exec, contr.helmert
 hint @18<T>
 hint @20: T
 hint @21 -> T
@@ -406,7 +433,7 @@ hint @45 -> double
 f <- function(x, y = 2) x + y
 g <- function() f(y = $0)
 #++++
-hover 46..53: T
+hover 46..53: Unknown
 definition: none
 references: none
 rename: none
@@ -543,7 +570,7 @@ definition: installed tot from base, stats, utils, methods, graphics, grDevices,
 references: none
 rename: none
 signature: none
-completion (128+): total_count, prototype, NLSstAsymptotic, NLSstLfAsymptote, NLSstRtAsymptote, defaultPrototype, makePrototypeFromClassDef, .__C__classPrototypeDef
+completion (128+): total_count, prototype, NLSstAsymptotic, NLSstLfAsymptote, NLSstRtAsymptote, bringToTop, defaultPrototype, makePrototypeFromClassDef
 
 #---- globals_shadow_stubs
 print <- function(x) x
@@ -684,6 +711,7 @@ rename: 2 edit(s)
 type-definition 9..14
 signature: none
 completion (1): Score
+hint @42 -> Score
 
 #---- declaration_name_is_target
 #: @type Sco$0re {double}
@@ -699,6 +727,7 @@ references: 9..14*, 49..54
 rename: 2 edit(s)
 signature: none
 completion (1): Score
+hint @41 -> Score
 
 #---- annotation_completion_types
 #: @type UserId {integer}
@@ -764,7 +793,7 @@ references: 12..16*, 52..56, 71..75, 107..111
 rename: 4 edit(s)
 calls area: in (top level) [107..111] | out
 signature: none
-completion (24): ar, area, ar.burg, ar.mle, ar.ols, ar.yw, aregexec, args
+completion (25): ar, area, ar.burg, ar.mle, ar.ols, ar.yw, aregexec, args
 hint @11name =
 hint @19def =
 hint @78signature =
@@ -884,6 +913,34 @@ action: Add inferred type annotations for the whole file
 completion (55): count, count.fields, Num.count_leading_zero_bits, Num.count_one_bits, Num.count_trailing_zero_bits, Str.count_utf8_bytes, Expr.count, List.count_if
 hint @5: integer
 
+#---- an_unclosed_string_subscript_completes_fields
+config <- list(alpha = 1, beta = "b")
+config[["al$0
+#++++
+hover 46..49: character
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 6..6 -> ": list{alpha: double, beta: character}"
+completion (1): alpha
+hint @6: list{alpha: double, beta: character}
+
+#---- a_dollar_with_no_field_name_completes_no_receiver_name
+frame <- read.csv("f.csv")
+frame$$0
+#++++
+hover 27..33: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": data.frame"
+completion: none
+hint @5: data.frame
+
 #---- string_subscript_fields
 config <- list(alpha = 1, beta = "b")
 pick <- function() config[["al$0pha"]]
@@ -931,7 +988,7 @@ definition 0..2
 references: 0..2*, 56..58, 71..73
 rename: 3 edit(s)
 signature: none
-completion (54): D, DT, DataFrame, DataFrame.columns, DataFrame.copy, DataFrame.filter, DataFrame.group_by, DataFrame.head
+completion (55): D, DT, DataFrame, DataFrame.columns, DataFrame.copy, DataFrame.filter, DataFrame.group_by, DataFrame.head
 
 #---- a_top_level_update_keeps_the_first_definition
 DT <- data.table::data.table(x = 1)
@@ -944,7 +1001,7 @@ definition 0..2
 references: 0..2*, 36..38, 49..51
 rename: 3 edit(s)
 signature: none
-completion (54): D, DT, DataFrame, DataFrame.columns, DataFrame.copy, DataFrame.filter, DataFrame.group_by, DataFrame.head
+completion (55): D, DT, DataFrame, DataFrame.columns, DataFrame.copy, DataFrame.filter, DataFrame.group_by, DataFrame.head
 
 #---- a_frame_update_types_later_reads
 sales <- DataFrame(a = 1)

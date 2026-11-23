@@ -596,14 +596,10 @@ mod unix {
         }
 
         fn lookup_file(files: &mut Files, base: usize, name: *const libc::c_char) -> Option<File> {
-            let free = match files
+            let free = files
                 .files
                 .iter()
-                .position(|file| file.is_none_or(|file| file.base == base))
-            {
-                Some(index) => index,
-                None => return None,
-            };
+                .position(|file| file.is_none_or(|file| file.base == base))?;
             if let Some(file) = files.files[free] {
                 return Some(file);
             }
@@ -664,9 +660,12 @@ mod unix {
             Some(file)
         }
 
+        /// The (offset, size) of the symbol table and of the string table, and the load bias.
+        type ElfLayout = ((usize, usize), (usize, usize), usize);
+
         /// The symbol table, string table and load bias of a 64-bit little-endian ELF file. Every
         /// offset is checked, because the file on disk may not be the one that was loaded.
-        fn layout(bytes: &[u8], base: usize) -> Option<((usize, usize), (usize, usize), usize)> {
+        fn layout(bytes: &[u8], base: usize) -> Option<ElfLayout> {
             if bytes.get(..6)? != b"\x7fELF\x02\x01" {
                 return None;
             }

@@ -769,7 +769,7 @@ cbind(a = 1L, b = 2L)
 Sys.setenv(MY_VAR = "v")
 table(group = c("a", "a"))
 #++++
-data.frame
+data.frame{x: integer[]}
 integer
 Any
 Unknown

@@ -178,6 +178,21 @@ render <- function(count, label = NULL) count
 render: fn(count: integer, [label]: character) -> integer
 111..115 error[type-mismatch] `label` defaults to `NULL`, which its declared type `character` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `character | NULL` and narrow with `is.null()`
 
+#---- null_default_suggestion_parenthesizes_a_function_type
+#: fn(x: character, [f]: fn(x: character) -> character) -> character
+apply_or <- function(x, f = NULL) if (is.null(f)) x else f(x)
+#++++
+apply_or: fn(x: character, [f]: fn(x: character) -> character) -> character
+97..101 error[type-mismatch] `f` defaults to `NULL`, which its declared type `fn(x: character) -> character` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `(fn(x: character) -> character) | NULL` and narrow with `is.null()`
+
+#---- null_default_suggestion_keeps_a_nullable_return
+#: fn(x: character, [f]: fn(x: character) -> character | NULL) -> character
+apply_or <- function(x, f = NULL) if (is.null(f)) x else f(x)
+#++++
+apply_or: fn(x: character, [f]: fn(x: character) -> character | NULL) -> character
+104..108 error[type-mismatch] `f` defaults to `NULL`, which its declared type `fn(x: character) -> character | NULL` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `(fn(x: character) -> character | NULL) | NULL` and narrow with `is.null()`
+133..137 error[type-mismatch] expected `character`, found `character | NULL`
+
 #---- forall_identity
 #: @forall T
 #: @param value {T}
@@ -212,7 +227,7 @@ value: list[integer]
 #: @if-unknown user_id
 value <- some_unknown
 #++++
-value: user_id
+value: Unknown
 15..22 error[annotation] I do not know the type `user_id`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 32..44 warning[unresolved] I could not resolve `some_unknown` in this package, its imports, or builtins.
 

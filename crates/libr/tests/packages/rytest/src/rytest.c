@@ -1178,6 +1178,22 @@ static SEXP duplicate_checked(SEXP a)
     return result;
 }
 
+/* The environment accessors that check what they read: `op` picks one, `x` is the `...`
+   index or the binding's symbol. */
+SEXP rytest_env_accessor(SEXP op, SEXP env, SEXP x)
+{
+    switch (INTEGER(op)[0]) {
+    case 0: return R_DotDelayedExpression(asInteger(x), env);
+    case 1: return R_DotDelayedEnvironment(asInteger(x), env);
+    case 2: return R_DotForcedExpression(asInteger(x), env);
+    case 3: return ScalarLogical(R_DotsExist(env));
+    case 4: return R_DelayedBindingExpression(x, env);
+    case 5: return R_ForcedBindingExpression(x, env);
+    case 6: return R_ActiveBindingFunction(x, env);
+    default: return ScalarInteger(R_GetBindingType(x, env));
+    }
+}
+
 SEXP rytest_api_op(SEXP op, SEXP a, SEXP b, SEXP c)
 {
     SEXP result;
@@ -1672,6 +1688,7 @@ static const R_CallMethodDef call_entries[] = {
     {"rytest_run_callback", (DL_FUNC) &rytest_run_callback, 0},
     {"rytest_keep_promise", (DL_FUNC) &rytest_keep_promise, 2},
     {"rytest_force_promise", (DL_FUNC) &rytest_force_promise, 0},
+    {"rytest_env_accessor", (DL_FUNC) &rytest_env_accessor, 3},
     {"rytest_api_op", (DL_FUNC) &rytest_api_op, 4},
     {"rytest_api_bench", (DL_FUNC) &rytest_api_bench, 2},
     {NULL, NULL, 0}

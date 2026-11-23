@@ -6,6 +6,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Call, builtin, internal, special},
         coerce::parse_real,
+        handles::{self, Args, Cx, Local, Str, safe},
         http::FetchError,
         interp,
         platform::{Iconv, IconvStop, convert_all},
@@ -26,11 +27,13 @@ use {
         borrow::Cow,
         num::NonZeroU32,
         path::{Path, PathBuf},
+        sync::atomic::{AtomicBool, Ordering},
         time::{Duration, Instant},
     },
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
+    internal("ryThreadPoolStarted", 0, safe!(do_thread_pool_started)),
     builtin(".ry_view", 2, do_ry_view).invisible(),
     internal("internalsID", 0, |_| unsafe { scalar_string(INTERNALS_ID) }),
     internal("eSoftVersion", 0, do_esoft_version),
@@ -70,8 +73,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("isdebugged", 1, |call| unsafe {
         scalar_bool(debugged_function(call)?.has_gp(gp::CLOSURE_DEBUG))
     }),
-    internal("debugOnOff", 1, |_| unsafe { scalar_bool(false) }),
-    internal("traceOnOff", 1, |call| unsafe { do_trace_on_off(call) }),
+    internal("debugOnOff", 1, safe!(do_debug_on_off)),
+    internal("traceOnOff", 1, safe!(do_trace_on_off)),
     internal("browserText", 1, |call| {
         Err(call.error("no browser context to query"))
     }),
@@ -217,10 +220,13 @@ pub const BUILTINS: &[BuiltinDef] = &[
         scalar_integer(std::process::id() as i32)
     }),
     internal("Sys.info", 0, do_sys_info),
+    // `R_compiled_by()`: GNU R reports the C and Fortran compilers that built it, and "" for
+    // one it does not know. ry's runtime is Rust, built by neither.
+    internal("compilerVersion", 0, safe!(do_compiler_version)),
     internal("Sys.setlocale", 2, do_sys_setlocale),
     internal("Sys.getlocale", 1, do_sys_getlocale),
     internal("l10n_info", 0, do_l10n_info),
-    internal("Sys.localeconv", 0, |_| unsafe { values::named_list(&[]) }),
+    internal("Sys.localeconv", 0, do_sys_localeconv),
     internal("Sys.sleep", 1, |call| unsafe {
         {
             let seconds = values::as_real_scalar(call.arg(0));
@@ -426,6 +432,9 @@ fn find_r_home() -> Result<String, String> {
 /// `TMP` and `TEMP` that names a writable directory, created on first use and removed when the
 /// session ends.
 pub fn session_temp_dir() -> Result<&'static str, String> {
+    if let Some(Ok(renewed)) = RENEWED_SESSION_TEMP.get() {
+        return Ok(renewed.path.as_str());
+    }
     SESSION_TEMP
         .get_or_init(create_session_temp_dir)
         .as_ref()
@@ -433,10 +442,39 @@ pub fn session_temp_dir() -> Result<&'static str, String> {
         .map_err(Clone::clone)
 }
 
+/// Gives a forked process a session temporary directory of its own, which it then owns and
+/// removes, so that a worker's files cannot collide with its siblings'. The directory it
+/// inherited stays its parent's. A process renews it once; a second call returns the same one.
+pub fn renew_session_temp_dir() -> Result<&'static str, String> {
+    RENEWED_SESSION_TEMP
+        .get_or_init(create_session_temp_dir)
+        .as_ref()
+        .map(|temp| temp.path.as_str())
+        .map_err(Clone::clone)
+}
+
+static THREAD_POOL: AtomicBool = AtomicBool::new(false);
+
+/// Records that this process may have started a thread pool, such as the one Polars runs table
+/// queries on, so that `.Internal(ryThreadPoolStarted())` tells a caller a forked child cannot
+/// use it.
+pub fn note_thread_pool() {
+    THREAD_POOL.store(true, Ordering::Relaxed);
+}
+
+/// `.Internal(ryThreadPoolStarted())`: whether this process may have started a thread pool,
+/// which a forked child inherits only as memory, without its threads.
+fn do_thread_pool_started<'s>(context: &mut Cx<'s>, _arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    handles::logical_constant(context, i32::from(THREAD_POOL.load(Ordering::Relaxed)))
+}
+
 /// Removes the session's temporary directory. Only the process that created it does: a forked
 /// child shares the path but must leave the directory to its parent.
 pub fn remove_session_temp_dir() {
-    let Some(Ok(temp)) = SESSION_TEMP.get() else {
+    let renewed = RENEWED_SESSION_TEMP
+        .get()
+        .and_then(|temp| temp.as_ref().ok());
+    let Some(temp) = renewed.or_else(|| SESSION_TEMP.get()?.as_ref().ok()) else {
         return;
     };
     if temp.owner != std::process::id() {
@@ -483,6 +521,8 @@ struct SessionTemp {
 }
 
 static SESSION_TEMP: std::sync::OnceLock<Result<SessionTemp, String>> = std::sync::OnceLock::new();
+static RENEWED_SESSION_TEMP: std::sync::OnceLock<Result<SessionTemp, String>> =
+    std::sync::OnceLock::new();
 
 fn create_session_temp_dir() -> Result<SessionTemp, String> {
     let root = ["R_TMPDIR", "TMPDIR", "TMP", "TEMP"]
@@ -1870,11 +1910,18 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
     Ok(list)
 }
 
+/// The `tz` argument of the date-time internals: one string, where GNU R reads `NA` as the zone
+/// named "NA".
+unsafe fn zone_name(argument: Sexp) -> R<String> {
+    if argument.kind() != SexpType::String || length(argument) != 1 {
+        return Err(error("invalid 'tz' value"));
+    }
+    Ok(values::first_string(argument).map_or_else(|| "NA".to_owned(), |text| text.into_owned()))
+}
+
 unsafe fn do_as_posixlt(call: &Call<'_>) -> R<Sexp> {
     let times = crate::coerce::coerce_vector(call.arg(0), SexpType::Real)?;
-    let tz = values::first_string(call.arg(1))
-        .map(|text| text.into_owned())
-        .unwrap_or_default();
+    let tz = zone_name(call.arg(1))?;
     let seconds: Vec<f64> = values::reals(times).to_vec();
     let result = posixlt_from_seconds(&seconds, &tz)?;
     set_year_names(result, values::names(call.arg(0)))?;
@@ -2151,9 +2198,7 @@ unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp>
 
 /// `as.POSIXct(x, tz)`: the instants a POSIXlt names in the zone `tz`.
 unsafe fn do_as_posixct(call: &Call<'_>) -> R<Sexp> {
-    let tz = values::first_string(call.arg(1))
-        .map(|text| text.into_owned())
-        .unwrap_or_default();
+    let tz = zone_name(call.arg(1))?;
     let seconds = posixlt_instants(call.arg(0), &tz)?;
     let result = values::real_vector(&seconds)?;
     set_names_from_year(call.arg(0), result)?;
@@ -2401,13 +2446,21 @@ struct ParsedTime {
     whole: f64,
     fraction: f64,
     offset: Option<i64>,
+    /// A `%s` filled the fields from an instant, so its UTC offset is known.
+    from_instant: bool,
 }
 
-/// Parses `text` with a `strptime` format.
-fn parse_time(text: &str, format: &str, warnings: &mut Vec<String>) -> R<Option<ParsedTime>> {
+/// Parses `text` with a `strptime` format, where `tz` is the zone a `%s` breaks its instant down
+/// in.
+fn parse_time(
+    text: &str,
+    format: &str,
+    tz: &str,
+    warnings: &mut Vec<String>,
+) -> R<Option<ParsedTime>> {
     let mut fields = Parsed::default();
     let mut input = text;
-    let matched = parse_with(&mut fields, &mut input, format);
+    let matched = parse_with(&mut fields, &mut input, format, tz);
     // Like GNU R, a `%Z` is an error only once parsing reaches it, and an out-of-range `%z`
     // warns, so a text that fails earlier stays a quiet NA.
     if fields.zone_requested {
@@ -2512,6 +2565,7 @@ fn resolve_fields(mut fields: Parsed, warnings: &mut Vec<String>) -> Option<Pars
             + whole_second,
         fraction: fields.second - whole_second,
         offset: fields.offset,
+        from_instant: fields.from_instant,
     })
 }
 
@@ -2535,12 +2589,13 @@ struct Parsed {
     week: Option<(i64, bool)>,
     zone_requested: bool,
     offset_out_of_range: bool,
+    from_instant: bool,
 }
 
 /// Matches `input` against `format`, advancing `input` past what matched. Whitespace in the
-/// format matches any run of whitespace, including none, and numeric fields skip leading blanks,
-/// as in glibc's `strptime`.
-fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()> {
+/// format matches any run of whitespace, including none, while numeric fields and `%z` skip
+/// only leading spaces, as in GNU R's own `strptime`.
+fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str, tz: &str) -> Option<()> {
     let mut characters = format.chars();
     while let Some(character) = characters.next() {
         if character.is_whitespace() {
@@ -2632,13 +2687,12 @@ fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()>
             'S' => fields.second = number(input, 2)? as f64,
             'j' => fields.yearday = Some(number(input, 3)?),
             'p' | 'P' => {
-                let lower = input.trim_start().to_ascii_lowercase();
-                fields.afternoon = Some(match lower.get(..2) {
-                    Some("am") => false,
-                    Some("pm") => true,
+                fields.afternoon = Some(match input.get(..2).map(str::to_ascii_lowercase) {
+                    Some(text) if text == "am" => false,
+                    Some(text) if text == "pm" => true,
                     _ => return None,
                 });
-                *input = &input.trim_start()[2..];
+                *input = &input[2..];
             }
             'B' | 'b' | 'h' => {
                 let found = match_name(input, &MONTHS)?;
@@ -2667,15 +2721,38 @@ fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()>
                 fields.zone_requested = true;
                 return None;
             }
+            's' => {
+                let digits = input.bytes().take_while(u8::is_ascii_digit).count();
+                if digits == 0 {
+                    return None;
+                }
+                let seconds = input[..digits].parse::<i64>().ok()?;
+                *input = &input[digits..];
+                let instant = seconds as f64;
+                let (offset, _, _) = resolve_zone(tz).offset_at(instant);
+                let wall = broken_down(instant + f64::from(offset));
+                // GNU R's `localtime` fails once the year leaves the range of a C `int`.
+                i32::try_from(wall.year - 1900).ok()?;
+                *fields = Parsed {
+                    year: Some(wall.year),
+                    month: Some(wall.month),
+                    day: Some(wall.day),
+                    hour: wall.hour,
+                    minute: wall.minute,
+                    second: wall.second,
+                    from_instant: true,
+                    ..Parsed::default()
+                };
+            }
             'n' | 't' => *input = input.trim_start(),
-            '%' => *input = input.trim_start().strip_prefix('%')?,
-            'F' => parse_with(fields, input, "%Y-%m-%d")?,
-            'T' | 'X' => parse_with(fields, input, "%H:%M:%S")?,
-            'D' => parse_with(fields, input, "%m/%d/%y")?,
-            'x' => parse_with(fields, input, "%y/%m/%d")?,
-            'R' => parse_with(fields, input, "%H:%M")?,
-            'r' => parse_with(fields, input, "%I:%M:%S %p")?,
-            'c' => parse_with(fields, input, "%a %b %e %H:%M:%S %Y")?,
+            '%' => *input = input.strip_prefix('%')?,
+            'F' => parse_with(fields, input, "%Y-%m-%d", tz)?,
+            'T' | 'X' => parse_with(fields, input, "%H:%M:%S", tz)?,
+            // GNU R's `strptime` reads `%D` as `%y/%m/%d`, not the `%m/%d/%y` of POSIX.
+            'D' | 'x' => parse_with(fields, input, "%y/%m/%d", tz)?,
+            'R' => parse_with(fields, input, "%H:%M", tz)?,
+            'r' => parse_with(fields, input, "%I:%M:%S %p", tz)?,
+            'c' => parse_with(fields, input, "%a %b %e %H:%M:%S %Y", tz)?,
             _ => return None,
         }
     }
@@ -2685,7 +2762,7 @@ fn parse_with(fields: &mut Parsed, input: &mut &str, format: &str) -> Option<()>
 /// A month or weekday name, in full or abbreviated to three letters, ignoring case. Returns its
 /// position in `names`.
 fn match_name(input: &mut &str, names: &[&str]) -> Option<usize> {
-    let trimmed = input.trim_start();
+    let trimmed = *input;
     let lower = trimmed.to_ascii_lowercase();
     let full = names
         .iter()
@@ -2703,9 +2780,9 @@ fn match_name(input: &mut &str, names: &[&str]) -> Option<usize> {
     Some(position)
 }
 
-/// A field of at most `max_digits` digits, after leading blanks.
+/// A field of at most `max_digits` digits, after leading spaces.
 fn number(input: &mut &str, max_digits: usize) -> Option<i64> {
-    let trimmed = input.trim_start();
+    let trimmed = input.trim_start_matches(' ');
     let digits = trimmed
         .chars()
         .take(max_digits)
@@ -2721,7 +2798,7 @@ fn number(input: &mut &str, max_digits: usize) -> Option<i64> {
 /// A `%z` offset in seconds. The error is true when the offset is well formed but beyond
 /// +/-1400, which GNU R warns about.
 fn parse_offset(input: &mut &str) -> Result<i64, bool> {
-    let trimmed = input.trim_start();
+    let trimmed = input.trim_start_matches(' ');
     let sign = match trimmed.chars().next() {
         Some('+') => 1,
         Some('-') => -1,
@@ -2752,9 +2829,7 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
     if formats.kind() != SexpType::String || length(formats) == 0 {
         return Err(error("invalid 'format' argument"));
     }
-    let tz = values::first_string(call.arg(2))
-        .map(|text| text.into_owned())
-        .unwrap_or_default();
+    let tz = zone_name(call.arg(2))?;
     // GNU R recycles `x` and `format` to the longer of the two, unless `x` is empty.
     let count = match length(texts) {
         0 => 0,
@@ -2774,7 +2849,7 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
         let format = values::string_at(formats, index % length(formats))
             .map_or_else(|| "NA".to_owned(), |text| text.into_owned());
         parsed.push(match values::string_at(texts, index % length(texts)) {
-            Some(text) => parse_time(&text, &format, &mut warnings)?,
+            Some(text) => parse_time(&text, &format, &tz, &mut warnings)?,
             None => None,
         });
     }
@@ -2799,8 +2874,11 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
             continue;
         }
         // GNU R's strptime fills the fields from the text rather than from an instant, so the
-        // UTC offset stays unknown outside UTC, and a time with an explicit offset carries no
-        // abbreviation either.
+        // UTC offset stays unknown outside UTC unless a `%s` gave the instant, and a time with an
+        // explicit offset carries no abbreviation either.
+        if time.from_instant {
+            continue;
+        }
         values::ints_mut(fields[10])[index] = NA_INTEGER;
         if time.offset.is_some() {
             values::set_elt(fields[9], index, values::mkchar("")?);
@@ -2828,9 +2906,6 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
             values::ints_mut(fields[8])[index] = dst;
             values::set_elt(fields[9], index, values::mkchar(abbreviation.as_str())?);
         }
-    }
-    if !utc {
-        values::ints_mut(fields[10]).fill(NA_INTEGER);
     }
     let mut names = values::names(texts);
     if names != nil() && count > length(texts) {
@@ -2921,7 +2996,8 @@ pub(crate) enum DateFromText {
 /// zone `tz`: GMT is known here, the session's zone is left to the R code.
 pub(crate) fn date_from_text(text: &str, format: &str, gmt: bool) -> DateFromText {
     let mut warnings = Vec::new();
-    let Ok(parsed) = parse_time(text, format, &mut warnings) else {
+    let tz = if gmt { "GMT" } else { "" };
+    let Ok(parsed) = parse_time(text, format, tz, &mut warnings) else {
         return DateFromText::Unsupported;
     };
     if !warnings.is_empty() {
@@ -4151,7 +4227,7 @@ unsafe fn do_quit(call: &Call<'_>) -> R<Sexp> {
     let status = values::as_integer_scalar(call.arg(1));
     // GNU R prints the warnings still deferred when it quits, such as a failed `require()`'s
     // in `if (!require(pkg)) q()`.
-    crate::conditions::print_warnings()?;
+    crate::conditions::print_warnings("")?;
     crate::console_server::finish();
     crate::session::finish();
     use std::io::Write;
@@ -5088,6 +5164,12 @@ thread_local! {
     /// Whether `trace()`'s inserted calls run. `.doTrace` turns it off while a tracer runs,
     /// so a tracer that calls the traced function does not recurse.
     static TRACING: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// Whether a function `debug()` flagged stops at its entry: `debuggingState()`.
+    static DEBUGGING: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+pub(crate) fn debugging_enabled() -> bool {
+    DEBUGGING.with(|debugging| debugging.get())
 }
 
 /// The function `debug()` and its relatives flag: their first argument, or the function a
@@ -5104,19 +5186,116 @@ unsafe fn debugged_function(call: &Call<'_>) -> R<Sexp> {
     }
 }
 
-/// `.Internal(traceOnOff(state))`: the previous tracing state, after setting it to `state`
-/// unless that is `NULL`.
-unsafe fn do_trace_on_off(call: &Call<'_>) -> R<Sexp> {
-    let state = call.arg(0);
-    let previous = TRACING.with(|tracing| tracing.get());
-    if state != nil() {
-        let value = values::as_logical_scalar(state);
+/// `.Internal(debugOnOff(state))`: whether a function `debug()` flagged stops at its entry.
+fn do_debug_on_off<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    toggle_state(context, arguments, &DEBUGGING, "debuggingState")
+}
+
+/// `.Internal(traceOnOff(state))`: whether `trace()`'s inserted calls run.
+fn do_trace_on_off<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    toggle_state(context, arguments, &TRACING, "tracingState")
+}
+
+/// The previous state of `cell`, after setting it to the first argument unless that is `NULL`.
+fn toggle_state<'s>(
+    context: &mut Cx<'s>,
+    arguments: &Args<'_, 's>,
+    cell: &'static std::thread::LocalKey<std::cell::Cell<bool>>,
+    name: &str,
+) -> R<Local<'s>> {
+    let state = arguments.value(0);
+    let previous = cell.with(|current| current.get());
+    if state.r_type() != SexpType::Nil {
+        let value = handles::logical_scalar(context, state);
         if value == NA_LOGICAL {
-            return Err(call.error("Value for 'tracingState' must be TRUE or FALSE"));
+            return Err(arguments.error(format!("Value for '{name}' must be TRUE or FALSE")));
         }
-        TRACING.with(|tracing| tracing.set(value != 0));
+        cell.with(|current| current.set(value != 0));
     }
-    scalar_bool(previous)
+    handles::logical_constant(context, i32::from(previous))
+}
+
+/// `R_compiled_by()`: GNU R reports the C and Fortran compilers that built it, and "" for one
+/// it does not know. ry's runtime is Rust, built by neither.
+fn do_compiler_version<'s>(context: &mut Cx<'s>, _arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let mut result = context.alloc::<Str>(2)?;
+    let mut names = context.alloc::<Str>(2)?;
+    for (index, (compiler, version)) in [("C", ""), ("Fortran", "")].into_iter().enumerate() {
+        handles::set_text(context, &mut result, index, version)?;
+        handles::set_text(context, &mut names, index, compiler)?;
+    }
+    handles::set_attribute_named(context, &mut result, "names", names.finish().value())?;
+    Ok(result.finish().value())
+}
+
+/// `Sys.localeconv()`: the C library's `localeconv` for the current locale, its numbers as
+/// strings, where `127` (`CHAR_MAX`) means the locale does not say.
+unsafe fn do_sys_localeconv(_call: &Call<'_>) -> R<Sexp> {
+    #[cfg(unix)]
+    let values = {
+        let conventions = &*libc::localeconv();
+        let text = |field: *const libc::c_char| {
+            if field.is_null() {
+                String::new()
+            } else {
+                std::ffi::CStr::from_ptr(field)
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        };
+        let number = |field: libc::c_char| (field as i32).to_string();
+        [
+            text(conventions.decimal_point),
+            text(conventions.thousands_sep),
+            text(conventions.grouping),
+            text(conventions.int_curr_symbol),
+            text(conventions.currency_symbol),
+            text(conventions.mon_decimal_point),
+            text(conventions.mon_thousands_sep),
+            text(conventions.mon_grouping),
+            text(conventions.positive_sign),
+            text(conventions.negative_sign),
+            number(conventions.int_frac_digits),
+            number(conventions.frac_digits),
+            number(conventions.p_cs_precedes),
+            number(conventions.p_sep_by_space),
+            number(conventions.n_cs_precedes),
+            number(conventions.n_sep_by_space),
+            number(conventions.p_sign_posn),
+            number(conventions.n_sign_posn),
+        ]
+    };
+    // The libc crate declares no `localeconv` for Windows, so it answers for the C locale.
+    #[cfg(not(unix))]
+    let values: [String; 18] = std::array::from_fn(|index| match index {
+        0 => ".".to_owned(),
+        10.. => "127".to_owned(),
+        _ => String::new(),
+    });
+    let result = values::string_vector(&values)?;
+    crate::heap().root(result);
+    let names = values::string_vector(&[
+        "decimal_point",
+        "thousands_sep",
+        "grouping",
+        "int_curr_symbol",
+        "currency_symbol",
+        "mon_decimal_point",
+        "mon_thousands_sep",
+        "mon_grouping",
+        "positive_sign",
+        "negative_sign",
+        "int_frac_digits",
+        "frac_digits",
+        "p_cs_precedes",
+        "p_sep_by_space",
+        "n_cs_precedes",
+        "n_sep_by_space",
+        "p_sign_posn",
+        "n_sign_posn",
+    ])?;
+    values::set_attr(result, symbols().names, names)?;
+    Ok(result)
 }
 
 /// `Sys.glob` calls the C library's `glob`, as GNU R does, so wildcards work in every path
@@ -5189,22 +5368,45 @@ unsafe fn do_sys_getlocale(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// Takes the locale of the categories GNU R uses from the environment, as it does at startup;
-/// numbers and the rest stay in the C locale.
-pub unsafe fn init_locale() {
-    for category in [
-        libc::LC_CTYPE,
-        libc::LC_COLLATE,
-        libc::LC_TIME,
-        libc::LC_MONETARY,
-        LC_MESSAGES,
-        LC_PAPER,
-        LC_MEASUREMENT,
+/// numbers stay in the C locale. Returns the categories the system cannot provide, which fall
+/// back to "C", in GNU R's order: start-up warns about them last.
+pub unsafe fn init_locale() -> Vec<&'static str> {
+    let mut failed = Vec::new();
+    for (category, name) in [
+        (libc::LC_CTYPE, "LC_CTYPE"),
+        (libc::LC_COLLATE, "LC_COLLATE"),
+        (libc::LC_TIME, "LC_TIME"),
+        (LC_MESSAGES, "LC_MESSAGES"),
+        (libc::LC_MONETARY, "LC_MONETARY"),
+        (LC_PAPER, "LC_PAPER"),
+        (LC_MEASUREMENT, "LC_MEASUREMENT"),
     ] {
-        set_locale(category, c"".as_ptr());
+        if category < 0 {
+            continue;
+        }
+        if set_locale(category, c"".as_ptr()).is_null() {
+            set_locale(category, c"C".as_ptr());
+            failed.push(name);
+        }
         #[cfg(windows)]
         use_utf8_codeset(category);
     }
+    // A C or POSIX `LC_CTYPE` from the environment moves to C.UTF-8, as in Python (PEP 538),
+    // unless `LC_ALL` asks for it: the string builtins read native strings as UTF-8 in every
+    // locale, and this keeps the C library (`MB_CUR_MAX`, `mbrtowc`) agreeing with them.
+    #[cfg(unix)]
+    if !failed.contains(&"LC_CTYPE")
+        && std::env::var_os("LC_ALL").is_none_or(|value| value.is_empty())
+        && matches!(current_locale(libc::LC_CTYPE).as_str(), "C" | "POSIX")
+    {
+        for name in [c"C.UTF-8", c"C.utf8", c"UTF-8"] {
+            if !set_locale(libc::LC_CTYPE, name.as_ptr()).is_null() {
+                break;
+            }
+        }
+    }
     crate::sort::refresh_collation();
+    failed
 }
 
 /// Moves a Windows locale category to the UTF-8 codeset of the same language and region

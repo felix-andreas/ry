@@ -257,7 +257,7 @@ fn direct_attr<'a, 's>(context: &'a mut Cx<'s>, values: &[Local<'s>]) -> R<Optio
         [object, which] | [object, which, _] => (*object, *which),
         _ => return Ok(None),
     };
-    let Some(which) = which.downcast::<Str>() else {
+    let Some(which) = which.standard::<Str>() else {
         return Ok(None);
     };
     if which.len() != 1 || is_native(object) {
@@ -265,7 +265,7 @@ fn direct_attr<'a, 's>(context: &'a mut Cx<'s>, values: &[Local<'s>]) -> R<Optio
     }
     let exact = match values.get(2) {
         None => false,
-        Some(exact) => match exact.downcast::<Logical>() {
+        Some(exact) => match exact.standard::<Logical>() {
             Some(exact) if exact.len() == 1 => {
                 let value = exact.as_slice(context)[0];
                 value != NA_LOGICAL && value != 0
@@ -326,7 +326,7 @@ fn direct_set_attr<'a, 's>(context: &'a mut Cx<'s>, values: &[Local<'s>]) -> R<O
         return Ok(None);
     };
     // An ALTREP `which` takes the full call, which expands it.
-    let Some(which) = which.downcast::<Str>() else {
+    let Some(which) = which.standard::<Str>() else {
         return Ok(None);
     };
     if which.len() != 1
@@ -509,9 +509,13 @@ fn do_set_names<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'
         return Ok(object);
     }
     if object.r_type() == SexpType::Object {
-        let class = get_attribute(context, object, symbol(|symbols| symbols.class));
-        let class = match class.downcast::<Str>() {
-            Some(class) if !class.is_empty() => text(class.get(0)).into_owned(),
+        let class = context.root(get_attribute(
+            context,
+            object,
+            symbol(|symbols| symbols.class),
+        ));
+        let class = match dense::<Str>(context, class)? {
+            Some(class) if !class.is_empty() => text(class.get(context, 0)).into_owned(),
             _ => "S4".to_string(),
         };
         return Err(arguments.error(format!(
@@ -624,8 +628,8 @@ impl<'a> Classes<'a> {
         }
         if is_object(object) {
             let class = get_attribute(context, object, symbol(|symbols| symbols.class));
-            match class.downcast::<Str>() {
-                Some(class) if class.len() > 0 => return Some(Classes::Vector(class)),
+            match class.standard::<Str>() {
+                Some(class) if !class.is_empty() => return Some(Classes::Vector(class)),
                 Some(_) => {}
                 None if class.r_type() == SexpType::Nil => {}
                 None => return None,
@@ -635,7 +639,7 @@ impl<'a> Classes<'a> {
         if dim.r_type() == SexpType::Nil {
             return Some(Classes::Basic(basic_class(object)));
         }
-        let dim = dim.downcast::<Integer>()?;
+        let dim = dim.standard::<Integer>()?;
         Some(Classes::Fixed(if dim.len() == 2 {
             &["matrix", "array"]
         } else {

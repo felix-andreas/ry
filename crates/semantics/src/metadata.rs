@@ -4,7 +4,8 @@
 use {
     crate::{
         Db, SiteRole, SourceFile, file_syntax_sites, parse,
-        stubs::{META_PACKAGE_MEMBERS, stubs},
+        stubs::{CONDITIONAL_NAMESPACES, META_PACKAGE_MEMBERS, QUALIFIED_ONLY_NAMESPACES, stubs},
+        types::QueryName,
     },
     rustc_hash::FxHashMap,
     std::{collections::BTreeSet, num::NonZero, thread},
@@ -33,6 +34,10 @@ pub struct PackageMetadata {
     pub package: Option<String>,
     #[returns(ref)]
     pub native_symbols: NativeSymbols,
+    /// The names `pkg::name` reaches in the project's own package (see [`qualified_names`]),
+    /// or `None` when they are unknowable.
+    #[returns(ref)]
+    pub qualified_names: Option<BTreeSet<String>>,
 }
 
 /// The bindings `NAMESPACE`'s `useDynLib` directives create in the package namespace.
@@ -56,7 +61,30 @@ pub struct NamespaceFile {
     /// Only explicit `export()` names: `exportPattern` is a load-time regex, and
     /// `exportClasses`/`exportMethods`/`S3method` name S4 and S3 entities, not bindings.
     pub exports: Vec<(String, TextRange)>,
+    /// `exportMethods()` names, whose generics `pkg::name` reaches as well.
+    pub export_methods: Vec<String>,
+    /// Whether any `exportPattern()` directive exports names chosen at load time.
+    pub export_pattern: bool,
     pub native_symbols: NativeSymbols,
+}
+
+/// The names `pkg::name` reaches in a package: its `export()` and `exportMethods()` names and
+/// its lazy-loaded datasets, `::`'s fallback. An `exportPattern` matches names at load time, so
+/// the set is unknowable under one, and so it is without a `NAMESPACE` or with an unreadable
+/// dataset (`datasets` is `None`).
+pub fn qualified_names(
+    namespace: Option<&NamespaceFile>,
+    datasets: Option<Vec<String>>,
+) -> Option<BTreeSet<String>> {
+    let namespace = namespace.filter(|namespace| !namespace.export_pattern)?;
+    let mut names: BTreeSet<String> = namespace
+        .exports
+        .iter()
+        .map(|(name, _)| name.clone())
+        .chain(namespace.export_methods.iter().cloned())
+        .collect();
+    names.extend(datasets?);
+    Some(names)
 }
 
 /// A large file parses in chunks on separate threads. Every directive is self-contained, so
@@ -98,6 +126,8 @@ fn parse_namespace_in_chunks(source: &str, chunks: &[usize]) -> NamespaceFile {
     for part in parts {
         file.imports.extend(part.imports);
         file.exports.extend(part.exports);
+        file.export_methods.extend(part.export_methods);
+        file.export_pattern |= part.export_pattern;
         let symbols = part.native_symbols;
         file.native_symbols.names.extend(symbols.names);
         file.native_symbols
@@ -124,6 +154,16 @@ fn parse_namespace_chunk(source: &str, offset: TextSize) -> NamespaceFile {
             .filter_map(name_argument)
             .map(|(name, range)| (name, range + offset))
             .collect(),
+        export_methods: directives
+            .iter()
+            .filter(|(directive, _)| directive == "exportMethods")
+            .flat_map(|(_, values)| values)
+            .filter_map(name_argument)
+            .map(|(name, _)| name)
+            .collect(),
+        export_pattern: directives
+            .iter()
+            .any(|(directive, _)| directive == "exportPattern"),
         native_symbols: native_symbols(namespace_spec_of(&root)),
     }
 }
@@ -265,6 +305,36 @@ pub fn imports_every_name(db: &dyn Db) -> bool {
         .iter()
         .any(|(namespace, imported)| imported.is_none() && unknowable(namespace))
         || metadata.attached(db).iter().any(unknowable)
+}
+
+/// The names `pkg::name` reaches in the project's own package, when they are known. A check
+/// asks [`own_package_reaches`] for one name instead.
+pub fn own_qualified_names(db: &dyn Db) -> Option<&BTreeSet<String>> {
+    PackageMetadata::try_get(db)?.qualified_names(db).as_ref()
+}
+
+/// Whether the project's own `pkg::name` reaches `name`, `None` when the set is unknowable.
+/// Asked per name, so a `NAMESPACE` edit re-checks only the reads whose answer it changed.
+#[salsa::tracked(returns(copy))]
+pub fn own_package_reaches<'db>(db: &'db dyn Db, name: QueryName<'db>) -> Option<bool> {
+    own_qualified_names(db).map(|names| names.contains(name.name(db).text(db)))
+}
+
+/// Whether attaching `namespace` can change a finding. A gated namespace the project does not
+/// declare can, even when it is the project's own package, because the attach switches its
+/// shipped stubs on. Otherwise it cannot for the project's own package, nor for a namespace the
+/// stubs describe, which is active without the attach.
+pub fn attaching_changes_findings(db: &dyn Db, namespace: &str) -> bool {
+    let gated = CONDITIONAL_NAMESPACES.contains(&namespace)
+        || QUALIFIED_ONLY_NAMESPACES.contains(&namespace)
+        || META_PACKAGE_MEMBERS
+            .iter()
+            .any(|(meta, _)| *meta == namespace);
+    if gated && !declared_dependency(db, namespace) {
+        return true;
+    }
+    !is_own_package(db, namespace)
+        && !stubs(db).is_some_and(|library| library.knows_namespace(namespace))
 }
 
 pub fn is_own_package(db: &dyn Db, package: &str) -> bool {
@@ -911,6 +981,17 @@ pub fn parse_description_package(source: &str) -> Option<String> {
         .filter(|name| !name.is_empty())
 }
 
+/// Whether `LazyData` is true. Only then does `R CMD INSTALL` build the lazy-load database
+/// that `pkg::name` falls back to, so without it a dataset is reachable through `data()` alone.
+pub fn parse_description_lazy_data(source: &str) -> bool {
+    dcf_fields(source)
+        .into_iter()
+        .find(|(field, _)| *field == "LazyData")
+        .is_some_and(|(_, value)| {
+            matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "yes")
+        })
+}
+
 /// The operating system's name as R's `.Platform$OS.type` gives it, which names both the
 /// `R/` subdirectory whose code files a package loads and its `Collate.<os>` field.
 pub const OS_TYPE: &str = if cfg!(windows) { "windows" } else { "unix" };
@@ -1011,7 +1092,10 @@ mod tests {
             .iter()
             .map(|import| (&import.namespace, &import.name, import.range))
             .collect();
-        format!("{imports:?} {:?} {:?}", file.exports, file.native_symbols)
+        format!(
+            "{imports:?} {:?} {:?} {} {:?}",
+            file.exports, file.export_methods, file.export_pattern, file.native_symbols
+        )
     }
 
     #[test]

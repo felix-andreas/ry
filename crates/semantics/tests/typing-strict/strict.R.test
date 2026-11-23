@@ -70,7 +70,7 @@ f <- function() {
 f: fn() -> integer
 
 #---- one_origin_reported_once_however_many_uses
-frame <- data.frame(a = 1)
+frame <- as.data.frame(1)
 value <- frame$a
 first <- value
 second <- value
@@ -81,7 +81,7 @@ value: Unknown
 first: Unknown
 second: Unknown
 third: Unknown
-36..43 error[strict] strict mode: could not determine the type of `value`; add a type annotation
+35..42 error[strict] strict mode: could not determine the type of `value`; add a type annotation
 
 #==== directives
 #---- typing_comment_sets_the_mode
@@ -274,3 +274,119 @@ elementwise: <T, U> fn(a: T, b: U) -> Unknown
 157..158 error[strict] strict mode: parameter `a` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `a: TYPE`
 160..161 error[strict] strict mode: parameter `b` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `b: TYPE`
 163..168 error[strict] strict mode: this expression has an undetermined type (`Unknown`)
+
+#==== literal_decisions
+#---- c_decides_a_literal_as_r_type
+grow <- function(target: double) -> double[] {
+  bounds <- 1
+  bounds <- c(bounds, target)
+  bounds
+}
+#++++
+grow: fn(target: double) -> double[]
+
+#---- a_tuple_item_literal_takes_the_ry_number_beside_it
+alias Move = :Buy(quantity: F64, price: F64) | :Fee(amount: F64)
+spend <- function(moves: List<Move>) -> F64 {
+  total <- 0.0
+  for (move in moves) {
+    step <- match (move) {
+      :Buy(quantity = q, price = p) => (q, p)
+      :Fee(amount = a) => (0, a)
+    }
+    total <- total + step[[1]] * step[[2]]
+  }
+  total
+}
+#++++
+spend: fn(moves: List<Move>) -> F64
+
+#---- a_tuple_item_literal_beside_an_r_double_is_a_double
+alias Fill = :Buy(quantity: double, price: double) | :Sell(quantity: double, price: double) | :Fee(amount: double)
+book <- function(fills: list[Fill]) -> double {
+  position <- 0
+  realised <- 0
+  for (fill in fills) {
+    step <- match (fill) {
+      :Buy(quantity = q, price = p) => (q, p)
+      :Sell(quantity = q, price = p) => (-q, p)
+      :Fee(amount = a) => (0, a)
+    }
+    delta <- step[[1L]]
+    if (delta == 0) {
+      realised <- realised - step[[2L]]
+    } else {
+      position <- position + delta
+    }
+  }
+  realised + position
+}
+#++++
+book: fn(fills: list[Fill]) -> double
+
+#---- a_record_field_literal_takes_the_ry_number_beside_it
+alias Move = :Buy(quantity: F64, price: F64) | :Fee(amount: F64)
+spend <- function(moves: List<Move>) -> F64 {
+  total <- 0.0
+  for (move in moves) {
+    step <- match (move) {
+      :Buy(quantity = q, price = p) => (size = q, price = p)
+      :Fee(amount = a) => (size = 0, price = a)
+    }
+    total <- total + step$size * step$price
+  }
+  total
+}
+#++++
+spend: fn(moves: List<Move>) -> F64
+
+#---- a_string_item_literal_takes_the_str_beside_it
+alias Move = :Buy(name: Str, price: F64) | :Fee(amount: F64)
+spend <- function(moves: List<Move>) -> F64 {
+  total <- 0.0
+  for (move in moves) {
+    step <- match (move) {
+      :Buy(name = n, price = p) => (n, p)
+      :Fee(amount = a) => ("fee", a)
+    }
+    total <- total + step[[2]]
+  }
+  total
+}
+#++++
+spend: fn(moves: List<Move>) -> F64
+
+#---- a_tag_payload_literal_takes_the_ry_number_beside_it
+alias Move = :Buy(quantity: F64, price: F64) | :Fee(amount: F64)
+spend <- function(moves: List<Move>) -> F64 {
+  total <- 0.0
+  for (move in moves) {
+    step <- match (move) {
+      :Buy(quantity = q, price = p) => :Step(q, p)
+      :Fee(amount = a) => :Step(0, a)
+    }
+    total <- total + match (step) {
+      :Step(x, y) => x * y
+    }
+  }
+  total
+}
+#++++
+spend: fn(moves: List<Move>) -> F64
+
+#---- an_item_literal_the_number_cannot_hold_is_a_mismatch_at_the_literal
+alias Move = :Buy(quantity: I64, price: F64) | :Fee(amount: F64)
+spend <- function(moves: List<Move>) -> F64 {
+  total <- 0.0
+  for (move in moves) {
+    step <- match (move) {
+      :Buy(quantity = q, price = p) => (q, p)
+      :Fee(amount = a) => (2.5, a)
+    }
+    total <- total + step[[2]]
+  }
+  total
+}
+#++++
+spend: fn(moves: List<Move>) -> F64
+250..253 error[type-mismatch] this literal does not fit `I64`, which cannot hold its value exactly

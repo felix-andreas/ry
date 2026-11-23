@@ -156,6 +156,8 @@ pub enum Command {
         /// An R file to run after loading
         #[arg(long, short)]
         file: Option<PathBuf>,
+        #[command(flatten)]
+        startup: StartupArguments,
         /// Write a load plan for a plain R session to this file instead of loading
         #[arg(long, hide = true)]
         emit_plan: Option<PathBuf>,
@@ -198,6 +200,8 @@ pub enum Command {
         /// Keep running, and rerun tests after every edit
         #[arg(long, default_value_t = false)]
         watch: bool,
+        #[command(flatten)]
+        startup: StartupArguments,
         /// `gnu-r` runs on GNU R instead of ry's runtime
         #[arg(long, value_enum, hide = true)]
         runtime: Option<Runtime>,
@@ -219,6 +223,8 @@ pub enum Command {
         /// package's own, which are `collate`, `namespace` and `rd` unless it sets them)
         #[arg(long = "roclet")]
         roclets: Vec<String>,
+        #[command(flatten)]
+        startup: StartupArguments,
         /// `gnu-r` runs on GNU R instead of ry's runtime
         #[arg(long, value_enum, hide = true)]
         runtime: Option<Runtime>,
@@ -244,6 +250,10 @@ pub enum Command {
         /// Ship the vignettes as they are instead of rebuilding them
         #[arg(long, default_value_t = false, conflicts_with = "aot")]
         no_vignettes: bool,
+        /// Write the package's R code as plain R that GNU R and its tools read, with each
+        /// statement's inline annotations moved into `#:` comments above it
+        #[arg(long, default_value_t = false, conflicts_with = "aot")]
+        plain_r: bool,
         /// Install the package with its typed functions compiled ahead of time into its typed
         /// code file, as `ry install` does
         #[arg(long, default_value_t = false)]
@@ -325,6 +335,17 @@ pub struct SessionArguments {
     /// Editing keybindings for the console
     #[arg(long, value_enum, default_value_t, conflicts_with = "script")]
     pub keybindings: Keybindings,
+    #[command(flatten)]
+    pub startup: StartupArguments,
+}
+
+/// How a session starts, for every command that starts one.
+#[derive(Debug, Args)]
+pub struct StartupArguments {
+    /// Start without the user profile (`R_PROFILE_USER`, else `./.Rprofile`, else
+    /// `~/.Rprofile`), which a session otherwise runs once base R has loaded, as Rscript does
+    #[arg(long, visible_alias = "vanilla")]
+    pub no_init_file: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -375,6 +396,8 @@ pub enum Keybindings {
 pub struct Session {
     pub runtime: Runtime,
     pub mode: Mode,
+    /// Run the user profile once base R has loaded.
+    pub user_profile: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -410,10 +433,12 @@ impl Command {
             } => Session {
                 runtime: resolve_runtime(*runtime, runtime_variable, Runtime::Ry),
                 mode: session_mode(session, !no_load, *aot),
+                user_profile: !session.startup.no_init_file,
             },
             Command::R { session, no_load } => Session {
                 runtime: Runtime::GnuR,
                 mode: session_mode(session, !no_load, false),
+                user_profile: !session.startup.no_init_file,
             },
             Command::Repl {
                 keybindings,
@@ -427,6 +452,7 @@ impl Command {
                     keybindings: *keybindings,
                     load_package: !no_load,
                 },
+                user_profile: true,
             },
             _ => return None,
         };

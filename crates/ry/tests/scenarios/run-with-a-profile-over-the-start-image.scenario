@@ -1,0 +1,67 @@
+# A profile runs over the start-up image and sees the session GNU R's start-up shows it: only
+# `methods`, `Autoloads` and base attached, with ry's loader in front of base as a slow start has
+# it. A profile's warning prints right after its expression, without a startup heading. Whatever it attaches stays in front of `methods`,
+# `.First()` runs next, and then the default packages it left in `options(defaultPackages=)` are
+# attached in front of those, in GNU R's order. A default package it dropped is not attached, one
+# it added is, and setting `R_DEFAULT_PACKAGES` this late changes nothing. Options it sets and
+# bindings it changes in base survive into the script.
+
+requires ry-runtime
+
+file .Rprofile
+| cat("profile:", setdiff(search(), "package:ry"), "\n")
+| cat("loader:", "package:ry" %in% search(), "\n")
+| warning("from profile")
+| library(stats)
+| library(tools)
+| options(defaultPackages = c(setdiff(getOption("defaultPackages"), "graphics"), "splines"))
+| options(contrasts = c("contr.sum", "contr.poly"))
+| Sys.setenv(R_DEFAULT_PACKAGES = "NULL")
+| unlockBinding("pi", baseenv())
+| assign("pi", 3, envir = baseenv())
+| .First <- function() {
+|   cat("first:", setdiff(search(), "package:ry"), "\n")
+|   assign("from_first", TRUE, envir = globalenv())
+| }
+file report.R
+| cat("script:", setdiff(search(), c("tools:ry", "package:std", "package:ry")), "\n")
+| cat("contrasts:", getOption("contrasts"), "\n")
+| cat("base:", pi, "\n")
+| cat("first ran:", from_first, "\n")
+| cat("graphics:", "package:graphics" %in% search(), "\n")
+| fit <- lm(mpg ~ factor(cyl), data = mtcars)
+| cat("coef:", round(coef(fit), 2), "\n")
+file missing-package.R
+| options(defaultPackages = c("stats", "nosuchpkg", "std"))
+file short.R
+| cat("script:", setdiff(search(), c("tools:ry", "package:std", "package:ry")), "\n")
+
+unset R_DEFAULT_PACKAGES
+run ry run report.R
+expect exit 0
+expect stdout "profile: .GlobalEnv package:methods Autoloads package:base \n"
+expect stdout "loader: TRUE"
+expect stderr "Warning message:\nfrom profile"
+expect stdout "first: .GlobalEnv package:tools package:stats package:methods Autoloads package:base \n"
+expect stdout "script: .GlobalEnv package:splines package:grDevices package:utils package:datasets package:tools package:stats package:methods Autoloads package:base \n"
+expect stdout "contrasts: contr.sum contr.poly"
+expect stdout "base: 3"
+expect stdout "first ran: TRUE"
+expect stdout "graphics: FALSE"
+expect stdout "coef: 20.5 6.16 -0.76"
+
+# `sQuote` quotes the package name with curly quotes in a UTF-8 locale and straight ones in the C
+# locale, as in GNU R, so the locale is pinned.
+env LC_ALL C
+env R_PROFILE_USER missing-package.R
+run ry run short.R
+expect exit 0
+expect stdout "script: .GlobalEnv package:stats package:methods Autoloads package:base \n"
+expect stderr "During startup - Warning message:\npackage 'nosuchpkg' in options(\"defaultPackages\") was not found"
+
+# A slow start warns for the same default packages.
+env RY_IMAGE 0
+run ry run short.R
+expect exit 0
+expect stdout "script: .GlobalEnv package:stats package:methods Autoloads package:base \n"
+expect stderr "During startup - Warning message:\npackage 'nosuchpkg' in options(\"defaultPackages\") was not found"

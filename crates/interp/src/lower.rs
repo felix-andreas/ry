@@ -284,15 +284,12 @@ pub unsafe fn parse_script_prefix(text: &str) -> (Script<'_>, Option<SyntaxFailu
 /// parse in the order GNU R would meet them: the offset of the last token it has read by
 /// then, then which part raises it, then a tie-break among errors of one part.
 ///
-/// GNU R's lexer raises an error as it reads a token (rank 0). A grammar action runs when the
-/// token after its construct is read, innermost construct first (rank 1). The grammar refuses
-/// a token only after the actions that token completes have run (ranks 2 and 3, the line
-/// break GNU R ends the input with before the end of the input itself). A placeholder no pipe
-/// replaces is found once the token that ends its top-level expression is accepted (rank 4).
-/// `open_from` is where the last construct that the end of the input cuts short starts: a
-/// construct holding it is never complete, so its action never runs (rank 5). Neither does
-/// the action of a construct that is not whole when the grammar refuses a token, such as the
-/// argument of `c("" = -)`. `refused` holds the offsets of those tokens.
+/// Ranks: 0, the lexer's error as it reads a token; 1, a grammar action, run when the token
+/// after its construct is read, innermost first; 2 and 3, the grammar refusing a token (the
+/// final line break, then the end of input) after the actions that token completes; 4, a
+/// placeholder no pipe replaces; 5, a construct holding `open_from`, which the end of input
+/// cuts short, so its action never runs. Nor does the action of a construct that is not whole
+/// when the grammar refuses a token (`c("" = -)`); `refused` holds those tokens' offsets.
 fn error_order(
     root: &SyntaxNode,
     text: &str,
@@ -2549,8 +2546,6 @@ pub fn unescape_bytes(text: &str) -> Result<(Vec<u8>, bool), EscapeFailure> {
         value,
     })
 }
-
-// The internals.
 
 /// `parse(file, n, text, prompt, srcfile, encoding)`.
 unsafe fn do_parse(call: &Call<'_>) -> R<Sexp> {

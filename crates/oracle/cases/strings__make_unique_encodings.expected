@@ -1,0 +1,29 @@
+[stdout]
+| [1] NA     "NA.2" "NA"   "NA.1" "NA.3"
+| [1] "unknown" "unknown" "unknown" "unknown" "unknown"
+| [1] "é"   "é_1" "é_2"
+| [1] "UTF-8"   "unknown" "unknown"
+| [1] "é"   "é.1" "a"   "a.1" "é.2"
+| [1] "UTF-8"   "unknown" "unknown" "unknown" "unknown"
+| [1] "é"   "é.1" "é.2"
+| [1] "latin1"  "unknown" "unknown"
+| [1] "a"   "a.2" "a.1" "a.3"
+| [1] "unknown" "unknown" "unknown" "unknown"
+| [1] "é"   "é.2" "é.1"
+| [1] "unknown" "unknown" "unknown"
+| [1] "é"   "é.2" "é.1"
+| [1] "UTF-8"   "unknown" "unknown"
+| [1] "é"   "éé1"
+| [1] "UTF-8"   "unknown"
+| [1] c3 a9 2e 31
+| [1] "x"   "x.1"
+| [1] "unknown" "unknown"
+| [1] "translating strings with \"bytes\" encoding is not allowed"
+| [1] "translating strings with \"bytes\" encoding is not allowed"
+| [1] "'sep' must be a character string"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "'sep' must be a character string"

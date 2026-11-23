@@ -255,6 +255,36 @@ fn check_validates_namespace_imports_against_stubs() {
 }
 
 #[test]
+fn check_reaches_a_package_s_own_dataset_only_under_lazy_data() {
+    let files = |description: &'static str| -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("DESCRIPTION", description),
+            ("NAMESPACE", "export(run)\n"),
+            ("R/main.R", "run <- function() tallyr::prices\n"),
+            ("data/prices.csv", "a,b\n1,2\n"),
+        ]
+    };
+    let lazy = ry(
+        project(&files("Package: tallyr\nLazyData: true\n")).path(),
+        &["check", "."],
+    );
+    assert!(
+        !lazy.stderr.contains("`prices`"),
+        "a lazy-loaded dataset is reachable: {}",
+        lazy.stderr
+    );
+    // Without `LazyData`, `R CMD INSTALL` builds no lazy-load database for `::` to fall back to.
+    let eager = ry(project(&files("Package: tallyr\n")).path(), &["check", "."]);
+    assert!(
+        eager
+            .stderr
+            .contains("`prices` is not exported by `tallyr`."),
+        "a dataset without `LazyData` is reachable through `data()` alone: {}",
+        eager.stderr
+    );
+}
+
+#[test]
 fn check_flags_unused_imports_when_opted_in() {
     let files: &[(&str, &str)] = &[
         ("R/main.R", "run <- function() stats::sd(c(1, 2))\n"),
@@ -494,7 +524,10 @@ fn analysis_stats_rejects_a_workspace_without_r_files() {
 fn analysis_stats_reports_phases_and_probe() {
     let directory = project(&[
         ("R/a.R", "value <- 1L\nf <- function() value + 1L\n"),
-        ("R/b.R", "g <- function(x) f() + x\n"),
+        (
+            "R/b.R",
+            "g <- function(x) f() + x\nh <- function() R.home()\n",
+        ),
     ]);
     let output = ry(directory.path(), &["debug", "analysis-stats", "."]);
     let rendered = &output.stdout;
@@ -506,6 +539,8 @@ fn analysis_stats_reports_phases_and_probe() {
         "typecheck (+interfaces)",
         "slowest files (typecheck):",
         "incremental (typing burst",
+        "exports containing Unknown: 1 of 4 package items",
+        "a function: return only",
     ] {
         assert!(
             rendered.contains(section),

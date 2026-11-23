@@ -1,187 +1,8 @@
 //! Typed pointers and the context that make code above the heap safe Rust
 //! (`docs/src/content/docs/development/design/memory-safety.md`).
 //!
-//! A safepoint is a point where the heap may free an object or foreign code may run: an
-//! allocation, a call into R code, a call into native code. A function that can reach one takes
-//! `&mut Cx`, and a value read out of the heap borrows `&Cx`, so the borrow checker refuses a
-//! value held across a safepoint without a root:
-//!
-//! ```compile_fail,E0502
-//! use heap::handle::{Cx, List, Local, Real};
-//! fn held_across_an_allocation<'s>(cx: &mut Cx<'s>, list: Local<'s, List>) {
-//!     let first = list.get(cx, 0);
-//!     let copy = cx.alloc::<Real>(1);
-//!     let _ = (first, copy);
-//! }
-//! ```
-//!
-//! Rooting it is what the rule asks for:
-//!
-//! ```no_run
-//! use heap::handle::{Cx, List, Local, Real};
-//! fn rooted_across_an_allocation<'s>(cx: &mut Cx<'s>, list: Local<'s, List>) {
-//!     let first = cx.root(list.get(cx, 0));
-//!     let copy = cx.alloc::<Real>(1);
-//!     let _ = (first, copy);
-//! }
-//! ```
-//!
-//! A slice of a vector's elements borrows the context the same way:
-//!
-//! ```compile_fail,E0502
-//! use heap::handle::{Cx, Local, Real};
-//! fn slice_across_an_allocation<'s>(cx: &mut Cx<'s>, vector: Local<'s, Real>) {
-//!     let elements = vector.as_slice(cx);
-//!     let copy = cx.alloc::<Real>(1);
-//!     let _ = (elements, copy);
-//! }
-//! ```
-//!
-//! So do a string's bytes:
-//!
-//! ```compile_fail,E0502
-//! use heap::handle::{Chars, Cx, Local, Real};
-//! fn bytes_across_an_allocation<'s>(cx: &mut Cx<'s>, text: Local<'s, Chars>) {
-//!     let bytes = text.bytes(cx);
-//!     let copy = cx.alloc::<Real>(1);
-//!     let _ = (bytes, copy);
-//! }
-//! ```
-//!
-//! A rooted value cannot leave the scope that roots it, except as the scope's result:
-//!
-//! ```compile_fail
-//! use heap::handle::{Cx, Local, Real};
-//! use heap::HeapError;
-//! fn leaves_its_scope<'s>(cx: &mut Cx<'s>) {
-//!     let mut leaked = None;
-//!     let _ = cx.scope(|cx| -> Result<Local<'_, Real>, HeapError> {
-//!         let inner = cx.alloc::<Real>(1)?.finish();
-//!         leaked = Some(inner);
-//!         Ok(inner)
-//!     });
-//!     let _ = leaked;
-//! }
-//! ```
-//!
-//! ```no_run
-//! use heap::handle::{Cx, Local, Real};
-//! use heap::HeapError;
-//! fn returned_from_its_scope<'s>(cx: &mut Cx<'s>) -> Result<Local<'s, Real>, HeapError> {
-//!     cx.scope(|cx| Ok(cx.alloc::<Real>(1)?.finish()))
-//! }
-//! ```
-//!
-//! While an object is written in place, the context is borrowed mutably, so nothing allocates
-//! and no slice taken earlier is alive:
-//!
-//! ```compile_fail,E0499
-//! use heap::handle::{Cx, Owned, Real};
-//! fn allocates_during_a_write<'s>(cx: &mut Cx<'s>, mut vector: Owned<'s, Real>) {
-//!     let mut write = vector.write(cx);
-//!     let (elements, _reader) = write.split();
-//!     let copy = cx.alloc::<Real>(1);
-//!     elements[0] = 1.0;
-//!     let _ = copy;
-//! }
-//! ```
-//!
-//! ```compile_fail,E0502
-//! use heap::handle::{Cx, Owned, Real};
-//! fn reads_an_earlier_slice_during_a_write<'s>(cx: &mut Cx<'s>, mut vector: Owned<'s, Real>) {
-//!     let before = vector.get().as_slice(cx);
-//!     let mut write = vector.write(cx);
-//!     let (elements, _reader) = write.split();
-//!     elements[0] = before[1];
-//! }
-//! ```
-//!
-//! ```no_run
-//! use heap::handle::{Cx, Local, Owned, Real};
-//! fn reads_through_the_reader<'s>(cx: &mut Cx<'s>, mut vector: Owned<'s, Real>, source: Local<'s, Real>) {
-//!     let mut write = vector.write(cx);
-//!     let (elements, reader) = write.split();
-//!     match reader.slice(source) {
-//!         Some(source) => elements[0] = source[1],
-//!         None => elements.copy_within(1..2, 0),
-//!     }
-//! }
-//! ```
-//!
-//! A new object is the only one that can be filled without a check, and it is not `Copy`:
-//!
-//! ```compile_fail,E0382
-//! use heap::handle::{Cx, Integer};
-//! use heap::HeapError;
-//! fn written_after_it_is_visible<'s>(cx: &mut Cx<'s>) -> Result<(), HeapError> {
-//!     let mut fresh = cx.alloc::<Integer>(4)?;
-//!     let visible = fresh.finish();
-//!     fresh.as_mut_slice()[0] = 1;
-//!     let _ = visible;
-//!     Ok(())
-//! }
-//! ```
-//!
-//! An object with no element storage has no element access. An ALTREP object is never a vector
-//! kind, so a write into one has to go through a copy the allocator made:
-//!
-//! ```compile_fail,E0599
-//! use heap::handle::{Cx, Owned};
-//! fn written_without_storage<'s>(cx: &mut Cx<'s>, mut copy: Owned<'s>) {
-//!     copy.write(cx).split().0[0] = 1.0;
-//! }
-//! ```
-//!
-//! Whether a vector may be written where it is, is one value. An [`Owned`] comes from a new
-//! vector or from the one `unsafe` claim that nothing else refers to an existing one, so a
-//! shared value has to be copied first, and the copy has to be one with storage:
-//!
-//! ```compile_fail,E0599
-//! use heap::handle::{Cx, Local, Real};
-//! fn written_while_shared<'s>(cx: &mut Cx<'s>, shared: Local<'s, Real>) {
-//!     shared.write(cx).split().0[0] = 1.0;
-//! }
-//! ```
-//!
-//! ```no_run
-//! use heap::handle::{Cx, Local, Owned, Real};
-//! use heap::HeapError;
-//! fn written_into_a_copy<'s>(
-//!     cx: &mut Cx<'s>,
-//!     shared: Local<'s, Real>,
-//! ) -> Result<Local<'s, Real>, HeapError> {
-//!     let mut copy = cx.alloc::<Real>(shared.len())?;
-//!     copy.as_mut_slice().copy_from_slice(shared.as_slice(cx));
-//!     let mut owned: Owned<'s, Real> = copy.owned();
-//!     owned.write(cx).split().0[0] = 1.0;
-//!     Ok(owned.finish())
-//! }
-//! ```
-//!
-//! A pointer has no `==`. Two objects are compared with `is`, and strings are not, because one
-//! text can be several objects:
-//!
-//! ```compile_fail,E0369
-//! use heap::handle::{Chars, Gc};
-//! fn compared_by_address(left: Gc<'_, Chars>, right: Gc<'_, Chars>) -> bool {
-//!     left == right
-//! }
-//! ```
-//!
-//! ```compile_fail,E0277
-//! use heap::handle::{Chars, Gc};
-//! fn compared_by_identity(left: Gc<'_, Chars>, right: Gc<'_, Chars>) -> bool {
-//!     left.is(right)
-//! }
-//! ```
-//!
-//! ```no_run
-//! use heap::handle::{Gc, Symbol};
-//! fn same_symbol(left: Gc<'_, Symbol>, right: Gc<'_, Symbol>) -> bool {
-//!     left.is(right)
-//! }
-//! ```
-
+//! The examples, which are doc tests of what the borrow checker refuses, are in `handle.md`.
+#![doc = include_str!("handle.md")]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use {
@@ -454,7 +275,19 @@ impl<'a, T: Kind> Gc<'a, T> {
 
     /// This pointer as a `U`, when the object is one.
     #[inline]
-    pub fn downcast<U: Kind>(self) -> Option<Gc<'a, U>> {
+    pub fn downcast<U: Exact>(self) -> Option<Gc<'a, U>> {
+        admits::<U>(self.raw).then_some(Gc {
+            raw: self.raw,
+            borrow: PhantomData,
+            kind: PhantomData,
+        })
+    }
+
+    /// This pointer as a standard vector of `U`, or `None` when the object is another type or
+    /// an ALTREP vector of `U`'s type, which has no element storage. Only a path that falls
+    /// back to one that expands ALTREP objects may read that `None` as "not a `U`".
+    #[inline]
+    pub fn standard<U: Vector>(self) -> Option<Gc<'a, U>> {
         admits::<U>(self.raw).then_some(Gc {
             raw: self.raw,
             borrow: PhantomData,
@@ -657,7 +490,19 @@ impl<'s, T: Kind> Local<'s, T> {
 
     /// This pointer as a `U`, when the object is one.
     #[inline]
-    pub fn downcast<U: Kind>(self) -> Option<Local<'s, U>> {
+    pub fn downcast<U: Exact>(self) -> Option<Local<'s, U>> {
+        admits::<U>(self.raw).then_some(Local {
+            raw: self.raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        })
+    }
+
+    /// This pointer as a standard vector of `U`, or `None` when the object is another type or
+    /// an ALTREP vector of `U`'s type, which has no element storage. Only a path that falls
+    /// back to one that expands ALTREP objects may read that `None` as "not a `U`".
+    #[inline]
+    pub fn standard<U: Vector>(self) -> Option<Local<'s, U>> {
         admits::<U>(self.raw).then_some(Local {
             raw: self.raw,
             scope: PhantomData,
@@ -1076,9 +921,10 @@ impl<'s, T: Kind> Owned<'s, T> {
         }
     }
 
-    /// The object as kind `U`, or itself when it is not one.
+    /// The object as a standard vector of `U`, or itself when it is another type or an ALTREP
+    /// vector, which has no element storage to write.
     #[inline]
-    pub fn downcast<U: Kind>(self) -> Result<Owned<'s, U>, Owned<'s, T>> {
+    pub fn standard<U: Vector>(self) -> Result<Owned<'s, U>, Owned<'s, T>> {
         if admits::<U>(self.raw) {
             Ok(Owned {
                 raw: self.raw,
@@ -1157,6 +1003,12 @@ pub trait Kind: sealed::Sealed + 'static {
     fn admits(kind: SexpType, altrep: bool) -> bool;
 }
 
+/// A kind whose objects [`Local::downcast`] can recognize: whether an object is one does not
+/// depend on ALTREP. A [`Vector`] kind is not one, because an ALTREP vector of its type has no
+/// element storage: its caller chooses between [`Local::standard`], which leaves ALTREP
+/// vectors out, and expanding them (`interp::handles::dense`).
+pub trait Exact: Kind {}
+
 /// A kind whose objects are compared by identity. Every kind but [`Chars`] is one: the heap
 /// interns a text once per encoding mark, so two strings with the same text can be two objects.
 pub trait Identity: Kind {}
@@ -1220,6 +1072,16 @@ macro_rules! kinds {
         impl Identity for $name {}
     )*};
 }
+
+impl Exact for Value {}
+impl Exact for Alt {}
+impl Exact for Chars {}
+impl Exact for Symbol {}
+impl Exact for Pairlist {}
+impl Exact for Language {}
+impl Exact for Closure {}
+impl Exact for Environment {}
+impl Exact for Promise {}
 
 // Only a vector can be an ALTREP object (`Heap::alloc_altrep`), so the other kinds are told by
 // their type alone, which a walk over an attribute list tests for every cell and tag.

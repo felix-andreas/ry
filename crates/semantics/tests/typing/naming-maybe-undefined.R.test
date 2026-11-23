@@ -217,3 +217,150 @@ f <- function(flag) {
 == R/main.R
 f: fn(flag: logical) -> fn() -> integer
 67..72 warning[maybe-undefined] `cache` is only assigned on some paths here, so this read can find nothing.
+
+#==== outer_bindings
+#---- a_top_level_binding_serves_the_unassigned_path
+#~~~~ R/main.R
+limit <- "all"
+f <- function(ok) {
+  if (ok) limit <- 5L
+  limit
+}
+#++++
+== R/main.R
+limit: character
+f: fn(ok: logical) -> integer | character
+
+#---- a_binding_in_another_file_serves_the_unassigned_path
+#~~~~ R/main.R
+f <- function(ok) {
+  if (ok) limit <- 5L
+  limit
+}
+#~~~~ R/other.R
+limit <- "all"
+#++++
+== R/main.R
+f: fn(ok: logical) -> integer | character
+== R/other.R
+limit: character
+
+#---- an_enclosing_function_binding_serves_the_unassigned_path
+#~~~~ R/main.R
+f <- function() {
+  inner <- "start"
+  function(flag) {
+    if (flag) inner <- 2L
+    inner
+  }
+}
+#++++
+== R/main.R
+f: fn() -> fn(flag: logical) -> integer | character
+
+#---- a_base_binding_serves_the_unassigned_path
+#~~~~ R/main.R
+f <- function(ok) {
+  if (ok) pi <- 3L
+  pi
+}
+#++++
+== R/main.R
+f: fn(ok: logical) -> integer | double
+
+#---- a_library_function_under_a_local_variable_is_left_out
+#~~~~ R/main.R
+g <- function(ok: logical) -> double {
+  if (ok) max <- 3
+  if (ok) return(max)
+  0
+}
+#++++
+== R/main.R
+g: fn(ok: logical) -> double
+
+#---- a_package_function_under_a_local_variable_is_left_out
+# mgcv's timing: the read is guarded like the write, so it never reaches the
+# package's own `t2`.
+#~~~~ R/main.R
+fit <- function(trace: logical) {
+  if (trace) t2 <- proc.time()
+  if (trace) print(proc.time() - t2)
+  invisible(NULL)
+}
+#~~~~ R/smooth.R
+t2 <- function(..., k = NA) list(k = k)
+#++++
+== R/main.R
+fit: fn(trace: logical) -> NULL
+== R/smooth.R
+t2: <T> fn(...: Any, [k]: T) -> list{k: T}
+
+#---- an_enclosing_function_under_a_local_variable_is_left_out
+# mgcv's Newton loop: `ls` is bound by every iteration, and the enclosing
+# function's `ls` is a different thing that shares the name.
+#~~~~ R/main.R
+family <- function() {
+  ls <- function(y) list(ls = 0)
+  saturated <- function(y) {
+    for (i in 1:200) ls <- list(l = y)
+    ls$l
+  }
+  list(ls = ls, saturated = saturated)
+}
+#++++
+== R/main.R
+family: <T, U> fn() -> list{ls: fn([y]: T) -> list{ls: double}, saturated: fn([y]: U) -> U}
+
+#---- an_exit_handler_reads_a_name_written_after_it
+# R runs the `on.exit` expression when the function returns, after the write.
+#~~~~ R/main.R
+read_file <- function(path: character) {
+  on.exit(close(con))
+  con <- file(path)
+  readLines(con)
+}
+#++++
+== R/main.R
+read_file: fn(path: character) -> character[]
+
+#---- a_closure_inside_an_exit_handler_reads_its_own_frame_in_order
+#~~~~ R/main.R
+f <- function(xs: list[double]) {
+  on.exit(lapply(xs, function(x) {
+    print(late)
+    late <- 1
+    x
+  }))
+  invisible(NULL)
+}
+#++++
+== R/main.R
+f: fn(xs: list[double]) -> NULL
+79..83 warning[unresolved] I could not resolve `late` in this package, its imports, or builtins. Did you mean `date`?
+89..93 warning[unused] `late` is assigned but never used.
+
+#---- literals_on_both_paths_read_as_r_types
+#~~~~ R/main.R
+limit <- "all"
+f <- function(ok) {
+  if (ok) limit <- 5
+  limit
+}
+#++++
+== R/main.R
+limit: character
+f: fn(ok: logical) -> double | character
+
+#---- a_name_bound_nowhere_else_is_still_maybe_undefined
+#~~~~ R/main.R
+limit <- "all"
+f <- function(ok) {
+  if (ok) other <- 5L
+  other
+}
+#++++
+== R/main.R
+limit: character
+f: fn(ok: logical) -> integer
+59..64 warning[maybe-undefined] `other` is only assigned on some paths here, so this read can find nothing.

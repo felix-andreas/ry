@@ -1,0 +1,15 @@
+[stdout]
+| [1] "unknown" "unknown" "unknown" "unknown"
+| [1] "unknown" "unknown" "unknown" "unknown"
+|      Package Author  Note Encoding
+| [1,]   FALSE  FALSE FALSE    FALSE
+| [1] 63 61 66 e9
+|  [1] 4b 69 72 69 6c 6c 20 4d c3 bc 6c 6c 65 72 20 5b 61 75 74 5d
+[messages]
+[warnings]
+[errors]
+[value]
+raw
+| as.raw(c(0x4b, 0x69, 0x72, 0x69, 0x6c, 0x6c, 0x20, 0x4d, 0xc3, 
+| 0xbc, 0x6c, 0x6c, 0x65, 0x72, 0x20, 0x5b, 0x61, 0x75, 0x74, 0x5d
+| ))

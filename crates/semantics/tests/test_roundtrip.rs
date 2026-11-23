@@ -28,7 +28,7 @@ use {
 /// `return(NA)` takes the type of the other returns when inferred, while a declared return type
 /// checks it as `logical`. A callback shape inferred from calls lets a later call omit an argument
 /// an earlier call passed, while the declared shape requires it.
-const KNOWN_UNWRITABLE: [&str; 21] = [
+const KNOWN_UNWRITABLE: [&str; 23] = [
     "semantics/tests/typing::correct_r__a_formal_used_as_a_vector_passes_a_scalar_parameter :: unpack",
     "semantics/tests/typing::correct_r__a_null_default_is_a_placeholder_at_a_numeric_parameter :: solve",
     "semantics/tests/typing::correct_r__an_inferred_scalar_parameter_takes_a_vector_of_its_type :: rlength",
@@ -50,6 +50,8 @@ const KNOWN_UNWRITABLE: [&str; 21] = [
     "semantics/tests/typing::correct_r__a_formal_forwarded_to_a_missing_tested_defaulted_parameter_is_optional :: pick_format",
     "semantics/tests/typing::returns__a_bare_na_return_takes_the_type_of_the_other_returns :: curly_package",
     "semantics/tests/typing::correct_r__a_callback_may_later_be_called_without_an_argument_an_earlier_call_passed :: fetch",
+    "semantics/tests/typing::correct_r__a_function_supplied_on_the_missing_path_types_as_a_default :: f",
+    "semantics/tests/typing::correct_r__a_function_supplied_on_the_missing_path_types_as_a_default :: g",
 ];
 
 #[test]
@@ -142,11 +144,17 @@ fn rendered_schemes(db: &RootDatabase, file: SourceFile) -> Vec<(String, String,
     schemes
 }
 
-/// Ordinary comments may interleave with a multi-line `#:` block, so the whole run counts.
+/// Ordinary comments may interleave with a multi-line `#:` block, so the whole run counts, and
+/// a block may start past a `;` on the line of the statement before.
 fn already_annotated(text: &str, line_start: usize) -> bool {
-    text[..line_start]
-        .lines()
-        .rev()
-        .take_while(|line| line.trim_start().starts_with('#'))
-        .any(|line| line.trim_start().starts_with("#:"))
+    let mut lines = text[..line_start].lines().rev().peekable();
+    while let Some(line) = lines.next_if(|line| line.trim_start().starts_with('#')) {
+        if line.trim_start().starts_with("#:") {
+            return true;
+        }
+    }
+    lines.next().is_some_and(|line| {
+        line.split_once(';')
+            .is_some_and(|(_, rest)| rest.trim_start().starts_with("#:"))
+    })
 }

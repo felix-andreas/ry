@@ -75,23 +75,28 @@ length : fn(x: Any) -> integer
 lapply : <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named: U]
 ```
 
-### Opaque types
+### Abstract types
 
-Besides values, a stub can declare a type. A line `@type NAME` declares an *opaque nominal type*: a
+Besides values, a stub can declare a type. A line `@type NAME` declares an *abstract nominal type*: a
 named type with no inspectable representation, for standard-library values the type grammar cannot
 describe structurally, such as `factor`, `connection`, or `Date`.
 
-An opaque nominal is compatible only with itself, and a value of it can only come from a function
+An abstract nominal is compatible only with itself, and a value of it can only come from a function
 declared to return it. So `Sys.Date()` is a `Date`, and passing it where a `factor` is expected is a
 type error. The functions that *consume* such values usually keep `Any` parameters, because R
-coerces liberally; the nominals exist to tighten return types. Using `$`, `[`, or `[[` on an opaque
+coerces liberally; the nominals exist to tighten return types. Using `$`, `[`, or `[[` on an abstract
 nominal gives `Unknown` rather than an error, so value-dependent access stays usable, and strict
 mode flags each such access. The [typing reference](/reference/type-system#nominal-types) has the
 full rules.
 
-An opaque type may take type parameters, as `@type Dict<K, V>` does in `types/std.Rtypes`. Its
+An abstract type may take type parameters, as `@type Dict<K, V>` does in `types/std.Rtypes`. Its
 parameters are invariant, so a `Dict<character, double>` is neither a `Dict<character, Any>` nor
 the other way around, and `Dict<K, V>` in a signature binds both parameters at a call.
+
+`@type NAME {TYPE}` gives the nominal a representation, as a project's `#: @type` does. A value of
+it then passes wherever its representation is expected, never the other way around, which is how a
+stub declares an S3 subclass: `@type xts {zoo}` lets an `xts` series reach a parameter typed `zoo`,
+while a plain `zoo` is still not an `xts`.
 
 A stub can also declare a structural alias, written exactly like a project's `#: @alias`:
 
@@ -144,8 +149,36 @@ Under strict mode, a constant at the top level of a package file may call only p
 the name: marking any candidate of an overload set marks the name, and a later source that redeclares
 the name without the marker clears it. `@pure` and `@masked` may appear in either order. Mark a
 function only when no argument can make it read or change state outside its result: `cat`,
-`Sys.time` and `options` are not pure, and neither is a function that calls back into an argument it
-was given, such as `lapply`.
+`Sys.time` and `options` are not pure.
+
+A function that calls a function it is given, such as `lapply`, is pure only when that function is.
+`@pure(FUN)` declares this: the call is pure when the function passed at each named parameter is
+pure, and its other arguments have no effect.
+
+```
+lapply : @pure(FUN) <T, U> fn(X: list[T], FUN: fn(T) -> U, ...: Any) -> list[U]
+```
+
+The names match the function type's parameters, as R matches arguments against the first candidate,
+by name or by position, and a name the type does not declare is a stub problem. purrr's mapping
+functions read a string or a number passed as `.f` as the element to extract, and a formula such as
+`~ .x * 2` as a function, so a call qualified by or resolving to `purrr` accepts those too.
+
+### Parameters that take ry values
+
+The `@opaque(...)` attribute names the parameters the function only forces, and perhaps hands
+back, without inspecting the value as an R object:
+
+```
+expect_error : @opaque(object) <T> fn(object: T, [regexp]: Any, ...: Any) -> T
+```
+
+A ry record, tuple, tag or other native value may reach a named parameter, so
+`expect_error(make_point(-1), "negative")` checks while `expect_equal(make_point(1), p)` is still
+reported. Arguments match the parameters as R matches them against the first candidate, by name
+or by position. A name the function type does not declare is a stub problem. Like `@pure`, the
+attribute belongs to the name, combines with the others in any order, and a later source that
+redeclares the name without it clears it.
 
 ## Overloads and generics
 
@@ -352,8 +385,10 @@ source:
   [overload sets](#overloads-and-generics)).
 - `nominals` is the set of `@type` names.
 - `masked` maps each `@masked` name to the formals declared before its `...`.
-- `pure` holds each `@pure` name, and `pure_by_namespace` the same names per declaring namespace,
-  for `pkg::name` calls.
+- `opaque` maps each `@opaque` name to the parameters it names.
+- `pure_by_namespace` maps each declaring namespace to its `@pure` names, each with the parameters
+  `@pure(...)` names (empty when the function is pure whatever its arguments). A bare call reads the
+  namespace of the name's winning declaration, and `pkg::name` the named one.
 - `exports_by_namespace` maps a namespace to the names it declares.
 - `declarations` maps a name to the source index and range of its winning declaration. The declaring
   namespace is derived from the source index rather than stored, so the two can never disagree.

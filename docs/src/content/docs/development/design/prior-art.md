@@ -143,6 +143,9 @@ sources:
   - id: beans
     resource: https://arxiv.org/abs/1908.05647
     title: "Ullrich and de Moura: Counting Immutable Beans, Reference Counting Optimized for Purely Functional Programming (IFL 2019), section 7.2"
+  - id: porffor
+    resource: https://porffor.dev/
+    title: "Porffor: an ahead-of-time compiler for JavaScript and TypeScript"
   - id: okf
     resource: https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md
     title: Open Knowledge Format v0.2
@@ -1079,6 +1082,27 @@ The scope keeps it exact:
 
 **What ry rejects.** pqR's approach as a fork of GNU R, for the reason in the runtime design.
 
+### Porffor
+
+**What it is.** Porffor compiles JavaScript and TypeScript ahead of time, with no interpreter at run
+time. Its output is one native binary, built through C (so any target with a C compiler) or through
+WebAssembly. Its page claims about 0.9 MB of memory per app (over 1,000 apps per GB, against about
+28 for Node containers and 45 for self-hosted workerd) and a React server-rendering demo of 2.6 MB
+against 137 MB for Node, 79 MB for Deno and 59 MB for Bun. It measures conformance with Test262 and
+with a corpus of real packages: 76.8% of 1,295 popular npm packages compile with output matching
+Node. Its status is alpha.[^porffor]
+
+**Why it matters to ry.** It is the closest analogue to compiling a dynamic language fully ahead of
+time through C or Wasm, so it bears on `ry run --aot` and `ry build --aot --exe`, on small
+standalone binaries and per-process memory, and on measuring conformance with a corpus of real
+packages, as ry's oracle against GNU R and the pinned CRAN test suites do.
+
+**To study.** Its page does not say, so each of these is open:
+
+- How it handles JavaScript's dynamic types.
+- How it manages memory (its garbage collector).
+- How it handles `eval`-like features.
+
 ## About this page's format
 
 This page is an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format)
@@ -1090,6 +1114,7 @@ footnote also carries the source's link.
 [^bun-aot]: Bun documentation: the ahead-of-time compiler, and its internals page, <https://bun.sh/docs/compiler/aot>, <https://bun.sh/docs/compiler/internals>
 [^bun-aot-pr]: Bun pull request 45631, "Compile TypeScript to machine code ahead of time: `bun build --compile --aot`", <https://github.com/oven-sh/bun/pull/45631>
 [^bun-aot-rewrite]: Bun pull request 48120, "AOT: the next base", <https://github.com/oven-sh/bun/pull/48120>
+[^porffor]: Porffor, <https://porffor.dev/>
 [^okf]: Open Knowledge Format v0.2, <https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md>
 [^roc]: Roc repository: docs/langref, design.md, design/lambda-set-specialization.md, <https://github.com/roc-lang/roc>
 [^perceus]: Reinking, Xie, de Moura and Leijen: Perceus, Garbage Free Reference Counting with Reuse, <https://www.microsoft.com/en-us/research/wp-content/uploads/2020/11/perceus-tr-v4.pdf>

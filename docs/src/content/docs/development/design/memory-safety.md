@@ -142,9 +142,13 @@ means a standard vector, with its length in the header and its elements behind i
 object is an `Alt`, whatever R type it reports, so a `Local<Real>` always has elements and
 `len()`, `get(cx, i)` and `as_slice(cx)` on it are plain loads.
 
-A `Local<Value>` becomes a typed pointer through one checked downcast, the test a builtin already
-makes when it dispatches on `kind()`. Code that accepts "a double vector" asks for the view it can
-work with:
+A `Local<Value>` becomes a typed pointer through one checked test, the one a builtin already
+makes when it dispatches on `kind()`. For a kind whose objects are never ALTREP (`Exact`: a symbol,
+an environment, a `CHARSXP`) the test is `downcast`. A vector kind has no `downcast`, because an
+ALTREP vector of its type is not a standard vector, and a `None` that silently meant "absent" read
+`names(x) <- 1:2` as having no names. The caller chooses instead: `standard::<Real>()` leaves ALTREP
+vectors out, for a fast path that falls back to one that expands them, and code that accepts "a
+double vector" asks for the view it can work with:
 
 ```rust
 match reals(cx, value)? {                             // one test of the kind and the ALTREP bit
@@ -183,7 +187,7 @@ copied a shared argument with the attribute copy and then stored into it.
 With the typed forms that store has no spelling. A `Local<Value>` has no element access at all.
 The two ways from it to a mutable slice both refuse a wrapper:
 
-- `downcast::<Real>()` returns `None` for an ALTREP object, so there is no `Local<Real>` to hand
+- `standard::<Real>()` returns `None` for an ALTREP object, so there is no `Local<Real>` to hand
   to an ownership check, and `Owned::write` exists only for vector kinds.
 - `dense::<Real>` returns the standard vector the wrapper shares, as a `Local<Real>`, which reads
   but does not write. Writing needs an `Owned`, and the ownership check fails because the wrapper
@@ -553,7 +557,10 @@ and `crates/heap/tests/test_handles.rs` running them on a heap that collects bef
 allocation. `interp::handles` is the interpreter's side: a safe builtin has the signature
 `fn(&mut Cx<'s>, &Args<'_, 's>) -> R<Local<'s>>`, the `safe!` macro makes the raw entry the
 builtin table holds, and each value helper a safe builtin calls has a safe form there that wraps
-the raw one and says why the handle types make the call sound. The wrappers are where a migrated
+the raw one and says why the handle types make the call sound. A native routine of a builtin
+library has the same form over `NativeArgs`, whose errors name the calling closure as GNU R's do,
+and `safe!(native ...)` makes its raw entry, so a crate above the interpreter writes its routines
+without `unsafe`. The wrappers are where a migrated
 function meets an unmigrated one, so that boundary is visible and counted, and a wrapper
 disappears when the helper under it is migrated.
 
@@ -562,7 +569,8 @@ element reads and stores, and `[`, `[[`, `$`, `@` with their replacement forms (
 attribute readers and setters with their fast-path entries (`attr`, `attributes`, `names`, `dim`,
 `dimnames`, `class`, `oldClass`, `levels<-`, `comment`, `length<-`, `inherits`, `unclass` and the
 replacement forms); `strings.rs` except `paste`, `paste0`, `sprintf`, `strsplit` and
-`make.unique`; and the bit conversions in `arith.rs`. Two pieces of the API are not built: the
+`make.unique`; the bit conversions in `arith.rs`; and the `arima0` and `ppr` routines of the
+stats crate. Two pieces of the API are not built: the
 bytecode loop's register accessor and `Held<T>` fields in traced structures.
 
 An unmigrated caller reaches a migrated function through a raw entry, an `unsafe fn` over `Sexp`
@@ -618,7 +626,7 @@ no `Sexp`.
 
 ## Open questions
 
-- Whether a kind should refuse a vector that carries the array flag. `dense` and `downcast`
+- Whether a kind should refuse a vector that carries the array flag. `dense` and `standard`
   admit one, so a migrated fast path over a slice skips the strict checks the array code makes
   unless it tests the flag itself, as the raw fast paths must. A kind per flagged representation
   would make the test a type.

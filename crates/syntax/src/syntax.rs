@@ -137,17 +137,14 @@ impl SyntaxError {
 
 /// The console's rule for reading another line instead of running what it has.
 ///
-/// R's own rule is that input is unfinished when every error its grammar meets says that the
-/// input ended too early. A check R makes when a construct closes (a repeated parameter, a pipe's
-/// right side, a stray placeholder, an empty string as a name) refuses nothing until the command
-/// is whole, so R reads on past one and reports it with the finished command. A broken `#:`
-/// comment is only a comment to R, so it never holds input back.
+/// R's rule: input is unfinished when every grammar error says the input ended too early. Checks
+/// R makes when a construct closes (a repeated parameter, a stray placeholder) refuse nothing
+/// until the command is whole, and a broken `#:` comment never holds input back.
 ///
-/// ry adds one case: input that ends in a `#:` block on its own lines is unfinished, because the
-/// block annotates the expression on the line after it and means nothing alone. A blank line
-/// after the block ends the wait, exactly as it detaches the block in a file, so `text` must
-/// end with the line break of its last line for the blank line to be seen. A `@type` or `@alias`
-/// block declares a type by itself and is finished.
+/// ry adds one case: input ending in a `#:` block on its own lines is unfinished, because the
+/// block annotates the next expression. A blank line after it ends the wait, as it detaches the
+/// block in a file, so `text` must end with its last line break. A `@type` or `@alias` block
+/// declares a type by itself and is finished.
 pub fn input_is_unfinished(text: &str) -> bool {
     let parse = parse(text);
     let end = TextSize::of(text.trim_end());
@@ -199,10 +196,7 @@ fn ends_in_an_unattached_annotation(root: &SyntaxNode) -> bool {
     }
     let declares_a_type = block.children().any(|child| {
         child.kind() == SyntaxKind::ANNOTATION_DIRECTIVE
-            && matches!(
-                annotation::directive_name(&child).as_str(),
-                "type" | "alias"
-            )
+            && annotation::is_definition_keyword(&annotation::directive_name(&child))
     });
     let mut before = block.prev_sibling_or_token();
     while let Some(element) = &before
@@ -327,6 +321,214 @@ pub fn erased_lines_end(parse: &Parse, lines: usize) -> TextSize {
     end
 }
 
+/// [`erase_inline_annotations`]'s program with each statement's inline annotation moved into a
+/// `#:` block above the statement, so the program keeps its types and GNU R reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentedProgram {
+    pub text: String,
+    /// Inline annotations no `#:` block can carry, in source order: those on a function that is
+    /// not a statement's value, a `@Name(value)` inside an expression, and those on a statement
+    /// that already has a `#:` block. They are erased.
+    pub dropped: Vec<TextRange>,
+}
+
+/// Rewrites every statement that binds a name with inline types into the same statement under
+/// a `#:` block: `count: integer <- 0L` becomes `#: integer` above `count <- 0L`, a function's
+/// inline signature becomes `#: <T> fn(x: T, [y]: double) -> T`, `@pure` a `#: @pure` line, and
+/// a value `@Name(value)` a `#: @new Name` line. The rest erases as in
+/// [`erase_inline_annotations`].
+pub fn inline_annotations_to_comments(parse: &Parse) -> CommentedProgram {
+    let root = parse.syntax_node();
+    let source = parse.text();
+    let mut blocks: Vec<(TextSize, String)> = Vec::new();
+    let mut carried: Vec<TextRange> = Vec::new();
+    for statement in matching_nodes(&root, |node, parent| {
+        node.kind() == SyntaxKind::BINARY_EXPR
+            && parent.is_some_and(|parent| {
+                matches!(
+                    parent.kind(),
+                    SyntaxKind::SOURCE_FILE | SyntaxKind::BRACE_EXPR
+                )
+            })
+    }) {
+        if let Some((lines, statement_carried)) = statement_comment(&statement, source) {
+            let start = statement.text_range().start();
+            let line_start = source[..usize::from(start)]
+                .rfind('\n')
+                .map_or(0, |at| at + 1);
+            let before = &source[line_start..usize::from(start)];
+            let leading = before.len() - before.trim_start_matches([' ', '\t']).len();
+            let indent = &before[..leading];
+            let mut block = match leading == before.len() {
+                true => String::new(),
+                // Behind other code on its line, the block opens a line of its own.
+                false => format!("\n{indent}"),
+            };
+            for line in lines {
+                block.push_str("#: ");
+                block.push_str(&line.replace('\n', &format!("\n{indent}#: ")));
+                block.push('\n');
+                block.push_str(indent);
+            }
+            blocks.push((start, block));
+            carried.extend(statement_carried);
+        }
+    }
+    let dropped: Vec<TextRange> = matching_nodes(&root, |node, parent| {
+        node.kind() != SyntaxKind::TYPE_DEFINITION
+            && is_inline_annotation_kind(node.kind(), parent.map(|parent| parent.kind()))
+    })
+    .into_iter()
+    .map(|node| node.text_range())
+    .filter(|range| !carried.contains(range))
+    .collect();
+    let dropped = dropped
+        .iter()
+        .copied()
+        .filter(|range| {
+            !dropped
+                .iter()
+                .any(|outer| outer != range && outer.contains_range(*range))
+        })
+        .collect();
+    let mut text = String::with_capacity(source.len() + blocks.len() * 16);
+    let mut next = blocks.iter().peekable();
+    erase_with(parse, |piece, range, _| {
+        while let Some((_, block)) = next.next_if(|(at, _)| *at <= range.start()) {
+            text.push_str(block);
+        }
+        text.push_str(piece);
+        true
+    });
+    CommentedProgram { text, dropped }
+}
+
+/// The `#:` lines that say what `statement`'s inline annotations say, and the annotation nodes
+/// they carry; `None` when it binds no name, has none, or already has a `#:` block.
+fn statement_comment(
+    statement: &SyntaxNode,
+    source: &str,
+) -> Option<(Vec<String>, Vec<TextRange>)> {
+    let text = |range: TextRange| source[range].trim().to_owned();
+    let child =
+        |node: &SyntaxNode, kind: SyntaxKind| node.children().find(|child| child.kind() == kind);
+    let token = |node: &SyntaxNode, kind: SyntaxKind| {
+        node.children_with_tokens()
+            .filter_map(NodeOrToken::into_token)
+            .find(|token| token.kind() == kind)
+    };
+    let assigns = statement
+        .children_with_tokens()
+        .filter_map(NodeOrToken::into_token)
+        .any(|token| matches!(token.kind(), SyntaxKind::LESS_MINUS | SyntaxKind::EQ));
+    let mut nodes = statement.children();
+    let target = nodes.next()?;
+    if !assigns || target.kind() != SyntaxKind::NAME || paired_comment_block(statement) {
+        return None;
+    }
+    let value = statement.children().last()?;
+    let ascription = child(statement, SyntaxKind::TYPE_ASCRIPTION);
+    let after_colon = |ascription: &SyntaxNode| {
+        let colon = token(ascription, SyntaxKind::COLON)?;
+        Some(text(TextRange::new(
+            colon.text_range().end(),
+            ascription.text_range().end(),
+        )))
+    };
+    let mut lines = Vec::new();
+    let mut carried = Vec::new();
+    match value.kind() {
+        SyntaxKind::FUNCTION_DEF => {
+            if let Some(pure) = child(&value, SyntaxKind::PURE_MARKER) {
+                lines.push(text(pure.text_range()));
+                carried.push(pure.text_range());
+            }
+            let binders = child(&value, SyntaxKind::TYPE_BINDER_LIST);
+            let result = child(&value, SyntaxKind::RETURN_TYPE);
+            let mut parameters = Vec::new();
+            if let Some(list) = child(&value, SyntaxKind::PARAMETER_LIST) {
+                for parameter in list
+                    .children()
+                    .filter(|node| node.kind() == SyntaxKind::PARAMETER)
+                {
+                    let Some(parameter_ascription) = child(&parameter, SyntaxKind::TYPE_ASCRIPTION)
+                    else {
+                        continue;
+                    };
+                    let name = parameter
+                        .children_with_tokens()
+                        .filter_map(NodeOrToken::into_token)
+                        .find(|token| matches!(token.kind(), SyntaxKind::IDENT | SyntaxKind::DOTS))
+                        .or_else(|| child(&parameter, SyntaxKind::NAME)?.first_token())?;
+                    let type_text = after_colon(&parameter_ascription)?;
+                    parameters.push(match token(&parameter, SyntaxKind::EQ) {
+                        Some(_) => format!("[{}]: {type_text}", name.text()),
+                        None => format!("{}: {type_text}", name.text()),
+                    });
+                    carried.push(parameter_ascription.text_range());
+                }
+            }
+            let signed = binders.is_some() || result.is_some() || !parameters.is_empty();
+            if signed {
+                let mut signature = String::new();
+                if let Some(binders) = &binders {
+                    signature.push_str(&text(binders.text_range()));
+                    signature.push(' ');
+                    carried.push(binders.text_range());
+                }
+                signature.push_str(&format!("fn({})", parameters.join(", ")));
+                if let Some(result) = &result {
+                    let arrow = token(result, SyntaxKind::MINUS_GREATER)?;
+                    signature.push_str(" -> ");
+                    signature.push_str(&text(TextRange::new(
+                        arrow.text_range().end(),
+                        result.text_range().end(),
+                    )));
+                    carried.push(result.text_range());
+                }
+                lines.push(signature);
+            } else if let Some(ascription) = &ascription {
+                lines.push(after_colon(ascription)?);
+                carried.push(ascription.text_range());
+            }
+        }
+        SyntaxKind::NEW_EXPR => {
+            let nominal = child(&value, SyntaxKind::NEW_TYPE)?;
+            let at = token(&nominal, SyntaxKind::AT)?;
+            lines.push(format!(
+                "@new {}",
+                text(TextRange::new(
+                    at.text_range().end(),
+                    nominal.text_range().end()
+                ))
+            ));
+            carried.push(nominal.text_range());
+        }
+        _ => {
+            let ascription = ascription.as_ref()?;
+            lines.push(after_colon(ascription)?);
+            carried.push(ascription.text_range());
+        }
+    }
+    (!lines.is_empty()).then_some((lines, carried))
+}
+
+/// Whether a `#:` block sits directly above `statement`, on the line before it.
+fn paired_comment_block(statement: &SyntaxNode) -> bool {
+    let mut newlines = 0;
+    let mut element = statement.prev_sibling_or_token();
+    while let Some(current) = element {
+        match current.kind() {
+            SyntaxKind::WHITESPACE => {}
+            SyntaxKind::NEWLINE if newlines == 0 => newlines += 1,
+            SyntaxKind::ANNOTATION => return true,
+            _ => return false,
+        }
+        element = current.prev_sibling_or_token();
+    }
+    false
+}
+
 /// Walks the program [`erase_inline_annotations`] writes, handing `emit` each piece with the
 /// source range it stands for and whether it is that source copied as written, until `emit`
 /// returns false.
@@ -435,7 +637,7 @@ pub fn paired_comment_definition(definition: &SyntaxNode) -> Option<SyntaxNode> 
                             .children_with_tokens()
                             .nth(1)
                             .and_then(|element| element.into_token())
-                            .is_some_and(|word| matches!(word.text(), "type" | "alias"))
+                            .is_some_and(|word| annotation::is_definition_keyword(word.text()))
                     })
                     .any(|directive| definition_name(&directive).as_deref() == Some(name.as_str()));
                 return defines.then_some(comment);

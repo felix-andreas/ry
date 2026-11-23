@@ -15,7 +15,10 @@ use {
         testing::{ProbeDatabase, render_semantics},
         types::{Atomic, scalar},
     },
-    std::{collections::BTreeMap, thread},
+    std::{
+        collections::{BTreeMap, BTreeSet},
+        thread,
+    },
 };
 
 fn settle(db: &ProbeDatabase, files: &[SourceFile]) {
@@ -200,13 +203,53 @@ fn a_new_definition_reprojects_the_name_maps_and_checks_only_the_new_item() {
             "item_links",
             "item_check",
             "file_interface_groups",
-            "duplicate_binding_map",
-            "package_definition_index",
+            "definition_chunk",
+            "definition_layer",
+            "file_duplicate_definitions",
         ]),
-        [5, 1, 1, 1, 1],
+        [5, 1, 1, 1, 1, 3],
         "each item projects the maps again and only the new one is checked; the edited file \
-         walks its groups again, and the fold runs once and its duplicates backdate"
+         walks its groups again, only the edited file's chunk folds again, and each file's \
+         duplicates are probed again and backdate"
     );
+}
+
+/// A project spans three definition chunks. A new name re-folds the chunk of its own file
+/// alone, and a duplicate across chunks is reported in both files and cleared with them.
+#[test]
+fn a_new_name_refolds_only_its_own_chunk() {
+    let mut db = ProbeDatabase::default();
+    let sources: Vec<String> = (0..70)
+        .map(|index| format!("f{index} <- function() {index}L\n"))
+        .collect();
+    let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
+    let files = db.project(&sources);
+    settle(&db, &files);
+    db.executions_since(&[]);
+
+    db.edit(files[0], "f0 <- function() 0L\nfresh <- 2L\n".to_owned());
+    settle(&db, &files);
+    assert_eq!(
+        db.executions_since(&["definition_chunk", "definition_layer"]),
+        [1, 1],
+        "only the first chunk folds again"
+    );
+    assert!(package_definitions(&db, ProjectFiles::get(&db)).contains_key(&Symbol::new("fresh")));
+
+    db.edit(files[69], "f69 <- function() 69L\nfresh <- 3L\n".to_owned());
+    let duplicates = |db: &ProbeDatabase, file: SourceFile| {
+        file_diagnostics(db, file)
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "duplicate")
+            .count()
+    };
+    assert_eq!(duplicates(&db, files[0]), 1);
+    assert_eq!(duplicates(&db, files[69]), 1);
+    assert_eq!(duplicates(&db, files[35]), 0);
+
+    db.edit(files[69], "f69 <- function() 69L\n".to_owned());
+    assert_eq!(duplicates(&db, files[0]), 0);
+    assert_eq!(duplicates(&db, files[69]), 0);
 }
 
 /// An item's links ask whether its file belongs to the project, which reads the file list and
@@ -510,9 +553,8 @@ fn an_edit_to_a_low_durability_file_never_revisits_the_others_trees() {
 
 /// An item keeps the stamp of its syntax while that syntax is unchanged, wherever the item
 /// moves in its file. Its stamp is read again after every edit to the file and comes out
-/// equal, so nothing derived from the item's syntax runs again. The `#:` block of an item is
-/// a sibling of the item, attached by a per-file walk that comes out equal while no block
-/// changes, so the annotated item's annotations stay memoized too.
+/// equal, so nothing derived from the item's syntax runs again. The `#:` block of an item has
+/// a stamp of its own, so the annotated item's annotations stay memoized too.
 #[test]
 fn an_edit_lowers_only_the_items_whose_syntax_changed() {
     let mut db = ProbeDatabase::default();
@@ -586,6 +628,39 @@ fn an_edit_lowers_only_the_items_whose_syntax_changed() {
         [4, 4, 4, 4, 2],
         "edits at both ends of the file leave one changed region that spans it, so every item \
          lowers again, and the two in the middle lower to what they were"
+    );
+}
+
+/// An edit to one `#:` block lowers the annotations of that block's item alone, and an
+/// edit that detaches a block from its item lowers that item's.
+#[test]
+fn an_edit_to_one_annotation_block_lowers_only_its_items_annotations() {
+    let mut db = ProbeDatabase::default();
+    let source = |first: &str, gap: &str| {
+        format!(
+            "#: {first}\nfirst <- function(x) x\n#: fn(x: integer) -> integer\n\
+             second <- function(x) x\n#: fn(x: double) -> double\n{gap}third <- function(x) x\n"
+        )
+    };
+    let files = db.project(&[&source("fn(x: integer) -> integer", "")]);
+    let derived = ["item_annotation_stamp", "item_annotations", "item_hir"];
+    settle(&db, &files);
+    assert_eq!(db.executions_since(&derived), [3, 3, 3]);
+
+    db.edit(files[0], source("fn(x: double) -> double", ""));
+    settle(&db, &files);
+    assert_eq!(
+        db.executions_since(&derived),
+        [3, 1, 0],
+        "an edit inside the first block"
+    );
+
+    db.edit(files[0], source("fn(x: double) -> double", "\n"));
+    settle(&db, &files);
+    assert_eq!(
+        db.executions_since(&derived),
+        [3, 1, 0],
+        "a blank line that detaches the last block"
     );
 }
 
@@ -901,6 +976,7 @@ fn a_data_file_edit_rechecks_only_the_reads_of_that_file() {
         attached,
         None,
         Default::default(),
+        None,
     );
     let layouts = |prices: &str| {
         BTreeMap::from([
@@ -928,6 +1004,43 @@ fn a_data_file_edit_rechecks_only_the_reads_of_that_file() {
         semantics::diagnostics::TypeRenderer::default().render_scheme(&db, &scheme),
         "data.table{id: integer[], price: double[], ticker: character[]}"
     );
+}
+
+#[test]
+fn a_namespace_edit_rechecks_only_the_qualified_reads_it_answers_differently() {
+    let mut db = ProbeDatabase::default();
+    install_shipped_stubs(&db);
+    let files = db.project(&[
+        "first <- function() 1\nsecond <- function() 2\n",
+        "use_first <- function() tallyr::first()\n",
+        "use_second <- function() tallyr::second()\n",
+    ]);
+    let attached = attached_union(&db, files.iter().copied());
+    let exports = |names: &[&str]| {
+        Some(
+            names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<BTreeSet<_>>(),
+        )
+    };
+    let metadata = PackageMetadata::new(
+        &db,
+        Vec::new(),
+        Default::default(),
+        attached,
+        Some("tallyr".to_owned()),
+        Default::default(),
+        exports(&["first"]),
+    );
+    settle(&db, &files);
+    db.checked_since();
+
+    metadata
+        .set_qualified_names(&mut db)
+        .to(exports(&["first", "second"]));
+    settle(&db, &files);
+    assert_eq!(db.checked_since(), ["use_second"]);
 }
 
 /// Renders every file, edits `files[edited]` to `text`, and renders again after editing it

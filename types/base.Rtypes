@@ -39,7 +39,7 @@
 # record synthesis) that a single declaration cannot describe, so they are modeled directly in the
 # checker instead.
 
-# Opaque nominal types: standard-library values whose structure the type grammar cannot describe.
+# Abstract nominal types: standard-library values whose structure the type grammar cannot describe.
 # `@type NAME` declares a named type with no inspectable representation — compatible only with
 # itself, produced only by functions declared to return it. Consumers that accept them keep `Any`
 # parameters (R coerces liberally), so the nominals tighten *returns* without rejecting calls.
@@ -263,6 +263,8 @@ endsWith : @pure fn(x: Any, suffix: Any) -> logical
 trimws : @pure fn(x: Any, [which]: character, [whitespace]: character) -> character
 strrep : @pure fn(x: Any, times: Any) -> character
 chartr : @pure fn(old: character, new: character, x: Any) -> character
+utf8ToInt : @pure fn(x: character) -> integer[]
+intToUtf8 : @pure fn(x: Any, [multiple]: logical, [allow_surrogate_pairs]: logical) -> character[]
 toString : @pure fn(x: Any, ...: Any, [sep]: character) -> character
 sQuote : @pure fn(x: Any, [q]: Any) -> character
 dQuote : @pure fn(x: Any, [q]: Any) -> character
@@ -318,6 +320,13 @@ gregexpr : @pure fn(pattern: character[], text: Any, [ignore.case]: logical, [pe
 regexec : @pure Any
 regmatches : @pure fn(x: character[], m: Any, [invert]: Any) -> Any
 strtoi : @pure fn(x: Any, [base]: Any) -> integer
+# Bitwise operations coerce numeric arguments to integer (Any-param, scalar-claim).
+bitwAnd : @pure fn(a: Any, b: Any) -> integer
+bitwOr : @pure fn(a: Any, b: Any) -> integer
+bitwXor : @pure fn(a: Any, b: Any) -> integer
+bitwNot : @pure fn(a: Any) -> integer
+bitwShiftL : @pure fn(a: Any, n: Any) -> integer
+bitwShiftR : @pure fn(a: Any, n: Any) -> integer
 
 # `strsplit` splits each input string, returning one character vector per input, so a list of them.
 strsplit : @pure fn(x: Any, split: character[] | NULL, [fixed]: logical, [perl]: logical, [useBytes]: logical) -> list[character[]]
@@ -393,16 +402,19 @@ mean : @pure fn(x: Any, [trim]: Any, [na.rm]: logical, ...: Any) -> double
 
 # Cumulative reductions: elementwise type-preserving (logical/integer input gives an integer
 # vector, double gives double), overloaded per atomic family. `cumprod` always returns double —
-# R computes it in double to dodge integer overflow.
+# R computes it in double to dodge integer overflow. `NULL` is an empty vector to them.
 cumsum : @pure fn(x: integer[] | logical[]) -> integer[]
 cumsum : fn(x: double[]) -> double[]
+cumsum : fn(x: NULL) -> double[]
 cumsum : fn(x: Any) -> Any
 cumprod : @pure fn(x: Any) -> double[]
 cummax : @pure fn(x: integer[] | logical[]) -> integer[]
 cummax : fn(x: double[]) -> double[]
+cummax : fn(x: NULL) -> double[]
 cummax : fn(x: Any) -> Any
 cummin : @pure fn(x: integer[] | logical[]) -> integer[]
 cummin : fn(x: double[]) -> double[]
+cummin : fn(x: NULL) -> double[]
 cummin : fn(x: Any) -> Any
 
 # Math with a fixed double result (elementwise, scalar-claim, Any-param). `abs` is type-preserving.
@@ -573,31 +585,32 @@ colMeans : @pure fn(x: Any, [na.rm]: logical, [dims]: Any) -> double[]
 # `apply`'s result shape is value-dependent (a vector or a list, by what FUN returns per slice), so
 # the return stays `Any`; the callback position still checks, and forwarded arguments complete
 # callbacks with more formals.
-apply : fn(X: Any, MARGIN: Any, FUN: fn(Any) -> Any, ...: Any) -> Any
+apply : @pure(FUN) fn(X: Any, MARGIN: Any, FUN: fn(Any) -> Any, ...: Any) -> Any
 # `sweep` keeps its input's dimensions, so a matrix in is a matrix out.
-sweep : fn(x: matrix, MARGIN: integer | double | character, STATS: Any, [FUN]: Any, [check.margin]: logical, ...: Any) -> matrix
-sweep : fn(x: Any, MARGIN: integer | double | character, STATS: Any, [FUN]: Any, [check.margin]: logical, ...: Any) -> Any
+sweep : fn(x: matrix, MARGIN: integer[] | double[] | character[], STATS: Any, [FUN]: Any, [check.margin]: logical, ...: Any) -> matrix
+sweep : fn(x: Any, MARGIN: integer[] | double[] | character[], STATS: Any, [FUN]: Any, [check.margin]: logical, ...: Any) -> Any
 # `lapply` keeps its input's names, so a named list in is a named list out. The
 # named candidate comes first because it is the narrower one: a plain list or a
 # vector does not fit it at all and takes the general form below, which also takes
 # `NULL` (`lapply(NULL, f)` is `list()`).
-lapply : <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named: U]
+lapply : @pure(FUN) <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named: U]
 # A formula is a call, and `lapply` walks its parts (`~`, the left side, the right side).
-lapply : <T, U> fn(X: list[T] | T[] | NULL | formula, FUN: fn(T) -> U, ...: Any) -> list[U]
+lapply : @pure(FUN) <T, U> fn(X: list[T] | T[] | NULL | formula, FUN: fn(T) -> U, ...: Any) -> list[U]
 # `Filter` selects with `[`, so it hands back the shape it was given: an atomic
 # vector stays an atomic vector (`Filter(f, c(1, 2)) + 1` is valid R), and a
 # named list keeps its names. Narrower candidates first.
-Filter : fn(f: fn(Any) -> Any, x: data.frame) -> data.frame
-Filter : <T> fn(f: fn(T) -> Any, x: T[]) -> T[]
-Filter : <T> fn(f: fn(T) -> Any, x: list[named: T]) -> list[named: T]
-Filter : <T> fn(f: fn(T) -> Any, x: list[T]) -> list[T]
-Find : <T> fn(f: fn(T) -> Any, x: list[T] | T[], [right]: logical, [nomatch]: Any) -> T | NULL
-Position : <T> fn(f: fn(T) -> Any, x: list[T] | T[], [right]: logical, [nomatch]: Any) -> integer | NULL
-Reduce : <T, U> fn(f: fn(U, T) -> U, x: list[T] | T[], [init]: U, [right]: logical, [accumulate]: logical, [simplify]: logical) -> U
+Filter : @pure(f) fn(f: fn(Any) -> Any, x: data.frame) -> data.frame
+Filter : @pure(f) <T> fn(f: fn(T) -> Any, x: T[]) -> T[]
+Filter : @pure(f) <T> fn(f: fn(T) -> Any, x: list[named: T]) -> list[named: T]
+Filter : @pure(f) <T> fn(f: fn(T) -> Any, x: list[T]) -> list[T]
+Find : @pure(f) <T> fn(f: fn(T) -> Any, x: list[T] | T[], [right]: logical, [nomatch]: Any) -> T | NULL
+Position : @pure(f) <T> fn(f: fn(T) -> Any, x: list[T] | T[], [right]: logical, [nomatch]: Any) -> integer | NULL
+Reduce : @pure(f) <T, U> fn(f: fn(U, T) -> U, x: list[T] | T[], [init]: U, [right]: logical, [accumulate]: logical, [simplify]: logical) -> U
 # `identity : <T> fn(x: T) -> T` and `apply : Any` are deliberately NOT declared yet: many existing
 # fixtures bind those names as local helpers, and a stub declaration makes each such binding fire the
 # (by-design) builtin-shadow warning. Rename the fixture helpers first, then declare both.
-invisible : @pure <T> fn([x]: T) -> T
+invisible : @pure fn() -> NULL
+invisible : @pure <T> fn(x: T) -> T
 # The checker types `list(...)` and `c(...)` from their arguments; these declare what a
 # call takes, for signature help, and what the function is as a value.
 list : @pure fn(...: Any) -> list[Any]
@@ -607,7 +620,7 @@ withVisible : <T> fn(x: T) -> list{value: T, visible: logical}
 # `sapply`/`mapply`/`Map` simplify (or not) to a vector, matrix, or list depending on the
 # results (value-dependent), so their results stay `Any`; `apply` and friends also forward named
 # arguments to the callee. `Negate` needs a variadic-generic signature.
-sapply : fn(X: Any, FUN: Any, ...: Any, [simplify]: Any, [USE.NAMES]: logical) -> Any
+sapply : @pure(FUN) fn(X: Any, FUN: Any, ...: Any, [simplify]: Any, [USE.NAMES]: logical) -> Any
 # `vapply`'s whole reason to exist is that `FUN.VALUE` DECLARES the result type,
 # so the declaration ties the callback's return to it: a callback returning
 # `character` under a `numeric(1)` template is the error R raises at runtime
@@ -621,22 +634,22 @@ sapply : fn(X: Any, FUN: Any, ...: Any, [simplify]: Any, [USE.NAMES]: logical) -
 # R checks the callback's result length at run time, and a length the checker
 # cannot see types as a vector (`str_c(x, collapse = " ")` is `character[]`), so
 # an atomic template accepts a callback returning that vector type.
-vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> logical[], FUN.VALUE: logical[] | logical, ...: Any, [USE.NAMES]: logical) -> logical[]
-vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> integer[] | logical[], FUN.VALUE: integer[] | integer, ...: Any, [USE.NAMES]: logical) -> integer[]
-vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> double | integer | logical, FUN.VALUE: double[] | double, ...: Any, [USE.NAMES]: logical) -> double[]
+vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> logical[], FUN.VALUE: logical[] | logical, ...: Any, [USE.NAMES]: logical) -> logical[]
+vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> integer[] | logical[], FUN.VALUE: integer[] | integer, ...: Any, [USE.NAMES]: logical) -> integer[]
+vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> double | integer | logical, FUN.VALUE: double[] | double, ...: Any, [USE.NAMES]: logical) -> double[]
 # A vector-valued `FUN` gives a matrix when `FUN.VALUE` has several elements and a vector when it has
 # one, which the types cannot tell apart, and R coerces an integer or logical result to double.
-vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double[], ...: Any, [USE.NAMES]: logical) -> matrix | double[]
-vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double, ...: Any, [USE.NAMES]: logical) -> double[]
-vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> character[], FUN.VALUE: character[] | character, ...: Any, [USE.NAMES]: logical) -> character[]
-vapply : <T, V> fn(X: list[T] | T[], FUN: fn(T) -> V, FUN.VALUE: V[] | V, ...: Any, [USE.NAMES]: logical) -> V[]
+vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double[], ...: Any, [USE.NAMES]: logical) -> matrix | double[]
+vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double, ...: Any, [USE.NAMES]: logical) -> double[]
+vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> character[], FUN.VALUE: character[] | character, ...: Any, [USE.NAMES]: logical) -> character[]
+vapply : @pure(FUN) <T, V> fn(X: list[T] | T[], FUN: fn(T) -> V, FUN.VALUE: V[] | V, ...: Any, [USE.NAMES]: logical) -> V[]
 # Tried last, because a generic `FUN` would also match it. A matrix carries no element
 # type, so a matrix-valued `FUN` accepts any template, and R stacks the results into a matrix.
-vapply : <T> fn(X: list[T] | T[], FUN: fn(T) -> matrix, FUN.VALUE: Any, ...: Any, [USE.NAMES]: logical) -> matrix
-mapply : fn(FUN: Any, ...: Any, [MoreArgs]: Any, [SIMPLIFY]: Any, [USE.NAMES]: logical) -> Any
+vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> matrix, FUN.VALUE: Any, ...: Any, [USE.NAMES]: logical) -> matrix
+mapply : @pure(FUN) fn(FUN: Any, ...: Any, [MoreArgs]: Any, [SIMPLIFY]: Any, [USE.NAMES]: logical) -> Any
 Map : Any
 # `tapply`'s result is an array whose shape follows `INDEX` (value-dependent).
-tapply : @pure fn(X: Any, INDEX: Any, [FUN]: Any, ...: Any, [default]: Any, [simplify]: logical) -> Any
+tapply : @pure(FUN) fn(X: Any, INDEX: Any, [FUN]: Any, ...: Any, [default]: Any, [simplify]: logical) -> Any
 Negate : @pure Any
 Vectorize : @pure Any
 Recall : Any
@@ -729,6 +742,7 @@ within : @pure fn(data: Any, ...: Any) -> Any
 library : fn([package]: Any, [help]: Any, [pos]: Any, [lib.loc]: Any, [character.only]: logical, [logical.return]: logical, [warn.conflicts]: logical, [quietly]: logical, [verbose]: logical) -> Any
 require : fn([package]: Any, [lib.loc]: Any, [quietly]: logical, [warn.conflicts]: logical, [character.only]: logical) -> logical
 requireNamespace : fn(package: Any, ...: Any, [quietly]: logical) -> logical
+sys.source : fn(file: character, [envir]: Any, [chdir]: logical, [keep.source]: logical, [keep.parse.data]: logical, [toplevel.env]: Any) -> NULL
 source : fn([file]: Any, [local]: Any, [echo]: logical, [print.eval]: logical, [exprs]: Any, [spaced]: logical, [verbose]: logical, [prompt.echo]: character, [max.deparse.length]: Any, [width.cutoff]: Any, [deparseCtrl]: Any, [chdir]: logical, [catch.aborts]: logical, [encoding]: Any, [continue.echo]: character, [skip.echo]: Any, [keep.source]: logical) -> Any
 getOption : fn(x: character, [default]: Any) -> Any
 # `options(warn = 1, digits = 7)`: arbitrary option names as named arguments.
@@ -795,6 +809,8 @@ julian : @pure Any
 
 # System and session.
 Sys.time : fn() -> POSIXct
+# A `proc_time` is a named double vector: user, system and elapsed seconds.
+proc.time : fn() -> double[]
 Sys.Date : fn() -> Date
 Sys.getenv : fn([x]: Any, [unset]: Any, [names]: logical) -> character
 # `Sys.setenv(VAR = "v")`: arbitrary variable names as named arguments.
@@ -828,6 +844,8 @@ traceback : fn([x]: Any, [max.lines]: Any) -> Any
 # The S4 dispatch primitive lives in base, not methods.
 standardGeneric : fn(f: character, [fdef]: Any) -> Any
 getwd : fn() -> character
+# The previous working directory, invisibly.
+setwd : fn(dir: character) -> character
 system.file : fn(...: Any, [package]: character, [lib.loc]: Any, [mustWork]: logical) -> character
 asNamespace : fn(ns: Any, [base.OK]: logical) -> environment
 loadNamespace : fn(package: character, ...: Any) -> environment

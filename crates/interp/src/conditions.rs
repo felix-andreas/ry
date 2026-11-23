@@ -203,6 +203,9 @@ unsafe fn class_names(class: Sexp, wanted: &[u8]) -> bool {
 /// handlers for the error's classes, jumps to an exiting one, and otherwise runs the default
 /// error handler. The result is the unwind to propagate.
 pub unsafe fn signal_error(failure: RError) -> Unwind {
+    if let Some(unwind) = waits_for_frame() {
+        return unwind;
+    }
     // GNU R formats a message into a C buffer, so it ends at the first NUL.
     let mut message = failure.message;
     if let Some(nul) = message.find('\0') {
@@ -356,7 +359,7 @@ pub unsafe fn default_error(call: Sexp, message: &str) -> Unwind {
         }
         if !interp().warnings.is_empty() {
             write_console(b"In addition: ", true);
-            if let Err(unwind) = print_warnings() {
+            if let Err(unwind) = print_warnings("") {
                 return unwind;
             }
         }
@@ -603,9 +606,8 @@ pub unsafe fn warning_call(call: Sexp, message: impl Into<String>) -> R<()> {
         }
     }
     // The hook is R code, which a call without a frame cannot run.
-    if interp().signalling != Signalling::Immediate {
-        interp().signalling = Signalling::Abandoned;
-        return Err(error("a warning waits for its call's frame"));
+    if let Some(unwind) = waits_for_frame() {
+        return Err(unwind);
     }
     let hook = values::install(".signalSimpleWarning")?;
     if crate::heap()
@@ -811,18 +813,23 @@ unsafe fn immediate_warning_text(call: Sexp, message: &str) -> String {
     format!("Warning in {call_text}{separator}{message}\n")
 }
 
+/// The heading of the warnings a session's start left.
+pub const DURING_STARTUP: &str = "During startup - ";
+
 /// Prints the deferred warnings the way the top level does after a call, and clears them.
-pub unsafe fn print_warnings() -> R<()> {
+/// `heading` goes in front, as GNU R puts `During startup - ` ([`DURING_STARTUP`]) in front of
+/// the warnings a session's start left.
+pub unsafe fn print_warnings(heading: &str) -> R<()> {
     let warnings = std::mem::take(&mut interp().warnings);
     if warnings.is_empty() {
         return Ok(());
     }
-    let mut text = String::new();
+    let mut text = heading.to_owned();
     if warnings.len() == 1 {
         text.push_str("Warning message:\n");
         let (call, message) = &warnings[0];
         if *call == nil() {
-            // GNU R ends a lone warning without a call with a space.
+            // GNU R ends a warning without a call with a space, alone or numbered.
             text.push_str(message);
             text.push(' ');
         } else {
@@ -849,7 +856,7 @@ pub unsafe fn print_warnings() -> R<()> {
         if warnings.len() <= 10 {
             for (index, (call, message)) in warnings.iter().enumerate() {
                 if *call == nil() {
-                    text.push_str(&format!("{}: {message}\n", index + 1));
+                    text.push_str(&format!("{}: {message} \n", index + 1));
                 } else {
                     let call_text = deparse::deparse_first_line(*call);
                     let separator = if call_text.len() + message.len() + 10 > 75 {
@@ -965,6 +972,9 @@ unsafe fn do_signal_condition(call: &Call<'_>) -> R<Sexp> {
 /// calling handler in turn from the top of the stack, until an exiting one unwinds to its
 /// `tryCatch`. Returns `NULL` when none unwinds.
 pub(crate) unsafe fn signal_condition(condition: Sexp, condition_call: Sexp) -> R<Sexp> {
+    if let Some(unwind) = waits_for_frame() {
+        return Err(unwind);
+    }
     activity::count(Counter::ConditionsSignalled);
     let saved = interp().handlers.clone();
     let _saved = set_aside(saved.clone(), None);
@@ -987,6 +997,17 @@ pub(crate) unsafe fn signal_condition(condition: Sexp, condition_call: Sexp) -> 
     }
     interp().handlers = saved;
     Ok(nil())
+}
+
+/// The unwind a signal gives up with while an instruction runs for a closure call that has no
+/// frame ([`Signalling`]): a handler is R code and would see a stack without the call, so the
+/// instruction is abandoned and runs again, and signals, once the call has its frame.
+fn waits_for_frame() -> Option<Unwind> {
+    if interp().signalling == Signalling::Immediate {
+        return None;
+    }
+    interp().signalling = Signalling::Abandoned;
+    Some(error("a condition waits for its call's frame"))
 }
 
 unsafe fn message_text(message: Sexp) -> R<String> {
@@ -1081,7 +1102,7 @@ unsafe fn do_seterrmessage(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_print_deferred_warnings(_call: &Call<'_>) -> R<Sexp> {
     if !interp().warnings.is_empty() {
         write_console(b"In addition: ", true);
-        print_warnings()?;
+        print_warnings("")?;
     }
     Ok(nil())
 }

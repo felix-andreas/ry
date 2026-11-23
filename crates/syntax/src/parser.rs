@@ -5,6 +5,7 @@
 use {
     crate::{
         Classed, Lookahead, Parse, SyntaxError, Unexpected,
+        annotation::is_definition_keyword,
         kind::SyntaxKind::{self, *},
         lexer::{Token, lex},
         tree::{Checkpoint, TreeBuilder},
@@ -298,6 +299,17 @@ impl Parser<'_> {
     }
 
     fn push_error(&mut self, range: TextRange, message: impl Into<String>) {
+        // After a final line break, the input's end sits on a line the file does not show, so
+        // an error there moves to just past the last code, where a missing token would go.
+        let start = usize::from(range.start()).min(self.text.len());
+        let code_end = self.text[..start].trim_end().len();
+        let range = match code_end > 0
+            && start == self.text.len()
+            && self.text[code_end..].contains('\n')
+        {
+            true => TextRange::empty(TextSize::from(code_end as u32)),
+            false => range,
+        };
         let mut error = SyntaxError::new(message, self.on_one_line(range));
         error.in_annotation = self.in_annotation;
         match self.peek_significant(self.pos, true) {
@@ -551,7 +563,7 @@ impl Parser<'_> {
             return;
         }
         match name.as_str() {
-            "type" | "alias" => {
+            "type" | "alias" | "opaque" => {
                 self.ann_trivia(end);
                 if self.ann_at(IDENT, end) {
                     self.wrap(NAME);
@@ -734,7 +746,7 @@ impl Parser<'_> {
         if self.ann_at(COLON, end) {
             self.bump();
             self.ann_trivia(end);
-            if self.ann_at(IDENT, end) {
+            if self.ann_at(IDENT, end) && self.ann_constraint_ahead(end) {
                 // A constraint may span words (`scalar numeric`). Trivia is taken
                 // only between words: after the last it would pull the next `#:`
                 // marker into the binder.
@@ -743,11 +755,37 @@ impl Parser<'_> {
                     self.ann_trivia(end);
                 }
                 self.wrap(NAME);
+            } else if self.pos < end && !matches!(self.current(), Some(COMMA | GREATER)) {
+                // A union bound: `<U: list[T] | T[]>`.
+                self.ann_union(end);
             } else {
                 self.error_here("expected a constraint name after `:`");
             }
         }
         self.finish();
+    }
+
+    /// Whether the binder bound at the cursor is a constraint's words (`scalar numeric`), which
+    /// end at the binder's `,` or `>`, rather than a type such as `list[T] | T[]`.
+    fn ann_constraint_ahead(&self, end: usize) -> bool {
+        let mut pos = self.pos;
+        loop {
+            let next = if self.inline_type {
+                self.peek_significant(pos + 1, !self.inline_newlines_significant())
+            } else {
+                (pos + 1..end).find_map(|at| match self.kind_at(at) {
+                    Some(WHITESPACE | COMMENT | ANNOTATION_MARKER) | None => None,
+                    Some(kind) => Some((kind, at)),
+                })
+            };
+            match next {
+                Some((IDENT, at)) if at < end => pos = at,
+                // A line break ends a `#:` constraint: `@forall T: numeric` is often the last
+                // thing on its line, and the next line's tag is no type.
+                Some((COMMA | GREATER | NEWLINE, _)) | None => return true,
+                Some((_, at)) => return at >= end,
+            }
+        }
     }
 
     fn ann_union(&mut self, end: usize) {
@@ -872,7 +910,7 @@ impl Parser<'_> {
                     // Inline, a body may follow a return type, so `list {` and `fn (` with a
                     // space start the body; only the hugging spelling is the type.
                     "list" | "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy"
-                    | "data.table" | "Record" | "Tuple"
+                    | "data.table" | "data.frame" | "Record" | "Tuple" | "environment"
                         if self.ann_next_significant(end) == Some(L_BRACE)
                             && (!self.inline_type || self.next_token_is(L_BRACE)) =>
                     {
@@ -1038,8 +1076,10 @@ impl Parser<'_> {
             "LazyFrame" => "LazyFrame type",
             "GroupBy" | "LazyGroupBy" => "GroupBy type",
             "data.table" => "data.table type",
+            "data.frame" => "data.frame type",
             "Record" => "Record type",
             "Tuple" => "Tuple type",
+            "environment" => "environment type",
             _ => "list type",
         };
         self.wrap(NAME);
@@ -1222,16 +1262,19 @@ impl Parser<'_> {
             Some(L_BRACKET) => {
                 self.bump();
                 self.ann_trivia(end);
+                let mut malformed = false;
                 if self.ann_at(IDENT, end) {
                     self.wrap(NAME);
                 } else {
                     self.error_here("expected `[name]: TYPE` for an optional parameter");
+                    malformed = true;
                 }
                 self.ann_trivia(end);
                 if self.ann_at(R_BRACKET, end) {
                     self.bump();
                 } else {
                     self.error_here("expected `]` after the optional parameter name");
+                    malformed = true;
                 }
                 self.ann_trivia(end);
                 if self.ann_at(COLON, end) {
@@ -1240,6 +1283,13 @@ impl Parser<'_> {
                     self.ann_type(end, false);
                 } else {
                     self.error_here("expected `:` after `[name]` in an optional parameter");
+                    malformed = true;
+                }
+                // `[character]` reads as a parameter named `character` with no type, which
+                // the checker would then blame as a name the function lacks.
+                if malformed {
+                    self.start(ERROR);
+                    self.finish();
                 }
             }
             Some(IDENT) if self.ann_next_significant(end) == Some(COLON) => {
@@ -1512,11 +1562,11 @@ impl Parser<'_> {
         }
     }
 
-    /// `type Name` or `alias Name` at the start of a statement: two names side by side
-    /// on one line are a syntax error in R, so code that uses `type` or `alias` as an
-    /// ordinary name never has this shape.
+    /// `type Name`, `alias Name` or `opaque Name` at the start of a statement: two names side
+    /// by side on one line are a syntax error in R, so code that uses these words as ordinary
+    /// names never has this shape.
     fn type_definition_ahead(&self) -> bool {
-        if !self.at(IDENT) || !matches!(self.token_str(self.pos), "type" | "alias") {
+        if !self.at(IDENT) || !is_definition_keyword(self.token_str(self.pos)) {
             return false;
         }
         let kind_at = |pos: usize| self.kind_at(pos);
@@ -1530,8 +1580,8 @@ impl Parser<'_> {
         kind_at(pos) == Some(IDENT)
     }
 
-    /// `type Name<T> = TYPE` or `alias Name = TYPE`, the inline spelling of a
-    /// `#: @type` or `#: @alias` block.
+    /// `type Name<T> = TYPE`, `alias Name = TYPE` or `opaque Name = TYPE`, the inline
+    /// spelling of a `#: @type`, `#: @alias` or `#: @opaque` block.
     fn type_definition(&mut self) {
         self.start(TYPE_DEFINITION);
         let keyword = self.token_str(self.pos).to_owned();

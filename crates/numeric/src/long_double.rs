@@ -617,20 +617,22 @@ pub fn covariance(x: &[f64], x_offset: f64, y: &[f64], y_offset: f64, divisor: i
 /// on each NaN operand, never sees one.
 pub fn running_sums(values: &[f64], out: &mut [f64]) {
     let count = values.len().min(out.len());
-    let first = values[..count]
-        .iter()
-        .position(|value| value.is_nan())
-        .unwrap_or(count);
     #[cfg(all(target_arch = "x86_64", not(windows)))]
-    x87::running_sums(&values[..first], &mut out[..first]);
+    let first = x87::running_sums(&values[..count], &mut out[..count]);
     #[cfg(not(all(target_arch = "x86_64", not(windows))))]
-    {
+    let first = {
         let mut total = LongDouble::ZERO;
-        for (&value, out) in values[..first].iter().zip(&mut out[..first]) {
+        let mut first = count;
+        for (index, (&value, out)) in values[..count].iter().zip(&mut out[..count]).enumerate() {
+            if value.is_nan() {
+                first = index;
+                break;
+            }
             total += value;
             *out = total.to_f64();
         }
-    }
+        first
+    };
     out[first..count].fill(f64::NAN);
 }
 
@@ -638,20 +640,22 @@ pub fn running_sums(values: &[f64], out: &mut [f64]) {
 /// `out`, for the shorter of the two. NA and NaN end the products as in `running_sums`.
 pub fn running_products(values: &[f64], out: &mut [f64]) {
     let count = values.len().min(out.len());
-    let first = values[..count]
-        .iter()
-        .position(|value| value.is_nan())
-        .unwrap_or(count);
     #[cfg(all(target_arch = "x86_64", not(windows)))]
-    x87::running_products(&values[..first], &mut out[..first]);
+    let first = x87::running_products(&values[..count], &mut out[..count]);
     #[cfg(not(all(target_arch = "x86_64", not(windows))))]
-    {
+    let first = {
         let mut product = LongDouble::from(1.0);
-        for (&value, out) in values[..first].iter().zip(&mut out[..first]) {
+        let mut first = count;
+        for (index, (&value, out)) in values[..count].iter().zip(&mut out[..count]).enumerate() {
+            if value.is_nan() {
+                first = index;
+                break;
+            }
             product = product * LongDouble::from(value);
             *out = product.to_f64();
         }
-    }
+        first
+    };
     out[first..count].fill(f64::NAN);
 }
 
@@ -797,17 +801,19 @@ pub fn strtod(text: &[u8], decimal: u8, accept_na: bool, exactness: Exactness) -
     }
     let signed = |value: f64| if negative { -value } else { value };
     let rest = &text[position..];
-    for (word, value) in [
-        (&b"nan"[..], f64::NAN),
-        (b"infinity", f64::INFINITY),
-        (b"inf", f64::INFINITY),
-    ] {
-        if rest.len() >= word.len() && rest[..word.len()].eq_ignore_ascii_case(word) {
-            return found(signed(value), position + word.len());
+    if matches!(rest.first(), Some(b'n' | b'N' | b'i' | b'I')) {
+        for (word, value) in [
+            (&b"nan"[..], f64::NAN),
+            (b"infinity", f64::INFINITY),
+            (b"inf", f64::INFINITY),
+        ] {
+            if rest.len() >= word.len() && rest[..word.len()].eq_ignore_ascii_case(word) {
+                return found(signed(value), position + word.len());
+            }
         }
     }
     let not_a_number = found(signed(heap::object::NA_REAL), 0);
-    let largest_exact = LongDouble::from(9_007_199_254_740_991.0);
+    let largest_exact = || LongDouble::from(9_007_199_254_740_991.0);
     let mut accuracy_lost = false;
     let mut exponent: i32 = 0;
 
@@ -829,7 +835,7 @@ pub fn strtod(text: &[u8], decimal: u8, accept_na: bool, exactness: Exactness) -
             position += 1;
         }
         let mut total = digits.total();
-        if exactness != Exactness::Allow && total > largest_exact {
+        if exactness != Exactness::Allow && total > largest_exact() {
             if exactness == Exactness::Refuse {
                 return not_a_number;
             }
@@ -881,8 +887,7 @@ pub fn strtod(text: &[u8], decimal: u8, accept_na: bool, exactness: Exactness) -
     if count == 0 {
         return not_a_number;
     }
-    let mut total = digits.total();
-    if exactness != Exactness::Allow && total > largest_exact {
+    if exactness != Exactness::Allow && digits.total() > largest_exact() {
         if exactness == Exactness::Refuse {
             return not_a_number;
         }
@@ -894,6 +899,16 @@ pub fn strtod(text: &[u8], decimal: u8, accept_na: bool, exactness: Exactness) -
         };
         exponent += power;
     }
+    if digits.rounded.is_none()
+        && let Some(value) = scale_exactly(digits.exact, exponent)
+    {
+        return Number {
+            value: signed(value),
+            length: position,
+            accuracy_lost,
+        };
+    }
+    let mut total = digits.total();
     let ten = LongDouble::from(10.0);
     // Dividing first keeps a long run of digits with a large negative exponent from
     // underflowing in the scale factor.
@@ -930,6 +945,99 @@ pub fn strtod(text: &[u8], decimal: u8, accept_na: bool, exactness: Exactness) -
         accuracy_lost,
     }
 }
+
+/// `digits * 10^exponent` as the long-double scaling in `strtod` gives it, computed in integer
+/// arithmetic: `None` outside the exponents where that scaling is one rounded operation.
+///
+/// For these exponents `10^|exponent|` is exact in a 64-bit significand, so the scaling rounds
+/// the exact product or quotient once to 64 bits, and `significand_to_f64` then rounds that to
+/// double, which is the double rounding GNU R's reader does.
+fn scale_exactly(digits: u64, exponent: i32) -> Option<f64> {
+    if digits == 0 {
+        return Some(0.0);
+    }
+    if (-22..0).contains(&exponent) && digits < 1 << 53 {
+        // Both operands are exact doubles, so the quotient is the correctly rounded one. The
+        // long double rounds to it too unless the exact quotient lies near the midpoint between
+        // it and a neighbor, which the exact remainder `quotient * power - digits` tells.
+        let power = POWERS_OF_TEN_F64[exponent.unsigned_abs() as usize];
+        let numerator = digits as f64;
+        let quotient = numerator / power;
+        let (product, error) = two_product(quotient, power);
+        let remainder = (product - numerator) + error;
+        let bits = quotient.to_bits();
+        let unit = f64::from_bits(bits & 0x7ff0_0000_0000_0000) * f64::EPSILON;
+        if bits & 0x000f_ffff_ffff_ffff != 0 && remainder.abs() < 0.49 * unit * power {
+            return Some(quotient);
+        }
+    }
+    // The exact value lies in [wide, wide + 1) * 2^binary, strictly inside when `inexact`.
+    let (wide, inexact, binary) = match exponent {
+        0..=19 => (
+            u128::from(digits) * POWERS_OF_TEN[exponent.unsigned_abs() as usize],
+            false,
+            0,
+        ),
+        -18..=-1 => {
+            let divisor = POWERS_OF_TEN[exponent.unsigned_abs() as usize];
+            // At least 64 places, so the quotient keeps more than 64 bits for rounding.
+            let shift = u128::from(digits).leading_zeros();
+            let numerator = u128::from(digits) << shift;
+            (
+                numerator / divisor,
+                numerator % divisor != 0,
+                -(shift as i32),
+            )
+        }
+        _ => return None,
+    };
+    let bits = 128 - wide.leading_zeros();
+    let (significand, exponent) = if bits <= 64 {
+        ((wide << (64 - bits)) as u64, binary - (64 - bits) as i32)
+    } else {
+        let dropped = bits - 64;
+        let kept = wide >> dropped;
+        let rest = wide & ((1 << dropped) - 1);
+        let half = 1u128 << (dropped - 1);
+        let up = rest > half || (rest == half && (inexact || kept & 1 == 1));
+        let kept = kept + u128::from(up);
+        if kept >> 64 != 0 {
+            (1u64 << 63, binary + dropped as i32 + 1)
+        } else {
+            (kept as u64, binary + dropped as i32)
+        }
+    };
+    Some(significand_to_f64(significand, exponent))
+}
+
+/// `a * b` as an unevaluated sum `product + error`, exactly, by Dekker's splitting, which
+/// needs no fused multiply-add.
+fn two_product(a: f64, b: f64) -> (f64, f64) {
+    let split = |value: f64| {
+        let scaled = 134_217_729.0 * value;
+        let high = scaled - (scaled - value);
+        (high, value - high)
+    };
+    let product = a * b;
+    let ((a_high, a_low), (b_high, b_low)) = (split(a), split(b));
+    let error = ((a_high * b_high - product) + a_high * b_low + a_low * b_high) + a_low * b_low;
+    (product, error)
+}
+
+const POWERS_OF_TEN_F64: [f64; 23] = [
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+    1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+];
+
+const POWERS_OF_TEN: [u128; 20] = {
+    let mut powers = [1u128; 20];
+    let mut index = 1;
+    while index < 20 {
+        powers[index] = powers[index - 1] * 10;
+        index += 1;
+    }
+    powers
+};
 
 /// The digits read so far as `base * total + digit` leaves them in a `long double`: an exact
 /// integer while it fits the 64-bit significand, rounded after each step beyond that.
@@ -1425,69 +1533,91 @@ mod x87 {
     }
 
     /// `out[i]` is the running total of `values[..=i]`, stored as a double without leaving the
-    /// register. `out` must be as long as `values`.
-    pub(super) fn running_sums(values: &[f64], out: &mut [f64]) {
+    /// register, up to the first NaN or NA in `values`; returns its position, or the length.
+    /// The NaN test reads the loaded value off the total's dependency chain, so it costs no
+    /// latency, and the caller needs no pass of its own over the values to find it.
+    /// `out` must be as long as `values`.
+    pub(super) fn running_sums(values: &[f64], out: &mut [f64]) -> usize {
         assert_eq!(
             values.len(),
             out.len(),
             "running sums need an output per value"
         );
-        // SAFETY: reads and writes `values.len()` doubles; the stack is left empty.
+        let remaining: usize;
+        // SAFETY: reads and writes at most `values.len()` doubles; the stack is left empty.
         unsafe {
             asm!(
                 "fldz",
                 "test {count}, {count}",
                 "jz 3f",
                 "2:",
-                "fadd qword ptr [{data}]",
+                "fld qword ptr [{data}]",
+                "fucomi st(0), st(0)",
+                "jp 4f",
+                "faddp st(1), st(0)",
                 "fst qword ptr [{out}]",
                 "add {data}, 8",
                 "add {out}, 8",
                 "dec {count}",
                 "jnz 2b",
+                "jmp 3f",
+                "4:",
+                "fstp st(0)",
                 "3:",
                 "fstp st(0)",
                 data = inout(reg) values.as_ptr() => _,
                 out = inout(reg) out.as_mut_ptr() => _,
-                count = inout(reg) values.len() => _,
+                count = inout(reg) values.len() => remaining,
                 out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
                 out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
                 options(nostack),
             );
         }
+        values.len() - remaining
     }
 
-    /// `out[i]` is the running product of `values[..=i]`, stored as a double without leaving
-    /// the register. `out` must be as long as `values`.
-    pub(super) fn running_products(values: &[f64], out: &mut [f64]) {
+    /// `out[i]` is the running product of `values[..=i]`, stored as a double without leaving the
+    /// register, up to the first NaN or NA in `values`; returns its position, or the length.
+    /// The NaN test reads the loaded value off the product's dependency chain, so it costs no
+    /// latency, and the caller needs no pass of its own over the values to find it.
+    /// `out` must be as long as `values`.
+    pub(super) fn running_products(values: &[f64], out: &mut [f64]) -> usize {
         assert_eq!(
             values.len(),
             out.len(),
             "running products need an output per value"
         );
-        // SAFETY: reads and writes `values.len()` doubles; the stack is left empty.
+        let remaining: usize;
+        // SAFETY: reads and writes at most `values.len()` doubles; the stack is left empty.
         unsafe {
             asm!(
                 "fld1",
                 "test {count}, {count}",
                 "jz 3f",
                 "2:",
-                "fmul qword ptr [{data}]",
+                "fld qword ptr [{data}]",
+                "fucomi st(0), st(0)",
+                "jp 4f",
+                "fmulp st(1), st(0)",
                 "fst qword ptr [{out}]",
                 "add {data}, 8",
                 "add {out}, 8",
                 "dec {count}",
                 "jnz 2b",
+                "jmp 3f",
+                "4:",
+                "fstp st(0)",
                 "3:",
                 "fstp st(0)",
                 data = inout(reg) values.as_ptr() => _,
                 out = inout(reg) out.as_mut_ptr() => _,
-                count = inout(reg) values.len() => _,
+                count = inout(reg) values.len() => remaining,
                 out("st(0)") _, out("st(1)") _, out("st(2)") _, out("st(3)") _,
                 out("st(4)") _, out("st(5)") _, out("st(6)") _, out("st(7)") _,
                 options(nostack),
             );
         }
+        values.len() - remaining
     }
 
     /// The rows `block_row_sums` keeps in registers at once: seven totals and one loaded term
@@ -1695,12 +1825,17 @@ fn significand_to_f64(significand: u64, exponent: i32) -> f64 {
     if top > 1023 {
         return f64::INFINITY;
     }
-    // A normal double keeps 53 bits; a subnormal one keeps fewer, down to its 2^-1074 unit.
-    let dropped = if top >= -1022 {
-        11
-    } else {
-        11 + (-1022 - top) as u32
-    };
+    if top >= -1022 {
+        // A normal double keeps 53 bits. Adding the rounded significand to the exponent field
+        // carries a round-up to 2^53 into the next binade, and from the largest one to infinity.
+        let kept = significand >> 11;
+        let rest = significand & 0x7ff;
+        let rounded = kept + u64::from(rest > 0x400 || (rest == 0x400 && kept & 1 == 1));
+        let biased = (top + 1023) as u64;
+        return f64::from_bits((biased << 52) + (rounded - (1 << 52)));
+    }
+    // A subnormal double keeps fewer bits, down to its 2^-1074 unit.
+    let dropped = 11 + (-1022 - top) as u32;
     if dropped > 65 {
         return 0.0;
     }
@@ -1883,7 +2018,7 @@ mod tests {
             let fast = add_products(third, values, &reversed, third, seven);
             assert_eq!(format!("{fast:?}"), format!("{model:?}"), "{values:?}");
             let shifted: Vec<f64> = values.iter().map(|value| value * 0.3 - 1.0).collect();
-            let columns = [&values[..], &reversed, &shifted, &values[..]];
+            let columns = [values, &reversed, &shifted, values];
             let offsets = [0.7, -2.5, 1e-3, 0.0];
             let fast = covariances_by_four(values, 1.0 / 3.0, columns, offsets, 7);
             for (j, column) in columns.iter().enumerate() {
@@ -2073,5 +2208,46 @@ mod tests {
             off_by_one > 0,
             "no text exercised the extended-precision rounding"
         );
+    }
+
+    /// Seeded digits and exponents: the integer scaling gives the long-double scaling's double,
+    /// including for digits near 2^64 and quotients near a tie of either rounding.
+    #[test]
+    fn fuzz_exact_scaling_matches_the_long_double_scaling() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state ^ (state >> 29)
+        };
+        for iteration in 0..200_000 {
+            let digits = match next() % 4 {
+                0 => next() % 1_000_000,
+                1 => next() >> (next() % 64),
+                2 => u64::MAX - next() % 4096,
+                // A multiple of a power of five sits on or next to a binary tie after division.
+                _ => (next() % 100_000).wrapping_mul(5u64.pow((next() % 20) as u32)) | 1 << 52,
+            };
+            let exponent = (next() % 42) as i32 - 22;
+            let total = LongDouble::from_u64(digits);
+            let expected = if exponent < 0 {
+                total / power_of_ten(exponent.unsigned_abs())
+            } else {
+                total * power_of_ten(exponent as u32)
+            }
+            .to_f64();
+            let Some(fast) = scale_exactly(digits, exponent) else {
+                assert!(exponent < -18, "{digits}e{exponent}");
+                continue;
+            };
+            assert_eq!(
+                fast.to_bits(),
+                expected.to_bits(),
+                "iteration {iteration}: {digits}e{exponent}"
+            );
+        }
+        assert_eq!(scale_exactly(1 << 53, -19), None);
+        assert_eq!(scale_exactly(1, 20), None);
     }
 }

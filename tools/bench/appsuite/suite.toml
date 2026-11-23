@@ -6,7 +6,7 @@ A workload modelled on the test suite of a large business application, which a t
 GNU R and ry. It has 13 sections, one per kind of code the suite spends its time in, and each section
 runs a number of rounds chosen so that its share of GNU R's time is the share that kind of code has
 in the suite. The score is the workload's total time, because in a test suite time adds up. Beside it,
-236 patterns reduced from the same suite time one kind of call each, in nanoseconds per call.
+248 patterns reduced from the same suite time one kind of call each, in nanoseconds per call.
 """
 
 [[groups]]
@@ -1526,3 +1526,75 @@ id = "body: helper of 20 lines"
 display = "body: helper of 20 lines"
 group = "patterns"
 source = "tools/bench/appsuite/patterns/r15_plain_function_bodies.R"
+
+[[programs]]
+id = "data.table calls: dt[col2 > 5]"
+display = "data.table calls: dt[col2 > 5]"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r16_data_table_calls.R"
+
+[[programs]]
+id = "data.table calls: dt[key1 %chin% keys]"
+display = "data.table calls: dt[key1 %chin% keys]"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r16_data_table_calls.R"
+
+[[programs]]
+id = "data.table calls: dt[, .(key1, col2)]"
+display = "data.table calls: dt[, .(key1, col2)]"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r16_data_table_calls.R"
+
+[[programs]]
+id = "data.table calls: dt[, .(s = sum(col2)), by = col1]"
+display = "data.table calls: dt[, .(s = sum(col2)), by = col1]"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r16_data_table_calls.R"
+
+[[programs]]
+id = "data.table calls: copy(dt)[, w := col2 / 2]"
+display = "data.table calls: copy(dt)[, w := col2 / 2]"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r16_data_table_calls.R"
+
+[[programs]]
+id = "data.table calls: other[dt, on = 'key1']"
+display = "data.table calls: other[dt, on = 'key1']"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r16_data_table_calls.R"
+
+[[programs]]
+id = "data.table calls: rbindlist() of 2 tables"
+display = "data.table calls: rbindlist() of 2 tables"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r16_data_table_calls.R"
+
+[[programs]]
+id = "data.table calls: setorder(copy(dt), -col2)"
+display = "data.table calls: setorder(copy(dt), -col2)"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r16_data_table_calls.R"
+
+[[programs]]
+id = "data.table calls: data.table() with 3 columns"
+display = "data.table calls: data.table() with 3 columns"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r16_data_table_calls.R"
+
+[[programs]]
+id = "data.table calls: as.data.table(data.frame())"
+display = "data.table calls: as.data.table(data.frame())"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r16_data_table_calls.R"
+
+[[programs]]
+id = "data.table calls: nrow() and names()"
+display = "data.table calls: nrow() and names()"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r16_data_table_calls.R"
+
+[[programs]]
+id = "data.table calls: merge(all.x = TRUE) after joins"
+display = "data.table calls: merge(all.x = TRUE) after joins"
+group = "patterns"
+source = "tools/bench/appsuite/patterns/r16_data_table_calls.R"

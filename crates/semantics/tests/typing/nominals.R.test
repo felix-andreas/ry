@@ -45,8 +45,26 @@ value: integer
 f <- function() 1L
 #++++
 f: fn() -> integer
-3..27 error[annotation] the alias `A` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle.
+3..27 error[annotation] the alias `A` refers to itself, so its expansion never ends. A recursive type needs a name of its own: declare it as `@type A {...}` instead of `@alias`.
 31..43 error[annotation] the alias `B` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle.
+
+#---- a_recursive_record_is_a_nominal_type
+# An alias is shorthand for its expansion, so one that mentions itself never
+# ends; a nominal `@type` names the recursive type, and a chained call keeps it.
+#: @alias Chain {list{next_step: fn() -> Chain}}
+
+#: @type Logger {list{set_threshold: fn(level: character) -> Logger, info: fn(msg: character) -> NULL}}
+
+#: fn(log: Logger) -> NULL
+use <- function(log) {
+  log$set_threshold("info")$info("hi")
+  log$set_threshold(3)
+  NULL
+}
+#++++
+use: fn(log: Logger) -> NULL
+161..206 error[annotation] the alias `Chain` refers to itself, so its expansion never ends. A recursive type needs a name of its own: declare it as `@type Chain {...}` instead of `@alias`.
+422..423 error[type-mismatch] expected `character`, found `double`
 
 #---- new_introduces_and_projects
 #: @type Person {list{name: character, age: integer}}
@@ -142,7 +160,7 @@ f: Future
 #: Instument
 x <- 1L
 #++++
-x: Instument
+x: integer
 3..12 error[annotation] I do not know the type `Instument`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 
 #---- forward_reference_resolves_and_needs_new
@@ -157,7 +175,7 @@ origin: Point
 #: Pair<integer>
 x <- 1L
 #++++
-x: Pair<integer>
+x: integer
 3..7 error[annotation] I do not know the type `Pair`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 
 #---- stub_class_resolves

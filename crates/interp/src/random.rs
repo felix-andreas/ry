@@ -397,6 +397,25 @@ macro_rules! with_deviates {
 }
 pub(crate) use with_deviates;
 
+/// [`with_deviates`] with the Mersenne twister read ahead through a [`Lookahead`], for a batch
+/// of draws from a sampler that mixes normal deviates with other ones.
+macro_rules! with_lookahead {
+    (|$deviates:ident| $body:expr) => {
+        match $crate::random::session_draws() {
+            $crate::random::SessionDraws::Twister(draws) => {
+                let mut draws = draws.lookahead();
+                let $deviates = &mut draws;
+                $body
+            }
+            $crate::random::SessionDraws::Other(mut draws) => {
+                let $deviates = &mut draws;
+                $body
+            }
+        }
+    };
+}
+pub(crate) use with_lookahead;
+
 /// The session's generator, split by family for [`with_deviates`].
 pub(crate) fn session_draws() -> SessionDraws<'static> {
     split_draws(rng())
@@ -424,6 +443,19 @@ fn split_draws(rng: &mut Rng) -> SessionDraws<'_> {
             sample_kind,
             box_muller_saved,
         }),
+    }
+}
+
+impl<'a> Draws<'a, Twister<'a>> {
+    /// The same draws with the twister read ahead.
+    pub(crate) fn lookahead(self) -> Draws<'a, Lookahead<'a>> {
+        let Twister { position, words } = self.uniform;
+        Draws {
+            uniform: Lookahead::new(position, words),
+            normal_kind: self.normal_kind,
+            sample_kind: self.sample_kind,
+            box_muller_saved: self.box_muller_saved,
+        }
     }
 }
 
@@ -548,6 +580,15 @@ pub trait Uniform {
         true
     }
 
+    /// A standard normal deviate by inversion, from the next two deviates as GNU R's
+    /// `norm_rand` combines them.
+    #[inline]
+    fn inversion_normal(&mut self) -> f64 {
+        let first = self.next();
+        let probability = inversion_probability(first, self.next());
+        qnorm(probability, 0.0, 1.0, true, false)
+    }
+
     /// `floor(65536 * next())`: the sixteen bits of an index draw that one deviate gives.
     #[inline]
     fn chunk(&mut self) -> i64 {
@@ -603,6 +644,153 @@ impl Uniform for Twister<'_> {
             temper_block(&self.words[start..start + take], head);
             *self.position += take as i32;
             rest = tail;
+        }
+    }
+}
+
+/// The Mersenne twister read ahead within its block of words, for a batch of draws. Drawing a
+/// deviate at a time is a serial chain of the word's tempering, the normal quantile and the
+/// sampler's branch on the result, which the processor cannot overlap across draws because
+/// the branch decides where the next draw starts. A lookahead tempers the block's words a
+/// chunk at a time and computes the inversion normal starting at every position of a chunk
+/// in SIMD lanes, so a draw only reads what it consumes. The words of the block stay as they
+/// are until the block runs out, and dropping the lookahead stores the position of the first
+/// word not consumed, so the generator's state afterwards is exactly that of single draws.
+pub struct Lookahead<'a> {
+    position: &'a mut i32,
+    words: &'a mut [u32; TWISTER_WORDS],
+    /// The index of the next word to consume.
+    cursor: usize,
+    /// `uniforms[cursor..tempered]` holds the tempered deviates of those words.
+    tempered: usize,
+    /// `normals[normals_start..normals_end]` holds the inversion normal from the deviates at
+    /// each position and the one after it.
+    normals_start: usize,
+    normals_end: usize,
+    uniforms: [f64; TWISTER_WORDS],
+    normals: [f64; TWISTER_WORDS],
+}
+
+/// The words a lookahead tempers, and the positions it computes normals for, at a time: small
+/// enough that a short batch reads little past its last draw, and large enough to fill the
+/// SIMD loops.
+const LOOKAHEAD_CHUNK: usize = 64;
+
+impl<'a> Lookahead<'a> {
+    fn new(position: &'a mut i32, words: &'a mut [u32; TWISTER_WORDS]) -> Self {
+        // A spent block, or a state that asks to be seeded, waits for the first draw, because a
+        // batch may draw nothing.
+        let cursor = if (0..TWISTER_WORDS as i32).contains(position) {
+            *position as usize
+        } else {
+            TWISTER_WORDS
+        };
+        Self {
+            position,
+            words,
+            cursor,
+            tempered: cursor,
+            normals_start: 0,
+            normals_end: 0,
+            uniforms: [0.0; TWISTER_WORDS],
+            normals: [0.0; TWISTER_WORDS],
+        }
+    }
+
+    /// Starts the twister's next block once every word of this one is consumed.
+    #[inline(never)]
+    fn next_block(&mut self) {
+        if (0..TWISTER_WORDS as i32).contains(self.position) {
+            *self.position = TWISTER_WORDS as i32;
+        }
+        regenerate_twister(self.position, self.words);
+        self.cursor = 0;
+        self.tempered = 0;
+        self.normals_start = 0;
+        self.normals_end = 0;
+    }
+
+    /// Tempers at least the words up to `end`, a chunk at a time.
+    #[inline(never)]
+    fn temper_to(&mut self, end: usize) {
+        let end = end.max(self.tempered + LOOKAHEAD_CHUNK).min(TWISTER_WORDS);
+        let start = self.tempered;
+        temper_block(&self.words[start..end], &mut self.uniforms[start..end]);
+        self.tempered = end;
+    }
+
+    /// Computes the normals starting at the cursor and at the positions of the chunk after it.
+    #[inline(never)]
+    fn fill_normals(&mut self) {
+        let start = self.cursor;
+        let end = (start + LOOKAHEAD_CHUNK).min(TWISTER_WORDS - 1);
+        if self.tempered < end + 1 {
+            self.temper_to(end + 1);
+        }
+        for index in start..end {
+            self.normals[index] =
+                inversion_probability(self.uniforms[index], self.uniforms[index + 1]);
+        }
+        qnorm_standard_fill(&mut self.normals[start..end]);
+        self.normals_start = start;
+        self.normals_end = end;
+    }
+}
+
+impl Uniform for Lookahead<'_> {
+    #[inline]
+    fn next(&mut self) -> f64 {
+        if self.cursor == TWISTER_WORDS {
+            self.next_block();
+        }
+        if self.cursor >= self.tempered {
+            self.temper_to(self.cursor + 1);
+        }
+        let value = self.uniforms[self.cursor];
+        self.cursor += 1;
+        value
+    }
+
+    fn fill(&mut self, slots: &mut [f64]) {
+        let mut rest = slots;
+        while !rest.is_empty() {
+            if self.cursor == TWISTER_WORDS {
+                self.next_block();
+            }
+            let take = (TWISTER_WORDS - self.cursor).min(rest.len());
+            if self.tempered < self.cursor + take {
+                self.temper_to(self.cursor + take);
+            }
+            let (head, tail) = std::mem::take(&mut rest).split_at_mut(take);
+            head.copy_from_slice(&self.uniforms[self.cursor..self.cursor + take]);
+            self.cursor += take;
+            rest = tail;
+        }
+    }
+
+    #[inline]
+    fn inversion_normal(&mut self) -> f64 {
+        if self.cursor + 2 > TWISTER_WORDS {
+            // The two deviates straddle the block's end.
+            let first = self.next();
+            let probability = inversion_probability(first, self.next());
+            return qnorm(probability, 0.0, 1.0, true, false);
+        }
+        if !(self.normals_start..self.normals_end).contains(&self.cursor) {
+            self.fill_normals();
+        }
+        let value = self.normals[self.cursor];
+        self.cursor += 2;
+        value
+    }
+}
+
+impl Drop for Lookahead<'_> {
+    fn drop(&mut self) {
+        // A position outside the block means no block was generated and no word drawn, so
+        // the state stays as it was.
+        if (0..TWISTER_WORDS as i32).contains(self.position) {
+            *self.position = self.cursor as i32;
         }
     }
 }
@@ -1823,11 +2011,7 @@ fn inversion_fill_avx2(uniforms: &[f64], slots: &mut [f64]) {
 
 fn next_normal(uniform: &mut impl Uniform, kind: NormalKind, saved: &mut f64) -> R<f64> {
     match kind {
-        NormalKind::Inversion => {
-            let first = uniform.next();
-            let probability = inversion_probability(first, uniform.next());
-            Ok(qnorm(probability, 0.0, 1.0, true, false))
-        }
+        NormalKind::Inversion => Ok(uniform.inversion_normal()),
         NormalKind::BoxMuller => {
             if *saved != 0.0 {
                 let value = *saved;

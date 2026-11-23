@@ -272,6 +272,12 @@ pub enum TyKind<'db> {
     Tuple(&'db [Ty<'db>]),
     /// `list{a: A, b: B}`; fields keep declaration order.
     Record(&'db [RecordField<'db>]),
+    /// `list{a: A, ..}`: a record-like list with at least these fields. A record with more
+    /// fits it, and only the listed fields can be read through it.
+    OpenRecord(&'db [RecordField<'db>]),
+    /// `environment{count: integer}`: an environment whose listed bindings keep their types.
+    /// It is mutable, so a write is checked against the field and never changes the type.
+    Environment(&'db [RecordField<'db>]),
     /// `Tuple{A, B}`: ry's native tuple, which is not a list and never fits a list type.
     NativeTuple(&'db [Ty<'db>]),
     /// `Record{a: A, b: B}`: ry's native record. Field order is not part of the type, so the
@@ -300,7 +306,8 @@ pub enum TyKind<'db> {
 }
 
 /// What a table type is. The kinds never fit each other: a `data.table` runs data.table's code,
-/// a `LazyFrame` holds a plan rather than rows, and a `GroupBy` only feeds `GroupBy.agg`.
+/// a `data.frame` runs base R's, a `LazyFrame` holds a plan rather than rows, and a `GroupBy`
+/// only feeds `GroupBy.agg`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum FrameKind {
     DataFrame,
@@ -313,6 +320,8 @@ pub enum FrameKind {
     },
     /// A data.table whose columns are known, from `fread` and the rest of data.table's readers.
     DataTable,
+    /// An R `data.frame` whose columns are known, from `data.frame(...)`.
+    RDataFrame,
 }
 
 impl FrameKind {
@@ -323,6 +332,17 @@ impl FrameKind {
             FrameKind::GroupBy { lazy: false, .. } => "GroupBy",
             FrameKind::GroupBy { lazy: true, .. } => "LazyGroupBy",
             FrameKind::DataTable => "data.table",
+            FrameKind::RDataFrame => "data.frame",
+        }
+    }
+
+    /// The R class of a kind whose values are R objects: such a frame is its class with the
+    /// columns known, and passes wherever the class does.
+    pub fn class(self) -> Option<&'static str> {
+        match self {
+            FrameKind::DataTable => Some("data.table"),
+            FrameKind::RDataFrame => Some("data.frame"),
+            _ => None,
         }
     }
 
@@ -340,6 +360,7 @@ impl FrameKind {
                 keys: 0,
             },
             "data.table" => FrameKind::DataTable,
+            "data.frame" => FrameKind::RDataFrame,
             _ => return None,
         })
     }
@@ -566,6 +587,10 @@ pub struct FunctionType<'db> {
     /// Formals the body reads only as the whole condition of an `if` or `while`, which takes a
     /// string through `as.logical`. Inferred only.
     pub condition_only: &'db [Name<'db>],
+    /// The formal an S3 generic's `UseMethod` dispatches on. Dispatch forces a supplied
+    /// argument, so forwarding a missing formal there fails even though a call may leave the
+    /// formal out. Inferred only.
+    pub dispatch: Option<Name<'db>>,
     /// The body returns `NULL` only through `if (!predicate(parameter)) return(NULL)`, so a
     /// call where the caller already showed `predicate` holds of its argument returns the
     /// other members alone. Inferred only.
@@ -599,6 +624,7 @@ impl<'db> FunctionType<'db> {
             default_reads: &[],
             missing_tested: &[],
             condition_only: &[],
+            dispatch: None,
             null_unless: None,
             reduces: None,
             from_calls: false,
@@ -768,8 +794,49 @@ impl Constraint {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub struct TypeScheme<'db> {
-    pub binders: ThinVec<(Name<'db>, Constraint)>,
+    pub binders: ThinVec<Binder<'db>>,
     pub body: Ty<'db>,
+}
+
+/// A type parameter of a scheme: `T`, `T: numeric` or `T: list[U] | U[]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub struct Binder<'db> {
+    pub name: Name<'db>,
+    pub bound: Bound<'db>,
+}
+
+/// What a type parameter ranges over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub enum Bound<'db> {
+    Constraint(Constraint),
+    /// The types that fit this type, usually a union. `function(path) { vapply(path, f, ...);
+    /// path }` takes any vector or list and returns the argument's own type, which the union
+    /// alone cannot say: as the parameter's type it would hand every caller back the whole union.
+    Type(Ty<'db>),
+}
+
+impl<'db> Binder<'db> {
+    pub fn constrained(name: Name<'db>, constraint: Constraint) -> Binder<'db> {
+        Binder {
+            name,
+            bound: Bound::Constraint(constraint),
+        }
+    }
+
+    /// `Unconstrained` for a type bound, which says what the binder admits on its own.
+    pub fn constraint(self) -> Constraint {
+        match self.bound {
+            Bound::Constraint(constraint) => constraint,
+            Bound::Type(_) => Constraint::Unconstrained,
+        }
+    }
+
+    pub fn type_bound(self) -> Option<Ty<'db>> {
+        match self.bound {
+            Bound::Type(bound) => Some(bound),
+            Bound::Constraint(_) => None,
+        }
+    }
 }
 
 impl<'db> TypeScheme<'db> {
@@ -1145,6 +1212,10 @@ fn rebuilt_type<'db>(
             Ty::new(db, TyKind::Tuple(&items))
         }
         TyKind::Record(fields) => Ty::new(db, TyKind::Record(&mapped_fields(fields, map))),
+        TyKind::OpenRecord(fields) => Ty::new(db, TyKind::OpenRecord(&mapped_fields(fields, map))),
+        TyKind::Environment(fields) => {
+            Ty::new(db, TyKind::Environment(&mapped_fields(fields, map)))
+        }
         TyKind::NativeTuple(items) => {
             let items: TypeList<'db> = items.iter().map(|&item| map(item)).collect();
             Ty::new(db, TyKind::NativeTuple(&items))
@@ -1229,9 +1300,10 @@ fn for_each_child<'db>(kind: &TyKind<'db>, visit: &mut impl FnMut(Ty<'db>)) {
         }
         TyKind::NativeRecord(fields) => fields.iter().for_each(|field| visit(field.ty)),
         TyKind::Tag(_, payload) => payload.iter().copied().for_each(visit),
-        TyKind::Record(fields) | TyKind::Frame(_, Some(fields)) => {
-            fields.iter().for_each(|field| visit(field.ty))
-        }
+        TyKind::Record(fields)
+        | TyKind::OpenRecord(fields)
+        | TyKind::Environment(fields)
+        | TyKind::Frame(_, Some(fields)) => fields.iter().for_each(|field| visit(field.ty)),
         TyKind::Frame(_, None) => {}
         TyKind::Function(function) => {
             function.positional.iter().copied().for_each(&mut *visit);
@@ -1258,6 +1330,11 @@ fn for_each_child<'db>(kind: &TyKind<'db>, visit: &mut impl FnMut(Ty<'db>)) {
 /// value cached across a rollback) must contain none.
 pub fn contains_inference_var<'db>(_db: &'db dyn Db, ty: Ty<'db>) -> bool {
     ty.bits.get() & HAS_VAR != 0
+}
+
+/// Whether `ty` names a type parameter of an enclosing signature.
+pub fn contains_rigid(ty: Ty<'_>) -> bool {
+    ty.bits.get() & HAS_RIGID != 0
 }
 
 /// Unmapped rigid variables are left intact. A name bound twice takes its last binding.
@@ -1454,6 +1531,8 @@ fn stored_kind<'a>(arena: &'a Bump, kind: TyKind<'a>) -> TyKind<'a> {
     match kind {
         TyKind::Tuple(items) => TyKind::Tuple(arena.alloc_slice_copy(items)),
         TyKind::Record(fields) => TyKind::Record(arena.alloc_slice_copy(fields)),
+        TyKind::OpenRecord(fields) => TyKind::OpenRecord(arena.alloc_slice_copy(fields)),
+        TyKind::Environment(fields) => TyKind::Environment(arena.alloc_slice_copy(fields)),
         TyKind::NativeTuple(items) => TyKind::NativeTuple(arena.alloc_slice_copy(items)),
         TyKind::NativeRecord(fields) => TyKind::NativeRecord(arena.alloc_slice_copy(fields)),
         TyKind::Frame(frame, Some(columns)) => {

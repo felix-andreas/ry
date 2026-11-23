@@ -4,6 +4,18 @@ r <- Result.map(List.get([1, 2], 1), function(x) x * 2)
 #++++
 r: :Ok(I64) | :Err(:OutOfBounds)
 
+#---- a_string_is_not_a_callback
+# `match.fun` turns a function's name into the function, but a ry function never calls it.
+names <- List.map([1, 2], "toupper")
+kept <- List.keep_if(["a", ""], "nzchar")
+r_names <- lapply(list("a"), "toupper")
+#++++
+names: Unknown
+kept: Unknown
+r_names: list[character]
+117..126 error[type-mismatch] expected a function, found a function's name. A function that takes ry values calls its callback directly and never looks a name up, so pass `toupper`, not `"toupper"`
+160..168 error[type-mismatch] expected `fn(Str) -> Bool`, found a function's name. A function that takes ry values calls its callback directly and never looks a name up, so pass `nzchar`, not `"nzchar"`
+
 #---- with_default_unwraps
 v <- Result.with_default(List.first(["a", "b"]), "")
 #++++

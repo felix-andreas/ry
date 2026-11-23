@@ -45,7 +45,7 @@ use {
 pub const DIRECTORY: &str = ".ry_cache";
 const RECORD: &str = "check.json";
 /// Bumped whenever the record's layout or its reuse rule changes.
-const FORMAT: u32 = 5;
+const FORMAT: u32 = 6;
 
 /// Whether a run may read and write the record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,8 +70,9 @@ pub struct Record {
     key: Fingerprint,
     files: Vec<RecordedFile>,
     namespace: Option<Vec<RecordedDiagnostic>>,
-    /// The packages the project's files attach. Attach calls are part of a file's surface, so a
-    /// partial run reuses the set instead of scanning every file for them.
+    /// The packages the analysed files attach, which every recorded finding was computed under,
+    /// because attach calls reach findings across files (`decisions/libr-rcmd.md`, "The strict
+    /// load check analyses only the package").
     attached: Vec<String>,
 }
 
@@ -85,6 +86,8 @@ struct RecordedFile {
     dependencies: Vec<u32>,
     /// The NAMESPACE imports the file's code uses, which the NAMESPACE findings depend on.
     tokens: Vec<String>,
+    /// The namespaces the recorded text attaches; `None` when no run that saw it analysed it.
+    attaches: Option<Vec<String>>,
     /// `None` when the run that wrote the record did not check the file.
     diagnostics: Option<Vec<RecordedDiagnostic>>,
 }
@@ -135,6 +138,7 @@ pub struct FileOutcome<'a> {
     pub surface: Option<Fingerprint>,
     pub dependencies: Vec<u32>,
     pub tokens: Vec<String>,
+    pub attaches: Option<Vec<String>>,
     /// `None` for a file this run did not check.
     pub diagnostics: Option<&'a [Diagnostic]>,
 }
@@ -266,6 +270,18 @@ pub fn load(root: &Path) -> Option<Record> {
     (record.format == FORMAT).then_some(record)
 }
 
+/// How a run's attached set is computed, which [`plan`] compares with the recorded one.
+pub struct Attaching<Files, Of, Changes> {
+    /// Whether the run's analysis attaches the file's calls.
+    pub files: Files,
+    /// The namespaces a file's text attaches, `None` when it cannot tell.
+    pub attaches_of: Of,
+    /// Whether attaching a namespace can change a finding.
+    pub changes_findings: Changes,
+}
+
+/// Plans a run against the previous record. A record the plan keeps carries this run's
+/// attached set.
 pub fn plan(
     previous: Option<Record>,
     key: Fingerprint,
@@ -273,8 +289,18 @@ pub fn plan(
     contents: &[Fingerprint],
     analysed: impl Fn(usize) -> bool,
     surface_of: impl Fn(usize) -> Fingerprint,
+    attaching: Attaching<
+        impl Fn(usize) -> bool,
+        impl Fn(usize) -> Option<BTreeSet<String>>,
+        impl Fn(&str) -> bool,
+    >,
 ) -> Plan {
-    let Some(previous) = previous else {
+    let Attaching {
+        files: attaching,
+        attaches_of,
+        changes_findings,
+    } = attaching;
+    let Some(mut previous) = previous else {
         return Plan::Fresh;
     };
     let same_files = previous.files.len() == paths.len()
@@ -292,6 +318,31 @@ pub fn plan(
         .zip(contents)
         .map(|(recorded, content)| recorded.content != *content)
         .collect();
+    // A run of another kind analyses other files, and their attach calls may differ. The
+    // set is the one this run's analysis attaches, which in the server is only the files it
+    // loaded, while `analysed` also covers the files whose changes it must notice.
+    let mut attached = BTreeSet::new();
+    for (index, recorded) in previous.files.iter().enumerate() {
+        if !attaching(index) {
+            continue;
+        }
+        match (&recorded.attaches, changed[index]) {
+            (Some(attaches), false) => attached.extend(attaches.iter().cloned()),
+            _ => match attaches_of(index) {
+                Some(attaches) => attached.extend(attaches),
+                None => return Plan::Fresh,
+            },
+        }
+    }
+    let effective = |set: &mut dyn Iterator<Item = &String>| -> BTreeSet<String> {
+        set.filter(|namespace| changes_findings(namespace))
+            .cloned()
+            .collect()
+    };
+    if effective(&mut previous.attached.iter()) != effective(&mut attached.iter()) {
+        return Plan::Fresh;
+    }
+    previous.attached = attached.into_iter().collect();
     let unchecked = |index: usize| {
         previous
             .files
@@ -363,16 +414,16 @@ impl Record {
         self.files.get(index).map(|recorded| recorded.content)
     }
 
-    /// Whether the run that wrote the record analysed every file, so that its attached set is
-    /// the whole project's.
-    pub fn analysed_every_file(&self) -> bool {
-        self.files.iter().all(|recorded| recorded.surface.is_some())
-    }
-
     pub fn tokens(&self, index: usize) -> Option<&[String]> {
         self.files
             .get(index)
             .map(|recorded| recorded.tokens.as_slice())
+    }
+
+    pub fn attaches(&self, index: usize) -> Option<&[String]> {
+        self.files
+            .get(index)
+            .and_then(|recorded| recorded.attaches.as_deref())
     }
 
     pub fn attached(&self) -> BTreeSet<String> {
@@ -440,6 +491,7 @@ pub fn record(
                 surface: outcome.surface,
                 dependencies,
                 tokens,
+                attaches: outcome.attaches,
                 diagnostics,
             })
         })

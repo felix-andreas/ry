@@ -1,0 +1,12 @@
+[stdout]
+| [1] "expressionStackOverflowError" "stackOverflowError"          
+| [3] "error"                        "condition"                   
+| [1] "evaluation nested too deeply: infinite recursion / options(expressions=)?"
+| NULL
+| [1] TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+logical
+| TRUE

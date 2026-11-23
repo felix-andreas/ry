@@ -29,6 +29,75 @@ action: Add inferred type annotations for the whole file
 completion (2): region, units
 hint @5: DataFrame{region: character[], units: integer[]}
 
+#---- base_df_dollar_completion
+frame <- data.frame(region = c("eu", "us"), units = c(3L, 5L))
+frame$$0
+#++++
+hover 63..69: Unknown
+definition: none
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 5..5 -> ": data.frame{region: character[], units: integer[]}"
+completion (2): region, units
+hint @5: data.frame{region: character[], units: integer[]}
+
+#---- a_local_letters_the_signatures_second_parameter_as_u
+compute <- function(x, y) {
+  dou$0bled <- y + y
+  doubled
+}
+#++++
+hover 30..37: doubled: U
+hover-definition: local 30..37
+definition 30..37
+references: 30..37*, 49..56
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `compute`
+  edit 0..0 -> "#: <T, U: numeric> fn([x]: T, y: U) -> U\n"
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T, U: numeric> fn([x]: T, y: U) -> U\n"
+completion (26): doubled, double, stdout, as.double, as.double.difftime, as.double.POSIXlt, is.double, .__C__double
+hint @7: <T, U: numeric> fn([x]: T, y: U) -> U
+hint @37: U
+
+#---- a_declared_signatures_local_offers_its_t
+#: <T: numeric, U> fn(x: U, y: T) -> T
+compute <- function(x, y) {
+  dou$0bled <- y + y
+  doubled
+}
+#++++
+hover 69..76: doubled: T
+hover-definition: local 69..76
+definition 69..76
+references: 69..76*, 88..95
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `doubled`
+  edit 76..76 -> ": T"
+completion (26): doubled, double, stdout, as.double, as.double.difftime, as.double.POSIXlt, is.double, .__C__double
+hint @76: T
+
+#---- an_inline_signatures_local_offers_its_t
+compute <- function<T: numeric>(x: double, y: T) -> T {
+  dou$0bled <- y + y
+  doubled
+}
+#++++
+hover 58..65: doubled: T
+hover-definition: local 58..65
+definition 58..65
+references: 58..65*, 77..84
+rename: 2 edit(s)
+signature: none
+action: Add inferred type annotation for `doubled`
+  edit 65..65 -> ": T"
+completion (26): doubled, double, stdout, as.double, as.double.difftime, as.double.POSIXlt, is.double, .__C__double
+hint @65: T
+
 #---- df_col_completion
 sales <- DataFrame(region = c("eu", "us"), units = c(3L, 5L))
 x <- sales |> DataFrame.select(Expr.col("$0"))
@@ -182,7 +251,7 @@ action: Add inferred type annotations for the whole file
   edit 24..24 -> ": T"
   edit 32..32 -> ": U"
   edit 38..38 -> " -> T"
-completion (81): second = , se.contrast, sealClass, search, searchpaths, seek, seek.connection, segments
+completion (85): second = , se.contrast, sealClass, search, searchpaths, seek, seek.connection, segments
 hint @18<T, U>
 hint @24: T
 hint @32: U
@@ -224,6 +293,7 @@ completion (128+): value, result, f, function, break, else, FALSE, for
 hint @13<T>
 hint @19: T
 hint @20 -> T
+hint @31: T
 
 #---- completion_skips_positionally_filled_parameter
 helper <- function(first, second = 2L, third = 3L) first
@@ -252,7 +322,7 @@ hint @50 -> T
 helper <- function(first, second = 2L, third = 3L) first
 helper(third = 1L, $0)
 #++++
-hover 57..77: T
+hover 57..77: Unknown
 definition: none
 references: none
 rename: none
@@ -275,7 +345,7 @@ hint @50 -> T
 helper <- function(first, second = 2L) first
 helper(second = $0)
 #++++
-hover 45..62: T
+hover 45..62: Unknown
 definition: none
 references: none
 rename: none
@@ -295,7 +365,7 @@ hint @38 -> T
 #---- base_data_frame_hover
 fra$0me <- data.frame(region = c("eu", "us"), units = c(3L, 5L))
 #++++
-hover 0..5: frame: data.frame
+hover 0..5: frame: data.frame{region: character[], units: integer[]}
 hover-definition: global 0..5
 definition 0..5
 references: 0..5*
@@ -303,11 +373,11 @@ rename: 1 edit(s)
 type-definition: stub source base at `data.frame`
 signature: none
 action: Add inferred type annotation for `frame`
-  edit 5..5 -> ": data.frame"
+  edit 5..5 -> ": data.frame{region: character[], units: integer[]}"
 action: Add inferred type annotations for the whole file
-  edit 5..5 -> ": data.frame"
+  edit 5..5 -> ": data.frame{region: character[], units: integer[]}"
 completion (128+): frame, format.data.frame, xtfrm.data.frame, DataFrame, DataFrame.columns, DataFrame.copy, DataFrame.filter, DataFrame.group_by
-hint @5: data.frame
+hint @5: data.frame{region: character[], units: integer[]}
 
 #---- base_matrix_hover
 gr$0id <- matrix(0, nrow = 2L, ncol = 2L)
@@ -411,7 +481,7 @@ action: Add inferred type annotation for `outer`
   edit 19..19 -> " -> double"
 action: Add inferred type annotations for the whole file
   edit 19..19 -> " -> double"
-completion (73): by, break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot, barplot.default
+completion (74): by, break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot, barplot.default
 hint @19 -> double
 hint @43: T
 hint @47: T
@@ -460,7 +530,7 @@ references: none
 rename: none
 signature: fn(...: Any) -> list[named: Unknown]
 parameters: [...: Any]
-completion (47): fifo, file, file.access, file.append, file.choose, file.copy, file.create, file.edit
+completion (48): fifo, file, file.access, file.append, file.choose, file.copy, file.create, file.edit
 
 #---- qualified_library_name_navigates_to_its_stub
 x <- base::past$0e("a", "b")
@@ -677,6 +747,8 @@ references: 42..47*, 154..159
 rename: 2 edit(s)
 signature: fn()
 parameters:
+action: Add inferred type annotations for the whole file
+  edit 60..60 -> " -> character"
 completion (1): greet
 
 #---- field_record
@@ -732,6 +804,8 @@ action: Add inferred type annotation for `fit`
   edit 3..3 -> ": double"
 action: Add inferred type annotations for the whole file
   edit 3..3 -> ": double"
+  edit 32..32 -> ": double"
+  edit 33..33 -> " -> double"
 completion (1): root
 hint @3: double
 hint @41interval =
@@ -776,10 +850,11 @@ hover 150..155: envir: NULL
 definition 104..109
 references: 104..109*, 150..155
 rename: 2 edit(s)
-signature: none
+signature: fn(x, envir = NULL)
+parameters: x | [envir = NULL]
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn([expr]: T) -> Any\n"
-completion (63): env.profile, environment, environmentIsLocked, environmentName, emptyenv, .expand_R_libs_env_var, getGraphicsEventEnv, new.env
+completion (64): envir, env.profile, environment, environmentIsLocked, environmentName, emptyenv, .expand_R_libs_env_var, getGraphicsEventEnv
 hint @11: <T> fn([expr]: T) -> Any
 hint @35expr =
 hint @53envir =
@@ -845,11 +920,11 @@ type-definition: stub source base at `data.frame`
 signature: fn(...: Any, [row.names]: Any, [check.rows]: logical, [check.names]: logical, [fix.empty.names]: logical, [stringsAsFactors]: logical) -> data.frame
 parameters: ...: Any | [row.names]: Any | [check.rows]: logical | [check.names]: logical | [fix.empty.names]: logical | [[stringsAsFactors]: logical]
 action: Add inferred type annotation for `df`
-  edit 2..2 -> ": data.frame"
+  edit 2..2 -> ": data.frame{x: double[]}"
 action: Add inferred type annotations for the whole file
-  edit 2..2 -> ": data.frame"
+  edit 2..2 -> ": data.frame{x: double[]}"
 completion (2): stringsAsFactors, default.stringsAsFactors
-hint @2: data.frame
+hint @2: data.frame{x: double[]}
 
 #---- field_self_reassigned
 f <- function() {
@@ -1076,7 +1151,7 @@ action: Add inferred type annotation for `f`
   edit 0..0 -> "#: <T> fn([xs]: T) -> NULL\n"
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn([xs]: T) -> NULL\n"
-completion (28): item, inheritedSlotNames, ISOdatetime, bindtextdomain, Dict.empty, Dict.is_empty, Dict.remove, Dict.remove_all
+completion (31): item, winMenuAddItem, winMenuDelItem, winMenuItems, inheritedSlotNames, ISOdatetime, bindtextdomain, Dict.empty
 hint @1: <T> fn([xs]: T) -> NULL
 hint @31: character
 
@@ -1171,7 +1246,7 @@ references: none
 rename: none
 signature: fn(x: Any, ...: Any, [trim]: logical, [digits]: Any, [nsmall]: Any, [justify]: character, [width]: Any, [na.encode]: logical, [scientific]: Any, [big.mark]: character, [decimal.mark]: character) -> character
 parameters: [x: Any] | ...: Any | [trim]: logical | [digits]: Any | [nsmall]: Any | [justify]: character | [width]: Any | [na.encode]: logical | [scientific]: Any | [big.mark]: character | [decimal.mark]: character
-completion (27): format, format.AsIs, format.data.frame, format.Date, format.default, format.difftime, format.factor, format.hexmode
+completion (28): format, format.AsIs, format.data.frame, format.Date, format.default, format.difftime, format.factor, format.hexmode
 
 #---- completion_offers_a_global_assigned_inside_another_assignment
 total <- sum(parts <- c(1, 2))
@@ -1186,7 +1261,7 @@ signature: fn(x: double[], ...: Any, [digits]: Any, [quote]: logical, [right]: l
 parameters: [x: double[]] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": double"
-completion (15): parts, packageStartupMessage, pairwise.prop.test, pairwise.t.test, pairwise.wilcox.test, print.NativeRoutineList, suppressPackageStartupMessages, .deparseOpts
+completion (16): parts, packageStartupMessage, pairwise.prop.test, pairwise.t.test, pairwise.wilcox.test, print.NativeRoutineList, suppressPackageStartupMessages, .deparseOpts
 hint @5: double
 hint @18: double[]
 
@@ -1248,7 +1323,7 @@ references: 49..53*, 58..62
 rename: 2 edit(s)
 type-definition: stub source std at `List`
 signature: none
-completion (114): rest, restartDescription, restartFormals, print.restart, tryInvokeRestart, isRestart, de.restore, USArrests
+completion (115): rest, restartDescription, restartFormals, print.restart, tryInvokeRestart, isRestart, de.restore, USArrests
 
 #---- completion_offers_a_top_level_pattern_variable
 match (:Some(1L)) {
@@ -1361,10 +1436,11 @@ f <- function(a, b) {
   }
 }
 #++++
-hover 115..120: found: T
+hover 115..120: found: U
 hover-definition: local 55..60
 definition 55..60
 references: 55..60*, 65..70, 115..120*, 125..130
 rename: 4 edit(s)
 signature: none
 completion: none
+hint @29: T | integer

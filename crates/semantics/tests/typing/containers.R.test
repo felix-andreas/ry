@@ -198,6 +198,98 @@ row_id: fn(row: list{id: integer}) -> integer
 integer
 99..104 error[type-mismatch] this list has a field `extra`, which is not expected here
 
+#---- an_open_record_lets_more_fields_through
+# `..` asks for the listed fields and accepts a list with more, so a function can
+# take any list that carries a `tick` callback.
+#: fn(t: list{tick: fn() -> NULL, ..}) -> NULL
+run <- function(t) t$tick()
+run(list(tick = function() NULL, finished = TRUE))
+#++++
+run: fn(t: list{tick: fn() -> NULL, ..}) -> NULL
+NULL
+
+#---- an_open_record_still_needs_its_listed_fields
+#: fn(t: list{tick: fn() -> NULL, ..}) -> NULL
+run <- function(t) t$tick()
+run(list(tock = function() NULL))
+run(list(tick = 1))
+#++++
+run: fn(t: list{tick: fn() -> NULL, ..}) -> NULL
+NULL
+NULL
+79..107 error[type-mismatch] expected a field `tick` here, and this list has `tock` instead. Check the spelling
+125..126 error[type-mismatch] expected `fn() -> NULL` for field `tick`, found `double`
+
+#---- an_open_record_reads_only_its_listed_fields
+# A field the type does not list may or may not be there, so it reads as
+# `Unknown`; a near miss of a listed one is still a typo.
+#: fn(t: list{tick: fn() -> NULL, ..}) -> Any
+peek <- function(t) t$finished
+#: fn(t: list{tick: fn() -> NULL, ..}) -> Any
+tickk <- function(t) t$tikc
+#++++
+peek: fn(t: list{tick: fn() -> NULL, ..}) -> Any
+tickk: fn(t: list{tick: fn() -> NULL, ..}) -> Any
+277..281 error[type-mismatch] field `tikc` does not exist in `list{tick: fn() -> NULL, ..}`. Did you mean `tick`?
+
+#---- an_open_record_takes_named_fields_only
+#: fn(t: list{a: double, character, ..}) -> NULL
+f <- function(t) NULL
+#: fn(t: data.frame{a: double, ..}) -> NULL
+g <- function(t) NULL
+#++++
+f: <T> fn([t]: T) -> NULL
+g: <T> fn([t]: T) -> NULL
+25..34 error[annotation] `..` stands for more named fields, so every item of this `list{...}` type needs a name: write it as `name: TYPE`
+80..105 error[annotation] a `data.frame{...}` type lists every column, so it cannot end in `..`
+
+#---- a_typed_environment_keeps_its_bindings_types
+# `new.env()` fits any `environment{...}` type, and a write is checked against
+# the binding without changing the variable's type.
+count <- function() -> integer {
+  #: environment{count: integer}
+  calls <- new.env()
+  calls$count <- 0L
+  calls$count <- calls$count + 1L
+  calls[["count"]] <- calls[["count"]] * 2L
+  calls$count
+}
+#: fn(cache: environment{hits: integer}) -> NULL
+remember <- function(cache) {
+  cache$hits <- cache$hits + 1L
+  NULL
+}
+#: fn() -> NULL
+use <- function() remember(new.env())
+#++++
+count: fn() -> integer
+remember: fn(cache: environment{hits: integer}) -> NULL
+use: fn() -> NULL
+
+#---- a_typed_environment_refuses_other_bindings
+#: fn(calls: environment{count: integer}) -> integer
+bump <- function(calls) {
+  calls$count <- "many"
+  calls$total <- 1L
+  calls$cuont
+}
+#++++
+bump: fn(calls: environment{count: integer}) -> integer
+96..102 error[type-mismatch] expected `integer`, found `character`
+111..116 error[type-mismatch] `total` is not a binding of `environment{count: integer}`, whose type lists every binding it may hold. Add `total: TYPE` to the type to allow it
+131..136 error[type-mismatch] field `cuont` does not exist in `environment{count: integer}`. Did you mean `count`?
+
+#---- a_typed_environment_lists_every_binding
+#: fn(e: environment{a: integer, ..}) -> NULL
+f <- function(e) NULL
+#: fn(e: environment{a: integer, character}) -> NULL
+g <- function(e) NULL
+#++++
+f: <T> fn([e]: T) -> NULL
+g: <T> fn([e]: T) -> NULL
+33..35 error[annotation] an `environment{...}` type lists every binding the environment may hold, so it cannot end in `..`. Write plain `environment` for one whose bindings are not typed
+101..110 error[annotation] an `environment{...}` type names every binding: write it as `name: TYPE`
+
 #---- fields_pair_by_name_so_order_does_not_matter
 #: fn(row: list{id: integer, label: character}) -> integer
 row_id <- function(row) row$id
@@ -307,6 +399,22 @@ build <- function(escape) {
 #++++
 build: Unknown
 191..197 error[type-mismatch] field `escpae` does not exist in `list{} | list{escape: logical}`. Did you mean `escape`?
+
+#---- dollar_on_a_vector_or_a_list_by_a_flag_is_unknown
+f <- function(names_only) {
+  frame <- list(name = "a", size = 1)
+  if (names_only) frame$name else frame
+}
+g <- function() f(FALSE)$size
+#++++
+f: fn(names_only: logical) -> character | list{name: character, size: double}
+g: fn() -> Unknown
+
+#---- dollar_on_a_vector_or_null_is_reported
+f <- function(v: character | NULL) v$name
+#++++
+f: fn(v: character | NULL) -> Unknown
+35..41 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `character | NULL`. Extract an element with `[[` instead.
 
 #---- dollar_on_atomic_vector
 f <- function() {

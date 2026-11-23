@@ -44,7 +44,7 @@
 
 use {
     crate::{
-        Frame, Interp,
+        Frame, Interp, Signalling,
         arith::{MATHS, math_index},
         builtins::{Arg, BuiltinDef, Call, Generic, Replacement, internal},
         conditions, deparse,
@@ -72,6 +72,7 @@ use {
     smallvec::{SmallVec, smallvec},
     std::{
         hash::{Hash, Hasher},
+        mem::MaybeUninit,
         ops::Range,
         rc::Rc,
     },
@@ -1578,12 +1579,16 @@ pub mod profile {
     /// opened, which the optimizing tier reads to estimate how often the body
     /// runs.
     pub const WINDOW: usize = 5;
+    /// The backward jumps the body took before [`BACK_EDGES`] last restarted, so the two add up
+    /// to every backward jump it has taken under the optimizing tier. The tier compares that
+    /// total with what compiling the body costs.
+    pub const EDGES_BEFORE: usize = 6;
     /// How often the code was entered while a profile summary was collected
     /// ([`super::count_code_entry`]), which the summary reads when it is written
     /// ([`super::take_body_entries`]). [`ENTRIES`] cannot serve, because the optimizing tier
     /// rewrites it.
-    pub const CALLS: usize = 6;
-    pub const LENGTH: usize = 7;
+    pub const CALLS: usize = 7;
+    pub const LENGTH: usize = 8;
     /// The counters a code image keeps. The next event is derived from them when it is read.
     pub const SERIALIZED: usize = 4;
 }
@@ -3008,7 +3013,7 @@ unsafe fn guard_compiles_in_place(guard: Sexp, names: &[Sexp]) -> bool {
 /// argument, there are alternatives (the special warns when there are none), no alternative is
 /// `...` (whose alternatives are only known at run time), and at most one alternative is a
 /// default (the special reports a second one as an error).
-unsafe fn switch_compiles(args: &[(Sexp, Sexp)]) -> bool {
+fn switch_compiles(args: &[(Sexp, Sexp)]) -> bool {
     let Some(((selector_tag, selector), alternatives)) = args.split_first() else {
         return false;
     };
@@ -3823,7 +3828,7 @@ impl Compiler {
         }
     }
 
-    unsafe fn frame_may_bind(&self, symbol: Sexp) -> bool {
+    fn frame_may_bind(&self, symbol: Sexp) -> bool {
         self.local_symbols
             .as_ref()
             .is_none_or(|found| found.contains(&symbol))
@@ -3937,7 +3942,7 @@ impl Compiler {
         Ok(())
     }
 
-    unsafe fn fallback(&mut self, expression: Sexp, dst: u32) -> R<()> {
+    fn fallback(&mut self, expression: Sexp, dst: u32) -> R<()> {
         let constant = self.constant(expression);
         self.evaluate(dst, constant);
         Ok(())
@@ -7306,13 +7311,7 @@ unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExi
     let profile = values::ints_mut(constants.element(PROFILE));
     let optimized = constants.element(TIER1) != nil();
     if optimized {
-        // A body with optimized code asks at every entry, and goes on asking for as long as
-        // it has the code, so only an entry that lost the code reschedules.
-        let entered = (tier.enter)(machine);
-        if constants.element(TIER1) != nil() {
-            return entered;
-        }
-        return reschedule(tier, constants, entered);
+        return enter_optimized(tier, machine, constants);
     }
     {
         if entries == recording_start(tier.entry_threshold) && profile[profile::TIER_STATE] >= 0 {
@@ -7330,6 +7329,21 @@ unsafe fn entry_event(machine: &mut Machine<'_>, entries: i32) -> Option<TierExi
         } else {
             None
         };
+    reschedule(tier, constants, entered)
+}
+
+/// [`entry_event`] for a body with optimized code, which asks at every entry and goes on
+/// asking for as long as it has the code, so only an entry that lost the code reschedules.
+#[inline(always)]
+unsafe fn enter_optimized(
+    tier: &Tier,
+    machine: &mut Machine<'_>,
+    constants: Sexp,
+) -> Option<TierExit> {
+    let entered = (tier.enter)(machine);
+    if pool_entry(constants, TIER1) != nil() {
+        return entered;
+    }
     reschedule(tier, constants, entered)
 }
 
@@ -7414,53 +7428,142 @@ unsafe fn loop_target(loops: Sexp, pc: usize, is_break: bool) -> Option<usize> {
 /// A closure call that [`call_fast`] takes enters its callee in place: the dispatch loop runs
 /// the body here and stops when it returns to the stepped call ([`Activation::stepping`]), so
 /// a call out of compiled code costs what a call between two interpreted bodies costs.
-pub unsafe fn step_one(machine: &mut Machine<'_>, pc: usize) -> R<Option<Sexp>> {
-    let mut state = activation(machine, true);
-    if op_of(*state.code.add(pc) as u32) == Some(Op::CallGeneric) {
-        state.resume_base = (*state.interp).bytecode.resumes.len();
-        state.stepping = true;
-        let entered = if *state.header == (*state.heap).known().nil {
-            match call_fast::<false, false, false, GUARDING>(&mut state, pc) {
-                None => call_fast::<false, true, false, GUARDING>(&mut state, pc),
-                taken => taken,
-            }
-        } else {
-            call_fast::<true, false, false, GUARDING>(&mut state, pc)
-        };
-        let entered = match entered {
-            None if activity::summary_only() => call_summarized::<false>(&mut state, pc),
-            entered => entered,
-        };
-        match entered {
-            Some(STOP) => {}
-            Some(next) => {
-                // The callee runs on tier 0 from here, not in the compiled code that called.
-                let _activity = activity::enter(Activity::Interpreter, 0);
-                (*RUN_HANDLERS.as_ptr().add(op_index(state.code, next)))(&mut state, next)
-            }
-            None => {
-                state.resume_base = NO_RESUMES;
-                state.stepping = false;
-                (*STEP_HANDLERS.as_ptr().add(op_index(state.code, pc)))(&mut state, pc);
-            }
+#[inline(always)]
+pub unsafe fn step_one(stepper: &mut Stepper, machine: &mut Machine<'_>, pc: usize) -> StepEnd {
+    let state = stepper.state(machine);
+    // Tier 0 specializes no closure call's word, so the opcode byte alone names one.
+    if *state.code.add(pc) as u32 & OP_MASK == Op::CallGeneric as u32 {
+        return step_call(stepper, pc);
+    }
+    (*STEP_HANDLERS.as_ptr().add(op_index(state.code, pc)))(state, pc);
+    step_end(state)
+}
+
+/// How an instruction the optimizing tier stepped ended ([`step_one`]). A failure's unwind
+/// waits in the stepper ([`Stepper::failure`]), so the common end is one byte in a register.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepEnd {
+    /// The activation goes on after the instruction.
+    Next,
+    /// The instruction returned from the activation.
+    Returned,
+    Failed,
+}
+
+#[inline(always)]
+fn step_end(state: &Activation<'_, '_>) -> StepEnd {
+    if state.exit.is_err() {
+        StepEnd::Failed
+    } else if state.stepped == STOP {
+        StepEnd::Returned
+    } else {
+        StepEnd::Next
+    }
+}
+
+/// [`step_one`] for a closure call. A callee entered in place points the state at its own
+/// code while it runs, so the next step builds the state again.
+#[inline(never)]
+unsafe fn step_call(stepper: &mut Stepper, pc: usize) -> StepEnd {
+    stepper.built = false;
+    let state = stepper.state.assume_init_mut();
+    state.resume_base = (*state.interp).bytecode.resumes.len();
+    state.stepping = true;
+    state.stepped = STOP;
+    let entered = if *state.header == (*state.heap).known().nil {
+        match call_fast::<false, false, false, GUARDING>(state, pc) {
+            None => call_fast::<false, true, false, GUARDING>(state, pc),
+            taken => taken,
         }
     } else {
-        (*STEP_HANDLERS.as_ptr().add(op_index(state.code, pc)))(&mut state, pc);
+        call_fast::<true, false, false, GUARDING>(state, pc)
+    };
+    let entered = match entered {
+        None if activity::summary_only() => call_summarized::<false>(state, pc),
+        entered => entered,
+    };
+    match entered {
+        Some(STOP) => {}
+        Some(next) => {
+            // The callee runs on tier 0 from here, not in the compiled code that called.
+            let _activity = activity::enter(Activity::Interpreter, 0);
+            (*RUN_HANDLERS.as_ptr().add(op_index(state.code, next)))(state, next)
+        }
+        None => {
+            state.resume_base = NO_RESUMES;
+            state.stepping = false;
+            (*STEP_HANDLERS.as_ptr().add(op_index(state.code, pc)))(state, pc);
+        }
     }
-    match (state.exit, state.stepped) {
-        (Ok(value), STOP) => Ok(Some(value)),
-        (result, _) => result.map(|_| None),
+    step_end(state)
+}
+
+/// The interpreter's view of one activation that the optimizing tier runs single instructions
+/// of ([`step_one`], [`quiet_step`], [`call_builtin_step`]). Building the view costs about as
+/// much as a simple instruction, so it is built at the activation's first step and kept: the
+/// addresses it holds stay put while the activation runs compiled, and the tier keeps one
+/// stepper per activation, the activation of each inlined call included.
+pub struct Stepper {
+    state: MaybeUninit<Activation<'static, 'static>>,
+    built: bool,
+}
+
+impl Stepper {
+    pub const fn new() -> Self {
+        Stepper {
+            state: MaybeUninit::uninit(),
+            built: false,
+        }
+    }
+
+    /// The unwind of the step that ended as [`StepEnd::Failed`]. Every failed step's unwind
+    /// is taken, here or by the step itself, so the stepper needs no drop.
+    #[cold]
+    pub unsafe fn failure(&mut self) -> Unwind {
+        let state = self.state.assume_init_mut();
+        match std::mem::replace(&mut state.exit, Ok(nil())) {
+            Err(unwind) => unwind,
+            Ok(_) => error("a stepped instruction failed without an error"),
+        }
+    }
+
+    /// The view of `machine`'s activation, which every use of one stepper names.
+    #[inline(always)]
+    unsafe fn state(&mut self, machine: &mut Machine<'_>) -> &mut Activation<'static, 'static> {
+        let machine =
+            std::mem::transmute::<&mut Machine<'_>, &'static mut Machine<'static>>(machine);
+        if self.built {
+            let state = self.state.assume_init_mut();
+            state.machine = machine;
+            state
+        } else {
+            self.built = true;
+            self.state.write(activation(machine, true))
+        }
+    }
+}
+
+impl Default for Stepper {
+    fn default() -> Self {
+        Stepper::new()
     }
 }
 
 /// Runs the builtin call at `pc` for the optimizing tier, which calls it only where the call
-/// runs no R code: the builtin is one that calls none, no argument dispatches, and no calling
-/// handler is established. The handler's body runs here directly rather than through the step
+/// runs no R code: the builtin is one that calls none, no argument dispatches, and no handler
+/// is established unless the call's activation has no frame, where nothing is signalled. The
+/// handler's body runs here directly rather than through the step
 /// table, so only the parts of the activation the call reads are loaded, and the call costs
-/// what tier 0's handler costs. It records the result's type when `record` is set, and
-/// otherwise only while tier 0 profiles.
+/// what tier 0's handler costs. A builtin's direct entry records the result's type when
+/// `record` is set, and otherwise only while tier 0 profiles; any other call records it, as
+/// every stepped instruction does.
 #[inline(always)]
-pub unsafe fn call_builtin_step(machine: &mut Machine<'_>, pc: usize, record: bool) -> R<()> {
+pub unsafe fn call_builtin_step(
+    stepper: &mut Stepper,
+    machine: &mut Machine<'_>,
+    pc: usize,
+    record: bool,
+) -> R<()> {
     let code = machine.code.car().data().cast::<i32>().cast_const();
     // A positional call of a builtin with a direct entry reads only its registers, so it runs
     // without the activation, which costs as much to build as the call itself. Under an
@@ -7492,13 +7595,13 @@ pub unsafe fn call_builtin_step(machine: &mut Machine<'_>, pc: usize, record: bo
             return Ok(());
         }
     }
-    let mut state = activation(machine, record);
+    let state = stepper.state(machine);
     let instruction = Instruction {
         code: state.code,
         at: pc,
         registers: state.registers,
     };
-    op_call_builtin(&mut state, instruction).map(|_| ())
+    op_call_builtin(state, instruction).map(|_| ())
 }
 
 /// Runs the element read or store at `pc` through tier 0's fast handler for it, for the
@@ -7523,28 +7626,37 @@ pub unsafe fn fast_step(machine: &mut Machine<'_>, pc: usize) -> bool {
 /// Runs the element read or store at `pc` through its generic handler when that runs no R code,
 /// for the optimizing tier where [`fast_step`] declined, so that no frame needs writing back. It
 /// may rebind `SubAssign`'s variable. `None` when the handler might run R code, and nothing
-/// ran: a calling handler is established, which a warning would run, or an operand is an
-/// object, an ALTREP vector, an environment or a promise, whose methods, active bindings or
-/// forcing could.
+/// ran: a handler is established that a warning or an error would run while the call signals
+/// ([`Signalling::Immediate`]), or an operand is an object, an ALTREP vector, an environment
+/// or a promise, whose methods, active bindings or forcing could.
 #[inline(always)]
-pub unsafe fn quiet_step(machine: &mut Machine<'_>, pc: usize) -> Option<R<()>> {
-    let mut state = activation(machine, true);
+pub unsafe fn quiet_step(
+    stepper: &mut Stepper,
+    machine: &mut Machine<'_>,
+    pc: usize,
+) -> Option<R<()>> {
+    let state = stepper.state(machine);
     // A specialized or fused opcode steps as the instruction it starts from, so the step
     // table is indexed by that base op, never by the specialized handler index.
     let op = op_of(*state.code.add(pc) as u32)?;
-    if !runs_no_r_code(&state, op, pc) {
+    if !runs_no_r_code(state, op, pc) {
         return None;
     }
     let heap = state.heap;
     let mark = (*heap).handle_mark();
-    (*STEP_HANDLERS.as_ptr().add(op as usize))(&mut state, pc);
+    (*STEP_HANDLERS.as_ptr().add(op as usize))(state, pc);
     (*heap).release_handles(mark);
-    Some(state.exit.map(|_| ()))
+    if state.exit.is_ok() {
+        return Some(Ok(()));
+    }
+    Some(std::mem::replace(&mut state.exit, Ok(nil())).map(|_| ()))
 }
 
 #[inline(always)]
 unsafe fn runs_no_r_code(state: &Activation<'_, '_>, op: Op, pc: usize) -> bool {
-    if (*state.interp).handlers.is_some() {
+    // A call that runs without a frame signals nothing, so no handler runs before the exit
+    // that builds its frame.
+    if (*state.interp).handlers.is_some() && (*state.interp).signalling == Signalling::Immediate {
         return false;
     }
     let code = state.code;
@@ -8109,7 +8221,15 @@ unsafe fn scheduled_entry_in_place(state: &mut Activation<'_, '_>, entries: i32)
     // Compiled code runs on the native stack, and a call it hands to this loop may enter the
     // next compiled body in place, so a deep recursion nests here without passing through a
     // closure call's own stack check.
-    let event = eval::on_large_stack(|| entry_event(state.machine, entries));
+    let event = eval::on_large_stack(|| {
+        let constants = state.constants;
+        match &(*state.interp).bytecode.tier {
+            Some(tier) if pool_entry(constants, TIER1) != nil() => {
+                enter_optimized(tier, state.machine, constants)
+            }
+            _ => entry_event(state.machine, entries),
+        }
+    });
     // A finished activation's exit reads only what the tier leaves alone (the register file
     // never moves), and reloads for the caller, so only a body that goes on in tier 0 reloads:
     // the tier may have started or stopped its recording.
@@ -9440,16 +9560,28 @@ unsafe fn set_srcref_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<u
     Some(at + 1 + operand_count(Op::SetSrcref))
 }
 
-/// `Jump` forward, and backward while no optimizing tier counts back edges and no interrupt is
-/// pending.
+/// `Jump` forward, and backward while no interrupt is requested and the back edge reaches no
+/// count the optimizing tier acts on. The count is left unwritten when it is due, because the
+/// generic handler counts the same edge again. The profile is read as the plain vector it is:
+/// an accessor that tests for ALTREP can call, which would cost every jump a frame.
 #[inline(always)]
 unsafe fn jump_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
     let target = *state.code.add(at + 1) as usize;
-    if target < at
-        && ((*state.interp).bytecode.tier.is_some()
-            || crate::unwind::INTERRUPT_REQUESTED.load(std::sync::atomic::Ordering::Relaxed))
-    {
-        return None;
+    if target < at {
+        if crate::unwind::INTERRUPT_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        if let Some(tier) = &(*state.interp).bytecode.tier {
+            let back_edges = pool_constant(state, PROFILE)
+                .data()
+                .cast::<i32>()
+                .add(profile::BACK_EDGES);
+            let count = (*back_edges).saturating_add(1);
+            if count >= tier.back_edge_threshold || count == tier.back_edge_threshold / 2 {
+                return None;
+            }
+            *back_edges = count;
+        }
     }
     Some(target)
 }
@@ -11071,7 +11203,7 @@ impl CallPlans {
     /// Whether the spread plan `id` holds for `args`, a call's arguments with `...` spread
     /// out: `...` held as many arguments as the plan was made for, with the same names, and
     /// no argument is the empty one, which would take a formal's default.
-    unsafe fn spread_holds(&self, id: usize, args: &[Arg]) -> bool {
+    fn spread_holds(&self, id: usize, args: &[Arg]) -> bool {
         let spread = self.spread(id);
         let (at, count) = (spread[SPREAD_AT] as usize, spread[SPREAD_COUNT] as usize);
         let missing = missing_arg();
@@ -13894,10 +14026,17 @@ unsafe fn back_edge(state: &mut Activation<'_, '_>, tier: &Tier, pc: usize) -> B
     if profile[profile::BACK_EDGES] < tier.back_edge_threshold {
         return BackEdge::Continue(pc);
     }
+    profile[profile::EDGES_BEFORE] =
+        profile[profile::EDGES_BEFORE].saturating_add(profile[profile::BACK_EDGES]);
     profile[profile::BACK_EDGES] = 0;
     let exit = (tier.back_edge)(machine, pc);
     // The tier may have compiled the body or moved its entry count.
-    values::ints_mut(machine.code.cdr().element(PROFILE))[profile::NEXT] = i32::MIN;
+    let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
+    profile[profile::NEXT] = i32::MIN;
+    // A refusal closes the recording window, and the loop that asked may run on for long.
+    if profile[profile::RECORDING] == 0 {
+        state.feedback = std::ptr::null_mut();
+    }
     match exit {
         Some(TierExit::Finished(result)) => BackEdge::Finished(result),
         Some(TierExit::Resume {
@@ -14029,7 +14168,7 @@ trait Stored: Vector + Sized {
 /// The one element of an atomic vector that has no attributes.
 #[inline]
 fn bare_scalar<'a, 's: 'a, T: Atomic>(context: &'a Cx<'_>, value: Local<'s>) -> Option<T::Element> {
-    let vector = value.downcast::<T>()?;
+    let vector = value.standard::<T>()?;
     (vector.len() == 1 && value.attributes(context).r_type() == SexpType::Nil)
         .then(|| vector.as_slice(context)[0])
 }
@@ -14127,7 +14266,7 @@ impl Stored for Str {
         kind: ElementKind,
         _converts: bool,
     ) -> Option<Local<'s, Str>> {
-        let text = value.downcast::<Str>()?;
+        let text = value.standard::<Str>()?;
         (kind != ElementKind::Dollar
             && text.len() == 1
             && value.attributes(context).r_type() == SexpType::Nil)
@@ -14176,15 +14315,15 @@ fn store_element<'s>(
     }
     if let Some(environment) = target.downcast::<Environment>() {
         Ok(bind_named(context, environment, index, value, kind)?.then_some(target))
-    } else if let Some(vector) = target.downcast::<Real>() {
+    } else if let Some(vector) = target.standard::<Real>() {
         store_element_of(context, vector, index, value, kind, claim)
-    } else if let Some(vector) = target.downcast::<List>() {
+    } else if let Some(vector) = target.standard::<List>() {
         store_element_of(context, vector, index, value, kind, claim)
-    } else if let Some(vector) = target.downcast::<Integer>() {
+    } else if let Some(vector) = target.standard::<Integer>() {
         store_element_of(context, vector, index, value, kind, claim)
-    } else if let Some(vector) = target.downcast::<Str>() {
+    } else if let Some(vector) = target.standard::<Str>() {
         store_element_of(context, vector, index, value, kind, claim)
-    } else if let Some(vector) = target.downcast::<Logical>() {
+    } else if let Some(vector) = target.standard::<Logical>() {
         store_element_of(context, vector, index, value, kind, claim)
     } else {
         Ok(None)
@@ -14205,7 +14344,7 @@ fn bind_named<'s>(
     if kind != ElementKind::Dollar {
         return Ok(false);
     }
-    let Some(text) = index.downcast::<Str>() else {
+    let Some(text) = index.standard::<Str>() else {
         return Ok(false);
     };
     if text.len() != 1 {
@@ -14289,19 +14428,19 @@ fn element_position<'s, T: Vector>(
     if index.attributes(context).r_type() != SexpType::Nil {
         return None;
     }
-    if let Some(integer) = index.downcast::<Integer>() {
+    if let Some(integer) = index.standard::<Integer>() {
         let &[position] = integer.as_slice(context) else {
             return None;
         };
         return (position != NA_INTEGER).then(|| Position::At(f64::from(position)));
     }
-    if let Some(real) = index.downcast::<Real>() {
+    if let Some(real) = index.standard::<Real>() {
         let &[position] = real.as_slice(context) else {
             return None;
         };
         return Some(Position::At(position));
     }
-    named_position(context, vector, index.downcast::<Str>()?)
+    named_position(context, vector, index.standard::<Str>()?)
 }
 
 /// The position of the element `name` names: `$<-` and a character subscript replace the first
@@ -14782,13 +14921,13 @@ fn store_matrix_element<'s>(
     if target.is(value) || handles::is_object(target) {
         return Ok(None);
     }
-    if let Some(matrix) = target.downcast::<Real>() {
+    if let Some(matrix) = target.standard::<Real>() {
         store_matrix_element_of(context, matrix, subscripts, value, shared, claim)
-    } else if let Some(matrix) = target.downcast::<Integer>() {
+    } else if let Some(matrix) = target.standard::<Integer>() {
         store_matrix_element_of(context, matrix, subscripts, value, shared, claim)
-    } else if let Some(matrix) = target.downcast::<Logical>() {
+    } else if let Some(matrix) = target.standard::<Logical>() {
         store_matrix_element_of(context, matrix, subscripts, value, shared, claim)
-    } else if let Some(matrix) = target.downcast::<Str>() {
+    } else if let Some(matrix) = target.standard::<Str>() {
         store_matrix_element_of(context, matrix, subscripts, value, shared, claim)
     } else {
         Ok(None)
@@ -14838,7 +14977,7 @@ fn matrix_subscript(context: &Cx<'_>, index: Local<'_>, extent: i32) -> Option<u
     if index.attributes(context).r_type() != SexpType::Nil {
         return None;
     }
-    let position = if let Some(integer) = index.downcast::<Integer>() {
+    let position = if let Some(integer) = index.standard::<Integer>() {
         let &[position] = integer.as_slice(context) else {
             return None;
         };
@@ -14847,7 +14986,7 @@ fn matrix_subscript(context: &Cx<'_>, index: Local<'_>, extent: i32) -> Option<u
         }
         f64::from(position)
     } else {
-        let &[position] = index.downcast::<Real>()?.as_slice(context) else {
+        let &[position] = index.standard::<Real>()?.as_slice(context) else {
             return None;
         };
         position

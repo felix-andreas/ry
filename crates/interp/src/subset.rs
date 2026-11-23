@@ -14,9 +14,9 @@ use {
         element_access::direct_subset2,
         eval::{self, value_of},
         handles::{
-            self, Alt, Args, Atomic, Chars, Complex, Cx, Elements, Environment, Expression, Fresh,
-            Gc, I64, Integer, Kind, Language, List, Local, Logical, Owned, Pairlist, Pointer,
-            Promise, Raw, Real, Str, Symbol, Unfilled, Vector, attribute_cells,
+            self, Alt, Args, Atomic, Chars, Complex, Cx, Elements, Environment, Exact, Expression,
+            Fresh, Gc, I64, Integer, Kind, Language, List, Local, Logical, Owned, Pairlist,
+            Pointer, Promise, Raw, Real, Str, Symbol, Unfilled, Vector, attribute_cells,
             attributes_unshared, clear_attributes, coerce, compact_sequence, dense, element_text,
             get_attribute, int_element, is_missing_argument, is_na, is_s4, item, materialize, na,
             names_of, null, pairlist_to_list, real_element, remove_attribute, safe, same_text,
@@ -308,7 +308,7 @@ pub unsafe fn copy_element(from: Sexp, from_index: usize, to: Sexp, to_index: us
 
 /// The elements of a standard logical or integer vector, or none for another type.
 fn integers<'a, 's: 'a>(context: &'a Cx<'_>, vector: Local<'s>) -> &'a [i32] {
-    match (vector.downcast::<Integer>(), vector.downcast::<Logical>()) {
+    match (vector.standard::<Integer>(), vector.standard::<Logical>()) {
         (Some(vector), _) => vector.as_slice(context),
         (_, Some(vector)) => vector.as_slice(context),
         _ => &[],
@@ -330,7 +330,7 @@ fn copy_number<'s, T: Atomic>(
     to: &mut Owned<'s>,
     to_index: usize,
 ) -> R<()> {
-    let Some(source) = from.downcast::<T>() else {
+    let Some(source) = from.standard::<T>() else {
         return Err(error(
             "internal error: a copy from a vector of another type",
         ));
@@ -352,7 +352,7 @@ fn copy_pointer<'s, T: Elements>(
     to: &mut Owned<'s>,
     to_index: usize,
 ) -> R<()> {
-    let Some(source) = from.downcast::<T>() else {
+    let Some(source) = from.standard::<T>() else {
         return Err(error(
             "internal error: a copy from a vector of another type",
         ));
@@ -605,7 +605,7 @@ fn gathered<'s, T: Gather>(
     positions: impl Iterator<Item = usize>,
     count: usize,
 ) -> R<Local<'s>> {
-    let Some(vector) = vector.downcast::<T>() else {
+    let Some(vector) = vector.standard::<T>() else {
         return Err(error(
             "internal error: a selection from a vector of another type",
         ));
@@ -768,16 +768,18 @@ fn read_integers<'s, T: Atomic<Element = i32>>(
 }
 
 /// `object[index]` for a logical, integer, double, character or list vector whose selection
-/// keeps none of its attributes (the caller checks that) and an attribute-free integer, double
-/// or logical subscript, gathered straight from the subscript without first resolving it to a
-/// position list. `None` defers to the general path, which handles every other shape
-/// (negative or zero subscripts, recycled logical subscripts, other element types).
+/// keeps none of its attributes (the caller checks that) and an integer, double or logical
+/// subscript, gathered straight from the subscript without first resolving it to a position
+/// list. `None` defers to the general path, which handles every other shape (negative or zero
+/// subscripts, recycled logical subscripts, other element types). The subscript's attributes
+/// play no part: the caller has already taken a matrix subscript of an array, and a factor
+/// selects by its codes.
 fn gather_plain<'s>(
     context: &mut Cx<'s>,
     object: Local<'s>,
     index: Local<'s>,
 ) -> R<Option<Local<'s>>> {
-    if is_missing_argument(index) || has_attributes(context, index) {
+    if is_missing_argument(index) {
         return Ok(None);
     }
     // A selection `select` reads sparsely takes the general path.
@@ -814,7 +816,7 @@ fn gather_subscript<'s, T: Gather>(
     }
     let extent = object.len();
     let index = materialize(context, index)?;
-    if let Some(index) = index.downcast::<Integer>() {
+    if let Some(index) = index.standard::<Integer>() {
         let positions = index.as_slice(context);
         if positions
             .iter()
@@ -840,7 +842,7 @@ fn gather_subscript<'s, T: Gather>(
             T::fill(result, context, object, positions).finish().value(),
         ));
     }
-    if let Some(index) = index.downcast::<Real>() {
+    if let Some(index) = index.standard::<Real>() {
         let positions = index.as_slice(context);
         if positions.iter().all(|&position| position < 1.0)
             && let Some(keep) = excluded(extent, positions.iter().map(|&position| -position))
@@ -862,7 +864,7 @@ fn gather_subscript<'s, T: Gather>(
             T::fill(result, context, object, positions).finish().value(),
         ));
     }
-    if let Some(index) = index.downcast::<Logical>() {
+    if let Some(index) = index.standard::<Logical>() {
         let flags = index.as_slice(context);
         if flags.len() != extent {
             return Ok(None);
@@ -1121,7 +1123,7 @@ pub(crate) fn resolve_subscript<'s>(
             Ok((positions, new_names))
         }
         SexpType::Symbol => {
-            let symbol = standard::<Symbol>(index)?;
+            let symbol = exact::<Symbol>(index)?;
             let name = context.root(symbol.read(context).name());
             let mut text = context.alloc::<Str>(1)?;
             text.set(context, 0, name);
@@ -1145,10 +1147,18 @@ pub(crate) fn resolve_subscript<'s>(
 
 /// `vector` as a standard vector of `T`, which the caller has checked its type to be.
 #[inline(always)]
-fn standard<'s, T: Kind>(vector: Local<'s>) -> R<Local<'s, T>> {
+fn standard<'s, T: Vector>(vector: Local<'s>) -> R<Local<'s, T>> {
     vector
-        .downcast::<T>()
+        .standard::<T>()
         .ok_or_else(|| error("internal error: a vector is not of the expected kind"))
+}
+
+/// `value` as a `T`, which the caller has checked its type to be.
+#[inline(always)]
+fn exact<'s, T: Exact>(value: Local<'s>) -> R<Local<'s, T>> {
+    value
+        .downcast::<T>()
+        .ok_or_else(|| error("internal error: a value is not of the expected kind"))
 }
 
 /// The elements of a standard integer or double subscript, read as doubles with NA as NA.
@@ -1160,7 +1170,7 @@ enum Numbers<'a> {
 
 impl<'a> Numbers<'a> {
     fn of<'s: 'a>(context: &'a Cx<'_>, vector: Local<'s>) -> R<Numbers<'a>> {
-        if let Some(vector) = vector.downcast::<Integer>() {
+        if let Some(vector) = vector.standard::<Integer>() {
             return Ok(Numbers::Integer(vector.as_slice(context)));
         }
         Ok(Numbers::Real(standard::<Real>(vector)?.as_slice(context)))
@@ -1191,7 +1201,7 @@ fn scalar_position(context: &mut Cx<'_>, object: Local<'_>, index: Local<'_>) ->
     if !vector || object.downcast::<Alt>().is_some() || has_attributes(context, index) {
         return None;
     }
-    let position = match (index.downcast::<Integer>(), index.downcast::<Real>()) {
+    let position = match (index.standard::<Integer>(), index.standard::<Real>()) {
         (Some(index), _) if index.len() == 1 => f64::from(index.as_slice(context)[0]),
         (_, Some(index)) if index.len() == 1 => index.as_slice(context)[0],
         _ => return None,
@@ -1342,7 +1352,7 @@ fn scalar_cell<'s>(
     }
     let dimnames = get_attribute(context, object, symbol(|symbols| symbols.dimnames));
     let dim = get_attribute(context, object, symbol(|symbols| symbols.dim));
-    let Some(dim) = dim.downcast::<Integer>() else {
+    let Some(dim) = dim.standard::<Integer>() else {
         return Ok(None);
     };
     if dim.len() != indices.len() || dimnames.r_type() != SexpType::Nil {
@@ -1463,10 +1473,12 @@ fn subset_value<'s>(
     let names = names_of(context, object)?;
     // A parsed expression's per-element source references are subset along with it, as in GNU
     // R, so `attr(exprs[i], "srcref")` still locates element `i`.
-    let srcrefs = get_attribute(context, object, symbol(|symbols| symbols.srcref));
-    let srcrefs = srcrefs
-        .downcast::<List>()
-        .map(|srcrefs| context.root(srcrefs));
+    let srcrefs = context.root(get_attribute(
+        context,
+        object,
+        symbol(|symbols| symbols.srcref),
+    ));
+    let srcrefs = dense::<List>(context, srcrefs)?;
     // Without names, a source reference or one dimension, the selection keeps no attribute, so
     // the object's other attributes (a matrix's `dim`, a factor's levels) need no further rules.
     if dims.as_ref().is_none_or(|dims| dims.len() != 1)
@@ -1522,16 +1534,20 @@ fn subset_value<'s>(
     // A one-dimensional array stays one when indexed, unless `drop` leaves at most one element,
     // which GNU R returns as a vector named by the dimnames.
     let one_dimensional = dims.as_ref().is_some_and(|dims| dims.len() == 1) && !missing;
-    let first_dimnames = |context: &Cx<'s>| {
-        let dimnames = get_attribute(context, object, symbol(|symbols| symbols.dimnames));
-        let first = dimnames.downcast::<List>().map(|dimnames| dimnames.get(0));
-        first
+    let first_dimnames = |context: &mut Cx<'s>| -> R<Option<Local<'s>>> {
+        let dimnames = context.root(get_attribute(
+            context,
+            object,
+            symbol(|symbols| symbols.dimnames),
+        ));
+        let first = dense::<List>(context, dimnames)?.map(|dimnames| dimnames.get(context, 0));
+        Ok(first
             .filter(|first| first.r_type() != SexpType::Nil)
-            .map(|first| context.root(first))
+            .map(|first| context.root(first)))
     };
     if one_dimensional && drop && positions.len() <= 1 {
         if names.r_type() == SexpType::Nil
-            && let Some(first) = first_dimnames(context)
+            && let Some(first) = first_dimnames(context)?
         {
             let selected = select(context, first, &positions)?;
             set_attribute(
@@ -1564,7 +1580,7 @@ fn subset_value<'s>(
             symbol(|symbols| symbols.dim),
             dim.finish(),
         )?;
-        if let Some(first) = first_dimnames(context) {
+        if let Some(first) = first_dimnames(context)? {
             let selected = select(context, first, &positions)?;
             let mut new_dimnames = context.alloc::<List>(1)?;
             new_dimnames.set(context, 0, selected);
@@ -1657,7 +1673,7 @@ fn matrix_subset<'s>(
         object,
         symbol(|symbols| symbols.dimnames),
     ));
-    let dimnames = all_dimnames.downcast::<List>();
+    let dimnames = dense::<List>(context, all_dimnames)?;
     let component = |context: &Cx<'s>, dimension: usize| match dimnames {
         Some(dimnames) if dimension < dimnames.len() => {
             context.root(dimnames.get(context, dimension))
@@ -1878,7 +1894,7 @@ fn matrix_index(context: &Cx<'_>, index: Local<'_>, extent: usize) -> Option<usi
     if has_attributes(context, index) {
         return None;
     }
-    let position = match (index.downcast::<Integer>(), index.downcast::<Real>()) {
+    let position = match (index.standard::<Integer>(), index.standard::<Real>()) {
         (Some(index), _) => match index.as_slice(context) {
             &[position] if position != NA_INTEGER => f64::from(position),
             _ => return None,
@@ -1970,7 +1986,7 @@ fn dimension_positions<'s>(
     if let Some(message) = refused {
         return Err(call_error(reported_call(context)?, message));
     }
-    let names = match of.dimnames.downcast::<List>() {
+    let names = match dense::<List>(context, of.dimnames)? {
         Some(dimnames) if of.dimension < dimnames.len() => {
             context.root(dimnames.get(context, of.dimension))
         }
@@ -2126,6 +2142,15 @@ pub(crate) fn matrix_positions<'s>(
     let index = materialize(context, index)?;
     let rows = index_dims[0];
     let mut positions = Vec::with_capacity(rows);
+    // A dimension's names may be an ALTREP vector, such as deferred strings, so each is
+    // expanded before the lookup reads it.
+    let mut dimension_names: SmallVec<[Option<Local<'s, Str>>; 4]> = SmallVec::new();
+    if !numeric && let Some(list) = dense::<List>(context, dimnames)? {
+        for dimension in 0..list.len() {
+            let names = context.root(list.get(context, dimension));
+            dimension_names.push(dense::<Str>(context, names)?);
+        }
+    }
     let failure = {
         let numbers = match numeric {
             true => Some(Numbers::of(context, index)?),
@@ -2135,9 +2160,6 @@ pub(crate) fn matrix_positions<'s>(
             true => None,
             false => Some(standard::<Str>(index)?.read(context)),
         };
-        let dimnames = dimnames
-            .downcast::<List>()
-            .map(|dimnames| dimnames.read(context));
         let mut failure = None;
         'rows: for row in 0..rows {
             let mut offset = 0usize;
@@ -2170,10 +2192,8 @@ pub(crate) fn matrix_positions<'s>(
                         positions.push(None);
                         continue 'rows;
                     };
-                    let names = dimnames
-                        .filter(|dimnames| dimension < dimnames.len())
-                        .and_then(|dimnames| dimnames.get(dimension).downcast::<Str>());
-                    let found = names.and_then(|names| {
+                    let names = dimension_names.get(dimension).copied().flatten();
+                    let found = names.map(|names| names.read(context)).and_then(|names| {
                         (0..names.len()).find(|&candidate| {
                             let candidate = names.get(candidate);
                             !is_na(candidate) && same_text(candidate, name)
@@ -2321,7 +2341,7 @@ fn write_slab<'s>(
         dims: &[usize],
         fixed: &[Option<usize>],
     ) -> Option<bool> {
-        let (result, value) = (result.narrow::<T>()?, value.downcast::<T>()?);
+        let (result, value) = (result.narrow::<T>()?, value.standard::<T>()?);
         let mut write = result.write(context);
         let (array, reader) = write.split();
         scatter_slab(array, reader.slice(value)?, dims, fixed);
@@ -2538,10 +2558,10 @@ unsafe fn do_subset2(call: &Call<'_>) -> R<Sexp> {
             {
                 // The position is inside a vector with storage, so a list's element is read
                 // where it lies.
-                if let Some(list) = object.downcast::<List>() {
+                if let Some(list) = object.standard::<List>() {
                     return Ok(list.get(context, position).raw());
                 }
-                if let Some(expressions) = object.downcast::<Expression>() {
+                if let Some(expressions) = object.standard::<Expression>() {
                     return Ok(expressions.get(context, position).raw());
                 }
                 return element(context, object, position).map(Local::raw);
@@ -2601,14 +2621,15 @@ enum Lookup<'s> {
 }
 
 /// The position `name` matches among `names`. Names compare as text, so a latin1-marked name
-/// matches its UTF-8 spelling.
+/// matches its UTF-8 spelling. Names that are an ALTREP vector, such as the deferred strings
+/// `names(x) <- 1:2` stores, are expanded first.
 fn name_position<'s>(
     context: &mut Cx<'s>,
-    names: Local<'_>,
+    names: Local<'s>,
     name: Local<'_, Chars>,
     lookup: Lookup<'s>,
 ) -> R<Option<usize>> {
-    let Some(names) = names.downcast::<Str>() else {
+    let Some(names) = dense::<Str>(context, names)? else {
         return Ok(None);
     };
     let name = name.read(context);
@@ -2720,8 +2741,12 @@ fn subset2_value<'s>(
     }
     let is_nil = object.r_type() == SexpType::Nil;
     let subscript_count_fits = indices.len() <= 1 || {
-        let dim = get_attribute(context, object, symbol(|symbols| symbols.dim));
-        dim.downcast::<Integer>().map_or(0, |dim| dim.len()) == indices.len()
+        let dim = context.root(get_attribute(
+            context,
+            object,
+            symbol(|symbols| symbols.dim),
+        ));
+        dim.r_type() == SexpType::Integer && handles::length(context, dim) == indices.len()
     };
     if object.r_type() != SexpType::Environment
         && subscript_count_fits
@@ -2742,10 +2767,13 @@ fn subset2_value<'s>(
         return Ok(null());
     }
     if object.r_type() == SexpType::Environment {
-        let name = indices
-            .first()
-            .and_then(|index| index.downcast::<Str>())
-            .filter(|index| index.len() == 1);
+        handles::reaching_environment(context)?;
+        // `dense`, not `downcast`: `as.character(1.5)` is a deferred string vector.
+        let name = match indices.first() {
+            Some(&index) => handles::dense::<Str>(context, index)?,
+            None => None,
+        }
+        .filter(|index| index.len() == 1);
         let Some(name) = name else {
             return Err(call_error(
                 call,
@@ -2772,7 +2800,7 @@ fn subset2_value<'s>(
             object,
             symbol(|symbols| symbols.dimnames),
         ));
-        let dimnames = dimnames.downcast::<List>();
+        let dimnames = dense::<List>(context, dimnames)?;
         let mut offset = 0usize;
         let mut stride = 1usize;
         for (dimension, (&index, &extent)) in indices.iter().zip(dims.iter()).enumerate() {
@@ -2829,7 +2857,7 @@ fn subset2_value<'s>(
         ));
     }
     let names = names_of(context, object)?;
-    if list && let Some(wanted) = index.downcast::<Str>() {
+    if list && let Some(wanted) = index.standard::<Str>() {
         let wanted = context.root(wanted.get(context, 0));
         // A list has no element of that name: `[[` gives `NULL`, unlike for atomic vectors.
         if wanted.bytes(context).is_empty() {
@@ -2843,7 +2871,7 @@ fn subset2_value<'s>(
     if list {
         // A list gives `NULL` for a missing or infinite subscript, where an atomic vector
         // reports it out of bounds; a large finite subscript is out of bounds for both.
-        let absent = match (index.downcast::<Real>(), integers(context, index)) {
+        let absent = match (index.standard::<Real>(), integers(context, index)) {
             (Some(index), _) => {
                 let value = index.as_slice(context)[0];
                 value.is_nan() || value == f64::INFINITY
@@ -3022,7 +3050,7 @@ fn argument_name<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s, Char
     }
     if value.r_type() == SexpType::String
         && let Some(text) = dense::<Str>(context, value)?
-        && text.len() >= 1
+        && !text.is_empty()
     {
         return Ok(context.root(text.get(context, 0)));
     }
@@ -3073,9 +3101,9 @@ unsafe fn do_dollar(call: &Call<'_>) -> R<Sexp> {
 pub unsafe fn dollar_value(object: Sexp, name: Sexp, call: Sexp, env: Sexp) -> R<Sexp> {
     handles::in_caller_scope(|context| {
         let object = handles::held(context, object);
-        let name = standard::<Chars>(handles::held(context, name))?;
+        let name = exact::<Chars>(handles::held(context, name))?;
         let call = handles::held(context, call);
-        let environment = standard::<Environment>(handles::held(context, env))?;
+        let environment = exact::<Environment>(handles::held(context, env))?;
         dollar_dispatch(context, object, name, call, environment).map(Local::raw)
     })
 }
@@ -3111,7 +3139,7 @@ fn dollar_dispatch<'s>(
 pub unsafe fn dollar(object: Sexp, name: Sexp, call: Sexp) -> R<Sexp> {
     handles::in_caller_scope(|context| {
         let object = handles::held(context, object);
-        let name = standard::<Chars>(handles::held(context, name))?;
+        let name = exact::<Chars>(handles::held(context, name))?;
         let call = (call != unbound()).then(|| handles::held(context, call));
         dollar_field(context, object, name, call).map(Local::raw)
     })
@@ -3163,8 +3191,7 @@ fn field_of_value<'s>(
             let value = item(context, object, position)?;
             // A complex assignment through a partial name, `v$mi[[1]] <- 2`, assigns a new `mi`
             // element, so the `misc` element it read must not be modified in place.
-            let exact = names
-                .downcast::<Str>()
+            let exact = dense::<Str>(context, names)?
                 .is_some_and(|names| names.get(context, position).bytes() == name.bytes(context));
             if !exact {
                 handles::mark_shared(value);
@@ -3272,7 +3299,7 @@ pub unsafe fn get_slot(object: Sexp, symbol: Sexp, call: Sexp) -> R<Sexp> {
         {
             return handles::call_value(context, function, &[object]).map(Local::raw);
         }
-        let slot = standard::<Symbol>(handles::adopt(context, symbol))?;
+        let slot = exact::<Symbol>(handles::adopt(context, symbol))?;
         let call = (call != unbound()).then(|| handles::adopt(context, call));
         slot_value(context, object, slot, call).map(Local::raw)
     })
@@ -3392,7 +3419,7 @@ unsafe fn do_at_assign(call: &Call<'_>) -> R<Sexp> {
                     return Ok(result);
                 }
             }
-            let symbol = handles::permanent(standard::<Symbol>(handles::held(context, symbol))?);
+            let symbol = handles::permanent(exact::<Symbol>(handles::held(context, symbol))?);
             Ok(checked_slot_assign(context, object, symbol, value)?.raw())
         })
     }
@@ -3459,7 +3486,7 @@ pub unsafe fn set_slot(object: Sexp, symbol: Sexp, value: Sexp) -> R<Sexp> {
     unsafe {
         handles::with_result(|context| {
             let object = handles::held(context, object);
-            let slot = handles::permanent(standard::<Symbol>(handles::held(context, symbol))?);
+            let slot = handles::permanent(exact::<Symbol>(handles::held(context, symbol))?);
             let value = handles::held(context, value);
             let mut object = unshared(context, object)?;
             Ok(store_slot(context, &mut object, slot, value)?.raw())
@@ -3481,7 +3508,7 @@ pub unsafe fn assign_slot(object: Sexp, symbol: Sexp, value: Sexp) -> R<Sexp> {
     unsafe {
         handles::with_result(|context| {
             let object = handles::held(context, object);
-            let slot = handles::permanent(standard::<Symbol>(handles::held(context, symbol))?);
+            let slot = handles::permanent(exact::<Symbol>(handles::held(context, symbol))?);
             let value = handles::held(context, value);
             let mut object = Owned::assume(object);
             Ok(store_slot(context, &mut object, slot, value)?.raw())
@@ -4031,7 +4058,10 @@ fn scatter_plain<'s>(
         return Ok(highest < count && scatter_offsets(context, target, offsets, value, value_count));
     }
     let index = handles::materialize(context, index)?;
-    let offsets: Positions = if let Some(positions) = index.downcast::<Integer>() {
+    if let Some(mask) = index.standard::<Logical>() {
+        return Ok(scatter_mask(context, target, mask, value));
+    }
+    let offsets: Positions = if let Some(positions) = index.standard::<Integer>() {
         let positions = positions.as_slice(context);
         if positions
             .iter()
@@ -4043,7 +4073,7 @@ fn scatter_plain<'s>(
             .iter()
             .map(|&position| position as usize - 1)
             .collect()
-    } else if let Some(positions) = index.downcast::<Real>() {
+    } else if let Some(positions) = index.standard::<Real>() {
         let positions = positions.as_slice(context);
         // NaN fails both comparisons, so an NA subscript also declines.
         if !positions
@@ -4068,6 +4098,73 @@ fn scatter_plain<'s>(
     ))
 }
 
+/// Writes `value`, recycled, to the elements of `target` that `mask` selects, recycled over
+/// `target`. `value` has `target`'s type. False, having written nothing, for a list or character
+/// target, an empty mask or one longer than `target`, and wherever the general path warns or
+/// fails: an NA flag with a value longer than one, or a selection that is no multiple of it.
+fn scatter_mask<'s>(
+    context: &mut Cx<'s>,
+    target: &mut Owned<'s>,
+    mask: Local<'s, Logical>,
+    value: Local<'s>,
+) -> bool {
+    fn atomic<'s, T: Atomic>(
+        context: &mut Cx<'s>,
+        target: &mut Owned<'s>,
+        mask: Local<'s, Logical>,
+        value: Local<'s>,
+    ) -> Option<bool> {
+        let (target, source) = (target.narrow::<T>()?, value.standard::<T>()?);
+        let mut write = target.write(context);
+        let (elements, reader) = write.split();
+        let (flags, source) = (reader.slice(mask)?, reader.slice(source)?);
+        if flags.is_empty() || flags.len() > elements.len() {
+            return Some(false);
+        }
+        if let [single] = source {
+            // A single value skips the NA flags.
+            for chunk in elements.chunks_mut(flags.len()) {
+                for (element, &flag) in chunk.iter_mut().zip(flags) {
+                    if flag != 0 && flag != NA_LOGICAL {
+                        *element = *single;
+                    }
+                }
+            }
+            return Some(true);
+        }
+        let mut selected = 0usize;
+        for chunk in elements.chunks(flags.len()) {
+            for &flag in &flags[..chunk.len()] {
+                if flag == NA_LOGICAL {
+                    return Some(false);
+                }
+                selected += usize::from(flag != 0);
+            }
+        }
+        if !selected.is_multiple_of(source.len()) {
+            return Some(false);
+        }
+        let mut next = 0;
+        for chunk in elements.chunks_mut(flags.len()) {
+            for (element, &flag) in chunk.iter_mut().zip(flags) {
+                if flag != 0 {
+                    *element = source[next];
+                    next = if next + 1 == source.len() {
+                        0
+                    } else {
+                        next + 1
+                    };
+                }
+            }
+        }
+        Some(true)
+    }
+    atomic::<Real>(context, target, mask, value)
+        .or_else(|| atomic::<Integer>(context, target, mask, value))
+        .or_else(|| atomic::<Logical>(context, target, mask, value))
+        .unwrap_or(false)
+}
+
 /// Writes `value`, recycled, to the `run` elements of `target` from `start`, which lie inside it,
 /// a whole copy of `value` at a time. `value` has `target`'s type and is another vector. False,
 /// having written nothing, unless `run` is a multiple of `value_count`.
@@ -4086,7 +4183,7 @@ fn scatter_run<'s>(
         run: usize,
         value: Local<'s>,
     ) -> Option<()> {
-        let (target, source) = (target.narrow::<T>()?, value.downcast::<T>()?);
+        let (target, source) = (target.narrow::<T>()?, value.standard::<T>()?);
         let mut write = target.write(context);
         let (elements, reader) = write.split();
         fill_run(elements.get_mut(start..start + run)?, reader.slice(source)?);
@@ -4102,7 +4199,7 @@ fn scatter_run<'s>(
         value: Local<'s>,
         value_count: usize,
     ) -> Option<()> {
-        let (target, source) = (target.narrow::<T>()?, value.downcast::<T>()?);
+        let (target, source) = (target.narrow::<T>()?, value.standard::<T>()?);
         handles::copy_elements(context, target, start, source, 0, value_count);
         let mut filled = value_count;
         while filled < run {
@@ -4161,7 +4258,7 @@ fn scatter_offsets<'s, I: ExactSizeIterator<Item = usize>>(
         value: Local<'s>,
         value_count: usize,
     ) -> Result<(), I> {
-        let (Some(target), Some(source)) = (target.narrow::<T>(), value.downcast::<T>()) else {
+        let (Some(target), Some(source)) = (target.narrow::<T>(), value.standard::<T>()) else {
             return Err(offsets);
         };
         let mut write = target.write(context);
@@ -4243,7 +4340,7 @@ macro_rules! stored_atomic {
                 let element = None
                     $(.or_else(|| {
                         value
-                            .downcast::<$source>()
+                            .standard::<$source>()
                             .and_then(|source| source.as_slice(context).first().copied())
                     }))+
                     .ok_or_else(|| error("internal error: an element of another type than the vector's"))?;
@@ -4289,7 +4386,7 @@ impl Growable for Str {
         value: Local<'s>,
     ) -> R<()> {
         let text = value
-            .downcast::<Str>()
+            .standard::<Str>()
             .filter(|text| !text.is_empty())
             .ok_or_else(|| error("internal error: an element of another type than the vector's"))?;
         let mut write = vector.write(context);
@@ -4344,7 +4441,7 @@ macro_rules! for_stored_kind {
     };
     (@each $value:expr, $typed:ident, $kind:ident, $body:expr, $($each:ident),+) => {
         $(
-            if let Some($typed) = $value.downcast::<$each>() {
+            if let Some($typed) = $value.standard::<$each>() {
                 #[allow(dead_code)]
                 type $kind = $each;
                 return $body;
@@ -4374,7 +4471,7 @@ fn grow<'s>(
         "the claim is for another vector"
     );
     for_stored_kind!(vector, |typed: Kind| {
-        let owned = owned.and_then(|owned| owned.downcast::<Kind>().ok());
+        let owned = owned.and_then(|owned| owned.standard::<Kind>().ok());
         Ok(grow_as(context, typed, owned, new_length, final_step)?
             .vector
             .value())
@@ -4536,7 +4633,7 @@ pub(crate) fn append<'s, T: Growable>(
         "the claim is for another vector"
     );
     let count = vector.len();
-    let owned = owned.and_then(|owned| owned.downcast::<T>().ok());
+    let owned = owned.and_then(|owned| owned.standard::<T>().ok());
     // Writing a name can fail, so only an unnamed append may move an owned list's elements.
     let Grown {
         vector: mut result,
@@ -4615,7 +4712,7 @@ fn recycle_typed<'s, T: Atomic, I: Iterator<Item = usize>>(
     offsets: I,
     value: Local<'s>,
 ) -> Result<(), I> {
-    let (Some(target), Some(source)) = (target.narrow::<T>(), value.downcast::<T>()) else {
+    let (Some(target), Some(source)) = (target.narrow::<T>(), value.standard::<T>()) else {
         return Err(offsets);
     };
     let mut write = target.write(context);
@@ -4806,12 +4903,16 @@ fn assign_subset2<'s>(
     if !is_list {
         atomic_replacement_check(context, value)?;
     }
-    let dimnames = get_attribute(context, object, symbol(|symbols| symbols.dimnames));
-    let dimnames = context.root(dimnames);
+    let dimnames = context.root(get_attribute(
+        context,
+        object,
+        symbol(|symbols| symbols.dimnames),
+    ));
+    let dimnames = dense::<List>(context, dimnames)?;
     let mut offset = 0usize;
     let mut stride = 1usize;
     for (dimension, (&index, &extent)) in indices.iter().zip(dims.iter()).enumerate() {
-        let names = match dimnames.downcast::<List>() {
+        let names = match dimnames {
             Some(dimnames) if dimension < dimnames.len() => {
                 context.root(dimnames.get(context, dimension))
             }
@@ -5467,7 +5568,7 @@ fn resized<'s, T: Vector>(
     fill: impl FnOnce(&Cx<'s>, &mut Fresh<'s, T>, usize),
 ) -> R<Local<'s>> {
     let object = object
-        .downcast::<T>()
+        .standard::<T>()
         .ok_or_else(|| error("internal error: an expanded vector has no standard form"))?;
     let kept = length.min(object.len());
     let mut result = context.alloc::<T>(length)?;
@@ -7408,7 +7509,7 @@ fn do_short_row_names<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<L
     if kind == 0 {
         return Ok(context.root(row_names));
     }
-    let count = match row_names.downcast::<Integer>() {
+    let count = match row_names.standard::<Integer>() {
         Some(rows) if rows.len() == 2 && rows.as_slice()[0] == NA_INTEGER => rows.as_slice()[1],
         _ if row_names.r_type() == SexpType::Nil => 0,
         _ => {

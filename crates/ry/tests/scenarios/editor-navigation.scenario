@@ -52,7 +52,7 @@ expect fold R/ledger.R "report <- function" "  balance(entries"
 expect selection R/ledger.R "opening = 1" "entries, opening = 1"
 
 # Signature help follows the named argument.
-expect signature R/ledger.R after "balance(entries, opening = " "[opening: U = 0]"
+expect signature R/ledger.R after "balance(entries, opening = " "[opening: double = 0]"
 
 # A `pkg::name` call into the package's own code is not colored as a library function.
 expect token R/ledger.R "balance(entries) +" "function"

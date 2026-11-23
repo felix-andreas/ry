@@ -211,7 +211,7 @@ action: Add inferred type annotation for `result`
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": integer"
   edit 18..18 -> ": NULL"
-completion (102): for, function, factanal, factor, factor.scope, factorial, faithful, family
+completion (103): for, function, factanal, factor, factor.scope, factorial, faithful, family
 hint @5: integer
 hint @18: NULL
 hint @31: integer
@@ -248,7 +248,7 @@ action: Add inferred type annotation for `again`
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": integer"
   edit 17..17 -> ": NULL"
-completion (117): rep, repeat, rep.Date, rep.difftime, rep.factor, rep.int, rep.numeric_version, rep.POSIXct
+completion (119): rep, repeat, rep.Date, rep.difftime, rep.factor, rep.int, rep.numeric_version, rep.POSIXct
 hint @5: integer
 hint @17: NULL
 
@@ -363,10 +363,10 @@ definition 11..18
 references: 11..18*
 rename: 1 edit(s)
 signature: none
-completion (99): checked, check.options, checkAtAssignment, checkCRAN, checkSlotAssignment, cacheGenericsMetaData, cacheMetaData, cacheMethod
+completion (101): checked, check.options, checkAtAssignment, checkCRAN, checkSlotAssignment, cacheGenericsMetaData, cacheMetaData, cacheMethod
 
 #---- if_unknown_annotation
-frame <- data.frame(a = 1)
+frame <- read.csv("a.csv")
 
 #: @if-unknown integer
 may$0be <- frame$a
@@ -406,7 +406,7 @@ definition 56..62
 references: 56..62*
 rename: 1 edit(s)
 signature: none
-completion (128): person, personList, persp, phyper, aperm, aperm.default, aperm.table, spec.taper
+completion (128+): person, personList, persp, phyper, aperm, aperm.default, aperm.table, spec.taper
 
 #---- new_annotation_unknown_value_use
 #: @type Person {list{name: character}}
@@ -426,7 +426,7 @@ action: Add inferred type annotation for `touch`
   edit 99..99 -> " -> Person"
 action: Add inferred type annotations for the whole file
   edit 99..99 -> " -> Person"
-completion (128): person, personList, persp, phyper, aperm, aperm.default, aperm.table, spec.taper
+completion (128+): person, personList, persp, phyper, aperm, aperm.default, aperm.table, spec.taper
 hint @99 -> Person
 
 #---- alias_declaration_tag
@@ -572,7 +572,7 @@ action: Add inferred type annotation for `f`
   edit 15..15 -> " -> integer"
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> integer"
-completion (128+): total, prototype, NLSstAsymptotic, NLSstLfAsymptote, NLSstRtAsymptote, defaultPrototype, makePrototypeFromClassDef, .__C__classPrototypeDef
+completion (128+): total, prototype, NLSstAsymptotic, NLSstLfAsymptote, NLSstRtAsymptote, bringToTop, defaultPrototype, makePrototypeFromClassDef
 hint @15 -> integer
 hint @25: integer
 hint @40: integer
@@ -658,7 +658,7 @@ action: Add inferred type annotations for the whole file
   edit 19..19 -> "<T: numeric>"
   edit 21..21 -> ": T"
   edit 22..22 -> " -> T"
-completion (69): add_one, add.scope, add1, addmargins, addNA, addNextMethod, addTaskCallback, lazyLoadDBexec
+completion (72): add_one, add.scope, add1, addmargins, addNA, addNextMethod, addTaskCallback, lazyLoadDBexec
 hint @19<T: numeric>
 hint @21: T
 hint @22 -> T
@@ -686,7 +686,7 @@ hint @19 -> list{T, integer}
 #---- parameter_never_raw_variable
 wrap <- function(first, second) sec$0ond
 #++++
-hover 32..38: second: T
+hover 32..38: second: U
 hover-definition: local 24..30
 definition 24..30
 references: 24..30*, 32..38
@@ -810,7 +810,7 @@ definition: installed undefined_fn from base, stats, utils, methods, graphics, g
 references: none
 rename: none
 signature: none
-completion (116): optim, optimHess, optimise, optimize, options, .Options, .OptRequireMethods, constrOptim
+completion (118): optim, optimHess, optimise, optimize, options, .Options, .OptRequireMethods, constrOptim
 
 #---- namespaced_callee
 f <- function(obj) {

@@ -122,7 +122,7 @@ x
 == R/a.R
 x: integer
 == R/b.R
-Person
+integer
 3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 
 #==== package_and_scripts
@@ -137,7 +137,7 @@ value <- 1L
 Unknown
 0..1 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
 == inst/scripts/helper.R
-value: Person
+value: integer
 3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 10..15 warning[unused] `value` is assigned but never used.
 
@@ -181,6 +181,43 @@ result: Unknown
 10..23 warning[unresolved] `bazqux` is not exported by `stats`.
 
 #==== typo_suggestions
+#---- a_read_inside_try_probes_the_export
+# doParallel falls back to its own `splitList` where parallel exports none: the error a missing
+# export raises is caught, so the read is a probe.
+#~~~~ R/main.R
+split_list <- try(parallel::splitList, silent = TRUE)
+check <- tryCatch(base::check_tzones, error = function(e) NULL)
+outside <- stats::bazqux
+called <- try(stats::quxbaz(1), silent = TRUE)
+warned <- tryCatch(stats::bazqux, warning = function(w) NULL)
+body <- tryCatch({
+  y <- 1
+  stats::sdd(y)
+}, error = function(e) NULL)
+handler <- tryCatch(1, error = function(e) stats::bazqux)
+#++++
+== R/main.R
+split_list: Any
+check: Unknown
+outside: Unknown
+called: Any
+warned: Unknown
+body: Unknown
+handler: double
+129..142 warning[unresolved] `bazqux` is not exported by `stats`.
+209..222 warning[unresolved] `bazqux` is not exported by `stats`.
+282..292 warning[unresolved] `sdd` is not exported by `stats`.
+368..381 warning[unresolved] `bazqux` is not exported by `stats`.
+
+#---- a_windows_only_export_resolves
+#~~~~ R/main.R
+short <- function(path) if (.Platform$OS.type == "windows") utils::shortPathName(path) else path
+device <- function(file) grDevices::win.metafile(file)
+#++++
+== R/main.R
+short: <T> fn(path: T) -> Unknown
+device: <T> fn(file: T) -> Unknown
+
 #---- near_miss_of_a_stub_name_suggests_it
 #~~~~ R/main.R
 lenght(c(1L, 2L))

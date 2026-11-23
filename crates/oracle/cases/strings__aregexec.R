@@ -1,0 +1,17 @@
+# aregexec: approximate matches with their capture groups, NA texts, unmatched texts, cost and
+# bound settings, fixed patterns, bytes, and the empty-pattern error.
+print(aregexec("lasy", c("1 lazy 2", NA, "none")))
+print(aregexec("(lay)(s)", "1 lazy 2", max.distance = 2))
+print(aregexec("(lay)(s)?", "1 lazy 2"))
+print(aregexec("abc", "xxabdxx", max.distance = list(all = 1, ins = 0)))
+x <- c("1 lazy", "1", "1 LAZY")
+print(regmatches(x, aregexec("laysy", x, max.distance = 2)))
+print(regmatches(x, aregexec("(lay)(sy)", x, max.distance = 2, ignore.case = TRUE)))
+print(aregexec("a.c", "xabcx", fixed = TRUE))
+print(aregexec("a.c", "xabcx", fixed = FALSE))
+print(aregexec("b", "abc", useBytes = TRUE))
+print(tryCatch(aregexec("", "a"), error = conditionMessage))
+y <- c("abcde", "xbcdy", "aXcde", "ab", "zzabcdezz", "bcd")
+print(regmatches(y, aregexec("(ab)(cd)", y, max.distance = 1)))
+print(regmatches(y, aregexec("(a|b)(c+)(d?)", y, max.distance = 1)))
+print(regmatches(y, aregexec("(b)(cd)(e)", y, max.distance = 1)))

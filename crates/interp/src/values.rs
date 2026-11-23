@@ -344,9 +344,6 @@ impl Globals {
         for &classes in self.implicit_classes.values() {
             marker.mark(classes);
         }
-        for definitions in &self.deferred_definitions {
-            marker.mark(definitions.force);
-        }
     }
 }
 
@@ -1011,20 +1008,37 @@ pub unsafe fn refuse_bytes(strings: Sexp) -> R<()> {
 }
 
 /// Whether two `CHARSXP`s hold the same text. The string cache interns each text once per
-/// encoding, and ASCII text always unmarked, so two distinct cached ASCII strings differ and only
-/// strings that may differ in encoding need their text compared.
+/// encoding, and ASCII text always unmarked, so a cached ASCII string is the only string that
+/// holds its text (`NA_STRING` is uncached), and a different string can equal it only by being
+/// the same object. Only strings that may differ in encoding need their text compared.
+///
+/// A name lookup calls this once per candidate with the wanted name as `right`, so `right` is
+/// tested first: for the usual ASCII name the scan then reads no candidate's header.
 #[inline]
 pub unsafe fn same_string(left: Sexp, right: Sexp) -> bool {
     if left == right {
         return true;
     }
-    let na = na_string();
-    if left == na || right == na {
+    let interned_ascii = gp::ASCII | gp::CACHED;
+    if right.gp() & interned_ascii == interned_ascii || left.gp() & interned_ascii == interned_ascii
+    {
+        if cfg!(debug_assertions) && syntax::testing::invariants_enabled() {
+            crate::handles::assert_distinct_text(
+                heap::handle::Gc::adopt(left),
+                heap::handle::Gc::adopt(right),
+            );
+        }
         return false;
     }
-    let interned_ascii = gp::ASCII | gp::CACHED;
-    if left.gp() & interned_ascii == interned_ascii && right.gp() & interned_ascii == interned_ascii
-    {
+    same_text_across_encodings(left, right)
+}
+
+/// [`same_string`] for two strings neither of which is cached ASCII, kept out of line so the
+/// common case inlines into a name scan: inlined, the text comparison made a name scan slower.
+#[inline(never)]
+unsafe fn same_text_across_encodings(left: Sexp, right: Sexp) -> bool {
+    let na = na_string();
+    if left == na || right == na {
         return false;
     }
     char_str(left) == char_str(right)
@@ -1054,7 +1068,7 @@ pub unsafe fn char_str<'a>(charsxp: Sexp) -> Cow<'a, str> {
         // before a NUL byte is still valid UTF-8.
         return Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(bytes) });
     }
-    unsafe { char_str_decoded(charsxp) }
+    char_str_decoded(charsxp)
 }
 
 /// [`char_str`] for a string the heap has not validated as UTF-8 text.

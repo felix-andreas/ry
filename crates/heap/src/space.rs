@@ -1086,7 +1086,7 @@ impl Space {
         let (page, word, bit) = self.locate(object)?;
         let offset = (object.as_ptr() as usize).wrapping_sub(self.base.as_ptr() as usize);
         let slot_size = SLOT_SIZES[self.page_class[page] as usize];
-        let aligned = (offset & (PAGE_SIZE - 1)) % slot_size == 0;
+        let aligned = (offset & (PAGE_SIZE - 1)).is_multiple_of(slot_size);
         Some(aligned && self.allocated[page][word] & bit != 0)
     }
 

@@ -182,7 +182,14 @@ pub(crate) fn is_blank(text: &[u8]) -> R<bool> {
         .position(|&byte| byte == 0)
         .map_or(text, |end| &text[..end]);
     let mut rest = text;
-    while !rest.is_empty() {
+    while let Some(&first) = rest.first() {
+        if first.is_ascii() {
+            if !is_c_space(first) {
+                return Ok(false);
+            }
+            rest = &rest[1..];
+            continue;
+        }
         // One character is at most four bytes, so only those are validated per step.
         let head = &rest[..rest.len().min(4)];
         let valid = head.utf8_chunks().next().map_or("", |chunk| chunk.valid());
@@ -275,7 +282,11 @@ pub unsafe fn element_as_charsxp(vector: Sexp, index: usize) -> R<Sexp> {
                 Ok(na_string())
             } else {
                 values::mkchar(&crate::format::localize_decimal(
-                    crate::format::format_complex_alone(value, 15),
+                    crate::format::format_complex_alone(
+                        value,
+                        15,
+                        crate::format::Settings::current_scipen(),
+                    ),
                 ))
             }
         }

@@ -52,7 +52,7 @@ fn a_list_filled_across_collections_keeps_its_elements() {
                 for (index, &length) in lengths.iter().enumerate() {
                     let element = list
                         .get(cx, index)
-                        .downcast::<Integer>()
+                        .standard::<Integer>()
                         .expect("an integer vector");
                     let element = cx.root(element);
                     let expected: Vec<i32> = (0..length as i32)
@@ -124,7 +124,7 @@ fn a_list_written_in_place_keeps_young_elements() {
         for index in [0, 2] {
             let element = list
                 .get(cx, index)
-                .downcast::<Integer>()
+                .standard::<Integer>()
                 .expect("an integer vector");
             assert_eq!(cx.root(element).as_slice(cx), [7, 8]);
         }
@@ -137,11 +137,11 @@ fn a_list_written_in_place_keeps_young_elements() {
 fn a_downcast_checks_the_kind() {
     with_context(GcStress::Off, |cx| -> Result<(), HeapError> {
         let value: Local<'_, Value> = integers(cx, &[1])?.value();
-        assert!(value.downcast::<Integer>().is_some());
-        assert!(value.downcast::<Real>().is_none());
-        assert!(value.downcast::<List>().is_none());
+        assert!(value.standard::<Integer>().is_some());
+        assert!(value.standard::<Real>().is_none());
+        assert!(value.standard::<List>().is_none());
         let strings = cx.alloc::<Str>(2)?.finish();
-        assert!(strings.value().downcast::<Str>().is_some());
+        assert!(strings.value().standard::<Str>().is_some());
         assert_eq!(strings.get(cx, 1).bytes(), b"");
         Ok(())
     })

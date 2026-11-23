@@ -7,7 +7,7 @@ use {
     bumpalo::Bump,
     semantics::{
         Db, DocumentKind, Item, ItemKind, ProjectFiles, SourceFile, TypeDefinitions,
-        annotations::{statement_inline_site, type_definition_keyword},
+        annotations::{definition_keyword, statement_inline_site, type_definition_keyword},
         check::{ArgumentShape, ArgumentTarget, CalleeTarget, ItemCheck, argument_targets},
         diagnostics::{Applicability, Diagnostic, TypeRenderer, applicable_fixes},
         file_type_definitions, global_scheme,
@@ -20,14 +20,14 @@ use {
         item_name_range, item_naming, item_node, item_spans, item_tree,
         metadata::{PackageMetadata, is_own_package},
         naming::{BindingId, BindingInfo, BindingKind, CopySource, ItemNaming, dot_dot_variable},
-        package_definitions, project_global_names, project_type_definitions,
+        package_definitions, project_global_names, project_type_definitions, reaching_writer,
         stubs::{
             NATIVE_NAMESPACES, StubSources, declaring_namespace, exporting_namespaces,
             outside_prelude, stub_declaration, stub_type_declaration, stubs,
         },
         types::{
-            Atomic, Constraint, FunctionType, Name, Parameter, RecordField, Ty, TyKind, TypeScheme,
-            contains_inference_var, union_of,
+            Atomic, Binder, Constraint, FunctionType, Name, Parameter, RecordField, Ty, TyKind,
+            TypeScheme, contains_inference_var, contains_rigid, union_of,
         },
     },
     std::{
@@ -41,7 +41,7 @@ use {
         SyntaxElement,
         SyntaxKind::{self, *},
         SyntaxNode, SyntaxToken, TextRange, TextSize, TokenAtOffset,
-        annotation::block_refusal,
+        annotation::{argument_value, attached_annotation, block_refusal, is_definition_keyword},
         ast::BinaryExpr,
         highlight::{
             classify_r_name, classify_ry_token, classify_type_token, is_tag_node, tag_node_of,
@@ -270,16 +270,17 @@ fn typed_hover(
     {
         // With neither a project nor a stub declaration, the caller attaches the installed
         // package's documentation instead.
-        let (lines, definition) = match referenced_scheme(db, files, name, check, innermost) {
-            Some(mut scheme) => {
-                scheme.body = without_impossible_vectors(db, scheme.body);
-                (
-                    hover_lines(db, name, &scheme),
-                    hover_definition(db, files, position.item, innermost),
-                )
-            }
-            None => (vec![name.to_string()], None),
-        };
+        let (lines, definition) =
+            match referenced_scheme(db, files, name, (position.item, check), innermost) {
+                Some(mut scheme) => {
+                    scheme.body = without_impossible_vectors(db, scheme.body);
+                    (
+                        hover_lines(db, name, &scheme, &[]),
+                        hover_definition(db, files, position.item, innermost),
+                    )
+                }
+                None => (vec![name.to_string()], None),
+            };
         return Some(Hover {
             range: trim_trailing_trivia(file.text(db), hir.range(innermost) + position.item_offset),
             lines,
@@ -303,7 +304,7 @@ fn typed_hover(
             Some(mut scheme) => {
                 scheme.body = without_impossible_vectors(db, scheme.body);
                 (
-                    hover_lines(db, name, &scheme),
+                    hover_lines(db, name, &scheme, &[]),
                     hover_definition(db, files, position.item, innermost),
                 )
             }
@@ -347,11 +348,16 @@ fn typed_hover(
     let (lines, definition) = match (variable, &hir.kind(expression)) {
         (Some(name), _) => {
             // The item's own top-level name renders the exported scheme, not the initializer's
-            // type: `#: @new` brands the scheme even when the initializer is `Unknown`.
+            // type: `#: @new` brands the scheme even when the initializer is `Unknown`. Only the
+            // name the item assigns does: in `m$amount <- 5` the scheme is the value's.
+            let defines_item = hir.root.is_some_and(|root| {
+                matches!(hir.kind(root), ExpressionKind::Assign { target, .. } if *target == expression)
+            });
             let exported = naming.and_then(|naming| {
                 if names_item {
                     return Some(global_scheme(db, position.item));
                 }
+                defines_item.then_some(())?;
                 let binding = naming.resolutions.get(&expression)?;
                 (naming.bindings.get(binding)?.kind == BindingKind::TopLevel).then_some(())?;
                 check.scheme.clone()
@@ -361,15 +367,17 @@ fn typed_hover(
             let referenced = || {
                 naming.filter(|naming| naming.non_locals.contains_key(&expression))?;
                 contains_inference_var(db, ty).then_some(())?;
-                referenced_scheme(db, files, name, check, expression)
+                referenced_scheme(db, files, name, (position.item, check), expression)
             };
             // Render the whole scheme so the `<T>` prefix explains `T`, matching the inlay hint.
-            let mut scheme = exported
-                .or_else(referenced)
-                .unwrap_or_else(|| TypeScheme::monomorphic(ty));
+            // A local's type names the item's own type parameters as its signature letters them.
+            let (mut scheme, outer) = match exported.or_else(referenced) {
+                Some(scheme) => (scheme, &[][..]),
+                None => (TypeScheme::monomorphic(ty), item_binders(check)),
+            };
             scheme.body = without_impossible_vectors(db, scheme.body);
             (
-                hover_lines(db, name, &scheme),
+                hover_lines(db, name, &scheme, outer),
                 hover_definition(db, files, position.item, expression),
             )
         }
@@ -379,7 +387,7 @@ fn typed_hover(
                 name: Some(name), ..
             },
         ) => (
-            hover_lines(db, name, &TypeScheme::monomorphic(ty)),
+            hover_lines(db, name, &TypeScheme::monomorphic(ty), &[]),
             hover_definition(db, files, position.item, expression),
         ),
         _ => (vec![TypeRenderer::default().render(db, ty)], None),
@@ -651,9 +659,15 @@ fn updated_column_at<'db>(
     None
 }
 
-fn hover_lines(db: &dyn Db, name: &str, scheme: &TypeScheme<'_>) -> Vec<String> {
+/// `outer` are the binders of the item around a local, which the local's type reads.
+fn hover_lines<'db>(
+    db: &'db dyn Db,
+    name: &str,
+    scheme: &TypeScheme<'db>,
+    outer: &[Binder<'db>],
+) -> Vec<String> {
     const WIDTH: usize = 80;
-    let mut renderer = TypeRenderer::default();
+    let mut renderer = renderer_within(db, outer, scheme.body);
     let line = format!("{name}: {}", renderer.render_scheme(db, scheme));
     let TyKind::Function(function) = scheme.body.kind(db) else {
         return vec![line];
@@ -661,9 +675,9 @@ fn hover_lines(db: &dyn Db, name: &str, scheme: &TypeScheme<'_>) -> Vec<String> 
     if line.chars().count() <= WIDTH {
         return vec![line];
     }
-    let mut renderer = TypeRenderer::default();
+    let mut renderer = renderer_within(db, outer, scheme.body);
     let binders = renderer
-        .render_binder_prefix(&scheme.binders)
+        .render_binder_prefix(db, &scheme.binders)
         .map(|prefix| format!("{prefix} "))
         .unwrap_or_default();
     let (label, parameters) =
@@ -680,6 +694,26 @@ fn hover_lines(db: &dyn Db, name: &str, scheme: &TypeScheme<'_>) -> Vec<String> 
     }
     lines.push(label[usize::from(last.end())..].to_owned());
     lines
+}
+
+/// The binders of an item's own scheme, which its locals' types read as rigid variables.
+fn item_binders<'a, 'db>(check: &'a ItemCheck<'db>) -> &'a [Binder<'db>] {
+    check
+        .scheme
+        .as_ref()
+        .map_or(&[][..], |scheme| &scheme.binders[..])
+}
+
+/// A renderer for `ty` that letters `outer` first, as the signature that binds them does, so
+/// a type naming the signature's parameters reads with the same names. A type naming none of
+/// them letters its own variables from `T`.
+fn renderer_within<'db>(db: &'db dyn Db, outer: &[Binder<'db>], ty: Ty<'db>) -> TypeRenderer<'db> {
+    let mut renderer = TypeRenderer::default();
+    if contains_rigid(ty) {
+        // Only the lettering is wanted here; the prefix is the signature's to show.
+        renderer.render_binder_prefix(db, outer);
+    }
+    renderer
 }
 
 /// What a hover says about where the name at `expression` is defined, which is where "go to
@@ -810,6 +844,24 @@ fn declaring_item<'db>(db: &'db dyn Db, files: ProjectFiles, name: &str) -> Opti
         .or_else(|| project_declarations(db, files).get(name).copied())
 }
 
+/// The item whose top-level write of `name` the read `reference` in `item` reaches, as the checker
+/// resolves it: the nearest earlier writer in the file for a read at top level, and for a read
+/// inside a function the file's last writer in a script or the package's definition.
+fn reaching_item<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    item: Item<'db>,
+    reference: ExprId,
+    name: &str,
+) -> Option<Item<'db>> {
+    let deferred = inside_function(item_hir(db, item).as_ref()?, reference);
+    let package_wide = deferred && *item.file(db).kind(db) == DocumentKind::Package;
+    (!package_wide)
+        .then(|| reaching_writer(db, item, name, deferred))
+        .flatten()
+        .or_else(|| declaring_item(db, files, name))
+}
+
 /// The first function or value item of each name across every project file, scripts and tests
 /// included. Field resolution asks for every library call head it follows, and a miss would
 /// otherwise scan every file's items.
@@ -831,11 +883,11 @@ fn referenced_scheme<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
     name: &str,
-    check: &ItemCheck<'db>,
+    (item, check): (Item<'db>, &ItemCheck<'db>),
     reference: ExprId,
 ) -> Option<TypeScheme<'db>> {
-    if let Some(item) = declaring_item(db, files, name) {
-        return Some(global_scheme(db, item));
+    if let Some(writer) = reaching_item(db, files, item, reference, name) {
+        return Some(global_scheme(db, writer));
     }
     if hidden_by_prelude(db, name) {
         return None;
@@ -1332,7 +1384,12 @@ pub fn inlay_hints(db: &dyn Db, file: SourceFile, viewport: Option<TextRange>) -
                 }));
                 continue;
             }
-            let label = TypeRenderer::default().render_scheme(db, &scheme);
+            let mut renderer = if is_root {
+                TypeRenderer::default()
+            } else {
+                renderer_within(db, item_binders(check), scheme.body)
+            };
+            let label = renderer.render_scheme(db, &scheme);
             hints.push(InlayHint {
                 offset: hir.range(*target).end() + node.text_range().start(),
                 label: format!(": {label}"),
@@ -1767,9 +1824,19 @@ pub fn signature_help_with(
             }
         });
         let bare = matches!(hir.kind(*callee), ExpressionKind::NameRef(_));
+        let package = match hir.kind(*callee) {
+            ExpressionKind::Namespace {
+                package: Some(package),
+                ..
+            } => Some(*package),
+            _ => None,
+        };
         let schemes = name
             .filter(|name| !(bare && hidden_by_prelude(db, name)))
-            .and_then(|name| stubs(db)?.schemes.get(&name));
+            .and_then(|name| match package {
+                Some(package) => stubs(db)?.namespace_schemes(package, &name),
+                None => stubs(db)?.schemes.get(&name),
+            });
         let overloads = schemes.filter(|schemes| schemes.len() > 1);
         if function.is_some() || overloads.is_some() {
             typed = Some((*callee, function, overloads, arguments, cursor_index));
@@ -1837,7 +1904,7 @@ pub fn signature_help_with(
         && naming.is_some_and(|naming| naming.non_locals.contains_key(&callee))
         && contains_inference_var(db, function)
         && let Some(files) = ProjectFiles::try_get(db)
-        && let Some(scheme) = referenced_scheme(db, files, &name, check, callee)
+        && let Some(scheme) = referenced_scheme(db, files, &name, (position.item, check), callee)
     {
         scheme
     } else {
@@ -1935,23 +2002,7 @@ fn untyped_formals(
     let hir = item_hir(db, item).as_ref()?;
     if matches!(hir.kind(callee), ExpressionKind::Field { .. }) {
         let (declaring, function) = fields::field_function(db, files, item, callee)?;
-        let declaring_hir = item_hir(db, declaring).as_ref()?;
-        let ExpressionKind::Function { parameters, .. } = declaring_hir.kind(function) else {
-            return None;
-        };
-        let text = item_node(db, declaring)?.text().to_string();
-        return Some(
-            declaring_hir[parameters]
-                .iter()
-                .map(|parameter| Formal {
-                    name: parameter.name.to_string(),
-                    default: parameter.default.and_then(|default| {
-                        text.get(std::ops::Range::<usize>::from(declaring_hir.range(default)))
-                            .map(str::to_owned)
-                    }),
-                })
-                .collect(),
-        );
+        return literal_formals(db, declaring, function);
     }
     let naming = item_naming(db, item).as_ref()?;
     match expression_target(db, files, item, naming, callee)? {
@@ -1959,8 +2010,35 @@ fn untyped_formals(
         // A stub name without a scheme (`list`, which the checker types itself) still has the
         // formals its package defines.
         Target::StubGlobal(name) => installed.formals(&library_target(db, name)),
+        // A function in code the checker leaves untyped, such as R6's helpers that
+        // `encapsulate({...})` evaluates elsewhere, still has the formals it was written with.
+        target @ (Target::Global(_) | Target::Slot { .. }) => {
+            let (declaring, function) = bound_function(db, files, &target, (item, callee))?;
+            literal_formals(db, declaring, function)
+        }
         _ => None,
     }
+}
+
+/// The formals of the function literal `function` in `item`, defaults as written.
+fn literal_formals(db: &dyn Db, item: Item<'_>, function: ExprId) -> Option<Vec<Formal>> {
+    let hir = item_hir(db, item).as_ref()?;
+    let ExpressionKind::Function { parameters, .. } = hir.kind(function) else {
+        return None;
+    };
+    let text = item_node(db, item)?.text().to_string();
+    Some(
+        hir[parameters]
+            .iter()
+            .map(|parameter| Formal {
+                name: parameter.name.to_string(),
+                default: parameter.default.and_then(|default| {
+                    text.get(std::ops::Range::<usize>::from(hir.range(default)))
+                        .map(str::to_owned)
+                }),
+            })
+            .collect(),
+    )
 }
 
 /// An untyped signature in R's own spelling, `fn(x, n = 1L, ...)`.
@@ -2168,7 +2246,7 @@ fn scheme_signature(
         };
     };
     let prefix = renderer
-        .render_binder_prefix(&scheme.binders)
+        .render_binder_prefix(db, &scheme.binders)
         .map(|prefix| format!("{prefix} "))
         .unwrap_or_default();
     let (label, parameters) = render_signature(db, &mut renderer, prefix, function);
@@ -2298,14 +2376,17 @@ pub fn completion_with(
         return annotation_completion(db, files, file, &query);
     }
     // R value names never resolve inside string content; only record-field subscripts complete
-    // there.
+    // there. A string still being typed (`x[["al`) ends at its line break, so the cursor at its
+    // end is inside it.
     if let Some(string_token) = root
         .descendants_with_tokens()
         .filter_map(SyntaxElement::into_token)
         .find(|token| {
+            let range = token.text_range();
             token.kind() == STRING
-                && token.text_range().start() < offset
-                && offset < token.text_range().end()
+                && range.start() < offset
+                && (offset < range.end()
+                    || offset == range.end() && !is_closed_string(token.text()))
         })
     {
         return string_subscript_completion(db, file, offset, &string_token);
@@ -2661,14 +2742,14 @@ pub fn code_actions(db: &dyn Db, file: SourceFile, viewport: TextRange) -> Vec<C
         .filter(|annotation| ranges_overlap(annotation.range, viewport))
     {
         actions.push(CodeAction {
-            title: format!("Add inferred type annotation for `{}`", annotation.name),
+            title: annotation.title(),
             kind: CodeActionKind::InsertInferredAnnotation,
             edits: annotation.edits.clone(),
         });
     }
     let all_annotation_edits: Vec<TextEdit> = annotations
         .into_iter()
-        .filter(|annotation| annotation.top_level)
+        .filter(InferredAnnotation::in_whole_file)
         .flat_map(|annotation| annotation.edits)
         .collect();
     if !all_annotation_edits.is_empty() {
@@ -2912,16 +2993,45 @@ pub fn fix_all(diagnostics: &[Diagnostic]) -> Option<CodeAction> {
     })
 }
 
-/// A binding with no annotation whose inferred type can be written down, and the edits that
-/// write it: one `#:` line, or with inline annotations on, the types at their inline places.
+/// A binding or a lambda argument with no annotation whose inferred type can be written down,
+/// and the edits that write it: one `#:` line, or with inline annotations on, the types at
+/// their inline places.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InferredAnnotation {
+    /// The binding's name, or for a lambda the function it is passed to.
     pub name: String,
-    /// The binding's whole statement.
+    /// The binding's whole statement, or the lambda.
     pub range: TextRange,
-    /// A top-level binding, as opposed to a local inside a function body.
-    pub top_level: bool,
+    pub site: AnnotationSite,
     pub edits: Vec<TextEdit>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnotationSite {
+    TopLevel,
+    /// A binding inside a function body, which inference types well enough unannotated.
+    Local,
+    /// A function literal passed as an argument, typed by the callee's parameter.
+    Argument,
+}
+
+impl InferredAnnotation {
+    /// Whether "annotate the whole file" writes it: a local's type follows from its function's.
+    pub fn in_whole_file(&self) -> bool {
+        self.site != AnnotationSite::Local
+    }
+
+    pub fn title(&self) -> String {
+        match self.site {
+            AnnotationSite::Argument => format!(
+                "Add the inferred signature of the function passed to `{}`",
+                self.name
+            ),
+            AnnotationSite::TopLevel | AnnotationSite::Local => {
+                format!("Add inferred type annotation for `{}`", self.name)
+            }
+        }
+    }
 }
 
 /// Every binding in `file` that an inferred annotation would type. A statement typed inline, or
@@ -2948,8 +3058,8 @@ pub fn inferred_annotations(db: &dyn Db, file: SourceFile) -> Vec<InferredAnnota
             .iter()
             .map(|(id, _)| *id)
             .collect();
-        // An annotation, inline or `#:`, belongs to a statement: inside a call's arguments
-        // `x: T <- 1` does not parse, and a `#:` line there annotates nothing.
+        // A binding's annotation belongs to a statement: inside a call's arguments
+        // `x: T <- 1` does not parse, and a `#:` block there types the argument, not a binding.
         let statements: BTreeSet<ExprId> = hir
             .root
             .into_iter()
@@ -2999,13 +3109,22 @@ pub fn inferred_annotations(db: &dyn Db, file: SourceFile) -> Vec<InferredAnnota
             let Some(scheme) = inferred_scheme(db, check, id, *value, is_root) else {
                 continue;
             };
+            // A signature's `T` is in scope for the body only where the signature is written.
+            if !is_root && !annotated && contains_rigid(scheme.body) {
+                continue;
+            }
             let target_range = hir.range(*target) + item_offset;
             let value_range = hir.range(*value) + item_offset;
             let inline_edits = inline
                 .then(|| inline_annotation_edits(db, &node, &scheme, target_range, value_range))
                 .flatten();
             let edits = inline_edits.unwrap_or_else(|| {
-                let label = TypeRenderer::default().render_scheme(db, &scheme);
+                let outer = if is_root {
+                    &[][..]
+                } else {
+                    item_binders(check)
+                };
+                let label = renderer_within(db, outer, scheme.body).render_scheme(db, &scheme);
                 vec![TextEdit {
                     range: TextRange::empty(TextSize::from(line_start as u32)),
                     replacement: format!("{indentation}#: {label}\n"),
@@ -3014,10 +3133,116 @@ pub fn inferred_annotations(db: &dyn Db, file: SourceFile) -> Vec<InferredAnnota
             annotations.push(InferredAnnotation {
                 name: name.as_str().to_owned(),
                 range,
-                top_level: is_root,
+                site: if is_root {
+                    AnnotationSite::TopLevel
+                } else {
+                    AnnotationSite::Local
+                },
                 edits,
             });
         }
+        annotations.extend(lambda_annotations(db, &node, hir, check, text, inline));
+    }
+    annotations
+}
+
+/// The signatures of the function literals passed as arguments in `item_node` that write no
+/// type at all, when every one of their types is determined: by the parameter the lambda is
+/// passed to, or by its body.
+fn lambda_annotations<'db>(
+    db: &'db dyn Db,
+    item_node: &SyntaxNode,
+    hir: &Module,
+    check: &ItemCheck<'db>,
+    text: &str,
+    inline: bool,
+) -> Vec<InferredAnnotation> {
+    let item_offset = item_node.text_range().start();
+    let mut annotations = Vec::new();
+    for function_def in item_node
+        .descendants()
+        .filter(|node| node.kind() == FUNCTION_DEF)
+    {
+        let Some(argument) = function_def
+            .parent()
+            .filter(|parent| argument_value(parent).as_ref() == Some(&function_def))
+        else {
+            continue;
+        };
+        let writes_a_type = attached_annotation(&function_def).is_some()
+            || function_def.descendants().any(|node| {
+                matches!(
+                    node.kind(),
+                    TYPE_ASCRIPTION | RETURN_TYPE | TYPE_BINDER_LIST
+                ) && node
+                    .ancestors()
+                    .find(|ancestor| ancestor.kind() == FUNCTION_DEF)
+                    == Some(function_def.clone())
+            });
+        if writes_a_type {
+            continue;
+        }
+        let Some(callee) = argument
+            .parent()
+            .and_then(|list| list.parent())
+            .filter(|call| call.kind() == CALL_EXPR)
+            .and_then(|call| call.first_child())
+        else {
+            continue;
+        };
+        let range = function_def.text_range();
+        let Some(relative) = range.checked_sub(item_offset) else {
+            continue;
+        };
+        let Some(id) = hir
+            .ranges()
+            .enumerate()
+            .map(|(index, candidate)| (ExprId::new(index), candidate))
+            .find(|&(id, candidate)| {
+                candidate == relative && matches!(hir.kind(id), ExpressionKind::Function { .. })
+            })
+            .map(|(id, _)| id)
+        else {
+            continue;
+        };
+        let Some(&ty) = check.editor().expression_types.get(&id) else {
+            continue;
+        };
+        let ty = without_impossible_vectors(db, ty);
+        if !matches!(ty.kind(db), TyKind::Function(_)) || !is_hintable(db, ty, false) {
+            continue;
+        }
+        let scheme = TypeScheme::monomorphic(ty);
+        let inline_edits = inline
+            .then(|| inline_annotation_edits(db, item_node, &scheme, range, range))
+            .flatten();
+        let edits = match inline_edits {
+            Some(edits) => edits,
+            // A `#:` line needs the argument to start its own line.
+            None => {
+                let start = usize::from(argument.text_range().start());
+                let line_start = text[..start.min(text.len())]
+                    .rfind('\n')
+                    .map_or(0, |at| at + 1);
+                let Some(indentation) = text
+                    .get(line_start..start)
+                    .filter(|indentation| indentation.trim().is_empty())
+                else {
+                    continue;
+                };
+                let label = TypeRenderer::default().render_scheme(db, &scheme);
+                vec![TextEdit {
+                    range: TextRange::empty(TextSize::from(line_start as u32)),
+                    replacement: format!("{indentation}#: {label}\n"),
+                }]
+            }
+        };
+        annotations.push(InferredAnnotation {
+            name: callee.text().to_string(),
+            range,
+            site: AnnotationSite::Argument,
+            edits,
+        });
     }
     annotations
 }
@@ -3063,7 +3288,7 @@ fn inline_annotation_edits<'db>(
         .children()
         .find(|node| node.kind() == PARAMETER_LIST)?;
     let mut edits = Vec::new();
-    if let Some(binders) = renderer.render_binder_prefix(&scheme.binders) {
+    if let Some(binders) = renderer.render_binder_prefix(db, &scheme.binders) {
         edits.push(TextEdit {
             range: TextRange::empty(keyword.text_range().end()),
             replacement: binders,
@@ -3141,10 +3366,13 @@ pub fn type_definition(
         .expressions_at()
         .into_iter()
         .find_map(|id| check.editor().expression_types.get(&id).copied())?;
-    let TyKind::Named(name, _) = ty.kind(db) else {
-        return None;
+    let name = match *ty.kind(db) {
+        TyKind::Named(name, _) => name.text(db),
+        // A `data.frame{...}` is its class with the columns known.
+        TyKind::Frame(kind, _) => kind.class()?,
+        _ => return None,
     };
-    type_name_definition(db, files, name.text(db))
+    type_name_definition(db, files, name)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3281,6 +3509,7 @@ pub fn document_symbols(db: &dyn Db, file: SourceFile) -> Vec<DocumentSymbol> {
     {
         let (kind, detail) = match directive_name(&directive).as_deref() {
             Some("type") => (DocumentSymbolKind::TypeDefinition, "@type"),
+            Some("opaque") => (DocumentSymbolKind::TypeDefinition, "@opaque"),
             Some("alias") => (DocumentSymbolKind::AliasDefinition, "@alias"),
             _ => continue,
         };
@@ -4303,7 +4532,7 @@ fn directive_name(directive: &SyntaxNode) -> Option<String> {
 }
 
 fn is_type_directive(directive: &SyntaxNode) -> bool {
-    matches!(directive_name(directive).as_deref(), Some("type" | "alias"))
+    directive_name(directive).is_some_and(|name| is_definition_keyword(&name))
 }
 
 /// The type parameters a region's types may name: a `#:` block's or a type definition's
@@ -4633,18 +4862,20 @@ fn annotation_type_hover(db: &dyn Db, file: SourceFile, cursor: &AnnotationTypeC
             // The renderer names the parameters in order, so the body must be rendered through
             // the same renderer for its references to agree with the `<...>` list.
             let mut renderer = TypeRenderer::default();
-            let binders: Vec<(Name<'_>, Constraint)> = definition
+            let binders: Vec<Binder<'_>> = definition
                 .parameters
                 .iter()
-                .map(|parameter| (*parameter, Constraint::Unconstrained))
+                .map(|parameter| Binder::constrained(*parameter, Constraint::Unconstrained))
                 .collect();
-            let parameters = renderer.render_binder_prefix(&binders).unwrap_or_default();
+            let parameters = renderer
+                .render_binder_prefix(db, &binders)
+                .unwrap_or_default();
             let body = renderer.render(db, definition.body);
-            match (definition.inline, definition.alias) {
-                (true, true) => format!("alias {}{parameters} = {body}", cursor.name),
-                (true, false) => format!("type {}{parameters} = {body}", cursor.name),
-                (false, true) => format!("@alias {}{parameters} {{{body}}}", cursor.name),
-                (false, false) => format!("@type {}{parameters} {{{body}}}", cursor.name),
+            let keyword = definition_keyword(&definition);
+            if definition.inline {
+                format!("{keyword} {}{parameters} = {body}", cursor.name)
+            } else {
+                format!("@{keyword} {}{parameters} {{{body}}}", cursor.name)
             }
         }
         None => cursor.name.clone(),
@@ -4751,6 +4982,23 @@ fn type_name_occurrences(db: &dyn Db, files: ProjectFiles, name: &str) -> Vec<Oc
         }
     }
     result
+}
+
+/// Whether a string token ends with the quote it opened with, unescaped. A raw string's body
+/// takes no escapes, and its lexer stops it only at its closer.
+fn is_closed_string(text: &str) -> bool {
+    if let Some(raw) = text.strip_prefix(['r', 'R']) {
+        return raw.len() > 2 && raw.ends_with(['"', '\'']);
+    }
+    let mut characters = text.chars();
+    let (Some(open), Some(close)) = (characters.next(), characters.next_back()) else {
+        return false;
+    };
+    let escapes = characters
+        .rev()
+        .take_while(|&character| character == '\\')
+        .count();
+    open == close && escapes % 2 == 0
 }
 
 fn string_subscript_completion(
@@ -5221,8 +5469,14 @@ fn spelled_names(db: &dyn Db, file: SourceFile) -> SpelledNames {
         {
             spelled.tags.push(name.text().to_string());
         }
-        // The lhs is an expression node, so the last bare NAME child is the spelled name.
-        let Some(name) = node.children().filter(|child| child.kind() == NAME).last() else {
+        // The spelled name is the NAME after the operator; the receiver can be a NAME too, and is
+        // the only one while the name after `$` is still unwritten.
+        let Some(name) = node
+            .children_with_tokens()
+            .skip_while(|element| !matches!(element.kind(), DOLLAR | AT | COLON2 | COLON3))
+            .filter_map(SyntaxElement::into_node)
+            .find(|child| child.kind() == NAME)
+        else {
             continue;
         };
         let name = name.text().to_string();
@@ -6471,9 +6725,11 @@ fn value_shapes<'db>(db: &'db dyn Db, ty: Ty<'db>, shapes: &mut Vec<ValueShape<'
             TyKind::Scalar(atomic) => ValueShape::Atomic(*atomic),
             _ => return false,
         },
-        TyKind::List(_) | TyKind::NamedList(_) | TyKind::Tuple(_) | TyKind::Record(_) => {
-            ValueShape::List
-        }
+        TyKind::List(_)
+        | TyKind::NamedList(_)
+        | TyKind::Tuple(_)
+        | TyKind::Record(_)
+        | TyKind::OpenRecord(_) => ValueShape::List,
         TyKind::NativeTuple(_)
         | TyKind::NativeRecord(_)
         | TyKind::Tag(..)
@@ -6488,7 +6744,11 @@ fn value_shapes<'db>(db: &'db dyn Db, ty: Ty<'db>, shapes: &mut Vec<ValueShape<'
                 .iter()
                 .all(|member| value_shapes(db, *member, shapes));
         }
-        TyKind::Any | TyKind::Unknown | TyKind::Var(_) | TyKind::Rigid(_) => return false,
+        TyKind::Any
+        | TyKind::Unknown
+        | TyKind::Var(_)
+        | TyKind::Rigid(_)
+        | TyKind::Environment(_) => return false,
     };
     shapes.push(shape);
     true
@@ -7057,12 +7317,11 @@ fn inferred_scheme<'db>(
         TypeScheme::monomorphic(*ty)
     };
     scheme.body = without_impossible_vectors(db, scheme.body);
-    is_hintable(
-        db,
-        scheme.body,
-        matches!(scheme.body.kind(db), TyKind::Function(_)),
-    )
-    .then_some(scheme)
+    // Inside a function, a variable the signature binds reads as the signature's `T`; one it
+    // does not bind has no name the reader can find.
+    let variables_allowed = matches!(scheme.body.kind(db), TyKind::Function(_))
+        || (!is_root && !contains_inference_var(db, scheme.body));
+    is_hintable(db, scheme.body, variables_allowed).then_some(scheme)
 }
 
 /// Drops the union members that name an atomic vector of non-atomic elements, such as the
@@ -7163,7 +7422,10 @@ fn is_hintable(db: &dyn Db, ty: Ty<'_>, variables_allowed: bool) -> bool {
         TyKind::Tuple(items) => items
             .iter()
             .all(|&item| is_hintable(db, item, variables_allowed)),
-        TyKind::Record(fields) | TyKind::Frame(_, Some(fields)) => fields
+        TyKind::Record(fields)
+        | TyKind::OpenRecord(fields)
+        | TyKind::Environment(fields)
+        | TyKind::Frame(_, Some(fields)) => fields
             .iter()
             .all(|field| is_hintable(db, field.ty, variables_allowed)),
         TyKind::Frame(_, None) => true,
@@ -7500,26 +7762,10 @@ fn parameter_target<'db>(
         _ => expression_target(db, files, item, naming, argument.callee)?,
     };
     match callee {
-        Target::Global(name) => {
-            // A function a top-level block assigns, as in `local({ helper <- function(...) })`,
-            // is no item of its own, so its item is found from the declaration, as definition
-            // finds it.
-            let definition = declaring_item(db, files, &name).or_else(|| {
-                let target = Target::Global(name.clone());
-                let declaration = occurrences(db, files, &target)
-                    .into_iter()
-                    .find(|occurrence| occurrence.is_declaration)?;
-                Some(position_in_item(db, declaration.file, declaration.range.start())?.item)
-            })?;
-            let binding = item_naming(db, definition)
-                .as_ref()?
-                .bindings
-                .iter()
-                .find(|(_, info)| info.kind == BindingKind::TopLevel && info.name == name)
-                .map(|(binding, _)| *binding)?;
-            parameter_binding(db, definition, binding, argument.name)
+        Target::Global(_) | Target::Slot { .. } => {
+            let (item, function) = bound_function(db, files, &callee, (item, argument.callee))?;
+            function_parameter(db, item, function, argument.name)
         }
-        Target::Slot { item, binding } => parameter_binding(db, item, binding, argument.name),
         library @ (Target::StubGlobal(_) | Target::Package(_)) => Some(library),
         // `object$method(deep = TRUE)`: the parameter of the function the field was given.
         Target::Field(field) if field.precise => field.sites.iter().find_map(|site| {
@@ -7576,28 +7822,77 @@ fn function_parameter<'db>(
     })
 }
 
-/// The parameter named `name` of the function last assigned to `function`.
-fn parameter_binding<'db>(
+/// The function literal a call at `call` (an item and its callee) runs through `target`, with the
+/// item that holds it. A global is the writer the call reaches: the nearest earlier one in the file
+/// for a call at top level, and for a call inside a function the file's last one in a script or the
+/// package's definition. Within the item that holds the call, the write is the last one before it,
+/// or the last one at all when none precedes it (a closure defined above the write). A function a
+/// top-level block assigns, as in `local({ helper <- function(...) })`, is no item of its own, so
+/// its item is found from the declaration, as definition finds it.
+fn bound_function<'db>(
     db: &'db dyn Db,
-    item: Item<'db>,
-    function: BindingId,
-    name: Symbol,
-) -> Option<Target<'db>> {
+    files: ProjectFiles,
+    target: &Target<'db>,
+    call: (Item<'db>, ExprId),
+) -> Option<(Item<'db>, ExprId)> {
+    let (calling, callee) = call;
+    let (item, binding) = match target {
+        Target::Slot { item, binding } => (*item, *binding),
+        Target::Global(name) => {
+            let item = reaching_item(db, files, calling, callee, name).or_else(|| {
+                let declaration = occurrences(db, files, target)
+                    .into_iter()
+                    .find(|occurrence| occurrence.is_declaration)?;
+                Some(position_in_item(db, declaration.file, declaration.range.start())?.item)
+            })?;
+            let binding = item_naming(db, item)
+                .as_ref()?
+                .bindings
+                .iter()
+                .find(|(_, info)| info.kind == BindingKind::TopLevel && &info.name == name)
+                .map(|(binding, _)| *binding)?;
+            (item, binding)
+        }
+        _ => return None,
+    };
     let hir = item_hir(db, item).as_ref()?;
     let naming = item_naming(db, item).as_ref()?;
-    let value = hir
-        .expressions()
-        .filter_map(|expression| match expression.kind {
-            ExpressionKind::Assign { target, value, .. }
-                if naming.resolutions.get(target) == Some(&function)
-                    && matches!(hir.kind(*value), ExpressionKind::Function { .. }) =>
-            {
-                Some(*value)
-            }
-            _ => None,
-        })
-        .last()?;
-    function_parameter(db, item, value, name)
+    // A call inside a closure runs later, so it reaches the last definition the closure may
+    // still see, not the one written before it.
+    let call_start = (item == calling).then(|| {
+        naming
+            .extras()
+            .captured_reads
+            .get(&callee)
+            .copied()
+            .unwrap_or_else(|| hir.range(callee).start())
+    });
+    let (mut before_call, mut last) = (None, None);
+    for expression in hir.expressions() {
+        let ExpressionKind::Assign { target, value, .. } = expression.kind else {
+            continue;
+        };
+        if naming.resolutions.get(target) != Some(&binding)
+            || !matches!(hir.kind(*value), ExpressionKind::Function { .. })
+        {
+            continue;
+        }
+        if call_start.is_some_and(|start| hir.range(*value).end() <= start) {
+            before_call = Some(*value);
+        }
+        last = Some(*value);
+    }
+    Some((item, before_call.or(last)?))
+}
+
+/// Whether `expression` sits inside a function literal of its item, so a read there runs when the
+/// function is called rather than where it is written.
+fn inside_function(hir: &Module, expression: ExprId) -> bool {
+    let range = hir.range(expression);
+    hir.expressions().enumerate().any(|(index, candidate)| {
+        matches!(candidate.kind, ExpressionKind::Function { .. })
+            && hir.range(ExprId::new(index)).contains_range(range)
+    })
 }
 
 /// The named arguments that fill a parameter at the calls of its function, so a rename of the

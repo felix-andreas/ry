@@ -1,7 +1,8 @@
 # xts: extensible time series. An `xts` object is a matrix (or vector) of observations
-# indexed by time; its class vector is c("xts", "zoo"), but nominal types have no
-# subclassing, so functions that accept any zoo object list both classes.
-@type xts
+# indexed by time. Its class vector is c("xts", "zoo"), so its representation is `zoo`: an
+# xts passes wherever a zoo is expected, and functions that keep their input's class list the
+# xts case first.
+@type xts {zoo}
 
 xts : fn([x]: Any, [order.by]: Any, [frequency]: Any, [unique]: logical, [tzone]: character, ...: Any) -> xts
 as.xts : fn(x: Any, ...: Any) -> xts

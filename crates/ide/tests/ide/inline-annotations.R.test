@@ -169,7 +169,7 @@ action: Add inferred type annotations for the whole file
   edit 10..10 -> "<T: numeric>"
   edit 12..12 -> ": T"
   edit 13..13 -> " -> T"
-completion (53): twice, HoltWinters, Num.bitwise_and, Num.bitwise_not, Num.bitwise_or, Num.bitwise_xor, .__C__MethodWithNextWithTrace, RtangleWritedoc
+completion (59): twice, getWindowsHandle, getWindowsHandles, getWindowTitle, getWinProgressBar, setWindowTitle, setWinProgressBar, HoltWinters
 hint @10<T: numeric>
 hint @12: T
 hint @13 -> T
@@ -208,7 +208,7 @@ action: Add inferred type annotation for `f`
   edit 15..15 -> " -> integer"
 action: Add inferred type annotations for the whole file
   edit 15..15 -> " -> integer"
-completion (128+): total, prototype, NLSstAsymptotic, NLSstLfAsymptote, NLSstRtAsymptote, defaultPrototype, makePrototypeFromClassDef, .__C__classPrototypeDef
+completion (128+): total, prototype, NLSstAsymptotic, NLSstLfAsymptote, NLSstRtAsymptote, bringToTop, defaultPrototype, makePrototypeFromClassDef
 hint @15 -> integer
 hint @25: integer
 
@@ -251,3 +251,51 @@ completion (54): count.fields, Num.count_leading_zero_bits, Num.count_one_bits, 
 hint @15 -> double
 hint @25: double
 hint @46: double
+
+#---- inferred_annotation_types_a_lambda_by_the_parameter_it_is_passed_to
+doubled <- function(values: integer[]) vapply(values, function(v) v$0 * 2, numeric(1))
+#++++
+hover 66..67: v: integer
+hover-definition: local 63..64
+definition 63..64
+references: 63..64*, 66..67
+rename: 2 edit(s)
+signature: <T> fn(X: list[T] | T[], FUN: fn(T) -> logical[], FUN.VALUE: logical[] | logical, ...: Any, [USE.NAMES]: logical) -> logical[]
+parameters: X: list[T] | T[] | [FUN: fn(T) -> logical[]] | FUN.VALUE: logical[] | logical | ...: Any | [USE.NAMES]: logical
+signature: <T> fn(X: list[T] | T[], FUN: fn(T) -> integer[] | logical[], FUN.VALUE: integer[] | integer, ...: Any, [USE.NAMES]: logical) -> integer[]
+parameters: X: list[T] | T[] | [FUN: fn(T) -> integer[] | logical[]] | FUN.VALUE: integer[] | integer | ...: Any | [USE.NAMES]: logical
+signature: fn(X: list[integer] | integer[], FUN: fn(integer) -> double | integer | logical, FUN.VALUE: double[] | double, ...: Any, [USE.NAMES]: logical) -> double[] (active)
+parameters: X: list[integer] | integer[] | [FUN: fn(integer) -> double | integer | logical] | FUN.VALUE: double[] | double | ...: Any | [USE.NAMES]: logical
+signature: <T> fn(X: list[T] | T[], FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double[], ...: Any, [USE.NAMES]: logical) -> matrix | double[]
+parameters: X: list[T] | T[] | [FUN: fn(T) -> double[] | integer[] | logical[]] | FUN.VALUE: double[] | ...: Any | [USE.NAMES]: logical
+signature: <T> fn(X: list[T] | T[], FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double, ...: Any, [USE.NAMES]: logical) -> double[]
+parameters: X: list[T] | T[] | [FUN: fn(T) -> double[] | integer[] | logical[]] | FUN.VALUE: double | ...: Any | [USE.NAMES]: logical
+signature: <T> fn(X: list[T] | T[], FUN: fn(T) -> character[], FUN.VALUE: character[] | character, ...: Any, [USE.NAMES]: logical) -> character[]
+parameters: X: list[T] | T[] | [FUN: fn(T) -> character[]] | FUN.VALUE: character[] | character | ...: Any | [USE.NAMES]: logical
+signature: <T, V> fn(X: list[T] | T[], FUN: fn(T) -> V, FUN.VALUE: V[] | V, ...: Any, [USE.NAMES]: logical) -> V[]
+parameters: X: list[T] | T[] | [FUN: fn(T) -> V] | FUN.VALUE: V[] | V | ...: Any | [USE.NAMES]: logical
+signature: <T> fn(X: list[T] | T[], FUN: fn(T) -> matrix, FUN.VALUE: Any, ...: Any, [USE.NAMES]: logical) -> matrix
+parameters: X: list[T] | T[] | [FUN: fn(T) -> matrix] | FUN.VALUE: Any | ...: Any | [USE.NAMES]: logical
+action: Add the inferred signature of the function passed to `vapply`
+  edit 64..64 -> ": integer"
+  edit 65..65 -> " -> double"
+action: Add inferred type annotations for the whole file
+  edit 64..64 -> ": integer"
+  edit 65..65 -> " -> double"
+completion (20): v, values, vapply, validEnc, validObject, validSlotNames, validUTF8, var
+hint @54FUN =
+hint @73FUN.VALUE =
+
+#---- inferred_annotation_skips_a_lambda_that_writes_a_type
+doub$0led <- function(values: integer[]) vapply(values, function(v: integer) v * 2, numeric(1))
+#++++
+hover 0..7: doubled: fn(values: integer[]) -> double[]
+hover-definition: global 0..7
+definition 0..7
+references: 0..7*
+rename: 1 edit(s)
+calls doubled: in  | out
+signature: none
+completion (8): doubled, double, as.double, as.double.difftime, as.double.POSIXlt, is.double, .__C__double, DataFrame.group_by
+hint @54FUN =
+hint @82FUN.VALUE =

@@ -16,6 +16,8 @@ file R/tally.R
 |   }
 |   rows
 | }
+file R/clean.R
+| total <- function(rows) sum(rows)
 file ry.toml
 | [lint]
 | while-true = "warn"
@@ -24,7 +26,7 @@ run ry check
 expect exit 1
 expect stderr "length-test"
 expect stderr "while-true"
-expect stdout "2 problems in 1 file"
+expect stdout "2 problems in 1 of 2 files"
 
 run ry check --fix --unsafe-fixes
 expect exit 0

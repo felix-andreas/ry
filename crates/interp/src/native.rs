@@ -222,8 +222,8 @@ pub unsafe fn call_base_routine(call: &Call<'_>, interface: Interface) -> R<Opti
                         index + 1
                     )));
                 }
-                if !na_ok {
-                    check_finite(value, index + 1)?;
+                if !na_ok && let Some(message) = non_finite(value) {
+                    return Err(error(format!("{message} (arg {})", index + 1)));
                 }
                 copies.push(values::duplicate(value)?);
             }
@@ -248,8 +248,9 @@ pub unsafe fn call_base_routine(call: &Call<'_>, interface: Interface) -> R<Opti
     }
 }
 
-/// `.C` and `.Fortran` refuse missing and non-finite values unless `NAOK = TRUE`.
-unsafe fn check_finite(value: Sexp, position: usize) -> R<()> {
+/// Why `.C` and `.Fortran` refuse `value` unless `NAOK = TRUE`: it holds a missing or
+/// non-finite value.
+pub unsafe fn non_finite(value: Sexp) -> Option<&'static str> {
     let message = match value.kind() {
         SexpType::Logical | SexpType::Integer
             if values::ints(value)
@@ -268,9 +269,9 @@ unsafe fn check_finite(value: Sexp, position: usize) -> R<()> {
         {
             "complex NA/NaN/Inf in foreign function call"
         }
-        _ => return Ok(()),
+        _ => return None,
     };
-    Err(error(format!("{message} (arg {position})")))
+    Some(message)
 }
 
 /// Runs `body` as the foreign call `call`, which tracebacks list while it runs, as GNU R's

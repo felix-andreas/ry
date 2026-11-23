@@ -30,8 +30,8 @@ use {
         lints::LintLevel,
         metadata::{
             NamespaceFile, OS_TYPE, PackageMetadata, attached_union, normalized_imports,
-            parse_description_collate, parse_description_dependencies, parse_description_package,
-            parse_namespace,
+            parse_description_collate, parse_description_dependencies, parse_description_lazy_data,
+            parse_description_package, parse_namespace, qualified_names,
         },
         stubs::{
             StubSources, namespace_exports, namespace_known, shipped_export_manifests,
@@ -136,20 +136,20 @@ pub fn check(
     let groups = project_groups(maybe_files)?;
     let mut n_files = 0;
     let mut n_diagnostics = 0;
+    let mut n_problem_files = 0;
     let mut n_failures = 0;
     let mut n_fixed = 0;
     let mut n_fixable = 0;
     let mut n_unsafe_fixable = 0;
     let mut n_annotated = 0;
+    // A lambda's signature is read from the types the checker records for editor features.
+    let purpose = match annotate {
+        true => Purpose::Rewrites,
+        false => Purpose::Diagnostics,
+    };
     for (root, config, requested) in groups {
-        let mut analysis = analyze_project(
-            &root,
-            &root,
-            config.clone(),
-            &requested,
-            cache,
-            Purpose::Diagnostics,
-        )?;
+        let mut analysis =
+            analyze_project(&root, &root, config.clone(), &requested, cache, purpose)?;
         if fix != FixMode::Off {
             for _ in 0..MAX_FIX_PASSES {
                 let fixed = apply_check_fixes(&analysis, fix == FixMode::All)?;
@@ -157,14 +157,8 @@ pub fn check(
                     break;
                 }
                 n_fixed += fixed;
-                analysis = analyze_project(
-                    &root,
-                    &root,
-                    config.clone(),
-                    &requested,
-                    cache,
-                    Purpose::Diagnostics,
-                )?;
+                analysis =
+                    analyze_project(&root, &root, config.clone(), &requested, cache, purpose)?;
             }
         }
         if annotate {
@@ -191,17 +185,20 @@ pub fn check(
             n_unsafe_fixable += applicable_fixes(&file.diagnostics, true).len();
         }
         for (path, source, problems) in &analysis.stub_problems {
-            n_diagnostics +=
-                render_findings(output, min_severity, path, source, problems, &|_| None);
+            let rendered = render_findings(output, min_severity, path, source, problems, &|_| None);
+            n_diagnostics += rendered;
+            n_problem_files += usize::from(rendered > 0);
         }
         for (text, rendered) in render_project_findings(&analysis, output, min_severity) {
             n_files += 1;
             n_diagnostics += rendered;
+            n_problem_files += usize::from(rendered > 0);
             print_findings(output, &text);
         }
         if let Some((path, source, problems)) = &analysis.namespace {
-            n_diagnostics +=
-                render_findings(output, min_severity, path, source, problems, &|_| None);
+            let rendered = render_findings(output, min_severity, path, source, problems, &|_| None);
+            n_diagnostics += rendered;
+            n_problem_files += usize::from(rendered > 0);
         }
         // Freeing every memo one by one costs close to a second on a large project, and the
         // process is about to exit.
@@ -225,7 +222,7 @@ pub fn check(
             };
             println!("added {n_annotated} inferred {annotations}");
         }
-        report_check_summary(n_files, n_diagnostics);
+        report_check_summary(n_files, n_problem_files, n_diagnostics);
         let unsafe_only = n_unsafe_fixable.saturating_sub(n_fixable);
         match (n_fixable, unsafe_only) {
             (0, 0) => {}
@@ -401,7 +398,7 @@ fn write_inferred_annotations(analysis: &ProjectAnalysis) -> Result<usize, Comma
     {
         let annotations: Vec<InferredAnnotation> = inferred_annotations(&analysis.db, file.file)
             .into_iter()
-            .filter(|annotation| annotation.top_level)
+            .filter(InferredAnnotation::in_whole_file)
             .collect();
         if annotations.is_empty() {
             continue;
@@ -733,6 +730,18 @@ fn analyze_project_with(
                         &project_fold_shares(&db, file),
                     )
                 },
+                check_cache::Attaching {
+                    files: analysed,
+                    attaches_of: |index| {
+                        Some(semantics::metadata::file_attached_namespaces(
+                            &db,
+                            files[index],
+                        ))
+                    },
+                    changes_findings: |namespace: &str| {
+                        semantics::metadata::attaching_changes_findings(&db, namespace)
+                    },
+                },
             )
         }
     };
@@ -895,7 +904,6 @@ fn analyze_project_with(
             .collect();
         in_parallel(&db, workers, &reused, |db, index| {
             semantics::diagnostics::warm_project_folds(db, files[index]);
-            semantics::metadata::file_attached_namespaces(db, files[index]);
         });
     }
     // A package-only run judges NAMESPACE by the package alone, as a fresh one would, so the
@@ -906,11 +914,11 @@ fn analyze_project_with(
         .filter(|(_, reached)| **reached)
         .flat_map(|(tokens, _)| tokens.iter().copied())
         .collect();
-    // Attach calls are part of every file's surface, so a partial run attaches what the
-    // recorded run did.
+    // A kept record carries the set this run's files attach, read from the record for the files
+    // whose text it saw.
     let attached = match previous {
-        Some(previous) if previous.analysed_every_file() => previous.attached(),
-        Some(_) | None => attached_union(&db, project),
+        Some(previous) => previous.attached(),
+        None => attached_union(&db, project),
     };
     if !attached.is_empty() {
         metadata.set_attached(&mut db).to(attached.clone());
@@ -1020,10 +1028,23 @@ fn analyze_project_with(
                         .filter_map(|file| positions.get(file).copied())
                         .collect(),
                 };
+                let unchanged = previous.is_some_and(|previous| {
+                    previous.content(index) == contents.get(index).copied()
+                });
+                let attaches = match previous.and_then(|previous| previous.attaches(index)) {
+                    Some(attaches) if unchanged => Some(attaches.to_vec()),
+                    _ if reached[index] => Some(
+                        semantics::metadata::file_attached_namespaces(&db, files[index])
+                            .into_iter()
+                            .collect(),
+                    ),
+                    _ => None,
+                };
                 FileOutcome {
                     path: &paths[index],
                     content: contents[index],
                     surface: surfaces[index],
+                    attaches,
                     dependencies,
                     tokens: file_tokens[index]
                         .iter()
@@ -1350,6 +1371,10 @@ fn install_environment(
             .as_deref()
             .and_then(parse_description_package),
         namespace_file.native_symbols.clone(),
+        qualified_names(
+            namespace_source.is_some().then_some(&namespace_file),
+            lazy_datasets(root, description_source.as_deref()),
+        ),
     )
     .durability(Durability::HIGH)
     .attached_durability(Durability::LOW)
@@ -1509,10 +1534,11 @@ fn in_parallel<T: Send>(
 }
 
 /// An empty tree exits clean: a monorepo stage with no R in it yet must not fail a pipeline.
-fn report_check_summary(n_files: usize, n_diagnostics: usize) {
-    let files = if n_files == 1 { "file" } else { "files" };
+/// The files with problems include a stub file or NAMESPACE, which are not counted as checked.
+fn report_check_summary(n_files: usize, n_problem_files: usize, n_diagnostics: usize) {
+    let files = |count: usize| if count == 1 { "file" } else { "files" };
     if n_diagnostics == 0 {
-        println!("{n_files} {files} checked, no problems");
+        println!("{n_files} {} checked, no problems", files(n_files));
         return;
     }
     let problems = if n_diagnostics == 1 {
@@ -1520,7 +1546,14 @@ fn report_check_summary(n_files: usize, n_diagnostics: usize) {
     } else {
         "problems"
     };
-    println!("{n_diagnostics} {problems} in {n_files} {files}");
+    if n_problem_files >= n_files {
+        println!(
+            "{n_diagnostics} {problems} in {n_problem_files} {}",
+            files(n_problem_files)
+        );
+    } else {
+        println!("{n_diagnostics} {problems} in {n_problem_files} of {n_files} files");
+    }
 }
 
 /// For a literate document, the R its chunks contain with prose blanked, so
@@ -1644,6 +1677,22 @@ pub(crate) fn scan_data_files(root: &Path) -> BTreeMap<String, sniff::Layout> {
             Some((key, sniff_data_file(path)?))
         })
         .collect()
+}
+
+/// The datasets the project's own `pkg::name` falls back to ([`qualified_names`]): none unless
+/// `DESCRIPTION` sets `LazyData`. A dataset that cannot be read makes the set unknowable, which
+/// silences the check rather than reporting every read.
+pub(crate) fn lazy_datasets(root: &Path, description: Option<&str>) -> Option<Vec<String>> {
+    if !description.is_some_and(parse_description_lazy_data) {
+        return Some(Vec::new());
+    }
+    match rdb::dataset_names(root) {
+        Ok(names) => Some(names),
+        Err(error) => {
+            tracing::debug!("the package's datasets are unknown: {error}");
+            None
+        }
+    }
 }
 
 /// The project-relative key of a data file, or `None` for any other path.
@@ -3255,7 +3304,8 @@ mod tests {
                         "setClass(\"Point{}\", representation(x = \"numeric\"))",
                         random.below(2)
                     ),
-                    1 => "library(utils)".to_owned(),
+                    // A package no stub describes tolerates every bare read.
+                    1 => ["library(utils)", "library(zzqqpkg)"][random.below(2)].to_owned(),
                     2 => format!("CONSTANT_{} <- {}", random.below(2), random.below(3)),
                     _ => format!("f0_0(\"{}\")", random.below(2)),
                 };

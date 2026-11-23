@@ -1,0 +1,34 @@
+# A package author runs one test file through `ry load -f`, and the test replaces an internal
+# function with testthat's `local_mocked_bindings()`. testthat finds the package to mock in
+# through pkgload's registry of packages loaded from source, which counts a package `ry load`
+# loaded, so the test passes as it does under `ry test`.
+
+requires ry-runtime r-package:testthat>=3.2.0
+
+file DESCRIPTION
+| Package: tally
+| Version: 0.1.0
+| Config/testthat/edition: 3
+file NAMESPACE
+| export(total)
+file R/total.R
+| fetch <- function() stop("fetch reached the network")
+| total <- function() sum(fetch())
+file tests/testthat/test-total.R
+| test_that("total sums what fetch returns", {
+|   local_mocked_bindings(fetch = function() c(1, 2, 3))
+|   expect_equal(total(), 6)
+| })
+
+run ry load --runtime ry -f tests/testthat/test-total.R
+expect exit 0
+expect stdout "Test passed"
+
+# The registry's marker stays out of the package's exports.
+run ry load --runtime ry -e "cat('marker exported:', exists('.__DEVTOOLS__', as.environment('package:tally'), inherits = FALSE), '\\n')"
+expect exit 0
+expect stdout "marker exported: FALSE"
+
+run ry test --runtime ry --reporter summary
+expect exit 0
+expect stdout "total: ."

@@ -681,22 +681,22 @@ impl Loader {
 
     /// Derives the facts of `files` across cores.
     fn analyze(&mut self, position: usize, files: &[SourceFile]) {
-        self.warm(files, |db, file| {
+        self.derive_in_parallel(files, |db, file| {
             file_items(db, file);
             file_typing_mode(db, file);
         });
         if self.prepare_purity(position) {
             // Classifying a constant resolves its callees through the project-wide definition
             // maps, which join per-file facts that are cheaper to derive across cores first.
-            self.warm(files, |db, file| {
+            self.derive_in_parallel(files, |db, file| {
                 file_definitions(db, file);
                 file_conditional_writers(db, file);
             });
             let sources = self.packages[position].sources;
-            self.warm(files, |db, file| classify_top_level(db, sources, file));
+            self.derive_in_parallel(files, |db, file| classify_top_level(db, sources, file));
         }
         let sources = self.packages[position].sources;
-        self.warm(files, |db, file| {
+        self.derive_in_parallel(files, |db, file| {
             file_binds(db, sources, file);
         });
     }
@@ -943,6 +943,8 @@ impl Loader {
                     BTreeSet::new(),
                     package,
                     native_symbols,
+                    // The loader reports no findings on qualified reads, so it leaves its own exports unknown.
+                    None,
                 )
                 .durability(Durability::HIGH)
                 .attached_durability(Durability::LOW)
@@ -968,7 +970,11 @@ impl Loader {
 
     /// Derives the changed files' per-item facts across cores, so `package_index` only joins
     /// memoized results. Salsa storage handles share memos, so the workers fill one cache.
-    fn warm(&self, files: &[SourceFile], derive: impl Fn(&dyn Db, SourceFile) + Sync) {
+    fn derive_in_parallel(
+        &self,
+        files: &[SourceFile],
+        derive: impl Fn(&dyn Db, SourceFile) + Sync,
+    ) {
         if files.is_empty() {
             return;
         }

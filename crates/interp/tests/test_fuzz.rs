@@ -26,13 +26,13 @@ use {
     interp::{
         deparse, lower,
         testing::{
-            check_argument_reference_agreement, check_bytecode_agreement, check_code_image_file,
-            check_code_image_load, check_code_image_round_trip, check_element_access_agreement,
-            check_environment_agreement, check_frame_stack, check_fused_agreement,
-            check_image_bodies_round_trip, check_lowering_input, check_parse_verdict,
-            check_quickening_agreement, check_replacement_agreement, check_resume_at_every_pc,
-            check_s3_lookup_agreement, check_shadowing_agreement, check_unserialize_input,
-            with_interpreter,
+            check_argument_reference_agreement, check_bytecode_agreement, check_bytecode_program,
+            check_code_image_file, check_code_image_load, check_code_image_round_trip,
+            check_element_access_agreement, check_environment_agreement, check_frame_stack,
+            check_fused_agreement, check_image_bodies_round_trip, check_lowering_input,
+            check_parse_verdict, check_quickening_agreement, check_replacement_agreement,
+            check_resume_at_every_pc, check_s3_lookup_agreement, check_shadowing_agreement,
+            check_unserialize_input, with_interpreter,
         },
         values,
     },
@@ -396,6 +396,19 @@ fn deparse_round_trips_lowered_seeds() {
 #[test]
 fn fuzz_bytecode_agrees_with_the_ast_evaluator() {
     for_each_seed(300, |seed| check_bytecode_agreement(&mut SplitMix64(seed)));
+}
+
+/// Programs the bytecode fuzzer found disagreeing or panicking, with their `a` and `b`.
+const BYTECODE_REGRESSIONS: &[(&str, &str, &str)] = &[
+    // A negative integer over a zero integer divisor overflowed the floored quotient.
+    ("c((-a) %/% (b - b), NA_integer_ %/% (b - b))", "3L", "3L"),
+];
+
+#[test]
+fn bytecode_regressions_agree_with_the_ast_evaluator() {
+    for &(body, a, b) in BYTECODE_REGRESSIONS {
+        check_bytecode_program(body, a, b);
+    }
 }
 
 #[test]

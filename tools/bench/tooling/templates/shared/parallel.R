@@ -20,7 +20,7 @@ mapped_sums_@ID@ <- function(x: integer[], chunks: integer = @CHUNKS@L) -> doubl
   purrr::map_dbl(groups, sum) |> unname()
 }
 
-with_workers_@ID@ <- function<T>(expr: T) -> T {
+with_workers_@ID@ <- function<T: numeric>(expr: T) -> T {
   doParallel::registerDoParallel(cores = 1L)
   on.exit(foreach::registerDoSEQ(), add = TRUE)
   force(expr)

@@ -34,7 +34,7 @@ total <- function() {
   sum
 }
 #++++
-total: Unknown
+total: fn() -> double
 39..45 error[type-mismatch] expected `double`, found `character`
 
 #---- binding_with_a_function_type
@@ -170,12 +170,29 @@ first(list(1L, 2L))
 first: <T> fn(items: list[T]) -> T
 integer
 
+#---- a_generic_lambda_argument_takes_fresh_variables
+apply_to <- function(step: fn(double) -> double, x: double) -> double step(x)
+apply_to(function<T>(v: T) -> T v, 2)
+lapply(list("a", "b"), function<T>(v: T) -> T v)
+#++++
+apply_to: fn(step: fn(double) -> double, x: double) -> double
+double
+list[character]
+
+#---- a_generic_lambda_still_checks_its_body
+apply_to <- function(step: fn(double) -> double, x: double) -> double step(x)
+apply_to(function<T: numeric>(v: T) -> T paste(v), 2)
+#++++
+apply_to: fn(step: fn(double) -> double, x: double) -> double
+double
+119..127 error[type-mismatch] expected `T`, found `character`
+
 #---- constrained_type_parameters
 twice <- function<T: numeric>(x: T) -> T x + x
 twice("a")
 #++++
 twice: <T: numeric> fn(x: T) -> T
-T
+Unknown
 53..56 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- lambda_spelling
@@ -313,7 +330,7 @@ outer: fn() -> integer
 #---- unknown_type_name
 count: Integr <- 1L
 #++++
-count: Integr
+count: integer
 7..13 error[annotation] I do not know the type `Integr`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 
 #---- generic_without_arguments
@@ -353,7 +370,7 @@ g <- function<T: numeric>(x: T) -> T x
 g("a")
 #++++
 g: <T: numeric> fn(x: T) -> T
-T
+Unknown
 35..45 warning[annotation-mismatch] the inline annotation gives this type parameter `numeric`, but the `#:` comment gives it no constraint. ry uses the inline one; make the two agree, or delete one
   = 4..5 the `#:` comment's type parameter is here
 62..65 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
@@ -362,4 +379,56 @@ T
 #: <T> fn(x: T) -> T
 h <- function<U>(x: U) -> U x
 #++++
-h: <T> fn(x: T) -> T
+h: <U> fn(x: U) -> U
+
+#---- an_inline_binder_takes_a_union_bound
+normalize <- function<T, U: list[T] | T[]>(path: U) -> U {
+  vapply(path, nchar, 1L)
+  path
+}
+one <- normalize("a")
+#++++
+normalize: <T, U: list[T] | T[]> fn(path: U) -> U
+one: character
+
+#---- a_generic_literal_bound_inside_a_function_generalizes
+f <- function() {
+  id <- function<T>(v: T) -> T v
+  a <- id(1)
+  b <- id("a")
+  #: character
+  c1 <- a
+  list(a, b, c1)
+}
+#++++
+f: fn() -> list{double, character, character}
+102..103 error[type-mismatch] expected `character`, found `double`
+
+#---- a_type_bound_of_numbers_takes_arithmetic
+plus <- function<N: integer | double>(x: N) -> N x + x
+whole <- plus(1L)
+#++++
+plus: <N: integer | double> fn(x: N) -> N
+whole: integer
+
+#---- a_broken_constraint_names_the_constraint
+middle <- function<N: scalar numeric>(x: N) -> N x
+total <- function<N: number>(x: N) -> N x
+list(middle("a"), total("a"))
+#++++
+middle: <N: scalar numeric> fn(x: N) -> N
+total: <N: number> fn(x: N) -> N
+list{Unknown, Unknown}
+105..108 error[type-mismatch] expected a scalar numeric value (`integer` or `double`), found `character`
+117..120 error[type-mismatch] expected a ry number (`I64` or `F64`), found `character`
+
+#---- a_message_names_the_declared_type_parameter
+h <- function<N: integer | double>(x: N) -> N {
+  #: character
+  y <- x
+  y
+}
+#++++
+h: <N: integer | double> fn(x: N) -> N
+70..71 error[type-mismatch] expected `character`, found `N`
+74..75 error[type-mismatch] expected `N`, found `character`

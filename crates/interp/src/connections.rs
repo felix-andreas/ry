@@ -1760,7 +1760,7 @@ unsafe fn do_read_dcf(call: &Call<'_>) -> R<Sexp> {
     let fields = call.arg(1);
     let keep_white = values::strings(call.arg(2));
     let text = with_input(call.arg(0), |bytes, position| {
-        let text = String::from_utf8_lossy(&bytes[*position..]).into_owned();
+        let text = values::escape_invalid_bytes(&bytes[*position..]).into_owned();
         *position = bytes.len();
         text
     })?;
@@ -1841,7 +1841,19 @@ unsafe fn do_read_dcf(call: &Call<'_>) -> R<Sexp> {
             );
         }
     }
-    let matrix = values::string_vector_na(&cells)?;
+    // GNU R's `mkChar` leaves every value in the native encoding, whatever its bytes, and
+    // desc compares these values against `read.dcf(all = TRUE)`'s, which are native too.
+    let matrix = values::alloc(SexpType::String, cells.len())?;
+    for (index, cell) in cells.iter().enumerate() {
+        let charsxp = match cell {
+            Some(text) => match values::unescape_invalid_bytes(text) {
+                Some(bytes) => values::mkchar_bytes(&bytes, Encoding::Native)?,
+                None => values::mkchar_bytes(text.as_bytes(), Encoding::Native)?,
+            },
+            None => values::na_string(),
+        };
+        crate::heap().set_element(matrix, index, charsxp);
+    }
     let dim = values::integer_vector(&[records.len() as i32, columns.len() as i32])?;
     values::set_attr(matrix, symbols().dim, dim)?;
     let dimnames = values::alloc(SexpType::List, 2)?;
@@ -2590,7 +2602,11 @@ unsafe fn cat_element(vector: Sexp, index: usize, settings: crate::format::Setti
             if !is_na_real(value.r) && !is_na_real(value.i) {
                 crate::format::warn_decimal_width(2)?;
             }
-            crate::format::localize_decimal(crate::format::format_complex_alone(value, 7))
+            crate::format::localize_decimal(crate::format::format_complex_alone(
+                value,
+                7,
+                crate::format::Settings::current_scipen(),
+            ))
         }
         _ => crate::coerce::element_as_charsxp(vector, index)
             .map(|charsxp| {

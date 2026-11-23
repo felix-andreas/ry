@@ -66,6 +66,8 @@ action: Add inferred type annotation for `result`
   edit 89..89 -> ": list[integer]"
 action: Add inferred type annotations for the whole file
   edit 89..89 -> ": list[integer]"
+  edit 127..127 -> ": integer"
+  edit 128..128 -> " -> integer"
 completion (128+): result, lapply, list, function, break, else, FALSE, for
 hint @89: list[integer]
 hint @114FUN =
@@ -74,7 +76,7 @@ hint @114FUN =
 pick <- function(x, y) x
 value <- pick($0)
 #++++
-hover 34..40: T
+hover 34..40: Unknown
 definition: none
 references: none
 rename: none
@@ -98,7 +100,7 @@ references: none
 rename: none
 signature: fn(count, wait = TRUE)
 parameters: count | [wait = TRUE]
-completion (40): wait = , while, warnErrList, warning, warningCondition, warnings, warpbreaks, weekdays
+completion (58): wait = , while, warnErrList, warning, warningCondition, warnings, warpbreaks, weekdays
 
 #---- r6_method_on_an_instance
 Pool <- R6::R6Class("Pool", public = list(
@@ -128,5 +130,45 @@ references: none
 rename: none
 signature: fn(x: double, [by]: double) -> double
 parameters: x: double | [[by]: double]
-completion (74): by = , by, break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot
+completion (75): by = , by, break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot
 hint @69by =
+
+#---- a_block_function_called_in_the_same_block
+encapsulate <- function(expr) eval(substitute(expr), new.env())
+encapsulate({
+  helper <- function(objs, target_env) objs
+  user <- function(x) helper(x$0, NULL)
+})
+#++++
+hover 64..162: Any
+definition 141..142
+references: 141..142*, 151..152
+rename: 2 edit(s)
+signature: fn(objs, target_env)
+parameters: [objs] | target_env
+action: Add inferred type annotations for the whole file
+  edit 0..0 -> "#: <T> fn([expr]: T) -> Any\n"
+completion (29): x, x11, xedit, xemacs, xfig, xinch, xor, xpdrows.data.frame
+hint @11: <T> fn([expr]: T) -> Any
+hint @35expr =
+hint @53envir =
+
+#---- a_closure_call_sees_the_callee_bound_when_it_runs
+g <- function() {
+  h <- function(a) a
+  k <- function() h(b$0 = 1)
+  h <- function(b) b
+  k
+}
+#++++
+hover 59..60: b
+definition 82..83
+references: 59..60, 82..83*, 85..86
+rename: 3 edit(s)
+signature: fn(b)
+parameters: [b]
+completion (75): b, break, backsolve, balanceMethodsList, balancePOSIXlt, bandwidth.kernel, barplot, barplot.default
+hint @35: T
+hint @36 -> T
+hint @83: T
+hint @84 -> T

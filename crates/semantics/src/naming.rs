@@ -7,19 +7,20 @@ use {
         dense::DenseId,
         hir::{
             Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind,
-            MatchArm, Module, NameSite, PatId, PatternKind, Symbol, UnaryOperator,
+            MatchArm, Module, NameId, NameSite, PatId, PatternKind, Symbol, UnaryOperator,
             destructure_leaves,
         },
         sorted::{SortedMap, SortedSet},
         stubs::{SymbolKey, SymbolMap},
     },
     rustc_hash::{FxHashMap, FxHashSet},
+    smallvec::SmallVec,
     std::{
         collections::{BTreeMap, BTreeSet, btree_map::Entry},
         mem,
         sync::LazyLock,
     },
-    syntax::{SyntaxKind, TextRange, lex},
+    syntax::{SyntaxKind, TextRange, TextSize, lex},
     thin_vec::ThinVec,
 };
 
@@ -65,6 +66,9 @@ pub struct NamespaceRead {
     pub internal: bool,
     pub package: Symbol,
     pub name: Option<Symbol>,
+    /// The whole expression of `try()` or an error-catching `tryCatch()`, or its callee, so
+    /// the read probes whether the package exports the name.
+    pub probed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -102,6 +106,9 @@ pub struct NamingExtras {
     /// The variables of top-level `for` loops. They stay bound in the global environment like
     /// a top-level assignment, so the item exports their type.
     pub loop_bound_slots: SortedSet<BindingId>,
+    /// Each `for` loop's variable slot. A nested loop over an enclosing loop's variable writes
+    /// the enclosing slot, so the slot's own range does not identify the loop.
+    pub for_variables: SortedMap<ExprId, BindingId>,
     /// data.table `[`s: indexes evaluate in the data's frame, and the bracket types `Unknown`.
     pub masked_subsets: SortedSet<ExprId>,
     /// `f[, y := v]` statements whose subject the current scope owns: ry models the update as
@@ -127,6 +134,14 @@ pub struct NamingExtras {
     /// editor treats it as the variable it copies, since renaming one without the other breaks
     /// the code.
     pub replacement_copies: SortedMap<BindingId, CopySource>,
+    /// Reads of a function's own slot that some path reaches unassigned, each with the
+    /// enclosing function's slot R reads on that path instead.
+    pub enclosing_fallbacks: SortedMap<ExprId, BindingId>,
+    /// Reads that observe a slot of an enclosing frame, or of their own frame from code that
+    /// runs later (a closure, a default), each with the last position whose write the read
+    /// may see: a closure passed to `lapply` runs before the call ends, and one bound to a
+    /// name runs by its last call, unless it escapes.
+    pub captured_reads: SortedMap<ExprId, TextSize>,
 }
 
 static NO_EXTRAS: LazyLock<NamingExtras> = LazyLock::new(NamingExtras::default);
@@ -171,6 +186,7 @@ struct NamingDraft {
     used_top_level_names: BTreeSet<Symbol>,
     captured_slots: BTreeSet<BindingId>,
     loop_bound_slots: BTreeSet<BindingId>,
+    for_variables: BTreeMap<ExprId, BindingId>,
     masked_subsets: BTreeSet<ExprId>,
     column_updates: BTreeMap<ExprId, BindingId>,
     run_time_writes: BTreeMap<ExprId, BindingId>,
@@ -181,6 +197,8 @@ struct NamingDraft {
     callee_fallbacks: BTreeMap<ExprId, CalleeFallback>,
     native_routine_reads: BTreeSet<ExprId>,
     replacement_copies: BTreeMap<BindingId, CopySource>,
+    enclosing_fallbacks: BTreeMap<ExprId, BindingId>,
+    captured_reads: BTreeMap<ExprId, TextSize>,
 }
 
 impl NamingDraft {
@@ -192,6 +210,7 @@ impl NamingDraft {
             unused_parameters: ThinVec::from(self.unused_parameters),
             captured_slots: self.captured_slots.into(),
             loop_bound_slots: self.loop_bound_slots.into(),
+            for_variables: self.for_variables.into(),
             masked_subsets: self.masked_subsets.into(),
             column_updates: self.column_updates.into(),
             run_time_writes: self.run_time_writes.into(),
@@ -200,6 +219,8 @@ impl NamingDraft {
             or_pattern_mismatches: ThinVec::from(self.or_pattern_mismatches),
             native_routine_reads: self.native_routine_reads.into(),
             replacement_copies: self.replacement_copies.into(),
+            enclosing_fallbacks: self.enclosing_fallbacks.into(),
+            captured_reads: self.captured_reads.into(),
         };
         ItemNaming {
             bindings: self.bindings.into(),
@@ -251,17 +272,23 @@ pub fn resolve_item(
             id: 0,
             kind: ScopeKind::TopLevel,
             slots: FxHashMap::default(),
+            horizon: Horizon::Unbounded,
         }],
         bindings_by_site: FxHashMap::default(),
         scope_ids: FxHashMap::default(),
         flow: FlowState::new(),
         loop_exits: Vec::new(),
+        loop_nexts: Vec::new(),
+        active_loop_variables: Vec::new(),
         writes: Vec::new(),
         write_by_expression: FxHashMap::default(),
         read_parameter_slots: BTreeSet::new(),
         emit: true,
         quiet_depth: 0,
+        probes: Vec::new(),
         deferred_depth: 0,
+        exit_frame: None,
+        example_scope: None,
         in_defaults: false,
         quoted_depth: 0,
         bracket_depth: 0,
@@ -269,12 +296,30 @@ pub fn resolve_item(
         escaped_frames: FxHashSet::default(),
         explicit_frame_arguments: FxHashSet::default(),
         quoting_aliases: FxHashSet::default(),
+        literal_horizons: FxHashMap::default(),
+        loop_ends: Vec::new(),
+        callee_reads: FxHashMap::default(),
+        closure_runs: FxHashMap::default(),
+        captured_horizons: Vec::new(),
         naming: NamingDraft::default(),
     };
     if let Some(root) = module.root {
         context.resolve(root);
     }
     context.collect_unused();
+    let unbounded = TextSize::from(u32::MAX);
+    for (read, horizon) in mem::take(&mut context.captured_horizons) {
+        let end = match horizon {
+            Horizon::Until(end) => end,
+            Horizon::CallsOf(slot, defined) => match context.closure_runs.get(&slot) {
+                Some(Some(latest)) => defined.max(*latest),
+                Some(None) => unbounded,
+                None => defined,
+            },
+            Horizon::Unbounded => unbounded,
+        };
+        context.naming.captured_reads.insert(read, end);
+    }
     context.naming.freeze()
 }
 
@@ -298,6 +343,20 @@ struct Scope {
     id: u32,
     kind: ScopeKind,
     slots: FxHashMap<Symbol, BindingId>,
+    /// For a function scope, how long the closure may run after its definition.
+    horizon: Horizon,
+}
+
+/// The last point at which a function literal may still run, which bounds the writes its
+/// reads of an enclosing frame can observe.
+#[derive(Debug, Clone, Copy)]
+enum Horizon {
+    /// The closure runs inside a call that ends here, as `lapply(xs, function(x) ...)` does.
+    Until(TextSize),
+    /// The closure is bound to this slot at a definition ending at the position, and runs by
+    /// the last call through the slot, unless another read lets it escape.
+    CallsOf(BindingId, TextSize),
+    Unbounded,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -310,6 +369,17 @@ enum Reach {
 }
 
 type FlowState = BTreeMap<BindingId, BTreeSet<Reach>>;
+
+/// What a read finds on a path that reaches it before any write of its slot.
+#[derive(Clone, Copy)]
+enum Unassigned {
+    /// Every path writes the slot first.
+    Never,
+    /// Nothing in the item binds the name outside the slot's frame.
+    Undefined,
+    /// The enclosing function's slot of the same name.
+    Enclosing(BindingId),
+}
 
 struct AssignmentWrite {
     name: Symbol,
@@ -342,10 +412,24 @@ struct Context<'a> {
     /// Flow state at each `break` of the innermost loop. A loop that cannot be skipped exits
     /// only through these; joining the loop head would keep first-iteration paths alive.
     loop_exits: Vec<FlowState>,
+    /// Flow state at each `next` of the innermost loop, which reaches the next iteration.
+    loop_nexts: Vec<FlowState>,
+    /// The variables of the `for` loops being walked, innermost last.
+    active_loop_variables: Vec<BindingId>,
     quiet_depth: u32,
+    /// The `pkg::name` reads that are the whole expression a `try()` or an error-catching
+    /// `tryCatch()` evaluates, or that expression's callee.
+    probes: Vec<ExprId>,
     /// Inside an expression R evaluates later (`on.exit`): its reads see the final value, so
     /// they keep every write of the name alive.
     deferred_depth: u32,
+    /// The function depth whose `on.exit` expression is being resolved. Only that frame's
+    /// reads see its later writes; a closure written inside the handler reads its own frame
+    /// in order.
+    exit_frame: Option<usize>,
+    /// The depth of the scope a top-level `if (FALSE)` body resolves in. `<<-` inside it
+    /// stops there, since the example never runs to reach a package name.
+    example_scope: Option<usize>,
     /// Resolving a function's parameter defaults. R evaluates a default lazily in the
     /// function's own frame, so a name the body assigns is visible to it.
     in_defaults: bool,
@@ -367,6 +451,18 @@ struct Context<'a> {
     explicit_frame_arguments: FxHashSet<ExprId>,
     /// Slots bound to a quoting function itself (`e <- expression`), whose calls quote too.
     quoting_aliases: FxHashSet<BindingId>,
+    /// The horizons of function literals whose context bounds when they run, set before the
+    /// literal is walked.
+    literal_horizons: FxHashMap<ExprId, Horizon>,
+    /// The function depth and end of each loop being walked, outermost first: a call inside a
+    /// loop runs again after every write in it.
+    loop_ends: Vec<(usize, TextSize)>,
+    /// Called names, each with the end of its call.
+    callee_reads: FxHashMap<ExprId, TextSize>,
+    /// Slots bound to a function literal, each with the latest point a call through it runs
+    /// to, or `None` once a read other than a call lets the closure escape.
+    closure_runs: FxHashMap<BindingId, Option<TextSize>>,
+    captured_horizons: Vec<(ExprId, Horizon)>,
     naming: NamingDraft,
 }
 
@@ -395,6 +491,16 @@ impl Context<'_> {
             .iter()
             .rposition(|scope| scope.kind == ScopeKind::Function)
             .unwrap_or(0)
+    }
+
+    /// Where a call ending at `end` stops running in the current frame: a loop around it runs
+    /// it again, so the end of the outermost such loop.
+    fn run_horizon(&self, end: TextSize) -> TextSize {
+        let depth = self.current_function_depth();
+        self.loop_ends
+            .iter()
+            .find(|(loop_depth, _)| *loop_depth == depth)
+            .map_or(end, |&(_, loop_end)| loop_end.max(end))
     }
 
     fn record_write(&mut self, slot: BindingId, reach: Reach) {
@@ -456,8 +562,9 @@ impl Context<'_> {
     fn resolve(&mut self, id: ExprId) {
         let module = self.module;
         match module.kind(id) {
-            ExpressionKind::Missing | ExpressionKind::Next => {}
+            ExpressionKind::Missing => {}
             ExpressionKind::Break => self.loop_exits.push(self.flow.clone()),
+            ExpressionKind::Next => self.loop_nexts.push(self.flow.clone()),
             // glue and cli evaluate `{...}` inside a string in the caller's frame, and so does
             // any wrapper that forwards `parent.frame()`, so a name there keeps its binding
             // alive. It is never an unresolved read, because the string may be plain text.
@@ -478,6 +585,22 @@ impl Context<'_> {
                 if *spelling == AssignSpelling::Destructure
                     || matches!(module.kind(*target), ExpressionKind::NameRef(_))
                 {
+                    if !matches!(
+                        *spelling,
+                        AssignSpelling::Super | AssignSpelling::Destructure
+                    ) && matches!(module.kind(*value), ExpressionKind::Function { .. })
+                        && matches!(
+                            self.scopes.last().map(|scope| scope.kind),
+                            Some(ScopeKind::Function | ScopeKind::Local)
+                        )
+                        && let ExpressionKind::NameRef(name) = module.kind(*target)
+                        && let Some(&slot) = self.current_scope().slots.get(name)
+                    {
+                        let defined = self.run_horizon(module.range(id).end());
+                        self.literal_horizons
+                            .insert(*value, Horizon::CallsOf(slot, defined));
+                        self.closure_runs.entry(slot).or_insert(Some(defined));
+                    }
                     self.resolve(*value);
                     self.resolve_assignment_target(id, *target, *spelling);
                     if let Some(&slot) = self.naming.resolutions.get(target) {
@@ -512,6 +635,10 @@ impl Context<'_> {
                     // A local `%op%` needs its slot marked too, or it reads as a dead store.
                     self.mark_slot_read(*name);
                 }
+                if let Some(foreach) = foreach_loop(module, id) {
+                    self.resolve_foreach(id, &foreach);
+                    return;
+                }
                 match operator {
                     BinaryOperator::Help => {}
                     BinaryOperator::Tilde => self.resolve_formula(&[*lhs, *rhs]),
@@ -534,6 +661,21 @@ impl Context<'_> {
                     for (_, method) in definition.methods {
                         self.method_classes.insert(method, definition.key);
                     }
+                }
+                let call_end = module.range(id).end();
+                let mut inline = *callee;
+                while let ExpressionKind::Paren(inner) = module.kind(inline) {
+                    inline = *inner;
+                }
+                match module.kind(inline) {
+                    ExpressionKind::NameRef(_) => {
+                        self.callee_reads.insert(inline, call_end);
+                    }
+                    ExpressionKind::Function { .. } => {
+                        let until = self.run_horizon(call_end);
+                        self.literal_horizons.insert(inline, Horizon::Until(until));
+                    }
+                    _ => {}
                 }
                 self.resolve(*callee);
                 let callee_symbol = match module.kind(*callee) {
@@ -586,6 +728,58 @@ impl Context<'_> {
                     } => Some(name.as_str()),
                     _ => builtin_callee,
                 };
+                // `try(pkg::name)` asks whether the running R has the name, so that one read
+                // is a probe; a read deeper in the expression, or under a `tryCatch()` that
+                // catches no error, is ordinary code.
+                let from_base = match module.kind(*callee) {
+                    ExpressionKind::Namespace { package, .. } => {
+                        package.is_some_and(|package| package == "base")
+                    }
+                    _ => true,
+                };
+                let catches_errors = match accessor {
+                    Some("try") => true,
+                    Some("tryCatch") => module[arguments].iter().any(|argument| {
+                        matches!(
+                            module.argument_name(argument).as_deref(),
+                            Some("error" | "condition")
+                        )
+                    }),
+                    _ => false,
+                };
+                if from_base
+                    && catches_errors
+                    && let Some(mut probed) = module[arguments]
+                        .iter()
+                        .find(|argument| module.argument_name(argument).as_deref() == Some("expr"))
+                        .or_else(|| {
+                            module[arguments]
+                                .iter()
+                                .find(|argument| argument.name.is_none())
+                        })
+                        .and_then(|argument| argument.value)
+                {
+                    while let ExpressionKind::Paren(inner)
+                    | ExpressionKind::Call { callee: inner, .. } = module.kind(probed)
+                    {
+                        probed = *inner;
+                    }
+                    if matches!(module.kind(probed), ExpressionKind::Namespace { .. }) {
+                        self.probes.push(probed);
+                    }
+                }
+                if accessor.is_some_and(|name| EAGER_CALLERS.contains(&name)) {
+                    let until = self.run_horizon(call_end);
+                    for value in module[arguments]
+                        .iter()
+                        .filter_map(|argument| argument.value)
+                        .filter(|&value| {
+                            matches!(module.kind(value), ExpressionKind::Function { .. })
+                        })
+                    {
+                        self.literal_horizons.insert(value, Horizon::Until(until));
+                    }
+                }
                 if accessor.is_some_and(|name| EXPLICIT_NAME_ACCESSORS.contains(&name)) {
                     for value in module[arguments]
                         .iter()
@@ -741,7 +935,9 @@ impl Context<'_> {
                     // value and keep every write of those names alive.
                     Some("on.exit") => {
                         self.deferred_depth += 1;
+                        let enclosing_exit = self.exit_frame.replace(self.current_function_depth());
                         self.resolve_arguments(&module[arguments]);
+                        self.exit_frame = enclosing_exit;
                         self.deferred_depth -= 1;
                         return;
                     }
@@ -751,11 +947,13 @@ impl Context<'_> {
                         self.resolve_switch(&module[arguments]);
                         return;
                     }
-                    // data.table's `setnames(f, ...)` and `setcolorder(f, ...)` change the
-                    // frame's columns by reference, which ry models like `:=`: a new write of
-                    // the subject's slot. `write_tokens` screens items for these names, so a
-                    // new by-reference writer belongs there too.
-                    Some("setnames" | "setcolorder") if !arguments.is_empty() => {
+                    // data.table's `setnames(f, ...)`, `setcolorder(f, ...)`, `set`, `setattr`,
+                    // `setDT` and `setDF` change the frame by reference, which ry models like
+                    // `:=`: a new write of the subject's slot. `write_tokens` screens items for
+                    // these names, so a new by-reference writer belongs there too.
+                    Some("setnames" | "setcolorder" | "set" | "setattr" | "setDT" | "setDF")
+                        if !arguments.is_empty() =>
+                    {
                         self.resolve_arguments(&module[arguments]);
                         if let Some(subject) = module[arguments][0]
                             .value
@@ -805,6 +1003,7 @@ impl Context<'_> {
                             id: scope_id,
                             kind: ScopeKind::Mask,
                             slots: FxHashMap::default(),
+                            horizon: Horizon::Unbounded,
                         });
                         self.premint_frame_assignments(value);
                         self.quiet_depth += 1;
@@ -823,7 +1022,16 @@ impl Context<'_> {
                 if !*double {
                     self.bracket_depth += 1;
                 }
-                if !*double && data_table_signature(module, &module[arguments]) {
+                // A query that gives a table dispatches `[` on its result to the same method, so
+                // a chain's later links evaluate in the table's frame as the first does.
+                let queries_a_query = self.naming.masked_subsets.contains(target)
+                    && matches!(
+                        module.kind(*target),
+                        ExpressionKind::Index { arguments, .. }
+                            if query_gives_table(module, &module[*arguments])
+                    );
+                if !*double && (queries_a_query || data_table_signature(module, &module[arguments]))
+                {
                     self.naming.masked_subsets.insert(id);
                     self.quiet_depth += 1;
                     self.resolve_arguments(&module[arguments]);
@@ -855,12 +1063,14 @@ impl Context<'_> {
                     && self.quiet_depth == 0
                     && let Some(package) = package
                 {
+                    let probed = self.probes.contains(&id);
                     self.naming.namespace_reads.insert(
                         id,
                         NamespaceRead {
                             internal: *internal,
                             package: *package,
                             name: *name,
+                            probed,
                         },
                     );
                 }
@@ -875,6 +1085,11 @@ impl Context<'_> {
                     id: scope_id,
                     kind: ScopeKind::Function,
                     slots: FxHashMap::default(),
+                    horizon: self
+                        .literal_horizons
+                        .get(&id)
+                        .copied()
+                        .unwrap_or(Horizon::Unbounded),
                 });
                 let saved_flow = mem::take(&mut self.flow);
                 for parameter in &module[parameters] {
@@ -907,7 +1122,31 @@ impl Context<'_> {
             } => {
                 self.resolve(*condition);
                 let entry = self.flow.clone();
-                self.resolve(*then_branch);
+                // A top-level `if (FALSE) { ... }` holds example code R never runs, so its
+                // writes bind no global: as package names they would join other items' cycles.
+                let dead = self.current_scope().kind == ScopeKind::TopLevel
+                    && matches!(
+                        module.kind(*condition),
+                        ExpressionKind::Literal(LiteralKind::Logical(false))
+                    );
+                if dead {
+                    let scope_id = self.stable_scope_id(*then_branch);
+                    // Its stores are scratch for stepping through by hand, so none is unused.
+                    self.escaped_frames.insert(scope_id);
+                    let enclosing_example = self.example_scope.replace(self.scopes.len());
+                    self.scopes.push(Scope {
+                        id: scope_id,
+                        kind: ScopeKind::Local,
+                        slots: FxHashMap::default(),
+                        horizon: Horizon::Unbounded,
+                    });
+                    self.premint_frame_assignments(*then_branch);
+                    self.resolve(*then_branch);
+                    self.scopes.pop();
+                    self.example_scope = enclosing_example;
+                } else {
+                    self.resolve(*then_branch);
+                }
                 let after_then = mem::replace(&mut self.flow, entry);
                 if let Some(else_branch) = else_branch {
                     self.resolve(*else_branch);
@@ -927,22 +1166,38 @@ impl Context<'_> {
                     } = self.module[variable];
                     // A top-level loop leaves its variable bound in the global environment, so
                     // later statements read the type it exports.
-                    let slot = self.mint_binding(variable, range, BindingKind::ForVariable);
+                    // A nested loop over an enclosing loop's variable writes that same variable,
+                    // so what the outer loop leaves behind includes the inner loop's values.
+                    let enclosing = self
+                        .current_scope()
+                        .slots
+                        .get(&variable)
+                        .copied()
+                        .filter(|slot| self.active_loop_variables.contains(slot));
+                    let slot = match enclosing {
+                        Some(slot) => slot,
+                        None => self.mint_binding(variable, range, BindingKind::ForVariable),
+                    };
                     if self.current_scope().kind == ScopeKind::TopLevel {
                         self.naming.super_globals.insert(variable);
                         self.naming.loop_bound_slots.insert(slot);
                     }
                     self.current_scope().slots.insert(variable, slot);
+                    self.naming.for_variables.insert(id, slot);
                     self.record_write(slot, Reach::Implicit);
+                    self.active_loop_variables.push(slot);
+                    self.walk_loop(id, *body, None, true);
+                    self.active_loop_variables.pop();
+                } else {
+                    self.walk_loop(id, *body, None, true);
                 }
-                self.loop_body(*body, None, true);
             }
             ExpressionKind::While { condition, body } => {
                 self.resolve(*condition);
-                self.loop_body(*body, Some(*condition), true);
+                self.walk_loop(id, *body, Some(*condition), true);
             }
             ExpressionKind::Repeat { body } => {
-                self.loop_body(*body, None, false);
+                self.walk_loop(id, *body, None, false);
             }
             ExpressionKind::Local { body } => {
                 let scope_id = self.stable_scope_id(id);
@@ -950,6 +1205,7 @@ impl Context<'_> {
                     id: scope_id,
                     kind: ScopeKind::Local,
                     slots: FxHashMap::default(),
+                    horizon: Horizon::Unbounded,
                 });
                 self.premint_frame_assignments(*body);
                 self.resolve(*body);
@@ -1148,6 +1404,49 @@ impl Context<'_> {
         };
     }
 
+    /// `foreach(g = groups) %do% body` binds each iterator and evaluates the body once per
+    /// element in the calling frame, as a `for` loop does. A parallel backend (`%dopar%`)
+    /// evaluates it in an environment of its own, so its writes vanish with it. A nested stage
+    /// (`%:% foreach(...)`, `%:% when(...)`) reads the iterators of the stages before it.
+    fn resolve_foreach(&mut self, id: ExprId, foreach: &ForeachLoop) {
+        let module = self.module;
+        if !foreach.caller_frame {
+            let scope_id = self.stable_scope_id(id);
+            self.scopes.push(Scope {
+                id: scope_id,
+                kind: ScopeKind::Local,
+                slots: FxHashMap::default(),
+                horizon: Horizon::Unbounded,
+            });
+        }
+        let mut iterators: SmallVec<[BindingId; 2]> = SmallVec::new();
+        for &stage in &foreach.stages {
+            self.resolve(stage);
+            for (name, value) in foreach_iterators(module, stage) {
+                let NameSite { name, range } = module[name];
+                let slot = self.mint_binding(name, range, BindingKind::ForVariable);
+                if self.current_scope().kind == ScopeKind::TopLevel {
+                    self.naming.super_globals.insert(name);
+                    self.naming.loop_bound_slots.insert(slot);
+                }
+                self.current_scope().slots.insert(name, slot);
+                self.naming.for_variables.insert(value, slot);
+                self.record_write(slot, Reach::Implicit);
+                iterators.push(slot);
+            }
+        }
+        if foreach.caller_frame {
+            let depth = self.active_loop_variables.len();
+            self.active_loop_variables.extend(iterators);
+            self.walk_loop(id, foreach.body, None, true);
+            self.active_loop_variables.truncate(depth);
+        } else {
+            self.premint_frame_assignments(foreach.body);
+            self.resolve(foreach.body);
+            self.scopes.pop();
+        }
+    }
+
     fn resolve_arguments(&mut self, arguments: &[Argument]) {
         for argument in arguments {
             if let Some(value) = argument.value {
@@ -1198,14 +1497,25 @@ impl Context<'_> {
     /// Re-walks to a fixed point (the reach lattice is finite and joins only grow), then
     /// records effects on one final pass. A `while` loop's `condition` runs again after each
     /// pass, so it reads what the body wrote. `may_skip` joins the never-entered path back in.
+    fn walk_loop(&mut self, id: ExprId, body: ExprId, condition: Option<ExprId>, may_skip: bool) {
+        let depth = self.current_function_depth();
+        self.loop_ends.push((depth, self.module.range(id).end()));
+        self.loop_body(body, condition, may_skip);
+        self.loop_ends.pop();
+    }
+
     fn loop_body(&mut self, body: ExprId, condition: Option<ExprId>, may_skip: bool) {
         let entry = self.flow.clone();
         let saved_emit = self.emit;
         let enclosing_exits = mem::take(&mut self.loop_exits);
+        let enclosing_nexts = mem::take(&mut self.loop_nexts);
         self.emit = false;
         loop {
             let before = self.flow.clone();
             self.resolve(body);
+            for next in mem::take(&mut self.loop_nexts) {
+                join_flow(&mut self.flow, &next);
+            }
             if let Some(condition) = condition {
                 self.resolve(condition);
             }
@@ -1218,6 +1528,9 @@ impl Context<'_> {
         // Only the final pass's `break` states describe the converged loop.
         self.loop_exits.clear();
         self.resolve(body);
+        for next in mem::replace(&mut self.loop_nexts, enclosing_nexts) {
+            join_flow(&mut self.flow, &next);
+        }
         if let Some(condition) = condition {
             // The condition's own effects were recorded before the loop; this read only marks
             // the body's writes it sees as used.
@@ -1302,6 +1615,21 @@ impl Context<'_> {
                 operator: UnaryOperator::Tilde | UnaryOperator::Help,
                 ..
             } => {}
+            // A parallel foreach body gets its own scope when it is resolved.
+            ExpressionKind::Binary { .. } if let Some(foreach) = foreach_loop(module, id) => {
+                for &stage in &foreach.stages {
+                    self.premint_frame_assignments(stage);
+                    if foreach.caller_frame {
+                        for (name, _) in foreach_iterators(module, stage) {
+                            let NameSite { name, range } = module[name];
+                            self.frame_slot(name, range, BindingKind::ForVariable);
+                        }
+                    }
+                }
+                if foreach.caller_frame {
+                    self.premint_frame_assignments(foreach.body);
+                }
+            }
             // A masked argument gets its own scope when it is resolved, so its assignments
             // mint nothing in this frame.
             ExpressionKind::Call { callee, arguments }
@@ -1326,7 +1654,9 @@ impl Context<'_> {
     /// Separate from [`Self::resolve_read`] because a `%op%` read is a token with no expression
     /// id. A slot resolves when a write reaches the read or the read crosses a function
     /// boundary (a capture); an unassignable slot does not shadow.
-    fn mark_slot_read(&mut self, name: Symbol) -> Option<(BindingId, bool)> {
+    /// The third value is the horizon of a read that may run after later writes (`None` for
+    /// an immediate read).
+    fn mark_slot_read(&mut self, name: Symbol) -> Option<(BindingId, Unassigned, Option<Horizon>)> {
         let function_depth = self.current_function_depth();
         let (depth, slot) = self
             .scopes
@@ -1335,32 +1665,61 @@ impl Context<'_> {
             .rev()
             .find_map(|(depth, scope)| {
                 let &slot = scope.slots.get(&name)?;
-                let own_frame_default = self.in_defaults && depth == function_depth;
-                (self.flow.contains_key(&slot) || depth < function_depth || own_frame_default)
+                let own_frame_later =
+                    // A quoted read stays quiet: the quotation may never run.
+                    (self.in_defaults
+                        || (self.exit_frame == Some(function_depth) && self.quiet_depth == 0))
+                        && depth == function_depth;
+                (self.flow.contains_key(&slot) || depth < function_depth || own_frame_later)
                     .then_some((depth, slot))
             })?;
-        // A default forced after the body assigned the name reads it like a closure would:
-        // the read comes before every write, and any of them may be the one it observes.
+        // A default forced after the body assigned the name, or an `on.exit` expression, reads
+        // it like a closure would: the read comes before every write, and any of them may be
+        // the one it observes.
         let forward = !self.flow.contains_key(&slot) && depth == function_depth;
         if forward {
             self.deferred_depth += 1;
         }
-        let maybe_undefined = self.mark_slot_reached(name, depth, slot, function_depth);
+        let captured = if self.deferred_depth > 0 {
+            Some(Horizon::Unbounded)
+        } else if depth < function_depth {
+            Some(self.capture_horizon(depth))
+        } else {
+            None
+        };
+        let unassigned = self.mark_slot_reached(name, depth, slot, function_depth);
         if forward {
             self.deferred_depth -= 1;
         }
-        Some((slot, maybe_undefined))
+        Some((slot, unassigned, captured))
     }
 
-    /// Records that a read at the current point observes `slot`, which lives at scope `depth`;
-    /// true when some path reaches the read with the slot still unassigned.
+    /// How long a read of a slot at scope `depth` from inside a closure may run: the outermost
+    /// closure inside the slot's frame decides, and one nested inside it bounds nothing unless
+    /// it too runs before its enclosing call ends.
+    fn capture_horizon(&self, depth: usize) -> Horizon {
+        let mut functions = self.scopes[depth + 1..]
+            .iter()
+            .filter(|scope| scope.kind == ScopeKind::Function);
+        let outermost = functions
+            .next()
+            .map_or(Horizon::Unbounded, |scope| scope.horizon);
+        if functions.all(|scope| matches!(scope.horizon, Horizon::Until(_))) {
+            outermost
+        } else {
+            Horizon::Unbounded
+        }
+    }
+
+    /// Records that a read at the current point observes `slot`, which lives at scope `depth`,
+    /// and says what the read finds on a path that reaches it with the slot unassigned.
     fn mark_slot_reached(
         &mut self,
         name: Symbol,
         depth: usize,
         slot: BindingId,
         function_depth: usize,
-    ) -> bool {
+    ) -> Unassigned {
         match self.naming.bindings.get(&slot).map(|binding| binding.kind) {
             Some(BindingKind::Parameter) => {
                 self.read_parameter_slots.insert(slot);
@@ -1392,7 +1751,23 @@ impl Context<'_> {
                 }
             }
         }
-        maybe_undefined
+        if !maybe_undefined {
+            return Unassigned::Never;
+        }
+        // On a path that leaves a function's own slot unassigned, R looks the name up in the
+        // enclosing frames, so an enclosing function's binding serves the read there.
+        let enclosing = self.scopes[..function_depth]
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(depth, scope)| Some((depth, *scope.slots.get(&name)?)));
+        match enclosing {
+            Some((enclosing_depth, enclosing_slot)) => {
+                self.mark_slot_reached(name, enclosing_depth, enclosing_slot, function_depth);
+                Unassigned::Enclosing(enclosing_slot)
+            }
+            None => Unassigned::Undefined,
+        }
     }
 
     /// Every enclosing slot that could serve the call is marked read, since the checker may
@@ -1436,10 +1811,41 @@ impl Context<'_> {
             _ => name,
         };
         match self.mark_slot_read(name) {
-            Some((slot, maybe_undefined)) => {
+            Some((slot, unassigned, captured)) => {
                 self.naming.resolutions.insert(id, slot);
-                if maybe_undefined && self.emit {
-                    self.naming.maybe_undefined.insert(id);
+                // The enclosing slot a path leaving the own slot unassigned reads is a capture.
+                let fallback = match unassigned {
+                    Unassigned::Enclosing(enclosing) if captured.is_none() => self
+                        .scopes
+                        .iter()
+                        .rposition(|scope| scope.slots.get(&name) == Some(&enclosing))
+                        .map(|depth| self.capture_horizon(depth)),
+                    _ => None,
+                };
+                if let Some(horizon) = captured.or(fallback) {
+                    self.captured_horizons.push((id, horizon));
+                }
+                // A closure bound to `slot` escapes through any read but a call in its own
+                // frame, which runs it by the time the call ends.
+                if self.closure_runs.contains_key(&slot) {
+                    let run = match (captured, self.callee_reads.get(&id)) {
+                        (None, Some(&end)) => Some(self.run_horizon(end)),
+                        _ => None,
+                    };
+                    if let Some(latest) = self.closure_runs.get_mut(&slot) {
+                        *latest = latest.zip(run).map(|(latest, run)| latest.max(run));
+                    }
+                }
+                if self.emit {
+                    match unassigned {
+                        Unassigned::Never => {}
+                        Unassigned::Undefined => {
+                            self.naming.maybe_undefined.insert(id);
+                        }
+                        Unassigned::Enclosing(enclosing) => {
+                            self.naming.enclosing_fallbacks.insert(id, enclosing);
+                        }
+                    }
                 }
             }
             // A method's object frame sits between its body and the namespace, so a field or
@@ -1489,6 +1895,13 @@ impl Context<'_> {
             return;
         }
         let module = self.module;
+        let spelling = if spelling == AssignSpelling::Super
+            && self.example_scope == Some(self.scopes.len() - 1)
+        {
+            AssignSpelling::Local
+        } else {
+            spelling
+        };
         if spelling == AssignSpelling::Destructure {
             for leaf in destructure_leaves(module, target).unwrap_or_default() {
                 if let ExpressionKind::NameRef(name) = module.kind(leaf) {
@@ -1514,36 +1927,21 @@ impl Context<'_> {
                 };
                 let range = module.range(target_expression);
                 match spelling {
-                    AssignSpelling::Super => {
-                        // `<<-` binds the nearest slot in a strictly enclosing scope, else the
-                        // global environment. Bounded by the scope stack, not the enclosing
-                        // function: `local()` scopes are not functions.
-                        let enclosing = (0..self.scopes.len() - 1)
-                            .rev()
-                            .find_map(|depth| Some((depth, *self.scopes[depth].slots.get(&name)?)));
-                        match enclosing {
-                            Some((depth, slot)) => {
-                                self.naming.resolutions.insert(target, slot);
-                                self.naming.captured_slots.insert(slot);
-                                // `<<-` finds this slot only because of that frame's writes, so it
-                                // keeps them alive like a capturing read; otherwise a write-only
-                                // counter's initializer looks like a dead store.
-                                let frame = self.scopes[depth].id;
-                                for write in &mut self.writes {
-                                    if write.scope == frame && write.name == name {
-                                        write.used = true;
-                                    }
-                                }
-                                self.record_write_site(assignment, name, range, slot, true);
-                            }
-                            None => {
-                                if self.emit {
-                                    self.naming.non_locals.insert(target, name);
-                                    self.naming.super_globals.insert(name);
-                                }
+                    AssignSpelling::Super => match self.enclosing_slot(name) {
+                        Some((depth, slot)) => {
+                            self.naming.resolutions.insert(target, slot);
+                            self.naming.captured_slots.insert(slot);
+                            self.keep_frame_writes(depth, name);
+                            self.record_write_site(assignment, name, range, slot, true);
+                        }
+                        None => {
+                            // In an example that never runs, the write reaches no global.
+                            if self.emit && self.example_scope.is_none() {
+                                self.naming.non_locals.insert(target, name);
+                                self.naming.super_globals.insert(name);
                             }
                         }
-                    }
+                    },
                     _ => {
                         let kind = self.assignment_binding_kind();
                         let slot = self.frame_slot(name, range, kind);
@@ -1557,6 +1955,17 @@ impl Context<'_> {
             // Replacement forms read their base as a value, then rebind it in the current scope
             // (R evaluates `x[i] <- v` as `x <- `[<-`(x, i, v)`).
             _ => match replacement_base(module, target) {
+                // `x$a <<- v` reads and writes the enclosing `x`, as `x <<- v` writes it.
+                Some((base_expression, name, range))
+                    if spelling == AssignSpelling::Super
+                        && let Some((depth, slot)) = self.enclosing_slot(name) =>
+                {
+                    self.naming.resolutions.insert(base_expression, slot);
+                    self.naming.captured_slots.insert(slot);
+                    self.keep_frame_writes(depth, name);
+                    self.record_write_site(assignment, name, range, slot, true);
+                    self.resolve_replacement_subscripts(target, base_expression);
+                }
                 Some((base_expression, name, range)) => {
                     let fresh = !self.current_scope().slots.contains_key(&name);
                     // A loop body is walked more than once, and an earlier walk's resolution of
@@ -1597,6 +2006,26 @@ impl Context<'_> {
                 }
                 None => self.resolve(target),
             },
+        }
+    }
+
+    /// The slot `<<-` writes: the nearest one in a strictly enclosing scope, with its scope's
+    /// depth. Bounded by the scope stack, not the enclosing function: `local()` scopes are not
+    /// functions. `None` means the global environment.
+    fn enclosing_slot(&self, name: Symbol) -> Option<(usize, BindingId)> {
+        (self.example_scope.unwrap_or(0)..self.scopes.len() - 1)
+            .rev()
+            .find_map(|depth| Some((depth, *self.scopes[depth].slots.get(&name)?)))
+    }
+
+    /// `<<-` finds a slot only because of its frame's writes, so it keeps them alive like a
+    /// capturing read; otherwise a write-only counter's initializer looks like a dead store.
+    fn keep_frame_writes(&mut self, depth: usize, name: Symbol) {
+        let frame = self.scopes[depth].id;
+        for write in &mut self.writes {
+            if write.scope == frame && write.name == name {
+                write.used = true;
+            }
         }
     }
 
@@ -1960,6 +2389,34 @@ fn data_table_signature(module: &Module, arguments: &[Argument]) -> bool {
     })
 }
 
+/// Whether a query gives a table: one that groups, has no `j`, selects with `with = FALSE`, or
+/// whose `j` builds a list, updates by reference or reads `.SD`. Any other `j`, such as `.N` or
+/// a column, gives a vector, so a `[` on that result is base indexing.
+fn query_gives_table(module: &Module, arguments: &[Argument]) -> bool {
+    if arguments.iter().any(|argument| {
+        matches!(
+            module.argument_name(argument).as_deref(),
+            Some("by" | "keyby" | "with")
+        )
+    }) {
+        return true;
+    }
+    let (_, j) = query_index_arguments(module, arguments);
+    let Some(j) = j.and_then(|argument| argument.value) else {
+        return true;
+    };
+    let names_sd = |value: ExprId| matches!(module.kind(value), ExpressionKind::NameRef(name) if name == ".SD");
+    match module.kind(j) {
+        ExpressionKind::NameRef(_) => names_sd(j),
+        ExpressionKind::Index { target, .. } => names_sd(*target),
+        ExpressionKind::Call { callee, .. } => matches!(
+            module.kind(*callee),
+            ExpressionKind::NameRef(name) if matches!(name.as_str(), "." | "list" | ":=" | "lapply")
+        ),
+        _ => false,
+    }
+}
+
 /// The variable a data.table `..name` read inside `[` refers to: `name`, looked up in the
 /// enclosing scope rather than among the columns.
 pub fn dot_dot_variable(name: &str) -> Option<&str> {
@@ -2070,6 +2527,37 @@ pub(crate) const MATCH_FUN_CALLERS: [&str; 20] = [
 /// The base functions that call a compiled routine named by their `.NAME` argument.
 const NATIVE_INTERFACES: [&str; 5] = [".Call", ".External", ".External2", ".C", ".Fortran"];
 
+/// Functions that call a function argument before they return, and never keep it.
+const EAGER_CALLERS: [&str; 27] = [
+    "lapply",
+    "sapply",
+    "vapply",
+    "mapply",
+    "Map",
+    "Filter",
+    "Reduce",
+    "Find",
+    "Position",
+    "apply",
+    "tapply",
+    "rapply",
+    "outer",
+    "do.call",
+    "tryCatch",
+    "withCallingHandlers",
+    "map",
+    "map_chr",
+    "map_dbl",
+    "map_int",
+    "map_lgl",
+    "map2",
+    "pmap",
+    "imap",
+    "walk",
+    "keep",
+    "discard",
+];
+
 const QUOTING_FORMS: [&str; 4] = ["quote", "substitute", "bquote", "expression"];
 
 /// Functions that read the variable a string names.
@@ -2166,6 +2654,91 @@ fn collect_tail_assignments(module: &Module, id: ExprId, tails: &mut FxHashSet<E
         }
         _ => {}
     }
+}
+
+/// `foreach(...) %do% body`, also with `%dopar%` or doRNG's `%dorng%`, and with stages nested
+/// by `%:%`.
+pub(crate) struct ForeachLoop {
+    /// In order, each a `foreach()` or `when()` call, the first a `foreach()`.
+    pub stages: SmallVec<[ExprId; 2]>,
+    pub body: ExprId,
+    /// `%do%` evaluates the body in the calling frame; a parallel backend in an environment of
+    /// its own.
+    pub caller_frame: bool,
+}
+
+pub(crate) fn foreach_loop(module: &Module, id: ExprId) -> Option<ForeachLoop> {
+    let ExpressionKind::Binary {
+        operator: BinaryOperator::Special,
+        special_name: Some(name),
+        lhs,
+        rhs,
+    } = module.kind(id)
+    else {
+        return None;
+    };
+    if !matches!(name.as_str(), "%do%" | "%dopar%" | "%dorng%") {
+        return None;
+    }
+    let mut stages = SmallVec::new();
+    let mut pending = *lhs;
+    loop {
+        match module.kind(pending) {
+            ExpressionKind::Binary {
+                operator: BinaryOperator::Special,
+                special_name: Some(name),
+                lhs,
+                rhs,
+            } if name.as_str() == "%:%" => {
+                stages.push(*rhs);
+                pending = *lhs;
+            }
+            _ => {
+                stages.push(pending);
+                break;
+            }
+        }
+    }
+    stages.reverse();
+    let callee_is = |stage: ExprId, wanted: &str| match module.kind(stage) {
+        ExpressionKind::Call { callee, .. } => match module.kind(*callee) {
+            ExpressionKind::NameRef(name) => name.as_str() == wanted,
+            ExpressionKind::Namespace {
+                package: Some(package),
+                name: Some(name),
+                ..
+            } => package.as_str() == "foreach" && name.as_str() == wanted,
+            _ => false,
+        },
+        _ => false,
+    };
+    let first = *stages.first()?;
+    let shaped = callee_is(first, "foreach")
+        && stages
+            .iter()
+            .all(|&stage| callee_is(stage, "foreach") || callee_is(stage, "when"));
+    shaped.then_some(ForeachLoop {
+        stages,
+        body: *rhs,
+        caller_frame: name.as_str() == "%do%",
+    })
+}
+
+/// The iterators of a `foreach()` stage: its named arguments other than the dotted options
+/// (`.combine`, `.packages`, ...), each with its value.
+pub(crate) fn foreach_iterators(
+    module: &Module,
+    stage: ExprId,
+) -> impl Iterator<Item = (NameId, ExprId)> + '_ {
+    let arguments = match module.kind(stage) {
+        ExpressionKind::Call { arguments, .. } => &module[*arguments],
+        _ => &[],
+    };
+    arguments.iter().filter_map(move |argument| {
+        let name = argument.name?;
+        let value = argument.value?;
+        (!module[name].name.as_str().starts_with('.')).then_some((name, value))
+    })
 }
 
 /// The formals that hold the data; every other argument evaluates in the data's frame.

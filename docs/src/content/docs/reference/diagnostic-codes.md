@@ -16,7 +16,9 @@ unresolved
 Every finding starts with its code, here `unresolved`. The code stays the same when the wording of
 a message changes, so it is what you name in a suppression, in `ry.toml`, and in the JSON output.
 `!` marks a warning and `x` an error (`⚠` and `×` in a terminal). The carets underline exactly
-what the finding is about, such as one name, not the whole statement.
+what the finding is about, such as one name, not the whole statement. Where something is missing,
+such as the branch after `if (ready)` at the end of a file, one caret points just past the last
+code, on that code's line.
 
 ## Suppressing a finding
 

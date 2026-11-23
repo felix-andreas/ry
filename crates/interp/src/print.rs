@@ -2,12 +2,13 @@
 
 use {
     crate::{
+        attribute_access::expand_row_names,
         builtins::{BuiltinDef, Call, internal},
         coerce::integer_scalar,
         deparse,
         eval::{self, value_of},
         format::{self, Settings, display_width, encode_element, encode_string, pad},
-        interp,
+        handles, interp, scope,
         unwind::{R, error},
         values::{self, char_str, get_attr, length, nil, symbol_name, symbols},
         write_console,
@@ -18,10 +19,67 @@ use {
 pub const BUILTINS: &[BuiltinDef] = &[
     internal("print.default", 3, do_print_default).invisible(),
     internal("print.function", 3, do_print_function).invisible(),
-    internal("prmatrix", 6, |call| {
-        Err(call.error("prmatrix is not supported"))
-    }),
+    internal("prmatrix", 6, do_prmatrix).invisible(),
 ];
+
+/// `.Internal(prmatrix(x, rowlab, collab, quote, right, na.print))`: `x` printed as a matrix with
+/// `rowlab` and `collab` as its labels, and without the names of its dimnames.
+unsafe fn do_prmatrix(call: &Call<'_>) -> R<Sexp> {
+    let x = call.arg(0);
+    let (rows, cols) = match values::dims(x).as_deref() {
+        Some(&[rows, cols]) => (rows, cols),
+        _ => return Err(call.error("invalid 'x' argument")),
+    };
+    // GNU R's `printMatrix` uses the first labels of a longer vector.
+    let labels = |value: Sexp, what: &str, count: usize| -> R<Sexp> {
+        if length(value) == 0 {
+            Ok(nil())
+        } else if value.kind() != SexpType::String {
+            Err(call.error(format!("invalid {what} labels")))
+        } else if length(value) < count {
+            Err(call.error(format!("too few {what} labels")))
+        } else if length(value) > count {
+            let strings: Vec<String> = (0..count)
+                .map(|index| {
+                    values::string_at(value, index)
+                        .map(|text| text.into_owned())
+                        .unwrap_or_default()
+                })
+                .collect();
+            values::string_vector(&strings)
+        } else {
+            Ok(value)
+        }
+    };
+    let row_labels = labels(call.arg(1), "row", rows)?;
+    crate::heap().root(row_labels);
+    let column_labels = labels(call.arg(2), "column", cols)?;
+    crate::heap().root(column_labels);
+    let mut options = PrintOptions::defaults(call.env()?);
+    options.quote = values::as_integer_scalar(call.arg(3)) != 0;
+    options.right = values::as_integer_scalar(call.arg(4)) != 0;
+    let na_print = call.arg(5);
+    if na_print != nil() {
+        if na_print.kind() != SexpType::String || length(na_print) == 0 {
+            return Err(call.error("invalid 'na.print' specification"));
+        }
+        let text = values::first_string(na_print)
+            .map(|text| text.into_owned())
+            .unwrap_or_default();
+        options.na_string = text.clone();
+        options.na_string_noquote = text;
+    }
+    let shown = values::shallow_duplicate(x)?;
+    crate::heap().root(shown);
+    let dimnames = if row_labels == nil() && column_labels == nil() {
+        nil()
+    } else {
+        values::list_vector(&[row_labels, column_labels])?
+    };
+    values::set_attr(shown, symbols().dimnames, dimnames)?;
+    print_matrix(shown, rows, cols, &options, true)?;
+    Ok(x)
+}
 
 /// Print settings, from `print.default`'s arguments and the options.
 #[derive(Clone)]
@@ -578,7 +636,7 @@ pub unsafe fn print_matrix(
     top: bool,
 ) -> R<()> {
     if !top {
-        return print_matrix_rows(matrix, rows, cols, rows, options);
+        return print_matrix_rows(matrix, rows, cols, rows, true, options);
     }
     // GNU R prints whole rows only, as many as fit within `max` entries. R 4.5 also stops at
     // `max` columns, and then prints at least one row.
@@ -595,7 +653,7 @@ pub unsafe fn print_matrix(
     if cols > shown_cols && shown < 1 && rows > 0 {
         shown = 1;
     }
-    print_matrix_rows(matrix, rows, shown_cols, shown, options)?;
+    print_matrix_rows(matrix, rows, shown_cols, shown, true, options)?;
     if truncates_columns && (shown < rows || shown_cols < cols) {
         let mut note = max_reached_prefix().to_owned();
         if shown < rows {
@@ -625,9 +683,10 @@ unsafe fn print_matrix_rows(
     rows: usize,
     cols: usize,
     shown: usize,
+    cells: bool,
     options: &PrintOptions,
 ) -> R<()> {
-    if rows == 0 && cols == 0 {
+    if rows == 0 && cols == 0 && cells {
         out("<0 x 0 matrix>\n");
         return Ok(());
     }
@@ -702,7 +761,10 @@ unsafe fn print_matrix_rows(
             }
         })
         .collect();
-    let columns = matrix_columns(matrix, rows, shown, cols, options)?;
+    let columns = match cells {
+        true => matrix_columns(matrix, rows, shown, cols, options)?,
+        false => vec![Vec::new(); cols],
+    };
     let is_string = matrix.kind() == SexpType::String;
     let right = !is_string || options.right;
     let col_labels: Vec<String> = (0..cols)
@@ -768,6 +830,10 @@ unsafe fn print_matrix_rows(
         text.push('\n');
         for row in 0..shown {
             text.push_str(&row_labels[row]);
+            if !cells {
+                text.push('\n');
+                continue;
+            }
             for col in start..end {
                 text.push_str(&" ".repeat(options.gap));
                 let (item, measure) = &columns[col][row];
@@ -815,6 +881,38 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
     } else {
         (slices, rows, cols)
     };
+    // Every slice prints with the dimnames of the first two dimensions, and their titles.
+    let leading = if dimnames.kind() == SexpType::List {
+        let leading = values::list_vector(&[dimnames.element(0), dimnames.element(1)])?;
+        crate::heap().root(leading);
+        if dimnames_names != nil() {
+            let titles = values::string_vector(&[
+                &values::string_at(dimnames_names, 0).unwrap_or_default(),
+                &values::string_at(dimnames_names, 1).unwrap_or_default(),
+            ])?;
+            values::set_attr(leading, symbols().names, titles)?;
+        }
+        leading
+    } else {
+        nil()
+    };
+    if slices == 0 {
+        // GNU R names the shape of an array with no slices, then prints the labels of its first
+        // two dimensions with no cells.
+        let shape: Vec<String> = dims.iter().map(usize::to_string).collect();
+        out(&format!(
+            "<{} array of {}>\n",
+            shape.join(" x "),
+            array.kind().name()
+        ));
+        let matrix = values::alloc(array.kind(), 0)?;
+        if leading != nil() {
+            values::set_attr(matrix, symbols().dimnames, leading)?;
+        }
+        print_matrix_rows(matrix, rows, cols, rows, false, options)?;
+        out("\n");
+        return Ok(());
+    }
     for index in 0..shown_slices {
         let mut label = String::from(", , ");
         let mut remainder = index;
@@ -849,23 +947,15 @@ unsafe fn print_array(array: Sexp, dims: &[usize], options: &PrintOptions) -> R<
         let matrix = crate::subset::select_elements(array, &indices)?;
         let dim = values::integer_vector(&[rows as i32, cols as i32])?;
         values::set_attr(matrix, symbols().dim, dim)?;
-        if dimnames.kind() == SexpType::List {
-            let sub = values::list_vector(&[dimnames.element(0), dimnames.element(1)])?;
-            if dimnames_names != nil() {
-                let titles = values::string_vector(&[
-                    &values::string_at(dimnames_names, 0).unwrap_or_default(),
-                    &values::string_at(dimnames_names, 1).unwrap_or_default(),
-                ])?;
-                values::set_attr(sub, symbols().names, titles)?;
-            }
-            values::set_attr(matrix, symbols().dimnames, sub)?;
+        if leading != nil() {
+            values::set_attr(matrix, symbols().dimnames, leading)?;
         }
         let (shown, shown_cols) = if index + 1 == shown_slices {
             (last_rows, last_cols)
         } else {
             (rows, cols)
         };
-        print_matrix_rows(matrix, rows, shown_cols, shown, options)?;
+        print_matrix_rows(matrix, rows, shown_cols, shown, true, options)?;
         out("\n");
     }
     if max_reached && truncates_columns {
@@ -1063,8 +1153,15 @@ unsafe fn print_attributes(value: Sexp, options: &PrintOptions, tag: &mut String
             out(&format!("{tag}\n"));
             let attribute = cell.car();
             if name == symbols.row_names {
-                let expanded = crate::subset::subset(attribute, &[], false, nil())?;
-                print_value(expanded, options, tag)?;
+                // Compact row names (`c(NA, -n)`) print as `1:n`, as `getAttrib` reads them.
+                let expanded = handles::with(|context| {
+                    let stored = handles::held(context, attribute);
+                    Ok(expand_row_names(context, stored)?.raw())
+                })?;
+                scope(|| {
+                    crate::heap().root(expanded);
+                    print_value(expanded, options, tag)
+                })?;
             } else if attribute.is_object() {
                 print_dispatch(attribute, options, tag)?;
             } else {
@@ -1110,7 +1207,9 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
                     options.settings.digits = digits as usize;
                 }
             }
-            "quote" => options.quote = logical_argument(argument, "quote")?,
+            "quote" => {
+                options.quote = logical_argument(values::as_logical_scalar(argument), "quote")?
+            }
             "na.print" => {
                 if argument != nil() {
                     if argument.kind() != SexpType::String || values::length(argument) == 0 {
@@ -1132,7 +1231,9 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
                     options.gap = gap as usize;
                 }
             }
-            "right" => options.right = logical_argument(argument, "right")?,
+            "right" => {
+                options.right = logical_argument(values::as_logical_scalar(argument), "right")?
+            }
             "max" => {
                 if argument != nil() {
                     let max = integer_scalar(argument)?;
@@ -1151,7 +1252,10 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
                     options.width = width as usize;
                 }
             }
-            "useSource" => options.use_source = logical_argument(argument, "useSource")?,
+            "useSource" => {
+                options.use_source =
+                    logical_argument(values::as_logical_scalar(argument), "useSource")?
+            }
             _ => {}
         }
     }
@@ -1167,8 +1271,9 @@ unsafe fn do_print_default(call: &Call<'_>) -> R<Sexp> {
     Ok(value)
 }
 
-unsafe fn logical_argument(argument: Sexp, name: &str) -> R<bool> {
-    match values::as_logical_scalar(argument) {
+/// The logical argument `name`, read as `value`, which must not be `NA`.
+fn logical_argument(value: i32, name: &str) -> R<bool> {
+    match value {
         NA_LOGICAL => Err(error(format!("invalid '{name}' argument"))),
         value => Ok(value != 0),
     }

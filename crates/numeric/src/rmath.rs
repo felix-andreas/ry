@@ -305,8 +305,17 @@ fn q_p01_boundaries(p: f64, lower: bool, log: bool, left: f64, right: f64) -> Op
 }
 
 /// `R_forceint`: round half to even, as C's `nearbyint` does in the default rounding mode.
+/// `round_ties_even` is a libm call on baseline x86-64; adding and removing 2^52 rounds a
+/// smaller magnitude to an integer in the same way, and every larger one is already whole.
+#[inline]
 pub fn forceint(x: f64) -> f64 {
-    x.round_ties_even()
+    const WHOLE: f64 = 4_503_599_627_370_496.0;
+    let magnitude = x.abs();
+    if magnitude < WHOLE {
+        (magnitude + WHOLE - WHOLE).copysign(x)
+    } else {
+        x
+    }
 }
 
 /// `R_nonint`: whether `x` is not within rounding of an integer.
@@ -2453,177 +2462,364 @@ pub fn choose(n: f64, k: f64) -> f64 {
     lfastchoose(n, k).exp()
 }
 
-/// The Bernoulli numbers `B_2, B_4, ..., B_30`.
-const BERNOULLI: [f64; 15] = [
-    1.0 / 6.0,
-    -1.0 / 30.0,
-    1.0 / 42.0,
-    -1.0 / 30.0,
-    5.0 / 66.0,
-    -691.0 / 2730.0,
-    7.0 / 6.0,
-    -3617.0 / 510.0,
-    43867.0 / 798.0,
-    -174611.0 / 330.0,
-    854513.0 / 138.0,
-    -236364091.0 / 2730.0,
-    8553103.0 / 6.0,
-    -23749461029.0 / 870.0,
-    8615841276005.0 / 14322.0,
+/// `d^n/dx^n cot(x)` for `n <= 5`, GNU R's closed forms.
+fn d_n_cot(x: f64, n: c_int) -> f64 {
+    match n {
+        0 => x.cos() / x.sin(),
+        1 => -1.0 / r_pow_di(x.sin(), 2),
+        2 => 2.0 * x.cos() / r_pow_di(x.sin(), 3),
+        3 => {
+            let sin2 = r_pow_di(x.sin(), 2);
+            -2.0 * (3.0 - 2.0 * sin2) / r_pow_di(sin2, 2)
+        }
+        4 => {
+            let co = x.cos();
+            8.0 * co * (r_pow_di(co, 2) + 2.0) / r_pow_di(x.sin(), 5)
+        }
+        5 => {
+            let co2 = r_pow_di(x.cos(), 2);
+            -8.0 * (2.0 * r_pow_di(co2, 2) + 11.0 * co2 + 2.0) / r_pow_di(x.sin(), 6)
+        }
+        _ => f64::NAN,
+    }
+}
+
+/// The Bernoulli numbers `B_0` to `B_21` as Amos's algorithm indexes them.
+const BERNOULLI: [f64; 22] = [
+    1.00000000000000000e+00,
+    -5.00000000000000000e-01,
+    1.66666666666666667e-01,
+    -3.33333333333333333e-02,
+    2.38095238095238095e-02,
+    -3.33333333333333333e-02,
+    7.57575757575757576e-02,
+    -2.53113553113553114e-01,
+    1.16666666666666667e+00,
+    -7.09215686274509804e+00,
+    5.49711779448621554e+01,
+    -5.29124242424242424e+02,
+    6.19212318840579710e+03,
+    -8.65802531135531136e+04,
+    1.42551716666666667e+06,
+    -2.72982310678160920e+07,
+    6.01580873900642368e+08,
+    -1.51163157670921569e+10,
+    4.29614643061166667e+11,
+    -1.37116552050883328e+13,
+    4.88332318973593167e+14,
+    -1.92965793419400681e+16,
 ];
 
-/// `psi(x)` for `x > 0`: the recurrence `psi(x) = psi(x + 1) - 1/x` up to where the asymptotic
-/// series in the Bernoulli numbers is exact to double precision.
-fn digamma_positive(x: f64) -> f64 {
-    let mut shift = 0.0;
-    let mut z = x;
-    while z < 10.0 {
-        shift += 1.0 / z;
-        z += 1.0;
-    }
-    let inverse_square = 1.0 / (z * z);
-    let mut power = inverse_square;
-    let mut series = 0.0;
-    for (index, bernoulli) in BERNOULLI.iter().take(8).enumerate() {
-        let order = 2.0 * (index + 1) as f64;
-        series += bernoulli / (order * 1.0) * power;
-        power *= inverse_square;
-    }
-    z.ln() - 0.5 / z - series - shift
-}
-
-/// The Hurwitz zeta function `sum_{i >= 0} (x + i)^(-s)` for integer `s >= 2` and `x > 0`, by
-/// Euler-Maclaurin summation after shifting `x` far enough that the correction terms shrink.
-fn hurwitz_zeta(s: f64, x: f64) -> f64 {
-    let threshold = 16.0 + 0.5 * s;
-    let mut sum = 0.0;
-    let mut z = x;
-    while z < threshold {
-        sum += z.powf(-s);
-        z += 1.0;
-    }
-    let mut tail = z.powf(1.0 - s) / (s - 1.0) + 0.5 * z.powf(-s);
-    // term_j = B_2j / (2j)! * s (s+1) ... (s+2j-2) * z^(-s-2j+1)
-    let mut factor = s / z.powf(s + 1.0);
-    let mut factorial = 2.0;
-    for (index, bernoulli) in BERNOULLI.iter().enumerate() {
-        let j = (index + 1) as f64;
-        let term = bernoulli / factorial * factor;
-        tail += term;
-        if term.abs() <= DBL_EPSILON * 0.25 * tail.abs() {
-            break;
-        }
-        factor *= (s + 2.0 * j - 1.0) * (s + 2.0 * j) / (z * z);
-        factorial *= (2.0 * j + 1.0) * (2.0 * j + 2.0);
-    }
-    sum + tail
-}
-
-/// Fills `ans[j]` with `(-1)^(k+1) / k! * psi^(k)(x)` for `k = n + j` and returns Amos's error
-/// code: 1 for invalid arguments, 4 where the reflection for negative `x` does not apply.
+/// Amos's algorithm 610 as GNU R's `dpsifn`: fills `ans[j]` with `(-1)^(k+1) / k! * psi^(k)(x)`
+/// for `k = n + j` and returns the error code (1 for invalid arguments, 2 for overflow, 3 when
+/// the backward recurrence would exceed 100 steps, 4 for `x <= 0` beyond the fifth derivative).
+/// GNU R's underflow count increments its pointer rather than the count, so it is always 0.
 pub fn dpsifn(x: f64, n: c_int, kode: c_int, ans: &mut [f64]) -> c_int {
-    if n < 0 || !(1..=2).contains(&kode) || ans.is_empty() {
+    let m = ans.len() as c_int;
+    if n < 0 || !(1..=2).contains(&kode) || m < 1 {
         return 1;
     }
-    if x.is_nan() {
-        ans.fill(x);
-        return 0;
-    }
-    if x == f64::INFINITY {
-        for (j, slot) in ans.iter_mut().enumerate() {
-            *slot = if j as c_int + n == 0 {
-                f64::NEG_INFINITY
-            } else {
-                0.0
-            };
-        }
-        return 0;
-    }
-    if x <= 0.0 && x == x.round() {
-        for (j, slot) in ans.iter_mut().enumerate() {
-            *slot = if (j as c_int + n) % 2 == 1 {
-                f64::INFINITY
-            } else {
-                f64::NAN
-            };
-        }
-        return 0;
-    }
-    if x < 0.0 {
-        // psi^(k)(x) = (-1)^k psi^(k)(1 - x) - pi^(k+1) cot^(k)(pi x), the k-th derivative of
-        // the reflection formula psi(1 - x) - psi(x) = pi cot(pi x).
-        // GNU R's reflection stops at the fifth derivative.
-        if n as usize + ans.len() - 1 > 5 {
-            return 4;
+    if x <= 0.0 {
+        // The reflection formula psi(n, x) = (-1)^n psi(n, 1 - x) - pi^(n+1) d_n(pi x).
+        if x == x.round() {
+            for (j, slot) in ans.iter_mut().enumerate() {
+                *slot = if (j as c_int + n) % 2 != 0 {
+                    f64::INFINITY
+                } else {
+                    f64::NAN
+                };
+            }
+            return 0;
         }
         let status = dpsifn(1.0 - x, n, 1, ans);
-        if status != 0 {
-            return status;
+        if n > 5 {
+            return 4;
         }
-        let cot = cot_derivatives(x * M_PI, (n as usize) + ans.len() - 1);
-        let mut factorial = 1.0;
-        let mut pi_power = M_PI;
-        for k in 1..=n {
-            factorial *= k as f64;
-            pi_power *= M_PI;
-        }
-        for (j, slot) in ans.iter_mut().enumerate() {
-            let k = n as usize + j;
-            if j > 0 {
-                factorial *= k as f64;
-                pi_power *= M_PI;
+        let x = x * M_PI;
+        let (mut t1, mut t2, mut s) = (1.0, 1.0, 1.0);
+        let mut k: c_int = 0;
+        let mut j = k - n;
+        while j < m {
+            t1 *= M_PI;
+            if k >= 2 {
+                t2 *= f64::from(k);
             }
-            // ans holds (-1)^(k+1)/k! psi^(k)(1 - x); convert, reflect and convert back.
-            let sign = if k.is_multiple_of(2) { -1.0 } else { 1.0 };
-            let psi_reflected = sign * factorial * *slot;
-            let parity = if k.is_multiple_of(2) { 1.0 } else { -1.0 };
-            let psi = parity * psi_reflected - pi_power * cot[k];
-            *slot = sign * psi / factorial;
+            if j >= 0 {
+                let slot = &mut ans[j as usize];
+                *slot = s * (*slot + t1 / t2 * d_n_cot(x, k));
+            }
+            k += 1;
+            j += 1;
+            s = -s;
         }
-        return 0;
+        return status;
     }
-    for (j, slot) in ans.iter_mut().enumerate() {
-        let k = n + j as c_int;
-        *slot = if k == 0 {
-            let value = -digamma_positive(x);
-            if kode == 2 { value + x.ln() } else { value }
+    let xln = x.ln();
+    if kode == 1 && m == 1 {
+        let lrg = 1.0 / (2.0 * DBL_EPSILON);
+        if n == 0 && x * xln > lrg {
+            ans[0] = -xln;
+            return 0;
+        } else if n >= 1 && x > f64::from(n) * lrg {
+            ans[0] = (f64::from(-n) * xln).exp() / f64::from(n);
+            return 0;
+        }
+    }
+    // d1mach(5), d1mach(4) / 2 and i1mach(14) of IEEE doubles.
+    let r1m5 = std::f64::consts::LOG10_2;
+    let r1m4 = DBL_EPSILON * 0.5;
+    let wdtol = fmax2(r1m4, 0.5e-18);
+    let mut nx: c_int = 1021;
+    let elim = 2.302 * (f64::from(nx) * r1m5 - 3.0);
+    let rln = fmin2(r1m5 * 53.0, 18.06);
+    let mut fln = fmax2(rln, 3.0) - 3.0;
+    let yint = 3.50 + 0.40 * fln;
+    let slope = 0.21 + fln * (0.0006038 * fln + 0.008677);
+    let mut trm = [0.0; 23];
+    let mut mm = m;
+    let (mut nn, mut fn_, mut t);
+    let (mut xdmy, mut xdmln, mut xinc);
+    loop {
+        nn = n + mm - 1;
+        fn_ = nn;
+        t = f64::from(fn_ + 1) * xln;
+        let mut series = false;
+        if t.abs() > elim {
+            if t <= 0.0 {
+                return 2;
+            }
         } else {
-            hurwitz_zeta((k + 1) as f64, x)
-        };
-        if !finite(*slot) {
-            // Amos's overflow error, which GNU R reports as NaN.
-            return 2;
+            if x < wdtol {
+                ans[0] = r_pow_di(x, -n - 1);
+                for k in 1..mm as usize {
+                    ans[k] = ans[k - 1] / x;
+                }
+                if n == 0 && kode == 2 {
+                    ans[0] += xln;
+                }
+                return 0;
+            }
+            let mut xm = yint + slope * f64::from(fn_);
+            let mx = xm as c_int + 1;
+            let xmin = f64::from(mx);
+            if n != 0 {
+                xm = -2.302 * rln - fmin2(0.0, xln);
+                let arg = fmin2(0.0, xm / f64::from(n));
+                let eps = arg.exp();
+                xm = if arg.abs() < 1.0e-3 { -arg } else { 1.0 - eps };
+                fln = x * xm / eps;
+                xm = xmin - x;
+                if xm > 7.0 && fln < 15.0 {
+                    series = true;
+                }
+            }
+            if !series {
+                xdmy = x;
+                xdmln = xln;
+                xinc = 0.0;
+                if x < xmin {
+                    nx = x as c_int;
+                    xinc = xmin - f64::from(nx);
+                    xdmy = x + xinc;
+                    xdmln = xdmy.ln();
+                }
+                t = f64::from(fn_) * xdmln;
+                let t1 = xdmln + xdmln;
+                let t2 = t + xdmln;
+                let tk = fmax2(t.abs(), fmax2(t1.abs(), t2.abs()));
+                if tk <= elim {
+                    return dpsifn_asymptotic(
+                        x, kode, ans, mm, nn, fn_, t, xdmy, xdmln, xinc, &mut trm, wdtol,
+                    );
+                }
+            }
+        }
+        if series {
+            break;
+        }
+        mm -= 1;
+        ans[mm as usize] = 0.0;
+        if mm == 0 {
+            return 0;
+        }
+    }
+    // A direct sum of the series for x small enough against the derivative's order.
+    nn = fln as c_int + 1;
+    let np = n + 1;
+    let t1 = f64::from(n + 1) * xln;
+    let mut t = (-t1).exp();
+    let mut s = t;
+    let mut den = x;
+    for slot in &mut trm[1..=nn as usize] {
+        den += 1.0;
+        *slot = den.powf(f64::from(-np));
+        s += *slot;
+    }
+    ans[0] = s;
+    if n == 0 && kode == 2 {
+        ans[0] = s + xln;
+    }
+    if mm != 1 {
+        let tol = wdtol / 5.0;
+        for answer in &mut ans[1..mm as usize] {
+            t /= x;
+            s = t;
+            let tols = t * tol;
+            den = x;
+            for slot in &mut trm[1..=nn as usize] {
+                den += 1.0;
+                *slot /= den;
+                s += *slot;
+                if *slot < tols {
+                    break;
+                }
+            }
+            *answer = s;
         }
     }
     0
 }
 
-/// The derivatives `d^k/dt^k cot(t)` for `k <= order` at `t`, from the polynomials in
-/// `c = cot(t)` that the rule `d/dt c = -(1 + c^2)` generates.
-fn cot_derivatives(t: f64, order: usize) -> Vec<f64> {
-    let c = t.cos() / t.sin();
-    let mut polynomial = vec![0.0, 1.0];
-    let mut values = Vec::with_capacity(order + 1);
-    for k in 0..=order {
-        values.push(
-            polynomial
-                .iter()
-                .rev()
-                .fold(0.0, |sum, coefficient| sum * c + coefficient),
-        );
-        if k == order {
-            break;
-        }
-        // P'(c) * -(1 + c^2)
-        let mut next = vec![0.0; polynomial.len() + 1];
-        for (power, coefficient) in polynomial.iter().enumerate().skip(1) {
-            let derivative = coefficient * power as f64;
-            next[power - 1] -= derivative;
-            next[power + 1] -= derivative;
-        }
-        polynomial = next;
+/// The asymptotic expansion of `dpsifn` at `xdmy = x + xinc` (Amos's label 10), recurring back
+/// to `x` and down to the lower derivatives.
+#[allow(clippy::too_many_arguments)]
+fn dpsifn_asymptotic(
+    x: f64,
+    kode: c_int,
+    ans: &mut [f64],
+    mm: c_int,
+    nn: c_int,
+    mut fn_: c_int,
+    t: f64,
+    xdmy: f64,
+    xdmln: f64,
+    xinc: f64,
+    trm: &mut [f64; 23],
+    wdtol: f64,
+) -> c_int {
+    let mut tss = (-t).exp();
+    let tt = 0.5 / xdmy;
+    let mut t1 = tt;
+    let tst = wdtol * tt;
+    if nn != 0 {
+        t1 = tt + 1.0 / f64::from(fn_);
     }
-    values
+    let rxsq = 1.0 / (xdmy * xdmy);
+    let ta = 0.5 * rxsq;
+    let mut t = f64::from(fn_ + 1) * ta;
+    let mut s = t * BERNOULLI[2];
+    if s.abs() >= tst {
+        let mut tk = 2.0;
+        for k in 4..=22 {
+            t = t
+                * ((tk + f64::from(fn_) + 1.0) / (tk + 1.0))
+                * ((tk + f64::from(fn_)) / (tk + 2.0))
+                * rxsq;
+            trm[k] = t * BERNOULLI[k - 1];
+            if trm[k].abs() < tst {
+                break;
+            }
+            s += trm[k];
+            tk += 2.0;
+        }
+    }
+    s = (s + t1) * tss;
+    let mut nx = 0;
+    // The terms of the backward recurrence, kept only when lower derivatives reuse them.
+    let mut trmr = Vec::new();
+    if xinc != 0.0 {
+        nx = xinc as usize;
+        let np = nn + 1;
+        if nx > 100 {
+            return 3;
+        }
+        if nn == 0 {
+            return dpsifn_small(x, kode, ans, s, nx, xdmy, xdmln);
+        }
+        let mut xm = xinc - 1.0;
+        let mut fx = x + xm;
+        // GNU R: "this loop should not be changed. fx is accurate when x is small".
+        for _ in 0..nx {
+            let term = fx.powf(f64::from(-np));
+            s += term;
+            if mm > 1 {
+                trmr.push(term);
+            }
+            xm -= 1.0;
+            fx = x + xm;
+        }
+    }
+    ans[mm as usize - 1] = s;
+    if fn_ == 0 {
+        return dpsifn_finish(x, kode, ans, s, xdmy, xdmln);
+    }
+    for j in 2..=mm as usize {
+        fn_ -= 1;
+        tss *= xdmy;
+        t1 = tt;
+        if fn_ != 0 {
+            t1 = tt + 1.0 / f64::from(fn_);
+        }
+        t = f64::from(fn_ + 1) * ta;
+        s = t * BERNOULLI[2];
+        if s.abs() >= tst {
+            let mut tk = f64::from(4 + fn_);
+            for slot in &mut trm[4..=22] {
+                *slot = *slot * f64::from(fn_ + 1) / tk;
+                if slot.abs() < tst {
+                    break;
+                }
+                s += *slot;
+                tk += 2.0;
+            }
+        }
+        s = (s + t1) * tss;
+        if xinc != 0.0 {
+            if fn_ == 0 {
+                return dpsifn_small(x, kode, ans, s, nx, xdmy, xdmln);
+            }
+            let mut xm = xinc - 1.0;
+            let mut fx = x + xm;
+            for slot in &mut trmr {
+                *slot *= fx;
+                s += *slot;
+                xm -= 1.0;
+                fx = x + xm;
+            }
+        }
+        ans[mm as usize - j] = s;
+        if fn_ == 0 {
+            return dpsifn_finish(x, kode, ans, s, xdmy, xdmln);
+        }
+    }
+    0
+}
+
+/// Amos's label 20: the digamma recurrence summed from the small end, which avoids the
+/// cancellation of GNU R's PR#13714.
+fn dpsifn_small(
+    x: f64,
+    kode: c_int,
+    ans: &mut [f64],
+    mut s: f64,
+    nx: usize,
+    xdmy: f64,
+    xdmln: f64,
+) -> c_int {
+    for i in 1..=nx {
+        s += 1.0 / (x + (nx - i) as f64);
+    }
+    dpsifn_finish(x, kode, ans, s, xdmy, xdmln)
+}
+
+/// Amos's label 30.
+fn dpsifn_finish(x: f64, kode: c_int, ans: &mut [f64], s: f64, xdmy: f64, xdmln: f64) -> c_int {
+    if kode != 2 {
+        ans[0] = s - xdmln;
+    } else if xdmy != x {
+        ans[0] = s - (xdmy / x).ln();
+    }
+    0
 }
 
 /// The `n`-th derivative of the digamma function.
@@ -3111,7 +3307,7 @@ fn qnorm_tail_positions(
 }
 
 /// The central region across AVX lanes, and the tail positions from a comparison mask per four
-/// probabilities, so a block of central values costs one test.
+/// probabilities.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx")]
 fn qnorm_central_avx(probabilities: &[f64], out: &mut [f64], tails: &mut [u16]) -> usize {
@@ -3132,13 +3328,14 @@ fn qnorm_central_avx(probabilities: &[f64], out: &mut [f64], tails: &mut [u16]) 
         // `!(|p - 0.5| <= 0.425)`, where the ordered comparison is false for NaN.
         let distance = _mm256_andnot_pd(sign, _mm256_sub_pd(probability, half));
         let central = _mm256_movemask_pd(_mm256_cmp_pd::<_CMP_LE_OQ>(distance, limit));
-        let mut outside = !central & 0b1111;
-        while outside != 0 {
+        // Branch-free, as in `qnorm_tail_positions`: about one block in two holds a tail, at
+        // random, so a loop over the set bits would mispredict.
+        let outside = !central;
+        for lane in 0..LANES {
             if let Some(slot) = tails.get_mut(count) {
-                *slot = (start + outside.trailing_zeros() as usize) as u16;
+                *slot = (start + lane) as u16;
             }
-            count += 1;
-            outside &= outside - 1;
+            count += ((outside >> lane) & 1) as usize;
         }
     }
     qnorm_tail_positions(&probabilities[blocks..], blocks, tails, count)
@@ -8981,7 +9178,9 @@ thread_local! {
     static SIGNRANK_COUNTS: RefCell<Option<(usize, Rc<[f64]>)>> = const { RefCell::new(None) };
 }
 
-/// The number of subsets of `1..=n` with each sum from 0 to `n (n + 1) / 2`.
+/// The number of subsets of `1..=n` with each sum from 0 to the middle sum `n (n + 1) / 4`.
+/// The counts are symmetric about the middle, so, as in GNU R, only the lower half is built
+/// and [`signrank_count`] reflects a larger sum into it.
 fn signrank_counts(n: usize) -> Rc<[f64]> {
     debug_assert!(signrank_valid(n as f64));
     if let Some(counts) = SIGNRANK_COUNTS.with_borrow(|table| {
@@ -8992,19 +9191,30 @@ fn signrank_counts(n: usize) -> Rc<[f64]> {
     }) {
         return counts;
     }
-    let total = n * (n + 1) / 2;
-    let mut counts = vec![0.0; total + 1];
+    let middle = n * (n + 1) / 4;
+    let mut counts = vec![0.0; middle + 1];
     counts[0] = 1.0;
-    let mut reach = 0;
-    for j in 1..=n {
-        reach += j;
-        for i in (j..=reach).rev() {
-            counts[i] += counts[i - j];
+    for j in 1..=n.min(middle) {
+        // Adding the counts `j` below, from the top down, in blocks of at most `j` sums, so a
+        // block never reads what it writes and the additions vectorize.
+        let mut end = (j * (j + 1) / 2).min(middle) + 1;
+        while end > j {
+            let start = (end - j.min(64)).max(j);
+            let (low, high) = counts.split_at_mut(start);
+            for (count, lower) in high[..end - start].iter_mut().zip(&low[start - j..]) {
+                *count += *lower;
+            }
+            end = start;
         }
     }
     let counts: Rc<[f64]> = counts.into();
     SIGNRANK_COUNTS.with_borrow_mut(|table| *table = Some((n, Rc::clone(&counts))));
     counts
+}
+
+/// The number of subsets of `1..=n` that sum to `sum`, at most `n (n + 1) / 2`.
+fn signrank_count(counts: &[f64], n: usize, sum: usize) -> f64 {
+    counts[sum.min(n * (n + 1) / 2 - sum)]
 }
 
 /// Releases the signed rank counts, as the GNU R wrappers do on exit.
@@ -9027,8 +9237,9 @@ pub fn dsignrank(x: f64, n: f64, log: bool) -> f64 {
     if x < 0.0 || x > n * (n + 1.0) / 2.0 {
         return d0(log);
     }
-    let count = signrank_counts(n as usize)[x as usize];
-    d_exp(count.ln() - n * M_LN2, log)
+    let n = n as usize;
+    let count = signrank_count(&signrank_counts(n), n, x as usize);
+    d_exp(count.ln() - n as f64 * M_LN2, log)
 }
 
 pub fn psignrank(x: f64, n: f64, lower: bool, log: bool) -> f64 {
@@ -9094,14 +9305,16 @@ pub fn qsignrank(x: f64, n: f64, lower: bool, log: bool) -> f64 {
     } else {
         x
     };
-    let counts = signrank_counts(n as usize);
+    let size = n as usize;
+    let total = size * (size + 1) / 2;
+    let counts = signrank_counts(size);
     let f = (-n * M_LN2).exp();
     let mut p = 0.0;
     let mut q = 0usize;
     if x <= 0.5 {
         x -= 10.0 * DBL_EPSILON;
-        while q + 1 < counts.len() {
-            p += counts[q] * f;
+        while q < total {
+            p += signrank_count(&counts, size, q) * f;
             if p >= x {
                 break;
             }
@@ -9110,8 +9323,8 @@ pub fn qsignrank(x: f64, n: f64, lower: bool, log: bool) -> f64 {
         q as f64
     } else {
         x = 1.0 - x + 10.0 * DBL_EPSILON;
-        while q + 1 < counts.len() {
-            p += counts[q] * f;
+        while q < total {
+            p += signrank_count(&counts, size, q) * f;
             if p > x {
                 break;
             }
@@ -9121,415 +9334,30 @@ pub fn qsignrank(x: f64, n: f64, lower: bool, log: bool) -> f64 {
     }
 }
 
-// Bessel functions. I and K come together from Temme's series (x < 2) or Steed's continued
-// fraction (x >= 2) for K at an order in [-1/2, 1/2], the continued fraction for I'/I, and
-// the Wronskian; J and Y likewise (Temme 1975, Barnett and Thompson 1986). The scaled forms
-// exp(-x) I and exp(x) K come out directly, so large arguments do not overflow on the way.
+// Bessel functions: GNU R's ports of Cody's netlib routines RIBESL, RJBESL, RKBESL and RYBESL,
+// with their evaluation order, so the results match GNU R's bit for bit. Each routine fills a
+// work array with the orders `alpha, alpha + 1, ..., alpha + nb - 1` for a fractional `alpha`,
+// and the wrappers return its last entry.
 
-/// The Taylor coefficients of `1 / gamma(1 + x)` at zero.
-const RECIPROCAL_GAMMA: [f64; 27] = [
-    1.0,
-    0.5772156649015329,
-    -0.6558780715202539,
-    -0.04200263503409524,
-    0.16653861138229148,
-    -0.04219773455554433,
-    -0.009621971527876973,
-    0.0072189432466631,
-    -0.0011651675918590652,
-    -0.00021524167411495098,
-    0.0001280502823881162,
-    -2.013485478078824e-05,
-    -1.2504934821426706e-06,
-    1.133027231981696e-06,
-    -2.056338416977607e-07,
-    6.116095104481416e-09,
-    5.002007644469223e-09,
-    -1.18127457048702e-09,
-    1.0434267116911005e-10,
-    7.782263439905071e-12,
-    -3.696805618642206e-12,
-    5.100370287454476e-13,
-    -2.0583260535665066e-14,
-    -5.348122539423018e-15,
-    1.2267786282382608e-15,
-    -1.1812593016974588e-16,
-    1.1866922547516004e-18,
-];
+const BESSEL_NSIG: i64 = 16;
+const BESSEL_ENSIG: f64 = 1e16;
+const BESSEL_RTNSIG: f64 = 1e-4;
+const BESSEL_ENMTEN: f64 = 8.9e-308;
+const BESSEL_ENTEN: f64 = 1e308;
+/// Above this argument, unscaled `I` is infinite.
+const BESSEL_EXPARG: f64 = 709.0;
+const BESSEL_XLRG_IJ: f64 = 1e5;
+const BESSEL_XLRG_Y: f64 = 1e8;
+const BESSEL_THRESH_Y: f64 = 16.0;
+/// The largest argument with a nonzero unscaled `K`.
+const BESSEL_XMAX_K: f64 = 705.342;
+const BESSEL_SQXMIN_K: f64 = 1.49e-154;
+/// Below this, `sin(x) / x` rounds to one.
+const BESSEL_EPS_SINC: f64 = 2.149119e-8;
+/// `2^-900`, by which `I`'s backward recurrence rescales.
+const TWO_POW_MINUS_900: f64 = f64::from_bits(123 << 52);
 
-/// Temme's auxiliary functions for `|mu| <= 1/2`: `(1/gamma(1-mu) - 1/gamma(1+mu)) / (2 mu)`,
-/// `(1/gamma(1-mu) + 1/gamma(1+mu)) / 2`, `1/gamma(1+mu)` and `1/gamma(1-mu)`.
-fn temme_gammas(mu: f64) -> (f64, f64, f64, f64) {
-    let mut odd = 0.0;
-    let mut even = 0.0;
-    let mut power = 1.0;
-    for (k, coefficient) in RECIPROCAL_GAMMA.iter().enumerate() {
-        if k % 2 == 0 {
-            even += coefficient * power;
-        } else {
-            odd += coefficient * power;
-        }
-        if k % 2 == 1 {
-            power *= mu * mu;
-        }
-    }
-    // 1/gamma(1+mu) = even + mu * odd, 1/gamma(1-mu) = even - mu * odd.
-    let plus = even + mu * odd;
-    let minus = even - mu * odd;
-    (-odd, even, plus, minus)
-}
-
-const BESSEL_EPS: f64 = 1e-16;
-const BESSEL_FPMIN: f64 = 1e-300;
-const BESSEL_MAXIT: usize = 10_000_000;
-/// Downward recurrences rescale past this magnitude so that a high order does not overflow.
-const BESSEL_BIG: f64 = 1e250;
-
-/// `exp(-x) I_nu(x)` and `k_factor * exp(x) K_nu(x)` for `x > 0` and `nu >= 0`, by the
-/// asymptotic expansion where `x` is large against `nu^2` and by Temme's method elsewhere.
-/// Passing `k_factor = exp(-x)` gives `K_nu(x)` itself without forming the scaled value, which
-/// overflows for a high order before the unscaled one does.
-fn bessel_ik_scaled(x: f64, nu: f64, k_factor: f64) -> (f64, f64) {
-    if x >= 50.0 && x >= 2.0 * nu * nu {
-        let (i, k) = bessel_ik_asymptotic(x, nu);
-        return (i, k * k_factor);
-    }
-    bessel_ik_temme(x, nu, k_factor)
-}
-
-/// `exp(-x) I_nu(x) ~ (2 pi x)^(-1/2) sum (-1)^k a_k / x^k` and
-/// `exp(x) K_nu(x) ~ (pi / (2 x))^(1/2) sum a_k / x^k`, with
-/// `a_k = prod_{j <= k} (4 nu^2 - (2j - 1)^2) / (k! 8^k)`.
-fn bessel_ik_asymptotic(x: f64, nu: f64) -> (f64, f64) {
-    let mu = 4.0 * nu * nu;
-    let z8 = 8.0 * x;
-    let mut term: f64 = 1.0;
-    let mut i_sum = 1.0;
-    let mut k_sum = 1.0;
-    let mut k = 1.0;
-    loop {
-        let next = term * (mu - (2.0 * k - 1.0) * (2.0 * k - 1.0)) / (k * z8);
-        if next.abs() > term.abs() || next == 0.0 {
-            break;
-        }
-        term = next;
-        k_sum += term;
-        i_sum += if (k as i64) % 2 == 1 { -term } else { term };
-        if term.abs() < DBL_EPSILON * 1e-3 {
-            break;
-        }
-        k += 1.0;
-    }
-    (
-        i_sum / (2.0 * M_PI * x).sqrt(),
-        k_sum * (M_PI / (2.0 * x)).sqrt(),
-    )
-}
-
-fn bessel_ik_temme(x: f64, nu: f64, k_factor: f64) -> (f64, f64) {
-    let nl = (nu + 0.5) as usize;
-    let xmu = nu - nl as f64;
-    let xmu2 = xmu * xmu;
-    let xi = 1.0 / x;
-    let xi2 = 2.0 * xi;
-    let mut h = nu * xi;
-    if h < BESSEL_FPMIN {
-        h = BESSEL_FPMIN;
-    }
-    let mut b = xi2 * nu;
-    let mut d = 0.0;
-    let mut c = h;
-    for _ in 0..BESSEL_MAXIT {
-        b += xi2;
-        d = 1.0 / (b + d);
-        c = b + 1.0 / c;
-        let del = c * d;
-        h *= del;
-        // At tiny x the terms overflow; callers then use only the parts that do not need
-        // the ratio.
-        if !((del - 1.0).abs() >= BESSEL_EPS) {
-            break;
-        }
-    }
-    let mut ril = BESSEL_FPMIN;
-    let mut ripl = h * ril;
-    let mut ril1 = ril;
-    let mut fact = nu * xi;
-    for _ in 0..nl {
-        let ritemp = fact * ril + ripl;
-        fact -= xi;
-        ripl = fact * ritemp + ril;
-        ril = ritemp;
-        if ril.abs() > BESSEL_BIG {
-            ril /= BESSEL_BIG;
-            ripl /= BESSEL_BIG;
-            ril1 /= BESSEL_BIG;
-        }
-    }
-    let f = ripl / ril;
-    let (rkmu, rk1);
-    if x < 2.0 {
-        let x2 = 0.5 * x;
-        let pimu = M_PI * xmu;
-        let fact = if pimu.abs() < BESSEL_EPS {
-            1.0
-        } else {
-            pimu / pimu.sin()
-        };
-        let d = -x2.ln();
-        let e = xmu * d;
-        let fact2 = if e.abs() < BESSEL_EPS {
-            1.0
-        } else {
-            e.sinh() / e
-        };
-        let (gam1, gam2, gampl, gammi) = temme_gammas(xmu);
-        let mut ff = fact * (gam1 * e.cosh() + gam2 * fact2 * d);
-        let mut sum = ff;
-        let e = e.exp();
-        let mut p = 0.5 * e / gampl;
-        let mut q = 0.5 / (e * gammi);
-        let mut c = 1.0;
-        let d = x2 * x2;
-        let mut sum1 = p;
-        let mut i = 1.0;
-        loop {
-            ff = (i * ff + p + q) / (i * i - xmu2);
-            c *= d / i;
-            p /= i - xmu;
-            q /= i + xmu;
-            let del = c * ff;
-            sum += del;
-            sum1 += c * (p - i * ff);
-            if del.abs() < sum.abs() * BESSEL_EPS || i > 1000.0 {
-                break;
-            }
-            i += 1.0;
-        }
-        let scale = x.exp();
-        rkmu = sum * scale;
-        rk1 = sum1 * xi2 * scale;
-    } else {
-        let mut b = 2.0 * (1.0 + x);
-        let mut d = 1.0 / b;
-        let mut h = d;
-        let mut delh = d;
-        let mut q1 = 0.0;
-        let mut q2 = 1.0;
-        let a1 = 0.25 - xmu2;
-        let mut q = a1;
-        let mut c = a1;
-        let mut a = -a1;
-        let mut s = 1.0 + q * delh;
-        for i in 2..BESSEL_MAXIT {
-            a -= 2.0 * (i - 1) as f64;
-            c = -a * c / i as f64;
-            let qnew = (q1 - b * q2) / a;
-            q1 = q2;
-            q2 = qnew;
-            q += c * qnew;
-            b += 2.0;
-            d = 1.0 / (b + a * d);
-            delh *= b * d - 1.0;
-            h += delh;
-            let dels = q * delh;
-            s += dels;
-            if (dels / s).abs() < BESSEL_EPS {
-                break;
-            }
-        }
-        h *= a1;
-        rkmu = (M_PI / (2.0 * x)).sqrt() / s;
-        rk1 = rkmu * (xmu + x + 0.5 - h) * xi;
-    }
-    let rkmup = xmu * xi * rkmu - rk1;
-    let rimu = xi / (f * rkmu - rkmup);
-    let rinu = (rimu * ril1) / ril;
-    // The upward recurrence is linear, so scaling its two starting values scales every order.
-    let mut rkmu = rkmu * k_factor;
-    let mut rk1 = rk1 * k_factor;
-    for i in 1..=nl {
-        let rktemp = (xmu + i as f64) * xi2 * rk1 + rkmu;
-        rkmu = rk1;
-        rk1 = rktemp;
-    }
-    (rinu, rkmu)
-}
-
-/// `J_nu(x)` and `Y_nu(x)` for `x > 0` and `nu >= 0`.
-fn bessel_jy(x: f64, nu: f64) -> (f64, f64) {
-    let nl = if x < 2.0 {
-        (nu + 0.5) as usize
-    } else {
-        (nu - x + 1.5).max(0.0) as usize
-    };
-    let xmu = nu - nl as f64;
-    let xmu2 = xmu * xmu;
-    let xi = 1.0 / x;
-    let xi2 = 2.0 * xi;
-    let w = xi2 / M_PI;
-    let mut isign = 1.0;
-    let mut h = nu * xi;
-    if h < BESSEL_FPMIN {
-        h = BESSEL_FPMIN;
-    }
-    let mut b = xi2 * nu;
-    let mut d = 0.0;
-    let mut c = h;
-    for _ in 0..BESSEL_MAXIT {
-        b += xi2;
-        d = b - d;
-        if d.abs() < BESSEL_FPMIN {
-            d = BESSEL_FPMIN;
-        }
-        c = b - 1.0 / c;
-        if c.abs() < BESSEL_FPMIN {
-            c = BESSEL_FPMIN;
-        }
-        d = 1.0 / d;
-        let del = c * d;
-        h *= del;
-        if d < 0.0 {
-            isign = -isign;
-        }
-        if !((del - 1.0).abs() >= BESSEL_EPS) {
-            break;
-        }
-    }
-    let mut rjl = isign * BESSEL_FPMIN;
-    let mut rjpl = h * rjl;
-    let mut rjl1 = rjl;
-    let mut fact = nu * xi;
-    for _ in 0..nl {
-        let rjtemp = fact * rjl + rjpl;
-        fact -= xi;
-        rjpl = fact * rjtemp - rjl;
-        rjl = rjtemp;
-        if rjl.abs() > BESSEL_BIG {
-            rjl /= BESSEL_BIG;
-            rjpl /= BESSEL_BIG;
-            rjl1 /= BESSEL_BIG;
-        }
-    }
-    if rjl == 0.0 {
-        rjl = BESSEL_EPS;
-    }
-    let f = rjpl / rjl;
-    let (rjmu, mut rymu, mut ry1);
-    if x < 2.0 {
-        let x2 = 0.5 * x;
-        let pimu = M_PI * xmu;
-        let fact = if pimu.abs() < BESSEL_EPS {
-            1.0
-        } else {
-            pimu / pimu.sin()
-        };
-        let d = -x2.ln();
-        let e = xmu * d;
-        let fact2 = if e.abs() < BESSEL_EPS {
-            1.0
-        } else {
-            e.sinh() / e
-        };
-        let (gam1, gam2, gampl, gammi) = temme_gammas(xmu);
-        let mut ff = 2.0 / M_PI * fact * (gam1 * e.cosh() + gam2 * fact2 * d);
-        let e = e.exp();
-        let mut p = e / (gampl * M_PI);
-        let mut q = 1.0 / (e * M_PI * gammi);
-        let pimu2 = 0.5 * pimu;
-        let fact3 = if pimu2.abs() < BESSEL_EPS {
-            1.0
-        } else {
-            pimu2.sin() / pimu2
-        };
-        let r = M_PI * pimu2 * fact3 * fact3;
-        let mut c = 1.0;
-        let d = -x2 * x2;
-        let mut sum = ff + r * q;
-        let mut sum1 = p;
-        let mut i = 1.0;
-        loop {
-            ff = (i * ff + p + q) / (i * i - xmu2);
-            c *= d / i;
-            p /= i - xmu;
-            q /= i + xmu;
-            let del = c * (ff + r * q);
-            sum += del;
-            let del1 = c * p - i * del;
-            sum1 += del1;
-            if del.abs() < (1.0 + sum.abs()) * BESSEL_EPS || i > 1000.0 {
-                break;
-            }
-            i += 1.0;
-        }
-        rymu = -sum;
-        ry1 = -sum1 * xi2;
-        let rymup = xmu * xi * rymu - ry1;
-        rjmu = w / (rymup - f * rymu);
-    } else {
-        let mut a = 0.25 - xmu2;
-        let mut p = -0.5 * xi;
-        let mut q = 1.0;
-        let br = 2.0 * x;
-        let mut bi = 2.0;
-        let mut fact = a * xi / (p * p + q * q);
-        let mut cr = br + q * fact;
-        let mut ci = bi + p * fact;
-        let mut den = br * br + bi * bi;
-        let mut dr = br / den;
-        let mut di = -bi / den;
-        let mut dlr = cr * dr - ci * di;
-        let mut dli = cr * di + ci * dr;
-        let mut temp = p * dlr - q * dli;
-        q = p * dli + q * dlr;
-        p = temp;
-        for i in 2..BESSEL_MAXIT {
-            a += 2.0 * (i - 1) as f64;
-            bi += 2.0;
-            dr = a * dr + br;
-            di = a * di + bi;
-            if dr.abs() + di.abs() < BESSEL_FPMIN {
-                dr = BESSEL_FPMIN;
-            }
-            fact = a / (cr * cr + ci * ci);
-            cr = br + cr * fact;
-            ci = bi - ci * fact;
-            if cr.abs() + ci.abs() < BESSEL_FPMIN {
-                cr = BESSEL_FPMIN;
-            }
-            den = dr * dr + di * di;
-            dr /= den;
-            di /= -den;
-            dlr = cr * dr - ci * di;
-            dli = cr * di + ci * dr;
-            temp = p * dlr - q * dli;
-            q = p * dli + q * dlr;
-            p = temp;
-            if (dlr - 1.0).abs() + dli.abs() < BESSEL_EPS {
-                break;
-            }
-        }
-        let gam = (p - f) / q;
-        let magnitude = (w / ((p - f) * gam + q)).sqrt();
-        rjmu = if rjl < 0.0 { -magnitude } else { magnitude };
-        rymu = rjmu * gam;
-        let rymup = rymu * (p + q / gam);
-        ry1 = xmu * xi * rymu - rymup;
-    }
-    let fact = rjmu / rjl;
-    let rj = rjl1 * fact;
-    for i in 1..=nl {
-        let rytemp = (xmu + i as f64) * xi2 * ry1 - rymu;
-        rymu = ry1;
-        ry1 = rytemp;
-        if !rymu.is_finite() {
-            break;
-        }
-    }
-    (rj, rymu)
-}
-
-/// GNU R stops at orders this large, where its recurrences would need too much memory.
+/// GNU R stops `Y` at orders this large, and `J` too before R 4.6.2.
 const BESSEL_NU_MAX: f64 = 1e7;
 /// R 4.6.2 lets `J`, `I` and `K` go to this order (`M_bessel_j_max_alpha` and
 /// `M_bessel_ik_max_alpha`), and warns beyond it.
@@ -9538,8 +9366,6 @@ const BESSEL_NU_MAX_WIDE: f64 = 1e9;
 fn bessel_limits_widened() -> bool {
     r_at_least_release(4, 6, 2)
 }
-/// Above this argument, unscaled `I` is reported as infinite, as GNU R does.
-const BESSEL_EXPARG: f64 = 709.0;
 
 pub fn bessel_i(x: f64, alpha: f64, expo: f64) -> f64 {
     if x.is_nan() || alpha.is_nan() {
@@ -9549,95 +9375,56 @@ pub fn bessel_i(x: f64, alpha: f64, expo: f64) -> f64 {
         range_warning("bessel_i");
         return f64::NAN;
     }
-    let scaled = expo as i32 == 2;
-    if alpha > BESSEL_NU_MAX_WIDE && bessel_limits_widened() {
-        warning(format!(
-            "besselI(x, nu): nu={} > max_alpha_i (= {}): too large for bessel_i() algorithm",
-            format_g(alpha),
-            format_g(BESSEL_NU_MAX_WIDE)
-        ));
-        return f64::NAN;
-    }
+    let ize = expo as i32;
+    let na = alpha.floor();
     if alpha < 0.0 {
-        let na = alpha.floor();
         // Abramowitz and Stegun 9.6.2 and 9.6.6.
         return bessel_i(x, -alpha, expo)
             + if alpha == na {
                 0.0
             } else {
-                bessel_k(x, -alpha, expo) * if scaled { 2.0 * (-2.0 * x).exp() } else { 2.0 } / M_PI
+                bessel_k(x, -alpha, expo)
+                    * if ize == 1 {
+                        2.0
+                    } else {
+                        2.0 * (-2.0 * x).exp()
+                    }
+                    / M_PI
                     * sinpi_(-alpha)
             };
     }
-    if x == 0.0 {
-        return if alpha == 0.0 { 1.0 } else { 0.0 };
-    }
-    if !scaled && x > BESSEL_EXPARG {
-        return f64::INFINITY;
-    }
-    if x == f64::INFINITY {
-        return if scaled { 0.0 } else { f64::INFINITY };
-    }
-    if x <= 15.0 || x * x <= 50.0 * (alpha + 1.0) {
-        let i = bessel_i_series(x, alpha);
-        return if scaled { i * (-x).exp() } else { i };
-    }
-    let (i, _) = bessel_ik_scaled(x, alpha, 1.0);
-    if scaled { i } else { i * x.exp() }
-}
-
-/// `I_nu(x)` by its power series, whose terms are all positive. The Wronskian route loses
-/// digits to cancellation at small `x`.
-fn bessel_i_series(x: f64, nu: f64) -> f64 {
-    let half = 0.5 * x;
-    let mut prefactor = 0.0;
-    if nu + 1.0 < 170.0 {
-        prefactor = half.powf(nu) / gammafn(nu + 1.0);
-    }
-    if !(prefactor.is_finite() && prefactor >= DBL_MIN) {
-        prefactor = (nu * half.ln() - lgammafn(nu + 1.0)).exp();
-    }
-    let quarter_square = half * half;
-    let mut term = 1.0;
-    let mut sum = 1.0;
-    let mut k = 1.0;
-    loop {
-        term *= quarter_square / (k * (nu + k));
-        sum += term;
-        if !(term >= DBL_EPSILON * 0.25 * sum) {
-            break;
+    if alpha > BESSEL_NU_MAX_WIDE {
+        // GNU R before 4.6.2 fails to allocate its work array here instead.
+        if bessel_limits_widened() {
+            warning(format!(
+                "besselI(x, nu): nu={} > max_alpha_i (= {}): too large for bessel_i() algorithm",
+                format_g(alpha),
+                format_g(BESSEL_NU_MAX_WIDE)
+            ));
         }
-        k += 1.0;
-    }
-    prefactor * sum
-}
-
-pub fn bessel_k(x: f64, alpha: f64, expo: f64) -> f64 {
-    if x.is_nan() || alpha.is_nan() {
-        return x + alpha;
-    }
-    if x < 0.0 {
-        range_warning("bessel_k");
         return f64::NAN;
     }
-    let alpha = alpha.abs();
-    if alpha > BESSEL_NU_MAX_WIDE && bessel_limits_widened() {
-        warning(format!(
-            "besselK(x, nu): |nu|={} > max_alpha_k (= {}): too large for bessel_k() algorithm",
-            format_g(alpha),
-            format_g(BESSEL_NU_MAX_WIDE)
-        ));
-        return f64::NAN;
+    let nb = 1 + na as i64;
+    let alpha = alpha - (nb - 1) as f64;
+    let Some((ncalc, value)) = with_bessel_work(nb, |bi| i_bessel(x, alpha, ize, bi)) else {
+        return bessel_allocation_error("bessel_i");
+    };
+    if ncalc != nb {
+        if ncalc < 0 {
+            warning(format!(
+                "bessel_i({}): ncalc (={ncalc}) != nb (={nb}); alpha={}. Arg. out of range?",
+                format_g(x),
+                format_g(alpha)
+            ));
+        } else {
+            warning(format!(
+                "bessel_i({},nu={}): precision lost in result",
+                format_g(x),
+                format_g(alpha + (nb - 1) as f64)
+            ));
+        }
     }
-    let scaled = expo as i32 == 2;
-    if x == 0.0 {
-        return f64::INFINITY;
-    }
-    if x == f64::INFINITY {
-        return 0.0;
-    }
-    let k_factor = if scaled { 1.0 } else { (-x).exp() };
-    bessel_ik_scaled(x, alpha, k_factor).1
+    value
 }
 
 pub fn bessel_j(x: f64, alpha: f64) -> f64 {
@@ -9677,182 +9464,71 @@ pub fn bessel_j(x: f64, alpha: f64) -> f64 {
         ));
         return f64::NAN;
     }
-    if x == 0.0 {
-        return if alpha == 0.0 { 1.0 } else { 0.0 };
-    }
-    if x == f64::INFINITY {
-        return 0.0;
-    }
-    let value = bessel_jy_any(x, alpha).0;
-    if value == 0.0 && x > 0.0 {
-        warning(format!(
-            "bessel_j({},nu={}): precision lost in result",
-            format_g(x),
-            format_g(alpha)
-        ));
+    let nb = 1 + na as i64;
+    let alpha = alpha - (nb - 1) as f64;
+    let Some((ncalc, value)) = with_bessel_work(nb, |b| j_bessel(x, alpha, b)) else {
+        return bessel_allocation_error("bessel_j");
+    };
+    if ncalc != nb {
+        if ncalc < 0 {
+            warning(format!(
+                "bessel_j({}): ncalc (={ncalc}) != nb (={nb}); alpha={}. Arg. out of range?",
+                format_g(x),
+                format_g(alpha)
+            ));
+        } else {
+            warning(format!(
+                "bessel_j({},nu={}): precision lost in result",
+                format_g(x),
+                format_g(alpha + (nb - 1) as f64)
+            ));
+        }
     }
     value
 }
 
-/// `J_nu(x)` and `Y_nu(x)`. Below `x = 20` the continued fractions of `bessel_jy` serve,
-/// with the power series for `J` where it has no cancellation. From 20 on, Hankel's
-/// expansion gives the two orders nearest zero exactly, and the three-term recurrence carries
-/// them up: upwards for `Y` always, and for `J` while the order stays below `x`, where the
-/// recurrence neither grows nor damps errors. Above `x`, `J` recurs downwards from Lentz's
-/// continued fraction for `J_nu / J_(nu-1)` and is normalized where the two ranges meet.
-fn bessel_jy_any(x: f64, nu: f64) -> (f64, f64) {
-    if x < 20.0 {
-        let (j, y) = bessel_jy(x, nu);
-        if x * x < 2.0 * (nu + 1.0) {
-            return (bessel_j_series(x, nu), y);
-        }
-        return (j, y);
+pub fn bessel_k(x: f64, alpha: f64, expo: f64) -> f64 {
+    if x.is_nan() || alpha.is_nan() {
+        return x + alpha;
     }
-    let n = nu.floor() as usize;
-    let mu = nu - n as f64;
-    let (j0, y0) = bessel_jy_hankel(x, mu);
-    let (j1, y1) = bessel_jy_hankel(x, mu + 1.0);
-    let upward = |mut previous: f64, mut current: f64, steps: usize| {
-        if steps == 0 {
-            return (previous, current);
+    if x < 0.0 {
+        range_warning("bessel_k");
+        return f64::NAN;
+    }
+    let alpha = alpha.abs();
+    if alpha > BESSEL_NU_MAX_WIDE {
+        // GNU R before 4.6.2 fails to allocate its work array here instead.
+        if bessel_limits_widened() {
+            warning(format!(
+                "besselK(x, nu): |nu|={} > max_alpha_k (= {}): too large for bessel_k() algorithm",
+                format_g(alpha),
+                format_g(BESSEL_NU_MAX_WIDE)
+            ));
         }
-        for k in 1..steps {
-            let next = 2.0 * (mu + k as f64) / x * current - previous;
-            previous = current;
-            current = next;
-            if !current.is_finite() {
-                break;
-            }
-        }
-        (previous, current)
+        return f64::NAN;
+    }
+    let ize = expo as i32;
+    let nb = 1 + alpha.floor() as i64;
+    let alpha = alpha - (nb - 1) as f64;
+    let Some((ncalc, value)) = with_bessel_work(nb, |bk| k_bessel(x, alpha, ize, bk)) else {
+        return bessel_allocation_error("bessel_k");
     };
-    let y = if n == 0 { y0 } else { upward(y0, y1, n).1 };
-    if nu <= x {
-        let j = if n == 0 { j0 } else { upward(j0, j1, n).1 };
-        return (j, y);
-    }
-    // The meeting point m: the largest order mu + m not above x.
-    let m = (x - mu).floor() as usize;
-    let (jm, jm1) = if m == 0 {
-        (j0, j1)
-    } else {
-        upward(j0, j1, m + 1)
-    };
-    // J_nu / J_(nu-1) = 1 / (2 nu/x - 1 / (2 (nu+1)/x - ...)) by modified Lentz.
-    let mut f = 2.0 * nu / x;
-    if f == 0.0 {
-        f = BESSEL_FPMIN;
-    }
-    let mut c = f;
-    let mut d = 0.0;
-    let mut k = nu + 1.0;
-    for _ in 0..BESSEL_MAXIT {
-        let b = 2.0 * k / x;
-        d = b - d;
-        if d.abs() < BESSEL_FPMIN {
-            d = BESSEL_FPMIN;
-        }
-        c = b - 1.0 / c;
-        if c.abs() < BESSEL_FPMIN {
-            c = BESSEL_FPMIN;
-        }
-        d = 1.0 / d;
-        let delta = c * d;
-        f *= delta;
-        if (delta - 1.0).abs() < BESSEL_EPS {
-            break;
-        }
-        k += 1.0;
-    }
-    let ratio = 1.0 / f;
-    // Unnormalized J from order nu down to mu + m, rescaled so it cannot overflow; `top` is
-    // the (rescaled) value at order nu.
-    let mut top = 1.0;
-    let mut upper = 1.0;
-    let mut lower = 1.0 / ratio;
-    let mut order = nu - 1.0;
-    while order > mu + m as f64 + 0.5 {
-        let next = 2.0 * order / x * lower - upper;
-        upper = lower;
-        lower = next;
-        order -= 1.0;
-        if lower.abs() > BESSEL_BIG {
-            lower /= BESSEL_BIG;
-            upper /= BESSEL_BIG;
-            top /= BESSEL_BIG;
+    if ncalc != nb {
+        if ncalc < 0 {
+            warning(format!(
+                "bessel_k({}): ncalc (={ncalc}) != nb (={nb}); alpha={}. Arg. out of range?",
+                format_g(x),
+                format_g(alpha)
+            ));
+        } else {
+            warning(format!(
+                "bessel_k({},nu={}): precision lost in result",
+                format_g(x),
+                format_g(alpha + (nb - 1) as f64)
+            ));
         }
     }
-    // The least-squares fit of the computed pair to the true one, scaled so no square
-    // overflows.
-    let scale = lower.abs().max(upper.abs());
-    let (lower, upper) = (lower / scale, upper / scale);
-    let fact = (jm * lower + jm1 * upper) / (lower * lower + upper * upper);
-    (top / scale * fact, y)
-}
-
-/// `J_nu(x)` by its power series, for `x^2 / 4` small against `nu + 1`, where the terms
-/// shrink from the first.
-fn bessel_j_series(x: f64, nu: f64) -> f64 {
-    let half = 0.5 * x;
-    let mut prefactor = 0.0;
-    if nu + 1.0 < 170.0 {
-        prefactor = half.powf(nu) / gammafn(nu + 1.0);
-    }
-    if !(prefactor.is_finite() && prefactor >= DBL_MIN) {
-        prefactor = (nu * half.ln() - lgammafn(nu + 1.0)).exp();
-    }
-    let quarter_square = half * half;
-    let mut term = 1.0;
-    let mut sum = 1.0;
-    let mut k = 1.0;
-    loop {
-        term *= -quarter_square / (k * (nu + k));
-        sum += term;
-        if !(term.abs() >= DBL_EPSILON * 0.25 * sum.abs()) {
-            break;
-        }
-        k += 1.0;
-    }
-    prefactor * sum
-}
-
-/// Hankel's asymptotic expansion of `J_nu(x)` and `Y_nu(x)` for `x` large against `nu^2`.
-fn bessel_jy_hankel(x: f64, nu: f64) -> (f64, f64) {
-    let mu = 4.0 * nu * nu;
-    let z8 = 8.0 * x;
-    let mut p = 1.0;
-    let mut q = 0.0;
-    let mut term: f64 = 1.0;
-    let mut k = 1.0;
-    loop {
-        let next = term * (mu - (2.0 * k - 1.0) * (2.0 * k - 1.0)) / (k * z8);
-        if next.abs() > term.abs() || next == 0.0 {
-            break;
-        }
-        term = next;
-        // t_k contributes to Q for odd k and to P for even k, with alternating signs.
-        match (k as i64) % 4 {
-            1 => q += term,
-            2 => p -= term,
-            3 => q -= term,
-            _ => p += term,
-        }
-        if term.abs() < DBL_EPSILON * 1e-3 {
-            break;
-        }
-        k += 1.0;
-    }
-    // chi = x - (nu/2 + 1/4) pi, expanded so that only x needs argument reduction.
-    let phase = nu / 2.0 + 0.25;
-    let (cos_phase, sin_phase) = (cospi_(phase), sinpi_(phase));
-    let (sin_x, cos_x) = x.sin_cos();
-    let cos_chi = cos_x * cos_phase + sin_x * sin_phase;
-    let sin_chi = sin_x * cos_phase - cos_x * sin_phase;
-    let amplitude = (2.0 / (M_PI * x)).sqrt();
-    (
-        amplitude * (p * cos_chi - q * sin_chi),
-        amplitude * (p * sin_chi + q * cos_chi),
-    )
+    value
 }
 
 pub fn bessel_y(x: f64, alpha: f64) -> f64 {
@@ -9899,19 +9575,1364 @@ pub fn bessel_y(x: f64, alpha: f64) -> f64 {
         warning(message);
         return f64::NAN;
     }
-    if x == 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    if x == f64::INFINITY {
-        return 0.0;
-    }
-    let value = bessel_jy_any(x, alpha).1;
-    if value.is_infinite() {
-        warning(format!(
-            "bessel_y({},nu={}): precision lost in result",
-            format_g(x),
-            format_g(alpha)
-        ));
+    let nb = 1 + na as i64;
+    let alpha = alpha - (nb - 1) as f64;
+    let Some((ncalc, value)) = with_bessel_work(nb, |by| y_bessel(x, alpha, by)) else {
+        return bessel_allocation_error("bessel_y");
+    };
+    if ncalc != nb {
+        if ncalc == -1 {
+            return f64::INFINITY;
+        } else if ncalc < -1 {
+            warning(format!(
+                "bessel_y({}): ncalc (={ncalc}) != nb (={nb}); alpha={}. Arg. out of range?",
+                format_g(x),
+                format_g(alpha)
+            ));
+        } else {
+            warning(format!(
+                "bessel_y({},nu={}): precision lost in result",
+                format_g(x),
+                format_g(alpha + (nb - 1) as f64)
+            ));
+        }
     }
     value
+}
+
+/// Work arrays of up to this many orders live on the stack.
+const BESSEL_STACK_ORDERS: usize = 16;
+
+/// Runs a routine on a zeroed work array of `nb` orders and returns its `ncalc` and the
+/// highest order's entry, or `None` when the array cannot be allocated.
+fn with_bessel_work(nb: i64, routine: impl FnOnce(&mut [f64]) -> i64) -> Option<(i64, f64)> {
+    let length = usize::try_from(nb).ok()?;
+    let mut stack = [0.0; BESSEL_STACK_ORDERS];
+    let mut heap = Vec::new();
+    let work: &mut [f64] = match stack.get_mut(..length) {
+        Some(work) => work,
+        None => {
+            heap.try_reserve_exact(length).ok()?;
+            heap.resize(length, 0.0);
+            &mut heap
+        }
+    };
+    let ncalc = routine(work);
+    Some((ncalc, work.last().copied().unwrap_or(f64::NAN)))
+}
+
+fn bessel_allocation_error(function: &str) -> f64 {
+    warning(format!("{function} allocation error"));
+    f64::NAN
+}
+
+/// The slice index of the routines' 1-based order index `n`.
+#[inline]
+fn order_index(n: i64) -> usize {
+    (n - 1) as usize
+}
+
+/// `I_(alpha + k)(x)`, or `exp(-x) I_(alpha + k)(x)` for `ize == 2`, into `bi[k]` for
+/// `0 <= alpha < 1`, by Olver and Sookne's backward recurrence (Cody's RIBESL). Returns `ncalc`.
+fn i_bessel(x: f64, alpha: f64, ize: i32, bi: &mut [f64]) -> i64 {
+    const CONST: f64 = 1.585;
+    let nb = bi.len() as i64;
+    let nu = alpha;
+    let twonu = nu * 2.0;
+    if !(nb > 0 && x >= 0.0 && (0.0 <= nu && nu < 1.0) && (1..=2).contains(&ize)) {
+        return nb.min(0) - 1;
+    }
+    let mut ncalc = nb;
+    if ize == 1 && x > BESSEL_EXPARG {
+        bi.fill(f64::INFINITY);
+        return ncalc;
+    }
+    if ize == 2 && x > BESSEL_XLRG_IJ {
+        bi.fill(0.0);
+        return ncalc;
+    }
+    let intx = x as i64;
+    if x < BESSEL_RTNSIG {
+        // The two-term ascending series for small x.
+        let mut aa = 1.0;
+        let mut empal = 1.0 + nu;
+        let halfx = x * 0.5;
+        if nu != 0.0 {
+            aa = halfx.powf(nu) / gamma_cody(empal);
+        }
+        if ize == 2 {
+            aa *= (-x).exp();
+        }
+        let bb = halfx * halfx;
+        bi[0] = aa + aa * bb / empal;
+        if x != 0.0 && bi[0] == 0.0 {
+            ncalc = 0;
+        }
+        if nb > 1 {
+            if x == 0.0 {
+                bi[1..].fill(0.0);
+            } else {
+                let cc = halfx;
+                let mut tover = (BESSEL_ENMTEN + BESSEL_ENMTEN) / x;
+                if bb != 0.0 {
+                    tover = BESSEL_ENMTEN / bb;
+                }
+                for n in 2..nb + 1 {
+                    aa /= empal;
+                    empal += 1.0;
+                    aa *= cc;
+                    let value = if aa <= tover * empal {
+                        aa = 0.0;
+                        0.0
+                    } else {
+                        aa + aa * bb / empal
+                    };
+                    bi[order_index(n)] = value;
+                    if value == 0.0 && ncalc > n {
+                        ncalc = n - 1;
+                    }
+                }
+            }
+        }
+        return ncalc;
+    }
+    // The forward sweep of Olver's P-sequence.
+    let nbmx = nb - intx;
+    let mut n = intx + 1;
+    let mut en = (n + n) as f64 + twonu;
+    let mut plast = 1.0;
+    let mut pold: f64;
+    let mut p = en / x;
+    let mut test = BESSEL_ENSIG + BESSEL_ENSIG;
+    if intx << 1 > BESSEL_NSIG * 5 {
+        test = (test * p).sqrt();
+    } else {
+        test /= r_pow_di(CONST, intx as c_int);
+    }
+    let mut overflowed = false;
+    if nbmx >= 3 {
+        let mut tover = BESSEL_ENTEN / BESSEL_ENSIG;
+        let nstart = intx + 2;
+        let nend = nb - 1;
+        for k in nstart..nend + 1 {
+            n = k;
+            en += 2.0;
+            pold = plast;
+            plast = p;
+            p = en * plast / x + pold;
+            if p > tover {
+                // Rescale against overflow, and find ncalc, the highest order that passes the
+                // backward test.
+                tover = BESSEL_ENTEN;
+                p /= tover;
+                plast /= tover;
+                let mut psave = p;
+                let mut psavel = plast;
+                let rescale_start = n + 1;
+                loop {
+                    n += 1;
+                    en += 2.0;
+                    pold = plast;
+                    plast = p;
+                    p = en * plast / x + pold;
+                    if !(p <= 1.0) {
+                        break;
+                    }
+                }
+                let bb = en / x;
+                test = pold * plast / BESSEL_ENSIG;
+                test *= 0.5 - 0.5 / (bb * bb);
+                p = plast * tover;
+                n -= 1;
+                en -= 2.0;
+                let rescale_end = nb.min(n);
+                ncalc = rescale_end + 1;
+                for l in rescale_start..rescale_end + 1 {
+                    pold = psavel;
+                    psavel = psave;
+                    psave = en * psavel / x + pold;
+                    if psave * psavel > test {
+                        ncalc = l;
+                        break;
+                    }
+                }
+                ncalc -= 1;
+                overflowed = true;
+                break;
+            }
+        }
+        if !overflowed {
+            n = nend;
+            en = (n + n) as f64 + twonu;
+            test = fmax2(test, (plast * BESSEL_ENSIG).sqrt() * (p + p).sqrt());
+        }
+    }
+    if !overflowed {
+        loop {
+            n += 1;
+            en += 2.0;
+            pold = plast;
+            plast = p;
+            p = en * plast / x + pold;
+            if !(p < test) {
+                break;
+            }
+        }
+    }
+    // The backward recursion and the normalization sum.
+    n += 1;
+    en += 2.0;
+    let mut bb = 0.0;
+    let mut aa = 1.0 / p;
+    let mut em = n as f64 - 1.0;
+    let mut empal = em + nu;
+    let mut emp2al = em - 1.0 + twonu;
+    let mut sum = aa * empal * emp2al / em;
+    let mut nend = n - nb;
+    // The C jumps past the rest of the recurrence to L220 or L230.
+    let mut skip_to_first = false;
+    let mut skip_to_normalize = false;
+    if nend < 0 {
+        bi[order_index(n)] = aa;
+        nend = -nend;
+        for l in 1..nend + 1 {
+            bi[order_index(n + l)] = 0.0;
+        }
+    } else {
+        if nend > 0 {
+            for _ in 0..nend {
+                n -= 1;
+                en -= 2.0;
+                let mut cc = bb;
+                bb = aa;
+                // Near x = 1500 the sum overflows; rescaling it with the terms keeps the ratio.
+                if nend > 100 && aa > 1e200 {
+                    cc *= TWO_POW_MINUS_900;
+                    bb *= TWO_POW_MINUS_900;
+                    sum *= TWO_POW_MINUS_900;
+                }
+                aa = en * bb / x + cc;
+                em -= 1.0;
+                emp2al -= 1.0;
+                if n == 1 {
+                    break;
+                }
+                if n == 2 {
+                    emp2al = 1.0;
+                }
+                empal -= 1.0;
+                sum = (sum + aa * empal) * emp2al / em;
+            }
+        }
+        bi[order_index(n)] = aa;
+        if nb <= 1 {
+            sum = sum + sum + aa;
+            skip_to_normalize = true;
+        } else {
+            n -= 1;
+            en -= 2.0;
+            let value = en * aa / x + bb;
+            bi[order_index(n)] = value;
+            if n == 1 {
+                skip_to_first = true;
+            } else {
+                em -= 1.0;
+                if n == 2 {
+                    emp2al = 1.0;
+                } else {
+                    emp2al -= 1.0;
+                }
+                empal -= 1.0;
+                sum = (sum + value * empal) * emp2al / em;
+            }
+        }
+    }
+    if !skip_to_normalize {
+        if !skip_to_first {
+            let nend = n - 2;
+            for _ in 0..nend {
+                n -= 1;
+                en -= 2.0;
+                let value = en * bi[order_index(n + 1)] / x + bi[order_index(n + 2)];
+                bi[order_index(n)] = value;
+                em -= 1.0;
+                if n == 2 {
+                    emp2al = 1.0;
+                } else {
+                    emp2al -= 1.0;
+                }
+                empal -= 1.0;
+                sum = (sum + value * empal) * emp2al / em;
+            }
+            bi[0] = 2.0 * empal * bi[1] / x + bi[2];
+        }
+        sum = sum + sum + bi[0];
+    }
+    if nu != 0.0 {
+        sum *= gamma_cody(1.0 + nu) * (x * 0.5).powf(-nu);
+    }
+    if ize == 1 {
+        sum *= (-x).exp();
+    }
+    let mut aa = BESSEL_ENMTEN;
+    if sum > 1.0 {
+        aa *= sum;
+    }
+    for value in bi.iter_mut() {
+        if *value < aa {
+            *value = 0.0;
+        } else {
+            *value /= sum;
+        }
+    }
+    ncalc
+}
+
+/// `J_(alpha + k)(x)` into `b[k]` for `0 <= alpha < 1` (Cody's RJBESL): the ascending series
+/// for small x, the asymptotic series for large x and not much larger orders, and Olver and
+/// Sookne's backward recurrence otherwise. Returns `ncalc`.
+fn j_bessel(x: f64, alpha: f64, b: &mut [f64]) -> i64 {
+    const PI2: f64 = 0.636619772367581343075535;
+    const TWOPI1: f64 = 6.28125;
+    const TWOPI2: f64 = 0.001935307179586476925286767;
+    /// `2^-800`; a smaller nonzero order is raised to it.
+    const VERY_SMALL_NU: f64 = f64::from_bits(223 << 52);
+    const XLARGE: f64 = 1e24;
+    const FACT: [f64; 25] = [
+        1.,
+        1.,
+        2.,
+        6.,
+        24.,
+        120.,
+        720.,
+        5040.,
+        40320.,
+        362880.,
+        3628800.,
+        39916800.,
+        479001600.,
+        6227020800.,
+        87178291200.,
+        1.307674368e12,
+        2.0922789888e13,
+        3.55687428096e14,
+        6.402373705728e15,
+        1.21645100408832e17,
+        2.43290200817664e18,
+        5.109094217170944e19,
+        1.12400072777760768e21,
+        2.585201673888497664e22,
+        6.2044840173323943936e23,
+    ];
+    let nb = b.len() as i64;
+    let mut nu = alpha;
+    let mut twonu = nu * 2.0;
+    if !(nb > 0 && x >= 0.0 && 0.0 <= nu && nu < 1.0) {
+        if let Some(first) = b.first_mut() {
+            *first = 0.0;
+        }
+        return nb.min(0) - 1;
+    }
+    let mut ncalc = nb;
+    b.fill(0.0);
+    if x > XLARGE {
+        range_warning("J_bessel");
+        return ncalc;
+    }
+    let fl_x = x.floor();
+    if x < BESSEL_RTNSIG {
+        // The two-term ascending series for small x.
+        let mut alpem = 1.0 + nu;
+        let halfx = if x > BESSEL_ENMTEN { 0.5 * x } else { 0.0 };
+        let mut aa = if nu != 0.0 {
+            halfx.powf(nu) / (nu * gamma_cody(nu))
+        } else {
+            1.0
+        };
+        let bb = if x + 1.0 > 1.0 { -halfx * halfx } else { 0.0 };
+        b[0] = aa + aa * bb / alpem;
+        if x != 0.0 && b[0] == 0.0 {
+            ncalc = 0;
+        }
+        if nb != 1 {
+            if x <= 0.0 {
+                b[1..].fill(0.0);
+            } else {
+                let tover = if bb == 0.0 {
+                    (BESSEL_ENMTEN + BESSEL_ENMTEN) / x
+                } else {
+                    BESSEL_ENMTEN / bb
+                };
+                let cc = halfx;
+                for n in 2..nb + 1 {
+                    aa /= alpem;
+                    alpem += 1.0;
+                    aa *= cc;
+                    if aa <= tover * alpem {
+                        aa = 0.0;
+                    }
+                    let value = aa + aa * bb / alpem;
+                    b[order_index(n)] = value;
+                    if value == 0.0 && ncalc > n {
+                        ncalc = n - 1;
+                    }
+                }
+            }
+        }
+        return ncalc;
+    }
+    if x > (c_int::MAX - 1) as f64 || (x > 25.0 && nb as f64 <= fl_x + 1.0) {
+        // The asymptotic series, with m terms.
+        let m: usize = if x >= 130.0 {
+            4
+        } else if x >= 35.0 {
+            8
+        } else {
+            11
+        };
+        let xc = (PI2 / x).sqrt();
+        let xin = 1.0 / (64.0 * x * x);
+        let xm = 4.0 * m as f64;
+        // Argument reduction with 2 pi split in two parts, for extra precision.
+        let mut t = (x / (TWOPI1 + TWOPI2) + 0.5).trunc();
+        let z = (x - t * TWOPI1) - t * TWOPI2 - (nu + 0.5) / PI2;
+        let mut vsin = z.sin();
+        let mut vcos = z.cos();
+        let mut gnu = twonu;
+        for slot in b.iter_mut().take(2) {
+            let mut s = (xm - 1.0 - gnu) * (xm - 1.0 + gnu) * xin * 0.5;
+            t = (gnu - (xm - 3.0)) * (gnu + (xm - 3.0));
+            let mut k = m + m;
+            let mut t1 = (gnu - (xm + 1.0)) * (gnu + (xm + 1.0));
+            let mut capp = s * t / FACT[k];
+            let mut capq = s * t1 / FACT[k + 1];
+            let mut xk = xm;
+            while k >= 4 {
+                xk -= 4.0;
+                s = (xk - 1.0 - gnu) * (xk - 1.0 + gnu);
+                t1 = t;
+                t = (gnu - (xk - 3.0)) * (gnu + (xk - 3.0));
+                capp = (capp + 1.0 / FACT[k - 2]) * s * t * xin;
+                capq = (capq + 1.0 / FACT[k - 1]) * s * t1 * xin;
+                k -= 2;
+            }
+            capp += 1.0;
+            capq = (capq + 1.0) * (gnu * gnu - 1.0) * (0.125 / x);
+            *slot = xc * (capp * vcos - capq * vsin);
+            t = vsin;
+            vsin = -vcos;
+            vcos = t;
+            gnu += 2.0;
+        }
+        let mut gnu = twonu + 2.0;
+        for i in 2..b.len() {
+            b[i] = gnu * b[i - 1] / x - b[i - 2];
+            gnu += 2.0;
+        }
+        return ncalc;
+    }
+    // The backward recurrence; first the significance test on Olver's P * S.
+    if nu != 0.0 && nu.abs() < VERY_SMALL_NU {
+        nu = if nu < 0.0 {
+            -VERY_SMALL_NU
+        } else {
+            VERY_SMALL_NU
+        };
+        twonu = nu * 2.0;
+    }
+    let intx = x as i64;
+    let nbmx = nb - intx;
+    let mut n = intx + 1;
+    let mut en = 2.0 * fl_x + 2.0 + twonu;
+    let mut p = en / x;
+    let mut plast = 1.0;
+    let mut pold: f64;
+    let mut test = BESSEL_ENSIG + BESSEL_ENSIG;
+    let mut overflowed = false;
+    if nbmx >= 3 {
+        let mut tover = BESSEL_ENTEN / BESSEL_ENSIG;
+        let nstart = intx + 2;
+        let nend = nb - 1;
+        en = (nstart + nstart) as f64 - 2.0 + twonu;
+        for k in nstart..nend + 1 {
+            // The C declares a fresh `n` in this loop, so the overflow branch advances that copy
+            // and the backward recurrence below starts from the outer `n`, which is `intx + 1`.
+            let mut inner_n = k;
+            en += 2.0;
+            pold = plast;
+            plast = p;
+            p = en * plast / x - pold;
+            if p > tover {
+                tover = BESSEL_ENTEN;
+                p /= tover;
+                plast /= tover;
+                let mut psave = p;
+                let mut psavel = plast;
+                let rescale_start = inner_n + 1;
+                loop {
+                    inner_n += 1;
+                    en += 2.0;
+                    pold = plast;
+                    plast = p;
+                    p = en * plast / x - pold;
+                    if !(p <= 1.0) {
+                        break;
+                    }
+                }
+                let bb = en / x;
+                test = pold * plast * (0.5 - 0.5 / (bb * bb));
+                test /= BESSEL_ENSIG;
+                p = plast * tover;
+                inner_n -= 1;
+                en -= 2.0;
+                let rescale_end = nb.min(inner_n);
+                ncalc = rescale_end;
+                for i in rescale_start..rescale_end + 1 {
+                    pold = psavel;
+                    psavel = psave;
+                    psave = en * psavel / x - pold;
+                    if psave * psavel > test {
+                        ncalc = i - 1;
+                        break;
+                    }
+                }
+                overflowed = true;
+                break;
+            }
+        }
+        if !overflowed {
+            n = nend;
+            en = (n + n) as f64 + twonu;
+            test = fmax2(test, (plast * BESSEL_ENSIG).sqrt() * (p + p).sqrt());
+        }
+    }
+    if !overflowed {
+        loop {
+            n += 1;
+            en += 2.0;
+            pold = plast;
+            plast = p;
+            p = en * plast / x - pold;
+            if !(p < test) {
+                break;
+            }
+        }
+    }
+    // The backward recursion and the normalization sum; m alternates between 0 and 2 with the
+    // parity of n.
+    n += 1;
+    en += 2.0;
+    let mut bb = 0.0;
+    let mut aa = 1.0 / p;
+    let mut m = n / 2;
+    let mut em = m as f64;
+    m = (n << 1) - (m << 2);
+    let mut alpem: f64;
+    let mut alp2em;
+    let mut sum = if m == 0 {
+        0.0
+    } else {
+        alpem = em - 1.0 + nu;
+        alp2em = em + em + nu;
+        aa * alpem * alp2em / em
+    };
+    let nend = n - nb;
+    for _ in 0..nend {
+        n -= 1;
+        en -= 2.0;
+        let cc = bb;
+        bb = aa;
+        aa = en * bb / x - cc;
+        m = if m != 0 { 0 } else { 2 };
+        if m != 0 {
+            em -= 1.0;
+            alp2em = em + em + nu;
+            if n == 1 {
+                break;
+            }
+            alpem = em - 1.0 + nu;
+            if alpem == 0.0 {
+                alpem = 1.0;
+            }
+            sum = (sum + aa * alp2em) * alpem / em;
+        }
+    }
+    b[order_index(n)] = aa;
+    // The C jumps past the rest of the recurrence to L240 or L250.
+    let mut skip_to_first = false;
+    let mut skip_to_normalize = false;
+    if nend >= 0 {
+        if n <= 1 {
+            sum += b[0] * if nu == 0.0 { 1.0 } else { nu };
+            skip_to_normalize = true;
+        } else {
+            n -= 1;
+            en -= 2.0;
+            let value = en * aa / x - bb;
+            b[order_index(n)] = value;
+            if n == 1 {
+                skip_to_first = true;
+            } else {
+                m = if m != 0 { 0 } else { 2 };
+                if m != 0 {
+                    em -= 1.0;
+                    alp2em = em + em + nu;
+                    alpem = em - 1.0 + nu;
+                    if alpem == 0.0 {
+                        alpem = 1.0;
+                    }
+                    sum = (sum + value * alp2em) * alpem / em;
+                }
+            }
+        }
+    }
+    if !skip_to_normalize {
+        if !skip_to_first {
+            n -= 1;
+            while n >= 2 {
+                en -= 2.0;
+                let value = en * b[order_index(n + 1)] / x - b[order_index(n + 2)];
+                b[order_index(n)] = value;
+                m = if m != 0 { 0 } else { 2 };
+                if m != 0 {
+                    em -= 1.0;
+                    alp2em = em + em + nu;
+                    alpem = em - 1.0 + nu;
+                    if alpem == 0.0 {
+                        alpem = 1.0;
+                    }
+                    sum = (sum + value * alp2em) * alpem / em;
+                }
+                n -= 1;
+            }
+            b[0] = 2.0 * (nu + 1.0) * b[1] / x - b[2];
+        }
+        em -= 1.0;
+        alp2em = em + em + nu;
+        if alp2em == 0.0 {
+            alp2em = 1.0;
+        }
+        sum += b[0] * alp2em;
+    }
+    if nu != 0.0 {
+        sum *= gamma_cody(nu) * (0.5 * x).powf(-nu);
+    }
+    for value in b.iter_mut() {
+        *value /= sum;
+    }
+    ncalc
+}
+
+/// `K_(alpha + k)(x)`, or `exp(x) K_(alpha + k)(x)` for `ize == 2`, into `bk[k]` for
+/// `0 <= alpha < 1`, by Temme's and Campbell's methods (Cody's RKBESL). Returns `ncalc`.
+fn k_bessel(x: f64, alpha: f64, ize: i32, bk: &mut [f64]) -> i64 {
+    /// `log(2)` less Euler's constant.
+    const A: f64 = 0.11593151565841244881;
+    // P, Q: log(gamma(1 + alpha)) / alpha + Euler's constant.
+    const P: [f64; 8] = [
+        0.805629875690432845,
+        20.4045500205365151,
+        157.705605106676174,
+        536.671116469207504,
+        900.382759291288778,
+        730.923886650660393,
+        229.299301509425145,
+        0.822467033424113231,
+    ];
+    const Q: [f64; 7] = [
+        29.4601986247850434,
+        277.577868510221208,
+        1206.70325591027438,
+        2762.91444159791519,
+        3443.74050506564618,
+        2210.63190113378647,
+        572.267338359892221,
+    ];
+    // R, S: (1 - alpha pi / sin(alpha pi)) / (2 alpha).
+    const R: [f64; 5] = [
+        -0.48672575865218401848,
+        13.079485869097804016,
+        -101.96490580880537526,
+        347.65409106507813131,
+        3.495898124521934782e-4,
+    ];
+    const S: [f64; 4] = [
+        -25.579105509976461286,
+        212.57260432226544008,
+        -610.69018684944109624,
+        422.69668805777760407,
+    ];
+    // T: sinh(y) / y.
+    const T: [f64; 6] = [
+        1.6125990452916363814e-10,
+        2.5051878502858255354e-8,
+        2.7557319615147964774e-6,
+        1.9841269840928373686e-4,
+        0.0083333333333334751799,
+        0.16666666666666666446,
+    ];
+    const ESTM: [f64; 6] = [52.0583, 5.7607, 2.7782, 14.4303, 185.3004, 9.3715];
+    const ESTF: [f64; 7] = [41.8341, 7.1075, 6.4306, 42.511, 1.35633, 84.5096, 20.];
+
+    let nb = bk.len() as i64;
+    let ex = x;
+    let mut nu = alpha;
+    if !(nb > 0 && (0.0 <= nu && nu < 1.0) && (1..=2).contains(&ize)) {
+        return nb.min(0) - 2;
+    }
+    if ex <= 0.0 || (ize == 1 && ex > BESSEL_XMAX_K) {
+        if ex <= 0.0 {
+            if ex < 0.0 {
+                range_warning("K_bessel");
+            }
+            bk.fill(f64::INFINITY);
+        } else {
+            bk.fill(0.0);
+        }
+        return nb;
+    }
+    let mut k: i64 = 0;
+    if nu < BESSEL_SQXMIN_K {
+        nu = 0.0;
+    } else if nu > 0.5 {
+        k = 1;
+        nu -= 1.0;
+    }
+    let mut twonu = nu + nu;
+    let iend = nb + k - 1;
+    let mut c = nu * nu;
+    let mut d3 = -c;
+    let mut ratio = 0.0;
+    let mut bk1;
+    let mut bk2;
+    let wminf;
+    if ex <= 1.0 {
+        // P0 = gamma(1 + alpha) (2/x)^alpha and Q0 = gamma(1 - alpha) (x/2)^alpha.
+        let mut d1 = 0.0;
+        let mut d2 = P[0];
+        let mut t1 = 1.0;
+        let mut t2 = Q[0];
+        for i in (2..=7).step_by(2) {
+            d1 = c * d1 + P[i - 1];
+            d2 = c * d2 + P[i];
+            t1 = c * t1 + Q[i - 1];
+            t2 = c * t2 + Q[i];
+        }
+        d1 *= nu;
+        t1 *= nu;
+        let mut f1 = ex.ln();
+        let mut f0 = A + nu * (P[7] - nu * (d1 + d2) / (t1 + t2)) - f1;
+        let mut q0 = (-nu * (A - nu * (P[7] + nu * (d1 - d2) / (t1 - t2)) - f1)).exp();
+        f1 = nu * f0;
+        let mut p0 = f1.exp();
+        let mut d1 = R[4];
+        let mut t1 = 1.0;
+        for i in 0..4 {
+            d1 = c * d1 + R[i];
+            t1 = c * t1 + S[i];
+        }
+        // d2 = sinh(f1) / nu = f0 sinh(f1) / f1.
+        let d2 = if f1.abs() <= 0.5 {
+            f1 *= f1;
+            let mut d2 = 0.0;
+            for coefficient in T {
+                d2 = f1 * d2 + coefficient;
+            }
+            f0 + f0 * f1 * d2
+        } else {
+            f1.sinh() / nu
+        };
+        f0 = d2 - nu * d1 / (t1 * p0);
+        if ex <= 1e-10 {
+            // K(alpha, x) and x K(alpha + 1, x) / K(alpha, x).
+            bk[0] = f0 + ex * f0;
+            if ize == 1 {
+                bk[0] -= ex * bk[0];
+            }
+            ratio = p0 / f0;
+            c = ex * DBL_MAX;
+            if k != 0 {
+                if bk[0] >= c / ratio {
+                    return -1;
+                }
+                bk[0] = ratio * bk[0] / ex;
+                twonu += 2.0;
+                ratio = twonu;
+            }
+            if nb == 1 {
+                return 1;
+            }
+            // K(alpha + l, x) / K(alpha + l - 1, x) for l = 1, ..., nb - 1.
+            for slot in bk.iter_mut().skip(1) {
+                if ratio >= c {
+                    return -1;
+                }
+                *slot = ratio / ex;
+                twonu += 2.0;
+                ratio = twonu;
+            }
+            return bessel_k_ratios_to_values(bk, 1);
+        }
+        // 1e-10 < x <= 1.
+        c = 1.0;
+        let x2by4 = ex * ex / 4.0;
+        p0 *= 0.5;
+        q0 *= 0.5;
+        let mut d1 = -1.0;
+        let mut d2 = 0.0;
+        bk1 = 0.0;
+        bk2 = 0.0;
+        let f1 = f0;
+        let f2 = p0;
+        loop {
+            d1 += 2.0;
+            d2 += 1.0;
+            d3 = d1 + d3;
+            c = x2by4 * c / d2;
+            f0 = (d2 * f0 + p0 + q0) / d3;
+            p0 /= d2 - nu;
+            q0 /= d2 + nu;
+            let t1 = c * f0;
+            let t2 = c * (p0 - d2 * f0);
+            bk1 += t1;
+            bk2 += t2;
+            if !((t1 / (f1 + bk1)).abs() > DBL_EPSILON || (t2 / (f2 + bk2)).abs() > DBL_EPSILON) {
+                break;
+            }
+        }
+        bk1 = f1 + bk1;
+        bk2 = 2.0 * (f2 + bk2) / ex;
+        if ize == 2 {
+            let d1 = ex.exp();
+            bk1 *= d1;
+            bk2 *= d1;
+        }
+        wminf = ESTF[0] * ex + ESTF[1];
+    } else if DBL_EPSILON * ex > 1.0 {
+        // x > 1 / eps.
+        bk.fill(1.0 / (M_SQRT_2DPI * ex.sqrt()));
+        return nb;
+    } else {
+        // x > 1.
+        let twox = ex + ex;
+        let mut blpha = 0.0;
+        if ex <= 4.0 {
+            // K(alpha + 1, x) / K(alpha, x) for 1 <= x <= 4.
+            let mut d2 = (ESTM[0] / ex + ESTM[1]).trunc();
+            let m = d2 as i64;
+            let mut d1 = d2 + d2;
+            d2 -= 0.5;
+            d2 *= d2;
+            for _ in 1..m {
+                d1 -= 2.0;
+                d2 -= d1;
+                ratio = (d3 + d2) / (twox + d1 - ratio);
+            }
+            // I(|alpha|, x) and I(|alpha| + 1, x) by backward recurrence, and K(alpha, x) from
+            // the Wronskian.
+            let mut d2 = (ESTM[2] * ex + ESTM[3]).trunc();
+            let m = d2 as i64;
+            c = nu.abs();
+            d3 = c + c;
+            let d1 = d3 - 1.0;
+            let mut f1 = DBL_MIN;
+            let mut f0 = (2.0 * (c + d2) / ex + 0.5 * ex / (c + d2 + 1.0)) * DBL_MIN;
+            for _ in 2..m {
+                d2 -= 1.0;
+                let mut f2 = (d3 + d2 + d2) * f0;
+                blpha = (1.0 + d1 / d2) * (f2 + blpha);
+                f2 = f2 / ex + f1;
+                f1 = f0;
+                f0 = f2;
+            }
+            f1 = (d3 + 2.0) * f0 / ex + f1;
+            let mut d1 = 0.0;
+            let mut t1 = 1.0;
+            for i in 0..7 {
+                d1 = c * d1 + P[i];
+                t1 = c * t1 + Q[i];
+            }
+            let p0 = (c * (A + c * (P[7] - c * d1 / t1) - ex.ln())).exp() / ex;
+            let f2 = (c + 0.5 - ratio) * f1 / ex;
+            bk1 = p0 + (d3 * f0 - f2 + f0 + blpha) / (f2 + f1 + f0) * p0;
+            if ize == 1 {
+                bk1 *= (-ex).exp();
+            }
+            wminf = ESTF[2] * ex + ESTF[3];
+        } else {
+            // K(alpha, x) and K(alpha + 1, x) / K(alpha, x) by backward recurrence, for x > 4.
+            let mut dm = (ESTM[4] / ex + ESTM[5]).trunc();
+            let m = dm as i64;
+            let mut d2 = dm - 0.5;
+            d2 *= d2;
+            let mut d1 = dm + dm;
+            for _ in 1..m {
+                dm -= 1.0;
+                d1 -= 2.0;
+                d2 -= d1;
+                ratio = (d3 + d2) / (twox + d1 - ratio);
+                blpha = (ratio + ratio * blpha) / dm;
+            }
+            bk1 = 1.0 / ((M_SQRT_2DPI + M_SQRT_2DPI * blpha) * ex.sqrt());
+            if ize == 1 {
+                bk1 *= (-ex).exp();
+            }
+            wminf = ESTF[4] * (ex - (ex - ESTF[6]).abs()) + ESTF[5];
+        }
+        // K(alpha + 1, x) from K(alpha, x) and K(alpha + 1, x) / K(alpha, x).
+        bk2 = bk1 + bk1 * (nu + 0.5 - ratio) / ex;
+    }
+    // ncalc, K(alpha + i, x) for i < ncalc, and K(alpha + i, x) / K(alpha + i - 1, x) beyond.
+    bk[0] = bk1;
+    if iend == 0 {
+        return nb;
+    }
+    let mut j = 1 - k;
+    if j >= 0 {
+        bk[j as usize] = bk2;
+    }
+    if iend == 1 {
+        return nb;
+    }
+    let m = ((wminf - nu) as i64).min(iend);
+    let mut last = 0;
+    for i in 2..m + 1 {
+        let t1 = bk1;
+        bk1 = bk2;
+        twonu += 2.0;
+        if ex < 1.0 {
+            if bk1 >= DBL_MAX / twonu * ex {
+                break;
+            }
+        } else if bk1 / ex >= DBL_MAX / twonu {
+            break;
+        }
+        bk2 = twonu / ex * bk1 + t1;
+        last = i;
+        j += 1;
+        if j >= 0 {
+            bk[j as usize] = bk2;
+        }
+    }
+    let m = last;
+    if m == iend {
+        return nb;
+    }
+    ratio = bk2 / bk1;
+    let mplus1 = m + 1;
+    for _ in mplus1..iend + 1 {
+        twonu += 2.0;
+        ratio = twonu / ex + 1.0 / ratio;
+        j += 1;
+        if j >= 1 {
+            bk[j as usize] = ratio;
+        } else {
+            if bk2 >= DBL_MAX / ratio {
+                return -1;
+            }
+            bk2 *= ratio;
+        }
+    }
+    let ncalc = 1.max(mplus1 - k);
+    if ncalc == 1 {
+        bk[0] = bk2;
+    }
+    if nb == 1 {
+        return ncalc;
+    }
+    bessel_k_ratios_to_values(bk, ncalc)
+}
+
+/// Turns the ratios `K(alpha + i, x) / K(alpha + i - 1, x)` from `bk[ncalc]` on into values
+/// (`L420` in RKBESL) and returns the new `ncalc`.
+fn bessel_k_ratios_to_values(bk: &mut [f64], ncalc: i64) -> i64 {
+    let mut ncalc = ncalc;
+    for i in ncalc as usize..bk.len() {
+        bk[i] *= bk[i - 1];
+        ncalc += 1;
+    }
+    ncalc
+}
+
+/// `Y_(alpha + k)(x)` into `by[k]` for `0 <= alpha < 1` (Cody's RYBESL): Temme's series below
+/// x = 3, Temme's continued fraction below 16 and Campbell's asymptotic series above, then the
+/// forward recurrence. Returns `ncalc`.
+fn y_bessel(x: f64, alpha: f64, by: &mut [f64]) -> i64 {
+    /// The Chebyshev coefficients of `1 / gamma(1 - x)` for `|x| <= 1/2`.
+    const CH: [f64; 21] = [
+        -6.7735241822398840964e-24,
+        -6.1455180116049879894e-23,
+        2.9017595056104745456e-21,
+        1.3639417919073099464e-19,
+        2.3826220476859635824e-18,
+        -9.0642907957550702534e-18,
+        -1.4943667065169001769e-15,
+        -3.3919078305362211264e-14,
+        -1.7023776642512729175e-13,
+        9.1609750938768647911e-12,
+        2.4230957900482704055e-10,
+        1.7451364971382984243e-9,
+        -3.3126119768180852711e-8,
+        -8.6592079961391259661e-7,
+        -4.9717367041957398581e-6,
+        7.6309597585908126618e-5,
+        0.0012719271366545622927,
+        0.0017063050710955562222,
+        -0.07685284084478667369,
+        -0.28387654227602353814,
+        0.92187029365045265648,
+    ];
+    /// `5 pi`, and its excess over 15, for argument reduction.
+    const FIVPI: f64 = 15.707963267948966192;
+    const PIM5: f64 = 0.70796326794896619231;
+
+    let nb = by.len() as i64;
+    let ex = x;
+    let mut nu = alpha;
+    if !(nb > 0 && 0.0 <= nu && nu < 1.0) {
+        if let Some(first) = by.first_mut() {
+            *first = 0.0;
+        }
+        return nb.min(0) - 1;
+    }
+    if ex < DBL_MIN || ex > BESSEL_XLRG_Y {
+        by.fill(if ex > BESSEL_XLRG_Y {
+            0.0
+        } else {
+            f64::NEG_INFINITY
+        });
+        return nb;
+    }
+    let xna = (nu + 0.5).trunc();
+    let mut na = xna as i64;
+    if na == 1 {
+        nu -= xna;
+    }
+    let mut ya;
+    let mut ya1;
+    if nu == -0.5 {
+        let p = M_SQRT_2DPI / ex.sqrt();
+        ya = p * ex.sin();
+        ya1 = -p * ex.cos();
+    } else if ex < 3.0 {
+        // Temme's series for small x.
+        let b = ex * 0.5;
+        let mut d = -b.ln();
+        let mut f = nu * d;
+        let mut e = b.powf(-nu);
+        let mut c = if nu.abs() < BESSEL_EPS_SINC {
+            M_1_PI
+        } else {
+            nu / sinpi_(nu)
+        };
+        // sinh(f) / f.
+        let s = if f.abs() < 1.0 {
+            let x2 = f * f;
+            let mut en = 19.0;
+            let mut s = 1.0;
+            for _ in 1..=9 {
+                s = s * x2 / en / (en - 1.0) + 1.0;
+                en -= 2.0;
+            }
+            s
+        } else {
+            (e - 1.0 / e) * 0.5 / f
+        };
+        // 1 / gamma(1 - nu) by its Chebyshev series.
+        let x2 = nu * nu * 8.0;
+        let mut aye = CH[0];
+        let mut alfa = CH[1];
+        let mut even = 0.0;
+        let mut odd = 0.0;
+        for i in (3..=19).step_by(2) {
+            even = -(aye + aye + even);
+            aye = -even * x2 - aye + CH[i - 1];
+            odd = -(alfa + alfa + odd);
+            alfa = -odd * x2 - alfa + CH[i];
+        }
+        even = (even * 0.5 + aye) * x2 - aye + CH[20];
+        odd = (odd + alfa) * 2.0;
+        let gamma = odd * nu + even;
+        let mut g = e * gamma;
+        e = (e + 1.0 / e) * 0.5;
+        f = 2.0 * c * (odd * e + even * s * d);
+        e = nu * nu;
+        let mut p = g * c;
+        let mut q = M_1_PI / g;
+        c = nu * M_PI_2;
+        let mut r = if c.abs() < BESSEL_EPS_SINC {
+            1.0
+        } else {
+            sinpi_(nu / 2.0) / c
+        };
+        r = M_PI * c * r * r;
+        c = 1.0;
+        d = -b * b;
+        let mut h = 0.0;
+        ya = f + r * q;
+        ya1 = p;
+        let mut en = 1.0;
+        while (g / (1.0 + ya.abs())).abs() + (h / (1.0 + ya1.abs())).abs() > DBL_EPSILON {
+            f = (f * en + p + q) / (en * en - e);
+            c *= d / en;
+            p /= en - nu;
+            q /= en + nu;
+            g = c * (f + r * q);
+            h = c * p - en * g;
+            ya += g;
+            ya1 += h;
+            en += 1.0;
+        }
+        ya = -ya;
+        ya1 = -ya1 / b;
+    } else if ex < BESSEL_THRESH_Y {
+        // Temme's continued fraction for 3 <= x < 16.
+        let c = (0.5 - nu) * (0.5 + nu);
+        let b = ex + ex;
+        let mut e = ex * M_1_PI * cospi_(nu) / DBL_EPSILON;
+        e *= e;
+        let mut p = 1.0;
+        let mut q = -ex;
+        let mut r = 1.0 + ex * ex;
+        let mut s = r;
+        let mut en = 2.0;
+        let mut en1 = 0.0;
+        while r * en * en < e {
+            en1 = en + 1.0;
+            let d = (en - 1.0 + c / en) / s;
+            p = (en + en - p * d) / en1;
+            q = (-b + q * d) / en1;
+            s = p * p + q * q;
+            r *= s;
+            en = en1;
+        }
+        let mut f = p / s;
+        p = f;
+        let mut g = -q / s;
+        q = g;
+        loop {
+            en -= 1.0;
+            if !(en > 0.0) {
+                break;
+            }
+            r = en1 * (2.0 - p) - 2.0;
+            s = b + en1 * q;
+            let d = (en - 1.0 + c / en) / (r * r + s * s);
+            p = d * r;
+            q = d * s;
+            let e = f + 1.0;
+            f = p * e - g * q;
+            g = q * e + p * g;
+            en1 = en;
+        }
+        f += 1.0;
+        let mut d = f * f + g * g;
+        let pa = f / d;
+        let qa = -g / d;
+        d = nu + 0.5 - p;
+        q += ex;
+        let pa1 = (pa * q - qa * d) / ex;
+        let qa1 = (qa * q + pa * d) / ex;
+        let b = ex - M_PI_2 * (nu + 0.5);
+        let c = b.cos();
+        let s = b.sin();
+        let d = M_SQRT_2DPI / ex.sqrt();
+        ya = d * (pa * s + qa * c);
+        ya1 = d * (qa1 * s - pa1 * c);
+    } else {
+        // Campbell's asymptotic series for x >= 16, on the unshifted order.
+        na = 0;
+        let mut d1 = (ex / FIVPI).trunc();
+        let mut dmu = ex - 15.0 * d1 - d1 * PIM5 - (alpha + 0.5) * M_PI_2;
+        let i = d1 as i64;
+        let (mut cosmu, mut sinmu) = if i - ((i / 2) << 1) == 0 {
+            (dmu.cos(), dmu.sin())
+        } else {
+            (-dmu.cos(), -dmu.sin())
+        };
+        let ddiv = 8.0 * ex;
+        let den = ex.sqrt();
+        dmu = alpha;
+        ya = 0.0;
+        ya1 = 0.0;
+        for k in 1..=2 {
+            let p = cosmu;
+            cosmu = sinmu;
+            sinmu = -p;
+            d1 = (2.0 * dmu - 1.0) * (2.0 * dmu + 1.0);
+            let mut div = ddiv;
+            let mut d2 = 0.0;
+            let q0 = d1 / div;
+            let mut term = q0;
+            let mut p = 0.0;
+            let mut q = 0.0;
+            for _ in 2..=20 {
+                d2 += 8.0;
+                d1 -= d2;
+                div += ddiv;
+                term = -term * d1 / div;
+                p += term;
+                d2 += 8.0;
+                d1 -= d2;
+                div += ddiv;
+                term *= d1 / div;
+                q += term;
+                if term.abs() <= DBL_EPSILON {
+                    break;
+                }
+            }
+            p += 1.0;
+            q += q0;
+            let value = M_SQRT_2DPI * (p * cosmu - q * sinmu) / den;
+            if k == 1 {
+                ya = value;
+            } else {
+                ya1 = value;
+            }
+            dmu += 1.0;
+        }
+    }
+    if na == 1 {
+        let mut h = 2.0 * (nu + 1.0) / ex;
+        if h > 1.0 && ya1.abs() > DBL_MAX / h {
+            h = 0.0;
+            ya = 0.0;
+        }
+        h = h * ya1 - ya;
+        ya = ya1;
+        ya1 = h;
+    }
+    by[0] = ya;
+    let mut ncalc: i64 = 1;
+    if nb > 1 {
+        by[1] = ya1;
+        if ya1 != 0.0 {
+            let mut aye = 1.0 + alpha;
+            let twobyx = 2.0 / ex;
+            ncalc = 2;
+            for i in 2..by.len() {
+                if twobyx < 1.0 {
+                    if by[i - 1].abs() * twobyx >= DBL_MAX / aye {
+                        break;
+                    }
+                } else if by[i - 1].abs() >= DBL_MAX / aye / twobyx {
+                    break;
+                }
+                by[i] = twobyx * aye * by[i - 1] - by[i - 2];
+                aye += 1.0;
+                ncalc += 1;
+            }
+        }
+    }
+    by[ncalc as usize..].fill(f64::NEG_INFINITY);
+    ncalc
+}
+
+/// Cody's rational approximation to `gamma(x)`, which the Bessel routines use in place of
+/// [`gammafn`].
+fn gamma_cody(x: f64) -> f64 {
+    const SQRTPI: f64 = 0.9189385332046727417803297;
+    const XBIG: f64 = 171.624;
+    // The rational minimax approximation over (1, 2).
+    const P: [f64; 8] = [
+        -1.71618513886549492533811,
+        24.7656508055759199108314,
+        -379.804256470945635097577,
+        629.331155312818442661052,
+        866.966202790413211295064,
+        -31451.2729688483675254357,
+        -36144.4134186911729807069,
+        66456.1438202405440627855,
+    ];
+    const Q: [f64; 8] = [
+        -30.8402300119738975254353,
+        315.350626979604161529144,
+        -1015.15636749021914166146,
+        -3107.77167157231109440444,
+        22538.1184209801510330112,
+        4755.84627752788110767815,
+        -134659.959864969306392456,
+        -115132.259675553483497211,
+    ];
+    // The minimax approximation over (12, inf).
+    const C: [f64; 7] = [
+        -0.001910444077728,
+        8.4171387781295e-4,
+        -5.952379913043012e-4,
+        7.93650793500350248e-4,
+        -0.002777777777777681622553,
+        0.08333333333333333331554247,
+        0.0057083835261,
+    ];
+    let mut parity = false;
+    let mut fact = 1.0;
+    let mut n: i64 = 0;
+    let mut y = x;
+    if y <= 0.0 {
+        y = -x;
+        let yi = y.trunc();
+        let res = y - yi;
+        if res != 0.0 {
+            if yi != (yi * 0.5).trunc() * 2.0 {
+                parity = true;
+            }
+            fact = -M_PI / sinpi_(res);
+            y += 1.0;
+        } else {
+            return f64::INFINITY;
+        }
+    }
+    let mut res;
+    if y < DBL_EPSILON {
+        if y >= DBL_MIN {
+            res = 1.0 / y;
+        } else {
+            return f64::INFINITY;
+        }
+    } else if y < 12.0 {
+        let yi = y;
+        let z;
+        if y < 1.0 {
+            z = y;
+            y += 1.0;
+        } else {
+            n = y as i64 - 1;
+            y -= n as f64;
+            z = y - 1.0;
+        }
+        let mut xnum = 0.0;
+        let mut xden = 1.0;
+        for i in 0..8 {
+            xnum = (xnum + P[i]) * z;
+            xden = xden * z + Q[i];
+        }
+        res = xnum / xden + 1.0;
+        if yi < y {
+            res /= yi;
+        } else if yi > y {
+            for _ in 0..n {
+                res *= y;
+                y += 1.0;
+            }
+        }
+    } else if y <= XBIG {
+        let ysq = y * y;
+        let mut sum = C[6];
+        for coefficient in &C[..6] {
+            sum = sum / ysq + coefficient;
+        }
+        sum = sum / y - y + SQRTPI;
+        sum += (y - 0.5) * y.ln();
+        res = sum.exp();
+    } else {
+        return f64::INFINITY;
+    }
+    if parity {
+        res = -res;
+    }
+    if fact != 1.0 {
+        res = fact / res;
+    }
+    res
 }

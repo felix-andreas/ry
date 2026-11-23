@@ -499,6 +499,7 @@ fn render_migration(source: &str) -> String {
         Default::default(),
         None,
         Default::default(),
+        None,
     );
     metadata.set_attached(&mut db).to(attached);
     let mut output = String::new();

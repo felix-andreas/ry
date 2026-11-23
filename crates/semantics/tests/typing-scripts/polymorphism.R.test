@@ -165,7 +165,7 @@ same <- function(x) x
 same(list(1L, 2L))
 #++++
 same: <T> fn(x: T[]) -> T[]
-T[]
+Unknown
 52..64 error[type-mismatch] expected `T[]`, found `list{integer, integer}`
 
 #---- forall_vector_element_used_arithmetically
@@ -190,7 +190,7 @@ character
 #: fn(x: Person[]) -> NULL
 f <- function(x) NULL
 #++++
-f: fn(x: Person[]) -> NULL
+f: <T> fn([x]: T) -> NULL
 51..59 error[type-mismatch] the element of a `[]` vector type must be an atomic type, found `Person`. For a list of these, write `list[Person]`
 69..70 warning[unused] `f` is assigned but never used.
 

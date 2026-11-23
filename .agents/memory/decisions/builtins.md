@@ -86,7 +86,7 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 
 **Status:** built.
 
-- `Matcher::Automaton` keeps two regex-automata `meta::Regex` beside fancy-regex: a leftmost-first search gives the start, and an anchored `MatchKind::All` search the longest end, POSIX leftmost-longest in linear time (`leftmost_longest` on fancy-regex backtracked forever on lgr's `(.*z.*){10}`). Groups come from fancy-regex only for callers that report them (not `regexpr`/`gregexpr` without `perl`, nor `sub`/`gsub` without backreferences); patterns regex-automata cannot compile, such as backreferences, stay on fancy-regex.
+- `Matcher::Automaton` keeps two regex-automata `meta::Regex` beside fancy-regex: a leftmost-first search gives the start, and an anchored `MatchKind::All` search the longest end, POSIX leftmost-longest in linear time (`leftmost_longest` on fancy-regex backtracked forever on lgr's `(.*z.*){10}`). Groups come from the port of TRE's tagged automaton (`crates/interp/src/tre.rs`, below) only for callers that report them (not `regexpr`/`gregexpr` without `perl`, nor `sub`/`gsub` without backreferences); patterns regex-automata cannot compile, such as backreferences, stay on fancy-regex.
 
 ## `perl = TRUE` runs on PCRE2, linked statically
 
@@ -102,14 +102,22 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 
 - `strings::parse_bound` ports `tre_parse_bound`, so counts, settings and errors agree with GNU R, including `{,n}` allowing `n + 1` copies (`{,1}` exactly one) and an approximate bound needing copies (`{2+}`, `{1,2#}`) being "Invalid contents of {}".
 - A pattern with settings and no backreference compiles to `Matcher::Approximate` (`approximate::ApproximateRegex`), a port of `tre_tnfa_run_approx` over a position automaton; scopes are named groups (`SCOPE_GROUP`) that become parameter changes on transitions. With a backreference TRE's backtracker ignores the settings, and so does ry.
-- Observed details: nesting depth is counted in `{` order, and more than three scopes trip TRE's `value <= 3` assertion only when a match reaches the fourth; an unset cost is free inside its scope yet counts 1 overall; ties go to the earlier start; minimal repetition is ignored; later `gsub`/`gregexpr` searches use `REG_NOTBOL`. `strings__tre_bounds` pins it.
+- Observed details: nesting depth is counted in `{` order, and more than three scopes trip TRE's `value <= 3` assertion only when a match reaches the fourth; an unset cost is free inside its scope yet counts 1 overall; ties go to the earlier start, then by the POSIX subexpression rule over the capture slots (the first differing group starts earlier and ends later), which reproduces TRE's tag order on `aregexec("(lay)(sy)", "1 lazy", max.distance = 2)` (`"laz"`, `"y"`); minimal repetition is ignored; later `gsub`/`gregexpr` searches use `REG_NOTBOL`. `strings__tre_bounds` pins it.
+- A path entry (`Reach<LEVELS>`) refers to its settings by index into the search's `ParamsTable`, because scopes combine into few distinct settings, and keeps one cost level unless the pattern has a `{...}` scope (`ApproximateRegex::scoped`), so an entry is 32 bytes instead of 128. That cut `search_with`'s instructions by 13% on `aregexec`; the search is then within about 13% of TRE's count (backlog, "`aregexec` is 1.4 to 2.5x").
+
+## aregexec and compilerVersion
+
+**Status:** built.
+
+- `aregexec` compiles its pattern as an `ApproximateRegex` and searches with whole-pattern parameters from `max.distance` and `costs`, ported from `amatch_regaparams`, which swaps two bounds: R's `ins` bound limits TRE's deletions and `del` its insertions. A bound below 1 is a fraction of the pattern length, rounded up. `strings__aregexec` pins it.
+- `.Internal(compilerVersion())` (behind `tools:::R_compiled_by()`) gives `c(C = "", Fortran = "")`: ry's runtime is Rust, built by neither compiler, and the empty strings keep the names and type that callers index by.
 
 ## TRE minimal repetitions over alternatives
 
 **Status:** built.
 
-- Without submatches (`regexpr`, `gregexpr`, `grepl`), TRE minimizes lazy repetitions over all top-level alternatives: `regexpr("a.*?Z|a.*?Y", "aXbYcXdZ")` has length 4. Such patterns compile to `Matcher::Automaton` with `shortest`, taking the earliest end among leftmost matches.
-- Submatch queries (`sub`, `regexec`) keep leftmost-first, so `sub("(a).*?Z|(a)(.*?)Y", ...)` takes the first alternative, as TRE does on the corpus's shapes; TRE's submatch results for these are irregular in general (`regexec` can skip the leftmost match). `connections__message_sink_and_flush` pins both.
+- TRE minimizes lazy repetitions over all top-level alternatives: `regexpr("a.*?Z|a.*?Y", "aXbYcXdZ")` has length 4. Where a match with a minimal repetition ends follows TRE's tag priorities, which can even end it at a later start (`regexpr("xabcd|b*?c", "xabcd")` is `"bc"`), so every pattern that repeats minimally (`Translation::repeats_minimally`) compiles to `Matcher::Automaton` with `minimal`, and both `find_at` and `captures_at` take the match from the tagged automaton started at the leftmost-first start. Threads from later starts join there as in TRE, and none from an earlier one can match.
+- `shortest` (a minimal repetition outside every group, none opening after it: the earliest end among leftmost matches) remains only for a pattern the tagged automaton does not model. `connections__message_sink_and_flush` and `strings__tre_capture_priorities` pin it.
 
 ## The message sink and connection flush points
 
@@ -312,7 +320,7 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
   - *An exact guard per release.* `FAST_PATHS` names the release and hash; `crates/ry/tests/scenarios/native-package-functions.scenario` fails when the installed release differs, so an update is not a silent slowdown.
   - *Fallback.* `decline()` whenever the R body could observe something the port does not model.
   - *Evidence.* A seeded differential harness against the R body (`fuzz_native_trace_back_matches_its_r_body` in `crates/oracle/tests/test_differential.rs`), oracle cases against GNU R, and a news-page line.
-- **Why trace_back.** It is about 80% of `expect_error()` on GNU R too; no primitive under it was slower than GNU R, so the gain had to be native. `ryTraceBack` is a pure function of `interp().frames` and reproduces rlang 1.3.0's columns (`call_zap_inline`, `call_trace_context`, trimming, attribute order). It declines on `rlang:::visible_bottom`, `rlang:::error_frame`, `knitr.in.progress` without `top`, an unforced promise in call position, an object as function, or a malformed `function` call. `conditions__rlang_trace_back.R` (hand-written stacks) and `conditions__rlang_trace_back_generated.R` (150 seeded random stacks) compare with GNU R and with the R body on the same frame; `native-package-functions.scenario` pins the script and `ry load` paths.
+- **Why trace_back.** It is about 80% of `expect_error()` on GNU R too; no primitive under it was slower than GNU R, so the gain had to be native. `ryTraceBack` is a pure function of `interp().frames` and reproduces rlang 1.3.0's columns (`call_zap_inline`, `call_trace_context`, trimming, attribute order). It declines on `rlang:::visible_bottom`, `rlang:::error_frame`, `knitr.in.progress` without `top`, an unforced promise in call position, an object as function, or a malformed `function` call. `conditions__rlang_trace_back.R` (hand-written stacks) and `conditions__rlang_trace_back_generated.R` (50 seeded random stacks) compare with GNU R and with the R body on the same frame; `native-package-functions.scenario` pins the script and `ry load` paths.
 - **Interned strings carry a validity fact.** `flag_bits::VALID_UTF8` is set in `Heap::intern_new`, and `char_str` borrows such a string unchecked unless it is marked Latin-1 or bytes. The header flag byte is unreachable from `SETLEVELS` and interned bytes never change, so unlike the gp `ASCII` bit it is a fact.
 - **Names stay symbols.** `::`, `getNamespaceValue`, `options()` and the fast paths take symbols and `CHARSXP`s; fixed names come from `Symbols`, generated by one macro so a name is listed once (`envir__namespace_lookup.R`).
 - *Review rule.* A reviewer accepts a new entry only with the same-sitting generic measurement, the profile share, the hash test entry, the differential harness and the news line.
@@ -449,11 +457,13 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 - **glibc behavior matched.** A negative `.*` precision echoes the unparsed spec (`%.0-1f`); `%#g` carrying to the next power of ten prints `1.e+02`; `%#o` adds 0 only when the digits do not start with one. Type errors print the spec with `n$` removed and `*` replaced.
 - **Contract.** `base__sprintf_conversions.R` and `fuzz_sprintf_matches_gnu_r` (`crates/oracle/src/fuzz.rs`, `sprintf_program`, with a bounded pass in `cargo test -p oracle`).
 
-## Hash tables for `unique()` and `match()` stop growing with the elements at 256 KB
+## Hash tables for `unique()` and `match()` start at 512 KB and grow by extrapolation
 
 **Status:** built.
 
-- `PositionTable` (`crates/interp/src/sort.rs`) starts at two slots per element, capped at 65,536 slots (256 KB), and doubles when half full past the cap, so a long vector with few distinct values zeroes 256 KB once (presizing a million strings zeroed 8 MB). Starting small and always doubling was rejected: rehashing made `match()` on 5,000 distinct strings cost about 100 more instructions per element and slowed `merge()` by about 10% through `cbind()`'s `make.unique` check.
+- `PositionTable` (`crates/interp/src/sort.rs`) starts at two slots per element, capped at 65,536 slots (512 KB), so a long vector with few distinct values zeroes 512 KB once (presizing a million strings zeroed 16 MB). Starting small and always doubling was rejected: rehashing made `match()` on 5,000 distinct strings cost about 100 more instructions per element and slowed `merge()` by about 10% through `cbind()`'s `make.unique` check.
+- A slot is 64 bits: the 1-based position below the hash's high 32 bits. A probe reads the stored key only when the hash bits agree, so a miss in a table larger than the cache costs one random read instead of one per occupied slot, and growing moves slots without rehashing keys.
+- Past the cap the table grows to the distinct keys that the share of distinct keys so far predicts for the remaining lookups, at least twofold and at most eightfold per step. A vector of distinct values grows a few times instead of once per doubling; the eightfold cap exists because `anyDuplicated` often stops early, and without it `anyDuplicated` of 1e6 doubles zeroed a 16 MB table and ran at half GNU R's speed.
 - Strings hash by interned object, which is exact only for ASCII (equal text in latin1 and UTF-8 is two objects), so `TableKey::exact` is checked per distinct key and miss, and the first inexact one goes to the general path.
 - Duplicate flags are a bitset built a register word at a time; `anyDuplicated()` stops at the first word with a duplicate. `split()` counts per level, allocates each piece once and scatters typed slices through per-level cursors on the stack (1e6 doubles 121M to 69M instructions; `match()` of 1e6 strings 51M to 37M; the sales workload -20.8% warm). The table is a call local, so peak RSS does not rise.
 - `gather_kind` keeps the filtered position walk: mask walks and branchless compaction cost more where the selection branch predicts well.
@@ -529,7 +539,17 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 **Status:** built.
 
 - **`byte_ranks` (`crates/interp/src/sort.rs`)** ranks the distinct strings of a radix sort by their stored `CHAR()` bytes, untranslated, which is GNU R's rule (`StrCmp2` is `strcmp`), so a latin1 string and its UTF-8 twin rank apart. It skips the prefix all strings share, packs the next eight bytes into a big-endian `u64` (zero padding orders correctly because no R string holds a NUL), sorts the keys with an LSD radix that skips constant bytes, and re-keys only runs of equal keys. A comparison sort over the strings chased pointers per comparison and took 185 ms on 1e6 strings against GNU R's 170 ms; the key sort takes about GNU R's time. `order()` under a collation keeps the comparison sort.
-- **POSIX captures without backtracking:** when a pattern has no alternation, no lazy quantifier and repeats only single characters (`greedy_single_width` in `crates/interp/src/strings.rs`), the leftmost-first captures of the `regex` crate equal TRE's whenever the leftmost-first match ends where the leftmost-longest one does. `captures_at` checks that end against the longest automaton and falls back to the backtracker otherwise, so `sub`/`gsub` with back-references and `regexec` on such patterns run at GNU R's speed. A repeated group (`(a)?(ab)?b*`) still differs from TRE on the backtracker (`crates/oracle/known_failures.toml`).
+- **POSIX captures without backtracking:** when a pattern has no alternation, no lazy quantifier and repeats only single characters (`greedy_single_width` in `crates/interp/src/strings.rs`), the leftmost-first captures of the `regex` crate equal TRE's whenever the leftmost-first match ends where the leftmost-longest one does. `captures_at` checks that end against the longest automaton and hands the pattern to the tagged automaton otherwise, so `sub`/`gsub` with back-references and `regexec` on such patterns run at GNU R's speed. Every other pattern without backreferences captures on the tagged automaton (next entry).
+
+## POSIX capture groups come from a port of TRE's tagged automaton
+
+**Status:** built.
+
+- **Before.** Groups of a pattern with alternation or a repeated group came from fancy-regex's backtracker run leftmost-longest, which splits text between groups by its own priorities: `(a)?(ab)?b*` on `"abb"` filled the first group where TRE fills the second, and patterns with a minimal repetition inside a group matched leftmost-first.
+- **Shape.** `crates/interp/src/tre.rs` ports what decides TRE's groups: the parser's positions (all items of a bracket share one, and a multi-item bracket under a group becomes a union of a guarded leaf per item, as `tre_parse_bracket` builds it), `tre_add_tags` (tag placement, directions, minimal pairs), `tre_expand_ast`, the position automaton with `tre_match_empty` tags, `tre_tnfa_run_parallel` and `tre_fill_pmatch`. Wide mode (UTF-8 locale) and byte mode differ for named classes, so a pattern with one builds both and an ASCII subject runs the byte one. The matcher keeps tag rows in one flat array and swaps row indices, never copies rows, as TRE swaps pointers.
+- **Where it runs.** `captures_at` keeps `greedy_captures` (exact for single-width greedy patterns), starts the tagged automaton at the leftmost-first start otherwise, and falls back to fancy-regex only when `tre::compile` declines: backreferences, approximate settings, expansions past `NODE_LIMIT` and friends, or a group count that disagrees with the `regex` crate's. A group under `{0}` keeps its number (`(?:x){0}` in the translation) and reports the empty string at the match start, as TRE's never-tagged submatch reads tag 0.
+- **Differential.** 2,000 random patterns over `{a,b,c}` with groups, `?`, `*`, `+`, bounds, minimal repetitions, alternation, classes and anchors, each through `regexec`, `regexpr` and `gsub`, against GNU R 4.6.2: the mismatches drop from 275 to 39, and no case that matched before mismatches after. What remains: `^` or `$` inside a group or alternative, where TRE's assertion handling in `gsub`'s `REG_NOTBOL` loop differs; `gsub`'s empty-match loop (GNU R compares each match end with the previous one's in shifting coordinates); and TRE producing spans the pattern cannot match (`(c(a?|([bc]{2}[^a]+a|c*)*)(b)?)?` on `"caca"` gives `"caca"`).
+- **Contract.** `strings__tre_capture_priorities` and `strings__posix_repeated_group`.
 
 ## `x[] <- value` and `x[a:b] <- value` write whole copies of the value
 
@@ -575,3 +595,55 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 - **A negative minimum** (reachable through `.Internal` only) follows GNU R's unsigned comparisons: an ASCII element is returned unchanged, and a non-ASCII one loses its inner spaces.
 - **Lower case can differ from GNU R by Unicode version** for letters added or reclassified between the Unicode of Rust's standard library and of the system's glibc (U+0295 and the letters Unicode 16 added are examples).
 - Oracle case: `strings__abbreviate_non_ascii`.
+
+## Vector kernels: one typed loop per case, exact sizes, and GNU R's polygamma and Bessel functions
+
+**Status:** settled.
+
+- **Typed loops.** A kernel that read each element through a generic accessor (`logical_at`, `real_at`) or matched on the function per element runs one loop per operand type or per function instead: `!` (`do_not`), the one-argument math functions (`kernels::math`, with GNU R 4.6's signed-zero release test asked once per vector through `arith::math_value_at`).
+- **Integer `%/%`** floors the double quotient as truncation minus one where the truncation lies above it (`arith::floored_quotient`). A quotient of two `int`s is at least `1 / |b|` from any integer it does not equal, so this is GNU R's `floor((double) x / y)` exactly, and unlike `f64::floor`, a libm call on baseline x86-64 without SSE4.1, it vectorizes.
+- **Exact sizes before fills.** `which` counts its `TRUE`s, allocates the result, and stores every position up to the last `TRUE`, advancing only past a `TRUE`, so neither loop branches on the data. `rep` of a short source fills by doubling the filled prefix.
+- **Blocks.** `is.unsorted` (and `order`'s sortedness check) test adjacent pairs in branchless blocks of 16 with GNU R's comparisons. `unique` and `duplicated` of a list hash each element once into a `PositionTable`.
+- **`make.unique`** works on interned strings and gives a made name as native text. GNU R hashes by `CHARSXP` address and compares text only on a bucket collision, so its answer for the same text in two encodings depends on allocation; ry always gives the answer of distinct buckets, and the oracle case avoids mixing encodings.
+- **Polygamma** runs a line-by-line port of GNU R's `dpsifn` (Amos's algorithm 610), bit-identical on a 72,444-value grid; the earlier Hurwitz-zeta sum differed in the last bits and cost more per value. GNU R's underflow count increments its pointer, not the count, so `Rf_dpsifn` reports 0, as GNU R does.
+- **The Bessel functions** run a port of GNU R 4.6.2's netlib routines (`I_bessel`, `J_bessel`, `K_bessel`, `Y_bessel`, with Cody's `gamma_cody`) in C evaluation order with `bessel.h`'s constants, bit-identical with GNU R on 72,000 random and 6,318 edge points, warnings included. The C quirks are kept: J's inner `n` shadows the outer one, so `besselJ(5, 200)` is 0 without a warning. Orders up to 16 use a stack work array.
+- **Measured and not taken: carrying `order`'s second key through the first key's counting scatter.** At 1e7 rows `order(g, -x)` took 0.64 s with it against 0.50 to 0.59 s without, because the per-run sort, not the gather, dominates.
+- **Oracle cases:** `arith__integer_divide_not_and_which_kernels`, `arith__polygamma_last_bits`, `arith__bessel_last_bits`, `sort__fast_paths_for_repeats_and_order_checks`, `strings__make_unique_encodings`.
+
+## Base and stats kernels: exact shortcuts, GNU R's quirks kept, and one prepared state per call
+
+**Status:** built.
+
+Each kernel below matched or trailed GNU R in the builtins sweep (`tools/bench/builtins`) and keeps GNU R's result bit for bit.
+
+- **`strtod` scales short decimals exactly.** A hardware division gives the double when its exact remainder (Dekker's product) shows it is not near a rounding tie; otherwise integer arithmetic rounds once to 64 bits and then to double, as the long-double reader does. A fuzz test checks both paths against `LongDouble`.
+- **`floor`, `ceiling` and `trunc` round whole vectors with `roundpd`** (`numeric::vector_math::round_all`), compiled for AVX or SSE4.1 and chosen at run time, because glibc's own `floor` is an ifunc that uses SSE4.1's `roundsd` one element at a time. Without SSE4.1 the loop rounds with the 2^52 trick on SSE2 lanes. An NA or NaN input comes back with its own bits, as GNU R's `math1` keeps them.
+- **`cospi`, `sinpi` and `tanpi` reduce with `x - p * trunc(x / p)`** (`arith::periodic_remainder`) for a power-of-two period, which is exact and equals `fmod` without its bit-by-bit loop.
+- **`.bincode`** is one loop per side of the interval (`bin_codes::<LEFT>`): with up to 64 breaks it counts the breaks below each point, a branch-free sum the compiler vectorizes, and beyond that it runs a fixed-length binary search whose steps add a comparison times the half width. Breaks holding NaN keep GNU R's bisection, whose answer on them is not a partition point. The errors keep GNU R's order.
+- **Grouping comes from the radix sort's tie runs.** `radixsort(retgrp = TRUE)` reports the last key's runs as well, so the group ends need no second pass over the keys. With `sortstr = FALSE`, GNU R numbers strings by first appearance within each run of rows tied on the earlier keys, and reverses a run whose strings are strictly in descending byte order; ry ports both. Under `na.last = NA`, a run that holds an NA is never reversed, and the first key of such strings drops no NA unless every entry is NA, when it drops every row; a later key drops its NA rows like any other (GNU R's `csorted`).
+- **`duplicated` and `anyDuplicated` of a non-decreasing double vector compare neighbours** without a hash table. A NaN fails every comparison, so such a vector holds none, and the test fails at the first descent of unsorted input.
+- **`runmed` slides one sorted window** of order-preserving integer keys, finding the outgoing and incoming values by binary search. The NA stand-ins follow `Srunmed`: the stand-in is its `BIG_dbl`, and only a missing row whose median is a stand-in gets its NA or NaN back.
+- **Kendall's covariance counts sign products as integers.** Each is -1, 0 or 1, so the long-double sum over ordered pairs is an exact integer: ry counts unordered pairs once and doubles.
+- **`model.matrix`** resolves each term's parts, allocates the matrix once and writes each column in place. Automatic row names are `as.character(seq_len(n))` deferred, as in GNU R.
+- **`approx`, `spline` and `splinefun` look points up in a knot grid** (`KnotGrid`, `crates/stats/src/routines.rs`): equal buckets over the knots, sized by the points that fall inside, each holding the last knot not above its left edge. A lookup reads one bucket and walks at most eight knots, then falls back to bisection. On sorted knots without NaN, bisection's answer is the partition point the walk also finds, so the two agree exactly.
+- **`smooth.spline` prepares each point's cubic B-spline state once** (`CubicPoint`, `crates/stats/src/spline.rs`): the knot interval and de Boor's differences are shared by every criterion evaluation in the search for the smoothing parameter, and the basis values come from `bsplvd` once per fit.
+- **`rhyper` prepares its sampler once per call** (`Hypergeometric`), holding the setup GNU R keeps in static variables between calls with the same parameters, and draws the same uniforms in the same order. A single `rpois` draw from a mean of at least 10, as `rgeom` makes per element, builds only the normal method's constants, not a sampler with the inversion table.
+- **Long batches read the twister ahead** (`random::Lookahead`). Drawing one deviate at a time is a serial chain (twister word, inversion, `qnorm`, then a branch on the value that mispredicts), so a sampler waits on latency, not on instructions: `rpois` with mean 500 took 66 ns per draw against GNU R's 47 with similar instruction counts. A batch of at least 64 draws with scalar parameters tempers the block 64 words at a time and computes the inversion normal at every position of a chunk with `qnorm_standard_fill`; a normal that straddles the block end takes the scalar path. A block is generated only when a draw needs it, and the cursor is stored as the twister's position, so the stream and `.Random.seed` are GNU R's, also after a batch that draws nothing. Recycled parameters skip the lookahead, because their normals are sparse and one at every position costs more than it saves; `rnorm` and `runif` have vectorized fills of their own.
+- **`rsignrank` sums whole ranks in a `u64` over a filled chunk of uniforms**, testing `u + 0.5 >= 1` for `floor(u + 0.5)`; `rwilcox` keeps its pool of ranks across draws (`Wilcoxon`).
+- **`forceint` adds and removes 2^52** instead of calling `round_ties_even`, which is a libm `rint` call on baseline x86-64; the two agree bit for bit on 10^8 sampled doubles.
+- **`rpois` with a vector mean and `rgeom` run at GNU R's speed within noise.** Cachegrind's branch simulator counts five times GNU R's mispredicts in the scalar `qnorm` on the same inputs, which no branch in its code accounts for; that is the first place to look for any gap.
+- **Oracle cases:** `coerce__string_to_number_last_bits`, `kernels__pi_trigonometry_periods`, `kernels__bincode_breaks`, `kernels__sorted_duplicates`, `kernels__interpolation_grid`, `stats__smooth_spline_prepared_points`, `random__hypergeometric_and_poisson_streams`, `random__lookahead_streams`.
+
+
+## Approximate repetitions expand as TRE's do
+
+**Status:** built.
+
+- `ApproximateRegex` lays out a repetition as TRE's parser expands it: `x*` and `x+` are one copy of `x` with a loop, `x{m,}` is `m` copies followed by `x*`, and `x{m,n}` is `m` copies followed by nested optional ones. The layout is semantic, not cosmetic: two paths that reach the same position compete for it, so which positions a path occupies decides which match starts survive. It shows in `aregexec("([a-c]+)(d)(e?)", "xbcdy", max.distance = 1)`, where GNU R buys the earlier start `x` with a substitution (`strings__aregexec_starts`).
+- `Reach`, the per-position state every path step copies, holds 32-bit fields and no total edit count (the sum of insertions, deletions and substitutions), which shrinks the copy below the inline `memcpy` threshold.
+
+## Fortran-style ports keep C's `pow` call for constant bases
+
+**Status:** built.
+
+- `r_pow` in `crates/stats/src/spline.rs` passes its base through `std::hint::black_box`. Inlined with the constant 16 of `sbart`'s `ratio * 16^(6 * spar - 2)`, LLVM rewrites `pow(16, y)` to `exp2(4 * y)`, which differs from glibc's `pow` in the last bit, and `smooth.spline` and `ppr` (whose `supsmu` with `bass` and `spline` smoothers runs `sbart`) amplify that bit through Brent's search into visibly different fits.

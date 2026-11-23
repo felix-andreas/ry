@@ -1802,8 +1802,8 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
         .then(|| String::from_utf8_lossy(crate::strings::c_bytes(startup)).into_owned());
     let options = interp::session::StartOptions {
         command_args: vec!["ry".to_owned()],
-        site_profile: true,
-        user_profile: true,
+        site_profile: flags & RUN_FLAG_SITE_PROFILE != 0,
+        user_profile: flags & RUN_FLAG_USER_PROFILE != 0,
         interactive: true,
         image: Some(IMAGE_HOST),
         build: env!("RY_RUNTIME_ID"),

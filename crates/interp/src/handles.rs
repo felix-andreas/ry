@@ -8,15 +8,16 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub use heap::handle::{
-    Alt, Atomic, Chars, Complex, Cx, Elements, Environment, Expression, Fresh, Gc, I64, Identity,
-    Integer, Kind, Language, List, Local, Logical, Owned, Pairlist, Pointer, Promise, Raw, Real,
-    Str, Symbol, Unfilled, Value, Vector,
+    Alt, Atomic, Chars, Complex, Cx, Elements, Environment, Exact, Expression, Fresh, Gc, I64,
+    Identity, Integer, Kind, Language, List, Local, Logical, Owned, Pairlist, Pointer, Promise,
+    Raw, Real, Str, Symbol, Unfilled, Value, Vector,
 };
 use {
     crate::{
-        builtins::Call,
+        builtin_libraries::NativeCall,
+        builtins::{Arg, Call},
         coerce::coerce_vector,
-        conditions,
+        conditions, connections,
         unwind::{R, Unwind, error},
         values,
     },
@@ -34,31 +35,40 @@ use {
 /// result are handles of the call's scope.
 pub type SafeFn = for<'s> fn(&mut Cx<'s>, &Args<'_, 's>) -> R<Local<'s>>;
 
-/// The raw entry of the safe builtin `$function`, for the builtin table.
+/// The raw entry of the safe builtin `$function`, for the builtin table, or with `native` of the
+/// safe native routine `$function`, for a builtin library's routine table.
+#[macro_export]
 macro_rules! safe {
-    ($function:path) => {{
-        unsafe fn entry(
-            call: &$crate::builtins::Call<'_>,
-        ) -> $crate::unwind::R<heap::object::Sexp> {
-            // SAFETY: the evaluator calls a builtin on the interpreter's thread, with the
-            // call's arguments rooted.
+    (native $function:path) => {
+        $crate::safe!(@entry $crate::builtin_libraries::NativeCall<'_>, $function)
+    };
+    ($function:path) => {
+        $crate::safe!(@entry $crate::builtins::Call<'_>, $function)
+    };
+    (@entry $call:ty, $function:path) => {{
+        unsafe fn entry(call: &$call) -> $crate::unwind::R<::heap::object::Sexp> {
+            // SAFETY: the evaluator calls a builtin, and a foreign call a native routine, on
+            // the interpreter's thread, with the call's arguments rooted.
             unsafe { $crate::handles::enter(call, $function) }
         }
         entry
     }};
 }
-pub(crate) use safe;
+pub use safe;
 
-/// Runs the safe builtin `body` for `call`.
+/// The arguments of the foreign call a safe native routine runs for.
+pub type NativeArgs<'a, 's> = Args<'a, 's, NativeCall<'a>>;
+
+/// Runs the safe builtin or native routine `body` for `call`.
 ///
 /// # Safety
 ///
 /// The caller is on the interpreter's thread, holds no reference into the heap, and keeps the
 /// call's arguments rooted until this returns.
 #[inline]
-pub unsafe fn enter(
-    call: &Call<'_>,
-    body: impl for<'s> FnOnce(&mut Cx<'s>, &Args<'_, 's>) -> R<Local<'s>>,
+pub unsafe fn enter<'a, C: Invocation>(
+    call: &'a C,
+    body: impl for<'s> FnOnce(&mut Cx<'s>, &Args<'a, 's, C>) -> R<Local<'s>>,
 ) -> R<Sexp> {
     // SAFETY: the interpreter's heap lives as long as the process, and `body` cannot keep the
     // context or anything of its scope, because it must accept every `'s`.
@@ -70,33 +80,90 @@ pub unsafe fn enter(
     body(&mut context, &arguments).map(Local::raw)
 }
 
-/// The arguments of the call a safe builtin runs for.
-pub struct Args<'a, 's> {
-    call: &'a Call<'a>,
+/// The call a safe routine runs for: a builtin's, or the foreign call of a native routine,
+/// whose arguments are the ones after `.NAME` and whose errors name the calling closure, as
+/// GNU R's do.
+pub trait Invocation {
+    fn arguments(&self) -> &[Arg];
+    fn error(&self, message: String) -> Unwind;
+}
+
+impl Invocation for Call<'_> {
+    fn arguments(&self) -> &[Arg] {
+        self.args
+    }
+
+    fn error(&self, message: String) -> Unwind {
+        Call::error(self, message)
+    }
+}
+
+impl Invocation for NativeCall<'_> {
+    fn arguments(&self) -> &[Arg] {
+        self.args
+    }
+
+    fn error(&self, message: String) -> Unwind {
+        NativeCall::error(self, message)
+    }
+}
+
+/// The arguments of the call a safe builtin or native routine runs for.
+pub struct Args<'a, 's, C = Call<'a>> {
+    call: &'a C,
     scope: PhantomData<fn(&'s ()) -> &'s ()>,
 }
 
-impl<'s> Args<'_, 's> {
+impl<'s, C: Invocation> Args<'_, 's, C> {
     pub fn len(&self) -> usize {
-        self.call.args.len()
+        self.call.arguments().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.call.args.is_empty()
+        self.call.arguments().is_empty()
     }
 
     /// The argument at `index`, or `NULL` past the last one.
     #[inline]
     pub fn value(&self, index: usize) -> Local<'s> {
-        // SAFETY: `enter`'s caller keeps every argument rooted for the call, which outlasts
-        // `'s`.
-        unsafe { Local::adopt(self.call.arg(index)) }
+        self.part(index, Part::Value)
+    }
+
+    /// The tag of the argument at `index`, `NULL` for an untagged one or past the last one.
+    #[inline]
+    pub fn tag(&self, index: usize) -> Local<'s> {
+        self.part(index, Part::Tag)
     }
 
     /// An error reported against the call.
     pub fn error(&self, message: impl Into<String>) -> Unwind {
-        self.call.error(message)
+        self.call.error(message.into())
     }
+
+    #[inline]
+    fn part(&self, index: usize, part: Part) -> Local<'s> {
+        let raw = match (self.call.arguments().get(index), part) {
+            (None, _) => values::nil(),
+            (Some(argument), Part::Value) => argument.value,
+            (Some(argument), Part::Tag) => argument.tag,
+        };
+        // SAFETY: `enter`'s caller keeps every argument rooted for the call, which outlasts
+        // `'s`, and a tag is a symbol or `NULL`, which the heap keeps for as long as it lives.
+        unsafe { Local::adopt(raw) }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Part {
+    Value,
+    Tag,
+}
+
+/// Writes `bytes` to the standard output connection, or to the sink that diverts it.
+pub fn write_output(_context: &mut Cx<'_>, bytes: &[u8]) {
+    // SAFETY: writing to a sink may allocate or run a connection's methods, which `&mut Cx`
+    // permits.
+    unsafe { connections::write_output(bytes) }
 }
 
 /// Whether `value` is the empty argument, as an empty symbol in a call evaluates.
@@ -155,7 +222,7 @@ pub fn dense<'s, T: Vector>(context: &mut Cx<'s>, value: Local<'s>) -> R<Option<
     if value.r_type() != T::TYPE {
         return Ok(None);
     }
-    match value.downcast::<T>() {
+    match value.standard::<T>() {
         Some(vector) => Ok(Some(vector)),
         None => expanded(context, value),
     }
@@ -170,7 +237,7 @@ fn expanded<'s, T: Vector>(context: &mut Cx<'s>, value: Local<'s>) -> R<Option<L
     // methods, which `&mut Cx` permits.
     let vector = unsafe { values::materialize(value.raw())? };
     // SAFETY: `materialize` returned a live object and nothing has allocated since.
-    Ok(unsafe { rooted(context, vector) }.downcast::<T>())
+    Ok(unsafe { rooted(context, vector) }.standard::<T>())
 }
 
 /// A standard vector of `T` to read the elements of `value` from: itself when it is one, and
@@ -186,7 +253,7 @@ pub fn elements_of<'s, T: Vector>(
     if value.r_type() != T::TYPE {
         return Ok(None);
     }
-    match value.downcast::<T>() {
+    match value.standard::<T>() {
         Some(vector) => Ok(Some(vector)),
         None => stored(context, value),
     }
@@ -204,7 +271,7 @@ fn stored<'s, T: Vector>(context: &mut Cx<'s>, value: Local<'s>) -> R<Option<Loc
             (crate::interp().hooks.altrep_storage)(value.raw())?,
         )
     };
-    Ok(vector.downcast::<T>())
+    Ok(vector.standard::<T>())
 }
 
 /// Whether the class of an ALTREP vector holds its elements in memory already, as a wrapper
@@ -375,6 +442,20 @@ unsafe fn install_raw<'s>(_context: &mut Cx<'s>, name: Sexp) -> R<Local<'s, Symb
 pub fn same_text(left: Gc<'_, Chars>, right: Gc<'_, Chars>) -> bool {
     // SAFETY: both strings are live, and the comparison only reads them.
     unsafe { values::same_string(left.raw(), right.raw()) }
+}
+
+/// The cross-check behind [`values::same_string`]'s identity rule: a cached ASCII string is the
+/// only string that holds its text, so a different string with the same text means some path
+/// made a `CHARSXP` without the string cache. `NA` is uncached and spells "NA".
+#[cold]
+#[inline(never)]
+pub fn assert_distinct_text(left: Gc<'_, Chars>, right: Gc<'_, Chars>) {
+    assert!(
+        is_na(left) || is_na(right) || text(left) != text(right),
+        "two CHARSXPs hold the text {:?}, one of them cached ASCII: a string was made outside the \
+         string cache",
+        text(left)
+    );
 }
 
 /// A string's text, decoded when it is marked latin1 or bytes.
@@ -730,7 +811,7 @@ pub fn names<'a, T: Vector>(_context: &'a Cx<'_>, vector: impl Pointer<T>) -> Na
         return Names::None;
     }
     names
-        .downcast::<Str>()
+        .standard::<Str>()
         .map_or(Names::Other, Names::Standard)
 }
 
@@ -751,7 +832,7 @@ pub fn writable<'s, T: Vector>(
 ) -> R<Owned<'s, T>> {
     if let Some(owned) = owned
         && owned.get().is(vector.value())
-        && let Ok(owned) = owned.downcast::<T>()
+        && let Ok(owned) = owned.standard::<T>()
     {
         return Ok(owned);
     }
@@ -767,7 +848,7 @@ pub fn writable<'s, T: Vector>(
 #[inline]
 pub fn first_duplicate(context: &mut Cx<'_>, vector: Local<'_>) -> R<Option<usize>> {
     // A few strings compare pairwise in less time than a hash table takes to set up.
-    if let Some(strings) = vector.downcast::<Str>()
+    if let Some(strings) = vector.standard::<Str>()
         && strings.len() <= 8
     {
         let strings = strings.read(context);
@@ -1093,15 +1174,23 @@ pub fn names_of<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
         object,
         symbol(|symbols| symbols.dim),
     ));
-    if length(context, dim) == 1 {
-        return Ok(context.root(array_names(context, object)));
+    if length(context, dim) != 1 {
+        return Ok(null());
     }
-    Ok(null())
+    let dimnames = context.root(get_attribute(
+        context,
+        object,
+        symbol(|symbols| symbols.dimnames),
+    ));
+    match dense::<List>(context, dimnames)? {
+        Some(dimnames) if dimnames.len() == 1 => Ok(context.root(dimnames.get(context, 0))),
+        _ => Ok(null()),
+    }
 }
 
 /// [`names_of`] for an object whose names are not a pairlist's tags, read where they are
-/// stored. It is `None` when only a safepoint can tell: the `dim` is an ALTREP vector, whose
-/// length its class's method reports.
+/// stored. It is `None` when only a safepoint can tell: the `dim` or the `dimnames` is an
+/// ALTREP vector, whose length its class's method reports.
 #[inline(always)]
 pub fn stored_names<'a, 's: 'a>(context: &'a Cx<'_>, object: Local<'s>) -> Option<Gc<'a>> {
     if object.r_type() == SexpType::Environment {
@@ -1112,20 +1201,22 @@ pub fn stored_names<'a, 's: 'a>(context: &'a Cx<'_>, object: Local<'s>) -> Optio
         return Some(names);
     }
     let dim = get_attribute(context, object, symbol(|symbols| symbols.dim));
-    match dim.downcast::<Integer>() {
-        Some(dim) if dim.len() == 1 => Some(array_names(context, object)),
+    match dim.standard::<Integer>() {
+        Some(dim) if dim.len() == 1 => array_names(context, object),
         Some(_) => Some(null().read(context)),
         None if dim.r_type() == SexpType::Integer => None,
         None => Some(null().read(context)),
     }
 }
 
-/// The names of a one-dimensional array, which are its dimnames.
-fn array_names<'a, 's: 'a>(context: &'a Cx<'_>, object: Local<'s>) -> Gc<'a> {
+/// The names of a one-dimensional array, which are its dimnames, or `None` when the dimnames
+/// are an ALTREP list.
+fn array_names<'a, 's: 'a>(context: &'a Cx<'_>, object: Local<'s>) -> Option<Gc<'a>> {
     let dimnames = get_attribute(context, object, symbol(|symbols| symbols.dimnames));
-    match dimnames.downcast::<List>() {
-        Some(dimnames) if dimnames.len() == 1 => dimnames.get(0),
-        _ => null().read(context),
+    match dimnames.standard::<List>() {
+        Some(dimnames) if dimnames.len() == 1 => Some(dimnames.get(0)),
+        None if dimnames.r_type() == SexpType::List => None,
+        _ => Some(null().read(context)),
     }
 }
 
@@ -1855,20 +1946,6 @@ pub unsafe fn with_result<T: crate::unwind::Rooted>(
     result
 }
 
-impl<'s> Args<'_, 's> {
-    /// The tag of the argument at `index`, `NULL` for an untagged one or past the last one.
-    #[inline]
-    pub fn tag(&self, index: usize) -> Local<'s> {
-        let tag = self
-            .call
-            .args
-            .get(index)
-            .map_or(values::nil(), |argument| argument.tag);
-        // SAFETY: a tag is a symbol or `NULL`, which the heap keeps for as long as it lives.
-        unsafe { Local::adopt(tag) }
-    }
-}
-
 /// A copy of `value` with its own storage, for a caller that changes it where it is: GNU R's
 /// `shallow_duplicate`, which also makes one of ry's Arrays a plain R vector.
 pub fn shallow_copy<'s>(context: &mut Cx<'s>, value: Local<'_>) -> R<Owned<'s>> {
@@ -1946,7 +2023,7 @@ pub fn owned_names<'s, T: Kind>(
         if names.kind() != SexpType::String || names.is_altrep() || values::maybe_shared(names) {
             return None;
         }
-        let names = rooted(context, names).downcast::<Str>()?;
+        let names = rooted(context, names).standard::<Str>()?;
         Some(Owned::assume(names))
     }
 }

@@ -97,7 +97,7 @@ value: Slot
 value <- 1L
 #++++
 == R/a.R
-value: Widget
+value: integer
 3..9 error[annotation] I do not know the type `Widget`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
 
 #---- forward_type_reference_then_defined_later

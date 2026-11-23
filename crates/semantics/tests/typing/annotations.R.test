@@ -115,7 +115,7 @@ outer: Unknown
 
 #==== unknown_only_coercions
 #---- if_unknown_fills_a_genuine_gap
-frame <- data.frame(a = 1)
+frame <- read.csv("a.csv")
 
 #: @if-unknown integer
 gap <- frame$a
@@ -131,7 +131,7 @@ known: Unknown
 32..34 error[type-mismatch] `@if-unknown` applies only where the type is unknown, and this is already `integer`. Drop the annotation, or use `#:` to check the type or `@trust` to override it
 
 #---- the_coerced_type_is_then_enforced
-frame <- data.frame(a = 1)
+frame <- read.csv("a.csv")
 
 #: @if-unknown character
 gap <- frame$a
@@ -148,6 +148,39 @@ label: Unknown
 handlers <- list(add = function(left, right) left + right)
 #++++
 handlers: <T: numeric> list{add: fn(left: T, right: T) -> T}
+
+#---- a_binder_bounded_by_a_union_returns_what_it_is_given
+#: <T, U: list[T] | T[]> fn(path: U) -> U
+normalize <- function(path) {
+  vapply(path, nchar, 1L)
+  path
+}
+one <- nchar(normalize("a"))
+many <- normalize(list("a", "b"))
+#++++
+normalize: <T, U: list[T] | T[]> fn(path: U) -> U
+one: integer
+many: list{character, character}
+
+#---- a_call_outside_a_binder_bound_is_reported
+#: <T, U: list[T] | T[]> fn(path: U) -> U
+normalize <- function(path) path
+broken <- normalize(sum)
+#++++
+normalize: <T, U: list[T] | T[]> fn(path: U) -> U
+broken: Unknown
+95..98 error[type-mismatch] expected `list[T] | T[]`, found `fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) -> complex`
+
+#---- a_forall_binder_takes_a_union_bound
+#: @forall T, U: list[T] | T[]
+#: @param path {U}
+#: @return {U}
+normalize <- function(path) {
+  vapply(path, nchar, 1L)
+  path
+}
+#++++
+normalize: <T, U: list[T] | T[]> fn(path: U) -> U
 
 #---- declared_scheme_wins
 #: <T> fn(x: T) -> T
@@ -181,6 +214,49 @@ bad: <T> fn(x: T) -> T
 ok <- function(x) x + 1L
 #++++
 ok: <T: numeric> fn(x: T) -> T
+
+#---- a_logical_argument_binds_a_numeric_parameter_to_integer
+# R's arithmetic reads `TRUE` as `1L`, so `TRUE + TRUE` is the integer `2`.
+#: <N: numeric> fn(x: N) -> N
+twice <- function(x) x + x
+#: <N: integer | logical> fn(x: N) -> N
+also <- function(x) x + x
+one <- twice(TRUE)
+many <- twice(c(TRUE, FALSE))
+inferred <- (function(x) x * x)(TRUE)
+bump <- function(x) x + 1L
+bumped <- bump(TRUE)
+cost <- function(price, rate) price * rate
+priced <- cost(TRUE, 0.5)
+keep <- function(x) {
+  x + 0L
+  x
+}
+kept <- keep(TRUE)
+#: <N: numeric> fn(x: N[]) -> N[]
+dbl <- function(x) x + x
+doubled <- dbl(c(TRUE, FALSE))
+named <- dbl(c(a = TRUE))
+#: <N: integer | logical> fn(x: N[]) -> N[]
+both <- function(x) x + x
+#++++
+twice: <N: numeric> fn(x: N) -> N
+also: <N: integer | logical> fn(x: N) -> N
+one: integer
+many: integer[]
+inferred: integer
+bump: <T: numeric> fn(x: T) -> T
+bumped: integer
+cost: <T: numeric> fn(price: T, rate: T) -> T
+priced: double
+keep: <T: numeric> fn(x: T) -> T
+kept: integer
+dbl: <N: numeric> fn(x: N[]) -> N[]
+doubled: integer[]
+named: integer[]
+both: <N: integer | logical> fn(x: N[]) -> N[]
+193..198 error[type-mismatch] expected `N`, found `integer`
+639..644 error[type-mismatch] expected `N[]`, found `integer[]`
 
 #---- expanded_form
 #: @forall T: numeric
@@ -450,6 +526,27 @@ value <- 1L
 #++++
 value: integer
 
+#---- pure_marks_only_a_top_level_binding
+#: @pure
+cat("loading\n")
+#: @pure
+answer <- function(x) {
+  #: @pure
+  helper <- function(y) y
+  helper(x)
+}
+#: @pure
+1 -> one
+#: @pure
+"quoted" <- function() 1
+#++++
+NULL
+answer: <T> fn(x: T) -> T
+one: double
+quoted: fn() -> double
+3..8 warning[annotation] `@pure` declares nothing here. It marks a top-level definition, such as `name <- function(...)`, as safe to call while the package loads; put it above one, or remove it
+64..69 warning[annotation] `@pure` declares nothing here. It marks a top-level definition, such as `name <- function(...)`, as safe to call while the package loads; put it above one, or remove it
+
 #==== new_shape
 #---- new_requires_a_nominal_reference
 #: @new integer
@@ -474,14 +571,43 @@ h: double
 #: fn(x: Person[]) -> NULL
 f <- function(x) NULL
 #++++
-f: fn(x: Person[]) -> NULL
+f: <T> fn([x]: T) -> NULL
 51..59 error[type-mismatch] the element of a `[]` vector type must be an atomic type, found `Person`. For a list of these, write `list[Person]`
+
+#---- a_refused_vector_annotation_causes_no_follow_on_findings
+#: @alias Rec {list{name: character, n: integer}}
+
+#: fn(xs: Rec[]) -> integer
+count_all <- function(xs) length(xs)
+total <- count_all(list())
+#++++
+count_all: <T> fn(xs: T) -> integer
+total: integer
+61..66 error[type-mismatch] the element of a `[]` vector type must be an atomic type, found `Rec`. For a list of these, write `list[Rec]`
+
+#---- an_undeclared_vector_element_causes_no_follow_on_findings
+#: fn(xs: Undeclared[]) -> integer
+count_all <- function(xs) length(xs)
+total <- count_all(list())
+#++++
+count_all: <T> fn(xs: T) -> integer
+total: integer
+10..20 error[annotation] I do not know the type `Undeclared`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+
+#---- a_bare_optional_parameter_causes_no_follow_on_findings
+#: fn(integer, [character]) -> integer
+f <- function(n, label = "x") n + 1L
+y <- f(1L)
+#++++
+f: <T: numeric, U> fn(n: T, [label]: U) -> T
+y: integer
+26..27 error[annotation] expected `:` after `[name]` in an optional parameter
 
 #---- structural_vector_element_is_refused
 #: fn(x: list{name: character}[]) -> NULL
 f <- function(x) NULL
 #++++
-f: fn(x: list{name: character}[]) -> NULL
+f: <T> fn([x]: T) -> NULL
 9..32 error[type-mismatch] the element of a `[]` vector type must be an atomic type, found `list{name: character}`. For a list of these, write `list[list{name: character}]`
 
 #---- atomic_alias_and_binder_vector_elements_are_fine
@@ -613,7 +739,7 @@ f <- function() {
   count
 }
 #++++
-f: Unknown
+f: fn() -> integer
 42..48 error[type-mismatch] expected `integer`, found `character`
 
 #---- trusted_local_overrides_unchecked
@@ -672,11 +798,24 @@ out: Unknown
 113..119 error[type-mismatch] expected `integer`, found `character`
 
 #==== elided_returns
-#---- a_trusted_elided_return_is_null
+#---- a_trusted_elided_return_comes_from_the_value
 #: @trust fn(count: integer)
 log_count <- function(count) count
 #++++
-log_count: fn(count: integer) -> NULL
+log_count: fn(count: integer) -> integer
+
+#---- an_elided_return_on_a_function_value_comes_from_the_value
+f <- function(x) x + 1L
+
+#: fn(integer)
+g <- f
+
+#: @trust fn(integer)
+h <- f
+#++++
+f: <T: numeric> fn(x: T) -> T
+g: fn(integer) -> integer
+h: fn(integer) -> integer
 
 #---- elided_callback_return_means_null
 #: @param cb {fn(integer)}
@@ -834,17 +973,50 @@ guarded <- function(title = NULL) {
 unguarded: fn([title]: character | NULL) -> character
 guarded: fn([title]: character | NULL) -> character
 
+#---- a_function_default_takes_its_parameter_types_from_the_declaration
+# typing: strict
+#: fn(dsn: character, [connector]: fn(dsn: character) -> character) -> character
+connect <- function(dsn, connector = function(dsn) toupper(dsn)) connector(dsn)
+#++++
+connect: fn(dsn: character, [connector]: fn(dsn: character) -> character) -> character
+
+#---- a_function_default_that_breaks_the_declaration_is_reported
+#: fn([scale]: fn(v: character) -> character) -> character
+apply_scale <- function(scale = function(v) v * 2) scale("a")
+#++++
+apply_scale: fn([scale]: fn(v: character) -> character) -> character
+103..104 error[type-mismatch] `v` is used as a numeric value (`integer` or `double`) here, but the parameter this function is the default of declares `character` for it
+
 #==== annotations_in_argument_lists
-#---- an_annotation_beside_a_lambda_argument_is_reported
-# An argument is not a statement, so the block attaches to nothing. It used to
-# say nothing either, which made a deliberately wrong type there invisible.
+#---- an_annotation_beside_a_lambda_argument_is_its_signature
 xs <- list("a")
-mapped <- lapply(xs, #: fn(x: integer) -> integer
+mapped <- lapply(xs, #: fn(v: integer) -> character
   function(v) paste0(v, "!"))
 #++++
 xs: list{character}
-mapped: list[character]
-192..220 error[annotation] A `#:` typing comment annotates the statement that follows it, and an argument is not a statement, so this one annotates nothing. Give the value its own binding and annotate that.
+mapped: Unknown
+70..96 error[type-mismatch] this function is passed `character`, but its parameter `v` accepts `integer`
+
+#---- an_annotation_types_a_lambda_the_callee_leaves_untyped
+#: fn(m: matrix) -> Any
+f <- function(m) apply(
+  m, 1,
+  #: fn(row: double[]) -> double
+  function(row) sum(row)
+)
+#++++
+f: fn(m: matrix) -> Any
+
+#---- a_named_argument_takes_the_annotation
+xs <- list(1, 2)
+total <- vapply(xs,
+  #: fn(v: double) -> double
+  FUN = function(v) v * 2,
+  numeric(1)
+)
+#++++
+xs: list{double, double}
+total: double[]
 
 #---- the_same_holds_for_a_plain_value_argument
 xs <- list(1L)
@@ -852,9 +1024,19 @@ mapped <- lapply(xs, #: character
   1L)
 #++++
 xs: list{integer}
-mapped: Unknown
-36..48 error[annotation] A `#:` typing comment annotates the statement that follows it, and an argument is not a statement, so this one annotates nothing. Give the value its own binding and annotate that.
-51..53 error[type-mismatch] expected `fn(integer) -> T`, found `integer`
+mapped: list[Unknown]
+51..53 error[type-mismatch] expected `character`, found `integer`
+
+#---- a_blank_line_separates_an_argument_from_its_annotation
+xs <- list(1L)
+mapped <- lapply(xs,
+  #: fn(v: integer) -> integer
+
+  function(v) v)
+#++++
+xs: list{integer}
+mapped: list[integer]
+38..66 error[annotation] A `#:` typing comment cannot be separated from its expression by an empty line.
 
 #---- a_braceless_function_body_does_attach_and_is_not_reported
 # The contrast, measured against a no-annotation control: these positions look
@@ -863,12 +1045,12 @@ annotated_body <- function(x)
   #: character
   x + 1L
 #++++
-annotated_body: Unknown
+annotated_body: <T: numeric> fn(x: T) -> character
 208..214 error[type-mismatch] expected `character`, found `T`
 
 #---- a_parenthesised_expression_does_attach
 parenthesised <- ( #: character
   1L )
 #++++
-parenthesised: Unknown
+parenthesised: character
 34..36 error[type-mismatch] expected `character`, found `integer`

@@ -238,6 +238,89 @@ call_it <- function() stats::sd(1L)
 sd: <T> fn([x]: T) -> character
 call_it: fn() -> character
 
+#---- an_own_read_of_an_unexported_name_fails_once_installed
+# R resolves `pkg::name` against the installed package's exports, so a read of
+# an internal function works under `load_all` and fails for every user.
+#description Package: tallyr
+#namespace export(tally)
+tally <- function(x) helper(x)
+helper <- function(x) length(x)
+call_it <- function() tallyr::helper(1:3)
+#++++
+tally: <T> fn(x: T) -> integer
+helper: <T> fn(x: T) -> integer
+call_it: fn() -> Unknown
+290..304 warning[unresolved] `helper` is not exported by `tallyr`, so this read fails once the package is installed. Export it in `NAMESPACE`, or write `tallyr:::helper`.
+
+#---- an_own_read_of_a_misspelled_export_suggests_it
+#description Package: tallyr
+#namespace export(tally_all)
+tally_all <- function(x) length(x)
+call_it <- function() tallyr::tally_al(1:3)
+#++++
+tally_all: <T> fn(x: T) -> integer
+call_it: fn() -> Unknown
+115..131 warning[unresolved] `tally_al` is not exported by `tallyr`. Did you mean `tally_all`?
+
+#---- an_own_read_of_a_name_defined_nowhere_offers_no_export
+# Nothing binds `zzqqxx` and no export is near it, so there is nothing to
+# export or respell.
+#description Package: tallyr
+#namespace export(tally)
+tally <- function(x) length(x)
+call_it <- function() tallyr::zzqqxx(1:3)
+#++++
+tally: <T> fn(x: T) -> integer
+call_it: fn() -> Unknown
+202..216 warning[unresolved] `zzqqxx` is not exported by `tallyr`.
+
+#---- an_own_read_of_an_internal_name_is_not_respelled
+# `tally_one` is a letter away from the export `tally_all`, but the package
+# defines it, so the read wants an export, not a different name.
+#description Package: tallyr
+#namespace export(tally_all)
+tally_all <- function(x) tally_one(x)
+tally_one <- function(x) length(x)
+call_it <- function() tallyr::tally_one(1:3)
+#++++
+tally_all: <T> fn(x: T) -> integer
+tally_one: <T> fn(x: T) -> integer
+call_it: fn() -> Unknown
+294..311 warning[unresolved] `tally_one` is not exported by `tallyr`, so this read fails once the package is installed. Export it in `NAMESPACE`, or write `tallyr:::tally_one`.
+
+#---- an_own_triple_colon_read_reaches_internals
+#description Package: tallyr
+#namespace export(tally)
+tally <- function(x) helper(x)
+helper <- function(x) length(x)
+call_it <- function() tallyr:::helper(1:3)
+#++++
+tally: <T> fn(x: T) -> integer
+helper: <T> fn(x: T) -> integer
+call_it: fn() -> integer
+
+#---- an_own_read_of_a_dataset_or_exported_method_is_known
+#description Package: tallyr
+#namespace export(tally)
+#namespace exportMethods(show)
+#dataset sales
+tally <- function(x) length(x)
+read_data <- function() tallyr::sales
+read_method <- function() tallyr::show
+#++++
+tally: <T> fn(x: T) -> integer
+read_data: fn() -> Unknown
+read_method: fn() -> fn(object: Any) -> Any
+
+#---- an_export_pattern_leaves_own_reads_unknowable
+#description Package: tallyr
+#namespace exportPattern("^[a-z]")
+helper <- function(x) length(x)
+call_it <- function() tallyr::anything(1:3)
+#++++
+helper: <T> fn(x: T) -> integer
+call_it: fn() -> Unknown
+
 #---- a_different_package_is_still_validated
 #description Package: withr
 call_it <- function(d) unshipped::mutate(d, x = 1)
@@ -545,10 +628,10 @@ kept <- drop_na(d, a)
 t <- tibble(x = 1:3, y = x * 2)
 #++++
 Any
-d: data.frame
+d: data.frame{a: double[], b: double[]}
 long: Any
 wide: Any
-kept: data.frame
+kept: data.frame{a: double[], b: double[]}
 t: data.frame
 
 #---- an_unknown_attached_package_tolerates_a_near_miss_of_a_project_name
@@ -560,3 +643,98 @@ str_dup <- function(s) stri_dup(s, 2)
 #++++
 Any
 str_dup: <T> fn(s: T) -> Unknown
+
+#==== native_values_in_expectations
+#---- an_expectation_that_only_evaluates_its_object_takes_a_ry_value
+# `expect_error` forces `object` and never inspects it, so a call returning a record may sit
+# there, by position or by name; a value-inspecting expectation still refuses one.
+#namespace import(testthat)
+point <- function(n) (x = n, y = n)
+a <- function() expect_error(point(1), "neg")
+b <- function() testthat::expect_silent(object = point(2))
+c <- function() expect_equal(point(3), 1)
+#++++
+point: <T> fn(n: T) -> Record{x: T, y: T}
+a: fn() -> Record{x: double, y: double}
+b: fn() -> Record{x: double, y: double}
+c: Unknown
+374..382 error[type-mismatch] `expect_equal` is an R function, and this value is a ry record, not an R object. Convert it with `as.list()` first
+
+#---- an_xts_series_is_a_zoo_series
+#namespace import(xts)
+#namespace import(zoo)
+#: fn(x: xts) -> zoo
+as_zoo <- function(x) x
+
+#: fn(x: zoo) -> xts
+as_xts <- function(x) x
+#++++
+as_zoo: fn(x: xts) -> zoo
+as_xts: fn(x: zoo) -> xts
+135..136 error[type-mismatch] expected `xts`, found `zoo`
+
+#---- a_qualified_call_reads_its_own_namespace_s_declaration
+#namespace import(rugarch)
+#: fn(fit: Any) -> double
+residual_scale <- function(fit) stats::sigma(fit)
+
+#: fn(fit: uGARCHfit) -> matrix
+volatility <- function(fit) sigma(fit)
+
+#: fn(fit: uGARCHfit) -> matrix
+qualified_volatility <- function(fit) rugarch::sigma(fit)
+#++++
+residual_scale: fn(fit: Any) -> double
+volatility: fn(fit: uGARCHfit) -> matrix
+qualified_volatility: fn(fit: uGARCHfit) -> matrix
+
+#---- a_foreach_body_sees_its_iterators
+#namespace import(foreach)
+#: fn(groups: list[integer[]]) -> integer[]
+totals <- function(groups) {
+  foreach(g = groups, .combine = c) %do% sum(g)
+}
+
+#: fn(groups: list[integer[]]) -> Any
+fields <- function(groups) {
+  foreach(g = groups) %do% g$name
+}
+
+#: fn(n: integer) -> list[list[integer]]
+pairs <- function(n) {
+  foreach(i = seq_len(n)) %:% when(i > 1L) %:% foreach(j = seq_len(i)) %do% (i + j)
+}
+
+#: fn(xs: double[]) -> double
+running <- function(xs) {
+  total <- 0
+  foreach(x = xs) %do% {
+    total <- total + x
+  }
+  total
+}
+
+#: fn(groups: list[double[]], weights: double[]) -> list[double]
+weighted <- function(groups, weights) {
+  foreach(g = groups, w = weights) %dopar% {
+    s <- sum(g)
+    s * w
+  }
+}
+#++++
+totals: fn(groups: list[integer[]]) -> integer[]
+fields: fn(groups: list[integer[]]) -> Any
+pairs: fn(n: integer) -> list[list[integer]]
+running: fn(xs: double[]) -> double
+weighted: fn(groups: list[double[]], weights: double[]) -> list[double]
+245..251 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `integer[]`. Extract an element with `[[` instead.
+
+#---- a_subclass_subsets_with_its_own_method_before_its_representation
+#namespace importFrom(xts, xts)
+#namespace importFrom(zoo, index)
+f <- function(x, at, n) {
+  series <- xts(x, at)
+  series[1:n] * series[1:n]
+}
+#++++
+f: <T, U, V: scalar numeric> fn(x: T, at: U, n: V) -> xts

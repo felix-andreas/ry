@@ -227,7 +227,7 @@ class AppSuite(unittest.TestCase):
     def test_lists_every_section_and_pattern(self):
         manifest = bench.load_suite(bench.APP_SUITE)
         groups = [program["group"] for program in manifest["programs"]]
-        self.assertEqual((groups.count("sections"), groups.count("patterns")), (13, 236))
+        self.assertEqual((groups.count("sections"), groups.count("patterns")), (13, 248))
 
     def test_the_score_is_the_total_and_contended_ry_is_compared_with_contended_gnu_r(self):
         results = self.summarize({
@@ -258,6 +258,30 @@ class AppSuite(unittest.TestCase):
         self.assertEqual(bench.APP_SECTION.match("bodies            3.234  1.23457e+07")["check"], "1.23457e+07")
         self.assertEqual(bench.APP_PATTERN.match("s4: is(x, 'Base')\t7523")["nanoseconds"], "7523")
         self.assertEqual(bench.TIER_ONE.search("| builtins | 3.3% | 0.008 |\n| JIT-compiled code | 16.7% | 0.004 |\n")["share"], "16.7")
+
+
+class PackagesSuite(unittest.TestCase):
+    def test_tracks_the_cpu_cost_and_speed_up_of_test_workers(self):
+        args = argparse.Namespace(seed=1)
+        programs = [{"id": "lgr", "display": "lgr", "jobs": 4}, {"id": "brio", "display": "brio"}]
+        rounds = [{"lgr": {"ry": {"seconds": 6.0, "test_jobs": {"jobs": 4, "cpu": [3.0, cpu], "wall": [6.0, wall]}}},
+                   "brio": {"ry": {"seconds": 1.0}}}
+                  for cpu, wall in ((3.3, 2.0), (3.6, 2.0), (3.3, 3.0))]
+        results = {}
+        bench.packages_summary(results, programs, {"rounds": rounds}, args)
+        found = results["tracked"]["test_jobs"]
+        self.assertEqual((found["package"], found["jobs"]), ("lgr", 4))
+        self.assertEqual(found["cpu"]["median"], 1.1)
+        self.assertEqual(found["speedup"]["median"], 3.0)
+        self.assertEqual(found["seconds"], {"cpu": [3.0, 3.3], "wall": [6.0, 2.0]})
+
+    def test_the_tree_timer_counts_a_process_that_outlives_its_parent(self):
+        child = "import os, time\nif os.fork() == 0:\n    end = time.process_time() + 0.3\n    while time.process_time() < end: pass\n"
+        status, _, err, _, _ = bench.spawn([sys.executable, "-I", "-c", bench.TREE_TIMER, sys.executable, "-c", child],
+                                           dict(os.environ), sample=False)
+        timed = bench.TREE_TIMED.search(err)
+        self.assertEqual((status, timed["status"]), (0, "0"))
+        self.assertGreaterEqual(float(timed["cpu"]), 0.3)
 
 
 class PublicSuite(unittest.TestCase):

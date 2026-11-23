@@ -10,7 +10,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 
 ## Syntax and semantics
 
-[`syntax-semantics.md`](syntax-semantics.md): The parser and syntax tree, the salsa analysis core, name resolution, and the type checker.
+[`syntax-semantics.md`](syntax-semantics.md): The parser and syntax tree, name resolution, and the type checker.
 
 - The standard library ships as declaration-only stub files
 - The beta semantics
@@ -37,7 +37,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Shipping stack: Why salsa rather than an in-house engine
 - Shipping stack: Item granularity and item identity (planned)
 - Shipping stack: An annotation is one concept with pluggable spellings
-- Shipping stack: The inline annotation syntax is a superset of R (built, with exceptions)
+- Shipping stack: The inline annotation syntax is a superset of R
 - Shipping stack: How inline annotations are built
 - Shipping stack: Inline type definitions, coercions and nominal constructors
 - Shipping stack: Testing doctrine for `syntax`
@@ -60,12 +60,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The native pipe desugars at lowering
 - `@masked` is formal-aware, and dplyr is a conditional namespace
 - A vendored export manifest carries the name-level truth beside the typed stubs
-- One source of truth for where an item spells its name
-- A check reads per-name firewalls, never project-wide maps (built, with exceptions)
-- Cold-pass memory and time: interned names, compact HIR, parallel setup (built, with exceptions)
-- Syntax trees are evicted, and only small syntax facts are memoized (built, with exceptions)
 - A call's result drops unconstrained type-parameter members of a union
-- The cold check searches green trees and caches globals per item check
 - Call checking follows R's lazy argument and matching rules (built, with exceptions)
 - Called names are looked up as functions
 - testthat files mirror testthat's environments
@@ -76,14 +71,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `switch(typeof(x), ...)` narrows `x` per arm
 - Nested replacement rewrites the spine
 - A strict library file's top level holds only definitions, and purity is declared
-- Cold-check constant costs: one green walk per file, immortal interning, high durability (built, with exceptions)
-- Types and names are hash-consed outside salsa
 - The checker presumes R code is correct where R's semantics leave the question open
 - A computed function that may be `NULL` is called as the function
-- A file's check names only what its interface reaches (built, with exceptions)
-- Every host keeps every tree
-- `ry check` releases its trees once, and memoized records are compact (built, with exceptions)
-- HIR as struct-of-arrays, lowered from the green tree (built, with exceptions)
 - A function literal in a call argument is typed in context
 - Shipped stubs are whatever `types/` holds
 - Override-stub problems are computed after `PackageMetadata` exists
@@ -91,8 +80,6 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - An all-`Any` overload does not veto agreement among unchecked fits
 - A formula is the nominal `formula`, and its operands are not judged
 - `$`, `[` and `[[` dispatch to a class's subset method
-- A new top-level name costs one project fold (built, with exceptions)
-- Typed checking costs per name, not per file
 - A conditional write of a formal covers the paths that run it
 - `<<-` writes flow forward, and a NULL-initialized cache reads its own first write
 - The overload probe's unchecked-argument witness is a nominal no candidate declares
@@ -100,11 +87,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Corpus-driven stub and overload fixes
 - Strict-friction rules for matrices, unions, `...: Any` and `$` members
 - Inferred annotations follow the project's annotation style
-- The cold check's per-call work: a bump arena, borrowed schemes, a token-only green builder (built, with exceptions)
-- The item check's working maps live in a pooled bump arena (built, with exceptions)
 - `$` fields resolve through the values that built the receiver
 - Packages without stubs are read from the R library by the host, lazily
-- One-shot checks record coarse dependencies (superseded by "Every host resolves names through one path, and trees live in the host's store")
 - Inferred signatures carry body facts that a call reads
 - `Reduce` folds a named function instead of matching `fn(U, T) -> U`
 - References are checked against an independent resolver, and a replacement copy is its source
@@ -124,6 +108,66 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Overload probes reject by call shape first
 - `[[` by name on a named atomic vector is the element, not `T | NULL`
 - Correlated-path allowances added for the fresh sample
+- A function has one signature, resolved in `syntax::annotation`
+- A splice reparse shares what the parser's recorded lookahead proves untouched
+- One syntax verdict, in the `syntax` crate, for `ry check` and the runtime
+- A stub type name is no value, and a type and a value of one name each have a declaration
+- Corpus false reports: the narrowing and overload rules that cleared them
+- `@opaque` parameters accept ry values
+- The stats d/p/q functions follow the scalar claim
+- A `#:` block in an argument list types the argument after it
+- A function literal default takes its parameter's declared function type
+- A type variable may be bounded by a union
+- A value whose code a later top-level write replaces is a template
+- A key test reads within the tests that enclose it
+- Strict mode reports where `Unknown` enters, not every type it reaches
+- An all-`logical` call of a numeric function keeps `logical` (settled)
+- A package's own `pkg::name` reads are checked against `NAMESPACE` and `data/` (settled)
+- A wrapper over a numeric overload set takes the `numeric` bound (settled)
+- A `[` on a query's result is a query
+- Branches decide each other's literal items, and `c()` decides a literal as R's type
+- A loop's `break`s and `next`s join where they land
+- An error against a fixed type keeps the item's export
+- An annotation that misuses the type vocabulary carries no payload
+- An unassigned path reads the name outside the function
+- A declared type parameter keeps its name in messages
+- A closure's read sees the writes after its definition
+- A nominal field narrows through a fact, not a rewritten type
+- A type past the size ceiling widens to `Unknown`, never to a recursive nominal (settled)
+- A `logical` argument binds a numeric type parameter to `integer`
+- Feature probes, Windows-only exports and callback strings
+- An empty list adds no element to `c()` or a loop
+- Shipping stack: Plain R comes from `ry build --plain-r`
+- A signature's type parameters are in scope in its body
+- `opaque` makes a type's representation private to its file
+- Open records are explicit, with no row variables
+- Recursive types are nominal; an alias never recurses
+- S4 is typed through a nominal wrapper, not from `setClass`
+- A typed environment lists its bindings and never changes type
+- A top-level `if (FALSE)` body binds no package name (settled)
+- S3 subsetting dispatches on the declared class first (settled)
+- A generic's dispatch formal is forced when an argument reaches it (settled)
+
+## Analysis core
+
+[`analysis-core.md`](analysis-core.md): The analysis core's incremental structure, memory layout and cold-check cost: item identity, firewalls, tree storage, interning and per-item tables.
+
+- One source of truth for where an item spells its name
+- A check reads per-name firewalls, never project-wide maps (built, with exceptions)
+- Cold-pass memory and time: interned names, compact HIR, parallel setup (built, with exceptions)
+- Syntax trees are evicted, and only small syntax facts are memoized (built, with exceptions)
+- The cold check searches green trees and caches globals per item check
+- Cold-check constant costs: one green walk per file, immortal interning, high durability (built, with exceptions)
+- Types and names are hash-consed outside salsa
+- A file's check names only what its interface reaches (built, with exceptions)
+- Every host keeps every tree
+- `ry check` releases its trees once, and memoized records are compact (built, with exceptions)
+- HIR as struct-of-arrays, lowered from the green tree (built, with exceptions)
+- A new top-level name costs one chunk fold (built, with exceptions)
+- Typed checking costs per name, not per file
+- The cold check's per-call work: a bump arena, borrowed schemes, a token-only green builder (built, with exceptions)
+- The item check's working maps live in a pooled bump arena (built, with exceptions)
+- One-shot checks record coarse dependencies (superseded by "Every host resolves names through one path, and trees live in the host's store")
 - A cold check holds one parse tree per worker (built, with exceptions)
 - The one-shot check scans kind columns and overlaps its serial phases (built, with exceptions)
 - The checker's per-item facts are columns and bitsets indexed by dense id
@@ -131,10 +175,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Types and symbols are four-byte ids into append-only columns (built, with exceptions)
 - An item's syntax has a stamp, so an edit lowers only the items it changed
 - The analysis core's per-item and per-file tables after the type store
-- A function has one signature, resolved in `syntax::annotation`
-- A splice reparse shares what the parser's recorded lookahead proves untouched
-- One syntax verdict, in the `syntax` crate, for `ry check` and the runtime
-- A stub type name is no value, and a type and a value of one name each have a declaration
+- `item_links` resolves every name an item spells (settled)
 
 ## Editor and language server
 
@@ -171,6 +212,9 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The console's crossterm is patched to drain the terminal, and R reads console input one line per chunk
 - An editor target is what the code means, and rename refuses what it cannot trace
 - A hover's link is the definition's resolution, and a name that resolves is one completion offers
+- `--annotate` and the code action write a lambda argument's signature
+- A cancellation flips the worker's token only inside an armed scope
+- A local typed by a signature's type parameter reads as that parameter
 
 ## Interpreter
 
@@ -233,6 +277,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - POSIX regular expressions run on an automaton when they need the longest match
 - `perl = TRUE` runs on PCRE2, linked statically
 - TRE approximate regular expressions
+- aregexec and compilerVersion
 - TRE minimal repetitions over alternatives
 - The message sink and connection flush points
 - utils' sockets, internal downloads and allocation profiling
@@ -263,7 +308,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Base `.Internal` wrappers inlined; string fast paths not kept (built, with exceptions)
 - The serialize reader checks what a stream claims before it stores it
 - sprintf formats numbers with the native kernels
-- Hash tables for `unique()` and `match()` stop growing with the elements at 256 KB
+- Hash tables for `unique()` and `match()` start at 512 KB and grow by extrapolation
 - Positional builtin calls read their arguments from the registers (built, with exceptions)
 - A warning reaches `suppressWarnings` and `tryCatch` without running R
 - `%%` and `%/%` on doubles port GNU R's kernels, with a 64-bit path for whole numbers
@@ -271,10 +316,15 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Small base closures with call arguments run their bodies natively behind prologues
 - `c`, `unlist`, `rep` and positional `[` copy handle vectors a run at a time
 - The radix string order ranks bytes with integer keys, and plain POSIX patterns capture on the automata
+- POSIX capture groups come from a port of TRE's tagged automaton
 - `x[] <- value` and `x[a:b] <- value` write whole copies of the value
 - `order`, `sort.int` and `sort.default` run natively on plain vectors
 - Strings collate with ICU4X's CLDR collator, as GNU R's ICU does
 - `abbreviate` is GNU R's `stripchars`, pass for pass (settled)
+- Vector kernels: one typed loop per case, exact sizes, and GNU R's polygamma and Bessel functions (settled)
+- Base and stats kernels: exact shortcuts, GNU R's quirks kept, and one prepared state per call
+- Approximate repetitions expand as TRE's do
+- Fortran-style ports keep C's `pow` call for constant bases
 
 ## R compatibility
 
@@ -356,6 +406,14 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A compiled replacement probes the target before any subscript runs
 - A call native code evaluates repeatedly compiles at its third evaluation
 - A handler compiled code steps outside `scoped` leaves no handle behind
+- Tier 1 on generic code is frames for generic callees, not a third compiler
+- A stepped instruction runs on a kept view of the activation
+- Compiled code that keeps leaving is retired
+- The cost model counts frames, and free steps count nothing
+- Portable code with no lookup from the enclosure is proven for every enclosure
+- A loop compiles when its backward jumps repay the body
+- A back edge is counted in tier 0's fast jump handler
+- A load that reaches the runtime writes dirty variables back first
 
 ## Heap and collector
 
@@ -403,6 +461,11 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A raw entry into handle code picks its scope by who releases
 - An allocation failure reports the size of the vector's data
 - A list of inert elements skips its children when it dies
+- A cached ASCII string is the only string with its text
+- A vector kind has no `downcast`: the caller chooses `standard` or `dense`
+- glibc's malloc keeps freed package buffers (settled)
+- Profiles run over the start-up image
+- Native routines enter through the same safe entry as builtins
 
 ## C API, R home and packages
 
@@ -458,6 +521,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Hot C API entry points take a direct success path
 - Measured and not taken: a builtin path for `Rf_eval` and a cheaper protect stack
 - Measured and not taken: libdeflate for lazy-load records
+- Extracted runtimes and base trees are pruned by a ledger and held by locks
 
 ## Typed ry and the standard library
 
@@ -564,6 +628,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A `NULL` local inside a query of unknown columns is the column
 - String keys sort by rank, and merge pairs come from sorted codes
 - package:ry attaches no bare name another package exports
+- A base frame built by `data.frame()` or `data.table()` knows its columns
 
 ## Build, benchmarks and CI
 
@@ -610,6 +675,10 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A test user's application workload is a suite scored by total time
 - The analysis batteries share one generator and check sessions on warm databases
 - The parser is fuzzed against GNU R's `parse()`, with the known differences in one list
+- Session commands read the user profile, as Rscript does
+- A package `ry load` loaded counts as a pkgload dev package
+- Typed benchmark templates do R-level work in boundary functions
+- ry test forks its workers
 
 ## Docs, process and positioning
 
