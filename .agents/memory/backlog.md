@@ -647,6 +647,7 @@ A test user's application workload (`tools/bench/appsuite`) spends its time flat
 - **A free variable read through a pending environment** costs about 700 instructions the first time a callee reads its maker's variable, because the variable moves from its slot to a cell. `function(x) { inner <- function() x + 1L; inner() }` is 3,679 against 937 for a plain call, and 831 of it is `fast_call_generic`.
 - **`list("a", "b", i)`** 3,455 (`fast_call_generic` 594, `triple` 325, `slot_builtin_call` 300) and **`seq_len(4L)`** 750 against GNU R's 652 (the scalar coercion with its warning check 170, the compact sequence 170).
 - **A replacement at top level** (`grid[2L, 2L] <- 9` 720 against 536) pays a hashed lookup of the variable in the global environment per statement; inside a function it is a slot.
+- **A frame whose closure or promise outlives it walks its holders twice at the return**: tier 0's fast return asks `eval::outliving_cause`, and on a holder that outlives the frame the general return (`eval::finish_frame`) asks again, about 200 instructions (`try(i + 1L, silent = TRUE)`, `suppressWarnings(i + 1L)` and a `withCallingHandlers` in a function, each 1 to 2% of the operation). The fast return can lift the frame itself with the cause it found.
 
 ## Open: a string `switch` without the linear name scan
 

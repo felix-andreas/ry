@@ -1700,7 +1700,7 @@ just bench-mechanisms --ry target/release/ry --filter dispatch
 ...
 ```
 
-The whole table takes about ten minutes on four cores, and one filtered group well under a
+The whole table takes about fifteen minutes on four cores, and one filtered group well under a
 minute. `--filter` may be given several times, and an operation is run when its name contains any
 of the texts. `--save FILE` keeps the counts and `--baseline FILE` prints the change against
 them, which is how a change to the call path or to dispatch is checked before the suite is run.
