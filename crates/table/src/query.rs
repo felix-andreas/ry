@@ -11,17 +11,19 @@
 use {
     crate::{
         ColumnType, Error, Result, RowIndex, Schema, Table,
+        convert::{NA_REAL, is_na_real},
         factor::{self, Levels},
         group, join,
-        kernel::{self, Evaluator, Vector, scatter, scatters, selected_rows},
+        kernel::{Evaluator, Vector, scatter, scatters, selected_rows},
     },
+    numeric::long_double::{real_integer_divide, real_modulo},
     polars::prelude::{
         AnyValue, AsOfOptions, AsofStrategy, ChunkAgg, Column, DataFrame, DataType, ExplodeOptions,
         Expr as PolarsExpr, Field, Float64Chunked, Int32Chunked, IntoColumn, IntoLazy, JoinType,
         LazyFrame, MaintainOrderJoin, NULL, NamedFrom, PlSmallStr, Scalar, Series,
         SortMultipleOptions, UnionArgs, by_name, col, concat, len, lit, pearson_corr, when,
     },
-    polars_arrow::bitmap::MutableBitmap,
+    polars_arrow::bitmap::{Bitmap, MutableBitmap},
     std::{collections::HashSet, fmt, sync::Arc},
 };
 
@@ -3438,13 +3440,15 @@ impl Lowering<'_> {
                     .then(lit(polars::prelude::Null {}).cast(DataType::Int32))
                     .otherwise(l.floor_div(r))
             }
-            BinaryOp::IntegerDivide => r_floor_divide(
+            BinaryOp::IntegerDivide => rowwise_double(
                 self.numeric(left, ColumnType::Double)?,
                 self.numeric(right, ColumnType::Double)?,
+                real_integer_divide,
             ),
-            BinaryOp::Modulo => r_modulo(
+            BinaryOp::Modulo => rowwise_double(
                 self.numeric(left, ColumnType::Double)?,
                 self.numeric(right, ColumnType::Double)?,
+                real_modulo,
             )
             .cast(dtype(kind)),
             BinaryOp::Equal
@@ -3480,50 +3484,83 @@ impl Lowering<'_> {
     }
 }
 
-/// R's `%%` on doubles, [`kernel::r_modulo`] on every row.
-fn r_modulo(x1: PolarsExpr, x2: PolarsExpr) -> PolarsExpr {
-    rowwise_double(x1, x2, kernel::r_modulo, true)
-}
-
-/// R's `%/%` on doubles, [`kernel::r_floor_divide`] on every row.
-fn r_floor_divide(x1: PolarsExpr, x2: PolarsExpr) -> PolarsExpr {
-    rowwise_double(x1, x2, kernel::r_floor_divide, false)
-}
-
-/// `apply` on each row of two double columns, either of which may be a single value. A row with a
-/// missing value is missing, except that with `zero_decides` a zero divisor gives `NaN` whatever
-/// the dividend, as R's `NA %% 0` does. The kernel's lowering of the same operators shares
+/// `apply` on each row of two double columns, either of which may be a single value. A missing
+/// value enters `apply` as R's `NA_real_`, and the row is missing only when the result is that
+/// `NA`, so `NA %% 0` is `NaN` and `NaN %/% NA` is `NaN`, as in R. The kernel's lowering of the same operators shares
 /// `apply`, so the two never disagree on R's edge cases.
-fn rowwise_double(
-    x1: PolarsExpr,
-    x2: PolarsExpr,
-    apply: fn(f64, f64) -> f64,
-    zero_decides: bool,
-) -> PolarsExpr {
+fn rowwise_double(x1: PolarsExpr, x2: PolarsExpr, apply: fn(f64, f64) -> f64) -> PolarsExpr {
     x1.map_many(
         move |columns: &mut [Column]| {
-            let left = columns[0].as_materialized_series().f64()?.clone();
-            let right = columns[1].as_materialized_series().f64()?.clone();
+            let left = columns[0]
+                .as_materialized_series()
+                .f64()?
+                .rechunk()
+                .into_owned();
+            let right = columns[1]
+                .as_materialized_series()
+                .f64()?
+                .rechunk()
+                .into_owned();
             // A single value broadcasts to the other side's length, zero included.
             let len = match (left.len(), right.len()) {
                 (1, other) | (other, 1) => other,
                 (left_len, right_len) => left_len.min(right_len),
             };
-            let at = |values: &Float64Chunked, row: usize| {
-                values.get(if values.len() == 1 { 0 } else { row })
+            let (left_values, left_validity) = contiguous(&left);
+            let (right_values, right_validity) = contiguous(&right);
+            let (left_step, right_step) =
+                (usize::from(left.len() != 1), usize::from(right.len() != 1));
+            let mut values = Vec::with_capacity(len);
+            let validity = if left_validity.is_none() && right_validity.is_none() {
+                if left_step == 1 && right_step == 1 {
+                    values.extend(
+                        left_values[..len]
+                            .iter()
+                            .zip(&right_values[..len])
+                            .map(|(lhs, rhs)| apply(*lhs, *rhs)),
+                    );
+                } else {
+                    values.extend((0..len).map(|row| {
+                        apply(left_values[row * left_step], right_values[row * right_step])
+                    }));
+                }
+                None
+            } else {
+                let mut validity = MutableBitmap::with_capacity(len);
+                for row in 0..len {
+                    let (left_row, right_row) = (row * left_step, row * right_step);
+                    let lhs = if left_validity.is_none_or(|bits| bits.get_bit(left_row)) {
+                        left_values[left_row]
+                    } else {
+                        NA_REAL
+                    };
+                    let rhs = if right_validity.is_none_or(|bits| bits.get_bit(right_row)) {
+                        right_values[right_row]
+                    } else {
+                        NA_REAL
+                    };
+                    let value = apply(lhs, rhs);
+                    values.push(value);
+                    validity.push(!is_na_real(value));
+                }
+                Some(validity.into())
             };
-            let values: Float64Chunked = (0..len)
-                .map(|row| match (at(&left, row), at(&right, row)) {
-                    (Some(lhs), Some(rhs)) => Some(apply(lhs, rhs)),
-                    (None, Some(rhs)) if zero_decides && rhs == 0.0 => Some(f64::NAN),
-                    _ => None,
-                })
-                .collect();
-            Ok(values.with_name(left.name().clone()).into_column())
+            Ok(
+                Float64Chunked::from_vec_validity(left.name().clone(), values, validity)
+                    .into_column(),
+            )
         },
         &[x2],
         |_, fields| Ok(Field::new(fields[0].name().clone(), DataType::Float64)),
     )
+}
+
+/// A single-chunk column's values and validity, read in place.
+fn contiguous(values: &Float64Chunked) -> (&[f64], Option<&Bitmap>) {
+    match values.downcast_iter().next() {
+        Some(array) => (array.values().as_slice(), array.validity()),
+        None => (&[], None),
+    }
 }
 
 /// An `Int64` result narrowed to `Int32`, with `NA` where it does not fit, as R's integer

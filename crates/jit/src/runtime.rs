@@ -21,7 +21,7 @@ use {
         builtins::Arg,
         bytecode::{self, LoopState, Machine, PROFILE, StepEnd, Stepper, TIER1, profile},
         eval::{self, Entering},
-        heap, moves,
+        heap, long_double, moves,
         standard_library::{self, CompiledKey},
         unwind::{R, Unwind, error},
         values,
@@ -2841,18 +2841,18 @@ pub extern "C" fn jit_log(value: f64) -> f64 {
 }
 
 pub extern "C" fn jit_real_modulo(a: f64, b: f64) -> f64 {
-    arith::real_modulo(a, b)
+    long_double::real_modulo(a, b)
 }
 
 /// Whether `%%` on doubles must warn about a total loss of accuracy, which compiled code
 /// leaves to tier 0: 1 when it must, else 0.
 pub extern "C" fn jit_modulus_loses_accuracy(a: f64, b: f64) -> i32 {
-    i32::from(arith::modulus_loses_accuracy(a, b))
+    i32::from(long_double::modulus_loses_accuracy(a, b))
 }
 
 /// `%/%` on doubles, as the interpreter computes it.
 pub extern "C" fn jit_real_integer_divide(a: f64, b: f64) -> f64 {
-    arith::real_integer_divide(a, b)
+    long_double::real_integer_divide(a, b)
 }
 
 /// `%%` on integers: `NA` for an `NA` operand or a zero divisor, else the sign of the divisor.

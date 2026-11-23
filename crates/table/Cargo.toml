@@ -42,6 +42,7 @@ memmap2 = "0.9"
 ryu = "1.0"
 itoa = "1.0"
 sniff = { path = "../sniff" }
+numeric = { path = "../numeric" }
 rustc-hash.workspace = true
 foldhash.workspace = true
 hashbrown.workspace = true

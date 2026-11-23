@@ -15355,11 +15355,11 @@ unsafe fn fast_arithmetic(operator: Arith, left: Sexp, right: Sexp) -> R<Option<
         Arith::LessEqual => comparison((!nan).then_some(a <= b)),
         Arith::GreaterEqual => comparison((!nan).then_some(a >= b)),
         // The builtin warns when the remainder loses all accuracy.
-        Arith::Modulo if !crate::arith::modulus_loses_accuracy(a, b) => {
-            real(crate::arith::real_modulo(a, b))
+        Arith::Modulo if !crate::long_double::modulus_loses_accuracy(a, b) => {
+            real(crate::long_double::real_modulo(a, b))
         }
         Arith::Modulo => Ok(None),
-        Arith::IntegerDivide => real(crate::arith::real_integer_divide(a, b)),
+        Arith::IntegerDivide => real(crate::long_double::real_integer_divide(a, b)),
     }
 }
 

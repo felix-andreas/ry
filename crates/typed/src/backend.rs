@@ -2789,15 +2789,15 @@ extern "C" fn real_platform_power(x: f64, y: f64) -> f64 {
 }
 
 extern "C" fn real_modulo(x: f64, y: f64) -> f64 {
-    interp::arith::real_modulo(x, y)
+    interp::long_double::real_modulo(x, y)
 }
 
 extern "C" fn modulus_loses_accuracy(x: f64, y: f64) -> u32 {
-    u32::from(interp::arith::modulus_loses_accuracy(x, y))
+    u32::from(interp::long_double::modulus_loses_accuracy(x, y))
 }
 
 extern "C" fn real_integer_divide(x: f64, y: f64) -> f64 {
-    interp::arith::real_integer_divide(x, y)
+    interp::long_double::real_integer_divide(x, y)
 }
 
 /// `max(x, y)` of doubles: `NA` wins over `NaN`, which wins over any number.

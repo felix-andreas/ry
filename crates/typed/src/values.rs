@@ -22,12 +22,11 @@
 use {
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, NA_REAL_BITS, is_na_real},
     interp::{
-        arith::{
-            long_double_mean, long_double_mean_from_total, modulus_loses_accuracy, power,
-            real_integer_divide, real_modulo,
-        },
+        arith::{long_double_mean, long_double_mean_from_total, power},
         format::format_real_alone,
-        long_double::{LongDouble, add_all},
+        long_double::{
+            LongDouble, add_all, modulus_loses_accuracy, real_integer_divide, real_modulo,
+        },
         rmath::fround,
         sort::collate,
     },
