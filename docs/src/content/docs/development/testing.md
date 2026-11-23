@@ -343,6 +343,11 @@ reaches the parser, the formatter, the checker and the editor features at once:
 A battery reports up to eight failing seeds per run (`FAILURES_PER_RUN`), each with its replay
 command, so one run of a deep campaign shows whether it found one defect or several.
 
+A deep run belongs in the `fuzz` profile, which optimizes like `iterate` but keeps debug
+assertions and overflow checks, since the batteries rely on both:
+`FUZZ_ITERS=3000 cargo test --profile fuzz -p semantics --test test_fuzz fuzz_sessions -- --exact`.
+There `fuzz_sessions` checks about 140 sessions a second against about 14 in the debug profile.
+
 ### The semantic pipeline
 
 `crates/semantics/tests/test_fuzz.rs` checks *sessions*. A session is a project of one to four
@@ -364,6 +369,31 @@ state the harness checks:
 - **Diagnostic ranges are well formed.**
 - **The output is deterministic** across interning orders: every sixty-fourth session also compares
   its first state with a database that has no history at all.
+- **A parallel check equals the sequential one.** Every fourth session also checks each state on
+  three threads, each a clone of one fresh database that checks the items in a different rotation,
+  and every thread's rendering must equal the reference.
+
+In debug builds the checker also asserts, for every item it checks, that each type it records for
+the editor resolves in the item's own inference table, so every input of every suite tests that no
+inference variable escapes its item.
+
+Two metamorphic relations compare a program with an edit that changes no meaning
+(`edits_that_change_no_meaning_only_move_findings`). A blank line or `# note` inserted before a
+top-level statement must give the same findings with their ranges moved by its length. A local
+name renamed throughout to a fresh name of the same length and sort position must give the same
+findings with the name spelled back. The rename skips names it cannot rename safely: names that a
+stub, a namespace or an annotation spells, members and named arguments that a stub spells, and a
+file whose findings suggest the old or the new name ("Did you mean").
+
+The stub loader has its own arm (`fuzz_stub_sources`) over token soup, windows of the shipped
+`.Rtypes` files and splices of two windows. Every problem must name a line of the file and every
+declaration range lie inside it, and the loaded library must be the same after another stub was
+loaded in between and in a fresh database.
+
+`crates/ry/tests/test_fuzz.rs` checks the editor's two diagnostic waves
+(`fuzz_first_wave_is_a_subset_of_the_settled_wave`): under a random check and lint configuration,
+every finding the fast first wave publishes must also be in the settled diagnostics, or the editor
+shows a finding that then flickers away.
 
 The rendering folds every lint, under a configuration that turns them all on, so the lint layer
 inherits the same invariants. Two further arms run every fixture case as the project its suite
@@ -379,10 +409,10 @@ of seeds that replays it. `FUZZ_ITERS` scales the budgets, a bounded default run
 
 `crates/format/tests/test_fuzz.rs` feeds the formatter valid-program seeds, byte-level mutations of
 those seeds, token soup, generated programs and fixture cases with one small edit each, every
-fixture case source in the repository, the program corpus, and real corpus files once they are
-fetched. It checks that nothing panics (the formatter either succeeds or refuses with a structured
-error), that the output is deterministic, that the code is preserved, and that formatting is
-idempotent, meaning that formatting a successful output again succeeds and reproduces it byte for
+fixture case source in the repository, the program corpus, and mutations of real corpus files,
+or of the program corpus when `corpus/` is not fetched. It checks that nothing panics (the
+formatter either succeeds or refuses with a structured error), that the output is deterministic,
+that the code is preserved, and that formatting is idempotent, meaning that formatting a successful output again succeeds and reproduces it byte for
 byte.
 
 The refusal path is part of the contract, and the battery holds the formatter to it: a refusal is
@@ -553,7 +583,8 @@ on in-tree input, which is full of `#:` annotations (comments, to tree-sitter) a
 broken sources. Accepting what tree-sitter rejects is gated there against
 `crates/syntax/tests/in-tree-acceptance-allowlist.txt`. Each allowlist entry is adjudicated by
 running R itself, and must say which of two things it is: tree-sitter being wrong, or a known gap in
-this parser.
+this parser. An entry that is no longer accepted only by us fails the test too, so a closed gap
+leaves the list.
 
 Inline type annotations are ry syntax that R rejects by design, so tree-sitter judges the plain R
 program a source erases to (`syntax::erase_inline_annotations`), not the source itself. That makes

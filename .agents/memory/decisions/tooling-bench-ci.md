@@ -426,3 +426,15 @@ contract in the type-system reference.
 - **Temp directories.** `mc_exit` removes a renewed session temp directory (the owner check leaves a shared one alone), and the parent unlinks the directory of a worker it had to kill.
 - **What remains.** Each worker pays first-call costs for the code its files reach (lazy-load fetches, closure compilation, about 0.1 s per worker on stringr), so a short suite costs relatively more. Warming that code in the parent before forking cost as much wall time as it saved CPU, so it was rejected.
 - **Rejected:** long-lived callr workers (they already were; the cost was the per-worker start and the relay), and forking per file (each file would pay the warm-up again).
+
+## Analysis oracles compare two computations that must agree
+
+**Status:** built (`semantics` `test_fuzz`, `ry` `test_fuzz`, `semantics::check`).
+
+- **What was weak.** The analysis batteries asked whether an answer was well formed (no panic, ranges in bounds, deterministic, incremental equal to fresh), so a uniformly wrong answer passed every arm: an inference variable escaping its item shipped that way.
+- **Parallel against sequential.** Every fourth workbench session renders each state on three threads, each a clone of one fresh command database that checks the items in a rotated order, so the threads race for the same memos. Each rendering is compared with the sequential reference text, not with a hash, so a failure shows the differing finding. Three threads and every fourth session keep the default run's added cost to a few seconds; `FUZZ_DEPTH` deepens it.
+- **Resolved types.** The check asserts in debug builds that every type recorded for the editor resolves in the item's own table. It reads only the table the check already holds, so it adds no salsa dependency and no release cost.
+- **Metamorphic relations.** Inserted trivia must move findings by its length (a finding that spans the insertion point grows). A rename must give the same findings with the name spelled back, compared per file as sorted lines. The rename keeps the old name's length, character classes and sort position, because symbols and record fields render in spelling order; it skips stub, namespace and annotation spellings, stub-spelled members and named arguments, R6's bound names, and files whose findings suggest either name. What it does not check: renames of those names, and the order of findings within a file.
+- **Two waves.** The first wave's findings, after suppressions, must be contained in the settled diagnostics under a random check and lint configuration. Containment, not equality, because the settled wave adds semantic findings.
+- **Stub loader.** A stub that loads, then another stub, then the first again must render the same library as before and as a fresh database. Each declaration's range must lie in its text.
+- **Stack overflow.** Analysis batteries run each seed on a thread named after the test and the seed, because the overflow abort prints only the thread's name. Batteries whose cases are not `Send` (the runtime's) keep `for_each_seed`.

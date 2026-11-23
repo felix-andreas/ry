@@ -395,7 +395,7 @@ fn fuzz_stub_sources() {
     }
     for_each_seed_on_named_threads(400, |seed| {
         let mut rng = SplitMix64(0x57AB_5EED ^ seed);
-        let mut window = |rng: &mut SplitMix64| {
+        let window = |rng: &mut SplitMix64| {
             let lines: Vec<&str> = shipped[rng.below(shipped.len())].lines().collect();
             let start = rng.below(lines.len().max(1));
             let end = (start + 1 + rng.below(40)).min(lines.len());

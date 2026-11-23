@@ -114,6 +114,13 @@ lto = false
 codegen-units = 16
 strip = false
 
+# The fuzz batteries optimized, with every debug assertion and overflow check they rely on:
+# `cargo test --profile fuzz -p semantics --test test_fuzz`.
+[profile.fuzz]
+inherits = "iterate"
+debug-assertions = true
+overflow-checks = true
+
 # Release with line tables kept for profilers: `cargo build --profile profiling`. It keeps release's
 # fat LTO and codegen settings, so the profiler sees release's inlining: compare
 # `size -A target/{release,profiling}/libR.so`, whose `.text` sections differ by under 0.2%. Line
