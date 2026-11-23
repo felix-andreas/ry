@@ -1,0 +1,144 @@
+[stdout]
+| -- a value of the slot's class
+|  num 1.5
+|  num 2.5
+|  num 3.5
+|  chr "a"
+|  chr "b"
+|  chr "c"
+|  num 1
+| -- a slot of class ANY takes any value
+|  int 1
+|  chr "text"
+|  symbol NULL
+| function (..., na.rm = FALSE)  
+|  symbol name
+| Formal class 'Leaf' [package ".GlobalEnv"] with 1 slot
+|   ..@ size: num 2
+| List of 2
+|  $ : num 1
+|  $ : num 2
+| -- a value of a class that extends the slot's class
+|  int 1
+|  int 2
+|  int 3
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+|  chr "words"
+|  symbol NULL
+|  chr "more"
+| [1] "stamp"   "POSIXct"
+| [1] "stamp"   "POSIXct"
+| [1] "stamp"   "POSIXct"
+| -- a value of a class the slot does not take
+| [1] "assignment of an object of class “character” is not valid for @‘value’ in an object of class “Holder”; is(value, \"numeric\") is not TRUE"
+| [2] "(function (cl, name, valueClass) "                                                                                                        
+| [1] "assignment of an object of class “character” is not valid for @‘value’ in an object of class “Holder”; is(value, \"numeric\") is not TRUE"
+| [2] "(function (cl, name, valueClass) "                                                                                                        
+| [1] "assignment of an object of class “character” is not valid for @‘value’ in an object of class “Holder”; is(value, \"numeric\") is not TRUE"
+| [2] "(function (cl, name, valueClass) "                                                                                                        
+| [1] "assignment of an object of class “numeric” is not valid for @‘label’ in an object of class “Holder”; is(value, \"character\") is not TRUE"
+| [2] "(function (cl, name, valueClass) "                                                                                                        
+| [1] "assignment of an object of class “Holder” is not valid for @‘part’ in an object of class “Holder”; is(value, \"Base\") is not TRUE"
+| [2] "(function (cl, name, valueClass) "                                                                                                 
+| [1] "assignment of an object of class “integer” is not valid for @‘text’ in an object of class “Holder”; is(value, \"Text\") is not TRUE"
+| [2] "(function (cl, name, valueClass) "                                                                                                  
+| [1] "c(\"assignment of an object of class “other” is not valid for @‘when’ in an object of class “Holder”; is(value, \\\"stamp\\\") is not TRUE\", \"assignment of an object of class “stamp” is not valid for @‘when’ in an object of class “Holder”; is(value, \\\"stamp\\\") is not TRUE\")"
+| [2] "(function (cl, name, valueClass) "                                                                                                                                                                                                                                                        
+| [1] "assignment of an object of class “character” is not valid for @‘flag’ in an object of class “Holder”; is(value, \"logical\") is not TRUE"
+| [2] "(function (cl, name, valueClass) "                                                                                                       
+|  logi NA
+| [1] "assignment of an object of class “numeric” is not valid for @‘count’ in an object of class “Holder”; is(value, \"integer\") is not TRUE"
+| [2] "(function (cl, name, valueClass) "                                                                                                      
+|  int 1
+| -- values with dimensions and S3 classes, by the slot's class
+| numbers takes double integer factor ordered 
+| grid takes matrix 
+| cube takes matrix array 
+| items takes matrix array double integer factor ordered frame list 
+| whole takes integer factor ordered 
+| level takes factor ordered 
+| frame takes frame 
+| shaped takes matrix array 
+| listed takes frame list 
+| -- a slot the class does not have
+| [1] "‘absent’ is not a slot in class “Holder”"
+| [2] "(function (cl, name, valueClass) "       
+| [1] "‘absent’ is not a slot in class “Holder”"
+| [2] "(function (cl, name, valueClass) "       
+| [1] "‘absent’ is not a slot in class “Holder”"
+| [2] "(function (cl, name, valueClass) "       
+| [1] "‘absent’ is not a slot in class “Holder”"
+| [2] "(function (cl, name, valueClass) "       
+| -- an object that is not an S4 object
+| [1] "‘value’ is not a slot in class “numeric”"
+| [2] "(function (cl, name, valueClass) "       
+| [1] "‘value’ is not a slot in class “character”"
+| [2] "(function (cl, name, valueClass) "         
+| [1] "‘value’ is not a slot in class “list”"
+| [2] "(function (cl, name, valueClass) "    
+| -- one site writes values of several classes in turn
+| [1] 1
+| [1] 2
+| [1] "assignment of an object of class “character” is not valid for @‘value’ in an object of class “Holder”; is(value, \"numeric\") is not TRUE"
+| [2] "(function (cl, name, valueClass) "                                                                                                        
+| [1] 3
+| [1] "assignment of an object of class “logical” is not valid for @‘value’ in an object of class “Holder”; is(value, \"numeric\") is not TRUE"
+| [2] "(function (cl, name, valueClass) "                                                                                                      
+| [1] 4
+| -- the caller's object is unchanged, a local one changes in place
+| [1] 2
+| [1] 4
+| [1] 7
+|  num 1
+| [1] 10  1
+| [1] "label 1"
+| [1] 20  1
+| [1] "label 2"
+| [1] 30  1
+| [1] "label 3"
+| -- a write to a slot of a slot
+| [1] 1
+| [1] 2
+| [1] 3
+| [1] "assignment of an object of class “character” is not valid for @‘size’ in an object of class “Leaf”; is(value, \"numeric\") is not TRUE"
+| [2] "(function (cl, name, valueClass) "                                                                                                     
+| -- `slot<-` and `@<-` called by name
+|  num 1.25
+|  num 2.25
+|  num 3.25
+| [1] "assignment of an object of class “character” is not valid for slot ‘value’ in an object of class “Holder”; is(value, \"numeric\") is not TRUE"
+| [2] "checkSlotAssignment(object, name, value)"                                                                                                     
+|  chr "called"
+|  chr "by symbol"
+| [1] "assignment of an object of class “numeric” is not valid for @‘label’ in an object of class “Holder”; is(value, \"character\") is not TRUE"
+| [2] "(function (cl, name, valueClass) "                                                                                                        
+| -- a replacement method writes its object's slot
+| [1] "size<-"
+| [1] 1
+| [1] 2
+| [1] 3
+| [1] "assignment of an object of class “character” is not valid for @‘size’ in an object of class “Leaf”; is(value, \"numeric\") is not TRUE"
+| [2] "(function (cl, name, valueClass) "                                                                                                     
+| -- a class defined after the first write to a site
+| [1] TRUE
+| [1] TRUE
+|  chr "text 1"
+|  chr "text 2"
+|  chr "text 3"
+| [1] "assignment of an object of class “numeric” is not valid for @‘value’ in an object of class “Holder”; is(value, \"character\") is not TRUE"
+| [2] "(function (cl, name, valueClass) "                                                                                                        
+| -- a check replaced after the first write is not called
+|  chr "checked"
+|  chr "checked"
+| [1] "assignment of an object of class “numeric” is not valid for @‘label’ in an object of class “Holder”; is(value, \"character\") is not TRUE"
+| [2] "(function (cl, name, valueClass) "                                                                                                        
+|  chr "unchecked"
+|  chr "unchecked"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

@@ -139,6 +139,10 @@ const FAST_PATHS: &[(&str, &[u64])] = &[
     ("cacheMetaData", &[0xacce_736a_7865_842c]),
 ];
 
+/// The [`stable_hash`] of `checkAtAssignment`, per supported version of the package. It gets no
+/// prologue: `@<-` answers for it without calling it (`subset::slot_accepts`).
+const CHECK_AT_ASSIGNMENT: &[u64] = &[0x15ad_4bda_a44c_c570];
+
 /// The version of GNU R that ry's bundled base R is built from. Its methods package is the one
 /// every fast path must match, so a fast path that does not install there is an error rather
 /// than a silent loss of speed.
@@ -217,10 +221,27 @@ pub unsafe fn install_fast_paths(namespace: Sexp) -> R<()> {
             missed.push(name);
         }
     }
+    let check = eval::value_of(eval::find_var_in_frame(
+        symbols().check_at_assignment,
+        namespace,
+    )?)?;
+    if check.kind() == SexpType::Closure {
+        let mut hash = FNV_OFFSET;
+        stable_hash(check.car(), &mut hash);
+        stable_hash(crate::bytecode::closure_body(check), &mut hash);
+        if print {
+            eprintln!("checkAtAssignment {hash:#018x}");
+        }
+        if CHECK_AT_ASSIGNMENT.contains(&hash) {
+            interp().globals.answered_slot_check = check;
+        } else {
+            missed.push("checkAtAssignment".into());
+        }
+    }
     if bundled && !missed.is_empty() {
         return Err(crate::unwind::error(format!(
             "the native fast paths for {} do not match ry's bundled methods package; update \
-             FAST_PATHS in methods_core.rs (RY_PRINT_FAST_PATH_HASHES=1 prints the hashes)",
+             FAST_PATHS or CHECK_AT_ASSIGNMENT in methods_core.rs (RY_PRINT_FAST_PATH_HASHES=1 prints the hashes)",
             missed.join(", ")
         )));
     }

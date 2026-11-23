@@ -54,7 +54,7 @@ use {
         eval::{self, Reify, Site, SwitchSelector, as_condition},
         handles::{
             self, Atomic, Chars, Cx, Environment, Integer, List, Local, Logical, Names, Owned,
-            Real, Str, Vector,
+            Real, Str, Vector, safe,
         },
         interp,
         kernels::{self, Element, MAX_NODES, Node, Reduction},
@@ -83,25 +83,16 @@ use {
 /// `mkCode` turns it into byte code; ry keeps only the buffer's first constant, the source
 /// expression, exactly as it reads GNU R byte code from a stream, and compiles that itself.
 pub const BUILTINS: &[BuiltinDef] = &[
-    internal("bcVersion", 0, |_| unsafe {
-        values::scalar_integer(GNU_R_BYTECODE_VERSION)
-    }),
-    internal("mkCode", 2, do_mk_code),
+    internal("bcVersion", 0, safe!(do_bytecode_version)),
+    internal("mkCode", 2, safe!(do_mk_code)),
     internal("bcClose", 3, |call| unsafe {
         close_compiled(call.arg(0), call.arg(1), call.arg(2))
     }),
-    internal("growconst", 1, do_grow_constants),
+    internal("growconst", 1, safe!(do_grow_constants)),
     internal("putconst", 3, do_put_constant),
-    internal("getconst", 2, do_get_constants),
-    internal("enableJIT", 1, |call| unsafe {
-        let previous = interp().bytecode.jit_level;
-        let level = values::as_integer_scalar(call.arg(0));
-        if level >= 0 && level != NA_INTEGER {
-            interp().bytecode.jit_level = level.min(3);
-        }
-        values::scalar_integer(previous)
-    }),
-    internal("compilePKGS", 1, |_| unsafe { values::scalar_logical(0) }),
+    internal("getconst", 2, safe!(do_get_constants)),
+    internal("enableJIT", 1, safe!(do_enable_jit)),
+    internal("compilePKGS", 1, safe!(do_compile_packages)),
 ];
 
 /// A closure over `formals`, `body` and `env` whose body is compiled at once, as `cmpfun`
@@ -2346,6 +2337,10 @@ pub enum Op {
     /// found from the closure's enclosure is known to take the replacement function's own
     /// code. Anything else runs the general assignment ([`eval::complex_assign`]).
     SuperSubAssign,
+    /// `dst src name call`: `src@name` for the base `@`, whose slot name is the symbol `name`.
+    /// An S4 object's slot is an attribute read; any other object takes `@`'s own path
+    /// ([`crate::subset::at`]), which asks for the frame only to dispatch an S3 method.
+    At,
 }
 
 /// Which replacement an [`Op::SubAssign`] does, stored as its sixth operand.
@@ -2369,7 +2364,7 @@ fn replacement_name(kind: ElementKind) -> &'static str {
     }
 }
 
-pub const OPS: [Op; 56] = [
+pub const OPS: [Op; 57] = [
     Op::Constant,
     Op::GetVar,
     Op::SetVar,
@@ -2426,6 +2421,7 @@ pub const OPS: [Op; 56] = [
     Op::ComplexAssign,
     Op::Subscript,
     Op::SuperSubAssign,
+    Op::At,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -3474,6 +3470,8 @@ unsafe fn collect_bindings(expression: Sexp, found: &mut FxHashSet<Sexp>) -> boo
             symbols.dot_generic,
             symbols.dot_class,
             symbols.dot_method,
+            symbols.dot_target,
+            symbols.dot_defined,
             symbols.dot_group,
             symbols.dot_generic_call_env,
             symbols.dot_generic_def_env,
@@ -3859,10 +3857,13 @@ impl Compiler {
             && let Some(&call) = (call as usize)
                 .checked_sub(FIRST_CONSTANT)
                 .and_then(|index| self.constants.get(index))
-            // SAFETY: the compiler roots every constant it holds, and a call is a pairlist.
-            && unsafe { positional_call(call, count as usize) }
         {
-            POSITIONAL_CALL_BUILTIN_WORD
+            // SAFETY: the compiler roots every constant it holds, and a call is a pairlist.
+            match unsafe { call_form(call, count as usize) } {
+                CallForm::StandardGeneric => STANDARD_GENERIC_CALL_WORD,
+                CallForm::Positional => POSITIONAL_CALL_BUILTIN_WORD,
+                CallForm::General => op_word(op),
+            }
         } else {
             op_word(op)
         };
@@ -4465,6 +4466,24 @@ impl Compiler {
                 ".ry_match" if supported_match(&args)? => {
                     return self.compiled_match(call, head, primitive, dst, &args);
                 }
+                // A slot read as an instruction of its own, so a method that reads its
+                // object's slots keeps its slot frame.
+                "@" => {
+                    return match args.as_slice() {
+                        [(subject_tag, subject), (name_tag, slot)]
+                            if *subject_tag == nil()
+                                && *name_tag == nil()
+                                && *subject != symbols().dots
+                                && *subject != missing_arg()
+                                && slot.kind() == SexpType::Symbol
+                                && *slot != symbols().dot_data
+                                && *slot != missing_arg() =>
+                        {
+                            self.at(call, head, primitive, dst, *subject, *slot)
+                        }
+                        _ => self.general_call(call, head, dst),
+                    };
+                }
                 // `quote(x)` is `x` itself, so a slot frame needs no environment for it, as
                 // `identical(x, quote(expr = ))` in rlang's `is_missing` would otherwise.
                 "quote" => {
@@ -5066,6 +5085,7 @@ impl Compiler {
                 | "quote"
                 | "::"
                 | ":::"
+                | "@"
         ) || ARITHS.iter().any(|(_, operator)| *operator == name);
         if !inlinable {
             return Ok(None);
@@ -5515,6 +5535,27 @@ impl Compiler {
             Op::Namespace,
             &[dst, package, symbol, u32::from(exported), lookup],
         );
+        self.cold_fallback(guard.as_slice(), call, dst)
+    }
+
+    /// `subject@slot`, guarded by `@`: [`Op::At`] on the evaluated subject.
+    unsafe fn at(
+        &mut self,
+        call: Sexp,
+        head: Sexp,
+        primitive: Sexp,
+        dst: u32,
+        subject: Sexp,
+        slot: Sexp,
+    ) -> R<()> {
+        let guard = self.guard(call, head, primitive)?;
+        let call_constant = self.constant(call);
+        let slot = self.constant(slot);
+        let mark = self.next_register;
+        let object = self.allocate();
+        self.expression(subject, object)?;
+        self.emit(Op::At, &[dst, object, slot, call_constant]);
+        self.release_to(mark);
         self.cold_fallback(guard.as_slice(), call, dst)
     }
 
@@ -6402,7 +6443,7 @@ pub const fn operand_count(op: Op) -> usize {
         Op::CallRebinding | Op::CallTailUpdate => 4,
         Op::Field | Op::Item => 5,
         Op::MatchShape | Op::MatchTag | Op::MatchLiteral => 3,
-        Op::Slot | Op::Construct => 4,
+        Op::Slot | Op::Construct | Op::At => 4,
         Op::MatchFail | Op::Move => 2,
         Op::BoundEval => 5,
         Op::MatchCondition => 4,
@@ -6451,7 +6492,9 @@ pub fn op_of(word: u32) -> Option<Op> {
     let index = (word & OP_MASK) as usize;
     let op = match OPS.get(index) {
         Some(&op) => op,
-        None if index == POSITIONAL_CALL_BUILTIN => Op::CallBuiltin,
+        None if index == POSITIONAL_CALL_BUILTIN || index == STANDARD_GENERIC_CALL => {
+            Op::CallBuiltin
+        }
         None if index < HANDLER_COUNT => Op::Arithmetic,
         None => return None,
     };
@@ -6566,8 +6609,19 @@ const POSITIONAL_CALL_BUILTIN: usize = OPS.len() + QUICK_ARITHMETIC.len();
 const POSITIONAL_CALL_BUILTIN_WORD: u32 =
     (op_word(Op::CallBuiltin) & !OP_MASK) | POSITIONAL_CALL_BUILTIN as u32;
 
+/// Tier 0's form of [`Op::CallBuiltin`] for a site whose call is `standardGeneric("name")`
+/// ([`CallForm::StandardGeneric`]), which the compiler emits as it does
+/// [`POSITIONAL_CALL_BUILTIN`], whose path the site takes wherever its own handler declines.
+/// The handler runs the method an S4 generic dispatches to in place of the builtin's call
+/// ([`standard_generic_in_place`]).
+const STANDARD_GENERIC_CALL: usize = POSITIONAL_CALL_BUILTIN + 1;
+
+/// The code word of [`STANDARD_GENERIC_CALL`].
+const STANDARD_GENERIC_CALL_WORD: u32 =
+    (op_word(Op::CallBuiltin) & !OP_MASK) | STANDARD_GENERIC_CALL as u32;
+
 /// The size of tier 0's handler tables: every generic and specialized opcode.
-const HANDLER_COUNT: usize = POSITIONAL_CALL_BUILTIN + 1;
+const HANDLER_COUNT: usize = STANDARD_GENERIC_CALL + 1;
 
 // The interpreter turns a code word's low byte back into an `Op` by its discriminant.
 const _: () = {
@@ -6646,6 +6700,7 @@ fn operands(op: Op) -> Option<&'static [Operand]> {
         Op::Arithmetic => &[Operator, Register, Register, Register, Call, Constant],
         Op::Return | Op::ForEnd => &[Register],
         Op::Missing => &[Register, Symbol],
+        Op::At => &[Register, Register, Symbol, Call],
         Op::Namespace => &[Register, Symbol, Symbol, Immediate, Cache],
         Op::SuperAssign => &[Symbol, Register],
         Op::ComplexAssign => &[Register, Register, Call],
@@ -6766,9 +6821,9 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
     while pc < words.len() {
         let op = op_of(words[pc] as u32).ok_or("an invalid instruction")?;
         // Specialized forms trust what tier 0 saw when it wrote them, which a file cannot show.
-        // The positional builtin call is the exception: its call constant shows it, and the
-        // operand pass below checks that.
-        if words[pc] as u32 != op_word(op) && words[pc] as u32 != POSITIONAL_CALL_BUILTIN_WORD {
+        // The forms of a builtin call are the exception: its call constant shows them, and
+        // the operand pass below checks that.
+        if words[pc] as u32 != op_word(op) && !positional_word(words[pc] as u32) {
             return Err("a specialized instruction".to_owned());
         }
         operands(op).ok_or("a record instruction")?;
@@ -6866,12 +6921,16 @@ pub unsafe fn verify(code: Sexp) -> Result<(), String> {
         if op == Op::EndStatement && operand(1) > operand(2) {
             return Err(format!("an invalid register range at {pc}"));
         }
-        if words[pc] as u32 == POSITIONAL_CALL_BUILTIN_WORD
-            && !positional_call(constant(operand(2))?, operand(4))
-        {
-            return Err(format!(
-                "a positional builtin call with other arguments at {pc}"
-            ));
+        if positional_word(words[pc] as u32) {
+            let form = call_form(constant(operand(2))?, operand(4));
+            if form == CallForm::General
+                || (words[pc] as u32 == STANDARD_GENERIC_CALL_WORD)
+                    != (form == CallForm::StandardGeneric)
+            {
+                return Err(format!(
+                    "a positional builtin call with other arguments at {pc}"
+                ));
+            }
         }
         pc += 1 + operand_count(op);
     }
@@ -7569,7 +7628,7 @@ pub unsafe fn call_builtin_step(
     // without the activation, which costs as much to build as the call itself. Under an
     // observer a declined entry would be observed twice, so the full path takes it; a profile
     // summary counts a direct entry only when it answers (`eval::call_direct`).
-    if *code.add(pc) as u32 == POSITIONAL_CALL_BUILTIN_WORD && activity::observers() == 0 {
+    if positional_word(*code.add(pc) as u32) && activity::observers() == 0 {
         let constants = machine.code.cdr();
         let registers = register_address(machine.base);
         let operand = |index: usize| *code.add(pc + 1 + index) as usize;
@@ -8420,6 +8479,7 @@ macro_rules! handlers {
                 index += 1;
             }
             table[POSITIONAL_CALL_BUILTIN] = table[Op::CallBuiltin as usize];
+            table[STANDARD_GENERIC_CALL] = table[Op::CallBuiltin as usize];
             table
         }
     };
@@ -8515,6 +8575,7 @@ handlers! {
     run_sub_assign_matrix: SubAssignMatrix, true, op_sub_assign_matrix;
     run_replace: Replace, true, op_replace;
     run_missing: Missing, true, op_missing;
+    run_at_slot: At, true, op_at;
     run_namespace: Namespace, true, op_namespace;
     run_fused: Fused, true, op_fused;
     run_unfused: Unfused, false, op_unfused;
@@ -8617,6 +8678,7 @@ fast_paths! {
     fast_call_builtin: CallBuiltin, call_builtin_fast;
     fast_sub_assign: SubAssign, sub_assign_fast;
     fast_field: Field, field_fast;
+    fast_at_slot: At, at_fast;
 }
 
 /// The fast handler of `CallGeneric`. Unlike the other fast paths, [`call_fast`] can end the
@@ -9834,6 +9896,38 @@ unsafe fn field_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize>
     Some(at + 1 + operand_count(Op::Field))
 }
 
+/// `At` (`object@name`) on an S4 object that has the attribute `name`. A slot that holds
+/// `NULL` or a symbol is stored in a form the generic handler reads, as are `.S3Class` and
+/// the row names.
+#[inline(always)]
+unsafe fn at_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let code = state.code;
+    let registers = state.registers;
+    let subject = *registers.add(*code.add(at + 2) as usize);
+    if !subject.has_gp(gp::S4_OBJECT) {
+        return None;
+    }
+    let name = pool_constant(state, *code.add(at + 3) as usize);
+    let nil = (*state.heap).known().nil;
+    let mut attribute = subject.attrib();
+    let value = loop {
+        if attribute == nil {
+            return None;
+        }
+        if attribute.tag() == name {
+            break attribute.car();
+        }
+        attribute = attribute.cdr();
+    };
+    if value.kind() == SexpType::Symbol || name == (*state.interp).symbols.row_names {
+        return None;
+    }
+    state.record(at, value);
+    *registers.add(*code.add(at + 1) as usize) = value;
+    (*state.interp).visible = true;
+    Some(at + 1 + operand_count(Op::At))
+}
+
 /// `SubAssign` of `x[i] <- v`, `x[[i]] <- v` or `x$name <- v` on a slot frame's slot that alone
 /// holds a double, integer or logical vector or a list that is not an object, an array or
 /// ALTREP, at a plain numeric position within bounds or an existing ASCII name. The
@@ -9948,7 +10042,85 @@ const fn specialized_table(mut table: [Handler; HANDLER_COUNT]) -> [Handler; HAN
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
     );
     table[POSITIONAL_CALL_BUILTIN] = positional_call_builtin;
+    table[STANDARD_GENERIC_CALL] = standard_generic_call;
     table
+}
+
+/// The handler of [`STANDARD_GENERIC_CALL`]: the method in place where the generic runs on
+/// its slots, and the builtin's call otherwise.
+unsafe fn standard_generic_call(state: &mut Activation<'_, '_>, at: usize) {
+    if let Some(next) = standard_generic_in_place(state, at) {
+        if next == STOP {
+            return;
+        }
+        dispatch!(state, next);
+    }
+    become positional_call_builtin(state, at)
+}
+
+/// The call of `standardGeneric("name")` at `at` in a generic that runs on its slots: the
+/// method the generic's site holds for the classes of the signature arguments
+/// ([`crate::methods::select_in_slots`]) runs in place on a slot frame of its own above the
+/// generic's ([`eval::enter_method`]), so an S4 generic call costs a closure call's entry and
+/// a method lookup, makes no environment and recurses into no interpreter loop. `None` when
+/// the builtin answers the call: the function is another one, something observes calls, the
+/// loop cannot run the method in place, or selecting or entering the method takes the
+/// generic's environment.
+#[inline(never)]
+unsafe fn standard_generic_in_place(state: &mut Activation<'_, '_>, at: usize) -> Option<usize> {
+    let code = state.code;
+    let known = (*state.heap).known();
+    let function = *state.registers.add(*code.add(at + 2) as usize);
+    let interp = &mut *state.interp;
+    let definition = interp.builtins.get(function.primitive_index() as usize)?;
+    if definition.symbol != Some(symbols().standard_generic)
+        || *state.header != known.nil
+        || state.resume_base == NO_RESUMES
+        || activity::observers() != 0
+        || !interp.globals.methods_dispatch
+    {
+        return None;
+    }
+    // A summary counts the builtin's call once: here when the method runs in place or the
+    // call fails, and in the builtin's own call when this declines.
+    let builtin = eval::builtin_index(definition);
+    let count = || {
+        if activity::enabled() {
+            activity::record_builtin(builtin);
+        }
+    };
+    let name = pool_constant(state, *code.add(at + 3) as usize).cdr().car();
+    let references = interp.references_used;
+    let selected = match crate::methods::select_in_slots(name, interp.slot_owner as usize) {
+        Ok(selected) => selected?,
+        Err(unwind) => {
+            count();
+            return Some(failed::<false>(
+                state,
+                at,
+                eval::builtin_failure(known.unbound, unwind),
+            ));
+        }
+    };
+    let method = selected.method;
+    if method.cdr().kind() != SexpType::Bytecode || !in_place(state, method) {
+        return None;
+    }
+    let position = (*state.interp).slot_owner as usize;
+    match eval::enter_method(position, method, &selected.vars, selected.standard) {
+        Ok(None) => None,
+        Ok(Some(entered)) => {
+            count();
+            let slots = slot_count(entered.value);
+            Some(enter_in_place(
+                state, at, method, entered, slots, references,
+            ))
+        }
+        Err(unwind) => {
+            count();
+            Some(failed::<false>(state, at, unwind))
+        }
+    }
 }
 
 /// The handler of [`POSITIONAL_CALL_BUILTIN`]: the element read of `[` and `[[` first, as for the
@@ -9969,6 +10141,40 @@ unsafe fn positional_call_builtin(state: &mut Activation<'_, '_>, at: usize) {
     }
     release(state);
     dispatch!(state, pc)
+}
+
+/// Whether `word` is one of the forms of [`Op::CallBuiltin`] the compiler emits for a call
+/// whose arguments are positional.
+#[inline(always)]
+fn positional_word(word: u32) -> bool {
+    word == POSITIONAL_CALL_BUILTIN_WORD || word == STANDARD_GENERIC_CALL_WORD
+}
+
+/// The form of [`Op::CallBuiltin`] a call takes, which the call itself shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CallForm {
+    General,
+    /// [`POSITIONAL_CALL_BUILTIN`].
+    Positional,
+    /// [`STANDARD_GENERIC_CALL`]: a positional call of the name `standardGeneric` on one
+    /// string.
+    StandardGeneric,
+}
+
+unsafe fn call_form(call: Sexp, count: usize) -> CallForm {
+    if !positional_call(call, count) {
+        return CallForm::General;
+    }
+    let name = call.cdr().car();
+    if count == 1
+        && call.car() == symbols().standard_generic
+        && name.kind() == SexpType::String
+        && name.length() == 1
+    {
+        CallForm::StandardGeneric
+    } else {
+        CallForm::Positional
+    }
 }
 
 /// Whether `count` untagged, non-empty cells make up `call`'s arguments, which lets its
@@ -10370,7 +10576,7 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
     let count = instruction.operand(4);
     // The step table, which the optimizing tier runs single instructions through, sends a
     // positional site here too.
-    if *instruction.code.add(instruction.at) as u32 == POSITIONAL_CALL_BUILTIN_WORD {
+    if positional_word(*instruction.code.add(instruction.at) as u32) {
         return op_call_builtin_positional(state, instruction);
     }
     let definition = eval::builtin_def(function)?;
@@ -12922,6 +13128,28 @@ unsafe fn op_internal(state: &mut Activation<'_, '_>, instruction: Instruction) 
 unsafe fn op_missing(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let symbol = state.constant(instruction, 1);
     let value = values::scalar_bool(slot_missing(state, symbol)?)?;
+    state.record(instruction.at, value);
+    (*state.interp).visible = true;
+    instruction.output(0, value);
+    Ok(Flow::Next)
+}
+
+unsafe fn op_at(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
+    let object = instruction.input(1);
+    let slot = state.constant(instruction, 2);
+    let call = state.constant(instruction, 3);
+    let value = handles::with_result(|context| {
+        let object = handles::held(context, object);
+        let slot = handles::held(context, slot);
+        let call = handles::held(context, call);
+        let value = crate::subset::at(context, object, slot, call, |context| {
+            let frame = state.env(Reify::Site(Site::MethodDispatch))?;
+            handles::adopt(context, frame)
+                .downcast::<Environment>()
+                .ok_or_else(|| error("internal error: a frame has no environment"))
+        })?;
+        Ok(value.raw())
+    })?;
     state.record(instruction.at, value);
     (*state.interp).visible = true;
     instruction.output(0, value);
@@ -15586,30 +15814,39 @@ unsafe fn resolve(symbol: Sexp, mut env: Sexp, function: bool) -> R<Option<Sexp>
 
 // The `compiler` package's internals.
 
+fn do_bytecode_version<'s>(
+    context: &mut Cx<'s>,
+    _arguments: &handles::Args<'_, 's>,
+) -> R<Local<'s>> {
+    handles::integer(context, GNU_R_BYTECODE_VERSION)
+}
+
 /// `mkCode(code, consts)`: the source expression, which `compiler` stores as the first constant.
-unsafe fn do_mk_code(call: &Call<'_>) -> R<Sexp> {
-    let constants = call.arg(1);
-    if constants.kind() != SexpType::List || length(constants) == 0 {
-        return Err(call.error("constant buffer must be a generic vector"));
-    }
-    Ok(constants.element(0))
+fn do_mk_code<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let constants = handles::dense::<List>(context, arguments.value(1))?
+        .filter(|constants| !constants.is_empty())
+        .ok_or_else(|| arguments.error("constant buffer must be a generic vector"))?;
+    Ok(context.root(constants.get(context, 0)))
 }
 
 /// `growconst(buffer)`: the constant buffer at twice its length.
-unsafe fn do_grow_constants(call: &Call<'_>) -> R<Sexp> {
-    let buffer = constant_buffer(call)?;
-    let count = length(buffer);
-    let grown = values::alloc(SexpType::List, 2 * count.max(1))?;
+fn do_grow_constants<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let buffer = constants_of(context, arguments)?;
+    let count = buffer.len();
+    let mut grown = context.alloc::<List>(2 * count.max(1))?;
     for index in 0..count {
-        values::set_elt(grown, index, buffer.element(index));
+        grown.set(context, index, buffer.get(context, index));
     }
-    Ok(grown)
+    Ok(grown.finish().value())
 }
 
 /// `putconst(buffer, count, x)`: the 0-based index of `x` among the first `count` constants,
 /// adding it at `count` when no identical constant is there yet.
 unsafe fn do_put_constant(call: &Call<'_>) -> R<Sexp> {
-    let buffer = constant_buffer(call)?;
+    let buffer = call.arg(0);
+    if buffer.kind() != SexpType::List {
+        return Err(call.error("constant buffer must be a generic vector"));
+    }
     let count = values::as_integer_scalar(call.arg(1));
     if count < 0 || count as usize >= length(buffer) {
         return Err(call.error("bad constCount value"));
@@ -15628,23 +15865,37 @@ unsafe fn do_put_constant(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// `getconst(buffer, n)`: the first `n` constants.
-unsafe fn do_get_constants(call: &Call<'_>) -> R<Sexp> {
-    let buffer = constant_buffer(call)?;
-    let count = values::as_integer_scalar(call.arg(1));
-    if count < 0 || count as usize > length(buffer) {
-        return Err(call.error("bad n"));
+fn do_get_constants<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let buffer = constants_of(context, arguments)?;
+    let count = handles::integer_scalar(context, arguments.value(1));
+    if count < 0 || count as usize > buffer.len() {
+        return Err(arguments.error("bad n"));
     }
-    let constants = values::alloc(SexpType::List, count as usize)?;
+    let mut constants = context.alloc::<List>(count as usize)?;
     for index in 0..count as usize {
-        values::set_elt(constants, index, buffer.element(index));
+        constants.set(context, index, buffer.get(context, index));
     }
-    Ok(constants)
+    Ok(constants.finish().value())
 }
 
-unsafe fn constant_buffer(call: &Call<'_>) -> R<Sexp> {
-    let buffer = call.arg(0);
-    if buffer.kind() != SexpType::List {
-        return Err(call.error("constant buffer must be a generic vector"));
+/// The constant buffer, the first argument of the `compiler` internals.
+fn constants_of<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s, List>> {
+    handles::dense::<List>(context, arguments.value(0))?
+        .ok_or_else(|| arguments.error("constant buffer must be a generic vector"))
+}
+
+fn do_enable_jit<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let previous = interp().bytecode.jit_level;
+    let level = handles::integer_scalar(context, arguments.value(0));
+    if level >= 0 && level != NA_INTEGER {
+        interp().bytecode.jit_level = level.min(3);
     }
-    Ok(buffer)
+    handles::integer(context, previous)
+}
+
+fn do_compile_packages<'s>(
+    context: &mut Cx<'s>,
+    _arguments: &handles::Args<'_, 's>,
+) -> R<Local<'s>> {
+    handles::logical_constant(context, 0)
 }
