@@ -169,6 +169,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `@elementwise(x)` gives a scalar result the shape of its argument
 - The fresh sample's false-report classes, second pass
 - The fresh sample's false-report classes, third pass
+- The fresh sample's false-report classes, fourth pass
 
 ## Analysis core
 
