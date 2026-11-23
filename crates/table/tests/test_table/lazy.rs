@@ -511,3 +511,122 @@ fn a_cross_join_pairs_every_row_left_major() {
         ints(&[3, 3, 5, 5, 2, 2, 7, 7, 1, 1])
     );
 }
+
+/// Every kind of join matches a missing key with a missing key, as R's `merge()` does.
+#[test]
+fn every_kind_of_join_matches_a_missing_key_with_a_missing_key() {
+    let left = frame(vec![
+        ("id", ints(&[1, i32::MIN, 2])),
+        ("name", strings(&["a", "missing", "b"])),
+    ]);
+    let right = frame(vec![("id", ints(&[1, i32::MIN])), ("score", ints(&[10, 20]))]);
+    let join = |how| {
+        collect(Plan::new(Source::Table(left.clone())).with(Step::Join {
+            other: Box::new(Plan::new(Source::Table(right.clone()))),
+            left_on: vec!["id".into()],
+            right_on: vec!["id".into()],
+            how,
+            suffix: "_right".into(),
+        }))
+    };
+    assert_eq!(column_values(&join(How::Inner), "score"), ints(&[10, 20]));
+    assert_eq!(
+        column_values(&join(How::Left), "score"),
+        ints(&[10, 20, i32::MIN])
+    );
+    assert_eq!(
+        column_values(&join(How::Semi), "name"),
+        strings(&["a", "missing"])
+    );
+    assert_eq!(column_values(&join(How::Anti), "name"), strings(&["b"]));
+    assert_eq!(join(How::Full).height(), 3);
+}
+
+/// `count` counts the values that are not missing, `NaN` included among the missing, while
+/// `len` counts every row; `na_rm = FALSE` makes a sum over a missing value missing.
+#[test]
+fn count_skips_missing_values_and_a_sum_can_keep_them() {
+    let table = frame(vec![
+        ("key", strings(&["a", "a", "b", "b"])),
+        (
+            "value",
+            doubles(&[1.0, table::convert::NA_REAL, f64::NAN, 2.0]),
+        ),
+    ]);
+    let plan = Plan::new(Source::Table(table)).with(Step::Aggregate {
+        keys: vec![named("key", column("key"))],
+        aggregates: vec![
+            named("count", aggregate(Aggregate::Count, column("value"))),
+            named("len", aggregate(Aggregate::Length, column("value"))),
+            named("kept", sum("value")),
+            named(
+                "skipped",
+                Expr::Aggregate {
+                    function: Aggregate::Sum,
+                    arg: Box::new(column("value")),
+                    na_rm: true,
+                },
+            ),
+        ],
+    });
+    let result = collect(plan);
+    assert_eq!(column_values(&result, "count"), ints(&[1, 1]));
+    assert_eq!(column_values(&result, "len"), ints(&[2, 2]));
+    assert_eq!(na_doubles(&result, "kept")[0], None);
+    assert_eq!(na_doubles(&result, "skipped"), [Some(1.0), Some(2.0)]);
+}
+
+/// A date-time keeps its zone, shifts by seconds, subtracts to seconds and compares with
+/// another date-time.
+#[test]
+fn date_times_shift_by_seconds_and_keep_their_zone() {
+    let table = frame(vec![(
+        "at",
+        RVector::Datetime {
+            seconds: vec![1_700_000_000.0, 1_700_003_600.5, table::convert::NA_REAL],
+            zone: Some("Europe/Berlin".to_string()),
+        },
+    )]);
+    let plan = Plan::new(Source::Table(table))
+        .with(Step::WithColumns(vec![
+            named(
+                "later",
+                binary(BinaryOp::Add, column("at"), Expr::Double(60.0)),
+            ),
+            named(
+                "since",
+                binary(
+                    BinaryOp::Subtract,
+                    column("at"),
+                    Expr::Datetime {
+                        micros: 1_699_999_000_000_000,
+                        zone: None,
+                    },
+                ),
+            ),
+        ]))
+        .with(Step::Filter(binary(
+            BinaryOp::Greater,
+            column("at"),
+            Expr::Datetime {
+                micros: 1_700_000_000_000_000,
+                zone: None,
+            },
+        )));
+    let result = collect(plan);
+    assert_eq!(
+        column_values(&result, "at"),
+        RVector::Datetime {
+            seconds: vec![1_700_003_600.5],
+            zone: Some("Europe/Berlin".to_string()),
+        }
+    );
+    assert_eq!(
+        column_values(&result, "later"),
+        RVector::Datetime {
+            seconds: vec![1_700_003_660.5],
+            zone: Some("Europe/Berlin".to_string()),
+        }
+    );
+    assert_eq!(column_values(&result, "since"), doubles(&[4_600.5]));
+}
