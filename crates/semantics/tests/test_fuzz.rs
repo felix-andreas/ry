@@ -5,11 +5,12 @@
 use {
     rustc_hash::FxHashMap,
     semantics::{
-        DocumentKind,
+        AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase,
         metadata::resolve_namespace_conditionals,
+        stubs::shipped_stub_sources,
         testing::{
             ProjectState, Workbench, check_metamorphic_relations, check_semantics_input,
-            fixture_state, for_each_session, generate_session,
+            check_stub_source, fixture_state, for_each_session, generate_session,
         },
     },
     std::sync::LazyLock,
@@ -18,7 +19,7 @@ use {
         ast::is_expression_kind,
         testing::{
             SplitMix64, fixture_case_sources, for_each_seed, mutate_seed, program_corpus_sources,
-            small_edit, split_files,
+            small_edit, split_files, token_soup,
         },
     },
 };
@@ -333,6 +334,83 @@ fn edits_that_change_no_meaning_only_move_findings() {
             "{cases} cases: only {leading_trivia} with a line inserted and {renames} renamed"
         );
     }
+}
+
+/// The words and punctuation of the `.Rtypes` grammar, for token soup.
+const STUB_ALPHABET: &[&str] = &[
+    "name",
+    "zoo",
+    "[.zoo",
+    "%+%",
+    " : ",
+    ":",
+    "fn(",
+    ")",
+    "(",
+    "[x]",
+    "x: ",
+    "...: ",
+    "Any",
+    "integer",
+    "double[]",
+    "list{",
+    "}",
+    "<T>",
+    "T",
+    " -> ",
+    "|",
+    ", ",
+    "@type ",
+    "@alias ",
+    "@pure",
+    "@pure(FUN)",
+    "@masked",
+    "@opaque(x)",
+    "#' ",
+    "# ",
+    "\n",
+    "\n\n",
+    " ",
+    "`",
+    "\"",
+    "é",
+];
+
+/// Stub sources that once broke the loader.
+const STUB_REGRESSIONS: &[&str] = &[];
+
+/// Generated, windowed and mutated `.Rtypes` text through the stub loader
+/// ([`check_stub_source`]), on one database that stays warm across seeds.
+#[test]
+fn fuzz_stub_sources() {
+    let shipped: Vec<String> = shipped_stub_sources()
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect();
+    let mut db = RootDatabase::default();
+    AnalysisSettings::new(&db, true, false, true);
+    ProjectFiles::new(&db, Vec::new());
+    for input in STUB_REGRESSIONS {
+        check_stub_source(&mut db, input);
+    }
+    for_each_seed(400, |seed| {
+        let mut rng = SplitMix64(0x57AB_5EED ^ seed);
+        let mut window = |rng: &mut SplitMix64| {
+            let lines: Vec<&str> = shipped[rng.below(shipped.len())].lines().collect();
+            let start = rng.below(lines.len().max(1));
+            let end = (start + 1 + rng.below(40)).min(lines.len());
+            lines.get(start..end).unwrap_or_default().join("\n") + "\n"
+        };
+        let input = match rng.below(3) {
+            0 => token_soup(&mut rng, STUB_ALPHABET),
+            1 => window(&mut rng),
+            _ => {
+                let seeds = [window(&mut rng), window(&mut rng)];
+                mutate_seed(&mut rng, &[&seeds[0], &seeds[1]], 24)
+            }
+        };
+        check_stub_source(&mut db, &input);
+    });
 }
 
 #[test]

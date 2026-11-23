@@ -9,7 +9,9 @@ use {
         item_check, item_naming, item_syntax, item_tree,
         lints::{LintConfig, LintLevel, NameStyle, lint_file},
         naming::BindingKind,
-        stubs::{install_shipped_stubs, shipped_stub_sources, stubs},
+        stubs::{
+            StubSources, install_shipped_stubs, shipped_stub_sources, stub_source_problems, stubs,
+        },
         test_document_kind,
     },
     rustc_hash::FxHashSet,
@@ -784,6 +786,135 @@ fn declared_outside(db: &RootDatabase, word: &str) -> bool {
             || library.known_exports.contains(word)
             || library.knows_namespace(word)
     })
+}
+
+/// Loads `text` as a project's only stub source on `db`, a warm database whose stub input this
+/// call owns, and checks the loader: it never panics, every problem names a line of the text
+/// and every declaration a range inside it, the library is the same after loading another
+/// source and this one again, and a database that never saw another source loads it alike.
+/// A few declared names are then called from a project file, which must check without a panic.
+pub fn check_stub_source(db: &mut RootDatabase, text: &str) {
+    let sources = vec![(String::from("pkg"), text.to_owned())];
+    let line_count = text.lines().count();
+    for problem in stub_source_problems(db, text) {
+        assert!(
+            problem.line < line_count,
+            "a problem on line {} of a stub of {line_count} lines: {}\n{text}",
+            problem.line,
+            problem.message
+        );
+    }
+    let stub_input = match StubSources::try_get(db) {
+        Some(input) => {
+            input.set_sources(db).to(sources.clone());
+            input
+        }
+        None => StubSources::new(db, sources.clone(), Vec::new()),
+    };
+    let first = render_stub_library(db, text);
+    let other = "other : fn(x: Any) -> Any\n";
+    stub_input
+        .set_sources(db)
+        .to(vec![(String::from("pkg"), other.to_owned())]);
+    render_stub_library(db, other);
+    stub_input.set_sources(db).to(sources.clone());
+    assert!(
+        render_stub_library(db, text) == first,
+        "the stub loads differently after another one\n{text}"
+    );
+    let pristine = RootDatabase::default();
+    AnalysisSettings::new(&pristine, true, false, true);
+    ProjectFiles::new(&pristine, Vec::new());
+    StubSources::new(&pristine, sources, Vec::new());
+    assert!(
+        render_stub_library(&pristine, text) == first,
+        "the stub loads differently on a database with no history\n{text}"
+    );
+    let called: Vec<String> = stubs(db)
+        .map(|library| {
+            let mut names: Vec<String> = library
+                .schemes
+                .keys()
+                .map(|name| name.to_string())
+                .collect();
+            names.sort_unstable();
+            names.truncate(3);
+            names
+        })
+        .unwrap_or_default();
+    let probe: String = called
+        .iter()
+        .enumerate()
+        .map(|(index, name)| format!("probe{index} <- `{name}`(1L, x = \"a\")\n"))
+        .collect();
+    let file = SourceFile::new(db, probe, DocumentKind::Package);
+    ProjectFiles::get(db).set_files(db).to(vec![file]);
+    render_semantics(db, file);
+}
+
+/// Every fact a stub library holds, one sorted line each, asserting each declaration's range
+/// lies inside `text`.
+fn render_stub_library(db: &RootDatabase, text: &str) -> String {
+    let Some(library) = stubs(db) else {
+        return String::new();
+    };
+    let mut lines = Vec::new();
+    for (name, schemes) in library.schemes.iter() {
+        let mut renderer = TypeRenderer::default();
+        let rendered: Vec<String> = schemes
+            .iter()
+            .map(|scheme| renderer.render_scheme(db, scheme))
+            .collect();
+        lines.push(format!("{name} : {}", rendered.join(" / ")));
+    }
+    for (kind, declarations) in [
+        ("value", &library.declarations),
+        ("type", &library.type_declarations),
+    ] {
+        for (name, declaration) in declarations.iter() {
+            let range = declaration.range;
+            assert!(
+                usize::from(range.end()) <= text.len(),
+                "the {kind} `{name}` is declared at {range:?}, past the end of the stub\n{text}"
+            );
+            lines.push(format!("{kind} {name} at {range:?}"));
+        }
+    }
+    lines.extend(
+        library
+            .nominals
+            .iter()
+            .map(|name| format!("nominal {name}")),
+    );
+    lines.extend(
+        library
+            .known_exports
+            .iter()
+            .map(|name| format!("known {name}")),
+    );
+    for (name, names) in library.masked.iter() {
+        lines.push(format!("masked {name} {names:?}"));
+    }
+    for (name, names) in library.opaque.iter() {
+        lines.push(format!("opaque {name} {names:?}"));
+    }
+    for (namespace, pure) in library.pure_by_namespace.iter() {
+        for (name, names) in pure.iter() {
+            lines.push(format!("pure {namespace}::{name} {names:?}"));
+        }
+    }
+    for (namespace, exports) in library.exports_by_namespace.iter() {
+        lines.extend(
+            exports
+                .iter()
+                .map(|name| format!("export {namespace}::{name}")),
+        );
+    }
+    for (name, documentation) in library.documentation.iter() {
+        lines.push(format!("documentation {name} {documentation:?}"));
+    }
+    lines.sort_unstable();
+    lines.join("\n")
 }
 
 /// A fixture case as a project state: a `#~~~~ <path>` case as its files, with the kinds their
