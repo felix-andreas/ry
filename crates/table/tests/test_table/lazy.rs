@@ -4,12 +4,12 @@
 use {
     syntax::testing::{SplitMix64, for_each_seed},
     table::{
-        Table,
+        ColumnType, Table,
         convert::{RVector, is_na_real, to_r},
         lazy::{self, How, Plan, Source, Step, Strategy},
         polars::prelude::PlSmallStr,
         query::{
-            Aggregate, BinaryOp, Expr, SortKey,
+            Aggregate, BinaryOp, Expr, Function, SortKey,
             build::{aggregate, binary, column},
         },
     },
@@ -708,4 +708,345 @@ fn date_times_shift_by_seconds_and_keep_their_zone() {
         }
     );
     assert_eq!(column_values(&result, "since"), doubles(&[4_600.5]));
+}
+
+fn call(function: Function, args: Vec<Expr>) -> Expr {
+    Expr::Call(function, args)
+}
+
+/// A date column with `NA` as `None`, because `NA` is a NaN and never equals itself.
+fn na_dates(table: &Table, name: &str) -> Vec<Option<f64>> {
+    match column_values(table, name) {
+        RVector::Date(values) => values
+            .into_iter()
+            .map(|value| (!is_na_real(value)).then_some(value))
+            .collect(),
+        other => panic!("`{name}` is not a date column: {other:?}"),
+    }
+}
+
+fn na_strings(values: &[Option<&str>]) -> RVector {
+    RVector::Character(
+        values
+            .iter()
+            .map(|value| value.map(str::to_owned))
+            .collect(),
+    )
+}
+
+#[test]
+fn text_functions_keep_missing_values_missing() {
+    let table = frame(vec![(
+        "city",
+        na_strings(&[Some("Oslo"), Some("Bergen"), None]),
+    )]);
+    let text = || Expr::Character("o".to_owned());
+    let plan = Plan::new(Source::Table(table)).with(Step::Select(vec![
+        named(
+            "has",
+            call(
+                Function::Contains { literal: false },
+                vec![column("city"), Expr::Character("^B".to_owned())],
+            ),
+        ),
+        named(
+            "swapped",
+            call(
+                Function::Replace {
+                    all: true,
+                    literal: true,
+                },
+                vec![column("city"), text(), Expr::Character("0".to_owned())],
+            ),
+        ),
+        named(
+            "tail",
+            call(
+                Function::Slice {
+                    start: -2,
+                    length: None,
+                },
+                vec![column("city")],
+            ),
+        ),
+        named(
+            "joined",
+            call(
+                Function::ConcatStr {
+                    separator: "-".into(),
+                },
+                vec![column("city"), Expr::Integer(1)],
+            ),
+        ),
+        named(
+            "either",
+            call(
+                Function::Coalesce,
+                vec![column("city"), Expr::Character("none".to_owned())],
+            ),
+        ),
+    ]));
+    let result = collect(plan);
+    assert_eq!(
+        column_values(&result, "has"),
+        RVector::Logical(vec![0, 1, table::convert::NA_INTEGER])
+    );
+    assert_eq!(
+        column_values(&result, "swapped"),
+        na_strings(&[Some("Osl0"), Some("Bergen"), None])
+    );
+    assert_eq!(
+        column_values(&result, "tail"),
+        na_strings(&[Some("lo"), Some("en"), None])
+    );
+    assert_eq!(
+        column_values(&result, "joined"),
+        na_strings(&[Some("Oslo-1"), Some("Bergen-1"), None])
+    );
+    assert_eq!(
+        column_values(&result, "either"),
+        strings(&["Oslo", "Bergen", "none"])
+    );
+}
+
+/// A cast to text prints a double with R's 15 significant digits, and a cast from text reads
+/// it as R's `as.*` functions do.
+#[test]
+fn casts_convert_as_r_does() {
+    let table = frame(vec![
+        ("x", doubles(&[0.1 + 0.2, 1e-20, 100000.0, 123456.0])),
+        ("text", strings(&["1.9", "T", "yes", "2024-02-29"])),
+    ]);
+    let cast = |name: &str, to| call(Function::Cast(to), vec![column(name)]);
+    let plan = Plan::new(Source::Table(table)).with(Step::Select(vec![
+        named("shown", cast("x", ColumnType::Character)),
+        named("whole", cast("text", ColumnType::Integer)),
+        named("flag", cast("text", ColumnType::Logical)),
+        named("day", cast("text", ColumnType::Date)),
+    ]));
+    let result = collect(plan);
+    let na = table::convert::NA_INTEGER;
+    assert_eq!(
+        column_values(&result, "shown"),
+        strings(&["0.3", "1e-20", "1e+05", "123456"])
+    );
+    assert_eq!(column_values(&result, "whole"), ints(&[1, na, na, na]));
+    assert_eq!(
+        column_values(&result, "flag"),
+        RVector::Logical(vec![na, 1, na, na])
+    );
+    assert_eq!(na_dates(&result, "day"), [None, None, None, Some(19782.0)]);
+}
+
+/// `shift`, `cum_sum` and the row index read the rows in order, so a filter above them must not
+/// move below them.
+#[test]
+fn running_values_number_the_rows_after_a_filter() {
+    let plan = Plan::new(Source::Table(sales()))
+        .with(Step::Filter(binary(
+            BinaryOp::Greater,
+            column("units"),
+            Expr::Integer(1),
+        )))
+        .with(Step::WithColumns(vec![
+            named("row", call(Function::RowIndex(1), vec![])),
+            named("previous", call(Function::Shift(1), vec![column("units")])),
+            named("running", call(Function::CumSum, vec![column("units")])),
+        ]))
+        .with(Step::Filter(binary(
+            BinaryOp::Less,
+            column("row"),
+            Expr::Integer(4),
+        )));
+    let result = collect(plan);
+    let na = table::convert::NA_INTEGER;
+    assert_eq!(column_values(&result, "row"), ints(&[1, 2, 3]));
+    assert_eq!(column_values(&result, "units"), ints(&[3, 5, 2]));
+    assert_eq!(column_values(&result, "previous"), ints(&[na, 3, 5]));
+    assert_eq!(column_values(&result, "running"), ints(&[3, 8, 10]));
+}
+
+#[test]
+fn n_unique_counts_missing_values_once() {
+    let table = frame(vec![
+        ("group", strings(&["a", "a", "a", "b"])),
+        (
+            "x",
+            doubles(&[1.0, table::convert::NA_REAL, table::convert::NA_REAL, 2.0]),
+        ),
+    ]);
+    let plan = Plan::new(Source::Table(table)).with(Step::Aggregate {
+        keys: vec![named("group", column("group"))],
+        aggregates: vec![named(
+            "distinct",
+            aggregate(Aggregate::NUnique, column("x")),
+        )],
+    });
+    let result = collect(plan);
+    assert_eq!(column_values(&result, "distinct"), ints(&[2, 1]));
+}
+
+#[test]
+fn dates_split_shift_by_calendar_months_and_format() {
+    let table = frame(vec![(
+        "day",
+        RVector::Date(vec![19753.0, table::convert::NA_REAL]),
+    )]);
+    let plan = Plan::new(Source::Table(table)).with(Step::Select(vec![
+        named("month", call(Function::Month, vec![column("day")])),
+        named(
+            "later",
+            call(Function::OffsetBy { by: "1mo".into() }, vec![column("day")]),
+        ),
+        named(
+            "shown",
+            call(
+                Function::Format {
+                    format: "%d.%m.%Y".into(),
+                },
+                vec![column("day")],
+            ),
+        ),
+    ]));
+    let result = collect(plan);
+    let na = table::convert::NA_INTEGER;
+    assert_eq!(column_values(&result, "month"), ints(&[1, na]));
+    assert_eq!(na_dates(&result, "later"), [Some(19782.0), None]);
+    assert_eq!(
+        column_values(&result, "shown"),
+        na_strings(&[Some("31.01.2024"), None])
+    );
+}
+
+fn failure(plan: Plan) -> String {
+    match lazy::collect(plan) {
+        Ok(_) => panic!("the plan should fail"),
+        Err(error) => error.to_string(),
+    }
+}
+
+/// R's integer `cumsum` gives `NA` from the first sum outside the integer range on.
+#[test]
+fn integer_cum_sum_is_missing_from_the_first_overflow_on() {
+    let table = frame(vec![("x", ints(&[i32::MAX - 1, 1, 1, -5, 3]))]);
+    let plan = Plan::new(Source::Table(table)).with(Step::Select(vec![named(
+        "running",
+        call(Function::CumSum, vec![column("x")]),
+    )]));
+    let na = table::convert::NA_INTEGER;
+    assert_eq!(
+        column_values(&collect(plan), "running"),
+        ints(&[i32::MAX - 1, i32::MAX, na, na, na])
+    );
+}
+
+#[test]
+fn factors_cast_to_their_codes_and_fill_by_their_labels() {
+    let na = table::convert::NA_INTEGER;
+    let levels = |labels: &[&str]| labels.iter().map(|label| label.to_string()).collect();
+    let table = frame(vec![
+        (
+            "f",
+            RVector::Factor {
+                codes: vec![2, 1, na],
+                levels: levels(&["10", "20"]),
+            },
+        ),
+        (
+            "g",
+            RVector::Factor {
+                codes: vec![1, 1, 2],
+                levels: levels(&["a", "b"]),
+            },
+        ),
+    ]);
+    let plan = Plan::new(Source::Table(table)).with(Step::Select(vec![
+        named(
+            "codes",
+            call(Function::Cast(ColumnType::Integer), vec![column("f")]),
+        ),
+        named(
+            "numbers",
+            call(Function::Cast(ColumnType::Double), vec![column("f")]),
+        ),
+        named(
+            "filled",
+            call(Function::FillNull, vec![column("f"), column("g")]),
+        ),
+    ]));
+    let result = collect(plan);
+    assert_eq!(column_values(&result, "codes"), ints(&[2, 1, na]));
+    assert_eq!(na_doubles(&result, "numbers"), [Some(2.0), Some(1.0), None]);
+    let RVector::Factor { codes, levels } = column_values(&result, "filled") else {
+        panic!("`fill_null` of two factors is not a factor");
+    };
+    let labels: Vec<&str> = codes
+        .iter()
+        .map(|&code| levels[usize::try_from(code - 1).unwrap_or(usize::MAX)].as_str())
+        .collect();
+    assert_eq!(labels, ["20", "10", "b"]);
+}
+
+#[test]
+fn text_casts_to_numbers_as_as_numeric_reads_them() {
+    let table = frame(vec![(
+        "text",
+        strings(&[" 1.5", "0x10", "1e3 ", "abc", "", "2.7"]),
+    )]);
+    let plan = Plan::new(Source::Table(table)).with(Step::Select(vec![
+        named(
+            "number",
+            call(Function::Cast(ColumnType::Double), vec![column("text")]),
+        ),
+        named(
+            "whole",
+            call(Function::Cast(ColumnType::Integer), vec![column("text")]),
+        ),
+    ]));
+    let result = collect(plan);
+    let na = table::convert::NA_INTEGER;
+    assert_eq!(
+        na_doubles(&result, "number"),
+        [Some(1.5), Some(16.0), Some(1000.0), None, None, Some(2.7)]
+    );
+    assert_eq!(
+        column_values(&result, "whole"),
+        ints(&[1, 16, 1000, na, na, 2])
+    );
+}
+
+#[test]
+fn bad_patterns_durations_and_fills_are_refused_by_name() {
+    let table = frame(vec![
+        ("city", strings(&["a"])),
+        ("day", RVector::Date(vec![19753.0])),
+        ("units", ints(&[1])),
+    ]);
+    let select = |expr: Expr| {
+        Plan::new(Source::Table(table.clone())).with(Step::Select(vec![named("out", expr)]))
+    };
+    let pattern = failure(select(call(
+        Function::Contains { literal: false },
+        vec![column("city"), Expr::Character("(".into())],
+    )));
+    assert!(
+        pattern.contains("`str_contains` cannot read the regular expression \"(\""),
+        "{pattern}"
+    );
+    let offset = failure(select(call(
+        Function::OffsetBy { by: "12h".into() },
+        vec![column("day")],
+    )));
+    assert!(
+        offset.contains("`dt_offset_by` moves a Date by whole days"),
+        "{offset}"
+    );
+    let fill = failure(select(call(
+        Function::Coalesce,
+        vec![column("day"), column("units")],
+    )));
+    assert!(
+        fill.contains("`coalesce` fills Date values only from values of the same type"),
+        "{fill}"
+    );
 }

@@ -1,0 +1,39 @@
+# The DataFrame column functions give R's answers: text functions keep a missing value missing,
+# fill_null, coalesce and cast fill and convert columns, the date functions split, shift by
+# calendar months and format dates, shift and cum_sum read rows in order and skip NA, n_unique
+# counts NA once, and drop, rename, with_row_index and unpivot reshape a frame by naming only the
+# columns they change.
+
+requires ry-runtime
+
+file table.R
+| people <- DataFrame(name = c("Ann", "bob", NA), city = c("Oslo", "Rome", "Oslo"), units = c(3L, NA, 5L), joined = as.Date(c("2024-01-31", "2024-02-29", NA)))
+| text <- DataFrame.with_columns(people, upper = Expr.str_to_uppercase(Expr.col("name")), has_o = Expr.str_contains(Expr.col("city"), "o"), label = Expr.concat_str(Expr.col("name"), Expr.col("city"), separator = "-"), short = Expr.str_slice(Expr.col("city"), 0L, 2L))
+| print(text$upper)
+| print(text$has_o)
+| print(text$label)
+| print(text$short)
+| filled <- DataFrame.with_columns(people, units = Expr.fill_null(Expr.col("units"), 0L), name = Expr.coalesce(Expr.col("name"), Expr.col("city")), code = Expr.cast(Expr.col("units"), "character"))
+| print(filled$units)
+| print(filled$name)
+| print(filled$code)
+| dates <- DataFrame.with_columns(people, year = Expr.dt_year(Expr.col("joined")), later = Expr.dt_offset_by(Expr.col("joined"), "1mo"), shown = Expr.dt_to_string(Expr.col("joined"), "%d.%m.%Y"))
+| print(dates$year)
+| print(dates$later)
+| print(dates$shown)
+| running <- DataFrame.with_columns(people, prev = Expr.shift(Expr.col("units")), total = Expr.cum_sum(Expr.col("units")))
+| print(running$prev)
+| print(running$total)
+| print(DataFrame.unique(people, "city")$city)
+| counts <- people |> DataFrame.group_by("city") |> GroupBy.agg(n = Expr.n_unique(Expr.col("name"))) |> DataFrame.sort("city")
+| print(counts$n)
+| shaped <- people |> DataFrame.drop("joined", "units") |> DataFrame.rename(town = "city") |> DataFrame.with_row_index("row")
+| print(names(shaped))
+| print(shaped$row)
+| long <- DataFrame(id = 1:2, a = c(1, 2), b = c(3, 4)) |> DataFrame.unpivot(on = c("a", "b"), index = "id")
+| print(names(long))
+| print(long$value)
+
+run ry run --runtime ry table.R
+expect exit 0
+expect stdout "[1] \"ANN\" \"BOB\" NA   \n[1] TRUE TRUE TRUE\n[1] \"Ann-Oslo\" \"bob-Rome\" NA        \n[1] \"Os\" \"Ro\" \"Os\"\n[1] 3 0 5\n[1] \"Ann\"  \"bob\"  \"Oslo\"\n[1] \"3\" NA  \"5\"\n[1] 2024 2024   NA\n[1] \"2024-02-29\" \"2024-03-29\" NA          \n[1] \"31.01.2024\" \"29.02.2024\" NA          \n[1] NA  3 NA\n[1]  3 NA  8\n[1] \"Oslo\" \"Rome\"\n[1] 2 1\n[1] \"row\"  \"name\" \"town\"\n[1] 1 2 3\n[1] \"id\"       \"variable\" \"value\"   \n[1] 1 2 3 4"

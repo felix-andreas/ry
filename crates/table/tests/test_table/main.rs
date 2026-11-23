@@ -4200,12 +4200,7 @@ fn melt_stacks_measures_under_a_factor_of_their_names() {
     ]);
     let executed = ops::melt(&x, &["id"], &["v1", "v2"], "variable", "value")
         .unwrap_or_else(|error| panic!("{error}"));
-    assert_eq!(
-        executed.warnings,
-        [table::query::Warning::MeltCoerced {
-            to: ColumnType::Double
-        }]
-    );
+    assert!(executed.warnings.is_empty());
     let mut long = output_table(executed);
     assert_eq!(
         long.schema().to_string(),
@@ -4223,6 +4218,13 @@ fn melt_stacks_measures_under_a_factor_of_their_names() {
         Read(get(&mut long, "value")),
         doubles(&[1.0, 2.0, 1.5, 2.5])
     );
+
+    let mixed = frame(vec![("v1", ints(&[1, 2])), ("v2", strings(&["a", "b"]))]);
+    let executed = ops::melt(&mixed, &[], &["v1", "v2"], "variable", "value")
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(executed.warnings, [table::query::Warning::MeltCoerced]);
+    let mut long = output_table(executed);
+    assert_eq!(get(&mut long, "value"), strings(&["1", "2", "a", "b"]));
 }
 
 #[test]

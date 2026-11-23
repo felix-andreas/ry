@@ -396,10 +396,13 @@ pub fn melt(
         .flatten()
         .map(|column| ColumnType::of(column.dtype()))
         .collect();
-    if types.len() > 1
-        && let Some(to) = ColumnType::of(&dtype)
+    // Widening numbers loses nothing, so only values turned into their text warn.
+    let text = |kind: &Option<ColumnType>| {
+        matches!(kind, Some(ColumnType::Character | ColumnType::Factor))
+    };
+    if ColumnType::of(&dtype) == Some(ColumnType::Character) && types.iter().any(|kind| !text(kind))
     {
-        warnings.push(Warning::MeltCoerced { to });
+        warnings.push(Warning::MeltCoerced);
     }
     let levels = Arc::new(Levels::from_labels(
         measure.iter().map(|name| name.as_ref()),
@@ -2042,7 +2045,7 @@ fn recycle(name: &str, column: &Column, length: usize) -> Result<Column> {
 fn fill_empty(values: Series, function: Aggregate) -> Result<Series> {
     let mask = values.is_not_null();
     let empty = match function {
-        Aggregate::Sum | Aggregate::Length | Aggregate::Count => 0.0,
+        Aggregate::Sum | Aggregate::Length | Aggregate::Count | Aggregate::NUnique => 0.0,
         Aggregate::Mean => f64::NAN,
         _ => return Ok(values),
     };

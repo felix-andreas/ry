@@ -122,6 +122,26 @@ impl ColumnType {
         }
     }
 
+    /// The name `Expr.cast` takes for the type: its vector type without the brackets.
+    pub fn cast_name(self) -> &'static str {
+        self.name().trim_end_matches("[]")
+    }
+
+    /// The type `Expr.cast` names.
+    pub fn from_cast_name(text: &str) -> Option<ColumnType> {
+        [
+            ColumnType::Logical,
+            ColumnType::Integer,
+            ColumnType::Double,
+            ColumnType::Character,
+            ColumnType::Factor,
+            ColumnType::Date,
+            ColumnType::Datetime,
+        ]
+        .into_iter()
+        .find(|kind| kind.cast_name() == text)
+    }
+
     fn parse(text: &str) -> Option<ColumnType> {
         Some(match text {
             "logical[]" => ColumnType::Logical,

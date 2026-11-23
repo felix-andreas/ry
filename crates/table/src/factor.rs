@@ -654,6 +654,21 @@ pub fn text_expr(expr: Expr) -> Expr {
     )
 }
 
+/// A factor's level numbers, counted from 1, inside a lazy plan, as R's `as.integer` reads a
+/// factor.
+pub fn codes_expr(expr: Expr) -> Expr {
+    expr.map(
+        |column| {
+            let codes = column
+                .as_materialized_series()
+                .to_physical_repr()
+                .cast(&DataType::Int32)?;
+            Ok((&codes + 1).into_column())
+        },
+        |_, field| Ok(Field::new(field.name().clone(), DataType::Int32)),
+    )
+}
+
 /// `expr` as a factor of its own distinct strings inside a lazy plan: [`from_strings`] applied to
 /// whatever column it evaluates to.
 pub fn factor_expr(expr: Expr) -> Expr {

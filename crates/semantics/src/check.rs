@@ -240,6 +240,30 @@ pub enum TypeErrorKind<'db> {
         columns: Vec<String>,
         suggestion: Option<String>,
     },
+    /// A column a verb would add, or rename another to, under a name the frame already has, such
+    /// as `DataFrame.with_row_index(f, "id")` on a frame with an `id` column.
+    DuplicateColumn {
+        column: String,
+        verb: &'static str,
+    },
+    /// `Expr.cast` to a type the value cannot become, such as a `Date` to `logical`.
+    UnsupportedCast {
+        from: Ty<'db>,
+        to: String,
+    },
+    /// A duration `Expr.dt_offset_by` cannot read, or, with `part_of_day`, one that moves a
+    /// `Date` by part of a day.
+    InvalidDuration {
+        text: String,
+        part_of_day: bool,
+    },
+    /// `Expr.coalesce` or `Expr.fill_null` filling dates or date-times from values of another
+    /// type, whose common type would be text.
+    FilledTypesDiffer {
+        function: String,
+        first: Ty<'db>,
+        second: Ty<'db>,
+    },
     /// A column in `GroupBy.agg` that gives one value per row instead of one per group.
     NotAnAggregation {
         column: String,
@@ -492,6 +516,12 @@ pub enum ExpressionNeeds {
     LogicalOrNumbers,
     /// The test of `Expr.if_else`.
     Logical,
+    /// The `str_` functions: character or factor columns.
+    Text,
+    /// The `dt_` functions: `Date` or `POSIXct` columns.
+    Temporal,
+    /// `Expr.cum_sum`: logical, integer or double columns, and no dates.
+    Summable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
@@ -604,6 +634,22 @@ enum DataFrameVerb {
     /// `lazy` and `collect`, which keep the columns and change the kind.
     Convert(FrameKind),
     ReadCsv(FrameKind),
+    /// `drop`, which removes the columns it names.
+    Drop {
+        lazy: bool,
+    },
+    /// `rename(new = "old")`, which keeps each column in place under its new name.
+    Rename {
+        lazy: bool,
+    },
+    /// `with_row_index`, which puts an integer column of row numbers first.
+    WithRowIndex {
+        lazy: bool,
+    },
+    /// `unpivot`, which stacks columns into a variable and a value column.
+    Unpivot {
+        lazy: bool,
+    },
 }
 
 /// How `DataFrame.concat` puts frames together.
@@ -14309,6 +14355,10 @@ impl<'db, 'a> Checker<'db, 'a> {
             "join_asof" => DataFrameVerb::Join { lazy, asof: true },
             "lazy" => DataFrameVerb::Convert(FrameKind::LazyFrame),
             "collect" => DataFrameVerb::Convert(FrameKind::DataFrame),
+            "drop" => DataFrameVerb::Drop { lazy },
+            "rename" => DataFrameVerb::Rename { lazy },
+            "with_row_index" => DataFrameVerb::WithRowIndex { lazy },
+            "unpivot" => DataFrameVerb::Unpivot { lazy },
             "read_csv" if !lazy => DataFrameVerb::ReadCsv(FrameKind::DataFrame),
             "scan_csv" if lazy => DataFrameVerb::ReadCsv(FrameKind::LazyFrame),
             _ => return None,
@@ -14497,6 +14547,148 @@ impl<'db, 'a> Checker<'db, 'a> {
             DataFrameVerb::Join { lazy, asof } => self.join_type(lazy, asof, columns, frame, rest),
             DataFrameVerb::Convert(_) if matches!(subject_kind, FrameKind::GroupBy { .. }) => None,
             DataFrameVerb::Convert(kind) => Some(Ty::new(db, TyKind::Frame(kind, Some(columns)))),
+            DataFrameVerb::Drop { lazy } => {
+                let mut dropped: Vec<String> = Vec::with_capacity(rest.len());
+                let mut known = true;
+                for value in rest.iter().filter_map(|argument| argument.value) {
+                    let Some(names) = literal_strings(module, value) else {
+                        known = false;
+                        continue;
+                    };
+                    for (name, range) in names {
+                        if columns.iter().any(|column| column.name.text(db) == name) {
+                            dropped.push(name);
+                        } else {
+                            self.errors.push(TypeError {
+                                range,
+                                kind: column_does_not_exist(db, &name, frame, columns),
+                            });
+                        }
+                    }
+                }
+                let kept = existing(columns)
+                    .into_iter()
+                    .filter(|(name, _)| !dropped.contains(name))
+                    .collect();
+                known.then(|| frame_of(db, frame_kind(lazy), kept))
+            }
+            DataFrameVerb::Rename { lazy } => {
+                let mut result = existing(columns);
+                let mut known = true;
+                for argument in rest {
+                    let (Some(value), Some(new)) = (argument.value, module.argument_name(argument))
+                    else {
+                        known = false;
+                        continue;
+                    };
+                    let ExpressionKind::Literal(LiteralKind::String(text)) = module.kind(value)
+                    else {
+                        known = false;
+                        continue;
+                    };
+                    let old = &module[text];
+                    match result
+                        .iter_mut()
+                        .zip(columns)
+                        .find(|(_, column)| column.name.text(db) == old)
+                    {
+                        Some((slot, _)) => slot.0 = new.to_string(),
+                        None => self.errors.push(TypeError {
+                            range: module.range(value),
+                            kind: column_does_not_exist(db, old, frame, columns),
+                        }),
+                    }
+                }
+                let mut seen = FxHashSet::default();
+                if let Some((column, _)) = result.iter().find(|(name, _)| !seen.insert(name)) {
+                    let renamed = rest.iter().rev().find(|argument| {
+                        module.argument_name(argument).as_deref() == Some(column.as_str())
+                    });
+                    self.errors.push(TypeError {
+                        range: renamed
+                            .and_then(|argument| argument.value)
+                            .map_or_else(|| module.range(subject), |value| module.range(value)),
+                        kind: TypeErrorKind::DuplicateColumn {
+                            column: column.clone(),
+                            verb: "rename",
+                        },
+                    });
+                    return None;
+                }
+                known.then(|| frame_of(db, frame_kind(lazy), result))
+            }
+            DataFrameVerb::WithRowIndex { lazy } => {
+                let given = match_formals(module, rest, &["name"])
+                    .first()
+                    .copied()
+                    .flatten();
+                let name = match given {
+                    None => "index".to_owned(),
+                    Some(value) => match module.kind(value) {
+                        ExpressionKind::Literal(LiteralKind::String(text)) => {
+                            module[text].to_string()
+                        }
+                        _ => return None,
+                    },
+                };
+                if columns.iter().any(|column| column.name.text(db) == name) {
+                    self.errors.push(TypeError {
+                        range: module.range(given.unwrap_or(subject)),
+                        kind: TypeErrorKind::DuplicateColumn {
+                            column: name,
+                            verb: "with_row_index",
+                        },
+                    });
+                    return None;
+                }
+                let mut result = vec![(
+                    name,
+                    Ty::new(db, TyKind::Vector(scalar(db, Atomic::Integer))),
+                )];
+                result.extend(existing(columns));
+                Some(frame_of(db, frame_kind(lazy), result))
+            }
+            DataFrameVerb::Unpivot { lazy } => {
+                let matched = match_formals(
+                    module,
+                    rest,
+                    &["on", "index", "variable_name", "value_name"],
+                );
+                let listed = |position: usize| {
+                    matched.get(position).copied().flatten().filter(|&value| {
+                        !matches!(
+                            module.kind(value),
+                            ExpressionKind::Literal(LiteralKind::Null)
+                        )
+                    })
+                };
+                let name_of = |position: usize, default: &str| -> Option<String> {
+                    match matched
+                        .get(position)
+                        .copied()
+                        .flatten()
+                        .map(|value| module.kind(value))
+                    {
+                        None => Some(default.to_owned()),
+                        Some(ExpressionKind::Literal(LiteralKind::String(text))) => {
+                            Some(module[text].to_string())
+                        }
+                        Some(_) => None,
+                    }
+                };
+                let variable = name_of(2, "variable")?;
+                let value = name_of(3, "value")?;
+                let result = self.melted_columns(
+                    columns,
+                    frame,
+                    false,
+                    listed(1),
+                    listed(0),
+                    (variable, factor_type(db)),
+                    value,
+                )?;
+                Some(frame_of(db, frame_kind(lazy), result))
+            }
             DataFrameVerb::ReadCsv(_)
             | DataFrameVerb::Concat(_)
             | DataFrameVerb::BaseGeneric(_) => None,
@@ -15085,6 +15277,214 @@ impl<'db, 'a> Checker<'db, 'a> {
                             shape: yes.shape.combine(no.shape),
                         })
                     }
+                    "Expr.str_contains"
+                    | "Expr.str_starts_with"
+                    | "Expr.str_ends_with"
+                    | "Expr.str_replace"
+                    | "Expr.str_replace_all"
+                    | "Expr.str_slice"
+                    | "Expr.str_to_uppercase"
+                    | "Expr.str_to_lowercase"
+                    | "Expr.str_to_date" => {
+                        let (formals, count): (&[&str], usize) = match name.as_str() {
+                            "Expr.str_contains" => (&["expr", "pattern"], 2),
+                            "Expr.str_starts_with" => (&["expr", "prefix"], 2),
+                            "Expr.str_ends_with" => (&["expr", "suffix"], 2),
+                            "Expr.str_replace" | "Expr.str_replace_all" => {
+                                (&["expr", "pattern", "replacement"], 3)
+                            }
+                            _ => (&["expr"], 1),
+                        };
+                        let operands = self.function_operands(
+                            &module[arguments],
+                            &formals[..count],
+                            columns,
+                            frame,
+                        )?;
+                        for (value, operand) in &operands {
+                            self.check_expression_operand(
+                                name.as_str(),
+                                *value,
+                                operand,
+                                ExpressionNeeds::Text,
+                            );
+                        }
+                        let ty = match name.as_str() {
+                            "Expr.str_contains" | "Expr.str_starts_with" | "Expr.str_ends_with" => {
+                                vector(Atomic::Logical)
+                            }
+                            "Expr.str_to_date" => date_type(db),
+                            _ => vector(Atomic::Character),
+                        };
+                        Some(joined_column(operands, ty))
+                    }
+                    "Expr.dt_year" | "Expr.dt_month" | "Expr.dt_day" | "Expr.dt_offset_by"
+                    | "Expr.dt_to_string" => {
+                        let column = argument(self)?;
+                        let fits = self.check_expression_operand(
+                            name.as_str(),
+                            first?,
+                            &column,
+                            ExpressionNeeds::Temporal,
+                        );
+                        let by = match_formals(module, &module[arguments], &["expr", "by"])
+                            .get(1)
+                            .copied()
+                            .flatten();
+                        if let (true, "Expr.dt_offset_by", Some(by)) = (fits, name.as_str(), by)
+                            && let ExpressionKind::Literal(LiteralKind::String(text)) =
+                                module.kind(by)
+                        {
+                            let text = &module[text];
+                            let date = temporal_column(db, column.ty) == Some(Temporal::Date);
+                            let part_of_day = match duration_has_part_of_day(text) {
+                                Some(false) => None,
+                                Some(true) => date.then_some(true),
+                                None => Some(false),
+                            };
+                            if let Some(part_of_day) = part_of_day {
+                                self.errors.push(TypeError {
+                                    range: module.range(by),
+                                    kind: TypeErrorKind::InvalidDuration {
+                                        text: text.to_owned(),
+                                        part_of_day,
+                                    },
+                                });
+                            }
+                        }
+                        let ty = match name.as_str() {
+                            "Expr.dt_offset_by" => column.ty,
+                            "Expr.dt_to_string" => vector(Atomic::Character),
+                            _ => vector(Atomic::Integer),
+                        };
+                        Some(ComputedColumn { ty, ..column })
+                    }
+                    "Expr.concat_str" | "Expr.coalesce" | "Expr.fill_null" => {
+                        let operands = if name == "Expr.fill_null" {
+                            self.function_operands(
+                                &module[arguments],
+                                &["expr", "value"],
+                                columns,
+                                frame,
+                            )?
+                        } else {
+                            let mut operands = Vec::with_capacity(module[arguments].len());
+                            for argument in &module[arguments] {
+                                let Some(value) = argument.value else {
+                                    continue;
+                                };
+                                if argument.name.is_some() {
+                                    continue;
+                                }
+                                operands.push((value, self.frame_operand(value, columns, frame)?));
+                            }
+                            operands
+                        };
+                        let ty = if name == "Expr.concat_str" {
+                            vector(Atomic::Character)
+                        } else {
+                            // A bare `NA` of any type yields to the values it stands among, as
+                            // the engine leaves it out of the common type.
+                            let types: Vec<Ty<'db>> = operands
+                                .iter()
+                                .filter(|(value, _)| {
+                                    !matches!(
+                                        module.kind(*value),
+                                        ExpressionKind::Literal(LiteralKind::Na(_))
+                                    )
+                                })
+                                .map(|(_, operand)| operand.ty)
+                                .collect();
+                            match types.split_first() {
+                                None => vector(Atomic::Logical),
+                                Some((&first, rest)) if rest.iter().all(|&ty| ty == first) => first,
+                                Some((&first, rest)) => {
+                                    let temporal = std::iter::once(&first)
+                                        .chain(rest)
+                                        .find(|ty| temporal_column(db, **ty).is_some());
+                                    if let Some(&temporal) = temporal {
+                                        let other = std::iter::once(&first)
+                                            .chain(rest)
+                                            .find(|ty| **ty != temporal)?;
+                                        self.errors.push(TypeError {
+                                            range: self.blame_range(value),
+                                            kind: TypeErrorKind::FilledTypesDiffer {
+                                                function: name.to_string(),
+                                                first: temporal,
+                                                second: *other,
+                                            },
+                                        });
+                                        return None;
+                                    }
+                                    widest_column(db, &types, false)?
+                                }
+                            }
+                        };
+                        if operands.is_empty() {
+                            return None;
+                        }
+                        Some(joined_column(operands, ty))
+                    }
+                    "Expr.cast" => {
+                        let column = argument(self)?;
+                        let target =
+                            *match_formals(module, &module[arguments], &["expr", "type"]).get(1)?;
+                        let target = target?;
+                        let ExpressionKind::Literal(LiteralKind::String(text)) =
+                            module.kind(target)
+                        else {
+                            return None;
+                        };
+                        let to = &module[text];
+                        let ty = match to {
+                            "logical" => vector(Atomic::Logical),
+                            "integer" => vector(Atomic::Integer),
+                            "double" => vector(Atomic::Double),
+                            "character" => vector(Atomic::Character),
+                            "factor" => factor_type(db),
+                            "Date" => date_type(db),
+                            _ => return None,
+                        };
+                        // R's `as.logical` of a date and `as.Date` of a logical are errors.
+                        let from = temporal_column(db, column.ty);
+                        let refused = match to {
+                            "logical" => from.is_some(),
+                            "Date" => join_class(db, column.ty) == Some(JoinClass::Logical),
+                            _ => false,
+                        };
+                        if refused {
+                            let from = self.shown_operand_type(first?, &column);
+                            self.errors.push(TypeError {
+                                range: module.range(target),
+                                kind: TypeErrorKind::UnsupportedCast {
+                                    from,
+                                    to: to.to_owned(),
+                                },
+                            });
+                            return None;
+                        }
+                        Some(ComputedColumn { ty, ..column })
+                    }
+                    "Expr.shift" => argument(self),
+                    "Expr.cum_sum" => {
+                        let column = argument(self)?;
+                        self.check_expression_operand(
+                            name.as_str(),
+                            first?,
+                            &column,
+                            ExpressionNeeds::Summable,
+                        )
+                        .then_some(())?;
+                        let ty = match element_atomic(db, column.ty) {
+                            Some(Atomic::Logical | Atomic::Integer) => vector(Atomic::Integer),
+                            _ => vector(Atomic::Double),
+                        };
+                        Some(ComputedColumn { ty, ..column })
+                    }
+                    "Expr.n_unique" => {
+                        let column = argument(self)?;
+                        Some(aggregate(column, vector(Atomic::Integer)))
+                    }
                     _ => None,
                 }
             }
@@ -15192,6 +15592,30 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             _ => None,
         }
+    }
+
+    /// The per-row operands of an expression function, matched to its formals: the receiver,
+    /// which must be an expression, and the plain values or expressions after it. `None` when
+    /// one is missing or is not an expression ry can read.
+    fn function_operands(
+        &mut self,
+        arguments: &[Argument],
+        formals: &[&str],
+        columns: &[RecordField<'db>],
+        frame: Option<Symbol>,
+    ) -> Option<Vec<(ExprId, ComputedColumn<'db>)>> {
+        let matched = match_formals(self.module, arguments, formals);
+        let mut operands = Vec::with_capacity(matched.len());
+        for (position, value) in matched.into_iter().enumerate() {
+            let value = value?;
+            let column = if position == 0 {
+                self.frame_expression(value, columns, frame)?
+            } else {
+                self.frame_operand(value, columns, frame)?
+            };
+            operands.push((value, column));
+        }
+        Some(operands)
     }
 
     /// Types a binary operator with a `Date` or `POSIXct` operand. The engine stores a date as
@@ -15325,14 +15749,24 @@ impl<'db, 'a> Checker<'db, 'a> {
         operand: &ComputedColumn<'db>,
         needs: ExpressionNeeds,
     ) -> bool {
-        let Some(class) = join_class(self.db, operand.ty) else {
-            return true;
-        };
+        let db = self.db;
+        let class = join_class(db, operand.ty);
         let fits = match needs {
             ExpressionNeeds::Numbers | ExpressionNeeds::LogicalOrNumbers => {
-                class != JoinClass::Text
+                class != Some(JoinClass::Text)
             }
-            ExpressionNeeds::Logical => class == JoinClass::Logical,
+            ExpressionNeeds::Logical => class.is_none_or(|class| class == JoinClass::Logical),
+            ExpressionNeeds::Text => match class {
+                Some(class) => class == JoinClass::Text,
+                None => temporal_column(db, operand.ty).is_none(),
+            },
+            ExpressionNeeds::Temporal => {
+                class.is_none() || temporal_column(db, operand.ty).is_some()
+            }
+            ExpressionNeeds::Summable => {
+                matches!(class, Some(JoinClass::Logical | JoinClass::Number))
+                    || (class.is_none() && temporal_column(db, operand.ty).is_none())
+            }
         };
         if fits {
             return true;
@@ -16068,41 +16502,9 @@ impl<'db, 'a> Checker<'db, 'a> {
         let subject = matched[0]?;
         let columns = self.frame_columns_of(subject)?;
         let frame = variable_name(module, subject);
-        let listed = |checker: &mut Self, value: Option<ExprId>| -> Option<Option<Vec<usize>>> {
-            let Some(value) = value else {
-                return Some(None);
-            };
-            let mut positions = Vec::new();
-            for (name, range) in literal_strings(module, value)? {
-                match columns
-                    .iter()
-                    .position(|column| column.name.text(db) == name)
-                {
-                    Some(position) => positions.push(position),
-                    None => checker.errors.push(TypeError {
-                        range,
-                        kind: column_does_not_exist(db, &name, frame, &columns),
-                    }),
-                }
-            }
-            Some(Some(positions))
-        };
-        let ids = listed(self, matched[1])?;
-        let measures = listed(self, matched[2])?;
-        let others = |listed: &[usize]| -> Vec<usize> {
-            (0..columns.len())
-                .filter(|position| !listed.contains(position))
-                .collect()
-        };
-        let (ids, measures) = match (ids, measures) {
-            (Some(ids), Some(measures)) => (ids, measures),
-            (Some(ids), None) => {
-                let measures = others(&ids);
-                (ids, measures)
-            }
-            (None, Some(measures)) => (others(&measures), measures),
-            (None, None) => return None,
-        };
+        if matched[1].is_none() && matched[2].is_none() {
+            return None;
+        }
         let name_of = |value: Option<ExprId>, default: &str| -> Option<String> {
             match value.map(|value| module.kind(value)) {
                 None => Some(default.to_owned()),
@@ -16123,6 +16525,77 @@ impl<'db, 'a> Checker<'db, 'a> {
                     )
                 })
         });
+        let variable_ty = if factor_variable {
+            factor_type(db)
+        } else {
+            Ty::new(db, TyKind::Vector(scalar(db, Atomic::Character)))
+        };
+        let result = self.melted_columns(
+            &columns,
+            frame,
+            true,
+            matched[1],
+            matched[2],
+            (variable, variable_ty),
+            value,
+        )?;
+        Some(frame_of(db, FrameKind::DataTable, result))
+    }
+
+    /// The columns of a melted frame: the id columns, then the variable column naming each
+    /// measure column and the value column holding its values, as the widest of their types.
+    /// Measures left out are every column the ids do not name, and ids left out are every
+    /// column the measures do not name when `rest_are_ids` holds (data.table's `melt`) and none
+    /// otherwise (Polars' `unpivot`).
+    #[allow(clippy::too_many_arguments)]
+    fn melted_columns(
+        &mut self,
+        columns: &[RecordField<'db>],
+        frame: Option<Symbol>,
+        rest_are_ids: bool,
+        ids: Option<ExprId>,
+        measures: Option<ExprId>,
+        (variable, variable_ty): (String, Ty<'db>),
+        value: String,
+    ) -> Option<Vec<(String, Ty<'db>)>> {
+        let module = self.module;
+        let db = self.db;
+        let mut listed = |value: Option<ExprId>| -> Option<Option<Vec<usize>>> {
+            let Some(value) = value else {
+                return Some(None);
+            };
+            let mut positions = Vec::new();
+            for (name, range) in literal_strings(module, value)? {
+                match columns
+                    .iter()
+                    .position(|column| column.name.text(db) == name)
+                {
+                    Some(position) => positions.push(position),
+                    None => self.errors.push(TypeError {
+                        range,
+                        kind: column_does_not_exist(db, &name, frame, columns),
+                    }),
+                }
+            }
+            Some(Some(positions))
+        };
+        let ids = listed(ids)?;
+        let measures = listed(measures)?;
+        let others = |listed: &[usize]| -> Vec<usize> {
+            (0..columns.len())
+                .filter(|position| !listed.contains(position))
+                .collect()
+        };
+        let (ids, measures) = match (ids, measures) {
+            (Some(ids), Some(measures)) => (ids, measures),
+            (Some(ids), None) => {
+                let measures = others(&ids);
+                (ids, measures)
+            }
+            (None, Some(measures)) if rest_are_ids => (others(&measures), measures),
+            (None, Some(measures)) => (Vec::new(), measures),
+            (None, None) => (Vec::new(), others(&[])),
+        };
         let measure_types: Vec<Ty<'db>> = measures
             .iter()
             .filter_map(|&position| columns.get(position))
@@ -16133,14 +16606,9 @@ impl<'db, 'a> Checker<'db, 'a> {
             .filter_map(|&position| columns.get(position))
             .map(|column| (column.name.text(db).to_owned(), column.ty))
             .collect();
-        let variable_ty = if factor_variable {
-            factor_type(db)
-        } else {
-            Ty::new(db, TyKind::Vector(scalar(db, Atomic::Character)))
-        };
         result.push((variable, variable_ty));
         result.push((value, widest_column(db, &measure_types, false)?));
-        Some(frame_of(db, FrameKind::DataTable, result))
+        Some(result)
     }
 
     /// `None` unless every non-`NULL` argument is one nominal whose class declares `c.Class`.
@@ -23771,6 +24239,32 @@ fn temporal_column(db: &dyn Db, ty: Ty<'_>) -> Option<Temporal> {
 }
 
 /// The column type of an R vector a verb takes as a column's values. A string is left out,
+/// Whether a Polars duration such as `"1mo"` or `"-3d12h"` has a part shorter than a day, or
+/// `None` when it does not read as a duration.
+fn duration_has_part_of_day(text: &str) -> Option<bool> {
+    let mut rest = text.strip_prefix('-').unwrap_or(text);
+    let mut part_of_day = false;
+    if rest.is_empty() {
+        return None;
+    }
+    while !rest.is_empty() {
+        let digits = rest.find(|character: char| !character.is_ascii_digit())?;
+        if digits == 0 {
+            return None;
+        }
+        let unit_end = rest[digits..]
+            .find(|character: char| character.is_ascii_digit())
+            .map_or(rest.len(), |end| digits + end);
+        match &rest[digits..unit_end] {
+            "d" | "w" | "mo" | "q" | "y" => {}
+            "ns" | "us" | "µs" | "ms" | "s" | "m" | "h" => part_of_day = true,
+            _ => return None,
+        }
+        rest = &rest[unit_end..];
+    }
+    Some(part_of_day)
+}
+
 /// because a single string names a column instead.
 fn vector_column<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Ty<'db>> {
     match column_element(db, ty).kind(db) {
@@ -23790,6 +24284,35 @@ fn is_expr_type(db: &dyn Db, ty: Ty<'_>) -> bool {
 
 fn factor_type(db: &dyn Db) -> Ty<'_> {
     Ty::new(db, TyKind::Named(Name::new(db, "factor"), &[]))
+}
+
+fn date_type(db: &dyn Db) -> Ty<'_> {
+    Ty::new(db, TyKind::Named(Name::new(db, "Date"), &[]))
+}
+
+/// The column an expression function computes from its operands: Polars names it after the
+/// first column it reads, and it gives one value per group only when every operand does.
+fn joined_column<'db>(
+    operands: Vec<(ExprId, ComputedColumn<'db>)>,
+    ty: Ty<'db>,
+) -> ComputedColumn<'db> {
+    let reads_column = operands.iter().any(|(_, operand)| operand.reads_column);
+    let shape = operands
+        .iter()
+        .map(|(_, operand)| operand.shape)
+        .reduce(Shape::combine)
+        .unwrap_or(Shape::PerRow);
+    let name = operands
+        .into_iter()
+        .map(|(_, operand)| operand)
+        .find(|operand| operand.reads_column || !reads_column)
+        .map_or_else(|| "literal".to_owned(), |operand| operand.name);
+    ComputedColumn {
+        name,
+        ty,
+        reads_column,
+        shape,
+    }
 }
 
 /// The column type data.table gives values of several column types stacked together: the

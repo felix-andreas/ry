@@ -16,13 +16,14 @@ use {
         group, join,
         kernel::{Evaluator, Vector, scatter, scatters, selected_rows},
     },
-    numeric::long_double::{real_integer_divide, real_modulo},
+    numeric::long_double::{Exactness, real_integer_divide, real_modulo, strtod},
     polars::prelude::{
-        AnyValue, AsOfOptions, AsofStrategy, ChunkAgg, Column, DataFrame, DataType, ExplodeOptions,
-        Expr as PolarsExpr, Field, Float64Chunked, Int32Chunked, IntoColumn, IntoLazy, JoinType,
-        LazyFrame, MaintainOrderJoin, NULL, NamedFrom, PlSmallStr, RoundMode, Scalar, Series,
-        SortMultipleOptions, TimeUnit, TimeZone, UnionArgs, by_name, col, concat, len, lit,
-        pearson_corr, when,
+        AnyValue, AsOfOptions, AsofStrategy, ChunkAgg, Column, DataFrame, DataType, Duration,
+        ExplodeOptions, Expr as PolarsExpr, Field, Float64Chunked, Int32Chunked, IntoColumn,
+        IntoLazy, JoinType, LazyFrame, MaintainOrderJoin, NULL, NamedFrom, PlSmallStr, RoundMode,
+        Scalar, Series, SortMultipleOptions, StringChunked, StrptimeOptions, TimeUnit, TimeZone,
+        UnionArgs, by_name, coalesce, col, concat, concat_str, int_range, len, lit, pearson_corr,
+        when,
     },
     polars_arrow::bitmap::{Bitmap, MutableBitmap},
     std::{collections::HashSet, fmt, sync::Arc},
@@ -243,12 +244,71 @@ impl PartialEq for Values {
     }
 }
 
-/// A function of [`Expr::Call`]. Each computes a row from the same row of its arguments.
+/// A function of [`Expr::Call`]. Each computes a row from the same row of its arguments, except
+/// `Shift`, `CumSum` and `RowIndex`, which read the rows in order. Options are part of the
+/// function; values that may differ per row are arguments.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Function {
     /// `is_in(x, values)`: whether each value of `x` is one of `values`. A missing value is in
     /// `values` when they hold one, as R's `%in%` decides, so the result is never `NA`.
     IsIn,
+    /// `str_contains(x, pattern)`: whether the text matches the regular expression, or holds
+    /// the literal text.
+    Contains {
+        literal: bool,
+    },
+    /// `str_starts_with(x, prefix)`.
+    StartsWith,
+    /// `str_ends_with(x, suffix)`.
+    EndsWith,
+    /// `str_replace(x, pattern, replacement)`: the first match replaced, or every match when
+    /// `all` holds.
+    Replace {
+        all: bool,
+        literal: bool,
+    },
+    /// `str_slice(x)`: the characters from `start`, counted from 1, or from the end when
+    /// negative, through `length` of them or to the end.
+    Slice {
+        start: i64,
+        length: Option<u64>,
+    },
+    Uppercase,
+    Lowercase,
+    /// `concat_str(...)`: the arguments as text, pasted with `separator`. A missing value in any
+    /// argument makes the row `NA`.
+    ConcatStr {
+        separator: PlSmallStr,
+    },
+    Year,
+    Month,
+    Day,
+    /// `dt_offset_by(x)`: a date or date-time moved by a calendar duration such as `"1mo"`.
+    OffsetBy {
+        by: PlSmallStr,
+    },
+    /// `dt_to_string(x)`: a date or date-time as text in a strftime format.
+    Format {
+        format: PlSmallStr,
+    },
+    /// `str_to_date(x)`: text parsed as dates in a strftime format, `NA` where it does not
+    /// parse.
+    ToDate {
+        format: PlSmallStr,
+    },
+    /// `fill_null(x, value)`: `x`, with `value` where `x` is `NA`. `NaN` is a value.
+    FillNull,
+    /// `coalesce(...)`: the first argument that is not `NA`.
+    Coalesce,
+    /// `cast(x)`: the values converted as R's `as.*` converts them.
+    Cast(ColumnType),
+    /// `shift(x)`: each row takes the value `n` rows before it (after it when negative), `NA`
+    /// where there is none.
+    Shift(i64),
+    /// `cum_sum(x)`: the running total in row order, skipping `NA`.
+    CumSum,
+    /// The row's position, from `offset`.
+    RowIndex(i64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -293,6 +353,8 @@ pub enum Aggregate {
     Length,
     /// The values that are not missing (`sum(!is.na(x))`), as Polars' `count` counts.
     Count,
+    /// The distinct values, `NA` counting as one (`length(unique(x))`).
+    NUnique,
 }
 
 /// Shorthands for building expressions in tests and in the interpreter's lowering.
@@ -353,8 +415,9 @@ pub enum Warning {
     /// were parsed as R's `as.logical`, `as.integer` or `as.double` would. data.table warns on
     /// every such write, whatever the strings hold.
     Parsed { column: PlSmallStr, to: ColumnType },
-    /// `melt`'s measure columns had different types, so the value column holds the widest.
-    MeltCoerced { to: ColumnType },
+    /// `melt`'s measure columns mixed text with numbers or logicals, so the value column holds
+    /// their text.
+    MeltCoerced,
     /// `dcast` had no aggregate, but some cell got several values, so it counts them instead.
     CastCounted,
     /// `min` or `max` with `na.rm = TRUE`, written as a column of `j`, found a group with no
@@ -384,10 +447,8 @@ impl fmt::Display for Warning {
                 "column `{column}` holds {holds}, so the assigned strings were converted to {holds}",
                 holds = holds(*to)
             ),
-            Warning::MeltCoerced { to } => write!(
-                formatter,
-                "the measure columns have different types, so the value column holds {}",
-                holds(*to)
+            Warning::MeltCoerced => formatter.write_str(
+                "the measure columns mix text with other values, so the value column holds text",
             ),
             Warning::NoValues { column } => write!(
                 formatter,
@@ -1104,7 +1165,7 @@ fn reads_count(expr: &Expr) -> bool {
 /// is `NA`.
 fn one_value(function: Aggregate, value: Expr) -> Expr {
     match function {
-        Aggregate::Length => Expr::Integer(1),
+        Aggregate::Length | Aggregate::NUnique => Expr::Integer(1),
         Aggregate::Count => Expr::Binary(
             BinaryOp::Subtract,
             Box::new(Expr::Integer(1)),
@@ -1136,9 +1197,11 @@ fn single_value(function: Aggregate, arg: &Expr, na_rm: bool) -> Expr {
         na_rm: false,
     };
     match function {
-        Aggregate::Length | Aggregate::Count | Aggregate::Sd | Aggregate::Var => {
-            one_value(function, first())
-        }
+        Aggregate::Length
+        | Aggregate::Count
+        | Aggregate::NUnique
+        | Aggregate::Sd
+        | Aggregate::Var => one_value(function, first()),
         _ if na_rm => Expr::Aggregate {
             function,
             arg: Box::new(Expr::IfElse(
@@ -2247,6 +2310,7 @@ pub(crate) fn collapses(expr: &Expr) -> bool {
         | Expr::Window(..) => false,
         Expr::Call(function, args) => match (function, args.as_slice()) {
             (Function::IsIn, [x, _]) => collapses(x),
+            (function, _) if function.reads_order() => false,
             _ => args.iter().all(collapses),
         },
         Expr::Unary(_, arg) => collapses(arg),
@@ -2884,8 +2948,23 @@ fn conversion_warning(
     }))
 }
 
-/// Formats a double as R prints it: the shorter of fixed and scientific notation, with R's
-/// `1e+10` exponent form.
+/// Formats a double as R's `as.character` does: fifteen significant digits without trailing
+/// Text read as a number as R's `as.numeric` reads it (`RealFromString`): white space around the
+/// number is allowed, hexadecimal and `Inf` are numbers, and anything else is `NA`.
+fn r_number(text: &str) -> Option<f64> {
+    let bytes = text.as_bytes();
+    let blank = |rest: &[u8]| rest.iter().all(u8::is_ascii_whitespace);
+    if blank(bytes) {
+        return None;
+    }
+    let number = strtod(bytes, b'.', false, Exactness::Allow);
+    match number.length > 0 && blank(bytes.get(number.length..).unwrap_or_default()) {
+        true => Some(number.value),
+        false => None,
+    }
+}
+
+/// zeros, in fixed notation unless scientific notation (`1e+05`) is shorter.
 fn r_double(value: f64) -> String {
     if value.is_nan() {
         return "NaN".to_string();
@@ -2893,19 +2972,40 @@ fn r_double(value: f64) -> String {
     if value.is_infinite() {
         return if value > 0.0 { "Inf" } else { "-Inf" }.to_string();
     }
-    let fixed = value.to_string();
-    let scientific = format!("{value:e}");
-    let scientific = match scientific.split_once('e') {
-        Some((mantissa, exponent)) => match exponent.strip_prefix('-') {
-            Some(digits) => format!("{mantissa}e-{digits:0>2}"),
-            None => format!("{mantissa}e+{exponent:0>2}"),
-        },
-        None => scientific,
+    if value == 0.0 {
+        return "0".to_string();
+    }
+    let rounded = format!("{:.14e}", value.abs());
+    let Some((mantissa, exponent)) = rounded.split_once('e') else {
+        return rounded;
     };
-    if scientific.len() < fixed.len() {
-        scientific
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let digits: String = mantissa
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect::<String>()
+        .trim_end_matches('0')
+        .to_string();
+    let sign = if value < 0.0 { "-" } else { "" };
+    let significant = digits.len() as i32;
+    let fixed = if exponent < 0 {
+        format!("0.{}{digits}", "0".repeat((-exponent - 1) as usize))
+    } else if significant <= exponent + 1 {
+        format!(
+            "{digits}{}",
+            "0".repeat((exponent + 1 - significant) as usize)
+        )
     } else {
-        fixed
+        let (whole, fraction) = digits.split_at((exponent + 1) as usize);
+        format!("{whole}.{fraction}")
+    };
+    let (lead, rest) = digits.split_at(1);
+    let point = if rest.is_empty() { "" } else { "." };
+    let exponent_sign = if exponent < 0 { "-" } else { "+" };
+    let scientific = format!("{lead}{point}{rest}e{exponent_sign}{:02}", exponent.abs());
+    match scientific.len() < fixed.len() {
+        true => format!("{sign}{scientific}"),
+        false => format!("{sign}{fixed}"),
     }
 }
 
@@ -2992,6 +3092,7 @@ fn row_wise(expr: &Expr) -> bool {
         | Expr::Na(_) => true,
         Expr::Call(function, args) => match (function, args.as_slice()) {
             (Function::IsIn, [x, values]) => row_wise(x) && is_constant(values),
+            (function, _) if function.reads_order() => false,
             _ => args.iter().all(row_wise),
         },
         Expr::Unary(_, arg) => row_wise(arg),
@@ -3088,13 +3189,14 @@ impl NullCounts {
             | Expr::Date(_)
             | Expr::Datetime { .. }
             | Expr::Count
-            | Expr::Call(Function::IsIn, _)
+            | Expr::Call(Function::IsIn | Function::RowIndex(_), _)
             | Expr::Rank { .. } => false,
             Expr::Values(values) => values.0.null_count() > 0,
             Expr::Unary(UnaryOp::IsNa, _) => false,
             Expr::Unary(_, arg) | Expr::Head(arg, _) => self.may_be_null(arg),
             // Integer arithmetic overflows to NA, so it may always produce one.
             Expr::Binary(..)
+            | Expr::Call(..)
             | Expr::Aggregate { .. }
             | Expr::Correlation(..)
             | Expr::IfElse(..)
@@ -3180,7 +3282,9 @@ impl Typer<'_> {
                         ColumnType::Integer
                     }
                     Aggregate::Min | Aggregate::Max | Aggregate::First | Aggregate::Last => kind,
-                    Aggregate::Length | Aggregate::Count => ColumnType::Integer,
+                    Aggregate::Length | Aggregate::Count | Aggregate::NUnique => {
+                        ColumnType::Integer
+                    }
                 }
             }
             Expr::Head(arg, _) => self.expr(arg)?,
@@ -3210,14 +3314,92 @@ impl Typer<'_> {
             .iter()
             .map(|arg| self.expr(arg))
             .collect::<Result<Vec<_>>>()?;
+        let name = function.name();
+        let text = |kind: ColumnType| match kind {
+            ColumnType::Character | ColumnType::Factor => Ok(()),
+            other => Err(Error::Query(format!("`{name}` needs text, not {other}"))),
+        };
+        let temporal = |kind: ColumnType| match is_temporal(kind) {
+            true => Ok(()),
+            false => Err(Error::Query(format!(
+                "`{name}` needs a Date or POSIXct, not {kind}"
+            ))),
+        };
         Ok(match (function, kinds.as_slice()) {
             (Function::IsIn, [x, values]) => {
                 comparison(*x, *values)?;
                 ColumnType::Logical
             }
+            (
+                Function::Contains { .. } | Function::StartsWith | Function::EndsWith,
+                [x, pattern],
+            ) => {
+                text(*x)?;
+                text(*pattern)?;
+                checked_pattern(function, args)?;
+                ColumnType::Logical
+            }
+            (Function::Replace { .. }, [x, pattern, replacement]) => {
+                text(*x)?;
+                text(*pattern)?;
+                text(*replacement)?;
+                checked_pattern(function, args)?;
+                ColumnType::Character
+            }
+            (Function::Slice { .. } | Function::Uppercase | Function::Lowercase, [x]) => {
+                text(*x)?;
+                ColumnType::Character
+            }
+            (Function::ConcatStr { .. }, [_, ..]) => ColumnType::Character,
+            (Function::Year | Function::Month | Function::Day, [x]) => {
+                temporal(*x)?;
+                ColumnType::Integer
+            }
+            (Function::OffsetBy { by }, [x]) => {
+                temporal(*x)?;
+                let duration = Duration::try_parse(by).map_err(|_| {
+                    Error::Query(format!(
+                        "`{name}` takes a duration such as \"1mo\" or \"-2d\", not \"{by}\""
+                    ))
+                })?;
+                if *x == ColumnType::Date && duration.nanoseconds() != 0 {
+                    return Err(Error::Query(format!(
+                        "`{name}` moves a Date by whole days, weeks, months or years, not \"{by}\""
+                    )));
+                }
+                *x
+            }
+            (Function::Format { .. }, [x]) => {
+                temporal(*x)?;
+                ColumnType::Character
+            }
+            (Function::ToDate { .. }, [x]) => {
+                text(*x)?;
+                ColumnType::Date
+            }
+            (Function::FillNull, [_, _]) | (Function::Coalesce, [_, ..]) => {
+                coalesced_type(name, args, &kinds)?
+            }
+            (Function::Cast(target), [x]) => {
+                if !castable(*x, *target) {
+                    return Err(Error::Query(format!(
+                        "`cast` cannot convert {x} to {target}"
+                    )));
+                }
+                *target
+            }
+            (Function::Shift(_), [x]) => *x,
+            (Function::CumSum, [x]) => match x {
+                ColumnType::Logical | ColumnType::Integer => ColumnType::Integer,
+                ColumnType::Double => ColumnType::Double,
+                other => {
+                    return Err(Error::Query(format!("`{name}` needs numbers, not {other}")));
+                }
+            },
+            (Function::RowIndex(_), []) => ColumnType::Integer,
             (function, _) => {
                 return Err(Error::Query(format!(
-                    "`{}` takes {} arguments, not {}",
+                    "`{}` takes {}, not {}",
                     function.name(),
                     function.arity(),
                     args.len()
@@ -3232,14 +3414,228 @@ impl Function {
     pub fn name(&self) -> &'static str {
         match self {
             Function::IsIn => "is_in",
+            Function::Contains { .. } => "str_contains",
+            Function::StartsWith => "str_starts_with",
+            Function::EndsWith => "str_ends_with",
+            Function::Replace { all: false, .. } => "str_replace",
+            Function::Replace { all: true, .. } => "str_replace_all",
+            Function::Slice { .. } => "str_slice",
+            Function::Uppercase => "str_to_uppercase",
+            Function::Lowercase => "str_to_lowercase",
+            Function::ConcatStr { .. } => "concat_str",
+            Function::Year => "dt_year",
+            Function::Month => "dt_month",
+            Function::Day => "dt_day",
+            Function::OffsetBy { .. } => "dt_offset_by",
+            Function::Format { .. } => "dt_to_string",
+            Function::ToDate { .. } => "str_to_date",
+            Function::FillNull => "fill_null",
+            Function::Coalesce => "coalesce",
+            Function::Cast(_) => "cast",
+            Function::Shift(_) => "shift",
+            Function::CumSum => "cum_sum",
+            Function::RowIndex(_) => "row_index",
         }
     }
 
-    fn arity(&self) -> usize {
+    /// Whether the function is written on its own, as `coalesce(a, b)`, rather than as a method
+    /// of its first argument.
+    pub fn is_free(&self) -> bool {
+        matches!(
+            self,
+            Function::ConcatStr { .. } | Function::Coalesce | Function::RowIndex(_)
+        )
+    }
+
+    /// Whether the function reads the rows in order rather than one row at a time.
+    pub fn reads_order(&self) -> bool {
+        matches!(
+            self,
+            Function::Shift(_) | Function::CumSum | Function::RowIndex(_)
+        )
+    }
+
+    fn arity(&self) -> &'static str {
         match self {
-            Function::IsIn => 2,
+            Function::RowIndex(_) => "no arguments",
+            Function::Slice { .. }
+            | Function::Uppercase
+            | Function::Lowercase
+            | Function::Year
+            | Function::Month
+            | Function::Day
+            | Function::OffsetBy { .. }
+            | Function::Format { .. }
+            | Function::ToDate { .. }
+            | Function::Cast(_)
+            | Function::Shift(_)
+            | Function::CumSum => "1 argument",
+            Function::IsIn
+            | Function::Contains { .. }
+            | Function::StartsWith
+            | Function::EndsWith
+            | Function::FillNull => "2 arguments",
+            Function::Replace { .. } => "3 arguments",
+            Function::ConcatStr { .. } | Function::Coalesce => "at least 1 argument",
         }
     }
+}
+
+/// The type of `coalesce` and `fill_null`: the common type of the arguments, leaving out a bare
+/// `NA`, which only ever yields to the next argument. A date or date-time fills only from its own
+/// type, because the common type of a date and a number is text, which nobody filling gaps wants.
+fn coalesced_type(name: &str, args: &[Expr], kinds: &[ColumnType]) -> Result<ColumnType> {
+    let given: Vec<ColumnType> = args
+        .iter()
+        .zip(kinds)
+        .filter(|(arg, _)| !matches!(arg, Expr::Na(_)))
+        .map(|(_, kind)| *kind)
+        .collect();
+    if let Some(temporal) = given.iter().find(|kind| is_temporal(**kind))
+        && let Some(other) = given.iter().find(|kind| *kind != temporal)
+    {
+        return Err(Error::Query(format!(
+            "`{name}` fills {temporal} values only from values of the same type, not from {other}"
+        )));
+    }
+    Ok(given
+        .into_iter()
+        .reduce(supertype)
+        .or_else(|| kinds.iter().copied().reduce(supertype))
+        .unwrap_or(ColumnType::Logical))
+}
+
+/// A regular expression written as a literal, checked before the plan runs, so its mistake is
+/// reported in R's terms rather than as a failed query.
+fn checked_pattern(function: &Function, args: &[Expr]) -> Result<()> {
+    let literal = match function {
+        Function::Contains { literal } | Function::Replace { literal, .. } => *literal,
+        _ => true,
+    };
+    match (literal, args.get(1)) {
+        (false, Some(Expr::Character(pattern))) => {
+            regex::Regex::new(pattern).map(|_| ()).map_err(|failure| {
+                let reason = match failure {
+                    regex::Error::Syntax(message) => message
+                        .lines()
+                        .rev()
+                        .find_map(|line| line.strip_prefix("error: "))
+                        .unwrap_or("it does not parse")
+                        .to_owned(),
+                    other => other.to_string(),
+                };
+                Error::Query(format!(
+                    "`{}` cannot read the regular expression \"{pattern}\": {reason}",
+                    function.name()
+                ))
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Whether `cast` converts a `from` value to `to`. R's `as.logical` of a date and `as.Date` of a
+/// logical are errors, and a date-time is no target.
+fn castable(from: ColumnType, to: ColumnType) -> bool {
+    from == to
+        || !matches!(
+            (from, to),
+            (ColumnType::Logical, ColumnType::Date)
+                | (ColumnType::Date | ColumnType::Datetime, ColumnType::Logical)
+                | (_, ColumnType::Datetime)
+        )
+}
+
+/// A `from` value converted to `to` as R's `as.*` converts it: a logical as text is `"TRUE"`, a
+/// double as text has fifteen significant digits, text that does not parse is `NA`, a number as a
+/// logical is `TRUE` unless it is zero, and a number of days is floored to a date.
+fn r_cast(value: PolarsExpr, from: ColumnType, to: ColumnType) -> Result<PolarsExpr> {
+    let null = |kind: ColumnType| lit(NULL).cast(dtype(kind));
+    Ok(match (from, to) {
+        _ if from == to => value,
+        (ColumnType::Factor, ColumnType::Integer) => factor::codes_expr(value),
+        (ColumnType::Factor, ColumnType::Double) => {
+            factor::codes_expr(value).cast(DataType::Float64)
+        }
+        (ColumnType::Factor, to) => r_cast(factor::text_expr(value), ColumnType::Character, to)?,
+        (from, ColumnType::Factor) => {
+            factor::factor_expr(r_cast(value, from, ColumnType::Character)?)
+        }
+        (ColumnType::Logical, ColumnType::Character) => when(value.clone())
+            .then(lit("TRUE"))
+            .otherwise(when(value.not()).then(lit("FALSE")).otherwise(null(to))),
+        (ColumnType::Double, ColumnType::Character) => value.map(
+            |column| {
+                let text: StringChunked = column
+                    .as_materialized_series()
+                    .f64()?
+                    .iter()
+                    .map(|value| value.map(r_double))
+                    .collect();
+                Ok(text.with_name(column.name().clone()).into_column())
+            },
+            |_, field| Ok(Field::new(field.name().clone(), DataType::String)),
+        ),
+        (ColumnType::Datetime, ColumnType::Character) => value.dt().to_string("%Y-%m-%d %H:%M:%S"),
+        (_, ColumnType::Character) => value.cast(DataType::String),
+        (ColumnType::Character, ColumnType::Logical) => {
+            let spelled = |spellings: [&str; 4]| {
+                value.clone().is_in(
+                    lit(Series::new(PlSmallStr::EMPTY, spellings)).implode(false),
+                    false,
+                )
+            };
+            when(spelled(["TRUE", "true", "T", "True"]))
+                .then(lit(true))
+                .when(spelled(["FALSE", "false", "F", "False"]))
+                .then(lit(false))
+                .otherwise(null(to))
+        }
+        (ColumnType::Double, ColumnType::Logical) => when(value.clone().is_nan())
+            .then(null(to))
+            .otherwise(value.neq(lit(0.0))),
+        (_, ColumnType::Logical) => value.neq(lit(0)),
+        (ColumnType::Character, ColumnType::Double) => value.map(
+            |column| {
+                let numbers: Float64Chunked = column
+                    .as_materialized_series()
+                    .str()?
+                    .iter()
+                    .map(|text| text.and_then(r_number))
+                    .collect();
+                Ok(numbers.with_name(column.name().clone()).into_column())
+            },
+            |_, field| Ok(Field::new(field.name().clone(), DataType::Float64)),
+        ),
+        (ColumnType::Character, ColumnType::Integer) => {
+            let number = r_cast(value, ColumnType::Character, ColumnType::Double)?;
+            r_cast(number, ColumnType::Double, to)?
+        }
+        (ColumnType::Datetime, ColumnType::Integer | ColumnType::Double) => {
+            let seconds = value.cast(DataType::Int64).cast(DataType::Float64) / lit(1e6);
+            r_cast(seconds, ColumnType::Double, to)?
+        }
+        (ColumnType::Date, ColumnType::Double) => {
+            value.cast(DataType::Int32).cast(DataType::Float64)
+        }
+        (_, ColumnType::Integer | ColumnType::Double) => value.cast(dtype(to)),
+        (ColumnType::Character, ColumnType::Date) => value.str().to_date(StrptimeOptions {
+            format: Some(PlSmallStr::from_static("%Y-%m-%d")),
+            strict: false,
+            exact: true,
+            cache: true,
+        }),
+        (ColumnType::Datetime, ColumnType::Date) => value.dt().date(),
+        (ColumnType::Integer, ColumnType::Date) => value.cast(DataType::Date),
+        (ColumnType::Double, ColumnType::Date) => {
+            checked_int32(value.floor().cast(DataType::Int64)).cast(DataType::Date)
+        }
+        (from, to) => {
+            return Err(Error::Query(format!(
+                "`cast` cannot convert {from} to {to}"
+            )));
+        }
+    })
 }
 
 /// The result type of R arithmetic: logical promotes to integer, and anything with a double is
@@ -3503,11 +3899,20 @@ impl Lowering<'_> {
                     // With `na_rm` set, a double's `NaN`s are already dropped, as `is.na` counts
                     // them missing.
                     Aggregate::Count => value.count().cast(DataType::Int32),
+                    // Polars cannot hash a factor's extension column, so it counts the labels.
+                    Aggregate::NUnique if kind == ColumnType::Factor => {
+                        factor::text_expr(value).n_unique().cast(DataType::Int32)
+                    }
+                    Aggregate::NUnique => value.n_unique().cast(DataType::Int32),
                 };
                 let propagates = !na_rm
                     && !matches!(
                         function,
-                        Aggregate::First | Aggregate::Last | Aggregate::Length | Aggregate::Count
+                        Aggregate::First
+                            | Aggregate::Last
+                            | Aggregate::Length
+                            | Aggregate::Count
+                            | Aggregate::NUnique
                     );
                 if propagates && self.nulls.may_be_null(arg) {
                     when(self.expr(arg)?.null_count().gt(lit(0)))
@@ -3581,12 +3986,104 @@ impl Lowering<'_> {
     fn call(&self, function: &Function, args: &[Expr]) -> Result<PolarsExpr> {
         let typer = self.typer();
         let kind = typer.call(function, args)?;
+        let text = |expr: &Expr| -> Result<PolarsExpr> {
+            r_cast(self.expr(expr)?, typer.expr(expr)?, ColumnType::Character)
+        };
         Ok(match (function, args) {
             (Function::IsIn, [x, values]) => {
                 let target = comparison(typer.expr(x)?, typer.expr(values)?)?;
                 self.compared(x, target)?
                     .is_in(self.compared(values, target)?.implode(false), true)
             }
+            (Function::Contains { literal: true }, [x, pattern]) => {
+                text(x)?.str().contains_literal(text(pattern)?)
+            }
+            (Function::Contains { literal: false }, [x, pattern]) => {
+                text(x)?.str().contains(text(pattern)?, true)
+            }
+            (Function::StartsWith, [x, prefix]) => text(x)?.str().starts_with(text(prefix)?),
+            (Function::EndsWith, [x, suffix]) => text(x)?.str().ends_with(text(suffix)?),
+            (Function::Replace { all, literal }, [x, pattern, replacement]) => {
+                let (pattern, replacement) = (text(pattern)?, text(replacement)?);
+                match all {
+                    true => text(x)?.str().replace_all(pattern, replacement, *literal),
+                    false => text(x)?.str().replace(pattern, replacement, *literal),
+                }
+            }
+            (Function::Slice { start, length }, [x]) => {
+                // R counts characters from 1, and `substr` reads a start of 0 as 1.
+                let offset = match *start {
+                    start if start > 0 => start - 1,
+                    0 => 0,
+                    start => start,
+                };
+                let length = match length {
+                    Some(length) => lit(*length),
+                    None => lit(NULL).cast(DataType::UInt64),
+                };
+                text(x)?.str().slice(lit(offset), length)
+            }
+            (Function::Uppercase, [x]) => text(x)?.str().to_uppercase(),
+            (Function::Lowercase, [x]) => text(x)?.str().to_lowercase(),
+            (Function::ConcatStr { separator }, args) => {
+                let parts = args.iter().map(text).collect::<Result<Vec<_>>>()?;
+                concat_str(parts, separator, false)
+            }
+            (Function::Year, [x]) => self.expr(x)?.dt().year().cast(DataType::Int32),
+            (Function::Month, [x]) => self.expr(x)?.dt().month().cast(DataType::Int32),
+            (Function::Day, [x]) => self.expr(x)?.dt().day().cast(DataType::Int32),
+            (Function::OffsetBy { by }, [x]) => self.expr(x)?.dt().offset_by(lit(by.clone())),
+            (Function::Format { format }, [x]) => self.expr(x)?.dt().to_string(format),
+            (Function::ToDate { format }, [x]) => text(x)?.str().to_date(StrptimeOptions {
+                format: Some(format.clone()),
+                strict: false,
+                exact: true,
+                cache: true,
+            }),
+            (Function::FillNull | Function::Coalesce, args) => {
+                // Polars cannot coalesce extension columns, so factors fill by their labels.
+                let target = match kind {
+                    ColumnType::Factor => ColumnType::Character,
+                    kind => kind,
+                };
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    if !matches!(arg, Expr::Na(_)) {
+                        values.push(r_cast(self.expr(arg)?, typer.expr(arg)?, target)?);
+                    }
+                }
+                let filled = match values.len() {
+                    0 => lit(NULL).cast(dtype(target)),
+                    1 => values.remove(0),
+                    _ => coalesce(&values),
+                };
+                match kind {
+                    ColumnType::Factor if values.len() > 1 => factor::factor_expr(filled),
+                    _ => filled,
+                }
+            }
+            (Function::Cast(target), [x]) => r_cast(self.expr(x)?, typer.expr(x)?, *target)?,
+            (Function::Shift(rows), [x]) => self.expr(x)?.shift(lit(*rows)),
+            (Function::CumSum, [x]) if kind == ColumnType::Integer => {
+                // As in R's integer `cumsum`, every row from the first overflow on is `NA`.
+                let sum = self.expr(x)?.cast(DataType::Int64).cum_sum(false);
+                let limit = i64::from(i32::MAX);
+                let overflowed = sum
+                    .clone()
+                    .gt(lit(limit))
+                    .or(sum.clone().lt(lit(-limit)))
+                    .cast(DataType::UInt8)
+                    .fill_null(lit(0u8))
+                    .cum_max(false);
+                when(overflowed.eq(lit(0u8)))
+                    .then(sum.cast(DataType::Int32))
+                    .otherwise(lit(NULL).cast(DataType::Int32))
+            }
+            (Function::CumSum, [x]) => self.expr(x)?.cum_sum(false),
+            (Function::RowIndex(offset), []) => checked_int32(
+                int_range(lit(0i64), len().cast(DataType::Int64), 1, DataType::Int64)
+                    + lit(*offset),
+            ),
             (function, _) => {
                 return Err(Error::Query(format!(
                     "`{}` cannot give {kind}",

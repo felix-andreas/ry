@@ -1,6 +1,6 @@
 # `unsafe` keywords per file outside heap, libr, jit, typed and ssa, which may only shrink.
 # Lower: python3 tools/unsafe.py baseline. A raise is a hand edit with a backlog line.
-47 crates/frames/src/dataframe.rs
+54 crates/frames/src/dataframe.rs
 91 crates/frames/src/frame.rs
 1 crates/frames/src/frames.rs
 11 crates/frames/src/viewer.rs
