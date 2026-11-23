@@ -1051,3 +1051,10 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - A number field is equal as `identical` decides it (`NaN` equals `NaN`, `NA` does not equal `NaN`), unlike `F64 ==`. The interpreter already had `identical` on these values, and the typed core's `object_equal` follows it, so every tier gives one answer, and a value compared with itself is equal whatever the pointer test says.
 - An R value never equals a ry value. The report names the conversion for the R side (`r_side` on `NumberOperands`): `Str.from_r()` for `character`, `Bool.from_r()` for `logical`, `Num.from_r()` for a number, `List.from_r()` for a vector. Beside a record, tuple or tag no conversion fits, so the report says an R value never equals one.
 - At run time `==` and `!=` accept ry values (`ACCEPTS_NATIVE`). In untyped R code a record beside an R value is `FALSE` rather than a boundary error, since the checker reports that comparison where types are known.
+
+## ry's immutable containers are covariant
+
+**Status:** built.
+
+- `List<T>`, `Dict<K, V>` and `Set<T>` are abstract (`@type` without a body), which the variance rule checks invariantly, and invariance would reject `[:Cash]` at a `List<:Bond | :Cash>` parameter. They are immutable values, so a wider item type can never be written back into a narrower list: `parameter_variances` (`crates/semantics/src/infer.rs`) makes every parameter of an abstract type the standard library declares (`stubs::is_ry_type`) covariant. Other abstract types stay invariant.
+- A lone `..` (every tag) normalizes to `OtherTags` rather than a union, so `compatible_probe` accepts a tag, or an open union, against it directly. As a source, a lone `..` is an open union that lists no tag, so it fits only an open target that lists none either; otherwise a function `fn(x: ..) -> :A(I64) | ..` would launder `:A("text")` into the narrower payload.

@@ -1143,7 +1143,10 @@ in the representation:
 A type parameter inside a nested generic application, such as the `T` of `Sink<T>` within
 `@type Outer<T> {Sink<T>}`, is invariant: the inner type's own variance does not compose with the
 outer direction. When a generic nominal has no visible definition, every argument is checked
-invariantly, which errs toward rejecting rather than toward accepting an unsound widening.
+invariantly, which errs toward rejecting rather than toward accepting an unsound widening. The
+standard library's `List<T>`, `Dict<K, V>` and `Set<T>` are the exception: they are immutable
+values, so every parameter is covariant, and `[:Cash]`, a `List<:Cash>`, is accepted where a
+`List<:Bond | :Cash>` is expected.
 
 R's lists and vectors are mutable, yet their element positions are treated as covariant. A sound
 mutable container would have to be invariant, which would break structural coercions such as scalar
@@ -1266,7 +1269,8 @@ and payload shape into one member whose payloads are joined position by position
 `:Some(1L)` with `:Some("a")` gives `:Some(integer | character)`. Two members with the same name and
 a different payload shape are a `type-mismatch` where they meet.
 
-A union that lists `..` as a member is *open*: it also holds every tag it does not list.
+A union that lists `..` as a member is *open*: it also holds every tag it does not list. A lone
+`..` lists no tag, so it holds every tag.
 
 - A tag value fits an open union when the union lists its name with a compatible payload, or does
   not list its name at all.
@@ -4476,6 +4480,15 @@ are never recycled and never mix item types, so `sales$units * sales$price` woul
 error. Whether a column holds an `NA`
 depends on the data, such as a left join's unmatched rows, so a read that gave a `List` only when
 the column had none would make the same code fail or pass depending on its input.
+
+A `List` of tags without a payload is a *tag column*, and its type is the tag union:
+`DataFrame(kind = [:Bond, :Cash])` is a `DataFrame{kind: :Bond | :Cash}`, and a column declared
+`kind: :Bond | :Cash` accepts only such a list. The frame stores the column as the character vector
+of the tag names, so a read from R code (`df$kind`, `df[["kind"]]`, or the column's name inside a
+data.table query) is a `character[]`. A tag compares with an expression by name
+(`Expr.col("kind") == :Bond`), and `Expr.is_in` takes a `List` of tags. A `character[]` value never
+fills a tag column, because its strings are not checked against the union. A tag with a payload has
+no column type.
 
 #### Verbs
 

@@ -17,12 +17,13 @@ use {
     heap::{
         large::huge_pages,
         object::{NA_INTEGER, Sexp, SexpType, gp},
+        records::Fields,
     },
     interp::{
         builtins::{Arg, BuiltinDef, Call, builtin, special},
         conditions, eval,
         format::{Settings, display_width, format_real_common, format_real_with},
-        heap, interp, scope,
+        heap, interp, records, scope,
         system::civil_from_days,
         unwind::{R, Unwind, error, error_in},
         values::{
@@ -364,6 +365,20 @@ unsafe fn column_contents(value: Sexp) -> R<Option<RVector>> {
         }
         SexpType::Real => RVector::Double(values::reals(value).to_vec()),
         SexpType::String => RVector::Character(values::strings(value)),
+        // A list of tags without a payload, such as `[:Bond, :Cash]`, is the character column of
+        // their names, which R code reads as it reads any text column.
+        // A list of tags without a payload is a column of their names, which `literal` gives.
+        SexpType::List if length(value) > 0 => {
+            let mut names = Vec::with_capacity(length(value));
+            for index in 0..length(value) {
+                let item = value.element(index);
+                match (item.kind(), literal(item)) {
+                    (SexpType::Record, Some(Expr::Character(name))) => names.push(Some(name)),
+                    _ => return Ok(None),
+                }
+            }
+            RVector::Character(names)
+        }
         // An `I64` column is an R `integer` column when every item fits, and `double` otherwise,
         // the same conversion `Num.to_r` makes, so a typed `[3, 5]` builds the column R's `3L`
         // would.
@@ -2350,7 +2365,8 @@ fn binary_op(name: &str) -> Option<BinaryOp> {
 /// or empty vector as a column of its values. `None` for a value no column can hold.
 pub(crate) unsafe fn vector_literal(value: Sexp) -> R<Option<Expr>> {
     // A factor's levels have no scalar literal, so even a single one is a column of values.
-    if length(value) == 1 && !values::inherits(value, "factor") {
+    let single = length(value) == 1 && value.kind() != SexpType::List;
+    if (single || value.kind() == SexpType::Record) && !values::inherits(value, "factor") {
         return Ok(literal(value));
     }
     let value = values::materialize(value)?;
@@ -2364,6 +2380,12 @@ pub(crate) unsafe fn vector_literal(value: Sexp) -> R<Option<Expr>> {
 
 /// A single R value as a literal of the IR, or `None` for anything longer or of another type.
 pub(crate) unsafe fn literal(value: Sexp) -> Option<Expr> {
+    // A tag without a payload compares with a tag column, which holds the tags' names.
+    if let Some(tag) = records::plain_tag(value)
+        && matches!(records::layout(value).fields, Fields::Positional(0))
+    {
+        return Some(Expr::Character(records::tag_name(tag)));
+    }
     if length(value) != 1 {
         return None;
     }

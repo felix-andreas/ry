@@ -259,6 +259,36 @@ f: fn(r: :Ok(integer) | ..) -> logical
 a: Unknown
 72..75 error[type-mismatch] expected `integer`, found `character`
 
+#---- a_lone_open_union_holds_every_tag
+count <- function(r: ..) -> I64 { 1 }
+counts <- function(rs: List<..>) -> I64 { List.len(rs) }
+a <- count(:Ok(1L))
+b <- counts([:Bond, :Cash])
+#++++
+count: fn(r: ..) -> I64
+counts: fn(rs: List<..>) -> I64
+a: I64
+b: I64
+
+#---- a_ry_list_of_narrower_items_fits_a_wider_list
+count <- function(kinds: List<:Bond | :Cash>) -> I64 { List.len(kinds) }
+lookup <- function(kinds: Dict<Str, :Bond | :Cash>) -> I64 { Dict.len(kinds) }
+cash <- function(name: Str) -> Dict<Str, :Cash> { Dict.single(name, :Cash) }
+a <- count([:Cash])
+b <- lookup(cash("savings"))
+#++++
+count: fn(kinds: List<:Bond | :Cash>) -> I64
+lookup: fn(kinds: Dict<Str, :Bond | :Cash>) -> I64
+cash: fn(name: Str) -> Dict<Str, :Cash>
+a: I64
+b: I64
+
+#---- a_lone_open_union_fits_no_target_that_lists_a_tag
+launder <- function(x: ..) -> :A(I64) | .. { x }
+#++++
+launder: fn(x: ..) -> :A(I64) | ..
+45..46 error[type-mismatch] expected `:A(I64) | ..`, found `..`
+
 #---- closed_union_fits_an_open_one
 #: fn(r: :Ok(integer) | ..) -> logical
 f <- function(r) TRUE

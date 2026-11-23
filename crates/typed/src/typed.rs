@@ -753,8 +753,8 @@ fn item_kind(item: Item) -> u32 {
 
 /// The typed core's type for an R value, or `None` when it has none: a length-one plain vector
 /// is a scalar, a longer or empty one a vector, an `Array` an array, a plain list of length-one
-/// strings, numbers or logicals of one storage type a list of them, a plain tag any tag, and a
-/// value of the table API a table.
+/// strings, numbers or logicals of one storage type a list of them, an `Array` list of plain tags
+/// an array of tags, a plain tag any tag, and a value of the table API a table.
 /// A record or tuple has none, because a typed closure takes one only from typed code.
 unsafe fn type_of(value: Sexp) -> Option<Type> {
     if (interp::interp().extensions.tables.is_table_value)(value) {
@@ -781,6 +781,18 @@ unsafe fn type_of(value: Sexp) -> Option<Type> {
             Item::Str
         }
         SexpType::List if !array => return list_type(value, length),
+        // A ry list of tags, such as `[:Bond, :Cash]`, which converts item by item.
+        SexpType::List
+            if length > 0
+                && (0..length).all(|index| {
+                    let item = value.element(index);
+                    item.kind() == SexpType::Record
+                        && !item.is_object()
+                        && interp::records::native_kind(item) == NativeKind::Tag
+                }) =>
+        {
+            Item::Tag(shapes::ANY)
+        }
         _ => return None,
     };
     if length == 1 && !array {
@@ -875,6 +887,14 @@ impl Arguments {
                 if list.is_null() {
                     return Err(OUT_OF_MEMORY);
                 }
+                self.lists.push(list);
+                self.words.push(list as u64);
+            }
+            Type::Vector {
+                item: Item::Tag(_), ..
+            } => {
+                let length = rvalues::length(value);
+                let (list, _) = shapes::with(|shapes| list_of_objects(shapes, value, length, 0))?;
                 self.lists.push(list);
                 self.words.push(list as u64);
             }

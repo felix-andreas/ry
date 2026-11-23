@@ -1,0 +1,35 @@
+# A user models a column's few allowed values as a tag union. A table stores a column of tags
+# without a payload as the character column of their names: typed code builds it from a `List` of
+# tags and filters it by comparing with a tag, R code reads the names, and the native functions
+# compile.
+
+requires ry-runtime
+
+file kinds.R
+| # typing: strict
+| alias Rows = DataFrame{kind: :Bond | :Cash, v: double}
+| build <- function(kinds: List<:Bond | :Cash>) -> Rows {
+|   DataFrame(kind = kinds, v = c(1, 2))
+| }
+| bonds <- function(rows: Rows) -> Rows {
+|   DataFrame.filter(rows, Expr.col("kind") == :Bond)
+| }
+| cash <- function(rows: Rows) -> Rows {
+|   DataFrame.filter(rows, Expr.is_in(Expr.col("kind"), [:Cash]))
+| }
+| rows <- build([:Bond, :Cash])
+| print(bonds(rows))
+| print(cash(rows))
+| #: character[]
+| names <- rows$kind
+| print(names)
+
+run ry check kinds.R
+expect exit 0
+expect stdout "1 file checked, no problems"
+
+run ry run kinds.R
+expect exit 0
+expect stdout "1:   Bond     1"
+expect stdout "1:   Cash     2"
+expect stdout "[1] \"Bond\" \"Cash\""

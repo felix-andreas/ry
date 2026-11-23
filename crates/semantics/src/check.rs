@@ -39,9 +39,9 @@ use {
             InferenceVar, Name, NativeField, NativeScalar, NullUnless, NumberLiteral, Parameter,
             QueryName, RecordField, ReduceForward, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind,
             TypeList, TypeScheme, any, array, array_element, column_type, conflicting_tags,
-            contains_inference_var, contains_rigid, erase_vars, for_each_child_type,
+            contains_inference_var, contains_rigid, erase_vars, for_each_child_type, is_bare_tags,
             is_ry_value_type, is_tag_type, map_child_types, native_record, native_scalar, null,
-            scalar, substitute_rigid, type_size, union_of, unknown,
+            r_column_type, scalar, substitute_rigid, type_size, union_of, unknown,
         },
     },
     bumpalo::{Bump, collections::Vec as BumpVec},
@@ -5817,7 +5817,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         .iter()
                         .find(|column| column.name.text(self.db) == name)
                     {
-                        let ty = column.ty;
+                        let ty = r_column_type(self.db, column.ty);
                         self.masked_reads.insert(id);
                         return Some(ty);
                     }
@@ -10471,11 +10471,13 @@ impl<'db, 'a> Checker<'db, 'a> {
         let left = self.structural(left);
         let right = self.structural(right);
         // A DataFrame expression beside another one, or beside a ry value that shares R's
-        // representation, builds a bigger expression, as `Ops.Expr` does at run time. `I64` is
-        // left to the ordinary rule, which rejects it: an R operator cannot read one.
+        // representation, builds a bigger expression, as `Ops.Expr` does at run time. A tag
+        // without a payload tests equality by its name, as a tag column stores it. `I64` is left to
+        // the ordinary rule, which rejects it: an R operator cannot read one.
         for (expression, other) in [(left, right), (right, left)] {
             if is_expr_type(self.db, expression)
                 && (is_expr_type(self.db, other)
+                    || (matches!(operator, Equal | NotEqual) && is_bare_tags(self.db, other))
                     || matches!(
                         other.kind(self.db),
                         TyKind::Native(NativeScalar::F64 | NativeScalar::Bool | NativeScalar::Str)
@@ -15107,6 +15109,33 @@ impl<'db, 'a> Checker<'db, 'a> {
             .iter()
             .map(|column| (column.name.text(db).to_owned(), column.ty))
             .collect();
+        // A right or full join fills a key column with the right frame's keys too, so a column
+        // of tags takes the other side's values: more tags, or the text a table stores them as.
+        if matches!(how.as_str(), "right" | "full" | "outer") {
+            for ((left_key, _), (right_key, _)) in left_keys.iter().zip(&right_keys) {
+                let column_of = |columns: &[RecordField<'db>], name: &str| {
+                    columns
+                        .iter()
+                        .find(|column| column.name.text(db) == name)
+                        .map(|column| column.ty)
+                };
+                let (Some(left_ty), Some(right_ty)) =
+                    (column_of(left, left_key), column_of(right, right_key))
+                else {
+                    continue;
+                };
+                let (left_tags, right_tags) =
+                    (is_bare_tags(db, left_ty), is_bare_tags(db, right_ty));
+                let joined = match (left_tags, right_tags) {
+                    (false, false) => continue,
+                    (true, true) => self.join_types(left_ty, right_ty),
+                    _ => self.join_types(r_column_type(db, left_ty), r_column_type(db, right_ty)),
+                };
+                if let Some(slot) = result.iter_mut().find(|(name, _)| name == left_key) {
+                    slot.1 = joined;
+                }
+            }
+        }
         if !matches!(how.as_str(), "semi" | "anti") {
             for column in right.iter() {
                 let name = column.name.text(db);
@@ -21125,6 +21154,16 @@ impl<'db, 'a> Checker<'db, 'a> {
             }),
             (None, None) => None,
         };
+        // `.SD` is the R table `j` runs on, so a column of tags reads as their names there.
+        let subset_columns = subset_columns.map(|columns| {
+            columns
+                .into_iter()
+                .map(|column| RecordField {
+                    ty: r_column_type(db, column.ty),
+                    ..column
+                })
+                .collect::<Vec<_>>()
+        });
         let subset_data = Ty::new(db, TyKind::Frame(kind, subset_columns.as_deref()));
         if let Some(scope) = self.column_scopes.last_mut() {
             scope.subset_data = subset_data;
@@ -22640,7 +22679,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             TyKind::Frame(_, None) => Ok(unknown(self.db)),
             TyKind::Frame(_, Some(columns)) => match (literal_position, literal_name) {
                 (Some(position), _) => match columns.get(position) {
-                    Some(column) => Ok(column.ty),
+                    Some(column) => Ok(r_column_type(self.db, column.ty)),
                     None => Err(TypeError {
                         range: key_range,
                         kind: TypeErrorKind::PositionDoesNotExist {
@@ -22654,14 +22693,19 @@ impl<'db, 'a> Checker<'db, 'a> {
                         .iter()
                         .find(|column| column.name.text(self.db) == name)
                     {
-                        Some(column) => Ok(column.ty),
+                        Some(column) => Ok(r_column_type(self.db, column.ty)),
                         None => Err(TypeError {
                             range: key_range,
                             kind: column_does_not_exist(self.db, &name, None, columns),
                         }),
                     }
                 }
-                (None, None) => Ok(union_of(self.db, columns.iter().map(|column| column.ty))),
+                (None, None) => Ok(union_of(
+                    self.db,
+                    columns
+                        .iter()
+                        .map(|column| r_column_type(self.db, column.ty)),
+                )),
             },
             // An open record lists only some of its fields, in no fixed order, so it answers
             // only a read by name.
@@ -23087,7 +23131,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .iter()
                     .find(|column| column.name.text(self.db) == name)
                 {
-                    Some(column) => Ok(column.ty),
+                    Some(column) => Ok(r_column_type(self.db, column.ty)),
                     None => Err(TypeError {
                         range: name_range,
                         kind: column_does_not_exist(self.db, name, None, columns),
@@ -24109,9 +24153,14 @@ fn element_types<'db>(db: &'db dyn Db, x: Ty<'db>) -> (Vec<Ty<'db>>, bool) {
         TyKind::Vector(element) | TyKind::List(element) => (vec![*element], false),
         TyKind::NamedVector(element) | TyKind::NamedList(element) => (vec![*element], true),
         TyKind::Tuple(items) => (items.to_vec(), false),
-        TyKind::Record(fields) | TyKind::Frame(_, Some(fields)) => {
-            (fields.iter().map(|field| field.ty).collect(), true)
-        }
+        TyKind::Record(fields) => (fields.iter().map(|field| field.ty).collect(), true),
+        TyKind::Frame(_, Some(fields)) => (
+            fields
+                .iter()
+                .map(|field| r_column_type(db, field.ty))
+                .collect(),
+            true,
+        ),
         TyKind::Scalar(_) => (vec![x], false),
         _ => (vec![unknown(db)], false),
     }

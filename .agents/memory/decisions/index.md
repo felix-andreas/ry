@@ -177,6 +177,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - An overload probe rolls back the types it recorded, and an undecided literal takes its default's candidate
 - A nominal record updates with `..` and keeps its nominal type
 - `==` on ry's records, tuples and tags is structural, and a crossing names the R side's conversion
+- ry's immutable containers are covariant
 
 ## Analysis core
 
@@ -685,6 +686,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The frame fuzz kind's reference is a base-R model of the documented contract
 - A DataFrame sort puts missing values last and compares text by bytes
 - Column functions follow Polars' names and R's values
+- A column of bare tags is stored as their names
 
 ## Build, benchmarks and CI
 
