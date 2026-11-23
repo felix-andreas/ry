@@ -369,8 +369,9 @@ unsafe fn compile_cost(machine: &Machine<'_>) -> u64 {
 /// repay its compilation. A body that saves too little per call to repay it even if every call
 /// of the session were its own is [`analysis::SMALL`], for good; one that is only called too
 /// rarely is [`analysis::RARE`], and is asked again later. A body that compiled before, or in
-/// the session that trained its code image, passed the second test once already. Outside the default mode the compile's cost does not count,
-/// so only a body that saves nothing per call is refused.
+/// the session that trained its code image, passed the second test once already. Outside the
+/// default mode the compile's cost does not count, so only a body that saves nothing per call
+/// is refused.
 unsafe fn unpaid(machine: &Machine<'_>, per_call: u64) -> Option<&'static str> {
     unsafe {
         if MODE.with(Cell::get) != Mode::On {
@@ -671,7 +672,11 @@ unsafe fn compiled_for<'a>(
         let counters = values::ints_mut(constants.element(PROFILE));
         match result {
             Ok(compiled) => {
-                counters[profile::TIER_STATE] = state + 1;
+                let decided = match MODE.with(Cell::get) {
+                    Mode::On => runtime::TRAINED,
+                    _ => 0,
+                };
+                counters[profile::TIER_STATE] = (state + 1) | decided;
                 Some(compiled)
             }
             Err(Refusal(reason)) => {

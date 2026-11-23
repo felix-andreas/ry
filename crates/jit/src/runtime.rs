@@ -592,10 +592,10 @@ pub const UNFORCED_FORMALS: i32 = 1 << 24;
 /// own in the body, and its closure calls are tier 0's.
 pub const NO_FRAMES: i32 = 1 << 25;
 
-/// A tier state flag a code image sets: the body held compiled code when the session that
-/// trained the image wrote it. That session measured how often the body is called and how long
-/// its loops run. A session started from the image has measured neither when the body arrives
-/// hot at its first call, so the body counts as having repaid its compile once ([`repaid`]).
+/// A tier state flag, the one a code image keeps: the body compiled in the default mode, where
+/// the compile had to pass every test of what it repays. Those tests measure how often the body
+/// is called and how long its loops run. A session started from a trained image has measured
+/// neither when the body arrives hot at its first call, so the flag stands for them ([`repaid`]).
 pub const TRAINED: i32 = profile::TIER_TRAINED;
 
 const _: () = assert!(TRAINED > NO_FRAMES);

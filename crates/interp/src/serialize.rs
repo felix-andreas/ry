@@ -2161,7 +2161,7 @@ impl Encoder<'_> {
     unsafe fn code(&mut self, code: Sexp, depth: u32) -> Result<(), Unencodable> {
         use crate::bytecode::{
             EPOCHS, FEEDBACK, FIRST_CONSTANT, HINTS, LOOPS, PROFILE, REGISTERS, SLOTS, SOURCE,
-            SUMMARY, TIER1, profile,
+            SUMMARY, profile,
         };
         if depth > MAX_DEPTH {
             return Err(Unencodable("code nested too deeply"));
@@ -2232,10 +2232,8 @@ impl Encoder<'_> {
                 // which a new process has not measured when the body arrives hot.
                 let counter = if index != profile::TIER_STATE || counter < 0 {
                     counter
-                } else if constants.element(TIER1) != nil() {
-                    profile::TIER_TRAINED
                 } else {
-                    0
+                    counter & profile::TIER_TRAINED
                 };
                 write_signed(self.out, i64::from(counter));
             }
