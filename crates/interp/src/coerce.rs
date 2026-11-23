@@ -4,7 +4,7 @@ use {
     crate::{
         builtins::{BuiltinDef, Call, Generic, builtin, internal, is_native_value},
         conditions, deparse,
-        handles::is_na,
+        handles::{self, Cx, Local, is_na, safe_unary},
         strings::with_text_buffer,
         system::r_at_least,
         unwind::{R, error},
@@ -950,23 +950,28 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("as.character", -1, |call| unsafe {
         as_type(call, SexpType::String)
     })
-    .generic(Generic::Internal),
+    .generic(Generic::Internal)
+    .unary(safe_unary!(unary_as_character)),
     builtin("as.integer", -1, |call| unsafe {
         as_type(call, SexpType::Integer)
     })
-    .generic(Generic::Internal),
+    .generic(Generic::Internal)
+    .unary(safe_unary!(unary_as_integer)),
     builtin("as.double", -1, |call| unsafe {
         as_type(call, SexpType::Real)
     })
-    .generic(Generic::Internal),
+    .generic(Generic::Internal)
+    .unary(safe_unary!(unary_as_double)),
     builtin("as.numeric", -1, |call| unsafe {
         as_type(call, SexpType::Real)
     })
-    .generic(Generic::Internal),
+    .generic(Generic::Internal)
+    .unary(safe_unary!(unary_as_double)),
     builtin("as.logical", -1, |call| unsafe {
         as_type(call, SexpType::Logical)
     })
-    .generic(Generic::Internal),
+    .generic(Generic::Internal)
+    .unary(safe_unary!(unary_as_logical)),
     builtin("as.complex", -1, |call| unsafe {
         as_type(call, SexpType::Complex)
     })
@@ -1127,6 +1132,31 @@ pub const BUILTINS: &[BuiltinDef] = &[
         }
     }),
 ];
+
+fn unary_as_character<'a, 's>(context: &'a mut Cx<'s>, value: Local<'s>) -> R<Option<Gc<'a>>> {
+    Ok(unchanged(context, value, SexpType::String))
+}
+
+fn unary_as_integer<'a, 's>(context: &'a mut Cx<'s>, value: Local<'s>) -> R<Option<Gc<'a>>> {
+    Ok(unchanged(context, value, SexpType::Integer))
+}
+
+fn unary_as_double<'a, 's>(context: &'a mut Cx<'s>, value: Local<'s>) -> R<Option<Gc<'a>>> {
+    Ok(unchanged(context, value, SexpType::Real))
+}
+
+fn unary_as_logical<'a, 's>(context: &'a mut Cx<'s>, value: Local<'s>) -> R<Option<Gc<'a>>> {
+    Ok(unchanged(context, value, SexpType::Logical))
+}
+
+/// `as.integer(x)` and its kin for a vector of the type asked for without attributes, which the
+/// conversion returns as it is. `None` for any other value.
+fn unchanged<'a, 's>(context: &'a Cx<'s>, value: Local<'s>, kind: SexpType) -> Option<Gc<'a>> {
+    (value.r_type() == kind
+        && !handles::is_array(value)
+        && value.attributes(context).r_type() == SexpType::Nil)
+        .then(|| value.read(context))
+}
 
 unsafe fn as_type(call: &Call<'_>, kind: SexpType) -> R<Sexp> {
     let object = values::plain(call.arg(0))?;

@@ -1,0 +1,162 @@
+[stdout]
+| -- a closure reads its maker's unforced argument
+| forcing x 
+| [1] 2 2
+| forcing x 
+| [1] 3 3
+| forcing x 
+| [1] 4 4
+| forcing the default 
+| [1] 10
+| forcing the default 
+| [1] 10
+| forcing the default 
+| [1] 10
+| forcing x 
+| [1] "y never forced"
+| forcing x 
+| forcing y 
+| [1] "y forced"
+| forcing x 
+| forcing y 
+| [1] "y forced"
+| -- a missing argument, an error and a warning in the argument
+| [1] "argument \"x\" is missing, with no default"
+| [1] "argument \"x\" is missing, with no default"
+| [1] "argument \"x\" is missing, with no default"
+| [1] "no value"
+| [1] "no value"
+| [1] "no value"
+| [1] "object 'undefined_variable' not found"
+| [1] "object 'undefined_variable' not found"
+| [1] "object 'undefined_variable' not found"
+| warning: NAs introduced by coercion 
+| [1] NA NA
+| warning: NAs introduced by coercion 
+| [1] NA NA
+| warning: NAs introduced by coercion 
+| [1] NA NA
+| [1] "failed once"  "even attempt"
+| [1] "failed once"  "even attempt"
+| [1] "failed once"  "even attempt"
+| [1] "a default that reads itself"
+| [1] "a default that reads itself"
+| [1] "a default that reads itself"
+| -- the argument is evaluated where the call was written
+| [1] 14
+| [1] 14
+| [1] 14
+| [1] "R_GlobalEnv"
+| [1] "R_GlobalEnv"
+| [1] "R_GlobalEnv"
+| [1] "the caller's local"
+| [1] "the caller's local"
+| [1] "the caller's local"
+| [1] "eval(expression, globalenv())"
+| [1] "eval(expression, globalenv())"
+| [1] "eval(expression, globalenv())"
+| -- nested closures and functionals
+| forcing nested 
+| [1] 1
+| forcing nested 
+| [1] 2
+| forcing nested 
+| [1] 3
+| forcing scaled 
+| [1] 1 2 3
+| forcing scaled 
+| [1] 2 4 6
+| forcing scaled 
+| [1] 3 6 9
+| forcing twice 
+| [1] 2
+| forcing twice 
+| [1] 4
+| forcing twice 
+| [1] 6
+| forcing assigned 
+| [1] "the argument"            "assigned after the read"
+| forcing assigned 
+| [1] "the argument"            "assigned after the read"
+| forcing assigned 
+| [1] "the argument"            "assigned after the read"
+| forcing superassigned 
+| [1] 2 3 3
+| forcing superassigned 
+| [1] 3 4 4
+| forcing superassigned 
+| [1] 4 5 5
+| forcing substituted 
+| List of 3
+|  $ : chr "noisy(\"substituted\", i)"
+|  $ : int 1
+|  $ : chr "noisy(\"substituted\", i)"
+| forcing substituted 
+| List of 3
+|  $ : chr "noisy(\"substituted\", i)"
+|  $ : int 2
+|  $ : chr "noisy(\"substituted\", i)"
+| forcing substituted 
+| List of 3
+|  $ : chr "noisy(\"substituted\", i)"
+|  $ : int 3
+|  $ : chr "noisy(\"substituted\", i)"
+| -- a function returns a closure
+| forcing made 
+| [1] 1 1
+| forcing made 
+| [1] 2 2
+| forcing made 
+| [1] 3 3
+| [1] "x"
+| [1] "x"
+| [1] "x"
+| [1] 1 2 3
+| [1] 1 2 3
+| [1] 1 2 3
+| [1] 11 12 13
+| [1] 10
+| [1] 20
+| [1] 30
+| [1] "the last value"
+| [1] "the early closure"
+| [1] "the early closure"
+| leaving the maker
+| [1] 1
+| leaving the maker
+| [1] 2
+| leaving the maker
+| [1] 3
+| [1] FALSE
+| [1] FALSE
+| [1] FALSE
+| forcing kept 
+| [1] 1
+| forcing kept 
+| [1] 2
+| forcing kept 
+| [1] 3
+| forcing handled 
+| [1] 1
+| forcing handled 
+| [1] 2
+| forcing handled 
+| [1] 3
+| [1] 2 1
+| [1] 4 2
+| [1] 6 3
+| [1] "the closure is dropped"
+| [1] "the closure is dropped"
+| [1] "the closure is dropped"
+| [1] "the innermost"
+| [1] "the innermost"
+| [1] "the innermost"
+[messages]
+[warnings]
+- restarting interrupted promise evaluation (in inner())
+- restarting interrupted promise evaluation (in inner())
+- restarting interrupted promise evaluation (in inner())
+[errors]
+[value]
+NULL
+| NULL

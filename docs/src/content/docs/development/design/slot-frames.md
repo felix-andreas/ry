@@ -244,7 +244,8 @@ These are hot in package code and work from the slots and the frame record alone
 - A variable or function lookup that reaches the frame's environment from a closure or a promise
   made in it. `find_var`, `find_fun` and the byte code's `lookup_variable` and `lookup_function`
   take a value or a promise from the slot where it sits (`eval::slot_binding`), so a callback
-  reading its defining frame's locals leaves them in their slots.
+  reading its defining frame's locals leaves them in their slots. An unforced promise that the
+  byte code's lookup finds there is forced where it was found, without a search by name.
 - `substitute(x)` and `deparse(substitute(x))`, which read the promise's expression, not its
   environment.
 - `missing(x)`, by name through the environment or on an argument forwarded from the caller. It
@@ -576,8 +577,13 @@ Rust frame, matches nothing, and allocates nothing unless the argument reference
   was made over it), the return discards that environment when nothing that outlives the frame
   holds it: `outliving_cause` is asked whenever the environment has a counted reference, is the
   result or is held by `R_PreserveObject`. A function that defines a helper closure and calls it
-  (`inner <- function() ...; inner()`) therefore returns here. Any other frame returns through
-  `eval::leave`.
+  (`inner <- function() ...; inner()`) therefore returns here. When something does outlive the
+  frame, `return_fast` makes the environment complete with the cause it found (`lift_frame`) and
+  finishes the return itself: it pops the frame and hands the environment to
+  `Heap::release_frame`, as the general return does. A function that returns a closure
+  (`function(n) function() n`) therefore returns here too. Only a lift that fails for want of
+  memory goes on to `eval::leave`, which lifts again and raises the error. Any other frame
+  returns through `eval::leave` as well.
 
 `crates/oracle/cases/calls__fast_calls_from_frames_read_by_name.R`,
 `calls__closures_without_formals.R`, `calls__trivial_bodies.R`,

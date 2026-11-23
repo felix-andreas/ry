@@ -338,7 +338,12 @@ fn do_nchar<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> 
             *slot = NA_INTEGER;
             continue;
         }
+        // Bytes 1 to 127 are one character each in every encoding, so such a string needs
+        // neither validating nor decoding.
+        let ascii = count_type == CountType::Chars
+            && chars.bytes().iter().all(|&byte| byte.wrapping_sub(1) < 127);
         let invalid = count_type != CountType::Bytes
+            && !ascii
             && !handles::is_latin1(chars)
             && std::str::from_utf8(chars.bytes()).is_err();
         *slot = if handles::is_na(chars) {
@@ -354,6 +359,7 @@ fn do_nchar<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> 
         } else {
             match count_type {
                 CountType::Bytes => chars.bytes().len() as i32,
+                _ if ascii => chars.bytes().len() as i32,
                 // GNU R counts a latin1 string's bytes, each one character and one column.
                 _ if handles::is_latin1(chars) => chars.bytes().len() as i32,
                 CountType::Chars => handles::text(chars).chars().count() as i32,

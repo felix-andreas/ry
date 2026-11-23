@@ -48,6 +48,7 @@ kdots <- function(...) k1(...)
 kdots_list <- function(...) length(list(...))
 kmissing <- function(x, y) if (missing(y)) x + 1L else y
 kclosure <- function(x) { inner <- function() x + 1L; inner() }
+kmaker <- function(x) function() x
 kexit <- function(x) { on.exit(NULL); x + 1L }
 kmatch <- function(kind = c("first", "second")) { kind <- match.arg(kind); kind }
 kstop <- function(x) { stopifnot(is.numeric(x)); x }
@@ -146,6 +147,7 @@ OPERATIONS = [
     ("call: collects `...` in a list", "kdots_list(i, 1L)"),
     ("call: tests `missing()`", "kmissing(i)"),
     ("call: makes and calls a closure", "kclosure(i)"),
+    ("call: returns a closure", "kmaker(i)"),
     ("call: calls an anonymous function", "kanonymous(i)"),
     ("call: calls an anonymous function with defaults", "kdefaults(i)"),
     ("call: `local()` block", "kblock(i)"),
@@ -212,6 +214,7 @@ OPERATIONS = [
     ("condition: `signalCondition`, no handler", 'signalCondition(simpleCondition("m"))'),
     ("builtin: `length`", "length(plain)"),
     ("builtin: `is.null`", "is.null(plain)"),
+    ("builtin: `as.integer` of an integer", "as.integer(i)"),
     ("builtin: `[[` by position", "plain[[1L]]"),
     ("builtin: `[[` by name", 'plain[["b"]]'),
     ("builtin: `$`", "plain$b"),
@@ -219,6 +222,7 @@ OPERATIONS = [
     ("builtin: `[` by name", 'named["b"]'),
     ("builtin: `names`", "names(named)"),
     ("builtin: `c` of two scalars", "c(i, 1L)"),
+    ("builtin: `c` of two named scalars", "c(a = i, b = 1L)"),
     ("builtin: `list` with a name", "list(a = i)"),
     ("builtin: `paste0`", 'paste0("a", i)'),
     ("builtin: `sprintf`", 'sprintf("%d", i)'),
@@ -251,6 +255,7 @@ OPERATIONS = [
     ("builtin: `unique` of three strings", "unique(words)"),
     ("builtin: `duplicated` of three strings", "duplicated(words)"),
     ("builtin: `do.call` of `c` on 10 values", 'do.call("c", ten)'),
+    ("builtin: `do.call` of `c` on 3 named values", 'do.call("c", named_list)'),
     ("builtin: `unlist` of 10 numbers", "unlist(ten)"),
     ("builtin: `unlist` of a named list", "unlist(named_list)"),
     ("builtin: `sprintf` with two values", 'sprintf("%s_%d", "name", i)'),
