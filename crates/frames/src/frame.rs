@@ -329,10 +329,22 @@ unsafe fn column_contents(value: Sexp) -> R<Option<RVector>> {
             }
         }
         SexpType::Real | SexpType::Integer if values::inherits(value, "POSIXct") => {
-            RVector::Datetime {
-                seconds: datetime_seconds(value),
-                zone: time_zone(value),
-            }
+            let seconds = if value.kind() == SexpType::Integer {
+                values::ints(value)
+                    .iter()
+                    .map(|seconds| match *seconds {
+                        NA_INTEGER => convert::NA_REAL,
+                        seconds => f64::from(seconds),
+                    })
+                    .collect()
+            } else {
+                values::reals(value).to_vec()
+            };
+            // An empty `tzone` means the session's zone.
+            let zone = values::string_at(values::get_attr(value, install("tzone")?), 0)
+                .map(|zone| zone.to_string())
+                .filter(|zone| !zone.is_empty());
+            RVector::Datetime { seconds, zone }
         }
         SexpType::Integer if values::inherits(value, "Date") => RVector::Date(
             values::ints(value)
@@ -368,30 +380,6 @@ unsafe fn column_contents(value: Sexp) -> R<Option<RVector>> {
         }
         _ => return Ok(None),
     }))
-}
-
-/// A `POSIXct` vector's seconds, with [`convert::NA_REAL`] for `NA`.
-unsafe fn datetime_seconds(value: Sexp) -> Vec<f64> {
-    if value.kind() == SexpType::Integer {
-        return values::ints(value)
-            .iter()
-            .map(|seconds| match *seconds {
-                NA_INTEGER => convert::NA_REAL,
-                seconds => f64::from(seconds),
-            })
-            .collect();
-    }
-    values::reals(value).to_vec()
-}
-
-/// The time zone of a `POSIXct` vector's `tzone` attribute; an empty one means the session's.
-unsafe fn time_zone(value: Sexp) -> Option<String> {
-    let Ok(symbol) = install("tzone") else {
-        return None;
-    };
-    values::string_at(values::get_attr(value, symbol), 0)
-        .map(|zone| zone.to_string())
-        .filter(|zone| !zone.is_empty())
 }
 
 /// `value` as a column of `height` rows, recycling a single value.
@@ -2395,11 +2383,14 @@ pub(crate) unsafe fn literal(value: Sexp) -> Option<Expr> {
             }
         }
         SexpType::Real | SexpType::Integer if values::inherits(value, "POSIXct") => {
-            let micros = (datetime_seconds(value)[0] * 1e6).round();
+            let Ok(Some(RVector::Datetime { seconds, zone })) = column_contents(value) else {
+                return None;
+            };
+            let micros = (seconds[0] * 1e6).round();
             if micros.is_finite() && micros.abs() < 9.2e18 {
                 Expr::Datetime {
                     micros: micros as i64,
-                    zone: time_zone(value).map(Into::into),
+                    zone: zone.map(Into::into),
                 }
             } else {
                 Expr::Na(ColumnType::Datetime)

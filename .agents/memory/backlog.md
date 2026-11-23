@@ -694,6 +694,8 @@ Rule and order: `development/design/memory-safety.md`, "Migration".
   - `crates/interp/src/base_fast_paths.rs` 139 to 144: `all_bound`, `bind_local`, `call_exiting_handler`, `defines_prologue`, `leave_levels`, `push_frame`, `push_levels`, `try_catch_chain`, `variable_reference`.
   - `crates/interp/src/profile_summary.rs` 17 to 27: `count_inlined_call`, `entering`, `finish`, `frame_identity`, `resolve_samples`.
   - `crates/interp/src/testing.rs` 28 to 29: `check_saved_prologues_replaced`, `refusal`.
+  - `crates/frames/src/dataframe.rs` 43 to 47: `do_call`, `do_concat`, `do_duplicated`, `do_unique`.
+  - `crates/frames/src/frame.rs` 90 to 91: `vector_literal`.
 
 ## Open: the package loader
 
