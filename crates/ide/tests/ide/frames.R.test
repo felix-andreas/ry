@@ -115,7 +115,6 @@ action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
 completion (1): amount
 hint @5: DataFrame{team: character[], amount: double[]}
-hint @84df =
 
 #---- hover_on_a_column_string_in_a_verb
 sales <- DataFrame(team = c("a", "b"), amount = c(1, 2))
@@ -125,8 +124,8 @@ hover 96..102: team: character[]
 definition: none
 references: none
 rename: none
-signature: fn(df: DataFrame, ...: Expr | character) -> GroupBy
-parameters: df: DataFrame | [...: Expr | character]
+signature: fn(DataFrame, ...: Expr | character) -> GroupBy
+parameters: DataFrame | [...: Expr | character]
 action: Add inferred type annotation for `grouped`
   edit 64..64 -> ": GroupBy{team: character[]; amount: double[]}"
 action: Add inferred type annotations for the whole file
@@ -163,8 +162,8 @@ hover 88..90: character
 definition: none
 references: none
 rename: none
-signature: fn(df: DataFrame, ...: Expr | character, [descending]: logical) -> DataFrame
-parameters: df: DataFrame | [...: Expr | character] | [descending]: logical
+signature: fn(DataFrame, ...: Expr | character, [descending]: logical) -> DataFrame
+parameters: DataFrame | [...: Expr | character] | [descending]: logical
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{team: character[], amount: double[]}"
 completion (2): amount, team

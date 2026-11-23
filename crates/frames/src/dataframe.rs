@@ -539,6 +539,16 @@ unsafe fn verb_arguments(list: Sexp, verb: &str, call: Sexp) -> R<(Sexp, Vec<(Pl
         ));
     }
     let names = values::names(list);
+    if !is_nil(names)
+        && let Some(name) = values::string_at(names, 0).filter(|name| !name.is_empty())
+    {
+        return Err(error_in(
+            call,
+            format!(
+                "`{verb}` takes the value it works on as its first argument, without a name: `{name} =` names a column"
+            ),
+        ));
+    }
     let mut columns = Vec::with_capacity(length(list));
     for index in 1..length(list) {
         let item = list.element(index);
