@@ -349,8 +349,8 @@ stopifnot : fn(...: Any, [exprs]: Any, [exprObject]: Any, [local]: Any) -> NULL
 # Conditions and exits. `tryCatch` takes arbitrary condition-class names as named handlers, and its
 # value is the body's or a handler's. `withCallingHandlers` handlers run for effect and the value is
 # value-dependent, so it stays `Any`. `suppress*` pass the body's value through: genuine generics.
-tryCatch : <T> fn(expr: T, ...: fn(condition: Any) -> T, [finally]: Any) -> T
-tryCatch : <T, H> fn(expr: T, ...: fn(condition: Any) -> H, [finally]: Any) -> T | H
+tryCatch : <T> fn(expr: T, ...: fn(condition: condition) -> T, [finally]: Any) -> T
+tryCatch : <T, H> fn(expr: T, ...: fn(condition: condition) -> H, [finally]: Any) -> T | H
 tryCatch : fn(expr: Any, ...: Any, [finally]: Any) -> Any
 withCallingHandlers : Any
 try : fn(expr: Any, [silent]: logical, [outFile]: Any) -> Any

@@ -1235,6 +1235,34 @@ impl<'db> InferenceTable<'db> {
             // First, so union-vs-union means every actual member fits some expected member.
             // An open source fits only an open target that it can vouch for: a tag hidden in
             // the source's `..` could carry any payload under a name the target lists.
+            // A union of functions fits a function target when each member does, and the
+            // call returns whichever member ran: `F <- if (wrap) function(i) list(i) else
+            // function(i) i + 1` maps with `lapply(n, F)` to `list{T} | double` elements.
+            (TyKind::Union(members), TyKind::Function(target))
+                if members
+                    .iter()
+                    .all(|member| matches!(member.kind(db), TyKind::Function(_))) =>
+            {
+                let mut returns = Vec::with_capacity(members.len());
+                for &member in members.iter() {
+                    let ret = self.fresh_ty(db, Constraint::Unconstrained);
+                    let each = Ty::new(
+                        db,
+                        TyKind::Function(&FunctionType {
+                            ret,
+                            ..(*target).clone()
+                        }),
+                    );
+                    if !self.compatible_probe(db, member, each, depth + 1) {
+                        return false;
+                    }
+                    returns.push(ret);
+                }
+                let resolved: Vec<Ty<'db>> =
+                    returns.iter().map(|&ret| self.resolve(db, ret)).collect();
+                let joined = union_of(db, resolved);
+                self.compatible_probe(db, joined, target.ret, depth + 1)
+            }
             (TyKind::Union(members), _) => {
                 if members
                     .iter()

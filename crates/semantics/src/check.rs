@@ -17091,13 +17091,16 @@ impl<'db, 'a> Checker<'db, 'a> {
             // NULL` leaves `vapply(pkgs, getNamespaceVersion, "")` calling base's function.
             // A local list named like the function (psych's `apply(m, 1, prod)` beside a
             // `prod` list) is passed over the same way; a local string names the function to use.
+            // A local holding one of several functions (`F <- if (cond) function(i) ... else
+            // function(i) ...`) is a function to R's lookup.
             if let ExpressionKind::NameRef(name) = self.module.kind(value)
                 && (!self.naming.resolutions.contains_key(&value)
                     || !is_character(self.db, resolved))
-                && !matches!(
-                    resolved.kind(self.db),
-                    TyKind::Function(_) | TyKind::Var(_) | TyKind::Any | TyKind::Unknown
-                )
+                && match resolved.kind(self.db) {
+                    TyKind::Var(_) => false,
+                    TyKind::Rigid(_) => true,
+                    _ => self.callable(resolved) == Callable::No,
+                }
             {
                 // An export the stubs list without a type is still a function.
                 if let Some(candidates) = self

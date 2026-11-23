@@ -271,9 +271,17 @@ plain <- function(x) {
   if (inherits(value, "integer")) value$message else NULL
 }
 #++++
-fetch: Unknown
+fetch: <T> fn(url: T) -> integer | condition
 plain: fn(x: logical) -> Unknown
-139..150 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `integer`. Extract an element with `[[` instead
+
+#---- a_handler_returning_its_condition_joins_the_value
+root <- function(f) {
+  r <- tryCatch(uniroot(f, c(0, 1))$root, error = function(e) e)
+  if (inherits(r, "error")) stop(conditionMessage(r), r$message)
+  r
+}
+#++++
+root: fn(f: fn(double) -> double[]) -> double | condition
 
 #---- a_class_dispatch_null_fallback_passes_an_object_that_may_carry_the_class
 is.chain <- function(x) inherits(x, "chain")

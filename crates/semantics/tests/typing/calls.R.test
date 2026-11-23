@@ -807,6 +807,14 @@ f <- function(data, groups) {
 #++++
 f: <T, U> fn([data]: T, groups: U) -> double[]
 
+#---- match_fun_takes_a_local_holding_one_of_two_functions
+f <- function(wrap) {
+  F <- if (wrap) function(i) list(i) else function(i) i + 1
+  lapply(1:3, F)
+}
+#++++
+f: fn(wrap: logical) -> list[list{integer} | double]
+
 #---- a_list_of_functions_maps
 # Every member of the element union must serve the callback interface; the
 # stdlib reductions do, despite their optional parameters.
