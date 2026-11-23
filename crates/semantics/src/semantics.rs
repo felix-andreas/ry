@@ -3332,9 +3332,10 @@ pub struct MemberExports<'db> {
     pub pending: bool,
 }
 
-/// Independent of which member was queried first: each round re-checks every member
-/// against the previous round's exports, and members still changing at the cap pin to
-/// `Unknown`. Members are checked directly, never via `item_check`, so no salsa cycle forms.
+/// Independent of which member was queried first: each round re-checks every member in the
+/// group's solve order against the latest exports, a member whose built exports grow is
+/// widened, and members still changing at the cap pin to `Unknown`. Members are checked
+/// directly, never via `item_check`, so no salsa cycle forms.
 #[salsa::tracked(
     returns(ref),
     cycle_fn = scc_exports_recover,
@@ -3349,25 +3350,140 @@ pub fn scc_exports<'db>(
     let Some(members) = item_group(db, files, representative) else {
         return exports;
     };
-    for _round in 0..SCHEME_ROUND_CAP {
-        let next_exports: FxHashMap<Item<'db>, MemberExports<'db>> = members
-            .iter()
-            .map(|&item| {
-                let globals = SalsaGlobals::for_item(db, item, Some(&exports));
-                let check = check_item_against(db, item, &globals);
-                (
-                    item,
-                    member_exports(db, check, globals.pending_reads.get() > 0),
-                )
-            })
-            .collect();
-        if next_exports == exports {
+    // Each member reads the exports its predecessors in the round just wrote, so a chain of
+    // calls settles in one round when it is solved callee first, whatever its length.
+    let order = solve_order(db, members);
+    let mut widened: FxHashMap<Item<'db>, Widening> = FxHashMap::default();
+    for round in 0..SCHEME_ROUND_CAP {
+        let mut changed = false;
+        for &item in &order {
+            let globals = SalsaGlobals::for_item(db, item, Some(&exports));
+            let check = check_item_against(db, item, &globals);
+            let mut next = member_exports(db, check, globals.pending_reads.get() > 0);
+            let previous = exports.get(&item);
+            let widening = widened.get(&item).copied();
+            if round >= WIDENING_ROUND
+                && let Some(previous) = previous
+                && widening != Some(Widening::Everything)
+                && exports_grew(db, previous, &widen(db, next.clone(), widening), widening)
+            {
+                let wider = match widening {
+                    None => Widening::Result,
+                    Some(_) => Widening::Everything,
+                };
+                widened.insert(item, wider);
+            }
+            if let Some(&widening) = widened.get(&item) {
+                next = widen(db, next, Some(widening));
+            }
+            if previous != Some(&next) {
+                exports.insert(item, next);
+                changed = true;
+            }
+        }
+        if !changed {
             return exports;
         }
-        exports = next_exports;
     }
     // Pinning every member is the only entry-order-free refusal.
     unknown_group_exports(db, files, representative)
+}
+
+/// From this round on, a member whose built exports grow is widened: such a type, a record
+/// holding the results of the group's own calls, grows without bound
+/// (`.agents/memory/decisions/type-checker.md`, "A recursive group widens an export that keeps
+/// growing").
+const WIDENING_ROUND: u32 = 2;
+
+/// How far a member's exports are widened. Once widened, a member stays widened for the rest
+/// of the solve, so the group cannot oscillate between a large type and its collapse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Widening {
+    /// A function's result is `Unknown`, and its parameters stay.
+    Result,
+    /// Every export is `Unknown`.
+    Everything,
+}
+
+fn widen<'db>(
+    db: &'db dyn Db,
+    mut exports: MemberExports<'db>,
+    widening: Option<Widening>,
+) -> MemberExports<'db> {
+    let Some(widening) = widening else {
+        return exports;
+    };
+    let unknown = types::unknown(db);
+    exports.scheme.body = match (widening, exports.scheme.body.kind(db)) {
+        (Widening::Result, types::TyKind::Function(function)) => {
+            let mut function: types::FunctionType<'db> = **function;
+            function.ret = unknown;
+            types::Ty::new(db, types::TyKind::Function(&function))
+        }
+        _ => unknown,
+    };
+    for (_, binding) in &mut exports.top_level_bindings {
+        *binding = types::TypeScheme::monomorphic(unknown);
+    }
+    exports
+}
+
+/// Whether an export of `next` is larger than the same export of `previous` that was already a
+/// type of its own. A finite type can arrive late, after several back edges, and arriving from
+/// the seed's `Unknown` is not growth; a type that nests the group's own results grows from one
+/// built type to a larger one every round. A function's result is measured until it is widened,
+/// and the whole function, parameters included, after.
+fn exports_grew<'db>(
+    db: &'db dyn Db,
+    previous: &MemberExports<'db>,
+    next: &MemberExports<'db>,
+    widening: Option<Widening>,
+) -> bool {
+    let surface = |ty: types::Ty<'db>| match (widening, ty.kind(db)) {
+        (None, types::TyKind::Function(function)) => function.ret,
+        _ => ty,
+    };
+    let grew = |previous: types::Ty<'db>, next: types::Ty<'db>| {
+        let previous = types::type_size(db, previous);
+        previous > 1 && types::type_size(db, next) > previous
+    };
+    if grew(surface(previous.scheme.body), surface(next.scheme.body)) {
+        return true;
+    }
+    next.top_level_bindings.iter().any(|(name, binding)| {
+        previous
+            .top_level_bindings
+            .iter()
+            .find(|(previous_name, _)| previous_name == name)
+            .is_some_and(|(_, previous)| grew(previous.body, binding.body))
+    })
+}
+
+/// The group's members callees first: a depth-first walk of the edges inside the group from
+/// its first member, in post-order. It depends only on the group and its edges, never on which
+/// member was queried first.
+fn solve_order<'db>(db: &'db dyn Db, members: &[Item<'db>]) -> Vec<Item<'db>> {
+    let mut order = Vec::with_capacity(members.len());
+    let mut unvisited: FxHashSet<Item<'db>> = members.iter().copied().collect();
+    for &root in members {
+        if !unvisited.remove(&root) {
+            continue;
+        }
+        let mut work: Vec<(Item<'db>, usize)> = vec![(root, 0)];
+        while let Some((node, cursor)) = work.last_mut() {
+            let edges = item_interface_edges(db, *node);
+            if let Some(&target) = edges.get(*cursor) {
+                *cursor += 1;
+                if unvisited.remove(&target) {
+                    work.push((target, 0));
+                }
+                continue;
+            }
+            order.push(*node);
+            work.pop();
+        }
+    }
+    order
 }
 
 fn member_exports<'db>(

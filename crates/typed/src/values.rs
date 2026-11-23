@@ -109,7 +109,7 @@ pub const DICT_VALUES: i32 = std::mem::offset_of!(Dict, values) as i32;
 /// The list's items belong to someone else (an R vector the compiler borrows).
 pub const VIEW: u8 = 1;
 
-/// A count that is never changed: a view, a static, or a value whose count saturated.
+/// A count that is never changed: a static, or a value whose count saturated.
 pub const STATIC_COUNT: u32 = u32::MAX;
 
 pub const ADD: u32 = 0;
@@ -422,15 +422,16 @@ pub unsafe extern "C" fn ry_list_rep(kind: u32, word0: u64, word1: u64, times: u
     list
 }
 
-/// A view header over foreign items. Its count is static, so drops leave it alone; only
-/// `ry_view_release` frees it, and never the items.
+/// A view header over foreign items, with count one, which its maker holds until
+/// `ry_view_release`. Code the view is lent to counts it like any list, so a record or a list
+/// can keep it past the loan.
 pub unsafe extern "C" fn ry_list_view(kind: u32, data: *mut u8, length: u64) -> *mut List {
     let Some(kind) = list_kind(kind) else {
         return null_mut();
     };
     let list = block_alloc(HEADER_BYTES) as *mut List;
     list.write(List {
-        count: STATIC_COUNT,
+        count: 1,
         kind,
         flags: VIEW,
         _pad: 0,
@@ -441,10 +442,34 @@ pub unsafe extern "C" fn ry_list_view(kind: u32, data: *mut u8, length: u64) -> 
     list
 }
 
+/// Ends the loan of a view. A view nothing else holds is freed, never its items. A view some
+/// value kept gets its own copy of the items in place, because the foreign items may die with
+/// the loan, and every holder reads through this one header.
 pub unsafe extern "C" fn ry_view_release(list: *mut List) {
-    if !list.is_null() {
-        block_free(list as *mut u8, HEADER_BYTES);
+    if list.is_null() {
+        return;
     }
+    let count = (*list).count;
+    if count <= 1 {
+        block_free(list as *mut u8, HEADER_BYTES);
+        return;
+    }
+    let kind = (*list).kind;
+    let width = item_size(kind);
+    let length = (*list).length as usize;
+    // An empty list still gets a block, which `list_release_storage` returns.
+    let capacity = length.max(1);
+    let data = block_alloc(capacity * width);
+    ptr::copy_nonoverlapping((*list).data, data, length * width);
+    dup_items(kind, data, length);
+    (*list).data = data;
+    (*list).capacity = capacity as u64;
+    (*list).flags &= !VIEW;
+    if count != STATIC_COUNT {
+        (*list).count = count - 1;
+    }
+    // From here the header is freed as a counted list, which leaves the live count.
+    live_add(1);
 }
 
 /// A list with count one the caller may write: `list` itself when it is owned and unique, else

@@ -3142,6 +3142,7 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 | StrictOriginKind::RecursiveUnknown(_)
                 | StrictOriginKind::UntypedParameter(_)
                 | StrictOriginKind::UnknownColumns { .. }
+                | StrictOriginKind::UnlistedColumns { .. }
                 | StrictOriginKind::UncheckedAnnotation => None,
                 _ => assignment_targets.get(&origin.expression),
             };
@@ -3179,6 +3180,18 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                         column,
                     } => format!(
                         "strict mode: the columns of this frame are unknown, so the column names and types this query uses are not checked. Annotate it with a type that lists its columns, as in `DataFrame{{{column}: TYPE}}`"
+                    ),
+                    StrictOriginKind::UnlistedColumns {
+                        source: Some((source, head)),
+                        column,
+                    } => format!(
+                        "strict mode: the columns of `{source}` are unknown, so nothing checks them against the columns this type lists. Give `{source}` a type that lists its columns, as in `{source}: {head}{{{column}: TYPE}}`"
+                    ),
+                    StrictOriginKind::UnlistedColumns {
+                        source: None,
+                        column,
+                    } => format!(
+                        "strict mode: the columns of this frame are unknown, so nothing checks them against the columns this type lists. Annotate it with a type that lists its columns, as in `DataFrame{{{column}: TYPE}}`"
                     ),
                     StrictOriginKind::UntypedParameter(name) => format!(
                         "strict mode: parameter `{}` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `{}: TYPE`",
