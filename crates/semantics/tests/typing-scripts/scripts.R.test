@@ -548,8 +548,8 @@ T
 sales <- DataFrame(team = ["a", "b"], amount = [1, 2])
 sales[, amount := 3]
 #++++
-sales: DataFrame{team: character[], amount: List<I64>}
-DataFrame{team: character[], amount: List<I64>}
+sales: DataFrame{team: character[], amount: integer[]}
+DataFrame{team: character[], amount: integer[]}
 
 #==== loop_carried_reads
 #---- rebinding_reads_the_nearest_earlier_binding

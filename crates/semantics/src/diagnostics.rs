@@ -3795,7 +3795,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             left,
             right,
         } => format!(
-            "`{operator}` is not defined between `{}` and `{}`. A date adds or subtracts a number of days, subtracting two dates gives the days between them, and dates compare only with dates",
+            "`{operator}` is not defined between `{}` and `{}`. A date adds or subtracts a number of days and a date-time a number of seconds, subtracting two of the same kind gives the time between them, and each compares only with its own kind",
             renderer.render(db, *left),
             renderer.render(db, *right)
         ),
@@ -3803,6 +3803,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "this frame has {columns} {}, but {names} {} given",
             if *columns == 1 { "column" } else { "columns" },
             if *names == 1 { "name is" } else { "names are" }
+        ),
+        TypeErrorKind::StackedColumnTypesDiffer {
+            column,
+            first_ty,
+            second_ty,
+        } => format!(
+            "column `{column}` is `{}` in one frame and `{}` in another, so the frames do not stack",
+            renderer.render(db, *first_ty),
+            renderer.render(db, *second_ty)
         ),
         TypeErrorKind::IncompatibleJoinColumns { condition, x, i } => format!(
             "the join condition `{condition}` compares `{}` with `{}`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals",

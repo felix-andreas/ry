@@ -199,6 +199,64 @@ pub fn unique_rows(table: &Table, by: &[&str]) -> Result<Table> {
     Ok(Table::from_normalized(unique))
 }
 
+/// Which of the rows that share a key a distinct-rows step keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keep {
+    First,
+    Last,
+    /// Only the rows whose key no other row has.
+    None,
+}
+
+impl Keep {
+    pub fn parse(text: &str) -> Option<Keep> {
+        Some(match text {
+            "first" => Keep::First,
+            "last" => Keep::Last,
+            "none" => Keep::None,
+            _ => return None,
+        })
+    }
+}
+
+/// The distinct rows by `by` (every column when empty) in their original order, keeping the
+/// first, the last, or none of the rows that share a key.
+pub fn unique_rows_keeping(table: &Table, by: &[&str], keep: Keep) -> Result<Table> {
+    let strategy = match keep {
+        Keep::First => return unique_rows(table, by),
+        Keep::Last => UniqueKeepStrategy::Last,
+        Keep::None => UniqueKeepStrategy::None,
+    };
+    let subset = subset(table, by)?;
+    let unique = table.frame().unique_stable(Some(&subset), strategy, None)?;
+    Ok(Table::from_normalized(unique))
+}
+
+/// Whether each row repeats an earlier row's `by` values (every column when `by` is empty), as
+/// R's `duplicated()` marks a row: the first of each combination is `false`, or the last one with
+/// `from_last`, as `fromLast = TRUE` marks it.
+pub fn duplicated_rows(table: &Table, by: &[&str], from_last: bool) -> Result<Vec<bool>> {
+    let subset = subset(table, by)?;
+    let keep = if from_last {
+        UniqueKeepStrategy::Last
+    } else {
+        UniqueKeepStrategy::First
+    };
+    let index = PlSmallStr::from_static("__ry_row");
+    let first = table
+        .frame()
+        .select(subset.iter().cloned())?
+        .with_row_index(index.clone(), None)?
+        .unique_stable(Some(&subset), keep, None)?;
+    let mut duplicated = vec![true; table.height()];
+    for row in first.column(&index)?.idx()?.into_no_null_iter() {
+        if let Some(slot) = duplicated.get_mut(row as usize) {
+            *slot = false;
+        }
+    }
+    Ok(duplicated)
+}
+
 /// How many distinct combinations of `by` the table holds, as `uniqueN(x, by = ...)` does.
 pub fn unique_count(table: &Table, by: &[&str]) -> Result<usize> {
     let subset = subset(table, by)?;
@@ -1283,8 +1341,8 @@ fn order_digits(column: &Column, descending: bool) -> Result<Option<Digit>> {
     if u32::try_from(column.len()).is_err() {
         return Ok(None);
     }
-    // A date orders as its day number.
-    if matches!(column.dtype(), DataType::Date) {
+    // A date orders as its day number, and a date-time as its microseconds.
+    if matches!(column.dtype(), DataType::Date | DataType::Datetime(..)) {
         return order_digits(&column.to_physical_repr(), descending);
     }
     let digit = |codes: Vec<u64>, top: u64| Digit {
@@ -1894,6 +1952,26 @@ fn stacked_type(pieces: &[Option<Column>]) -> Result<DataType> {
         .filter_map(|column| ColumnType::of(column.dtype()))
         .collect();
     let has = |kind: ColumnType| kinds.contains(&kind);
+    // A date or date-time stacks only with its own kind; date-times take the first piece's zone.
+    if let Some(&temporal) = kinds
+        .iter()
+        .find(|kind| matches!(kind, ColumnType::Date | ColumnType::Datetime))
+    {
+        if let Some(other) = kinds.iter().find(|kind| **kind != temporal) {
+            return Err(Error::Query(format!(
+                "a {} column stacks only with {} columns, not with a {} column",
+                temporal.name(),
+                temporal.name(),
+                other.name()
+            )));
+        }
+        return pieces
+            .iter()
+            .flatten()
+            .next()
+            .map(|column| column.dtype().clone())
+            .ok_or_else(|| Error::Query("no column to stack".to_string()));
+    }
     if has(ColumnType::Factor)
         && kinds
             .iter()
@@ -1964,7 +2042,7 @@ fn recycle(name: &str, column: &Column, length: usize) -> Result<Column> {
 fn fill_empty(values: Series, function: Aggregate) -> Result<Series> {
     let mask = values.is_not_null();
     let empty = match function {
-        Aggregate::Sum | Aggregate::Length => 0.0,
+        Aggregate::Sum | Aggregate::Length | Aggregate::Count => 0.0,
         Aggregate::Mean => f64::NAN,
         _ => return Ok(values),
     };
@@ -1985,6 +2063,7 @@ fn type_name(dtype: &DataType) -> &'static str {
         Some(ColumnType::Character) => "character",
         Some(ColumnType::Factor) => "factor",
         Some(ColumnType::Date) => "Date",
+        Some(ColumnType::Datetime) => "POSIXct",
         None => "unsupported",
     }
 }

@@ -20,8 +20,9 @@ use {
     polars::prelude::{
         AnyValue, AsOfOptions, AsofStrategy, ChunkAgg, Column, DataFrame, DataType, ExplodeOptions,
         Expr as PolarsExpr, Field, Float64Chunked, Int32Chunked, IntoColumn, IntoLazy, JoinType,
-        LazyFrame, MaintainOrderJoin, NULL, NamedFrom, PlSmallStr, Scalar, Series,
-        SortMultipleOptions, UnionArgs, by_name, col, concat, len, lit, pearson_corr, when,
+        LazyFrame, MaintainOrderJoin, NULL, NamedFrom, PlSmallStr, RoundMode, Scalar, Series,
+        SortMultipleOptions, TimeUnit, TimeZone, UnionArgs, by_name, col, concat, len, lit,
+        pearson_corr, when,
     },
     polars_arrow::bitmap::{Bitmap, MutableBitmap},
     std::{collections::HashSet, fmt, sync::Arc},
@@ -194,6 +195,16 @@ pub enum Expr {
     Character(String),
     /// A date literal, whole days since 1970-01-01.
     Date(i32),
+    /// A date-time literal: microseconds since 1970-01-01 UTC, and the time zone it prints in.
+    Datetime {
+        micros: i64,
+        zone: Option<PlSmallStr>,
+    },
+    /// A whole R vector, one value per row of the table it meets: `Expr.lit(c(...))`, or a vector
+    /// passed to a verb.
+    Values(Values),
+    /// A function of its arguments, such as `is_in`.
+    Call(Function, Vec<Expr>),
     /// A typed `NA`.
     Na(ColumnType),
     Unary(UnaryOp, Box<Expr>),
@@ -220,6 +231,24 @@ pub enum Expr {
         arg: Box<Expr>,
         descending: bool,
     },
+}
+
+/// The values of an R vector, held as a column.
+#[derive(Clone, Debug)]
+pub struct Values(pub Series);
+
+impl PartialEq for Values {
+    fn eq(&self, other: &Values) -> bool {
+        self.0.equals_missing(&other.0)
+    }
+}
+
+/// A function of [`Expr::Call`]. Each computes a row from the same row of its arguments.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Function {
+    /// `is_in(x, values)`: whether each value of `x` is one of `values`. A missing value is in
+    /// `values` when they hold one, as R's `%in%` decides, so the result is never `NA`.
+    IsIn,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -260,7 +289,10 @@ pub enum Aggregate {
     Median,
     Sd,
     Var,
+    /// R's `length(x)`: every value, missing or not.
     Length,
+    /// The values that are not missing (`sum(!is.na(x))`), as Polars' `count` counts.
+    Count,
 }
 
 /// Shorthands for building expressions in tests and in the interpreter's lowering.
@@ -378,6 +410,7 @@ fn holds(kind: ColumnType) -> &'static str {
         ColumnType::Character => "strings",
         ColumnType::Factor => "factor levels",
         ColumnType::Date => "dates",
+        ColumnType::Datetime => "date-times",
     }
 }
 
@@ -583,7 +616,14 @@ fn bind_group_columns(mut query: Query) -> Query {
             | Expr::Character(_)
             | Expr::Na(_)
             | Expr::Date(_)
+            | Expr::Datetime { .. }
+            | Expr::Values(_)
             | Expr::Count => {}
+            Expr::Call(_, args) => {
+                for arg in args {
+                    bind(arg, keys);
+                }
+            }
             Expr::Unary(_, arg)
             | Expr::Head(arg, _)
             | Expr::Rank { arg, .. }
@@ -806,11 +846,18 @@ pub(crate) fn column_references(expr: &Expr, names: &mut impl Extend<PlSmallStr>
             column_references(arg, names);
             names.extend(keys.iter().cloned());
         }
+        Expr::Call(_, args) => {
+            for arg in args {
+                column_references(arg, names);
+            }
+        }
         Expr::Integer(_)
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime { .. }
+        | Expr::Values(_)
         | Expr::Na(_)
         | Expr::Count => {}
     }
@@ -1013,11 +1060,17 @@ fn per_row_of_i(
             descending: *descending,
         },
         Expr::Window(arg, keys) => Expr::Window(rewrite(arg), keys.clone()),
+        Expr::Call(function, args) => Expr::Call(
+            function.clone(),
+            args.iter().map(|arg| *rewrite(arg)).collect(),
+        ),
         Expr::Integer(_)
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime { .. }
+        | Expr::Values(_)
         | Expr::Na(_)
         | Expr::Column(_) => expr.clone(),
     }
@@ -1033,11 +1086,14 @@ fn reads_count(expr: &Expr) -> bool {
         }
         Expr::IfElse(test, yes, no) => reads_count(test) || reads_count(yes) || reads_count(no),
         Expr::Rank { arg, .. } | Expr::Window(arg, _) => reads_count(arg),
+        Expr::Call(_, args) => args.iter().any(reads_count),
         Expr::Integer(_)
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime { .. }
+        | Expr::Values(_)
         | Expr::Na(_)
         | Expr::Column(_) => false,
     }
@@ -1049,6 +1105,11 @@ fn reads_count(expr: &Expr) -> bool {
 fn one_value(function: Aggregate, value: Expr) -> Expr {
     match function {
         Aggregate::Length => Expr::Integer(1),
+        Aggregate::Count => Expr::Binary(
+            BinaryOp::Subtract,
+            Box::new(Expr::Integer(1)),
+            Box::new(Expr::Unary(UnaryOp::IsNa, Box::new(value))),
+        ),
         Aggregate::Sd | Aggregate::Var => Expr::Na(ColumnType::Double),
         Aggregate::Sum => Expr::Binary(BinaryOp::Add, Box::new(value), Box::new(Expr::Integer(0))),
         Aggregate::Mean => Expr::Binary(
@@ -1075,7 +1136,9 @@ fn single_value(function: Aggregate, arg: &Expr, na_rm: bool) -> Expr {
         na_rm: false,
     };
     match function {
-        Aggregate::Length | Aggregate::Sd | Aggregate::Var => one_value(function, first()),
+        Aggregate::Length | Aggregate::Count | Aggregate::Sd | Aggregate::Var => {
+            one_value(function, first())
+        }
         _ if na_rm => Expr::Aggregate {
             function,
             arg: Box::new(Expr::IfElse(
@@ -1220,11 +1283,21 @@ fn has_integer_sum(typer: &Typer, expr: &Expr) -> Result<bool> {
                 || has_integer_sum(typer, yes)?
                 || has_integer_sum(typer, no)?
         }
+        Expr::Call(_, args) => {
+            for arg in args {
+                if has_integer_sum(typer, arg)? {
+                    return Ok(true);
+                }
+            }
+            false
+        }
         Expr::Integer(_)
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime { .. }
+        | Expr::Values(_)
         | Expr::Na(_)
         | Expr::Column(_)
         | Expr::Count => false,
@@ -1255,11 +1328,18 @@ fn integer_sums(typer: &Typer, expr: &Expr, sums: &mut Vec<Expr>) -> Result<()> 
             integer_sums(typer, yes, sums)?;
             integer_sums(typer, no, sums)?;
         }
+        Expr::Call(_, args) => {
+            for arg in args {
+                integer_sums(typer, arg, sums)?;
+            }
+        }
         Expr::Integer(_)
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime { .. }
+        | Expr::Values(_)
         | Expr::Na(_)
         | Expr::Column(_)
         | Expr::Count => {}
@@ -1304,11 +1384,19 @@ fn double_sums(typer: &Typer, expr: &Expr) -> Result<Expr> {
             descending: *descending,
         },
         Expr::Window(arg, keys) => Expr::Window(double(arg)?, keys.clone()),
+        Expr::Call(function, args) => Expr::Call(
+            function.clone(),
+            args.iter()
+                .map(|arg| double_sums(typer, arg))
+                .collect::<Result<_>>()?,
+        ),
         Expr::Integer(_)
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime { .. }
+        | Expr::Values(_)
         | Expr::Na(_)
         | Expr::Column(_)
         | Expr::Count => expr.clone(),
@@ -1558,8 +1646,9 @@ fn join_columns(join: &Join, key: &[PlSmallStr]) -> Result<Vec<On>> {
 }
 
 /// Checks a join's conditions against both schemas, and gives for each condition the type both
-/// sides compare in when their types differ. Integers meet doubles as doubles, and two factors, or
-/// a factor and a string, meet as strings, since factor codes index different level sets.
+/// sides compare in when their types differ. Integers meet doubles as doubles, two factors, or a
+/// factor and a string, meet as strings, since factor codes index different level sets, and two
+/// date-times meet in UTC, since their zones may differ.
 fn comparison_types(
     x: &Schema,
     i: &Schema,
@@ -1604,6 +1693,11 @@ fn comparison_types(
                 | (ColumnType::Character, ColumnType::Factor) => Some(DataType::String),
                 (ColumnType::Integer, ColumnType::Double)
                 | (ColumnType::Double, ColumnType::Integer) => Some(DataType::Float64),
+                // A date-time's zone only changes how it prints, so two zones meet as UTC.
+                (ColumnType::Datetime, ColumnType::Datetime) => Some(DataType::Datetime(
+                    TimeUnit::Microseconds,
+                    Some(TimeZone::UTC),
+                )),
                 (x_type, i_type) if x_type == i_type => None,
                 (x_type, i_type) => {
                     return Err(Error::Query(format!(
@@ -1796,14 +1890,40 @@ fn join_plan(
                 .ok_or_else(|| Error::Query("a rolling join needs a join column".to_string()))?;
             let (x_roll, i_roll) = (&rolled.x, &rolled.i);
             let groups = &on[..on.len() - 1];
+            // Polars' as-of join puts a row whose group key is null in no group, but data.table
+            // matches `NA` with `NA`. Each group column is therefore grouped by two columns on
+            // both sides: whether it is missing, and its value with a missing value filled by one
+            // constant of its type.
+            let mut by_names: Vec<PlSmallStr> = Vec::with_capacity(groups.len() * 2);
+            let mut x_by: Vec<PolarsExpr> = Vec::with_capacity(groups.len() * 2);
+            let mut i_by: Vec<PolarsExpr> = Vec::with_capacity(groups.len() * 2);
+            for (index, condition) in groups.iter().enumerate() {
+                let dtype = column_dtype(&i, &condition.i)?;
+                let filled = |value: PolarsExpr| match &dtype {
+                    DataType::String => value.fill_null(lit("")),
+                    DataType::Categorical(..) | DataType::Enum(..) => {
+                        value.cast(DataType::String).fill_null(lit(""))
+                    }
+                    other => value.fill_null(lit(0).cast(other.clone())),
+                };
+                let (missing, value) = (
+                    PlSmallStr::from(format!("\u{1}by_missing{index}")),
+                    PlSmallStr::from(format!("\u{1}by_value{index}")),
+                );
+                for (side, column) in [(&mut x_by, &condition.x), (&mut i_by, &condition.i)] {
+                    side.push(col(column.clone()).is_null().alias(missing.clone()));
+                    side.push(filled(col(column.clone())).alias(value.clone()));
+                }
+                by_names.push(missing);
+                by_names.push(value);
+            }
+            let x_grouped = x.clone().with_columns(x_by);
             let options = AsOfOptions {
                 strategy,
                 tolerance: tolerance.map(|limit| Scalar::from(limit.abs())),
                 tolerance_str: None,
-                left_by: (!groups.is_empty())
-                    .then(|| groups.iter().map(|condition| condition.i.clone()).collect()),
-                right_by: (!groups.is_empty())
-                    .then(|| groups.iter().map(|condition| condition.x.clone()).collect()),
+                left_by: (!by_names.is_empty()).then(|| by_names.clone()),
+                right_by: (!by_names.is_empty()).then(|| by_names.clone()),
                 allow_eq: true,
                 check_sortedness: false,
             };
@@ -1813,6 +1933,7 @@ fn join_plan(
             // picks.
             let matched = keep_mult(exact(i.clone(), JoinType::Inner), join.mult);
             let unmatched = i
+                .with_columns(i_by)
                 .join_builder()
                 .with(x.clone().select(right_on.clone()))
                 .left_on(left_on.clone())
@@ -1839,8 +1960,7 @@ fn join_plan(
             // Marks the rows of `x` so that an unmatched row of `i` is told apart from a match
             // whose values are `NA`.
             const MATCHED: &str = "\u{1}matched";
-            let x = x
-                .clone()
+            let x = x_grouped
                 .with_column(lit(true).alias(MATCHED))
                 .sort_by_exprs(sort_x, options_sort.clone());
             let mut rolled = unmatched
@@ -2118,12 +2238,37 @@ pub(crate) fn collapses(expr: &Expr) -> bool {
         | Expr::Logical(_)
         | Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime { .. }
         | Expr::Na(_) => true,
-        Expr::Column(_) | Expr::Head(..) | Expr::Rank { .. } | Expr::Window(..) => false,
+        Expr::Column(_)
+        | Expr::Values(_)
+        | Expr::Head(..)
+        | Expr::Rank { .. }
+        | Expr::Window(..) => false,
+        Expr::Call(function, args) => match (function, args.as_slice()) {
+            (Function::IsIn, [x, _]) => collapses(x),
+            _ => args.iter().all(collapses),
+        },
         Expr::Unary(_, arg) => collapses(arg),
         Expr::Binary(_, left, right) => collapses(left) && collapses(right),
         Expr::IfElse(test, yes, no) => collapses(test) && collapses(yes) && collapses(no),
     }
+}
+
+/// Whether an expression is given values rather than computed from the frame's rows, so that as
+/// the values of `is_in` it is the same set whichever rows the frame holds.
+pub(crate) fn is_constant(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Integer(_)
+            | Expr::Double(_)
+            | Expr::Logical(_)
+            | Expr::Character(_)
+            | Expr::Date(_)
+            | Expr::Datetime { .. }
+            | Expr::Na(_)
+            | Expr::Values(_)
+    )
 }
 
 /// Lowers `:=`. Each new column is computed by one projection of the plan, and then replaces or
@@ -2835,14 +2980,20 @@ fn row_wise(expr: &Expr) -> bool {
         | Expr::Head(..)
         | Expr::Correlation(..)
         | Expr::Rank { .. }
-        | Expr::Window(..) => false,
+        | Expr::Window(..)
+        | Expr::Values(_) => false,
         Expr::Column(_)
         | Expr::Integer(_)
         | Expr::Double(_)
         | Expr::Logical(_)
         | Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime { .. }
         | Expr::Na(_) => true,
+        Expr::Call(function, args) => match (function, args.as_slice()) {
+            (Function::IsIn, [x, values]) => row_wise(x) && is_constant(values),
+            _ => args.iter().all(row_wise),
+        },
         Expr::Unary(_, arg) => row_wise(arg),
         Expr::Binary(_, left, right) => row_wise(left) && row_wise(right),
         Expr::IfElse(test, yes, no) => row_wise(test) && row_wise(yes) && row_wise(no),
@@ -2935,8 +3086,11 @@ impl NullCounts {
             | Expr::Logical(_)
             | Expr::Character(_)
             | Expr::Date(_)
+            | Expr::Datetime { .. }
             | Expr::Count
+            | Expr::Call(Function::IsIn, _)
             | Expr::Rank { .. } => false,
+            Expr::Values(values) => values.0.null_count() > 0,
             Expr::Unary(UnaryOp::IsNa, _) => false,
             Expr::Unary(_, arg) | Expr::Head(arg, _) => self.may_be_null(arg),
             // Integer arithmetic overflows to NA, so it may always produce one.
@@ -2966,6 +3120,11 @@ impl Typer<'_> {
             Expr::Logical(_) => ColumnType::Logical,
             Expr::Character(_) => ColumnType::Character,
             Expr::Date(_) => ColumnType::Date,
+            Expr::Datetime { .. } => ColumnType::Datetime,
+            Expr::Values(values) => ColumnType::of(values.0.dtype()).ok_or_else(|| {
+                Error::Query(format!("a vector of {} is not a column", values.0.dtype()))
+            })?,
+            Expr::Call(function, args) => self.call(function, args)?,
             Expr::Na(kind) => *kind,
             Expr::Unary(UnaryOp::Not, arg) => {
                 expect_truthy(self.expr(arg)?, "`!`")?;
@@ -3021,7 +3180,7 @@ impl Typer<'_> {
                         ColumnType::Integer
                     }
                     Aggregate::Min | Aggregate::Max | Aggregate::First | Aggregate::Last => kind,
-                    Aggregate::Length => ColumnType::Integer,
+                    Aggregate::Length | Aggregate::Count => ColumnType::Integer,
                 }
             }
             Expr::Head(arg, _) => self.expr(arg)?,
@@ -3031,7 +3190,7 @@ impl Typer<'_> {
             }
             Expr::IfElse(test, yes, no) => {
                 expect_logical(self.expr(test)?, "an `ifelse` test")?;
-                supertype(self.expr(yes)?, self.expr(no)?)
+                if_else_type(yes, self.expr(yes)?, no, self.expr(no)?)
             }
             Expr::Rank { arg, .. } => {
                 self.expr(arg)?;
@@ -3045,6 +3204,42 @@ impl Typer<'_> {
             }
         })
     }
+
+    fn call(&self, function: &Function, args: &[Expr]) -> Result<ColumnType> {
+        let kinds = args
+            .iter()
+            .map(|arg| self.expr(arg))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(match (function, kinds.as_slice()) {
+            (Function::IsIn, [x, values]) => {
+                comparison(*x, *values)?;
+                ColumnType::Logical
+            }
+            (function, _) => {
+                return Err(Error::Query(format!(
+                    "`{}` takes {} arguments, not {}",
+                    function.name(),
+                    function.arity(),
+                    args.len()
+                )));
+            }
+        })
+    }
+}
+
+impl Function {
+    /// The name of the function in the `Expr` API, without the `Expr.` prefix.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Function::IsIn => "is_in",
+        }
+    }
+
+    fn arity(&self) -> usize {
+        match self {
+            Function::IsIn => 2,
+        }
+    }
 }
 
 /// The result type of R arithmetic: logical promotes to integer, and anything with a double is
@@ -3054,6 +3249,10 @@ fn arithmetic(left: ColumnType, right: ColumnType) -> Result<ColumnType> {
     match (left, right) {
         (ColumnType::Date, _) | (_, ColumnType::Date) => Err(Error::Query(
             "a date only takes `+` and `-` with a number of days, or `-` with another date"
+                .to_string(),
+        )),
+        (ColumnType::Datetime, _) | (_, ColumnType::Datetime) => Err(Error::Query(
+            "a date-time only takes `+` and `-` with a number of seconds, or `-` with another date-time"
                 .to_string(),
         )),
         (ColumnType::Character | ColumnType::Factor, _)
@@ -3067,7 +3266,8 @@ fn arithmetic(left: ColumnType, right: ColumnType) -> Result<ColumnType> {
 
 /// The result type of `+` or `-`, which also take dates: a date plus or minus a number of days is
 /// a date, and the difference of two dates is their distance in whole days, an integer, where R
-/// would give a `difftime`.
+/// would give a `difftime`. A date-time takes seconds the same way, and the difference of two
+/// date-times is their distance in seconds, a double.
 fn date_arithmetic(op: BinaryOp, left: ColumnType, right: ColumnType) -> Result<ColumnType> {
     let days = |kind| {
         matches!(
@@ -3077,6 +3277,9 @@ fn date_arithmetic(op: BinaryOp, left: ColumnType, right: ColumnType) -> Result<
     };
     match (op, left, right) {
         (BinaryOp::Subtract, ColumnType::Date, ColumnType::Date) => Ok(ColumnType::Integer),
+        (BinaryOp::Subtract, ColumnType::Datetime, ColumnType::Datetime) => Ok(ColumnType::Double),
+        (_, ColumnType::Datetime, other) if days(other) => Ok(ColumnType::Datetime),
+        (BinaryOp::Add, other, ColumnType::Datetime) if days(other) => Ok(ColumnType::Datetime),
         (_, ColumnType::Date, other) if days(other) => Ok(ColumnType::Date),
         (BinaryOp::Add, other, ColumnType::Date) if days(other) => Ok(ColumnType::Date),
         _ => arithmetic(left, right),
@@ -3085,13 +3288,30 @@ fn date_arithmetic(op: BinaryOp, left: ColumnType, right: ColumnType) -> Result<
 
 /// The type both of two column types coerce to, in R's order logical < integer < double <
 /// character. A factor joined with anything else becomes character.
+/// The type of `ifelse(test, yes, no)`: the branches' common type, except that a bare `NA`
+/// branch takes a date or date-time from the other branch instead of turning it into text.
+fn if_else_type(yes: &Expr, yes_kind: ColumnType, no: &Expr, no_kind: ColumnType) -> ColumnType {
+    match (yes, no) {
+        (Expr::Na(_), _) if is_temporal(no_kind) => no_kind,
+        (_, Expr::Na(_)) if is_temporal(yes_kind) => yes_kind,
+        _ => supertype(yes_kind, no_kind),
+    }
+}
+
+fn is_temporal(kind: ColumnType) -> bool {
+    matches!(kind, ColumnType::Date | ColumnType::Datetime)
+}
+
 fn supertype(left: ColumnType, right: ColumnType) -> ColumnType {
     fn rank(kind: ColumnType) -> u8 {
         match kind {
             ColumnType::Logical => 0,
             ColumnType::Integer => 1,
             ColumnType::Double => 2,
-            ColumnType::Character | ColumnType::Factor | ColumnType::Date => 3,
+            ColumnType::Character
+            | ColumnType::Factor
+            | ColumnType::Date
+            | ColumnType::Datetime => 3,
         }
     }
     if left == right {
@@ -3121,16 +3341,14 @@ fn expect_truthy(kind: ColumnType, what: &str) -> Result<()> {
 /// refused rather than compared wrongly.
 pub(crate) fn comparison(left: ColumnType, right: ColumnType) -> Result<ColumnType> {
     // Without this, a date against anything else would meet at character and compare as text.
-    if (left == ColumnType::Date) != (right == ColumnType::Date) {
-        let other = if left == ColumnType::Date {
-            right
-        } else {
-            left
-        };
-        return Err(Error::Query(format!(
-            "a Date compares only with a Date, not with {}",
-            other.name()
-        )));
+    for temporal in [ColumnType::Date, ColumnType::Datetime] {
+        if (left == temporal) != (right == temporal) {
+            let other = if left == temporal { right } else { left };
+            return Err(Error::Query(format!(
+                "a {temporal} compares only with a {temporal}, not with {}",
+                other.name()
+            )));
+        }
     }
     let textual = |kind| matches!(kind, ColumnType::Character | ColumnType::Factor);
     if (textual(left) && right == ColumnType::Double)
@@ -3173,6 +3391,9 @@ fn dtype(kind: ColumnType) -> DataType {
         // arm only casts a factor column onto itself.
         ColumnType::Character | ColumnType::Factor => DataType::String,
         ColumnType::Date => DataType::Date,
+        // The time zone only changes how a date-time prints, so a computed one has none, and
+        // comparisons and arithmetic read the instant.
+        ColumnType::Datetime => DataType::Datetime(TimeUnit::Microseconds, None),
     }
 }
 
@@ -3200,6 +3421,14 @@ impl Lowering<'_> {
             Expr::Logical(value) => lit(*value),
             Expr::Character(value) => lit(value.clone()),
             Expr::Date(days) => lit(*days).cast(DataType::Date),
+            Expr::Datetime { micros, zone } => lit(*micros).cast(DataType::Datetime(
+                TimeUnit::Microseconds,
+                TimeZone::opt_try_new(zone.clone())?,
+            )),
+            // Polars broadcasts a scalar, not a column of one value, such as a single factor.
+            Expr::Values(values) if values.0.len() == 1 => lit(values.0.clone()).first(),
+            Expr::Values(values) => lit(values.0.clone()),
+            Expr::Call(function, args) => self.call(function, args)?,
             Expr::Na(kind) => lit(polars::prelude::Null {}).cast(dtype(*kind)),
             Expr::Count => len().cast(DataType::Int32),
             Expr::Unary(UnaryOp::Not, arg) => self.logical(arg)?.not(),
@@ -3231,7 +3460,8 @@ impl Lowering<'_> {
                 }
                 // `na.rm = TRUE` drops `NaN` as well as `NA`. Polars' reductions skip nulls on
                 // their own, but `first` and `last` do not.
-                if *na_rm && kind == ColumnType::Double && *function != Aggregate::Length {
+                let drops_missing = *na_rm || *function == Aggregate::Count;
+                if drops_missing && kind == ColumnType::Double && *function != Aggregate::Length {
                     value = value.clone().filter(value.is_not_nan());
                 } else if *na_rm && matches!(function, Aggregate::First | Aggregate::Last) {
                     value = value.drop_nulls();
@@ -3270,11 +3500,14 @@ impl Lowering<'_> {
                     // The length of the argument, not of the group: a grouping column bound to
                     // its group's value has length one.
                     Aggregate::Length => value.len().cast(DataType::Int32),
+                    // With `na_rm` set, a double's `NaN`s are already dropped, as `is.na` counts
+                    // them missing.
+                    Aggregate::Count => value.count().cast(DataType::Int32),
                 };
                 let propagates = !na_rm
                     && !matches!(
                         function,
-                        Aggregate::First | Aggregate::Last | Aggregate::Length
+                        Aggregate::First | Aggregate::Last | Aggregate::Length | Aggregate::Count
                     );
                 if propagates && self.nulls.may_be_null(arg) {
                     when(self.expr(arg)?.null_count().gt(lit(0)))
@@ -3310,10 +3543,13 @@ impl Lowering<'_> {
                     ColumnType::Factor => value,
                     kind => convert(value, from, kind),
                 };
-                let (yes, no) = (
-                    branch(self.expr(yes)?, typer.expr(yes)?),
-                    branch(self.expr(no)?, typer.expr(no)?),
-                );
+                let lowered = |branch_expr: &Expr| -> Result<PolarsExpr> {
+                    Ok(match branch_expr {
+                        Expr::Na(_) if is_temporal(kind) => lit(NULL).cast(dtype(kind)),
+                        _ => branch(self.expr(branch_expr)?, typer.expr(branch_expr)?),
+                    })
+                };
+                let (yes, no) = (lowered(yes)?, lowered(no)?);
                 let test = self.expr(test)?;
                 // An `NA` test gives `NA`, where Polars would take the `no` branch.
                 when(test.clone().is_null())
@@ -3338,6 +3574,24 @@ impl Lowering<'_> {
             Expr::Window(arg, keys) => {
                 let keys: Vec<PolarsExpr> = keys.iter().map(|key| col(key.clone())).collect();
                 self.expr(arg)?.over(keys)?
+            }
+        })
+    }
+
+    fn call(&self, function: &Function, args: &[Expr]) -> Result<PolarsExpr> {
+        let typer = self.typer();
+        let kind = typer.call(function, args)?;
+        Ok(match (function, args) {
+            (Function::IsIn, [x, values]) => {
+                let target = comparison(typer.expr(x)?, typer.expr(values)?)?;
+                self.compared(x, target)?
+                    .is_in(self.compared(values, target)?.implode(false), true)
+            }
+            (function, _) => {
+                return Err(Error::Query(format!(
+                    "`{}` cannot give {kind}",
+                    function.name()
+                )));
             }
         })
     }
@@ -3372,6 +3626,8 @@ impl Lowering<'_> {
                 )
             }
             (ColumnType::Factor, kind) => convert(value, ColumnType::Factor, kind),
+            // Two date-times compare as instants, whatever time zones they print in.
+            (_, ColumnType::Datetime) => value.cast(DataType::Int64),
             _ => value.cast(dtype(kind)),
         })
     }
@@ -3386,6 +3642,27 @@ impl Lowering<'_> {
         let typer = self.typer();
         let (left_kind, right_kind) = (typer.expr(left)?, typer.expr(right)?);
         Ok(match op {
+            BinaryOp::Add | BinaryOp::Subtract if kind == ColumnType::Datetime => {
+                // A number of seconds becomes a duration in whole microseconds, and Polars adds
+                // it to the instant, keeping the date-time's time zone.
+                let seconds = |expr: &Expr| -> Result<PolarsExpr> {
+                    Ok((self.numeric(expr, ColumnType::Double)? * lit(1e6))
+                        .round(0, RoundMode::HalfToEven)
+                        .cast(DataType::Int64)
+                        .cast(DataType::Duration(TimeUnit::Microseconds)))
+                };
+                match (left_kind, op) {
+                    (ColumnType::Datetime, BinaryOp::Add) => self.expr(left)? + seconds(right)?,
+                    (ColumnType::Datetime, _) => self.expr(left)? - seconds(right)?,
+                    _ => self.expr(right)? + seconds(left)?,
+                }
+            }
+            BinaryOp::Subtract if left_kind == ColumnType::Datetime => {
+                let micros = |expr: &Expr| -> Result<PolarsExpr> {
+                    Ok(self.expr(expr)?.cast(DataType::Int64))
+                };
+                (micros(left)? - micros(right)?).cast(DataType::Float64) / lit(1e6)
+            }
             BinaryOp::Add | BinaryOp::Subtract if kind == ColumnType::Date => {
                 // Days are whole in a Polars date, so a fractional number of days is floored, as
                 // R's `format` of a fractional date shows the day it falls in.

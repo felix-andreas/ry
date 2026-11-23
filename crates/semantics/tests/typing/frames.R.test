@@ -12,7 +12,7 @@ labels: DataFrame{count: integer[], label: character[]}
 #---- a_list_column_types_as_the_vector_sharing_its_items
 prices <- DataFrame(id = [1, 2], price = [12.5, 9.99], name = ["a", "b"])
 #++++
-prices: DataFrame{id: List<I64>, price: double[], name: character[]}
+prices: DataFrame{id: integer[], price: double[], name: character[]}
 
 #---- a_list_column_reads_back_as_a_plain_vector
 prices <- DataFrame(price = [12.5, 9.99])
@@ -1251,6 +1251,101 @@ visits: DataFrame{id: integer[], day: Date}
 later: DataFrame{id: integer[], day: Date, due: Date, waited: integer[]}
 recent: DataFrame{id: integer[], day: Date}
 
+#---- date_time_columns_shift_by_seconds
+calls <- DataFrame(id = 1:2, at = as.POSIXct("2024-01-01 09:00:00", tz = "UTC") + c(0, 60))
+later <- calls |> DataFrame.with_columns(due = Expr.col("at") + 3600, waited = Expr.col("at") - Expr.col("at"))
+recent <- calls |> DataFrame.filter(Expr.col("at") >= as.POSIXct("2024-01-01 09:01:00", tz = "UTC"))
+#++++
+calls: DataFrame{id: integer[], at: POSIXct}
+later: DataFrame{id: integer[], at: POSIXct, due: POSIXct, waited: double[]}
+recent: DataFrame{id: integer[], at: POSIXct}
+
+#---- vectors_become_columns_and_filters
+sales <- DataFrame(region = c("eu", "us", "eu"), units = c(1L, 2L, 3L))
+weights <- c(0.5, 1, 2)
+labelled <- sales |> DataFrame.with_columns(weight = weights, one = 1, area = "region")
+label <- paste0(sales$region, "_", sales$units)
+unchecked <- sales |> DataFrame.with_columns(label = label)
+kept <- sales |> DataFrame.filter(c(TRUE, FALSE, TRUE), Expr.is_in(Expr.col("region"), c("eu", "asia")))
+flags <- sales |> DataFrame.select(Expr.is_in(Expr.col("units"), 2:3))
+#++++
+sales: DataFrame{region: character[], units: integer[]}
+weights: double[]
+labelled: DataFrame{region: character[], units: integer[], weight: double[], one: double[], area: character[]}
+label: character
+unchecked: DataFrame
+kept: DataFrame{region: character[], units: integer[]}
+flags: DataFrame{units: logical[]}
+
+#---- frames_stack_and_keep_distinct_rows
+first <- DataFrame(id = 1:2, name = c("a", "b"))
+second <- DataFrame(name = "c", id = 3.5)
+stacked <- DataFrame.concat(first, second)
+filled <- DataFrame.concat(first, DataFrame(id = 9L), how = "diagonal")
+wide <- DataFrame.concat(first, DataFrame(score = c(0.5, 1)), how = "horizontal")
+bound <- rbind(first, second)
+beside <- cbind(first, flag = c(TRUE, FALSE))
+distinct <- DataFrame.unique(first, "name", keep = "last")
+once <- unique(first)
+repeated <- duplicated(first)
+lazy_distinct <- DataFrame.lazy(first) |> LazyFrame.unique()
+#++++
+first: DataFrame{id: integer[], name: character[]}
+second: DataFrame{name: character[], id: double[]}
+stacked: DataFrame{id: double[], name: character[]}
+filled: DataFrame{id: integer[], name: character[]}
+wide: DataFrame{id: integer[], name: character[], score: double[]}
+bound: DataFrame{id: double[], name: character[]}
+beside: DataFrame{id: integer[], name: character[], flag: logical[]}
+distinct: DataFrame{id: integer[], name: character[]}
+once: DataFrame{id: integer[], name: character[]}
+repeated: logical
+lazy_distinct: LazyFrame{id: integer[], name: character[]}
+
+#---- unique_names_columns_the_frame_has
+first <- DataFrame(id = 1:2, name = c("a", "b"))
+distinct <- DataFrame.unique(first, "nmae")
+#++++
+first: DataFrame{id: integer[], name: character[]}
+distinct: Unknown
+85..91 error[type-mismatch] the frame `first` has no column `nmae`. Did you mean `name`?
+
+#---- unique_takes_its_subset_by_name
+first <- DataFrame(id = 1:2, name = c("a", "b"))
+both <- DataFrame.unique(first, subset = c("id", "name"))
+typo <- DataFrame.unique(first, subset = "nmae")
+#++++
+first: DataFrame{id: integer[], name: character[]}
+both: DataFrame{id: integer[], name: character[]}
+typo: Unknown
+148..154 error[type-mismatch] the frame `first` has no column `nmae`. Did you mean `name`?
+
+#---- frames_whose_column_types_do_not_meet_do_not_stack
+days <- DataFrame(d = as.Date("2024-01-01"))
+amounts <- DataFrame(d = 1.5)
+stacked <- DataFrame.concat(days, amounts)
+#++++
+days: DataFrame{d: Date}
+amounts: DataFrame{d: double[]}
+stacked: Unknown
+109..116 error[type-mismatch] column `d` is `Date` in one frame and `double[]` in another, so the frames do not stack
+
+#---- cbind_names_an_unnamed_vector_after_it
+first <- DataFrame(id = 1:2, name = c("a", "b"))
+score <- c(1.5, 2.5)
+bound <- cbind(first, score, deparse.level = 0)
+#++++
+first: DataFrame{id: integer[], name: character[]}
+score: double[]
+bound: DataFrame{id: integer[], name: character[], score: double[]}
+
+#---- an_na_branch_keeps_a_date_time
+times <- DataFrame(t = as.POSIXct("2024-01-01", tz = "UTC"))
+missing <- DataFrame.with_columns(times, u = Expr.if_else(Expr.col("t") > Expr.col("t"), Expr.col("t"), NA))
+#++++
+times: DataFrame{t: POSIXct}
+missing: DataFrame{t: POSIXct, u: POSIXct}
+
 #---- a_cross_join_appends_the_right_columns
 patients <- DataFrame(id = 1:2)
 visits <- DataFrame(visit = 1:3)
@@ -1337,7 +1432,15 @@ twice <- visits |> DataFrame.with_columns(x = Expr.col("day") * 2)
 #++++
 visits: DataFrame{day: Date}
 twice: Unknown
-101..120 error[type-mismatch] `*` is not defined between `Date` and `double`. A date adds or subtracts a number of days, subtracting two dates gives the days between them, and dates compare only with dates
+101..120 error[type-mismatch] `*` is not defined between `Date` and `double`. A date adds or subtracts a number of days and a date-time a number of seconds, subtracting two of the same kind gives the time between them, and each compares only with its own kind
+
+#---- a_date_time_column_compares_only_with_date_times
+calls <- DataFrame(at = as.POSIXct("2024-01-01 09:00:00", tz = "UTC"), day = as.Date("2024-01-01"))
+mixed <- calls |> DataFrame.filter(Expr.col("at") > Expr.col("day"))
+#++++
+calls: DataFrame{at: POSIXct, day: Date}
+mixed: Unknown
+135..167 error[type-mismatch] `>` is not defined between `POSIXct` and `Date`. A date adds or subtracts a number of days and a date-time a number of seconds, subtracting two of the same kind gives the time between them, and each compares only with its own kind
 
 #==== dataframe_expression_types
 #---- arithmetic_on_a_string_column_is_reported

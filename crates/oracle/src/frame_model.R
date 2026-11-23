@@ -117,15 +117,28 @@ Ops.Expr <- function(e1, e2) {
   }
 }
 
-Expr.sum <- .model_reduce(sum)
-Expr.mean <- .model_reduce(mean)
-Expr.median <- .model_reduce(median)
-Expr.min <- .model_reduce(min)
-Expr.max <- .model_reduce(max)
+# An aggregate that skips missing values (`NA` and `NaN`) unless `na_rm = FALSE`.
+.model_reduce_na <- function(reduce) {
+  force(reduce)
+  function(expr, na_rm = TRUE) {
+    expr <- .model_as_expr(expr)
+    .model_expr(function(columns, rows) {
+      values <- expr$evaluate(columns, rows)
+      reduce(if (na_rm) values[!is.na(values)] else values)
+    }, expr$name, TRUE)
+  }
+}
+
+Expr.sum <- .model_reduce_na(sum)
+Expr.mean <- .model_reduce_na(mean)
+Expr.median <- .model_reduce_na(median)
+Expr.min <- .model_reduce_na(min)
+Expr.max <- .model_reduce_na(max)
 Expr.first <- .model_reduce(function(values) values[1L])
 Expr.last <- .model_reduce(function(values) values[length(values)])
-Expr.std <- .model_reduce(sd)
-Expr.var <- .model_reduce(var)
+Expr.std <- .model_reduce_na(sd)
+Expr.var <- .model_reduce_na(var)
+Expr.count <- .model_reduce(function(values) sum(!is.na(values)))
 
 Expr.len <- function() .model_expr(function(columns, rows) as.integer(rows), NULL, TRUE)
 
