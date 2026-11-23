@@ -187,7 +187,7 @@ sales |> DataFrame.sort("region", "units", descending = c(FALSE, TRUE))
 4:     us     5   2.0    10.0
 ```
 
-## Windows, ranks, reshaping and dates
+## Windows, ranks, reshaping, stacking and dates
 
 | data.table | DataFrame |
 | --- | --- |
@@ -197,6 +197,10 @@ sales |> DataFrame.sort("region", "units", descending = c(FALSE, TRUE))
 | `CJ`-style pairing, or `dt[, .(v = 1:n), by = .(id)]` | `DataFrame.join(df, DataFrame(v = 1:n), how = "cross")` |
 | `dt[, due := day + 28L]` | `DataFrame.with_columns(df, due = Expr.col("day") + 28L)` |
 | `dt[, days := as.integer(due - day)]` | `DataFrame.with_columns(df, days = Expr.col("due") - Expr.col("day"))` |
+| `rbindlist(list(a, b))` | `DataFrame.concat(a, b)` |
+| `rbindlist(list(a, b), fill = TRUE)` | `DataFrame.concat(a, b, how = "diagonal")` |
+| `unique(dt, by = "g")` | `DataFrame.unique(df, "g")` |
+| `dt[g %in% values]` | `DataFrame.filter(df, Expr.is_in(Expr.col("g"), values))` |
 
 [Working with DataFrames](/reference/dataframes/#windows-and-ranks) shows each with its output.
 
@@ -297,6 +301,6 @@ Anything without an exact equivalent is left as it is rather than rewritten appr
   path and `stringsAsFactors`, and `data.table()` with `key`, `keep.rownames`, `check.names` or
   `stringsAsFactors`.
 
-Two differences remain after a rewrite. The DataFrame aggregations skip missing values, so
-`sum(units)` over a column with an `NA` gives a number instead of `NA`. `DataFrame.sort` places
+Two differences remain after a rewrite. The DataFrame aggregations skip missing values unless
+given `na_rm = FALSE`, so `sum(units)` over a column with an `NA` gives a number instead of `NA`. `DataFrame.sort` places
 missing values last, where `setorder()` places them first.
