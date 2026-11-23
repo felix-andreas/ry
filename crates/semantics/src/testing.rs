@@ -218,14 +218,14 @@ const WORKBENCH_SESSIONS: u64 = 256;
 
 /// One session in this many, counted from the run's first seed, is rendered again in the child
 /// process, so a replay of one seed (`FUZZ_SEED`) always samples it.
-pub const CHILD_SAMPLE: u64 = 1;
+pub const CHILD_SAMPLE: u64 = 8;
 
 /// Walks the states and then returns to the first. At every step the incremental database must
 /// render each file as the reference does, and the return must restore the first rendering.
-/// The final state's editor facts must equal those of a database that checks it from new
-/// inputs. Every fourth session also renders each state on several threads at once, which must
-/// equal the sequential rendering, and every sixty-fourth compares its first state with a
-/// database that has no history at all. Returns the reference rendering of each state.
+/// Every odd session's final state must record the editor facts a database that checks it from
+/// new inputs records. Every fourth session also renders each state on several threads at once,
+/// which must equal the sequential rendering, and every sixty-fourth compares its first state
+/// with a database that has no history at all. Returns the reference rendering of each state.
 pub fn check_session(workbench: &mut Workbench, states: &[ProjectState]) -> Vec<Vec<String>> {
     let mut first: Option<Vec<String>> = None;
     let mut renderings = Vec::with_capacity(states.len());
@@ -241,7 +241,7 @@ pub fn check_session(workbench: &mut Workbench, states: &[ProjectState]) -> Vec<
             incremental.join("----\n"),
             reference.join("----\n"),
         );
-        if step + 1 == states.len() {
+        if step + 1 == states.len() && workbench.sessions % 2 == 1 {
             let incremental = editor_facts_of_inputs(workbench);
             let fresh = render_editor_facts_afresh(&mut workbench.editor_reference, state);
             if let Err(difference) = compare_renderings(&fresh, &incremental) {

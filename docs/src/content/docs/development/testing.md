@@ -373,8 +373,8 @@ On every state the harness checks:
   with a database that has analyzed nothing before.
 - **The output does not depend on interning order.** `Ty` and `Symbol` ids are process-global, so
   every database of one process agrees on them and no comparison inside it can see output that
-  sorts by an id. After the run, one child process of the same test binary renders every session
-  again (`CHILD_SAMPLE` sets the share). It interns the sessions' words before the stubs', each list
+  sorts by an id. After the run, one child process of the same test binary renders every eighth
+  session again (`CHILD_SAMPLE`; a replay of one seed always samples it). It interns the sessions' words before the stubs', each list
   in reverse, and checks sessions, states, files and items in reverse, which flips the order of
   almost every pair of ids. Its renderings must equal the parent's. The child takes its seeds from
   the parent through `FUZZ_INTERNING_CHILD`, and a failure prints the command that replays the
@@ -382,10 +382,10 @@ On every state the harness checks:
 - **A parallel check equals the sequential one.** Every fourth session also checks each state on
   three threads, each a handle of the warm reference database with new inputs, checking the items
   in a different rotation, and every thread's rendering must equal the reference.
-- **The editor facts equal a fresh check's.** On a session's last state, every fact the incremental
-  database's checks recorded for the editor (each expression's and pattern's type as hover renders
-  it, literal expectations, loop variables, selected overloads, callee targets) must equal what the
-  editor reference records from new inputs.
+- **The editor facts equal a fresh check's.** On every second session's last state, every fact
+  the incremental database's checks recorded for the editor (each expression's and pattern's type
+  as hover renders it, literal expectations, loop variables, selected overloads, callee targets)
+  must equal what the editor reference records from new inputs.
 
 In debug builds the checker also asserts, for every item it checks, that each type it records for
 the editor resolves in the item's own inference table, and that it is the checked type resolved

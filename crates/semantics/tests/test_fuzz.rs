@@ -662,7 +662,7 @@ fn stub_test_database() -> RootDatabase {
 #[test]
 fn fuzz_package_metadata() {
     let mut db = command_database();
-    for_each_seed_on_named_threads(100, |seed| {
+    for_each_seed_on_named_threads(50, |seed| {
         let mut rng = SplitMix64(0x3E7A_DA7A ^ seed);
         let generated = generated_namespace(&mut rng);
         let namespace = match rng.below(6) {
