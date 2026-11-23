@@ -2626,10 +2626,11 @@ a shipped stub does. That is also how the class satisfies the arithmetic require
 defines no arithmetic method. Passing two to `function(a, b) a + b` needs a method whose first two
 operands both take a `Money`, as `function(e1: Money, e2: Money)` does.
 
-R also dispatches on a class that `class(x) <- "string"` sets on a plain list, and no type tracks
-that attribute. So when the project defines an arithmetic or `Ops` method for a class that no type
-declares, arithmetic with a list operand is left to that method: `result + "text"` on such a list,
-and the rest of a chain `result + a + b`, give `Unknown` and report nothing. Without such a method,
+R also dispatches on a class that `class(x) <- "string"` sets on a plain list or an environment
+(ggplot2's ggproto objects are classed environments), and no type tracks that attribute. So when the
+project defines an arithmetic or `Ops` method for a class that no type declares, arithmetic with a
+list or environment operand is left to that method: `result + "text"` on such a list, and the rest
+of a chain `result + a + b`, give `Unknown` and report nothing. Without such a method,
 `list(a = 1) + 1` is a type error, as it is in R.
 
 `c()` dispatches the same way. A class that declares a `c.Class` method keeps its class through
@@ -3009,7 +3010,11 @@ Arguments are checked for compatibility, not exact equality:
   base `var` and compares the number, and `lapply(chunks, op, n)` beside `op == "tail"` accepts a
   string `op`. A formal used only as a function, as in `each <- function(f) lapply(list(1, 2), f)`,
   still infers as `fn(double) -> T`.
-- An argument bound to a formal that the callee reads only through `substitute()` is code the callee captures, not a value, so it is not typed in the caller's frame.
+- An argument bound to a formal that the callee reads only through `substitute()`, or rlang's
+  `enquo()`, `enquo0()`, `enexpr()` or `ensym()`, is code the callee captures, not a value, so it is
+  not typed in the caller's frame. An exclusion by name, `-"value"`, passed to a library function no
+  stub types is captured code too, because R rejects it as a value, so
+  `dplyr::select(data, -"value")` reports nothing.
   withr's `wrap <- function(f, pre) { pre <- substitute(pre); ... }` splices `pre` into a function
   that takes `f`'s formals, so `wrap(sink_to, { if (append) "a" else "w" })` reads `sink_to`'s
   `append`, not base's `append`. A callee that also evaluates the formal checks the argument as usual,
@@ -3169,7 +3174,9 @@ join does not merge or coerce branch types beyond unification; it records the al
   are both fine. The parameters of a function passed as a call argument are the exception: the
   callee supplies them, so its signature decides how they relate, and two open branches over them
   are tied. In `Reduce(function(best, x) if (x > best) x else best, xs, 0)` the callback returns
-  the accumulator's type.
+  the accumulator's type. A callback that returns the union of two such open types still fits a
+  callee that wants one of them, and the other ties to it, so with `bind_pair` returning either of
+  its arguments, `Reduce(function(x, y) bind_pair(x, y), parts)` is accepted.
 - An `Unknown` branch makes the whole conditional `Unknown`, so `if (flag) 1L else df$count` is
   `Unknown`. The exception is a branch whose `Unknown` comes from a recursive call the checker is
   still working out: it joins as the other branch, which is how `fact` converges.
@@ -3978,7 +3985,9 @@ Definite assignment follows four rules:
   is safe.
 - A `repeat` is left through its `break` points, so one that always assigns before breaking reports
   nothing, and nothing after a `repeat` without a `break` is reachable. A branch that cannot fall
-  through contributes no path.
+  through contributes no path, and neither does a block after a statement that cannot fall
+  through, so a definition written after `stop()` never binds and a later read of it is
+  maybe-undefined.
 - A read that no write can reach does not resolve to the variable at all (see the shadowing rule
   under [value names](#value-names)).
 - A top-level variable is different, because a path without a write reaches the enclosing
@@ -4772,6 +4781,11 @@ out of the parts decided at run time from a value's class attribute:
 - A directly called S3 method, such as `speak.dog(x)`, is an ordinary call, checked against that
   function's own signature.
 - `UseMethod("speak")`, and any call to an S3 generic, gives `Any`, with no strict-mode finding.
+- A base generic that a stub types by its default method, such as `str` or `print`, gives `Unknown`
+  when the package registers its own method for it (`S3method(str, Logger)`) and the first argument
+  may carry a class: anything but an atomic vector, `NULL` or a function, or any parameter of the
+  enclosing function, since a parameter's type says nothing about its class attribute. The
+  registered method decides the result, not the stub.
 - `structure(list(...), class = "dog")` keeps the argument's type, because a `class` attribute is
   data, not a type, so the record's fields stay checkable. A `dim` attribute is the exception: it
   makes the value an array, whose shape is not tracked, so such a value is `Unknown`.
