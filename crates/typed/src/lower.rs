@@ -109,6 +109,9 @@ pub enum RResult {
     /// The call is one of the table API's that gives a table value
     /// ([`gives_table_value`]), which the code holds as it is.
     Table,
+    /// The site reads the global variable its `call` names, which must hold a value of this type
+    /// each time the code runs. It calls nothing.
+    Global(Type),
 }
 
 /// An argument of an [`RCall`], written as `code`.
@@ -181,6 +184,8 @@ pub enum Awaited {
     /// The forcing of this lazy-load promise, which a namespace binds a function to until the
     /// first use reads it from the package database.
     Promise(Sexp),
+    /// A binding of this symbol that a lookup from this environment finds.
+    Binding(Sexp, Sexp),
 }
 
 /// Whether the interpreter has done what `awaited` waits for.
@@ -189,6 +194,7 @@ pub unsafe fn arrived(awaited: Awaited) -> bool {
         Awaited::Conversion(call) => interp::numbers::observed_conversion(call).is_some(),
         Awaited::Namespace(package) => loaded_namespace(package).is_some(),
         Awaited::Promise(promise) => promise.car() != rvalues::unbound(),
+        Awaited::Binding(symbol, env) => !matches!(global_binding(symbol, env), Global::Unbound),
     }
 }
 
@@ -664,31 +670,84 @@ impl Lowering<'_> {
         }
     }
 
-    /// A constant of the standard library, such as `Num.pi`, read as its value for as long as
-    /// the lookup finds that binding.
+    /// A read of `symbol` from outside the function: a constant of the standard library, such
+    /// as `Num.pi`, read as its value for as long as the lookup finds that binding, or else a
+    /// global that holds a ry value.
     unsafe fn library_constant(&mut self, symbol: Sexp) -> Result<Local, Refusal> {
+        // Locals are bound as lowering reaches their assignment, so a read that a loop runs
+        // again after a later assignment of the same name would keep reading the outside one.
+        if assigns(interp::bytecode::closure_body(self.closure), symbol)
+            || self
+                .inlining
+                .iter()
+                .any(|&function| assigns(interp::bytecode::closure_body(function), symbol))
+        {
+            return Err(Refusal(Cow::Owned(format!(
+                "it reads `{}` from outside the function before it assigns it: give the local \
+                 another name",
+                rvalues::symbol_name(symbol)
+            ))));
+        }
         // `package:std` binds the very object the builtins environment was created with, and
         // that object is shared, so nothing modifies it in place.
         let original = interp::standard_library::builtins_env()
             .and_then(|env| interp::heap().frame_cell(env, symbol))
             .map(|cell| cell.cdr());
-        let found = resolve_value(symbol, self.env)
-            .filter(|speculation| original == Some(speculation.function));
-        let Some(speculation) = found else {
-            return Err(Refusal(Cow::Owned(format!(
-                "it reads `{}`, which is neither one of its locals nor a standard library \
-                 constant: pass the value in as a parameter",
-                rvalues::symbol_name(symbol)
-            ))));
-        };
-        // Locals are bound as lowering reaches their assignment, so a read that a loop runs
-        // again after a later assignment of the same name would keep reading the constant.
-        if assigns(interp::bytecode::closure_body(self.closure), symbol) {
-            return Err(Refusal::new("a library constant the function assigns"));
+        match resolve_value(symbol, self.env) {
+            Some(speculation) if original == Some(speculation.function) => {
+                let local = self.constant(speculation.function)?;
+                self.speculations.push(speculation);
+                Ok(local)
+            }
+            _ => self.global(symbol),
         }
-        let local = self.constant(speculation.function)?;
-        self.speculations.push(speculation);
-        Ok(local)
+    }
+
+    /// A read of the global `symbol`, which holds a ry value. The code reads the binding each
+    /// time it runs, so it sees a rebinding, and the value must keep the type it holds here.
+    unsafe fn global(&mut self, symbol: Sexp) -> Result<Local, Refusal> {
+        let name = rvalues::symbol_name(symbol);
+        let value = match global_binding(symbol, self.env) {
+            Global::Value(value) => value,
+            Global::Unbound => {
+                AWAITED.set(Some(Awaited::Binding(symbol, self.env)));
+                return Err(Refusal(Cow::Owned(format!(
+                    "{AWAITING}{name} <- ...` once, which binds the global `{name}` it reads"
+                ))));
+            }
+            Global::Enclosing => {
+                return Err(Refusal(Cow::Owned(format!(
+                    "it reads `{name}` from an enclosing function: pass the value in as a \
+                     parameter"
+                ))));
+            }
+            Global::Promise(promise) => {
+                AWAITED.set(Some(Awaited::Promise(promise)));
+                return Err(Refusal(Cow::Owned(format!(
+                    "{AWAITING}{name}` once, which loads the value of the global"
+                ))));
+            }
+            Global::Active => {
+                return Err(Refusal(Cow::Owned(format!(
+                    "it reads `{name}`, an active binding, which runs R code when it is read: \
+                     pass the value in as a parameter"
+                ))));
+            }
+        };
+        let ty = crate::type_of(value).filter(|&ty| reads_globally(ty)).ok_or_else(|| {
+            Refusal(Cow::Owned(format!(
+                "it reads the global `{name}`, which holds a value native code does not read from \
+                 a global: pass the value in as a parameter"
+            )))
+        })?;
+        Ok(self.r_site(
+            symbol,
+            rvalues::nil(),
+            (RUse::Unused, RResult::Global(ty)),
+            true,
+            SmallVec::new(),
+            SmallVec::new(),
+        ))
     }
 
     unsafe fn assign(&mut self, symbol: Sexp, value: Local) -> Result<Local, Refusal> {
@@ -1316,6 +1375,7 @@ impl Lowering<'_> {
                 dest
             }
             RResult::Table => self.builder.emit(Type::Table, Op::CallR(site, values)),
+            RResult::Global(ty) => self.builder.emit(ty, Op::CallR(site, values)),
         }
     }
 
@@ -7084,6 +7144,74 @@ pub unsafe fn resolve_function(symbol: Sexp, start: Sexp) -> Option<Speculation>
 
 /// Walks from `start` to the binding a variable lookup of `symbol` finds, giving up at a promise
 /// or an active binding. The speculation's `function` is the bound value.
+/// What a read of a variable from outside a typed function finds.
+pub enum Global {
+    /// The value of a binding in the global environment, a namespace or a package on the
+    /// search path.
+    Value(Sexp),
+    Unbound,
+    /// A binding in the frame of an enclosing function.
+    Enclosing,
+    /// A promise not yet forced, such as a lazy-load promise of a package's variable.
+    Promise(Sexp),
+    /// An active binding, whose read calls R.
+    Active,
+}
+
+/// What a read of `symbol` from `start` finds, outside the typed function whose environment
+/// `start` is.
+pub unsafe fn global_binding(symbol: Sexp, start: Sexp) -> Global {
+    let heap = interp::heap();
+    let known = heap.known();
+    let mut env = start;
+    while env != known.empty_env {
+        if let Some(cell) = heap.frame_cell(env, symbol) {
+            if env != known.global_env && !interp::envir::is_namespace(env) && !on_search_path(env)
+            {
+                return Global::Enclosing;
+            }
+            if cell.has_gp(heap::object::gp::ACTIVE_BINDING) {
+                return Global::Active;
+            }
+            let value = cell.cdr();
+            if value.kind() != SexpType::Promise {
+                return Global::Value(value);
+            }
+            if value.car() == rvalues::unbound() {
+                return Global::Promise(value);
+            }
+            return Global::Value(value.car());
+        }
+        env = env.enclosure();
+    }
+    Global::Unbound
+}
+
+/// Whether `env` is the global environment or an environment after it on the search path.
+unsafe fn on_search_path(env: Sexp) -> bool {
+    let known = interp::heap().known();
+    let mut search = known.global_env;
+    while search != known.empty_env {
+        if search == env {
+            return true;
+        }
+        search = search.enclosure();
+    }
+    false
+}
+
+/// Whether native code reads a global of type `ty`, the types a variable from R takes that are
+/// ry values: a number, a `Bool`, a `Str`, a list of them, or a table value.
+pub fn reads_globally(ty: Type) -> bool {
+    match ty {
+        Type::Dbl | Type::I64 | Type::Lgl | Type::Str | Type::Table => true,
+        Type::Vector { item, array } => {
+            array && matches!(item, Item::Dbl | Item::I64 | Item::Lgl | Item::Str)
+        }
+        _ => false,
+    }
+}
+
 pub unsafe fn resolve_value(symbol: Sexp, start: Sexp) -> Option<Speculation> {
     let heap = interp::heap();
     let mut env = start;

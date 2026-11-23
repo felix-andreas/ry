@@ -383,3 +383,67 @@ env RY_JIT off
 run ry run --runtime ry arguments.R
 expect exit 0
 expect stdout "   region units\n   <char> <num>\n1:  south     2\n   region units\n   <char> <num>\n1:  north     1\n2:  south     2\n   region units\n   <char> <num>\n1:  north     1\n2:  south    NA\n[1] \"q-jan-NA-0+2i q-feb-NA-0+2i\""
+unset RY_JIT
+
+# A global that holds an `F64`, a `Str` or another value native code reads is read where the code
+# runs, so the calls after `rate` and `limit` are rebound see the new values. Compiled ahead of
+# time, a function that reads a global the script has not bound yet compiles at its first call.
+# Every way the program runs, it prints the same.
+
+file globals.R
+| alias Sales = DataFrame{region: character, units: double}
+| rate: F64 <- 0.25
+| label: Str <- "total"
+| limit: F64 <- 1.5
+| taxed <- function(amount: F64) -> F64 amount * (1 + rate)
+| named <- function(suffix: Str) -> Str Str.concat(label, suffix)
+| large <- function(sales: Sales) -> Sales {
+|   sales |> DataFrame.filter(Expr.col("units") > Num.to_r(limit))
+| }
+| sales <- DataFrame(region = c("north", "south"), units = c(1, 2))
+| print(taxed(100))
+| print(named("!"))
+| print(large(sales))
+| rate <- 0.5
+| limit <- 0.5
+| print(taxed(100))
+| print(large(sales))
+
+run ry check globals.R
+expect exit 0
+
+run ry run --runtime ry globals.R
+expect exit 0
+expect stdout "[1] 125\n[1] \"total!\"\n   region units\n   <char> <num>\n1:  south     2\n[1] 150\n   region units\n   <char> <num>\n1:  north     1\n2:  south     2"
+expect stderr "typed: compiled for [Dbl] -> Dbl"
+expect stderr "typed: compiled for [Str] -> Str"
+expect stderr "typed: compiled for [Table] -> Table"
+expect stderr lacks "runs in the interpreter"
+
+run ry run --runtime ry --aot globals.R
+expect exit 0
+expect stdout "[1] 125\n[1] \"total!\"\n   region units\n   <char> <num>\n1:  south     2\n[1] 150\n   region units\n   <char> <num>\n1:  north     1\n2:  south     2"
+expect stderr "typed: `taxed` is not compiled ahead of time for [Dbl]: it waits on the interpreter to run `rate <- ...` once, which binds the global `rate` it reads"
+expect stderr "typed: compiled for [Dbl] -> Dbl"
+expect stderr lacks "runs in the interpreter"
+
+env RY_JIT off
+run ry run --runtime ry globals.R
+expect exit 0
+expect stdout "[1] 125\n[1] \"total!\"\n   region units\n   <char> <num>\n1:  south     2\n[1] 150\n   region units\n   <char> <num>\n1:  north     1\n2:  south     2"
+unset RY_JIT
+
+# A global that R code rebinds to a value of another type, which the checker does not see, stops
+# the compiled code with an error.
+
+file loose/retyped.R
+| rate: F64 <- 0.25
+| taxed <- function(amount: F64) -> F64 amount * (1 + rate)
+| print(taxed(100))
+| assign("rate", c(1, 2))
+| print(taxed(100))
+
+run ry run --runtime ry loose/retyped.R
+expect exit 1
+expect stdout "[1] 125"
+expect stderr "the global `rate` must be `F64`, the type it had when the typed function compiled, not a `double` vector of length 2"

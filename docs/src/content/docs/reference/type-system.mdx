@@ -5423,6 +5423,27 @@ print(simulate(4, "noise"))
 An operator applied to ry values is native. So is an operator with an `Expr` operand, which builds
 a bigger expression, and its other operand may be an R literal: `Expr.col("units") > 3L`.
 
+A native function reads a global that holds an `F64`, an `I64`, a `Bool`, a `Str`, a `List` of
+one of them, or a table value. The compiled code reads the binding each time it runs, so a call
+after the global is rebound sees the new value:
+
+```r
+rate: F64 <- 0.25
+taxed <- function(amount: F64) -> F64 amount * (1 + rate)
+print(taxed(100))
+rate <- 0.5
+print(taxed(100))
+```
+
+```text ry check typing strict exact
+1 file checked, no problems
+```
+
+The second call prints `150`. A global that R code rebinds to a value of another type, as
+`assign("rate", "high")` does without a finding, stops the compiled code with an error that names
+the global and both types. With `ry run --aot`, a function that reads a global the script has not
+bound yet compiles at its first call instead of before the script starts.
+
 #### What is reported
 
 Each function is judged on its own body, so a function that calls a blocked native function gets no
@@ -5563,7 +5584,7 @@ interpreted
 | a `Dict` whose keys or values are not `I64`, `F64` or `Str` | keep the values in a `List` and store their positions |
 | `try` | `match` on the result, and return the `:Err` from its arm |
 | a `match` on a list or a scalar (so every list pattern), a nested pattern, and an arm with an `if` guard | match a tag, a record or a tuple, and test inside the arm |
-| a read of a global that holds a ry value, or of a variable of an enclosing boundary function | pass the value in as a parameter |
+| a read of a global that holds a record, a tuple, a tag, a `Dict` or a `Set`, or of a variable of an enclosing boundary function | pass the value in as a parameter |
 | a function that ends in a loop or another expression whose value R returns invisibly | end with the value, or with `NULL` |
 
 The rule covers the function's body. How R code calls a native function is not checked, so these

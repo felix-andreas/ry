@@ -438,16 +438,36 @@ NULL
 
 #---- global_that_holds_a_ry_value
 #~~~~ script.R
-# blocked: taxed
+# Native code reads a global that holds a number, a `Bool`, a `Str`, a list of them or a table
+# value where it runs.
 rate: F64 <- 0.2
-taxed <- function(amount: F64) -> F64 amount * (1 + rate)
-cat(taxed(100), "\n")
+label: Str <- "total"
+weights: List<F64> <- [1.5, 2.5]
+taxed <- function(amount: F64) -> F64 amount * (1 + rate) * List.sum(weights)
+named <- function(suffix: Str) -> Str Str.concat(label, suffix)
+cat(taxed(100), Num.to_r(Str.count_utf8_bytes(named("!"))), "\n")
 #++++
 == script.R
 rate: F64
+label: Str
+weights: List<F64>
 taxed: fn(amount: F64) -> F64
+named: fn(suffix: Str) -> Str
 NULL
-86..90 warning[interpreted] this function runs in the interpreter, because reading the global `rate` is not compiled natively yet. Pass the value in as a parameter
+
+#---- global_that_holds_a_record
+#~~~~ script.R
+# blocked: shifted
+alias Point = Record{x: F64, y: F64}
+origin: Point <- (x = 1, y = 2)
+shifted <- function(dx: F64) -> F64 origin$x + dx
+cat(shifted(1), "\n")
+#++++
+== script.R
+origin: Point
+shifted: fn(dx: F64) -> F64
+NULL
+124..130 warning[interpreted] this function runs in the interpreter, because reading the global `origin` is not compiled natively yet. Pass the value in as a parameter
 
 #---- variable_of_an_enclosing_boundary_function
 #~~~~ script.R

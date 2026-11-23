@@ -1,4 +1,5 @@
-# blocked: taxed
-rate: F64 <- 0.2
-taxed <- function(amount: F64) -> F64 amount * (1 + rate)
-cat(taxed(100), "\n")
+# blocked: shifted
+alias Point = Record{x: F64, y: F64}
+origin: Point <- (x = 1, y = 2)
+shifted <- function(dx: F64) -> F64 origin$x + dx
+cat(shifted(1), "\n")

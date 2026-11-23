@@ -639,6 +639,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Whole-number ranges decide which checks typed code needs
 - An R vector with `NA` converts through `List.from_r_or` or `List.from_r_missing`
 - An R call's argument passes R literals and outside variables as code
+- Native code reads a ry-typed global where it runs
 
 ## DataFrame and the table engine
 

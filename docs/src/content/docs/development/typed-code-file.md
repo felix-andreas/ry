@@ -125,9 +125,11 @@ The metadata tables are:
   class of what it found (below).
 - **`sites`**: per R call site, every field of its `RCall`: the environment, where the call stands
   (the closure whose body holds it, which is the version's own or one a lookup finds, and the item
-  positions from the body to it), the called function's lookup, per argument its tag, its code and what compiled code passes for it (a native value
-  of a type, with its conversion, or the code itself, which R evaluates), how the result is used,
-  and the flags `diverges` and `effect_free`.
+  positions from the body to it), the called function's lookup, per argument its tag, its code and
+  what compiled code passes for it (a native value of a type, with its conversion, or the code
+  itself, which R evaluates), how the result is used, and the flags `diverges` and `effect_free`.
+  A read of a global is a site too: its call is the global's symbol, it has no function lookup,
+  and its result is the type the global must hold each time the code reads it.
 - **`callees`**: per typed function a version calls, its lookup, the signature the caller compiled
   against, and whether it is a version of this file (a direct call) or reached through a `Callee`
   slot.

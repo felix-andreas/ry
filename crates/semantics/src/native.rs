@@ -1618,10 +1618,25 @@ impl<'a, 'db> Judge<'a, 'db> {
             }
         } else if enclosing {
             NativeBlockerKind::Uncompiled(Uncompiled::EnclosingRead(name))
+        } else if ty.is_some_and(|ty| self.reads_globally(ty)) {
+            return;
         } else {
             NativeBlockerKind::Uncompiled(Uncompiled::GlobalRead(name))
         };
         self.block(id, kind);
+    }
+
+    /// Whether native code reads a global of type `ty` where it runs: an `F64`, `I64`, `Bool` or
+    /// `Str`, a `List` of them, or a table value. The typed core takes the type from the value
+    /// it finds, and a record, a tuple, a tag, a `Dict` or a `Set` from R has none it can read.
+    fn reads_globally(&self, ty: Ty<'db>) -> bool {
+        let db = self.judged.db;
+        let ty = self.peel(ty);
+        let scalar = |ty: Ty<'db>| matches!(ty.kind(db), TyKind::Native(_));
+        scalar(ty)
+            || array_element(db, ty).is_some_and(|item| scalar(self.peel(item)))
+            || matches!(ty.kind(db), TyKind::Frame(..))
+            || matches!(ty.kind(db), TyKind::Named(name, _) if name.text(db) == "Expr")
     }
 
     /// The `from_r` that takes an R value of type `ty`.

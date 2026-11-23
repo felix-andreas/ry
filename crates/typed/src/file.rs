@@ -769,7 +769,8 @@ pub struct Place {
 pub struct Site {
     pub env: EnvRef,
     pub call: Place,
-    pub function: u32,
+    /// The lookup of the function the site calls, and `None` for a read of a global.
+    pub function: Option<u32>,
     pub arguments: Vec<Argument>,
     pub result: SiteResult,
     pub diverges: bool,
@@ -803,6 +804,7 @@ pub enum SiteResult {
     Unused,
     Converted(FileConversion, Type),
     Table,
+    Global(Type),
 }
 
 /// A typed function a version calls, found by `lookup`.
@@ -1303,11 +1305,18 @@ impl Encoder<'_> {
                 self.shapes.ty(ty).map_err(|_| UNNAMED_SHAPE)?,
             ),
             RResult::Table => SiteResult::Table,
+            RResult::Global(ty) => {
+                SiteResult::Global(self.shapes.ty(ty).map_err(|_| UNNAMED_SHAPE)?)
+            }
+        };
+        let function = match site.result {
+            RResult::Global(_) => None,
+            _ => Some(identify(site.function).ok_or(UNNAMED_FUNCTION)?),
         };
         Ok(Site {
             env: self.env(site.env).ok_or(UNNAMED_CODE)?,
             call: locate(site.call).ok_or(UNPLACED_CODE)?,
-            function: identify(site.function).ok_or(UNNAMED_FUNCTION)?,
+            function,
             arguments,
             result,
             diverges: site.diverges,
@@ -1680,7 +1689,7 @@ fn encode_metadata(parsed: &Parsed) -> Vec<u8> {
     for site in &parsed.sites {
         out.env(&site.env);
         out.place(&site.call);
-        out.number(u64::from(site.function));
+        out.option(site.function);
         out.number(site.arguments.len() as u64);
         for argument in &site.arguments {
             out.option(argument.tag);
@@ -1706,6 +1715,10 @@ fn encode_metadata(parsed: &Parsed) -> Vec<u8> {
                 out.ty(*ty);
             }
             SiteResult::Table => out.number(2),
+            SiteResult::Global(ty) => {
+                out.number(3);
+                out.ty(*ty);
+            }
         }
         out.number(u64::from(site.diverges) | u64::from(site.effect_free) << 1);
     }
@@ -2176,7 +2189,7 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
     for _ in 0..count {
         let env = input.env(strings)?;
         let call = input.place(lookups)?;
-        let function = input.index(lookups)?;
+        let function = input.option(lookups)?;
         let length = input.count()?;
         let mut arguments = Vec::with_capacity(length);
         for _ in 0..length {
@@ -2201,6 +2214,7 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
                 SiteResult::Converted(conversion, input.ty(&parsed.shapes)?)
             }
             2 => SiteResult::Table,
+            3 => SiteResult::Global(input.ty(&parsed.shapes)?),
             _ => return Err(MALFORMED),
         };
         let flags = input.number()?;
@@ -3186,9 +3200,14 @@ unsafe fn build_site_inner(
             live_type(*ty, &mapped.live),
         ),
         SiteResult::Table => RResult::Table,
+        SiteResult::Global(ty) => RResult::Global(live_type(*ty, &mapped.live)),
+    };
+    let function = match site.function {
+        Some(lookup) => found(mapped, resolved, lookup)?.function,
+        None => rvalues::nil(),
     };
     Ok(RCall {
-        function: found(mapped, resolved, site.function)?.function,
+        function,
         call: placed(&site.call, resolved)?,
         env: live_env(mapped, &site.env)
             .ok_or("an R call it makes runs in a missing environment")?,
@@ -3461,9 +3480,10 @@ pub mod testing {
                         },
                     })
                     .collect();
-                let result = match below(3) {
+                let result = match below(4) {
                     0 => SiteResult::Unused,
                     1 => SiteResult::Converted(conversion(&mut below), Type::I64),
+                    2 => SiteResult::Global(Type::Str),
                     _ => SiteResult::Table,
                 };
                 let call = place(&mut below);
@@ -3473,7 +3493,10 @@ pub mod testing {
                 let site = Site {
                     env: random_env(entropy, strings),
                     call,
-                    function: entropy.below(lookups) as u32,
+                    function: match result {
+                        SiteResult::Global(_) => None,
+                        _ => Some(entropy.below(lookups) as u32),
+                    },
                     arguments,
                     result,
                     diverges: entropy.chance(1, 2),
