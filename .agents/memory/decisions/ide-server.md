@@ -301,3 +301,11 @@ The Zed extension bundles no binary: it locates `ry` at run time through the LSP
 
 - **Shape.** The checker maps the variables its root generalization turned into binders (`root_binders`) and the editor facts name them (`editor_type`), so a local typed by the signature's `T` hovers and hints as `T` instead of an anonymous variable. Hover and inlay hints letter such a type with the item's binders (`renderer_within`), so the second parameter's local reads `U` as the signature does. The renderer is seeded only when the type holds a rigid parameter, so an unrelated generic type keeps its own lettering.
 - **The annotation action** offers a local's `T` only under a written signature, where the body annotation can name it; under an inferred signature it offers nothing, because no binder names `T`.
+
+## `# ry: expect(code)` reports when its finding is gone
+
+**Status:** built (`suppress` in `crates/ry/src/diagnostics.rs`).
+
+- `expect` covers the same lines as `allow` (its own and the next) and suppresses the same way, but a code it names that matches no finding there reports `unfulfilled-expect`, a warning at the directive. This is TypeScript's `@ts-expect-error` for every code, so a suppressed false report or a test of a rejection cannot outlive the problem.
+- Only a complete finding set can judge an expectation, so `settle_suppressions` runs on the CLI's findings and the server's settled wave, and `apply_suppressions` (no judging) on preflight and the first wave, which lack the semantic codes. Judging there would flash a stale-expectation warning on every keystroke.
+- Each code is judged separately, so `expect(a, b)` with only `a` present names `b` alone in the message. `nolint` and `allow` never judge, because lintr's and ry's existing comments were written without that promise.

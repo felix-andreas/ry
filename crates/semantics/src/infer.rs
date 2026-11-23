@@ -401,7 +401,7 @@ impl<'db> InferenceTable<'db> {
         {
             return Err(UnifyError::Mismatch(ty, bound));
         }
-        if constraint == Constraint::Numeric
+        if matches!(constraint, Constraint::Numeric | Constraint::Arithmetic)
             && let TyKind::Vector(element) | TyKind::NamedVector(element) = ty.kind(db)
             && let TyKind::Var(element) = self.shallow_resolve(db, *element).kind(db)
         {
@@ -425,7 +425,10 @@ impl<'db> InferenceTable<'db> {
             }
         }
         self.adjust_levels(db, level, ty);
-        let numeric = matches!(constraint, Constraint::Numeric | Constraint::ScalarNumeric);
+        let numeric = matches!(
+            constraint,
+            Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric
+        );
         self.set(representative, Entry::Bound { ty, numeric });
         Ok(())
     }
@@ -969,17 +972,20 @@ impl<'db> InferenceTable<'db> {
                         && matches!(
                             *self.entry(actual_representative),
                             Entry::Unbound {
-                                constraint: Constraint::Unconstrained | Constraint::Numeric,
+                                constraint: Constraint::Unconstrained
+                                    | Constraint::Numeric
+                                    | Constraint::Arithmetic,
                                 ..
                             }
                         )
                         && self
-                            .constrain(db, actual_representative, Constraint::Numeric)
+                            .constrain(db, actual_representative, Constraint::Arithmetic)
                             .is_ok()
                 }
-                TyKind::Rigid(name) => {
-                    self.rigid_constraints.get(name) == Some(&Constraint::Numeric)
-                }
+                TyKind::Rigid(name) => matches!(
+                    self.rigid_constraints.get(name),
+                    Some(Constraint::Numeric | Constraint::Arithmetic)
+                ),
                 _ => false,
             };
         if open_numeric {
@@ -2086,9 +2092,10 @@ fn nullable_single_member<'db>(db: &'db dyn Db, members: &[Ty<'db>]) -> Option<T
     Some(members[1 - null_at])
 }
 
-/// Beyond atoms: a class declaring an arithmetic operator method is numeric
-/// (`a + b` is legal R for it), and a rigid binder is admitted when its declared
-/// bound is at least as strong (self-recursive calls unify it with a fresh variable).
+/// Beyond atoms: a class whose arithmetic takes two of it is numeric (`a + b` is legal R for
+/// it), a class declaring any arithmetic method satisfies `arithmetic` (`Date + 1`), and a
+/// rigid binder is admitted when its declared bound is at least as strong (self-recursive
+/// calls unify it with a fresh variable).
 pub(crate) fn constraint_rejects<'db>(
     db: &'db dyn Db,
     table: &InferenceTable<'db>,
@@ -2122,7 +2129,7 @@ pub(crate) fn constraint_rejects<'db>(
     let admissible = match constraint {
         Constraint::Unconstrained => true,
         // R's arithmetic takes logicals (as 0 and 1) and complex numbers as well as numbers.
-        Constraint::Numeric => match ty.kind(db) {
+        Constraint::Numeric | Constraint::Arithmetic => match ty.kind(db) {
             TyKind::Scalar(
                 Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Complex,
             )
@@ -2143,10 +2150,17 @@ pub(crate) fn constraint_rejects<'db>(
                 TyKind::Rigid(name) => binder_implies(name),
                 _ => false,
             },
-            TyKind::Named(name, _) => declares_arithmetic(name),
+            TyKind::Named(name, _) if constraint == Constraint::Arithmetic => {
+                declares_arithmetic(name)
+            }
+            TyKind::Named(name, _) => arithmetic_classes
+                .is_some_and(|classes| classes.closed_under_arithmetic(name.symbol())),
             // A frame with known columns carries its class like a nominal one does.
             TyKind::Frame(kind, _) => kind.class().is_some_and(|class| {
-                arithmetic_classes.is_some_and(|classes| classes.contains(class))
+                arithmetic_classes.is_some_and(|classes| match constraint {
+                    Constraint::Arithmetic => classes.contains(class),
+                    _ => classes.closed_under_arithmetic(class),
+                })
             }),
             TyKind::Rigid(name) => binder_implies(name),
             _ => false,

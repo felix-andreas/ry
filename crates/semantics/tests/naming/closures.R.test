@@ -578,7 +578,7 @@ report <- function(dt) {
   27..29 dt -> b0
   30..36 region -> quiet deferred
   48..49 . -> quiet deferred
-  58..61 sum -> quiet deferred
+  58..61 sum -> non-local deferred
   62..68 amount -> quiet deferred
   77..84 product -> quiet deferred
   masked-subset 27..85
@@ -612,10 +612,10 @@ ranked <- function(dt) {
   0..6 ranked <- b1
   27..29 dt -> b0
   32..33 . -> quiet deferred
-  42..45 sum -> quiet deferred
+  42..45 sum -> non-local deferred
   46..52 amount -> quiet deferred
   61..66 group -> quiet deferred
-  68..73 order -> quiet deferred
+  68..73 order -> non-local deferred
   75..80 total -> quiet deferred
   masked-subset 27..67
   masked-subset 27..82

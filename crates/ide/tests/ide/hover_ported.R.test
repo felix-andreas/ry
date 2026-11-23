@@ -647,7 +647,7 @@ hint @4: <T, U> fn(x: T, [y]: U) -> T
 add_one <- function(x) x + 1L
 add$0_one
 #++++
-hover 30..37: add_one: <T: numeric> fn(x: T) -> T
+hover 30..37: add_one: <T: arithmetic> fn(x: T) -> T
 hover-definition: global 0..7
 definition 0..7
 references: 0..7*, 30..37
@@ -655,11 +655,11 @@ rename: 2 edit(s)
 calls add_one: in  | out
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 19..19 -> "<T: numeric>"
+  edit 19..19 -> "<T: arithmetic>"
   edit 21..21 -> ": T"
   edit 22..22 -> " -> T"
 completion (72): add_one, add.scope, add1, addmargins, addNA, addNextMethod, addTaskCallback, lazyLoadDBexec
-hint @19<T: numeric>
+hint @19<T: arithmetic>
 hint @21: T
 hint @22 -> T
 

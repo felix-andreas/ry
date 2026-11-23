@@ -33,9 +33,9 @@ use {
             InferenceVar, Name, NativeField, NativeScalar, NullUnless, NumberLiteral, Parameter,
             QueryName, RecordField, ReduceForward, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind,
             TypeList, TypeScheme, any, array, array_element, column_type, conflicting_tags,
-            contains_inference_var, erase_vars, for_each_child_type, is_ry_value_type, is_tag_type,
-            map_child_types, native_record, native_scalar, null, scalar, substitute_rigid,
-            type_size, union_of, unknown,
+            contains_inference_var, contains_rigid, erase_vars, for_each_child_type,
+            is_ry_value_type, is_tag_type, map_child_types, native_record, native_scalar, null,
+            scalar, substitute_rigid, type_size, union_of, unknown,
         },
     },
     bumpalo::{Bump, collections::Vec as BumpVec},
@@ -747,6 +747,8 @@ pub enum StrictOriginKind {
     /// An unannotated parameter nothing constrains, so it accepts any value unchecked.
     /// `expression` is the function and `range` the parameter's name.
     UntypedParameter(Symbol),
+    /// A checked annotation over a value whose type is undetermined, so it checks nothing.
+    UncheckedAnnotation,
 }
 
 /// No method has a default body: adding a fact must be a compile error at every
@@ -796,6 +798,10 @@ pub trait GlobalEnv<'db> {
     /// Whether the project or the file defines a `$` method (`$.vs`), which R dispatches on a
     /// class attribute that `class(x) <- "vs"` sets on an atomic vector no type tracks.
     fn defines_dollar_method(&self) -> bool;
+
+    /// How many reads so far served a cyclic-group export that may still hold the fixpoint's
+    /// seed, so an `Unknown` read after it may be a value the fixpoint has not computed yet.
+    fn pending_reads(&self) -> usize;
 }
 
 /// Perf-witness instrument; fixpoint re-runs make it exceed the item count.
@@ -923,6 +929,7 @@ fn check_item_in<'db>(
         late_triggers: SmallVec::new(),
         body_range: TextRange::default(),
         capture_repass_needed: false,
+        placeholder_reads: 0,
         superassign_seeds: SmallVec::new(),
         pre_materialized: Column::new_in(arena, bindings),
         loop_jumps: Vec::new(),
@@ -1631,7 +1638,9 @@ fn erase_residual_vars_at<'db>(
     }
     if !closer.abstracted.contains(&table.find(var)) {
         return match constraint {
-            Constraint::Numeric | Constraint::ScalarNumeric => scalar(db, Atomic::Double),
+            Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric => {
+                scalar(db, Atomic::Double)
+            }
             Constraint::WholeLiteral { .. }
             | Constraint::FracLiteral
             | Constraint::StrLiteral
@@ -1954,6 +1963,9 @@ struct Checker<'db, 'a> {
     body_range: TextRange,
     /// Closures were inferred against an incomplete capture join, so the body re-checks once.
     capture_repass_needed: bool,
+    /// Reads of a captured slot before any write, whose `Unknown` is a placeholder the
+    /// capture repass replaces, like a pending group export ([`GlobalEnv::pending_reads`]).
+    placeholder_reads: usize,
     /// Per function body: the variable each `<<-`-written enclosing slot reads beside its
     /// enclosing type on entry, and whether the body's first write has bound it yet. A body
     /// seeds the few slots it writes with `<<-`, so the list is searched, not indexed.
@@ -4964,7 +4976,21 @@ impl<'db, 'a> Checker<'db, 'a> {
             return value_ty;
         };
         if annotation.declared.is_some() || annotation.new_nominal.is_some() {
-            self.annotation_covers(value);
+            // A checked annotation over a value of undetermined type checks nothing, so strict
+            // mode says so at the annotated value instead of accepting it as a declaration.
+            let unchecked = annotation.new_nominal.is_none()
+                && !annotation.trusted
+                && !annotation.if_unknown
+                && annotation.declared.as_ref().is_some_and(|declared| {
+                    !matches!(declared.body.kind(self.db), TyKind::Unknown | TyKind::Any)
+                })
+                && matches!(
+                    self.table.resolve(self.db, value_ty).kind(self.db),
+                    TyKind::Unknown
+                );
+            if self.annotation_covers(value) && unchecked {
+                self.record_strict_origin(value, StrictOriginKind::UncheckedAnnotation);
+            }
         }
         if let Some((name, arguments, _)) = &annotation.new_nominal {
             let scheme = self.check_new_nominal(*name, arguments, value, value_ty);
@@ -5143,9 +5169,10 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// the value it types: `#: double[]` over `as.numeric(d$age)` covers `d$age`. A function
     /// literal or braced block inside keeps its findings, because its own statements can be
     /// annotated where they are.
-    fn annotation_covers(&mut self, value: ExprId) {
+    /// Drops the strict origins inside an annotated value, and says whether there were any.
+    fn annotation_covers(&mut self, value: ExprId) -> bool {
         if self.strict_origins.is_empty() {
-            return;
+            return false;
         }
         let mut covered = FxHashSet::default();
         let mut pending = vec![value];
@@ -5161,8 +5188,10 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             self.module.for_each_child(id, |child| pending.push(child));
         }
+        let before = self.strict_origins.len();
         self.strict_origins
             .retain(|origin| !covered.contains(&origin.expression));
+        self.strict_origins.len() < before
     }
 
     fn literal_ty(&mut self, literal: &LiteralKind) -> Ty<'db> {
@@ -5384,6 +5413,9 @@ impl<'db, 'a> Checker<'db, 'a> {
                     if let Some(&join) = self.capture_joins.get(slot) {
                         return join;
                     }
+                    // A local function's read of itself or of a later local function: the
+                    // repass fills the slot in, so this `Unknown` is a placeholder.
+                    self.placeholder_reads += 1;
                 } else if let Some(observed) = self.materialize_pre_state(slot, false) {
                     return observed;
                 }
@@ -6539,7 +6571,9 @@ impl<'db, 'a> Checker<'db, 'a> {
         if let Some(guard) = &guard {
             self.apply_refinements(&guard.true_edge);
         }
+        let pending_before = self.pending_reads();
         let then_ty = self.infer(then_branch);
+        let then_pending = self.pending_reads() != pending_before;
         let then_diverges = self.diverges(then_branch);
         let mut then_writes = self.environment.writes_since(mark);
         // A refinement the branch never overwrote is the value it narrowed, not a new one.
@@ -6570,10 +6604,12 @@ impl<'db, 'a> Checker<'db, 'a> {
         if let Some(guard) = &guard {
             self.apply_refinements(&guard.false_edge);
         }
+        let pending_before = self.pending_reads();
         let (else_ty, else_diverges) = match else_branch {
             Some(else_branch) => (self.infer(else_branch), self.diverges(else_branch)),
             None => (null(self.db), false),
         };
+        let else_pending = self.pending_reads() != pending_before;
 
         // `if (exists("emptyenv")) emptyenv() else NULL` probes for a function the library
         // ships, so the else branch is a fallback for older R that never runs here.
@@ -6642,17 +6678,19 @@ impl<'db, 'a> Checker<'db, 'a> {
                 for fact in correlations {
                     self.environment.establish(fact);
                 }
-                // A library call its untyped arguments left undecided may return anything, so
-                // the `if` may too: renv's `if (is.null(FUN.VALUE)) lapply(...) else vapply(...,
-                // FUN.VALUE = FUN.VALUE)` is a list only on one path. Any other `Unknown` branch
-                // still joins as the typed one, because a recursive call's placeholder is one.
-                let undecided = |checker: &mut Self, branch: ExprId, ty: Ty<'db>| {
+                // An `Unknown` branch may be anything, so the `if` may be too. The exception is
+                // a branch that read a recursive group's export the fixpoint has not computed
+                // yet: that `Unknown` is a placeholder, and joining it away is what lets
+                // `if (n <= 1) 1L else n * fact(n - 1)` converge. A library call its untyped
+                // arguments left undecided is `Unknown` whatever it read.
+                let unknown_branch = |checker: &mut Self, branch: ExprId, ty: Ty<'db>, pending| {
                     let ty = checker.table.resolve(checker.db, ty);
-                    checker.ends_in_undecided_call(branch)
-                        && matches!(ty.kind(checker.db), TyKind::Unknown)
+                    matches!(ty.kind(checker.db), TyKind::Unknown)
+                        && (!pending || checker.ends_in_undecided_call(branch))
                 };
-                let joined = if undecided(self, then_branch, then_ty)
-                    || else_branch.is_some_and(|branch| undecided(self, branch, else_ty))
+                let joined = if unknown_branch(self, then_branch, then_ty, then_pending)
+                    || else_branch
+                        .is_some_and(|branch| unknown_branch(self, branch, else_ty, else_pending))
                 {
                     self.join_branch_values(then_ty, else_ty);
                     unknown(self.db)
@@ -6995,7 +7033,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             .collect();
         let found = tags.iter().find(|(tag, _)| *tag == name.as_str());
         if let Some((_, None)) = found {
-            return Some((format!("`:{}` carries no payload.", name.as_str()), None));
+            return Some((format!("`:{}` carries no payload", name.as_str()), None));
         }
         let Some((_, Some(tag_payload))) = found else {
             let nearest = nearest_name(name.as_str(), tags.iter().map(|(tag, _)| *tag))?;
@@ -7005,7 +7043,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 .map(|start| TextRange::new(start, name_range.end()));
             return Some((
                 format!(
-                    "The value has no tag `:{}`. Did you mean `:{nearest}`?",
+                    "the value has no tag `:{}`. Did you mean `:{nearest}`?",
                     name.as_str()
                 ),
                 tag_range,
@@ -7026,11 +7064,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             .iter()
             .find(|field| !known.contains(&field.name.as_str()))?;
         let suggestion = nearest_name(unknown.name.as_str(), known.iter().copied())
-            .map(|nearest| format!(" Did you mean `{nearest}`?"))
+            .map(|nearest| format!(". Did you mean `{nearest}`?"))
             .unwrap_or_default();
         Some((
             format!(
-                "`:{}` has no field `{}`.{suggestion}",
+                "`:{}` has no field `{}`{suggestion}",
                 name.as_str(),
                 unknown.name.as_str()
             ),
@@ -8550,6 +8588,10 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     /// Whether `id`'s value is the result of a library call its untyped arguments left
     /// undecided between candidates.
+    fn pending_reads(&self) -> usize {
+        self.placeholder_reads + self.globals.map_or(0, |globals| globals.pending_reads())
+    }
+
     fn ends_in_undecided_call(&self, id: ExprId) -> bool {
         match self.module.kind(id) {
             ExpressionKind::Call { .. } => self.undecided_calls.contains(id),
@@ -9489,24 +9531,34 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .collect();
                 union_of(self.db, members)
             }
+            // R has no unary `-` on a `Date`, which only adds a number, so the operand needs
+            // the arithmetic a class has with its own values.
             NumericOperand::Flexible(ty) => {
-                self.constrain_numeric_flexible(operand_range, ty);
+                self.constrain_operand(operand_range, ty, Constraint::Numeric);
                 ty
             }
             NumericOperand::FlexibleVector(element) => {
                 if let Some(element) = element {
-                    self.constrain_numeric_flexible(operand_range, element);
+                    self.constrain_operand(operand_range, element, Constraint::Numeric);
                 }
                 resolved
             }
             NumericOperand::OpenUnion(open) => {
                 for member in open {
-                    self.constrain_numeric_flexible(operand_range, member);
+                    self.constrain_operand(operand_range, member, Constraint::Numeric);
                 }
                 unknown(self.db)
             }
             NumericOperand::AnyUnknown => unknown(self.db),
-            NumericOperand::Invalid if self.declares_arithmetic(resolved) => resolved,
+            // R stops on `-day`, so a class negates only when its arithmetic takes two of its
+            // values, as `difftime`'s does, the same test the flexible operand gets.
+            NumericOperand::Invalid
+                if self.declares_arithmetic(resolved)
+                    && constraint_rejects(self.db, &self.table, Constraint::Numeric, resolved)
+                        .is_none() =>
+            {
+                resolved
+            }
             NumericOperand::Invalid => {
                 self.errors.push(TypeError {
                     range: operand_range,
@@ -10592,22 +10644,23 @@ impl<'db, 'a> Checker<'db, 'a> {
         lhs: ExprId,
         rhs: ExprId,
     ) -> Option<Ty<'db>> {
-        let library = self.library?;
-        if !library.schemes.contains_key(name) {
+        let globals = self.globals?;
+        let symbol = Symbol::new(name);
+        let in_project = globals.defined_in_project(symbol, false);
+        if !in_project && !self.library?.schemes.contains_key(name) {
             return None;
         }
-        if self
-            .globals
-            .is_some_and(|globals| globals.defined_in_project(Symbol::new(name), false))
-        {
-            return None;
-        }
-        let scheme = self.globals?.scheme(Symbol::new(name), false)?;
+        let scheme = globals.scheme(symbol, false)?;
         let instantiated = self.instantiate(&scheme);
         let resolved = self.table.shallow_resolve(self.db, instantiated);
         let TyKind::Function(function) = resolved.kind(self.db) else {
             return None;
         };
+        // A project operator that captures an operand's code (`substitute(rhs)`, as magrittr's
+        // `%>%` does) is non-standard evaluation, so its operands are not ordinary arguments.
+        if in_project && !function.quoted.is_empty() {
+            return None;
+        }
         let left = self.infer(lhs);
         let right = self.infer(rhs);
         let arguments = [
@@ -10648,9 +10701,28 @@ impl<'db, 'a> Checker<'db, 'a> {
                 self.infer_compare(lhs, rhs, left, right)
             }
             // `/` and `^` always produce doubles.
-            Divide | Power => self.infer_binary_numeric(range, lhs, rhs, left, right, true),
-            _ => self.infer_binary_numeric(range, lhs, rhs, left, right, false),
+            _ => self.infer_binary_numeric(range, operator, lhs, rhs, left, right),
         }
+    }
+
+    /// The S3 class vector a nominal stands for: the type itself, then each nominal its
+    /// representation names, so `data.table` over `data.frame` is `c("data.table",
+    /// "data.frame")`. Resolved fully, so an alias of a class is the class it names; empty for
+    /// a type that is not nominal.
+    fn class_chain(&self, ty: Ty<'db>) -> SmallVec<[Name<'db>; 2]> {
+        let mut chain: SmallVec<[Name<'db>; 2]> = SmallVec::new();
+        let mut current = self.table.resolve(self.db, ty);
+        while let TyKind::Named(name, arguments) = current.kind(self.db) {
+            if chain.contains(name) {
+                break;
+            }
+            chain.push(*name);
+            let Some(representation) = self.table.representation(self.db, *name, arguments) else {
+                break;
+            };
+            current = self.table.resolve(self.db, representation);
+        }
+        chain
     }
 
     /// Dispatches as R does: `+.Date`, then the group generic (`Arith.Date`), then
@@ -10759,7 +10831,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 TyKind::Rigid(name)
                     if self
                         .table
-                        .rigid_satisfies(self.db, *name, Constraint::Numeric) =>
+                        .rigid_satisfies(self.db, *name, Constraint::Arithmetic) =>
                 {
                     scalar(self.db, Atomic::Double)
                 }
@@ -10769,15 +10841,17 @@ impl<'db, 'a> Checker<'db, 'a> {
             self.operand_argument(lhs, probe_operand(left)),
             self.operand_argument(rhs, probe_operand(right)),
         ];
-        // Resolved fully, so an alias of a class dispatches as the class it names.
-        let class_of = |ty: Ty<'db>| match self.table.resolve(self.db, ty).kind(self.db) {
-            TyKind::Named(name, _) => Some(name.text(self.db).to_owned()),
-            _ => None,
-        };
-        let mut classes: Vec<String> = [class_of(left), class_of(right)]
-            .into_iter()
-            .flatten()
-            .collect();
+        // Each operand's whole class vector, left first: a `TradeDate` over `Date` takes
+        // `+.Date` when it declares no `+` of its own.
+        let mut classes: Vec<String> = Vec::new();
+        for operand in [left, right] {
+            for class in self.class_chain(operand) {
+                let class = class.text(self.db);
+                if !classes.iter().any(|known| known == class) {
+                    classes.push(class.to_owned());
+                }
+            }
+        }
         // An untyped operand (`omega + v %*% w` on a parameter) must not take the first
         // candidate's class, which would reject the plain vector R accepts there. It is
         // only required to be numeric, and the call types when every fit agrees.
@@ -11045,11 +11119,12 @@ impl<'db, 'a> Checker<'db, 'a> {
             // A value already required to be numeric (`if (n %% 2L)`) coerces like a number.
             TyKind::Var(_) => matches!(
                 self.table.open_constraint(self.db, ty),
-                Some(Constraint::Numeric | Constraint::ScalarNumeric)
+                Some(Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric)
             ),
-            TyKind::Rigid(name) => self
-                .table
-                .rigid_satisfies(self.db, *name, Constraint::Numeric),
+            TyKind::Rigid(name) => {
+                self.table
+                    .rigid_satisfies(self.db, *name, Constraint::Arithmetic)
+            }
             _ => false,
         }
     }
@@ -11057,12 +11132,14 @@ impl<'db, 'a> Checker<'db, 'a> {
     fn infer_binary_numeric(
         &mut self,
         range: TextRange,
+        operator: BinaryOperator,
         lhs: ExprId,
         rhs: ExprId,
         lhs_ty: Ty<'db>,
         rhs_ty: Ty<'db>,
-        always_double: bool,
     ) -> Ty<'db> {
+        // `/` and `^` always produce doubles.
+        let always_double = matches!(operator, BinaryOperator::Divide | BinaryOperator::Power);
         let lhs_range = self.blame_range(lhs);
         let rhs_range = self.blame_range(rhs);
         let resolved_left = self.operand_view(lhs_ty);
@@ -11151,6 +11228,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
 
         let mut flexible: Option<Ty<'db>> = None;
+        let mut tied = false;
         for operand in [&left, &right] {
             if let NumericOperand::Flexible(ty) = operand {
                 match flexible {
@@ -11163,7 +11241,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                             && [existing, *ty].into_iter().all(|side| {
                                 matches!(
                                     self.table.variable_constraint(self.db, side),
-                                    None | Some(Constraint::Numeric | Constraint::ScalarNumeric)
+                                    None | Some(
+                                        Constraint::Numeric
+                                            | Constraint::Arithmetic
+                                            | Constraint::ScalarNumeric
+                                    )
                                 )
                             }) =>
                     {
@@ -11184,13 +11266,26 @@ impl<'db, 'a> Checker<'db, 'a> {
                             self.report_unify(range, error);
                             return unknown(self.db);
                         }
+                        tied = true;
                     }
                     None => flexible = Some(*ty),
                 }
             }
         }
         if let Some(ty) = flexible {
-            self.constrain_numeric_flexible(range, ty);
+            // R subtracts two dates or two times (their difference is a `difftime`), so `a - b`
+            // asks no more of a class than `a + 1` does, while `a + b` asks `numeric`.
+            let tied_difference = tied && operator == BinaryOperator::Subtract;
+            let constraint = match tied && !tied_difference {
+                true => Constraint::Numeric,
+                false => Constraint::Arithmetic,
+            };
+            self.constrain_operand(range, ty, constraint);
+            // The difference is not `T` itself: two dates subtract to a `difftime`. It claims
+            // `double`, the representation every arithmetic class shares.
+            if tied_difference {
+                return scalar(self.db, Atomic::Double);
+            }
         }
         // Combined with its existing atomic-element bound, an arithmetic `T[]` element
         // becomes scalar-numeric.
@@ -11528,23 +11623,25 @@ impl<'db, 'a> Checker<'db, 'a> {
         results
     }
 
-    /// A rigid satisfies the numeric constraint only when its declaration promised it.
     fn constrain_numeric_flexible(&mut self, range: TextRange, ty: Ty<'db>) {
+        self.constrain_operand(range, ty, Constraint::Arithmetic);
+    }
+
+    /// Two operands of one type (`a + b` on `a: T, b: T`) need arithmetic between two of its
+    /// values, which `Date` lacks although `Date + 1` is legal. A rigid satisfies a constraint
+    /// only when its declaration promised it.
+    fn constrain_operand(&mut self, range: TextRange, ty: Ty<'db>, constraint: Constraint) {
         match ty.kind(self.db) {
             TyKind::Var(var) => {
-                if let Err(error) = self.table.constrain(self.db, *var, Constraint::Numeric) {
+                if let Err(error) = self.table.constrain(self.db, *var, constraint) {
                     self.report_unify(range, error);
                 }
             }
-            TyKind::Rigid(name)
-                if !self
-                    .table
-                    .rigid_satisfies(self.db, *name, Constraint::Numeric) =>
-            {
+            TyKind::Rigid(name) if !self.table.rigid_satisfies(self.db, *name, constraint) => {
                 self.errors.push(TypeError {
                     range,
                     kind: TypeErrorKind::ConstraintViolation {
-                        constraint: Constraint::Numeric,
+                        constraint,
                         found: ty,
                     },
                 });
@@ -11612,7 +11709,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             TyKind::Rigid(name) => {
                 match self
                     .table
-                    .rigid_satisfies(self.db, *name, Constraint::Numeric)
+                    .rigid_satisfies(self.db, *name, Constraint::Arithmetic)
                 {
                     true => NumericOperand::Flexible(resolved),
                     false => NumericOperand::Invalid,
@@ -11639,7 +11736,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 TyKind::Rigid(name)
                     if self
                         .table
-                        .rigid_satisfies(self.db, *name, Constraint::Numeric) =>
+                        .rigid_satisfies(self.db, *name, Constraint::Arithmetic) =>
                 {
                     NumericOperand::FlexibleVector(Some(*element))
                 }
@@ -11914,7 +12011,15 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
             }
         }
+        // An annotation says what the formals take, not how the body reads them, so an
+        // annotated function that captures a formal's code is non-standard evaluation too.
+        let quoted: Vec<Name<'db>> = module[parameters]
+            .iter()
+            .filter(|parameter| uses.quotes(parameter.name))
+            .map(|parameter| Name::new(self.db, parameter.name))
+            .collect();
         let mut signature = FunctionType::declared(&[], &named, variadic, declared.ret);
+        signature.quoted = &quoted;
 
         self.return_frames.push(Vec::new());
         let trailing_ty = self.infer_body_with_capture_discovery(*body, pending_mark);
@@ -12669,9 +12774,15 @@ impl<'db, 'a> Checker<'db, 'a> {
         let errors_before = self.errors.len();
         let ty = self.infer_ordinary_call(id, range, callee, arguments);
         if matches!(self.module.kind(callee), ExpressionKind::NameRef(name) if name.as_str() == "vapply")
-            && !self.naming.resolutions.contains_key(&callee)
+            && self.calls_base(callee)
         {
             self.name_vapply_callback(errors_before, arguments);
+        }
+        if let ExpressionKind::NameRef(name) = self.module.kind(callee)
+            && let family @ ("sapply" | "mapply" | "Map") = name.as_str()
+            && self.calls_base(callee)
+        {
+            return self.simplified_apply(family, arguments).unwrap_or(ty);
         }
         if let Some(sequence) = self.integer_seq(callee, arguments, ty) {
             return self.record(id, sequence);
@@ -12683,6 +12794,19 @@ impl<'db, 'a> Checker<'db, 'a> {
         self.refine_table_call(id, function, arguments, ty)
     }
 
+    /// Whether a called name reaches the base function of that name: neither a local binding nor
+    /// a project definition shadows it.
+    fn calls_base(&self, callee: ExprId) -> bool {
+        let ExpressionKind::NameRef(name) = self.module.kind(callee) else {
+            return false;
+        };
+        let deferred = self.naming.deferred_non_locals.contains(&callee);
+        !self.naming.resolutions.contains_key(&callee)
+            && !self.globals.is_some_and(|globals| {
+                globals.defined_in_project(Symbol::new(name.as_str()), deferred)
+            })
+    }
+
     /// Base `seq` without `by` or a length is R's `from:to`, an integer vector whenever
     /// `from` is a whole number, and `seq(x)` alone is `seq_len` or `seq_along`, always
     /// integer. The stub's numeric candidates cannot tell `1` from `1.5`, so they say
@@ -12691,13 +12815,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let ExpressionKind::NameRef(name) = self.module.kind(callee) else {
             return None;
         };
-        let deferred = self.naming.deferred_non_locals.contains(&callee);
-        if name.as_str() != "seq"
-            || self.naming.resolutions.contains_key(&callee)
-            || self
-                .globals
-                .is_some_and(|globals| globals.defined_in_project(Symbol::new("seq"), deferred))
-        {
+        if name.as_str() != "seq" || !self.calls_base(callee) {
             return None;
         }
         let resolved = self.table.resolve(self.db, ty);
@@ -15555,7 +15673,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             let snapshot = self.table.snapshot();
             if self
                 .table
-                .constrain(self.db, *var, Constraint::Numeric)
+                .constrain(self.db, *var, Constraint::Arithmetic)
                 .is_err()
             {
                 // A variable an earlier use made non-numeric keeps that finding to itself.
@@ -16055,7 +16173,19 @@ impl<'db, 'a> Checker<'db, 'a> {
                 .filter(|(blame, _)| **blame == Some(deepest))
                 .map(|(_, error)| error)
             && let Some(first) = furthest.next()
-            && furthest.all(|error| error == first)
+            // Candidates that all want a function where the argument is none (`sapply(xs, 4)`
+            // fails `fn(T) -> U` and the fallback's `fn(Any) -> Any`) agree on what is wrong.
+            && furthest.all(|error| {
+                let not_a_function = |kind: &TypeErrorKind<'db>| {
+                    matches!(kind, TypeErrorKind::Mismatch { expected, found }
+                        if matches!(expected.kind(self.db), TyKind::Function(_))
+                            && !matches!(found.kind(self.db), TyKind::Function(_)))
+                };
+                error == first
+                    || error.range == first.range
+                        && not_a_function(&error.kind)
+                        && not_a_function(&first.kind)
+            })
         {
             Some(first)
         } else {
@@ -17770,11 +17900,16 @@ impl<'db, 'a> Checker<'db, 'a> {
         argument: &CallArgument<'db>,
         inferred_signature: bool,
     ) -> Option<Ty<'db>> {
+        // `tapply`'s `FUN` is a function or `NULL`, and `"sum"` still names the function.
+        let expects_function = |ty: Ty<'db>| match ty.kind(self.db) {
+            TyKind::Function(_) => true,
+            TyKind::Union(members) => members
+                .iter()
+                .any(|member| matches!(member.kind(self.db), TyKind::Function(_))),
+            _ => false,
+        };
         if let Some(named) = argument.named_function
-            && matches!(
-                self.table.shallow_resolve(self.db, expected).kind(self.db),
-                TyKind::Function(_)
-            )
+            && expects_function(self.table.shallow_resolve(self.db, expected))
         {
             return Some(named);
         }
@@ -18175,7 +18310,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let numeric = |ty: Ty<'db>| {
             matches!(
                 self.table.open_constraint(self.db, ty),
-                Some(Constraint::Numeric | Constraint::ScalarNumeric)
+                Some(Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric)
             )
         };
         match self.table.resolve(self.db, expected).kind(self.db) {
@@ -18593,13 +18728,19 @@ impl<'db, 'a> Checker<'db, 'a> {
         } else {
             (self.frame_as_class(subject), self.frame_as_class(target_ty))
         };
+        // A class that extends `data.table` queries as one.
+        let data_table = !double
+            && self
+                .class_chain(target_ty)
+                .iter()
+                .any(|name| name.text(self.db) == "data.table");
         let unseen_frame = !double
-            && (self.naming.extras().masked_subsets.contains(&id)
-                || match self.table.resolve(self.db, subject).kind(self.db) {
-                    TyKind::Unknown | TyKind::Any | TyKind::Var(_) => true,
-                    TyKind::Named(name, _) => name.text(self.db) == "data.table",
-                    _ => false,
-                });
+            && (data_table
+                || self.naming.extras().masked_subsets.contains(&id)
+                || matches!(
+                    self.table.resolve(self.db, subject).kind(self.db),
+                    TyKind::Unknown | TyKind::Any | TyKind::Var(_)
+                ));
         if unseen_frame {
             self.unseen_frames += 1;
         }
@@ -18614,16 +18755,14 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         // A declared `data.table` subject makes `[` a query: index arguments evaluate in
         // the data's frame (masked column reads), and the `j` syntax decides the result class.
-        if !double
-            && matches!(subject.kind(self.db), TyKind::Named(name, _) if name.text(self.db) == "data.table")
-        {
+        if data_table {
             for argument in arguments {
                 if let Some(value) = argument.value {
                     self.mask_column_reads(value);
                 }
             }
             return if data_table_keeps_class(self.module, arguments) {
-                subject
+                self.table.resolve(self.db, target_ty)
             } else {
                 self.record_strict_origin(id, StrictOriginKind::UnsupportedConstruct);
                 unknown(self.db)
@@ -18634,25 +18773,20 @@ impl<'db, 'a> Checker<'db, 'a> {
         if self.naming.extras().masked_subsets.contains(&id) {
             return unknown(self.db);
         }
-        // R dispatches `[` and `[[` on the class before any shape rule applies, so a stub's
-        // `[.factor` or `[[.Date` gives the result type. The declared class comes first,
-        // because it leads the class vector: an `xts` subsets with `[.xts`, not with the
-        // `[.zoo` of its representation.
-        if let TyKind::Named(name, _) = self.table.resolve(self.db, target_ty).kind(self.db)
-            && let Some(ty) = self.index_method_result(name.text(self.db), double)
-        {
-            return ty;
-        }
-        if let TyKind::Named(name, _) = subject.kind(self.db)
-            && name.text(self.db) == "matrix"
-            && let Some(ty) = self.matrix_index(double, arguments, &index_types)
-        {
-            return ty;
-        }
-        if let TyKind::Named(name, _) = subject.kind(self.db)
-            && let Some(ty) = self.index_method_result(name.text(self.db), double)
-        {
-            return ty;
+        // R dispatches `[` and `[[` on the class vector before any shape rule applies, so a
+        // stub's `[.factor` or `[[.Date` gives the result type, and an `xts` subsets with
+        // `[.xts` before the `[.zoo` of the class it extends.
+        let chain = self.class_chain(target_ty);
+        let subject_chain = self.class_chain(subject);
+        for name in chain.iter().chain(subject_chain.iter()) {
+            if name.text(self.db) == "matrix"
+                && let Some(ty) = self.matrix_index(double, arguments, &index_types)
+            {
+                return ty;
+            }
+            if let Some(ty) = self.index_method_result(name.text(self.db), double) {
+                return ty;
+            }
         }
         if let Some(element) = array_element(self.db, subject) {
             return self.array_index(range, double, subject, element, arguments, &index_types);
@@ -19752,13 +19886,123 @@ impl<'db, 'a> Checker<'db, 'a> {
                     _ => unknown(db),
                 }
             }
-            "sapply" => match self.table.resolve(db, element).kind(db) {
+            "sapply" => match (
+                simplify_flag(self.module, arguments, "simplify"),
+                self.table.resolve(db, element).kind(db),
+            ) {
+                (Some(false), _) => list(element),
                 // `sapply` simplifies results that all have length one into a vector.
-                TyKind::Scalar(_) => vector(element),
+                (Some(true), TyKind::Scalar(_)) => vector(element),
                 _ => unknown(db),
             },
             _ => list(element),
         })
+    }
+
+    /// `sapply`, `mapply` and `Map` with a callback whose signature is known. Their stubs return `Any`,
+    /// because the result's shape depends on what the callback returns and on the `simplify`
+    /// flag, which no candidate can discriminate. A callback that returns a scalar-like value
+    /// simplifies to a vector of it, and `simplify = FALSE` keeps a list.
+    fn simplified_apply(&mut self, family: &str, arguments: &[Argument]) -> Option<Ty<'db>> {
+        let db = self.db;
+        let (function, items, flag) = if family == "sapply" {
+            let bound = bind_formals(self.module, arguments, &["X", "FUN"]);
+            (bound.value(1)?, bound.value(0), Some("simplify"))
+        } else {
+            let (formal, flag) = if family == "Map" {
+                ("f", None)
+            } else {
+                ("FUN", Some("SIMPLIFY"))
+            };
+            let function = bind_formals(self.module, arguments, &[formal]).value(0)?;
+            // The first argument `...` takes is the one whose names the result keeps.
+            let items = arguments
+                .iter()
+                .filter(|argument| {
+                    !self.module.argument_name(argument).is_some_and(|name| {
+                        matches!(name.as_str(), "FUN" | "MoreArgs" | "SIMPLIFY" | "USE.NAMES")
+                            || name.as_str() == formal
+                    })
+                })
+                .filter_map(|argument| argument.value)
+                .find(|value| *value != function);
+            (function, items, flag)
+        };
+        let function = self.recorded.get(&function).copied()?;
+        // The parameters are read as the callback declared them, before the call bound them to
+        // the elements.
+        let (generic, returned) = match self.table.shallow_resolve(db, function).kind(db) {
+            TyKind::Function(function) => (
+                function
+                    .positional
+                    .iter()
+                    .copied()
+                    .chain(function.named.iter().map(|parameter| parameter.ty))
+                    .any(|parameter| {
+                        contains_inference_var(db, parameter) || contains_rigid(parameter)
+                    }),
+                self.table.resolve(db, function.ret),
+            ),
+            _ => return None,
+        };
+        // An undetermined return keeps the stub's `Any`, which strict mode does not report, and
+        // so does one that depends on the call's own type variables (`identity`'s `T`), which
+        // the stub's `Any` never fixes.
+        if matches!(returned.kind(db), TyKind::Unknown)
+            || contains_inference_var(db, returned)
+            || contains_rigid(returned)
+        {
+            return None;
+        }
+        let items = items.map(|items| {
+            let items = self
+                .recorded
+                .get(&items)
+                .copied()
+                .unwrap_or_else(|| unknown(db));
+            self.structural(items)
+        });
+        // A generic callback's return was inferred before its parameter met an element, and
+        // generic arithmetic claims a scalar (`function(v) v * 2` returns `double`), which holds
+        // only when every element is one: an atomic vector's are, a list's may be vectors.
+        let scalar_elements = items.is_some_and(|items| {
+            element_types(db, items).0.iter().all(|&element| {
+                matches!(self.table.resolve(db, element).kind(db), TyKind::Scalar(_))
+            })
+        });
+        if generic && !scalar_elements {
+            return None;
+        }
+        let use_names = simplify_flag(self.module, arguments, "USE.NAMES") != Some(false);
+        let named = items.is_some_and(|items| {
+            let character = match items.kind(db) {
+                TyKind::Vector(element) => *element,
+                _ => items,
+            };
+            let character_names =
+                use_names && matches!(character.kind(db), TyKind::Scalar(Atomic::Character));
+            // `sapply` keeps the input's names whatever `USE.NAMES` says, while `mapply` and
+            // `Map` name the result only under `USE.NAMES`.
+            (element_types(db, items).1 && (family == "sapply" || use_names)) || character_names
+        });
+        // `Map` is `mapply` with `SIMPLIFY = FALSE`.
+        let simplify = match flag {
+            Some(flag) => simplify_flag(self.module, arguments, flag),
+            None => Some(false),
+        };
+        let shape = match simplify {
+            Some(false) if named => TyKind::NamedList(returned),
+            Some(false) => TyKind::List(returned),
+            Some(true) if matches!(returned.kind(db), TyKind::Scalar(_)) => {
+                if named {
+                    TyKind::NamedVector(returned)
+                } else {
+                    TyKind::Vector(returned)
+                }
+            }
+            _ => return None,
+        };
+        Some(Ty::new(db, shape))
     }
 
     /// The generic `vapply` candidate fixes `V` from the callback first, so a template that
@@ -21796,6 +22040,22 @@ fn element_types<'db>(db: &'db dyn Db, x: Ty<'db>) -> (Vec<Ty<'db>>, bool) {
         }
         TyKind::Scalar(_) => (vec![x], false),
         _ => (vec![unknown(db)], false),
+    }
+}
+
+/// A logical flag that only a name can pass, as `sapply`'s `simplify` after `...`: `Some(true)`
+/// when it is left out or literally `TRUE`, `Some(false)` when literally `FALSE`, and `None` when
+/// its value is not known.
+fn simplify_flag(module: &Module, arguments: &[Argument], name: &str) -> Option<bool> {
+    let Some(argument) = arguments
+        .iter()
+        .find(|argument| module.argument_name(argument).as_deref() == Some(name))
+    else {
+        return Some(true);
+    };
+    match argument.value.map(|value| module.kind(value)) {
+        Some(ExpressionKind::Literal(LiteralKind::Logical(value))) => Some(*value),
+        _ => None,
     }
 }
 

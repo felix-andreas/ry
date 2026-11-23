@@ -114,7 +114,7 @@ both <- function(x) {
 }
 use <- function() both(if (append) 1 else 2)
 #++++
-both: <T: numeric> fn(x: T) -> double
+both: <T: arithmetic> fn(x: T) -> double
 use: Unknown
 82..88 error[type-mismatch] expected `logical`, found `fn(x: Any, values: Any, [after]: Any) -> Any`
 
@@ -180,7 +180,7 @@ retries <- function(config = NULL) {
 }
 second <- function(config = NULL) config[["name"]]
 #++++
-retries: <T> fn([config]: T) -> integer
+retries: <T> fn([config]: T) -> Unknown
 second: <T> fn([config]: T) -> Unknown
 
 #---- a_name_missing_from_an_array_like_list_reads_as_null
@@ -197,7 +197,7 @@ f <- function(...) {
   if (is.null(dots$main)) "untitled" else dots$main
 }
 #++++
-f: fn(...: Any) -> character
+f: fn(...: Any) -> Unknown
 
 #---- matrix_indexing_is_unchecked
 cell <- function(m) {
@@ -212,21 +212,21 @@ is_even <- function(x) {
   return(x %% 2L == 0L)
 }
 #++++
-is_even: <T: numeric> fn(x: T) -> logical
+is_even: <T: arithmetic> fn(x: T) -> logical
 
 #---- arithmetic_takes_logicals_and_complex_numbers
 double_it <- function(x) x * 2
 a <- double_it(TRUE)
 z <- 1i + 2
 #++++
-double_it: <T: numeric> fn(x: T) -> double
+double_it: <T: arithmetic> fn(x: T) -> double
 a: double
 z: complex
 
 #---- a_numeric_value_is_a_condition
 odd <- function(n) if (n %% 2L) "odd" else "even"
 #++++
-odd: <T: numeric> fn(n: T) -> character
+odd: <T: arithmetic> fn(n: T) -> character
 
 #---- a_vector_is_a_condition_but_a_long_literal_is_not
 check <- function(x) if (x >= 1) "big" else "small"
@@ -244,7 +244,7 @@ f <- function(x = NULL) {
   y + 1
 }
 #++++
-f: <T: numeric> fn([x]: T | NULL) -> double
+f: <T: arithmetic> fn([x]: T | NULL) -> double
 
 #---- negating_a_value_that_may_be_null
 f <- function(flag = NULL) {
@@ -310,7 +310,7 @@ f <- function(omega, v) {
 }
 f(c(1, 2), c(1, 2))
 #++++
-f: <T: numeric, U> fn(omega: T, v: U) -> Unknown
+f: <T: arithmetic, U> fn(omega: T, v: U) -> Unknown
 Unknown
 
 #---- a_matrix_negates_to_a_matrix
@@ -449,7 +449,7 @@ flagged <- function() cost(TRUE, 0.5)
 both <- function() shifted(c(1, 2))
 #++++
 cost: <T: numeric> fn(price: T, rate: T) -> T
-shifted: <T: numeric> fn(x: T) -> double[]
+shifted: <T: arithmetic> fn(x: T) -> double[]
 flagged: fn() -> double
 both: fn() -> double[]
 
@@ -571,7 +571,7 @@ forecast <- function(omega, regressors, flag) {
 }
 run <- function(m) forecast(c(1, 2), m, TRUE)
 #++++
-forecast: <T: numeric, U> fn(omega: T, [regressors]: U, flag: logical) -> Unknown
+forecast: <T: arithmetic, U> fn(omega: T, [regressors]: U, flag: logical) -> Unknown
 run: <T> fn([m]: T) -> Unknown
 
 #---- a_matrix_scales_by_a_vector
@@ -668,7 +668,7 @@ pick <- function(flag) {
   shift(start)
 }
 #++++
-shift: <T: numeric> fn(n: T) -> T
+shift: <T: arithmetic> fn(n: T) -> T
 pick: fn(flag: logical) -> double | integer
 
 #---- arithmetic_rejects_a_union_with_a_string
@@ -794,8 +794,8 @@ sample_starts <- function(pars, fun, eqfun) {
 #++++
 evaluate: <T, U, V> fn(pars: T, fun: fn(T) -> U, [eqfun]: fn(T) -> V) -> Unknown
 sample_starts: <T, U, V> fn(pars: T, fun: fn(T) -> U, eqfun: (fn(T) -> V) | NULL) -> Unknown
-140..144 warning[unused] `kind` is assigned but never used.
-157..161 warning[unused] `kind` is assigned but never used.
+140..144 warning[unused] `kind` is assigned but never used
+157..161 warning[unused] `kind` is assigned but never used
 
 #---- a_computed_string_that_may_be_a_vector_passes_as_one_string
 format_message <- function(fmt, ...) if (nargs() == 1L) fmt else sprintf(fmt, ...)
@@ -875,7 +875,7 @@ f <- function() {
 #++++
 width: fn(name: character) -> integer
 f: Unknown
-90..91 warning[unused] `x` is assigned but never used.
+90..91 warning[unused] `x` is assigned but never used
 158..159 error[type-mismatch] expected `character`, found `character | NULL`
 
 #---- an_annotated_function_that_may_be_null_is_reported_when_called
@@ -1128,7 +1128,7 @@ call: fn() -> Any
 expression <- function(x) x + 1
 label <- function() expression("a")
 #++++
-expression: <T: numeric> fn(x: T) -> double
+expression: <T: arithmetic> fn(x: T) -> double
 label: Unknown
 63..66 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
@@ -1182,7 +1182,7 @@ none: list{character[], character[]} | list{logical, logical}
 #---- a_list_branch_keeps_a_constrained_variable_open
 pair <- function(dp) { n <- dp + 1L; if (n > 0L) list(dp, dp) else list(2L, 2L) }
 #++++
-pair: <T: numeric> fn(dp: T) -> list{T, T} | list{integer, integer}
+pair: <T: arithmetic> fn(dp: T) -> list{T, T} | list{integer, integer}
 
 #---- unlink_takes_a_vector_as_its_recursive_flag
 remove_paths <- function(paths) unlink(paths, recursive = dir.exists(paths) & rep(TRUE, 2))
@@ -1199,14 +1199,14 @@ remove_paths: Unknown
 span <- function(from, to) to - from
 count_up <- function(fine) span(1L, if (fine) 2.5 else 2L)
 #++++
-span: <T: numeric> fn(from: T, to: T) -> T
+span: <T: arithmetic> fn(from: T, to: T) -> double
 count_up: fn(fine: logical) -> double
 
 #---- a_numeric_binding_still_rejects_a_union_with_text
 span <- function(from, to) to - from
 count_up <- function(fine) span(1L, if (fine) 2.5 else "2")
 #++++
-span: <T: numeric> fn(from: T, to: T) -> T
+span: <T: arithmetic> fn(from: T, to: T) -> double
 count_up: Unknown
 73..95 error[type-mismatch] expected `integer`, found `double | character`
 
@@ -1233,7 +1233,7 @@ step <- function(f, pars, arglist) {
   f(pars = pars + 1, arglist) - base
 }
 #++++
-step: <T: numeric, U, V: numeric> fn(f: fn(T, U) -> V, pars: T, arglist: U) -> V
+step: <T: arithmetic, U, V: arithmetic> fn(f: fn(T, U) -> V, pars: T, arglist: U) -> double
 
 #---- a_callback_may_later_be_called_without_an_argument_an_earlier_call_passed
 # AzureRMR calls `api_func(op, options = ...)` and then `api_func(op)`, relying on the callee's
@@ -1293,7 +1293,7 @@ labelled: Unknown
 half <- function(n) if (n %% 2 == 1L) 0L else 1L
 halves <- function(n) if (length(n) == 1L) half(n) else lapply(n, half)
 #++++
-half: <T: numeric> fn(n: T) -> integer
+half: <T: arithmetic> fn(n: T) -> integer
 halves: <T: scalar numeric> fn(n: T[]) -> integer | list[integer]
 
 #---- a_mapped_number_still_rejects_text
@@ -1301,7 +1301,7 @@ half <- function(n) if (n %% 2 == 1L) 0L else 1L
 halves <- function(n) if (length(n) == 1L) half(n) else lapply(n, half)
 wrong <- halves(c("a", "b"))
 #++++
-half: <T: numeric> fn(n: T) -> integer
+half: <T: arithmetic> fn(n: T) -> integer
 halves: <T: scalar numeric> fn(n: T[]) -> integer | list[integer]
 wrong: Unknown
 137..148 error[type-mismatch] expected `T[]`, found `character[]`
@@ -1394,7 +1394,7 @@ f <- function() {
 }
 #++++
 f: fn() -> Unknown
-20..21 warning[unused] `x` is assigned but never used.
+20..21 warning[unused] `x` is assigned but never used
 
 #---- a_matrix_valued_vapply_callback_and_a_matrix_sum_type
 pair <- function(x) matrix(c(x, x), nrow = 1)
@@ -1502,10 +1502,10 @@ gap <- function(x, p) p_dist(x) - p
 full <- function(x) p_dist(x, valueOnly = FALSE)$error
 either <- function(x, flag) p_dist(x, flag)
 #++++
-p_dist: <T: numeric, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
-gap: <T: numeric, U: numeric> fn(x: T, p: U) -> double
-full: <T: numeric> fn(x: T) -> double
-either: <T: numeric, U> fn(x: T, flag: U) -> double | list{value: double, error: double}
+p_dist: <T: arithmetic, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
+gap: <T: arithmetic, U: arithmetic> fn(x: T, p: U) -> double
+full: <T: arithmetic> fn(x: T) -> double
+either: <T: arithmetic, U> fn(x: T, flag: U) -> double | list{value: double, error: double}
 
 #---- a_flag_default_selects_a_returned_branch_written_with_return
 # pracma's `gcd(a, b, extended = FALSE)` returns from each branch.
@@ -1529,7 +1529,7 @@ p_dist <- function(q, valueOnly = TRUE) {
 }
 bad <- function(x) p_dist(x, valueOnly = FALSE) - 1
 #++++
-p_dist: <T: numeric, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
+p_dist: <T: arithmetic, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
 bad: Unknown
 139..167 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list{value: double, error: double}`
 
@@ -1541,8 +1541,8 @@ p_dist <- function(q, valueOnly = TRUE) {
 }
 gap <- function(x) p_dist(x)
 #++++
-p_dist: <T: numeric, U> fn(q: T, [valueOnly]: U) -> double | list{value: double}
-gap: <T: numeric> fn(x: T) -> double | list{value: double}
+p_dist: <T: arithmetic, U> fn(q: T, [valueOnly]: U) -> double | list{value: double}
+gap: <T: arithmetic> fn(x: T) -> double | list{value: double}
 
 #---- an_inferred_logical_callback_parameter_takes_numbers
 # gmp's `lapply(0:(n-1L), Eulerian, n = n)`: a direct call `not(1L)` is accepted, so
@@ -1600,7 +1600,7 @@ quantile_of <- function(p) {
 }
 #++++
 cdf: fn(x: double) -> double[]
-quantile_of: <T: numeric> fn(p: T) -> double
+quantile_of: <T: arithmetic> fn(p: T) -> double
 
 #---- vapply_takes_a_callback_returning_a_vector_of_the_template_type
 # snakecase's `vapply(string, stringr::str_c, "", collapse = " ")`.
@@ -1871,7 +1871,7 @@ f <- function() {
 #++++
 g: fn(s: character) -> character
 f: Unknown
-72..73 warning[unused] `x` is assigned but never used.
+72..73 warning[unused] `x` is assigned but never used
 99..100 error[type-mismatch] expected `character`, found `NULL`
 
 #---- a_cache_read_as_a_number_before_its_first_write_rejects_a_string_write
@@ -2233,7 +2233,7 @@ simplify: <T, U> fn(x: T, [reals]: U) -> list[Any]
 add <- function(count, value) count + 1L
 run <- function() Reduce(add, list(1, 2), "start")
 #++++
-add: <T: numeric, U> fn(count: T, [value]: U) -> T
+add: <T: arithmetic, U> fn(count: T, [value]: U) -> T
 run: Unknown
 83..90 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
@@ -2286,9 +2286,9 @@ p_dist <- function(q, valueOnly = TRUE) {
 wrapper <- function(x, ...) p_dist(x, ...)
 use <- function(x) wrapper(x, valueOnly = FALSE)
 #++++
-p_dist: <T: numeric, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
-wrapper: <T: numeric> fn(x: T, ...: Any) -> double
-use: <T: numeric> fn(x: T) -> double
+p_dist: <T: arithmetic, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
+wrapper: <T: arithmetic> fn(x: T, ...: Any) -> double
+use: <T: arithmetic> fn(x: T) -> double
 
 #---- a_wrapper_that_forwards_to_reduce_folds_like_reduce
 reduce <- function(.x, .f, ..., .init) {
@@ -2333,10 +2333,10 @@ wrap <- function(pre) {
 }
 use <- function() wrap("a")
 #++++
-helper: <T: numeric> fn([v]: T) -> double
-wrap: <T: numeric> fn([pre]: T) -> double
+helper: <T: arithmetic> fn([v]: T) -> double
+wrap: <T: arithmetic> fn([pre]: T) -> double
 use: Unknown
-77..78 warning[unused] `s` is assigned but never used.
+77..78 warning[unused] `s` is assigned but never used
 137..140 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- a_reference_class_method_calls_its_sibling_not_the_top_level_namesake
@@ -2392,7 +2392,7 @@ predict_fit <- function(nlp, x) {
   if (nlp > 1) offset[[1]] + x else x + offset
 }
 #++++
-predict_fit: <T, U: numeric> fn(nlp: T, x: U) -> Unknown
+predict_fit: <T, U: arithmetic> fn(nlp: T, x: U) -> Unknown
 
 #---- a_flag_default_selects_an_early_return
 iam <- function(j, both = FALSE) {
@@ -2402,7 +2402,7 @@ iam <- function(j, both = FALSE) {
 rows <- function() iam(1, both = TRUE)$row.index
 next_index <- function() iam(1) * 2
 #++++
-iam: <T: numeric, U> fn(j: T, [both]: U) -> list{row.index: T} | double
+iam: <T: arithmetic, U> fn(j: T, [both]: U) -> list{row.index: T} | double
 rows: fn() -> double
 next_index: fn() -> double
 
@@ -2424,7 +2424,7 @@ weights: fn() -> Unknown
 added <- function(plot) undeclared::plot_of(plot) + list(1)
 #++++
 added: <T> fn(plot: T) -> Unknown
-24..43 warning[unresolved] unknown package namespace `undeclared`.
+24..43 warning[unresolved] unknown package namespace `undeclared`
 
 #---- a_sequence_between_computed_bounds_is_numeric
 # `seq` dispatches on `from`, so bounds computed from an unannotated parameter are numbers, not dates.
@@ -2447,7 +2447,7 @@ span <- function(n) {
 }
 #++++
 basis: <T, U> fn([n]: T, [penalty]: U) -> list{off: double | NULL}
-span: <T: numeric> fn(n: T) -> double[]
+span: <T: arithmetic> fn(n: T) -> double[]
 
 #---- a_literal_local_fills_a_vector_parameter
 # A literal is a length-one vector, so a local written from one fills a `character[]` or
@@ -2520,7 +2520,7 @@ renamed <- function() {
   ret$y
 }
 #++++
-risk: <T: numeric, U> fn(v: T, cv: U) -> list{VaR: double, contribution: U}
+risk: <T: arithmetic, U> fn(v: T, cv: U) -> list{VaR: double, contribution: U}
 use: fn() -> double
 computed: <T> fn(keys: T) -> double | character | NULL
 renamed: fn() -> character
@@ -2542,10 +2542,10 @@ none <- function() search(fun = function(x) 1, constraint = NULL, target = NULL)
 maybe <- function(flag) search(fun = function(x) 1, target = if (flag) 2 else NULL)
 wrong <- function() search(fun = function(x) 1, target = "a")
 #++++
-check: <T, U: numeric> fn(pars: T, fun: fn(T) -> U, target: U) -> U
-solve: <T, U, V: numeric> fn(pars: T, [fun]: fn(T) -> U, [constraint]: (fn(T) -> V) | NULL, [target]: V) -> V | U
-search: <T, U, V: numeric> fn([pars]: T, fun: fn(T) -> U, [constraint]: (fn(T) -> V) | NULL, [target]: V) -> V | U
-none: fn() -> Unknown
+check: <T, U: arithmetic> fn(pars: T, fun: fn(T) -> U, target: U) -> double
+solve: <T, U, V: arithmetic> fn(pars: T, [fun]: fn(T) -> U, [constraint]: (fn(T) -> V) | NULL, [target]: V) -> double | U
+search: <T, U, V: arithmetic> fn([pars]: T, fun: fn(T) -> U, [constraint]: (fn(T) -> V) | NULL, [target]: V) -> double | U
+none: fn() -> double
 maybe: fn(flag: logical) -> double
 wrong: Unknown
 577..580 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
@@ -2559,7 +2559,7 @@ bench <- function(n, timefun = bit::repeat.time) {
 }
 #++++
 bench: <T, U> fn(n: T, [timefun]: U) -> Unknown
-31..47 warning[unresolved] unknown package namespace `bit`.
+31..47 warning[unresolved] unknown package namespace `bit`
 
 #---- a_scalar_bound_does_not_spread_through_arithmetic
 deriv <- function(x, mu = 0, sigma = 1, order = 0) {
@@ -2576,9 +2576,9 @@ widened <- function(x, n) {
 }
 use <- function() widened(1L, 2.5)
 #++++
-deriv: <T: numeric, U: scalar numeric> fn(x: T, [mu]: T, [sigma]: T, [order]: U) -> double
+deriv: <T: arithmetic, U: arithmetic, V: scalar numeric> fn(x: T, [mu]: T, [sigma]: U, [order]: V) -> double
 grid: <T> fn(n: T) -> double
-widened: <T: numeric, U: scalar numeric> fn(x: T, n: U) -> double
+widened: <T: arithmetic, U: scalar numeric> fn(x: T, n: U) -> double
 use: fn() -> double
 
 #---- an_if_over_an_undecided_library_call_is_untyped
@@ -2626,7 +2626,7 @@ twice <- function(name, format_name = identity) {
   if (identical(format_name, identity)) c(format_name(1), format_name("a")) else "b"
 }
 #++++
-usage: <T: numeric, U, V> fn([name]: T, [format_name]: fn(character) -> U) -> double | U
+usage: <T: arithmetic, U, V> fn([name]: T, [format_name]: fn(character) -> U) -> double | U
 unguarded: Unknown
 twice: <T, U, V> fn([name]: T, [format_name]: U) -> character[] | character
 271..279 error[type-mismatch] expected `character`, found `double`

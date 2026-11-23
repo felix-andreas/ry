@@ -40,7 +40,7 @@ greeting: Str
 greeting <- f"hello {undefined_name}"
 #++++
 greeting: Str
-21..35 warning[unresolved] I could not resolve `undefined_name` in this package, its imports, or builtins.
+21..35 warning[unresolved] I could not resolve `undefined_name` in this package, its imports, or builtins
 
 #==== try
 #---- try_unwraps_the_ok_value_and_returns_the_error

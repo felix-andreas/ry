@@ -32,7 +32,7 @@ character
 v <- list(name = "bob")
 #++++
 v: list{name: character}
-49..54 error[annotation] `@new` requires a nominal type declared with `@type`, but `Shape` is an alias.
+49..54 error[annotation] `@new` requires a nominal type declared with `@type`, but `Shape` is an alias
 
 #---- structural_value_to_nominal_param
 #: @type Person {list{name: character}}

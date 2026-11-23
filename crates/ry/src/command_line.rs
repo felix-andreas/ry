@@ -373,6 +373,12 @@ pub enum Debug {
     /// Rewrite the given R files in place as the plain R program they mean, with every inline
     /// annotation removed
     Erase { paths: Vec<PathBuf> },
+    /// Print the type the checker gives the name or expression at a position, as the editor's
+    /// hover shows it
+    Type {
+        /// `FILE:LINE:COLUMN`, with the line and the column (in characters) counted from 1
+        position: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

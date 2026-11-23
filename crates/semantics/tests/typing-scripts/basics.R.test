@@ -23,13 +23,13 @@ value
 value: integer
 value: character
 character
-0..5 warning[unused] `value` is assigned but never used.
+0..5 warning[unused] `value` is assigned but never used
 
 #---- unknown_name
 missing_value
 #++++
 Unknown
-0..13 warning[unresolved] I could not resolve `missing_value` in this package, its imports, or builtins.
+0..13 warning[unresolved] I could not resolve `missing_value` in this package, its imports, or builtins
 
 #==== blocks
 #---- block_returns_last_expression_type

@@ -93,6 +93,40 @@ pub fn render_semantics(db: &RootDatabase, file: SourceFile) -> String {
     output
 }
 
+/// Panics unless a finding's message or related label follows the wording convention: it ends
+/// without a full stop, and it starts lowercase unless its first word is `I`, `R`, code, an
+/// acronym or a proper noun (`.agents/memory/decisions/syntax-semantics.md`, "Diagnostic
+/// messages are lowercase and end without a full stop").
+pub fn assert_message_style(message: &str) {
+    assert!(
+        !message.ends_with('.') || message.ends_with("..."),
+        "a diagnostic message ends without a full stop: {message:?}"
+    );
+    let first_word: String = message
+        .chars()
+        .take_while(|character| character.is_alphanumeric() || *character == '_')
+        .collect();
+    let lowercase_start = first_word
+        .chars()
+        .next()
+        .is_none_or(|character| !character.is_uppercase());
+    let exempt = first_word == "I"
+        || first_word == "R"
+        || first_word
+            .chars()
+            .skip(1)
+            .any(|character| character.is_uppercase() || character.is_numeric())
+        || PROPER_NOUN_STARTS
+            .iter()
+            .any(|noun| message.starts_with(noun));
+    assert!(
+        lowercase_start || exempt,
+        "a diagnostic message starts lowercase unless it opens with `I`, `R`, code or a proper noun: {message:?}"
+    );
+}
+
+const PROPER_NOUN_STARTS: [&str; 1] = ["Reference Classes"];
+
 /// One state of a project in a fuzz session.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectState {

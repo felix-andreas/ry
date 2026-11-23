@@ -921,6 +921,40 @@ impl Parser<'_> {
                     {
                         self.ann_function_type(end);
                     }
+                    _ if self
+                        .peek_significant(self.pos + 1, true)
+                        .is_some_and(|(kind, at)| {
+                            kind == L_BRACKET && !self.ann_bracket_is_suffix(at)
+                        }) =>
+                    {
+                        let name = self.token_str(self.pos).to_owned();
+                        self.wrap(TYPE_REF);
+                        self.ann_trivia(end);
+                        let start = self.token_range(self.pos).start();
+                        // `Box[integer]` reads like R indexing, but only `list` takes its element
+                        // type in square brackets. One finding covers the bracket, and `ERROR`
+                        // keeps the block from typing the binding with half a type.
+                        self.start(ERROR);
+                        let mut depth = 0usize;
+                        let mut close = start;
+                        while self.pos < end && !self.at(NEWLINE) {
+                            match self.current() {
+                                Some(L_BRACKET) => depth += 1,
+                                Some(R_BRACKET) => depth = depth.saturating_sub(1),
+                                _ => {}
+                            }
+                            close = self.token_range(self.pos).end();
+                            self.bump();
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        self.finish();
+                        self.error_at(
+                            TextRange::new(start, close),
+                            format!("type arguments go in angle brackets, as `{name}<...>`. Only `list` takes its element type in square brackets"),
+                        );
+                    }
                     _ => {
                         if self.ann_next_significant(end) == Some(LESS) {
                             self.start(TYPE_APPLY);
@@ -944,19 +978,7 @@ impl Parser<'_> {
             if !self.ann_at(L_BRACKET, end) {
                 break;
             }
-            let after = self.peek_significant(self.pos + 1, true);
-            let is_suffix = match after {
-                Some((R_BRACKET, _)) => true,
-                Some((IDENT, ident_pos)) => {
-                    self.token_str(ident_pos) == "named"
-                        && matches!(
-                            self.peek_significant(ident_pos + 1, true),
-                            Some((R_BRACKET, _))
-                        )
-                }
-                _ => false,
-            };
-            if !is_suffix {
+            if !self.ann_bracket_is_suffix(self.pos) {
                 break;
             }
             self.start_at(checkpoint, TYPE_VECTOR);
@@ -970,6 +992,21 @@ impl Parser<'_> {
                 self.bump();
             }
             self.finish();
+        }
+    }
+
+    /// Whether the `[` at `bracket` opens a vector suffix, `T[]` or `T[named]`.
+    fn ann_bracket_is_suffix(&self, bracket: usize) -> bool {
+        match self.peek_significant(bracket + 1, true) {
+            Some((R_BRACKET, _)) => true,
+            Some((IDENT, ident_pos)) => {
+                self.token_str(ident_pos) == "named"
+                    && matches!(
+                        self.peek_significant(ident_pos + 1, true),
+                        Some((R_BRACKET, _))
+                    )
+            }
+            _ => false,
         }
     }
 

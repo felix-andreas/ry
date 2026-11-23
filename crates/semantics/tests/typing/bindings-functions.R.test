@@ -23,7 +23,7 @@ increment: fn(value: integer) -> integer
 #---- numeric_param_plus_literal
 increment <- function(x) x + 1L
 #++++
-increment: <T: numeric> fn(x: T) -> T
+increment: <T: arithmetic> fn(x: T) -> T
 
 #---- numeric_param_negate
 negate <- function(x) -x

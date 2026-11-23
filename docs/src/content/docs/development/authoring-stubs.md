@@ -450,7 +450,7 @@ stubs. An `importFrom(pkg, name)` whose namespace the corpus knows (shipped or p
 does not export `name` is an error at the import:
 
 ```text
-`medain` is not exported by `stats`, so this package will not load.
+`medain` is not exported by `stats`, so this package will not load
 ```
 
 R refuses to load a package with such an import, so the code cannot run at all; it is the same rule

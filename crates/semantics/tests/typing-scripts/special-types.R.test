@@ -36,7 +36,7 @@ integer
 value <- 1L
 #++++
 value: Unknown
-23..28 warning[unused] `value` is assigned but never used.
+23..28 warning[unused] `value` is assigned but never used
 32..34 error[type-mismatch] `@if-unknown` applies only where the type is unknown, and this is already `integer`. Drop the annotation, or use `#:` to check the type or `@trust` to override it
 
 #---- trusted_coercion_overrides_incompatible_source
@@ -52,7 +52,7 @@ integer
 value <- 1L %undeclared% 2L
 #++++
 value: integer
-11..16 warning[unused] `value` is assigned but never used.
+11..16 warning[unused] `value` is assigned but never used
 
 #==== nullable_unions
 #---- nullable_union_annotation_accepts_integer
@@ -76,7 +76,7 @@ integer | NULL
 value <- if (TRUE) 1L
 #++++
 value: integer
-11..16 warning[unused] `value` is assigned but never used.
+11..16 warning[unused] `value` is assigned but never used
 20..32 error[type-mismatch] expected `integer`, found `integer | NULL`
 
 #==== unknown_propagation
@@ -147,7 +147,7 @@ integer | character
 value <- TRUE
 #++++
 value: integer | character
-23..28 warning[unused] `value` is assigned but never used.
+23..28 warning[unused] `value` is assigned but never used
 
 #---- member_accepted_where_union_parameter_expected
 #: fn(value: integer | character | NULL) -> logical
@@ -176,7 +176,7 @@ narrowed <- value
 #++++
 value: integer | character
 narrowed: integer
-47..55 warning[unused] `narrowed` is assigned but never used.
+47..55 warning[unused] `narrowed` is assigned but never used
 59..64 error[type-mismatch] expected `integer`, found `integer | character`
 
 #---- union_accepted_where_wider_union_expected
@@ -200,7 +200,7 @@ narrow <- wide
 #++++
 wide: integer | character | NULL
 narrow: integer | NULL
-60..66 warning[unused] `narrow` is assigned but never used.
+60..66 warning[unused] `narrow` is assigned but never used
 70..74 error[type-mismatch] expected `integer | NULL`, found `integer | character | NULL`
 
 #---- alias_expansion_into_union_dedupes

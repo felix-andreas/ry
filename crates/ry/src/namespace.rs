@@ -29,7 +29,7 @@ pub fn namespace_import_problems(
                 Severity::Error,
                 "unresolved",
                 format!(
-                    "`{name}` is not exported by `{}`, so this package will not load.",
+                    "`{name}` is not exported by `{}`, so this package will not load",
                     import.namespace
                 ),
             ))
@@ -75,7 +75,7 @@ pub fn namespace_export_problems(
                 *range,
                 Severity::Error,
                 "unresolved",
-                format!("`{name}` is exported but this package defines no such top-level object."),
+                format!("`{name}` is exported but this package defines no such top-level object"),
             )
         })
         .collect()
@@ -116,7 +116,7 @@ pub fn unused_import_diagnostics(
                 severity,
                 "unused-import",
                 format!(
-                    "imported name `{name}` from `{}` is never used.",
+                    "imported name `{name}` from `{}` is never used",
                     import.namespace
                 ),
             ))
@@ -251,7 +251,7 @@ mod tests {
         );
         assert_eq!(
             problems,
-            ["`nope_not_real` is not exported by `stats`, so this package will not load."]
+            ["`nope_not_real` is not exported by `stats`, so this package will not load"]
         );
     }
 

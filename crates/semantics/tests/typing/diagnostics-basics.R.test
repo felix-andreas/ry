@@ -19,7 +19,7 @@ value: Unknown
 value
 #++++
 Unknown
-0..5 warning[unresolved] I could not resolve `value` in this package, its imports, or builtins.
+0..5 warning[unresolved] I could not resolve `value` in this package, its imports, or builtins
 
 #---- loop_body_binding_is_visible_after_the_loop
 for (item in list(1L)) {
@@ -38,7 +38,7 @@ x <- 2L
 #++++
 x: integer
 x: integer
-0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
-  = 8..9 the later binding is here.
-8..9 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
-  = 0..1 the earlier binding is here.
+0..1 warning[duplicate] top-level binding `x` is overwritten by a later top-level binding in this package
+  = 8..9 the later binding is here
+8..9 warning[duplicate] top-level binding `x` overwrites an earlier top-level binding in this package
+  = 0..1 the earlier binding is here

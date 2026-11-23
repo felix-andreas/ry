@@ -441,3 +441,10 @@ contract in the type-system reference.
 - **Package metadata.** A `NAMESPACE` parsed in chunks must equal one parse; a project using the metadata must render alike after other metadata.
 - **Canaries.** Each comparison of two renderings has a test that feeds it a perturbed side wrapped around the real rendering and asserts a failure within the default seeds. The perturbation lives in the test; ry's non-test code has no fault-injection seam.
 - **Stack overflow.** Analysis batteries run each seed on a thread named after the test and the seed, because the overflow abort prints only the thread's name. Batteries whose cases are not `Send` (the runtime's) keep `for_each_seed`.
+
+## `ry debug type FILE:LINE:COLUMN` prints the hover at a position
+
+**Status:** built (`cli::type_at`).
+
+- A CLI-only user had no way to ask what the checker inferred, which made an inference surprise guesswork. The command analyzes the project as `ry check` does, with typing forced on, and prints `ide::hover` at the position: one code path with the editor, so the two never disagree.
+- It sits under `debug` because it explains a result rather than checking code; the line and the column count from 1, the column in characters, as `ry check` reports them.

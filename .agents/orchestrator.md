@@ -47,9 +47,9 @@ The goal, the mandate and the benchmark are in `AGENTS.md`. On top of them:
 
 No release unless the user asks (user). The weekly limit reset Mon Nov 23 10:00 UTC; all five sessions resumed. Check-in trig_01LuX97P7ZbAg4TRxYu7c1tu is enabled again.
 
-- session_0111kWqCHzz5KgPTQQvkUSXS (Opus high, checker): #684, #686, #687, #688 merged. Now (branch feat/type-system-adoption): backlog "adoption reviews", "second simulated-user round", "semantics" and "diagnostic wording" sections. First: the red editor-navigation scenario on main (CI 44726657090).
+- session_0111kWqCHzz5KgPTQQvkUSXS (Opus high, checker): #692 merged (27c3b361). Now feat/checker-false-reports: shape-generic vectorised math, fresh-sample false-report classes (target under 10 per 100k lines), other corpus checker items.
 - session_0111kWqCXYKiR937Au74eL55 (Opus high, kernels; replaced the archived session_0111kWqE86VPq98yVE2JgLVm, whose disk filled after #685, #689, #690): branch fix/dependency-suites, test-suite parity for the benchmark dependency set beyond the 27 pinned packages, and load-index cache eviction. Stays out of the JIT, calls, the builtin calling convention and semantics/ide. BLOCKED since Fri: its git commit/push was denied by the permission classifier ("Undermining Oversight"); waiting on the user.
-- session_0111kWqEyHh2WBFnP93ZvPEM (Fable, JIT): PR 2: #637 compile-time growth, mean.default, tier 1 on call-heavy bodies (test user request 3), merge() history slowdown (request 2).
+- session_0111kWqEyHh2WBFnP93ZvPEM (Fable, JIT): draft #691 (claude/generic-tier-calls): compile-time growth, mean.default, call-storm and merge() slowdown (test user requests 2, 3) fixed via an exit profile. Now trimming forced-mode overhead; then proposes a compiled-to-compiled call interface directly to the calls session.
 - session_0111kWqD8G8GVR8fbHetepcc (Fable, calls): step 4 S4 generic call, builtins, .Call; test user requests 4 (single-.Call closures keep slot frames) and 1 (small data.table calls).
 - session_0111kWqDs8aQ1MWFmKMxX9HQ (Fable, fuzz): IDE relational oracles PR via Opus subagents.
 

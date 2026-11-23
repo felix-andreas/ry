@@ -49,7 +49,7 @@ crates", has the shape and the measurements behind this list.
 
 ## Open: the analysis core after the type store
 
-`decisions/syntax-semantics.md` has the shape and the measurements behind this list, in "Types
+`decisions/analysis-core.md` has the shape and the measurements behind this list, in "Types
 and symbols are four-byte ids into append-only columns", "An item's syntax has a stamp, so an edit
 lowers only the items it changed" and "The analysis core's per-item and per-file tables after the
 type store".
@@ -750,7 +750,7 @@ gap, in the Limitations section of `reference/type-system.mdx`.
 - devtools `test.R` 72 and knitr `citation.R` 163: a vector of statically unknown length
   (`p[file.exists(p)]` returned through a function) reaches a stub's scalar `character` parameter.
   The value has length one at run time, but no type says so, and no sound rule can say so
-  (`decisions/syntax-semantics.md`, "Corpus false reports: the narrowing and overload rules that cleared them").
+  (`decisions/type-checker.md`, "Corpus false reports: the narrowing and overload rules that cleared them").
 
 ### Scalar-claim chains
 
@@ -1916,33 +1916,6 @@ triggering shape is unknown. Do not guess at it. The `unused` warning has severa
 script liveness, the package top level, parameters, and the interaction with `shadows-namespace`. A
 fix aimed at the wrong one is worse than none. Ask for the snippet before working it.
 
-## Open: diagnostic wording is not styled consistently
-
-Six findings shown side by side in the README read as though five people wrote them. Three
-`type-mismatch` messages are lowercase sentence fragments. `Unexpected comma after last argument` and
-`Use TRUE, not T, for Boolean values` are capitalized, and the second is imperative. ``` `tmp` is
-assigned but never used. ``` is the only one carrying a full stop. A README reviewer caught it,
-noticing that the page claims a finding says the same thing everywhere while the sample visibly
-disagrees with itself.
-
-**The obvious rule does not survive measurement.** Across 62 message literals in `diagnostics.rs`,
-36 are lowercase with no period, 14 are lowercase with a period, and 9 are capitalized. So
-"lowercase fragment, no period" is the plurality and nothing like a convention. It also cannot be
-applied blanket, because the capitalized ones are capitalized for a reason. `R's $ operator` opens
-with a proper noun, and three messages are first-person sentences: `I could not resolve ...`,
-`I do not know the type ...` and `I cannot construct an infinite type`. Lowercasing those yields
-`r's` and `i could not`.
-
-The rule that fits the corpus has two shapes. A message that is a complete sentence is sentence-cased
-and ends with a period. A message that is a fragment, which is the expected-and-found family, is
-lowercase with no period. Under that rule the real violations are far fewer than "five people wrote
-them" suggests, and are mostly sentences missing their period.
-
-This is unblocked. The reporter change that re-captured every rendered sample has landed, so
-rewording a message now invalidates only the samples that quote it. Those samples have to be
-re-captured in the same change. There is no harness for that yet, so it is a manual pass over the
-pages named in the next item.
-
 ## Open: findings from the second simulated-user round
 
 Five simulated users each worked on a distinct project of their own writing, learned the tool from
@@ -1950,113 +1923,28 @@ the docs alone with no source access, and tried to reach a clean run. The report
 `users/feedback-*.md` files from that round. What follows is what is still open, by theme, with the tester who found it
 named where their judgment is the point.
 
-### A clean run still does not mean enough
-
-Every tester reached this conclusion independently, and it is the round's headline. The Shiny
-dashboard tester finished with exit code 0 and five real bugs still in the code. The ETL engineer
-would not use `typing = true` as a merge gate, not because it is noisy but because "after these, a
-green run doesn't yet mean what it needs to mean at 3am". The Quarto analyst would have been "fully
-off by end of day, never knowing the default checks were not running".
-
-Two holes of that kind are still open.
+### Still open
 
 - **A package with no manifest still buys the blanket tolerance.** Fifteen manifest-only CRAN
-  namespaces now close the common case, but a package a user names, such as `janitor`, still
-  switches unresolved detection off project-wide. The remedy is a two-line project stub, and the
-  limitations page says so on the user-facing side.
-- **A column name inside `DT[...]` is never validated.** `orders[, net := gross_ammount * 1.19]`
-  and `by = currrency` are both silently accepted, while the only name that did report was a correct
-  one. That is exactly inverted: silent where the typo is real and noisy where the name is right.
-  `limitations.md` should say plainly that column names are never validated.
-
-### Two configuration defects that break CI
-
-- **Setting `[check] exclude` disables the built-in `renv/` and `packrat/` skip.** With no key the
-  walk finds 1 file. With `exclude = []` it finds 1 file. With `exclude = ["nothing-here/"]`, which
-  matches nothing, it walks renv and packrat both. The docs' own example, `exclude = ["scripts/"]`,
-  would drag an entire renv library into CI. A user-supplied list must extend the vendored defaults
-  rather than replace them.
-- **Any file in `stubs/` deactivates the shipped conditional namespaces.** One stub for an unrelated
-  package made 19 `data.table::` calls unresolved while bare `fread` still resolved, and it made
-  `data.table` unusable as an annotation type name, which silently suppressed a real type error.
-
-### The traits tripwire, tripped a fifth time
-
-A `<T: numeric>` bound admits a `Date`, and the body's arithmetic then fails in R. A helper
-annotated `#: <T: numeric> fn(a: T, b: T) -> T` and called as `add_them(d1, d2)` is accepted, while
-the direct `d1 + d2` is correctly rejected with ``\`+\` is not defined between \`Date\` and \`Date\```.
-A one-line helper therefore launders a real error.
-
-The mechanism is the `declares_arithmetic` relaxation: a class that declares any arithmetic method
-satisfies `Numeric` wholesale. That does not follow. `Date` declares `+.Date` for `Date + integer`
-and has no `Date + Date`.
-
-A constraint meaning "supports this operator with these operands" replaces both this relaxation and
-the operand tie. Do not patch it again. Design it.
-
-One related leak: `sort`, `head` and `rev` on dates report ``found \`T[]\```, which leaks an unbound
-type variable.
-
-### Nominal subtyping, which is the same deferred design as S4 and R6 inheritance
-
-`data.table` is rejected where `data.frame` is expected, and the wrong direction is accepted.
-`needs_df(data.table(a = 1L))` is legal R and reports `expected data.frame, found data.table`, while
-`needs_dt(data.frame(a = 1L))`, the direction that really is wrong, reports nothing. R's class vector
-for a data.table is `c("data.table", "data.frame")`.
-
-`TyKind::Named` matches by exact name and nothing in the compatibility relation carries a hierarchy.
-The tractable corner is a declared, acyclic nominal-extends-nominal relation in the stub vocabulary.
-Do it as that design, not as a data.table special case.
-
-### `Date` does not survive real code
-
-It survives `d + 1L`, `d2 - d1`, `d1 < d2`, `format`, `seq.Date` and a `while` cursor. It is lost to
-`Unknown` through `dates[i]`, `dates[mask]`, `for (d in dates)` and `Reduce`. It is wrong through
-`min` and `max`. The same bug is therefore caught in one place and missed in another: `cursor + cursor`
-after a `while` loop is flagged, and the identical `d + d` inside `for (d in dates)` is not. No doc
-describes this boundary.
-
-Two related gaps. `#: @type TradeDate {Date}` disables all Date arithmetic, so `settle - trade` is
-rejected, which kills the guide's own recipe for domain types over dates. The working route is a
-project `.Rtypes` declaring `-.SettleDate`, which the guide never mentions, and a stub cannot see an
-inline `@type` anyway. Separately, `Date[]` is inexpressible, and `Days + Days` yields `double`, so a
-units tag dies on arithmetic.
-
-### Strict mode's own advice does not work
-
-The message says to add a type annotation, and no annotation form silences it. `#:`, `@if-unknown`,
-`@trust` and `#: Any` all still report, and the last contradicts the reference directly. Only
-`# ry: allow(strict)` works.
-
-### Missing type-system coverage, each with its repro
-
+  namespaces close the common case, but a package a user names, such as `janitor`, switches
+  unresolved detection off project-wide. The remedy is a two-line project stub, and the limitations
+  page says so.
+- **`Reduce(f, dates)` is rejected** (``expected `list[T] | T[]`, found `Date` ``). A `Date`
+  candidate on `Reduce` was measured: every wrapper over an open argument then loses its signature
+  (`function(xs) Reduce(`+`, xs)` degrades from `fn(xs: list[double] | double[]) -> double` to an
+  open `T`), because two candidates narrow differently. It waits for `Date[]`, which is
+  inexpressible, like `Days + Days` giving `double`.
 - **A parameter's type is not seeded from its default value.** `f <- function(s = settings) s$hsot`
-  is missed while `settings$hsot` and a local alias are both caught. The obvious fix generates false
-  positives, so this needs the design rather than a patch. Binding the parameter to its default's
-  type makes every caller passing anything else wrong, and reporting the field against the default's
-  shape breaks the commonest idiom of all, `function(x = list()) x$name`, where the default is an
-  empty accumulator and callers supply the real record. R answers `NULL` there, so an error would be
-  plain wrong. The honest model is that such a parameter is the default's type unioned with whatever
-  callers pass, which is still open, so a field access on it should be at most `T | NULL`, the same
-  rule the accumulator fix established for unions. Recovering the tester's case needs to know the
-  argument is never supplied anywhere, which is whole-program information the checker does not have.
-  Leave it missed rather than trade it for the class of false positive this round spent its time
-  removing.
-- **`&` and `|` are unmodelled**, so `TRUE & FALSE` is `Unknown` and every logical mask kills
-  downstream checking. The reference documents `&&` and `||` with no counterpart, and the only
-  mention of `&` is a parenthetical inside the non-standard-evaluation discussion.
-- **A maybe-`NULL` value is only caught by arithmetic.** `toupper`, `nchar` and `substr` on a
-  `character | NULL` all pass, despite the guide promising this class of check.
-- **Recursion defeats `is.logical()` narrowing.** The identical non-recursive function is clean.
+  is missed while `settings$hsot` is caught. Binding the parameter to its default's type breaks
+  `function(x = list()) x$name`, where callers supply the real record and R answers `NULL`. The
+  honest model unions the default with what callers pass, so a field read is at most `T | NULL`.
+  Recovering the tester's case needs whole-program knowledge that the argument is never supplied, so
+  it stays missed rather than traded for a false-positive class.
 - **`$` on an unannotated parameter constrains nothing**, so the parameter accepts anything.
-- **`#: @new` does not stop `structure()` being a strict origin**, so the documented S3 remedy fails
-  at exactly the site it exists for.
-- **S3 generic and method signature consistency is unchecked.** Both planted violations were missed,
-  and `R CMD check` catches both. ry already does the rarer undefined-export check.
-- **`vapply(x, f, numeric(1))` errors whenever the callback is not statically `double`.** R accepts
-  a wider template, which the tester confirmed with `ry run` on
-  `vapply(1:3, function(i) i, numeric(1))`.
-- **A function name inside `mutate` and `filter` is swallowed** along with the column names.
+
+Not a defect, recorded so it is not re-filed: `toupper`, `nchar` and `substr` on a
+`character | NULL` pass, because R returns `character(0)` (or `integer(0)`) for `NULL` there, so a
+report would be a false one.
 
 ### Two lints need a model change rather than a patch
 
@@ -2072,34 +1960,16 @@ The message says to add a type annotation, and no annotation form silences it. `
   class and a testthat suite, in the package author's words. Two of the three causes are fixed. The
   shadow lint above is the third.
 
-### Formatter and message defects
+### Two format questions left from the round
 
-- **`m[i, , drop = FALSE]` becomes `m[i,, drop = FALSE]`**, which removes the space that makes the
-  empty dimension slot visible, in exactly the code where miscounting slots is the bug. It is
-  idempotent, so it is deliberate, and it is undocumented.
-- **Any `X[Y]` annotation reports "only one compact annotation fits in a `#:` block, separate the
-  annotations with a blank line" when there is only one annotation.**
-- **The unknown-type and duplicate-definition messages name only `@type` or `@alias`**, although a
-  definition may also be written inline as `type` or `alias`.
 - **A bodyless abstract type (`@type Dict<K, V>`) is a stub-format form only.** If project files ever
   accept it, the inline `type Name<K, V>` must accept a missing `= TYPE` in the same change, so the
   two spellings stay one grammar.
-- **"Add inferred type annotation" is offered on `x <- @UserId(1L)`**, where the constructor already
-  states the type.
-- **An unclosed chunk reports the tester's English prose as an unresolved variable** rather than the
-  missing fence.
-
-### Documentation gaps the round hit
-
-- The adjacency rules say a plain `#` comment breaks `#:` attachment and never mention `#'`. So
-  interleaving `#: @param` with roxygen's `#' @param`, which is the first thing a roxygen user
-  tries, fails.
-- The guide never shows `...` or `[optional]` in an annotation, and every S3 method needs both.
-- `configuration.md` omits `DESCRIPTION` as a project root marker, and a three-line `DESCRIPTION`
-  with `Imports:` was what fixed 30 of the ETL engineer's 34 first-run warnings. The path the docs do
-  recommend, hand-writing `stubs/*.Rtypes`, cost five files, fixed less, and was actively harmful.
-- The guide's showcase uses `list(...)`. Swapping it for `read.csv()` makes the identical mistake
-  report nothing, and the page calls that the whole pitch with no caveat at the point of contact.
+- **An unclosed literate chunk reports the prose after it as unresolved names** rather than the
+  missing fence. Deferred because analysis sees only the blanked script that
+  `r_source_of_literate` produces, so semantics cannot see a fence: the fix needs the hosts (the
+  CLI's `analysable_source` and the server) to report literate findings of their own. The fix then
+  reports the missing fence at the opening one and ends the chunk at the next chunk start.
 
 ### What the round praised
 
@@ -2196,16 +2066,11 @@ Three independent black-box adoption reviews simulated real projects from the do
 only, with no source access. They were an analysis-script user, a CRAN package author and a
 numerical-computing user, and they converged on the same walls. What remains is below, ranked by how often a real user hits it.
 
-### The apply family is unblocked but still untyped where its result shape depends on a value
+### `tapply` and a non-scalar `sapply` return `Any`
 
-Overload selection with a flexible argument works now, through fact-versus-guess probing that
-`decisions/syntax-semantics.md` records. `sapply`, `mapply`, `Map` and `tapply` stay `Any`, because `simplify = FALSE`
-and a vector-returning callback change the result shape without changing any argument type, so no
-overload set can discriminate them.
-
-The reachable win is typing only their parameters and leaving the return `Any`. That costs R's
-function-name-as-string form, so `sapply(x, "length")` would be rejected, as it already is for
-`lapply`.
+`sapply` and `mapply` follow the callback's return when it is scalar-like or `simplify = FALSE`.
+A vector-returning callback gives a matrix in R, and `tapply` gives an array shaped by the groups,
+so both wait for the matrix-shape design below.
 
 ### The three object systems, re-measured
 
@@ -2226,24 +2091,16 @@ Two of the four claims this entry used to make were stale, including the one it 
   deliberate. What is actually missing is typed declarations. The class, its fields and its methods
   are `Unknown`, so `obj$typo()` is silent and completion after `self$` offers every record field in
   the workspace.
-- **Still true: an S4 slot typo is silent.** `setClass("A", representation(x = "numeric"))` followed
-  by `new("A", y = 1)` reports nothing, where R halts with `invalid name for slot of class "A": y`.
-  `x@slot` has no type either, and `setClass`, `setMethod` and `new` are `Any` stubs.
+- **Still true: S4 slots have no types.** `x@slot` is `Unknown`, and `setClass`, `setMethod` and
+  `new` are `Any` stubs. `new("A", y = 1)` with no slot `y` is reported (`s4.rs`).
 - **Still true: `UseMethod` is not modelled**, so a generic call is `Unknown`, and
   `structure(list(...), class = "dog")` produces a plain record, so the class attribute is data. S3
   operator dispatch is real, because `+.Date`, `Arith.X` and `Ops.X` are built and dispatched, and
   the linter knows `generic.class` names.
 
 All three systems are recognized structurally by the IDE outline, in `classify_symbol_call`, which
-is where the type-side work can start. The fix order, cheapest real win first, is the S4 slot-name
-check, then R6 class typing, then S4 slot types, then `UseMethod`.
-
-The slot check is bounded, because `setClass` names the slots and `new("Class", ...)` names its
-arguments. But `contains =` is the trap. A subclass legitimately takes its parent's slots, verified
-against R, where `setClass("C", contains = "P", ...)` followed by `new("C", x = 1, y = 2)` runs. A
-check that does not follow the inheritance chain therefore turns correct code into a false positive.
-Both the `representation(...)` and the `slots =` form need reading, and a class assembled
-dynamically must fall back to silence.
+is where the type-side work can start. The fix order, cheapest real win first, is R6 class typing,
+then S4 slot types, then `UseMethod`.
 
 ### Matrix shape is untracked
 
@@ -2254,12 +2111,6 @@ same shape of problem.
 
 One trap came out of the work that returned the `matrix` nominal: making a constructor return a real
 nominal without also declaring that class's operator methods turns every `m + 1` into a false error.
-
-### Everything from a `data.frame` is `Unknown`, and `Unknown` satisfies every annotation
-
-On data-frame-heavy code, annotations therefore look protective and are not. This is the design
-consequence that decides the tool's value for analysis users. It needs at minimum a way to see that
-a check was skipped, which is what strict mode does once it reports origins.
 
 ### An unannotated helper that wraps an operator over a class fails, and the tie is why
 
@@ -2276,41 +2127,26 @@ This is the same third-constraint-kind question recorded above and in
 place of `Numeric`, replacing both the tie and the `declares_arithmetic` relaxation. The next stub
 corpus addition that returns a real nominal will trip it again.
 
-### A project's own `%op%` stays untyped by design
-
-The result is `Unknown`, which is a strict-mode origin. It may be a non-standard-evaluation wrapper
-whose right operand is quoted, as magrittr's `%>%` is, and checking that as an ordinary call would
-reject correct code.
-
-Lowering `%op%` to the call it is, following the documented `|>` precedent, would type it and give
-goto-definition and references on the operator. Weigh that against the non-standard-evaluation risk
-and the `unresolved` finding a bare-script `%>%` would gain.
-
-### Only the stub route to an operator method on a project nominal is blocked
-
-Declaring the method as an annotated R function works, and that is what an author writes anyway for
-a real S3 class. The gap is narrower than "operator methods need ergonomics". A `.Rtypes` stub
-cannot see a `@type` the R source declares, reporting instead that the declaration does not load
-because it does not know the type. So only the stub spelling is unreachable.
-
-Decide whether a stub source should see a project's `@type` declarations at all, or whether the
-R-side declaration is simply the answer and the docs should say so.
-
-### The stronger suppression form
-
-A type error inside `expect_error(...)` stays reported, and `# ry: allow(type-mismatch)` is the
-answer. `decisions/syntax-semantics.md` holds the record and the diagnostics page documents it. The open follow-up is
-the stronger form, which is a suppression that reports when the expected finding does not appear,
-like `@ts-expect-error`. That is a feature for every code, not a special case.
-
 ### Smaller items, each with a one-line repro in the reports
 
-- A message leaks an unbound type variable, as `list[T] | T[]`, and expands an alias on only one
-  side of an expected-and-found pair.
-- Closure re-entry is unmodelled, so the memo idiom
-  `if (!is.null(cache)) return(cache); cache <<- v` yields `T | NULL`.
-- There is no `--fix`, no stdin input, and no CLI way to ask what type an expression has, which
-  makes debugging an inference surprise guesswork for a CLI-only user.
+- A message expands an alias on only one side of an expected-and-found pair (no repro yet on a
+  valid `@alias`). A type variable in an expected type, as `Find(f, mean)` printing
+  ``expected `list[T] | T[]` ``, is kept: it says what the parameter accepts.
+- The memo idiom `if (!is.null(cache)) return(cache); cache <<- v` is precise inside a factory
+  (`fn() -> integer`), but a script's top-level `cache` written by `<<-` stays `integer | NULL`,
+  because joining would make a binding's type depend on every item that writes it.
+- There is no stdin input for `ry check`.
+- `Reduce(function(a, b) max(a, b), dates)` is a false error (``expected `list[T] | T[]`, found
+  `Date` ``), because a nominal vector has no element type. A `Date` candidate in the stub fixes it
+  but leaves an unannotated `Reduce(f, x)` over a parameter undecided, so `x` loses its
+  `list[T] | T[]` type. The fix is letting a class with a `[[.Class` method match `T[]`.
+- A project's own top-level `new` is still held to `setClass` slots, because the diagnostics pass
+  sees only local shadowing (`diagnostics.rs`, the `new()` loop).
+- A `# ry: expect(code)` inside a string literal counts as a directive, as every `#` on the line is
+  tried, so it can raise `unfulfilled-expect`.
+- `sapply` over a zero-length input is `list()` in R but types `T[]`.
+- A project `%op%` that captures an operand with `match.call`, `enquo` or `enexpr` instead of
+  `substitute` is checked as a call.
 
 Two items from the reports were checked and are not defects, recorded so they are not re-filed. A
 generic parameter rejecting a non-`NULL` default is correct, because `<T> fn(x: T, [fallback]: T)`
@@ -2324,12 +2160,6 @@ the space serves, and the `trailing-comma` lint reports the mistake.
 
 ## Open: semantics
 
-### A `#:` comment after a type definition annotates the next binding
-
-After `type P = Record{x: double} #: integer`, the line `p: P <- ...` reports
-`annotation-mismatch` against `integer`. The comment should annotate nothing, or be reported
-where it stands.
-
 ### A list operation over a record still loses the field types
 
 `rev`, `unique`, `head`, `tail` and `Filter` declare a `list[named: T]` candidate ahead of the plain
@@ -2341,21 +2171,6 @@ Only a shape-mirroring return, meaning "the same record", fixes it, and the type
 for a stub to say that. `rev` is the case where that claim would be exactly right, because it
 reorders and drops nothing, while `head`, `tail` and `Filter` genuinely may drop a name and are
 correctly nullable. This is the same family as the data.frame row-type and matrix-shape designs.
-
-### One residual on annotating a lambda
-
-Reporting that an annotation in a call's argument list is silent does not give the lambda parameter
-an annotatable position. That stays the one genuine expressiveness argument for inline type syntax,
-which `development/design/inline-type-syntax.md` records. The message says to lift the function to
-its own binding, rather than to move it up a line, which would annotate the wrong thing.
-
-### `Unknown` is both the gradual top and the recursion fixpoint's seed
-
-The fixpoint starts every member at `Unknown`, so a join must keep the other side of an `Unknown`
-branch, or recursion never sharpens. That is why `if (c) 1L else untyped()` is `integer` rather than
-`integer | Unknown`, and the reference says so. Absorbing `Unknown` at joins, which is the gradual
-reading, broke recursion convergence when it was tried. The clean fix is a separate bottom for the
-seed, so a join can absorb a genuine `Unknown` while the fixpoint starts from nothing.
 
 ### Overload candidates worth adding when the area is touched
 

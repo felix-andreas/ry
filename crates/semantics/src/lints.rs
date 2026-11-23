@@ -293,7 +293,7 @@ pub fn lint_file(db: &dyn Db, file: SourceFile, config: &LintConfig) -> Vec<Diag
                     unused.range + span.range.start(),
                     severity,
                     "unused-parameter",
-                    format!("parameter `{}` is never used.", unused.name),
+                    format!("parameter `{}` is never used", unused.name),
                 ));
             }
         }
@@ -358,7 +358,7 @@ fn shadow_lints(
                         range,
                         *severity,
                         "shadows-builtin",
-                        format!("Top-level binding `{}` shadows a builtin.", binding.name),
+                        format!("top-level binding `{}` shadows a builtin", binding.name),
                     ));
                 }
             } else if let Some(severity) = &namespace_severity
@@ -369,7 +369,7 @@ fn shadow_lints(
                     *severity,
                     "shadows-namespace",
                     format!(
-                        "Top-level binding `{}` shadows `{namespace}::{}`.",
+                        "top-level binding `{}` shadows `{namespace}::{}`",
                         binding.name, binding.name
                     ),
                 ));
@@ -488,7 +488,7 @@ fn syntax_lints(root: &SyntaxNode, config: &LintConfig, lints: &mut SyntaxLints)
                         Severity::Warning,
                         "numeric-leading-zero",
                         range,
-                        format!("Write `0{text}` with a leading zero, which is easier to read"),
+                        format!("write `0{text}` with a leading zero, which is easier to read"),
                         Some((
                             Applicability::Safe,
                             "Add a leading zero",
@@ -522,7 +522,7 @@ fn line_length_lint(root: &SyntaxNode, config: &LintConfig, diagnostics: &mut Ve
                     TextRange::new(start.into(), end.into()),
                     severity,
                     "line-length",
-                    format!("This line is {length} characters long, over the limit of {limit}"),
+                    format!("this line is {length} characters long, over the limit of {limit}"),
                 ));
             }
         }
@@ -581,12 +581,12 @@ fn boolean_shorthand_lint(
     }
     let (message, title, replacement) = match token.text() {
         "T" => (
-            "Use TRUE, not T, for Boolean values",
+            "use TRUE, not T, for Boolean values",
             "Change to `TRUE`",
             "TRUE",
         ),
         "F" => (
-            "Use FALSE, not F, for Boolean values",
+            "use FALSE, not F, for Boolean values",
             "Change to `FALSE`",
             "FALSE",
         ),
@@ -714,7 +714,7 @@ fn binary_lints(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
             Severity::Warning,
             "assignment-operator",
             operator.text_range(),
-            "Use <-, not =, for assignment",
+            "use <-, not =, for assignment",
             Some((Applicability::Safe, "Change to `<-`", "<-".to_owned())),
         );
     }
@@ -753,7 +753,7 @@ fn binary_lints(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
             Severity::Warning,
             "scalar-in",
             significant_range(node),
-            "Use `==` to compare with one value: `x %in% y` with a single value on the right is `x == y`, apart from NA",
+            "use `==` to compare with one value: `x %in% y` with a single value on the right is `x == y`, apart from NA",
             Some((
                 Applicability::Unsafe,
                 "Change to `==`",
@@ -780,7 +780,7 @@ fn binary_lints(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
             Severity::Warning,
             "empty-assignment",
             significant_range(&value),
-            "Assign NULL instead of an empty `{}`, which evaluates to NULL",
+            "assign NULL instead of an empty `{}`, which evaluates to NULL",
             Some((Applicability::Safe, "Change to `NULL`", "NULL".to_owned())),
         );
     }
@@ -791,7 +791,7 @@ fn binary_lints(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Di
             .filter(|target| target.kind() == SyntaxKind::NAME)
     {
         let name = node_text(&target).into_owned();
-        if let Some(message) = naming_style_message(&name, style, "Variable") {
+        if let Some(message) = naming_style_message(&name, style, "variable") {
             diagnostics.push(Diagnostic::new(
                 significant_range(&target),
                 Severity::Warning,
@@ -979,7 +979,7 @@ fn trailing_comma_lint(
                 comma,
                 severity,
                 "trailing-comma",
-                "Unexpected comma after last argument".to_owned(),
+                "unexpected comma after last argument".to_owned(),
             )
             .with_fix(
                 Applicability::Safe,
@@ -1006,7 +1006,7 @@ fn parameter_name_lint(
     else {
         return;
     };
-    if let Some(message) = naming_style_message(name_token.text(), style, "Parameter") {
+    if let Some(message) = naming_style_message(name_token.text(), style, "parameter") {
         diagnostics.push(Diagnostic::new(
             name_token.text_range(),
             Severity::Warning,
@@ -1046,7 +1046,7 @@ fn comparison_lints(
             Severity::Warning,
             "equals-na",
             range,
-            "Comparing with NA always gives NA, whatever the other side holds. Use is.na() to test for missing values",
+            "comparing with NA always gives NA, whatever the other side holds. Use is.na() to test for missing values",
             Some((
                 Applicability::Unsafe,
                 "Change to `is.na()`",
@@ -1070,7 +1070,7 @@ fn comparison_lints(
             Severity::Warning,
             "class-equals",
             range,
-            "Comparing class() with a string misses objects that have several classes. Use inherits()",
+            "comparing class() with a string misses objects that have several classes. Use inherits()",
             Some((
                 Applicability::Unsafe,
                 "Change to `inherits()`",
@@ -1299,7 +1299,7 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
                     Severity::Warning,
                     "any-is-na",
                     significant_range(call),
-                    "Use anyNA(x), which stops at the first NA instead of building a vector for any()",
+                    "use anyNA(x), which stops at the first NA instead of building a vector for any()",
                     Some((
                         Applicability::Safe,
                         "Change to `anyNA()`",
@@ -1328,7 +1328,7 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
                     "lengths",
                     significant_range(call),
                     format!(
-                        "Use lengths(x), which counts every element's length without calling length() through {callee}()"
+                        "use lengths(x), which counts every element's length without calling length() through {callee}()"
                     ),
                     Some((
                         Applicability::Unsafe,
@@ -1358,7 +1358,7 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
                     "yoda-test",
                     significant_range(call),
                     format!(
-                        "Put the value under test first: testthat reports the first argument of {callee}() as the actual value"
+                        "put the value under test first: testthat reports the first argument of {callee}() as the actual value"
                     ),
                     (!has_comment(call)).then(|| {
                         (
@@ -1396,7 +1396,7 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
                     Severity::Warning,
                     "unnecessary-concatenation",
                     significant_range(call),
-                    format!("Write `{constant}` directly: c() has nothing to combine here"),
+                    format!("write `{constant}` directly: c() has nothing to combine here"),
                     (!has_comment).then(|| {
                         (
                             Applicability::Safe,
@@ -1438,7 +1438,7 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
                 Severity::Warning,
                 "which-grepl",
                 significant_range(call),
-                "Use grep(...), which returns the matching positions directly, instead of which(grepl(...))",
+                "use grep(...), which returns the matching positions directly, instead of which(grepl(...))",
                 Some((
                     Applicability::Safe,
                     "Change to `grep()`",
@@ -1455,7 +1455,7 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
                     Severity::Warning,
                     "length-levels",
                     significant_range(call),
-                    "Use nlevels(x) instead of length(levels(x))",
+                    "use nlevels(x) instead of length(levels(x))",
                     Some((
                         Applicability::Safe,
                         "Change to `nlevels()`",
@@ -1470,7 +1470,7 @@ fn call_lints(call: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec<Diag
             Severity::Warning,
             "browser-call",
             significant_range(call),
-            "Remove this browser() call, which pauses the code whenever it runs in an interactive session",
+            "remove this browser() call, which pauses the code whenever it runs in an interactive session",
             None,
         ),
         _ => {}
@@ -1604,7 +1604,7 @@ fn unreachable_code_lint(
         Severity::Warning,
         "unreachable-code",
         range,
-        format!("This code never runs, because {written} above it leaves the block first"),
+        format!("this code never runs, because {written} above it leaves the block first"),
         None,
     );
     unless_redefined.extend(
@@ -1691,7 +1691,7 @@ fn sprintf_arguments_lint(
         "sprintf-arguments",
         significant_range(literal),
         format!(
-            "This format wants {} but {callee}() gets {}, so {consequence}",
+            "this format wants {} but {callee}() gets {}, so {consequence}",
             plural(wanted, "value"),
             plural(given, "value"),
         ),
@@ -1792,7 +1792,7 @@ fn paste_sep_lint(
         Severity::Warning,
         "paste-sep",
         significant_range(call),
-        "Use paste0(...) instead of paste(..., sep = \"\")",
+        "use paste0(...) instead of paste(..., sep = \"\")",
         fix,
     );
 }
@@ -1835,7 +1835,7 @@ fn literal_coercion_lint(
         Severity::Warning,
         "literal-coercion",
         significant_range(call),
-        format!("Write the literal `{replacement}` instead of coercing it with {callee}()"),
+        format!("write the literal `{replacement}` instead of coercing it with {callee}()"),
         Some((Applicability::Safe, "Use the literal", replacement)),
     );
 }
@@ -1865,7 +1865,7 @@ fn redundant_equals_lint(
         Severity::Warning,
         "redundant-equals",
         significant_range(comparison),
-        format!("Comparing with {literal} is redundant for a logical value. Write `{replacement}`"),
+        format!("comparing with {literal} is redundant for a logical value. Write `{replacement}`"),
         Some((
             Applicability::Unsafe,
             "Drop the comparison",
@@ -1904,7 +1904,7 @@ fn single_quotes_lint(
         Severity::Warning,
         "single-quotes",
         range,
-        "Use double quotes for strings",
+        "use double quotes for strings",
         fix,
     );
 }
@@ -1952,7 +1952,7 @@ fn vector_logic_lint(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut V
                     "vector-logic",
                     operator.text_range(),
                     format!(
-                        "Use {scalar}, not {}, in {keyword} condition: {} works element by element and always evaluates both sides",
+                        "use {scalar}, not {}, in {keyword} condition: {} works element by element and always evaluates both sides",
                         operator.text(),
                         operator.text()
                     ),
@@ -2010,7 +2010,7 @@ fn implicit_assignment_lint(
                 "implicit-assignment",
                 significant_range(&expression),
                 format!(
-                    "Move this assignment out of the `{keyword}` condition, where it reads like a comparison"
+                    "move this assignment out of the `{keyword}` condition, where it reads like a comparison"
                 ),
                 None,
             );
@@ -2049,7 +2049,7 @@ fn while_true_lint(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut Vec
         Severity::Warning,
         "while-true",
         range,
-        "Use `repeat` for a loop that only ends with `break`, instead of `while (TRUE)`",
+        "use `repeat` for a loop that only ends with `break`, instead of `while (TRUE)`",
         (!has_comment).then(|| {
             (
                 Applicability::Safe,
@@ -2101,7 +2101,7 @@ fn order_subset_lint(node: &SyntaxNode, config: &LintConfig, diagnostics: &mut V
         Severity::Warning,
         "order-subset",
         significant_range(node),
-        "Use sort(x) instead of x[order(x)], which builds an index only to subset with it",
+        "use sort(x) instead of x[order(x)], which builds an index only to subset with it",
         Some((
             Applicability::Unsafe,
             "Change to `sort()`",
@@ -2167,7 +2167,7 @@ fn matrix_apply_lint(
         "matrix-apply",
         significant_range(call),
         format!(
-            "Use {prefix}{suffix}(), which computes in C, instead of apply() with {}()",
+            "use {prefix}{suffix}(), which computes in C, instead of apply() with {}()",
             function.text()
         ),
         (!has_comment(call)).then_some((Applicability::Unsafe, title.as_str(), replacement)),
@@ -2255,7 +2255,7 @@ fn unnecessary_lambda_lint(
             Severity::Warning,
             "unnecessary-lambda",
             significant_range(function),
-            format!("Pass `{callee}` itself instead of a function that only calls it"),
+            format!("pass `{callee}` itself instead of a function that only calls it"),
             Some((
                 Applicability::Unsafe,
                 &format!("Change to `{callee}`"),
@@ -2289,7 +2289,7 @@ fn nzchar_lint(
         Severity::Warning,
         "nzchar",
         significant_range(comparison),
-        format!("Use `{replacement}`, which tests for an empty string without counting characters"),
+        format!("use `{replacement}`, which tests for an empty string without counting characters"),
         Some((
             Applicability::Unsafe,
             "Change to `nzchar()`",
@@ -2347,7 +2347,7 @@ fn sample_int_lint(
         "sample-int",
         significant_range(call),
         format!(
-            "Use sample.int({count}, ...), which draws the same values without building 1:{count}"
+            "use sample.int({count}, ...), which draws the same values without building 1:{count}"
         ),
         Some((
             Applicability::Unsafe,
@@ -2438,7 +2438,7 @@ fn redundant_return_lint(
                         Severity::Warning,
                         "redundant-return",
                         significant_range(&tail),
-                        "This return() is redundant: a function returns the value of its last expression",
+                        "this return() is redundant: a function returns the value of its last expression",
                         Some((
                             Applicability::Safe,
                             "Remove `return()`",
@@ -2524,7 +2524,7 @@ fn commented_code_lint(
             Severity::Warning,
             "commented-code",
             range,
-            "This comment is code. Delete it, since version control keeps the history",
+            "this comment is code. Delete it, since version control keeps the history",
             None,
         );
     }
@@ -2551,7 +2551,7 @@ fn outer_negation_lint(
         Severity::Warning,
         "outer-negation",
         significant_range(call),
-        format!("Use `!{other}(x)` instead of `{callee}(!x)`, which negates every element first"),
+        format!("use `!{other}(x)` instead of `{callee}(!x)`, which negates every element first"),
         Some((
             Applicability::Safe,
             &format!("Change to `!{other}()`"),
@@ -2615,7 +2615,7 @@ fn comparison_negation_lint(
         Severity::Warning,
         "comparison-negation",
         significant_range(node),
-        format!("Use `{negated}` instead of negating `{}`", operator.text()),
+        format!("use `{negated}` instead of negating `{}`", operator.text()),
         fix,
     );
 }
@@ -2696,7 +2696,7 @@ fn testthat_expectation_lint(
         "testthat-expectation",
         significant_range(call),
         format!(
-            "Use {expectation}(), which says what the test checks and fails with a clearer message"
+            "use {expectation}(), which says what the test checks and fails with a clearer message"
         ),
         Some((
             applicability,
@@ -2897,7 +2897,7 @@ fn fixed_regex_lint(
         severity,
         "fixed-regex",
         format!(
-            "This pattern has no regular expression syntax, so {callee}() matches it faster with `fixed = TRUE`"
+            "this pattern has no regular expression syntax, so {callee}() matches it faster with `fixed = TRUE`"
         ),
     );
     diagnostics.push(match closing {
@@ -3142,7 +3142,7 @@ fn naming_style_message(actual: &str, style: NameStyle, subject: &str) -> Option
         NameStyle::Snake => "snake_case",
     };
     Some(format!(
-        "{subject} `{actual}` should have {style} name, e.g. {expected}"
+        "{subject} `{actual}` should have a {style} name, such as `{expected}`"
     ))
 }
 
