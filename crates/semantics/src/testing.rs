@@ -6,7 +6,8 @@ use {
         ANALYSIS_STACK_SIZE, AnalysisSettings, DataFiles, Db, DocumentKind, ItemKind, ProjectFiles,
         RootDatabase, SourceFile, TreeStore, binds_only_own_name,
         diagnostics::{TypeRenderer, file_diagnostics, strict_diagnostics},
-        item_check, item_naming, item_syntax, item_tree,
+        hir::{ExprId, PatId, Symbol},
+        item_check, item_hir, item_naming, item_node, item_syntax, item_tree,
         lints::{LintConfig, LintLevel, NameStyle, lint_file},
         naming::BindingKind,
         stubs::{
@@ -19,9 +20,12 @@ use {
     std::{
         cell::RefCell,
         collections::{BTreeMap, BTreeSet},
+        env,
+        io::{self, Write as _},
         mem,
         ops::Bound,
-        panic::{self, AssertUnwindSafe},
+        panic,
+        process::Command,
         slice,
         sync::{Arc, LazyLock, Mutex},
         thread,
@@ -30,7 +34,7 @@ use {
         SyntaxKind, SyntaxToken,
         testing::{
             Entropy, FAILURES_PER_RUN, SplitMix64, fuzz_seeds, generate_program, generate_project,
-            replay_command, small_edit, split_files,
+            on_seed_thread, replay_command, running_test_name, small_edit, split_files,
         },
     },
 };
@@ -93,18 +97,21 @@ pub struct ProjectState {
     pub prelude: bool,
 }
 
-/// Two databases that outlive a fuzz case, so a case pays for its analysis and not for
+/// Three databases that outlive a fuzz case, so a case pays for its analysis and not for
 /// re-parsing the stub corpus, which costs thirty times as much.
 ///
 /// The incremental database is an editor's: it keeps one input per file key and moves from
 /// state to state through the setters, across cases too, so every state is reached by an edit
 /// from an unrelated history. The reference database is a command's (`ry check`): bounded tree
 /// store, no editor facts, and new inputs for every state, so nothing it memoized about a file
-/// survives into the next. The two must render every file alike.
+/// survives into the next. The two must render every file alike. The editor reference records
+/// editor facts like the incremental database but gets new inputs for every state it checks,
+/// so the two must record the same editor facts.
 pub struct Workbench {
     incremental: RootDatabase,
     inputs: Vec<(usize, SourceFile)>,
     reference: RootDatabase,
+    editor_reference: RootDatabase,
     sessions: usize,
 }
 
@@ -112,7 +119,8 @@ impl Default for Workbench {
     fn default() -> Workbench {
         let incremental = RootDatabase::default();
         let reference = RootDatabase::for_command(false);
-        for db in [&incremental, &reference] {
+        let editor_reference = RootDatabase::default();
+        for db in [&incremental, &reference, &editor_reference] {
             install_shipped_stubs(db);
             AnalysisSettings::new(db, true, false, true);
             ProjectFiles::new(db, Vec::new());
@@ -121,31 +129,46 @@ impl Default for Workbench {
             incremental,
             inputs: Vec::new(),
             reference,
+            editor_reference,
             sessions: 0,
         }
     }
 }
 
-/// Runs one session per seed of [`fuzz_seeds`] on a warm [`Workbench`]. A failure is retried on
+/// Runs one session per seed of [`fuzz_seeds`] on a warm [`Workbench`], each on a thread named
+/// after the test and the seed, so a stack overflow names its seed. A failure is retried on
 /// fresh databases to tell a failure of the session alone, which its seed replays, from one that
 /// needs the sessions before it, which the window from the workbench's first seed replays. The
 /// workbench is rebuilt every [`WORKBENCH_SESSIONS`] seeds so that window stays short, and after
 /// a failure, since the run goes on to report up to [`FAILURES_PER_RUN`] failing seeds.
-pub fn for_each_session(default: usize, mut session: impl FnMut(u64) -> Vec<ProjectState>) {
+///
+/// Every [`CHILD_SAMPLE`]th session of the run is then rendered again by one child process
+/// ([`compare_with_child_process`]), whose interners fill in another order.
+pub fn for_each_session(default: usize, mut session: impl FnMut(u64) -> Vec<ProjectState> + Send) {
+    if let Some(seeds) = interning_child_seeds() {
+        render_in_another_interning_order(&seeds, &mut session);
+        return;
+    }
     let mut bench: Option<(u64, Workbench)> = None;
     let mut replays: Vec<String> = Vec::new();
-    for seed in fuzz_seeds(default) {
+    let mut samples: Vec<(u64, Vec<Vec<String>>)> = Vec::new();
+    let seeds = fuzz_seeds(default);
+    let first_of_run = seeds.start;
+    for seed in seeds {
         if seed % WORKBENCH_SESSIONS == 0 {
             bench = None;
         }
         let (first_seed, workbench) = bench.get_or_insert_with(|| (seed, Workbench::default()));
         let states = session(seed);
-        if panic::catch_unwind(AssertUnwindSafe(|| check_session(workbench, &states))).is_ok() {
+        if let Ok(renderings) = on_seed_thread(seed, || check_session(workbench, &states)) {
+            if (seed - first_of_run) % CHILD_SAMPLE == 0 {
+                samples.push((seed, renderings));
+            }
             continue;
         }
-        let alone = panic::catch_unwind(AssertUnwindSafe(|| {
-            check_session(&mut Workbench::default(), &states)
-        }));
+        let alone = on_seed_thread(seed, || {
+            check_session(&mut Workbench::default(), &states);
+        });
         let history = match alone {
             Err(_) => "",
             Ok(()) => ", which fails only after the sessions before it",
@@ -173,17 +196,24 @@ pub fn for_each_session(default: usize, mut session: impl FnMut(u64) -> Vec<Proj
         replays.len(),
         replays.join("\n")
     );
+    compare_with_child_process(&samples);
 }
 
 const WORKBENCH_SESSIONS: u64 = 256;
 
+/// One session in this many, counted from the run's first seed, is rendered again in the child
+/// process, so a replay of one seed (`FUZZ_SEED`) always samples it.
+pub const CHILD_SAMPLE: u64 = 1;
+
 /// Walks the states and then returns to the first. At every step the incremental database must
 /// render each file as the reference does, and the return must restore the first rendering.
-/// Every fourth session also renders each state on several threads at once, which must equal
-/// the sequential rendering, and every sixty-fourth compares its first state with a database
-/// that has no history at all, which is the determinism check across interning orders.
-pub fn check_session(workbench: &mut Workbench, states: &[ProjectState]) {
+/// The final state's editor facts must equal those of a database that checks it from new
+/// inputs. Every fourth session also renders each state on several threads at once, which must
+/// equal the sequential rendering, and every sixty-fourth compares its first state with a
+/// database that has no history at all. Returns the reference rendering of each state.
+pub fn check_session(workbench: &mut Workbench, states: &[ProjectState]) -> Vec<Vec<String>> {
     let mut first: Option<Vec<String>> = None;
+    let mut renderings = Vec::with_capacity(states.len());
     // A session of one state has nothing to edit back from.
     let back = states.first().filter(|_| states.len() > 1);
     for (step, state) in states.iter().chain(back).enumerate() {
@@ -196,23 +226,32 @@ pub fn check_session(workbench: &mut Workbench, states: &[ProjectState]) {
             incremental.join("----\n"),
             reference.join("----\n"),
         );
+        if step + 1 == states.len() {
+            let incremental = editor_facts_of_inputs(workbench);
+            let fresh = render_editor_facts_afresh(&mut workbench.editor_reference, state);
+            if let Err(difference) = compare_renderings(&fresh, &incremental) {
+                panic!(
+                    "step {step}: the incremental editor facts diverge from a fresh check\n{}\n{difference}",
+                    describe_session(states),
+                );
+            }
+        }
         let parallel = match workbench.sessions % 4 {
             0 => render_in_parallel(&mut workbench.reference, state),
             _ => Vec::new(),
         };
         for (worker, parallel) in parallel.into_iter().enumerate() {
-            assert!(
-                parallel == reference,
-                "step {step}: a parallel check diverges from a sequential one (worker {worker} of {PARALLEL_WORKERS})\n{}\n---- parallel:\n{}\n---- sequential:\n{}",
-                describe_session(states),
-                parallel.join("----\n"),
-                reference.join("----\n"),
-            );
+            if let Err(difference) = compare_renderings(&reference, &parallel) {
+                panic!(
+                    "step {step}: a parallel check diverges from a sequential one (worker {worker} of {PARALLEL_WORKERS})\n{}\n{difference}",
+                    describe_session(states),
+                );
+            }
         }
         match &first {
             None => {
                 if workbench.sessions % 64 == 0 {
-                    let mut pristine = RootDatabase::default();
+                    let mut pristine = RootDatabase::for_command(false);
                     install_shipped_stubs(&pristine);
                     AnalysisSettings::new(&pristine, true, false, true);
                     ProjectFiles::new(&pristine, Vec::new());
@@ -231,8 +270,36 @@ pub fn check_session(workbench: &mut Workbench, states: &[ProjectState]) {
             ),
             Some(_) => {}
         }
+        if step < states.len() {
+            renderings.push(reference);
+        }
     }
     workbench.sessions += 1;
+    renderings
+}
+
+/// `Ok` when two renderings of the same files are equal, else the first file that differs
+/// with both its renderings. The comparison of the parallel check, the editor facts and the
+/// child process.
+pub fn compare_renderings(expected: &[String], actual: &[String]) -> Result<(), String> {
+    if expected.len() != actual.len() {
+        return Err(format!(
+            "{} files rendered against {} expected",
+            actual.len(),
+            expected.len()
+        ));
+    }
+    match expected
+        .iter()
+        .zip(actual)
+        .position(|(expected, actual)| expected != actual)
+    {
+        None => Ok(()),
+        Some(file) => Err(format!(
+            "file {file} differs\n---- expected:\n{}---- actual:\n{}",
+            expected[file], actual[file]
+        )),
+    }
 }
 
 /// Moves the incremental database to `state` as a host would, setting only what differs.
@@ -274,8 +341,75 @@ fn render_incrementally(workbench: &mut Workbench, state: &ProjectState) -> Vec<
         .collect()
 }
 
-/// Renders `state` from inputs `db` has never seen.
-fn render_afresh(db: &mut RootDatabase, state: &ProjectState) -> Vec<String> {
+/// The editor facts of the incremental database's current project, file by file.
+fn editor_facts_of_inputs(workbench: &Workbench) -> Vec<String> {
+    let db = &workbench.incremental;
+    ProjectFiles::get(db)
+        .files(db)
+        .iter()
+        .map(|file| render_editor_facts(db, *file))
+        .collect()
+}
+
+/// [`render_editor_facts`] of `state` from inputs `db` has never seen.
+fn render_editor_facts_afresh(db: &mut RootDatabase, state: &ProjectState) -> Vec<String> {
+    let files = set_new_inputs(db, state);
+    files
+        .iter()
+        .map(|file| render_editor_facts(db, *file))
+        .collect()
+}
+
+/// Every fact an item's check records for the editor, one line each: the type of every
+/// expression and pattern rendered as hover renders it, the expected type of each literal and
+/// loop variable, the selected overloads and the callee targets, with the absolute range of the
+/// expression they belong to.
+pub fn render_editor_facts(db: &RootDatabase, file: SourceFile) -> String {
+    let mut output = String::new();
+    for &item in item_tree(db, file) {
+        let (Some(check), Some(hir), Some(node)) = (
+            item_check(db, item),
+            item_hir(db, item),
+            item_node(db, item),
+        ) else {
+            continue;
+        };
+        let offset = node.text_range().start();
+        let facts = check.editor();
+        let range = |id: ExprId| {
+            let range = hir.range(id) + offset;
+            format!("{}..{}", u32::from(range.start()), u32::from(range.end()))
+        };
+        let render = |ty| TypeRenderer::default().render(db, ty);
+        for index in 0..hir.ranges().len() {
+            let id = ExprId::new(index);
+            if let Some(&ty) = facts.expression_types.get(&id) {
+                output.push_str(&format!("{} {}\n", range(id), render(ty)));
+            }
+        }
+        for index in 0..hir.pattern_count() {
+            if let Some(ty) = facts.pattern_types.get(PatId::new(index)) {
+                output.push_str(&format!("pattern {index} {}\n", render(ty)));
+            }
+        }
+        for (&id, &ty) in facts.literal_expectations.iter() {
+            output.push_str(&format!("{} expects {}\n", range(id), render(ty)));
+        }
+        for (&id, &ty) in facts.loop_variables.iter() {
+            output.push_str(&format!("{} binds {}\n", range(id), render(ty)));
+        }
+        for (&id, overload) in facts.selected_overloads.iter() {
+            output.push_str(&format!("{} selects overload {overload}\n", range(id)));
+        }
+        for (&id, target) in facts.callee_targets.iter() {
+            output.push_str(&format!("{} calls {target:?}\n", range(id)));
+        }
+    }
+    output
+}
+
+/// Sets `state` on `db` as new inputs, which share no memo with any file `db` saw before.
+fn set_new_inputs(db: &mut RootDatabase, state: &ProjectState) -> Vec<SourceFile> {
     apply_settings(db, state);
     let files: Vec<SourceFile> = state
         .files
@@ -283,6 +417,12 @@ fn render_afresh(db: &mut RootDatabase, state: &ProjectState) -> Vec<String> {
         .map(|(_, text, kind)| SourceFile::new(db, text.clone(), *kind))
         .collect();
     ProjectFiles::get(db).set_files(db).to(files.clone());
+    files
+}
+
+/// Renders `state` from inputs `db` has never seen.
+pub fn render_afresh(db: &mut RootDatabase, state: &ProjectState) -> Vec<String> {
+    let files = set_new_inputs(db, state);
     files
         .iter()
         .zip(&state.files)
@@ -298,18 +438,15 @@ const PARALLEL_WORKERS: usize = 3;
 
 /// Renders `state` from new inputs on [`PARALLEL_WORKERS`] threads at once, one rendering of
 /// every file per thread, as `ry check` and the server fan a check out over database handles.
-/// Each thread first checks every item in its own rotated order, so the threads claim items,
-/// intern types and settle fixpoints in orders a sequential check never takes, and each then
-/// renders the files starting from a different one. Every rendering must equal the sequential
-/// one: what a check finds may not depend on which thread got to an item first.
+/// The threads are handles of the warm reference database, so they share its memos of the stub
+/// library but none of the new inputs. Each first checks every item in its own rotated order, so
+/// the threads race to claim items and settle fixpoints, and each then renders the files
+/// starting from a different one. Every rendering must equal the sequential one: what a check
+/// finds may not depend on which thread got to an item first. The interners are process-global,
+/// so this cannot vary the order in which ids were handed out before; the child process of
+/// [`compare_with_child_process`] does.
 fn render_in_parallel(db: &mut RootDatabase, state: &ProjectState) -> Vec<Vec<String>> {
-    apply_settings(db, state);
-    let files: Vec<SourceFile> = state
-        .files
-        .iter()
-        .map(|(_, text, kind)| SourceFile::new(db, text.clone(), *kind))
-        .collect();
-    ProjectFiles::get(db).set_files(db).to(files.clone());
+    let files = set_new_inputs(db, state);
     let files = &files;
     thread::scope(|scope| {
         let handles: Vec<_> = (0..PARALLEL_WORKERS)
@@ -346,6 +483,213 @@ fn render_in_parallel(db: &mut RootDatabase, state: &ProjectState) -> Vec<Vec<St
             })
             .collect()
     })
+}
+
+/// The variable that makes a test binary the child of [`compare_with_child_process`], holding
+/// the seeds to render, comma-separated.
+const INTERNING_CHILD: &str = "FUZZ_INTERNING_CHILD";
+
+/// What starts each rendering a child prints: `<marker> <seed> <state> <file> <bytes>`, a line
+/// break, and then that many bytes of rendering.
+const CHILD_FRAME: &str = "@@ry-child-rendering";
+
+fn interning_child_seeds() -> Option<Vec<u64>> {
+    let seeds = env::var(INTERNING_CHILD).ok()?;
+    Some(
+        seeds
+            .split(',')
+            .filter_map(|seed| seed.trim().parse().ok())
+            .collect(),
+    )
+}
+
+/// Renders the sampled sessions again in one child process and asserts it renders every state
+/// as this process did. The `Ty` and `Symbol` interners are process-global, so any database of
+/// this process gets the same id for a type or a name as the reference did, and output that
+/// depends on an id's order passes every comparison made here. The child starts with empty
+/// interners and fills them in another order ([`render_in_another_interning_order`]).
+fn compare_with_child_process(samples: &[(u64, Vec<Vec<String>>)]) {
+    let test = running_test_name();
+    if samples.is_empty() || test.is_empty() || test == "main" {
+        return;
+    }
+    let seeds: Vec<String> = samples.iter().map(|(seed, _)| seed.to_string()).collect();
+    let child = render_in_child_process(&test, &seeds.join(","));
+    let replay = |seed: u64| {
+        format!(
+            "    {}\n  and the child alone with\n    {INTERNING_CHILD}={seed} {} --nocapture",
+            replay_command(seed),
+            replay_command(seed).trim_start_matches(&format!("FUZZ_SEED={seed} ")),
+        )
+    };
+    let mut failures = Vec::new();
+    for (seed, states) in samples {
+        for (state, expected) in states.iter().enumerate() {
+            let actual: Vec<String> = (0..expected.len())
+                .map(|file| {
+                    child
+                        .get(&(*seed, state, file))
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect();
+            if let Err(difference) = compare_renderings(expected, &actual) {
+                failures.push(format!(
+                    "seed {seed}, state {state}: the rendering depends on the interning order\n{difference}\nreplay with\n{}",
+                    replay(*seed)
+                ));
+            }
+        }
+        if failures.len() == FAILURES_PER_RUN {
+            break;
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Runs `test` of this test binary as the child, and returns each rendering it printed by seed,
+/// state and file.
+fn render_in_child_process(test: &str, seeds: &str) -> BTreeMap<(u64, usize, usize), String> {
+    let executable = env::current_exe().expect("a test knows its own executable");
+    let output = Command::new(executable)
+        .args([test, "--exact", "--nocapture", "--test-threads=1"])
+        .env(INTERNING_CHILD, seeds)
+        .env_remove("FUZZ_SEED")
+        .env_remove("FUZZ_ITERS")
+        .env_remove("FUZZ_DEPTH")
+        .output()
+        .expect("the child test process must start");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "the child process for seeds {seeds} failed\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut renderings = BTreeMap::new();
+    let mut rest: &str = &stdout;
+    while let Some(at) = rest.find(CHILD_FRAME) {
+        let header_end = rest[at..].find('\n').map_or(rest.len(), |end| at + end);
+        let fields: Vec<&str> = rest[at + CHILD_FRAME.len()..header_end]
+            .split_whitespace()
+            .collect();
+        let parsed = match fields[..] {
+            [seed, state, file, length] => seed
+                .parse()
+                .ok()
+                .zip(state.parse().ok())
+                .zip(file.parse().ok())
+                .zip(length.parse::<usize>().ok()),
+            _ => None,
+        };
+        let Some((((seed, state), file), length)) = parsed else {
+            panic!(
+                "the child printed a malformed frame header: {:?}",
+                &rest[at..header_end]
+            );
+        };
+        let body_start = (header_end + 1).min(rest.len());
+        let body = rest
+            .get(body_start..body_start + length)
+            .unwrap_or_else(|| panic!("the child's rendering of seed {seed} is cut short"));
+        renderings.insert((seed, state, file), body.to_owned());
+        rest = &rest[body_start + length..];
+    }
+    renderings
+}
+
+/// The child's side of [`compare_with_child_process`]. The parent interns the stubs' words
+/// first and then the sessions' words in the order they appear, so the child interns the
+/// sessions' words first, each list in reverse, which flips the order of almost every pair. It
+/// then checks
+/// every state on a database without stubs, sessions and items in reverse, so the project's
+/// types take ids before the stub library's; and then renders every state from new inputs on a
+/// command database, again checking the sessions, states, files and items in reverse before it
+/// renders. Each rendering goes to stdout in a [`CHILD_FRAME`].
+fn render_in_another_interning_order(
+    seeds: &[u64],
+    session: &mut impl FnMut(u64) -> Vec<ProjectState>,
+) {
+    let sessions: Vec<(u64, Vec<ProjectState>)> = seeds
+        .iter()
+        .rev()
+        .map(|&seed| (seed, session(seed)))
+        .collect();
+    // The parent meets the stubs' words first and the sessions' words in the order they
+    // appear; interning both in reverse, the sessions' first, flips the order of every pair.
+    let stub_sources = shipped_stub_sources();
+    let mut seen = FxHashSet::default();
+    let project_words = first_appearances(
+        sessions
+            .iter()
+            .rev()
+            .flat_map(|(_, states)| states)
+            .flat_map(|state| &state.files)
+            .map(|(_, text, _)| text.as_str()),
+        &mut seen,
+    );
+    let stub_words = first_appearances(
+        stub_sources.iter().map(|(_, text)| text.as_str()),
+        &mut seen,
+    );
+    for word in project_words.iter().rev().chain(stub_words.iter().rev()) {
+        Symbol::new(word);
+    }
+    let mut bare = RootDatabase::for_command(false);
+    AnalysisSettings::new(&bare, true, false, true);
+    ProjectFiles::new(&bare, Vec::new());
+    for (_, states) in &sessions {
+        for state in states.iter().rev() {
+            let files = set_new_inputs(&mut bare, state);
+            check_in_reverse(&bare, &files);
+        }
+    }
+    let mut db = RootDatabase::for_command(false);
+    install_shipped_stubs(&db);
+    AnalysisSettings::new(&db, true, false, true);
+    ProjectFiles::new(&db, Vec::new());
+    let mut out = io::stdout().lock();
+    for (seed, states) in &sessions {
+        for (index, state) in states.iter().enumerate().rev() {
+            let files = set_new_inputs(&mut db, state);
+            check_in_reverse(&db, &files);
+            for (file_index, file) in files.iter().enumerate().rev() {
+                let rendering = render_semantics(&db, *file);
+                write!(
+                    out,
+                    "\n{CHILD_FRAME} {seed} {index} {file_index} {}\n{rendering}",
+                    rendering.len()
+                )
+                .expect("the child writes its renderings to stdout");
+            }
+        }
+    }
+    out.flush().expect("the child flushes its renderings");
+}
+
+/// The words of `texts` in the order they first appear, skipping those in `seen`.
+fn first_appearances<'text>(
+    texts: impl Iterator<Item = &'text str>,
+    seen: &mut FxHashSet<&'text str>,
+) -> Vec<&'text str> {
+    let is_word =
+        |character: char| character.is_alphanumeric() || character == '.' || character == '_';
+    let mut words = Vec::new();
+    for text in texts {
+        for word in text.split(|character: char| !is_word(character)) {
+            if !word.is_empty() && seen.insert(word) {
+                words.push(word);
+            }
+        }
+    }
+    words
+}
+
+fn check_in_reverse(db: &RootDatabase, files: &[SourceFile]) {
+    for &file in files.iter().rev() {
+        for &item in item_tree(db, file).iter().rev() {
+            item_check(db, item);
+        }
+    }
 }
 
 fn apply_settings(db: &mut RootDatabase, state: &ProjectState) {

@@ -556,18 +556,32 @@ pub fn for_each_seed(default: usize, mut case: impl FnMut(u64)) {
 /// names the overflowing thread, so the name carries the replay. The thread gets the default
 /// stack, as libtest's test thread does, so a case overflows where it would there.
 pub fn for_each_seed_on_named_threads(default: usize, mut case: impl FnMut(u64) + Send) {
-    let test = thread::current().name().unwrap_or("").to_owned();
-    run_seeds(default, |seed| {
-        thread::scope(|scope| {
-            match thread::Builder::new()
-                .name(format!("{test}{SEED_THREAD_MARKER}{seed}"))
-                .spawn_scoped(scope, || case(seed))
-            {
-                Ok(handle) => handle.join().is_ok(),
-                Err(error) => panic!("could not start the thread for seed {seed}: {error}"),
-            }
-        })
-    });
+    run_seeds(default, |seed| on_seed_thread(seed, || case(seed)).is_ok());
+}
+
+/// Runs `case` on a thread named after the running test and `seed`, as
+/// [`for_each_seed_on_named_threads`] does, for a harness with its own seed loop. A panic comes
+/// back as the `Err` of [`thread::Result`].
+pub fn on_seed_thread<R: Send>(seed: u64, case: impl FnOnce() -> R + Send) -> thread::Result<R> {
+    let test = running_test_name();
+    thread::scope(|scope| {
+        match thread::Builder::new()
+            .name(format!("{test}{SEED_THREAD_MARKER}{seed}"))
+            .spawn_scoped(scope, case)
+        {
+            Ok(handle) => handle.join(),
+            Err(error) => panic!("could not start the thread for seed {seed}: {error}"),
+        }
+    })
+}
+
+/// The name of the running test, without the seed a seed thread's name adds.
+pub fn running_test_name() -> String {
+    let name = thread::current().name().unwrap_or("").to_owned();
+    match name.split_once(SEED_THREAD_MARKER) {
+        Some((test, _)) => test.to_owned(),
+        None => name,
+    }
 }
 
 /// What separates the test's name from the seed in a [`for_each_seed_on_named_threads`]
@@ -657,10 +671,7 @@ fn cargo_test_command() -> String {
     } else {
         "--lib".to_owned()
     };
-    let name = thread::current().name().unwrap_or("").to_owned();
-    let test = name
-        .split_once(SEED_THREAD_MARKER)
-        .map_or(name.as_str(), |(test, _)| test);
+    let test = running_test_name();
     format!("cargo test -p {package} {target} {test} -- --exact")
 }
 

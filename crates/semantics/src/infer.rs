@@ -219,10 +219,6 @@ impl<'db> InferenceTable<'db> {
         )
     }
 
-    pub fn holds(&self, var: InferenceVar) -> bool {
-        (var.0 as usize) < self.entries.len()
-    }
-
     pub fn entry(&self, var: InferenceVar) -> &Entry<'db> {
         &self.entries[self.find(var).0 as usize]
     }

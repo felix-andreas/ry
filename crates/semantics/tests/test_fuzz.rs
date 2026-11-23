@@ -106,6 +106,9 @@ const TEMPLATES: &[&str] = &[
     "{n} <- List.from_r({m})",
     "{n} <- [({m}, 1L), (2L, {m})]",
     "#: List<double[]>\n{n} <- [{m}]",
+    // Two names one alternative lacks are reported at one range, in the order of their
+    // symbols, so the child process of the session arms sees an order that follows ids.
+    "{n} <- match ({m}) {\n  :Pair(zorp_{n}, quib_{n}) | :Empty => 1L\n  _ => 2L\n}",
 ];
 
 const DIRECTIVES: &[&str] = &[

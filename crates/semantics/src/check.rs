@@ -1293,7 +1293,7 @@ fn check_item_in<'db>(
     if editor_facts {
         let mut binder_types = FxHashMap::default();
         let expression_types = recorded
-            .into_iter()
+            .iter()
             .map(|slot| slot.map(|ty| context.editor_type(ty, &mut binder_types)))
             .collect();
         let mut patterns = vec![None; module.pattern_count()];
@@ -1331,6 +1331,7 @@ fn check_item_in<'db>(
         };
         if cfg!(debug_assertions) {
             assert_facts_resolve(db, &context.table, &facts);
+            assert_facts_match_resolution(db, &context, &recorded, &facts);
         }
         editor = Some(Box::new(facts));
     }
@@ -1431,6 +1432,72 @@ fn assert_facts_resolve<'db>(
     }
 }
 
+/// Every type an item records for an editor is the checked type resolved in the item's table,
+/// with each variable the item's scheme generalized renamed to its binder. Derived here apart
+/// from `Context::editor_type`, so a recording that loses or invents a type is caught where it
+/// happens: both databases of an incremental comparison would record the same wrong type.
+fn assert_facts_match_resolution<'db>(
+    db: &'db dyn Db,
+    context: &Checker<'db, '_>,
+    recorded: &[Option<Ty<'db>>],
+    facts: &EditorFacts<'db>,
+) {
+    let mut memo = FxHashMap::default();
+    let mut expected = |ty: Ty<'db>| {
+        let resolved = context.table.resolve(db, ty);
+        rename_root_binders(db, context, resolved, &mut memo)
+    };
+    for (index, slot) in recorded.iter().enumerate() {
+        let id = ExprId::new(index);
+        assert_eq!(
+            facts.expression_types.get(&id).copied(),
+            slot.map(&mut expected),
+            "the editor type of {id:?} is not its checked type"
+        );
+    }
+    for (id, &ty) in context.recorded_patterns.iter() {
+        assert_eq!(
+            facts.pattern_types.get(id),
+            Some(expected(ty)),
+            "the editor type of pattern {id:?} is not its checked type"
+        );
+    }
+    for (id, &ty) in context.recorded_expectations.iter() {
+        assert_eq!(
+            facts.literal_expectations.get(&id).copied(),
+            Some(expected(ty))
+        );
+    }
+    for (id, &ty) in context.recorded_loop_variables.iter() {
+        assert_eq!(facts.loop_variables.get(&id).copied(), Some(expected(ty)));
+    }
+}
+
+fn rename_root_binders<'db>(
+    db: &'db dyn Db,
+    context: &Checker<'db, '_>,
+    ty: Ty<'db>,
+    memo: &mut FxHashMap<Ty<'db>, Ty<'db>>,
+) -> Ty<'db> {
+    if !contains_inference_var(db, ty) {
+        return ty;
+    }
+    if let Some(&renamed) = memo.get(&ty) {
+        return renamed;
+    }
+    let renamed = match *ty.kind(db) {
+        TyKind::Var(var) => context
+            .root_binders
+            .get(&context.table.find(var))
+            .map_or(ty, |&name| Ty::new(db, TyKind::Rigid(name))),
+        _ => map_child_types(db, ty, &mut |child| {
+            rename_root_binders(db, context, child, memo)
+        }),
+    };
+    memo.insert(ty, renamed);
+    renamed
+}
+
 fn assert_type_resolves<'db>(
     db: &'db dyn Db,
     table: &InferenceTable<'db>,
@@ -1444,7 +1511,7 @@ fn assert_type_resolves<'db>(
         assert!(
             table.is_unbound_root(var),
             "a recorded type holds the inference variable {var:?}, which is {} in this item's table",
-            match table.holds(var) {
+            match var.0 < table.next_var().0 {
                 true => "bound or merged",
                 false => "not",
             }
