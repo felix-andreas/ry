@@ -4,6 +4,9 @@
 # it reads, and whether it reduces the rows to one value. The fuzz kind never generates a shape
 # the contract leaves open, so the model need not define one either.
 
+# The contract compares and sorts text by its bytes, which is R's C collation.
+invisible(Sys.setlocale("LC_COLLATE", "C"))
+
 .model_frame <- function(columns, rows, class = "DataFrame") {
   structure(list(columns = columns, rows = as.integer(rows)), class = class)
 }

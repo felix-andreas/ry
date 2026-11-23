@@ -299,3 +299,10 @@ The table is a Polars `DataFrame` held by the `table` crate; this entry holds th
 **Status:** built.
 
 - `oracle fuzz --kind frame` runs one program on GNU R and ry; under GNU R a prelude (`crates/oracle/src/frame_model.R`) defines `DataFrame.*`, `Expr.*` and `GroupBy.*` in plain base R from `reference/dataframes.mdx`. The reference is the contract, not Polars, so a Polars default the docs do not state shows up as a difference to decide rather than as the expected answer, and GNU R needs no Polars. Shapes the docs leave open are not generated (the report lists them); row order is compared only where a verb defines it.
+
+## A DataFrame sort puts missing values last and compares text by bytes
+
+**Status:** built.
+
+- `sort` puts `NA` and `NaN` last in both directions as one missing class, keeps input order among them and among equal keys (descending included), and compares strings by their bytes whatever `LC_COLLATE` says; string `<` and `>` in an expression compare bytes too. This is what the engine does and what R's `order(method = "radix")` does, so it is the contract in `reference/dataframes.mdx` rather than a Polars accident.
+- The frame fuzz kind's model sets `LC_COLLATE` to `C` (`crates/oracle/src/frame_model.R`), so its base-R `<` on strings compares bytes and the generator emits every string comparison.

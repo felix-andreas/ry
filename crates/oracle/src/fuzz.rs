@@ -2173,8 +2173,8 @@ pub fn frame_program(seed: u64) -> String {
 }
 
 /// Fixed frame programs for shapes a fix pinned, run with the generated ones: column arguments
-/// named like a verb's formals, whole or in part, and `%%` and `%/%` on infinite, zero, missing
-/// and negative divisors and on an empty table against a single value.
+/// named like a verb's formals, whole or in part, and `%%` and `%/%` on infinite, zero, missing,
+/// negative, subnormal and huge operands and on an empty table against a single value.
 pub fn frame_regression_programs() -> Vec<String> {
     FRAME_REGRESSIONS
         .iter()
@@ -2241,6 +2241,26 @@ frame_check(TRUE, function() {
     DataFrame.lazy() |>
     LazyFrame.with_columns(m = Expr.col("x") %% 2, q = 7L %/% Expr.col("y")) |>
     LazyFrame.collect()
+})
+"#,
+    r#"frame_check(TRUE, function() {
+  DataFrame(x = c(4.9e-324, 1e308, -1e308, 5.5, -0.5), y = c(-5, 5, 5.5, 4.9e-324, 1e308)) |>
+    DataFrame.lazy() |>
+    LazyFrame.with_columns(m = Expr.col("x") %% Expr.col("y"), q = Expr.col("x") %/% Expr.col("y")) |>
+    LazyFrame.collect() |>
+    DataFrame.with_columns(m5 = Expr.col("x") %% -5, q5 = Expr.col("x") %/% 5)
+})
+frame_check(TRUE, function() {
+  x <- c(0, -numeric(1), 1, -1, 5, -5, 5.5, -5.5, 1e308, 4.9e-324, Inf, -Inf, NA)
+  grid <- expand.grid(x = x, y = x)
+  DataFrame(x = grid$x, y = grid$y, i = rep(c(0L, 1L, -1L, 5L, -5L, NA), length.out = nrow(grid))) |>
+    DataFrame.with_columns(
+      m = Expr.col("x") %% Expr.col("y"),
+      q = Expr.col("x") %/% Expr.col("y"),
+      mi = Expr.col("i") %% Expr.col("y"),
+      qi = Expr.col("x") %/% Expr.col("i"),
+      big = (Expr.col("x") * 3) %% 7
+    )
 })
 "#,
 ];
@@ -2368,8 +2388,8 @@ struct Term {
     output: Option<String>,
     reads: Vec<String>,
     values: Values,
-    /// Built from columns that are not big with `+`, `-` and unary minus only, so a quotient of
-    /// it stays far below 2^52.
+    /// Built row-wise from literals and columns that are not big, so both engines hold the same
+    /// double and `%%` and `%/%`, which magnify a last-bit difference, compare exactly.
     bounded: bool,
 }
 
@@ -3379,7 +3399,7 @@ impl FrameGenerator {
         let operator = ["+", "-", "*", "/", "^", "%/%", "%%", "%%", "%/%"][self.rng.below(9)];
         let left = self.numeric_term(schema, depth - 1)?;
         let divides = matches!(operator, "%%" | "%/%");
-        if divides && (!left.bounded || left.values.big) {
+        if divides && !left.bounded {
             return Some(left);
         }
         // R's `^` differs from C's `pow` for a negative infinite base under a fractional power,
@@ -3461,7 +3481,7 @@ impl FrameGenerator {
             output: first.output.clone().or_else(|| second.output.clone()),
             reads,
             values,
-            bounded: first.bounded && second.bounded && matches!(operator, "+" | "-"),
+            bounded: first.bounded && second.bounded,
         })
     }
 
@@ -3472,9 +3492,7 @@ impl FrameGenerator {
                 if self.rng.chance(1, 3)
                     && let Some(column) = self.pick(schema, |values| values.cell == Cell::Character)
                 {
-                    // The contract leaves open whether text compares by bytes or by the
-                    // locale's collation, so only equality is generated.
-                    let operator = ["==", "!="][self.rng.below(2)];
+                    let operator = ["==", "!=", "<", "<=", ">", ">="][self.rng.below(6)];
                     let value =
                         string_literal(CHARACTER_VALUES[self.rng.below(CHARACTER_VALUES.len())]);
                     let mut term = column_term(&column);
