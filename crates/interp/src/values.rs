@@ -77,6 +77,9 @@ symbol_table! {
     sig_length = ".SigLength",
     sig_args = ".SigArgs",
     class_table = ".classTable",
+    get_data_part = "getDataPart",
+    check_at_assignment = "checkAtAssignment",
+    set_data_part = "setDataPart",
     brace = "{",
     paren = "(",
     if_ = "if",
@@ -106,6 +109,7 @@ symbol_table! {
     vtmp = "*vtmp*",
     value = "value",
     dot_generic = ".Generic",
+    standard_generic = "standardGeneric",
     dot_class = ".Class",
     dot_method = ".Method",
     dot_group = ".Group",
@@ -273,6 +277,12 @@ pub struct Globals {
     /// The expression templates the native class definitions fill in, as the methods package's
     /// R code fills them in with `substitute()`.
     pub methods_templates: Sexp,
+    /// The methods package's `checkAtAssignment` as the first slot assignment found it, which
+    /// every later one calls, as in GNU R (`subset::slot_check`); nil before.
+    pub check_at_assignment: Sexp,
+    /// The `checkAtAssignment` that `subset::slot_accepts` answers for, which
+    /// `methods_core::install_fast_paths` knows by its hash; nil when the package has another.
+    pub answered_slot_check: Sexp,
     /// Whether the methods package turned S4 dispatch on, which makes `standardGeneric` and
     /// primitive generics dispatch.
     pub methods_dispatch: bool,
@@ -305,6 +315,8 @@ impl Globals {
         Globals {
             methods_namespace: Sexp::dangling(),
             methods_templates: Sexp::dangling(),
+            check_at_assignment: Sexp::dangling(),
+            answered_slot_check: Sexp::dangling(),
             methods_dispatch: false,
             allow_primitive_methods: true,
             primitive_methods: rustc_hash::FxHashMap::default(),
@@ -322,6 +334,8 @@ impl Globals {
         let globals = &mut interp().globals;
         globals.methods_namespace = nil;
         globals.methods_templates = nil;
+        globals.check_at_assignment = nil;
+        globals.answered_slot_check = nil;
         globals.host_environment = nil;
         globals.element_call = nil;
     }
@@ -329,6 +343,8 @@ impl Globals {
     pub(crate) unsafe fn trace(&self, marker: &mut Marker<'_>) {
         marker.mark(self.methods_namespace);
         marker.mark(self.methods_templates);
+        marker.mark(self.check_at_assignment);
+        marker.mark(self.answered_slot_check);
         marker.mark(self.host_environment);
         marker.mark(self.element_call);
         for methods in self.primitive_methods.values() {

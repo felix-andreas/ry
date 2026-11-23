@@ -440,12 +440,37 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch costs 2.3 to
   4.5 µs per call.
 - **Per-object frames in `new()`.** Every `new()` of a class with a validity method makes four
-  environments: `standardGeneric("initialize")` reifies the generic's slot frame
+  environments: `standardGeneric("initialize")` reifies the generic's slot frame, because the
+  default `initialize` method has no slot table, so `eval::enter_method` declines
   (`dispatch::do_standard_generic` takes `call.env()`, and `methods::exec_method` copies its
   binding cells into the method's environment), and the prologues of `new`, the default
   `initialize` and `validObject` pass `environment()`. Fix: read the signature arguments and the
   formals' bindings from the generic's slot frame without reifying it, and give the prologues
   frame access that does not reify (`decisions/builtins.md`, "`validObject` runs validity methods without its slot loop, and `new()` copies the prototype shallowly").
+- **An S4 generic call costs more than three plain closure calls** (`just bench-mechanisms --filter
+  "s4: "`: `id(item)` 3,183 instructions against 937 for a closure call). It makes two slot
+  frames and no environment (`decisions/interp.md`, "An S4 method runs in place on a slot frame
+  above its generic's"). What is left, in instructions per call: selecting the method about 540
+  (`select_in_slots` 211, `class_keys` 74, `settled_without_code` 74, `valid_site` 60,
+  `class_of` 56), `enter_method` about 680 (190 of it `Args::from_slice` and the frame's
+  argument list in `push_slot_frame`), `enter_in_place` 139, and `fast_return` about 231 for
+  each of the two frames. Levers: a method frame that shares the generic's argument list
+  instead of copying it, a site check that is one comparison (a version stamp on the generic's
+  tables instead of `valid_site`'s binding walk), and class keys read from the object's class
+  attribute without `class_of`.
+- **S4 operations that run the methods package's R code on each call**, in instructions: `callNextMethod()`
+  195,634 (the methods package's closure, which rebuilds the call and looks the next method up
+  each time), `new()` of a two-slot class 102,286, `validObject()` 60,917, `isVirtualClass()`
+  23,359, a replacement generic 8,564, a method with more arguments than its generic 5,906 (the
+  `.local` closure inside the method). `slot(x, name)` and `slot(x, name) <- v` are closures
+  around `.Call`. A generic called through `lapply` or `sapply` enters its method from Rust
+  (`do_standard_generic`, `run_slots`), which recurses into the interpreter loop for each
+  element.
+- **A slot write is checked in Rust only where the class cache answers** (`subset::slot_accepts`):
+  the slot's class is `ANY`, the value's first class, or one the value's cached class
+  definition lists in `contains`. A value whose class is defined in two packages, a class the
+  cache does not hold yet, and a declared class that knows the value's class only through its
+  own `subclasses` call `checkAtAssignment` (about 20,000 instructions).
 - `setDataPart()` (R code, about 28 µs per call), which the default `initialize` calls for every
   data part, so `new("MethodDefinition", f)` costs about 50 µs (GNU R about 340 µs).
   `.mergeAttrs` decides the attribute order, so a native version must reproduce it exactly.
