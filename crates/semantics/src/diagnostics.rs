@@ -683,14 +683,14 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let ExpressionKind::Call { callee, arguments } = module.kind(expression) else {
                 continue;
             };
-            if s4::methods_function(&module, *callee) != Some("new")
+            if s4::methods_function(module, *callee) != Some("new")
                 || naming.resolutions.contains_key(callee)
             {
                 continue;
             }
             let arguments = &module[arguments];
-            let Some(class) = s4::match_arguments(&module, arguments, &["Class"])[0]
-                .and_then(|value| s4::string(&module, value))
+            let Some(class) = s4::match_arguments(module, arguments, &["Class"])[0]
+                .and_then(|value| s4::string(module, value))
             else {
                 continue;
             };
@@ -728,7 +728,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 ));
             }
         }
-        if let Some((range, message)) = s3_method_finding(db, item, &module) {
+        if let Some((range, message)) = s3_method_finding(db, item, module) {
             diagnostics.push(Diagnostic::new(
                 range + offset,
                 Severity::Warning,

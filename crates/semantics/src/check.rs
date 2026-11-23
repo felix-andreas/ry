@@ -12586,6 +12586,12 @@ impl<'db, 'a> Checker<'db, 'a> {
         {
             self.name_vapply_callback(errors_before, arguments);
         }
+        if let ExpressionKind::NameRef(name) = self.module.kind(callee)
+            && let family @ ("sapply" | "mapply" | "Map") = name.as_str()
+            && !self.naming.resolutions.contains_key(&callee)
+        {
+            return self.simplified_apply(family, arguments).unwrap_or(ty);
+        }
         if let Some(sequence) = self.integer_seq(callee, arguments, ty) {
             return self.record(id, sequence);
         }
@@ -19681,13 +19687,91 @@ impl<'db, 'a> Checker<'db, 'a> {
                     _ => unknown(db),
                 }
             }
-            "sapply" => match self.table.resolve(db, element).kind(db) {
+            "sapply" => match (
+                simplify_flag(self.module, arguments, "simplify"),
+                self.table.resolve(db, element).kind(db),
+            ) {
+                (Some(false), _) => list(element),
                 // `sapply` simplifies results that all have length one into a vector.
-                TyKind::Scalar(_) => vector(element),
+                (Some(true), TyKind::Scalar(_)) => vector(element),
                 _ => unknown(db),
             },
             _ => list(element),
         })
+    }
+
+    /// `sapply`, `mapply` and `Map` with a callback whose signature is known. Their stubs return `Any`,
+    /// because the result's shape depends on what the callback returns and on the `simplify`
+    /// flag, which no candidate can discriminate. A callback that returns a scalar-like value
+    /// simplifies to a vector of it, and `simplify = FALSE` keeps a list.
+    fn simplified_apply(&mut self, family: &str, arguments: &[Argument]) -> Option<Ty<'db>> {
+        let db = self.db;
+        let (function, items, flag) = if family == "sapply" {
+            let bound = bind_formals(self.module, arguments, &["X", "FUN"]);
+            (bound.value(1)?, bound.value(0), Some("simplify"))
+        } else {
+            let (formal, flag) = if family == "Map" {
+                ("f", None)
+            } else {
+                ("FUN", Some("SIMPLIFY"))
+            };
+            let function = bind_formals(self.module, arguments, &[formal]).value(0)?;
+            // The first argument `...` takes is the one whose names the result keeps.
+            let items = arguments
+                .iter()
+                .filter(|argument| {
+                    !self.module.argument_name(argument).is_some_and(|name| {
+                        matches!(name.as_str(), "FUN" | "MoreArgs" | "SIMPLIFY" | "USE.NAMES")
+                            || name.as_str() == formal
+                    })
+                })
+                .filter_map(|argument| argument.value)
+                .find(|value| *value != function);
+            (function, items, flag)
+        };
+        let function = self.recorded.get(&function).copied()?;
+        let returned = match self.table.resolve(db, function).kind(db) {
+            TyKind::Function(function) => self.table.resolve(db, function.ret),
+            _ => return None,
+        };
+        // An undetermined return keeps the stub's `Any`, which strict mode does not report.
+        if matches!(returned.kind(db), TyKind::Unknown) {
+            return None;
+        }
+        let named = items.is_some_and(|items| {
+            let items = self
+                .recorded
+                .get(&items)
+                .copied()
+                .unwrap_or_else(|| unknown(db));
+            let items = self.structural(items);
+            // The result keeps the input's names, and `USE.NAMES` names it by a character input.
+            let character = match items.kind(db) {
+                TyKind::Vector(element) => *element,
+                _ => items,
+            };
+            element_types(db, items).1
+                || (simplify_flag(self.module, arguments, "USE.NAMES") != Some(false)
+                    && matches!(character.kind(db), TyKind::Scalar(Atomic::Character)))
+        });
+        // `Map` is `mapply` with `SIMPLIFY = FALSE`.
+        let simplify = match flag {
+            Some(flag) => simplify_flag(self.module, arguments, flag),
+            None => Some(false),
+        };
+        let shape = match simplify {
+            Some(false) if named => TyKind::NamedList(returned),
+            Some(false) => TyKind::List(returned),
+            Some(true) if matches!(returned.kind(db), TyKind::Scalar(_)) => {
+                if named {
+                    TyKind::NamedVector(returned)
+                } else {
+                    TyKind::Vector(returned)
+                }
+            }
+            _ => return None,
+        };
+        Some(Ty::new(db, shape))
     }
 
     /// The generic `vapply` candidate fixes `V` from the callback first, so a template that
@@ -21725,6 +21809,22 @@ fn element_types<'db>(db: &'db dyn Db, x: Ty<'db>) -> (Vec<Ty<'db>>, bool) {
         }
         TyKind::Scalar(_) => (vec![x], false),
         _ => (vec![unknown(db)], false),
+    }
+}
+
+/// A logical flag that only a name can pass, as `sapply`'s `simplify` after `...`: `Some(true)`
+/// when it is left out or literally `TRUE`, `Some(false)` when literally `FALSE`, and `None` when
+/// its value is not known.
+fn simplify_flag(module: &Module, arguments: &[Argument], name: &str) -> Option<bool> {
+    let Some(argument) = arguments
+        .iter()
+        .find(|argument| module.argument_name(argument).as_deref() == Some(name))
+    else {
+        return Some(true);
+    };
+    match argument.value.map(|value| module.kind(value)) {
+        Some(ExpressionKind::Literal(LiteralKind::Logical(value))) => Some(*value),
+        _ => None,
     }
 }
 

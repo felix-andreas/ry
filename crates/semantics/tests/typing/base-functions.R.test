@@ -101,7 +101,7 @@ xs: double[]
 ns: integer[]
 words: character[]
 flags: logical[]
-a27: Any
+a27: integer[named]
 a28: character
 a29: logical
 a30: double[]
@@ -446,3 +446,52 @@ nothing <- function() quiet()
 quiet: fn() -> NULL
 loud: <T> fn(x: T) -> T
 nothing: fn() -> NULL
+
+#==== apply_shapes
+#---- a_scalar_callback_simplifies_to_a_vector
+xs <- c(1, 2, 3)
+doubled <- sapply(xs, function(x) x * 2)
+totals <- sapply(xs, sum)
+#++++
+xs: double[]
+doubled: double[]
+totals: double[]
+
+#---- simplify_false_keeps_a_list
+xs <- c(1, 2, 3)
+doubled <- sapply(xs, function(x) x * 2, simplify = FALSE)
+totals <- sapply(xs, sum, simplify = FALSE)
+pairs <- mapply(function(a, b) paste(a, b), c("x", "y"), c("z", "w"), SIMPLIFY = FALSE)
+#++++
+xs: double[]
+doubled: list[double]
+totals: list[double]
+pairs: list[named: character]
+
+#---- a_vector_callback_leaves_the_shape_open
+xs <- c(1, 2, 3)
+pairs <- sapply(xs, function(x) c(x, x))
+#++++
+xs: double[]
+pairs: Any
+
+#---- names_follow_a_character_or_named_input
+widths <- sapply(c("a", "bb"), function(s) nchar(s))
+bare <- sapply(c("a", "bb"), function(s) nchar(s), USE.NAMES = FALSE)
+bumped <- sapply(list(p = 1, q = 2), function(v) v + 1)
+#++++
+widths: integer[named]
+bare: integer[]
+bumped: double[named]
+
+#---- a_flag_that_is_not_a_literal_leaves_the_shape_open
+f <- function(xs, keep) sapply(xs, function(x) x * 2, simplify = keep)
+#++++
+f: <T, U> fn(xs: T, keep: U) -> Any
+
+#---- map_is_a_list_of_the_callback_return
+sums <- Map(function(a, b) a + b, 1:3, 4:6)
+labels <- Map(function(a, b) paste(a, b), c("x", "y"), c("z", "w"))
+#++++
+sums: list[Any]
+labels: list[named: character]

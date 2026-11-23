@@ -2150,3 +2150,12 @@ lowering path and a third way for two annotations to disagree, for no case `#:` 
 - The rule is `tools:::checkS3methods`'s: the generic's parameters up to its first `...` (cut at the method's own `...`) match by position, every generic parameter appears in the method unless the method has `...`, and a method parameter outside the generic needs `...` on the generic. One finding per method, the first rule it breaks.
 - NAMESPACE registrations refine the name rule: when the package registers any method of a generic with `S3method()`, only registered functions are its methods (a dotted helper is not), and `S3method(g, cls, fn)` makes `fn` a method of `g`. Read through the per-name `registered_methods` and `registered_generic`, from `PackageMetadata::s3_methods`.
 - Generics from other packages are not checked: stub formals are written for typing and need not be the real ones, so a stub generic would turn a stub's spelling into a false report.
+
+## `sapply`, `mapply` and `Map` take their shape from the callback's return, after the stub call
+
+**Status:** built (`simplified_apply` in `crates/semantics/src/check.rs`).
+
+- The stubs return `Any`: the shape depends on the callback's return and the `simplify` flag, and an overload set cannot discriminate on either, because both leave every argument type the same.
+- The checker types the call through the stub first (so the callback is checked against the elements), then refines: a scalar-like return gives `T[]`, a literal `simplify = FALSE` gives `list[T]`, anything else keeps `Any`. Names follow R (a named input, or a character input unless `USE.NAMES = FALSE`).
+- The scalar-like claim is trusted as length one, the same trust the vector rules already extend, so a callback typed scalar that returns several elements is a missed matrix rather than a false error.
+- `tapply` stays `Any`: its result is an array shaped by the groups, which needs the matrix-shape design.

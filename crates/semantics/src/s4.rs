@@ -140,21 +140,21 @@ pub fn file_classes(db: &dyn Db, file: SourceFile) -> FileClasses {
             continue;
         };
         let arguments = &module[arguments];
-        match methods_function(&module, *callee) {
+        match methods_function(module, *callee) {
             Some("setClass") => {
-                let matched = match_arguments(&module, arguments, &SET_CLASS_FORMALS);
-                let Some(class) = matched[0].and_then(|value| string(&module, value)) else {
+                let matched = match_arguments(module, arguments, &SET_CLASS_FORMALS);
+                let Some(class) = matched[0].and_then(|value| string(module, value)) else {
                     continue;
                 };
                 classes.definitions.push(ClassDefinition {
                     class,
-                    shape: class_shape(&module, &matched),
+                    shape: class_shape(module, &matched),
                 });
             }
             Some("setMethod") => {
-                let matched = match_arguments(&module, arguments, &["f", "signature"]);
+                let matched = match_arguments(module, arguments, &["f", "signature"]);
                 if matched[0]
-                    .and_then(|value| string(&module, value))
+                    .and_then(|value| string(module, value))
                     .map(Symbol::as_str)
                     != Some("initialize")
                 {
@@ -164,8 +164,8 @@ pub fn file_classes(db: &dyn Db, file: SourceFile) -> FileClasses {
                     ExpressionKind::Call { arguments, .. } => module[arguments]
                         .first()
                         .and_then(|argument| argument.value)
-                        .and_then(|value| string(&module, value)),
-                    _ => string(&module, signature),
+                        .and_then(|value| string(module, value)),
+                    _ => string(module, signature),
                 });
                 if let Some(class) = first_class {
                     classes.initialized.push(class);

@@ -181,7 +181,7 @@ fn render_diagnostics(output: &mut String, diagnostics: &[Diagnostic]) {
             diagnostic.message
         ));
         for related in &diagnostic.related {
-            assert_message_style(&related.message);
+            assert_message_style(related.message);
             output.push_str(&format!(
                 "  = {}..{} {}\n",
                 u32::from(related.range.start()),

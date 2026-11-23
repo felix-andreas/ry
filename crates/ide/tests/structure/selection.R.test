@@ -334,7 +334,7 @@ token "c" LibraryFunction
 token "amount" Property
 token "." Function
 token "total" Parameter
-token "sum" Function
+token "sum" LibraryFunction
 token "amount" Property
 token "by" Parameter
 token "team" Property

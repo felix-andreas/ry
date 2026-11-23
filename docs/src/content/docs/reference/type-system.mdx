@@ -2076,8 +2076,30 @@ arguments and a fixed-arity function cannot receive them. Between two variadic t
 element types are contravariant like any parameter, and both sides must declare the same number of
 parameters before `...`. This rejects some safe pairings, but never admits an unsound one.
 
-`sapply`, `mapply` and `tapply` give `Any`, because whether R simplifies their results to a vector,
-a matrix or a list depends on what the callback returns. Their callbacks are still checked:
+`sapply` and `mapply` simplify their results to a vector, a matrix or a list depending on what the
+callback returns, so their type follows the callback's return type and the `simplify` flag
+(`SIMPLIFY` for `mapply`):
+
+| Call | Type |
+| --- | --- |
+| callback returns a scalar-like `T`, flag left out or `TRUE` | `T[]` |
+| flag is a literal `FALSE` | `list[T]` |
+| callback returns anything else, or the flag is not a literal | `Any` |
+
+The result is named (`T[named]`, `list[named: T]`) when the input is named or a character vector,
+as R names it, unless `USE.NAMES = FALSE` and the input is a character vector:
+
+```r
+xs <- c(1, 2, 3)
+doubled <- sapply(xs, function(x) x * 2)                    # double[]
+kept <- sapply(xs, function(x) x * 2, simplify = FALSE)     # list[double]
+pairs <- sapply(xs, function(x) c(x, x))                    # Any: a matrix in R
+widths <- sapply(c("a", "bb"), function(s) nchar(s))        # integer[named]
+```
+
+A scalar-like return is trusted as length one, as everywhere else, so a callback typed scalar that
+returns several elements gives a vector type to what R returns as a matrix. `tapply` gives `Any`,
+because its result is an array shaped by the groups of `INDEX`. The callbacks are still checked:
 `sapply`'s takes the elements of `X`, as `lapply`'s does, so `sapply(xs, function(v) v + "a")` over
 numbers is an error, and so is `sapply(xs, 4)`:
 
@@ -2085,7 +2107,8 @@ numbers is an error, and so is `sapply(xs, 4)`:
 expected a function that takes `double`, found `double`
 ```
 
-`Map` always gives a list, `list[Any]`.
+`Map` is `mapply` with `SIMPLIFY = FALSE`, so it gives `list[T]` for a callback that returns `T`, and
+`list[Any]` when the return is undetermined.
 
 The base functions that take a function argument and resolve it with `match.fun` (`lapply`,
 `sapply`, `vapply`, `mapply`, `Map`, `Filter`, `Find`, `Position`, `Reduce`, `do.call`, `outer`,

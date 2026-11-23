@@ -2160,12 +2160,11 @@ Three independent black-box adoption reviews simulated real projects from the do
 only, with no source access. They were an analysis-script user, a CRAN package author and a
 numerical-computing user, and they converged on the same walls. What remains is below, ranked by how often a real user hits it.
 
-### The apply family's result shape depends on a value
+### `tapply` and a non-scalar `sapply` return `Any`
 
-`sapply`, `mapply` and `tapply` return `Any`, because `simplify = FALSE` and a vector-returning
-callback change the result shape without changing any argument type, so no overload set can
-discriminate them. Their parameters are typed (callbacks, `match.fun` strings), and `Map` returns
-`list[Any]`.
+`sapply` and `mapply` follow the callback's return when it is scalar-like or `simplify = FALSE`.
+A vector-returning callback gives a matrix in R, and `tapply` gives an array shaped by the groups,
+so both wait for the matrix-shape design below.
 
 ### The three object systems, re-measured
 
