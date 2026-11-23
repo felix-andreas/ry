@@ -3504,7 +3504,11 @@ fn rowwise_double(
         move |columns: &mut [Column]| {
             let left = columns[0].as_materialized_series().f64()?.clone();
             let right = columns[1].as_materialized_series().f64()?.clone();
-            let len = left.len().max(right.len());
+            // A single value broadcasts to the other side's length, zero included.
+            let len = match (left.len(), right.len()) {
+                (1, other) | (other, 1) => other,
+                (left_len, right_len) => left_len.min(right_len),
+            };
             let at = |values: &Float64Chunked, row: usize| {
                 values.get(if values.len() == 1 { 0 } else { row })
             };
