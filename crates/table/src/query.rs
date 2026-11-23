@@ -19,7 +19,8 @@ use {
         AnyValue, AsOfOptions, AsofStrategy, ChunkAgg, Column, DataFrame, DataType, ExplodeOptions,
         Expr as PolarsExpr, Field, Float64Chunked, Int32Chunked, IntoColumn, IntoLazy, JoinType,
         LazyFrame, MaintainOrderJoin, NULL, NamedFrom, PlSmallStr, Scalar, Series,
-        SortMultipleOptions, UnionArgs, by_name, col, concat, len, lit, pearson_corr, when,
+        SortMultipleOptions, TimeUnit, UnionArgs, by_name, col, concat, len, lit, pearson_corr,
+        when,
     },
     polars_arrow::bitmap::MutableBitmap,
     std::{collections::HashSet, fmt, sync::Arc},
@@ -192,6 +193,8 @@ pub enum Expr {
     Character(String),
     /// A date literal, whole days since 1970-01-01.
     Date(i32),
+    /// A time literal, whole microseconds since 1970-01-01 UTC.
+    Datetime(i64),
     /// A typed `NA`.
     Na(ColumnType),
     Unary(UnaryOp, Box<Expr>),
@@ -376,6 +379,7 @@ fn holds(kind: ColumnType) -> &'static str {
         ColumnType::Character => "strings",
         ColumnType::Factor => "factor levels",
         ColumnType::Date => "dates",
+        ColumnType::Datetime => "times",
     }
 }
 
@@ -581,6 +585,7 @@ fn bind_group_columns(mut query: Query) -> Query {
             | Expr::Character(_)
             | Expr::Na(_)
             | Expr::Date(_)
+            | Expr::Datetime(_)
             | Expr::Count => {}
             Expr::Unary(_, arg)
             | Expr::Head(arg, _)
@@ -809,6 +814,7 @@ pub(crate) fn column_references(expr: &Expr, names: &mut impl Extend<PlSmallStr>
         | Expr::Logical(_)
         | Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime(_)
         | Expr::Na(_)
         | Expr::Count => {}
     }
@@ -1016,6 +1022,7 @@ fn per_row_of_i(
         | Expr::Logical(_)
         | Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime(_)
         | Expr::Na(_)
         | Expr::Column(_) => expr.clone(),
     }
@@ -1036,6 +1043,7 @@ fn reads_count(expr: &Expr) -> bool {
         | Expr::Logical(_)
         | Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime(_)
         | Expr::Na(_)
         | Expr::Column(_) => false,
     }
@@ -1223,6 +1231,7 @@ fn has_integer_sum(typer: &Typer, expr: &Expr) -> Result<bool> {
         | Expr::Logical(_)
         | Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime(_)
         | Expr::Na(_)
         | Expr::Column(_)
         | Expr::Count => false,
@@ -1258,6 +1267,7 @@ fn integer_sums(typer: &Typer, expr: &Expr, sums: &mut Vec<Expr>) -> Result<()> 
         | Expr::Logical(_)
         | Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime(_)
         | Expr::Na(_)
         | Expr::Column(_)
         | Expr::Count => {}
@@ -1307,6 +1317,7 @@ fn double_sums(typer: &Typer, expr: &Expr) -> Result<Expr> {
         | Expr::Logical(_)
         | Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime(_)
         | Expr::Na(_)
         | Expr::Column(_)
         | Expr::Count => expr.clone(),
@@ -2116,6 +2127,7 @@ pub(crate) fn collapses(expr: &Expr) -> bool {
         | Expr::Logical(_)
         | Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime(_)
         | Expr::Na(_) => true,
         Expr::Column(_) | Expr::Head(..) | Expr::Rank { .. } | Expr::Window(..) => false,
         Expr::Unary(_, arg) => collapses(arg),
@@ -2840,6 +2852,7 @@ fn row_wise(expr: &Expr) -> bool {
         | Expr::Logical(_)
         | Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime(_)
         | Expr::Na(_) => true,
         Expr::Unary(_, arg) => row_wise(arg),
         Expr::Binary(_, left, right) => row_wise(left) && row_wise(right),
@@ -2933,6 +2946,7 @@ impl NullCounts {
             | Expr::Logical(_)
             | Expr::Character(_)
             | Expr::Date(_)
+            | Expr::Datetime(_)
             | Expr::Count
             | Expr::Rank { .. } => false,
             Expr::Unary(UnaryOp::IsNa, _) => false,
@@ -2964,6 +2978,7 @@ impl Typer<'_> {
             Expr::Logical(_) => ColumnType::Logical,
             Expr::Character(_) => ColumnType::Character,
             Expr::Date(_) => ColumnType::Date,
+            Expr::Datetime(_) => ColumnType::Datetime,
             Expr::Na(kind) => *kind,
             Expr::Unary(UnaryOp::Not, arg) => {
                 expect_truthy(self.expr(arg)?, "`!`")?;
@@ -3054,6 +3069,9 @@ fn arithmetic(left: ColumnType, right: ColumnType) -> Result<ColumnType> {
             "a date only takes `+` and `-` with a number of days, or `-` with another date"
                 .to_string(),
         )),
+        (ColumnType::Datetime, _) | (_, ColumnType::Datetime) => Err(Error::Query(
+            "a POSIXct column takes no arithmetic in a query".to_string(),
+        )),
         (ColumnType::Character | ColumnType::Factor, _)
         | (_, ColumnType::Character | ColumnType::Factor) => Err(Error::Query(
             "arithmetic needs numeric or logical columns".to_string(),
@@ -3089,7 +3107,10 @@ fn supertype(left: ColumnType, right: ColumnType) -> ColumnType {
             ColumnType::Logical => 0,
             ColumnType::Integer => 1,
             ColumnType::Double => 2,
-            ColumnType::Character | ColumnType::Factor | ColumnType::Date => 3,
+            ColumnType::Character
+            | ColumnType::Factor
+            | ColumnType::Date
+            | ColumnType::Datetime => 3,
         }
     }
     if left == right {
@@ -3118,17 +3139,16 @@ fn expect_truthy(kind: ColumnType, what: &str) -> Result<()> {
 /// formatting (`1e+06`, fifteen significant digits) has no Polars equivalent, so that mix is
 /// refused rather than compared wrongly.
 pub(crate) fn comparison(left: ColumnType, right: ColumnType) -> Result<ColumnType> {
-    // Without this, a date against anything else would meet at character and compare as text.
-    if (left == ColumnType::Date) != (right == ColumnType::Date) {
-        let other = if left == ColumnType::Date {
-            right
-        } else {
-            left
-        };
-        return Err(Error::Query(format!(
-            "a Date compares only with a Date, not with {}",
-            other.name()
-        )));
+    // Without this, a date or a time against anything else would meet at character and compare
+    // as text.
+    for temporal in [ColumnType::Date, ColumnType::Datetime] {
+        if (left == temporal) != (right == temporal) {
+            let other = if left == temporal { right } else { left };
+            return Err(Error::Query(format!(
+                "a {temporal} compares only with a {temporal}, not with {}",
+                other.name()
+            )));
+        }
     }
     let textual = |kind| matches!(kind, ColumnType::Character | ColumnType::Factor);
     if (textual(left) && right == ColumnType::Double)
@@ -3155,7 +3175,8 @@ fn expect_logical(kind: ColumnType, what: &str) -> Result<()> {
 /// labels, because Polars cannot cast an extension column.
 fn convert(value: PolarsExpr, from: ColumnType, kind: ColumnType) -> PolarsExpr {
     match (from, kind) {
-        (ColumnType::Factor, ColumnType::Factor) => value,
+        // A cast to the same column type would drop a time column's zone.
+        (from, kind) if from == kind => value,
         (ColumnType::Factor, ColumnType::Character) => factor::text_expr(value),
         (ColumnType::Factor, kind) => factor::text_expr(value).cast(dtype(kind)),
         (_, kind) => value.cast(dtype(kind)),
@@ -3171,6 +3192,7 @@ fn dtype(kind: ColumnType) -> DataType {
         // arm only casts a factor column onto itself.
         ColumnType::Character | ColumnType::Factor => DataType::String,
         ColumnType::Date => DataType::Date,
+        ColumnType::Datetime => DataType::Datetime(TimeUnit::Microseconds, None),
     }
 }
 
@@ -3198,6 +3220,7 @@ impl Lowering<'_> {
             Expr::Logical(value) => lit(*value),
             Expr::Character(value) => lit(value.clone()),
             Expr::Date(days) => lit(*days).cast(DataType::Date),
+            Expr::Datetime(micros) => lit(*micros).cast(dtype(ColumnType::Datetime)),
             Expr::Na(kind) => lit(polars::prelude::Null {}).cast(dtype(*kind)),
             Expr::Count => len().cast(DataType::Int32),
             Expr::Unary(UnaryOp::Not, arg) => self.logical(arg)?.not(),

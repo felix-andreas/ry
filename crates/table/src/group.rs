@@ -986,6 +986,7 @@ pub(crate) fn rewrite(expr: &Expr, aggregates: &mut Vec<Expr>) -> Option<Expr> {
         Expr::Integer(_) | Expr::Double(_) | Expr::Logical(_) | Expr::Na(_) => expr.clone(),
         Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime(_)
         | Expr::Column(_)
         | Expr::Head(..)
         | Expr::Rank { .. }

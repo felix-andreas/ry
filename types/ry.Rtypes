@@ -67,8 +67,8 @@ LazyGroupBy.agg : fn(group: LazyGroupBy, ...: Expr) -> LazyFrame
 
 # Arithmetic, comparison and logic on an expression build a bigger expression, and a plain value
 # on the other side is a literal.
-Ops.Expr : fn(e1: Expr, e2: Expr | double | integer | character | logical | Date) -> Expr
-Ops.Expr : fn(e1: double | integer | character | logical | Date, e2: Expr) -> Expr
+Ops.Expr : fn(e1: Expr, e2: Expr | double | integer | character | logical | Date | POSIXct) -> Expr
+Ops.Expr : fn(e1: double | integer | character | logical | Date | POSIXct, e2: Expr) -> Expr
 
 Expr.col : fn(name: character) -> Expr
 Expr.lit : fn(value: Any) -> Expr

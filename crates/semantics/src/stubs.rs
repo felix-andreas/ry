@@ -348,7 +348,8 @@ fn dormant_schemes<'db>(
     };
     let own_types: FxHashSet<&str> = lines()
         .filter_map(|content| {
-            let rest = after_keyword(content, "@type").or_else(|| after_keyword(content, "@alias"))?;
+            let rest =
+                after_keyword(content, "@type").or_else(|| after_keyword(content, "@alias"))?;
             let rest = rest.trim_start();
             let end = rest
                 .find(|character: char| !is_identifier_character(character))
@@ -380,7 +381,10 @@ fn dormant_schemes<'db>(
             continue;
         }
         if let Some(scheme) = lower_type_text(db, markers.type_text) {
-            schemes.entry(Symbol::new(spelling)).or_default().push(scheme);
+            schemes
+                .entry(Symbol::new(spelling))
+                .or_default()
+                .push(scheme);
         }
     }
     schemes

@@ -660,6 +660,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - package:ry attaches no bare name another package exports
 - A base frame built by `data.frame()` or `data.table()` knows its columns
 - A missing key matches a missing key in every join
+- A `POSIXct` column is a time column in microseconds with its zone
 
 ## Build, benchmarks and CI
 

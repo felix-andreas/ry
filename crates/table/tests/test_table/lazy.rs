@@ -183,7 +183,10 @@ fn a_missing_key_matches_a_missing_key_in_every_join() {
             suffix: "_right".into(),
         }))
     };
-    assert_eq!(column_values(&join(How::Inner), "k"), ints(&[1, NA_INTEGER]));
+    assert_eq!(
+        column_values(&join(How::Inner), "k"),
+        ints(&[1, NA_INTEGER])
+    );
     assert_eq!(column_values(&join(How::Semi), "k"), ints(&[1, NA_INTEGER]));
     assert_eq!(column_values(&join(How::Anti), "k"), ints(&[2]));
     assert_eq!(join(How::Full).height(), 3);
@@ -487,6 +490,60 @@ fn a_date_rejects_arithmetic_and_comparisons_it_has_no_meaning_for() {
             "{expected}: {error:?}"
         );
     }
+}
+
+/// A time keeps its zone through a query, compares with a time literal whatever the literal's
+/// zone, and comes back as the same seconds, `NA` included.
+#[test]
+fn a_time_keeps_its_zone_and_compares_with_a_time() {
+    let at = RVector::Datetime {
+        seconds: vec![1_767_261_600.0, table::convert::NA_REAL, 1_767_259_800.25],
+        zone: Some("Europe/Berlin".to_string()),
+    };
+    let table = frame(vec![("id", ints(&[1, 2, 3])), ("at", at)]);
+    assert_eq!(
+        table.schema().to_string(),
+        "DataFrame{id: integer[], at: POSIXct}"
+    );
+    let RVector::Datetime { seconds, zone } = column_values(&table, "at") else {
+        panic!("a time column must read back as times");
+    };
+    assert_eq!(zone.as_deref(), Some("Europe/Berlin"));
+    assert_eq!(seconds[0], 1_767_261_600.0);
+    assert!(table::convert::is_na_real(seconds[1]));
+    assert_eq!(seconds[2], 1_767_259_800.25);
+    let plan = Plan::new(Source::Table(table)).with(Step::Filter(binary(
+        BinaryOp::Less,
+        column("at"),
+        Expr::Datetime(1_767_261_600_000_000),
+    )));
+    let result = collect(plan);
+    assert_eq!(column_values(&result, "id"), ints(&[3]));
+    assert_eq!(
+        column_values(&result, "at"),
+        RVector::Datetime {
+            seconds: vec![1_767_259_800.25],
+            zone: Some("Europe/Berlin".to_string()),
+        }
+    );
+    let table = frame(vec![(
+        "at",
+        RVector::Datetime {
+            seconds: vec![0.0],
+            zone: None,
+        },
+    )]);
+    let plan = Plan::new(Source::Table(table)).with(Step::Select(vec![named(
+        "later",
+        binary(BinaryOp::Add, column("at"), Expr::Double(60.0)),
+    )]));
+    let error = lazy::collect(plan).err().map(|error| error.to_string());
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|error| error.contains("a POSIXct column takes no arithmetic")),
+        "{error:?}"
+    );
 }
 
 /// A filter that reads which rows come first must not move below the sort that orders them.

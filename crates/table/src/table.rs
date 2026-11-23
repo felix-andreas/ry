@@ -28,7 +28,7 @@ use {
     ops::sort_frame,
     polars::prelude::{
         ChunkAgg, Column, DataFrame, DataType, Int32Chunked, IntoColumn, NamedFrom, PlSmallStr,
-        Series,
+        Series, TimeUnit,
     },
     polars_arrow::bitmap::Bitmap,
     polars_core::runtime::THREAD_POOL,
@@ -89,6 +89,9 @@ pub enum ColumnType {
     /// `Date`, a Polars `Date`: whole days since 1970-01-01. R stores a date as a double, so a
     /// fractional day is floored when it enters a table.
     Date,
+    /// `POSIXct`, a Polars `Datetime` in microseconds whose time zone is the vector's `tzone`.
+    /// R stores a time as double seconds, so a time enters a table rounded to the microsecond.
+    Datetime,
 }
 
 impl ColumnType {
@@ -99,6 +102,7 @@ impl ColumnType {
             DataType::Float64 => ColumnType::Double,
             DataType::String => ColumnType::Character,
             DataType::Date => ColumnType::Date,
+            DataType::Datetime(TimeUnit::Microseconds, _) => ColumnType::Datetime,
             dtype if factor::is_factor(dtype) => ColumnType::Factor,
             _ => return None,
         })
@@ -113,6 +117,7 @@ impl ColumnType {
             ColumnType::Character => "character[]",
             ColumnType::Factor => "factor",
             ColumnType::Date => "Date",
+            ColumnType::Datetime => "POSIXct",
         }
     }
 
@@ -124,6 +129,7 @@ impl ColumnType {
             "character[]" => ColumnType::Character,
             "factor" => ColumnType::Factor,
             "Date" => ColumnType::Date,
+            "POSIXct" => ColumnType::Datetime,
             _ => return None,
         })
     }
@@ -672,10 +678,15 @@ fn convert(column: Column) -> Result<Column> {
                 .collect();
             return Ok(cleaned.with_name(column.name().clone()).into_column());
         }
-        DataType::Boolean | DataType::Float64 | DataType::String | DataType::Date => {
+        DataType::Boolean
+        | DataType::Float64
+        | DataType::String
+        | DataType::Date
+        | DataType::Datetime(TimeUnit::Microseconds, _) => {
             return Ok(column);
         }
         dtype if factor::is_factor(dtype) => return Ok(column),
+        DataType::Datetime(_, zone) => DataType::Datetime(TimeUnit::Microseconds, zone.clone()),
         DataType::Int8 | DataType::Int16 | DataType::UInt8 | DataType::UInt16 => DataType::Int32,
         DataType::Int64 | DataType::UInt32 | DataType::UInt64 | DataType::Float32 => {
             DataType::Float64

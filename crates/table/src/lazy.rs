@@ -477,6 +477,7 @@ fn reads_order(expr: &Expr) -> bool {
         | Expr::Logical(_)
         | Expr::Character(_)
         | Expr::Date(_)
+        | Expr::Datetime(_)
         | Expr::Na(_)
         | Expr::Count => false,
     }
@@ -1062,6 +1063,7 @@ impl fmt::Display for Expr {
             Expr::Logical(false) => formatter.write_str("FALSE"),
             Expr::Character(value) => write!(formatter, "{value:?}"),
             Expr::Date(days) => write!(formatter, "date({days})"),
+            Expr::Datetime(micros) => write!(formatter, "datetime({micros})"),
             Expr::Na(_) => formatter.write_str("NA"),
             Expr::Unary(UnaryOp::Negate, arg) => write!(formatter, "-{arg}"),
             Expr::Unary(UnaryOp::Not, arg) => write!(formatter, "!{arg}"),

@@ -853,9 +853,7 @@ unsafe fn missing_as_character(mask: Mask, value: Sexp) -> R<Option<Sexp>> {
         || mask & CHARACTER == 0
         || value.kind() != SexpType::Logical
         || value.is_array()
-        || !values::ints(value)
-            .iter()
-            .all(|&item| item == NA_LOGICAL)
+        || !values::ints(value).iter().all(|&item| item == NA_LOGICAL)
     {
         return Ok(None);
     }
