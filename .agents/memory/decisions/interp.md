@@ -1265,3 +1265,13 @@ without cells, promise forcing in the loop, and one observer word on the general
 - **Rejected.** A prologue in `checkAtAssignment`, as the other methods fast paths have: the write would still build a call and enter a closure.
 - **Impact.** A slot read costs about a sixteenth of the instructions, a write the cache accepts about a twelfth, and a replacement generic that writes one slot about a seventh (`just bench-mechanisms --filter "s4: "`).
 - Tests: oracle cases `s4__slot_read`, `s4__slot_write`.
+
+## String equality is a kernel, and the fast return asks what outlives the frame
+
+**Status:** settled.
+
+- **Context.** A test user's application workload ranks builtin calls on small values second after tier 0's own instructions. Measured per operation against GNU R (`just bench-mechanisms --gnu-r`), nearly every builtin and call path costs 0.3 to 0.7 of GNU R's instructions, so the builtin call path got no redesign. Three operations had a path longer than their work, and the rest of the measurements are in the backlog ("Open: small-value operations the application workload ranks").
+- **`==` and `!=` on character vectors** ran the `==` builtin from compiled code: `kernels::binary` took only numeric and logical operands. `kernels::string_equality` answers two attribute-free character vectors of one length, or one of them a single string, by comparing interned strings as objects and decoding only strings that differ in encoding marks (`handles::equal_strings`, GNU R's `Seql` rule, which the builtin calls too, so the rule has one definition). Ordering comparisons collate and stay with the builtin, as does any operand with attributes, a zero length or lengths that recycle. An `if` chain on a string key costs about a third of what it did.
+- **The fast return** (`bytecode::leave_fast`) refused every frame whose pending environment had a counted reference and sent it through `eval::leave`, which asks `outliving_cause` and discards the environment when the references die with the frame. The fast return asks `outliving_cause` itself, so a function that defines a closure and calls it, a `local()` block and an unread default argument return in place. Rejected: tracking at closure creation whether the closure can escape, which is the same question asked earlier with less information.
+- **`PositionTable`** (`match`, `%in%`, `unique`, `duplicated`) sized its smallest table at 32 slots with 16 inline, so every lookup allocated and zeroed a table. The inline capacity is the smallest table's size.
+- Tests: oracle cases `kernels__string_equality`, `environments__closures_dying_with_frames`.

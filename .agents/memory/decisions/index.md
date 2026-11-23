@@ -290,6 +290,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `tryCatch` pushes its chain of frames natively (settled)
 - An S4 method runs in place on a slot frame above its generic's (settled)
 - `object@name` is an instruction, and a slot write is checked without a call (settled)
+- String equality is a kernel, and the fast return asks what outlives the frame (settled)
 
 ## Builtins and base R
 
@@ -667,6 +668,10 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Missing keys, missing values and date-times in the table engine
 - Verbs take R vectors as values, and only a single string names a column
 - DataFrame.concat and unique, and base generics on a DataFrame
+- A verb taking columns through `...` has no formal before them
+- `Expr` `%%` and `%/%` on doubles are GNU R's `myfmod` and `myfloor`
+- The frame fuzz kind's reference is a base-R model of the documented contract
+- A DataFrame sort puts missing values last and compares text by bytes
 
 ## Build, benchmarks and CI
 

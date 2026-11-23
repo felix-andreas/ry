@@ -4377,8 +4377,13 @@ that take a DataFrame directly would close the gap.
 variable keeps its name:
 
 ```r
-sales <- DataFrame(team = ["a", "b"], amount = [1, 2])   # DataFrame{team: character[], amount: double[]}
+sales <- DataFrame(team = ["a", "b"], amount = [1, 2])   # DataFrame{team: character[], amount: integer[]}
 ```
+
+A list literal's column takes the R type of its items: `[1, 2]` is an `I64` list, so it makes an
+integer column, as `[1L, 2L]` does, and `[1.5, 2]` makes a double column. An `I64` value too large
+for R's integer turns the column into a double column when the code runs, which the type does not
+show.
 
 An unnamed computed argument, a repeated name, or `...` leaves the columns unknown, and so does a
 project's own function named `DataFrame`, which shadows the builtin.

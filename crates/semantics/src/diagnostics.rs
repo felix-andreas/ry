@@ -3751,6 +3751,10 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             renderer.render(db, *first_ty),
             renderer.render(db, *second_ty)
         ),
+        TypeErrorKind::NamedPositional { argument, expected } => format!(
+            "`{argument}` is read as a column, not as the table: a named argument here is a column, which must be `{}`. Pass the table first, without a name",
+            renderer.render(db, *expected)
+        ),
         TypeErrorKind::NotAnAggregation { column } => format!(
             "`{column}` gives one value per row, but `agg` needs one value per group. Aggregate it, for example with `Expr.sum` or `Expr.first`"
         ),

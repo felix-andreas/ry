@@ -293,7 +293,7 @@ The table is a Polars `DataFrame` held by the `table` crate; this entry holds th
 
 **Status:** built.
 
-- **In `select` and `with_columns`, a named string of length one names a column; any other named vector is a column of its values** (`named_expressions` in `crates/frames/src/dataframe.rs`), recycled when it has one value. An unnamed character vector names several columns. The rule is decided by length at run time, so the checker refines a named non-string vector into a column of its type and leaves a named character variable unknown, since it cannot tell one string from several.
+- **In `select` and `with_columns`, a named string of length one names a column; any other named vector is a column of its values** (`verb_arguments` with `vectors` in `crates/frames/src/dataframe.rs`), recycled when it has one value. `group_by`, `agg`, `sort` and `Expr.over` reject a vector, so a misspelt option such as `desc = TRUE` cannot pass as a constant column. An unnamed character vector names several columns. The rule is decided by length at run time, so the checker refines a named non-string vector into a column of its type and leaves a named character variable unknown, since it cannot tell one string from several.
 - **A vector inside an expression is `Expr::Values(Series)`**, built by `vector_literal` from the same conversion as a frame column, so `Expr.lit(v)`, `Expr.col("x") + v` and `Expr.is_in(e, v)` all accept factors, dates and date-times. A length-one vector stays a scalar literal, and a single factor value lowers as `lit(series).first()`, so Polars broadcasts both. Any other length must equal the frame's height, checked before Polars runs (`check_vector_lengths` in `crates/table/src/lazy.rs`) so the error names the expression and both lengths.
 - **`Expr.is_in` with constant values is row-wise; with an expression as values it reads the whole column, so it classifies as an aggregate** and the lazy optimizer keeps it after the steps that change rows. `is_in(x, NULL)` is `is.na(x) & FALSE`: `FALSE` everywhere, keeping `x`'s name.
 - **`filter` takes a logical vector as a row mask**, ANDed with the other conditions; on a lazy frame it applies at its position in the plan, so the optimizer does not push it past a step that changes the row count.
@@ -305,5 +305,34 @@ The table is a Polars `DataFrame` held by the `table` crate; this entry holds th
 
 - **`DataFrame.concat(..., how)` follows Polars' names:** `"vertical"` stacks by column name and requires the same set of columns, `"diagonal"` fills missing columns with `NA`, `"horizontal"` puts frames of one height and named vectors side by side. A vertical column takes the widest type of logical, integer, double and character (`stacked_type` in `crates/table/src/ops.rs`), the same ladder as `rbindlist`.
 - **`DataFrame.unique(df, subset, keep)` is a lazy `Step::Unique`** that keeps the original row order; `keep = "none"` drops every duplicated row, as in Polars.
-- **`rbind`, `cbind`, `unique` and `duplicated` have S3 methods for `DataFrame`** that call the verbs, so base code keeps a DataFrame a DataFrame. `rbind` turns a `data.frame` or list into a DataFrame first and skips `NULL`; `cbind` names an unnamed vector after its deparsed argument, as base R does; `unique` and `duplicated` take `fromLast` and stop on `incomparables`, which has no Polars counterpart.
-- **Columns of different types do not stack:** the checker reports the column and both types (`StackedColumnTypesDiffer`) instead of typing the result `Unknown` silently. The checker refines the base generics only when the first argument is a `DataFrame` (`DataFrameVerb::BaseGeneric`), so data.table's own methods keep their typing; that is a refinement on ry's type, not a special case for data.table.
+- **`rbind`, `cbind`, `unique` and `duplicated` have S3 methods for `DataFrame`** that call the verbs, so base code keeps a DataFrame a DataFrame. `rbind` turns a `data.frame` or list into a DataFrame first and skips `NULL`; `cbind` names an unnamed vector after its deparsed argument, as base R does; `unique` and `duplicated` take `fromLast` and stop on `incomparables`, which has no Polars counterpart. The checker refines the base generics only when the first argument is a `DataFrame` (`DataFrameVerb::BaseGeneric`), so data.table's own methods keep their typing; that is a refinement on ry's type, not a special case for data.table.
+- **Columns of different types do not stack:** the checker reports the column and both types (`StackedColumnTypesDiffer`) instead of typing the result `Unknown` silently.
+
+## A verb taking columns through `...` has no formal before them
+
+**Status:** built.
+
+- **`DataFrame.select`, `with_columns`, `filter`, `group_by`, `sort`, `GroupBy.agg` and `Expr.over`** (and their `LazyFrame.`/`LazyGroupBy.` aliases) are `function(...)`, plus an exact-match `descending` after `...` on `sort`. The table, group or expression is the first element of `...`, taken by position (`subject` in `crates/frames/src/dataframe.rs`). With `function(df, ...)`, R's partial matching bound a column named `d` to `df` (and `g` to `group`), and a column named exactly `df` could never be written. Per-verb renames of the formal (`.df`) would only move the collision, so no formal precedes the columns at all.
+- The rule: the table (group, expression) is the first positional argument, and every named argument in a column position is a column, so `df`, `d`, `group` and `n` are ordinary column names. A named table is an error at run time (`verb_arguments`) and under `ry check`.
+- The stubs in `types/ry.Rtypes` declare that first parameter unnamed (positional only), so the checker matches exactly as the runtime does. A named argument that fails its `...` element type but fits the first parameter is reported as `NamedPositional` ("read as a column, not as the table"), not as a bare mismatch.
+
+## `Expr` `%%` and `%/%` on doubles are GNU R's `myfmod` and `myfloor`
+
+**Status:** built.
+
+- The interpreter, the JIT, typed code, the eager kernel and the lazy lowering share one pair of kernels, `real_modulo` and `real_integer_divide` in `crates/numeric/src/long_double.rs`, which compute in R's long double through `LongDouble`, so `1e308 %% 5` is `0` and `4.9e-324 %% -5` is `-5` everywhere. The lowering runs them row-wise through `map_many` because Polars' own `%` and floor division give `NaN` for an infinite divisor and differ on signs.
+- A missing value enters the kernel as R's `NA_real_`, and a row is missing only when the result is that `NA`, so `NA %% 0` and `NaN %/% NA` are `NaN` as in R. Integer columns keep R's `NA` for a zero divisor.
+- R warns "probable complete loss of accuracy in modulus" when the quotient is too large (`modulus_loses_accuracy`). The interpreter warns; a table column has no call to warn from and returns the same value silently.
+
+## The frame fuzz kind's reference is a base-R model of the documented contract
+
+**Status:** built.
+
+- `oracle fuzz --kind frame` runs one program on GNU R and ry; under GNU R a prelude (`crates/oracle/src/frame_model.R`) defines `DataFrame.*`, `Expr.*` and `GroupBy.*` in plain base R from `reference/dataframes.mdx`. The reference is the contract, not Polars, so a Polars default the docs do not state shows up as a difference to decide rather than as the expected answer, and GNU R needs no Polars. Shapes the docs leave open are not generated (the report lists them); row order is compared only where a verb defines it.
+
+## A DataFrame sort puts missing values last and compares text by bytes
+
+**Status:** built.
+
+- `sort` puts `NA` and `NaN` last in both directions as one missing class, keeps input order among them and among equal keys (descending included), and compares strings by their bytes whatever `LC_COLLATE` says; string `<` and `>` in an expression compare bytes too. This is what the engine does and what R's `order(method = "radix")` does, so it is the contract in `reference/dataframes.mdx` rather than a Polars accident.
+- The frame fuzz kind's model sets `LC_COLLATE` to `C` (`crates/oracle/src/frame_model.R`), so its base-R `<` on strings compares bytes and the generator emits every string comparison.

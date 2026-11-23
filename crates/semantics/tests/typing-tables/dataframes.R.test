@@ -197,3 +197,38 @@ kept: DataFrame{region: character[], units: integer[]}
 read: DataFrame{region: character[]}
 146..150 warning[unused] `kept` is assigned but never used
 208..212 warning[unused] `read` is assigned but never used
+
+#==== positional_table
+#---- a_named_argument_after_the_table_is_a_column
+# typing: on
+x <- DataFrame(a = c(1, 2), b = c("p", "q"))
+grouped <- DataFrame.group_by(x, "b")
+picked <- DataFrame.select(x, d = Expr.col("a"), df = Expr.col("b"))
+widened <- DataFrame.with_columns(x, dx = Expr.col("a") * 2)
+totals <- GroupBy.agg(grouped, g = Expr.sum(Expr.col("a")), group = Expr.max(Expr.col("a")), n = Expr.len())
+#++++
+x: DataFrame{a: double[], b: character[]}
+grouped: GroupBy{b: character[]; a: double[]}
+picked: DataFrame{d: double[], df: character[]}
+widened: DataFrame{a: double[], b: character[], dx: double[]}
+totals: DataFrame{b: character[], g: double[], group: double[], n: integer[]}
+96..102 warning[unused] `picked` is assigned but never used
+165..172 warning[unused] `widened` is assigned but never used
+226..232 warning[unused] `totals` is assigned but never used
+
+#---- a_named_table_is_reported
+# typing: on
+x <- DataFrame(a = c(1, 2), b = c("p", "q"))
+grouped <- DataFrame.group_by(x, "b")
+kept <- DataFrame.filter(Expr.col("a") > 1, df = x)
+totals <- GroupBy.agg(s = Expr.sum(Expr.col("a")), group = grouped)
+#++++
+x: DataFrame{a: double[], b: character[]}
+grouped: GroupBy{b: character[]; a: double[]}
+kept: Unknown
+totals: Unknown
+96..100 warning[unused] `kept` is assigned but never used
+121..138 error[type-mismatch] expected `DataFrame`, found `Expr`
+145..146 error[type-mismatch] `df` is read as a column, not as the table: a named argument here is a column, which must be `Expr | logical[]`. Pass the table first, without a name
+148..154 warning[unused] `totals` is assigned but never used
+207..214 error[type-mismatch] `group` is read as a column, not as the table: a named argument here is a column, which must be `Expr`. Pass the table first, without a name

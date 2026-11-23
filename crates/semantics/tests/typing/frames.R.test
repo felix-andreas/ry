@@ -12,7 +12,7 @@ labels: DataFrame{count: integer[], label: character[]}
 #---- a_list_column_types_as_the_vector_sharing_its_items
 prices <- DataFrame(id = [1, 2], price = [12.5, 9.99], name = ["a", "b"])
 #++++
-prices: DataFrame{id: List<I64>, price: double[], name: character[]}
+prices: DataFrame{id: integer[], price: double[], name: character[]}
 
 #---- a_list_column_reads_back_as_a_plain_vector
 prices <- DataFrame(price = [12.5, 9.99])

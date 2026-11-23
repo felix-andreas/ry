@@ -1255,34 +1255,6 @@ pub fn unescape_output(bytes: &[u8]) -> Cow<'_, [u8]> {
     Cow::Owned(output)
 }
 
-/// Whether two distinct interned strings hold the same text. Strings intern by bytes and
-/// encoding, so a native string and a UTF-8 one with the same bytes are distinct objects, and so
-/// are a latin1 string and its UTF-8 translation; GNU R's `Seql` calls both pairs equal because
-/// it compares their UTF-8 translations, and the session's native encoding is UTF-8.
-pub unsafe fn same_text(left: Sexp, right: Sexp) -> bool {
-    if left.has_gp(gp::BYTES) || right.has_gp(gp::BYTES) {
-        return false;
-    }
-    // Interning by bytes and encoding means two distinct strings of the same encoding differ in
-    // their bytes, which keeps `x == "a"` from decoding every element.
-    if [gp::LATIN1, gp::UTF8]
-        .iter()
-        .all(|&bit| left.has_gp(bit) == right.has_gp(bit))
-    {
-        return false;
-    }
-    // Outside a UTF-8 locale, GNU R reads a non-ASCII string of unknown encoding as native bytes
-    // that do not translate to the text of a marked string.
-    let native_non_ascii =
-        |text: Sexp| !text.has_gp(gp::LATIN1) && !text.has_gp(gp::UTF8) && !text.bytes().is_ascii();
-    if (native_non_ascii(left) || native_non_ascii(right))
-        && !crate::platform::native_codeset().eq_ignore_ascii_case("UTF-8")
-    {
-        return false;
-    }
-    char_str(left) == char_str(right)
-}
-
 /// The text of a symbol's name.
 #[inline]
 pub unsafe fn symbol_name<'a>(symbol: Sexp) -> Cow<'a, str> {
