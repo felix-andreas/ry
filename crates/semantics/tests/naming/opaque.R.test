@@ -386,3 +386,51 @@ f <- function() ~ predictor
   b0 f top-level 0..1
   0..1 f <- b0
   18..27 predictor -> quiet deferred
+
+#---- an_assign_with_a_computed_name_makes_later_free_reads_quiet
+# `assign(name, v)` with a computed name binds names ry cannot list, so a read
+# after it of a name nothing visible binds may find one of them. A called name
+# keeps its lookup, and a read before the `assign` is an ordinary non-local.
+f <- function(env) {
+  before
+  frame <- environment()
+  for (name in ls(env)) assign(name, env[[name]], envir = frame)
+  after
+  print(after)
+}
+#++++
+# f
+  b0 env parameter 14..17
+  b1 frame local 32..37
+  b2 name for-variable 62..66
+  b3 f top-level 0..1
+  0..1 f <- b3
+  23..29 before -> non-local deferred
+  32..37 frame <- b1
+  41..52 environment -> non-local deferred
+  70..72 ls -> non-local deferred
+  73..76 env -> b0
+  79..85 assign -> non-local deferred
+  86..90 name -> b2
+  92..95 env -> b0
+  97..101 name -> b2
+  113..118 frame -> b1
+  122..127 after -> quiet deferred
+  130..135 print -> non-local deferred
+  136..141 after -> quiet deferred
+
+#---- an_assign_into_another_frame_leaves_free_reads_ordinary
+f <- function(env, name) {
+  assign(name, 1, envir = env)
+  after
+}
+#++++
+# f
+  b0 env parameter 14..17
+  b1 name parameter 19..23
+  b2 f top-level 0..1
+  0..1 f <- b2
+  29..35 assign -> non-local deferred
+  36..40 name -> b1
+  53..56 env -> b0
+  60..65 after -> non-local deferred

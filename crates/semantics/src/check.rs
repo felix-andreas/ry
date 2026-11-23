@@ -11455,8 +11455,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             // vector type carries no length, so only a literal `c()` of several elements is known
             // to be too long. A list field that is only sometimes `NULL` is read where the code has
             // ruled that out (mgcv reads `b$off[i]:...` only after testing the flag that fills
-            // `off`). A local, an element read straight from a value, and a field of a parameter,
-            // whose `NULL` the declaration admits, stay checked.
+            // `off`). So is a variable the body computed or an undeclared formal, whose `NULL` is a
+            // placeholder for a path that does not reach the sequence (gt's `.after = NULL`, set
+            // on the path that builds `1:.after`). An element read straight from a value, a field
+            // of a parameter and an annotated variable, whose `NULL` the declaration admits, stay
+            // checked.
             let field_read = {
                 let mut expression = operand;
                 let mut through_field = false;
@@ -11472,7 +11475,8 @@ impl<'db, 'a> Checker<'db, 'a> {
                         _ => break,
                     }
                 }
-                through_field && !self.binds_parameter(expression)
+                (through_field && !self.binds_parameter(expression))
+                    || self.names_computed_value(operand)
             };
             let members: Vec<Ty<'db>> = match resolved.kind(self.db) {
                 TyKind::Union(members) if field_read => members
@@ -18267,14 +18271,54 @@ impl<'db, 'a> Checker<'db, 'a> {
         if inferred_signature && self.fits_inferred_scalar(expected, ty) {
             return Some(expected);
         }
+        // A literal `c()` of several elements is the one vector known to be too long.
+        let ty = match inferred_signature
+            && !argument
+                .value
+                .is_some_and(|value| self.is_long_combine(value))
+        {
+            true => self.vectors_as_scalar_numeric_claim(expected, ty),
+            false => ty,
+        };
         let ty = self.joined_list_union(expected, ty);
         match argument.value {
             Some(value) if self.names_computed_value(value) => {
                 let ty = self.without_inferred_null(expected, ty);
                 Some(self.without_inferred_length(expected, ty, self.binds_parameter(value)))
             }
+            Some(value) if self.calls_inferred_helper(value) => {
+                Some(self.without_inferred_length(expected, ty, false))
+            }
+            Some(value) if matches!(self.module.kind(value), ExpressionKind::NameRef(_)) => {
+                Some(self.callback_without_inferred_null(expected, ty))
+            }
             _ => Some(ty),
         }
+    }
+
+    /// A function passed by name whose unannotated body returns `NULL` on a path the code
+    /// presumably never takes (gt's `function(type) if (type == "row") ... else if (type ==
+    /// "group") ...`) passes where a callback returning no `NULL` is expected, as a variable
+    /// computed the same way does. The caller has no result to test, unlike a direct call's. A
+    /// function literal stays checked: its `NULL` may come from a declared variable it returns.
+    fn callback_without_inferred_null(&self, expected: Ty<'db>, ty: Ty<'db>) -> Ty<'db> {
+        let (TyKind::Function(callback), TyKind::Function(wanted)) = (
+            self.table.shallow_resolve(self.db, ty).kind(self.db),
+            self.table.shallow_resolve(self.db, expected).kind(self.db),
+        ) else {
+            return ty;
+        };
+        if !callback.inferred {
+            return ty;
+        }
+        let ret = self.without_inferred_null(wanted.ret, callback.ret);
+        if ret == callback.ret {
+            return ty;
+        }
+        Ty::new(
+            self.db,
+            TyKind::Function(&FunctionType { ret, ..**callback }),
+        )
     }
 
     /// A list that is `list(1)` on one path and `list("a")` on another is a list of either,
@@ -18384,6 +18428,21 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
+    /// A call of a helper whose signature was inferred from its body. Its `NULL` stays, since
+    /// the caller can test only a variable, but its length is a claim of the same kind as a
+    /// variable's (reticulate's own `sprintf(fmt, ...)` returns `fmt` when no values follow).
+    fn calls_inferred_helper(&self, value: ExprId) -> bool {
+        let ExpressionKind::Call { callee, .. } = self.module.kind(value) else {
+            return false;
+        };
+        self.recorded.get(callee).is_some_and(|&callee| {
+            matches!(
+                self.table.shallow_resolve(self.db, callee).kind(self.db),
+                TyKind::Function(function) if function.inferred
+            )
+        })
+    }
+
     /// A variable assigned from a `switch` without a default, an `if` without `else` or a helper
     /// that returns `NULL` on some path is presumably not `NULL` where it is passed on (rlang's
     /// `type <- switch(type, ...)` feeds `sprintf(type, kind)` after every type has an arm). So
@@ -18468,6 +18527,50 @@ impl<'db, 'a> Checker<'db, 'a> {
         match self.table.resolve(self.db, ty).kind(self.db) {
             TyKind::Union(members) => members.iter().all(|&member| fits(member)),
             _ => fits(self.table.resolve(self.db, ty)),
+        }
+    }
+
+    /// A `scalar numeric` bound inferred from an unannotated body comes from a use such as
+    /// `1:before`, which R also takes a vector for, by its first element. So a numeric vector,
+    /// such as the `integer[]` of `which()`, passes to it as its element: gt's
+    /// `add_rows(before = which(...))`.
+    fn vectors_as_scalar_numeric_claim(&self, expected: Ty<'db>, ty: Ty<'db>) -> Ty<'db> {
+        let scalar_bound = |member: Ty<'db>| {
+            matches!(
+                self.table.variable_constraint(self.db, member),
+                Some(Constraint::ScalarNumeric)
+            )
+        };
+        let expected = self.table.shallow_resolve(self.db, expected);
+        let bounded = match expected.kind(self.db) {
+            TyKind::Union(members) => members
+                .iter()
+                .any(|&member| scalar_bound(self.table.shallow_resolve(self.db, member))),
+            _ => scalar_bound(expected),
+        };
+        if !bounded {
+            return ty;
+        }
+        let numeric_element = |member: Ty<'db>| match member.kind(self.db) {
+            TyKind::Vector(element)
+                if matches!(
+                    element.kind(self.db),
+                    TyKind::Scalar(Atomic::Integer | Atomic::Double | Atomic::Logical)
+                ) =>
+            {
+                Some(*element)
+            }
+            _ => None,
+        };
+        let resolved = self.table.resolve(self.db, ty);
+        match resolved.kind(self.db) {
+            TyKind::Union(members) => union_of(
+                self.db,
+                members
+                    .iter()
+                    .map(|&member| numeric_element(member).unwrap_or(member)),
+            ),
+            _ => numeric_element(resolved).unwrap_or(ty),
         }
     }
 
@@ -20370,6 +20473,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                 .find(|value| *value != function);
             (function, items, flag)
         };
+        // An `@elementwise` function passed by name declares its result for one element, so
+        // over elements that may be vectors (raster's `sapply(frame, toupper)`) it is no
+        // length-one claim.
+        let elementwise = matches!(self.module.kind(function), ExpressionKind::NameRef(name)
+            if self.library.is_some_and(|library| library.elementwise.contains_key(name.as_str()))
+                && self.calls_base(function));
         let function = self.recorded.get(&function).copied()?;
         // The parameters are read as the callback declared them, before the call bound them to
         // the elements.
@@ -20412,7 +20521,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 matches!(self.table.resolve(db, element).kind(db), TyKind::Scalar(_))
             })
         });
-        if generic && !scalar_elements {
+        if (generic || elementwise) && !scalar_elements {
             return None;
         }
         let use_names = simplify_flag(self.module, arguments, "USE.NAMES") != Some(false);

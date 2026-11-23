@@ -2875,3 +2875,85 @@ available <- function(model, rcp) {
 }
 #++++
 available: <T, U> fn(model: T, rcp: U) -> matrix | NULL
+
+#---- a_name_a_computed_assign_may_bind_is_not_the_package_function
+layout <- function(p) p
+copy_in <- function(built) {
+  for (name in ls(built)) assign(name, built[[name]])
+  layout$panels
+}
+#++++
+layout: <T> fn(p: T) -> T
+copy_in: <T> fn(built: T) -> Unknown
+
+#---- a_call_of_an_unannotated_helper_passes_one_string_on
+# The helper returns `fmt` itself when no values follow, so its type joins
+# `fmt`'s vector claim with `sprintf`'s scalar, as a variable assigned from it
+# would.
+format_maybe <- function(fmt, ...) {
+  if (nargs() == 1L) return(fmt)
+  sprintf(fmt, ...)
+}
+expand <- function(x, name) gsub(format_maybe("$%s", name), "value", x, fixed = TRUE)
+#++++
+format_maybe: fn(fmt: character[], ...: Any) -> character[] | character
+expand: <T, U> fn(x: T, name: U) -> character
+
+#---- an_unannotated_callback_that_may_return_null_fits_a_vapply_template
+render_row <- function(content, type) {
+  if (type == "row") {
+    return(paste(content, collapse = " & "))
+  } else if (type == "group") {
+    return(paste(content, collapse = " | "))
+  }
+}
+render_all <- function(rows) vapply(rows, FUN.VALUE = character(1L), render_row, type = "row")
+#++++
+render_row: <T, U> fn([content]: T, type: U) -> character | NULL
+render_all: <T> fn(rows: list[T] | T[] | NULL) -> character[]
+
+#---- an_elementwise_function_applied_over_unknown_elements_is_no_length_one_claim
+# `toupper` over each column of a frame returns a whole column, so `sapply`
+# stacks the results into a matrix, which `data.frame()` spreads into columns.
+codes <- function() readRDS("codes.rds")
+country_code <- function(country) {
+  upper <- sapply(codes(), toupper)
+  table <- data.frame(upper, stringsAsFactors = FALSE)
+  table$ISO3[table$ISO2 == country]
+}
+#++++
+codes: fn() -> Any
+country_code: <T> fn(country: T) -> Unknown
+
+#---- a_sequence_bound_from_a_null_defaulted_formal_drops_the_placeholder
+# `.after` stays `NULL` only in the "prepend" mode, which never builds the
+# sequence.
+insert_rows <- function(rows, extra, .before = NULL, .after = NULL) {
+  mode <- "append"
+  if (!is.null(.before)) {
+    mode <- "insert"
+    .after <- .before - 1
+  }
+  if (mode == "insert") rows <- c(rows[1:.after], extra)
+  rows
+}
+#++++
+insert_rows: <T, U, V: arithmetic, W> fn(rows: T, [extra]: U, [.before]: V | NULL, [.after]: W) -> Unknown
+
+#---- a_vector_index_passes_to_a_parameter_the_body_reads_as_a_sequence_bound
+# `1:after` makes `after` a scalar number, which R also takes from a vector by
+# its first element, so the `integer[]` of `which()` passes.
+add_rows <- function(data, before, after) {
+  if (!is.null(before)) {
+    data[(1:before) - 1]
+  } else if (!is.null(after)) {
+    data[1:after]
+  }
+}
+add_after_large <- function(data) {
+  after_index <- if (any(data > 2)) which(data > 2) else NULL
+  add_rows(data, before = NULL, after = after_index)
+}
+#++++
+add_rows: <T, U: scalar numeric, V: scalar numeric> fn([data]: T, before: U | NULL, [after]: V | NULL) -> Unknown
+add_after_large: <T> fn(data: T) -> Unknown

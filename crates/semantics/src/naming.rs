@@ -295,6 +295,8 @@ pub fn resolve_item(
         bracket_depth: 0,
         tail_assignments: FxHashSet::default(),
         escaped_frames: FxHashSet::default(),
+        frame_aliases: FxHashSet::default(),
+        dynamic_frames: FxHashSet::default(),
         explicit_frame_arguments: FxHashSet::default(),
         quoting_aliases: FxHashSet::default(),
         literal_horizons: FxHashMap::default(),
@@ -450,6 +452,11 @@ struct Context<'a> {
     /// Frames that hand themselves on with `environment()`, so code outside the walk can read
     /// any of their variables.
     escaped_frames: FxHashSet<u32>,
+    /// Slots whose value is the frame they live in (`envir <- environment()`).
+    frame_aliases: FxHashSet<BindingId>,
+    /// Function frames an `assign` with a computed name writes: from there on, a name no
+    /// visible binding holds may be one of the names it wrote.
+    dynamic_frames: FxHashSet<u32>,
     /// `environment()` calls passed to a function that reads only the names it is given, such
     /// as `get` or `clusterExport`, which therefore do not expose the whole frame.
     explicit_frame_arguments: FxHashSet<ExprId>,
@@ -615,6 +622,11 @@ impl Context<'_> {
                             self.quoting_aliases.insert(slot);
                         } else {
                             self.quoting_aliases.remove(&slot);
+                        }
+                        if is_frame_query(module, *value) {
+                            self.frame_aliases.insert(slot);
+                        } else {
+                            self.frame_aliases.remove(&slot);
                         }
                     }
                 } else {
@@ -946,6 +958,22 @@ impl Context<'_> {
                         );
                         self.record_write(slot, Reach::Implicit);
                         self.naming.run_time_writes.insert(id, slot);
+                        return;
+                    }
+                    // `assign(name, v)` with a computed name, or `list2env(x, envir)`, into the
+                    // running frame binds names ry cannot list, so a later read of a name that
+                    // no visible binding holds reads an unknown value instead of the package's
+                    // or base's binding of that name.
+                    Some(writer @ ("assign" | "delayedAssign" | "list2env"))
+                        if self.current_function_depth() > 0 =>
+                    {
+                        self.resolve_arguments(&module[arguments]);
+                        if self.writes_running_frame(writer, &module[arguments]) {
+                            let depth = self.current_function_depth();
+                            if let Some(scope) = self.scopes.get(depth) {
+                                self.dynamic_frames.insert(scope.id);
+                            }
+                        }
                         return;
                     }
                     // `on.exit(expr)` runs `expr` at function exit, so its reads observe the last
@@ -1879,8 +1907,15 @@ impl Context<'_> {
                 .last()
                 .is_some_and(|&class| (self.is_member)(class, name)) => {}
             None => {
+                // A called name keeps its lookup: a computed `assign` that binds a function
+                // shadowing one the code calls is rare, and the call is typed from it.
+                let dynamic = !self.callee_reads.contains_key(&id)
+                    && self
+                        .scopes
+                        .iter()
+                        .any(|scope| self.dynamic_frames.contains(&scope.id));
                 if self.emit {
-                    if self.quiet_depth == 0 {
+                    if self.quiet_depth == 0 && !dynamic {
                         self.naming.non_locals.insert(id, name);
                         if self.current_function_depth() > 0 {
                             self.naming.deferred_non_locals.insert(id);
@@ -1892,6 +1927,55 @@ impl Context<'_> {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Whether a computed-name `assign`, `delayedAssign` or `list2env` call writes the frame
+    /// it runs in: `assign` and `delayedAssign` do by default, `list2env` only when told to.
+    fn writes_running_frame(&self, callee: &str, arguments: &[Argument]) -> bool {
+        let module = self.module;
+        let (frame_formal, frame_position, other_formal) = match callee {
+            "assign" => ("envir", 3, Some("pos")),
+            "delayedAssign" => ("assign.env", 3, None),
+            _ => ("envir", 1, None),
+        };
+        let computed_name = callee == "list2env"
+            || arguments.first().is_some_and(|first| {
+                module.argument_name(first).is_none_or(|name| name == "x")
+                    && first.value.is_some_and(|value| {
+                        !matches!(
+                            module.kind(value),
+                            ExpressionKind::Literal(LiteralKind::String(_))
+                        )
+                    })
+            });
+        if !computed_name {
+            return false;
+        }
+        let frame = arguments
+            .iter()
+            .find(|argument| {
+                module.argument_name(argument).is_some_and(|name| {
+                    name == frame_formal || other_formal.is_some_and(|other| name == other)
+                })
+            })
+            .or_else(|| {
+                arguments
+                    .iter()
+                    .filter(|argument| argument.name.is_none())
+                    .nth(frame_position - 1)
+            })
+            .and_then(|argument| argument.value);
+        match frame {
+            None => callee != "list2env",
+            Some(frame) => {
+                is_frame_query(module, frame)
+                    || self
+                        .naming
+                        .resolutions
+                        .get(&frame)
+                        .is_some_and(|slot| self.frame_aliases.contains(slot))
             }
         }
     }
