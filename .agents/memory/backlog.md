@@ -712,6 +712,7 @@ Rule and order: `development/design/memory-safety.md`, "Migration".
   - `crates/interp/src/session.rs` 26 to 28: `lock_base_bindings`, `source_base`.
   - `crates/interp/src/sort.rs` 44 to 48: `collation_locale`, `do_icu_get_collate`, `do_icu_set_collate`, `in_order`, `incomparable_keys_given`, `rank_keys`, `strcoll`.
   - `crates/interp/src/utils.rs` 68 to 81: `character_factor`, `comment_char`, `count_argument`, `extract_item`, `first_byte_separator`, `first_bytes`, `is_missing`, `pad_record`, `parse_complex_prefix`, `parse_double_prefix`, `quote_set`, `read_string`, `rule_out`, `scan_decimal`, `scan_frame`, `scan_separator`, `scan_vector`, `write_element`, `write_string`.
+  - `crates/interp/src/values.rs` at its count of 110, with two raw helpers a removed one made room for: `as_integer_scalar_warning`, `as_real_scalar_warning`.
   - `crates/interp/src/base_fast_paths.rs` 139 to 144: `all_bound`, `bind_local`, `call_exiting_handler`, `defines_prologue`, `leave_levels`, `push_frame`, `push_levels`, `try_catch_chain`, `variable_reference`.
   - `crates/interp/src/profile_summary.rs` 17 to 27: `count_inlined_call`, `entering`, `finish`, `frame_identity`, `resolve_samples`.
   - `crates/interp/src/testing.rs` 28 to 29: `check_saved_prologues_replaced`, `refusal`.

@@ -455,8 +455,7 @@ pub fn equal_strings(left: Gc<'_, Chars>, right: Gc<'_, Chars>) -> bool {
     left.raw() == right.raw() || same_text_under_marks(left, right)
 }
 
-/// [`equal_strings`] for two distinct objects, out of line because one object is the usual
-/// answer for equal strings.
+/// [`equal_strings`] for two distinct objects.
 fn same_text_under_marks(left: Gc<'_, Chars>, right: Gc<'_, Chars>) -> bool {
     if left.has_mark(gp::BYTES) || right.has_mark(gp::BYTES) {
         return false;

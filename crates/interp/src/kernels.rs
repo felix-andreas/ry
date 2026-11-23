@@ -93,7 +93,8 @@ impl Comparison {
 
 /// The result of an element-wise operation on two plain vectors, or `None` when the operation
 /// needs the builtin: an operand with attributes, an object, ALTREP, an Array, a type other than
-/// logical, integer and double, a zero length, or lengths that recycle unevenly.
+/// logical, integer and double, a zero length, or lengths that recycle unevenly. Two character
+/// vectors have a result for `==` and `!=` only ([`string_equality`]).
 ///
 /// `destination` is a vector the caller holds the only reference to, which the result may be
 /// written into instead of a new vector. It may be `left` or `right` itself, so `x <- x + y`

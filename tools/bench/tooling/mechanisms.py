@@ -315,6 +315,8 @@ def main():
     ]
     if len(operations) == 1:
         sys.exit("error: no operation matches")
+    if args.profile and (args.gnu_r or args.filter):
+        sys.exit("error: --profile takes one operation by name, without --filter or --gnu-r")
     if args.profile and len(operations) != 2:
         sys.exit(f"error: --profile needs one operation, and {len(operations) - 1} match: "
                  + "; ".join(name for name, _ in operations[1:]))
