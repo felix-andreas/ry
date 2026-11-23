@@ -343,10 +343,7 @@ pub unsafe fn check_return(call: Sexp, signature: Sexp, value: Sexp) -> R<Sexp> 
         return Ok(value);
     }
     // `-> I64` converts a whole R number, as an `I64` parameter does.
-    if let Some(converted) = as_i64(mask, value)? {
-        return Ok(converted);
-    }
-    if let Some(converted) = missing_as_character(mask, value)? {
+    if let Some(converted) = converted(mask, value)? {
         return Ok(converted);
     }
     Err(failure(
@@ -771,10 +768,7 @@ unsafe fn check_value(call: Sexp, signature: Sexp, slot: usize, value: Sexp) -> 
     // R has no `I64` literal, so `f(10)` for `n: I64` passes the R double 10, which the checker
     // types as `I64`. The boundary converts every R double or integer that is exactly a whole
     // number, as the `I64` library functions do, so the body always sees an `I64`.
-    if let Some(converted) = as_i64(mask, value)? {
-        return Ok(converted);
-    }
-    if let Some(converted) = missing_as_character(mask, value)? {
+    if let Some(converted) = converted(mask, value)? {
         return Ok(converted);
     }
     // The checker accepts a whole-number `double` literal at an `integer` parameter (`f(10)` for
@@ -801,13 +795,27 @@ unsafe fn check_value(call: Sexp, signature: Sexp, slot: usize, value: Sexp) -> 
     Err(failure(call, message))
 }
 
-/// `value` converted for an `I64` or `List<I64>` annotation, or `None` when the annotation is
-/// neither or a number in `value` is not exactly whole. An unsuffixed list literal is an R double
-/// Array that the checker types `List<I64>`, so the list converts item by item, as an annotated
-/// binding does.
-unsafe fn as_i64(mask: Mask, value: Sexp) -> R<Option<Sexp>> {
+/// `value` converted for its annotation `mask`, or `None` when no conversion applies.
+///
+/// - An `I64` or `List<I64>` annotation takes exactly whole numbers. An unsuffixed list literal
+///   is an R double Array that the checker types `List<I64>`, so the list converts item by item,
+///   as an annotated binding does.
+/// - A `character` annotation takes a logical vector of nothing but `NA`. A bare `NA` and a
+///   vector built from no data (`ifelse` over an empty test) are logical in R but fit any atomic
+///   type, as the checker types them. `integer`, `double` and `complex` admit logical storage as
+///   it is, so only `character` needs the conversion, which keeps the attributes as R's coercion
+///   does.
+unsafe fn converted(mask: Mask, value: Sexp) -> R<Option<Sexp>> {
     if mask & I64 == 0 {
-        return Ok(None);
+        if mask & ARRAY != 0
+            || mask & CHARACTER == 0
+            || value.kind() != SexpType::Logical
+            || value.is_array()
+            || !values::ints(value).iter().all(|&item| item == NA_LOGICAL)
+        {
+            return Ok(None);
+        }
+        return crate::coerce::coerce_vector(value, SexpType::String).map(Some);
     }
     if mask & ARRAY == 0 {
         return match crate::numbers::r_source(value)
@@ -843,23 +851,6 @@ unsafe fn as_i64(mask: Mask, value: Sexp) -> R<Option<Sexp>> {
     }
 }
 
-/// `value` as `character` when the annotation `mask` expects `character` and `value` is a
-/// logical vector of nothing but `NA`, or `None` otherwise. A bare `NA` and a vector built from
-/// no data (`ifelse` over an empty test) are logical in R but fit any atomic type, as the checker
-/// types them. `integer`, `double` and `complex` admit logical storage as it is, so only
-/// `character` needs the conversion, which keeps the attributes as R's coercion does.
-unsafe fn missing_as_character(mask: Mask, value: Sexp) -> R<Option<Sexp>> {
-    if mask & ARRAY != 0
-        || mask & CHARACTER == 0
-        || value.kind() != SexpType::Logical
-        || value.is_array()
-        || !values::ints(value).iter().all(|&item| item == NA_LOGICAL)
-    {
-        return Ok(None);
-    }
-    crate::coerce::coerce_vector(value, SexpType::String).map(Some)
-}
-
 /// Whether the annotation `mask` accepts `value` as it is, with no conversion; a mask of 0
 /// declares nothing.
 unsafe fn passes_unchanged(mask: Mask, value: Sexp) -> bool {
@@ -868,7 +859,7 @@ unsafe fn passes_unchanged(mask: Mask, value: Sexp) -> bool {
 
 /// Whether `value` is an empty list built without an item type (stored as `logical`, as
 /// `List.map` over no items builds it) where the annotation expects `I64` items, which
-/// [`as_i64`] then supplies.
+/// [`converted`] then supplies.
 unsafe fn lacks_item_type(mask: Mask, value: Sexp) -> bool {
     mask & I64 != 0 && mask & ARRAY != 0 && value.kind() == SexpType::Logical && value.length() == 0
 }
