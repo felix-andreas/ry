@@ -53,7 +53,7 @@ use {
             NativeSymbols, PackageMetadata, attached_union, attaching_changes_findings,
             file_attached_namespaces, normalized_imports, parse_description_collate,
             parse_description_dependencies, parse_description_package, parse_namespace,
-            qualified_names,
+            qualified_names, registered_s3_methods,
         },
         project_global_names,
         stubs::{
@@ -563,6 +563,7 @@ struct WorkspaceMetadata {
     package: Option<String>,
     native_symbols: NativeSymbols,
     qualified_names: Option<BTreeSet<String>>,
+    s3_methods: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Worker {
@@ -695,6 +696,7 @@ impl Worker {
             metadata.native_symbols,
             metadata.qualified_names,
         )
+        .s3_methods(metadata.s3_methods)
         .durability(Durability::MEDIUM)
         .new(&worker.db);
         let _: DataFiles = DataFiles::builder(scan_data_files(&worker.workspace_root))
@@ -753,6 +755,7 @@ impl Worker {
             self.lazy_datasets.clone(),
         );
         let imports = normalized_imports(&namespace_file.imports);
+        let s3_methods = registered_s3_methods(&namespace_file);
         let native_symbols = namespace_file.native_symbols;
         let description_text = fs::read_to_string(self.workspace_root.join("DESCRIPTION"));
         let dependencies = description_text
@@ -774,6 +777,7 @@ impl Worker {
             package,
             native_symbols,
             qualified_names,
+            s3_methods,
         }
     }
 
@@ -822,7 +826,8 @@ impl Worker {
             || metadata.dependencies(&self.db) != &current.dependencies
             || metadata.package(&self.db) != &current.package
             || metadata.native_symbols(&self.db) != &current.native_symbols
-            || metadata.qualified_names(&self.db) != &current.qualified_names;
+            || metadata.qualified_names(&self.db) != &current.qualified_names
+            || metadata.s3_methods(&self.db) != &current.s3_methods;
         if facts_changed {
             metadata.set_imports(&mut self.db).to(current.imports);
             metadata
@@ -835,6 +840,7 @@ impl Worker {
             metadata
                 .set_qualified_names(&mut self.db)
                 .to(current.qualified_names);
+            metadata.set_s3_methods(&mut self.db).to(current.s3_methods);
         }
         if facts_changed || collate_changed {
             self.refresh_all_diagnostics();

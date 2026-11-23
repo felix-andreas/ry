@@ -20,7 +20,8 @@ use {
         lints::LintConfig,
         metadata::{
             declared_dependency, imported_by_name, imports_every_name, is_own_package,
-            native_symbol, own_package_reaches, own_qualified_names,
+            native_symbol, own_package_reaches, own_qualified_names, registered_generic,
+            registered_methods,
         },
         naming::{BindingKind, ItemNaming, NamespaceRead},
         package_name, parse, prelude_enabled, project_type_definitions, reads_use_method, s4,
@@ -2493,16 +2494,31 @@ fn s3_method_finding<'db>(
     let ExpressionKind::Function { parameters, .. } = *module.kind(value) else {
         return None;
     };
-    let (generic, generic_parameters) = method
-        .as_str()
-        .match_indices('.')
-        .rev()
-        .filter(|&(dot, _)| dot > 0 && dot + 1 < method.as_str().len())
-        .find_map(|(dot, _)| {
-            let generic = Symbol::new(&method.as_str()[..dot]);
-            let parameters = s3_generic_parameters(db, generic)?;
-            Some((generic, parameters))
-        })?;
+    let registered = registered_generic(db, QueryName::new(db, Name::new(db, method)))
+        .as_deref()
+        .map(Symbol::new)
+        .and_then(|generic| Some((generic, s3_generic_parameters(db, generic)?)));
+    let (generic, generic_parameters) = registered.or_else(|| {
+        method
+            .as_str()
+            .match_indices('.')
+            .rev()
+            .filter(|&(dot, _)| dot > 0 && dot + 1 < method.as_str().len())
+            .find_map(|(dot, _)| {
+                let generic = Symbol::new(&method.as_str()[..dot]);
+                // A package that registers its methods registers them all, so an unregistered
+                // `generic.suffix` is an ordinary function, such as a deprecated `mpfr.is.0`.
+                let query = QueryName::new(db, Name::new(db, generic));
+                if registered_methods(db, query)
+                    .as_ref()
+                    .is_some_and(|registered| !registered.contains(method.as_str()))
+                {
+                    return None;
+                }
+                let parameters = s3_generic_parameters(db, generic)?;
+                Some((generic, parameters))
+            })
+    })?;
     let method_parameters = &module[parameters];
     let mut generic_names: &[Symbol] = &generic_parameters;
     let mut method_names: Vec<Symbol> = method_parameters

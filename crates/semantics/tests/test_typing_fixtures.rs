@@ -14,7 +14,7 @@ use {
         item_check, item_hir, item_spans, item_tree,
         metadata::{
             PackageMetadata, attached_union, normalized_imports, parse_description_dependencies,
-            parse_description_package, parse_namespace, qualified_names,
+            parse_description_package, parse_namespace, qualified_names, registered_s3_methods,
         },
         stubs::{
             StubSources, install_shipped_stubs, shipped_export_manifests, shipped_stub_sources,
@@ -131,15 +131,17 @@ fn install_metadata(db: &mut RootDatabase, source: &str, files: &[SourceFile]) {
         (!namespace_source.is_empty()).then_some(&namespace_file),
         Some(datasets),
     );
-    let metadata = PackageMetadata::new(
-        &*db,
+    let s3_methods = registered_s3_methods(&namespace_file);
+    let metadata = PackageMetadata::builder(
         normalized_imports(&namespace_file.imports),
         parse_description_dependencies(&description_source),
         Default::default(),
         parse_description_package(&description_source),
         namespace_file.native_symbols,
         qualified,
-    );
+    )
+    .s3_methods(s3_methods)
+    .new(&*db);
     let attached = attached_union(&*db, files.iter().copied());
     if !attached.is_empty() {
         metadata.set_attached(db).to(attached);

@@ -781,3 +781,21 @@ f <- function(x, at, n) {
 }
 #++++
 f: <T, U, V: scalar numeric> fn(x: T, at: U, n: V) -> xts
+
+#==== s3_registrations
+#---- a_package_that_registers_its_methods_checks_only_those
+#namespace S3method(mpfr, default)
+#namespace S3method(mpfr, bigz, mpfr_from_bigz)
+#namespace S3method(mpfr, character, mpfr_from_text)
+mpfr <- function(x, precBits, ...) UseMethod("mpfr")
+mpfr.default <- function(x, ...) x
+mpfr_from_bigz <- function(x, precBits, ...) x
+mpfr_from_text <- function(text, ...) text
+mpfr.is.0 <- function(x) x == 0
+#++++
+mpfr: <T, U> fn([x]: T, [precBits]: U, ...: Any) -> Any
+mpfr.default: <T> fn(x: T, ...: Any) -> T
+mpfr_from_bigz: <T, U> fn(x: T, [precBits]: U, ...: Any) -> T
+mpfr_from_text: <T> fn(text: T, ...: Any) -> T
+mpfr.is.0: <T> fn(x: T) -> logical
+298..302 warning[s3-method-signature] this method of `mpfr` takes `text` where the generic takes `x`, so a call that passes `x` by name fails for this class. Rename it to `x`

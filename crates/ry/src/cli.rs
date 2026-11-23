@@ -31,7 +31,7 @@ use {
         metadata::{
             NamespaceFile, OS_TYPE, PackageMetadata, attached_union, normalized_imports,
             parse_description_collate, parse_description_dependencies, parse_description_lazy_data,
-            parse_description_package, parse_namespace, qualified_names,
+            parse_description_package, parse_namespace, qualified_names, registered_s3_methods,
         },
         stubs::{
             StubSources, namespace_exports, namespace_known, shipped_export_manifests,
@@ -1376,6 +1376,7 @@ fn install_environment(
             lazy_datasets(root, description_source.as_deref()),
         ),
     )
+    .s3_methods(registered_s3_methods(&namespace_file))
     .durability(Durability::HIGH)
     .attached_durability(Durability::LOW)
     .new(db);
