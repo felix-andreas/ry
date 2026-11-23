@@ -806,16 +806,16 @@ unsafe fn check_value(call: Sexp, signature: Sexp, slot: usize, value: Sexp) -> 
 ///   it is, so only `character` needs the conversion, which keeps the attributes as R's coercion
 ///   does.
 unsafe fn converted(mask: Mask, value: Sexp) -> R<Option<Sexp>> {
-    if mask & I64 == 0 {
-        if mask & ARRAY != 0
-            || mask & CHARACTER == 0
-            || value.kind() != SexpType::Logical
-            || value.is_array()
-            || !values::ints(value).iter().all(|&item| item == NA_LOGICAL)
-        {
-            return Ok(None);
-        }
+    if mask & ARRAY == 0
+        && mask & CHARACTER != 0
+        && value.kind() == SexpType::Logical
+        && !value.is_array()
+        && values::ints(value).iter().all(|&item| item == NA_LOGICAL)
+    {
         return crate::coerce::coerce_vector(value, SexpType::String).map(Some);
+    }
+    if mask & I64 == 0 {
+        return Ok(None);
     }
     if mask & ARRAY == 0 {
         return match crate::numbers::r_source(value)

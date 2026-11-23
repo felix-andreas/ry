@@ -2159,10 +2159,11 @@ expected a function that takes `double`, found `double`
 `Map` is `mapply` with `SIMPLIFY = FALSE`, so it gives `list[T]` for a callback that returns `T`, and
 `list[Any]` when the return is undetermined.
 
-`ifelse(test, yes, no)` gives a vector of the wider of `yes` and `no` in the order `logical` <
-`integer` < `double` < `complex` < `character`, as `c()` widens, and a bare `NA` fits either
-branch, so `ifelse(x > 0, "positive", NA)` is `character[]`. A branch that is not a plain vector,
-such as a factor, whose class `ifelse` drops, gives `Any`.
+`ifelse(test, yes, no)` takes the shape of `test` and is either branch's type, so
+`ifelse(x > 0, 1L, 2.5)` is `integer[] | double[]` and `ifelse(TRUE, 1L, 2L)` is `integer`. A bare
+`NA` fits the other branch, so `ifelse(x > 0, "positive", NA)` is `character[]`. A branch that is
+not a plain vector, such as a factor, whose class `ifelse` drops, gives `Any`, and so does a test on
+a matrix, whose result keeps the matrix's dimensions.
 
 The base functions that take a function argument and resolve it with `match.fun` (`lapply`,
 `sapply`, `vapply`, `mapply`, `Map`, `Filter`, `Find`, `Position`, `Reduce`, `do.call`, `outer`,
@@ -4906,8 +4907,9 @@ in projects that never use them. So a conditional namespace activates only when:
 While a namespace is inactive, its bare names behave exactly like those of any package the stubs do
 not describe. A qualified call still reads its declarations, because `::` loads a package without
 attaching it, so `data.table::fifelse(test, 1, 2)` is `double[]` in a script that never declares
-data.table. A declaration that names one of the package's own types, such as `as.data.table`'s
-`data.table` result, or that carries `@masked`, `@opaque` or `@elementwise`, needs the namespace
+data.table. A declaration that names a type an inactive namespace defines, such as
+`as.data.table`'s `data.table` result, or `PerformanceAnalytics::Return.calculate`'s `xts` while
+xts is inactive, or that carries `@masked`, `@opaque` or `@elementwise`, needs the namespace
 active and is `Unknown` through `::` until then.
 
 The shipped dplyr verbs preserve their data argument's class, as `<T> fn(.data: T, ...) -> T`, so a

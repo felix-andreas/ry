@@ -3333,8 +3333,9 @@ pub struct MemberExports<'db> {
 }
 
 /// Independent of which member was queried first: each round re-checks every member in the
-/// group's solve order against the latest exports, a member whose exports keep growing is
-/// widened, and members still changing at the cap pin to `Unknown`. Members are checked directly, never via `item_check`, so no salsa cycle forms.
+/// group's solve order against the latest exports, a member whose built exports grow is
+/// widened, and members still changing at the cap pin to `Unknown`. Members are checked
+/// directly, never via `item_check`, so no salsa cycle forms.
 #[salsa::tracked(
     returns(ref),
     cycle_fn = scc_exports_recover,
@@ -3388,9 +3389,8 @@ pub fn scc_exports<'db>(
     unknown_group_exports(db, files, representative)
 }
 
-/// From this round on, a member whose exports grow is widened. Solved callee first, a group
-/// settles in a round or two; an export still growing after that is a type that nests itself,
-/// such as a record holding the results of the group's own calls, which grows without bound
+/// From this round on, a member whose built exports grow is widened: such a type, a record
+/// holding the results of the group's own calls, grows without bound
 /// (`.agents/memory/decisions/type-checker.md`, "A recursive group widens an export that keeps
 /// growing").
 const WIDENING_ROUND: u32 = 2;
@@ -3428,22 +3428,33 @@ fn widen<'db>(
     exports
 }
 
+/// Whether an export of `next` is larger than the same export of `previous` that was already a
+/// type of its own. A finite type can arrive late, after several back edges, and arriving from
+/// the seed's `Unknown` is not growth; a type that nests the group's own results grows from one
+/// built type to a larger one every round.
 fn exports_grew<'db>(
     db: &'db dyn Db,
     previous: &MemberExports<'db>,
     next: &MemberExports<'db>,
 ) -> bool {
-    let size = |exports: &MemberExports<'db>| {
-        exports
+    let surface = |ty: types::Ty<'db>| match ty.kind(db) {
+        types::TyKind::Function(function) => function.ret,
+        _ => ty,
+    };
+    let grew = |previous: types::Ty<'db>, next: types::Ty<'db>| {
+        let previous = types::type_size(db, previous);
+        previous > 1 && types::type_size(db, next) > previous
+    };
+    if grew(surface(previous.scheme.body), surface(next.scheme.body)) {
+        return true;
+    }
+    next.top_level_bindings.iter().any(|(name, binding)| {
+        previous
             .top_level_bindings
             .iter()
-            .map(|(_, binding)| types::type_size(db, binding.body))
-            .fold(
-                types::type_size(db, exports.scheme.body),
-                u64::saturating_add,
-            )
-    };
-    size(next) > size(previous)
+            .find(|(previous_name, _)| previous_name == name)
+            .is_some_and(|(_, previous)| grew(previous.body, binding.body))
+    })
 }
 
 /// The group's members callees first: a depth-first walk of the edges inside the group from

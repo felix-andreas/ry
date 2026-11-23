@@ -14429,9 +14429,21 @@ impl<'db, 'a> Checker<'db, 'a> {
         if !matches!(self.structural(found).kind(db), TyKind::Frame(_, None)) {
             return;
         }
-        let column = match self.structural(expected).kind(db) {
-            TyKind::Frame(_, Some([first, ..])) => first.name.text(db).to_owned(),
-            _ => return,
+        let expected = self.structural(expected);
+        let single = [expected];
+        let members: &[Ty<'db>] = match expected.kind(db) {
+            TyKind::Union(members) => members,
+            _ => &single,
+        };
+        let Some(column) =
+            members
+                .iter()
+                .find_map(|&member| match self.structural(member).kind(db) {
+                    TyKind::Frame(_, Some([first, ..])) => Some(first.name.text(db).to_owned()),
+                    _ => None,
+                })
+        else {
+            return;
         };
         let module = self.module;
         let mut inner = value;
@@ -14454,9 +14466,17 @@ impl<'db, 'a> Checker<'db, 'a> {
                 ExpressionKind::Call { callee, arguments }
                     if self.dataframe_verb(*callee).is_some() =>
                 {
-                    match module[arguments].first().and_then(|first| first.value) {
-                        Some(subject) => inner = subject,
-                        None => break None,
+                    // A subject whose columns are known did not bring the unknown ones, which
+                    // came from another argument, such as the right side of a join.
+                    let subject = module[arguments].first().and_then(|first| first.value);
+                    let known = subject
+                        .and_then(|subject| self.recorded.get(&subject).copied())
+                        .is_some_and(|ty| {
+                            matches!(self.structural(ty).kind(db), TyKind::Frame(_, Some(_)))
+                        });
+                    match subject {
+                        Some(subject) if !known => inner = subject,
+                        _ => break None,
                     }
                 }
                 _ => break None,
@@ -15722,16 +15742,29 @@ impl<'db, 'a> Checker<'db, 'a> {
     fn ifelse_type(&mut self, arguments: &[Argument]) -> Option<Ty<'db>> {
         let module = self.module;
         let db = self.db;
-        let rank = |atomic: Atomic| match atomic {
-            Atomic::Logical => Some(0),
-            Atomic::Integer => Some(1),
-            Atomic::Double => Some(2),
-            Atomic::Complex => Some(3),
-            Atomic::Character => Some(4),
-            Atomic::Raw => None,
-        };
         let matched = match_formals(self.module, arguments, &["test", "yes", "no"]);
-        let mut widest: Option<Atomic> = None;
+        let test = matched[0]?;
+        let scalar_test = match self.structural(*self.recorded.get(&test)?).kind(db) {
+            // A comparison on a matrix types as a scalar (`Compare.matrix`), so a scalar test
+            // counts only when its operands are scalars too.
+            TyKind::Scalar(_) => {
+                let operands: SmallVec<[ExprId; 2]> = match module.kind(test) {
+                    ExpressionKind::Unary { operand, .. } => smallvec![*operand],
+                    ExpressionKind::Binary { lhs, rhs, .. } => smallvec![*lhs, *rhs],
+                    _ => SmallVec::new(),
+                };
+                for operand in operands {
+                    let ty = *self.recorded.get(&operand)?;
+                    if !matches!(self.structural(ty).kind(db), TyKind::Scalar(_)) {
+                        return None;
+                    }
+                }
+                true
+            }
+            TyKind::Vector(element) if matches!(element.kind(db), TyKind::Scalar(_)) => false,
+            _ => return None,
+        };
+        let mut branches: SmallVec<[Ty<'db>; 2]> = SmallVec::new();
         for value in [matched[1], matched[2]].into_iter().flatten() {
             if matches!(
                 module.kind(value),
@@ -15741,17 +15774,23 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             let ty = *self.recorded.get(&value)?;
             let ty = self.structural(ty);
-            let TyKind::Scalar(atomic) = column_element(db, ty).kind(db) else {
+            let element = column_element(db, ty);
+            let TyKind::Scalar(atomic) = element.kind(db) else {
                 return None;
             };
-            let atomic = *atomic;
-            rank(atomic)?;
-            widest = match widest {
-                Some(seen) if rank(seen) >= rank(atomic) => Some(seen),
-                _ => Some(atomic),
-            };
+            if *atomic == Atomic::Raw {
+                return None;
+            }
+            branches.push(if scalar_test {
+                element
+            } else {
+                Ty::new(db, TyKind::Vector(element))
+            });
         }
-        Some(Ty::new(db, TyKind::Vector(scalar(db, widest?))))
+        if branches.is_empty() {
+            return None;
+        }
+        Some(union_of(db, branches))
     }
 
     /// `idcol` holds each piece's name when the list names them all, and its position

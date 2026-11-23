@@ -265,6 +265,20 @@ h: <T: arithmetic, U: arithmetic> fn(x: T, depth: U) -> Unknown
 419..608 error[strict] strict mode: could not determine the full type of `g`, because it is defined recursively. Add a type annotation
 609..794 error[strict] strict mode: could not determine the full type of `h`, because it is defined recursively. Add a type annotation
 
+#---- a_finite_result_reached_late_in_a_group_is_not_widened
+# The base case reaches `B`, `C` and `D` only after several back edges, so their
+# results first change from the seed's `Unknown` in a later round. The result is
+# finite, so nothing is widened.
+A <- function(n: integer) { if (n <= 0L) list(k = 1L) else B(n - 1L) }
+B <- function(n: integer) C(n)
+C <- function(n: integer) { if (n > 5L) A(n - 1L) else D(n) }
+D <- function(n: integer) B(n - 1L)
+#++++
+A: fn(n: integer) -> list{k: integer}
+B: fn(n: integer) -> list{k: integer}
+C: fn(n: integer) -> list{k: integer}
+D: fn(n: integer) -> list{k: integer}
+
 #---- growing_recursion_is_attributed
 x <- list(v = 1, w = x)
 #++++

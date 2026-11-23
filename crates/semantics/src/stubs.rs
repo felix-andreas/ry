@@ -322,9 +322,10 @@ pub fn dormant_namespace_schemes<'db>(
 }
 
 /// A dormant namespace's declarations, without the ones the namespace's activation would also
-/// change: a type the namespace defines (`data.table`) joins only with it, so a declaration that
-/// names one is left out, and so is one with a marker the checker reads from the active library
-/// (`@masked`, `@opaque`, `@elementwise`). Those names stay `Unknown` through `::`.
+/// change: a type a dormant namespace defines (`data.table`, or another package's `xts`) joins
+/// only with it, so a declaration that names one is left out, and so is one with a marker the
+/// checker reads from the active library (`@masked`, `@opaque`, `@elementwise`). Those names stay
+/// `Unknown` through `::`.
 #[salsa::tracked(returns(ref))]
 fn dormant_schemes<'db>(
     db: &'db dyn Db,
@@ -333,20 +334,33 @@ fn dormant_schemes<'db>(
 ) -> SymbolMap<Vec<TypeScheme<'db>>> {
     let package = package.as_str();
     let mut schemes: SymbolMap<Vec<TypeScheme<'db>>> = SymbolMap::default();
-    let texts: Vec<&str> = sources
-        .sources(db)
-        .iter()
-        .filter(|(namespace, _)| namespace == package)
-        .map(|(_, text)| text.as_str())
-        .collect();
-    let lines = || {
+    let texts_of = |wanted: &dyn Fn(&str) -> bool| -> Vec<&str> {
+        sources
+            .sources(db)
+            .iter()
+            .filter(|(namespace, _)| wanted(namespace))
+            .map(|(_, text)| text.as_str())
+            .collect()
+    };
+    let lines_of = |texts: &[&'db str]| -> Vec<&'db str> {
         texts
             .iter()
             .flat_map(|text| text.lines())
             .filter(|line| !line.trim_start().starts_with("#'"))
             .map(|line| strip_comment(line).trim())
+            .collect()
     };
-    let own_types: FxHashSet<&str> = lines()
+    let lines = lines_of(&texts_of(&|namespace| namespace == package));
+    // Every namespace that is not active defines types the checker does not know yet: this
+    // one, and another dormant package's, such as the `xts` a qualified call may return.
+    let dormant_lines = lines_of(&texts_of(&|namespace| {
+        namespace == package
+            || ((CONDITIONAL_NAMESPACES.contains(&namespace)
+                || QUALIFIED_ONLY_NAMESPACES.contains(&namespace))
+                && !namespace_active(db, namespace))
+    }));
+    let dormant_types: FxHashSet<&str> = dormant_lines
+        .iter()
         .filter_map(|content| {
             let rest =
                 after_keyword(content, "@type").or_else(|| after_keyword(content, "@alias"))?;
@@ -357,7 +371,7 @@ fn dormant_schemes<'db>(
             Some(&rest[..end]).filter(|name| !name.is_empty())
         })
         .collect();
-    for content in lines() {
+    for &content in &lines {
         if content.starts_with('@') {
             continue;
         }
@@ -369,14 +383,14 @@ fn dormant_schemes<'db>(
             continue;
         }
         let markers = declaration_markers(content[separator + 1..].trim());
-        let names_own_type = markers
+        let names_dormant_type = markers
             .type_text
             .split(|character: char| !is_identifier_character(character))
-            .any(|word| own_types.contains(word));
+            .any(|word| dormant_types.contains(word));
         if markers.masked
             || markers.opaque.is_some()
             || markers.elementwise.is_some()
-            || names_own_type
+            || names_dormant_type
         {
             continue;
         }

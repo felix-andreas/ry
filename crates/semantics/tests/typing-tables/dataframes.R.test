@@ -196,6 +196,25 @@ keep: fn(frame: data.frame) -> integer
 507..510 error[strict] strict mode: the columns of `raw` are unknown, so nothing checks them against the columns this type lists. Give `raw` a type that lists its columns, as in `raw: DataFrame{a: TYPE}`
 577..622 error[strict] strict mode: the columns of `frame` are unknown, so nothing checks them against the columns this type lists. Give `frame` a type that lists its columns, as in `frame: data.frame{a: TYPE}`
 
+#---- strict_mode_names_the_side_of_a_join_whose_columns_are_unknown
+# typing: strict
+# The left side lists its columns, so the unknown ones come from the right side,
+# which is not a variable. An expected union that holds a frame type is checked too.
+alias Rows = DataFrame{a: character, n: double}
+join_raw <- function(frame: data.frame, other: Rows) -> Rows {
+  DataFrame.join(other, as.DataFrame(frame), on = "a")
+}
+maybe <- function(frame: data.frame) -> Rows | NULL {
+  as.DataFrame(frame)
+}
+#++++
+join_raw: fn(frame: data.frame, other: Rows) -> Rows
+maybe: fn(frame: data.frame) -> Rows | NULL
+231..239 warning[unused] `join_raw` is assigned but never used
+351..356 warning[unused] `maybe` is assigned but never used
+296..348 error[strict] strict mode: the columns of this frame are unknown, so nothing checks them against the columns this type lists. Annotate it with a type that lists its columns, as in `DataFrame{a: TYPE}`
+407..426 error[strict] strict mode: the columns of `frame` are unknown, so nothing checks them against the columns this type lists. Give `frame` a type that lists its columns, as in `frame: data.frame{a: TYPE}`
+
 #---- strict_mode_accepts_a_frame_whose_columns_are_listed
 # typing: strict
 alias Rows = DataFrame{a: character, n: double}
