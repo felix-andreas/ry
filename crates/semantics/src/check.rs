@@ -14503,7 +14503,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                         continue;
                     };
                     let old = &module[text];
-                    match result.iter_mut().zip(columns).find(|(_, column)| column.name.text(db) == old) {
+                    match result
+                        .iter_mut()
+                        .zip(columns)
+                        .find(|(_, column)| column.name.text(db) == old)
+                    {
                         Some((slot, _)) => slot.0 = new.to_string(),
                         None => self.errors.push(TypeError {
                             range: module.range(value),
@@ -14514,7 +14518,10 @@ impl<'db, 'a> Checker<'db, 'a> {
                 known.then(|| frame_of(db, frame_kind(lazy), result))
             }
             DataFrameVerb::WithRowIndex { lazy } => {
-                let name = match match_formals(module, rest, &["name"]).first().copied().flatten()
+                let name = match match_formals(module, rest, &["name"])
+                    .first()
+                    .copied()
+                    .flatten()
                 {
                     None => "index".to_owned(),
                     Some(value) => match module.kind(value) {
@@ -14524,20 +14531,34 @@ impl<'db, 'a> Checker<'db, 'a> {
                         _ => return None,
                     },
                 };
-                let mut result = vec![(name, Ty::new(db, TyKind::Vector(scalar(db, Atomic::Integer))))];
+                let mut result = vec![(
+                    name,
+                    Ty::new(db, TyKind::Vector(scalar(db, Atomic::Integer))),
+                )];
                 result.extend(existing(columns));
                 Some(frame_of(db, frame_kind(lazy), result))
             }
             DataFrameVerb::Unpivot { lazy } => {
-                let matched =
-                    match_formals(module, rest, &["on", "index", "variable_name", "value_name"]);
+                let matched = match_formals(
+                    module,
+                    rest,
+                    &["on", "index", "variable_name", "value_name"],
+                );
                 let listed = |position: usize| {
                     matched.get(position).copied().flatten().filter(|&value| {
-                        !matches!(module.kind(value), ExpressionKind::Literal(LiteralKind::Null))
+                        !matches!(
+                            module.kind(value),
+                            ExpressionKind::Literal(LiteralKind::Null)
+                        )
                     })
                 };
                 let name_of = |position: usize, default: &str| -> Option<String> {
-                    match matched.get(position).copied().flatten().map(|value| module.kind(value)) {
+                    match matched
+                        .get(position)
+                        .copied()
+                        .flatten()
+                        .map(|value| module.kind(value))
+                    {
                         None => Some(default.to_owned()),
                         Some(ExpressionKind::Literal(LiteralKind::String(text))) => {
                             Some(module[text].to_string())
@@ -15166,9 +15187,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                                 .collect();
                             match types.split_first() {
                                 None => vector(Atomic::Logical),
-                                Some((&first, rest)) if rest.iter().all(|&ty| ty == first) => {
-                                    first
-                                }
+                                Some((&first, rest)) if rest.iter().all(|&ty| ty == first) => first,
                                 Some(_) => widest_column(db, &types, false)?,
                             }
                         };
@@ -15179,8 +15198,8 @@ impl<'db, 'a> Checker<'db, 'a> {
                     }
                     "Expr.cast" => {
                         let column = argument(self)?;
-                        let target = *match_formals(module, &module[arguments], &["expr", "type"])
-                            .get(1)?;
+                        let target =
+                            *match_formals(module, &module[arguments], &["expr", "type"]).get(1)?;
                         let target = target?;
                         let ExpressionKind::Literal(LiteralKind::String(text)) =
                             module.kind(target)
@@ -23858,7 +23877,10 @@ fn date_type(db: &dyn Db) -> Ty<'_> {
 
 /// The column an expression function computes from its operands: Polars names it after the
 /// first column it reads, and it gives one value per group only when every operand does.
-fn joined_column<'db>(operands: Vec<(ExprId, ComputedColumn<'db>)>, ty: Ty<'db>) -> ComputedColumn<'db> {
+fn joined_column<'db>(
+    operands: Vec<(ExprId, ComputedColumn<'db>)>,
+    ty: Ty<'db>,
+) -> ComputedColumn<'db> {
     let reads_column = operands.iter().any(|(_, operand)| operand.reads_column);
     let shape = operands
         .iter()

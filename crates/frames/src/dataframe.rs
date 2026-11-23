@@ -570,11 +570,9 @@ unsafe fn do_call(call: &Call<'_>) -> R<Sexp> {
         "str_slice" => {
             let length = match is_nil(option(1)) {
                 true => None,
-                false => Some(
-                    u64::try_from(whole(option(1), "length", caller)?).map_err(|_| {
-                        error_in(caller, "`length` must be a count of characters, 0 or more")
-                    })?,
-                ),
+                false => Some(u64::try_from(whole(option(1), "length", caller)?).map_err(
+                    |_| error_in(caller, "`length` must be a count of characters, 0 or more"),
+                )?),
             };
             Function::Slice {
                 start: whole(option(0), "start", caller)?,
@@ -592,9 +590,7 @@ unsafe fn do_call(call: &Call<'_>) -> R<Sexp> {
         "dt_year" => Function::Year,
         "dt_month" => Function::Month,
         "dt_day" => Function::Day,
-        "dt_offset_by" => Function::OffsetBy {
-            by: text(0, "by")?,
-        },
+        "dt_offset_by" => Function::OffsetBy { by: text(0, "by")? },
         "dt_to_string" => Function::Format {
             format: text(0, "format")?,
         },
@@ -650,10 +646,7 @@ unsafe fn whole(value: Sexp, what: &str, call: Sexp) -> R<i64> {
         _ => f64::NAN,
     };
     if !number.is_finite() || number.fract() != 0.0 || number.abs() > f64::from(i32::MAX) {
-        return Err(error_in(
-            call,
-            format!("`{what}` must be a whole number"),
-        ));
+        return Err(error_in(call, format!("`{what}` must be a whole number")));
     }
     Ok(number as i64)
 }
@@ -884,10 +877,7 @@ unsafe fn do_drop(call: &Call<'_>) -> R<Sexp> {
         if item.kind() != SexpType::String {
             return Err(error_in(
                 caller,
-                format!(
-                    "`drop` takes column names, not {}",
-                    describe(item)
-                ),
+                format!("`drop` takes column names, not {}", describe(item)),
             ));
         }
         for name in values::strings(item) {
@@ -896,7 +886,11 @@ unsafe fn do_drop(call: &Call<'_>) -> R<Sexp> {
             };
             let name = PlSmallStr::from(name);
             if schema.column(&name).is_none() {
-                return Err(table_error(caller, TableError::NoColumn(name.to_string()), Some(&schema)));
+                return Err(table_error(
+                    caller,
+                    TableError::NoColumn(name.to_string()),
+                    Some(&schema),
+                ));
             }
             dropped.push(name);
         }
@@ -936,7 +930,11 @@ unsafe fn do_rename(call: &Call<'_>) -> R<Sexp> {
         };
         let old = PlSmallStr::from(old.as_ref());
         if schema.column(&old).is_none() {
-            return Err(table_error(caller, TableError::NoColumn(old.to_string()), Some(&schema)));
+            return Err(table_error(
+                caller,
+                TableError::NoColumn(old.to_string()),
+                Some(&schema),
+            ));
         }
         if renames.iter().any(|(earlier, _)| *earlier == old) {
             return Err(error_in(caller, format!("`rename` renames `{old}` twice")));
