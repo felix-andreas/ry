@@ -153,7 +153,9 @@ expression in parentheses first.
 | `DataFrame.join_asof(df, other, on, by = NULL)` | joins each row to the nearest row of `other` |
 
 A string names a column wherever a verb takes an expression, so `DataFrame.select(df, "region")`
-is short for `DataFrame.select(df, Expr.col("region"))`. Inside `GroupBy.agg`, each expression must
+is short for `DataFrame.select(df, Expr.col("region"))`. A verb that takes columns through `...`
+reads its table as the first argument by position, so a column argument can have any name, `df`
+included. Inside `GroupBy.agg`, each expression must
 give one value per group. `Expr.col("units")` alone gives one value per row, so the checker and the
 runtime both reject it until you aggregate it.
 
