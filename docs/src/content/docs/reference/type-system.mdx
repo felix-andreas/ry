@@ -114,7 +114,8 @@ When a block needs a target and has none, it is an error and the annotation does
 happens when:
 
 - a blank line separates the block from the expression;
-- a plain `#` comment separates them, or no expression follows at all;
+- a plain `#` comment separates them, or no expression follows at all. A roxygen2 `#'` line is a
+  plain comment here, so the `#:` block goes below the roxygen block, directly above the definition;
 - the block follows code on its own line, as in `x <- 1 #: integer`, which would otherwise read as
   an annotation on the next line's statement;
 - the block has no content beyond the `#:` marker.

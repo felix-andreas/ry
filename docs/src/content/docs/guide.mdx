@@ -388,7 +388,8 @@ An `is.null()` test *narrows* the type for the rest of the function, so adding
 
 Values ry cannot model have the type `Unknown`, which fits everywhere, so one unmodeled construct
 never causes a cascade of false errors. The main sources are base `data.frame` columns, S4 and R6
-objects, and packages ry has no stub for. An annotation gives such a value a type, as `settings`
+objects, and packages ry has no stub for. So a misspelled column in `read.csv("sales.csv")$totl`
+reports nothing, while the same typo on a `list(...)` record is an error. An annotation gives such a value a type, as `settings`
 got one [above](#annotate), and every later use is checked against it.
 
 ry ships types for base R, the default packages, `data.table`, `dplyr`, `ggplot2` and `testthat`,

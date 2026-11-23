@@ -2017,79 +2017,28 @@ the docs alone with no source access, and tried to reach a clean run. The report
 `users/feedback-*.md` files from that round. What follows is what is still open, by theme, with the tester who found it
 named where their judgment is the point.
 
-### A clean run still does not mean enough
-
-Every tester reached this conclusion independently, and it is the round's headline. The Shiny
-dashboard tester finished with exit code 0 and five real bugs still in the code. The ETL engineer
-would not use `typing = true` as a merge gate, not because it is noisy but because "after these, a
-green run doesn't yet mean what it needs to mean at 3am". The Quarto analyst would have been "fully
-off by end of day, never knowing the default checks were not running".
-
-Two holes of that kind are still open.
+### Still open
 
 - **A package with no manifest still buys the blanket tolerance.** Fifteen manifest-only CRAN
-  namespaces now close the common case, but a package a user names, such as `janitor`, still
-  switches unresolved detection off project-wide. The remedy is a two-line project stub, and the
-  limitations page says so on the user-facing side.
-- **A column name inside `DT[...]` is never validated.** `orders[, net := gross_ammount * 1.19]`
-  and `by = currrency` are both silently accepted, while the only name that did report was a correct
-  one. That is exactly inverted: silent where the typo is real and noisy where the name is right.
-  `limitations.md` should say plainly that column names are never validated.
-
-### Two configuration defects that break CI
-
-- **Setting `[check] exclude` disables the built-in `renv/` and `packrat/` skip.** With no key the
-  walk finds 1 file. With `exclude = []` it finds 1 file. With `exclude = ["nothing-here/"]`, which
-  matches nothing, it walks renv and packrat both. The docs' own example, `exclude = ["scripts/"]`,
-  would drag an entire renv library into CI. A user-supplied list must extend the vendored defaults
-  rather than replace them.
-- **Any file in `stubs/` deactivates the shipped conditional namespaces.** One stub for an unrelated
-  package made 19 `data.table::` calls unresolved while bare `fread` still resolved, and it made
-  `data.table` unusable as an annotation type name, which silently suppressed a real type error.
-
-### `Date` does not survive real code
-
-`[`, `min`, `max`, `sort`, `rev`, `unique`, `head`, `tail`, `range` and `c` keep `Date`, and a `for`
-loop's variable is `double`, as R strips the class there. `Reduce(f, dates)` is still rejected
-(``expected `list[T] | T[]`, found `Date` ``): a `Date` overload on `Reduce` makes every wrapper over
-an open argument lose its type, because two candidates then fit, so it waits for `Date[]`.
-
-`Date[]` is inexpressible, and `Days + Days` yields `double`, so a units tag dies on
-arithmetic. `sort`, `head` and `rev` on dates report ``found \`T[]\```, which leaks an unbound
-type variable.
-
-### Strict mode's own advice does not work
-
-The message says to add a type annotation, and no annotation form silences it. `#:`, `@if-unknown`,
-`@trust` and `#: Any` all still report, and the last contradicts the reference directly. Only
-`# ry: allow(strict)` works.
-
-### Missing type-system coverage, each with its repro
-
+  namespaces close the common case, but a package a user names, such as `janitor`, switches
+  unresolved detection off project-wide. The remedy is a two-line project stub, and the limitations
+  page says so.
+- **`Reduce(f, dates)` is rejected** (``expected `list[T] | T[]`, found `Date` ``). A `Date`
+  candidate on `Reduce` was measured: every wrapper over an open argument then loses its signature
+  (`function(xs) Reduce(`+`, xs)` degrades from `fn(xs: list[double] | double[]) -> double` to an
+  open `T`), because two candidates narrow differently. It waits for `Date[]`, which is
+  inexpressible, like `Days + Days` giving `double`.
 - **A parameter's type is not seeded from its default value.** `f <- function(s = settings) s$hsot`
-  is missed while `settings$hsot` and a local alias are both caught. The obvious fix generates false
-  positives, so this needs the design rather than a patch. Binding the parameter to its default's
-  type makes every caller passing anything else wrong, and reporting the field against the default's
-  shape breaks the commonest idiom of all, `function(x = list()) x$name`, where the default is an
-  empty accumulator and callers supply the real record. R answers `NULL` there, so an error would be
-  plain wrong. The honest model is that such a parameter is the default's type unioned with whatever
-  callers pass, which is still open, so a field access on it should be at most `T | NULL`, the same
-  rule the accumulator fix established for unions. Recovering the tester's case needs to know the
-  argument is never supplied anywhere, which is whole-program information the checker does not have.
-  Leave it missed rather than trade it for the class of false positive this round spent its time
-  removing.
-- **`&` and `|` are unmodelled**, so `TRUE & FALSE` is `Unknown` and every logical mask kills
-  downstream checking. The reference documents `&&` and `||` with no counterpart, and the only
-  mention of `&` is a parenthetical inside the non-standard-evaluation discussion.
-- **A maybe-`NULL` value is only caught by arithmetic.** `toupper`, `nchar` and `substr` on a
-  `character | NULL` all pass, despite the guide promising this class of check.
-- **Recursion defeats `is.logical()` narrowing.** The identical non-recursive function is clean.
+  is missed while `settings$hsot` is caught. Binding the parameter to its default's type breaks
+  `function(x = list()) x$name`, where callers supply the real record and R answers `NULL`. The
+  honest model unions the default with what callers pass, so a field read is at most `T | NULL`.
+  Recovering the tester's case needs whole-program knowledge that the argument is never supplied, so
+  it stays missed rather than traded for a false-positive class.
 - **`$` on an unannotated parameter constrains nothing**, so the parameter accepts anything.
-- **`#: @new` does not stop `structure()` being a strict origin**, so the documented S3 remedy fails
-  at exactly the site it exists for.
-- **`vapply(x, f, numeric(1))` errors whenever the callback is not statically `double`.** R accepts
-  a wider template, which the tester confirmed with `ry run` on
-  `vapply(1:3, function(i) i, numeric(1))`.
+
+Not a defect, recorded so it is not re-filed: `toupper`, `nchar` and `substr` on a
+`character | NULL` pass, because R returns `character(0)` (or `integer(0)`) for `NULL` there, so a
+report would be a false one.
 
 ### Two lints need a model change rather than a patch
 
@@ -2115,18 +2064,6 @@ The message says to add a type annotation, and no annotation form silences it. `
   `r_source_of_literate` produces, so semantics cannot see a fence: the fix needs the hosts (the
   CLI's `analysable_source` and the server) to report literate findings of their own. The fix then
   reports the missing fence at the opening one and ends the chunk at the next chunk start.
-
-### Documentation gaps the round hit
-
-- The adjacency rules say a plain `#` comment breaks `#:` attachment and never mention `#'`. So
-  interleaving `#: @param` with roxygen's `#' @param`, which is the first thing a roxygen user
-  tries, fails.
-- The guide never shows `...` or `[optional]` in an annotation, and every S3 method needs both.
-- `configuration.md` omits `DESCRIPTION` as a project root marker, and a three-line `DESCRIPTION`
-  with `Imports:` was what fixed 30 of the ETL engineer's 34 first-run warnings. The path the docs do
-  recommend, hand-writing `stubs/*.Rtypes`, cost five files, fixed less, and was actively harmful.
-- The guide's showcase uses `list(...)`. Swapping it for `read.csv()` makes the identical mistake
-  report nothing, and the page calls that the whole pitch with no caveat at the point of contact.
 
 ### What the round praised
 
