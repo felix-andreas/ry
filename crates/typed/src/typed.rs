@@ -781,6 +781,18 @@ unsafe fn type_of(value: Sexp) -> Option<Type> {
             Item::Str
         }
         SexpType::List if !array => return list_type(value, length),
+        // A ry list of tags, such as `[:Bond, :Cash]`, which converts item by item.
+        SexpType::List
+            if length > 0
+                && (0..length).all(|index| {
+                    let item = value.element(index);
+                    item.kind() == SexpType::Record
+                        && !item.is_object()
+                        && interp::records::native_kind(item) == NativeKind::Tag
+                }) =>
+        {
+            Item::Tag(shapes::ANY)
+        }
         _ => return None,
     };
     if length == 1 && !array {
@@ -875,6 +887,14 @@ impl Arguments {
                 if list.is_null() {
                     return Err(OUT_OF_MEMORY);
                 }
+                self.lists.push(list);
+                self.words.push(list as u64);
+            }
+            Type::Vector {
+                item: Item::Tag(_), ..
+            } => {
+                let length = rvalues::length(value);
+                let (list, _) = shapes::with(|shapes| list_of_objects(shapes, value, length, 0))?;
                 self.lists.push(list);
                 self.words.push(list as u64);
             }

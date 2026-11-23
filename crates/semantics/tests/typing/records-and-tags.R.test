@@ -259,6 +259,30 @@ f: fn(r: :Ok(integer) | ..) -> logical
 a: Unknown
 72..75 error[type-mismatch] expected `integer`, found `character`
 
+#---- a_lone_open_union_holds_every_tag
+count <- function(r: ..) -> I64 { 1 }
+counts <- function(rs: List<..>) -> I64 { List.len(rs) }
+a <- count(:Ok(1L))
+b <- counts([:Bond, :Cash])
+#++++
+count: fn(r: ..) -> I64
+counts: fn(rs: List<..>) -> I64
+a: I64
+b: I64
+
+#---- a_ry_list_of_narrower_items_fits_a_wider_list
+count <- function(kinds: List<:Bond | :Cash>) -> I64 { List.len(kinds) }
+lookup <- function(prices: Dict<:Bond | :Cash, F64>) -> I64 { Dict.len(prices) }
+cash <- function(price: F64) -> Dict<:Cash, F64> { Dict.single(:Cash, price) }
+a <- count([:Cash])
+b <- lookup(cash(1.0))
+#++++
+count: fn(kinds: List<:Bond | :Cash>) -> I64
+lookup: fn(prices: Dict<:Bond | :Cash, F64>) -> I64
+cash: fn(price: F64) -> Dict<:Cash, F64>
+a: I64
+b: I64
+
 #---- closed_union_fits_an_open_one
 #: fn(r: :Ok(integer) | ..) -> logical
 f <- function(r) TRUE

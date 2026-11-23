@@ -29,8 +29,8 @@ use {
 
 pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".expr_column", 1, table_work!(do_column)),
-    builtin(".expr_literal", 1, table_work!(do_literal)),
-    builtin(".expr_operator", 4, table_work!(do_operator)),
+    builtin(".expr_literal", 1, table_work!(do_literal)).accepting_native(),
+    builtin(".expr_operator", 4, table_work!(do_operator)).accepting_native(),
     builtin(".expr_aggregate", 3, table_work!(do_aggregate)),
     builtin(".expr_len", 0, table_work!(do_len)),
     builtin(".expr_alias", 2, table_work!(do_alias)),

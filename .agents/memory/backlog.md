@@ -2514,6 +2514,10 @@ The end-to-end guard rests on the corpus suites.
 
 ## Open: DataFrame
 
+- **The checker accepts a constructor value no column can hold.** `DataFrame(x = list(1, "a"))`
+  and `DataFrame(kind = [:Bond(1), :Cash(2)])` check clean and stop at run time with "column `x`
+  is a list, which a DataFrame cannot hold". `types::column_type` passes such a value through as
+  the column type; it should report a `type-mismatch` that names the column.
 - **The 1e8 joins fit, with about 3 GB to spare; what would widen the margin.** At 1e8 rows the
   five db-benchmark joins peak at 11.6 GB from R and 12.0 GB from Rust, and data.table is killed
   at 14.3 GB before its first answer (`development/design/r-runtime.md`, section 7;

@@ -294,3 +294,34 @@ totals: Unknown
 145..146 error[type-mismatch] `df` is read as a column, not as the table: a named argument here is a column, which must be `Expr | logical[]`. Pass the table first, without a name
 148..154 warning[unused] `totals` is assigned but never used
 207..214 error[type-mismatch] `group` is read as a column, not as the table: a named argument here is a column, which must be `Expr`. Pass the table first, without a name
+
+#==== tag_columns
+#---- a_list_of_bare_tags_builds_a_tag_column_that_r_reads_as_text
+# typing: strict
+alias Rows = DataFrame{kind: :Bond | :Cash, v: double}
+kinds: List<:Bond | :Cash> <- [:Bond, :Cash]
+rows: Rows <- DataFrame(kind = kinds, v = c(1, 2))
+bonds: Rows <- DataFrame.filter(rows, Expr.col("kind") == :Bond)
+cash: Rows <- DataFrame.filter(rows, Expr.is_in(Expr.col("kind"), [:Cash]))
+names <- rows$kind
+first <- rows[["kind"]]
+#++++
+kinds: List<:Bond | :Cash>
+rows: Rows
+bonds: Rows
+cash: Rows
+names: character[]
+first: character[]
+168..173 warning[unused] `bonds` is assigned but never used
+233..237 warning[unused] `cash` is assigned but never used
+309..314 warning[unused] `names` is assigned but never used
+328..333 warning[unused] `first` is assigned but never used
+
+#---- unchecked_text_does_not_fill_a_tag_column
+# typing: strict
+alias Rows = DataFrame{kind: :Bond | :Cash, v: double}
+rows: Rows <- DataFrame(kind = c("Bond", "Cash"), v = c(1, 2))
+#++++
+rows: Rows
+72..76 warning[unused] `rows` is assigned but never used
+86..134 error[type-mismatch] expected `DataFrame{kind: :Bond | :Cash, v: double[]}`, found `DataFrame{kind: character[], v: double[]}`

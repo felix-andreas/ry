@@ -1305,12 +1305,16 @@ impl<'db> InferenceTable<'db> {
                     .iter()
                     .any(|member| matches!(member.kind(db), TyKind::OtherTags))
                 {
-                    let TyKind::Union(expected_members) = expected.kind(db) else {
-                        return false;
+                    // A lone `..` is every tag, so any open union of tags fits it.
+                    let expected_members = match expected.kind(db) {
+                        TyKind::Union(expected_members) => expected_members,
+                        TyKind::OtherTags => &[][..],
+                        _ => return false,
                     };
-                    let target_is_open = expected_members
-                        .iter()
-                        .any(|member| matches!(member.kind(db), TyKind::OtherTags));
+                    let target_is_open = matches!(expected.kind(db), TyKind::OtherTags)
+                        || expected_members
+                            .iter()
+                            .any(|member| matches!(member.kind(db), TyKind::OtherTags));
                     let every_target_tag_listed = expected_members.iter().all(|target| {
                         match target.kind(db) {
                             TyKind::Tag(name, _) => members.iter().any(|member| {
@@ -1348,6 +1352,7 @@ impl<'db> InferenceTable<'db> {
                         true
                     })
             }
+            (TyKind::Tag(..), TyKind::OtherTags) => true,
             // A tag the open target does not list falls into its `..`; a listed name must
             // fit that member, which the general search below decides.
             (TyKind::Tag(name, _), TyKind::Union(members))
@@ -1362,9 +1367,13 @@ impl<'db> InferenceTable<'db> {
             }
             // Concrete members first: `NULL` into `T | NULL` must match the `NULL` member
             // and bind nothing, leaving `T` for a later argument.
+            // A tag reaches the `..` member only through the arm above, which first rules out
+            // a listed name whose payload does not fit.
             (_, TyKind::Union(members)) => {
+                let tag = matches!(actual.kind(db), TyKind::Tag(..));
                 let (variables, concrete): (Vec<Ty<'db>>, Vec<Ty<'db>>) = members
                     .iter()
+                    .filter(|member| !(tag && matches!(member.kind(db), TyKind::OtherTags)))
                     .partition(|&&member| self.shallow_resolve(db, member).is_var());
                 concrete
                     .into_iter()
@@ -2084,8 +2093,15 @@ enum Variance {
 fn parameter_variances<'db>(db: &'db dyn Db, definition: &NamedDefinition<'db>) -> Vec<Variance> {
     // An abstract type (`@type Dict<K, V>`) hides its body, so its parameters are what tell two
     // values apart, and a `Dict<character, double>` must not pass for a `Dict<integer, double>`.
+    // ry's own `List`, `Dict` and `Set` are immutable values, so a `List<:Cash>` is also a
+    // `List<:Bond | :Cash>`: their parameters are covariant.
     if !definition.alias && matches!(definition.body.kind(db), TyKind::Unknown) {
-        return vec![Variance::Invariant; definition.parameters.len()];
+        let variance = if crate::stubs::is_ry_type(db, definition.name.text(db)) {
+            Variance::Covariant
+        } else {
+            Variance::Invariant
+        };
+        return vec![variance; definition.parameters.len()];
     }
     let mut occurrences = vec![(false, false); definition.parameters.len()];
     record_occurrences(

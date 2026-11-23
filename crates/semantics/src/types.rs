@@ -1043,13 +1043,41 @@ pub fn column_type<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
         TyKind::NamedVector(element) => Ty::new(db, TyKind::Vector(*element)),
         // A frame stores a `List` column of `F64`, `Bool` or `Str` as the R vector that shares
         // its representation, and one of `I64` as an integer column, as `[1L, 2L]` reads in R.
-        _ => match array_element(db, ty).map(|element| element.kind(db)) {
-            Some(TyKind::Native(native)) => {
-                let atomic = native.shared_atomic().unwrap_or(Atomic::Integer);
-                Ty::new(db, TyKind::Vector(scalar(db, atomic)))
-            }
-            _ => ty,
+        _ => match array_element(db, ty) {
+            Some(element) => match element.kind(db) {
+                TyKind::Native(native) => {
+                    let atomic = native.shared_atomic().unwrap_or(Atomic::Integer);
+                    Ty::new(db, TyKind::Vector(scalar(db, atomic)))
+                }
+                // A `List` of tags without a payload is a column of those tags, which a table
+                // stores as the character column of their names.
+                _ if is_bare_tags(db, element) => element,
+                _ => ty,
+            },
+            None => ty,
         },
+    }
+}
+
+/// The type R code reads from a column of type `ty`: a column of tags holds their names, so R
+/// reads a character vector.
+pub fn r_column_type<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
+    if is_bare_tags(db, ty) {
+        Ty::new(db, TyKind::Vector(scalar(db, Atomic::Character)))
+    } else {
+        ty
+    }
+}
+
+/// Whether `ty` is a closed union of tags without a payload, such as `:Bond | :Cash`: the type of
+/// a table column that holds tags.
+pub fn is_bare_tags<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
+    match ty.kind(db) {
+        TyKind::Tag(_, None) => true,
+        TyKind::Union(members) => members
+            .iter()
+            .all(|&member| matches!(member.kind(db), TyKind::Tag(_, None))),
+        _ => false,
     }
 }
 

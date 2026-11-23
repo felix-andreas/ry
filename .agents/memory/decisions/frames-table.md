@@ -351,3 +351,13 @@ The table is a Polars `DataFrame` held by the `table` crate; this entry holds th
 - **A `Date` offsets only by whole days, weeks, months, quarters or years**: Polars would turn the column into a date-time, and the checker and the typer refuse `"12h"` alike. A literal regular expression is compiled when the query is typed, so a bad pattern fails with the regex error before any row is read.
 - The Polars features `range` (row index, `shift`) and `dtype-array` (needed by the date offset kernels) are enabled in `crates/table/Cargo.toml`.
 - **The checker types each function from its operands** (`frame_expression` in `crates/semantics/src/check.rs`): the `str_` functions need text or factor columns and the `dt_` functions need `Date` or `POSIXct` (`ExpressionNeeds::Text`, `ExpressionNeeds::Temporal`); `fill_null` and `coalesce` take the operands' common type, ignoring a bare `NA`; `cast` reads its type literal. `drop`, `rename`, `with_row_index` and `unpivot` compute the result schema and report a missing column with a suggestion.
+
+## A column of bare tags is stored as their names
+
+**Status:** built.
+
+- **Shape.** `DataFrame(kind = [:Bond, :Cash])` makes a character column of the tag names, and its column type is the tag union (`types::column_type` maps a `List` of a closed union of payload-less tags to the union). R code reads the column as `character[]` (`types::r_column_type`, applied at `$`, `[[` and data.table column reads), because that is what the frame holds; Polars and every R consumer (printing, CSV, `as.data.frame`) handle text natively, so no new column kind exists.
+- **Comparisons by name.** `frames::frame::literal` turns a bare tag into a string literal, so `Expr.col("kind") == :Bond` and `Expr.is_in(col, [:Cash])` compare names; the checker accepts a bare tag beside an `Expr`, and `Expr.is_in` takes `List<..>`.
+- **Text never fills a tag column.** A `character[]` value is a `type-mismatch` against `kind: :Bond | :Cash`, because its strings are unchecked; the typed way in is a `List` of tags. The way back from R's text to tags is user code (a `Str` to tag function), since a string outside the union needs a decision only the program can make.
+- **Rejected:** a factor column (levels would need syncing with the union and R code treats factors differently from text) and a list column of tag records (Polars cannot hold R records, and every R reader would see opaque objects).
+- **Gap:** a `List` of tags with a payload checks clean and stops at run time (backlog, "The checker accepts a constructor value no column can hold").

@@ -364,6 +364,15 @@ unsafe fn column_contents(value: Sexp) -> R<Option<RVector>> {
         }
         SexpType::Real => RVector::Double(values::reals(value).to_vec()),
         SexpType::String => RVector::Character(values::strings(value)),
+        // A list of tags without a payload, such as `[:Bond, :Cash]`, is the character column of
+        // their names, which R code reads as it reads any text column.
+        SexpType::List => match (0..length(value))
+            .map(|index| interp::records::bare_tag_name(value.element(index)).map(Some))
+            .collect::<Option<Vec<_>>>()
+        {
+            Some(names) => RVector::Character(names),
+            None => return Ok(None),
+        },
         // An `I64` column is an R `integer` column when every item fits, and `double` otherwise,
         // the same conversion `Num.to_r` makes, so a typed `[3, 5]` builds the column R's `3L`
         // would.
@@ -2350,7 +2359,9 @@ fn binary_op(name: &str) -> Option<BinaryOp> {
 /// or empty vector as a column of its values. `None` for a value no column can hold.
 pub(crate) unsafe fn vector_literal(value: Sexp) -> R<Option<Expr>> {
     // A factor's levels have no scalar literal, so even a single one is a column of values.
-    if length(value) == 1 && !values::inherits(value, "factor") {
+    let single = length(value) == 1 && value.kind() != SexpType::List;
+    if (single || value.kind() == SexpType::Record) && !values::inherits(value, "factor")
+    {
         return Ok(literal(value));
     }
     let value = values::materialize(value)?;
@@ -2364,6 +2375,10 @@ pub(crate) unsafe fn vector_literal(value: Sexp) -> R<Option<Expr>> {
 
 /// A single R value as a literal of the IR, or `None` for anything longer or of another type.
 pub(crate) unsafe fn literal(value: Sexp) -> Option<Expr> {
+    // A tag without a payload compares with a tag column, which holds the tags' names.
+    if let Some(name) = interp::records::bare_tag_name(value) {
+        return Some(Expr::Character(name));
+    }
     if length(value) != 1 {
         return None;
     }

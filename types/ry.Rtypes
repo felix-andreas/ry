@@ -101,7 +101,7 @@ Expr.if_else : fn(test: Expr, yes: Any, no: Any) -> Expr
 Expr.cor : fn(first: Expr, second: Expr) -> Expr
 Expr.over : fn(Expr, ...: character) -> Expr
 Expr.rank : fn(expr: Expr, [descending]: logical) -> Expr
-Expr.is_in : fn(expr: Expr, values: Expr | logical[] | integer[] | double[] | character[] | factor | Date | POSIXct) -> Expr
+Expr.is_in : fn(expr: Expr, values: Expr | logical[] | integer[] | double[] | character[] | factor | Date | POSIXct | List<..>) -> Expr
 Expr.n_unique : fn(expr: Expr) -> Expr
 
 # Text functions take a character or factor column; the pattern of `str_contains` and

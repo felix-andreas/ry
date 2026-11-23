@@ -39,9 +39,9 @@ use {
             InferenceVar, Name, NativeField, NativeScalar, NullUnless, NumberLiteral, Parameter,
             QueryName, RecordField, ReduceForward, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind,
             TypeList, TypeScheme, any, array, array_element, column_type, conflicting_tags,
-            contains_inference_var, contains_rigid, erase_vars, for_each_child_type,
+            contains_inference_var, contains_rigid, erase_vars, for_each_child_type, is_bare_tags,
             is_ry_value_type, is_tag_type, map_child_types, native_record, native_scalar, null,
-            scalar, substitute_rigid, type_size, union_of, unknown,
+            r_column_type, scalar, substitute_rigid, type_size, union_of, unknown,
         },
     },
     bumpalo::{Bump, collections::Vec as BumpVec},
@@ -5817,7 +5817,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         .iter()
                         .find(|column| column.name.text(self.db) == name)
                     {
-                        let ty = column.ty;
+                        let ty = r_column_type(self.db, column.ty);
                         self.masked_reads.insert(id);
                         return Some(ty);
                     }
@@ -10471,11 +10471,13 @@ impl<'db, 'a> Checker<'db, 'a> {
         let left = self.structural(left);
         let right = self.structural(right);
         // A DataFrame expression beside another one, or beside a ry value that shares R's
-        // representation, builds a bigger expression, as `Ops.Expr` does at run time. `I64` is
-        // left to the ordinary rule, which rejects it: an R operator cannot read one.
+        // representation, builds a bigger expression, as `Ops.Expr` does at run time. A tag
+        // without a payload compares by its name, as a tag column stores it. `I64` is left to
+        // the ordinary rule, which rejects it: an R operator cannot read one.
         for (expression, other) in [(left, right), (right, left)] {
             if is_expr_type(self.db, expression)
                 && (is_expr_type(self.db, other)
+                    || is_bare_tags(self.db, other)
                     || matches!(
                         other.kind(self.db),
                         TyKind::Native(NativeScalar::F64 | NativeScalar::Bool | NativeScalar::Str)
@@ -22640,7 +22642,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             TyKind::Frame(_, None) => Ok(unknown(self.db)),
             TyKind::Frame(_, Some(columns)) => match (literal_position, literal_name) {
                 (Some(position), _) => match columns.get(position) {
-                    Some(column) => Ok(column.ty),
+                    Some(column) => Ok(r_column_type(self.db, column.ty)),
                     None => Err(TypeError {
                         range: key_range,
                         kind: TypeErrorKind::PositionDoesNotExist {
@@ -22654,14 +22656,19 @@ impl<'db, 'a> Checker<'db, 'a> {
                         .iter()
                         .find(|column| column.name.text(self.db) == name)
                     {
-                        Some(column) => Ok(column.ty),
+                        Some(column) => Ok(r_column_type(self.db, column.ty)),
                         None => Err(TypeError {
                             range: key_range,
                             kind: column_does_not_exist(self.db, &name, None, columns),
                         }),
                     }
                 }
-                (None, None) => Ok(union_of(self.db, columns.iter().map(|column| column.ty))),
+                (None, None) => Ok(union_of(
+                    self.db,
+                    columns
+                        .iter()
+                        .map(|column| r_column_type(self.db, column.ty)),
+                )),
             },
             // An open record lists only some of its fields, in no fixed order, so it answers
             // only a read by name.
@@ -23087,7 +23094,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .iter()
                     .find(|column| column.name.text(self.db) == name)
                 {
-                    Some(column) => Ok(column.ty),
+                    Some(column) => Ok(r_column_type(self.db, column.ty)),
                     None => Err(TypeError {
                         range: name_range,
                         kind: column_does_not_exist(self.db, name, None, columns),
