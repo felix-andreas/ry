@@ -162,6 +162,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - In strict mode, a checked annotation over an `Unknown` value is reported
 - An `Unknown` branch makes an `if` `Unknown`, unless it read a recursion placeholder
 - A project's top-level `%op%` is checked as a call unless it quotes an operand
+- A tied difference is `double`, and only a class closed under arithmetic negates
 
 ## Analysis core
 

@@ -2087,7 +2087,8 @@ callback returns, so their type follows the callback's return type and the `simp
 | callback returns anything else, or the flag is not a literal | `Any` |
 
 The result is named (`T[named]`, `list[named: T]`) when the input is named or a character vector,
-as R names it, unless `USE.NAMES = FALSE` and the input is a character vector:
+as R names it. `USE.NAMES = FALSE` drops the names a character input gives, and for `mapply` and
+`Map` the names of a named input too:
 
 ```r
 xs <- c(1, 2, 3)
@@ -2098,7 +2099,11 @@ widths <- sapply(c("a", "bb"), function(s) nchar(s))        # integer[named]
 ```
 
 A scalar-like return is trusted as length one, as everywhere else, so a callback typed scalar that
-returns several elements gives a vector type to what R returns as a matrix. `tapply` gives `Any`,
+returns several elements gives a vector type to what R returns as a matrix. A generic callback is
+the exception: its return was inferred before its parameter met an element, so it is trusted only
+over an atomic vector, whose elements are scalars. Over a list, `sapply(xs, function(v) v * 2)`
+gives `Any`, because `v` may be a vector. A return that depends on the callback's own type
+parameters, as `identity`'s `T` does, gives `Any` too. `tapply` gives `Any`,
 because its result is an array shaped by the groups of `INDEX`. The callbacks are still checked:
 `sapply`'s takes the elements of `X`, as `lapply`'s does, so `sapply(xs, function(v) v + "a")` over
 numbers is an error, and so is `sapply(xs, 4)`:
@@ -2513,8 +2518,10 @@ result's atomic type depends on the operator:
 - `+`, `-`, `*`, `%%`, and `%/%` give `integer` when both operands are `integer` (or `logical`), and
   `double` otherwise.
 - `/`, `^`, and `**` (R's parser alias for `^`) always give `double`.
-- Unary `-` keeps its operand's atomic type. A class with arithmetic methods negates to itself,
-  because R dispatches unary `-` through the same methods, so `-(m %*% m)` is a `matrix`.
+- Unary `-` keeps its operand's atomic type. A class whose arithmetic takes two of its values
+  negates to itself, because R dispatches unary `-` through the same methods, so `-(m %*% m)` is a
+  `matrix` and `-elapsed` on a `difftime` is a `difftime`. `-day` on a `Date` is a type error, as R
+  stops on it.
 - R rejects `-NULL`, and so does the checker. A value the body computes that may be `NULL` negates
   as its other members, because code like `if (length(k)) res <- res[-k]` negates only once the
   value exists. A parameter or an annotated variable keeps its `NULL`, so `-x` on a declared
@@ -2531,15 +2538,15 @@ it must end up as `integer` or `double`, in any vector shape, or as a class with
 a number it takes the [`arithmetic` constraint](#constraints), and two operands of one type take
 `numeric`, because a class such as `Date` adds a number but not another value of its own. A
 difference `a - b` is the exception and asks only `arithmetic`, because R subtracts two dates or
-two times.
+two times. That difference is not a value of the operands' type (two dates subtract to a
+`difftime`), so it is `double`, the representation every arithmetic class shares.
 
 - `function(x) x + 1L` is `<T: arithmetic> fn(x: T) -> T`, and calling it with `"oops"` is a type
   error.
 - `function(x) x / 2` is `<T: arithmetic> fn(x: T) -> double`.
 - `function(a, b) a + b` is `<T: numeric> fn(a: T, b: T) -> T`, and calling it with two dates is a
   type error.
-- `function(a, b) abs(a - b) < 1e-8` is `<T: arithmetic> fn(a: T, b: T) -> logical`, and accepts two
-  dates.
+- `function(a, b) a - b` is `<T: arithmetic> fn(a: T, b: T) -> double`, and accepts two dates.
 
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
 vector, so `f <- function(x) x + c(1L, 2L)` is `<T: arithmetic> fn(x: T) -> double[]` and accepts
@@ -2627,8 +2634,8 @@ and the rest of a chain `result + a + b`, give `Unknown` and report nothing. Wit
 concatenation, so `c(d1, d2)` on two `Date` values is a `Date`. The stubs keep `Date` and `POSIXct`
 through `[`, `min`, `max`, `range`, `sort`, `rev`, `unique`, `head` and `tail`, as R's methods do.
 A `for` loop over dates gives its variable the type `double`, because R strips the class there.
-`Reduce(f, dates)` is a type error, because `Reduce` takes a `list[T] | T[]` and a `Date` vector
-has no element type to write. A nominal with no such method loses
+`Reduce(f, dates)` is a type error, although R runs it, because `Reduce` takes a `list[T] | T[]`
+and a `Date` vector has no element type to write. A nominal with no such method loses
 its class but keeps its data, as R's default `c()` does, so two values of `@type Money {double}`
 combine to `double[]`. An abstract nominal has no representation, so combining it gives `Unknown`.
 

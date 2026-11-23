@@ -520,7 +520,7 @@ print(bump(label))
 label: Tag
 bump: <T: arithmetic> fn(x: T) -> T
 T
-158..163 error[type-mismatch] expected a numeric value (`integer` or `double`), found `Tag`
+158..163 error[type-mismatch] expected a numeric value (`integer` or `double`) or a class with arithmetic, found `Tag`
 
 #---- a_recursive_function_keeps_the_arithmetic_classes
 # A cyclic group is checked through its own view of the world, and that view has
@@ -580,7 +580,7 @@ double
 double
 double
 double
-669..671 error[type-mismatch] expected a numeric value (`integer` or `double`), found `Tag`
+669..671 error[type-mismatch] expected a numeric value (`integer` or `double`) or a class with arithmetic, found `Tag`
 
 #---- a_dollar_method_types_field_reads_on_its_class
 # R dispatches `x$name` on a classed `x` to a `$.class` method, so its result types the read.

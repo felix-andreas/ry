@@ -140,12 +140,16 @@ fn suppress(diagnostics: Vec<Diagnostic>, source: &str, complete: bool) -> Vec<D
                     "all" => "no finding".to_owned(),
                     code => format!("no `{code}` finding"),
                 };
+                let fix = match codes.len() {
+                    1 => "Remove the comment".to_owned(),
+                    _ => format!("Remove `{code}` from it"),
+                };
                 kept.push(Diagnostic::new(
                     range,
                     Severity::Warning,
                     "unfulfilled-expect",
                     format!(
-                        "{missing} is on this line or the next, so this expectation is stale. Remove `{code}` from it"
+                        "{missing} is on this line or the next, so this expectation is stale. {fix}"
                     ),
                 ));
             }
@@ -406,7 +410,24 @@ mod tests {
         assert_eq!(kept[0].code, "unfulfilled-expect");
         assert_eq!(u32::from(kept[0].range.start()), directive);
         assert!(
-            kept[0].message.contains("no `unused` finding"),
+            kept[0]
+                .message
+                .contains("no `unused` finding is on this line or the next, so this expectation is stale. Remove `unused` from it"),
+            "{}",
+            kept[0].message
+        );
+    }
+
+    #[test]
+    fn a_stale_expect_naming_one_code_says_to_remove_the_comment() {
+        let kept = settle_suppressions(
+            Vec::new(),
+            "x <- 1 # ry: expect(unused)
+",
+        );
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert!(
+            kept[0].message.ends_with("Remove the comment"),
             "{}",
             kept[0].message
         );

@@ -33,9 +33,9 @@ use {
             InferenceVar, Name, NativeField, NativeScalar, NullUnless, NumberLiteral, Parameter,
             QueryName, RecordField, ReduceForward, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind,
             TypeList, TypeScheme, any, array, array_element, column_type, conflicting_tags,
-            contains_inference_var, erase_vars, for_each_child_type, is_ry_value_type, is_tag_type,
-            map_child_types, native_record, native_scalar, null, scalar, substitute_rigid,
-            type_size, union_of, unknown,
+            contains_inference_var, contains_rigid, erase_vars, for_each_child_type,
+            is_ry_value_type, is_tag_type, map_child_types, native_record, native_scalar, null,
+            scalar, substitute_rigid, type_size, union_of, unknown,
         },
     },
     bumpalo::{Bump, collections::Vec as BumpVec},
@@ -9421,7 +9421,15 @@ impl<'db, 'a> Checker<'db, 'a> {
                 unknown(self.db)
             }
             NumericOperand::AnyUnknown => unknown(self.db),
-            NumericOperand::Invalid if self.declares_arithmetic(resolved) => resolved,
+            // R stops on `-day`, so a class negates only when its arithmetic takes two of its
+            // values, as `difftime`'s does, the same test the flexible operand gets.
+            NumericOperand::Invalid
+                if self.declares_arithmetic(resolved)
+                    && constraint_rejects(self.db, &self.table, Constraint::Numeric, resolved)
+                        .is_none() =>
+            {
+                resolved
+            }
             NumericOperand::Invalid => {
                 self.errors.push(TypeError {
                     range: operand_range,
@@ -11138,11 +11146,17 @@ impl<'db, 'a> Checker<'db, 'a> {
         if let Some(ty) = flexible {
             // R subtracts two dates or two times (their difference is a `difftime`), so `a - b`
             // asks no more of a class than `a + 1` does, while `a + b` asks `numeric`.
-            let constraint = match tied && operator != BinaryOperator::Subtract {
+            let tied_difference = tied && operator == BinaryOperator::Subtract;
+            let constraint = match tied && !tied_difference {
                 true => Constraint::Numeric,
                 false => Constraint::Arithmetic,
             };
             self.constrain_operand(range, ty, constraint);
+            // The difference is not `T` itself: two dates subtract to a `difftime`. It claims
+            // `double`, the representation every arithmetic class shares.
+            if tied_difference {
+                return scalar(self.db, Atomic::Double);
+            }
         }
         // Combined with its existing atomic-element bound, an arithmetic `T[]` element
         // becomes scalar-numeric.
@@ -11868,7 +11882,15 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
             }
         }
+        // An annotation says what the formals take, not how the body reads them, so an
+        // annotated function that captures a formal's code is non-standard evaluation too.
+        let quoted: Vec<Name<'db>> = module[parameters]
+            .iter()
+            .filter(|parameter| uses.quotes(parameter.name))
+            .map(|parameter| Name::new(self.db, parameter.name))
+            .collect();
         let mut signature = FunctionType::declared(&[], &named, variadic, declared.ret);
+        signature.quoted = &quoted;
 
         self.return_frames.push(Vec::new());
         let trailing_ty = self.infer_body_with_capture_discovery(*body, pending_mark);
@@ -12623,13 +12645,13 @@ impl<'db, 'a> Checker<'db, 'a> {
         let errors_before = self.errors.len();
         let ty = self.infer_ordinary_call(id, range, callee, arguments);
         if matches!(self.module.kind(callee), ExpressionKind::NameRef(name) if name.as_str() == "vapply")
-            && !self.naming.resolutions.contains_key(&callee)
+            && self.calls_base(callee)
         {
             self.name_vapply_callback(errors_before, arguments);
         }
         if let ExpressionKind::NameRef(name) = self.module.kind(callee)
             && let family @ ("sapply" | "mapply" | "Map") = name.as_str()
-            && !self.naming.resolutions.contains_key(&callee)
+            && self.calls_base(callee)
         {
             return self.simplified_apply(family, arguments).unwrap_or(ty);
         }
@@ -12643,6 +12665,19 @@ impl<'db, 'a> Checker<'db, 'a> {
         self.refine_table_call(id, function, arguments, ty)
     }
 
+    /// Whether a called name reaches the base function of that name: neither a local binding nor
+    /// a project definition shadows it.
+    fn calls_base(&self, callee: ExprId) -> bool {
+        let ExpressionKind::NameRef(name) = self.module.kind(callee) else {
+            return false;
+        };
+        let deferred = self.naming.deferred_non_locals.contains(&callee);
+        !self.naming.resolutions.contains_key(&callee)
+            && !self.globals.is_some_and(|globals| {
+                globals.defined_in_project(Symbol::new(name.as_str()), deferred)
+            })
+    }
+
     /// Base `seq` without `by` or a length is R's `from:to`, an integer vector whenever
     /// `from` is a whole number, and `seq(x)` alone is `seq_len` or `seq_along`, always
     /// integer. The stub's numeric candidates cannot tell `1` from `1.5`, so they say
@@ -12651,13 +12686,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let ExpressionKind::NameRef(name) = self.module.kind(callee) else {
             return None;
         };
-        let deferred = self.naming.deferred_non_locals.contains(&callee);
-        if name.as_str() != "seq"
-            || self.naming.resolutions.contains_key(&callee)
-            || self
-                .globals
-                .is_some_and(|globals| globals.defined_in_project(Symbol::new("seq"), deferred))
-        {
+        if name.as_str() != "seq" || !self.calls_base(callee) {
             return None;
         }
         let resolved = self.table.resolve(self.db, ty);
@@ -19771,29 +19800,61 @@ impl<'db, 'a> Checker<'db, 'a> {
             (function, items, flag)
         };
         let function = self.recorded.get(&function).copied()?;
-        let returned = match self.table.resolve(db, function).kind(db) {
-            TyKind::Function(function) => self.table.resolve(db, function.ret),
+        // The parameters are read as the callback declared them, before the call bound them to
+        // the elements.
+        let (generic, returned) = match self.table.shallow_resolve(db, function).kind(db) {
+            TyKind::Function(function) => (
+                function
+                    .positional
+                    .iter()
+                    .copied()
+                    .chain(function.named.iter().map(|parameter| parameter.ty))
+                    .any(|parameter| {
+                        contains_inference_var(db, parameter) || contains_rigid(parameter)
+                    }),
+                self.table.resolve(db, function.ret),
+            ),
             _ => return None,
         };
-        // An undetermined return keeps the stub's `Any`, which strict mode does not report.
-        if matches!(returned.kind(db), TyKind::Unknown) {
+        // An undetermined return keeps the stub's `Any`, which strict mode does not report, and
+        // so does one that depends on the call's own type variables (`identity`'s `T`), which
+        // the stub's `Any` never fixes.
+        if matches!(returned.kind(db), TyKind::Unknown)
+            || contains_inference_var(db, returned)
+            || contains_rigid(returned)
+        {
             return None;
         }
-        let named = items.is_some_and(|items| {
+        let items = items.map(|items| {
             let items = self
                 .recorded
                 .get(&items)
                 .copied()
                 .unwrap_or_else(|| unknown(db));
-            let items = self.structural(items);
-            // The result keeps the input's names, and `USE.NAMES` names it by a character input.
+            self.structural(items)
+        });
+        // A generic callback's return was inferred before its parameter met an element, and
+        // generic arithmetic claims a scalar (`function(v) v * 2` returns `double`), which holds
+        // only when every element is one: an atomic vector's are, a list's may be vectors.
+        let scalar_elements = items.is_some_and(|items| {
+            element_types(db, items).0.iter().all(|&element| {
+                matches!(self.table.resolve(db, element).kind(db), TyKind::Scalar(_))
+            })
+        });
+        if generic && !scalar_elements {
+            return None;
+        }
+        let use_names = simplify_flag(self.module, arguments, "USE.NAMES") != Some(false);
+        let named = items.is_some_and(|items| {
             let character = match items.kind(db) {
                 TyKind::Vector(element) => *element,
                 _ => items,
             };
-            element_types(db, items).1
-                || (simplify_flag(self.module, arguments, "USE.NAMES") != Some(false)
-                    && matches!(character.kind(db), TyKind::Scalar(Atomic::Character)))
+            let character_names =
+                use_names && matches!(character.kind(db), TyKind::Scalar(Atomic::Character));
+            // `sapply` keeps the input's names whatever `USE.NAMES` says, while `mapply` and
+            // `Map` name the result only under `USE.NAMES`.
+            (element_types(db, items).1 && (family == "sapply" || use_names)) || character_names
         });
         // `Map` is `mapply` with `SIMPLIFY = FALSE`.
         let simplify = match flag {

@@ -2230,6 +2230,17 @@ corpus addition that returns a real nominal will trip it again.
   (`fn() -> integer`), but a script's top-level `cache` written by `<<-` stays `integer | NULL`,
   because joining would make a binding's type depend on every item that writes it.
 - There is no stdin input for `ry check`.
+- `Reduce(function(a, b) max(a, b), dates)` is a false error (``expected `list[T] | T[]`, found
+  `Date` ``), because a nominal vector has no element type. A `Date` candidate in the stub fixes it
+  but leaves an unannotated `Reduce(f, x)` over a parameter undecided, so `x` loses its
+  `list[T] | T[]` type. The fix is letting a class with a `[[.Class` method match `T[]`.
+- A project's own top-level `new` is still held to `setClass` slots, because the diagnostics pass
+  sees only local shadowing (`diagnostics.rs`, the `new()` loop).
+- A `# ry: expect(code)` inside a string literal counts as a directive, as every `#` on the line is
+  tried, so it can raise `unfulfilled-expect`.
+- `sapply` over a zero-length input is `list()` in R but types `T[]`.
+- A project `%op%` that captures an operand with `match.call`, `enquo` or `enexpr` instead of
+  `substitute` is checked as a call.
 
 Two items from the reports were checked and are not defects, recorded so they are not re-filed. A
 generic parameter rejecting a non-`NULL` default is correct, because `<T> fn(x: T, [fallback]: T)`

@@ -120,6 +120,38 @@ pick: <T> fn(a: T, b: T) -> T
 color: :Red | :Green
 result: :Ok(integer) | :Err(:Missing)
 
+#---- a_difference_of_two_values_of_one_class_is_a_double
+# Two dates subtract to a `difftime`, not a date, so a generic difference claims the representation.
+span <- function(from, to) to - from
+day <- as.Date("2024-01-02")
+gap <- span(day, day)
+#++++
+span: <T: arithmetic> fn(from: T, to: T) -> double
+day: Date
+gap: double
+
+#---- a_class_without_arithmetic_is_told_what_it_lacks
+# A class could satisfy `x + 1` with an operator method, so the message names that way out.
+shift <- function(x) x + 1
+levels <- shift(factor("a"))
+#++++
+shift: <T: arithmetic> fn(x: T) -> double
+levels: Unknown
+135..146 error[type-mismatch] expected a numeric value (`integer` or `double`) or a class with arithmetic, found `factor`
+
+#---- a_class_negates_only_with_arithmetic_between_its_values
+# R stops on `-day` (`-.Date` needs two operands), and a `difftime` negates to itself.
+day <- as.Date("2024-01-02")
+back <- -day
+gap <- day - day
+ahead <- -gap
+#++++
+day: Date
+back: Unknown
+gap: difftime
+ahead: difftime
+125..128 error[type-mismatch] expected a numeric value (`integer` or `double`), found `Date`
+
 #---- a_numeric_bound_needs_arithmetic_between_two_of_the_class
 # `Date + 1` is legal R and `Date + Date` is not, so `x + 1` asks only `arithmetic` of
 # `x`, while `a + b` on two values of one type asks `numeric`, which `Date` lacks and

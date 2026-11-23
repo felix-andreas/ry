@@ -268,11 +268,11 @@ missing or unreachable cases.
 ```
 
 **`unfulfilled-expect`** (warning): a `# ry: expect(code)` comment whose line and the next have no
-`code` finding, either because the code was fixed or because ry stopped reporting it. Remove the
-code from the comment, or the whole comment once it names nothing else.
+`code` finding, either because the code was fixed or because ry stopped reporting it. The message
+says to remove the comment when it names only that code, and the code otherwise:
 
 ```text
-! no `type-mismatch` finding is on this line or the next, so this expectation is stale. Remove `type-mismatch` from it
+! no `type-mismatch` finding is on this line or the next, so this expectation is stale. Remove the comment
 ```
 
 **`config`** (error): invalid TOML or a value of the wrong type in `ry.toml`. The language server

@@ -3541,6 +3541,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "expected a numeric value (`integer` or `double`) or a class with arithmetic between two of its values, found `{}`",
             renderer.render(db, *found)
         ),
+        // A class may satisfy `arithmetic` by declaring an operator method, so a class that
+        // fails it is told what it lacks; a plain value is not, because that would be noise.
+        TypeErrorKind::ConstraintViolation {
+            constraint: Constraint::Arithmetic,
+            found,
+        } if matches!(found.kind(db), TyKind::Named(..)) => format!(
+            "expected a numeric value (`integer` or `double`) or a class with arithmetic, found `{}`",
+            renderer.render(db, *found)
+        ),
         TypeErrorKind::ConstraintViolation {
             constraint: Constraint::Numeric,
             found,

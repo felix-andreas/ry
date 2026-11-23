@@ -680,7 +680,7 @@ report <- function() {
   sprintf("total %.1f, difference %.1f", total, difference)
 }
 #++++
-handlers: <T: numeric, U: arithmetic, V: numeric> list{add: fn(left: T, right: T) -> T, subtract: fn(left: U, right: U) -> U, multiply: fn(left: V, right: V) -> V}
+handlers: <T: numeric, U: arithmetic, V: numeric> list{add: fn(left: T, right: T) -> T, subtract: fn(left: U, right: U) -> double, multiply: fn(left: V, right: V) -> V}
 apply_operation: <T> fn(name: T, left: Unknown, right: Unknown) -> Unknown
 report: fn() -> character
 

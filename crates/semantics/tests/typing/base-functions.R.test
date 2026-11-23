@@ -484,6 +484,46 @@ widths: integer[named]
 bare: integer[]
 bumped: double[named]
 
+#---- a_generic_callback_over_a_list_of_vectors_leaves_the_shape_open
+# `v * 2` claims a scalar before `v` meets an element, and each element here is a vector, so R
+# returns a matrix.
+xs <- list(c(1, 2), c(3, 4))
+doubled <- sapply(xs, function(v) v * 2)
+declared <- sapply(xs, function(v: double[]) -> double {
+  sum(v)
+})
+#++++
+xs: list{double[], double[]}
+doubled: Any
+declared: double[]
+
+#---- a_return_of_the_callbacks_own_type_variable_leaves_the_shape_open
+kept <- sapply(1:3, identity, simplify = FALSE)
+#++++
+kept: Any
+
+#---- mapply_names_its_result_only_under_use_names
+plus <- function(v: double) -> double {
+  v + 1
+}
+named <- c(a = 1, b = 2)
+kept <- mapply(plus, named)
+dropped <- mapply(plus, named, USE.NAMES = FALSE)
+still_named <- sapply(named, plus, USE.NAMES = FALSE)
+#++++
+plus: fn(v: double) -> double
+named: double[named]
+kept: double[named]
+dropped: double[]
+still_named: double[named]
+
+#---- a_project_definition_of_an_apply_function_is_called_as_written
+Map <- function(f, ...) "mine"
+mapped <- Map(function(a) a, 1:3)
+#++++
+Map: <T> fn([f]: T, ...: Any) -> character
+mapped: character
+
 #---- a_flag_that_is_not_a_literal_leaves_the_shape_open
 f <- function(xs, keep) sapply(xs, function(x) x * 2, simplify = keep)
 #++++

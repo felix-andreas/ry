@@ -550,8 +550,8 @@ Each trades a narrow class of missed errors for a class of false reports seen on
   rigid parameters (`a / b` under `<T: numeric, U: numeric>`) give `double` instead of a mismatch.
 - **An `if` over an undecided library call is `Unknown`.** `overloaded_call` marks a call whose
   unchecked arguments left candidates disagreeing (`Checker::undecided_calls`), and a value `if` with
-  one as a branch is `Unknown`. A plain `Unknown` branch still joins as the other one, because a
-  recursive call's placeholder is `Unknown` during the group fixpoint; the mark is the provenance.
+  one as a branch is `Unknown`, as is one with any `Unknown` branch that is not a recursion
+  placeholder (see "An `Unknown` branch makes an `if` `Unknown`").
 - **An unchecked argument beside open caller variables still decides.** Without this, the
   narrowings agreed and declaration order picked `vapply`'s first candidate for an `Unknown`
   `FUN.VALUE`. Disagreeing narrowings become `Unknown`; agreed ones commit by re-probing the first fit,
@@ -863,6 +863,8 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - The stubs return `Any`: the shape depends on the callback's return and the `simplify` flag, and an overload set cannot discriminate on either, because both leave every argument type the same.
 - The checker types the call through the stub first (so the callback is checked against the elements), then refines: a scalar-like return gives `T[]`, a literal `simplify = FALSE` gives `list[T]`, anything else keeps `Any`. Names follow R (a named input, or a character input unless `USE.NAMES = FALSE`).
 - The scalar-like claim is trusted as length one, the same trust the vector rules already extend, so a callback typed scalar that returns several elements is a missed matrix rather than a false error.
+- A generic callback (a parameter, read before the call bound it, holds a variable) is trusted only when every element of `X` is scalar: generic arithmetic claims `double` before the parameter meets an element, so over a list of vectors it would type a matrix as `double[]`. A return holding a variable or a rigid (`identity`) keeps `Any`.
+- `sapply` keeps a named input's names whatever `USE.NAMES` says; `mapply` and `Map` name the result only under `USE.NAMES`. A project or local definition of the name wins (`Checker::calls_base`).
 - `tapply` stays `Any`: its result is an array shaped by the groups, which needs the matrix-shape design.
 
 ## In strict mode, a checked annotation over an `Unknown` value is reported
@@ -890,3 +892,12 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - `a %op% b` is the call `` `%op%`(a, b) `` in R. A project operator used to give `Unknown` (a strict-mode origin) because one may quote its right operand, as magrittr's `%>%` does.
 - The function type already records quoted formals (`FunctionType::quoted`, from `substitute()` reads) for ordinary calls, so the operator takes the same path: checked and typed as the call, unless one of its formals is quoted, which keeps it opaque with its operands' findings discarded.
 - An operator defined inside a function stays opaque: it is not a global, and a local binding's scheme is not a `GlobalEnv` read. Lowering `%op%` into a `Call` node was rejected, because the HIR keeps `Binary` for the destructuring forms (`%<-%`) and the `%in%` key tests read it.
+
+## A tied difference is `double`, and only a class closed under arithmetic negates
+
+**Status:** built (`infer_binary_numeric`, `infer_unary_minus` in `crates/semantics/src/check.rs`).
+
+- `function(a, b) a - b` asks `arithmetic`, so two dates pass, and returns `double`, not `T`: R subtracts two dates to a `difftime`, so `T` was a wrong `Date`. `double` is the representation every arithmetic class shares, the claim the other unfixed-atomic cases make. A tied `-` no longer ties a later operand, so `(x - mu) / sigma` leaves `sigma` its own variable.
+- Unary `-` on a class needs arithmetic between two of its values (the `numeric` test), as R stops on `-day`; `difftime` and `matrix` negate to themselves.
+- An `arithmetic` violation names "or a class with arithmetic" only when the value found is a class, because the plain `half("4")` message is the one most users see.
+- An annotated function keeps the formals its body captures with `substitute()` (`FunctionType::quoted`), so annotating a quoting `%op%` does not make its operands checked.
