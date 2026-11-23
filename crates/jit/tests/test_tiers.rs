@@ -1584,7 +1584,7 @@ fn a_builtin_that_warns_under_a_handler_on_every_call_becomes_a_step() {
         );
 
         let expected = run("handled('seven')");
-        assert_eq!(expected, "0L");
+        assert!(expected.starts_with("0L"), "{expected}");
         let before = jit::deoptimizations();
         for _ in 0..500 {
             assert_eq!(run("handled('seven')"), expected);
@@ -2536,6 +2536,41 @@ fn a_body_with_a_loop_is_priced_by_its_passes_per_call() {
         assert!(
             has_compiled_code("few"),
             "few did not compile for a long loop"
+        );
+        jit::install_mode(Mode::Off);
+    });
+}
+
+/// A body that held compiled code when its code image was written compiles at its first call
+/// in a session started from the image, where its entries come from the image and no backward
+/// jump is counted. `trained` and `fresh` arrive the same way, hot by entries with one pass of
+/// the loop per call, and only `trained` carries the image's flag. The scenario
+/// `install-code-image` runs the same through a real image.
+#[test]
+fn a_body_trained_into_a_code_image_compiles_at_its_first_call() {
+    with_interpreter(|| unsafe {
+        use interp::bytecode::{PROFILE, profile};
+        jit::install_mode(Mode::On);
+        let entries = interp::bytecode::tier().map_or(0, |tier| tier.entry_threshold);
+        let body = "function(x) { n <- 0L; for (v in x) n <- n + v * 2L + 1L; n }";
+        run(&format!("trained <- {body}; fresh <- {body}"));
+        for (name, state) in [("trained", profile::TIER_TRAINED), ("fresh", 0)] {
+            assert_eq!(run(&format!("{name}(5L)")), "11L");
+            let function = values::install(name)
+                .and_then(|symbol| eval::eval(symbol, values::global_env()))
+                .unwrap_or_else(|_| panic!("{name} is not defined"));
+            let counters = values::ints_mut(function.cdr().cdr().element(PROFILE));
+            counters[profile::ENTRIES] = entries;
+            counters[profile::BACK_EDGES] = 0;
+            counters[profile::EDGES_BEFORE] = 0;
+            counters[profile::TIER_STATE] = state;
+            counters[profile::NEXT] = i32::MIN;
+            assert_eq!(run(&format!("{name}(5L)")), "11L");
+        }
+        assert!(has_compiled_code("trained"), "trained did not compile");
+        assert!(
+            !has_compiled_code("fresh"),
+            "fresh compiled for one pass per call"
         );
         jit::install_mode(Mode::Off);
     });

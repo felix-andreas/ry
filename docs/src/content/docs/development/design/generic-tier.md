@@ -288,6 +288,12 @@ same question as a loop-free body's (`unpaid`). A body whose loops run two passe
 thereby priced as the short body it is, and a body whose work around the loops is steps that
 save nothing is left to its loops (`MOSTLY_TIER0`), which enter compiled code past those steps.
 
+A body trained into a code image arrives hot by its entries at its first call, before the
+session has counted a backward jump or a call rate for it. The session that trained the image
+measured both, so the image keeps its decision: a body that held compiled code when the image was
+written is flagged (`runtime::TRAINED`), and the measured tests pass a flagged body. The tests
+that read only the plan apply to it as to any other body.
+
 ### Native forms on boxed values (stage 2, partly built)
 
 The planner's types describe numbers and numeric vectors, and every other value is `Boxed`. Generic

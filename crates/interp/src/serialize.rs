@@ -2161,7 +2161,7 @@ impl Encoder<'_> {
     unsafe fn code(&mut self, code: Sexp, depth: u32) -> Result<(), Unencodable> {
         use crate::bytecode::{
             EPOCHS, FEEDBACK, FIRST_CONSTANT, HINTS, LOOPS, PROFILE, REGISTERS, SLOTS, SOURCE,
-            SUMMARY, profile,
+            SUMMARY, TIER1, profile,
         };
         if depth > MAX_DEPTH {
             return Err(Unencodable("code nested too deeply"));
@@ -2227,11 +2227,15 @@ impl Encoder<'_> {
                 // The tier state counts the compilations and cold refusals of this process's
                 // optimized code, which the image does not carry, so a new process starts that
                 // count afresh. A negative state is the tier's final refusal, a verdict about the
-                // code that holds in any process, so it is kept.
-                let counter = if index == profile::TIER_STATE {
-                    counter.min(0)
-                } else {
+                // code that holds in any process, so it is kept. So is the decision to compile
+                // the body: it rests on how often the body ran and how long its loops went on,
+                // which a new process has not measured when the body arrives hot.
+                let counter = if index != profile::TIER_STATE || counter < 0 {
                     counter
+                } else if constants.element(TIER1) != nil() {
+                    profile::TIER_TRAINED
+                } else {
+                    0
                 };
                 write_signed(self.out, i64::from(counter));
             }

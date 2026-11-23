@@ -592,6 +592,20 @@ pub const UNFORCED_FORMALS: i32 = 1 << 24;
 /// own in the body, and its closure calls are tier 0's.
 pub const NO_FRAMES: i32 = 1 << 25;
 
+/// A tier state flag a code image sets: the body held compiled code when the session that
+/// trained the image wrote it. That session measured how often the body is called and how long
+/// its loops run. A session started from the image has measured neither when the body arrives
+/// hot at its first call, so the body counts as having repaid its compile once ([`repaid`]).
+pub const TRAINED: i32 = profile::TIER_TRAINED;
+
+const _: () = assert!(TRAINED > NO_FRAMES);
+
+/// Whether a body the tier may still compile passed the tests of what its compile repays once
+/// already: it compiled in this session, or in the one that trained its code image.
+pub fn repaid(state: i32) -> bool {
+    state >= 0 && (compiles(state) > 0 || state & TRAINED != 0)
+}
+
 /// The tier state of a body the tier no longer compiles and whose calls it no longer inlines
 /// without a frame either.
 pub const NEVER_ELIDED: i32 = -2;

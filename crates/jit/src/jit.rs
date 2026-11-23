@@ -368,8 +368,8 @@ unsafe fn compile_cost(machine: &Machine<'_>) -> u64 {
 /// `per_call` on each, by the model at [`COMPILE_FIXED`], or `None` when it is expected to
 /// repay its compilation. A body that saves too little per call to repay it even if every call
 /// of the session were its own is [`analysis::SMALL`], for good; one that is only called too
-/// rarely is [`analysis::RARE`], and is asked again later. A body that compiled before passed
-/// the second test once already. Outside the default mode the compile's cost does not count,
+/// rarely is [`analysis::RARE`], and is asked again later. A body that compiled before, or in
+/// the session that trained its code image, passed the second test once already. Outside the default mode the compile's cost does not count,
 /// so only a body that saves nothing per call is refused.
 unsafe fn unpaid(machine: &Machine<'_>, per_call: u64) -> Option<&'static str> {
     unsafe {
@@ -381,7 +381,7 @@ unsafe fn unpaid(machine: &Machine<'_>, per_call: u64) -> Option<&'static str> {
             return Some(analysis::SMALL);
         }
         let profile = values::ints(machine.code.cdr().element(PROFILE));
-        if runtime::compiles(profile[profile::TIER_STATE]) > 0 {
+        if runtime::repaid(profile[profile::TIER_STATE]) {
             return None;
         }
         let threshold = bytecode::tier().map_or(0, |tier| tier.entry_threshold);
@@ -407,11 +407,12 @@ unsafe fn unpaid(machine: &Machine<'_>, per_call: u64) -> Option<&'static str> {
 /// tier 0 has lost by then. A refusal is [`analysis::UNPAID_LOOP`] and sets the wait: the loop
 /// asks again when its body has taken the backward jumps the test needs, and at least as many
 /// again as it has taken, so the attempts on a body whose plan keeps changing stay few. A body
-/// that compiled before passed the test once already.
+/// that compiled before, or in the session that trained its code image, passed the test once
+/// already.
 unsafe fn unpaid_loop(machine: &Machine<'_>, hot: Work) -> Option<&'static str> {
     unsafe {
         let profile = values::ints_mut(machine.code.cdr().element(PROFILE));
-        if runtime::compiles(profile[profile::TIER_STATE]) > 0 {
+        if runtime::repaid(profile[profile::TIER_STATE]) {
             return None;
         }
         let cost = compile_cost(machine);
@@ -864,6 +865,10 @@ unsafe fn compile_in<'a>(
                     .or_else(|| payback.then(|| unpaid_loop(machine, work.hot)).flatten())
             } else if work.outside.steps > 0 && saving(work.outside) == 0 {
                 Some(analysis::MOSTLY_TIER0)
+            } else if state >= 0 && state & runtime::TRAINED != 0 {
+                // The session that trained the code image measured the passes per call, which
+                // this one has not when the body arrives hot at its first call.
+                None
             } else if trigger == Trigger::HotEntry {
                 // A backward jump of the body is a pass through one of its loops, so the mean
                 // pass is what one is expected to save.

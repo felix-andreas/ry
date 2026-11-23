@@ -1544,6 +1544,10 @@ pub mod profile {
     /// tier compiles or records feedback for: it runs without a call frame, and the tiers' frames
     /// and their resume points assume one. Negative, so the optimizing tier treats it as refused.
     pub const TIER_OFF: i32 = i32::MIN;
+    /// The [`TIER_STATE`] a code image gives a body that held optimized code when the image was
+    /// written: a flag above the optimizing tier's own, which that tier reads as the training
+    /// session's decision to compile the body.
+    pub const TIER_TRAINED: i32 = 1 << 26;
     /// Nonzero while tier 0 records type feedback for this code, which only happens with the
     /// optimizing tier installed and while the code has no optimized code: during the first
     /// activation of a body with a loop, over the last eighth of the entry threshold
