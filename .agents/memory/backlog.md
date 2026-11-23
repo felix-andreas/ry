@@ -1287,6 +1287,7 @@ overhead, not allocation.
 ## Open: untyped R against GNU R
 
 - **Differences the fuzz kinds report**:
+  - *DataFrame:* a named string argument is not renamed: `DataFrame.select(t, d = "b")` (also `with_columns`, `group_by`) gives column `b`, though a string is short for `Expr.col` and a name renames (`reference/dataframes.mdx`); the frame kind names only expressions.
   - *The call an error or warning of a primitive names.* A primitive called inside another call reports itself (`` tryCatch(`dimnames<-`(1:3, list()), error = conditionCall) ``); GNU R names the enclosing closure call unless the caller is byte-compiled.
   - Other messages: `matrix(sum)`, `x <- NULL; x[3] <- sum`, `qr.influence(1:3, 2)`, TRE's reasons (`regexpr("(", "a")`).
   - `sys.calls()` lacks `paste`'s frame while a promise is forced inside it.

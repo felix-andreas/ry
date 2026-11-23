@@ -12,7 +12,8 @@ use {
         Engine, ProcessEngine,
         corpus::{check_corpus_seed, load_corpus, render_corpus_divergences},
         fuzz::{
-            MEMORY_LIMIT, ProgramKind, SeedReport, check_seed, format_numbers_program,
+            MEMORY_LIMIT, ProgramKind, SeedReport, check_seed, compare_engines,
+            format_numbers_program, frame_preamble, frame_regression_programs,
             native_helpers_program, parse_data_program, program, render_divergences,
             sprintf_program, trace_back_program,
         },
@@ -254,6 +255,123 @@ fn fuzz_perturbed_programs_agree_across_tiers() {
         &[&jit],
         fuzz_iterations(8),
     ));
+}
+
+/// Frame programs: DataFrame verb chains under ry against the base-R model of their documented
+/// contract that the program's prelude defines under GNU R, plus the fixed programs that pin
+/// column names equal to a verb's formals and R's `%%` and `%/%` edge cases.
+#[test]
+fn fuzz_frame_queries_match_their_model() {
+    if !gnu_r_available() || !ry_runtime_available() {
+        eprintln!("skipped: GNU R or ry's runtime is not available");
+        return;
+    }
+    let gnu_r = ProcessEngine::gnu_r().with_timeout(TIMEOUT).observing();
+    let tier0 = ProcessEngine::ry_tier0().with_timeout(TIMEOUT).observing();
+    let jit = ProcessEngine::ry_jit().with_timeout(TIMEOUT).observing();
+    let reports = run_kind(
+        ProgramKind::Frame,
+        &gnu_r,
+        &[&tier0, &jit],
+        fuzz_iterations(8),
+    );
+    // A model or a generator that drifts into failing would compare only the word "error".
+    let (lines, failed) = reports
+        .iter()
+        .flat_map(|report| report.reference.stdout.lines())
+        .fold((0, 0), |(lines, failed), line| {
+            (lines + 1, failed + usize::from(line == "error"))
+        });
+    assert!(
+        failed * 4 <= lines,
+        "{failed} of {lines} lines GNU R printed for frame programs are errors"
+    );
+    assert_agree(&reports);
+    let directory = scratch_directory();
+    for (index, source) in frame_regression_programs().iter().enumerate() {
+        let path = directory.join(format!("frame_regression_{index}.R"));
+        std::fs::write(&path, source).expect("write the frame regression program");
+        let expected = gnu_r
+            .run(&path)
+            .unwrap_or_else(|error| panic!("frame regression {index}: GNU R failed: {error}"));
+        assert!(
+            !expected.stdout.lines().any(|line| line == "error"),
+            "frame regression {index} fails under the model:\n{}",
+            expected.stdout
+        );
+        let (divergences, _) = compare_engines(source, &gnu_r, &expected, &[&tier0, &jit], &path);
+        assert!(
+            divergences.is_empty(),
+            "frame regression {index} diverges:\n{source}\n{}",
+            divergences
+                .iter()
+                .map(|divergence| format!("--- {} ---\n{}", divergence.engine, divergence.detail))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+    std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
+}
+
+/// The frame kind's dump must notice one changed cell and one swapped pair of rows where the
+/// order is fixed, and must not notice the swap where the order is left open.
+#[test]
+fn frame_dump_reports_a_changed_cell_and_a_row_swap() {
+    if !gnu_r_available() {
+        eprintln!("skipped: GNU R is not installed");
+        return;
+    }
+    let gnu_r = ProcessEngine::gnu_r().with_timeout(TIMEOUT).observing();
+    let check = |ordered: &str, a: &str, b: &str| {
+        format!(
+            "{}frame_check({ordered}, function() {{\n  t1 <- DataFrame(a = c({a}), b = c({b}))\n  DataFrame.filter(t1, Expr.col(\"a\") > 0L)\n}})\n",
+            frame_preamble()
+        )
+    };
+    let original = r#"1L, 2L, 3L"#;
+    let labels = r#""x", "y", "z""#;
+    let directory = scratch_directory();
+    let differs = |reference: &str, changed: &str| {
+        let reference_path = directory.join("frame_canary_reference.R");
+        let changed_path = directory.join("frame_canary_changed.R");
+        std::fs::write(&reference_path, reference).expect("write the canary program");
+        std::fs::write(&changed_path, changed).expect("write the canary program");
+        let expected = gnu_r
+            .run(&reference_path)
+            .expect("run the canary under GNU R");
+        let (divergences, _) =
+            compare_engines(reference, &gnu_r, &expected, &[&gnu_r], &changed_path);
+        !divergences.is_empty()
+    };
+    assert!(
+        !differs(
+            &check("TRUE", original, labels),
+            &check("TRUE", original, labels)
+        ),
+        "the canary differs from itself"
+    );
+    assert!(
+        differs(
+            &check("TRUE", original, labels),
+            &check("TRUE", original, r#""x", "y", "w""#)
+        ),
+        "a changed cell went unreported"
+    );
+    assert!(
+        differs(
+            &check("TRUE", original, labels),
+            &check("TRUE", "2L, 1L, 3L", r#""y", "x", "z""#)
+        ),
+        "a row swap went unreported where the order is fixed"
+    );
+    assert!(
+        !differs(
+            &check("FALSE", original, labels),
+            &check("FALSE", "2L, 1L, 3L", r#""y", "x", "z""#)
+        ),
+        "a row swap was reported where the order is left open"
+    );
+    std::fs::remove_dir_all(&directory).expect("remove the fuzz scratch directory");
 }
 
 #[test]
