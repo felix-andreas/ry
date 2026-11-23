@@ -635,14 +635,6 @@ pub unsafe fn plain_tag(object: Sexp) -> Option<u32> {
     layout.tag
 }
 
-/// The name of a plain tag without a payload, such as `:Bond`, or `None` for anything else. A
-/// table stores a column of them as the character column of their names.
-pub unsafe fn bare_tag_name(object: Sexp) -> Option<String> {
-    let tag = plain_tag(object)?;
-    let fields = &crate::heap().layouts.get(object.record_layout())?.fields;
-    matches!(fields, Fields::Positional(0)).then(|| tag_name(tag))
-}
-
 /// The layout a constructor call builds and the slot each item lands in, when the call's syntax
 /// decides both: `tag` is the tag's name for `.ry_tag`, and `names` holds each item's name
 /// symbol, or `nil()` for an unnamed item. `None` when the call would raise an error, which the
