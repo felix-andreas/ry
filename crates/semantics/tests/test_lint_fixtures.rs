@@ -5,7 +5,7 @@ use {
         DocumentKind,
         diagnostics::{Applicability, Severity},
         lints::{LintConfig, LintLevel, NameStyle, lint_file},
-        testing::with_fixture_project,
+        testing::{assert_message_style, with_fixture_project},
     },
     std::path::Path,
     syntax::testing::run_fixture_suite,
@@ -20,6 +20,7 @@ fn render_with(source: &str, config: &LintConfig) -> String {
             };
             let mut output = String::new();
             for diagnostic in lint_file(db, file, config) {
+                assert_message_style(&diagnostic.message);
                 let severity = match diagnostic.severity {
                     Severity::Error => "error",
                     Severity::Warning => "warning",

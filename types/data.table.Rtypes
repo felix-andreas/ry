@@ -8,7 +8,7 @@
 # argument's syntax. These declarations give values that class in the first
 # place, and cover the high-traffic ordinary-call surface.
 
-@type data.table
+@type data.table {data.frame}
 
 data.table : fn(...: Any, [keep.rownames]: logical | character, [check.names]: logical, [key]: character[], [stringsAsFactors]: logical) -> data.table
 as.data.table : fn(x: Any, [keep.rownames]: logical | character, ...: Any) -> data.table

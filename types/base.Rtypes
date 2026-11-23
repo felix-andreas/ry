@@ -381,15 +381,20 @@ sum : fn(...: complex[] | double[] | integer[] | logical[], [na.rm]: logical) ->
 min : @pure fn(...: integer[] | logical[], [na.rm]: logical) -> integer
 min : fn(...: double[], [na.rm]: logical) -> double
 min : fn(...: character[], [na.rm]: logical) -> character
+min : fn(...: Date, [na.rm]: logical) -> Date
+min : fn(...: POSIXct, [na.rm]: logical) -> POSIXct
 min : fn(...: Any, [na.rm]: logical) -> Any
 max : @pure fn(...: integer[] | logical[], [na.rm]: logical) -> integer
 max : fn(...: double[], [na.rm]: logical) -> double
 max : fn(...: character[], [na.rm]: logical) -> character
+max : fn(...: Date, [na.rm]: logical) -> Date
+max : fn(...: POSIXct, [na.rm]: logical) -> POSIXct
 max : fn(...: Any, [na.rm]: logical) -> Any
 range : @pure fn(...: integer[] | logical[], [na.rm]: logical) -> integer[]
 range : fn(...: double[], [na.rm]: logical) -> double[]
 range : fn(...: character[], [na.rm]: logical) -> character[]
 range : fn(...: Date, [na.rm]: logical) -> Date
+range : fn(...: POSIXct, [na.rm]: logical) -> POSIXct
 range : fn(...: Any, [na.rm]: logical) -> Any
 pmin : @pure fn(...: integer[] | logical[], [na.rm]: logical) -> integer[]
 pmin : fn(...: double[], [na.rm]: logical) -> double[]
@@ -459,6 +464,8 @@ trunc : @pure fn(x: Any, ...: Any) -> double
 sort : fn(x: Any, [decreasing]: logical, [na.last]: Any, [method]: character, index.return: logical, ...: Any) -> Any
 sort : @pure <T> fn(x: T[], [decreasing]: logical, ...: Any, [na.last]: Any, [method]: character, [index.return]: logical, [partial]: Any) -> T[]
 sort : fn(x: factor, [decreasing]: logical, ...: Any) -> factor
+sort : fn(x: Date, [decreasing]: logical, ...: Any) -> Date
+sort : fn(x: POSIXct, [decreasing]: logical, ...: Any) -> POSIXct
 sort : fn(x: Any, [decreasing]: logical, ...: Any, [na.last]: Any, [method]: character, [index.return]: logical, [partial]: Any) -> Any
 order : @pure fn(...: Any, [na.last]: Any, [decreasing]: logical, [method]: character) -> integer[]
 rank : @pure fn(x: Any, [na.last]: Any, [ties.method]: character) -> Any
@@ -466,12 +473,16 @@ rank : @pure fn(x: Any, [na.last]: Any, [ties.method]: character) -> Any
 # ahead of the plain list one — otherwise `rev(opts)$timeout` is reported as a
 # missing field on code R runs.
 rev : @pure fn(x: factor) -> factor
+rev : fn(x: Date) -> Date
+rev : fn(x: POSIXct) -> POSIXct
 rev : <T> fn(x: T[]) -> T[]
 rev : <T> fn(x: list[named: T]) -> list[named: T]
 rev : <T> fn(x: list[T]) -> list[T]
 rev : fn(x: Any) -> Any
 unique : @pure <T> fn(x: T[], [incomparables]: Any, ...: Any, [fromLast]: logical, [nmax]: Any) -> T[]
 unique : fn(x: factor, [incomparables]: Any, ...: Any) -> factor
+unique : fn(x: Date, [incomparables]: Any, ...: Any) -> Date
+unique : fn(x: POSIXct, [incomparables]: Any, ...: Any) -> POSIXct
 unique : <T> fn(x: list[named: T], [incomparables]: Any, ...: Any, [fromLast]: logical, [nmax]: Any) -> list[named: T]
 unique : <T> fn(x: list[T], [incomparables]: Any, ...: Any, [fromLast]: logical, [nmax]: Any) -> list[T]
 # The fallback candidate is variadic because `unique` is a generic and its
@@ -617,10 +628,13 @@ list : @pure fn(...: Any) -> list[Any]
 c : @pure fn(...: Any, [recursive]: logical, [use.names]: logical) -> Any
 force : <T> fn(x: T) -> T
 withVisible : <T> fn(x: T) -> list{value: T, visible: logical}
-# `sapply`/`mapply`/`Map` simplify (or not) to a vector, matrix, or list depending on the
-# results (value-dependent), so their results stay `Any`; `apply` and friends also forward named
-# arguments to the callee. `Negate` needs a variadic-generic signature.
-sapply : @pure(FUN) fn(X: Any, FUN: Any, ...: Any, [simplify]: Any, [USE.NAMES]: logical) -> Any
+# `sapply` and `mapply` simplify (or not) to a vector, matrix, or list depending on the results
+# (value-dependent), so their results stay `Any`, but their parameters are typed: `sapply`'s
+# callback takes `X`'s elements, as `lapply`'s does, and `Map` always returns a list. A function
+# named by a string passes through `match.fun`. `Negate` needs a variadic-generic signature.
+sapply : @pure(FUN) <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any, [simplify]: Any, [USE.NAMES]: logical) -> Any
+sapply : @pure(FUN) <T, U> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> U, ...: Any, [simplify]: Any, [USE.NAMES]: logical) -> Any
+sapply : @pure(FUN) fn(X: Any, FUN: fn(Any) -> Any, ...: Any, [simplify]: Any, [USE.NAMES]: logical) -> Any
 # `vapply`'s whole reason to exist is that `FUN.VALUE` DECLARES the result type,
 # so the declaration ties the callback's return to it: a callback returning
 # `character` under a `numeric(1)` template is the error R raises at runtime
@@ -646,10 +660,10 @@ vapply : @pure(FUN) <T, V> fn(X: list[T] | T[], FUN: fn(T) -> V, FUN.VALUE: V[] 
 # Tried last, because a generic `FUN` would also match it. A matrix carries no element
 # type, so a matrix-valued `FUN` accepts any template, and R stacks the results into a matrix.
 vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> matrix, FUN.VALUE: Any, ...: Any, [USE.NAMES]: logical) -> matrix
-mapply : @pure(FUN) fn(FUN: Any, ...: Any, [MoreArgs]: Any, [SIMPLIFY]: Any, [USE.NAMES]: logical) -> Any
-Map : Any
+mapply : @pure(FUN) fn(FUN: fn(...: Any) -> Any, ...: Any, [MoreArgs]: Any, [SIMPLIFY]: Any, [USE.NAMES]: logical) -> Any
+Map : @pure(f) fn(f: fn(...: Any) -> Any, ...: Any) -> list[Any]
 # `tapply`'s result is an array whose shape follows `INDEX` (value-dependent).
-tapply : @pure(FUN) fn(X: Any, INDEX: Any, [FUN]: Any, ...: Any, [default]: Any, [simplify]: logical) -> Any
+tapply : @pure(FUN) fn(X: Any, INDEX: Any, [FUN]: (fn(Any) -> Any) | NULL, ...: Any, [default]: Any, [simplify]: logical) -> Any
 Negate : @pure Any
 Vectorize : @pure Any
 Recall : Any

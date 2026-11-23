@@ -7,8 +7,8 @@ second <- mirror("hello")
 mirror: <T> fn(x: T) -> T
 first: integer
 second: character
-24..29 warning[unused] `first` is assigned but never used.
-44..50 warning[unused] `second` is assigned but never used.
+24..29 warning[unused] `first` is assigned but never used
+44..50 warning[unused] `second` is assigned but never used
 
 #---- repeated_polymorphic_instantiations_remain_independent
 mirror <- function(x) x
@@ -20,9 +20,9 @@ mirror: <T> fn(x: T) -> T
 first: integer
 second: character
 third: integer
-24..29 warning[unused] `first` is assigned but never used.
-44..50 warning[unused] `second` is assigned but never used.
-70..75 warning[unused] `third` is assigned but never used.
+24..29 warning[unused] `first` is assigned but never used
+44..50 warning[unused] `second` is assigned but never used
+70..75 warning[unused] `third` is assigned but never used
 
 #---- aliased_polymorphic_function_remains_polymorphic
 mirror <- function(x) x
@@ -34,8 +34,8 @@ mirror: <T> fn(x: T) -> T
 alias: <T> fn(x: T) -> T
 first: integer
 second: character
-40..45 warning[unused] `first` is assigned but never used.
-59..65 warning[unused] `second` is assigned but never used.
+40..45 warning[unused] `first` is assigned but never used
+59..65 warning[unused] `second` is assigned but never used
 
 #---- higher_order_polymorphic_identity
 mirror <- function(x) x
@@ -47,8 +47,8 @@ mirror: <T> fn(x: T) -> T
 apply_once: <T, U> fn(f: fn(T) -> U, value: T) -> U
 first: integer
 second: character
-66..71 warning[unused] `first` is assigned but never used.
-98..104 warning[unused] `second` is assigned but never used.
+66..71 warning[unused] `first` is assigned but never used
+98..104 warning[unused] `second` is assigned but never used
 
 #---- constant_function_instantiates_across_argument_types
 const_integer <- function(x) 1L
@@ -192,7 +192,7 @@ f <- function(x) NULL
 #++++
 f: <T> fn([x]: T) -> NULL
 51..59 error[type-mismatch] the element of a `[]` vector type must be an atomic type, found `Person`. For a list of these, write `list[Person]`
-69..70 warning[unused] `f` is assigned but never used.
+69..70 warning[unused] `f` is assigned but never used
 
 #---- numeric_binder_authorizes_body_arithmetic
 #: <T: numeric> fn(x: T) -> T
@@ -207,7 +207,7 @@ integer
 add_one <- function(x) x + 1L
 #++++
 add_one: <T> fn(x: T) -> T
-21..28 warning[unused] `add_one` is assigned but never used.
+21..28 warning[unused] `add_one` is assigned but never used
 44..45 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T`
 
 #---- atomic_binder_does_not_authorize_arithmetic
@@ -215,7 +215,7 @@ add_one: <T> fn(x: T) -> T
 bump <- function(x) x + 1L
 #++++
 bump: <T: atomic> fn(x: T[]) -> T[]
-33..37 warning[unused] `bump` is assigned but never used.
+33..37 warning[unused] `bump` is assigned but never used
 53..54 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T[]`
 
 #---- numeric_binder_authorizes_comparison

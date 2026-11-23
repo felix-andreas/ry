@@ -80,7 +80,7 @@ fee_for <- function(region, amount) { ... }
 Writing the names is a style choice for readability, not a tax the carrier imposes.
 
 **A broken attachment is loud, not silent.** A plain `#` comment in between does detach a `#:`
-block, but the result is an error whose message contains the fix: "A `#:` typing comment must be
+block, but the result is an error whose message contains the fix: "a `#:` typing comment must be
 followed immediately by an expression. Put it directly above the definition, below any roxygen2
 block." The natural roxygen order works without any diagnostic, so this is one self-explaining error,
 not a trap.

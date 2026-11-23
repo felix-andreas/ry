@@ -59,7 +59,7 @@ result <- double_count(2L)
 #++++
 == R/b.R
 result: Unknown
-10..22 warning[unresolved] I could not resolve `double_count` in this package, its imports, or builtins.
+10..22 warning[unresolved] I could not resolve `double_count` in this package, its imports, or builtins
 
 #---- new_type_definition_resolves_forward_reference
 #~~~~ R/a.R
@@ -68,7 +68,7 @@ value <- list(name = "bob")
 #++++
 == R/a.R
 value: list{name: character}
-3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 
 #---- new_type_definition_resolves_forward_reference_then_v1
 #~~~~ R/a.R

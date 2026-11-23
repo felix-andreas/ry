@@ -729,7 +729,7 @@ async fn burst_of_edits_settles_on_the_final_text() {
     let deadline = Instant::now() + TIMEOUT;
     loop {
         let published = messages(context.recv_diagnostics(&uri).await);
-        if published.len() == 1 && published[0].contains("Use <-, not =, for assignment") {
+        if published.len() == 1 && published[0].contains("use <-, not =, for assignment") {
             break;
         }
         assert!(
@@ -1464,7 +1464,7 @@ async fn namespace_buffer_publishes_import_validation() {
     assert!(
         diagnostic
             .message
-            .contains("`medain` is not exported by `stats`, so this package will not load."),
+            .contains("`medain` is not exported by `stats`, so this package will not load"),
         "unexpected message: {diagnostic:?}"
     );
     assert_eq!(

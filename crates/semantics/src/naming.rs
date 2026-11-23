@@ -285,6 +285,7 @@ pub fn resolve_item(
         read_parameter_slots: BTreeSet::new(),
         emit: true,
         quiet_depth: 0,
+        mask_depth: 0,
         probes: Vec::new(),
         deferred_depth: 0,
         exit_frame: None,
@@ -417,6 +418,9 @@ struct Context<'a> {
     /// The variables of the `for` loops being walked, innermost last.
     active_loop_variables: Vec<BindingId>,
     quiet_depth: u32,
+    /// How many of the `quiet_depth` levels are table masks, whose frames hold columns, so
+    /// a called name there still resolves loudly.
+    mask_depth: u32,
     /// The `pkg::name` reads that are the whole expression a `try()` or an error-catching
     /// `tryCatch()` evaluates, or that expression's callee.
     probes: Vec<ExprId>,
@@ -677,7 +681,20 @@ impl Context<'_> {
                     }
                     _ => {}
                 }
-                self.resolve(*callee);
+                // A data mask's frame holds columns, which are not functions, so a called name
+                // inside it still resolves loudly: `mutate(d, b = typo(a))` is a real miss.
+                // data.table's `.()` and `J()` exist only inside its `[`.
+                let loud_in_mask = self.mask_depth > 0
+                    && self.quiet_depth == self.mask_depth
+                    && !matches!(module.kind(*callee),
+                        ExpressionKind::NameRef(name) if MASK_ONLY_CALLEES.contains(&name.as_str()));
+                if loud_in_mask {
+                    let quiet_depth = std::mem::replace(&mut self.quiet_depth, 0);
+                    self.resolve(*callee);
+                    self.quiet_depth = quiet_depth;
+                } else {
+                    self.resolve(*callee);
+                }
                 let callee_symbol = match module.kind(*callee) {
                     ExpressionKind::NameRef(name) => Some(*name),
                     _ => None,
@@ -987,6 +1004,9 @@ impl Context<'_> {
                     self.resolve_arguments(&module[arguments]);
                     return;
                 };
+                // `with` and `within` evaluate in any list or environment, which often holds
+                // functions, so only a table's mask makes its called names loud.
+                let table_mask = u32::from(!matches!(accessor, Some("with" | "within")));
                 let flags = data_argument_flags(module, &module[arguments], &leading);
                 for (argument, data_argument) in module[arguments].iter().zip(flags) {
                     let Some(value) = argument.value else {
@@ -1007,7 +1027,9 @@ impl Context<'_> {
                         });
                         self.premint_frame_assignments(value);
                         self.quiet_depth += 1;
+                        self.mask_depth += table_mask;
                         self.resolve(value);
+                        self.mask_depth -= table_mask;
                         self.quiet_depth -= 1;
                         self.scopes.pop();
                     }
@@ -1034,7 +1056,9 @@ impl Context<'_> {
                 {
                     self.naming.masked_subsets.insert(id);
                     self.quiet_depth += 1;
+                    self.mask_depth += 1;
                     self.resolve_arguments(&module[arguments]);
+                    self.mask_depth -= 1;
                     self.quiet_depth -= 1;
                 } else {
                     self.resolve_arguments(&module[arguments]);
@@ -2556,6 +2580,28 @@ const EAGER_CALLERS: [&str; 27] = [
     "walk",
     "keep",
     "discard",
+];
+
+/// Called names a mask gives meaning without any import. In a table `[`, `.()` is `list()`,
+/// `J()` a join, `:=` and `let()` the column update and `patterns()` a `.SDcols` selector;
+/// tidyselect puts its selection helpers in every selection's mask.
+const MASK_ONLY_CALLEES: [&str; 16] = [
+    ".",
+    "J",
+    ":=",
+    "let",
+    "patterns",
+    "all_of",
+    "any_of",
+    "contains",
+    "ends_with",
+    "everything",
+    "last_col",
+    "matches",
+    "num_range",
+    "one_of",
+    "starts_with",
+    "where",
 ];
 
 const QUOTING_FORMS: [&str; 4] = ["quote", "substitute", "bquote", "expression"];

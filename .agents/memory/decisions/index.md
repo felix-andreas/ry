@@ -10,7 +10,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 
 ## Syntax and semantics
 
-[`syntax-semantics.md`](syntax-semantics.md): The parser and syntax tree, name resolution, and the type checker.
+[`syntax-semantics.md`](syntax-semantics.md): The parser and syntax tree, name resolution, stubs, and the foundations of the type system.
 
 - The standard library ships as declaration-only stub files
 - The beta semantics
@@ -27,9 +27,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Beta semantics: Guard narrowing (built, with exceptions)
 - Beta semantics: The expanded parameter directive is `@param name {TYPE}`
 - A syntax error does not erase a file
-- `is.null` shapes an unconstrained inference variable (built, with exceptions)
 - Data-masked resolution for data.table and the with-family (built, with exceptions)
-- Recursion in a function-valued assignment is monomorphic (built, with exceptions)
 - Bare-name resolution is not gated on NAMESPACE imports
 - The shipping stack is a hand-written parser, a lossless tree, and salsa
 - Shipping stack: Why the previous stack was replaced rather than tuned
@@ -44,13 +42,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Shipping stack: Cases where R parsers get subtle
 - Shipping stack: Corpus mechanics (built, with exceptions)
 - Shipping stack: Better syntax errors are a goal, not a side effect
-- Deep resolve cuts a cycle to `Unknown` and resolves a shared subtree once
-- The interface fixpoint is canonical per group, so a cyclic scheme does not depend on forcing order (built, with exceptions)
-- There is no third constraint kind, so two flexible comparison operands stay unconstrained (built, with exceptions)
-- Union compatibility commits a flexible argument at first use, in program order
-- Strict mode attributes a recursive binding the fixpoint cannot fully type
 - Script frame semantics (built, with exceptions)
-- An undeclared type name errors once at the reference and compares like `Unknown`
 - An annotation shape violation refuses the whole block
 - A statement-level annotation attaches at any depth and applies where the expression infers
 - Capture liveness is frame-scoped
@@ -60,22 +52,66 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The native pipe desugars at lowering
 - `@masked` is formal-aware, and dplyr is a conditional namespace
 - A vendored export manifest carries the name-level truth beside the typed stubs
-- A call's result drops unconstrained type-parameter members of a union
-- Call checking follows R's lazy argument and matching rules (built, with exceptions)
 - Called names are looked up as functions
 - testthat files mirror testthat's environments
 - useDynLib native symbols resolve only as a native routine's name
+- Nested replacement rewrites the spine
+- A strict library file's top level holds only definitions, and purity is declared
+- The checker presumes R code is correct where R's semantics leave the question open
+- Shipped stubs are whatever `types/` holds
+- Override-stub problems are computed after `PackageMetadata` exists
+- Corpus-driven stub and overload fixes
+- Inferred annotations follow the project's annotation style
+- Packages without stubs are read from the R library by the host, lazily
+- References are checked against an independent resolver, and a replacement copy is its source
+- `if` in NAMESPACE is evaluated by the host, then resolved in text
+- Reference Class and R6 method bodies resolve object members in naming
+- A literal `source()` path is followed for resolution
+- A masked argument is its own scope, and the base masking family is typed
+- `pkg::name` on an inactive shipped namespace checks the shipped export list
+- A name inside a string's `{...}` is a read for liveness
+- tidyr and tibble ship masked-verb stubs beside their manifests
+- A splice reparse refuses a prefix with an unclosed delimiter
+- The syntax tree is ry's own flat preorder arena
+- A function has one signature, resolved in `syntax::annotation`
+- A splice reparse shares what the parser's recorded lookahead proves untouched
+- One syntax verdict, in the `syntax` crate, for `ry check` and the runtime
+- A stub type name is no value, and a type and a value of one name each have a declaration
+- A `#:` block in an argument list types the argument after it
+- A value whose code a later top-level write replaces is a template
+- A key test reads within the tests that enclose it
+- A package's own `pkg::name` reads are checked against `NAMESPACE` and `data/` (settled)
+- A `[` on a query's result is a query
+- An unassigned path reads the name outside the function
+- A closure's read sees the writes after its definition
+- Feature probes, Windows-only exports and callback strings
+- Shipping stack: Plain R comes from `ry build --plain-r`
+- A top-level `if (FALSE)` body binds no package name (settled)
+- Diagnostic messages are lowercase and end without a full stop (settled)
+- A called name inside a table's mask resolves loudly (settled)
+- S3 methods are held to their package generic's formals, by `R CMD check`'s rule
+- A stub never sees the project's own types
+
+## Type checker
+
+[`type-checker.md`](type-checker.md): Type inference: overloads, narrowing, unions, nominal types, recursion and strict mode.
+
+- `is.null` shapes an unconstrained inference variable (built, with exceptions)
+- Recursion in a function-valued assignment is monomorphic (built, with exceptions)
+- Deep resolve cuts a cycle to `Unknown` and resolves a shared subtree once
+- The interface fixpoint is canonical per group, so a cyclic scheme does not depend on forcing order (built, with exceptions)
+- There is no third constraint kind, so two flexible comparison operands stay unconstrained (built, with exceptions)
+- Union compatibility commits a flexible argument at first use, in program order
+- Strict mode attributes a recursive binding the fixpoint cannot fully type
+- An undeclared type name errors once at the reference and compares like `Unknown`
+- A call's result drops unconstrained type-parameter members of a union
+- Call checking follows R's lazy argument and matching rules (built, with exceptions)
 - Comparisons coerce across atomic types
 - A test-guarded write to a formal normalizes it; inferred types admit the default
 - An open `T | NULL` parameter binds `T` to the argument's non-`NULL` part
 - `switch(typeof(x), ...)` narrows `x` per arm
-- Nested replacement rewrites the spine
-- A strict library file's top level holds only definitions, and purity is declared
-- The checker presumes R code is correct where R's semantics leave the question open
 - A computed function that may be `NULL` is called as the function
 - A function literal in a call argument is typed in context
-- Shipped stubs are whatever `types/` holds
-- Override-stub problems are computed after `PackageMetadata` exists
 - Strict mode implies type errors
 - An all-`Any` overload does not veto agreement among unchecked fits
 - A formula is the nominal `formula`, and its operands are not judged
@@ -84,68 +120,50 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `<<-` writes flow forward, and a NULL-initialized cache reads its own first write
 - The overload probe's unchecked-argument witness is a nominal no candidate declares
 - A call on a parameter whose arity the body tests is unchecked, and a later sibling does not force
-- Corpus-driven stub and overload fixes
 - Strict-friction rules for matrices, unions, `...: Any` and `$` members
-- Inferred annotations follow the project's annotation style
 - `$` fields resolve through the values that built the receiver
-- Packages without stubs are read from the R library by the host, lazily
 - Inferred signatures carry body facts that a call reads
 - `Reduce` folds a named function instead of matching `fn(U, T) -> U`
-- References are checked against an independent resolver, and a replacement copy is its source
-- `if` in NAMESPACE is evaluated by the host, then resolved in text
-- Reference Class and R6 method bodies resolve object members in naming
-- A literal `source()` path is followed for resolution
-- A masked argument is its own scope, and the base masking family is typed
-- `pkg::name` on an inactive shipped namespace checks the shipped export list
-- A name inside a string's `{...}` is a read for liveness
 - An `if` with an `Any` branch is `Any`; a two-path write still unifies
-- tidyr and tibble ship masked-verb stubs beside their manifests
 - `length(x)` guards drop `NULL`
 - A numeric binding yields to a matrix or a generic argument
-- A splice reparse refuses a prefix with an unclosed delimiter
 - Alias cycles are reported at the declaration, and short names get narrow suggestions
-- The syntax tree is ry's own flat preorder arena
 - Overload probes reject by call shape first
 - `[[` by name on a named atomic vector is the element, not `T | NULL`
 - Correlated-path allowances added for the fresh sample
-- A function has one signature, resolved in `syntax::annotation`
-- A splice reparse shares what the parser's recorded lookahead proves untouched
-- One syntax verdict, in the `syntax` crate, for `ry check` and the runtime
 - Corpus false reports: the narrowing and overload rules that cleared them
 - `@opaque` parameters accept ry values
 - The stats d/p/q functions follow the scalar claim
-- A `#:` block in an argument list types the argument after it
 - A function literal default takes its parameter's declared function type
 - A type variable may be bounded by a union
-- A value whose code a later top-level write replaces is a template
-- A key test reads within the tests that enclose it
 - Strict mode reports where `Unknown` enters, not every type it reaches
 - An all-`logical` call of a numeric function keeps `logical` (settled)
-- A package's own `pkg::name` reads are checked against `NAMESPACE` and `data/` (settled)
 - A wrapper over a numeric overload set takes the `numeric` bound (settled)
-- A `[` on a query's result is a query
 - Branches decide each other's literal items, and `c()` decides a literal as R's type
 - A loop's `break`s and `next`s join where they land
 - An error against a fixed type keeps the item's export
 - An annotation that misuses the type vocabulary carries no payload
-- An unassigned path reads the name outside the function
 - A declared type parameter keeps its name in messages
-- A closure's read sees the writes after its definition
 - A nominal field narrows through a fact, not a rewritten type
 - A type past the size ceiling widens to `Unknown`, never to a recursive nominal (settled)
 - A `logical` argument binds a numeric type parameter to `integer`
-- Feature probes, Windows-only exports and callback strings
 - An empty list adds no element to `c()` or a loop
-- Shipping stack: Plain R comes from `ry build --plain-r`
 - A signature's type parameters are in scope in its body
 - `opaque` makes a type's representation private to its file
 - Open records are explicit, with no row variables
 - Recursive types are nominal; an alias never recurses
 - S4 is typed through a nominal wrapper, not from `setClass`
 - A typed environment lists its bindings and never changes type
-- A top-level `if (FALSE)` body binds no package name (settled)
 - S3 subsetting dispatches on the declared class first (settled)
 - A generic's dispatch formal is forced when an argument reaches it (settled)
+- A nominal over a nominal extends it (settled)
+- `numeric` is closed under arithmetic, `arithmetic` is not (settled)
+- `new()` is checked against the slots `setClass` writes out (settled)
+- `sapply`, `mapply` and `Map` take their shape from the callback's return, after the stub call
+- In strict mode, a checked annotation over an `Unknown` value is reported
+- An `Unknown` branch makes an `if` `Unknown`, unless it read a recursion placeholder
+- A project's top-level `%op%` is checked as a call unless it quotes an operand
+- A tied difference is `double`, and only a class closed under arithmetic negates
 
 ## Analysis core
 
@@ -210,9 +228,11 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Completion pushes down names whose declared type cannot fit, and never promotes
 - The console's crossterm is patched to drain the terminal, and R reads console input one line per chunk
 - An editor target is what the code means, and rename refuses what it cannot trace
+- A hover's link is the definition's resolution, and a name that resolves is one completion offers
 - `--annotate` and the code action write a lambda argument's signature
 - A cancellation flips the worker's token only inside an armed scope
 - A local typed by a signature's type parameter reads as that parameter
+- `# ry: expect(code)` reports when its finding is gone
 
 ## Interpreter
 
@@ -685,6 +705,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A package `ry load` loaded counts as a pkgload dev package
 - Typed benchmark templates do R-level work in boundary functions
 - ry test forks its workers
+- `ry debug type FILE:LINE:COLUMN` prints the hover at a position
 
 ## Docs, process and positioning
 

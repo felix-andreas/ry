@@ -713,9 +713,26 @@ while you work: connect to the socket named in `$TMPDIR/ry-<uid>/console-<pid>.j
 
 ## debug
 
+`ry debug type FILE:LINE:COLUMN` prints the type the checker gives the name or expression at a
+position, the same text the editor shows on hover. The line and the column count from 1, and the
+column counts characters, as `ry check` reports them. Typing is on for the query whatever `ry.toml`
+says. With `prices.R` holding
+
+```r
+prices <- c(a = 1.5, b = 2)
+cheap <- prices[prices < 2]
+```
+
+the query at the second `prices` gives
+
+```console
+$ ry debug type prices.R:2:10
+prices: double[named]
+```
+
 `ry debug ast FILE` prints the syntax tree of a file, `ry debug analysis-stats [PATH]` analyzes
 a workspace and reports where time and memory go, and `ry debug erase FILE...` rewrites files in
-place as the plain R that `ry R` runs, with every inline annotation removed. All three are developer
+place as the plain R that `ry R` runs, with every inline annotation removed. These three are developer
 aids for working on ry itself.
 
 ## Crash reports

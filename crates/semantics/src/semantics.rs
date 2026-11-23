@@ -11,6 +11,7 @@ pub mod load_index;
 pub mod metadata;
 pub mod naming;
 pub mod native;
+pub mod s4;
 pub mod session;
 pub mod sorted;
 pub mod stubs;
@@ -31,7 +32,7 @@ use {
     salsa::plumbing::AsId,
     smallvec::SmallVec,
     std::{
-        cell::RefCell,
+        cell::{Cell, RefCell},
         collections::{BTreeMap, BTreeSet},
         num::NonZero,
         sync::{
@@ -592,11 +593,27 @@ pub fn item_spans<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemSpan<'db>> 
             _ => NO_STAMP,
         };
         let (kind, name, name_range) = match top_level_definition(&node) {
-            Some(definition) => (
-                definition.kind,
-                Some(Symbol::new(&definition.name)),
-                Some(definition.name_range),
-            ),
+            Some(definition) => {
+                // A jump to a definition lands on this range, so it is the name's own token.
+                debug_assert!(
+                    node.text_range().contains_range(definition.name_range)
+                        && file
+                            .text(db)
+                            .get(std::ops::Range::<usize>::from(definition.name_range))
+                            .is_some_and(|spelled| {
+                                spelled.contains('\\')
+                                    || spelled.trim_matches(['`', '"', '\'']) == definition.name
+                            }),
+                    "the name range {:?} of `{}` does not spell it",
+                    definition.name_range,
+                    definition.name
+                );
+                (
+                    definition.kind,
+                    Some(Symbol::new(&definition.name)),
+                    Some(definition.name_range),
+                )
+            }
             None => (ItemKind::Statement, None, None),
         };
         let disambiguator = {
@@ -861,8 +878,16 @@ impl ItemSyntax {
 /// the module comes out equal, and everything downstream of it cuts off.
 #[salsa::tracked(returns(ref))]
 pub fn item_hir<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<hir::Module> {
-    let syntax = item_syntax(db, item)?;
-    Some(hir::lower_item(&syntax.syntax_node()))
+    let node = item_syntax(db, item)?.syntax_node();
+    let module = hir::lower_item(&node);
+    debug_assert!(
+        module
+            .ranges()
+            .all(|range| node.text_range().contains_range(range)),
+        "an expression lies outside its item {:?}",
+        node.text_range()
+    );
+    Some(module)
 }
 
 #[salsa::tracked(returns(ref))]
@@ -877,7 +902,20 @@ pub fn item_naming<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<naming::Item
         Some(files) => *project_ref_class_binds(db, files, class, member),
         None => ref_class_binds(file_ref_classes(db, file), class, member),
     };
-    Some(naming::resolve_item(module, masked_verbs, &is_member))
+    let naming = naming::resolve_item(module, masked_verbs, &is_member);
+    // The item's own range is its widest expression: reading the syntax here would tie the
+    // names to the item's stamp.
+    debug_assert!(
+        {
+            let extent = module.ranges().reduce(TextRange::cover);
+            naming
+                .bindings
+                .values()
+                .all(|info| extent.is_some_and(|extent| extent.contains_range(info.range)))
+        },
+        "a binding lies outside its item"
+    );
+    Some(naming)
 }
 
 /// The Reference Classes a file defines, keyed by class name, with the members that
@@ -1067,9 +1105,8 @@ pub fn package_scheme_exists_in(
         return true;
     }
     library.is_some_and(|library| {
-        library.nominals.contains(name)
-            || ((library.schemes.contains_key(name) || library.known_exports.contains(name))
-                && !stubs::outside_prelude(db, library, name))
+        (library.schemes.contains_key(name) || library.known_exports.contains(name))
+            && !stubs::outside_prelude(db, library, name)
     })
 }
 
@@ -2411,7 +2448,7 @@ pub(crate) fn file_s3_generics(db: &dyn Db, file: SourceFile) -> FxHashSet<Strin
 
 /// A firewall, so a body edit does not re-derive the file's generics.
 #[salsa::tracked]
-fn reads_use_method<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
+pub(crate) fn reads_use_method<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
     item_naming(db, item)
         .as_ref()
         .is_some_and(|naming| naming.non_locals.values().any(|name| *name == "UseMethod"))
@@ -3237,6 +3274,10 @@ fn canonical_position<'db>(
 pub struct MemberExports<'db> {
     pub scheme: types::TypeScheme<'db>,
     pub top_level_bindings: ThinVec<(Symbol, types::TypeScheme<'db>)>,
+    /// Whether an `Unknown` in these exports may come from the fixpoint's seed rather than from
+    /// the code: the seed itself, or a member that read a pending export and still carries an
+    /// `Unknown`. A reader treats such an `Unknown` as a value not computed yet.
+    pub pending: bool,
 }
 
 /// Independent of which member was queried first: each round re-checks every member
@@ -3261,9 +3302,10 @@ pub fn scc_exports<'db>(
             .iter()
             .map(|&item| {
                 let globals = SalsaGlobals::for_item(db, item, Some(&exports));
+                let check = check_item_against(db, item, &globals);
                 (
                     item,
-                    member_exports(db, check_item_against(db, item, &globals)),
+                    member_exports(db, check, globals.pending_reads.get() > 0),
                 )
             })
             .collect();
@@ -3279,16 +3321,28 @@ pub fn scc_exports<'db>(
 fn member_exports<'db>(
     db: &'db dyn Db,
     check: Option<check::ItemCheck<'db>>,
+    read_pending: bool,
 ) -> MemberExports<'db> {
     let unknown = || types::TypeScheme::monomorphic(types::unknown(db));
     match check {
-        Some(check) => MemberExports {
-            scheme: check.scheme.unwrap_or_else(unknown),
-            top_level_bindings: check.top_level_bindings,
-        },
+        Some(check) => {
+            let scheme = check.scheme.unwrap_or_else(unknown);
+            let pending = read_pending
+                && (types::contains_unknown(db, scheme.body)
+                    || check
+                        .top_level_bindings
+                        .iter()
+                        .any(|(_, binding)| types::contains_unknown(db, binding.body)));
+            MemberExports {
+                scheme,
+                top_level_bindings: check.top_level_bindings,
+                pending,
+            }
+        }
         None => MemberExports {
             scheme: unknown(),
             top_level_bindings: ThinVec::new(),
+            pending: read_pending,
         },
     }
 }
@@ -3311,6 +3365,7 @@ fn unknown_group_exports<'db>(
                     let exports = MemberExports {
                         scheme: unknown.clone(),
                         top_level_bindings,
+                        pending: true,
                     };
                     (item, exports)
                 })
@@ -3581,7 +3636,17 @@ struct SalsaGlobals<'db, 'a> {
     /// The scheme each linked name resolved to in this check, at twice the name's position
     /// plus one for a deferred read. A body reads the same few globals many times, and
     /// resolving one reads the binder's check through salsa and copies its scheme.
-    schemes: RefCell<Vec<Option<Option<types::TypeScheme<'db>>>>>,
+    schemes: RefCell<Vec<Option<ResolvedScheme<'db>>>>,
+    /// How many reads served a pending group export ([`MemberExports::pending`]).
+    pending_reads: Cell<usize>,
+}
+
+/// A global's scheme as one check resolved it, and whether the read served a pending group
+/// export ([`MemberExports::pending`]), which a cached read must count again.
+#[derive(Clone)]
+struct ResolvedScheme<'db> {
+    scheme: Option<types::TypeScheme<'db>>,
+    pending: bool,
 }
 
 /// The type definitions a file sees, looked up one name at a time: a script's own
@@ -3686,9 +3751,24 @@ fn hidden_type_definition<'db>(
 #[derive(Debug, Clone, Copy)]
 pub struct ArithmeticClasses<'db> {
     layers: [Option<&'db stubs::SymbolSet>; 3],
+    /// The stubs' classes whose declared arithmetic takes the class on both sides.
+    stub_closed: &'db stubs::SymbolSet,
 }
 
 impl<'db> ArithmeticClasses<'db> {
+    /// Whether `C + C` is arithmetic for the class, which is what a `numeric` bound promises
+    /// its type: `Date` declares `+.Date` for a date and a number, never for two dates. A
+    /// project's own method is unannotated, so its class counts as closed.
+    pub fn closed_under_arithmetic(self, class: impl stubs::SymbolKey) -> bool {
+        class.symbol().is_some_and(|class| {
+            self.stub_closed.contains(class)
+                || self.layers[1..]
+                    .iter()
+                    .flatten()
+                    .any(|layer| layer.contains(class))
+        })
+    }
+
     pub fn contains(self, class: impl stubs::SymbolKey) -> bool {
         class.symbol().is_some_and(|class| {
             self.layers
@@ -3724,6 +3804,7 @@ fn visible_arithmetic_classes(db: &dyn Db, file: SourceFile) -> ArithmeticClasse
             ProjectFiles::try_get(db).map(|files| project_arithmetic_classes(db, files)),
             Some(file_arithmetic_classes(db, file)),
         ],
+        stub_closed: stub_closed_arithmetic_classes(db),
     }
 }
 
@@ -3861,6 +3942,7 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
             library: stubs::stubs(db),
             links: item_links(db, item),
             schemes: RefCell::default(),
+            pending_reads: Cell::new(0),
         }
     }
 
@@ -3935,8 +4017,17 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
 
     fn item_scheme(&self, item: Item<'db>) -> types::TypeScheme<'db> {
         match self.group.and_then(|group| group.get(&item)) {
-            Some(exports) => exports.scheme.clone(),
+            Some(exports) => {
+                self.note_pending(exports);
+                exports.scheme.clone()
+            }
             None => global_scheme(self.db, item),
+        }
+    }
+
+    fn note_pending(&self, exports: &MemberExports<'db>) {
+        if exports.pending {
+            self.pending_reads.set(self.pending_reads.get() + 1);
         }
     }
 
@@ -3944,6 +4035,7 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
         let Some(exports) = self.group.and_then(|group| group.get(&item)) else {
             return statement_binding_scheme(self.db, item, types::Name::new(self.db, name));
         };
+        self.note_pending(exports);
         exports
             .top_level_bindings
             .iter()
@@ -4043,10 +4135,14 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
             .position(name)
             .map(|position| 2 * position + usize::from(deferred));
         if let Some(slot) = slot
-            && let Some(Some(scheme)) = self.schemes.borrow().get(slot)
+            && let Some(Some(resolved)) = self.schemes.borrow().get(slot)
         {
-            return scheme.clone();
+            if resolved.pending {
+                self.pending_reads.set(self.pending_reads.get() + 1);
+            }
+            return resolved.scheme.clone();
         }
+        let before = self.pending_reads.get();
         let scheme = self.lookup_scheme(name, deferred);
         if let Some(slot) = slot {
             let mut schemes = self.schemes.borrow_mut();
@@ -4054,10 +4150,17 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
                 schemes.resize(2 * self.links.name_count(), None);
             }
             if let Some(resolved) = schemes.get_mut(slot) {
-                *resolved = Some(scheme.clone());
+                *resolved = Some(ResolvedScheme {
+                    scheme: scheme.clone(),
+                    pending: self.pending_reads.get() != before,
+                });
             }
         }
         scheme
+    }
+
+    fn pending_reads(&self) -> usize {
+        self.pending_reads.get()
     }
 
     fn defined_in_project(&self, name: Symbol, deferred: bool) -> bool {
@@ -4144,6 +4247,64 @@ fn stub_arithmetic_classes(db: &dyn Db) -> stubs::SymbolSet {
         return stubs::SymbolSet::default();
     };
     arithmetic_classes_among(library.schemes.keys())
+}
+
+/// The stub classes with a `+` method candidate whose two operands both take the class,
+/// directly, through a class it extends, or as `Any`.
+#[salsa::tracked(returns(ref))]
+fn stub_closed_arithmetic_classes(db: &dyn Db) -> stubs::SymbolSet {
+    let Some(library) = stubs::stubs(db) else {
+        return stubs::SymbolSet::default();
+    };
+    // `+` stands for the arithmetic a bound promises: `-.Date` takes two dates, and their
+    // difference is a `difftime`, not a date.
+    let prefixes = ["+.", "Arith.", "Ops."];
+    let mut closed = stubs::SymbolSet::default();
+    for class in stub_arithmetic_classes(db).iter() {
+        let mut chain: Vec<types::Name<'_>> = vec![types::Name::new(db, class)];
+        while let Some(definition) = chain
+            .last()
+            .and_then(|name| library.type_definitions.get(name))
+            && let types::TyKind::Named(parent, _) = definition.body.kind(db)
+            && !chain.contains(parent)
+        {
+            chain.push(*parent);
+        }
+        let takes_class = |ty: types::Ty<'_>| {
+            let admits = |member: types::Ty<'_>| match member.kind(db) {
+                types::TyKind::Any | types::TyKind::Unknown | types::TyKind::Rigid(_) => true,
+                types::TyKind::Named(name, _) => chain.contains(name),
+                _ => false,
+            };
+            match ty.kind(db) {
+                types::TyKind::Union(members) => members.iter().any(|&member| admits(member)),
+                _ => admits(ty),
+            }
+        };
+        let is_closed = chain.iter().any(|ancestor| {
+            prefixes.iter().any(|prefix| {
+                let method = Symbol::new(&format!("{prefix}{}", ancestor.text(db)));
+                library.schemes.get(method).is_some_and(|schemes| {
+                    schemes.iter().any(|scheme| match scheme.body.kind(db) {
+                        types::TyKind::Function(function) => {
+                            let mut operands = function
+                                .positional
+                                .iter()
+                                .copied()
+                                .chain(function.named.iter().map(|parameter| parameter.ty));
+                            operands.next().is_some_and(takes_class)
+                                && operands.next().is_some_and(takes_class)
+                        }
+                        _ => false,
+                    })
+                })
+            })
+        });
+        if is_closed {
+            closed.insert(class);
+        }
+    }
+    closed
 }
 
 /// A union of the per-file sets, which are almost always empty, rather than a scan of every

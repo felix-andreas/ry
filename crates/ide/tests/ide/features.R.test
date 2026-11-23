@@ -46,15 +46,15 @@ references: 14..19*, 25..30
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `f`
-  edit 13..13 -> "<T: numeric>"
+  edit 13..13 -> "<T: arithmetic>"
   edit 19..19 -> ": T"
   edit 20..20 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 13..13 -> "<T: numeric>"
+  edit 13..13 -> "<T: arithmetic>"
   edit 19..19 -> ": T"
   edit 20..20 -> " -> double"
 completion (55): count, count.fields, Num.count_leading_zero_bits, Num.count_one_bits, Num.count_trailing_zero_bits, Str.count_utf8_bytes, Expr.count, List.count_if
-hint @13<T: numeric>
+hint @13<T: arithmetic>
 hint @19: T
 hint @20 -> double
 
@@ -218,15 +218,15 @@ references: 14..19*, 25..30
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `f`
-  edit 13..13 -> "<T: numeric>"
+  edit 13..13 -> "<T: arithmetic>"
   edit 19..19 -> ": T"
   edit 20..20 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 13..13 -> "<T: numeric>"
+  edit 13..13 -> "<T: arithmetic>"
   edit 19..19 -> ": T"
   edit 20..20 -> " -> double"
 completion (55): count, count.fields, Num.count_leading_zero_bits, Num.count_one_bits, Num.count_trailing_zero_bits, Str.count_utf8_bytes, Expr.count, List.count_if
-hint @13<T: numeric>
+hint @13<T: arithmetic>
 hint @19: T
 hint @20 -> double
 
@@ -803,7 +803,7 @@ hint @88definition =
 setGeneric("ar$0ea", function(shape) standardGeneric("area"))
 area(1)
 #++++
-hover 11..17: character
+hover 11..17: area: Unknown
 definition 12..16
 references: 12..16*, 52..56, 60..64
 rename: 3 edit(s)
@@ -1067,7 +1067,7 @@ a <- grow(100, rate, 3L)
 b <- grow(r = 0.1, 100, 2L)
 c <- grow(100)
 #++++
-hint @16<T: numeric, U: numeric, V: numeric>
+hint @16<T: arithmetic, U: arithmetic, V: arithmetic>
 hint @26: T
 hint @32: U
 hint @39: V

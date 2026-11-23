@@ -136,7 +136,7 @@ Unknown
 result <- (1L + "x")@slot
 #++++
 result: Unknown
-0..6 warning[unused] `result` is assigned but never used.
+0..6 warning[unused] `result` is assigned but never used
 16..19 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #==== whole_number_literal_operands
@@ -144,12 +144,12 @@ result: Unknown
 double_it <- function(x) 2 * x
 double_it(5L)
 #++++
-double_it: <T: numeric> fn(x: T) -> double
+double_it: <T: arithmetic> fn(x: T) -> double
 double
 
 #---- integer_literal_times_parameter_preserves_integer
 int_double_it <- function(x) 2L * x
 int_double_it(5L)
 #++++
-int_double_it: <T: numeric> fn(x: T) -> T
+int_double_it: <T: arithmetic> fn(x: T) -> T
 integer

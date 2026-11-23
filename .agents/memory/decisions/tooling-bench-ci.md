@@ -426,3 +426,10 @@ contract in the type-system reference.
 - **Temp directories.** `mc_exit` removes a renewed session temp directory (the owner check leaves a shared one alone), and the parent unlinks the directory of a worker it had to kill.
 - **What remains.** Each worker pays first-call costs for the code its files reach (lazy-load fetches, closure compilation, about 0.1 s per worker on stringr), so a short suite costs relatively more. Warming that code in the parent before forking cost as much wall time as it saved CPU, so it was rejected.
 - **Rejected:** long-lived callr workers (they already were; the cost was the per-worker start and the relay), and forking per file (each file would pay the warm-up again).
+
+## `ry debug type FILE:LINE:COLUMN` prints the hover at a position
+
+**Status:** built (`cli::type_at`).
+
+- A CLI-only user had no way to ask what the checker inferred, which made an inference surprise guesswork. The command analyzes the project as `ry check` does, with typing forced on, and prints `ide::hover` at the position: one code path with the editor, so the two never disagree.
+- It sits under `debug` because it explains a result rather than checking code; the line and the column count from 1, the column in characters, as `ry check` reports them.

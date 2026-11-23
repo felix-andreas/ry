@@ -34,7 +34,7 @@ f <- function() {
 #++++
 x: integer
 f: fn() -> integer
-8..9 warning[unused] `f` is assigned but never used.
+8..9 warning[unused] `f` is assigned but never used
 
 #---- local_shadows_global
 x <- 1L
@@ -45,8 +45,8 @@ f <- function() {
 #++++
 x: integer
 f: fn() -> character
-0..1 warning[unused] `x` is assigned but never used.
-8..9 warning[unused] `f` is assigned but never used.
+0..1 warning[unused] `x` is assigned but never used
+8..9 warning[unused] `f` is assigned but never used
 
 #---- argument_shadows_global
 x <- 1L
@@ -56,8 +56,8 @@ f <- function(x) {
 #++++
 x: integer
 f: <T> fn(x: T) -> T
-0..1 warning[unused] `x` is assigned but never used.
-8..9 warning[unused] `f` is assigned but never used.
+0..1 warning[unused] `x` is assigned but never used
+8..9 warning[unused] `f` is assigned but never used
 
 #---- nested_function_access
 f <- function() {
@@ -69,7 +69,7 @@ f <- function() {
 }
 #++++
 f: fn() -> integer
-0..1 warning[unused] `f` is assigned but never used.
+0..1 warning[unused] `f` is assigned but never used
 
 #---- nested_shadowing
 f <- function() {
@@ -82,8 +82,8 @@ f <- function() {
 }
 #++++
 f: fn() -> character
-0..1 warning[unused] `f` is assigned but never used.
-20..21 warning[unused] `x` is assigned but never used.
+0..1 warning[unused] `f` is assigned but never used
+20..21 warning[unused] `x` is assigned but never used
 
 #==== scope_visibility
 #---- local_binding_does_not_escape
@@ -97,7 +97,7 @@ x
 x: integer
 f: fn() -> character
 integer
-8..9 warning[unused] `f` is assigned but never used.
+8..9 warning[unused] `f` is assigned but never used
 
 #---- parameter_shadowing_preserves_outer_binding
 x <- 1L
@@ -131,4 +131,4 @@ trim <- function(drop) {
 }
 #++++
 trim: <T: numeric> fn(drop: T) -> NULL
-140..144 warning[unused] `trim` is assigned but never used.
+140..144 warning[unused] `trim` is assigned but never used

@@ -679,7 +679,10 @@ pub fn has_r_bound(scheme: &TypeScheme<'_>) -> bool {
     scheme.binders.iter().any(|binder| {
         matches!(
             binder.constraint(),
-            Constraint::Numeric | Constraint::ScalarNumeric | Constraint::AtomicElement
+            Constraint::Numeric
+                | Constraint::Arithmetic
+                | Constraint::ScalarNumeric
+                | Constraint::AtomicElement
         )
     })
 }

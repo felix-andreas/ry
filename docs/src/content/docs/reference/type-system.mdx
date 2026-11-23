@@ -114,7 +114,10 @@ When a block needs a target and has none, it is an error and the annotation does
 happens when:
 
 - a blank line separates the block from the expression;
-- a plain `#` comment separates them, or no expression follows at all;
+- a plain `#` comment separates them, or no expression follows at all. A roxygen2 `#'` line is a
+  plain comment here, so the `#:` block goes below the roxygen block, directly above the definition;
+- the block follows code on its own line, as in `x <- 1 #: integer`, which would otherwise read as
+  an annotation on the next line's statement;
 - the block has no content beyond the `#:` marker.
 
 A definition block, one that contains only `@type`, `@alias` and `@opaque` lines, attaches to nothing, and
@@ -122,7 +125,7 @@ neither does a `@strict` toggle, so the adjacency rules do not apply to them.
 
 ### Refused blocks
 
-A block is refused as a whole when it mixes forms, orders its directives wrongly, declares a
+A block is refused as a whole when it mixes forms, repeats a directive other than `@param`, orders its directives wrongly, declares a
 duplicate or unknown type parameter, or gives `@new` a payload that is not nominal. A refused block
 reports its error and carries no typing payload, so a broken annotation does not cause follow-on
 findings. An annotation that names an undeclared type, or writes `X[]` over an element that is not
@@ -732,8 +735,16 @@ signature only ry inferred binds no name, so `#: T` in an unannotated function i
 A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
 `<T: numeric> fn(values: T) -> T`. These are the constraints:
 
-- `numeric` admits `integer` and `double`, scalar or vector, and any class that declares an
-  arithmetic [operator method](#operator-methods-on-a-class).
+- `numeric` admits `integer` and `double`, scalar or vector, and any class whose arithmetic takes
+  two of its values, which an [operator method](#operator-methods-on-a-class) such as
+  `"+.Money" <- function(e1: Money, e2: Money)` declares. It is what `a + b` asks of two values of
+  one type, so `function(a, b) a + b` is `<T: numeric> fn(a: T, b: T) -> T`.
+- `arithmetic` admits everything `numeric` does and any class that declares an arithmetic operator
+  method at all, such as `Date`, whose `+.Date` adds a number to a date. It is what `x + 1` asks of
+  `x`, so `function(x) x + 1` is `<T: arithmetic> fn(x: T) -> double` and accepts a `Date`, while
+  `add_them(day, day)` under `<T: numeric> fn(a: T, b: T) -> T` reports "expected a numeric value
+  (`integer` or `double`) or a class with arithmetic between two of its values, found `Date`", as R
+  stops on `day + day`.
 - `atomic` admits one of the six atomic scalar types: `logical`, `integer`, `double`, `complex`,
   `character`, and `raw`.
 - `key` admits a scalar `logical`, `integer`, `double` or `character`, the types a dictionary key
@@ -796,7 +807,10 @@ constrained parameters, `a / b` under `<T: numeric, U: numeric> fn(a: T, b: U) -
 `double`, R's widest numeric, because neither parameter's type fixes the other's. The same holds for
 any two distinct type parameters, and for an unannotated parameter that a scalar use bounds, such as
 `n` in `for (i in 1:n)`: `x + n` is `double`, so a call passing `1L` and `2.5` checks. A body under a plain `<T>` that
-does arithmetic is a type error, and `atomic` does not imply `numeric`.
+does arithmetic is a type error, and `atomic` does not imply `numeric`. Under
+`<T: arithmetic> fn(x: T) -> T`, `x + 1` checks and `x + x` is a type error that says to declare
+`<T: numeric>`, because a `T` such as `Date` adds a number and not another `Date`. Unary minus asks
+`numeric` too, as R has no `-` on a single `Date`.
 
 Using a type parameter as a vector element, `T[]`, imposes the `atomic` bound, because a vector holds
 only atomic elements. This is what makes element-preserving signatures possible. With
@@ -900,6 +914,11 @@ representation. Its name may appear anywhere a type expression may.
 - A value of a nominal type *is* compatible with its representation type, so it can be passed to any
   function written for the representation, while `@new` is the only place the type's invariant is
   established. An [opaque type](#opaque-types) also restricts where `@new` may appear.
+- A nominal type whose representation is another nominal type extends it, the way R's class vector
+  `c("TradeDate", "Date")` does. With `@type TradeDate {Date}`, a `TradeDate` passes wherever a
+  `Date` is expected, and its operators and `[` dispatch to `TradeDate`'s own methods first and then
+  to `Date`'s, so `trade - trade` is a `difftime` through `-.Date`. The stubs declare `data.table`
+  over `data.frame` and `ggplot` over `gg` the same way.
 - When an operator, an indexing form, or a loop needs a structural shape, a nominal value projects to
   its representation type. The result of the projection is structural, not nominal. A union of
   nominal types projects member by member, so `s$radus` on `Circle | Square` is checked against
@@ -1879,11 +1898,11 @@ p_dist <- function(q, valueOnly = TRUE) {
   prob <- q * 2
   if (valueOnly) prob else list(value = prob, error = prob)
 }
-# p_dist: <T: numeric, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
+# p_dist: <T: arithmetic, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
 gap <- function(x, p) p_dist(x) - p
-# gap: <T: numeric, U: numeric> fn(x: T, p: U) -> double
+# gap: <T: arithmetic, U: arithmetic> fn(x: T, p: U) -> double
 full <- function(x) p_dist(x, valueOnly = FALSE)$error
-# full: <T: numeric> fn(x: T) -> double
+# full: <T: arithmetic> fn(x: T) -> double
 ```
 
 Any other flag argument, such as a variable, returns the union. A call that forwards `...` selects
@@ -2056,6 +2075,45 @@ is expected. The other direction is rejected, because a variadic interface may s
 arguments and a fixed-arity function cannot receive them. Between two variadic types, the rest
 element types are contravariant like any parameter, and both sides must declare the same number of
 parameters before `...`. This rejects some safe pairings, but never admits an unsound one.
+
+`sapply` and `mapply` simplify their results to a vector, a matrix or a list depending on what the
+callback returns, so their type follows the callback's return type and the `simplify` flag
+(`SIMPLIFY` for `mapply`):
+
+| Call | Type |
+| --- | --- |
+| callback returns a scalar-like `T`, flag left out or `TRUE` | `T[]` |
+| flag is a literal `FALSE` | `list[T]` |
+| callback returns anything else, or the flag is not a literal | `Any` |
+
+The result is named (`T[named]`, `list[named: T]`) when the input is named or a character vector,
+as R names it. `USE.NAMES = FALSE` drops the names a character input gives, and for `mapply` and
+`Map` the names of a named input too:
+
+```r
+xs <- c(1, 2, 3)
+doubled <- sapply(xs, function(x) x * 2)                    # double[]
+kept <- sapply(xs, function(x) x * 2, simplify = FALSE)     # list[double]
+pairs <- sapply(xs, function(x) c(x, x))                    # Any: a matrix in R
+widths <- sapply(c("a", "bb"), function(s) nchar(s))        # integer[named]
+```
+
+A scalar-like return is trusted as length one, as everywhere else, so a callback typed scalar that
+returns several elements gives a vector type to what R returns as a matrix. A generic callback is
+the exception: its return was inferred before its parameter met an element, so it is trusted only
+over an atomic vector, whose elements are scalars. Over a list, `sapply(xs, function(v) v * 2)`
+gives `Any`, because `v` may be a vector. A return that depends on the callback's own type
+parameters, as `identity`'s `T` does, gives `Any` too. `tapply` gives `Any`,
+because its result is an array shaped by the groups of `INDEX`. The callbacks are still checked:
+`sapply`'s takes the elements of `X`, as `lapply`'s does, so `sapply(xs, function(v) v + "a")` over
+numbers is an error, and so is `sapply(xs, 4)`:
+
+```text
+expected a function that takes `double`, found `double`
+```
+
+`Map` is `mapply` with `SIMPLIFY = FALSE`, so it gives `list[T]` for a callback that returns `T`, and
+`list[Any]` when the return is undetermined.
 
 The base functions that take a function argument and resolve it with `match.fun` (`lapply`,
 `sapply`, `vapply`, `mapply`, `Map`, `Filter`, `Find`, `Position`, `Reduce`, `do.call`, `outer`,
@@ -2460,8 +2518,10 @@ result's atomic type depends on the operator:
 - `+`, `-`, `*`, `%%`, and `%/%` give `integer` when both operands are `integer` (or `logical`), and
   `double` otherwise.
 - `/`, `^`, and `**` (R's parser alias for `^`) always give `double`.
-- Unary `-` keeps its operand's atomic type. A class with arithmetic methods negates to itself,
-  because R dispatches unary `-` through the same methods, so `-(m %*% m)` is a `matrix`.
+- Unary `-` keeps its operand's atomic type. A class whose arithmetic takes two of its values
+  negates to itself, because R dispatches unary `-` through the same methods, so `-(m %*% m)` is a
+  `matrix` and `-elapsed` on a `difftime` is a `difftime`. `-day` on a `Date` is a type error, as R
+  stops on it.
 - R rejects `-NULL`, and so does the checker. A value the body computes that may be `NULL` negates
   as its other members, because code like `if (length(k)) res <- res[-k]` negates only once the
   value exists. A parameter or an annotated variable keeps its `NULL`, so `-x` on a declared
@@ -2474,15 +2534,22 @@ For example, `double * integer[]` is `double[]`, `integer[named] + integer` is `
 #### Unannotated values in arithmetic
 
 An unannotated value used as an arithmetic operand is *required to be numeric* rather than rejected:
-it must end up as `integer` or `double`, in any vector shape, or as a class that declares an
-arithmetic operator method.
+it must end up as `integer` or `double`, in any vector shape, or as a class with arithmetic. Beside
+a number it takes the [`arithmetic` constraint](#constraints), and two operands of one type take
+`numeric`, because a class such as `Date` adds a number but not another value of its own. A
+difference `a - b` is the exception and asks only `arithmetic`, because R subtracts two dates or
+two times. That difference is not a value of the operands' type (two dates subtract to a
+`difftime`), so it is `double`, the representation every arithmetic class shares.
 
-- `function(x) x + 1L` is `<T: numeric> fn(x: T) -> T`, and calling it with `"oops"` is a type error.
-- `function(x) x / 2` is `<T: numeric> fn(x: T) -> double`.
-- `function(a, b) a + b` is `<T: numeric> fn(a: T, b: T) -> T`.
+- `function(x) x + 1L` is `<T: arithmetic> fn(x: T) -> T`, and calling it with `"oops"` is a type
+  error.
+- `function(x) x / 2` is `<T: arithmetic> fn(x: T) -> double`.
+- `function(a, b) a + b` is `<T: numeric> fn(a: T, b: T) -> T`, and calling it with two dates is a
+  type error.
+- `function(a, b) a - b` is `<T: arithmetic> fn(a: T, b: T) -> double`, and accepts two dates.
 
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
-vector, so `f <- function(x) x + c(1L, 2L)` is `<T: numeric> fn(x: T) -> double[]` and accepts
+vector, so `f <- function(x) x + c(1L, 2L)` is `<T: arithmetic> fn(x: T) -> double[]` and accepts
 `f(TRUE)` and `f(c(1, 2))` alike. When the other operand is a union, the unannotated operand is pinned
 to a scalar `double`, which matches how R treats bare numbers. An operand whose shape is still unknown
 counts as scalar-like here and in comparisons, by the same claim that
@@ -2529,7 +2596,10 @@ behaves like `d + 30L`. The method name's suffix is the nominal type's name, not
 vector, so a class declared as `@type ggplot` takes `+.ggplot`, even though R registers the method
 as `+.gg`.
 
-A method is declared under the name R gives it, in a stub or an annotation, so the result stays
+A method is declared under the name R gives it, in a stub or an annotation. A stub sees only the
+types stubs define, so the methods of a type your R code defines, such as `@type Money {double}`, are
+annotated R functions beside it (`` `+.Money` <- function(e1, e2) ... `` under
+`#: fn(e1: Money, e2: Money) -> Money`). Declaring each method keeps the result
 precise for each pairing of operands: subtracting two `Date` values gives a `difftime`, and offsetting
 one by a count gives a `Date`. A class that declares an operator but has no candidate that accepts
 the operands at hand is a `type-mismatch` error rather than a fall-through to the numeric rules, just
@@ -2549,9 +2619,10 @@ whole.
 
 Your own classes count. A method declared anywhere the global scope reaches, which includes a
 package's `R/` sources and a script's own top level, makes its class support that operator exactly as
-a shipped stub does. That is also how the class satisfies the numeric requirement: passing a `Money`
-to `function(x) x + 1L` is accepted when the project defines `+.Money`, and refused when it defines
-no arithmetic method.
+a shipped stub does. That is also how the class satisfies the arithmetic requirement: passing a
+`Money` to `function(x) x + 1L` is accepted when the project defines `+.Money`, and refused when it
+defines no arithmetic method. Passing two to `function(a, b) a + b` needs a method whose first two
+operands both take a `Money`, as `function(e1: Money, e2: Money)` does.
 
 R also dispatches on a class that `class(x) <- "string"` sets on a plain list, and no type tracks
 that attribute. So when the project defines an arithmetic or `Ops` method for a class that no type
@@ -2560,15 +2631,23 @@ and the rest of a chain `result + a + b`, give `Unknown` and report nothing. Wit
 `list(a = 1) + 1` is a type error, as it is in R.
 
 `c()` dispatches the same way. A class that declares a `c.Class` method keeps its class through
-concatenation, so `c(d1, d2)` on two `Date` values is a `Date`. A nominal with no such method loses
+concatenation, so `c(d1, d2)` on two `Date` values is a `Date`. The stubs keep `Date` and `POSIXct`
+through `[`, `min`, `max`, `range`, `sort`, `rev`, `unique`, `head` and `tail`, as R's methods do.
+A `for` loop over dates gives its variable the type `double`, because R strips the class there.
+`Reduce(f, dates)` is a type error, although R runs it, because `Reduce` takes a `list[T] | T[]`
+and a `Date` vector has no element type to write. A nominal with no such method loses
 its class but keeps its data, as R's default `c()` does, so two values of `@type Money {double}`
 combine to `double[]`. An abstract nominal has no representation, so combining it gives `Unknown`.
 
-`a %op% b` is the call `` `%op%`(a, b) ``. A `%…%` operator that the standard-library stubs declare
-is checked and typed as that call, so `"a" %in% valid` is `logical` and `m %*% m` is a `matrix`.
-Every other `%…%` operator, including a project's own, gives `Unknown`, because a user operator may
-quote its right operand instead of evaluating it, as magrittr's `%>%` does. Using any `%…%` operator
-still counts as a read of its name, so a project's own operator is never reported as unused.
+`a %op% b` is the call `` `%op%`(a, b) ``. A `%…%` operator that the standard-library stubs declare,
+or that the project defines as a top-level function, is checked and typed as that call, so
+`"a" %in% valid` is `logical`, `m %*% m` is a `matrix`, and with
+`` `%plus%` <- function(a, b) a + b `` annotated `fn(a: double, b: double) -> double`,
+`1 %plus% "a"` is reported at `"a"`. A project operator that captures an operand's code with
+`substitute()` is non-standard evaluation, as magrittr's `%>%` is, so it gives `Unknown` and its
+operands are not judged. An operator of a package without stubs, or one defined inside a function,
+gives `Unknown` too. Using any `%…%` operator still counts as a read of its name, so a project's own
+operator is never reported as unused.
 
 ### Comparison operators
 
@@ -2964,9 +3043,9 @@ to such a name is resolved separately at each call site:
 - A wrapper over a numeric set is the exception. When the `Any` fallback is the only candidate that
   leaves a parameter open, and every other candidate narrows it to a number (`logical`, `integer`,
   `double` or `complex`, scalar or vector), the call needs a number whichever candidate a caller
-  picks, so the parameter takes the `numeric` bound. `function(x) abs(x)` infers
-  `<T: numeric> fn(x: T) -> T`, and calling it with a string or `NULL` is an error, as `abs` is in
-  R. A class with an arithmetic method (`Ops.<class>`, `Arith.<class>` or an operator method)
+  picks, so the parameter takes the `arithmetic` bound. `function(x) abs(x)` infers
+  `<T: arithmetic> fn(x: T) -> T`, and calling it with a string or `NULL` is an error, as `abs` is
+  in R. A class with an arithmetic method (`Ops.<class>`, `Arith.<class>` or an operator method)
   satisfies the bound, as it does for an operator, and so does a data frame. A set that also
   accepts other values imposes nothing: `max` takes `character`, `cumsum` takes `NULL` and `sweep`
   takes any `matrix`, so `function(x) max(x)` stays `<T> fn(x: T) -> Any`.
@@ -3009,8 +3088,9 @@ to such a name is resolved separately at each call site:
 - When no candidate accepts the arguments, the call is a type error. Normally the error names the
   overloaded callee and how many signatures were tried, and gives the first candidate's failure as a
   hint. One candidate's own finding is reported instead, at its own argument range, when every
-  candidate rejects the call for the same reason, or when one candidate got strictly further into the
-  argument list than all the others.
+  candidate rejects the call for the same reason, or when the candidates that got furthest into the
+  argument list all reject the same argument for the same reason, including all wanting a function
+  where the argument is not one.
 - Passing an overloaded name as a value, or hovering over it, sees the *last* declaration, which by
   convention is the most general. Go-to-definition jumps to the *first* declaration.
 - The exception is an overloaded name passed by name to `lapply`, `sapply`, `vapply` or `Reduce`.
@@ -3082,7 +3162,9 @@ join does not merge or coerce branch types beyond unification; it records the al
 - Two branches that are both still open are tied to each other.
   `function(value, fallback) if (is.null(value)) fallback else value` is
   `<T> fn(value: T | NULL, [fallback]: T) -> T`.
-- An `Unknown` branch makes the whole conditional `Unknown`.
+- An `Unknown` branch makes the whole conditional `Unknown`, so `if (flag) 1L else df$count` is
+  `Unknown`. The exception is a branch whose `Unknown` comes from a recursive call the checker is
+  still working out: it joins as the other branch, which is how `fact` converges.
 - An `if` whose value is discarded, such as a statement in the middle of a block, does not join its
   branches at all, so a branch that only has a side effect never ties its types to the other
   branch's.
@@ -4068,6 +4150,14 @@ strict-mode origin. The recognized masks are:
 - A call to a [`@masked`](#conditional-stub-namespaces-datatable-dplyr-ggplot2-and-testthat) stub
   declaration.
 
+A called name is not a column reference, because R looks a called name up as a function and a
+column is a vector. So inside every mask except `with()` and `within()`, an unresolved called name
+is reported like any other: `mutate(d, b = scale_it(a))` reports `scale_it` when nothing defines it.
+`with()` and `within()` evaluate in any list or environment, which may hold functions, so their
+called names stay quiet. The names a mask provides without an import also stay quiet: data.table's
+`.()`, `J()`, `:=`, `let()` and `patterns()`, and tidyselect's selection helpers (`where()`,
+`starts_with()`, `everything()` and the rest), which tidyselect makes available in every selection.
+
 A name inside a mask that does resolve, such as a local variable or a function like `sum`, keeps its
 ordinary resolution and typing, because data.table itself falls back to the lexical scope for names
 that are not columns. Inside any single `[`, a `..name` read is data.table's way to name the
@@ -4499,7 +4589,7 @@ logicals. Any other pair is a type error, and so is an ordering on a column of s
 ```text
 type-mismatch
 
-  x the join condition `t > label` compares numbers, but `label` is `character[]`. Only `==` joins strings.
+  x the join condition `t > label` compares numbers, but `label` is `character[]`. Only `==` joins strings
    --[a.R:6:32]
  6 | print(events[names, on = .(t > label)])
    |                                ^^^^^
@@ -4658,8 +4748,23 @@ out of the parts decided at run time from a value's class attribute:
 - `structure(list(...), class = "dog")` keeps the argument's type, because a `class` attribute is
   data, not a type, so the record's fields stay checkable. A `dim` attribute is the exception: it
   makes the value an array, whose shape is not tracked, so such a value is `Unknown`.
-- `setClass`, `setGeneric`, `setMethod`, and `new` are not modeled, so `new(...)` is `Unknown`, and
-  a call to a generic made by `setGeneric` gives `Any`, like a call to an S3 generic.
+- `setClass`, `setGeneric`, `setMethod`, and `new` are not modeled as types, so `new(...)` is
+  `Any`, and a call to a generic made by `setGeneric` gives `Any`, like a call to an S3 generic.
+- A named argument of `new("Class", ...)` must be one of the class's slots, as R requires.
+  The slots come from `setClass`'s `representation(...)` and `slots =` arguments, together with
+  every class it `contains`, in the same file or anywhere in the package:
+
+  ```r
+  setClass("Shape", representation("VIRTUAL", name = "character"))
+  setClass("Circle", contains = "Shape", slots = list(radius = "numeric"))
+  new("Circle", name = "unit", radius = 1)    # fine
+  new("Circle", radius = 1, colour = "red")
+  # error[type-mismatch]: class `Circle` has no slot `colour`. Its slots are `name`, `radius`
+  ```
+
+  The check is skipped when a class on the chain is defined twice, has a computed slot list or
+  parent, extends a class the project does not define (such as `numeric` or another package's
+  class), or has its own `initialize` method, which may take any argument.
 - `x@slot` reads an S4 slot and types as `Unknown`, and is a strict-mode origin, except on an `Any`
   subject, whose slots are `Any` like its `$` fields. The subject
   expression is still inferred and counts as a read for naming, the unused check, references, and
@@ -4937,11 +5042,29 @@ be typed. A declaration whose return type is `Unknown` produces no finding at it
 A reference to a binding defined in this project is not an origin; the binding's own definition is
 reported instead, so one undetermined value does not produce a finding in every file that reads it.
 An unresolved bare name is not an origin either, because naming already reports it. An unresolved
-`pkg::name` is currently reported both ways. A value under any `#:` annotation (checked, `@trust`,
+`pkg::name` is reported both ways. A value under any `#:` annotation (checked, `@trust`,
 `@if-unknown`, or `@new`) is not an origin, because the annotation gives it a type, and neither is
 anything inside that value: `#: double[]` above `x <- as.numeric(df$age)` covers `df$age`. A function
 literal or a braced block inside the value keeps its own origins, because its statements can be
 annotated where they are.
+
+The one exception is a checked annotation over a value whose own type is `Unknown`. Such an
+annotation checks nothing, because `Unknown` satisfies every type, so it is reported in place of the
+origins it covers, and `@if-unknown` is the way to accept the value unchecked:
+
+```r
+total <- function(df: data.frame) -> double {
+  #: double[]
+  amount <- as.numeric(df$amount)   # covered: `as.numeric` returns `double[]`
+
+  #: double[]
+  prices <- df$price                # strict: the annotation checks nothing
+
+  #: @if-unknown double[]
+  costs <- df$cost                  # accepted unchecked
+  sum(amount) + sum(prices) + sum(costs)
+}
+```
 
 ### Native functions
 
@@ -5254,8 +5377,8 @@ Not checked:
   follow.
 - **A placeholder local**, a variable whose only visible value is `NULL` or a bare `NA`, filled
   later by `assign()` or `<<-`, where it is passed as an argument or tested as a condition.
-- **A project's own `%op%` operators**, because one may quote its right operand, as magrittr's `%>%`
-  does.
+- **A project `%op%` operator that quotes an operand** with `substitute()`, as magrittr's `%>%`
+  does, and any `%op%` operator defined inside a function.
 
 Known bugs, where correct code is reported:
 

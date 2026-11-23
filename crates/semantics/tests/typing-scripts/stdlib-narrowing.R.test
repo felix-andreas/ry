@@ -10,7 +10,7 @@ f <- function(x) {
 }
 #++++
 f: fn(x: integer | NULL) -> integer
-36..37 warning[unused] `f` is assigned but never used.
+36..37 warning[unused] `f` is assigned but never used
 
 #---- true_branch_is_null
 #: fn(x: integer | NULL) -> character
@@ -23,7 +23,7 @@ f <- function(x) {
 }
 #++++
 f: fn(x: integer | NULL) -> character
-38..39 warning[unused] `f` is assigned but never used.
+38..39 warning[unused] `f` is assigned but never used
 
 #---- negated_guard_swaps_the_edges
 #: fn(x: integer | NULL) -> integer
@@ -36,7 +36,7 @@ f <- function(x) {
 }
 #++++
 f: fn(x: integer | NULL) -> integer
-36..37 warning[unused] `f` is assigned but never used.
+36..37 warning[unused] `f` is assigned but never used
 
 #---- without_narrowing_the_union_still_errors
 #: fn(x: integer | NULL) -> integer
@@ -45,7 +45,7 @@ f <- function(x) {
 }
 #++++
 f: fn(x: integer | NULL) -> integer
-36..37 warning[unused] `f` is assigned but never used.
+36..37 warning[unused] `f` is assigned but never used
 
 #==== early_exit_guards
 #---- early_return_persists_the_false_edge
@@ -58,7 +58,7 @@ f <- function(x) {
 }
 #++++
 f: fn(x: integer | NULL) -> integer
-36..37 warning[unused] `f` is assigned but never used.
+36..37 warning[unused] `f` is assigned but never used
 
 #---- stop_call_persists_the_false_edge
 #: fn(x: character | NULL) -> character
@@ -70,7 +70,7 @@ f <- function(x) {
 }
 #++++
 f: fn(x: character | NULL) -> character
-40..41 warning[unused] `f` is assigned but never used.
+40..41 warning[unused] `f` is assigned but never used
 
 #---- negated_early_return_persists_the_true_edge
 #: fn(x: integer | NULL) -> integer
@@ -82,7 +82,7 @@ f <- function(x) {
 }
 #++++
 f: fn(x: integer | NULL) -> integer
-36..37 warning[unused] `f` is assigned but never used.
+36..37 warning[unused] `f` is assigned but never used
 
 #==== family_guards
 #---- character_guard_splits_a_two_family_union
@@ -96,7 +96,7 @@ f <- function(x) {
 }
 #++++
 f: fn(x: integer | character) -> character
-43..44 warning[unused] `f` is assigned but never used.
+43..44 warning[unused] `f` is assigned but never used
 
 #---- numeric_guard_keeps_both_numeric_families
 #: fn(x: integer | double | character) -> double
@@ -109,7 +109,7 @@ g <- function(x) {
 }
 #++++
 g: fn(x: integer | double | character) -> double
-49..50 warning[unused] `g` is assigned but never used.
+49..50 warning[unused] `g` is assigned but never used
 
 #---- list_guard_selects_the_list_member
 #: fn(x: list[integer] | integer) -> list[integer]
@@ -122,7 +122,7 @@ h <- function(x) {
 }
 #++++
 h: fn(x: list[integer] | integer) -> list[integer]
-51..52 warning[unused] `h` is assigned but never used.
+51..52 warning[unused] `h` is assigned but never used
 
 #==== invalidation_and_joins
 #---- branch_write_replaces_the_refinement
@@ -135,7 +135,7 @@ f <- function(x) {
 }
 #++++
 f: fn(x: integer | NULL) -> integer | character
-48..49 warning[unused] `f` is assigned but never used.
+48..49 warning[unused] `f` is assigned but never used
 
 #---- refined_edges_rejoin_to_the_original_union
 #: fn(x: integer | NULL) -> integer | NULL
@@ -147,8 +147,8 @@ f <- function(x) {
 }
 #++++
 f: fn(x: integer | NULL) -> integer | NULL
-43..44 warning[unused] `f` is assigned but never used.
-86..87 warning[unused] `y` is assigned but never used.
+43..44 warning[unused] `f` is assigned but never used
+86..87 warning[unused] `y` is assigned but never used
 
 #==== diverging_branch_values
 #---- diverging_else_contributes_no_value
@@ -159,7 +159,7 @@ f <- function(x) {
 }
 #++++
 f: fn(x: integer | NULL) -> integer
-36..37 warning[unused] `f` is assigned but never used.
+36..37 warning[unused] `f` is assigned but never used
 
 #---- guard_on_any_pins_the_true_edge_to_null
 f <- function() {
@@ -172,7 +172,7 @@ f <- function() {
 }
 #++++
 f: fn() -> character | NULL
-0..1 warning[unused] `f` is assigned but never used.
+0..1 warning[unused] `f` is assigned but never used
 
 #==== unannotated_null_guards
 #---- coalesce_generalizes_to_optional
@@ -185,7 +185,7 @@ or_else <- function(value, fallback) {
 }
 #++++
 or_else: <T> fn(value: T | NULL, [fallback]: T) -> T
-0..7 warning[unused] `or_else` is assigned but never used.
+0..7 warning[unused] `or_else` is assigned but never used
 
 #---- coalesce_accepts_null_and_binds_from_the_fallback
 or_else <- function(value, fallback) {
@@ -206,8 +206,8 @@ f <- function(x) {
   x + 1L
 }
 #++++
-f: <T: numeric> fn(x: T | NULL) -> integer | T
-0..1 warning[unused] `f` is assigned but never used.
+f: <T: arithmetic> fn(x: T | NULL) -> integer | T
+0..1 warning[unused] `f` is assigned but never used
 
 #---- negated_guard_shapes_too
 f <- function(x) {
@@ -215,7 +215,7 @@ f <- function(x) {
 }
 #++++
 f: fn(x: integer | NULL) -> integer
-0..1 warning[unused] `f` is assigned but never used.
+0..1 warning[unused] `f` is assigned but never used
 
 #---- arithmetic_on_a_null_tested_value_follows_r
 f <- function(x) {
@@ -223,5 +223,5 @@ f <- function(x) {
   x + 1L
 }
 #++++
-f: <T: numeric> fn(x: T | NULL) -> T
-0..1 warning[unused] `f` is assigned but never used.
+f: <T: arithmetic> fn(x: T | NULL) -> T
+0..1 warning[unused] `f` is assigned but never used

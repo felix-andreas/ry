@@ -13,17 +13,18 @@ use {
         exhaustiveness::{MatchFinding, MatchFindingKind},
         file_comment_annotations, file_conditional_writers, file_definitions, file_syntax_sites,
         file_type_definitions,
-        hir::{ExprId, ExpressionKind, Symbol},
+        hir::{self, ExprId, ExpressionKind, Symbol},
         infer::{FunctionMismatch, RecordMismatch, apply_definition},
         inline_annotations_enabled, item_check, item_hir, item_naming, item_spans, item_syntax,
         item_tree,
         lints::LintConfig,
         metadata::{
             declared_dependency, imported_by_name, imports_every_name, is_own_package,
-            native_symbol, own_package_reaches, own_qualified_names,
+            native_symbol, own_package_reaches, own_qualified_names, registered_generic,
+            registered_methods,
         },
         naming::{BindingKind, ItemNaming, NamespaceRead},
-        package_name, parse, prelude_enabled, project_type_definitions,
+        package_name, parse, prelude_enabled, project_type_definitions, reads_use_method, s4,
         stubs::{
             CONDITIONAL_NAMESPACES, STANDARD_LIBRARY, StubLibrary, SymbolSet,
             dormant_namespace_exports, namespace_exports, namespace_known, outside_prelude, stubs,
@@ -40,7 +41,10 @@ use {
     std::{cell::OnceCell, collections::BTreeSet, mem, ops::Range},
     syntax::{
         SyntaxKind, SyntaxNode, TextRange, TextSize,
-        annotation::{AnnotationTarget, directive_name, is_type_kind, statement_annotations},
+        annotation::{
+            AnnotationTarget, annotation_target, directive_name, is_type_kind,
+            statement_annotations,
+        },
         ast::{BinaryExpr, is_expression_kind},
         is_syntactic_name, node_text, paired_comment_definition,
     },
@@ -204,7 +208,7 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
 
     for (range, value) in crate::file_typing_directives(db, file).1 {
         diagnostics.push(Diagnostic::new(range, Severity::Error, "annotation", format!(
-                "Unknown typing directive `{value}`. Use `# typing: on`, `# typing: off`, or `# typing: strict`."
+                "unknown typing directive `{value}`. Use `# typing: on`, `# typing: off`, or `# typing: strict`"
             )));
     }
 
@@ -227,7 +231,7 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                 node.text_range(),
                 Severity::Error,
                 "annotation",
-                "Type definition blocks are only allowed at the top level of a file.".to_owned(),
+                "type definition blocks are only allowed at the top level of a file".to_owned(),
             ));
         }
     }
@@ -240,7 +244,7 @@ pub fn parse_stage_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
             node.text_range(),
             Severity::Error,
             "annotation",
-            "Type definitions are only allowed at the top level of a file.".to_owned(),
+            "type definitions are only allowed at the top level of a file".to_owned(),
         ));
     }
     diagnostics.extend(dangling_annotation_diagnostics(db, file));
@@ -342,6 +346,25 @@ fn dangling_annotation_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnos
             }
         }
     }
+    // A `#:` trailing code, as in `x <- 1 #: integer`, parses inside that code's node, so no
+    // sequence above lists it.
+    for node in sites.nodes(&root, SiteRole::Annotation) {
+        let in_sequence = node.parent().is_some_and(|parent| {
+            matches!(
+                parent.kind(),
+                SyntaxKind::SOURCE_FILE | SyntaxKind::BRACE_EXPR | SyntaxKind::ARGUMENT_LIST
+            )
+        });
+        if in_sequence {
+            continue;
+        }
+        let target = annotation_target(&node);
+        if matches!(target, AnnotationTarget::AfterCode)
+            && let Some(diagnostic) = dangling_annotation_diagnostic(db, file, &node, target)
+        {
+            diagnostics.push(diagnostic);
+        }
+    }
     diagnostics
 }
 
@@ -401,17 +424,20 @@ fn dangling_annotation_diagnostic(
     let message = match target {
         AnnotationTarget::Attached(_) => {
             if node.children().next().is_none() {
-                "A `#:` typing comment must include a type expression."
+                "a `#:` typing comment must include a type expression"
             } else {
                 return None;
             }
         }
         AnnotationTarget::BlankLineSeparated => {
-            "A `#:` typing comment cannot be separated from its expression by an empty line."
+            "a `#:` typing comment cannot be separated from its expression by an empty line"
+        }
+        AnnotationTarget::AfterCode => {
+            "this `#:` comment follows code on its line, so it annotates nothing. Put it on its own line, directly above the expression it describes"
         }
         AnnotationTarget::Dangling => {
             // Almost always a `#:` block placed above a roxygen2 block, so name the fix.
-            "A `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block."
+            "a `#:` typing comment must be followed immediately by an expression. Put it directly above the definition, below any roxygen2 block"
         }
     };
     Some(Diagnostic::new(
@@ -563,7 +589,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 range,
                 Severity::Warning,
                 "unused",
-                format!("`{}` is assigned but never used.", unused.name),
+                format!("`{}` is assigned but never used", unused.name),
             ));
         }
         for target in &naming.extras().invalid_assignment_targets {
@@ -636,7 +662,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 Severity::Warning,
                 "maybe-undefined",
                 format!(
-                    "`{}` is only assigned on some paths here, so this read can find nothing.",
+                    "`{}` is only assigned on some paths here, so this read can find nothing",
                     display_name(&binding.name)
                 ),
             ));
@@ -650,6 +676,63 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 range,
                 Severity::Warning,
                 "unresolved",
+                message,
+            ));
+        }
+        for expression in module.expression_ids() {
+            let ExpressionKind::Call { callee, arguments } = module.kind(expression) else {
+                continue;
+            };
+            if s4::methods_function(module, *callee) != Some("new")
+                || naming.resolutions.contains_key(callee)
+            {
+                continue;
+            }
+            let arguments = &module[arguments];
+            let Some(class) = s4::match_arguments(module, arguments, &["Class"])[0]
+                .and_then(|value| s4::string(module, value))
+            else {
+                continue;
+            };
+            let Some(slots) = s4::class_slots(db, file, QueryName::new(db, Name::new(db, class)))
+            else {
+                continue;
+            };
+            for argument in arguments {
+                let (Some(name), Some(name_range)) = (
+                    module.argument_name(argument),
+                    module.argument_name_range(argument),
+                ) else {
+                    continue;
+                };
+                if name == "Class" || slots.contains(&name) {
+                    continue;
+                }
+                let advice = match nearest_name(&name, slots.iter().map(|slot| slot.as_str())) {
+                    Some(nearest) => format!(". Did you mean `{nearest}`?"),
+                    None if slots.is_empty() => ". It has no slots".to_owned(),
+                    None => format!(
+                        ". Its slots are {}",
+                        slots
+                            .iter()
+                            .map(|slot| format!("`{slot}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                };
+                diagnostics.push(Diagnostic::new(
+                    name_range + offset,
+                    Severity::Error,
+                    "type-mismatch",
+                    format!("class `{class}` has no slot `{name}`{advice}"),
+                ));
+            }
+        }
+        if let Some((range, message)) = s3_method_finding(db, item, module) {
+            diagnostics.push(Diagnostic::new(
+                range + offset,
+                Severity::Warning,
+                "s3-method-signature",
                 message,
             ));
         }
@@ -674,7 +757,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 diagnostics.push(with_name_fix(
                     Diagnostic::new(range, Severity::Warning, "unresolved", format!(
                         "`{display}` is in ry's standard library, which `[check] prelude = false` \
-                         keeps out of scope. Write `{qualified}`."
+                         keeps out of scope. Write `{qualified}`"
                     )),
                     Some(&qualified),
                 ));
@@ -682,14 +765,14 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             }
             let hint = suggestion
                 .as_ref()
-                .map(|nearest| format!(" Did you mean `{nearest}`?"))
+                .map(|nearest| format!(". Did you mean `{nearest}`?"))
                 .unwrap_or_default();
             let message = match display.split_once('.') {
                 Some((module, member)) if STANDARD_MODULES.contains(&module) => {
-                    format!("ry's standard library has no function `{member}` in `{module}`.{hint}")
+                    format!("ry's standard library has no function `{member}` in `{module}`{hint}")
                 }
                 _ => format!(
-                    "I could not resolve `{display}` in this package, its imports, or builtins.{hint}"
+                    "I could not resolve `{display}` in this package, its imports, or builtins{hint}"
                 ),
             };
             diagnostics.push(with_name_fix(
@@ -722,7 +805,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 nearest_name(name, miss.columns.iter().map(String::as_str)).or(suggestion);
             let hint = suggestion
                 .as_ref()
-                .map(|nearest| format!(" Did you mean `{nearest}`?"))
+                .map(|nearest| format!(". Did you mean `{nearest}`?"))
                 .unwrap_or_default();
             let subject = match &miss.frame {
                 Some(frame) => format!("the frame `{frame}`"),
@@ -735,7 +818,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     Severity::Warning,
                     "unresolved",
                     format!(
-                        "{subject} has no column `{}`, and nothing else defines that name.{hint}",
+                        "{subject} has no column `{}`, and nothing else defines that name{hint}",
                         display_name(name)
                     ),
                 ),
@@ -966,11 +1049,11 @@ fn alias_cycle_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 // `@type` gives a name of its own; a bare alias chain is just a mistake.
                 if matches!(definition.body.kind(db), TyKind::Named(..)) {
                     format!(
-                        "the alias `{name}` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle."
+                        "the alias `{name}` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle"
                     )
                 } else {
                     format!(
-                        "the alias `{name}` refers to itself, so its expansion never ends. A recursive type needs a name of its own: declare it as `@type {name} {{...}}` instead of `@alias`."
+                        "the alias `{name}` refers to itself, so its expansion never ends. A recursive type needs a name of its own: declare it as `@type {name} {{...}}` instead of `@alias`"
                     )
                 },
             ));
@@ -1033,10 +1116,10 @@ fn unknown_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             ;
             let hint = suggestion
                 .as_ref()
-                .map(|nearest| format!(" Did you mean `{nearest}`?"))
+                .map(|nearest| format!(". Did you mean `{nearest}`?"))
                 .unwrap_or_default();
             let diagnostic = Diagnostic::new(range, Severity::Error, "annotation", format!(
-                    "I do not know the type `{name}`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.{hint}"
+                    "I do not know the type `{name}`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs{hint}"
                 ));
             match suggestion {
                 Some(nearest) => {
@@ -1099,7 +1182,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                     *range,
                     Severity::Error,
                     "annotation",
-                    format!("`{name}` is not a generic type. It takes no type arguments."),
+                    format!("`{name}` is not a generic type. It takes no type arguments"),
                 ));
             } else if arity != *count {
                 diagnostics.push(Diagnostic::new(
@@ -1107,7 +1190,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                     Severity::Error,
                     "annotation",
                     format!(
-                        "generic type `{name}` expects {arity} type {}, but found {count}.",
+                        "generic type `{name}` expects {arity} type {}, but found {count}",
                         plural(arity, "argument", "arguments"),
                     ),
                 ));
@@ -1135,7 +1218,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                     Severity::Error,
                     "annotation",
                     format!(
-                        "generic type `{name}` expects {arity} type {}, but found 0.",
+                        "generic type `{name}` expects {arity} type {}, but found 0",
                         plural(arity, "argument", "arguments"),
                     ),
                 ));
@@ -1152,7 +1235,7 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                 Severity::Error,
                 "annotation",
                 format!(
-                    "`@new` requires a nominal type declared with `@type`, but `{}` is an alias.",
+                    "`@new` requires a nominal type declared with `@type`, but `{}` is an alias",
                     name.text(db)
                 ),
             ));
@@ -1900,13 +1983,13 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
                     severity: Severity::Warning,
                     code: "duplicate",
                     message: format!(
-                        "Top-level binding `{name}` overwrites an earlier top-level binding in this package."
+                        "top-level binding `{name}` overwrites an earlier top-level binding in this package"
                     ),
                     fix: None,
                     related: vec![RelatedLocation {
                         file: earlier_file,
                         range: earlier_range,
-                        message: "the earlier binding is here.",
+                        message: "the earlier binding is here",
                     }],
                 });
             }
@@ -1923,13 +2006,13 @@ fn duplicate_binding_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnosti
                     severity: Severity::Warning,
                     code: "duplicate",
                     message: format!(
-                        "Top-level binding `{name}` is overwritten by a later top-level binding in this package."
+                        "top-level binding `{name}` is overwritten by a later top-level binding in this package"
                     ),
                     fix: None,
                     related: vec![RelatedLocation {
                         file: later_file,
                         range: later_range,
-                        message: "the later binding is here.",
+                        message: "the later binding is here",
                     }],
                 });
             }
@@ -2143,13 +2226,13 @@ fn duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> 
                 severity: Severity::Error,
                 code: "annotation",
                 message: format!(
-                    "the type name `{name}` is declared more than once. `@type` and `@alias` declarations share one project-global namespace."
+                    "the type name `{name}` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project"
                 ),
                 fix: None,
                 related: vec![RelatedLocation {
                     file: neighbour_file,
                     range: neighbour_range,
-                    message: "another declaration of this name is here.",
+                    message: "another definition of this name is here",
                 }],
             });
         }
@@ -2175,13 +2258,13 @@ fn script_duplicate_type_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagn
             severity: Severity::Error,
             code: "annotation",
             message: format!(
-                "the type name `{name}` is declared more than once. `@type` and `@alias` declarations share one namespace, which for a script is this file."
+                "the type name `{name}` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace, which for a script is this file"
             ),
             fix: None,
             related: vec![RelatedLocation {
                 file,
                 range: neighbour_range,
-                message: "another declaration of this name is here.",
+                message: "another definition of this name is here",
             }],
         });
     }
@@ -2216,9 +2299,9 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
             Some(nearest) => {
                 format!("`{name}` is not exported by `{package}`. Did you mean `{nearest}`?")
             }
-            None if !defined => format!("`{name}` is not exported by `{package}`."),
+            None if !defined => format!("`{name}` is not exported by `{package}`"),
             None => format!(
-                "`{name}` is not exported by `{package}`, so this read fails once the package is installed. Export it in `NAMESPACE`, or write `{package}:::{name}`."
+                "`{name}` is not exported by `{package}`, so this read fails once the package is installed. Export it in `NAMESPACE`, or write `{package}:::{name}`"
             ),
         });
     }
@@ -2232,21 +2315,21 @@ fn namespace_read_message(db: &dyn Db, read: &NamespaceRead) -> Option<String> {
         false if CONDITIONAL_NAMESPACES.contains(&read.package.as_str()) => {
             let name = read.name.as_ref()?;
             (!read.internal && dormant_namespace_exports(db, &read.package, name) == Some(false))
-                .then(|| format!("`{name}` is not exported by `{}`.", read.package))
+                .then(|| format!("`{name}` is not exported by `{}`", read.package))
         }
-        false => Some(format!("unknown package namespace `{}`.", read.package)),
+        false => Some(format!("unknown package namespace `{}`", read.package)),
         true => {
             let name = read.name.as_ref()?;
             if !read.internal && !namespace_exports(db, &read.package, name) {
                 // `ry` is the other namespace ry ships, so `ry::List.map` is the likely slip.
                 let hint = if read.package == "ry" && namespace_exports(db, STANDARD_LIBRARY, name)
                 {
-                    format!(" It is in ry's standard library: write `{STANDARD_LIBRARY}::{name}`.")
+                    format!(". It is in ry's standard library: write `{STANDARD_LIBRARY}::{name}`")
                 } else {
                     String::new()
                 };
                 Some(format!(
-                    "`{name}` is not exported by `{}`.{hint}",
+                    "`{name}` is not exported by `{}`{hint}",
                     read.package
                 ))
             } else {
@@ -2389,6 +2472,160 @@ fn file_defines_r6_class(db: &dyn Db, file: SourceFile) -> bool {
                 }
             })
         })
+    })
+}
+
+/// `R CMD check`'s S3 generic/method consistency rule, for a package function `generic.class`
+/// whose generic is the package's own function that calls `UseMethod("generic")`. Dispatch
+/// passes the call's arguments on as they were matched to the generic, so the method must take
+/// the generic's arguments, in the generic's order up to the first `...`.
+fn s3_method_finding<'db>(
+    db: &'db dyn Db,
+    item: Item<'db>,
+    module: &hir::Module,
+) -> Option<(TextRange, String)> {
+    if *item.file(db).kind(db) != DocumentKind::Package {
+        return None;
+    }
+    let method = item.name(db)?;
+    let ExpressionKind::Assign { target, value, .. } = *module.kind(module.root?) else {
+        return None;
+    };
+    let ExpressionKind::Function { parameters, .. } = *module.kind(value) else {
+        return None;
+    };
+    let registered = registered_generic(db, QueryName::new(db, Name::new(db, method)))
+        .as_deref()
+        .map(Symbol::new)
+        .and_then(|generic| Some((generic, s3_generic_parameters(db, generic)?)));
+    let (generic, generic_parameters) = registered.or_else(|| {
+        method
+            .as_str()
+            .match_indices('.')
+            .rev()
+            .filter(|&(dot, _)| dot > 0 && dot + 1 < method.as_str().len())
+            .find_map(|(dot, _)| {
+                let generic = Symbol::new(&method.as_str()[..dot]);
+                // A package that registers its methods registers them all, so an unregistered
+                // `generic.suffix` is an ordinary function, such as a deprecated `mpfr.is.0`.
+                let query = QueryName::new(db, Name::new(db, generic));
+                if registered_methods(db, query)
+                    .as_ref()
+                    .is_some_and(|registered| !registered.contains(method.as_str()))
+                {
+                    return None;
+                }
+                let parameters = s3_generic_parameters(db, generic)?;
+                Some((generic, parameters))
+            })
+    })?;
+    let method_parameters = &module[parameters];
+    let mut generic_names: &[Symbol] = &generic_parameters;
+    let mut method_names: Vec<Symbol> = method_parameters
+        .iter()
+        .map(|parameter| parameter.name)
+        .collect();
+    let mut skipped = 0;
+    // A formula method may call its first argument `formula`.
+    if method.as_str().ends_with(".formula") && !method_names.is_empty() {
+        if generic_names.first().is_some_and(|name| *name != "...") {
+            generic_names = &generic_names[1..];
+        }
+        method_names.remove(0);
+        skipped = 1;
+    }
+    let dots = |names: &[Symbol]| names.iter().position(|name| *name == "...");
+    let generic_dots = dots(generic_names);
+    let method_dots = dots(&method_names);
+    let positional = generic_dots
+        .unwrap_or(generic_names.len())
+        .min(method_dots.unwrap_or(usize::MAX));
+    let parameter_range = |index: usize| method_parameters[index + skipped].range;
+    let name_range = module.range(target);
+    for (index, expected) in generic_names[..positional].iter().enumerate() {
+        match method_names.get(index) {
+            Some(found) if found == expected => {}
+            Some(found) => {
+                return Some((
+                    parameter_range(index),
+                    format!(
+                        "this method of `{generic}` takes `{found}` where the generic takes `{expected}`, so a call that passes `{expected}` by name fails for this class. Rename it to `{expected}`"
+                    ),
+                ));
+            }
+            None => {
+                return Some((
+                    name_range,
+                    format!(
+                        "this method of `{generic}` has no `{expected}` parameter, which the generic takes, so a call that passes `{expected}` fails for this class. Add `{expected}`"
+                    ),
+                ));
+            }
+        }
+    }
+    if method_dots.is_none()
+        && let Some(missing) = generic_names
+            .iter()
+            .find(|name| !method_names.contains(name))
+    {
+        return Some((
+            name_range,
+            match missing.as_str() {
+                "..." => format!(
+                    "this method of `{generic}` has no `...` parameter, which the generic takes, so a call that passes an extra argument fails for this class. Add `...`"
+                ),
+                _ => format!(
+                    "this method of `{generic}` has no `{missing}` parameter, which the generic takes, so a call that passes `{missing}` fails for this class. Add `{missing}` or `...`"
+                ),
+            },
+        ));
+    }
+    if generic_dots.is_none()
+        && let Some(index) = method_names
+            .iter()
+            .position(|name| *name != "..." && !generic_names.contains(name))
+    {
+        return Some((
+            parameter_range(index),
+            format!(
+                "this method of `{generic}` takes `{}`, which the generic does not, and the generic has no `...` to pass it on, so no call through `{generic}` can supply it. Add `{}` or `...` to the generic",
+                method_names[index], method_names[index]
+            ),
+        ));
+    }
+    None
+}
+
+/// The formals of the package's own S3 generic `generic`: a function whose body calls
+/// `UseMethod("generic")`.
+fn s3_generic_parameters(db: &dyn Db, generic: Symbol) -> Option<Vec<Symbol>> {
+    let winner = package_name(db, QueryName::new(db, Name::new(db, generic))).winner?;
+    if !*reads_use_method(db, winner) {
+        return None;
+    }
+    let module = item_hir(db, winner).as_ref()?;
+    let ExpressionKind::Assign { value, .. } = *module.kind(module.root?) else {
+        return None;
+    };
+    let ExpressionKind::Function { parameters, .. } = *module.kind(value) else {
+        return None;
+    };
+    let dispatches = module.expression_ids().any(|expression| {
+        let ExpressionKind::Call { callee, arguments } = module.kind(expression) else {
+            return false;
+        };
+        matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "UseMethod")
+            && module[arguments]
+                .first()
+                .and_then(|argument| argument.value)
+                .and_then(|value| s4::string(module, value))
+                == Some(generic)
+    });
+    dispatches.then(|| {
+        module[parameters]
+            .iter()
+            .map(|parameter| parameter.name)
+            .collect()
     })
 }
 
@@ -2798,7 +3035,7 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 definer.range,
                 Severity::Warning,
                 "unused",
-                format!("`{}` is assigned but never used.", definer.name),
+                format!("`{}` is assigned but never used", definer.name),
             )
         })
         .collect()
@@ -2899,21 +3136,26 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 StrictOriginKind::LoopWidened(_)
                 | StrictOriginKind::RecursiveUnknown(_)
                 | StrictOriginKind::UntypedParameter(_)
-                | StrictOriginKind::UnknownColumns { .. } => None,
+                | StrictOriginKind::UnknownColumns { .. }
+                | StrictOriginKind::UncheckedAnnotation => None,
                 _ => assignment_targets.get(&origin.expression),
             };
             let message = if let Some(name) = assignment_target {
                 format!(
-                    "strict mode: could not determine the type of `{name}`; add a type annotation"
+                    "strict mode: could not determine the type of `{name}`. Annotate it with `#: @if-unknown TYPE` to accept it unchecked"
                 )
             } else {
                 match &origin.kind {
+                    StrictOriginKind::UncheckedAnnotation => {
+                        "strict mode: this value's type is undetermined (`Unknown`), so its annotation checks nothing. Write the annotation as `@if-unknown TYPE` to accept the value unchecked"
+                            .to_owned()
+                    }
                     StrictOriginKind::UnsupportedConstruct => {
                         "strict mode: this expression has an undetermined type (`Unknown`)"
                             .to_owned()
                     }
                     StrictOriginKind::UndeterminedReference(name) => format!(
-                        "strict mode: could not determine the type of `{name}`; it has no known type"
+                        "strict mode: `{name}` has no declared type, so the code that uses it is not checked. Declare it in a `.Rtypes` stub, or annotate the result with `#: @if-unknown TYPE`"
                     ),
                     StrictOriginKind::LoopWidened(name) => format!(
                         "strict mode: could not determine the type of `{name}`, because it does not stabilize across loop iterations. Add a type annotation"
@@ -3177,7 +3419,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             renderer.render(db, *found)
         ),
         TypeErrorKind::MissingFormalRead { name } => format!(
-            "reading `{name}` here would fail at run time: this branch runs only when `{name}` is missing, and it has no default."
+            "reading `{name}` here would fail at run time: this branch runs only when `{name}` is missing, and it has no default"
         ),
         TypeErrorKind::TemplateDisagreesWithCallback {
             callback,
@@ -3291,6 +3533,32 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 "`{name}` defaults to `NULL`, which its declared type `{declared}` does not admit. A caller who omits it leaves `NULL` in the body. Declare it `{suggested}` and narrow with `is.null()`"
             )
         }
+        // `Date` has arithmetic with a number, so the message says what it lacks.
+        TypeErrorKind::ConstraintViolation {
+            constraint: Constraint::Numeric,
+            found,
+        } if matches!(found.kind(db), TyKind::Named(..)) => format!(
+            "expected a numeric value (`integer` or `double`) or a class with arithmetic between two of its values, found `{}`",
+            renderer.render(db, *found)
+        ),
+        // A class may satisfy `arithmetic` by declaring an operator method, so a class that
+        // fails it is told what it lacks; a plain value is not, because that would be noise.
+        TypeErrorKind::ConstraintViolation {
+            constraint: Constraint::Arithmetic,
+            found,
+        } if matches!(found.kind(db), TyKind::Named(..)) => format!(
+            "expected a numeric value (`integer` or `double`) or a class with arithmetic, found `{}`",
+            renderer.render(db, *found)
+        ),
+        TypeErrorKind::ConstraintViolation {
+            constraint: Constraint::Numeric,
+            found,
+        } if matches!(found.kind(db), TyKind::Rigid(_)) => {
+            let found = renderer.render(db, *found);
+            format!(
+                "expected a numeric value (`integer` or `double`), found `{found}`. Declare `<{found}: numeric>` to combine two of its values, because `arithmetic` admits classes such as `Date` that only add a number"
+            )
+        }
         TypeErrorKind::ConstraintViolation { constraint, found } => format!(
             "expected {}, found `{}`",
             constraint_description(*constraint),
@@ -3402,7 +3670,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             renderer.render(db, *found)
         ),
         TypeErrorKind::NotIterable { found } => format!(
-            "this `for` sequence is `{}`, which cannot be iterated. Expected a vector or list.",
+            "this `for` sequence is `{}`, which cannot be iterated. Expected a vector or list",
             renderer.render(db, *found)
         ),
         TypeErrorKind::UnsupportedSubset { found } => {
@@ -3528,7 +3796,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             if *names == 1 { "name is" } else { "names are" }
         ),
         TypeErrorKind::IncompatibleJoinColumns { condition, x, i } => format!(
-            "the join condition `{condition}` compares `{}` with `{}`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals.",
+            "the join condition `{condition}` compares `{}` with `{}`. A join matches numbers with numbers, strings with strings or factors, and logicals with logicals",
             renderer.render(db, *x),
             renderer.render(db, *i)
         ),
@@ -3537,7 +3805,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             column,
             found,
         } => format!(
-            "the join condition `{condition}` compares numbers, but `{column}` is `{}`. Only `==` joins strings.",
+            "the join condition `{condition}` compares numbers, but `{column}` is `{}`. Only `==` joins strings",
             renderer.render(db, *found)
         ),
         TypeErrorKind::InSubsetColumn { column, inner } => {
@@ -3582,7 +3850,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         }
         TypeErrorKind::BadRowIndex { found } => {
             let hint = if matches!(found.kind(db), TyKind::Frame(..)) {
-                ". To join two frames, add `on =`."
+                ". To join two frames, add `on =`"
             } else {
                 ""
             };
@@ -3592,7 +3860,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             )
         }
         TypeErrorKind::DollarOnAtomicVector { found } => format!(
-            "R's `$` operator is invalid on atomic vectors, and this value is `{}`. Extract an element with `[[` instead.",
+            "R's `$` operator is invalid on atomic vectors, and this value is `{}`. Extract an element with `[[` instead",
             renderer.render(db, *found)
         ),
         TypeErrorKind::InvalidOperand { expected, found } => format!(
@@ -3629,7 +3897,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             variable,
             container,
         } => format!(
-            "I cannot construct an infinite type: {} occurs inside `{}`.",
+            "I cannot construct an infinite type: {} occurs inside `{}`",
             renderer.render(db, *variable),
             renderer.render(db, *container)
         ),
@@ -4167,6 +4435,7 @@ fn constraint_description(constraint: Constraint) -> &'static str {
     match constraint {
         Constraint::Unconstrained => "a value",
         Constraint::Numeric => "a numeric value (`integer` or `double`)",
+        Constraint::Arithmetic => "a numeric value (`integer` or `double`)",
         Constraint::AtomicElement => {
             "an atomic value (`logical`, `integer`, `double`, `complex`, `character`, or `raw`)"
         }

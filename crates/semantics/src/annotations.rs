@@ -120,9 +120,7 @@ pub fn lower_annotation_within<'db>(
     let mut annotation = Annotation::default();
     match block_refusal(node) {
         Some(BlockRefusal::FormMixing(message)) => {
-            annotation
-                .errors
-                .push((message.to_owned(), node.text_range()));
+            annotation.errors.push((message, node.text_range()));
             return annotation;
         }
         Some(BlockRefusal::Unparsed) => return annotation,
@@ -952,12 +950,12 @@ impl<'db> Lowering<'db> {
         let mut errors = self.errors;
         if self.beyond_parse_depth {
             errors.push((
-                "This type annotation is nested too deeply (more than 160 levels).".to_owned(),
+                "this type annotation is nested too deeply (more than 160 levels)".to_owned(),
                 range,
             ));
         } else if self.beyond_check_depth {
             annotation.typing_errors.push((
-                "This type is nested too deeply to check (more than 128 levels).".to_owned(),
+                "this type is nested too deeply to check (more than 128 levels)".to_owned(),
                 range,
             ));
         }
@@ -1035,7 +1033,7 @@ impl<'db> Lowering<'db> {
                         // Blame the whole spelling, not just its first word.
                         self.errors.push((
                             format!(
-                                "unknown type-parameter constraint `{spelling}`; the available constraints are {available}."
+                                "unknown type-parameter constraint `{spelling}`; the available constraints are {available}"
                             ),
                             first.text_range().cover(last.text_range()),
                         ));
@@ -1053,7 +1051,7 @@ impl<'db> Lowering<'db> {
             if bound.iter().any(|existing| existing.name == name) {
                 self.errors.push((
                     format!(
-                        "duplicate type parameter name `{}` in {place}.",
+                        "duplicate type parameter name `{}` in {place}",
                         name.text(self.db)
                     ),
                     binder.text_range(),
@@ -1138,7 +1136,7 @@ impl<'db> Lowering<'db> {
                         annotation.new_nominal = Some((*name, arguments.to_vec(), range));
                     }
                     _ => self.errors.push((
-                        "expected a nominal type reference after `@new`.".to_owned(),
+                        "expected a nominal type reference after `@new`".to_owned(),
                         range,
                     )),
                 }
@@ -1398,7 +1396,7 @@ impl<'db> Lowering<'db> {
                     .map(|name_node| name_node.text_range());
                 if reference.is_some() && self.binders.contains(&name) {
                     self.errors.push((
-                        format!("`{text}` is a type parameter here and takes no type arguments."),
+                        format!("`{text}` is a type parameter here and takes no type arguments"),
                         node.text_range(),
                     ));
                     return unknown(self.db);

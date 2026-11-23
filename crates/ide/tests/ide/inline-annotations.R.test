@@ -55,19 +55,19 @@ definition 17..18
 references: 17..18*, 23..24, 29..30
 rename: 3 edit(s)
 signature: none
-completion (16): Any, character, complex, double, fn, integer, list, logical
+completion (26): Any, character, complex, double, fn, integer, list, logical
 
 #---- completion_after_a_parameter_colon
 #: @type Money {double}
 
 f <- function(x: $0) x
 #++++
-hover 25..45: fn(x: Unknown) -> Unknown
+hover 30..45: fn(x: Unknown) -> Unknown
 definition: none
 references: none
 rename: none
 signature: none
-completion (17): Money, Any, character, complex, double, fn, integer, list
+completion (27): Money, Any, character, complex, double, fn, integer, list
 
 #---- completion_after_a_binding_colon_before_the_type_exists
 #: @type Money {double}
@@ -120,7 +120,7 @@ definition 21..22
 references: 21..22*, 27..28, 33..34
 rename: 3 edit(s)
 signature: none
-completion (16): Any, character, complex, double, fn, integer, list, logical
+completion (26): Any, character, complex, double, fn, integer, list, logical
 
 #---- inferred_annotation_fills_a_generic_function_header
 sca$0le_by <- function(values, factor = 2, ...) values * factor
@@ -154,7 +154,7 @@ hint @45 -> T
 #---- inferred_annotation_fills_a_backslash_lambda
 twi$0ce <- \(x) x * 2L
 #++++
-hover 0..5: twice: <T: numeric> fn(x: T) -> T
+hover 0..5: twice: <T: arithmetic> fn(x: T) -> T
 hover-definition: global 0..5
 definition 0..5
 references: 0..5*
@@ -162,15 +162,15 @@ rename: 1 edit(s)
 calls twice: in  | out
 signature: none
 action: Add inferred type annotation for `twice`
-  edit 10..10 -> "<T: numeric>"
+  edit 10..10 -> "<T: arithmetic>"
   edit 12..12 -> ": T"
   edit 13..13 -> " -> T"
 action: Add inferred type annotations for the whole file
-  edit 10..10 -> "<T: numeric>"
+  edit 10..10 -> "<T: arithmetic>"
   edit 12..12 -> ": T"
   edit 13..13 -> " -> T"
 completion (59): twice, getWindowsHandle, getWindowsHandles, getWindowTitle, getWinProgressBar, setWindowTitle, setWinProgressBar, HoltWinters
-hint @10<T: numeric>
+hint @10<T: arithmetic>
 hint @12: T
 hint @13 -> T
 
@@ -289,7 +289,8 @@ hint @73FUN.VALUE =
 #---- inferred_annotation_skips_a_lambda_that_writes_a_type
 doub$0led <- function(values: integer[]) vapply(values, function(v: integer) v * 2, numeric(1))
 #++++
-hover 0..93: fn(values: integer[]) -> double[]
+hover 0..7: doubled: fn(values: integer[]) -> double[]
+hover-definition: global 0..7
 definition 0..7
 references: 0..7*
 rename: 1 edit(s)

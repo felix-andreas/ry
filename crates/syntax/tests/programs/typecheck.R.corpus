@@ -2389,7 +2389,7 @@ double_count <- function(count) {
 result <- double_count("two")
 #---- incremental.R__delete R/a.R
 #++++ R/b.R
-warning[unresolved] I could not resolve `double_count` in this package, its imports, or builtins.
+warning[unresolved] I could not resolve `double_count` in this package, its imports, or builtins
 --> 1:11-1:23
 | result <- double_count(2L)
 #---- incremental.R__R/a.R

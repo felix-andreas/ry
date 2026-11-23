@@ -89,7 +89,7 @@ run ry run --runtime ry write-ending.R
 expect exit 0
 run ry run --runtime ry ending.R
 expect exit 1
-expect stderr "A `#:` typing comment must be followed immediately by an expression"
+expect stderr "a `#:` typing comment must be followed immediately by an expression"
 expect stdout lacks "ran unchecked"
 
 # A blank line detaches the block, so the function below it is plain R.

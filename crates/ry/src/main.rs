@@ -403,6 +403,7 @@ fn main() -> ExitCode {
                 exit_code(analysis_stats(path.as_deref()).map(|()| Outcome::Clean))
             }
             Debug::Erase { paths } => exit_code(cli::erase(&paths).map(|()| Outcome::Clean)),
+            Debug::Type { position } => exit_code(cli::type_at(&position).map(|()| Outcome::Clean)),
         },
         Command::Load {
             path,
