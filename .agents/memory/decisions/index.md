@@ -665,6 +665,10 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - String keys sort by rank, and merge pairs come from sorted codes
 - package:ry attaches no bare name another package exports
 - A base frame built by `data.frame()` or `data.table()` knows its columns
+- A verb taking columns through `...` has no formal before them
+- `Expr` `%%` and `%/%` on doubles are GNU R's `myfmod` and `myfloor`
+- The frame fuzz kind's reference is a base-R model of the documented contract
+- A DataFrame sort puts missing values last and compares text by bytes
 
 ## Build, benchmarks and CI
 

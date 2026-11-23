@@ -191,7 +191,7 @@ pub unsafe fn binary(
     let loses_accuracy = kind == SexpType::Real
         && op == Op::Modulo
         && (0..count).any(|index| {
-            arith::modulus_loses_accuracy(
+            long_double::modulus_loses_accuracy(
                 arith::real_at(left, index % left_length),
                 arith::real_at(right, index % right_length),
             )
@@ -1964,8 +1964,8 @@ fn real_operation(op: Op, left: Option<Reals<'_>>, right: Option<Reals<'_>>, out
         // GNU R squares with `x * x` whatever `x` is (`R_POW`), so `NA^2` comes out quieted.
         Op::Power if square => map2(x, y, output, |a, _| a * a),
         Op::Power => map2(x, y, output, arith::power),
-        Op::Modulo => map2(x, y, output, arith::real_modulo),
-        Op::IntegerDivide => map2(x, y, output, arith::real_integer_divide),
+        Op::Modulo => map2(x, y, output, long_double::real_modulo),
+        Op::IntegerDivide => map2(x, y, output, long_double::real_integer_divide),
     }))
 }
 

@@ -119,7 +119,9 @@ are unknown is an error.
 `Expr.col("units")` refers to a column. Arithmetic (`+`, `-`, `*`, `/`, `^`, `%/%`, `%%`), comparisons,
 `&`, `|` and `!` combine columns and plain R values into a new expression, so
 `Expr.col("units") * Expr.col("price")` and `Expr.col("price") > 2` are both expressions.
-`Expr.lit(value)` makes a constant column.
+`Expr.lit(value)` makes a constant column. `%%` and `%/%` give R's values in every case, such as
+`1e308 %% 5` being `0` and `NA %% 0` being `NaN`, but a column never raises R's "probable complete
+loss of accuracy in modulus" warning.
 
 Aggregations reduce a column to one value: `Expr.sum`, `Expr.mean`, `Expr.median`, `Expr.min`,
 `Expr.max`, `Expr.first`, `Expr.last`, `Expr.std`, `Expr.var` and `Expr.count`. `Expr.len()`
@@ -153,7 +155,47 @@ expression in parentheses first.
 | `DataFrame.join_asof(df, other, on, by = NULL)` | joins each row to the nearest row of `other` |
 
 A string names a column wherever a verb takes an expression, so `DataFrame.select(df, "region")`
-is short for `DataFrame.select(df, Expr.col("region"))`. Inside `GroupBy.agg`, each expression must
+is short for `DataFrame.select(df, Expr.col("region"))`.
+
+The verbs that take columns through `...` (`select`, `with_columns`, `filter`, `group_by`, `agg`,
+`sort` and `Expr.over`) read their arguments by one rule:
+
+- The table (or the groups, or the expression for `Expr.over`) is the first positional argument.
+- Every named argument in a column position names a column, so `df`, `d`, `group` and `n` are
+  ordinary column names. A named table is an error at run time and under `ry check`.
+- The verb's own options come after the columns and match only by their full name. `sort`'s
+  `desc = TRUE` is read as a column, and fails because a logical value is not a column.
+
+```r
+sales |>
+  DataFrame.group_by("region") |>
+  GroupBy.agg(n = Expr.len(), group = Expr.sum(Expr.col("units"))) |>
+  DataFrame.sort("region")
+```
+
+```text
+   region     n group
+   <char> <int> <int>
+1:   asia     1     7
+2:     eu     2     5
+3:     us     2     6
+```
+
+Naming the table is the one mistake this rule catches:
+
+```r
+DataFrame.select(df = sales, "region")
+```
+
+```text
+x `df` is read as a column, not as the table: a named argument here is a column, which must be `Expr | character`. Pass the table first, without a name
+```
+
+`DataFrame.join`, `DataFrame.join_asof`, `head` and `tail` take no columns through `...`, so
+`on`, `how`, `left_on`, `right_on`, `suffix`, `by` and `n` match as ordinary R arguments, prefixes
+included: `DataFrame.join(left, right, on = "id", ho = "left")` is a left join.
+
+Inside `GroupBy.agg`, each expression must
 give one value per group. `Expr.col("units")` alone gives one value per row, so the checker and the
 runtime both reject it until you aggregate it.
 
@@ -197,6 +239,11 @@ sales |>
 The groups come in the order of their first row in the sorted data. Written lazily, with one
 sort column and `Expr.head(n)` as the only item for an `n` of at most 8, the sort and the grouping
 run as one step that keeps only each group's best rows, instead of sorting the whole table first.
+
+`sort` puts missing values last in both directions, with `NaN` counted as missing, so `NA` and
+`NaN` rows keep their input order among themselves. Rows with equal keys keep their input order
+too, descending included, and strings compare by their bytes (`"B" < "_" < "a" < "é"`), whatever
+the locale.
 
 ### Joins
 

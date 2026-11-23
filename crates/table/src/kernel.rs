@@ -15,6 +15,7 @@ use {
         ColumnType, Error, Result, Schema, factor,
         query::{BinaryOp, Expr, Typer, UnaryOp, comparison},
     },
+    numeric::long_double::{real_integer_divide, real_modulo},
     polars::prelude::{
         BooleanChunked, BooleanType, ChunkedArray, Column, DataFrame, DataType, Float64Chunked,
         Float64Type, IdxCa, Int32Chunked, Int32Type, IntoColumn, PlSmallStr, StringChunked,
@@ -863,9 +864,8 @@ fn double_arithmetic(
         // of R's `NA_real_`, which a null slot may still hold, so both cases are decided here.
         BinaryOp::Power if lhs == 1.0 || rhs == 0.0 => 1.0,
         BinaryOp::Power => lhs.powf(rhs),
-        BinaryOp::IntegerDivide => (lhs / rhs).floor(),
-        // R's `%%` takes the sign of the divisor.
-        BinaryOp::Modulo => lhs - (lhs / rhs).floor() * rhs,
+        BinaryOp::IntegerDivide => real_integer_divide(lhs, rhs),
+        BinaryOp::Modulo => real_modulo(lhs, rhs),
         _ => f64::NAN,
     };
     if !matches!(
@@ -880,19 +880,20 @@ fn double_arithmetic(
     ) {
         return None;
     }
-    // `NA^0` and `1^NA` are 1 in R, so a power is known whenever a known side decides it.
-    let power_decides =
-        |side: &Side<f64>, validity: &Option<Bitmap>, decides: fn(f64) -> bool| match side {
-            Side::Scalar(Some(value)) => Some(Bitmap::new_with_value(decides(*value), len)),
-            Side::Scalar(None) => Some(Bitmap::new_zeroed(len)),
-            Side::Array(values) => {
-                let hits = pack_map(len, values, decides);
-                Some(match validity {
-                    Some(validity) => &hits & validity,
-                    None => hits,
-                })
-            }
-        };
+    // A known side may decide the result whatever the other holds: `NA^0` and `1^NA` are 1 in R,
+    // and `NA %% 0` is `NaN`.
+    let decides = |side: &Side<f64>, validity: &Option<Bitmap>, decides: fn(f64) -> bool| match side
+    {
+        Side::Scalar(Some(value)) => Some(Bitmap::new_with_value(decides(*value), len)),
+        Side::Scalar(None) => Some(Bitmap::new_zeroed(len)),
+        Side::Array(values) => {
+            let hits = pack_map(len, values, decides);
+            Some(match validity {
+                Some(validity) => &hits & validity,
+                None => hits,
+            })
+        }
+    };
     if scalar {
         let (lhs, rhs) = match (&left.side, &right.side) {
             (Side::Scalar(lhs), Side::Scalar(rhs)) => (*lhs, *rhs),
@@ -902,6 +903,7 @@ fn double_arithmetic(
             (Some(lhs), Some(rhs)) => Some(apply(lhs, rhs)),
             (Some(lhs), None) if op == BinaryOp::Power && lhs == 1.0 => Some(1.0),
             (None, Some(rhs)) if op == BinaryOp::Power && rhs == 0.0 => Some(1.0),
+            (None, Some(rhs)) if op == BinaryOp::Modulo && rhs == 0.0 => Some(f64::NAN),
             _ => None,
         };
         return Some(Value::Scalar(Scalar::Double(value)));
@@ -920,9 +922,12 @@ fn double_arithmetic(
         };
         let both = &side_validity(&left) & &side_validity(&right);
         if op == BinaryOp::Power {
-            let one = power_decides(&left.side, &left.validity, |value| value == 1.0)?;
-            let zero = power_decides(&right.side, &right.validity, |value| value == 0.0)?;
+            let one = decides(&left.side, &left.validity, |value| value == 1.0)?;
+            let zero = decides(&right.side, &right.validity, |value| value == 0.0)?;
             Some(&(&both | &one) | &zero)
+        } else if op == BinaryOp::Modulo {
+            let zero = decides(&right.side, &right.validity, |value| value == 0.0)?;
+            Some(&both | &zero)
         } else {
             Some(both)
         }
