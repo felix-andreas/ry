@@ -11,8 +11,8 @@ use {
         types::{
             Atomic, Binder, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeScalar,
             Ty, TyKind, array_element, contains_inference_var, for_each_child_type,
-            is_ry_value_type, map_child_types, native_scalar, scalar, substitute_rigid, union_of,
-            unknown,
+            is_ry_value_type, map_child_types, native_scalar, r_column_type, scalar,
+            substitute_rigid, union_of, unknown,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -1334,8 +1334,12 @@ impl<'db> InferenceTable<'db> {
                 // It fits a union target as a lone open argument does, taking the union as a
                 // bound, so `character | U` passed where `list[T] | T[] | NULL` is expected
                 // leaves `U` free to be `character | NULL` at a later call.
-                let (open, concrete): (Vec<Ty<'db>>, Vec<Ty<'db>>) =
-                    members.iter().copied().partition(|&member| {
+                // The rule above already decided where the source's own `..` goes.
+                let (open, concrete): (Vec<Ty<'db>>, Vec<Ty<'db>>) = members
+                    .iter()
+                    .copied()
+                    .filter(|member| !matches!(member.kind(db), TyKind::OtherTags))
+                    .partition(|&member| {
                         matches!(
                             member.kind(db),
                             TyKind::Var(var) if matches!(
@@ -1353,6 +1357,16 @@ impl<'db> InferenceTable<'db> {
                     })
             }
             (TyKind::Tag(..), TyKind::OtherTags) => true,
+            // A lone `..` is an open union that lists no tag, so it fits an open target only
+            // when the target lists no tag either.
+            (TyKind::OtherTags, TyKind::Union(members)) => {
+                members
+                    .iter()
+                    .any(|member| matches!(member.kind(db), TyKind::OtherTags))
+                    && !members
+                        .iter()
+                        .any(|member| matches!(member.kind(db), TyKind::Tag(..)))
+            }
             // A tag the open target does not list falls into its `..`; a listed name must
             // fit that member, which the general search below decides.
             (TyKind::Tag(name, _), TyKind::Union(members))
@@ -1610,15 +1624,18 @@ impl<'db> InferenceTable<'db> {
                 TyKind::Frame(_, Some(columns)),
                 TyKind::List(element) | TyKind::NamedList(element),
             ) if self.resolve(db, *element).is_var() => {
-                let joined = union_of(db, columns.iter().map(|column| column.ty));
+                let joined = union_of(
+                    db,
+                    columns.iter().map(|column| r_column_type(db, column.ty)),
+                );
                 self.unify(db, *element, joined).is_ok()
             }
             (
                 TyKind::Frame(_, Some(columns)),
                 TyKind::List(element) | TyKind::NamedList(element),
-            ) => columns
-                .iter()
-                .all(|column| self.compatible_probe(db, column.ty, *element, depth + 1)),
+            ) => columns.iter().all(|column| {
+                self.compatible_probe(db, r_column_type(db, column.ty), *element, depth + 1)
+            }),
             // An open `T` takes the join of the items: unifying each in turn would pin `T`
             // to the first item and reject the rest. An empty `list()` says nothing about `T`,
             // so it leaves `T` open; binding it to the empty join would fail every constraint

@@ -2517,7 +2517,12 @@ The end-to-end guard rests on the corpus suites.
 - **The checker accepts a constructor value no column can hold.** `DataFrame(x = list(1, "a"))`
   and `DataFrame(kind = [:Bond(1), :Cash(2)])` check clean and stop at run time with "column `x`
   is a list, which a DataFrame cannot hold". `types::column_type` passes such a value through as
-  the column type; it should report a `type-mismatch` that names the column.
+  the column type; it should report a `type-mismatch` that names the column. The same gap lets
+  `Expr.is_in(col, [:Ok(1)])` check clean (its stub takes `List<..>`, and no type spells "a tag
+  without a payload").
+- **The checker admits a ry tag as a `Dict` or `Set` key.** `Dict.single(:Cash, 1.0)` checks clean
+  and stops at run time ("`key` must be a single logical, number or string, not a ry tag"). Either
+  the key constraint should exclude tags or the runtime should hash a bare tag by its name.
 - **The 1e8 joins fit, with about 3 GB to spare; what would widen the margin.** At 1e8 rows the
   five db-benchmark joins peak at 11.6 GB from R and 12.0 GB from Rust, and data.table is killed
   at 14.3 GB before its first answer (`development/design/r-runtime.md`, section 7;

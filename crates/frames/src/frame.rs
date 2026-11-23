@@ -370,8 +370,8 @@ unsafe fn column_contents(value: Sexp) -> R<Option<RVector>> {
             .map(|index| interp::records::bare_tag_name(value.element(index)).map(Some))
             .collect::<Option<Vec<_>>>()
         {
-            Some(names) => RVector::Character(names),
-            None => return Ok(None),
+            Some(names) if !names.is_empty() => RVector::Character(names),
+            _ => return Ok(None),
         },
         // An `I64` column is an R `integer` column when every item fits, and `double` otherwise,
         // the same conversion `Num.to_r` makes, so a typed `[3, 5]` builds the column R's `3L`

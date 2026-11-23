@@ -772,9 +772,11 @@ cash <- holdings |> DataFrame.filter(Expr.is_in(Expr.col("kind"), [:Cash]))
 ```
 
 The table stores the column as the text of the tag names, so it prints as a `<char>` column and R
-code reads it as a `character[]`: `holdings$kind` is `c("Bond", "Cash", "Bond")`. A character
-vector such as `c("Bond", "Cash")` cannot fill a tag column, because nothing checks that its strings
-are tag names.
+code reads it as a `character[]`, through `$`, `[[`, `lapply` or `.SD` alike: `holdings$kind` is
+`c("Bond", "Cash", "Bond")`. A character vector such as `c("Bond", "Cash")` cannot fill a tag
+column, because nothing checks that its strings are tag names. For the same reason a `right` or
+`full` join on a tag column and a text column gives a `character[]` key column. A tag compares with
+a column through `==` and `!=` only.
 
 A query can start from a file too. `DataFrame.read_csv("data/sales.csv")` and
 `LazyFrame.scan_csv(...)` with a literal path to a `.csv` file in the project have that file's
