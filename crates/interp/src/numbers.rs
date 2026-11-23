@@ -628,7 +628,7 @@ pub(crate) unsafe fn num_from_r(call: &Call<'_>) -> R<Sexp> {
         Ok(Source::Int(number)) => alloc(number)?,
         Err(_) => return Err(wrong(call, "value", needed, value)),
     };
-    observe(call.call, number);
+    observe(call.call, number.kind());
     Ok(number)
 }
 
@@ -654,9 +654,9 @@ pub unsafe fn checked_number(conversion: Sexp, number: Sexp, expected: arrays::I
 }
 
 thread_local! {
-    /// What the runs of each `Num.from_r` and `List.from_r` call gave, by call: the type feedback
-    /// that fixes the type compiled typed code gives the conversion of what an R call returns,
-    /// which depends on the R value.
+    /// What the runs of each `Num.from_r` call and `List.from_r` or sibling call gave, by call:
+    /// the type feedback that fixes the type compiled typed code gives the conversion of what an
+    /// R call returns, which depends on the R value.
     static CONVERSIONS: RefCell<FxHashMap<Sexp, Observed>> = RefCell::new(FxHashMap::default());
     /// How many conversions have given a second type, which makes code compiled for the first
     /// stale ([`conversion_epoch`]).
@@ -664,7 +664,7 @@ thread_local! {
 }
 
 /// What the runs of one `Num.from_r` or `List.from_r` call gave: the R type of the value it
-/// converted to.
+/// converted to. For `List.from_r_missing` it is the storage of the items inside `:Ok`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Observed {
     /// Every run gave this type.
@@ -688,8 +688,7 @@ pub fn conversion_epoch() -> u64 {
     CONVERSION_EPOCH.get()
 }
 
-unsafe fn observe(call: Sexp, value: Sexp) {
-    let kind = value.kind();
+fn observe(call: Sexp, kind: SexpType) {
     CONVERSIONS.with_borrow_mut(|conversions| match conversions.get(&call) {
         Some(Observed::Steady(before)) if *before == kind => {}
         Some(&Observed::Steady(before)) => {
@@ -788,66 +787,207 @@ pub(crate) unsafe fn str_from_r(call: &Call<'_>) -> R<Sexp> {
     ))
 }
 
-/// `List.from_r(vector)`: the elements of a double, integer, logical, character or raw vector as
-/// a list of `F64`, `I64`, `Bool` or `Str` (an integer and a raw byte both become an `I64`), or
-/// the items of an R list converted the same way. Names are dropped; `NA`, a class and other attributes are refused.
-pub(crate) unsafe fn list_from_r(call: &Call<'_>) -> R<Sexp> {
-    let list = list_from_r_value(call)?;
-    observe(call.call, list);
-    Ok(list)
-}
+/// `List.from_r(vector)`, which refuses `NA`: the elements of a double, integer, logical,
+/// character or raw vector as a list of `F64`, `I64`, `Bool` or `Str` (an integer and a raw byte
+/// both become an `I64`), or the items of an R list converted the same way. Names are dropped; a
+/// class and other attributes are refused.
+pub(crate) const NA_REFUSED: u8 = 0;
+/// `List.from_r_or(vector, default)`: `List.from_r` of an atomic vector with every `NA` replaced
+/// by `default`. A default wider than the vector's items widens them as R coerces, so an integer
+/// vector with a fractional default gives a `List<F64>`.
+pub(crate) const NA_FILLED: u8 = 1;
+/// `List.from_r_missing(vector)`: `List.from_r` of an atomic vector with every item wrapped as
+/// `:Ok(item)`, and `:Err(:Missing)` where the vector holds `NA`. The type feedback records the
+/// storage of the items inside `:Ok`, which fixes the type compiled code gives the result.
+pub(crate) const NA_KEPT: u8 = 2;
 
-unsafe fn list_from_r_value(call: &Call<'_>) -> R<Sexp> {
-    let [vector] = arguments(call, ["vector"])?;
-    if vector.is_array() {
-        return Ok(vector);
-    }
-    let vector = values::materialize(vector)?;
-    if let SexpType::Logical | SexpType::Real | SexpType::String = vector.kind() {
-        if vector.is_object() {
+/// `List.from_r` and its siblings, which differ in what they do where the vector holds `NA`
+/// (`MISSING`, one of [`NA_REFUSED`], [`NA_FILLED`] and [`NA_KEPT`]).
+pub(crate) unsafe fn list_from_r<const MISSING: u8>(call: &Call<'_>) -> R<Sexp> {
+    let (vector, default) = if MISSING == NA_FILLED {
+        let [vector, default] = arguments(call, ["vector", "default"])?;
+        (vector, default)
+    } else {
+        let [vector] = arguments(call, ["vector"])?;
+        (vector, nil())
+    };
+    // A ry list holds no `NA`.
+    let (list, gaps) = if vector.is_array() {
+        (vector, Vec::new())
+    } else {
+        let vector = values::materialize(vector)?;
+        let limit = if MISSING == NA_REFUSED { 1 } else { usize::MAX };
+        let (converted, gaps) = match vector.kind() {
+            SexpType::Logical | SexpType::Real | SexpType::String => {
+                if vector.is_object() {
+                    return Err(call.error(format!(
+                        "`vector` has the class {}, which a ry list cannot hold; convert it with `as.vector()` first",
+                        arrays::class_text(vector)
+                    )));
+                }
+                // `F64`, `Bool` and `Str` share R's representation, so a vector of them is
+                // already the packed layout their list uses, and the conversion is one copy.
+                let copy = values::shallow_duplicate(vector)?;
+                values::clear_attributes(copy);
+                (copy, arrays::missing_positions(vector, limit))
+            }
+            SexpType::Integer | SexpType::Raw => {
+                check_attributes(call, vector)?;
+                let widened: Vec<i64> = if vector.kind() == SexpType::Integer {
+                    values::ints(vector)
+                        .iter()
+                        .map(|&number| i64::from(number))
+                        .collect()
+                } else {
+                    values::raws(vector)
+                        .iter()
+                        .map(|&byte| i64::from(byte))
+                        .collect()
+                };
+                (list(&widened)?, arrays::missing_positions(vector, limit))
+            }
+            _ if MISSING != NA_REFUSED => {
+                return Err(wrong(
+                    call,
+                    "vector",
+                    "a double, integer, logical, character or raw vector",
+                    vector,
+                ));
+            }
+            _ => {
+                let items = from_r_items(call, vector)?;
+                let list = arrays::from_items(&items)?.map_err(|message| call.error(message))?;
+                (list, Vec::new())
+            }
+        };
+        if MISSING == NA_REFUSED
+            && let Some(position) = gaps.first()
+        {
             return Err(call.error(format!(
-                "`vector` has the class {}, which a ry list cannot hold; convert it with `as.vector()` first",
-                arrays::class_text(vector)
-            )));
-        }
-        // `F64`, `Bool` and `Str` share R's representation, so a vector of them without `NA` is
-        // already the packed layout their list uses, and the conversion is one copy.
-        if let Some(position) = arrays::first_missing(vector) {
-            return Err(call.error(format!(
-                "`vector` is `NA` at position {}, which no ry value holds",
+                "`vector` is `NA` at position {}, which no ry value holds; use \
+                 `List.from_r_or(vector, default)` or `List.from_r_missing(vector)`",
                 position + 1
             )));
         }
-        let copy = values::shallow_duplicate(vector)?;
-        values::clear_attributes(copy);
-        return Ok(arrays::finish(copy));
-    }
-    if let SexpType::Integer | SexpType::Raw = vector.kind()
-        && vector.attrib() == nil()
-    {
-        let widened: Vec<i64> = if vector.kind() == SexpType::Integer {
-            let numbers = values::ints(vector);
-            if let Some(position) = numbers.iter().position(|&number| number == NA_INTEGER) {
-                return Err(call.error(format!(
-                    "`vector` is `NA` at position {}, which no ry value holds",
-                    position + 1
-                )));
-            }
-            numbers.iter().map(|&number| i64::from(number)).collect()
+        if MISSING == NA_FILLED && !gaps.is_empty() {
+            (fill(call, converted, &gaps, default)?, Vec::new())
         } else {
-            values::raws(vector)
-                .iter()
-                .map(|&byte| i64::from(byte))
-                .collect()
-        };
-        return list(&widened);
+            (arrays::finish(converted), gaps)
+        }
+    };
+    observe(call.call, list.kind());
+    if MISSING != NA_KEPT {
+        return Ok(list);
     }
-    let items = from_r_items(call, vector)?;
-    arrays::from_items(&items)?.map_err(|message| call.error(message))
+    let count = length(list);
+    if count == 0 {
+        return Ok(arrays::finish(values::alloc_uninit(SexpType::List, 0)?));
+    }
+    let missing = err("Missing")?;
+    let mut gaps = gaps.iter().copied().peekable();
+    let mut items = Vec::with_capacity(count);
+    for position in 0..count {
+        if gaps.next_if_eq(&position).is_some() {
+            items.push(missing);
+            continue;
+        }
+        let item = match list.kind() {
+            SexpType::Real => scalar_real(values::reals(list)[position])?,
+            SexpType::Logical => scalar_bool(values::ints(list)[position] != 0)?,
+            SexpType::String => values::scalar_string_charsxp(list.element(position))?,
+            _ => alloc(list.slice::<i64>()[position])?,
+        };
+        items.push(ok(item)?);
+    }
+    arrays::from_items(&items)?.map_err(error)
 }
 
-unsafe fn from_r_items(call: &Call<'_>, vector: Sexp) -> R<Vec<Sexp>> {
-    let vector = values::materialize(vector)?;
+/// The ry list of the items of `converted`, a fresh unshared vector of `F64`, `Bool`, `Str` or
+/// `I64`, with `default` at each of `gaps`. A default wider than the items widens them as R
+/// coerces: a whole number makes `Bool` items `I64`, and a fractional one makes `Bool` or `I64`
+/// items `F64`.
+unsafe fn fill(call: &Call<'_>, converted: Sexp, gaps: &[usize], default: Sexp) -> R<Sexp> {
+    let number = || match read(default) {
+        Some(number) => Some(Source::Int(number)),
+        None => r_source(default).ok(),
+    };
+    let (mut whole, expected): (Vec<i64>, _) = match converted.kind() {
+        SexpType::Real => {
+            let Some(source) = number() else {
+                return Err(wrong(
+                    call,
+                    "default",
+                    "a single number that is not `NA`",
+                    default,
+                ));
+            };
+            let items = converted.slice_mut::<f64>();
+            for &position in gaps {
+                items[position] = to_double(source);
+            }
+            return Ok(arrays::finish(converted));
+        }
+        SexpType::String => {
+            let text = (default.kind() == SexpType::String
+                && length(default) == 1
+                && default.attrib() == nil())
+            .then(|| default.element(0))
+            .filter(|&text| text != values::na_string());
+            let Some(text) = text else {
+                return Err(wrong(
+                    call,
+                    "default",
+                    "a single string that is not `NA`",
+                    default,
+                ));
+            };
+            for &position in gaps {
+                values::set_elt(converted, position, text);
+            }
+            return Ok(arrays::finish(converted));
+        }
+        SexpType::Logical => {
+            let flag = (default.kind() == SexpType::Logical
+                && length(default) == 1
+                && default.attrib() == nil())
+            .then(|| values::ints(default)[0])
+            .filter(|&flag| flag != NA_LOGICAL);
+            if let Some(flag) = flag {
+                let items = converted.slice_mut::<i32>();
+                for &position in gaps {
+                    items[position] = flag;
+                }
+                return Ok(arrays::finish(converted));
+            }
+            let flags = values::ints(converted).iter().map(|&flag| i64::from(flag));
+            (
+                flags.collect(),
+                "a single logical or number that is not `NA`",
+            )
+        }
+        _ => (
+            converted.slice::<i64>().to_vec(),
+            "a single number that is not `NA`",
+        ),
+    };
+    let Some(source) = number() else {
+        return Err(wrong(call, "default", expected, default));
+    };
+    if let Some(number) = convert(source) {
+        for &position in gaps {
+            whole[position] = number;
+        }
+        return list(&whole);
+    }
+    let mut numbers: Vec<f64> = whole.iter().map(|&item| item as f64).collect();
+    for &position in gaps {
+        numbers[position] = to_double(source);
+    }
+    Ok(arrays::finish(values::real_vector(&numbers)?))
+}
+
+/// Refuses an attribute other than names on the vector `vector`, which a ry list cannot hold.
+unsafe fn check_attributes(call: &Call<'_>, vector: Sexp) -> R<()> {
     let mut attribute = vector.attrib();
     while attribute != nil() {
         if attribute.tag() != values::symbols().names {
@@ -858,6 +998,12 @@ unsafe fn from_r_items(call: &Call<'_>, vector: Sexp) -> R<Vec<Sexp>> {
         }
         attribute = attribute.cdr();
     }
+    Ok(())
+}
+
+unsafe fn from_r_items(call: &Call<'_>, vector: Sexp) -> R<Vec<Sexp>> {
+    let vector = values::materialize(vector)?;
+    check_attributes(call, vector)?;
     let count = length(vector);
     let missing = |position: usize| {
         call.error(format!(

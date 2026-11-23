@@ -17,7 +17,7 @@ use {
         unwind::{R, error_in},
         values::{self, alloc, length, missing_arg, nil, symbol_name},
     },
-    heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType},
+    heap::object::{NA_INTEGER, NA_LOGICAL, Sexp, SexpType, Slot},
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -101,9 +101,15 @@ pub unsafe fn empty_like(like: Sexp) -> R<Sexp> {
     Ok(finish(alloc(like.kind(), 0)?))
 }
 
-/// The first missing value in an atomic vector, by position.
-pub unsafe fn first_missing(vector: Sexp) -> Option<usize> {
-    let count = length(vector);
+/// The positions of the first `limit` missing values in an atomic vector, in increasing order.
+pub unsafe fn missing_positions(vector: Sexp, limit: usize) -> Vec<usize> {
+    fn found(missing: impl Iterator<Item = bool>, limit: usize) -> Vec<usize> {
+        missing
+            .enumerate()
+            .filter_map(|(position, missing)| missing.then_some(position))
+            .take(limit)
+            .collect()
+    }
     match vector.kind() {
         SexpType::Logical | SexpType::Integer => {
             let missing = if vector.kind() == SexpType::Logical {
@@ -111,15 +117,21 @@ pub unsafe fn first_missing(vector: Sexp) -> Option<usize> {
             } else {
                 NA_INTEGER
             };
-            values::ints(vector)
-                .iter()
-                .position(|&item| item == missing)
+            found(
+                values::ints(vector).iter().map(|&item| item == missing),
+                limit,
+            )
         }
-        SexpType::Real => values::reals(vector).iter().position(|item| item.is_nan()),
-        SexpType::String => {
-            (0..count).find(|&index| values::string_elt(vector, index) == values::na_string())
-        }
-        _ => None,
+        SexpType::Real => found(
+            values::reals(vector).iter().map(|item| item.is_nan()),
+            limit,
+        ),
+        SexpType::String => found(
+            (0..length(vector))
+                .map(|index| values::string_elt(vector, index) == values::na_string()),
+            limit,
+        ),
+        _ => Vec::new(),
     }
 }
 
@@ -178,7 +190,7 @@ unsafe fn item_kind(value: Sexp) -> Result<Items, String> {
             describe(value)
         ));
     }
-    if first_missing(value).is_some() {
+    if !missing_positions(value, 1).is_empty() {
         return Err("a list cannot hold NA; mark an item that may be missing with a tag instead, as in `[:Some(1), :None]`".to_owned());
     }
     Ok(kind)
@@ -224,11 +236,12 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
 /// `"list"`, the storage of records, tuples, tags and nested lists. A dictionary passes through
 /// unchanged: its `"Dict<K, V>"` name is for typed code, which lays the dictionary out by it.
 ///
-/// Around a `List.from_r(x)` the name is the type the checker gave the conversion, and the
-/// conversion gives a list of that type or fails ([`checked_conversion`]); around a
-/// `Num.from_r(x)` it is `"I64"` or `"F64"`, and the conversion gives that number or fails
-/// ([`numbers::checked_number`]). The test is the call's text, because the preflight writes the
-/// wrapper around the standard library's conversions only.
+/// Around a `List.from_r(x)` or `List.from_r_or(x, default)` the name is the item type the
+/// checker gave the conversion, and the conversion gives a list of that type or fails
+/// ([`checked_conversion`]); around a `List.from_r_missing(x)` it is the type of the items inside
+/// `:Ok` ([`checked_missing`]); around a `Num.from_r(x)` it is `"I64"` or `"F64"`, and the
+/// conversion gives that number or fails ([`numbers::checked_number`]). The test is the call's
+/// text, because the preflight writes the wrapper around the standard library's conversions only.
 unsafe fn do_items(call: &Call<'_>) -> R<Sexp> {
     let list = call.arg(0);
     let converted = call.call.cdr().car();
@@ -246,7 +259,12 @@ unsafe fn do_items(call: &Call<'_>) -> R<Sexp> {
     if !list.is_array() {
         return Ok(list);
     }
-    let converts = conversion.as_deref() == Some("List.from_r");
+    let missing = conversion.as_deref() == Some("List.from_r_missing");
+    let converts = missing
+        || matches!(
+            conversion.as_deref(),
+            Some("List.from_r" | "List.from_r_or")
+        );
     if length(list) != 0 && !converts {
         return Ok(list);
     }
@@ -258,6 +276,9 @@ unsafe fn do_items(call: &Call<'_>) -> R<Sexp> {
         Some("list") => Items::RyValues,
         _ => return Err(call.error("the item type must be \"I64\", \"F64\", \"Str\" or \"list\"")),
     };
+    if missing {
+        return checked_missing(converted, list, expected);
+    }
     if converts && expected != Items::RyValues {
         return checked_conversion(converted, list, expected);
     }
@@ -295,33 +316,95 @@ pub unsafe fn checked_conversion(conversion: Sexp, list: Sexp, expected: Items) 
         (Items::Logical | Items::Integer, Items::Double) => {
             let items = values::ints(list);
             let widened: Vec<f64> = items.iter().map(|&item| f64::from(item)).collect();
-            doubles(&widened)
+            Ok(finish(values::real_vector(&widened)?))
         }
         (Items::I64, Items::Double) => {
             let items = list.slice::<i64>();
             let widened: Vec<f64> = items.iter().map(|&item| item as f64).collect();
-            doubles(&widened)
+            Ok(finish(values::real_vector(&widened)?))
         }
-        _ => Err(crate::unwind::error(format!(
-            "`{}` gave a `List<{}>` where the type checker expects a `List<{}>`, the type of the \
-             R code it read: convert the vector to that type in R first{}",
-            crate::deparse::deparse_first_line(conversion),
-            found.item_type(),
-            expected.item_type(),
-            match expected {
-                Items::I64 => ", for example with `as.integer()`",
-                Items::Double => ", for example with `as.numeric()`",
-                Items::Character => ", for example with `as.character()`",
-                _ => "",
-            }
-        ))),
+        _ => Err(conversion_mismatch(
+            &crate::deparse::deparse_first_line(conversion),
+            format!("List<{}>", found.item_type()),
+            format!("List<{}>", expected.item_type()),
+            expected,
+        )),
     }
 }
 
-unsafe fn doubles(items: &[f64]) -> R<Sexp> {
-    let object = values::alloc_uninit(SexpType::Real, items.len())?;
-    object.slice_mut::<f64>().copy_from_slice(items);
-    Ok(finish(object))
+/// The list the `List.from_r_missing` call `conversion` gave, with the items inside its `:Ok`
+/// tags as `expected`, the type the checker gave them. They widen as [`checked_conversion`]
+/// widens a list's items, and any other difference is the same error.
+pub unsafe fn checked_missing(conversion: Sexp, list: Sexp, expected: Items) -> R<Sexp> {
+    let missing = crate::standard_library::err("Missing")?;
+    let count = length(list);
+    let found = (0..count)
+        .map(|position| list.element(position))
+        .find(|&item| item != missing && item.kind() == SexpType::Record)
+        .map(|item| match item.record_slot(0) {
+            Slot::Real(_) => Items::Double,
+            Slot::Integer(_) => Items::Integer,
+            Slot::Logical(_) => Items::Logical,
+            Slot::Handle(value) => items(value),
+        });
+    let Some(found) = found else {
+        return Ok(list);
+    };
+    if found == expected {
+        return Ok(list);
+    }
+    let widens = matches!(
+        (found, expected),
+        (Items::Logical | Items::Integer, Items::I64 | Items::Double) | (Items::I64, Items::Double)
+    );
+    if !widens {
+        return Err(conversion_mismatch(
+            &crate::deparse::deparse_first_line(conversion),
+            format!("List<Result<{}, :Missing>>", found.item_type()),
+            format!("List<Result<{}, :Missing>>", expected.item_type()),
+            expected,
+        ));
+    }
+    let mut items = Vec::with_capacity(count);
+    for position in 0..count {
+        let item = list.element(position);
+        if item == missing || item.kind() != SexpType::Record {
+            items.push(item);
+            continue;
+        }
+        let number = match item.record_slot(0) {
+            Slot::Integer(number) | Slot::Logical(number) => i64::from(number),
+            Slot::Real(number) => number as i64,
+            Slot::Handle(value) if value.kind() == SexpType::I64 => value.slice::<i64>()[0],
+            Slot::Handle(value) => i64::from(values::ints(value)[0]),
+        };
+        let widened = match expected {
+            Items::I64 => numbers::alloc(number)?,
+            _ => values::scalar_real(number as f64)?,
+        };
+        items.push(crate::standard_library::ok(widened)?);
+    }
+    from_items(&items)?.map_err(crate::unwind::error)
+}
+
+/// The error of the conversion written `conversion` that gave a `found` where the type checker
+/// expects an `expected`, a list of `items`.
+fn conversion_mismatch(
+    conversion: &str,
+    found: String,
+    expected: String,
+    items: Items,
+) -> crate::unwind::Unwind {
+    crate::unwind::error(format!(
+        "`{conversion}` gave a `{found}` where the type checker expects a `{expected}`, the type \
+         of the R code it read: convert the vector to that type in R first{}",
+        match items {
+            Items::I64 => ", for example with `as.integer()`",
+            Items::Double => ", for example with `as.numeric()`",
+            Items::Character => ", for example with `as.character()`",
+            _ => "",
+        }
+    ))
 }
 
 /// An empty list in `storage` with the room `list`, which is empty, set aside with
@@ -480,7 +563,7 @@ pub enum OperatorClass {
 /// The result of an operator on Arrays, which R computed as a plain vector, as an Array. A
 /// missing value (integer overflow, `0 / 0`) is an error, because an Array cannot hold one.
 pub unsafe fn finish_result(call: Sexp, operator: &str, result: Sexp) -> R<Sexp> {
-    if let Some(position) = first_missing(result) {
+    if let Some(&position) = missing_positions(result, 1).first() {
         return Err(error_in(
             call,
             format!(

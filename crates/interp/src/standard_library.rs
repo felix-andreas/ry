@@ -76,6 +76,8 @@ const LEAVES: &[&str] = &[
     "List.single",
     "List.repeat",
     "List.from_r",
+    "List.from_r_or",
+    "List.from_r_missing",
     "List.to_r",
     "List.prepend",
     "List.prepend_if_ok",
@@ -157,7 +159,18 @@ pub const BUILTINS: &[BuiltinDef] = &[
     library("Result.and_then", result_and_then),
     library("Result.on_err", result_on_err),
     library("Result.map2", result_map2),
-    library("List.from_r", numbers::list_from_r),
+    library(
+        "List.from_r",
+        numbers::list_from_r::<{ numbers::NA_REFUSED }>,
+    ),
+    library(
+        "List.from_r_or",
+        numbers::list_from_r::<{ numbers::NA_FILLED }>,
+    ),
+    library(
+        "List.from_r_missing",
+        numbers::list_from_r::<{ numbers::NA_KEPT }>,
+    ),
     library("List.to_r", list_to_r),
     library("List.len", list_len),
     library("List.is_empty", list_is_empty),

@@ -522,7 +522,14 @@ pub const COMPILED_STD: &[&str] = &[
     "Str.with_ascii_uppercased",
 ];
 
-const FROM_R: [&str; 4] = ["Num.from_r", "Str.from_r", "Bool.from_r", "List.from_r"];
+const FROM_R: [&str; 6] = [
+    "Num.from_r",
+    "Str.from_r",
+    "Bool.from_r",
+    "List.from_r",
+    "List.from_r_or",
+    "List.from_r_missing",
+];
 const TO_R: [&str; 2] = ["Num.to_r", "List.to_r"];
 
 const TABLE_MODULES: [&str; 5] = [
@@ -2001,7 +2008,16 @@ impl<'a, 'db> Judge<'a, 'db> {
                 }
             }
             Callee::Conversion => {
-                for &(_, value) in arguments {
+                let vector = arguments
+                    .iter()
+                    .position(|(name, _)| name.is_some_and(|name| name.as_str() == "vector"))
+                    .or_else(|| arguments.iter().position(|(name, _)| name.is_none()));
+                for (position, &(_, value)) in arguments.iter().enumerate() {
+                    // `List.from_r_or`'s `default` is ordinary ry code.
+                    if Some(position) != vector {
+                        self.walk(value, Use::Value);
+                        continue;
+                    }
                     // The conversion gives the inner call's value a ry type, and the call still
                     // runs while R's lazy arguments are being computed.
                     if let Some(outer) = self.r_arguments

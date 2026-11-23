@@ -216,3 +216,48 @@ env RY_JIT off
 run ry run --runtime ry rebound.R
 expect exit 1
 expect stderr "`List.from_r(prices())` gave a `List<Str>` where the type checker expects a `List<F64>`, the type of the R code it read: convert the vector to that type in R first, for example with `as.numeric()`"
+
+# An R vector with missing values reaches typed code through `List.from_r_or`, which puts the
+# default in place of every `NA`, or `List.from_r_missing`, which gives each item as a result.
+# `stats::var` of one number and `iconv` of a character it cannot convert give `NA`, and `match`
+# gives `NA` for a key the table lacks. Every call runs natively, the first included, and the
+# interpreter and the code compiled ahead of time print the same.
+
+file gaps.R
+| spread <- function(xs: List<F64>, fill: F64) -> F64 {
+|   List.sum(List.from_r_or(stats::var(List.to_r(xs)), fill))
+| }
+| ascii <- function(words: List<Str>) -> Str {
+|   Str.join_with(List.from_r_or(iconv(List.to_r(words), "UTF-8", "ASCII"), default = "?"), ",")
+| }
+| found <- function(keys: List<Str>, table: List<Str>) -> I64 {
+|   positions <- List.from_r_missing(match(List.to_r(keys), List.to_r(table)))
+|   List.walk(positions, 0, \(total, position) match (position) {
+|     :Ok(at) => total + at
+|     :Err(_) => total + 100
+|   })
+| }
+| print(spread([1.5], 10))
+| print(spread([1, 3], 10))
+| print(ascii(["a", "é", "b"]))
+| print(ascii(["x"]))
+| print(found(["b", "z", "a"], ["a", "b"]))
+| print(found(["b"], ["a", "b"]))
+
+unset RY_JIT
+run ry run --runtime ry gaps.R
+expect exit 0
+expect stdout "[1] 10\n[1] 2\n[1] \"a,?,b\"\n[1] \"x\"\n103i64\n2i64"
+expect stderr "typed: compiled for [Vector { item: Str, array: true }] -> Str"
+expect stderr "typed: compiled for [Vector { item: Str, array: true }, Vector { item: Str, array: true }] -> I64"
+expect stderr lacks "runs in the interpreter"
+
+run ry run --runtime ry --aot gaps.R
+expect exit 0
+expect stdout "[1] 10\n[1] 2\n[1] \"a,?,b\"\n[1] \"x\"\n103i64\n2i64"
+expect stderr "typed: compiled 3 functions ahead of time in "
+
+env RY_JIT off
+run ry run --runtime ry gaps.R
+expect exit 0
+expect stdout "[1] 10\n[1] 2\n[1] \"a,?,b\"\n[1] \"x\"\n103i64\n2i64"

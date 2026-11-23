@@ -427,6 +427,22 @@ replace_all: fn(text: Str) -> Str
 point: Record{x: double, y: double}
 
 #==== conversions
+#---- missing_values_convert_with_a_default_or_as_results
+# typing: strict
+filled <- function(values: double) -> List<F64> List.from_r_or(values, 0)
+flags <- function(values: logical) -> List<Bool> List.from_r_or(values, default = FALSE)
+kept <- function(values: character) -> List<Result<Str, :Missing>> List.from_r_missing(values)
+counted <- function(values: integer) -> I64 List.len(List.from_r_missing(values))
+totals <- List.from_r_or(c(1, NA), 0)
+results <- List.from_r_missing(c(1, NA))
+#++++
+filled: fn(values: double) -> List<F64>
+flags: fn(values: logical) -> List<Bool>
+kept: fn(values: character) -> List<Result<Str, :Missing>>
+counted: fn(values: integer) -> I64
+totals: List<F64>
+results: List<:Ok(F64) | :Err(:Missing)>
+
 #---- an_unsuffixed_list_literal_converts_through_the_overloads
 y <- List.to_r([1, 2])
 counts <- [1, 2]

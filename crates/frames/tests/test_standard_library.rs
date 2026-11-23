@@ -59,6 +59,19 @@ const PRINTS: &[(&str, &str)] = &[
     ),
     // List: construction and access.
     ("List.to_r(List.from_r(c(1, 2)))", "[1] 1 2\n"),
+    ("List.to_r(List.from_r_or(c(1, NA), 0))", "[1] 1 0\n"),
+    (
+        "List.to_r(List.from_r_or(c(\"a\", NA), \"-\"))",
+        "[1] \"a\" \"-\"\n",
+    ),
+    (
+        "List.get(List.from_r_missing(c(NA, 1L)), 1L)",
+        ":Ok(:Err(:Missing))\n",
+    ),
+    (
+        "List.get(List.from_r_missing(c(NA, 1L)), 2L)",
+        ":Ok(:Ok(1i64))\n",
+    ),
     ("List.to_r(list())", "logical(0)\n"),
     ("List.len(xs)", "3i64\n"),
     ("List.is_empty(list())", "[1] TRUE\n"),
@@ -970,6 +983,10 @@ const PRINTS: &[(&str, &str)] = &[
 
 /// Each case's code and the error message it raises.
 const ERRORS: &[(&str, &str)] = &[
+    (
+        "List.from_r_or(c(1, NA), \"x\")",
+        "`default` must be a single number that is not `NA`, not a character value",
+    ),
     // Compiled loops hand a failing call back to tier 0, which raises the same error.
     (
         "{ f <- function(m) { for (i in 1:50) r <- Dict.len(if (i > 40L) 1 else m); r }; f(d) }",

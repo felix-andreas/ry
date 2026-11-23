@@ -49,7 +49,7 @@ use {
 };
 
 const MAGIC: &[u8; 8] = b"RYTYPED\0";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 /// The bytes of the fixed header.
 const HEADER_SIZE: usize = 8 + 4 + 8 * 13;
 /// The alignment of the code in the file and of the offset table's reservation, which is the
@@ -789,6 +789,7 @@ pub struct FileConversion {
     pub call: Place,
     pub function: u32,
     pub checked: Option<Item>,
+    pub default: Option<Type>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1316,6 +1317,10 @@ impl Encoder<'_> {
                 Some(item) => Some(self.shapes.item(item).map_err(|_| UNNAMED_SHAPE)?),
                 None => None,
             },
+            default: match conversion.default {
+                Some(ty) => Some(self.shapes.ty(ty).map_err(|_| UNNAMED_SHAPE)?),
+                None => None,
+            },
         })
     }
 
@@ -1540,6 +1545,13 @@ impl Out {
             Some(item) => {
                 self.number(1);
                 self.item(item);
+            }
+            None => self.number(0),
+        }
+        match conversion.default {
+            Some(ty) => {
+                self.number(1);
+                self.ty(ty);
             }
             None => self.number(0),
         }
@@ -1943,6 +1955,11 @@ impl In<'_> {
             function: self.index(lookups)?,
             checked: if self.flag()? {
                 Some(self.item(shapes, false)?)
+            } else {
+                None
+            },
+            default: if self.flag()? {
+                Some(self.ty(shapes)?)
             } else {
                 None
             },
@@ -3123,6 +3140,7 @@ unsafe fn build_site_inner(
             call: placed(&conversion.call, resolved)?,
             function,
             checked: conversion.checked.map(|item| live_item(item, &mapped.live)),
+            default: conversion.default.map(|ty| live_type(ty, &mapped.live)),
         })
     };
     let mut arguments: SmallVec<[RArgument; 4]> = SmallVec::new();
@@ -3408,6 +3426,7 @@ pub mod testing {
                     call: place(entropy),
                     function: entropy(lookups) as u32,
                     checked: None,
+                    default: (entropy(2) == 0).then_some(Type::Dbl),
                 };
                 let mut below = |bound: usize| entropy.below(bound);
                 let mut arguments: Vec<Argument> = (0..below(3))

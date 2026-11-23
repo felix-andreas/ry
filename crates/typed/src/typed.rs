@@ -52,7 +52,7 @@ use {
     },
     interp::{
         annotations::decline,
-        arrays::{Items, checked_conversion},
+        arrays::{Items, checked_conversion, checked_missing},
         builtins::Arg,
         bytecode::TypedCall,
         records::NativeValues,
@@ -1524,7 +1524,25 @@ unsafe fn call_r(
         }
     };
     heap.root(value);
-    let converted = convert(conversion, site.call, value, site.env)?;
+    // A `List.from_r_or`'s default follows the arguments' words.
+    let default = match conversion.default {
+        Some(ty) => {
+            let offset: usize = site
+                .arguments
+                .iter()
+                .map(|argument| backend::words(argument.ty).len())
+                .sum();
+            let mut native = [0u64; 2];
+            for (position, word) in native.iter_mut().take(backend::words(ty).len()).enumerate() {
+                *word = *words.add(offset + position);
+            }
+            let default = to_r(ty, native)?;
+            heap.root(default);
+            Some(default)
+        }
+        None => None,
+    };
+    let converted = convert(conversion, site.call, value, default, site.env)?;
     heap.root(converted);
     let fits = write_converted(conversion, ty, converted, out)?;
     Ok(Made { value, fits })
@@ -1543,7 +1561,13 @@ unsafe fn apply_r(site: &RCall, mut words: *const u64, env: Sexp) -> Result<Sexp
         let mut value = to_r(argument.ty, native)?;
         heap.root(value);
         if let Some(conversion) = argument.conversion {
-            value = convert(conversion, conversion.call.cdr().car(), value, site.env)?;
+            value = convert(
+                conversion,
+                conversion.call.cdr().car(),
+                value,
+                None,
+                site.env,
+            )?;
             heap.root(value);
         }
         let promise = interp::eval::forced_promise(argument.code, value)?;
@@ -1557,20 +1581,32 @@ unsafe fn apply_r(site: &RCall, mut words: *const u64, env: Sexp) -> Result<Sexp
 }
 
 /// Applies the conversion `conversion` to `value`, the value of the code `code`, as the
-/// interpreter applies it.
+/// interpreter applies it, with `default` as a `List.from_r_or`'s second argument.
 unsafe fn convert(
     conversion: lower::Conversion,
     code: Sexp,
     value: Sexp,
+    default: Option<Sexp>,
     env: Sexp,
 ) -> Result<Sexp, Unwind> {
+    let heap = interp::heap();
     let promise = interp::eval::forced_promise(code, value)?;
-    interp::heap().root(promise);
-    let argument = Arg {
+    heap.root(promise);
+    let mut arguments: SmallVec<[Arg; 2]> = SmallVec::new();
+    arguments.push(Arg {
         tag: rvalues::nil(),
         value: promise,
-    };
-    interp::eval::apply(conversion.call, conversion.function, &[argument], env)
+    });
+    if let Some(default) = default {
+        let code = conversion.call.cdr().cdr().car();
+        let promise = interp::eval::forced_promise(code, default)?;
+        heap.root(promise);
+        arguments.push(Arg {
+            tag: rvalues::nil(),
+            value: promise,
+        });
+    }
+    interp::eval::apply(conversion.call, conversion.function, &arguments, env)
 }
 
 /// Writes the words of `value`, which the conversion `conversion` gave, as a native value of
@@ -1582,6 +1618,7 @@ unsafe fn write_converted(
     value: Sexp,
     out: *mut u64,
 ) -> Result<bool, Unwind> {
+    let missing = rvalues::symbol_name(conversion.call.car()) == "List.from_r_missing";
     let value = match conversion.checked {
         Some(item) if rvalues::symbol_name(conversion.call.car()) == "Num.from_r" => {
             let expected = match item {
@@ -1598,7 +1635,11 @@ unsafe fn write_converted(
                 Item::Dbl => Items::Double,
                 _ => Items::Character,
             };
-            let list = checked_conversion(conversion.call, value, expected)?;
+            let list = if missing {
+                checked_missing(conversion.call, value, expected)?
+            } else {
+                checked_conversion(conversion.call, value, expected)?
+            };
             interp::heap().root(list);
             list
         }
@@ -1637,6 +1678,24 @@ unsafe fn write_converted(
             }
             *out = list as u64;
         }
+        Type::Vector {
+            item: Item::Tag(union),
+            ..
+        } => match results_list(value, union)? {
+            Ok(list) => *out = list as u64,
+            Err(payload) if conversion.guessed() => {
+                FAILED_GUESS.set(Some((conversion.call, payload)));
+                return Ok(false);
+            }
+            Err(payload) => {
+                return Err(interp::unwind::error(format!(
+                    "`{}` gave results of `{}`, and the typed function was compiled for the type \
+                     it gave before: convert the value to one type in R first",
+                    interp::deparse::deparse_first_line(conversion.call),
+                    payload.name()
+                )));
+            }
+        },
         Type::Vector { item, .. } => {
             let length = rvalues::length(value);
             let list = values::ry_list_new(item_kind(item), length as u64);
@@ -1661,6 +1720,42 @@ unsafe fn write_converted(
         }
     }
     Ok(true)
+}
+
+/// A native list of the `:Ok(item)` and `:Err(:Missing)` tags in `value`, the R list a
+/// `List.from_r_missing` gave, whose boxes must have the shapes of `union`. Otherwise the R type
+/// of the first payload of another shape.
+unsafe fn results_list(value: Sexp, union: u32) -> Result<Result<*mut List, SexpType>, Unwind> {
+    let members = shapes::members(union).unwrap_or_default();
+    let length = rvalues::length(value);
+    let list = values::ry_list_new(item_kind(Item::Tag(union)), length as u64);
+    if list.is_null() {
+        return Err(interp::unwind::error("cannot allocate a ry list"));
+    }
+    // The list owns each item as soon as it is written, so dropping it drops the items written
+    // before a failure, and the rest are null.
+    for index in 0..length {
+        let item = value.element(index);
+        let boxed = match to_box(item) {
+            Ok((boxed, _)) => boxed,
+            Err(reason) => {
+                values::ry_list_drop(list);
+                return Err(interp::unwind::error(reason));
+            }
+        };
+        *((*list).data as *mut u64).add(index) = boxed;
+        if !members.contains(&(*(boxed as *const Boxed)).shape) {
+            values::ry_list_drop(list);
+            let payload = match item.record_slot(0) {
+                Slot::Real(_) => SexpType::Real,
+                Slot::Integer(_) => SexpType::Integer,
+                Slot::Logical(_) => SexpType::Logical,
+                Slot::Handle(field) => field.kind(),
+            };
+            return Ok(Err(payload));
+        }
+    }
+    Ok(Ok(list))
 }
 
 unsafe fn charsxp_of(string: Str) -> Result<Sexp, Unwind> {

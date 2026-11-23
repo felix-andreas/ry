@@ -51,6 +51,32 @@ const PRINTS: &[(&str, &str)] = &[
     ("List.from_r(c(a = 1, b = 2))", "[1, 2]\n"),
     ("List.from_r(xs)", "[1, 2, 3]\n"),
     ("List.from_r(list((1,), (2,)))", "[(1,), (2,)]\n"),
+    ("List.from_r_or(c(1, NA, NaN), 0)", "[1, 0, 0]\n"),
+    ("List.from_r_or(c(2L, NA), 0L)", "[2i64, 0i64]\n"),
+    ("List.from_r_or(c(TRUE, NA), FALSE)", "[TRUE, FALSE]\n"),
+    (
+        "List.from_r_or(c(a = \"x\", b = NA), \"-\")",
+        "[\"x\", \"-\"]\n",
+    ),
+    ("List.from_r_or(xs[0], 0)", "List.from_r(numeric(0))\n"),
+    ("List.from_r_or(xs, 0)", "[1, 2, 3]\n"),
+    (
+        "List.from_r_missing(c(1, NA))",
+        "[:Ok(1), :Err(:Missing)]\n",
+    ),
+    (
+        "List.from_r_missing(c(2L, NA))",
+        "[:Ok(2i64), :Err(:Missing)]\n",
+    ),
+    (
+        "List.from_r_missing(c(NA, TRUE))",
+        "[:Err(:Missing), :Ok(TRUE)]\n",
+    ),
+    (
+        "List.from_r_missing(c(\"a\", NA))",
+        "[:Ok(\"a\"), :Err(:Missing)]\n",
+    ),
+    ("List.from_r_missing(xs[0])", "[]\n"),
     (
         "names(xs) <- c(\"a\", \"b\", \"c\"); .ry_is_list(xs)",
         "[1] FALSE\n",
@@ -158,7 +184,24 @@ const ERRORS: &[(&str, &str)] = &[
     ("[list(1)]", "not a list"),
     (
         "List.from_r(c(1, NA))",
-        "`vector` is `NA` at position 2, which no ry value holds",
+        "`vector` is `NA` at position 2, which no ry value holds; use \
+         `List.from_r_or(vector, default)` or `List.from_r_missing(vector)`",
+    ),
+    (
+        "List.from_r_or(c(1, NA), \"x\")",
+        "`default` must be a single number that is not `NA`, not a character value",
+    ),
+    (
+        "List.from_r_or(c(\"a\", NA), NA_character_)",
+        "`default` must be a single string that is not `NA`, not `NA`",
+    ),
+    (
+        "List.from_r_or(list(1, NA), 0)",
+        "`vector` must be a double, integer, logical, character or raw vector, not a list",
+    ),
+    (
+        "m <- c(1, NA); class(m) <- \"money\"; List.from_r_missing(m)",
+        "has the class \"money\"",
     ),
     (
         "List.from_r(list(c(1, NA)))",

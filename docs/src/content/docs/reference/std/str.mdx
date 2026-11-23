@@ -72,7 +72,7 @@ Str.from_r <- function(value)
 
 Converts an R string into a `Str`, refusing `NA` and a length other than one.
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L765)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L789)
 
 ## `Str.is_empty`
 
@@ -101,7 +101,7 @@ Str.is_empty("")
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L773)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L797)
 
 ## `Str.concat`
 
@@ -130,7 +130,7 @@ Str.concat("snake", "_case")
 #> "snake_case"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L781)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L805)
 
 ## `Str.join_with`
 
@@ -159,7 +159,7 @@ Str.join_with(["a", "b", "c"], ", ")
 #> "a, b, c"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L789)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L813)
 
 ## `Str.split_on`
 
@@ -188,7 +188,7 @@ Str.split_on("a,b,,c", ",")
 #> ["a", "b", "", "c"]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L797)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L821)
 
 ## `Str.repeat`
 
@@ -217,7 +217,7 @@ Str.repeat("ab", 3)
 #> "ababab"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L805)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L829)
 
 ## `Str.starts_with`
 
@@ -246,7 +246,7 @@ Str.starts_with("report.csv", "report")
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L813)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L837)
 
 ## `Str.ends_with`
 
@@ -275,7 +275,7 @@ Str.ends_with("report.csv", ".R")
 #> FALSE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L821)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L845)
 
 ## `Str.contains`
 
@@ -304,7 +304,7 @@ Str.contains("a.b", ".")
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L829)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L853)
 
 ## `Str.trim`
 
@@ -333,7 +333,7 @@ Str.trim("  hi  ")
 #> "hi"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L837)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L861)
 
 ## `Str.trim_start`
 
@@ -362,7 +362,7 @@ Str.trim_start("  hi  ")
 #> "hi  "
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L845)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L869)
 
 ## `Str.trim_end`
 
@@ -391,7 +391,7 @@ Str.trim_end("  hi  ")
 #> "  hi"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L853)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L877)
 
 ## `Str.drop_prefix`
 
@@ -420,7 +420,7 @@ Str.drop_prefix("v1.2", "v")
 #> "1.2"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L861)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L885)
 
 ## `Str.drop_suffix`
 
@@ -449,7 +449,7 @@ Str.drop_suffix("data.csv", ".csv")
 #> "data"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L869)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L893)
 
 ## `Str.with_prefix`
 
@@ -478,7 +478,7 @@ Str.with_prefix("world", "hello ")
 #> "hello world"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L877)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L901)
 
 ## `Str.replace_each`
 
@@ -507,7 +507,7 @@ Str.replace_each("a.b.c", ".", "-")
 #> "a-b-c"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L885)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L909)
 
 ## `Str.replace_first`
 
@@ -536,7 +536,7 @@ Str.replace_first("a.b.c", ".", "-")
 #> "a-b.c"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L893)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L917)
 
 ## `Str.replace_last`
 
@@ -565,7 +565,7 @@ Str.replace_last("a.b.c", ".", "-")
 #> "a.b-c"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L901)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L925)
 
 ## `Str.split_first`
 
@@ -594,7 +594,7 @@ Str.split_first("key=value=more", "=")
 #> :Ok((after = "value=more", before = "key"))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L909)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L933)
 
 ## `Str.split_last`
 
@@ -623,7 +623,7 @@ Str.split_last("key=value=more", "=")
 #> :Ok((after = "more", before = "key=value"))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L917)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L941)
 
 ## `Str.count_utf8_bytes`
 
@@ -652,7 +652,7 @@ Str.count_utf8_bytes("hé")
 #> 3i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L925)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L949)
 
 ## `Str.to_utf8`
 
@@ -681,7 +681,7 @@ Str.to_utf8("hé")
 #> [104i64, 195i64, 169i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L933)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L957)
 
 ## `Str.from_utf8`
 
@@ -710,7 +710,7 @@ Str.from_utf8([104, 105])
 #> :Ok("hi")
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L941)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L965)
 
 ## `Str.from_utf8_lossy`
 
@@ -739,7 +739,7 @@ Str.from_utf8_lossy([104, 255, 105])
 #> "h�i"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L949)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L973)
 
 ## `Str.to_i64`
 
@@ -768,7 +768,7 @@ Str.to_i64("4.2")
 #> :Err(:InvalidNumStr)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L957)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L981)
 
 ## `Str.to_f64`
 
@@ -797,7 +797,7 @@ Str.to_f64("4.5e1")
 #> :Ok(45)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L965)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L989)
 
 ## `Str.with_ascii_lowercased`
 
@@ -826,7 +826,7 @@ Str.with_ascii_lowercased("Straße ABC")
 #> "straße abc"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L973)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L997)
 
 ## `Str.with_ascii_uppercased`
 
@@ -855,7 +855,7 @@ Str.with_ascii_uppercased("straße abc")
 #> "STRAßE ABC"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L981)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1005)
 
 ## `Str.caseless_ascii_equals`
 
@@ -884,7 +884,7 @@ Str.caseless_ascii_equals("Content-Type", "content-type")
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L989)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1013)
 
 ## `Str.walk_utf8`
 
@@ -913,7 +913,7 @@ Str.walk_utf8("abc", 0, function(total, byte) total + Num.to_i64(byte))
 #> 294i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L997)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1021)
 
 ## `Str.walk_utf8_with_index`
 
@@ -942,7 +942,7 @@ Str.walk_utf8_with_index("ab", [], function(seen, byte, i) List.append(seen, Num
 #> [97i64, 196i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1005)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1029)
 
 ## `Str.to_utf16`
 
@@ -972,7 +972,7 @@ Str.to_utf16("h\U0001F600")
 #> [104i64, 55357i64, 56832i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1014)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1038)
 
 ## `Str.from_utf16`
 
@@ -1002,7 +1002,7 @@ Str.from_utf16([104, 55357])
 #> :Err(:BadUtf16)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1023)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1047)
 
 ## `Str.from_utf16_lossy`
 
@@ -1031,7 +1031,7 @@ Str.from_utf16_lossy([104, 105])
 #> "hi"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1031)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1055)
 
 ## `Str.to_utf32`
 
@@ -1060,7 +1060,7 @@ Str.to_utf32("h\u00e9")
 #> [104i64, 233i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1039)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1063)
 
 ## `Str.from_utf32`
 
@@ -1090,7 +1090,7 @@ Str.from_utf32([55296])
 #> :Err(:BadUtf32)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1048)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1072)
 
 ## `Str.from_utf32_lossy`
 
@@ -1119,4 +1119,4 @@ Str.from_utf32_lossy([82, 121])
 #> "Ry"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1056)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1080)
