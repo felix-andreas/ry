@@ -5,7 +5,7 @@ use {
     syntax::testing::{SplitMix64, for_each_seed},
     table::{
         Table,
-        convert::{RVector, is_na_real, to_r},
+        convert::{NA_INTEGER, RVector, is_na_real, to_r},
         lazy::{self, How, Plan, Source, Step, Strategy},
         polars::prelude::PlSmallStr,
         query::{
@@ -165,6 +165,28 @@ fn joins_follow_polars_layout() {
     assert_eq!(names(&join(How::Semi)), ["id", "name", "score"]);
     assert_eq!(column_values(&join(How::Anti), "id"), ints(&[2]));
     assert_eq!(join(How::Full).height(), 4);
+}
+
+#[test]
+fn a_missing_key_matches_a_missing_key_in_every_join() {
+    let left = frame(vec![
+        ("k", ints(&[1, NA_INTEGER, 2])),
+        ("v", doubles(&[1.0, 2.0, 3.0])),
+    ]);
+    let right = frame(vec![("k", ints(&[1, NA_INTEGER]))]);
+    let join = |how| {
+        collect(Plan::new(Source::Table(left.clone())).with(Step::Join {
+            other: Box::new(Plan::new(Source::Table(right.clone()))),
+            left_on: vec!["k".into()],
+            right_on: vec!["k".into()],
+            how,
+            suffix: "_right".into(),
+        }))
+    };
+    assert_eq!(column_values(&join(How::Inner), "k"), ints(&[1, NA_INTEGER]));
+    assert_eq!(column_values(&join(How::Semi), "k"), ints(&[1, NA_INTEGER]));
+    assert_eq!(column_values(&join(How::Anti), "k"), ints(&[2]));
+    assert_eq!(join(How::Full).height(), 3);
 }
 
 #[test]

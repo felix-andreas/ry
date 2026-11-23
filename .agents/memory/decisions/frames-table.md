@@ -277,3 +277,10 @@ The table is a Polars `DataFrame` held by the `table` crate; this entry holds th
 - **Columns come from the constructor's arguments** (`constructed_frame`): a named argument or a bare variable is one column when its type makes exactly one (`makes_one_column`). A list, matrix, frame or record spreads into several, so it, a forwarded `...`, a repeated or non-syntactic name (R mangles it), and `stringsAsFactors`/`keep.rownames` not literally `FALSE` give unknown columns rather than a guess.
 - **Writes:** `f$x <- v` and `f[["x"]] <- v` update one column; any other replacement step forgets the columns, because `names<-`, `[<-` and positional `[[<-` may rename or retype any of them. By-reference `setDT`/`setDF` rebind with the new class and the same columns, and `set`/`setattr` forget them (`refine_table_call`, recorded as writes in `naming.rs` and `semantics.rs`).
 - **Only base's or data.table's own constructor counts:** a project's `data.frame` function is an ordinary call, and `data.table::data.table` sharpens only when the project declares data.table (otherwise its stubs are not loaded and the callee is `Unknown`).
+
+## A missing key matches a missing key in every join
+
+**Status:** built (`join` in `crates/table/src/lazy.rs`; `a_missing_key_matches_a_missing_key_in_every_join` in `crates/table/tests/test_table/lazy.rs`; `reference/dataframes.mdx`, "Joins").
+
+- The inner and left joins matched `NA` to `NA`, as data.table and `merge()` do, but the full, semi and anti joins ran as Polars joins with Polars' default `nulls_equal = false`, so a semi join dropped a row with an `NA` key that the right side also had, and an anti join kept it. One join call disagreed with itself across `how`.
+- Target: every `how` sets `nulls_equal = true`. R users expect the data.table rule, and the table type replaces data.table, so Polars' SQL-style rule loses.

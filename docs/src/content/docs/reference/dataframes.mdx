@@ -204,7 +204,9 @@ run as one step that keeps only each group's best rows, instead of sorting the w
 differ. `how` is `"inner"`, `"left"`, `"full"`, `"semi"`, `"anti"` or `"cross"`, which pairs every
 left row with every right row and takes no keys. The result has the left
 columns, then the right's non-key columns, and a right column whose name is already taken gets the
-`suffix` (`"_right"` by default), as in Polars.
+`suffix` (`"_right"` by default), as in Polars. A missing key matches a missing key in every kind
+of join, as in data.table and `merge()`, so a left row whose key is `NA` is kept by a semi join and
+dropped by an anti join when the right side has an `NA` key too.
 
 ```r
 regions <- DataFrame(region = ["eu", "us"], manager = ["Ana", "Bo"])

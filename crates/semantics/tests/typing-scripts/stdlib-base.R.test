@@ -775,13 +775,29 @@ Any
 Unknown
 integer[]
 
+#==== ifelse
+#---- the_result_is_a_vector_of_the_wider_branch
+# `ifelse` fills a logical vector from `yes` and `no`, so it widens as `c()` does, and a bare `NA`
+# fits either branch.
+ifelse(TRUE, 1L, 2L)
+ifelse(c(TRUE, FALSE), 1L, 2.5)
+ifelse(c(TRUE, FALSE), "yes", NA)
+ifelse(c(TRUE, FALSE), 1, "no")
+ifelse(c(TRUE, FALSE), NA, NA)
+ifelse(c(TRUE, FALSE), factor("a"), "b")
+#++++
+integer[]
+double[]
+character[]
+character[]
+Any
+Any
+
 #==== still_any
 #---- reflection_resolves
 do.call(sum, list(1L))
-ifelse(TRUE, 1L, 2L)
 eval(parse(text = "1 + 1"))
 #++++
-Any
 Any
 Any
 

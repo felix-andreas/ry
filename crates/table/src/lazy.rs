@@ -824,7 +824,7 @@ fn execute(table: &mut Table, query: Query, warnings: &mut Vec<Warning>) -> Resu
 /// Joins `left` with `right`. An inner or left equi join runs as data.table's `right[left, on]`
 /// on the engine's join kernel, then has its columns renamed and reordered into Polars' layout:
 /// the left columns, then the right's other columns, a name the left side has taking `suffix`.
-/// A full, semi or anti join runs as a Polars join.
+/// A full, semi or anti join runs as a Polars join. A missing key matches a missing key in each.
 fn join(
     left: Table,
     right: Table,
@@ -912,9 +912,12 @@ fn join(
                 How::Semi => JoinType::Semi,
                 _ => JoinType::Anti,
             };
-            let args = JoinArgs::new(join_type)
+            // A missing key matches a missing key in every kind of join, as in the inner and
+            // left joins above, data.table and `merge()`.
+            let mut args = JoinArgs::new(join_type)
                 .with_coalesce(JoinCoalesce::CoalesceColumns)
                 .with_suffix(Some(PlSmallStr::from(suffix)));
+            args.nulls_equal = true;
             let left_keys: Vec<_> = left_on.iter().map(|name| col(name.clone())).collect();
             let right_keys: Vec<_> = right_on.iter().map(|name| col(name.clone())).collect();
             let frame = left

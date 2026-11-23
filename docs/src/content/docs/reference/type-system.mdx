@@ -421,6 +421,22 @@ these rules:
   installed package, an alias is checked as the type it stands for, because ry's runtime reads
   each one-line annotation there with its aliases expanded. A check therefore fails only on a value that really does not
   have the annotated type.
+- **A logical vector holding only `NA` arrives as `character` where the type is `character`.** A
+  bare `NA` and a vector computed from no data, such as `ifelse()` over an empty test, are `logical`
+  in R, but the checker lets them stand for any atomic type. `integer`, `double` and `complex`
+  admit `logical` storage as it is, while a `character` parameter or return value converts such a
+  value, keeping its attributes, so `typeof()` on it says `"character"` where GNU R running the
+  erasure says `"logical"`. Every other check passes the value through unchanged, except the `I64`
+  conversion described under [number literals](#number-literals).
+
+  ```r
+  label <- function(x: double[]) -> character[] ifelse(x > 0, "positive", "other")
+  label(double())
+  ```
+
+  ```text ry run runtime=ry
+  character(0)
+  ```
 - **An installed typed package's signatures name the types, not their aliases.** `ry install` and
   `ry build` on ry's runtime write each one-line parameter and return annotation of a typed package
   as the type it stands for ([CLI reference](/reference/cli#build-and-install)), so an installed
@@ -2142,6 +2158,11 @@ expected a function that takes `double`, found `double`
 
 `Map` is `mapply` with `SIMPLIFY = FALSE`, so it gives `list[T]` for a callback that returns `T`, and
 `list[Any]` when the return is undetermined.
+
+`ifelse(test, yes, no)` gives a vector of the wider of `yes` and `no` in the order `logical` <
+`integer` < `double` < `complex` < `character`, as `c()` widens, and a bare `NA` fits either
+branch, so `ifelse(x > 0, "positive", NA)` is `character[]`. A branch that is not a plain vector,
+such as a factor, whose class `ifelse` drops, gives `Any`.
 
 The base functions that take a function argument and resolve it with `match.fun` (`lapply`,
 `sapply`, `vapply`, `mapply`, `Map`, `Filter`, `Find`, `Position`, `Reduce`, `do.call`, `outer`,

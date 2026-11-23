@@ -14134,11 +14134,12 @@ impl<'db, 'a> Checker<'db, 'a> {
             "setkeyv" | "setorderv" => TableFunction::SetKeyOrOrderNamed,
             "rbindlist" => TableFunction::RbindList,
             "fifelse" => TableFunction::Fifelse,
+            "ifelse" => TableFunction::Ifelse,
             "melt" => TableFunction::Melt,
             _ => return None,
         };
         let home = match function {
-            TableFunction::Construct(FrameKind::RDataFrame) => "base",
+            TableFunction::Construct(FrameKind::RDataFrame) | TableFunction::Ifelse => "base",
             _ => "data.table",
         };
         match package {
@@ -15090,6 +15091,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             Some(TableFunction::RbindList) => Some(self.rbind_list_type(arguments)),
             Some(TableFunction::Melt) => self.melt_type(arguments),
             Some(TableFunction::Fifelse) => self.fifelse_type(arguments),
+            Some(TableFunction::Ifelse) => self.ifelse_type(arguments),
         };
         // `setnames` and `setcolorder` change the subject by reference, which ry models as a
         // new write of its slot. Naming records the write from the callee's name alone, so a
@@ -15642,6 +15644,45 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         let (atomic, _, _) = shared?;
         Some(Ty::new(db, TyKind::Vector(scalar(db, atomic))))
+    }
+
+    /// `ifelse(test, yes, no)` fills a logical vector as long as `test` from `yes` and `no`, so
+    /// it is a vector of the wider of their types in R's coercion order (`logical`, `integer`,
+    /// `double`, `complex`, `character`), where a bare `NA` fits either. A `yes` or `no` that is
+    /// not a plain vector, such as a factor whose class `ifelse` drops, keeps the stub's type.
+    fn ifelse_type(&mut self, arguments: &[Argument]) -> Option<Ty<'db>> {
+        let module = self.module;
+        let db = self.db;
+        let rank = |atomic: Atomic| match atomic {
+            Atomic::Logical => Some(0),
+            Atomic::Integer => Some(1),
+            Atomic::Double => Some(2),
+            Atomic::Complex => Some(3),
+            Atomic::Character => Some(4),
+            Atomic::Raw => None,
+        };
+        let matched = match_formals(self.module, arguments, &["test", "yes", "no"]);
+        let mut widest: Option<Atomic> = None;
+        for value in [matched[1], matched[2]].into_iter().flatten() {
+            if matches!(
+                module.kind(value),
+                ExpressionKind::Literal(LiteralKind::Na(NaAtom::Logical))
+            ) {
+                continue;
+            }
+            let ty = *self.recorded.get(&value)?;
+            let ty = self.structural(ty);
+            let TyKind::Scalar(atomic) = column_element(db, ty).kind(db) else {
+                return None;
+            };
+            let atomic = *atomic;
+            rank(atomic)?;
+            widest = match widest {
+                Some(seen) if rank(seen) >= rank(atomic) => Some(seen),
+                _ => Some(atomic),
+            };
+        }
+        Some(Ty::new(db, TyKind::Vector(scalar(db, widest?))))
     }
 
     /// `idcol` holds each piece's name when the list names them all, and its position
@@ -23104,6 +23145,7 @@ enum TableFunction {
     RbindList,
     Melt,
     Fifelse,
+    Ifelse,
 }
 
 /// Each formal's argument, matched as R matches them: exact names first, then the unnamed

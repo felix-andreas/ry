@@ -110,7 +110,7 @@ a32: integer[]
 a33: integer
 a34: integer[]
 a35: integer
-a36: Any
+a36: character[]
 a37: double[]
 a38: character
 a39: integer[]

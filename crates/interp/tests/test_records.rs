@@ -126,6 +126,24 @@ const PRINTS: &[(&str, &str)] = &[
         "{ f <- function() -> Record{x: double} list(x = 1); f() }",
         "Error in f() : the function must return `Record{x: double}`, not `list`\n",
     ),
+    // A logical vector of only `NA`, such as `ifelse` over an empty test, fits `character` and
+    // arrives converted, keeping its attributes.
+    (
+        "{ f <- function(x: double[]) -> character[] x[0] > 0; typeof(f(1)) }",
+        "[1] \"character\"\n",
+    ),
+    (
+        "{ f <- function(x: character) -> character x; typeof(f(c(k = NA))) }",
+        "[1] \"character\"\n",
+    ),
+    (
+        "{ f <- function(x: character) -> character x; names(f(c(k = NA))) }",
+        "[1] \"k\"\n",
+    ),
+    (
+        "{ f <- function(x: character) x; f(c(NA, TRUE)) }",
+        "Error in f(c(NA, TRUE)) : argument `x` must be `character`, not `logical`\n",
+    ),
     // A whole-number double passes an `integer` parameter, as the checker's literal rule allows.
     (
         "{ f <- function(n: integer = 50) -> double n * 2; f() + f(3) }",

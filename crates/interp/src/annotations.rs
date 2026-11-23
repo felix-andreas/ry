@@ -31,7 +31,7 @@ use {
     },
     heap::{
         Marker,
-        object::{Sexp, SexpType, gp},
+        object::{NA_LOGICAL, Sexp, SexpType, gp},
     },
     rustc_hash::{FxHashMap, FxHashSet},
     std::{cell::RefCell, sync::OnceLock},
@@ -344,6 +344,9 @@ pub unsafe fn check_return(call: Sexp, signature: Sexp, value: Sexp) -> R<Sexp> 
     }
     // `-> I64` converts a whole R number, as an `I64` parameter does.
     if let Some(converted) = as_i64(mask, value)? {
+        return Ok(converted);
+    }
+    if let Some(converted) = missing_as_character(mask, value)? {
         return Ok(converted);
     }
     Err(failure(
@@ -771,6 +774,9 @@ unsafe fn check_value(call: Sexp, signature: Sexp, slot: usize, value: Sexp) -> 
     if let Some(converted) = as_i64(mask, value)? {
         return Ok(converted);
     }
+    if let Some(converted) = missing_as_character(mask, value)? {
+        return Ok(converted);
+    }
     // The checker accepts a whole-number `double` literal at an `integer` parameter (`f(10)` for
     // `n: integer`). Storage cannot tell a literal from a computed value, so every whole-number
     // `double` scalar passes, which keeps the check at least as loose as the static type. The
@@ -835,6 +841,25 @@ unsafe fn as_i64(mask: Mask, value: Sexp) -> R<Option<Sexp>> {
         Some(items) => crate::numbers::list(&items).map(Some),
         None => Ok(None),
     }
+}
+
+/// `value` as `character` when the annotation `mask` expects `character` and `value` is a
+/// logical vector of nothing but `NA`, or `None` otherwise. A bare `NA` and a vector built from
+/// no data (`ifelse` over an empty test) are logical in R but fit any atomic type, as the checker
+/// types them. `integer`, `double` and `complex` admit logical storage as it is, so only
+/// `character` needs the conversion, which keeps the attributes as R's coercion does.
+unsafe fn missing_as_character(mask: Mask, value: Sexp) -> R<Option<Sexp>> {
+    if mask & ARRAY != 0
+        || mask & CHARACTER == 0
+        || value.kind() != SexpType::Logical
+        || value.is_array()
+        || !values::ints(value)
+            .iter()
+            .all(|&item| item == NA_LOGICAL)
+    {
+        return Ok(None);
+    }
+    crate::coerce::coerce_vector(value, SexpType::String).map(Some)
 }
 
 /// Whether the annotation `mask` accepts `value` as it is, with no conversion; a mask of 0
