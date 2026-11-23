@@ -27,6 +27,7 @@ use {
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
     std::{borrow::Cow, cell::Cell},
+    syntax::native_values::reads_its_frame,
 };
 
 /// A function lookup the compiled code assumes keeps finding the same function.
@@ -1307,15 +1308,45 @@ impl Lowering<'_> {
                 self.lookup(code).is_none()
                     && !assigns(interp::bytecode::closure_body(self.closure), code)
             }
+            // A call of an R function on such code, which R evaluates lazily, as the interpreter
+            // would. The checker accepts the same calls (`is_r_code` in `semantics::native`).
+            SexpType::Language => {
+                let head = code.car();
+                let callable = if head.kind() == SexpType::Symbol {
+                    let name = rvalues::symbol_name(head);
+                    (takes_r_arguments(&name) || name == "(")
+                        && !is_language_keyword(&name)
+                        && !reads_its_frame(&name)
+                        && self.passes_code(head)
+                } else {
+                    // `pkg::f`, which R resolves when the promise runs.
+                    head.kind() == SexpType::Language
+                        && head.car().kind() == SexpType::Symbol
+                        && matches!(&*rvalues::symbol_name(head.car()), "::" | ":::")
+                        && match rvalues::pairlist_items(head.cdr())[..] {
+                            [(_, package), (_, function)] => {
+                                package.kind() == SexpType::Symbol
+                                    && function.kind() == SexpType::Symbol
+                                    && !reads_its_frame(&rvalues::symbol_name(function))
+                            }
+                            _ => false,
+                        }
+                };
+                callable
+                    && rvalues::pairlist_items(code.cdr())
+                        .into_iter()
+                        .all(|(_, argument)| self.passes_code(argument))
+            }
             _ => false,
         }
     }
 
     /// Whether only R can evaluate the argument `code` of a base function: a literal with no ry
-    /// type, such as `NA` or `2i`, or a variable from outside the function.
+    /// type, such as `NA` or `2i`, a variable from outside the function, or a call of an R
+    /// function on such code.
     unsafe fn only_r_evaluates(&self, code: Sexp) -> bool {
         match code.kind() {
-            SexpType::Symbol => self.passes_code(code),
+            SexpType::Symbol | SexpType::Language => self.passes_code(code),
             SexpType::Complex => true,
             SexpType::Logical | SexpType::Integer => {
                 rvalues::ints(code).first() == Some(&NA_INTEGER)
@@ -6979,6 +7010,14 @@ fn is_operator(name: &str) -> bool {
             | "!"
             | "&"
             | "|"
+    )
+}
+
+/// Whether `name` is one of the language's own forms rather than a function.
+fn is_language_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "function" | "if" | "for" | "while" | "repeat" | "return" | "break" | "next"
     )
 }
 

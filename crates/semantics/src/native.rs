@@ -31,6 +31,7 @@ use {
     syntax::{
         TextRange, TextSize,
         annotation::{Paired, pair_formals},
+        native_values::reads_its_frame,
     },
     thin_vec::ThinVec,
 };
@@ -2241,7 +2242,11 @@ impl<'a, 'db> Judge<'a, 'db> {
         arguments: &[(Option<Symbol>, ExprId)],
         usage: Use,
     ) {
-        self.r_position(id, name, origin, usage);
+        // R evaluates a call made only of R code where it stands among another call's arguments,
+        // lazily, as the interpreter would, so its value needs no ry type.
+        if !(is_r_argument(usage) && self.is_r_code(id)) {
+            self.r_position(id, name, origin, usage);
+        }
         let outer = self.r_arguments.replace(name);
         let hoist = self.hoist;
         if defers_arguments(name.as_str()) {
@@ -2273,6 +2278,29 @@ impl<'a, 'db> Judge<'a, 'db> {
             _ => return,
         };
         self.uncompiled(value, Uncompiled::RArgument(function, crossing));
+    }
+
+    /// Whether `id` is R code that R can evaluate in the function's enclosing environment just as
+    /// in its frame: a literal, a variable from outside the function, or a call of an R function
+    /// on such code. The typed core passes it as a promise, so it runs when R asks for it.
+    fn is_r_code(&self, id: ExprId) -> bool {
+        let module = self.judged.module;
+        match *module.kind(id) {
+            ExpressionKind::Literal(_) => true,
+            ExpressionKind::Paren(inner) => self.is_r_code(inner),
+            ExpressionKind::NameRef(name) => {
+                self.lookup(name).is_none() && !self.locals.contains(&name)
+            }
+            ExpressionKind::Call { callee, arguments } => {
+                matches!(self.callee(callee), Callee::R(name, origin)
+                    if origin != ROrigin::Table && !reads_its_frame(name.as_str()))
+                    && named_values(module, &module[arguments]).all(|(_, value)| {
+                        matches!(*module.kind(value), ExpressionKind::Missing)
+                            || self.is_r_code(value)
+                    })
+            }
+            _ => false,
+        }
     }
 
     /// The R function `id` calls, when `id` is a call of one.

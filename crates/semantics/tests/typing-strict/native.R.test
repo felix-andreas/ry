@@ -861,15 +861,15 @@ rows: fn(sales: DataFrame{units: integer[]}) -> I64
 
 #---- r_call_in_the_arguments_of_a_table_call
 #~~~~ script.R
-recent <- function(sales: DataFrame{day: double[]}) -> DataFrame{day: double[]} {
-  DataFrame.filter(sales, Expr.col("day") > max(1, 2))
+recent <- function(sales: DataFrame{day: double[]}, least: F64) -> DataFrame{day: double[]} {
+  DataFrame.filter(sales, Expr.col("day") > max(least, 2))
 }
 #++++
 == script.R
-recent: fn(sales: DataFrame{day: double[]}) -> DataFrame{day: double[]}
+recent: fn(sales: DataFrame{day: double[]}, least: F64) -> DataFrame{day: double[]}
 0..6 warning[unused] `recent` is assigned but never used
-126..135 error[native] `max` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(max(1, 2))`
-  safe fix 126..135 "Num.from_r(max(1, 2))"
+138..151 error[native] `max` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(max(least, 2))`
+  safe fix 138..151 "Num.from_r(max(least, 2))"
 
 #---- comment_annotations_are_judged
 #~~~~ script.R
@@ -1054,6 +1054,41 @@ labels: fn(label: Str) -> Str
 221..226 warning[unused] `large` is assigned but never used
 325..332 warning[unused] `blanked` is assigned but never used
 432..438 warning[unused] `labels` is assigned but never used
+
+#---- r_calls_on_r_code_as_r_arguments
+#~~~~ script.R
+# A call of an R function on literals and outside variables is R code too, which R evaluates
+# lazily among another call's arguments. A call on a local, or of a function that reads its
+# caller's frame, is not.
+alias Days = DataFrame{day: Date, v: double}
+#: character
+start <- "2026-01-01"
+since <- function(rows: Days) -> Days {
+  rows |> DataFrame.filter(Expr.col("day") >= as.Date(start))
+}
+shout <- function(word: Str) -> Str {
+  Str.from_r(paste(word, toupper(trimws(start)), base::nchar("abc")))
+}
+local_inner <- function(word: Str) -> Str {
+  Str.from_r(paste(toupper(word)))
+}
+frame_inner <- function(word: Str) -> Str {
+  Str.from_r(paste(word, get("start")))
+}
+#++++
+== script.R
+start: character
+since: fn(rows: Days) -> Days
+shout: fn(word: Str) -> Str
+local_inner: fn(word: Str) -> Str
+frame_inner: fn(word: Str) -> Str
+291..296 warning[unused] `since` is assigned but never used
+395..400 warning[unused] `shout` is assigned but never used
+505..516 warning[unused] `local_inner` is assigned but never used
+586..597 warning[unused] `frame_inner` is assigned but never used
+568..581 error[native] this calls R's `toupper` inside the arguments of R's `paste`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(toupper(...))`, and pass the variable
+  safe fix 551..581 "value <- Str.from_r(toupper(word))\n  Str.from_r(paste(value"
+655..667 error[native] this calls R's `get` inside the arguments of R's `paste`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Call `get` in a statement of its own if only its effect matters, or make both calls in a function with an R type in its signature
 
 #---- each_function_is_reported_where_the_value_first_appears
 #~~~~ script.R

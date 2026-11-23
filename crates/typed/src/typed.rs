@@ -1636,7 +1636,12 @@ unsafe fn apply_r(site: &RCall, mut words: *const u64, env: Sexp) -> Result<Sexp
     for argument in &site.arguments {
         let promise = match argument.passed {
             // A literal is its own value, as the interpreter passes it.
-            Passed::Code if argument.code.kind() != SexpType::Symbol => {
+            Passed::Code
+                if !matches!(
+                    argument.code.kind(),
+                    SexpType::Symbol | SexpType::Language
+                ) =>
+            {
                 interp::eval::forced_promise(argument.code, argument.code)?
             }
             Passed::Code => interp::eval::make_promise(argument.code, site.env)?,

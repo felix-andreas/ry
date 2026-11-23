@@ -150,3 +150,30 @@ pub fn object_systems_disabled_message(system: &str, defines: &str, function: &s
         "{system} are turned off in this project (`[check] object-systems = false`), so `{function}` cannot define {defines}. Use a record or a tagged union instead"
     )
 }
+
+/// Whether the R function `name` reads or writes the frame it is called from. Native code passes
+/// an argument made only of R code as a promise in the function's enclosing environment, which
+/// such a function would see instead of the frame the interpreter gives it, so a call of one is
+/// never passed that way.
+pub fn reads_its_frame(name: &str) -> bool {
+    const FRAME: [&str; 17] = [
+        "assign",
+        "environment",
+        "eval",
+        "evalq",
+        "exists",
+        "get",
+        "get0",
+        "local",
+        "ls",
+        "match.arg",
+        "mget",
+        "missing",
+        "nargs",
+        "on.exit",
+        "parent.frame",
+        "rm",
+        "substitute",
+    ];
+    FRAME.contains(&name) || name.starts_with("sys.")
+}
