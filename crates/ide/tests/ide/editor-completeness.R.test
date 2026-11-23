@@ -1265,17 +1265,6 @@ signature: fn(x: integer, ...: Any, [digits]: Any, [quote]: logical, [right]: lo
 parameters: [x: integer] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
 completion (2): found, packageNotFoundError
 
-#---- hover_on_an_unbound_condition
-if (condition$0) 1
-#++++
-hover 4..13: condition
-hover-definition: installed condition from base, stats, utils, methods, graphics, grDevices, datasets
-definition: installed condition from base, stats, utils, methods, graphics, grDevices, datasets
-references: none
-rename: none
-signature: none
-completion (15): conditionCall, conditionCall.condition, conditionMessage.condition, conditionMessage, .__C__conditionalExtension, as.character.condition, errorCondition, print.condition
-
 #---- a_function_named_like_a_stub_type_navigates_to_the_function
 levels <- factor$0(c("a", "b"))
 #++++

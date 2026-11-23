@@ -2,7 +2,9 @@
 //! `fuzz/` target so both check exactly the same properties.
 
 use {
-    crate::{DefinitionTarget, DocumentSymbol, HoverDefinition, Occurrence, TextEdit},
+    crate::{
+        DefinitionTarget, DocumentSymbol, HoverDefinition, Occurrence, TextEdit, spelled_variable,
+    },
     salsa::{Setter as _, plumbing::AsId as _},
     semantics::{
         AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
@@ -191,7 +193,9 @@ fn check_file(db: &RootDatabase, files: ProjectFiles, file: SourceFile) {
     }
     // A name's occurrences are compared from each of them once, not once per offset inside.
     let mut compared: HashSet<Vec<(SourceFile, TextRange)>> = HashSet::new();
-    let mut completed: HashSet<&str> = HashSet::new();
+    // A name is completed once per definition it resolves to, so a parameter and a global of
+    // one name are both checked.
+    let mut completed: HashSet<(&str, Option<(SourceFile, TextRange)>)> = HashSet::new();
     for (index, offset) in offsets.into_iter().enumerate() {
         let offset = TextSize::from(offset as u32);
         let at = |what: &str| format!("{what} in {source:?} at {offset:?}");
@@ -476,10 +480,9 @@ fn check_file(db: &RootDatabase, files: ProjectFiles, file: SourceFile) {
         };
         // A member completes from its receiver's type. Where that is unknown, the hover links to
         // the stub of the call that made the receiver, which says nothing about its members.
-        let member = start
-            .checked_sub(1)
-            .and_then(|before| source.as_bytes().get(before))
-            .is_some_and(|byte| matches!(byte, b'$' | b'@'));
+        let member = source
+            .get(..start)
+            .is_some_and(|before| before.trim_end().ends_with(['$', '@']));
         if let Some(name) = cursor_name
             && hover.as_ref().is_some_and(|hover| {
                 hovers_name(hover)
@@ -494,7 +497,15 @@ fn check_file(db: &RootDatabase, files: ProjectFiles, file: SourceFile) {
             && !declares
             && !name.starts_with('`')
             && !name.starts_with("..")
-            && completed.insert(name)
+            && completed.insert((
+                name,
+                match hover.as_ref().and_then(|hover| hover.definition.as_ref()) {
+                    Some(
+                        HoverDefinition::Local { target, .. } | HoverDefinition::Global { target },
+                    ) => Some((target.file, target.range)),
+                    _ => None,
+                },
+            ))
         {
             let end = start + name.len();
             let offered = crate::completion(db, files, file, TextSize::from(end as u32));
@@ -973,7 +984,9 @@ fn check_names(
     cursor_name: Option<&str>,
     what: &str,
 ) {
-    let Some(cursor_name) = cursor_name.map(unquote) else {
+    // A rest pattern (`..rest`) lexes as one name and binds the part after the dots, and a
+    // quoted or raw string target spells the name inside its delimiters.
+    let Some(cursor_name) = cursor_name.map(spelled_variable) else {
         return;
     };
     for (file, range) in ranges {
@@ -981,10 +994,9 @@ fn check_names(
         let Some(spelled) = text.get(usize::from(range.start())..usize::from(range.end())) else {
             continue;
         };
-        // A rest pattern (`..rest`) lexes as one name and binds the part after the dots.
-        let spelled = unquote(spelled);
+        let spelled = spelled_variable(spelled);
         assert!(
-            spelled == cursor_name || cursor_name.strip_prefix("..") == Some(spelled),
+            spelled == cursor_name,
             "{what}: range {range:?} covers {spelled:?}, not the name under the cursor \
              ({cursor_name:?})"
         );

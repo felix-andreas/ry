@@ -48,6 +48,11 @@ const REGRESSIONS: &[&str] = &[
     "setGeneric(\"area\", function(shape, ...) standardGeneric(\"area\"))\nsetMethod(\"area\", \"numeric\", function(shape, ...) shape * 2)\nprint(area(1))\n",
     "Kind <- setRefClass(\"Kind\", fields = list(amount = \"numeric\"))\nitem <- Kind$new(amount = 1)\nitem$amount\n",
     "f <- function(x) stats::sd(x)\n",
+    "f <- function() {\n  r\"(count)\" <- 1L\n  count\n}\n",
+    "f <- function(x: integer) -> List<integer> rev(x)\n",
+    "f <- function(x: integer) -> NULL invisible(x)\n",
+    "count <- 1L\nf <- function(count) count + 1L\ng <- function() count\n",
+    "Kind <- setRefClass(\"Kind\", fields = list(amount = \"numeric\"))\nitem <- Kind$new(amount = 1)\nitem $ amount\n",
 ];
 
 fn package(source: &str) -> Vec<Project> {

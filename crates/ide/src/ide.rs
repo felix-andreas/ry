@@ -48,6 +48,7 @@ use {
         },
         is_inline_annotation, is_syntactic_name,
         kind::KEYWORDS,
+        raw_string_content,
     },
 };
 
@@ -4577,7 +4578,10 @@ fn at_inline_type_start(root: &SyntaxNode, offset: TextSize) -> bool {
         return !(word
             && spaced
             && region.kind() == RETURN_TYPE
-            && matches!(token.kind(), IDENT | R_PAREN | R_BRACKET | R_BRACE));
+            && !matches!(
+                token.kind(),
+                MINUS_GREATER | PIPE | COMMA | COLON | EQ | LESS | L_PAREN | L_BRACKET | L_BRACE
+            ));
     }
     // `count: ` at the start of a statement still reads as R's `:` until a type and an
     // assignment follow.
@@ -4928,9 +4932,7 @@ fn annotation_completion(
                 definitions.push((label, definition.body, CompletionSource::Stdlib));
             }
         }
-    }
-    // A stub class declared with `@type` has a name to spell and no body to show.
-    if let Some(library) = stubs(db) {
+        // A stub class declared with `@type` has a name to spell and no body to show.
         items.extend(
             library
                 .nominals
@@ -5195,13 +5197,12 @@ fn spelled_names(db: &dyn Db, file: SourceFile) -> SpelledNames {
         .filter(|token| {
             token.kind() == IDENT
                 || token.kind().is_keyword()
-                || token.kind() == STRING && (is_string_target(token) || declares_item(token))
+                || matches!(token.kind(), STRING | RAW_STRING)
+                    && (is_string_target(token) || declares_item(token))
         })
         .collect();
     for token in &tokens {
-        // A quoted name and a `..name` read spell the variable `name`.
-        let name = token.text().trim_matches(['`', '"', '\'']);
-        let name = dot_dot_variable(name).unwrap_or(name);
+        let name = spelled_variable(token.text());
         *uses.entry(name).or_default() += 1;
         if token.kind() == IDENT && is_called_name(token) {
             *calls.entry(name).or_default() += 1;
@@ -5243,6 +5244,20 @@ fn spelled_names(db: &dyn Db, file: SourceFile) -> SpelledNames {
     spelled.namespace.sort_unstable();
     spelled.namespace.dedup();
     spelled
+}
+
+/// The variable a token spells: a quoted name or a raw string without its delimiters, and a
+/// `..name` read as `name`.
+pub(crate) fn spelled_variable(text: &str) -> &str {
+    let raw = text
+        .strip_prefix(['r', 'R'])
+        .is_some_and(|rest| rest.starts_with(['"', '\'']));
+    let name = if raw {
+        raw_string_content(text)
+    } else {
+        text.trim_matches(['`', '"', '\''])
+    };
+    dot_dot_variable(name).unwrap_or(name)
 }
 
 /// Whether `token` is the string of `"x" <- 1`, which spells the variable `x`.
@@ -7908,10 +7923,9 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
         {
             let mut names = result.iter().filter_map(|occurrence| {
                 let text = occurrence.file.text(db);
-                let name = text
-                    .get(std::ops::Range::<usize>::from(occurrence.range))?
-                    .trim_matches(['`', '"', '\'']);
-                Some(dot_dot_variable(name).unwrap_or(name))
+                Some(spelled_variable(
+                    text.get(std::ops::Range::<usize>::from(occurrence.range))?,
+                ))
             });
             names
                 .next()
