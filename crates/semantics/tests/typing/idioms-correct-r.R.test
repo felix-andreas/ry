@@ -2978,6 +2978,18 @@ summarise <- function(v, fun = NULL, na.rm = FALSE) {
 #++++
 summarise: <T> fn(v: Unknown, [fun]: (fn(Any, ...: Any) -> Any) | NULL, [na.rm]: T) -> Unknown
 
+#---- a_callback_parameter_is_variadic_even_where_the_library_call_forwards_nothing
+# raster tries `apply(x, 1, fun)` first and `fun(x, na.rm = na.rm)` later: `apply` passes its
+# `...` on to `FUN`, so the first call fixes no arity. A plain one-argument lambda still fits.
+calc <- function(x, fun, na.rm) {
+  if (missing(na.rm)) apply(x, 1, fun) else apply(x, 1, fun, na.rm = na.rm)
+  fun(x, na.rm = na.rm)
+}
+rows <- function(m) calc(m, function(row) row[1], TRUE)
+#++++
+calc: <T, U> fn(x: T, fun: fn(Any, ...: Any) -> Any, [na.rm]: U) -> Any
+rows: <T> fn(m: T) -> Any
+
 #---- a_parameter_with_a_string_default_is_skipped_by_the_call_lookup
 # R's call lookup skips a value that is no function, so `cor(r, r)` calls `stats::cor` while
 # `cor` holds its default.

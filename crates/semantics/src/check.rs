@@ -18296,6 +18296,10 @@ impl<'db, 'a> Checker<'db, 'a> {
             arena,
         );
 
+        // A library function's `...` goes to its callback (`apply(m, 1, fun)` calls
+        // `fun(row, ...)`), so an open callback is variadic even when this call forwards nothing.
+        let library_forwards = !forwarded_argument_indexes.is_empty()
+            || variadic_element.is_some() && !function.inferred;
         let forwards_dots = arguments.iter().any(|argument| argument.forwards_dots);
         let mut findings = Vec::new();
         // An unknown name throws off positional accounting, so its arity verdict would be noise.
@@ -18319,7 +18323,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         && let Some(ty) =
                             self.argument_type_for(expected, argument, function.inferred)
                         && let expected =
-                            self.forwarded_callback_shape(expected, ty, &forwarded_argument_indexes)
+                            self.forwarded_callback_shape(expected, ty, library_forwards)
                         && let Err(error) = self.check_argument(
                             expected,
                             ty,
@@ -18388,7 +18392,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         && let Some(ty) =
                             self.argument_type_for(expected, argument, function.inferred)
                         && let expected =
-                            self.forwarded_callback_shape(expected, ty, &forwarded_argument_indexes)
+                            self.forwarded_callback_shape(expected, ty, library_forwards)
                         && let Err(error) = self.check_argument(
                             expected,
                             ty,
@@ -19021,11 +19025,9 @@ impl<'db, 'a> Checker<'db, 'a> {
         &self,
         expected: Ty<'db>,
         actual: Ty<'db>,
-        forwarded_argument_indexes: &[usize],
+        forwards: bool,
     ) -> Ty<'db> {
-        if forwarded_argument_indexes.is_empty()
-            || !self.is_open_parameter(self.table.shallow_resolve(self.db, actual))
-        {
+        if !forwards || !self.is_open_parameter(self.table.shallow_resolve(self.db, actual)) {
             return expected;
         }
         match self.table.resolve(self.db, expected).kind(self.db) {

@@ -5358,7 +5358,8 @@ fn global_names<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<GlobalName<'db>> 
     let mut names = Vec::new();
     for &item in item_tree(db, file) {
         // A function's body binds locals only; any other item's code runs at the top level, so
-        // an assignment nested in it (`total <- sum(parts <- c(1, 2))`) binds a global too.
+        // an assignment nested in it (`total <- sum(parts <- c(1, 2))`) or a top-level loop's
+        // variable binds a global too.
         let kind = *item.kind(db);
         if kind != ItemKind::Function
             && let Some(naming) = item_naming(db, item)
@@ -5366,10 +5367,11 @@ fn global_names<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<GlobalName<'db>> 
             names.extend(
                 naming
                     .bindings
-                    .values()
-                    .filter(|info| {
-                        info.kind == BindingKind::TopLevel && Some(info.name) != item.name(db)
+                    .iter()
+                    .filter(|(binding, info)| {
+                        binds_global(naming, **binding, info) && Some(info.name) != item.name(db)
                     })
+                    .map(|(_, info)| info)
                     .map(|info| GlobalName {
                         name: info.name.to_string(),
                         is_function: false,
