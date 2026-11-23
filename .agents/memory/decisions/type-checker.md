@@ -77,17 +77,22 @@ interface group therefore resolves through an explicit canonical fixpoint in
   cap), condensed in canonical order (file order, then item order); only cyclic groups (more than one
   member, or a self-edge) are recorded. A winner-only graph that missed statement items, earlier writers,
   script and test files and conditional writers was the bug that surfaced this rule.
-- `scc_exports` runs Jacobi iteration: all members start at `Unknown` and each round re-checks every member
-  against the previous round's table, so order cannot matter. A group still changing at the round cap
-  (`SCHEME_ROUND_CAP`, 16, shared with the backstop) pins all members to `Unknown`. Member checks run
-  through `SalsaGlobals`, so no salsa cycle forms.
+- `scc_exports` runs Gauss-Seidel iteration in a solve order fixed by the group alone (a depth-first
+  post-order of its edges from its first member, so callees come first): all members start at `Unknown`,
+  and each member reads the exports its predecessors wrote earlier in the same round. Jacobi iteration,
+  which read only the previous round's table, needed one round per link, so any cycle longer than the cap
+  (a chain of 16 small functions through one annotated function) pinned to `Unknown` although its types
+  were fully determined; in callee-first order such a chain settles in one or two rounds. A group still
+  changing at the round cap (`SCHEME_ROUND_CAP`, 16, shared with the backstop) pins all members to
+  `Unknown`. Member checks run through `SalsaGlobals`, so no salsa cycle forms.
 - `item_check` adopts the canonical exports as a member's scheme, and `global_scheme` reads only
   `item_check`, so there is one source of truth.
 - Salsa cycle recovery (`item_check_recover`, `global_scheme_recover`) is a backstop, and reaching it is a
   bug: salsa never backdates a cycle member, so restoring a recovered cycle panics
   (`removing_a_cross_file_cycle_and_restoring_it_revalidates` in `test_incremental.rs`).
 
-Pinned by `cyclic_group_answers_are_forcing_order_independent` in `crates/semantics/tests/test_parallel.rs`.
+Pinned by `cyclic_group_answers_are_forcing_order_independent` in `crates/semantics/tests/test_parallel.rs`
+and the fixture `recursion__a_long_recursive_chain_settles_through_its_annotation`.
 
 ## There is no third constraint kind, so two flexible comparison operands stay unconstrained
 

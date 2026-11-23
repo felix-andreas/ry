@@ -186,6 +186,55 @@ fact <- function(n) if (n <= 1L) 1L else n * fact(n - 1L)
 #++++
 fact: fn(n: integer) -> integer
 
+#---- a_long_recursive_chain_settles_through_its_annotation
+# A cycle of any length through one annotated function settles: each round solves
+# the group callee first, so the chain's types flow through it in one pass.
+f <- function(x: integer) -> integer {
+  if (x <= 0L) 0L else g1(x - 1L)
+}
+g1 <- function(x) g2(x)
+g2 <- function(x) g3(x)
+g3 <- function(x) g4(x)
+g4 <- function(x) g5(x)
+g5 <- function(x) g6(x)
+g6 <- function(x) g7(x)
+g7 <- function(x) g8(x)
+g8 <- function(x) g9(x)
+g9 <- function(x) g10(x)
+g10 <- function(x) g11(x)
+g11 <- function(x) g12(x)
+g12 <- function(x) g13(x)
+g13 <- function(x) g14(x)
+g14 <- function(x) g15(x)
+g15 <- function(x) g16(x)
+g16 <- function(x) g17(x)
+g17 <- function(x) g18(x)
+g18 <- function(x) g19(x)
+g19 <- function(x) g20(x)
+g20 <- function(x) f(x)
+#++++
+f: fn(x: integer) -> integer
+g1: fn(x: integer) -> integer
+g2: fn(x: integer) -> integer
+g3: fn(x: integer) -> integer
+g4: fn(x: integer) -> integer
+g5: fn(x: integer) -> integer
+g6: fn(x: integer) -> integer
+g7: fn(x: integer) -> integer
+g8: fn(x: integer) -> integer
+g9: fn(x: integer) -> integer
+g10: fn(x: integer) -> integer
+g11: fn(x: integer) -> integer
+g12: fn(x: integer) -> integer
+g13: fn(x: integer) -> integer
+g14: fn(x: integer) -> integer
+g15: fn(x: integer) -> integer
+g16: fn(x: integer) -> integer
+g17: fn(x: integer) -> integer
+g18: fn(x: integer) -> integer
+g19: fn(x: integer) -> integer
+g20: fn(x: integer) -> integer
+
 #---- growing_recursion_is_attributed
 x <- list(v = 1, w = x)
 #++++

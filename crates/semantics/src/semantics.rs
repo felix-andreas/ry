@@ -3332,9 +3332,9 @@ pub struct MemberExports<'db> {
     pub pending: bool,
 }
 
-/// Independent of which member was queried first: each round re-checks every member
-/// against the previous round's exports, and members still changing at the cap pin to
-/// `Unknown`. Members are checked directly, never via `item_check`, so no salsa cycle forms.
+/// Independent of which member was queried first: each round re-checks every member in the
+/// group's solve order against the latest exports, and members still changing at the cap pin
+/// to `Unknown`. Members are checked directly, never via `item_check`, so no salsa cycle forms.
 #[salsa::tracked(
     returns(ref),
     cycle_fn = scc_exports_recover,
@@ -3349,25 +3349,53 @@ pub fn scc_exports<'db>(
     let Some(members) = item_group(db, files, representative) else {
         return exports;
     };
+    // Each member reads the exports its predecessors in the round just wrote, so a chain of
+    // calls settles in one round when it is solved callee first, whatever its length.
+    let order = solve_order(db, members);
     for _round in 0..SCHEME_ROUND_CAP {
-        let next_exports: FxHashMap<Item<'db>, MemberExports<'db>> = members
-            .iter()
-            .map(|&item| {
-                let globals = SalsaGlobals::for_item(db, item, Some(&exports));
-                let check = check_item_against(db, item, &globals);
-                (
-                    item,
-                    member_exports(db, check, globals.pending_reads.get() > 0),
-                )
-            })
-            .collect();
-        if next_exports == exports {
+        let mut changed = false;
+        for &item in &order {
+            let globals = SalsaGlobals::for_item(db, item, Some(&exports));
+            let check = check_item_against(db, item, &globals);
+            let next = member_exports(db, check, globals.pending_reads.get() > 0);
+            if exports.get(&item) != Some(&next) {
+                exports.insert(item, next);
+                changed = true;
+            }
+        }
+        if !changed {
             return exports;
         }
-        exports = next_exports;
     }
     // Pinning every member is the only entry-order-free refusal.
     unknown_group_exports(db, files, representative)
+}
+
+/// The group's members callees first: a depth-first walk of the edges inside the group from
+/// its first member, in post-order. It depends only on the group and its edges, never on which
+/// member was queried first.
+fn solve_order<'db>(db: &'db dyn Db, members: &[Item<'db>]) -> Vec<Item<'db>> {
+    let mut order = Vec::with_capacity(members.len());
+    let mut unvisited: FxHashSet<Item<'db>> = members.iter().copied().collect();
+    for &root in members {
+        if !unvisited.remove(&root) {
+            continue;
+        }
+        let mut work: Vec<(Item<'db>, usize)> = vec![(root, 0)];
+        while let Some((node, cursor)) = work.last_mut() {
+            let edges = item_interface_edges(db, *node);
+            if let Some(&target) = edges.get(*cursor) {
+                *cursor += 1;
+                if unvisited.remove(&target) {
+                    work.push((target, 0));
+                }
+                continue;
+            }
+            order.push(*node);
+            work.pop();
+        }
+    }
+    order
 }
 
 fn member_exports<'db>(
