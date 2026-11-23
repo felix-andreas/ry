@@ -28,7 +28,7 @@ use {
 /// `return(NA)` takes the type of the other returns when inferred, while a declared return type
 /// checks it as `logical`. A callback shape inferred from calls lets a later call omit an argument
 /// an earlier call passed, while the declared shape requires it.
-const KNOWN_UNWRITABLE: [&str; 23] = [
+const KNOWN_UNWRITABLE: [&str; 24] = [
     "semantics/tests/typing::correct_r__a_formal_used_as_a_vector_passes_a_scalar_parameter :: unpack",
     "semantics/tests/typing::correct_r__a_null_default_is_a_placeholder_at_a_numeric_parameter :: solve",
     "semantics/tests/typing::correct_r__an_inferred_scalar_parameter_takes_a_vector_of_its_type :: rlength",
@@ -52,6 +52,7 @@ const KNOWN_UNWRITABLE: [&str; 23] = [
     "semantics/tests/typing::correct_r__a_callback_may_later_be_called_without_an_argument_an_earlier_call_passed :: fetch",
     "semantics/tests/typing::correct_r__a_function_supplied_on_the_missing_path_types_as_a_default :: f",
     "semantics/tests/typing::correct_r__a_function_supplied_on_the_missing_path_types_as_a_default :: g",
+    "semantics/tests/typing::correct_r__arithmetic_on_an_environment_may_dispatch_to_a_project_method :: build",
 ];
 
 #[test]

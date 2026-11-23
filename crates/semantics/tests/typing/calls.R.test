@@ -805,7 +805,7 @@ f <- function(data, groups) {
   out
 }
 #++++
-f: <T> fn([data]: T, groups: fn(Any) -> Any) -> double[]
+f: <T, U> fn([data]: T, groups: U) -> double[]
 
 #---- a_list_of_functions_maps
 # Every member of the element union must serve the callback interface; the

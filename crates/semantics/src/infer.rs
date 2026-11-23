@@ -1262,6 +1262,9 @@ impl<'db> InferenceTable<'db> {
                 // way: it is a value the body never constrained, so nothing shows it cannot
                 // fit. After `x <- list(x)` on one path, `list{U}` binds the target's element to
                 // `U`, and `U` itself cannot then become a list of itself, which R never asks.
+                // It fits a union target as a lone open argument does, taking the union as a
+                // bound, so `character | U` passed where `list[T] | T[] | NULL` is expected
+                // leaves `U` free to be `character | NULL` at a later call.
                 let (open, concrete): (Vec<Ty<'db>>, Vec<Ty<'db>>) =
                     members.iter().copied().partition(|&member| {
                         matches!(
@@ -1276,10 +1279,7 @@ impl<'db> InferenceTable<'db> {
                     .iter()
                     .all(|&member| self.compatible_probe(db, member, expected, depth + 1))
                     && open.iter().all(|&member| {
-                        let snapshot = self.snapshot();
-                        if self.unify(db, member, expected).is_err() {
-                            self.rollback(snapshot);
-                        }
+                        self.compatible_probe(db, member, expected, depth + 1);
                         true
                     })
             }

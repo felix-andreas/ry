@@ -2096,6 +2096,45 @@ f: Unknown
 Unknown
 82..90 error[type-mismatch] expected `fn(T, U, extra: double) -> V`, found `fn(x: W) -> W`
 
+#---- a_computed_formals_rewrite_accepts_any_argument
+base_control <- function(optimizer = "bobyqa", tol = 1e-5) {
+  list(optimizer = optimizer, tol = tol)
+}
+glm_control <- base_control
+formals(glm_control)[["optimizer"]] <- "nm"
+formals(glm_control) <- c(formals(glm_control), list(compDev = TRUE))
+use <- function() glm_control(compDev = FALSE)
+#++++
+base_control: <T, U> fn([optimizer]: T, [tol]: U) -> list{optimizer: T, tol: U}
+glm_control: <T, U> fn(...: Any) -> list{optimizer: T, tol: U}
+character
+list[Any]
+use: <T, U> fn() -> list{optimizer: T, tol: U}
+
+#---- an_open_union_member_takes_a_union_parameter_as_a_bound
+normalize <- function(path) {
+  bad <- !vapply(path, is.character, logical(1))
+  path[bad] <- "x"
+  path
+}
+normalize_any <- function(path) {
+  if (nchar(Sys.getenv("X")) > 0) return(normalizePath(path))
+  normalize(path)
+}
+wants_text <- function(project = NULL) { if (!is.null(project)) setwd(project); 1 }
+settings <- list(read = function(project = NULL) normalize(project)[[1]])
+caller <- function(project = NULL) {
+  project <- normalize_any(project)
+  settings$read(project = project)
+  wants_text(project)
+}
+#++++
+normalize: <T, U: list[T] | T[] | NULL> fn(path: U) -> U
+normalize_any: <T, U: list[T] | T[] | NULL> fn(path: U) -> character | U
+wants_text: fn([project]: character | NULL) -> double
+settings: list{read: fn([project]: list[Unknown] | Unknown[] | NULL) -> Unknown}
+caller: fn([project]: character | NULL) -> double
+
 #---- a_namespaced_body_rewrite_makes_a_template
 make <- function(capture) {
   function(x, y) capture(x, y, extra = 1)
