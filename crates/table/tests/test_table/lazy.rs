@@ -204,6 +204,36 @@ fn an_asof_join_takes_the_nearest_row_within_each_by_group() {
     );
 }
 
+/// A missing `by` key is a group of its own, so it rolls to the right rows whose key is missing,
+/// as data.table's rolling join does, while an empty string stays apart from it.
+#[test]
+fn an_asof_join_matches_a_missing_by_key_with_a_missing_key() {
+    let trades = frame(vec![
+        (
+            "ticker",
+            RVector::Character(vec![Some("a".to_string()), None, Some(String::new())]),
+        ),
+        ("time", ints(&[5, 3, 4])),
+    ]);
+    let quotes = frame(vec![
+        (
+            "ticker",
+            RVector::Character(vec![Some("a".to_string()), None]),
+        ),
+        ("time", ints(&[2, 1])),
+        ("bid", doubles(&[1.5, 7.0])),
+    ]);
+    let joined = collect(Plan::new(Source::Table(trades)).with(Step::Join {
+        other: Box::new(Plan::new(Source::Table(quotes))),
+        left_on: vec!["ticker".into(), "time".into()],
+        right_on: vec!["ticker".into(), "time".into()],
+        how: How::Asof(Strategy::Backward),
+        suffix: "_right".into(),
+    }));
+    assert_eq!(names(&joined), ["ticker", "time", "bid"]);
+    assert_eq!(na_doubles(&joined, "bid"), [Some(1.5), Some(7.0), None]);
+}
+
 #[test]
 fn head_in_an_aggregation_keeps_each_groups_best_rows_after_a_sort() {
     let table = frame(vec![

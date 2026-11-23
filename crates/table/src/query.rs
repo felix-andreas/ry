@@ -1882,14 +1882,40 @@ fn join_plan(
                 .ok_or_else(|| Error::Query("a rolling join needs a join column".to_string()))?;
             let (x_roll, i_roll) = (&rolled.x, &rolled.i);
             let groups = &on[..on.len() - 1];
+            // Polars' as-of join puts a row whose group key is null in no group, but data.table
+            // matches `NA` with `NA`. Each group column is therefore grouped by two columns on
+            // both sides: whether it is missing, and its value with a missing value filled by one
+            // constant of its type.
+            let mut by_names: Vec<PlSmallStr> = Vec::with_capacity(groups.len() * 2);
+            let mut x_by: Vec<PolarsExpr> = Vec::with_capacity(groups.len() * 2);
+            let mut i_by: Vec<PolarsExpr> = Vec::with_capacity(groups.len() * 2);
+            for (index, condition) in groups.iter().enumerate() {
+                let dtype = column_dtype(&i, &condition.i)?;
+                let filled = |value: PolarsExpr| match &dtype {
+                    DataType::String => value.fill_null(lit("")),
+                    DataType::Categorical(..) | DataType::Enum(..) => {
+                        value.cast(DataType::String).fill_null(lit(""))
+                    }
+                    other => value.fill_null(lit(0).cast(other.clone())),
+                };
+                let (missing, value) = (
+                    PlSmallStr::from(format!("\u{1}by_missing{index}")),
+                    PlSmallStr::from(format!("\u{1}by_value{index}")),
+                );
+                for (side, column) in [(&mut x_by, &condition.x), (&mut i_by, &condition.i)] {
+                    side.push(col(column.clone()).is_null().alias(missing.clone()));
+                    side.push(filled(col(column.clone())).alias(value.clone()));
+                }
+                by_names.push(missing);
+                by_names.push(value);
+            }
+            let x_grouped = x.clone().with_columns(x_by);
             let options = AsOfOptions {
                 strategy,
                 tolerance: tolerance.map(|limit| Scalar::from(limit.abs())),
                 tolerance_str: None,
-                left_by: (!groups.is_empty())
-                    .then(|| groups.iter().map(|condition| condition.i.clone()).collect()),
-                right_by: (!groups.is_empty())
-                    .then(|| groups.iter().map(|condition| condition.x.clone()).collect()),
+                left_by: (!by_names.is_empty()).then(|| by_names.clone()),
+                right_by: (!by_names.is_empty()).then(|| by_names.clone()),
                 allow_eq: true,
                 check_sortedness: false,
             };
@@ -1899,6 +1925,7 @@ fn join_plan(
             // picks.
             let matched = keep_mult(exact(i.clone(), JoinType::Inner), join.mult);
             let unmatched = i
+                .with_columns(i_by)
                 .join_builder()
                 .with(x.clone().select(right_on.clone()))
                 .left_on(left_on.clone())
@@ -1925,8 +1952,7 @@ fn join_plan(
             // Marks the rows of `x` so that an unmatched row of `i` is told apart from a match
             // whose values are `NA`.
             const MATCHED: &str = "\u{1}matched";
-            let x = x
-                .clone()
+            let x = x_grouped
                 .with_column(lit(true).alias(MATCHED))
                 .sort_by_exprs(sort_x, options_sort.clone());
             let mut rolled = unmatched
