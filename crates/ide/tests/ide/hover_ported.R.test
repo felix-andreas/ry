@@ -248,7 +248,7 @@ action: Add inferred type annotation for `again`
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": integer"
   edit 17..17 -> ": NULL"
-completion (119): rep, repeat, rep.Date, rep.difftime, rep.factor, rep.int, rep.numeric_version, rep.POSIXct
+completion (125): rep, repeat, rep.Date, rep.difftime, rep.factor, rep.int, rep.numeric_version, rep.POSIXct
 hint @5: integer
 hint @17: NULL
 
@@ -268,7 +268,7 @@ action: Add inferred type annotations for the whole file
   edit 17..17 -> "<T>"
   edit 27..27 -> ": T"
   edit 28..28 -> " -> T"
-completion (56): function, functionBody, findFunction, .Defunct, as.function, as.function.default, getFunction, is.function
+completion (60): function, functionBody, findFunction, .Defunct, as.function, as.function.default, getFunction, is.function
 hint @17<T>
 hint @27: T
 hint @28 -> T
@@ -349,7 +349,7 @@ action: Add inferred type annotation for `value`
   edit 5..5 -> ": integer"
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": integer"
-completion (101): La.svd, La_library, La_version, LakeHuron, LazyFrame.collect, LazyFrame.explain, LazyFrame.filter, LazyFrame.group_by
+completion (108): La.svd, La_library, La_version, LakeHuron, LazyFrame.collect, LazyFrame.drop, LazyFrame.explain, LazyFrame.filter
 hint @5: integer
 
 #==== hover_annotated
@@ -392,7 +392,7 @@ definition 18..25
 references: 18..25*
 rename: 1 edit(s)
 signature: none
-completion (95): trusted, trunc, trunc.Date, trunc.POSIXt, truncate, truncate.connection, TRUE, StructTS
+completion (98): trusted, trunc, trunc.Date, trunc.POSIXt, truncate, truncate.connection, TRUE, StructTS
 
 #---- new_annotation_binding
 #: @type Person {list{name: character}}
@@ -622,7 +622,7 @@ action: Add inferred type annotations for the whole file
   edit 18..18 -> "<T>"
   edit 20..20 -> ": T"
   edit 21..21 -> " -> T"
-completion (71): mirror, mirror2html, psmirnov, qsmirnov, rsmirnov, getCRANmirrors, findCRANmirror, chooseBioCmirror
+completion (73): mirror, mirror2html, psmirnov, qsmirnov, rsmirnov, getCRANmirrors, findCRANmirror, chooseBioCmirror
 hint @18<T>
 hint @20: T
 hint @21 -> T
@@ -770,7 +770,7 @@ signature: <T, U> fn(X: list[named: T], FUN: fn(T) -> U, ...: Any) -> list[named
 parameters: [X: list[named: T]] | FUN: fn(T) -> U | ...: Any
 signature: <T, U> fn(X: list[T] | T[] | formula | NULL, FUN: fn(T) -> U, ...: Any) -> list[U]
 parameters: [X: list[T] | T[] | formula | NULL] | FUN: fn(T) -> U | ...: Any
-completion (60): lapply, lag.plot, LazyFrame.explain, LazyFrame.group_by, LazyFrame.pivot, LazyFrame.scan_parquet, LazyGroupBy.agg, List.append
+completion (62): lapply, lag.plot, LazyFrame.drop, LazyFrame.explain, LazyFrame.group_by, LazyFrame.pivot, LazyFrame.scan_parquet, LazyFrame.unpivot
 
 #---- c_unknown
 f <- function(a, b) {
@@ -797,7 +797,7 @@ definition: installed ls from base, stats, utils, methods, graphics, grDevices, 
 references: none
 rename: none
 signature: none
-completion (120): all, all.names, all.equal, all.equal.character, all.equal.default, all.equal.environment, all.equal.envRefClass, all.equal.factor
+completion (121): all, all.names, all.equal, all.equal.character, all.equal.default, all.equal.environment, all.equal.envRefClass, all.equal.factor
 
 #---- installed_argument_name
 f <- function(x) {

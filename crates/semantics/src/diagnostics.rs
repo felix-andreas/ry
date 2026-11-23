@@ -24,6 +24,7 @@ use {
             registered_methods,
         },
         naming::{BindingKind, ItemNaming, NamespaceRead},
+        native::{NativeBlocker, NativeFix},
         package_name, parse, prelude_enabled, project_type_definitions, reads_use_method, s4,
         stubs::{
             CONDITIONAL_NAMESPACES, STANDARD_LIBRARY, StubLibrary, SymbolSet,
@@ -3046,6 +3047,102 @@ fn script_unused_bindings(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         .collect()
 }
 
+/// The edit that applies a native blocker's rewrite. A hoisted call goes into a new variable on a
+/// line of its own above the statement, and above the statement's `#:` lines, which annotate
+/// the line below them. `taken` collects the item's variable names on first use, and then the
+/// names earlier fixes chose, because one pass applies them together.
+fn native_fix(
+    text: &str,
+    offset: TextSize,
+    blocker: &NativeBlocker,
+    module: &hir::Module,
+    taken: &mut Option<FxHashSet<Symbol>>,
+) -> Option<Fix> {
+    let range = blocker.range + offset;
+    let source = text.get(usize::from(range.start())..usize::from(range.end()))?;
+    match blocker.fix? {
+        NativeFix::Convert(conversion) => Some(Fix {
+            title: format!("Convert with `{}.from_r`", conversion.module()),
+            range,
+            replacement: format!("{}.from_r({source})", conversion.module()),
+            applicability: Applicability::Safe,
+        }),
+        NativeFix::Hoist { before, convert } => {
+            let statement = usize::from(before.start() + offset);
+            let line_start = text
+                .get(..statement)?
+                .rfind('\n')
+                .map_or(0, |newline| newline + 1);
+            let indentation = &text[line_start..statement];
+            let (start, separator) = if indentation.chars().all(|c| c == ' ' || c == '\t') {
+                let newline = if text[..line_start].ends_with("\r\n") {
+                    "\r\n"
+                } else {
+                    "\n"
+                };
+                let mut start = statement;
+                let mut line = line_start;
+                while line > 0 {
+                    let above = text[..line - 1]
+                        .rfind('\n')
+                        .map_or(0, |newline| newline + 1);
+                    let content = &text[above..line];
+                    if !content.trim().starts_with("#:") {
+                        break;
+                    }
+                    start = above + (content.len() - content.trim_start().len());
+                    line = above;
+                }
+                (start, format!("{newline}{indentation}"))
+            } else {
+                (statement, "; ".to_owned())
+            };
+            let computed = match convert {
+                Some(conversion) => format!("{}.from_r({source})", conversion.module()),
+                None => source.to_owned(),
+            };
+            let between = text.get(start..usize::from(range.start()))?;
+            let taken = taken.get_or_insert_with(|| variable_names(module));
+            let name = (1..)
+                .map(|number| match number {
+                    1 => Symbol::from("value"),
+                    _ => Symbol::from(format!("value{number}").as_str()),
+                })
+                .find(|name| !taken.contains(name))?;
+            taken.insert(name);
+            Some(Fix {
+                title: format!("Compute `{computed}` into `{name}` first"),
+                range: TextRange::new(TextSize::try_from(start).ok()?, range.end()),
+                replacement: format!("{name} <- {computed}{separator}{between}{name}"),
+                applicability: Applicability::Unsafe,
+            })
+        }
+    }
+}
+
+/// Every name an item reads or binds as a variable, which a new variable must not take.
+fn variable_names(module: &hir::Module) -> FxHashSet<Symbol> {
+    let mut names = FxHashSet::default();
+    for kind in module.kinds() {
+        match *kind {
+            ExpressionKind::NameRef(name) => {
+                names.insert(name);
+            }
+            ExpressionKind::Function { parameters, .. } => {
+                names.extend(module[parameters].iter().map(|parameter| parameter.name));
+            }
+            ExpressionKind::For {
+                variable: Some(variable),
+                ..
+            } => {
+                names.insert(module.name(variable));
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
 /// Empty unless [`crate::file_is_strict`] holds, which is also the only case a check records
 /// strict origins and native blockers for. An origin that is an assignment's value is phrased
 /// against the assigned name.
@@ -3093,10 +3190,12 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         let Some(check) = item_check(db, item) else {
             continue;
         };
+        let text = file.text(db);
+        let module = item_hir(db, item);
+        let mut taken = None;
         for blocker in &check.native_blockers {
             let range = blocker.range + offset;
-            let source = file
-                .text(db)
+            let source = text
                 .get(usize::from(range.start())..usize::from(range.end()))
                 .unwrap_or_default();
             let severity = if blocker.kind.is_error() {
@@ -3104,12 +3203,16 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             } else {
                 Severity::Warning
             };
-            diagnostics.push(Diagnostic::new(
+            let mut diagnostic = Diagnostic::new(
                 range,
                 severity,
                 blocker.kind.code(),
                 blocker.kind.message(source),
-            ));
+            );
+            if let Some(module) = &module {
+                diagnostic.fix = native_fix(text, offset, blocker, module, &mut taken);
+            }
+            diagnostics.push(diagnostic);
         }
         if check.strict_origins.is_empty() {
             continue;
@@ -4056,6 +4159,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             operator,
             left,
             right: None,
+            ..
         } => format!(
             "`{operator}` is not defined on `{}`. It takes a number",
             renderer.render(db, *left)
@@ -4064,6 +4168,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             operator,
             left,
             right: Some(right),
+            r_side,
         } => {
             let head = format!(
                 "`{operator}` is not defined between `{}` and `{}`",
@@ -4074,6 +4179,29 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 TyKind::Native(native) => Some(*native),
                 _ => None,
             };
+            let equality = matches!(*operator, "==" | "!=");
+            if let Some(r_side) = r_side {
+                // The conversion that turns the R side into the ry scalar beside it.
+                let conversion = match r_side.kind(db) {
+                    _ if native(*left).is_none() && native(*right).is_none() => None,
+                    TyKind::Scalar(Atomic::Character) => Some("Str.from_r()"),
+                    TyKind::Scalar(Atomic::Logical) => Some("Bool.from_r()"),
+                    TyKind::Scalar(Atomic::Integer | Atomic::Double) => Some("Num.from_r()"),
+                    TyKind::Vector(_) => Some("List.from_r()"),
+                    _ => None,
+                };
+                return match conversion {
+                    Some(conversion) => format!(
+                        "{head}. A ry value meets an R value only through a conversion: convert the R side with `{conversion}`"
+                    ),
+                    None if equality => format!(
+                        "{head}. A ry value never equals an R value: convert the R value into ry's types first"
+                    ),
+                    None => format!(
+                        "{head}. A ry value meets an R value only through a conversion such as `Num.from_r()`"
+                    ),
+                };
+            }
             match (native(*left), native(*right)) {
                 (Some(left), Some(right)) if left != right && left.is_number() && right.is_number() => {
                     format!(
@@ -4081,10 +4209,8 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                         left.name().to_lowercase()
                     )
                 }
-                (Some(_), Some(_)) => head,
-                _ => format!(
-                    "{head}. A ry value meets an R value only through a conversion such as `Num.from_r()`"
-                ),
+                _ if equality => format!("{head}, because a value of one type never equals a value of the other"),
+                _ => head,
             }
         }
         TypeErrorKind::IntegerDivision { ty } => format!(

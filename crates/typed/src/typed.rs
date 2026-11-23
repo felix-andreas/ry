@@ -40,7 +40,7 @@ use {
     crate::{
         backend::{Callee, Code, Entry, Trampoline},
         ir::{Item, Type},
-        lower::{Callees, Lowered, RCall, RResult, Speculation},
+        lower::{Callees, Global, Lowered, Passed, RCall, RResult, Speculation},
         shapes::Shapes,
         values::{Boxed, List, Str},
     },
@@ -584,7 +584,10 @@ unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<
         for conversion in site
             .arguments
             .iter()
-            .filter_map(|argument| argument.conversion)
+            .filter_map(|argument| match argument.passed {
+                Passed::Value(_, conversion) => conversion,
+                Passed::Code => None,
+            })
         {
             heap.add_global_root(conversion.function);
         }
@@ -1429,11 +1432,27 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
 /// has room for the words of its result.
 pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *mut u64) -> i32 {
     let site = &*site;
+    if let RResult::Global(ty) = site.result {
+        return match read_global(site, ty, out) {
+            Ok(true) => 0,
+            Ok(false) => 1,
+            Err(unwind) => {
+                PARKED.set(Some(unwind));
+                1
+            }
+        };
+    }
     let replayed = replay::replayed(site.call);
     // An effect-free call changes nothing a second run would see unless it warns, so only then
     // does it count as a call the code cannot make again. A replayed call counts, since running
     // the code again must give it the same value.
-    let effect_free = site.effect_free && replayed.is_none();
+    // A call R evaluates among the arguments may have an effect of its own, so the site is
+    // replayed, though it may still stand among another call's arguments.
+    let effect_free = site.effect_free
+        && replayed.is_none()
+        && !site.arguments.iter().any(|argument| {
+            matches!(argument.passed, Passed::Code) && argument.code.kind() == SexpType::Language
+        });
     let warnings = interp::conditions::warnings_raised();
     let heap = interp::heap();
     let mark = heap.handle_mark();
@@ -1482,6 +1501,70 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
     }
 }
 
+/// Reads the global that `site` names for compiled code, which was compiled for a value of type
+/// `ty`, and writes its words to `out`. `false` when the read runs R code or finds no global, as
+/// when the binding was removed, so the interpreter runs the call again and reads it as R does.
+/// A value of another type is an error, as an argument of another type is at the boundary.
+unsafe fn read_global(site: &RCall, ty: Type, out: *mut u64) -> Result<bool, Unwind> {
+    let value = match lower::global_binding(site.call, site.env) {
+        Global::Value(value) => value,
+        // R forces a promise where the variable is read, such as a package variable's lazy-load
+        // promise, which code attached from a typed code file meets on its first call.
+        // The forced promise keeps its value, so the binding keeps it alive.
+        Global::Promise(promise) => interp::eval::force_promise(promise)?,
+        Global::Unbound | Global::Enclosing | Global::Active => {
+            return Ok(false);
+        }
+    };
+    let found = type_of(value);
+    if found != Some(ty) {
+        let found = match found.filter(|&found| lower::reads_globally(found)) {
+            Some(found) => type_name(found),
+            None if rvalues::length(value) == 1 || value.is_array() => {
+                format!("`{}`", value.kind().name())
+            }
+            None => format!(
+                "a `{}` vector of length {}",
+                value.kind().name(),
+                rvalues::length(value)
+            ),
+        };
+        return Err(interp::unwind::error(format!(
+            "the global `{}` must be {}, the type it had when the typed function compiled, not \
+             {found}",
+            rvalues::symbol_name(site.call),
+            type_name(ty)
+        )));
+    }
+    if ty == Type::Table {
+        // Compiled code holds a table as a bare word, which the collector does not see, so the
+        // table stays rooted until the call that entered typed code releases its handles.
+        interp::heap().root(value);
+        *out = value.as_ptr() as u64;
+        return Ok(true);
+    }
+    write_native(ty, value, out)?;
+    Ok(true)
+}
+
+/// How an error names `ty`, a type [`lower::reads_globally`] admits.
+fn type_name(ty: Type) -> String {
+    let item = |item: Item| match item {
+        Item::I64 => "I64",
+        Item::Lgl => "Bool",
+        Item::Str => "Str",
+        _ => "F64",
+    };
+    match ty {
+        Type::Table => String::from("a table value"),
+        Type::Vector { item: inner, .. } => format!("`List<{}>`", item(inner)),
+        Type::I64 => String::from("`I64`"),
+        Type::Lgl => String::from("`Bool`"),
+        Type::Str => String::from("`Str`"),
+        _ => String::from("`F64`"),
+    }
+}
+
 /// What an R call compiled code made gave: the value the R function returned, `NULL` when the
 /// code does not use it, and whether its conversion gave the type the code was compiled for.
 #[derive(Clone, Copy)]
@@ -1510,6 +1593,11 @@ unsafe fn call_r(
             });
         }
         RResult::Converted(conversion, ty) => (conversion, ty),
+        RResult::Global(_) => {
+            return Err(interp::unwind::error(
+                "a typed function read a global as it would call R",
+            ));
+        }
         RResult::Table => {
             if !(interp::interp().extensions.tables.is_table_value)(value) {
                 return Err(interp::unwind::error(format!(
@@ -1530,7 +1618,10 @@ unsafe fn call_r(
             let offset: usize = site
                 .arguments
                 .iter()
-                .map(|argument| backend::words(argument.ty).len())
+                .map(|argument| match argument.passed {
+                    Passed::Value(ty, _) => backend::words(ty).len(),
+                    Passed::Code => 0,
+                })
                 .sum();
             let mut native = [0u64; 2];
             for (position, word) in native.iter_mut().take(backend::words(ty).len()).enumerate() {
@@ -1553,24 +1644,35 @@ unsafe fn apply_r(site: &RCall, mut words: *const u64, env: Sexp) -> Result<Sexp
     let heap = interp::heap();
     let mut args: SmallVec<[Arg; 4]> = SmallVec::new();
     for argument in &site.arguments {
-        let mut native = [0u64; 2];
-        for word in native.iter_mut().take(backend::words(argument.ty).len()) {
-            *word = *words;
-            words = words.add(1);
-        }
-        let mut value = to_r(argument.ty, native)?;
-        heap.root(value);
-        if let Some(conversion) = argument.conversion {
-            value = convert(
-                conversion,
-                conversion.call.cdr().car(),
-                value,
-                None,
-                site.env,
-            )?;
-            heap.root(value);
-        }
-        let promise = interp::eval::forced_promise(argument.code, value)?;
+        let promise = match argument.passed {
+            // A literal is its own value, as the interpreter passes it.
+            Passed::Code
+                if !matches!(argument.code.kind(), SexpType::Symbol | SexpType::Language) =>
+            {
+                interp::eval::forced_promise(argument.code, argument.code)?
+            }
+            Passed::Code => interp::eval::make_promise(argument.code, site.env)?,
+            Passed::Value(ty, conversion) => {
+                let mut native = [0u64; 2];
+                for word in native.iter_mut().take(backend::words(ty).len()) {
+                    *word = *words;
+                    words = words.add(1);
+                }
+                let mut value = to_r(ty, native)?;
+                heap.root(value);
+                if let Some(conversion) = conversion {
+                    value = convert(
+                        conversion,
+                        conversion.call.cdr().car(),
+                        value,
+                        None,
+                        site.env,
+                    )?;
+                    heap.root(value);
+                }
+                interp::eval::forced_promise(argument.code, value)?
+            }
+        };
         heap.root(promise);
         args.push(Arg {
             tag: argument.tag,
@@ -1660,6 +1762,35 @@ unsafe fn write_converted(
             value.kind().name()
         )));
     }
+    if let Type::Vector {
+        item: Item::Tag(union),
+        ..
+    } = ty
+    {
+        match results_list(value, union)? {
+            Ok(list) => *out = list as u64,
+            Err(payload) if conversion.guessed() => {
+                FAILED_GUESS.set(Some((conversion.call, payload)));
+                return Ok(false);
+            }
+            Err(payload) => {
+                return Err(interp::unwind::error(format!(
+                    "`{}` gave results of `{}`, and the typed function was compiled for the type \
+                     it gave before: convert the value to one type in R first",
+                    interp::deparse::deparse_first_line(conversion.call),
+                    payload.name()
+                )));
+            }
+        }
+        return Ok(true);
+    }
+    write_native(ty, value, out)?;
+    Ok(true)
+}
+
+/// Writes the words of the R value `value` as a new native value of `ty`, a scalar or a vector
+/// of scalars whose storage `value` has.
+unsafe fn write_native(ty: Type, value: Sexp, out: *mut u64) -> Result<(), Unwind> {
     match ty {
         Type::Dbl => *out = rvalues::reals(value)[0].to_bits(),
         Type::I64 => *out = value.slice::<i64>()[0] as u64,
@@ -1678,24 +1809,6 @@ unsafe fn write_converted(
             }
             *out = list as u64;
         }
-        Type::Vector {
-            item: Item::Tag(union),
-            ..
-        } => match results_list(value, union)? {
-            Ok(list) => *out = list as u64,
-            Err(payload) if conversion.guessed() => {
-                FAILED_GUESS.set(Some((conversion.call, payload)));
-                return Ok(false);
-            }
-            Err(payload) => {
-                return Err(interp::unwind::error(format!(
-                    "`{}` gave results of `{}`, and the typed function was compiled for the type \
-                     it gave before: convert the value to one type in R first",
-                    interp::deparse::deparse_first_line(conversion.call),
-                    payload.name()
-                )));
-            }
-        },
         Type::Vector { item, .. } => {
             let length = rvalues::length(value);
             let list = values::ry_list_new(item_kind(item), length as u64);
@@ -1715,11 +1828,11 @@ unsafe fn write_converted(
         }
         _ => {
             return Err(interp::unwind::error(
-                "a conversion of what R returns gave a type typed code does not take from R",
+                "a value from R has a type typed code does not take from R",
             ));
         }
     }
-    Ok(true)
+    Ok(())
 }
 
 /// A native list of the `:Ok(item)` and `:Err(:Missing)` tags in `value`, the R list a

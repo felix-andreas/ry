@@ -110,6 +110,9 @@ const PRINTS: &[(&str, &str)] = &[
     ("positions <- [3L, 1L]; xs[positions]", "[3, 1]\n"),
     ("xs[]", "[1, 2, 3]\n"),
     ("points[[2]]", "(x = 3, y = 4)\n"),
+    // Equality compares records structurally, item by item.
+    ("points == points", "[TRUE, TRUE]\n"),
+    ("points != (x = 3, y = 4)", "[TRUE, FALSE]\n"),
     ("ys <- xs; ys[[1]] <- 10; ys", "[10, 2, 3]\n"),
     ("xs", "[1, 2, 3]\n"),
     ("ys <- xs; ys[2:3] <- [20, 30]; ys", "[1, 20, 30]\n"),
@@ -247,10 +250,6 @@ const ERRORS: &[(&str, &str)] = &[
     (
         "flags & TRUE & xs",
         "one is logical and the other is double",
-    ),
-    (
-        "points == points",
-        "`==` is not defined for a list of ry value items",
     ),
     (
         "points + 1",

@@ -58,7 +58,8 @@ A finding with a mechanical fix says so under its snippet, and the summary count
 ```
 
 `--fix` rewrites the files in place and then reports what is left. It applies only safe fixes, which
-keep what the code means: `T` to `TRUE`, `=` to `<-`, and removing a trailing comma. A fix that
+keep what the code means: `T` to `TRUE`, `=` to `<-`, removing a trailing comma, and the
+conversions a [native function](/reference/type-system#what-is-reported) asks for. A fix that
 guesses what you meant, such as changing a misspelled `totl` to `total`, is unsafe and needs
 `--unsafe-fixes` as well. One fix can expose another, so ry repeats the pass until nothing changes. A file with a syntax
 error is left unchanged, because its fixes were worked out on a guess at what the broken code means.

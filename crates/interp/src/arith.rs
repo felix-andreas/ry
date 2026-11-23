@@ -1286,9 +1286,10 @@ unsafe fn item_by_item(
         for arg in call.args {
             let value = if arg.value.is_array() {
                 let item = arrays::item(arg.value, position)?;
-                // No record, tuple, tag, dictionary or set defines an operator, so one gets the
-                // list's own message rather than the boundary error for one item.
-                if item.kind() == SexpType::Record {
+                // No record, tuple, tag, dictionary or set defines an operator other than `==`
+                // and `!=`, so one gets the list's own message rather than the boundary error for
+                // one item.
+                if item.kind() == SexpType::Record && !matches!(name, "==" | "!=") {
                     return Err(call.error(format!(
                         "`{name}` is not defined for a list of ry value items"
                     )));
@@ -2080,6 +2081,20 @@ unsafe fn comparable(value: Sexp) -> R<Sexp> {
 }
 
 unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
+    // `==` on records, tuples and tags compares them structurally: two values are equal when
+    // they are the same value, as `identical` decides, so a field holding `NaN` equals `NaN`.
+    if let [left, right] = call.args
+        && matches!(comparison, Comparison::Equal | Comparison::NotEqual)
+        && (left.value.kind() == SexpType::Record || right.value.kind() == SexpType::Record)
+    {
+        let equal = left.value.kind() == right.value.kind()
+            && crate::sort::identical(
+                left.value,
+                right.value,
+                &crate::sort::IdenticalFlags::default(),
+            );
+        return values::scalar_bool(equal == (comparison == Comparison::Equal));
+    }
     if call
         .args
         .iter()

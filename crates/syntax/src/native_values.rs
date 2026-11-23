@@ -43,6 +43,8 @@ pub const ACCEPTS_NATIVE: &[&str] = &[
     "deparse",
     "dput",
     "identical",
+    "==",
+    "!=",
     "length",
     "[[",
     "[[<-",
@@ -147,4 +149,46 @@ pub fn object_systems_disabled_message(system: &str, defines: &str, function: &s
     format!(
         "{system} are turned off in this project (`[check] object-systems = false`), so `{function}` cannot define {defines}. Use a record or a tagged union instead"
     )
+}
+
+/// Whether the base R function `name` reads or writes the frame it is called from, or records the
+/// call made there, as `stop` and `warning` do for their message. Native code passes
+/// an argument made only of R code as a promise in the function's enclosing environment, which
+/// such a function would see instead of the frame the interpreter gives it, so a call of one is
+/// never passed that way.
+pub fn reads_its_frame(name: &str) -> bool {
+    const FRAME: [&str; 31] = [
+        "Recall",
+        "assign",
+        "bquote",
+        "delayedAssign",
+        "do.call",
+        "environment",
+        "eval",
+        "evalq",
+        "exists",
+        "expression",
+        "get",
+        "get0",
+        "library",
+        "local",
+        "ls",
+        "match.arg",
+        "match.call",
+        "mget",
+        "missing",
+        "nargs",
+        "on.exit",
+        "parent.frame",
+        "quote",
+        "require",
+        "rm",
+        "stop",
+        "stopifnot",
+        "subset",
+        "substitute",
+        "transform",
+        "warning",
+    ];
+    FRAME.contains(&name) || name.starts_with("sys.") || name.starts_with("with")
 }

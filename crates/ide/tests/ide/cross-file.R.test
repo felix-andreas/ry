@@ -101,7 +101,7 @@ signature: <T, U> fn(height: T, [width]: U) -> T
 parameters: height: T | [[width]: U]
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T, U> fn(height: T, [width]: U) -> T\n"
-completion (43): width, strwidth, bandwidth.kernel, glyphWidth, glyphWidthLeft, DataFrame.width, warningCondition, weighted.mean
+completion (45): width, strwidth, bandwidth.kernel, glyphWidth, glyphWidthLeft, DataFrame.width, warningCondition, weighted.mean
 hint @1: <T, U> fn(height: T, [width]: U) -> T
 
 #==== definition_workspace

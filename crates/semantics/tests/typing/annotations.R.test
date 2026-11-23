@@ -550,14 +550,19 @@ f <- function() {
   inner <- 1 #: character
   inner
 }
+last <- 1; #: character
+after <- 2
 #++++
 total: I64
 count: I64
 rate: F64
 f: fn() -> double
+last: I64
+after: I64
 11..21 error[annotation] this `#:` comment follows code on its line, so it annotates nothing. Put it on its own line, directly above the expression it describes
 64..74 error[annotation] this `#:` comment follows code on its line, so it annotates nothing. Put it on its own line, directly above the expression it describes
 118..130 error[annotation] this `#:` comment follows code on its line, so it annotates nothing. Put it on its own line, directly above the expression it describes
+152..164 error[annotation] this `#:` comment follows code on its line, so it annotates nothing. Put it on its own line, directly above the expression it describes
 
 #---- pure_marks_only_a_top_level_binding
 #: @pure

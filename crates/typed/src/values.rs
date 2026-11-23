@@ -20,6 +20,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use {
+    crate::ir::Item,
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, NA_REAL_BITS, is_na_real},
     interp::{
         arith::{long_double_mean, long_double_mean_from_total, power},
@@ -1763,6 +1764,85 @@ pub unsafe extern "C" fn ry_list_equal(a: *mut List, b: *mut List) -> u32 {
         _ => items::<i32>(a) == items::<i32>(b),
     };
     equal as u32
+}
+
+/// `a == b` on two boxed records, tuples or tags: 1 when they hold the same value, 0 otherwise.
+pub unsafe extern "C" fn ry_box_equal(a: *const Boxed, b: *const Boxed) -> u32 {
+    object_equal(a as *const u8, b as *const u8) as u32
+}
+
+/// Whether two counted objects (boxes or ry lists) hold the same value, as `==` on ry values
+/// decides it: structurally, with a number field equal when `identical` would call it so (a `NaN`
+/// equals `NaN`), which is what the interpreter's `==` on these values gives.
+unsafe fn object_equal(a: *const u8, b: *const u8) -> bool {
+    if a == b {
+        return true;
+    }
+    // A box and a list keep their kind at one offset.
+    let kind = |object: *const u8| (*(object as *const Boxed)).kind;
+    match (kind(a), kind(b)) {
+        (BOX, BOX) => box_equal(a as *const Boxed, b as *const Boxed),
+        (DICT, _) | (_, DICT) => false,
+        (left, right) if left == right => items_equal(a as *const List, b as *const List),
+        _ => false,
+    }
+}
+
+unsafe fn box_equal(a: *const Boxed, b: *const Boxed) -> bool {
+    if (*a).shape != (*b).shape {
+        return false;
+    }
+    let shape = crate::shapes::shape((*a).shape);
+    let field = |boxed: *const Boxed, offset: u32| {
+        (boxed as *const u8).add(BOX_FIELDS + offset as usize * 8) as *const u64
+    };
+    shape
+        .fields
+        .iter()
+        .zip(&shape.offsets)
+        .all(|(&item, &offset)| {
+            let (x, y) = (field(a, offset), field(b, offset));
+            match item {
+                Item::Str => str_equal(&*(x as *const Str), &*(y as *const Str)),
+                Item::Dbl => real_equal(f64::from_bits(*x), f64::from_bits(*y)),
+                Item::Int | Item::Lgl => word_int(*x) == word_int(*y),
+                Item::I64 => *x == *y,
+                Item::Record(_) | Item::Tag(_) | Item::Array(_) => {
+                    object_equal(*x as *const u8, *y as *const u8)
+                }
+            }
+        })
+}
+
+/// Whether two ry lists of one kind hold equal items.
+unsafe fn items_equal(a: *const List, b: *const List) -> bool {
+    (*a).length == (*b).length
+        && match (*a).kind {
+            DBL => items::<f64>(a)
+                .iter()
+                .zip(items::<f64>(b))
+                .all(|(&x, &y)| real_equal(x, y)),
+            STR => items::<Str>(a)
+                .iter()
+                .zip(items::<Str>(b))
+                .all(|(x, y)| str_equal(x, y)),
+            I64 => items::<i64>(a) == items::<i64>(b),
+            OBJECT => items::<u64>(a)
+                .iter()
+                .zip(items::<u64>(b))
+                .all(|(&x, &y)| object_equal(x as *const u8, y as *const u8)),
+            _ => items::<i32>(a) == items::<i32>(b),
+        }
+}
+
+/// Two doubles are the same value when they are equal or both `NaN` of one kind (`NA` or not),
+/// as `identical` decides.
+fn real_equal(x: f64, y: f64) -> bool {
+    if x.is_nan() || y.is_nan() {
+        x.is_nan() && y.is_nan() && is_na_real(x) == is_na_real(y)
+    } else {
+        x == y
+    }
 }
 
 /// A new string holding a copy of `length` bytes of valid UTF-8.
@@ -3599,6 +3679,18 @@ unsafe fn compare(op: u32, kind: u32, a: Side, b: Side) -> *mut List {
         }),
         // An `I64` has no `NA`.
         I64 => binary::<i64, i32>(a, b, LGL, length, |x, y| holds(op, x, y) as i32),
+        // Records, tuples, tags and lists compare structurally, and only for equality.
+        OBJECT if op <= NE => {
+            let equal = op == EQ;
+            binary::<u64, i32>(a, b, LGL, length, |x, y| {
+                (object_equal(x as *const u8, y as *const u8) == equal) as i32
+            })
+        }
+        OBJECT => {
+            release(a);
+            release(b);
+            null_mut()
+        }
         _ => binary::<i32, i32>(a, b, LGL, length, |x, y| {
             if x == NA_INTEGER || y == NA_INTEGER {
                 NA_LOGICAL

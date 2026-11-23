@@ -398,8 +398,9 @@ pub fn assigned_function(statement: &SyntaxNode) -> Option<SyntaxNode> {
 pub enum AnnotationTarget {
     Attached(SyntaxNode),
     BlankLineSeparated,
-    /// The block's first `#:` follows code on its line, as in `x <- 1 #: integer`. It would
-    /// otherwise attach to the next line's statement, which it does not describe.
+    /// The block's first `#:` follows code on its line, as in `x <- 1 #: integer` or
+    /// `x <- 1; #: integer`. It would otherwise attach to the next line's statement, which it
+    /// does not describe.
     AfterCode,
     Dangling,
 }
@@ -414,14 +415,19 @@ pub fn annotation_target(annotation: &SyntaxNode) -> AnnotationTarget {
         previous = element.prev_sibling_or_token();
     }
     // Only code that ends a construct counts, so a block after an argument list's `(` or `,`
-    // still types the argument on the next line.
-    if let Some(NodeOrToken::Node(node)) = &previous
-        && (is_expression_kind(node.kind())
-            || matches!(
-                node.kind(),
-                SyntaxKind::TYPE_DEFINITION | SyntaxKind::ARGUMENT
-            ))
-    {
+    // still types the argument on the next line. A `;` ends a statement on the block's line.
+    let after_code = match &previous {
+        Some(NodeOrToken::Node(node)) => {
+            is_expression_kind(node.kind())
+                || matches!(
+                    node.kind(),
+                    SyntaxKind::TYPE_DEFINITION | SyntaxKind::ARGUMENT
+                )
+        }
+        Some(NodeOrToken::Token(token)) => token.kind() == SyntaxKind::SEMICOLON,
+        None => false,
+    };
+    if after_code {
         return AnnotationTarget::AfterCode;
     }
     let mut newlines = 0;

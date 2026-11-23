@@ -116,8 +116,8 @@ happens when:
 - a blank line separates the block from the expression;
 - a plain `#` comment separates them, or no expression follows at all. A roxygen2 `#'` line is a
   plain comment here, so the `#:` block goes below the roxygen block, directly above the definition;
-- the block follows code on its own line, as in `x <- 1 #: integer`, which would otherwise read as
-  an annotation on the next line's statement;
+- the block follows code on its own line, as in `x <- 1 #: integer` or `x <- 1; #: integer`,
+  which would otherwise read as an annotation on the next line's statement;
 - the block has no content beyond the `#:` marker.
 
 A definition block, one that contains only `@type`, `@alias` and `@opaque` lines, attaches to nothing, and
@@ -1291,6 +1291,8 @@ this section needs the value's shape, the nominal value projects to its represen
 - `$`, `[[` and field writes follow the record and tuple rules above. A field write keeps the
   nominal type, its value must fit the field's type, and a field the representation lacks is a
   `type-mismatch`.
+- A [record update](#record-update) `(..point, y = 3)` on a nominal record follows the same rule:
+  the copy keeps the nominal type, so each replaced field keeps its declared type.
 - A `match` checks its patterns and its [coverage](#exhaustiveness) against the representation, so a
   nominal tag union, including a recursive generic one such as
   `type Tree<T> = :Leaf | :Node(left: Tree<T>, value: T, right: Tree<T>)`, must be matched
@@ -1316,7 +1318,45 @@ type-mismatch
   x field `z` does not exist in `Record{x: double, y: double}`
 ```
 
-Only a record can be updated this way, and `$<-` is the statement form of the same change.
+Only a record, or a nominal type whose representation is a record, can be updated this way, and
+`$<-` is the statement form of the same change. A nominal record's copy keeps the nominal type, so
+with `type Point = Record{x: F64, y: F64}`, `(..point, y = 3)` is a `Point`, and replacing `y` with a
+`Str` is a `type-mismatch` rather than a change of type.
+
+### Equality of records, tuples and tags
+
+`==` and `!=` compare two records, tuples or tags structurally and give a `Bool`. Two values are
+equal when they have the same shape (the same fields, or the same tag with the same payload shape)
+and every field or payload item is equal, compared the same way. A `List` of them compares item by
+item, as the [list operators](#list-operators) do.
+
+```r ry run runtime=ry strict
+type Point = Record{x: F64, y: F64}
+p <- @Point(x = 1, y = 2)
+p == @Point(x = 1, y = 2)
+#> [1] TRUE
+:Some((1i64, "a")) != :Some((1i64, "b"))
+#> [1] TRUE
+```
+
+The two sides must have types that can hold one value, so comparing values whose types never meet
+is a `type-mismatch`:
+
+```r
+isOther <- function(kind: :Bond | :Cash) kind == :Other
+```
+
+```text ry check typing
+type-mismatch
+
+  x `==` is not defined between `:Bond | :Cash` and `:Other`, because a value of one type never equals a value of the other
+```
+
+- A number field is equal when it holds the same number, as `identical` decides, so a field holding
+  `NaN` equals one holding `NaN`, unlike `==` on two `F64` values.
+- An R value never equals one of these values, so comparing one with an R value is a
+  `type-mismatch`.
+- `<`, `<=`, `>` and `>=` are not defined on records, tuples or tags.
 
 ### `match`
 
@@ -1594,9 +1634,9 @@ code changes meaning.
 
 ### Crossing between R and ry scalars
 
-`Num.from_r` turns an R `double` into an `F64` and an R `integer` into an `I64`, and `Str.from_r`
-turns a `character` into a `Str`. Each stops with an error on `NA`, on a length other than one, and
-on attributes. `Num.to_r` goes the other way: an `I64` becomes R's `integer` when it fits in 32
+`Num.from_r` turns an R `double` into an `F64` and an R `integer` into an `I64`, `Str.from_r` turns
+a `character` into a `Str`, and `Bool.from_r` turns a `logical` into a `Bool`. Each stops with an
+error on `NA`, on a length other than one, and on attributes. `Num.to_r` goes the other way: an `I64` becomes R's `integer` when it fits in 32
 bits and a `double` otherwise.
 
 No R type represents an `I64`, or a `List` whose items are not `F64`, `Bool` or `Str`, so passing
@@ -1618,6 +1658,20 @@ type-mismatch
 An `F64`, `Bool` or `Str`, and a `List` of one of them, shares the representation of R's `double`,
 `logical` or `character` (vector), so it passes to R code unconverted: `sqrt(2.0)` and
 `mean([1.5, 2.5])` need no conversion.
+
+An operator never converts between the two sides, so comparing a ry scalar with an R value is a
+`type-mismatch` that names the conversion for the R side: `Str.from_r()` for a `character`,
+`Bool.from_r()` for a `logical` and `Num.from_r()` for a number.
+
+```r
+same <- function(a: Str, b: character) -> Bool a == b
+```
+
+```text ry check typing
+type-mismatch
+
+  x `==` is not defined between `Str` and `character`. A ry value meets an R value only through a conversion: convert the R side with `Str.from_r()`
+```
 
 ## Lists
 
@@ -2718,7 +2772,9 @@ accepted, because R answers an empty `logical` vector instead of failing, as
 [union operands](#operators-over-union-operands) describe. A list compared with an atomic value
 is accepted, because R compares it element by element when each element is a length-one atomic,
 so `parts[parts != "null"]` on a parsed list and `lapply(xs, anyDuplicated) > 0` are not reported.
-Two lists never compare, so `list(1L) == list(1L)` is a type error, as it is in R.
+Two lists never compare, so `list(1L) == list(1L)` is a type error, as it is in R. ry's records,
+tuples and tags compare only for equality, structurally, as
+[their equality](#equality-of-records-tuples-and-tags) describes.
 
 An unannotated operand is left unconstrained, whatever the other operand is, so
 `function(x) x > 0` is `<T> fn(x: T) -> logical` and `function(a, b) a < b` is
@@ -5336,10 +5392,23 @@ an R function only in these positions:
 2. as a statement whose value nothing reads, which is not the last expression of the function;
 3. as `stop(...)`, whose arguments may hold anything.
 
-Each argument of such a call is a ry value that shares R's representation (an `F64`, `Bool` or
-`Str`, or a list of them), an R literal such as `42L`, or `Num.to_r(x)` or `List.to_r(x)` written
-directly as the argument. The arguments of a table function follow the same rule, and so do the
-operands of an operator that builds an `Expr`, as in `Expr.col("units") >= Num.to_r(least)`; they
+Each argument of such a call is one of these:
+
+- a ry value that shares R's representation: an `F64`, `Bool` or `Str`, or a list of them;
+- `Num.to_r(x)` or `List.to_r(x)` written directly as the argument;
+- an R literal, such as `42L`, `NA`, `NA_real_` or `2i`, which R evaluates itself;
+- a variable from outside the function that the function never assigns, such as a global. R reads
+  it when the call runs, so the call sees the binding as it is then;
+- a call of a base R function, or a `%op%` operator of base R such as `%in%`, whose own arguments
+  are only such literals, variables and calls, as in `Expr.col("day") >= as.Date(start)`. R
+  evaluates it lazily, when the outer call reads the argument, as it would without ry. A function
+  that looks at the frame it is called from cannot stand there: `get`, `assign`, `environment`,
+  `parent.frame`, `sys.call`, `match.call`, `do.call`, `with`, `subset`, `stop`, `warning` and the
+  like. Neither can another package's function, which may look at that frame as `glue::glue` does
+  to find the variables it interpolates, nor an index such as `month.name[1L]`.
+
+The arguments of a table function follow the same rule, and so do the operands of an operator that
+builds an `Expr`, as in `Expr.col("units") >= Num.to_r(least)` or `Expr.col("price") > limit`; they
 may also be table values and nested table calls
 ([Tables in typed code](#tables-in-typed-code)). This function is native:
 
@@ -5361,6 +5430,27 @@ print(simulate(4, "noise"))
 An operator applied to ry values is native. So is an operator with an `Expr` operand, which builds
 a bigger expression, and its other operand may be an R literal: `Expr.col("units") > 3L`.
 
+A native function reads a global that holds an `F64`, an `I64`, a `Bool`, a `Str`, a `List` of
+one of them, or a table value. The compiled code reads the binding each time it runs, so a call
+after the global is rebound sees the new value:
+
+```r
+rate: F64 <- 0.25
+taxed <- function(amount: F64) -> F64 amount * (1 + rate)
+print(taxed(100))
+rate <- 0.5
+print(taxed(100))
+```
+
+```text ry check typing strict exact
+1 file checked, no problems
+```
+
+The second call prints `150`. A global that R code rebinds to a value of another type, as
+`assign("rate", "high")` does without a finding, stops the compiled code with an error that names
+the global and both types. With `ry run --aot`, a function that reads a global the script has not
+bound yet compiles at its first call instead of before the script starts.
+
 #### What is reported
 
 Each function is judged on its own body, so a function that calls a blocked native function gets no
@@ -5368,7 +5458,10 @@ finding for the call. An R value is reported once, where it first appears, and n
 expression it flows into.
 
 **An R call whose value is used.** The first example shows it. The fix names the conversion that
-fits the R function's result type, when the checker knows it.
+fits the R function's result type, when the checker knows it, and `ry check --fix` wraps the call
+in it. It makes no change when the call's value is assigned to a variable that a later conversion
+reads, as `width` in the first example, or that an R call reads as a number or a list, which would
+then need `Num.to_r` or `List.to_r`. There the conversion moves by hand.
 
 **An R call inside the arguments of another R call.** R evaluates an argument only when the function
 reads it, so native code cannot run the two calls in a fixed order. A conversion around the inner
@@ -5391,17 +5484,43 @@ native
     into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
 ```
 
-**A variable that holds an R value.** A native function reads its own parameters and variables. A
-global that holds an R value is converted once, outside, and passed in:
+`ry check --fix --unsafe-fixes` makes that rewrite. It is unsafe because the outer function may
+read the argument late, more than once or not at all, and computed first the inner call runs once,
+before the statement. It computes the inner call, converted, into a new variable on
+a line of its own just before the statement, above any `#:` lines of the statement, and passes the
+variable. The variable is `value`, or `value2` and on when the function already uses that name:
+
+```r
+report <- function(label: Str, amount: F64) -> NULL {
+  value <- Str.from_r(format(amount, nsmall = 2))
+  cat(label, value, "\n")
+  NULL
+}
+report("total", 12.5)
+```
+
+```text ry check typing strict exact
+1 file checked, no problems
+```
+
+The rewrite runs the inner call before the statement, which is the one order native code can run.
+So `--fix` moves a call only where the statement runs it exactly once: never out of a branch, a
+loop, the condition of a `while`, the right side of `&&` or `||`, a function literal without braces,
+or the arguments of an R function that may evaluate them late, more than once or not at all, such as
+`tryCatch`, `switch`, `ifelse`, `quote` or a `with...` or `suppress...` function. The condition of
+an `if` runs first and once, so a call there moves before the `if`.
+
+**A variable that holds an R value, outside an R call's arguments.** A native function reads its
+own parameters and variables. A global that holds an R value may stand directly as an argument of
+an R call, which reads it, but anywhere else it is converted once, outside, and passed in:
 
 ```r
 #: character
 unit <- Sys.getenv("UNIT")
-report <- function(amount: F64) -> NULL {
-  cat(amount, unit, "\n")
-  NULL
+label <- function(amount: F64) -> Str {
+  Str.concat(Num.to_str(amount), Str.from_r(unit))
 }
-report(2.5)
+print(label(2.5))
 ```
 
 ```text ry check typing strict
@@ -5450,9 +5569,12 @@ native
     it is read: `List.from_r(sales$units)`
 ```
 
+`ry check --fix` wraps a column read in `List.from_r` where it is read, under the same condition as
+an R call's result.
+
 **An R value written as a literal or an operator.** `a:b` builds an R vector, and `NA` and complex
-literals have no ry type, so each is a `native` error. Write `List.range(a, b)`, and use a `Result`
-or a tag for a missing value. `Num.to_r` and `List.to_r` give an R value too, so they stand directly
+literals have no ry type, so each is a `native` error outside the arguments of an R call. Write
+`List.range(a, b)`, and use a `Result` or a tag for a missing value. `Num.to_r` and `List.to_r` give an R value too, so they stand directly
 inside the arguments of an R call.
 
 **A construct that is not compiled natively yet.** The program is legitimate ry and runs with the
@@ -5501,7 +5623,7 @@ interpreted
 | a `Dict` whose keys or values are not `I64`, `F64` or `Str` | keep the values in a `List` and store their positions |
 | `try` | `match` on the result, and return the `:Err` from its arm |
 | a `match` on a list or a scalar (so every list pattern), a nested pattern, and an arm with an `if` guard | match a tag, a record or a tuple, and test inside the arm |
-| a read of a global that holds a ry value, or of a variable of an enclosing boundary function | pass the value in as a parameter |
+| a read of a global that holds a record, a tuple, a tag, a `Dict` or a `Set`, or of a variable of an enclosing boundary function | pass the value in as a parameter |
 | a function that ends in a loop or another expression whose value R returns invisibly | end with the value, or with `NULL` |
 
 The rule covers the function's body. How R code calls a native function is not checked, so these

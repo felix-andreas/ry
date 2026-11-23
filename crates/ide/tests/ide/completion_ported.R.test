@@ -77,7 +77,7 @@ definition: installed na_ from base, stats, utils, methods, graphics, grDevices,
 references: none
 rename: none
 signature: none
-completion (22): NA_character_, NA_complex_, NA_integer_, NA_real_, Num.abs_diff, Num.add_checked, Num.add_saturated, Num.add_wrap
+completion (23): NA_character_, NA_complex_, NA_integer_, NA_real_, Num.abs_diff, Num.add_checked, Num.add_saturated, Num.add_wrap
 
 #---- block_body_local
 wrapper <- function(x) {
@@ -269,7 +269,7 @@ action: Add inferred type annotations for the whole file
   edit 139..139 -> "<T>"
   edit 145..145 -> ": T"
   edit 146..146 -> " -> double | NULL"
-completion (86): is_small, is_label, Dict.is_empty, List.is_empty, Num.is_approx_eq, Num.is_even, Num.is_finite, Num.is_gt
+completion (89): is_small, is_label, Dict.is_empty, List.is_empty, Num.is_approx_eq, Num.is_even, Num.is_finite, Num.is_gt
 hint @139<T>
 hint @145: T
 hint @146 -> double | NULL
@@ -293,7 +293,7 @@ action: Add inferred type annotation for `check`
   edit 122..122 -> "#: <T> fn([value]: T) -> double | NULL\n"
 action: Add inferred type annotations for the whole file
   edit 122..122 -> "#: <T> fn([value]: T) -> double | NULL\n"
-completion (86): is_small, is_label, Dict.is_empty, List.is_empty, Num.is_approx_eq, Num.is_even, Num.is_finite, Num.is_gt
+completion (89): is_small, is_label, Dict.is_empty, List.is_empty, Num.is_approx_eq, Num.is_even, Num.is_finite, Num.is_gt
 hint @127: <T> fn([value]: T) -> double | NULL
 
 #---- argument_ranks_the_parameter_type_first

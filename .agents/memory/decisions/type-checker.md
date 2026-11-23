@@ -1033,3 +1033,21 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 
 - Overload resolution probes each candidate and rolls the inference table back, on the rule that matching is a pure function of the table. Types recorded on expressions during a probe broke that rule: a number literal adapted in one probe kept a type naming a variable the rollback discarded, and the next probe read it (`List.to_r([1, 2])` indexed past the table). While a probe runs, every write of a recorded type or a recorded expectation is logged, and rolling the probe back restores both with the table; the winner is re-probed to commit, so nothing a probe recorded is lost.
 - A call whose open argument is an undecided literal picks the candidate the literal's default would pick, so `List.to_r([1, 2])` is `integer[] | double[]` like `counts <- [1, 2]; List.to_r(counts)`. Every other caller variable must stay open in that candidate. The usual rule, the first candidate leaving the caller's variables open, would pick the generic `List<T> -> list[T]`, which a guess about R code needs but a literal does not: its default is known.
+
+## A nominal record updates with `..` and keeps its nominal type
+
+**Status:** built (`Checker::infer_record_update` in `crates/semantics/src/check.rs`; `native-syntax.R.test` group `record_update`; `typed-ry-values.scenario`; `reference/type-system.mdx`, "Record update").
+
+- `(..point, y = 3)` on `point: Point` with `type Point = Record{x: F64, y: F64}` checks against the representation and has type `Point`, the same rule as a field write on a nominal record. A replaced field keeps its declared type, so `(..point, y = "far")` is a `type-mismatch` and a field the representation lacks is one too. Giving the copy a structural type instead would silently drop the nominal type at every update, which makes a nominal record useless in a loop that updates it.
+- An opaque type outside its home file is refused like any other look through it. A nominal tuple is not updatable, as no tuple is.
+- The runtime needs no change: a nominal value is erased to its representation, so the interpreter's `.ry_update` and the typed core's record update already produce the right value.
+
+## `==` on ry's records, tuples and tags is structural, and a crossing names the R side's conversion
+
+**Status:** built (`Checker::infer_ry_value_equality`, `r_operand` and the `NumberOperands` text in `crates/semantics`; `comparison` in `crates/interp/src/arith.rs`; `ry_box_equal` and the `OBJECT` arm of `compare` in `crates/typed/src/values.rs`; `native-syntax.R.test` group `ry_value_equality`; `typed-ry-values.scenario`; `reference/type-system.mdx`, "Equality of records, tuples and tags").
+
+- `==` and `!=` on two records, tuples or tags (nominal ones included) give `Bool` and compare structurally: one shape and equal fields, recursively. A `List` of them compares item by item. Ordering operators stay undefined on them. A tag such as `kind == :Bond` is the common case, and without equality every such test needed a `match`.
+- The two sides must be able to hold one value: either side's type fits the other (a literal adapts first), so `:Bond | :Cash` beside `:Other`, a tag beside `I64`, or two record types with different fields are a `type-mismatch` saying the values are never equal. A check that only compares shapes would accept comparisons that are always `FALSE`.
+- A number field is equal as `identical` decides it (`NaN` equals `NaN`, `NA` does not equal `NaN`), unlike `F64 ==`. The interpreter already had `identical` on these values, and the typed core's `object_equal` follows it, so every tier gives one answer, and a value compared with itself is equal whatever the pointer test says.
+- An R value never equals a ry value. The report names the conversion for the R side (`r_side` on `NumberOperands`): `Str.from_r()` for `character`, `Bool.from_r()` for `logical`, `Num.from_r()` for a number, `List.from_r()` for a vector. Beside a record, tuple or tag no conversion fits, so the report says an R value never equals one.
+- At run time `==` and `!=` accept ry values (`ACCEPTS_NATIVE`). In untyped R code a record beside an R value is `FALSE` rather than a boundary error, since the checker reports that comparison where types are known.

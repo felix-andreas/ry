@@ -24,7 +24,7 @@ use {
         },
         compiled_or_refusal, earliest,
         ir::{Item, Type},
-        lower::{self, Conversion, Lowered, RArgument, RCall, RResult, Speculation},
+        lower::{self, Conversion, Lowered, Passed, RArgument, RCall, RResult, Speculation},
         lower_settled, optimize, shapes, storage,
     },
     heap::{
@@ -49,7 +49,7 @@ use {
 };
 
 const MAGIC: &[u8; 8] = b"RYTYPED\0";
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 /// The bytes of the fixed header.
 const HEADER_SIZE: usize = 8 + 4 + 8 * 13;
 /// The alignment of the code in the file and of the offset table's reservation, which is the
@@ -330,7 +330,7 @@ unsafe fn collect(
             preserved.push(site.call);
             for argument in &site.arguments {
                 preserved.push(argument.code);
-                if let Some(conversion) = argument.conversion {
+                if let Passed::Value(_, Some(conversion)) = argument.passed {
                     preserved.push(conversion.call);
                 }
             }
@@ -769,7 +769,8 @@ pub struct Place {
 pub struct Site {
     pub env: EnvRef,
     pub call: Place,
-    pub function: u32,
+    /// The lookup of the function the site calls, and `None` for a read of a global.
+    pub function: Option<u32>,
     pub arguments: Vec<Argument>,
     pub result: SiteResult,
     pub diverges: bool,
@@ -780,8 +781,14 @@ pub struct Site {
 pub struct Argument {
     pub tag: Option<u32>,
     pub code: Expr,
-    pub ty: Type,
-    pub conversion: Option<FileConversion>,
+    pub passed: FilePassed,
+}
+
+/// What a site passes for an argument, as [`Passed`] says.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FilePassed {
+    Value(Type, Option<FileConversion>),
+    Code,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -797,6 +804,7 @@ pub enum SiteResult {
     Unused,
     Converted(FileConversion, Type),
     Table,
+    Global(Type),
 }
 
 /// A typed function a version calls, found by `lookup`.
@@ -1274,15 +1282,20 @@ impl Encoder<'_> {
             } else {
                 Some(self.shapes.strings.id(&rvalues::symbol_name(argument.tag)))
             };
-            let conversion = match argument.conversion {
-                Some(conversion) => Some(self.conversion(conversion, identify, locate)?),
-                None => None,
+            let passed = match argument.passed {
+                Passed::Value(ty, conversion) => FilePassed::Value(
+                    self.shapes.ty(ty).map_err(|_| UNNAMED_SHAPE)?,
+                    match conversion {
+                        Some(conversion) => Some(self.conversion(conversion, identify, locate)?),
+                        None => None,
+                    },
+                ),
+                Passed::Code => FilePassed::Code,
             };
             arguments.push(Argument {
                 tag,
                 code: self.expr(argument.code).ok_or(UNNAMED_CODE)?,
-                ty: self.shapes.ty(argument.ty).map_err(|_| UNNAMED_SHAPE)?,
-                conversion,
+                passed,
             });
         }
         let result = match site.result {
@@ -1292,11 +1305,18 @@ impl Encoder<'_> {
                 self.shapes.ty(ty).map_err(|_| UNNAMED_SHAPE)?,
             ),
             RResult::Table => SiteResult::Table,
+            RResult::Global(ty) => {
+                SiteResult::Global(self.shapes.ty(ty).map_err(|_| UNNAMED_SHAPE)?)
+            }
+        };
+        let function = match site.result {
+            RResult::Global(_) => None,
+            _ => Some(identify(site.function).ok_or(UNNAMED_FUNCTION)?),
         };
         Ok(Site {
             env: self.env(site.env).ok_or(UNNAMED_CODE)?,
             call: locate(site.call).ok_or(UNPLACED_CODE)?,
-            function: identify(site.function).ok_or(UNNAMED_FUNCTION)?,
+            function,
             arguments,
             result,
             diverges: site.diverges,
@@ -1669,18 +1689,22 @@ fn encode_metadata(parsed: &Parsed) -> Vec<u8> {
     for site in &parsed.sites {
         out.env(&site.env);
         out.place(&site.call);
-        out.number(u64::from(site.function));
+        out.option(site.function);
         out.number(site.arguments.len() as u64);
         for argument in &site.arguments {
             out.option(argument.tag);
             out.expr(&argument.code);
-            out.ty(argument.ty);
-            match &argument.conversion {
-                Some(conversion) => {
+            match &argument.passed {
+                FilePassed::Value(ty, None) => {
+                    out.number(0);
+                    out.ty(*ty);
+                }
+                FilePassed::Value(ty, Some(conversion)) => {
                     out.number(1);
+                    out.ty(*ty);
                     out.conversion(conversion);
                 }
-                None => out.number(0),
+                FilePassed::Code => out.number(2),
             }
         }
         match &site.result {
@@ -1691,6 +1715,10 @@ fn encode_metadata(parsed: &Parsed) -> Vec<u8> {
                 out.ty(*ty);
             }
             SiteResult::Table => out.number(2),
+            SiteResult::Global(ty) => {
+                out.number(3);
+                out.ty(*ty);
+            }
         }
         out.number(u64::from(site.diverges) | u64::from(site.effect_free) << 1);
     }
@@ -2161,24 +2189,23 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
     for _ in 0..count {
         let env = input.env(strings)?;
         let call = input.place(lookups)?;
-        let function = input.index(lookups)?;
+        let function = input.option(lookups)?;
         let length = input.count()?;
         let mut arguments = Vec::with_capacity(length);
         for _ in 0..length {
             let tag = input.option(strings)?;
             let code = input.expr(strings, 0)?;
-            let ty = input.ty(&parsed.shapes)?;
-            let conversion = if input.flag()? {
-                Some(input.conversion(&parsed.shapes, lookups)?)
-            } else {
-                None
+            let passed = match input.number()? {
+                0 => FilePassed::Value(input.ty(&parsed.shapes)?, None),
+                1 => {
+                    let ty = input.ty(&parsed.shapes)?;
+                    let conversion = input.conversion(&parsed.shapes, lookups)?;
+                    FilePassed::Value(ty, Some(conversion))
+                }
+                2 => FilePassed::Code,
+                _ => return Err(MALFORMED),
             };
-            arguments.push(Argument {
-                tag,
-                code,
-                ty,
-                conversion,
-            });
+            arguments.push(Argument { tag, code, passed });
         }
         let result = match input.number()? {
             0 => SiteResult::Unused,
@@ -2187,6 +2214,7 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
                 SiteResult::Converted(conversion, input.ty(&parsed.shapes)?)
             }
             2 => SiteResult::Table,
+            3 => SiteResult::Global(input.ty(&parsed.shapes)?),
             _ => return Err(MALFORMED),
         };
         let flags = input.number()?;
@@ -3112,19 +3140,21 @@ unsafe fn build_site_inner(
 ) -> Result<RCall, &'static str> {
     const UNBUILT: &str = "the session cannot build an R call it makes";
     const UNPLACED: &str = "an R call it makes is not where the file says in its function's body";
-    let placed =
-        |place: &Place, resolved: &mut FxHashMap<u32, Speculation>| -> Result<Sexp, &'static str> {
-            let holder = match place.holder {
-                None => closure,
-                Some(lookup) => found(mapped, resolved, lookup)?.function,
-            };
-            if holder.kind() != SexpType::Closure {
-                return Err(UNPLACED);
-            }
-            follow(bytecode::closure_body(holder), &place.steps)
-                .filter(|call| call.kind() == SexpType::Language)
-                .ok_or(UNPLACED)
+    let placed = |place: &Place,
+                  resolved: &mut FxHashMap<u32, Speculation>,
+                  kind: SexpType|
+     -> Result<Sexp, &'static str> {
+        let holder = match place.holder {
+            None => closure,
+            Some(lookup) => found(mapped, resolved, lookup)?.function,
         };
+        if holder.kind() != SexpType::Closure {
+            return Err(UNPLACED);
+        }
+        follow(bytecode::closure_body(holder), &place.steps)
+            .filter(|code| code.kind() == kind)
+            .ok_or(UNPLACED)
+    };
     let heap = interp::heap();
     let strings = &mapped.parsed.strings;
     // Everything the site holds lives as long as the code that may use it, which is the session.
@@ -3137,7 +3167,7 @@ unsafe fn build_site_inner(
      -> Result<Conversion, &'static str> {
         let function = found(mapped, resolved, conversion.function)?.function;
         Ok(Conversion {
-            call: placed(&conversion.call, resolved)?,
+            call: placed(&conversion.call, resolved, SexpType::Language)?,
             function,
             checked: conversion.checked.map(|item| live_item(item, &mapped.live)),
             default: conversion.default.map(|ty| live_type(ty, &mapped.live)),
@@ -3149,15 +3179,20 @@ unsafe fn build_site_inner(
             Some(tag) => rvalues::install(&strings[tag as usize]).map_err(|_| UNBUILT)?,
             None => rvalues::nil(),
         };
-        let converted = match &argument.conversion {
-            Some(converted) => Some(conversion(converted, resolved)?),
-            None => None,
+        let passed = match &argument.passed {
+            FilePassed::Value(ty, converted) => Passed::Value(
+                live_type(*ty, &mapped.live),
+                match converted {
+                    Some(converted) => Some(conversion(converted, resolved)?),
+                    None => None,
+                },
+            ),
+            FilePassed::Code => Passed::Code,
         };
         arguments.push(RArgument {
             tag,
             code: keep(build_expr(strings, &argument.code).ok_or(UNBUILT)?),
-            ty: live_type(argument.ty, &mapped.live),
-            conversion: converted,
+            passed,
         });
     }
     let result = match &site.result {
@@ -3167,10 +3202,21 @@ unsafe fn build_site_inner(
             live_type(*ty, &mapped.live),
         ),
         SiteResult::Table => RResult::Table,
+        SiteResult::Global(ty) => RResult::Global(live_type(*ty, &mapped.live)),
     };
+    let function = match site.function {
+        Some(lookup) => found(mapped, resolved, lookup)?.function,
+        None => rvalues::nil(),
+    };
+    // A global's site is the variable the body reads, not a call.
+    let read = match site.result {
+        SiteResult::Global(_) => SexpType::Symbol,
+        _ => SexpType::Language,
+    };
+    let call = placed(&site.call, resolved, read)?;
     Ok(RCall {
-        function: found(mapped, resolved, site.function)?.function,
-        call: placed(&site.call, resolved)?,
+        function,
+        call,
         env: live_env(mapped, &site.env)
             .ok_or("an R call it makes runs in a missing environment")?,
         arguments,
@@ -3265,8 +3311,8 @@ pub mod testing {
     use {
         super::{
             ALIGN, Argument, Class, EnvRef, Expr, FieldNames, FileCallee, FileConversion,
-            HEADER_SIZE, Header, Item, LayoutKey, Lookup, Matches, Parsed, Place, ShapeEntry, Site,
-            SiteResult, Target, Version, encode_header, encode_metadata, parse,
+            FilePassed, HEADER_SIZE, Header, Item, LayoutKey, Lookup, Matches, Parsed, Place,
+            ShapeEntry, Site, SiteResult, Target, Version, encode_header, encode_metadata, parse,
         },
         crate::{
             backend::{Helper, Slot},
@@ -3433,13 +3479,19 @@ pub mod testing {
                     .map(|_| Argument {
                         tag: (below(2) == 0).then(|| below(strings) as u32),
                         code: Expr::Symbol(below(strings) as u32),
-                        ty: Type::Dbl,
-                        conversion: (below(2) == 0).then(|| conversion(&mut below)),
+                        passed: match below(3) {
+                            0 => FilePassed::Code,
+                            _ => FilePassed::Value(
+                                Type::Dbl,
+                                (below(2) == 0).then(|| conversion(&mut below)),
+                            ),
+                        },
                     })
                     .collect();
-                let result = match below(3) {
+                let result = match below(4) {
                     0 => SiteResult::Unused,
                     1 => SiteResult::Converted(conversion(&mut below), Type::I64),
+                    2 => SiteResult::Global(Type::Str),
                     _ => SiteResult::Table,
                 };
                 let call = place(&mut below);
@@ -3449,7 +3501,10 @@ pub mod testing {
                 let site = Site {
                     env: random_env(entropy, strings),
                     call,
-                    function: entropy.below(lookups) as u32,
+                    function: match result {
+                        SiteResult::Global(_) => None,
+                        _ => Some(entropy.below(lookups) as u32),
+                    },
                     arguments,
                     result,
                     diverges: entropy.chance(1, 2),

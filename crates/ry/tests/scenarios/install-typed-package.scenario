@@ -2,7 +2,8 @@
 # session checks their arguments, converts a whole number to the `I64` a parameter declares, and
 # runs them as compiled for the declared types, with the code image and without it. A strict file
 # goes in as the preflight elaborates it, so a conversion compiles at its first call and a
-# parameter declared with an alias is checked as the type the alias names.
+# parameter declared with an alias is checked as the type the alias names, and a function that reads
+# a package variable forces its lazy-load promise where it reads it.
 #
 # The install writes the package's typed code file, so a new session attaches the machine code of
 # each typed function at its first call instead of compiling it; a version the file cannot
@@ -43,7 +44,7 @@ file pkg/R/strict.R
 
 run ry install pkg -l library
 expect exit 0
-expect stdout "typed code: closures=7 written=4 (left out: compiles with its caller (1), does not compile (2))"
+expect stdout "typed code: closures=7 written=6 (left out: compiles with its caller (1))"
 
 file use.R
 | library(typedpkg, lib.loc = "library")
@@ -70,6 +71,9 @@ expect stderr lacks "typed: compiled"
 expect stderr lacks "`total_reading` runs in the interpreter"
 expect stdout "[1] \"argument `p` must be `Record{x: F64, y: F64}`, not `list`\""
 expect stdout "[1] TRUE\n[1] TRUE"
+expect stderr "typed: attached `capped` for [I64] -> I64 from typedpkg's code file"
+expect stderr "typed: attached `step_total` for [] -> I64 from typedpkg's code file"
+expect stderr lacks "`capped` runs in the interpreter"
 
 env RY_CODE_IMAGE 0
 run ry run --runtime ry use.R
@@ -128,7 +132,7 @@ expect stdout "NULL"
 # points a script at `ry run --aot`.
 run ry build --aot pkg -l built
 expect exit 0
-expect stdout "typed code: closures=7 written=4"
+expect stdout "typed code: closures=7 written=6"
 env RY_TYPED_LOG 1
 file use-built.R
 | library(typedpkg, lib.loc = "built")
@@ -158,7 +162,7 @@ env RY_TYPED_LOG 1
 run ry run --aot --runtime ry use-built.R
 expect exit 0
 expect stdout "[1] 718640.9"
-expect stderr "typed: compiled 4 functions ahead of time"
+expect stderr "typed: compiled 6 functions ahead of time"
 expect stderr "ry: another build of ry installed typedpkg, so its typed functions compiled as it loaded; reinstall it to compile them at install"
 expect stderr lacks "typed: attached"
 
