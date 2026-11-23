@@ -164,6 +164,11 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - An `Unknown` branch makes an `if` `Unknown`, unless it read a recursion placeholder
 - A project's top-level `%op%` is checked as a call unless it quotes an operand
 - A tied difference is `double`, and only a class closed under arithmetic negates
+- Two independent open branches join by union
+- The fresh sample's false-report classes, and what each rule claims
+- `@elementwise(x)` gives a scalar result the shape of its argument
+- The fresh sample's false-report classes, second pass
+- The fresh sample's false-report classes, third pass
 
 ## Analysis core
 

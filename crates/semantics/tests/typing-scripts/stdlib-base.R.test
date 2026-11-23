@@ -139,13 +139,13 @@ double
 #---- toupper_accepts_vector
 toupper(c("a", "b"))
 #++++
-character
+character[]
 
 #---- nchar_accepts_vector_and_coerced_input
 nchar(c("aa", "b"))
 nchar(42L)
 #++++
-integer
+integer[]
 integer
 
 #---- gsub_accepts_vector_subject_and_flags
@@ -901,8 +901,8 @@ greet <- function(name, punct) {
 }
 greet("ada")
 #++++
-greet: <T> fn([name]: T, [punct]: T) -> T
-character
+greet: <T, U> fn([name]: T, [punct]: U) -> T | U
+Unknown
 
 #---- unguarded_formal_stays_required
 join2 <- function(left, right) {

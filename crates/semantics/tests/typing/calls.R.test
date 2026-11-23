@@ -145,6 +145,36 @@ f <- function() g("a")
 g: <T, U> fn(x: T, [label]: U) -> T | character
 f: fn() -> character
 
+#---- a_formal_used_only_as_a_single_bracket_index_may_be_omitted
+cells <- function(x, i, j) x$data[i, j, drop = FALSE]
+set_cells <- function(x, i, j, value) {
+  x$data[i, j] <- value
+  x
+}
+first <- function(x, i) x$data[[i]]
+f <- function(table) cells(table, j = 2)
+g <- function(table) set_cells(table, 1, value = 0)
+h <- function(table) first(table)
+#++++
+cells: <T, U, V> fn(x: T, [i]: U, [j]: V) -> Unknown
+set_cells: <T, U, V, W> fn(x: T, [i]: U, [j]: V, value: W) -> T
+first: <T, U> fn(x: T, i: U) -> Unknown
+f: <T> fn(table: T) -> Unknown
+g: <T> fn(table: T) -> T
+h: Unknown
+274..279 error[type-mismatch] this call leaves out `i`, which the function requires
+
+#---- a_formal_passed_to_a_function_read_from_a_field_may_be_omitted
+quantile_of <- function(p, dist, parms) dist$quantile(p, parms)
+nth_quantile <- function(p, dists, parms) dists[[1]](p, parms)
+f <- function(dist) quantile_of(0.5, dist)
+g <- function(dists) nth_quantile(0.5, dists)
+#++++
+quantile_of: <T, U, V> fn([p]: T, dist: U, [parms]: V) -> Unknown
+nth_quantile: <T, U, V> fn([p]: T, dists: U, [parms]: V) -> Unknown
+f: <T> fn(dist: T) -> Unknown
+g: <T> fn(dists: T) -> Unknown
+
 #---- a_formal_assigned_before_any_read_may_be_omitted
 g <- function(x, total) {
   total <- 0
@@ -316,6 +346,40 @@ f <- function() g()
 g: <T> fn([x]: T) -> character
 f: fn() -> character
 
+#---- an_argument_captured_with_enquo_is_quoted
+pick_columns <- function(data, columns) {
+  columns_expr <- rlang::enquo(columns)
+  list(data = data, columns = columns_expr)
+}
+f <- function(data) pick_columns(data, columns = -"value")
+#++++
+pick_columns: <T, U> fn(data: T, [columns]: U) -> list{data: T, columns: Unknown}
+f: <T> fn(data: T) -> list{data: T, columns: Unknown}
+
+#---- a_library_call_quotes_a_column_exclusion_by_name
+drop_value <- function(data) dplyr::select(data, -"value")
+negated <- function() -"value"
+#++++
+drop_value: <T> fn(data: T) -> Unknown
+negated: Unknown
+82..89 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- a_library_call_quotes_code_that_reads_a_name_placeholder
+# `.x <- ".x"` quiets R CMD check about a name that only the callee's
+# `substitute()` reads, so the argument is code, not a power of a string.
+log_labels <- function() {
+  .x <- ".x"
+  scales::math_format(2^.x)
+}
+power <- function() {
+  .x <- ".x"
+  2^.x
+}
+#++++
+log_labels: fn() -> Unknown
+power: Unknown
+253..255 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
 #---- a_missing_named_formal_is_named_in_the_message
 g <- function(a, b = NULL) {
   print(a)
@@ -323,7 +387,7 @@ g <- function(a, b = NULL) {
 }
 f <- function() g(b = 2)
 #++++
-g: <T> fn(a: T, [b]: T | NULL) -> T
+g: <T, U> fn(a: T, [b]: U | NULL) -> T | U
 f: Unknown
 85..86 error[type-mismatch] this call leaves out `a`, which the function requires
 
@@ -368,7 +432,7 @@ use: Unknown
 # `FUN.VALUE` instead of being matched against `FUN`.
 label <- function(xs) vapply(xs, character(1), FUN = as.character)
 #++++
-label: <T> fn(xs: list[T] | T[]) -> character[]
+label: <T> fn(xs: list[T] | T[] | NULL) -> character[]
 
 #==== omitted_defaults
 #---- an_omitted_argument_takes_the_defaults_type
@@ -487,7 +551,7 @@ f <- function(x) {
 }
 #++++
 f: Unknown
-63..68 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list[T] | T[]`
+63..68 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list[T] | T[] | NULL`
 
 #---- a_settled_bound_checks_a_later_caller
 f <- function(x) {
@@ -500,9 +564,10 @@ g <- function() f("a")
 f: Unknown
 g: fn() -> Unknown
 63..64 warning[unused] `y` is assigned but never used
-68..73 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list[T] | T[]`
+68..73 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list[T] | T[] | NULL`
 
 #---- a_bounded_variable_unified_into_its_own_bound_settles
+#: <T> fn(a: T, b: T) -> T
 same <- function(a, b) if (TRUE) a else b
 f <- function(x) {
   vapply(x, function(e) {
@@ -512,15 +577,16 @@ f <- function(x) {
   x
 }
 #++++
-same: <T> fn([a]: T, [b]: T) -> T
+same: <T> fn(a: T, b: T) -> T
 f: Unknown
-73..114 error[type-mismatch] this function is passed `T`, but its parameter `e` accepts `U`
+100..141 error[type-mismatch] this function is passed `T`, but its parameter `e` accepts `U`
 
 #---- two_bounded_variables_meet_on_their_common_members
 #: fn(x: integer | logical) -> logical
 first <- function(x) TRUE
 #: fn(x: character | logical) -> logical
 second <- function(x) TRUE
+#: <T> fn(a: T, b: T) -> T
 same <- function(a, b) if (TRUE) a else b
 g <- function(a, b) {
   first(a)
@@ -530,7 +596,7 @@ g <- function(a, b) {
 #++++
 first: fn(x: integer | logical) -> logical
 second: fn(x: character | logical) -> logical
-same: <T> fn([a]: T, [b]: T) -> T
+same: <T> fn(a: T, b: T) -> T
 g: fn(a: logical, b: logical) -> logical
 
 #---- union_commit_blames_the_later_conflicting_use
@@ -747,6 +813,45 @@ too_few: Unknown
 398..407 error[type-mismatch] expected `fn(integer) -> integer`, found `fn(a: integer, b: integer) -> integer`
 439..449 error[type-mismatch] expected `fn(integer) -> integer`, found `fn() -> integer`
 
+#---- match_fun_passes_over_a_local_list_named_like_the_function
+f <- function(data, groups) {
+  prod <- groups
+  out <- numeric(length(prod))
+  for (i in seq_along(prod)) out[i] <- sum(apply(data[, prod[[i]]], 1, prod))
+  out
+}
+#++++
+f: <T, U> fn([data]: T, groups: U) -> double[]
+
+#---- match_fun_takes_a_local_holding_one_of_two_functions
+f <- function(wrap) {
+  F <- if (wrap) function(i) list(i) else function(i) i + 1
+  lapply(1:3, F)
+}
+#++++
+f: fn(wrap: logical) -> list[list{integer} | double]
+
+#---- a_local_holding_one_of_two_functions_takes_forwarded_arguments
+# `lapply(x, update, new = NULL)` calls whichever function `update` holds with the extra
+# argument, as it would call either one alone.
+up_a <- function(geom, new) list(geom, new)
+up_b <- function(stat, new) list(stat, new)
+both <- function(type, names) {
+  update <- switch(type, geom = up_a, up_b)
+  lapply(names, update, new = NULL)
+}
+apply_at <- function(func, x, ...) func(x, ...)
+pick <- function(type, object) {
+  if (type == "a") f <- function(x, model, ...) x else f <- function(x, model, table) x
+  apply_at(func = f, x = 1, model = object)
+}
+#++++
+up_a: <T, U> fn(geom: T, new: U) -> list{T, U}
+up_b: <T, U> fn(stat: T, new: U) -> list{T, U}
+both: <T> fn(type: T, names: Unknown) -> Unknown
+apply_at: <T, U> fn(func: fn(T, ...: Any) -> U, x: T, ...: Any) -> U
+pick: <T, U> fn(type: T, object: U) -> double
+
 #---- a_list_of_functions_maps
 # Every member of the element union must serve the callback interface; the
 # stdlib reductions do, despite their optional parameters.
@@ -762,7 +867,7 @@ f <- function() {
   g(1L)
 }
 #++++
-f: fn() -> integer
+f: fn() -> Unknown
 
 #---- unknown_typed_parameter_accepts_anything
 user <- function(w) helper("text")
@@ -1179,3 +1284,8 @@ make <- function() {
 #++++
 make: Unknown
 90..96 error[type-mismatch] this call leaves out `x`, which the function requires
+
+#---- print_takes_a_logical_spelled_as_a_string_for_quote
+show_loadings <- function(m) print(m, quote = "FALSE")
+#++++
+show_loadings: <T> fn(m: T) -> T

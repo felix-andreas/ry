@@ -593,7 +593,8 @@ pub struct FunctionType<'db> {
     pub dispatch: Option<Name<'db>>,
     /// The body returns `NULL` only through `if (!predicate(parameter)) return(NULL)`, so a
     /// call where the caller already showed `predicate` holds of its argument returns the
-    /// other members alone. Inferred only.
+    /// other members alone, or only from the last `else` of a chain of tests of `parameter`'s
+    /// class, which an argument that may carry a class passes. Inferred only.
     pub null_unless: Option<NullUnless<'db>>,
     /// The body ends in `Reduce(f, x, init = init)` over its own formals, with `f` a formal
     /// or a closure that only forwards to one, so a call folds like a direct `Reduce` and its
@@ -641,11 +642,14 @@ pub struct ReduceForward<'db> {
     pub init: Option<Name<'db>>,
 }
 
-/// `ns_env <- function(package) { if (!is_loaded(package)) return(NULL); asNamespace(package) }`.
+/// `ns_env <- function(package) { if (!is_loaded(package)) return(NULL); asNamespace(package) }`,
+/// or with `class_fallback` the class dispatch `if (is.mcmc(x)) 1 else if (is.mcmc.list(x))
+/// length(x) else NULL`, whose `NULL` is the answer for an object of no class it handles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub struct NullUnless<'db> {
     pub predicate: Name<'db>,
     pub parameter: Name<'db>,
+    pub class_fallback: bool,
 }
 
 /// `formal` is required by a call that leaves out `default_of`, whose default reads it.

@@ -99,7 +99,7 @@ type Position = Record{x: double, y: double}
 position_value <- function(p) p$x
 summa$0rise <- function(positions) vapply(positions, position_value, numeric(1))
 #++++
-hover 108..117: summarise: fn(positions: list[Position]) -> double[]
+hover 108..117: summarise: fn(positions: list[Position] | NULL) -> double[]
 hover-definition: global 108..117
 definition 108..117
 references: 108..117*
@@ -107,13 +107,13 @@ rename: 1 edit(s)
 calls summarise: in  | out
 signature: none
 action: Add inferred type annotation for `summarise`
-  edit 139..139 -> ": list[Position]"
+  edit 139..139 -> ": list[Position] | NULL"
   edit 140..140 -> " -> double[]"
 action: Add inferred type annotations for the whole file
-  edit 139..139 -> ": list[Position]"
+  edit 139..139 -> ": list[Position] | NULL"
   edit 140..140 -> " -> double[]"
 completion (37): summarise, summary, summary.aov, summary.connection, summary.data.frame, summary.Date, summary.default, summary.difftime
-hint @139: list[Position]
+hint @139: list[Position] | NULL
 hint @140 -> double[]
 hint @159FUN =
 hint @175FUN.VALUE =

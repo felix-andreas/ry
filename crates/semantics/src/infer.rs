@@ -393,6 +393,19 @@ impl<'db> InferenceTable<'db> {
         else {
             unreachable!("bind target is always unbound after find");
         };
+        // An open member of a union takes the bound, as it would bound alone: a `NULL`
+        // default joined with a number (`T | double`) passed to arithmetic makes `T` a number.
+        if constraint != Constraint::Unconstrained
+            && let TyKind::Union(members) = ty.kind(db)
+        {
+            for &member in members.iter() {
+                if let TyKind::Var(member) = self.shallow_resolve(db, member).kind(db)
+                    && matches!(self.entry(self.find(*member)), Entry::Unbound { .. })
+                {
+                    self.constrain(db, *member, constraint)?;
+                }
+            }
+        }
         if let Some(error) = constraint_rejects(db, self, constraint, ty) {
             return Err(error);
         }
@@ -908,6 +921,36 @@ impl<'db> InferenceTable<'db> {
         self.compatible_probe(db, actual, expected, 0)
     }
 
+    /// Whether each function of a union fits `target` with its own return, and the join
+    /// of those returns fits the target's return. Leaves no binding behind on failure.
+    fn function_union_fits(
+        &mut self,
+        db: &'db dyn Db,
+        members: &[Ty<'db>],
+        target: &FunctionType<'db>,
+        depth: usize,
+    ) -> bool {
+        let snapshot = self.snapshot();
+        let mut returns = Vec::with_capacity(members.len());
+        for &member in members {
+            let ret = self.fresh_ty(db, Constraint::Unconstrained);
+            let each = Ty::new(db, TyKind::Function(&FunctionType { ret, ..*target }));
+            if !self.compatible_probe(db, member, each, depth + 1) {
+                self.rollback(snapshot);
+                return false;
+            }
+            returns.push(ret);
+        }
+        let resolved: Vec<Ty<'db>> = returns.iter().map(|&ret| self.resolve(db, ret)).collect();
+        let joined = union_of(db, resolved);
+        if self.compatible_probe(db, joined, target.ret, depth + 1) {
+            true
+        } else {
+            self.rollback(snapshot);
+            false
+        }
+    }
+
     fn compatible_probe(
         &mut self,
         db: &'db dyn Db,
@@ -1178,6 +1221,29 @@ impl<'db> InferenceTable<'db> {
             }
             self.rollback(snapshot);
         }
+        // A union of open variables fits one of them when the others tie to it: a callback
+        // `function(x, y) if (keep(x)) x else y` returns `U | T`, and `Reduce` needs a `U`.
+        if let (TyKind::Union(members), TyKind::Var(var)) = (actual.kind(db), expected.kind(db)) {
+            let representative = self.find(*var);
+            let open_members: Option<Vec<InferenceVar>> = members
+                .iter()
+                .map(|&member| match self.shallow_resolve(db, member).kind(db) {
+                    TyKind::Var(member_var) => Some(self.find(*member_var)),
+                    _ => None,
+                })
+                .collect();
+            if open_members.is_some_and(|open_members| open_members.contains(&representative)) {
+                let snapshot = self.snapshot();
+                if members
+                    .iter()
+                    .all(|&member| self.unify(db, member, expected).is_ok())
+                {
+                    return true;
+                }
+                self.rollback(snapshot);
+                return false;
+            }
+        }
         if actual.is_var() || expected.is_var() {
             return self.unify(db, actual, expected).is_ok();
         }
@@ -1221,6 +1287,19 @@ impl<'db> InferenceTable<'db> {
             // First, so union-vs-union means every actual member fits some expected member.
             // An open source fits only an open target that it can vouch for: a tag hidden in
             // the source's `..` could carry any payload under a name the target lists.
+            // A union of functions fits a function target when each member does, and the
+            // call returns whichever member ran: `F <- if (wrap) function(i) list(i) else
+            // function(i) i + 1` maps with `lapply(n, F)` to `list{T} | double` elements.
+            // When the joined return does not fit (a member returning `Any` where the target
+            // returns a number), each member fits the target as it is, below.
+            (TyKind::Union(members), TyKind::Function(target))
+                if members
+                    .iter()
+                    .all(|member| matches!(member.kind(db), TyKind::Function(_)))
+                    && self.function_union_fits(db, members, target, depth) =>
+            {
+                true
+            }
             (TyKind::Union(members), _) => {
                 if members
                     .iter()
@@ -1248,6 +1327,9 @@ impl<'db> InferenceTable<'db> {
                 // way: it is a value the body never constrained, so nothing shows it cannot
                 // fit. After `x <- list(x)` on one path, `list{U}` binds the target's element to
                 // `U`, and `U` itself cannot then become a list of itself, which R never asks.
+                // It fits a union target as a lone open argument does, taking the union as a
+                // bound, so `character | U` passed where `list[T] | T[] | NULL` is expected
+                // leaves `U` free to be `character | NULL` at a later call.
                 let (open, concrete): (Vec<Ty<'db>>, Vec<Ty<'db>>) =
                     members.iter().copied().partition(|&member| {
                         matches!(
@@ -1262,10 +1344,7 @@ impl<'db> InferenceTable<'db> {
                     .iter()
                     .all(|&member| self.compatible_probe(db, member, expected, depth + 1))
                     && open.iter().all(|&member| {
-                        let snapshot = self.snapshot();
-                        if self.unify(db, member, expected).is_err() {
-                            self.rollback(snapshot);
-                        }
+                        self.compatible_probe(db, member, expected, depth + 1);
                         true
                     })
             }
@@ -2125,6 +2204,18 @@ pub(crate) fn constraint_rejects<'db>(
             .all(|&member| constraint_rejects(db, table, constraint, member).is_none());
         return (!every_member_admissible)
             .then_some(UnifyError::ConstraintRejected(constraint, ty));
+    }
+    // An open member counts when its own bound implies the required one, which `bind`
+    // arranges for the members of a union before it asks.
+    if let TyKind::Var(var) = ty.kind(db) {
+        let admissible = match table.entry(table.find(*var)) {
+            Entry::Unbound {
+                constraint: own, ..
+            } => own.join(constraint) == Some(*own),
+            Entry::Bound { ty, .. } => constraint_rejects(db, table, constraint, *ty).is_none(),
+            Entry::Redirect(_) => false,
+        };
+        return (!admissible).then_some(UnifyError::ConstraintRejected(constraint, ty));
     }
     let admissible = match constraint {
         Constraint::Unconstrained => true,

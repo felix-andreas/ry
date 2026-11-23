@@ -28,7 +28,7 @@ use {
 /// `return(NA)` takes the type of the other returns when inferred, while a declared return type
 /// checks it as `logical`. A callback shape inferred from calls lets a later call omit an argument
 /// an earlier call passed, while the declared shape requires it.
-const KNOWN_UNWRITABLE: [&str; 23] = [
+const KNOWN_UNWRITABLE: [&str; 30] = [
     "semantics/tests/typing::correct_r__a_formal_used_as_a_vector_passes_a_scalar_parameter :: unpack",
     "semantics/tests/typing::correct_r__a_null_default_is_a_placeholder_at_a_numeric_parameter :: solve",
     "semantics/tests/typing::correct_r__an_inferred_scalar_parameter_takes_a_vector_of_its_type :: rlength",
@@ -52,6 +52,16 @@ const KNOWN_UNWRITABLE: [&str; 23] = [
     "semantics/tests/typing::correct_r__a_callback_may_later_be_called_without_an_argument_an_earlier_call_passed :: fetch",
     "semantics/tests/typing::correct_r__a_function_supplied_on_the_missing_path_types_as_a_default :: f",
     "semantics/tests/typing::correct_r__a_function_supplied_on_the_missing_path_types_as_a_default :: g",
+    "semantics/tests/typing::correct_r__arithmetic_on_an_environment_may_dispatch_to_a_project_method :: build",
+    "semantics/tests/typing::correct_r__arithmetic_registered_through_s4_may_dispatch_on_an_environment :: build",
+    "semantics/tests/typing::correct_r__a_negated_flag_guard_block_selects_its_returns :: valid",
+    // An inferred callback bound to a scalar takes a vector later; an annotation is exact.
+    "semantics/tests/typing::correct_r__a_callback_bound_to_a_scalar_by_a_forwarded_call_takes_a_vector_later :: quant",
+    // An inferred return's length, `NULL` path and scalar bound are claims of how the body
+    // uses values; an annotation states them exactly.
+    "semantics/tests/typing::correct_r__a_call_of_an_unannotated_helper_passes_one_string_on :: format_maybe",
+    "semantics/tests/typing::correct_r__an_unannotated_callback_that_may_return_null_fits_a_vapply_template :: render_row",
+    "semantics/tests/typing::correct_r__a_vector_index_passes_to_a_parameter_the_body_reads_as_a_sequence_bound :: add_rows",
 ];
 
 #[test]

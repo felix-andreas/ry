@@ -653,18 +653,23 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 true,
                 false,
             );
-            if !matches!(fallback, NonLocalRead::Unresolved { .. }) {
-                continue;
-            }
+            let message = match fallback {
+                NonLocalRead::Unresolved { .. } => format!(
+                    "`{}` is only assigned on some paths here, so this read can find nothing",
+                    display_name(&binding.name)
+                ),
+                _ if check.function_fallback_reads.contains(expression) => format!(
+                    "`{name}` is only assigned on some paths here, so on the others this reads the function `{name}`",
+                    name = display_name(&binding.name)
+                ),
+                _ => continue,
+            };
             let range = module.range(*expression) + offset;
             diagnostics.push(Diagnostic::new(
                 range,
                 Severity::Warning,
                 "maybe-undefined",
-                format!(
-                    "`{}` is only assigned on some paths here, so this read can find nothing",
-                    display_name(&binding.name)
-                ),
+                message,
             ));
         }
         for (expression, read) in &naming.namespace_reads {

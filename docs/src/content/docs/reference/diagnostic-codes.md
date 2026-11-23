@@ -334,7 +334,8 @@ message names the construct and the way to write the step that compiles.
 ```
 
 **`maybe-undefined`** (warning), with `[check] maybe-undefined = true`: a read that some path reaches
-before any write, which R reports as `object 'v' not found` on that path. It is off because it treats
+before any write, which R reports as `object 'v' not found` on that path, or where R finds a function
+of the same name instead (`if (flag) t <- 5; t + 1` reads base `t`). It is off because it treats
 conditions that always agree as independent, so `if (ok) v <- 1` followed by `if (ok) print(v)` is
 reported although it is safe.
 

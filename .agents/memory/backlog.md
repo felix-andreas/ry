@@ -743,7 +743,7 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-gives 28 errors: 26 true package bugs and 2 known limitations, and no false report on correct R. The
+gives 27 errors: 25 true package bugs and 2 known limitations, and no false report on correct R. The
 three generated benchmark packages (`tools/bench/tooling/generate.py`) report nothing. To reproduce, give
 each package a `ry.toml` with `[check]` `typing = true` (typing is off by default) and run
 `ry check --output json R` inside it. A fix also deletes its line here and, for a user-visible
@@ -763,7 +763,6 @@ gap, in the Limitations section of `reference/type-system.mdx`.
 - gmp `Stirling-n-etc.R` 277: `if (log)` with no `log` formal reads base `log`.
 - httr `oauth-token-utils.R` 34: `revoke_oauth2.0(x)` leaves out `credentials`.
 - kernlab `kqr.R` 173 and 263: `ramloss(...)` is a typo for `ramploss`.
-- kernlab `gausspr.R` 194: passes a `double` where the callee multiplies a `matrix`.
 - mclust `toremove.R` 259: leaves out `k`.
 - processx `process.R` 748: `new_not_implemented_error` without `call`.
 - renv `r.R` 137: `diagnostics$suggestion` reads the list of records where the loop variable
@@ -789,46 +788,32 @@ constraint now fills a vector parameter. The forms once seen in ks `kfe.1d`, pra
 
 The top 100 CRAN packages by reverse dependencies that are not in the corpus (99 checked,
 1,210,157 lines, sources only) first gave 1,449 errors, of which 1,384 were false (114 per 100,000
-lines). After the fixes they give 468, about 400 of them false (33 per 100,000 lines); the rest are
-50 true bugs and 15 debatable ones (psych's `print(quote = "FALSE")` works by coercion). Remaining
-false classes, largest first:
+lines). They now give 119, about 39 of them true bugs (psych about 23, `parent.env` misuse in
+Hmisc, XML and rgl, survival, survey, VGAM's `qt` with a numeric `lower.tail`), so about 80 are
+false (7 per 100,000 lines). Remaining false classes, largest first:
 
-- Return types selected by a flag the body reassigns or nests (VGAM `iam`, about 60 in `.q` files
-  that are now checked).
-- Dead code after `stop()` still binds names that shadow outer ones (psych, 44).
-- An unannotated parameter over-inferred from one use, a default or one branch (21).
-- A variable correlated with a flag tested elsewhere (20, measured before tests of the same local
-  were correlated; not re-measured).
-- A union of function types where a function is expected (lme4, kableExtra, 18).
-- A missing argument forwarded to `[` or to a callee that tests `missing()` (flextable, 10).
-- An element write `d[[i]] <- v` does not update the container type (psych, 10).
-- `vapply` over a parameter turns it into `list[T] | T[]`, so a later `$` fails (ggplot2, 10).
-- A project S3 method for a stubbed generic is ignored (R.utils, 9); NSE arguments checked (9);
-  narrowing gaps after `tryCatch` and inside `&&` (8); Windows-only NAMESPACE imports (8).
+- VGAM (14, not classified in detail): `new("vglmff", link = ...)` slots, `binomialff(dispersion =
+  ...)` with arguments its formals lack (possibly true), `qt(u, nu, 1, 0)` inside `if (FALSE)`.
+- psych (about 7 of 30): a function used as a condition or compared (`summary.psych.R` 377,
+  `print.psych.R` 14) and a function where a number is expected (`ICLUST.graph.R` 24).
+- raster (6): `calc` and `extractPolygons`.
+- ggplot2 (5): quick-plot, `guide-axis-stack`'s `lapply`, a missing `x` in `utilities-checks`.
+- One or two each in about 25 packages (gt formatter callbacks, reticulate's conda paths, forecast,
+  igraph, sandwich, spatstat's missing `f`, lavaan, pROC, boot).
 
-### Other open checker items found on the corpus
+### Checker gaps found in review
 
-- **A flag-selected return stops at the first guard.** `flag_return` in `crates/semantics/src/check.rs`
-  reads only the first `if (flag) return(...)` on a parameter, so a second flag guard later in the
-  body falls back to the union of every return. Low priority: no corpus or fresh-sample report
-  depends on it.
-- **A NULL default written back as an annotation is checked.** An inferred `[H]: T | NULL` passes
-  on as a placeholder, but the same signature declared reports the call, so the round-trip test
-  lists `a_null_default_is_a_placeholder_at_a_numeric_parameter` as known unwritable. Either a
-  declared optional `NULL` default should read as a placeholder too, or the renderer should mark
-  it. Flag-selected returns (`p_dist`, `iam`) are listed there for the same reason: an annotation
-  cannot say that a literal flag picks the branch.
-- **A local variable named like a function** (missed error). After `if (flag) t2 <- 5`, a read
-  `t2 + 1` types as the local writes alone when a project, enclosing or base function `t2`
-  exists, so the path that skips the write and reads the function is not reported, even with
-  `maybe-undefined = true` (naming counts the function as a fallback). Leaving the function out
-  cleared mgcv's guarded reads; reporting the unguarded one needs naming to tell a function
-  fallback from a value fallback.
-- **`m * tol` after `if (missing(tol)) tol <- 1e-8` leaves both parameters unbounded**, so
-  `fast_svd("a", 1)` is not reported (missed error). The join of an open parameter and a value
-  written on one path is `Unknown` (`join_written_values`), so that `omega <- omega + m %*% m` on
-  one path leaves a caller free to pass a plain vector. Keeping `U | double` instead would bound
-  `U` by the later use; it needs a rule for which uses of a joined parameter bound it.
+- **A default is never checked against the bound the body puts on its formal**:
+  `function(m, tol = "abc") m * tol` and the same default written on the `missing()` path both
+  type as `<T: numeric> fn(m: T, [tol]: T) -> T`, and an omitted call returns `double`. The default
+  loop after the body skips a settled type that still holds a variable; checking a literal default
+  against the bound would report at the default.
+- **`class_fallback` reads a list, record or tuple as possibly classed**, so `1:chain_count(list(1))`
+  keeps no `NULL`. A list literal and a record or tuple type carry no class.
+- **The `inherits()` true edge drops vector members**, but stubs type some classed values as plain
+  vectors (`table` returns `integer[]`), and so does a `class(x) <- "k"` write.
+- **A formal passed to a field or `[[` callee is never forced** (`self$m(x)`, `handlers[[k]](x)`),
+  so a call that leaves it out is never reported.
 
 ## Open: where findings point, and what the type system still refuses
 
@@ -970,10 +955,7 @@ The rule ships (`decisions/syntax-semantics.md`, "A strict library file's top le
 
 ## Open: strict-mode friction from typing finbench
 
-Porting the synthetic finance benchmark to fully typed strict code hit these. Each repro is a project with `[check] strict = true` (and `Imports:` naming the packages it uses); the quoted output is what `ry check` prints.
-
-- **Vectorised math types are wrong.** `exp`, `sqrt` and `nchar` return a scalar for any input, and there is no `array` type (an `array` annotation suggests `Array`, ry's own type). `#: fn(x: double[]) -> double` over `exp(x)` or `sqrt(x)` checks clean, as does `#: fn(x: character[]) -> integer` over `nchar(x)`; `#: fn(rates: matrix) -> matrix` over `exp(-rates)` gives `` expected `matrix`, found `double` ``. Overloads that keep the input's shape (`fn(x: double) -> double`, `fn(x: double[]) -> double[]`, `fn(x: Any) -> Any`) were tried and dropped: an unannotated wrapper such as `function(x) sqrt(x)` then matches several candidates that disagree, so the overload-set rules give it `Unknown` or a `numeric` bound, and inference regresses across the typing fixtures. The fix needs one shape-generic signature (a result with the shape of `x` and element type `double`) rather than an overload set.
-
+- **An unannotated wrapper of vectorised math returns a scalar.** `@elementwise(x)` gives `sqrt(x)` the shape of a known `x` (`decisions/type-checker.md`, "`@elementwise(x)` gives a scalar result the shape of its argument"), but `function(x) sqrt(x)` infers `<T> fn(x: T) -> double`, so `wrap(xs)` over a `double[]` is still `double`. A shape variable (the shape of `T` with a `double` element) would fix it; no `array` type exists either.
 
 ## Open: the JIT
 
