@@ -275,6 +275,13 @@ pub enum TypeErrorKind<'db> {
         second: String,
         second_ty: Ty<'db>,
     },
+    /// A column that frames stacked by `DataFrame.concat` or `rbind` hold in types no one column
+    /// holds, such as a date and a number.
+    StackedColumnTypesDiffer {
+        column: String,
+        first_ty: Ty<'db>,
+        second_ty: Ty<'db>,
+    },
     /// A join condition whose two columns hold values the join cannot compare, such as
     /// integers and strings.
     IncompatibleJoinColumns {
@@ -14443,6 +14450,9 @@ impl<'db, 'a> Checker<'db, 'a> {
         for argument in arguments {
             let value = argument.value?;
             let name = module.argument_name(argument).map(|name| name.to_string());
+            if stack.is_some() && name.as_deref() == Some("deparse.level") {
+                continue;
+            }
             if stack.is_none() && name.as_deref() == Some("how") {
                 let ExpressionKind::Literal(LiteralKind::String(text)) = module.kind(value) else {
                     return None;
@@ -14458,13 +14468,21 @@ impl<'db, 'a> Checker<'db, 'a> {
             pieces.push((name, value));
         }
         let how = how.unwrap_or(Stack::Vertical);
-        let mut result: Vec<(String, Vec<Ty<'db>>)> = Vec::new();
+        let mut result: Vec<(String, Vec<(Ty<'db>, ExprId)>)> = Vec::new();
         for (index, (name, value)) in pieces.into_iter().enumerate() {
             let ty = *self.recorded.get(&value)?;
             let columns = match *self.structural(ty).kind(db) {
                 TyKind::Frame(FrameKind::DataFrame, Some(columns)) => columns,
                 _ if how == Stack::Horizontal => {
-                    result.push((name?, vec![vector_column(db, ty)?]));
+                    // `cbind` names an unnamed vector after its expression, as R does.
+                    let name = match (name, module.kind(value)) {
+                        (Some(name), _) => name,
+                        (None, ExpressionKind::NameRef(reference)) if stack.is_some() => {
+                            reference.as_str().to_owned()
+                        }
+                        _ => return None,
+                    };
+                    result.push((name, vec![(vector_column(db, ty)?, value)]));
                     continue;
                 }
                 _ => return None,
@@ -14486,22 +14504,34 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .iter_mut()
                     .find(|(existing, _)| existing.as_str() == name)
                 {
-                    Some((_, types)) if how != Stack::Horizontal => types.push(column.ty),
-                    _ => result.push((name.to_owned(), vec![column.ty])),
+                    Some((_, types)) if how != Stack::Horizontal => types.push((column.ty, value)),
+                    _ => result.push((name.to_owned(), vec![(column.ty, value)])),
                 }
             }
         }
-        let columns = result
-            .into_iter()
-            .map(|(name, types)| {
-                let ty = if types.iter().all(|&ty| ty == types[0]) {
-                    types[0]
-                } else {
-                    widest_column(db, &types, true).unwrap_or_else(|| unknown(db))
-                };
-                (name, ty)
-            })
-            .collect();
+        let mut columns = Vec::with_capacity(result.len());
+        for (name, pieces) in result {
+            let (first_ty, _) = pieces[0];
+            if pieces.iter().all(|&(ty, _)| ty == first_ty) {
+                columns.push((name, first_ty));
+                continue;
+            }
+            let types: Vec<Ty<'db>> = pieces.iter().map(|&(ty, _)| ty).collect();
+            if let Some(widest) = widest_column(db, &types, true) {
+                columns.push((name, widest));
+                continue;
+            }
+            let &(second_ty, value) = pieces.iter().find(|&&(ty, _)| ty != first_ty)?;
+            self.errors.push(TypeError {
+                range: module.range(value),
+                kind: TypeErrorKind::StackedColumnTypesDiffer {
+                    column: name,
+                    first_ty,
+                    second_ty,
+                },
+            });
+            return Some(unknown(db));
+        }
         Some(frame_of(db, FrameKind::DataFrame, columns))
     }
 
@@ -14882,12 +14912,24 @@ impl<'db, 'a> Checker<'db, 'a> {
                             &test,
                             ExpressionNeeds::Logical,
                         );
-                        let yes =
-                            self.frame_operand(module[arguments].get(1)?.value?, columns, frame)?;
-                        let no =
-                            self.frame_operand(module[arguments].get(2)?.value?, columns, frame)?;
-                        let ty = if yes.ty == no.ty {
+                        let yes_argument = module[arguments].get(1)?.value?;
+                        let no_argument = module[arguments].get(2)?.value?;
+                        let yes = self.frame_operand(yes_argument, columns, frame)?;
+                        let no = self.frame_operand(no_argument, columns, frame)?;
+                        let bare_na = |argument| {
+                            matches!(
+                                module.kind(argument),
+                                ExpressionKind::Literal(LiteralKind::Na(NaAtom::Logical))
+                            )
+                        };
+                        // A bare `NA` branch takes a date or date-time from the other branch, as
+                        // the table engine's `ifelse` does.
+                        let ty = if yes.ty == no.ty
+                            || (bare_na(no_argument) && temporal_column(db, yes.ty).is_some())
+                        {
                             yes.ty
+                        } else if bare_na(yes_argument) && temporal_column(db, no.ty).is_some() {
+                            no.ty
                         } else {
                             union_of(db, [yes.ty, no.ty])
                         };

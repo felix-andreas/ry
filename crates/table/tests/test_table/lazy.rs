@@ -575,6 +575,52 @@ fn every_kind_of_join_matches_a_missing_key_with_a_missing_key() {
     assert_eq!(join(How::Full).height(), 3);
 }
 
+/// Two date-time keys match by instant whatever their zones, and an integer key matches a double
+/// key by value; the joined key keeps the left side's zone.
+#[test]
+fn a_full_join_matches_keys_across_zones_and_number_types() {
+    let instant = 1_704_110_400.0;
+    let utc = frame(vec![
+        (
+            "t",
+            RVector::Datetime {
+                seconds: vec![instant],
+                zone: Some("UTC".to_string()),
+            },
+        ),
+        ("id", ints(&[1])),
+    ]);
+    let new_york = frame(vec![
+        (
+            "t",
+            RVector::Datetime {
+                seconds: vec![instant],
+                zone: Some("America/New_York".to_string()),
+            },
+        ),
+        ("id", doubles(&[1.0])),
+    ]);
+    let join = |on: &str| {
+        collect(Plan::new(Source::Table(utc.clone())).with(Step::Join {
+            other: Box::new(Plan::new(Source::Table(new_york.clone()))),
+            left_on: vec![on.into()],
+            right_on: vec![on.into()],
+            how: How::Full,
+            suffix: "_right".into(),
+        }))
+    };
+    let by_time = join("t");
+    assert_eq!(by_time.height(), 1);
+    assert_eq!(
+        column_values(&by_time, "t"),
+        RVector::Datetime {
+            seconds: vec![instant],
+            zone: Some("UTC".to_string()),
+        }
+    );
+    assert_eq!(join("id").height(), 1);
+}
+
 /// `count` counts the values that are not missing, `NaN` included among the missing, while
 /// `len` counts every row; `na_rm = FALSE` makes a sum over a missing value missing.
 #[test]

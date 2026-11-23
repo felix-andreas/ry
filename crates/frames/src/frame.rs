@@ -2349,7 +2349,8 @@ fn binary_op(name: &str) -> Option<BinaryOp> {
 /// An R vector as a literal of the IR: a single value as a scalar that broadcasts, and a longer
 /// or empty vector as a column of its values. `None` for a value no column can hold.
 pub(crate) unsafe fn vector_literal(value: Sexp) -> R<Option<Expr>> {
-    if length(value) == 1 {
+    // A factor's levels have no scalar literal, so even a single one is a column of values.
+    if length(value) == 1 && !values::inherits(value, "factor") {
         return Ok(literal(value));
     }
     let value = values::materialize(value)?;

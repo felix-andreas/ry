@@ -141,10 +141,46 @@ local({
     # expression instead of failing on conflicting `Ops.Expr` and `Ops.Date` methods.
     chooseOpsMethod.Expr = function(x, y, mx, my, cl, reverse) TRUE,
     format.Expr = function(x, ...) .expr_format(x),
-    rbind.DataFrame = function(..., deparse.level = 1) DataFrame.concat(..., how = "vertical"),
-    cbind.DataFrame = function(..., deparse.level = 1) DataFrame.concat(..., how = "horizontal"),
-    unique.DataFrame = function(x, incomparables = FALSE, ...) DataFrame.unique(x),
-    duplicated.DataFrame = function(x, incomparables = FALSE, ...) .df_duplicated(x, NULL, sys.call()),
+    # As for a data.frame, a list or data.frame argument is a frame of rows (matched to the
+    # DataFrame's columns by position when it has no names) and a NULL one is skipped.
+    rbind.DataFrame = function(..., deparse.level = 1) {
+      items <- Filter(Negate(is.null), list(...))
+      columns <- NULL
+      for (item in items) if (inherits(item, "DataFrame")) {
+        columns <- names(item)
+        break
+      }
+      items <- lapply(items, function(item) {
+        if (!is.list(item)) return(item)
+        if (is.null(names(item)) && length(item) == length(columns)) names(item) <- columns
+        as.DataFrame(item)
+      })
+      DataFrame.concat(items, how = "vertical")
+    },
+    # As for a data.frame, an unnamed vector argument is a column named after its expression.
+    cbind.DataFrame = function(..., deparse.level = 1) {
+      items <- list(...)
+      labels <- vapply(as.list(substitute(list(...)))[-1L], function(e) paste(deparse(e), collapse = " "), "")
+      given <- names(items)
+      if (is.null(given)) given <- character(length(items))
+      for (index in seq_along(items)) {
+        item <- items[[index]]
+        if (is.list(item)) items[[index]] <- as.DataFrame(item)
+        else if (!inherits(item, "DataFrame") && !nzchar(given[[index]])) given[[index]] <- labels[[index]]
+      }
+      kept <- !vapply(items, is.null, NA)
+      items <- items[kept]
+      names(items) <- given[kept]
+      DataFrame.concat(items, how = "horizontal")
+    },
+    unique.DataFrame = function(x, incomparables = FALSE, fromLast = FALSE, ...) {
+      if (!isFALSE(incomparables)) stop("`incomparables` is not supported for a DataFrame", call. = FALSE)
+      DataFrame.unique(x, keep = if (isTRUE(fromLast)) "last" else "first")
+    },
+    duplicated.DataFrame = function(x, incomparables = FALSE, fromLast = FALSE, ...) {
+      if (!isFALSE(incomparables)) stop("`incomparables` is not supported for a DataFrame", call. = FALSE)
+      .df_duplicated(x, isTRUE(fromLast), sys.call())
+    },
     # `%in%` is not generic, so an expression on its left stops in `match()` with a pointer to the
     # expression's own test instead of an error about coercing a pointer.
     mtfrm.Expr = function(x) stop("`%in%` does not build an expression; write `Expr.is_in(x, values)`", call. = FALSE),
@@ -471,6 +507,16 @@ unsafe fn do_call(call: &Call<'_>) -> R<Sexp> {
         }
     };
     let list = call.arg(1);
+    // `x %in% NULL` is `FALSE` for every value of `x`, `NA` included; `is.na(x) & FALSE` keeps
+    // `x`'s name for the result.
+    if function == Function::IsIn && length(list) == 2 && is_nil(list.element(1)) {
+        let x = operand(list.element(0), call.call)?;
+        return expr(Expr::Binary(
+            BinaryOp::And,
+            Box::new(Expr::Unary(UnaryOp::IsNa, Box::new(x))),
+            Box::new(Expr::Logical(false)),
+        ));
+    }
     let mut arguments = Vec::with_capacity(length(list));
     for index in 0..length(list) {
         arguments.push(operand(list.element(index), call.call)?);
@@ -577,6 +623,20 @@ unsafe fn do_concat(call: &Call<'_>) -> R<Sexp> {
                 };
                 columns.push(frame::to_column(&name, item, height, caller)?);
             }
+            let duplicate = columns.iter().enumerate().find_map(|(index, column)| {
+                columns[..index]
+                    .iter()
+                    .any(|earlier| earlier.name() == column.name())
+                    .then(|| column.name().clone())
+            });
+            if let Some(duplicate) = duplicate {
+                return Err(error_in(
+                    caller,
+                    format!(
+                        "column `{duplicate}` appears in more than one of the frames and vectors set side by side; rename one first"
+                    ),
+                ));
+            }
             let combined = table::polars::prelude::DataFrame::new(height, columns)
                 .map_err(|failure| error_in(caller, failure.to_string()))?;
             return frame::wrap(
@@ -640,15 +700,15 @@ unsafe fn do_concat(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_unique(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(3);
     let (plan, lazy) = plan_of(call.arg(0), caller)?;
-    let subset = if is_nil(call.arg(1)) {
-        Vec::new()
-    } else {
-        values::strings(call.arg(1))
-            .into_iter()
-            .flatten()
-            .map(PlSmallStr::from)
-            .collect()
-    };
+    let mut subset = Vec::new();
+    if !is_nil(call.arg(1)) {
+        for name in values::strings(call.arg(1)) {
+            let Some(name) = name else {
+                return Err(error_in(caller, "`subset` names a column `NA`"));
+            };
+            subset.push(PlSmallStr::from(name));
+        }
+    }
     let keep = values::require_str(call.arg(2), "keep")?;
     let Some(keep) = ops::Keep::parse(&keep) else {
         return Err(error_in(
@@ -659,7 +719,8 @@ unsafe fn do_unique(call: &Call<'_>) -> R<Sexp> {
     finish(plan.with(Step::Unique { subset, keep }), lazy, caller)
 }
 
-/// `.df_duplicated(df, subset, call)`: whether each row repeats an earlier row.
+/// `.df_duplicated(df, from_last, call)`: whether each row repeats an earlier row, or a later one
+/// with `from_last`.
 unsafe fn do_duplicated(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(2);
     if !is_frame(call.arg(0)) {
@@ -668,13 +729,8 @@ unsafe fn do_duplicated(call: &Call<'_>) -> R<Sexp> {
             format!("expected a DataFrame, got {}", describe(call.arg(0))),
         ));
     }
-    let subset: Vec<String> = if is_nil(call.arg(1)) {
-        Vec::new()
-    } else {
-        values::strings(call.arg(1)).into_iter().flatten().collect()
-    };
-    let subset: Vec<&str> = subset.iter().map(String::as_str).collect();
-    let duplicated = ops::duplicated_rows(table_of(call.arg(0))?, &subset)
+    let from_last = values::require_flag(call.arg(1), "fromLast")?;
+    let duplicated = ops::duplicated_rows(table_of(call.arg(0))?, &[], from_last)
         .map_err(|failure| table_error(caller, failure, None))?;
     let vector = values::alloc(SexpType::Logical, duplicated.len())?;
     for (slot, flag) in values::ints_mut(vector).iter_mut().zip(duplicated) {
@@ -1054,12 +1110,13 @@ unsafe fn do_pivot(call: &Call<'_>) -> R<Sexp> {
             "max" => Aggregate::Max,
             "first" => Aggregate::First,
             "last" => Aggregate::Last,
-            "count" => Aggregate::Length,
+            "count" => Aggregate::Count,
+            "len" => Aggregate::Length,
             other => {
                 return Err(error_in(
                     caller,
                     format!(
-                        "`agg` is one of \"sum\", \"mean\", \"min\", \"max\", \"first\", \"last\" and \"count\", not \"{other}\""
+                        "`agg` is one of \"sum\", \"mean\", \"min\", \"max\", \"first\", \"last\", \"count\" and \"len\", not \"{other}\""
                     ),
                 ));
             }

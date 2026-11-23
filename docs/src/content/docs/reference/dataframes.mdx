@@ -121,9 +121,11 @@ are unknown is an error.
 `&`, `|` and `!` combine columns and plain R values into a new expression, so
 `Expr.col("units") * Expr.col("price")` and `Expr.col("price") > 2` are both expressions.
 `Expr.lit(value)` makes a constant column from a single value, and a column of its own values from
-a longer vector, which must have one value per row. `Expr.is_in(expr, values)` tests each value
-for membership in `values`, a vector or an expression; R's `%in%` cannot build an expression, so
-`Expr.col("x") %in% values` stops with an error that points to `Expr.is_in`.
+a longer vector, which must have one value per row; any other length stops with an error that
+gives both lengths. `Expr.is_in(expr, values)` tests each value for membership in `values`, a
+vector or an expression, and is `FALSE` for every value, `NA` included, when `values` is `NULL`.
+R's `%in%` cannot build an expression, so `Expr.col("x") %in% values` stops with an error that
+points to `Expr.is_in`.
 
 Aggregations reduce a column to one value: `Expr.sum`, `Expr.mean`, `Expr.median`, `Expr.min`,
 `Expr.max`, `Expr.first`, `Expr.last`, `Expr.std`, `Expr.var` and `Expr.count`. `Expr.len()`
@@ -153,6 +155,10 @@ scores |>
 1:      a     3     NA      1     2
 2:      b     4      4      1     1
 ```
+
+Inside `GroupBy.agg`, a key column holds its group's one key value, as a `by` column does in
+data.table, so `Expr.col("team") |> Expr.count()` is 1 for every group. Count a group's rows with
+`Expr.len()`.
 
 An expression's output column takes the name of the first column it reads. Rename it with
 `Expr.alias`, or by passing it as a named argument to a verb, as `revenue = ...` does above. Mind
@@ -253,6 +259,10 @@ differ. `how` is `"inner"`, `"left"`, `"full"`, `"semi"`, `"anti"` or `"cross"`,
 left row with every right row and takes no keys. The result has the left
 columns, then the right's non-key columns, and a right column whose name is already taken gets the
 `suffix` (`"_right"` by default), as in Polars.
+
+An integer key matches a double key by value, two factor keys match by label whatever their
+levels, and two date-time keys match by instant whatever their time zones, the result keeping the
+left key's zone.
 
 A missing key matches a missing key in every kind of join, as in R's `merge()` and data.table,
 where Polars would match it to nothing. A left join therefore gives a row whose key is `NA` the
@@ -365,10 +375,14 @@ sales |> DataFrame.unique("region", keep = "last")
 3:     us     1   4.0
 ```
 
-R's generics work on a DataFrame and give a DataFrame: `rbind(a, b)` is
-`DataFrame.concat(a, b)`, `cbind(a, ...)` is `DataFrame.concat(a, ..., how = "horizontal")`, and
-`unique(df)` is `DataFrame.unique(df)`. `duplicated(df)` gives a logical vector that is `TRUE` for
-each row equal to an earlier one.
+R's generics work on a DataFrame and give a DataFrame. `rbind(a, ...)` is
+`DataFrame.concat(a, ...)`, where a `data.frame` or a list becomes a DataFrame first (an unnamed
+list takes `a`'s column names when it has one value per column) and `NULL` is skipped.
+`cbind(a, ...)` is `DataFrame.concat(a, ..., how = "horizontal")`, where an unnamed vector takes the
+name it is written as, as in base R, and a column name that appears twice is an error.
+`unique(df)` is `DataFrame.unique(df)`, and `duplicated(df)` gives a logical vector that is `TRUE`
+for each row equal to an earlier one. Both take `fromLast = TRUE` to keep the last row of each set
+instead, and both stop on any `incomparables` other than `FALSE`.
 
 ### Windows and ranks
 
@@ -399,7 +413,8 @@ sales |> DataFrame.with_columns(
 `DataFrame.pivot(df, on, index, values, agg = NULL)` turns the values of the `on` column into
 columns, with one row per value of `index`, like data.table's `dcast`. Rows and new columns come
 out sorted. With several values for one cell, `agg` combines them: `"sum"`, `"mean"`, `"min"`,
-`"max"`, `"first"`, `"last"` or `"count"`. Because the new columns depend on the data, the
+`"max"`, `"first"`, `"last"`, `"count"` (the values that are not missing) or `"len"` (every
+value, as `fun.aggregate = length` counts). Because the new columns depend on the data, the
 checker types the result as a `DataFrame` without known columns.
 
 ```r
@@ -426,6 +441,8 @@ operator on a date, such as `Expr.col("placed") * 2`.
 A `POSIXct` column stays a date-time column with its time zone, to the microsecond. It works the
 same way in seconds: adding a number of seconds gives a date-time, subtracting two date-times
 gives the seconds between them as a double, and a date-time compares only with another date-time.
+An `Expr.if_else` whose other branch is a date or date-time takes a bare `NA` branch as a missing
+value of that type, so the column keeps its class.
 
 ```r
 orders <- DataFrame(id = [1L, 2L], placed = as.Date(c("2024-01-30", "2024-02-03")))

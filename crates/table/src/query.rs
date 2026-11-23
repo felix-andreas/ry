@@ -1644,8 +1644,9 @@ fn join_columns(join: &Join, key: &[PlSmallStr]) -> Result<Vec<On>> {
 }
 
 /// Checks a join's conditions against both schemas, and gives for each condition the type both
-/// sides compare in when their types differ. Integers meet doubles as doubles, and two factors, or
-/// a factor and a string, meet as strings, since factor codes index different level sets.
+/// sides compare in when their types differ. Integers meet doubles as doubles, two factors, or a
+/// factor and a string, meet as strings, since factor codes index different level sets, and two
+/// date-times meet in UTC, since their zones may differ.
 fn comparison_types(
     x: &Schema,
     i: &Schema,
@@ -1690,6 +1691,11 @@ fn comparison_types(
                 | (ColumnType::Character, ColumnType::Factor) => Some(DataType::String),
                 (ColumnType::Integer, ColumnType::Double)
                 | (ColumnType::Double, ColumnType::Integer) => Some(DataType::Float64),
+                // A date-time's zone only changes how it prints, so two zones meet as UTC.
+                (ColumnType::Datetime, ColumnType::Datetime) => Some(DataType::Datetime(
+                    TimeUnit::Microseconds,
+                    Some(TimeZone::UTC),
+                )),
                 (x_type, i_type) if x_type == i_type => None,
                 (x_type, i_type) => {
                     return Err(Error::Query(format!(
@@ -2237,11 +2243,30 @@ pub(crate) fn collapses(expr: &Expr) -> bool {
         | Expr::Head(..)
         | Expr::Rank { .. }
         | Expr::Window(..) => false,
-        Expr::Call(_, args) => args.iter().all(collapses),
+        Expr::Call(function, args) => match (function, args.as_slice()) {
+            (Function::IsIn, [x, _]) => collapses(x),
+            _ => args.iter().all(collapses),
+        },
         Expr::Unary(_, arg) => collapses(arg),
         Expr::Binary(_, left, right) => collapses(left) && collapses(right),
         Expr::IfElse(test, yes, no) => collapses(test) && collapses(yes) && collapses(no),
     }
+}
+
+/// Whether an expression is given values rather than computed from the frame's rows, so that as
+/// the values of `is_in` it is the same set whichever rows the frame holds.
+pub(crate) fn is_constant(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Integer(_)
+            | Expr::Double(_)
+            | Expr::Logical(_)
+            | Expr::Character(_)
+            | Expr::Date(_)
+            | Expr::Datetime { .. }
+            | Expr::Na(_)
+            | Expr::Values(_)
+    )
 }
 
 /// Lowers `:=`. Each new column is computed by one projection of the plan, and then replaces or
@@ -2963,7 +2988,10 @@ fn row_wise(expr: &Expr) -> bool {
         | Expr::Date(_)
         | Expr::Datetime { .. }
         | Expr::Na(_) => true,
-        Expr::Call(_, args) => args.iter().all(row_wise),
+        Expr::Call(function, args) => match (function, args.as_slice()) {
+            (Function::IsIn, [x, values]) => row_wise(x) && is_constant(values),
+            _ => args.iter().all(row_wise),
+        },
         Expr::Unary(_, arg) => row_wise(arg),
         Expr::Binary(_, left, right) => row_wise(left) && row_wise(right),
         Expr::IfElse(test, yes, no) => row_wise(test) && row_wise(yes) && row_wise(no),
@@ -3160,7 +3188,7 @@ impl Typer<'_> {
             }
             Expr::IfElse(test, yes, no) => {
                 expect_logical(self.expr(test)?, "an `ifelse` test")?;
-                supertype(self.expr(yes)?, self.expr(no)?)
+                if_else_type(yes, self.expr(yes)?, no, self.expr(no)?)
             }
             Expr::Rank { arg, .. } => {
                 self.expr(arg)?;
@@ -3258,6 +3286,20 @@ fn date_arithmetic(op: BinaryOp, left: ColumnType, right: ColumnType) -> Result<
 
 /// The type both of two column types coerce to, in R's order logical < integer < double <
 /// character. A factor joined with anything else becomes character.
+/// The type of `ifelse(test, yes, no)`: the branches' common type, except that a bare `NA`
+/// branch takes a date or date-time from the other branch instead of turning it into text.
+fn if_else_type(yes: &Expr, yes_kind: ColumnType, no: &Expr, no_kind: ColumnType) -> ColumnType {
+    match (yes, no) {
+        (Expr::Na(_), _) if is_temporal(no_kind) => no_kind,
+        (_, Expr::Na(_)) if is_temporal(yes_kind) => yes_kind,
+        _ => supertype(yes_kind, no_kind),
+    }
+}
+
+fn is_temporal(kind: ColumnType) -> bool {
+    matches!(kind, ColumnType::Date | ColumnType::Datetime)
+}
+
 fn supertype(left: ColumnType, right: ColumnType) -> ColumnType {
     fn rank(kind: ColumnType) -> u8 {
         match kind {
@@ -3381,6 +3423,8 @@ impl Lowering<'_> {
                 TimeUnit::Microseconds,
                 TimeZone::opt_try_new(zone.clone())?,
             )),
+            // Polars broadcasts a scalar, not a column of one value, such as a single factor.
+            Expr::Values(values) if values.0.len() == 1 => lit(values.0.clone()).first(),
             Expr::Values(values) => lit(values.0.clone()),
             Expr::Call(function, args) => self.call(function, args)?,
             Expr::Na(kind) => lit(polars::prelude::Null {}).cast(dtype(*kind)),
@@ -3497,10 +3541,13 @@ impl Lowering<'_> {
                     ColumnType::Factor => value,
                     kind => convert(value, from, kind),
                 };
-                let (yes, no) = (
-                    branch(self.expr(yes)?, typer.expr(yes)?),
-                    branch(self.expr(no)?, typer.expr(no)?),
-                );
+                let lowered = |branch_expr: &Expr| -> Result<PolarsExpr> {
+                    Ok(match branch_expr {
+                        Expr::Na(_) if is_temporal(kind) => lit(NULL).cast(dtype(kind)),
+                        _ => branch(self.expr(branch_expr)?, typer.expr(branch_expr)?),
+                    })
+                };
+                let (yes, no) = (lowered(yes)?, lowered(no)?);
                 let test = self.expr(test)?;
                 // An `NA` test gives `NA`, where Polars would take the `no` branch.
                 when(test.clone().is_null())

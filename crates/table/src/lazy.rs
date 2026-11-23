@@ -17,17 +17,18 @@
 
 use {
     crate::{
-        Error, Result, Schema, Table,
+        Error, Result, Schema, Table, factor,
         io::{self, ReadOptions},
         ops::{self, Keep},
         query::{
-            self, Aggregate, BinaryOp, Expr, Join, On, Output, Query, ResultType, Roll, Rows,
-            Select, SortKey, UnaryOp, Warning, collapses, column_references, join_layout,
+            self, Aggregate, BinaryOp, Expr, Function, Join, On, Output, Query, ResultType, Roll,
+            Rows, Select, SortKey, UnaryOp, Warning, collapses, column_references, is_constant,
+            join_layout,
         },
     },
     polars::prelude::{
-        CrossJoin, IntoLazy, JoinArgs, JoinCoalesce, JoinType, MaintainOrderJoin, ParquetReader,
-        PlSmallStr, SerReader, col,
+        CrossJoin, DataType, IntoLazy, JoinArgs, JoinCoalesce, JoinType, MaintainOrderJoin,
+        ParquetReader, PlSmallStr, SerReader, TimeUnit, TimeZone, col,
     },
     rustc_hash::FxHashSet,
     std::{
@@ -255,6 +256,7 @@ pub fn is_aggregation(expr: &Expr) -> bool {
 /// Runs the plan, optimized.
 pub fn collect(plan: Plan) -> Result<Collected> {
     plan.schema()?;
+    check_vector_lengths(&plan)?;
     run(optimize(plan)?)
 }
 
@@ -263,7 +265,97 @@ pub fn collect(plan: Plan) -> Result<Collected> {
 #[doc(hidden)]
 pub fn collect_unoptimized(plan: Plan) -> Result<Collected> {
     plan.schema()?;
+    check_vector_lengths(&plan)?;
     run(plan)
+}
+
+/// Checks that each R vector an expression holds as per-row values has one value per row of the
+/// frame it meets, where the plan knows that frame's height: from a table through the verbs that
+/// keep the rows. Past a filter, a join or an aggregation the height is known only when the plan
+/// runs, and Polars checks it there.
+fn check_vector_lengths(plan: &Plan) -> Result<()> {
+    let mut height = match &plan.source {
+        Source::Table(table) => Some(table.height()),
+        Source::Csv { .. } | Source::Parquet { .. } => None,
+    };
+    let check = |what: &str, expr: &Expr, height: Option<usize>| -> Result<()> {
+        let Some(height) = height else {
+            return Ok(());
+        };
+        match mismatched_vector(expr, height) {
+            Some(found) => Err(Error::Query(format!(
+                "{what} has a vector of {found} values, but the frame has {height} rows; give one value or one per row"
+            ))),
+            None => Ok(()),
+        }
+    };
+    for step in &plan.steps {
+        match step {
+            Step::Filter(predicate) => {
+                check("the filter", predicate, height)?;
+                height = None;
+            }
+            Step::Select(columns) | Step::WithColumns(columns) => {
+                for (name, expr) in columns {
+                    check(&format!("column `{name}`"), expr, height)?;
+                }
+                if matches!(step, Step::Select(_))
+                    && columns.iter().any(|(_, expr)| contains_aggregate(expr))
+                {
+                    height = None;
+                }
+            }
+            Step::Sort(keys) => {
+                for key in keys {
+                    check("the sort key", &key.expr, height)?;
+                }
+            }
+            Step::Head(count) | Step::Tail(count) => {
+                height = height.map(|height| height.min(*count));
+            }
+            Step::Join { other, .. } => {
+                check_vector_lengths(other)?;
+                height = None;
+            }
+            Step::Aggregate { .. } | Step::Unique { .. } => height = None,
+        }
+    }
+    Ok(())
+}
+
+/// The length of a per-row vector in `expr` that is neither one value nor `height` values. The
+/// values of `is_in` are a set of any length.
+fn mismatched_vector(expr: &Expr, height: usize) -> Option<usize> {
+    match expr {
+        Expr::Values(values) => {
+            let found = values.0.len();
+            (found != 1 && found != height).then_some(found)
+        }
+        Expr::Call(function, args) => match (function, args.as_slice()) {
+            (Function::IsIn, [x, _]) => mismatched_vector(x, height),
+            _ => args.iter().find_map(|arg| mismatched_vector(arg, height)),
+        },
+        Expr::Unary(_, arg)
+        | Expr::Head(arg, _)
+        | Expr::Aggregate { arg, .. }
+        | Expr::Rank { arg, .. }
+        | Expr::Window(arg, _) => mismatched_vector(arg, height),
+        Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
+            mismatched_vector(left, height).or_else(|| mismatched_vector(right, height))
+        }
+        Expr::IfElse(test, yes, no) => mismatched_vector(test, height)
+            .or_else(|| mismatched_vector(yes, height))
+            .or_else(|| mismatched_vector(no, height)),
+        Expr::Column(_)
+        | Expr::Integer(_)
+        | Expr::Double(_)
+        | Expr::Logical(_)
+        | Expr::Character(_)
+        | Expr::Date(_)
+        | Expr::Datetime { .. }
+        | Expr::Na(_)
+        | Expr::Count => None,
+    }
 }
 
 /// The optimized plan as text, one verb per line, the source last.
@@ -458,7 +550,11 @@ fn contains_aggregate(expr: &Expr) -> bool {
         | Expr::Rank { .. }
         | Expr::Window(..)
         | Expr::Values(_) => true,
-        Expr::Call(_, args) => args.iter().any(contains_aggregate),
+        // The values of `is_in` are a set over every row unless they are given ones.
+        Expr::Call(function, args) => match (function, args.as_slice()) {
+            (Function::IsIn, [x, values]) => contains_aggregate(x) || !is_constant(values),
+            _ => args.iter().any(contains_aggregate),
+        },
         Expr::Unary(_, arg) => contains_aggregate(arg),
         Expr::Binary(_, left, right) => contains_aggregate(left) || contains_aggregate(right),
         Expr::IfElse(test, yes, no) => {
@@ -482,7 +578,12 @@ fn reads_order(expr: &Expr) -> bool {
         Expr::Unary(_, arg) | Expr::Aggregate { arg, .. } | Expr::Window(arg, _) => {
             reads_order(arg)
         }
-        Expr::Call(_, args) => args.iter().any(reads_order),
+        Expr::Call(function, args) => match (function, args.as_slice()) {
+            (Function::IsIn, [x, values]) => {
+                reads_order(x) || (!is_constant(values) && reads_order(values))
+            }
+            _ => args.iter().any(reads_order),
+        },
         Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
             reads_order(left) || reads_order(right)
         }
@@ -957,14 +1058,52 @@ fn join(
             // A missing key matches a missing key in every kind of join, as in R's `merge()`
             // and data.table, and as the engine's own kernel does for inner and left joins.
             args.nulls_equal = true;
+            let left_frame = left.into_frame();
+            let right_frame = right.into_frame();
+            let mut key_types = Vec::with_capacity(left_on.len());
+            for (left_key, right_key) in left_on.iter().zip(right_on) {
+                key_types.push((
+                    left_frame.column(left_key)?.dtype().clone(),
+                    right_frame.column(right_key)?.dtype().clone(),
+                ));
+            }
+            let mut left_plan = left_frame.lazy();
+            let mut right_plan = right_frame.lazy();
+            let mut restore = Vec::new();
+            for ((left_key, right_key), (left_type, right_type)) in
+                left_on.iter().zip(right_on).zip(key_types)
+            {
+                if left_type == right_type {
+                    continue;
+                }
+                // Keys meet in one type: a date-time in UTC, since its zone only changes how it
+                // prints, a number as a double, and factors with different levels as strings.
+                // A date-time key takes the left key's zone back, and a factor key becomes a
+                // factor of the joined labels.
+                let common = if left_type.is_temporal() {
+                    DataType::Datetime(TimeUnit::Microseconds, Some(TimeZone::UTC))
+                } else if left_type.is_primitive_numeric() {
+                    DataType::Float64
+                } else {
+                    DataType::String
+                };
+                left_plan =
+                    left_plan.with_column(factor::cast_expr(col(left_key.clone()), common.clone()));
+                right_plan =
+                    right_plan.with_column(factor::cast_expr(col(right_key.clone()), common));
+                if left_type.is_temporal() {
+                    restore.push(col(left_key.clone()).cast(left_type));
+                } else if factor::is_factor(&left_type) {
+                    restore.push(factor::factor_expr(col(left_key.clone())));
+                }
+            }
             let left_keys: Vec<_> = left_on.iter().map(|name| col(name.clone())).collect();
             let right_keys: Vec<_> = right_on.iter().map(|name| col(name.clone())).collect();
-            let frame = left
-                .into_frame()
-                .lazy()
-                .join(right.into_frame().lazy(), left_keys, right_keys, args)
-                .collect()?;
-            Table::new(frame)
+            let mut joined = left_plan.join(right_plan, left_keys, right_keys, args);
+            if !restore.is_empty() {
+                joined = joined.with_columns(restore);
+            }
+            Table::new(joined.collect()?)
         }
     }
 }

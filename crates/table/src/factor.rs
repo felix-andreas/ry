@@ -654,6 +654,19 @@ pub fn text_expr(expr: Expr) -> Expr {
     )
 }
 
+/// `expr` as a factor of its own distinct strings inside a lazy plan: [`from_strings`] applied to
+/// whatever column it evaluates to.
+pub fn factor_expr(expr: Expr) -> Expr {
+    expr.map(
+        |column| {
+            from_strings(column.as_materialized_series())
+                .map(IntoColumn::into_column)
+                .map_err(polars_error)
+        },
+        |_, field| Ok(field.clone()),
+    )
+}
+
 /// A column converted to `dtype`. A factor converts through its labels, and a column becomes a
 /// factor by looking its labels up among the target's levels, because Polars cannot cast an
 /// extension column.

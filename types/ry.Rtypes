@@ -48,7 +48,7 @@ DataFrame.join : fn(df: DataFrame, other: DataFrame, [on]: character, [how]: cha
 DataFrame.join_asof : fn(df: DataFrame, other: DataFrame, on: character, [by]: character | NULL, [strategy]: character, [suffix]: character) -> DataFrame
 DataFrame.lazy : fn(df: DataFrame) -> LazyFrame
 DataFrame.concat : fn(...: DataFrame | list[DataFrame] | logical[] | integer[] | double[] | character[] | factor | Date | POSIXct, [how]: character) -> DataFrame
-DataFrame.unique : fn(df: DataFrame, [subset]: character | NULL, [keep]: character) -> DataFrame
+DataFrame.unique : fn(df: DataFrame, [subset]: character[] | NULL, [keep]: character) -> DataFrame
 DataFrame.pivot : fn(df: DataFrame, on: character, index: character, values: character, [agg]: character | NULL) -> DataFrame
 GroupBy.agg : fn(group: GroupBy, ...: Expr) -> DataFrame
 LazyFrame.scan_csv : fn(path: character) -> LazyFrame
@@ -63,7 +63,7 @@ LazyFrame.tail : fn(lf: LazyFrame, [n]: integer | double) -> LazyFrame
 LazyFrame.join : fn(lf: LazyFrame, other: LazyFrame | DataFrame, [on]: character, [how]: character, [left_on]: character, [right_on]: character, [suffix]: character) -> LazyFrame
 LazyFrame.join_asof : fn(lf: LazyFrame, other: LazyFrame | DataFrame, on: character, [by]: character | NULL, [strategy]: character, [suffix]: character) -> LazyFrame
 LazyFrame.collect : fn(lf: LazyFrame) -> DataFrame
-LazyFrame.unique : fn(lf: LazyFrame, [subset]: character | NULL, [keep]: character) -> LazyFrame
+LazyFrame.unique : fn(lf: LazyFrame, [subset]: character[] | NULL, [keep]: character) -> LazyFrame
 LazyFrame.explain : fn(lf: LazyFrame) -> character
 LazyFrame.pivot : fn(lf: LazyFrame, on: character, index: character, values: character, [agg]: character | NULL) -> DataFrame
 LazyGroupBy.agg : fn(group: LazyGroupBy, ...: Expr) -> LazyFrame

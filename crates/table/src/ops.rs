@@ -233,15 +233,21 @@ pub fn unique_rows_keeping(table: &Table, by: &[&str], keep: Keep) -> Result<Tab
 }
 
 /// Whether each row repeats an earlier row's `by` values (every column when `by` is empty), as
-/// R's `duplicated()` marks a row: the first of each combination is `false`.
-pub fn duplicated_rows(table: &Table, by: &[&str]) -> Result<Vec<bool>> {
+/// R's `duplicated()` marks a row: the first of each combination is `false`, or the last one with
+/// `from_last`, as `fromLast = TRUE` marks it.
+pub fn duplicated_rows(table: &Table, by: &[&str], from_last: bool) -> Result<Vec<bool>> {
     let subset = subset(table, by)?;
+    let keep = if from_last {
+        UniqueKeepStrategy::Last
+    } else {
+        UniqueKeepStrategy::First
+    };
     let index = PlSmallStr::from_static("__ry_row");
     let first = table
         .frame()
         .select(subset.iter().cloned())?
         .with_row_index(index.clone(), None)?
-        .unique_stable(Some(&subset), UniqueKeepStrategy::First, None)?;
+        .unique_stable(Some(&subset), keep, None)?;
     let mut duplicated = vec![true; table.height()];
     for row in first.column(&index)?.idx()?.into_no_null_iter() {
         if let Some(slot) = duplicated.get_mut(row as usize) {
