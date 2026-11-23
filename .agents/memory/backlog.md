@@ -1713,8 +1713,10 @@ completion fix.
 
 Building the four release test binaries costs 143 s warm.
 
-The `fuzz` profile (`iterate` with debug assertions and overflow checks) runs `fuzz_sessions` at
-about 140 sessions a second against 14 in debug; `just gate` does not use it yet.
+The `fuzz` profile (`iterate` with debug assertions and overflow checks) runs `fuzz_sessions` about
+ten times as fast as debug. `just fuzz-deep` builds the analysis crates with it; `just gate` and
+`just battery` build in debug, and the runtime suites need `target/debug/ry`, so only the analysis
+crates can move.
 
 ### Coverage-guided fuzzing has no ratchet, so nothing it learns survives the run
 
