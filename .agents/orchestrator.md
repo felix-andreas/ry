@@ -53,7 +53,8 @@ No release unless the user asks (user). User 2026-11-23: sessions finish their c
 - session_0111kWqCXYKiR937Au74eL55 (Opus high, kernels): #698 merged (aa444fb; dependency-set suites, callr 264/8, renv runs, load-index eviction). IDLE; leftovers in backlog "the dependency set's package suites".
 - session_0111kWqEyHh2WBFnP93ZvPEM (Fable, JIT): #691 merged (53a849b6; app suite 1.02x). IDLE; compiled-to-compiled calls, stretches and the Op::At compiled step are in the backlog.
 - session_0111kWqD8G8GVR8fbHetepcc (Fable, calls): #694, #696 merged (string equality kernel, fast return for frames whose closure dies with them). IDLE; .Call (test user requests 4 and 1) and the ranked small-value operations are in the backlog.
-- session_0111kWqDs8aQ1MWFmKMxX9HQ (Fable, fuzz): #649, #693 merged (analysis oracles with canaries). Now a frame fuzz kind plus fixes for the column-partial-match and Expr %% Inf bugs, then a planted-bug audit of the differential kinds.
+- session_0111kWqDs8aQ1MWFmKMxX9HQ (Fable, fuzz): #649, #693, #700 merged (verbs' named arguments are columns, Expr %% exact, frame fuzz kind). IDLE.
+- Calls session reopened (user: finish current item): branch claude/small-value-calls for builtin-call targets 1 and 3. Checker asked to fix two semantics fixtures red on main.
 
 User-only items (never ask; note in the final report): a history rewrite dropping an old customer-project name, the Marketplace trusted-publishing policy, the Zed listing, a real Windows run, deleting remote branches `feat/runtime-stats` and `runtime-packages-round4`.
 
