@@ -3,26 +3,33 @@
 
 use {
     crate::{
-        AnalysisSettings, DataFiles, Db, DocumentKind, ItemKind, ProjectFiles, RootDatabase,
-        SourceFile, TreeStore, binds_only_own_name,
+        ANALYSIS_STACK_SIZE, AnalysisSettings, DataFiles, Db, DocumentKind, ItemKind, ProjectFiles,
+        RootDatabase, SourceFile, TreeStore, binds_only_own_name,
         diagnostics::{TypeRenderer, file_diagnostics, strict_diagnostics},
         item_check, item_naming, item_syntax, item_tree,
         lints::{LintConfig, LintLevel, NameStyle, lint_file},
         naming::BindingKind,
-        stubs::install_shipped_stubs,
+        stubs::{install_shipped_stubs, shipped_stub_sources, stubs},
         test_document_kind,
     },
+    rustc_hash::FxHashSet,
     salsa::{Setter as _, plumbing::AsId as _},
     std::{
         cell::RefCell,
-        collections::BTreeMap,
+        collections::{BTreeMap, BTreeSet},
         mem,
+        ops::Bound,
         panic::{self, AssertUnwindSafe},
-        sync::{Arc, Mutex},
+        slice,
+        sync::{Arc, LazyLock, Mutex},
+        thread,
     },
-    syntax::testing::{
-        Entropy, FAILURES_PER_RUN, SplitMix64, fuzz_seeds, generate_program, generate_project,
-        replay_command, small_edit, split_files,
+    syntax::{
+        SyntaxKind, SyntaxToken,
+        testing::{
+            Entropy, FAILURES_PER_RUN, SplitMix64, fuzz_seeds, generate_program, generate_project,
+            replay_command, small_edit, split_files,
+        },
     },
 };
 
@@ -170,8 +177,9 @@ const WORKBENCH_SESSIONS: u64 = 256;
 
 /// Walks the states and then returns to the first. At every step the incremental database must
 /// render each file as the reference does, and the return must restore the first rendering.
-/// Every sixty-fourth session also compares its first state with a database that has no history
-/// at all, which is the determinism check across interning orders.
+/// Every fourth session also renders each state on several threads at once, which must equal
+/// the sequential rendering, and every sixty-fourth compares its first state with a database
+/// that has no history at all, which is the determinism check across interning orders.
 pub fn check_session(workbench: &mut Workbench, states: &[ProjectState]) {
     let mut first: Option<Vec<String>> = None;
     // A session of one state has nothing to edit back from.
@@ -186,6 +194,19 @@ pub fn check_session(workbench: &mut Workbench, states: &[ProjectState]) {
             incremental.join("----\n"),
             reference.join("----\n"),
         );
+        let parallel = match workbench.sessions % 4 {
+            0 => render_in_parallel(&mut workbench.reference, state),
+            _ => Vec::new(),
+        };
+        for (worker, parallel) in parallel.into_iter().enumerate() {
+            assert!(
+                parallel == reference,
+                "step {step}: a parallel check diverges from a sequential one (worker {worker} of {PARALLEL_WORKERS})\n{}\n---- parallel:\n{}\n---- sequential:\n{}",
+                describe_session(states),
+                parallel.join("----\n"),
+                reference.join("----\n"),
+            );
+        }
         match &first {
             None => {
                 if workbench.sessions % 64 == 0 {
@@ -268,6 +289,61 @@ fn render_afresh(db: &mut RootDatabase, state: &ProjectState) -> Vec<String> {
             render_semantics(db, *file)
         })
         .collect()
+}
+
+/// How many threads [`render_in_parallel`] races: enough that two of them meet on most items.
+const PARALLEL_WORKERS: usize = 3;
+
+/// Renders `state` from new inputs on [`PARALLEL_WORKERS`] threads at once, one rendering of
+/// every file per thread, as `ry check` and the server fan a check out over database handles.
+/// Each thread first checks every item in its own rotated order, so the threads claim items,
+/// intern types and settle fixpoints in orders a sequential check never takes, and each then
+/// renders the files starting from a different one. Every rendering must equal the sequential
+/// one: what a check finds may not depend on which thread got to an item first.
+fn render_in_parallel(db: &mut RootDatabase, state: &ProjectState) -> Vec<Vec<String>> {
+    apply_settings(db, state);
+    let files: Vec<SourceFile> = state
+        .files
+        .iter()
+        .map(|(_, text, kind)| SourceFile::new(db, text.clone(), *kind))
+        .collect();
+    ProjectFiles::get(db).set_files(db).to(files.clone());
+    let files = &files;
+    thread::scope(|scope| {
+        let handles: Vec<_> = (0..PARALLEL_WORKERS)
+            .map(|worker| {
+                let db = db.clone();
+                thread::Builder::new()
+                    .stack_size(ANALYSIS_STACK_SIZE)
+                    .spawn_scoped(scope, move || {
+                        let count = files.len();
+                        for offset in 0..count {
+                            let file = files[(worker + offset) % count];
+                            let items = item_tree(&db, file);
+                            for index in 0..items.len() {
+                                let at = (worker * 7 + index) % items.len();
+                                item_check(&db, items[at]);
+                            }
+                        }
+                        let mut rendered = vec![String::new(); count];
+                        for offset in 0..count {
+                            let index = (count - offset + worker) % count;
+                            rendered[index] = render_semantics(&db, files[index]);
+                        }
+                        rendered
+                    })
+                    .expect("a checking thread must spawn")
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|payload| panic::resume_unwind(payload))
+            })
+            .collect()
+    })
 }
 
 fn apply_settings(db: &mut RootDatabase, state: &ProjectState) {
@@ -367,6 +443,347 @@ pub fn generate_session(rng: &mut dyn Entropy, pool: &[String]) -> Vec<ProjectSt
         states.push(state.clone());
     }
     states
+}
+
+/// Which metamorphic edits [`check_metamorphic_relations`] found a place for, so a battery can
+/// tell an oracle that checks from one whose preconditions never hold.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MetamorphicCoverage {
+    pub leading_trivia: bool,
+    pub rename: bool,
+}
+
+/// Checks two edits that change no meaning against the rendering of `state` on the
+/// workbench's command database, each where `rng` places it.
+///
+/// - A blank line or a comment line inserted before a top-level expression moves the findings
+///   after it by its length and changes nothing else.
+/// - Renaming every occurrence of an identifier the project alone spells, to a fresh name of
+///   the same length and character classes, changes nothing but that name in the findings.
+pub fn check_metamorphic_relations(
+    workbench: &mut Workbench,
+    state: &ProjectState,
+    rng: &mut dyn Entropy,
+) -> MetamorphicCoverage {
+    let db = &mut workbench.reference;
+    let original = render_afresh(db, state);
+    MetamorphicCoverage {
+        leading_trivia: check_leading_trivia(db, state, &original, rng),
+        rename: check_consistent_rename(db, state, &original, rng),
+    }
+}
+
+fn check_leading_trivia(
+    db: &mut RootDatabase,
+    state: &ProjectState,
+    original: &[String],
+    rng: &mut dyn Entropy,
+) -> bool {
+    if state.files.is_empty() {
+        return false;
+    }
+    let target = rng.below(state.files.len());
+    let text = &state.files[target].1;
+    // A line under a comment is left alone: `#:` and `#'` comments belong to the expression
+    // below them, and a line between would detach them.
+    let starts: Vec<usize> = syntax::parse(text)
+        .syntax_node()
+        .children()
+        .map(|child| u32::from(child.text_range().start()) as usize)
+        .filter(|&start| {
+            let before = &text[..start];
+            let previous = before.strip_suffix('\n').unwrap_or(before);
+            let previous = previous.rsplit('\n').next().unwrap_or(previous);
+            (start == 0 || before.ends_with('\n')) && !previous.trim_start().starts_with('#')
+        })
+        .collect();
+    if starts.is_empty() {
+        return false;
+    }
+    let offset = starts[rng.below(starts.len())];
+    let inserted = ["\n", "# note\n"][rng.below(2)];
+    let mut edited = state.clone();
+    edited.files[target].1.insert_str(offset, inserted);
+    let expected: Vec<String> = original
+        .iter()
+        .enumerate()
+        .map(|(index, rendering)| match index == target {
+            true => shift_ranges(rendering, offset, inserted.len()),
+            false => rendering.clone(),
+        })
+        .collect();
+    let actual = render_afresh(db, &edited);
+    assert!(
+        actual == expected,
+        "inserting {inserted:?} at byte {offset} of file {target} changes more than the positions after it\n{}\n---- expected:\n{}\n---- after the insertion:\n{}",
+        describe_session(slice::from_ref(state)),
+        expected.join("----\n"),
+        actual.join("----\n"),
+    );
+    true
+}
+
+/// Moves every finding of a [`render_semantics`] rendering that lies at or after `offset` by
+/// `length` bytes; a finding that spans `offset` grows by it.
+fn shift_ranges(rendering: &str, offset: usize, length: usize) -> String {
+    let mut shifted = String::with_capacity(rendering.len());
+    for line in rendering.split_inclusive('\n') {
+        let finding = line.split_once(' ').and_then(|(range, rest)| {
+            let (start, end) = range.split_once("..")?;
+            let start: usize = start.parse().ok()?;
+            let end: usize = end.parse().ok()?;
+            rest.starts_with('[').then_some((start, end, rest))
+        });
+        let Some((start, end, rest)) = finding else {
+            shifted.push_str(line);
+            continue;
+        };
+        let (start, end) = match start >= offset {
+            true => (start + length, end + length),
+            false if end > offset => (start, end + length),
+            false => (start, end),
+        };
+        shifted.push_str(&format!("{start}..{end} {rest}"));
+    }
+    shifted
+}
+
+/// Whether an identifier names something outside the project, which a rename of the
+/// project's own names must leave alone: a package's export, a word of the annotation language
+/// (`fn`, `trust`, a type), a name R6 binds by its spelling, or a member or argument name a
+/// stub declares (`add` in `on.exit(add = TRUE)`, a field of a stub's record). The parameters
+/// and fields of a type the project writes are its own.
+fn names_foreign(token: &SyntaxToken) -> bool {
+    const SPELLING_BOUND: [&str; 6] =
+        ["self", "private", "super", "public", "active", "initialize"];
+    let parent = token
+        .parent_ancestors()
+        .map(|ancestor| ancestor.kind())
+        .find(|kind| *kind != SyntaxKind::NAME);
+    let foreign_syntax = parent.is_some_and(|parent| {
+        parent == SyntaxKind::NAMESPACE_EXPR
+            || ((SyntaxKind::ANNOTATION..=SyntaxKind::PURE_MARKER).contains(&parent)
+                && !matches!(parent, SyntaxKind::TYPE_PARAMETER | SyntaxKind::TYPE_FIELD))
+    });
+    let trivia = |kind: SyntaxKind| {
+        matches!(
+            kind,
+            SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
+        )
+    };
+    let mut previous = token.prev_token();
+    while let Some(candidate) = previous
+        .as_ref()
+        .filter(|candidate| trivia(candidate.kind()))
+    {
+        previous = candidate.prev_token();
+    }
+    let mut next = token.next_token();
+    while let Some(candidate) = next.as_ref().filter(|candidate| trivia(candidate.kind())) {
+        next = candidate.next_token();
+    }
+    let member = previous
+        .is_some_and(|previous| matches!(previous.kind(), SyntaxKind::DOLLAR | SyntaxKind::AT))
+        || next.is_some_and(|next| next.kind() == SyntaxKind::EQ);
+    foreign_syntax
+        || SPELLING_BOUND.contains(&token.text())
+        || (member && stub_words().contains(token.text()))
+}
+
+/// Every word the shipped stubs spell, which includes each parameter and field name they
+/// declare.
+fn stub_words() -> &'static FxHashSet<String> {
+    static WORDS: LazyLock<FxHashSet<String>> = LazyLock::new(|| {
+        let is_word = |character: char| {
+            character.is_ascii_alphanumeric() || character == '.' || character == '_'
+        };
+        shipped_stub_sources()
+            .iter()
+            .flat_map(|(_, text)| text.split(|character: char| !is_word(character)))
+            .filter(|word| !word.is_empty())
+            .map(str::to_owned)
+            .collect()
+    });
+    &WORDS
+}
+
+fn check_consistent_rename(
+    db: &mut RootDatabase,
+    state: &ProjectState,
+    original: &[String],
+    rng: &mut dyn Entropy,
+) -> bool {
+    let files: Vec<Vec<(SyntaxKind, String, bool)>> = state
+        .files
+        .iter()
+        .map(|(_, text, _)| {
+            syntax::parse(text)
+                .syntax_node()
+                .descendants_with_tokens()
+                .filter_map(|element| element.into_token())
+                .map(|token| {
+                    let foreign = token.kind() == SyntaxKind::IDENT && names_foreign(&token);
+                    (token.kind(), token.text().to_owned(), foreign)
+                })
+                .collect()
+        })
+        .collect();
+    let tokens: Vec<&(SyntaxKind, String, bool)> = files.iter().flatten().collect();
+    let identifiers: BTreeSet<&str> = tokens
+        .iter()
+        .filter(|(kind, _, _)| *kind == SyntaxKind::IDENT)
+        .map(|(_, text, _)| text.as_str())
+        .collect();
+    let candidates: Vec<&str> = identifiers
+        .iter()
+        .copied()
+        .filter(|word| renameable(db, word, &tokens))
+        .collect();
+    if candidates.is_empty() {
+        return false;
+    }
+    let old = candidates[rng.below(candidates.len())];
+    let Some(new) = fresh_name(db, old, &tokens, original, rng) else {
+        return false;
+    };
+    let mut edited = state.clone();
+    for ((_, text, _), tokens) in edited.files.iter_mut().zip(&files) {
+        *text = tokens
+            .iter()
+            .map(
+                |(kind, text, _)| match *kind == SyntaxKind::IDENT && text == old {
+                    true => new.as_str(),
+                    false => text.as_str(),
+                },
+            )
+            .collect();
+    }
+    let renamed = render_afresh(db, &edited);
+    // A near-miss suggestion picks by spelling, so a rename may change which name it offers.
+    let suggests = |renderings: &[String], word: &str| {
+        renderings
+            .iter()
+            .flat_map(|rendering| rendering.lines())
+            .any(|line| line.contains("Did you mean") && line.contains(word))
+    };
+    if suggests(original, old) || suggests(&renamed, &new) {
+        return false;
+    }
+    let sorted_lines = |rendering: &str| {
+        let mut lines: Vec<&str> = rendering.lines().collect();
+        lines.sort_unstable();
+        lines.join("\n")
+    };
+    let expected: Vec<String> = original.iter().map(|text| sorted_lines(text)).collect();
+    let actual: Vec<String> = renamed
+        .iter()
+        .map(|text| sorted_lines(&text.replace(new.as_str(), old)))
+        .collect();
+    assert!(
+        actual == expected,
+        "renaming `{old}` to `{new}` throughout changes more than the name\n{}\n---- before, sorted:\n{}\n---- after, renamed back and sorted:\n{}",
+        describe_session(slice::from_ref(state)),
+        expected.join("\n----\n"),
+        actual.join("\n----\n"),
+    );
+    true
+}
+
+/// Whether every occurrence of `word` is an identifier token of the project's own: no string,
+/// comment or other token contains it, no identifier is a prefix R's partial matching could
+/// complete to it, and the shipped stubs do not declare it.
+fn renameable(db: &RootDatabase, word: &str, tokens: &[&(SyntaxKind, String, bool)]) -> bool {
+    let mut characters = word.chars();
+    let snake = characters
+        .next()
+        .is_some_and(|first| first.is_ascii_lowercase())
+        && characters.all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+        });
+    snake
+        && !declared_outside(db, word)
+        && tokens.iter().all(|(kind, text, foreign)| {
+            match *kind == SyntaxKind::IDENT && text == word {
+                true => !foreign,
+                false => {
+                    !text.contains(word)
+                        && !(*kind == SyntaxKind::IDENT && word.starts_with(text.as_str()))
+                }
+            }
+        })
+}
+
+/// A name of `old`'s length and character classes that no token, stub or rendering contains,
+/// that no identifier of the project is a prefix of, and that sorts against every word of the
+/// project and its rendering as `old` does, or `None` when a few draws find none. Records
+/// list their fields by name and symbols order by spelling, so a name that moved past another
+/// would reorder what a rendering prints.
+fn fresh_name(
+    db: &RootDatabase,
+    old: &str,
+    tokens: &[&(SyntaxKind, String, bool)],
+    original: &[String],
+    rng: &mut dyn Entropy,
+) -> Option<String> {
+    let is_word =
+        |character: char| character.is_ascii_alphanumeric() || character == '.' || character == '_';
+    let words: BTreeSet<&str> = tokens
+        .iter()
+        .map(|(_, text, _)| text.as_str())
+        .chain(original.iter().map(String::as_str))
+        .flat_map(|text| text.split(|character: char| !is_word(character)))
+        .filter(|word| !word.is_empty())
+        .collect();
+    let below = words.range::<&str, _>(..old).next_back().copied();
+    let above = words
+        .range::<&str, _>((Bound::Excluded(old), Bound::Unbounded))
+        .next()
+        .copied();
+    for _ in 0..32 {
+        let kept = rng.below(old.len());
+        let new: String = old
+            .char_indices()
+            .map(|(index, character)| match (index < kept, character) {
+                (true, _) => character,
+                (false, 'a'..='z') => (b'a' + rng.below(26) as u8) as char,
+                (false, '0'..='9') => (b'0' + rng.below(10) as u8) as char,
+                (false, other) => other,
+            })
+            .collect();
+        let in_place = below.is_none_or(|below| below < new.as_str())
+            && above.is_none_or(|above| new.as_str() < above);
+        let lexes_as_name = syntax::parse(&new)
+            .syntax_node()
+            .first_token()
+            .is_some_and(|token| token.kind() == SyntaxKind::IDENT && token.text() == new);
+        let unused = new != old
+            && in_place
+            && lexes_as_name
+            && !declared_outside(db, &new)
+            && !stub_words().contains(new.as_str())
+            && original
+                .iter()
+                .all(|rendering| !rendering.contains(new.as_str()))
+            && tokens.iter().all(|(kind, text, _)| {
+                !text.contains(new.as_str())
+                    && !(*kind == SyntaxKind::IDENT && new.starts_with(text.as_str()))
+            });
+        if unused {
+            return Some(new);
+        }
+    }
+    None
+}
+
+/// Whether the shipped stubs know `word` as a name or a namespace, in the library the
+/// project's attached packages select: such a name means something outside the project.
+fn declared_outside(db: &RootDatabase, word: &str) -> bool {
+    stubs(db).is_some_and(|library| {
+        library.declarations.contains_key(word)
+            || library.type_declarations.contains_key(word)
+            || library.known_exports.contains(word)
+            || library.knows_namespace(word)
+    })
 }
 
 /// A fixture case as a project state: a `#~~~~ <path>` case as its files, with the kinds their

@@ -8,7 +8,8 @@ use {
         DocumentKind,
         metadata::resolve_namespace_conditionals,
         testing::{
-            ProjectState, check_semantics_input, fixture_state, for_each_session, generate_session,
+            ProjectState, Workbench, check_metamorphic_relations, check_semantics_input,
+            fixture_state, for_each_session, generate_session,
         },
     },
     std::sync::LazyLock,
@@ -303,6 +304,35 @@ fn program_corpus_holds_invariants() {
         edited.files[target].1 = small_edit(&mut rng, &edited.files[target].1, donor);
         vec![state, edited]
     });
+}
+
+/// The default budget of [`edits_that_change_no_meaning_only_move_findings`].
+const METAMORPHIC_CASES: usize = 400;
+
+/// The metamorphic relations over the first state of a generated session. A run of the default
+/// budget must find a place for each edit in most cases, or its preconditions have drifted so
+/// far that the oracle checks nothing.
+#[test]
+fn edits_that_change_no_meaning_only_move_findings() {
+    let mut workbench = Workbench::default();
+    let mut leading_trivia = 0;
+    let mut renames = 0;
+    let mut cases = 0;
+    for_each_seed(METAMORPHIC_CASES, |seed| {
+        let mut rng = SplitMix64(0x3E7A_3021 ^ seed);
+        let states = generate_session(&mut rng, &POOL);
+        let coverage = check_metamorphic_relations(&mut workbench, &states[0], &mut rng);
+        cases += 1;
+        leading_trivia += usize::from(coverage.leading_trivia);
+        renames += usize::from(coverage.rename);
+    });
+    eprintln!("{cases} cases: {leading_trivia} with a line inserted, {renames} renamed");
+    if cases >= METAMORPHIC_CASES {
+        assert!(
+            leading_trivia * 2 > cases && renames * 4 > cases,
+            "{cases} cases: only {leading_trivia} with a line inserted and {renames} renamed"
+        );
+    }
 }
 
 #[test]
