@@ -49,8 +49,11 @@ pub struct StubLibrary<'db> {
     /// Declaration-level: a later source overriding a name's type does not un-export it from the
     /// namespace that declared it.
     pub exports_by_namespace: SymbolMap<SymbolSet>,
-    /// The winning declaration site per name; for an overload set, the first candidate.
+    /// The winning declaration site per value name; for an overload set, the first candidate.
     pub declarations: SymbolMap<StubDeclaration>,
+    /// The winning declaration site per type name. A type and a value may share a name
+    /// (`factor`), and each navigates to its own declaration.
+    pub type_declarations: SymbolMap<StubDeclaration>,
     /// Manifest-listed exports of the active namespaces; these always resolve, untyped ones as
     /// `Unknown`.
     pub known_exports: SymbolSet,
@@ -198,6 +201,10 @@ impl Extend<Symbol> for SymbolSet {
 
 pub fn stub_declaration<'db>(db: &'db dyn Db, name: &str) -> Option<&'db StubDeclaration> {
     stubs(db)?.declarations.get(name)
+}
+
+pub fn stub_type_declaration<'db>(db: &'db dyn Db, name: &str) -> Option<&'db StubDeclaration> {
+    stubs(db)?.type_declarations.get(name)
 }
 
 /// `None` when no corpus is installed, so callers skip validation.
@@ -428,7 +435,7 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
                 library.nominals.insert(name);
                 namespace_exports.insert(name);
                 if let Some(range) = name_range(&name) {
-                    library.declarations.insert(
+                    library.type_declarations.insert(
                         name,
                         StubDeclaration {
                             source_index,
@@ -446,7 +453,7 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
                     library.nominals.insert(name);
                     namespace_exports.insert(name);
                     if let Some(range) = name_range(&name) {
-                        library.declarations.insert(
+                        library.type_declarations.insert(
                             name,
                             StubDeclaration {
                                 source_index,

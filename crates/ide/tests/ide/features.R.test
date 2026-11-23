@@ -803,7 +803,7 @@ hint @88definition =
 setGeneric("ar$0ea", function(shape) standardGeneric("area"))
 area(1)
 #++++
-hover 11..17: character
+hover 11..17: area: Unknown
 definition 12..16
 references: 12..16*, 52..56, 60..64
 rename: 3 edit(s)

@@ -1574,31 +1574,24 @@ well formed?" cannot see a wrong answer. These are the concrete follow-ups.
 ### Assert invariants in the code, not only properties in the harness
 
 A `debug_assert` at a seam turns every input of every suite, fixtures included, into a test of that
-invariant, at no release cost. The export-edge assertion (a closed scheme carries no inference
-variable) landed with the fix. Candidates for the next ones:
+invariant, at no release cost (`testing.md`, "The editor features", lists the ones in place). The
+next candidate: every expression type an item records resolves in the table that produced it, which
+is the escaped inference variable seen from the other end.
 
-- Every expression type an item records resolves in the table that produced it. This is the same
-  defect seen from the other end.
-- An item's declared-name range lies inside the item and spells the item's name. The fuzzer needed
-  1,200 iterations to stumble on a jump that landed on the wrong token. This assertion would catch it
-  on the first fixture that uses `->`.
-- HIR expression ranges and naming binding ranges lie inside their item's range.
-- The occurrences returned by references and rename are all spelled alike. The IDE battery checks
-  this locally. Promote it so that every caller is covered.
+### Gaps the editor relations left open
 
-### Add more relational oracles
-
-The IDE battery asks what must hold between answers (`testing.md`, "The editor features"). Two
-relations nobody asks yet, each one extra call with no expected output:
-
-- hover at the definition target names the same symbol as hover at the cursor;
-- completion at a name's first character offers that name;
-- the link a hover carries is one of the targets "go to definition" gives. `hover_definition`
-  resolves a name by its own copy of `expression_target`'s rules, and a default pass of the battery
-  with this check finds about ten disagreements: `x[[1]] <- 3` with the cursor on `x` links the hover
-  to the statement while the definition is empty; the others, in generated projects of several
-  files, are not reduced. The end shape is one resolution (`target_at`) that the hover's link
-  reads, with the check in the battery.
+- A member after `$` or `@` whose receiver has no known type is exempt from "completion offers what
+  resolves": `Gen <- setRefClass("Gen"); Gen$new` links the hover of `new` to the `setRefClass`
+  stub while completion offers only names spelled after a `$` elsewhere. The end shape types the
+  generator, so both read its members.
+- A stub's namespace exports hold its `@type` names beside its values, so `base::condition`
+  validates as an export although `condition` is only a class.
+- An unresolved name's definition offers the default packages although their export manifests
+  rule the name out: in `if (condition) 1`, hover and go to definition list `condition` as
+  installed in base, stats, utils, methods, graphics, grDevices and datasets.
+- A project `stubs/*.Rtypes` that declares `@type X` for a namespace without an `.exports` manifest
+  does not make a bare `X` resolve as a value (`unresolved`), since `@type` names stay out of the
+  value declarations.
 
 ### Run the pinned CRAN corpus as a test, one project per package
 

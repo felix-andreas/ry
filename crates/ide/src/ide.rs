@@ -17,13 +17,13 @@ use {
         },
         infer::apply_definition,
         inline_annotations_enabled, item_annotation_syntax, item_annotations, item_check, item_hir,
-        item_name_range, item_naming, item_node, item_tree,
+        item_name_range, item_naming, item_node, item_spans, item_tree,
         metadata::{PackageMetadata, is_own_package},
         naming::{BindingId, BindingInfo, BindingKind, CopySource, ItemNaming, dot_dot_variable},
         package_definitions, project_global_names, project_type_definitions, reaching_writer,
         stubs::{
             NATIVE_NAMESPACES, StubSources, declaring_namespace, exporting_namespaces,
-            outside_prelude, stub_declaration, stubs,
+            outside_prelude, stub_declaration, stub_type_declaration, stubs,
         },
         types::{
             Atomic, Binder, Constraint, FunctionType, Name, Parameter, RecordField, Ty, TyKind,
@@ -48,6 +48,7 @@ use {
         },
         is_inline_annotation, is_syntactic_name,
         kind::KEYWORDS,
+        raw_string_content,
     },
 };
 
@@ -275,7 +276,7 @@ fn typed_hover(
                     scheme.body = without_impossible_vectors(db, scheme.body);
                     (
                         hover_lines(db, name, &scheme, &[]),
-                        hover_definition(db, files, position.item, innermost, name),
+                        hover_definition(db, files, position.item, innermost),
                     )
                 }
                 None => (vec![name.to_string()], None),
@@ -304,7 +305,7 @@ fn typed_hover(
                 scheme.body = without_impossible_vectors(db, scheme.body);
                 (
                     hover_lines(db, name, &scheme, &[]),
-                    stub_hover_definition(db, name),
+                    hover_definition(db, files, position.item, innermost),
                 )
             }
             None => (vec![name.to_string()], None),
@@ -323,16 +324,40 @@ fn typed_hover(
         .find_map(|id| check.editor().expression_types.get(&id).map(|ty| (id, *ty)))?;
     let ty = without_impossible_vectors(db, ty);
 
-    let (lines, definition) = match &hir.kind(expression) {
-        ExpressionKind::NameRef(name) => {
+    let naming = item_naming(db, position.item).as_ref();
+    // The string of `setGeneric("show", ...)` is the token that declares the item.
+    let names_item = matches!(
+        hir.kind(expression),
+        ExpressionKind::Literal(LiteralKind::String(_))
+    ) && item_name_range(db, position.item)
+        .is_some_and(|range| (hir.range(expression) + position.item_offset).contains_range(range));
+    let variable = match hir.kind(expression) {
+        ExpressionKind::NameRef(name) => Some(name.as_str()),
+        // `"x" <- 1` binds `x`, so the string is the variable's name there.
+        ExpressionKind::Literal(LiteralKind::String(text))
+            if names_item
+                || naming.is_some_and(|naming| {
+                    naming.resolutions.contains_key(&expression)
+                        || naming.non_locals.contains_key(&expression)
+                }) =>
+        {
+            Some(&hir[*text])
+        }
+        _ => None,
+    };
+    let (lines, definition) = match (variable, &hir.kind(expression)) {
+        (Some(name), _) => {
             // The item's own top-level name renders the exported scheme, not the initializer's
             // type: `#: @new` brands the scheme even when the initializer is `Unknown`. Only the
             // name the item assigns does: in `m$amount <- 5` the scheme is the value's.
-            let naming = item_naming(db, position.item).as_ref();
             let defines_item = hir.root.is_some_and(|root| {
                 matches!(hir.kind(root), ExpressionKind::Assign { target, .. } if *target == expression)
             });
-            let exported = naming.filter(|_| defines_item).and_then(|naming| {
+            let exported = naming.and_then(|naming| {
+                if names_item {
+                    return Some(global_scheme(db, position.item));
+                }
+                defines_item.then_some(())?;
                 let binding = naming.resolutions.get(&expression)?;
                 (naming.bindings.get(binding)?.kind == BindingKind::TopLevel).then_some(())?;
                 check.scheme.clone()
@@ -353,23 +378,18 @@ fn typed_hover(
             scheme.body = without_impossible_vectors(db, scheme.body);
             (
                 hover_lines(db, name, &scheme, outer),
-                hover_definition(db, files, position.item, expression, name),
+                hover_definition(db, files, position.item, expression),
             )
         }
-        ExpressionKind::Namespace {
-            package,
-            name: Some(name),
-            ..
-        } => {
-            // A name the package's stub declares is documented there, as a bare name is.
-            let declared = package
-                .as_ref()
-                .is_some_and(|package| declaring_namespace(db, name) == Some(package.as_str()));
-            (
-                hover_lines(db, name, &TypeScheme::monomorphic(ty), &[]),
-                declared.then(|| stub_hover_definition(db, name)).flatten(),
-            )
-        }
+        (
+            None,
+            ExpressionKind::Namespace {
+                name: Some(name), ..
+            },
+        ) => (
+            hover_lines(db, name, &TypeScheme::monomorphic(ty), &[]),
+            hover_definition(db, files, position.item, expression),
+        ),
         _ => (vec![TypeRenderer::default().render(db, ty)], None),
     };
 
@@ -452,14 +472,20 @@ fn member_at<'db>(
                     else {
                         return None;
                     };
-                    let field = function
-                        .named
-                        .iter()
-                        .find(|field| field.name.text(db) == parameter.name.as_str())?;
+                    let ty = match parameter.name.as_str() {
+                        "..." => function.variadic.as_ref()?.element,
+                        name => {
+                            function
+                                .named
+                                .iter()
+                                .find(|field| field.name.text(db) == name)?
+                                .ty
+                        }
+                    };
                     return Some(Member {
                         range: parameter.range,
                         label: Some(parameter.name.to_string()),
-                        ty: field.ty,
+                        ty,
                     });
                 }
             }
@@ -690,64 +716,36 @@ fn renderer_within<'db>(db: &'db dyn Db, outer: &[Binder<'db>], ty: Ty<'db>) -> 
     renderer
 }
 
+/// What a hover says about where the name at `expression` is defined, which is where "go to
+/// definition" leads from it. A name only an installed package defines has no link here: `hover`
+/// attaches that package's help page.
 fn hover_definition<'db>(
     db: &'db dyn Db,
     files: ProjectFiles,
     item: Item<'db>,
     expression: ExprId,
-    name: &str,
 ) -> Option<HoverDefinition> {
     let naming = item_naming(db, item).as_ref()?;
-    let callee_target = item_check(db, item)
-        .and_then(|check| check.editor().callee_targets.get(&expression).copied());
-    let binding = match callee_target {
-        Some(CalleeTarget::Slot(binding)) => Some(binding),
-        // The checker's global scope holds the library's functions too.
-        Some(CalleeTarget::Project) => {
-            return global_hover_definition(db, files, name, None)
-                .or_else(|| stub_hover_definition(db, name));
-        }
-        Some(CalleeTarget::Library) => return stub_hover_definition(db, name),
-        None => naming.resolutions.get(&expression).copied(),
+    let target = expression_target(db, files, item, naming, expression)?;
+    let target = through_copies(db, files, target)?;
+    let local = matches!(target, Target::Slot { .. });
+    if let Target::StubGlobal(name) = &target {
+        return stub_hover_definition(db, name);
+    }
+    if !matches!(target, Target::Slot { .. } | Target::Global(_)) {
+        return None;
+    }
+    let DefinitionTarget::Project(target) = single_definition(db, files, target)? else {
+        return None;
     };
-    if let Some(binding) = binding {
-        let binding = match copy_origin(naming, binding) {
-            CopySource::Slot(origin) => origin,
-            CopySource::NonLocal(source) => {
-                return global_hover_definition(db, files, &source, None)
-                    .or_else(|| bare_stub_hover_definition(db, &source));
-            }
-        };
-        let info = naming.bindings.get(&binding)?;
-        if info.kind == BindingKind::TopLevel {
-            return global_hover_definition(db, files, &info.name, Some(item));
-        }
-        let item_offset = item_node(db, item)?.text_range().start();
-        return Some(HoverDefinition::Local {
-            target: NavigationTarget {
-                file: *item.file(db),
-                range: info.range + item_offset,
-            },
+    Some(if local {
+        HoverDefinition::Local {
+            target,
             maybe_undefined: naming.maybe_undefined.contains(&expression),
-        });
-    }
-    if !naming.non_locals.contains_key(&expression) {
-        return None;
-    }
-    let hir = item_hir(db, item).as_ref()?;
-    if frame_column_reads(db, item, hir, naming).contains(&hir.range(expression)) {
-        return None;
-    }
-    global_hover_definition(db, files, name, None).or_else(|| bare_stub_hover_definition(db, name))
-}
-
-/// A bare name reaches the standard library only through the prelude, so with the prelude off
-/// it has no stub declaration to show, matching the checker's unresolved-name report.
-fn bare_stub_hover_definition(db: &dyn Db, name: &str) -> Option<HoverDefinition> {
-    if hidden_by_prelude(db, name) {
-        return None;
-    }
-    stub_hover_definition(db, name)
+        }
+    } else {
+        HoverDefinition::Global { target }
+    })
 }
 
 fn hidden_by_prelude(db: &dyn Db, name: &str) -> bool {
@@ -761,16 +759,6 @@ fn stub_hover_definition(db: &dyn Db, name: &str) -> Option<HoverDefinition> {
         declaration: stub_target(db, name),
         documentation: stubs(db)?.documentation.get(name).cloned(),
     })
-}
-
-fn global_hover_definition(
-    db: &dyn Db,
-    files: ProjectFiles,
-    name: &str,
-    own_item: Option<Item<'_>>,
-) -> Option<HoverDefinition> {
-    let declaring = declaring_item(db, files, name).or(own_item)?;
-    item_target(db, declaring).map(|target| HoverDefinition::Global { target })
 }
 
 fn item_target(db: &dyn Db, item: Item<'_>) -> Option<NavigationTarget> {
@@ -836,6 +824,14 @@ const DEFAULT_SEARCH_PATH: [&str; 7] = [
 
 fn stub_target(db: &dyn Db, name: &str) -> Option<StubTarget> {
     stub_declaration(db, name).map(|declaration| StubTarget {
+        source_index: declaration.source_index,
+        range: declaration.range,
+    })
+}
+
+/// Where a stub declares the type `name`, which is not where it declares a value of that name.
+fn stub_type_target(db: &dyn Db, name: &str) -> Option<StubTarget> {
+    stub_type_declaration(db, name).map(|declaration| StubTarget {
         source_index: declaration.source_index,
         range: declaration.range,
     })
@@ -1041,7 +1037,7 @@ fn type_name_definition(db: &dyn Db, files: ProjectFiles, name: &str) -> Option<
         .into_iter()
         .rfind(|occurrence| occurrence.is_declaration)
         .map(declaration_target)
-        .or_else(|| stub_target(db, name).map(DefinitionTarget::Stub))
+        .or_else(|| stub_type_target(db, name).map(DefinitionTarget::Stub))
 }
 
 fn declaration_target(occurrence: Occurrence) -> DefinitionTarget {
@@ -4789,23 +4785,32 @@ fn at_inline_type_start(root: &SyntaxNode, offset: TextSize) -> bool {
         return false;
     };
     // Step back over the word being typed and the spacing before it.
-    if token.kind() == IDENT {
+    let word = token.kind() == IDENT;
+    if word {
         let Some(previous) = token.prev_token() else {
             return false;
         };
         token = previous;
     }
-    if token.kind() == WHITESPACE {
+    let spaced = token.kind() == WHITESPACE;
+    if spaced {
         let Some(previous) = token.prev_token() else {
             return false;
         };
         token = previous;
     }
-    if token
+    if let Some(region) = token
         .parent_ancestors()
-        .any(|ancestor| is_inline_annotation(&ancestor))
+        .find(|ancestor| is_inline_annotation(ancestor))
     {
-        return true;
+        // A word after a function's complete return type starts the body.
+        return !(word
+            && spaced
+            && region.kind() == RETURN_TYPE
+            && !matches!(
+                token.kind(),
+                MINUS_GREATER | PIPE | COMMA | COLON | EQ | LESS | L_PAREN | L_BRACKET | L_BRACE
+            ));
     }
     // `count: ` at the start of a statement still reads as R's `:` until a type and an
     // assignment follow.
@@ -4883,7 +4888,7 @@ fn annotation_type_hover(db: &dyn Db, file: SourceFile, cursor: &AnnotationTypeC
         Some(HoverDefinition::Stub {
             namespace: namespace.to_owned(),
             overloads: 0,
-            declaration: stub_target(db, &cursor.name),
+            declaration: stub_type_target(db, &cursor.name),
             documentation: None,
         })
     } else {
@@ -5175,6 +5180,25 @@ fn annotation_completion(
                 definitions.push((label, definition.body, CompletionSource::Stdlib));
             }
         }
+        // A stub class declared with `@type` has a name to spell and no body to show.
+        items.extend(
+            library
+                .nominals
+                .iter()
+                .filter(|name| {
+                    search_match(name, query).is_some()
+                        && !definitions
+                            .iter()
+                            .any(|(known, _, _)| known == name.as_str())
+                })
+                .map(|name| {
+                    CompletionItem::new(
+                        name.to_string(),
+                        CompletionKind::Variable,
+                        CompletionSource::Stdlib,
+                    )
+                }),
+        );
     }
     items.extend(
         definitions
@@ -5213,10 +5237,18 @@ fn binding_visible_at(item_node: &SyntaxNode, binding_start: TextSize, cursor: T
         SyntaxElement::Node(node) => node,
         SyntaxElement::Token(token) => token.parent().unwrap_or_else(|| item_node.clone()),
     };
+    // A body with no braces ends where the function ends, so a cursor there is typing in it.
     covering
         .ancestors()
         .find(|ancestor| ancestor.kind() == FUNCTION_DEF)
-        .is_none_or(|function| function.text_range().contains(cursor))
+        .is_none_or(|function| {
+            let range = function.text_range();
+            range.contains(cursor)
+                || (range.end() == cursor
+                    && function
+                        .last_token()
+                        .is_some_and(|token| token.kind() != R_BRACE))
+        })
 }
 
 /// Works on raw text so completion still fires mid-edit inside broken code.
@@ -5328,25 +5360,30 @@ struct GlobalName<'db> {
 fn global_names<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<GlobalName<'db>> {
     let mut names = Vec::new();
     for &item in item_tree(db, file) {
-        let is_function = match *item.kind(db) {
+        // A function's body binds locals only; any other item's code runs at the top level, so
+        // an assignment nested in it (`total <- sum(parts <- c(1, 2))`) binds a global too.
+        let kind = *item.kind(db);
+        if kind != ItemKind::Function
+            && let Some(naming) = item_naming(db, item)
+        {
+            names.extend(
+                naming
+                    .bindings
+                    .values()
+                    .filter(|info| {
+                        info.kind == BindingKind::TopLevel && Some(info.name) != item.name(db)
+                    })
+                    .map(|info| GlobalName {
+                        name: info.name.to_string(),
+                        is_function: false,
+                        item: None,
+                    }),
+            );
+        }
+        let is_function = match kind {
             ItemKind::Function => true,
             ItemKind::Value => false,
-            ItemKind::Statement => {
-                if let Some(naming) = item_naming(db, item) {
-                    names.extend(
-                        naming
-                            .bindings
-                            .values()
-                            .filter(|info| info.kind == BindingKind::TopLevel)
-                            .map(|info| GlobalName {
-                                name: info.name.to_string(),
-                                is_function: false,
-                                item: None,
-                            }),
-                    );
-                }
-                continue;
-            }
+            ItemKind::Statement => continue,
         };
         if let Some(name) = item.name(db) {
             names.push(GlobalName {
@@ -5391,21 +5428,38 @@ fn spelled_names(db: &dyn Db, file: SourceFile) -> SpelledNames {
     let root = semantics::parse(db, file).syntax_node();
     let mut uses: HashMap<&str, u32> = HashMap::new();
     let mut calls: HashMap<&str, u32> = HashMap::new();
+    // The string of `setGeneric("show", ...)` declares the item `show`, and so spells its name.
+    let mut declared: Vec<TextSize> = item_spans(db, file)
+        .iter()
+        .filter_map(|span| Some(span.name_range?.start()))
+        .collect();
+    declared.sort_unstable();
+    let declares_item = |token: &SyntaxToken| {
+        let range = token.text_range();
+        let next = declared.partition_point(|start| *start < range.start());
+        declared.get(next).is_some_and(|start| *start < range.end())
+    };
     let tokens: Vec<SyntaxToken> = root
         .descendants_with_tokens()
         .filter_map(SyntaxElement::into_token)
-        .filter(|token| token.kind() == IDENT || token.kind().is_keyword())
+        .filter(|token| {
+            token.kind() == IDENT
+                || token.kind().is_keyword()
+                || matches!(token.kind(), STRING | RAW_STRING)
+                    && (is_string_target(token) || declares_item(token))
+        })
         .collect();
     for token in &tokens {
-        *uses.entry(token.text()).or_default() += 1;
+        let name = spelled_variable(token.text());
+        *uses.entry(name).or_default() += 1;
         if token.kind() == IDENT && is_called_name(token) {
-            *calls.entry(token.text()).or_default() += 1;
+            *calls.entry(name).or_default() += 1;
         }
     }
     for (counts, sorted) in [(uses, &mut spelled.uses), (calls, &mut spelled.calls)] {
         *sorted = counts
             .into_iter()
-            .map(|(name, count)| (name.trim_matches('`').to_owned(), count))
+            .map(|(name, count)| (name.to_owned(), count))
             .collect();
         sorted.sort_unstable();
     }
@@ -5444,6 +5498,38 @@ fn spelled_names(db: &dyn Db, file: SourceFile) -> SpelledNames {
     spelled.namespace.sort_unstable();
     spelled.namespace.dedup();
     spelled
+}
+
+/// The variable a token spells: a quoted name or a raw string without its delimiters, and a
+/// `..name` read as `name`.
+pub(crate) fn spelled_variable(text: &str) -> &str {
+    let raw = text
+        .strip_prefix(['r', 'R'])
+        .is_some_and(|rest| rest.starts_with(['"', '\'']));
+    let name = if raw {
+        raw_string_content(text)
+    } else {
+        text.trim_matches(['`', '"', '\''])
+    };
+    dot_dot_variable(name).unwrap_or(name)
+}
+
+/// Whether `token` is the string of `"x" <- 1`, which spells the variable `x`.
+fn is_string_target(token: &SyntaxToken) -> bool {
+    token
+        .parent()
+        .filter(|literal| literal.kind() == LITERAL)
+        .is_some_and(|literal| {
+            literal
+                .parent()
+                .and_then(BinaryExpr::cast)
+                .and_then(|binary| match binary.operator()?.kind() {
+                    LESS_MINUS | LESS2_MINUS | EQ => binary.lhs(),
+                    MINUS_GREATER | MINUS_GREATER2 => binary.rhs(),
+                    _ => None,
+                })
+                .is_some_and(|target| target == literal)
+        })
 }
 
 /// Files per [`chunk_uses`] sum.
@@ -5815,11 +5901,11 @@ fn pattern_anchor(root: &SyntaxNode, word_start: TextSize, query: &str) -> Optio
 }
 
 /// The `match` arm whose pattern holds the position: before its `=>`, or anywhere in an arm that
-/// does not have one yet.
+/// does not have one yet. A guard is an expression, not part of the pattern.
 fn pattern_arm(anchor: &SyntaxToken, word_start: TextSize) -> Option<SyntaxNode> {
     let arm = anchor
         .parent_ancestors()
-        .take_while(|ancestor| !matches!(ancestor.kind(), MATCH_EXPR | FUNCTION_DEF))
+        .take_while(|ancestor| !matches!(ancestor.kind(), MATCH_EXPR | FUNCTION_DEF | MATCH_GUARD))
         .find(|ancestor| ancestor.kind() == MATCH_ARM)?;
     child_token(&arm, FAT_ARROW)
         .is_none_or(|arrow| word_start <= arrow.text_range().start())
@@ -7396,24 +7482,31 @@ fn target_at<'db>(
     file: SourceFile,
     offset: TextSize,
 ) -> Option<Target<'db>> {
-    match written_target_at(db, files, file, offset)? {
-        Target::Slot { item, binding } => {
-            let naming = item_naming(db, item).as_ref()?;
-            Some(match copy_origin(naming, binding) {
-                CopySource::Slot(origin) => match naming.bindings.get(&origin) {
-                    Some(info) if binds_global(naming, origin, info) => {
-                        Target::Global(info.name.to_string())
-                    }
-                    _ => Target::Slot {
-                        item,
-                        binding: origin,
-                    },
-                },
-                CopySource::NonLocal(name) => non_local_target(db, files, &name),
-            })
-        }
-        target => Some(target),
-    }
+    through_copies(db, files, written_target_at(db, files, file, offset)?)
+}
+
+/// A replacement assignment's local copy stands for the variable it was copied from.
+fn through_copies<'db>(
+    db: &'db dyn Db,
+    files: ProjectFiles,
+    target: Target<'db>,
+) -> Option<Target<'db>> {
+    let Target::Slot { item, binding } = target else {
+        return Some(target);
+    };
+    let naming = item_naming(db, item).as_ref()?;
+    Some(match copy_origin(naming, binding) {
+        CopySource::Slot(origin) => match naming.bindings.get(&origin) {
+            Some(info) if binds_global(naming, origin, info) => {
+                Target::Global(info.name.to_string())
+            }
+            _ => Target::Slot {
+                item,
+                binding: origin,
+            },
+        },
+        CopySource::NonLocal(name) => non_local_target(db, files, &name),
+    })
 }
 
 /// The variable a replacement assignment's local copy was copied from, through any chain of
@@ -8120,6 +8213,21 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
         )
     });
     result.dedup_by_key(|occurrence| (occurrence.file, occurrence.range));
+    // A range shifted by one byte is in bounds, and a rename through it destroys code.
+    debug_assert!(
+        {
+            let mut names = result.iter().filter_map(|occurrence| {
+                let text = occurrence.file.text(db);
+                Some(spelled_variable(
+                    text.get(std::ops::Range::<usize>::from(occurrence.range))?,
+                ))
+            });
+            names
+                .next()
+                .is_none_or(|first| names.all(|name| name == first))
+        },
+        "the occurrences of one name are spelled differently: {result:?}"
+    );
     result
 }
 
