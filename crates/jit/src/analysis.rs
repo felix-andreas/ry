@@ -1208,9 +1208,9 @@ pub const STEPPING_LOOP: &str = "the loops would hand too many instructions to t
 /// it has.
 pub const UNPAID_LOOP: &str = "the loop has not run long enough to repay compiling the body";
 
-/// The refusal for a body whose hot `for` loop has too few passes left in the running
-/// activation for what compiled code saves on each to repay entering it. Like [`UNPAID_LOOP`]
-/// it is not final: the loop asks again once the body has taken as many backward jumps again.
+/// The refusal for a body whose hot `for` loop runs too few passes in the running activation
+/// for what compiled code saves on a call to repay entering it. Like [`UNPAID_LOOP`] it is
+/// not final: the loop asks again once the body has taken as many backward jumps again.
 pub const SHORT_LOOP: &str = "the loop ends too soon to repay entering compiled code";
 
 /// The refusal for compiling a fully typed closure at its first call when the call cannot run

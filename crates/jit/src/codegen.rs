@@ -4964,14 +4964,14 @@ impl<'p> Translator<'p> {
         }
         let record = self.save_dirty(state);
         let statuses = self.builder.ins().stack_addr(I64, self.frame.statuses, 0);
-        let result = self
-            .call(
-                runtime::jit_write_back as *const () as usize,
-                &[I64, I64, I64],
-                Some(I32),
-                &[self.frame.activation, statuses, record],
-            )
-            .unwrap_or(record);
+        let Some(result) = self.call(
+            runtime::jit_write_back as *const () as usize,
+            &[I64, I64, I64],
+            Some(I32),
+            &[self.frame.activation, statuses, record],
+        ) else {
+            unreachable!("a call with a result type has a result");
+        };
         let ok = self.builder.ins().icmp_imm_s(IntCC::NotEqual, result, 0);
         self.guard(ok, failed);
     }

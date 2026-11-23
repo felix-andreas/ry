@@ -1584,13 +1584,14 @@ fn a_builtin_that_warns_under_a_handler_on_every_call_becomes_a_step() {
         );
 
         let expected = run("handled('seven')");
+        assert_eq!(expected, "0L");
         let before = jit::deoptimizations();
         for _ in 0..500 {
             assert_eq!(run("handled('seven')"), expected);
         }
         let left = jit::deoptimizations() - before;
         assert!(
-            left <= 48,
+            (1..=48).contains(&left),
             "count left compiled code {left} times in 500 calls"
         );
         assert!(has_compiled_code("count"), "count recompiles");
