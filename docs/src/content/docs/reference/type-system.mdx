@@ -2973,7 +2973,9 @@ Arguments are checked for compatibility, not exact equality:
   calls its callback directly, so a string there is an error: `List.map([1, 2], "toupper")` is
   reported, with the hint to pass `toupper` itself. `match.fun` also looks a bare name up as a function, past
   a binding that holds something else, so after a mocking placeholder such as `nchar <- NULL`,
-  `vapply(words, nchar, integer(1))` calls the library's `nchar`. A name the library does not
+  `vapply(words, nchar, integer(1))` calls the library's `nchar`, and beside a local list named
+  `prod`, `apply(m, 1, prod)` calls base's `prod`. A local that holds a string is the function's
+  name, and is checked as that name. A name the library does not
   export is still checked as the value it holds.
 - At a parameter of type `T | NULL` with `T` still open, which is what a callee that tests
   `is.null(x)` infers, `T` binds to the argument's non-`NULL` part. Passing a value there says that
@@ -3264,6 +3266,12 @@ The details:
   function types.
 - Narrowing filters union members. A member whose family cannot be decided statically, such as an
   unannotated value or an abstract nominal, is kept on both edges.
+- `inherits(x, "simpleError")` with a class R never gives an unclassed value drops `x`'s atomic,
+  `NULL` and function members on the true edge, since only a value with a class attribute passes.
+  So after `res <- tryCatch(download.file(url, path), error = function(e) e)`,
+  `if (inherits(res, "simpleError")) stop(res$message)` reads the condition's field. A class such
+  as `"integer"`, `"numeric"` or `"list"` narrows nothing, because R reports it for unclassed
+  values too.
 - An unannotated parameter whose runtime type the body inspects is `Unknown`, because code that
   inspects a type uses the value as a different type on each branch, so no one type describes it.
   The inspections are `typeof()`, `class()`, `mode()`, `storage.mode()`, `inherits()`,
@@ -3347,6 +3355,12 @@ The details:
   `if (!is_loaded(package)) stop("not loaded")` followed by `parent.env(ns_env(package))` checks,
   while the same call without the test is reported. A write to the variable after the test, even
   on one branch or in a loop, forgets it.
+- A callee whose body ends in a chain of such tests of one formal, with `NULL` only as the last
+  `else`, answers `NULL` for an object of no class it handles. With
+  `chain_count <- function(x) if (is.chain(x)) 1 else if (is.chains(x)) length(x) else NULL`, a call
+  whose argument may carry a class (any type but an atomic vector, `NULL` or a function) returns
+  without `NULL`, so `1:chain_count(x)` checks for an unannotated `x`, while
+  `1:chain_count("a")` is reported.
 - `identical(f, g)` with `f` a local and `g` a function narrows `f` to `g`'s type on the true edge,
   and a generic `g` is instantiated afresh at each call, so after `format_name <- identity` as a default, `if (identical(format_name, identity))
   format_name(name + 1)` calls `identity` with a number although an earlier call passed a string.
@@ -3397,6 +3411,13 @@ exceptions and additions:
   optional when `pick_format <- function(format = NULL)` tests `missing(format)`, and required when
   `pick_format` never tests it. As for a formal's own `missing()` test, the order of the test and
   the reads is not checked.
+- Passing the formal bare to a function read from a field or a list element, as in
+  `dist$quantile(p, parms)` or `handlers[[1]](p, parms)`, does not force it, because the checker
+  cannot see what that function reads.
+- Using the formal bare as one position of a matrix-style index, as in `x$data[i, j]` or
+  `x$data[i, j] <- value`, does not force it, because `[` reads a missing argument as an empty
+  index and selects the whole dimension. A one-position `x[i]` and `x[[i]]` still force it, since
+  `x[i]` types as one element and `[[` has no empty index.
 - Passing the formal positionally to a function that the enclosing body defines further down,
   as in `format_advice <- function(x) format_advice_cli(x)` before `format_advice_cli <- function(x)
   "advice"` in the same `local()`, does not force it either. The sibling runs only after its

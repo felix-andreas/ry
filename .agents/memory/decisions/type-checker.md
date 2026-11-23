@@ -901,3 +901,24 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - Unary `-` on a class needs arithmetic between two of its values (the `numeric` test), as R stops on `-day`; `difftime` and `matrix` negate to themselves.
 - An `arithmetic` violation names "or a class with arithmetic" only when the value found is a class, because the plain `half("4")` message is the one most users see.
 - An annotated function keeps the formals its body captures with `substitute()` (`FunctionType::quoted`), so annotating a quoting `%op%` does not make its operands checked.
+
+## Two independent open branches join by union
+
+**Status:** built (the branch join in `crates/semantics/src/check.rs`; `typing/calls.R.test`).
+
+- A project `%||%` typed `<T> fn(x: T | NULL, y: T) -> T` tied the fallback to the value, so `opts$flag %||% FALSE` beside `opts$extra %||% list()` was a false report. Two branches open in variables of their own join by union instead of unifying.
+- A call drops a type parameter no supplied argument filled, so `NULL %||% "x"` is `character`, not `character | T`.
+- A callback's parameters keep tying, because the callee decides how its arguments relate.
+
+## The fresh sample's false-report classes, and what each rule claims
+
+**Status:** built (`crates/semantics/src/check.rs`; fixtures named per bullet). Measured on 99 packages outside the benchmark closure (`tools/corpus/fresh-sample.txt`).
+
+- **A block diverges when any statement does**, so a definition after `stop()` never binds and a later read warns as maybe-undefined (`a_definition_after_stop_never_binds`).
+- **`match.fun` passes over a local that is not a function** (`apply(m, 1, prod)` beside a local list `prod`); a local string is the function's name.
+- **A stubbed base generic with a project S3 method is unchecked** when the first argument is not a plain atomic, `NULL` or function, because the stub describes only the default method (`a_registered_method_of_a_stubbed_generic_leaves_its_result_unchecked`). A registration alone, not a defined `str.Logger`, decides, matching R's dispatch table.
+- **`vapply(NULL, ...)` is an empty result**, as R maps `NULL` to `list()`.
+- **A formal used as a position of a two-or-more-position `[` is optional**: R reads a missing formal there as the empty index. A one-position `x[i]` stays forcing, because the checker types it as one element and would otherwise lose that claim; `[[` has no empty index.
+- **A formal passed to a callee read from a field or `[[` is optional**: the checker cannot see whether that function reads it.
+- **A class-dispatch chain ending in `NULL`** (`if (is.a(x)) ... else if (is.b(x)) ... else NULL`, each test a one-argument project predicate) excludes `NULL` only for an argument that cannot carry a class, so `chain_count(obj)` over an untyped object is not reported, and `chain_count("a")` is.
+- **`inherits(x, "cls")` narrows the true edge** to members that may carry a class, dropping atomic, `NULL` and function members. A class R gives unclassed values implicitly (`"integer"`, `"list"`, `"function"` and the rest) narrows nothing, and the false edge narrows nothing because an object may lack the class.

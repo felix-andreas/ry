@@ -1169,6 +1169,29 @@ impl<'db> InferenceTable<'db> {
             }
             self.rollback(snapshot);
         }
+        // A union of open variables fits one of them when the others tie to it: a callback
+        // `function(x, y) if (keep(x)) x else y` returns `U | T`, and `Reduce` needs a `U`.
+        if let (TyKind::Union(members), TyKind::Var(var)) = (actual.kind(db), expected.kind(db)) {
+            let representative = self.find(*var);
+            let open_members: Option<Vec<InferenceVar>> = members
+                .iter()
+                .map(|&member| match self.shallow_resolve(db, member).kind(db) {
+                    TyKind::Var(member_var) => Some(self.find(*member_var)),
+                    _ => None,
+                })
+                .collect();
+            if open_members.is_some_and(|open_members| open_members.contains(&representative)) {
+                let snapshot = self.snapshot();
+                if members
+                    .iter()
+                    .all(|&member| self.unify(db, member, expected).is_ok())
+                {
+                    return true;
+                }
+                self.rollback(snapshot);
+                return false;
+            }
+        }
         if actual.is_var() || expected.is_var() {
             return self.unify(db, actual, expected).is_ok();
         }

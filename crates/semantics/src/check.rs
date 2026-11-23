@@ -7932,8 +7932,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                     } if package == "base" || package == "rlang" => Some(name.as_str()),
                     _ => None,
                 };
-                if tester == Some("substitute")
-                    && let [argument] = &self.module[arguments][..]
+                // rlang's `enquo()` family captures the argument's code as `substitute()` does,
+                // which is how tidyselect reads `columns = -icon` as a column name.
+                if matches!(
+                    tester,
+                    Some("substitute" | "enquo" | "enquo0" | "enexpr" | "ensym")
+                ) && let [argument] = &self.module[arguments][..]
                     && argument.name.is_none()
                     && let Some(value) = argument.value
                     && let ExpressionKind::NameRef(name) = self.module.kind(value)
@@ -8049,6 +8053,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                     }
                     _ => (false, Bitset::new_in(self.arena, 0)),
                 };
+                // A function read from a field or a list element (`dist$quantile(p, parms)`) is
+                // one the checker cannot see, and R forces a promise only when the callee reads it.
+                let opaque_callee = matches!(
+                    self.module.kind(called),
+                    ExpressionKind::Field { .. } | ExpressionKind::Index { double: true, .. }
+                );
                 let library_name = match self.module.kind(*callee) {
                     ExpressionKind::NameRef(name) if !forwards => Some(name.as_str()),
                     ExpressionKind::Namespace {
@@ -8064,9 +8074,10 @@ impl<'db, 'a> Checker<'db, 'a> {
                     };
                     let argument_name = self.module.argument_name(argument);
                     if let ExpressionKind::NameRef(value_name) = self.module.kind(value)
-                        && ((forwards
-                            && (argument_name == Some(*value_name)
-                                || optional_targets.contains(index)))
+                        && (opaque_callee
+                            || (forwards
+                                && (argument_name == Some(*value_name)
+                                    || optional_targets.contains(index)))
                             || library_name.zip(argument_name).is_some_and(
                                 |(function, parameter)| {
                                     tests_missing_without_default(function, parameter.as_str())
@@ -8084,6 +8095,36 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
                 if let Some(forced) = runs {
                     uses.record_closure_run(&forced);
+                }
+                return;
+            }
+            // `[` reads a missing formal as an empty index, so `x$data[i, j]` passes the whole
+            // dimension through and leaves `i` and `j` optional. `[[` has no empty index, and a
+            // one-position `x[i]` stays forcing because the checker types it as one element.
+            ExpressionKind::Index {
+                double: false,
+                target,
+                arguments,
+            } if self.module[arguments]
+                .iter()
+                .filter(|argument| argument.name.is_none())
+                .count()
+                >= 2 =>
+            {
+                self.collect_formal_uses(*target, uses);
+                for argument in self.module[arguments].iter() {
+                    let Some(value) = argument.value else {
+                        continue;
+                    };
+                    if argument.name.is_none()
+                        && let ExpressionKind::NameRef(name) = self.module.kind(value)
+                        && uses.tracked.contains(name)
+                        && !uses.assigned.contains(name)
+                    {
+                        uses.evaluated.insert(*name);
+                        continue;
+                    }
+                    self.collect_formal_uses(value, uses);
                 }
                 return;
             }
@@ -8741,6 +8782,9 @@ impl<'db, 'a> Checker<'db, 'a> {
                         false_edge: Vec::new(),
                     });
                 }
+                if name == "inherits" {
+                    return self.inherits_guard(&self.module[arguments]);
+                }
                 let [argument] = &self.module[arguments][..] else {
                     return None;
                 };
@@ -8813,6 +8857,62 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             _ => None,
         }
+    }
+
+    /// `inherits(x, "simpleError")` holds only of a value with a class attribute when the class
+    /// is not one R gives an unclassed value implicitly, so the true edge drops `x`'s atomic,
+    /// `NULL` and function members: after `res <- tryCatch(download(), error = function(e) e)`,
+    /// `inherits(res, "error")` leaves the condition.
+    fn inherits_guard(&mut self, arguments: &[Argument]) -> Option<GuardRefinement<'db>> {
+        let [subject, class] = arguments else {
+            return None;
+        };
+        if subject.name.is_some() || class.name.is_some() {
+            return None;
+        }
+        let ExpressionKind::Literal(LiteralKind::String(text)) = self.module.kind(class.value?)
+        else {
+            return None;
+        };
+        if matches!(
+            &self.module[text],
+            "integer"
+                | "numeric"
+                | "double"
+                | "character"
+                | "logical"
+                | "complex"
+                | "raw"
+                | "function"
+                | "list"
+                | "NULL"
+                | "matrix"
+                | "array"
+                | "environment"
+                | "name"
+                | "call"
+                | "expression"
+        ) {
+            return None;
+        }
+        let slot = self.guard_slot(subject.value?)?;
+        let EnvEntry::Mono(current) = self.environment.get(slot)? else {
+            return None;
+        };
+        let members = guard_members(self.db, self.table.resolve(self.db, current));
+        let decide = |db: &'db dyn Db, member: Ty<'db>| match member.kind(db) {
+            TyKind::Scalar(_)
+            | TyKind::Vector(_)
+            | TyKind::NamedVector(_)
+            | TyKind::Null
+            | TyKind::Function(_) => Some(false),
+            _ => None,
+        };
+        let refinement = self.filtered_edges(slot, &members, decide);
+        Some(GuardRefinement {
+            true_edge: refinement.true_edge,
+            false_edge: Vec::new(),
+        })
     }
 
     /// A test of whether two locals differ in being `NULL`, written as
@@ -11047,9 +11147,10 @@ impl<'db, 'a> Checker<'db, 'a> {
         let rhs_range = self.blame_range(rhs);
         let resolved_left = self.operand_view(lhs_ty);
         let resolved_right = self.operand_view(rhs_ty);
-        // A list operand is an error in R unless it carries a class with an operator method,
-        // and a chain `s + a + b` passes the method's result on, so either kind of operand
-        // leaves the expression to that method.
+        // A list or environment operand is an error in R unless it carries a class with an
+        // operator method (ggplot2's `+.gg` on a ggproto environment), and a chain `s + a + b`
+        // passes the method's result on, so either kind of operand leaves the expression to
+        // that method.
         let may_dispatch = |ty: Ty<'db>| {
             matches!(
                 ty.kind(self.db),
@@ -11057,6 +11158,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     | TyKind::NamedList(_)
                     | TyKind::Tuple(_)
                     | TyKind::Record(_)
+                    | TyKind::Environment(_)
                     | TyKind::Unknown
             )
         };
@@ -12261,7 +12363,8 @@ impl<'db, 'a> Checker<'db, 'a> {
     }
 
     /// `if (!predicate(formal)) return(NULL)` as a statement of the body, when no other way out
-    /// of the body returns `NULL`.
+    /// of the body returns `NULL`, or a body ending in a chain of `predicate(formal)` tests of
+    /// one formal whose last `else` is `NULL`, when no early return may be `NULL`.
     fn null_unless(
         &self,
         parameters: &[Formal],
@@ -12275,9 +12378,6 @@ impl<'db, 'a> Checker<'db, 'a> {
                 id = *inner;
             }
             id
-        };
-        let ExpressionKind::Block { statements } = module.kind(strip(body)) else {
-            return None;
         };
         // An open or unchecked member may be instantiated as `NULL` at the call, so it counts.
         let may_be_null = |member: Ty<'db>| {
@@ -12293,23 +12393,16 @@ impl<'db, 'a> Checker<'db, 'a> {
                 _ => may_be_null(ty),
             }
         };
-        module[statements].iter().find_map(|&statement| {
-            let ExpressionKind::If {
-                condition,
-                then_branch,
-                else_branch: None,
-            } = module.kind(strip(statement))
-            else {
-                return None;
-            };
-            let ExpressionKind::Unary {
-                operator: UnaryOperator::Not,
-                operand,
-            } = module.kind(strip(*condition))
-            else {
-                return None;
-            };
-            let ExpressionKind::Call { callee, arguments } = module.kind(strip(*operand)) else {
+        let is_null = |id: ExprId| {
+            matches!(
+                module.kind(strip(id)),
+                ExpressionKind::Literal(LiteralKind::Null)
+            )
+        };
+        // `predicate(formal)` with a project or library predicate that is not a type test,
+        // on a formal the body never writes.
+        let guard = |condition: ExprId| -> Option<(Symbol, Symbol)> {
+            let ExpressionKind::Call { callee, arguments } = module.kind(strip(condition)) else {
                 return None;
             };
             let ExpressionKind::NameRef(predicate) = module.kind(*callee) else {
@@ -12329,6 +12422,34 @@ impl<'db, 'a> Checker<'db, 'a> {
             if self.writes_name(body, *name) {
                 return None;
             }
+            Some((*predicate, *name))
+        };
+        let null_unless = |(predicate, parameter): (Symbol, Symbol), class_fallback| NullUnless {
+            predicate: Name::new(self.db, predicate),
+            parameter: Name::new(self.db, parameter),
+            class_fallback,
+        };
+        let statements = match module.kind(strip(body)) {
+            ExpressionKind::Block { statements } => &module[statements][..],
+            _ => &[][..],
+        };
+        let early_exit = statements.iter().find_map(|&statement| {
+            let ExpressionKind::If {
+                condition,
+                then_branch,
+                else_branch: None,
+            } = module.kind(strip(statement))
+            else {
+                return None;
+            };
+            let ExpressionKind::Unary {
+                operator: UnaryOperator::Not,
+                operand,
+            } = module.kind(strip(*condition))
+            else {
+                return None;
+            };
+            let tested = guard(*operand)?;
             let mut exit = strip(*then_branch);
             if let ExpressionKind::Block { statements } = module.kind(exit) {
                 let [only] = &module[statements][..] else {
@@ -12345,10 +12466,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             let [returned] = &module[arguments][..] else {
                 return None;
             };
-            if !matches!(
-                returned.value.map(|value| module.kind(strip(value))),
-                Some(ExpressionKind::Literal(LiteralKind::Null))
-            ) {
+            if !returned.value.is_some_and(is_null) {
                 return None;
             }
             let exit_range = module.range(exit);
@@ -12357,11 +12475,38 @@ impl<'db, 'a> Checker<'db, 'a> {
                 .filter(|early| !exit_range.contains_range(early.range))
                 .any(|early| has_null(early.ty))
                 || (!self.diverges(body) && has_null(trailing));
-            (!others_null).then(|| NullUnless {
-                predicate: Name::new(self.db, predicate),
-                parameter: Name::new(self.db, name),
-            })
-        })
+            (!others_null).then(|| null_unless(tested, false))
+        });
+        if early_exit.is_some() {
+            return early_exit;
+        }
+        if early_returns.iter().any(|early| has_null(early.ty)) {
+            return None;
+        }
+        let mut arm = match statements.last() {
+            Some(&last) => strip(last),
+            None => strip(body),
+        };
+        let mut first = None;
+        loop {
+            let ExpressionKind::If {
+                condition,
+                then_branch,
+                else_branch: Some(else_branch),
+            } = module.kind(arm)
+            else {
+                return None;
+            };
+            let tested = guard(*condition)?;
+            if first.is_some_and(|(_, parameter)| parameter != tested.1) || is_null(*then_branch) {
+                return None;
+            }
+            first.get_or_insert(tested);
+            arm = strip(*else_branch);
+            if is_null(arm) {
+                return first.map(|tested| null_unless(tested, true));
+            }
+        }
     }
 
     /// A formal the body never forces is optional, but a forced formal's default runs when the
@@ -15783,7 +15928,15 @@ impl<'db, 'a> Checker<'db, 'a> {
         {
             return false;
         }
-        let Some(first) = arguments.first().and_then(|argument| argument.ty) else {
+        let Some(first) = arguments.first() else {
+            return false;
+        };
+        // A parameter's type comes from its uses, which never see a class attribute, so an
+        // R.oo-style object that is a classed logical `NA` passes as `logical`.
+        if first.value.is_some_and(|value| self.binds_parameter(value)) {
+            return true;
+        }
+        let Some(first) = first.ty else {
             return false;
         };
         !matches!(
@@ -16431,6 +16584,22 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         for &callee in callees {
             let resolved = self.table.resolve(self.db, callee);
+            // Base R rejects `-"value"`, so beside a callee no stub types it is a tidyselect
+            // exclusion (`dplyr::select(df, -"value")`) the callee quotes.
+            if matches!(resolved.kind(self.db), TyKind::Unknown) {
+                for (index, argument) in arguments.iter().enumerate() {
+                    let excludes_by_name = argument.value.is_some_and(|value| {
+                        matches!(self.module.kind(value), ExpressionKind::Unary {
+                            operator: UnaryOperator::Minus,
+                            operand,
+                        } if matches!(self.module.kind(*operand), ExpressionKind::Literal(LiteralKind::String(_))))
+                    });
+                    if !excludes_by_name {
+                        quoted.remove(index);
+                    }
+                }
+                continue;
+            }
             let TyKind::Function(function) = resolved.kind(self.db) else {
                 return Bitset::new_in(arena, 0);
             };
@@ -17406,12 +17575,27 @@ impl<'db, 'a> Checker<'db, 'a> {
         while let ExpressionKind::Paren(inner) = self.module.kind(value) {
             value = *inner;
         }
-        let slot = *self.naming.resolutions.get(&value)?;
-        if !self
-            .environment
-            .holds_of(slot, Symbol::new(guard.predicate.text(self.db)))
-        {
-            return None;
+        // A class dispatch answers `NULL` for an object of no class it handles, and only a
+        // plain atomic vector, `NULL` or a function is known to carry no class.
+        let may_carry_class = guard.class_fallback
+            && argument.ty.is_some_and(|ty| {
+                !matches!(
+                    self.table.shallow_resolve(self.db, ty).kind(self.db),
+                    TyKind::Scalar(_)
+                        | TyKind::Vector(_)
+                        | TyKind::NamedVector(_)
+                        | TyKind::Null
+                        | TyKind::Function(_)
+                )
+            });
+        if !may_carry_class {
+            let slot = *self.naming.resolutions.get(&value)?;
+            if !self
+                .environment
+                .holds_of(slot, Symbol::new(guard.predicate.text(self.db)))
+            {
+                return None;
+            }
         }
         let ret = self.table.resolve(self.db, function.ret);
         let TyKind::Union(members) = ret.kind(self.db) else {

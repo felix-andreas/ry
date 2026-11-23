@@ -537,6 +537,32 @@ render <- function(label) {
 string: <T> fn(text: T) -> list{text: T}
 render: <T> fn(label: T) -> Unknown
 
+#---- arithmetic_on_an_environment_may_dispatch_to_a_project_method
+"+.layered" <- function(e1, e2) {
+  e1$layers <- c(e1$layers, list(e2))
+  e1
+}
+layer <- function() {
+  self <- new.env()
+  class(self) <- "layered"
+  self
+}
+build <- function(plot) plot + layer()
+#++++
++.layered: <T, U> fn(e1: T, e2: U) -> T
+layer: fn() -> environment
+build: <T> fn(plot: T) -> T
+
+#---- a_reduce_callback_may_return_either_operand
+bind_pair <- function(x, y) {
+  if (length(x) == 0) return(y)
+  x
+}
+bind_all <- function(...) Reduce(function(x, y) bind_pair(x, y), list(...))
+#++++
+bind_pair: <T, U> fn(x: T, [y]: U) -> U | T
+bind_all: <T> fn(...: Any) -> T
+
 #---- arithmetic_on_a_list_without_a_project_method_is_an_error
 total <- function() list(a = 1) + 1
 #++++

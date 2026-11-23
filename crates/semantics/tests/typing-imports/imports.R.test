@@ -797,6 +797,16 @@ report <- function(x) {
 str.Logger: <T> fn([object]: T, ...: Any) -> logical
 report: <T> fn(x: T) -> character
 
+#---- a_registered_method_of_a_stubbed_generic_runs_on_a_parameter_used_as_logical
+#namespace S3method(str, Verbose)
+str.Verbose <- function(object, ...) invisible(TRUE)
+show_step <- function(verbose, x) {
+  verbose && str(verbose, x)
+}
+#++++
+str.Verbose: <T> fn([object]: T, ...: Any) -> logical
+show_step: <T> fn(verbose: logical, [x]: T) -> logical
+
 #---- without_a_registration_the_stubbed_generic_s_result_is_checked
 #namespace export(report)
 report <- function(x) {

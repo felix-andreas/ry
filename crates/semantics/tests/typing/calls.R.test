@@ -145,6 +145,36 @@ f <- function() g("a")
 g: <T, U> fn(x: T, [label]: U) -> T | character
 f: fn() -> character
 
+#---- a_formal_used_only_as_a_single_bracket_index_may_be_omitted
+cells <- function(x, i, j) x$data[i, j, drop = FALSE]
+set_cells <- function(x, i, j, value) {
+  x$data[i, j] <- value
+  x
+}
+first <- function(x, i) x$data[[i]]
+f <- function(table) cells(table, j = 2)
+g <- function(table) set_cells(table, 1, value = 0)
+h <- function(table) first(table)
+#++++
+cells: <T, U, V> fn(x: T, [i]: U, [j]: V) -> Unknown
+set_cells: <T, U, V, W> fn(x: T, [i]: U, [j]: V, value: W) -> T
+first: <T, U> fn(x: T, i: U) -> Unknown
+f: <T> fn(table: T) -> Unknown
+g: <T> fn(table: T) -> T
+h: Unknown
+274..279 error[type-mismatch] this call leaves out `i`, which the function requires
+
+#---- a_formal_passed_to_a_function_read_from_a_field_may_be_omitted
+quantile_of <- function(p, dist, parms) dist$quantile(p, parms)
+nth_quantile <- function(p, dists, parms) dists[[1]](p, parms)
+f <- function(dist) quantile_of(0.5, dist)
+g <- function(dists) nth_quantile(0.5, dists)
+#++++
+quantile_of: <T, U, V> fn([p]: T, dist: U, [parms]: V) -> Unknown
+nth_quantile: <T, U, V> fn([p]: T, dists: U, [parms]: V) -> Unknown
+f: <T> fn(dist: T) -> Unknown
+g: <T> fn(dists: T) -> Unknown
+
 #---- a_formal_assigned_before_any_read_may_be_omitted
 g <- function(x, total) {
   total <- 0
@@ -315,6 +345,24 @@ f <- function() g()
 #++++
 g: <T> fn([x]: T) -> character
 f: fn() -> character
+
+#---- an_argument_captured_with_enquo_is_quoted
+pick_columns <- function(data, columns) {
+  columns_expr <- rlang::enquo(columns)
+  list(data = data, columns = columns_expr)
+}
+f <- function(data) pick_columns(data, columns = -"value")
+#++++
+pick_columns: <T, U> fn(data: T, [columns]: U) -> list{data: T, columns: Unknown}
+f: <T> fn(data: T) -> list{data: T, columns: Unknown}
+
+#---- a_library_call_quotes_a_column_exclusion_by_name
+drop_value <- function(data) dplyr::select(data, -"value")
+negated <- function() -"value"
+#++++
+drop_value: <T> fn(data: T) -> Unknown
+negated: Unknown
+82..89 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- a_missing_named_formal_is_named_in_the_message
 g <- function(a, b = NULL) {
@@ -1191,3 +1239,8 @@ make <- function() {
 #++++
 make: Unknown
 90..96 error[type-mismatch] this call leaves out `x`, which the function requires
+
+#---- print_takes_a_logical_spelled_as_a_string_for_quote
+show_loadings <- function(m) print(m, quote = "FALSE")
+#++++
+show_loadings: <T> fn(m: T) -> T

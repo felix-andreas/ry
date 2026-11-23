@@ -260,6 +260,37 @@ compared <- function(A = NULL, b = NULL) {
 paired: <T, U: numeric> fn([A]: T | NULL, [b]: U | NULL) -> U | NULL
 compared: <T, U: numeric> fn([A]: T | NULL, [b]: U | NULL) -> U | NULL
 
+#---- inherits_a_class_rules_out_unclassed_members
+fetch <- function(url) {
+  res <- tryCatch(download.file(url, tempfile()), error = function(e) e)
+  if (inherits(res, "simpleError")) stop(res$message)
+  res
+}
+plain <- function(x) {
+  value <- if (x) 1L else list(message = "m")
+  if (inherits(value, "integer")) value$message else NULL
+}
+#++++
+fetch: Unknown
+plain: fn(x: logical) -> Unknown
+139..150 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `integer`. Extract an element with `[[` instead
+
+#---- a_class_dispatch_null_fallback_passes_an_object_that_may_carry_the_class
+is.chain <- function(x) inherits(x, "chain")
+is.chains <- function(x) inherits(x, "chains")
+chain_count <- function(x) if (is.chain(x)) 1 else if (is.chains(x)) length(x) else NULL
+each_chain <- function(x) {
+  for (i in 1:chain_count(x)) print(x[[i]])
+}
+of_string <- function() 1:chain_count("a")
+#++++
+is.chain: fn(x: Unknown) -> logical
+is.chains: fn(x: Unknown) -> logical
+chain_count: fn(x: Unknown) -> double | integer | NULL
+each_chain: <T> fn(x: T) -> NULL
+of_string: Unknown
+281..297 error[type-mismatch] expected a scalar numeric value (`integer` or `double`), found `double | integer | NULL`
+
 #---- a_predicate_the_caller_tested_rules_out_the_callee_null_return
 is_loaded <- function(package) package %in% loadedNamespaces()
 ns_env <- function(package) {

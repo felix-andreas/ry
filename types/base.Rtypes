@@ -334,8 +334,9 @@ strsplit : @pure fn(x: Any, split: character[] | NULL, [fixed]: logical, [perl]:
 # Output and messages. `print` returns its argument invisibly, so it is a genuine `<T> -> T`; its named
 # formals cover the common method arguments (`digits`, `n`, `row.names`, ...) that would otherwise be
 # false "unknown named argument" errors. `stop`/`warning` stay `Any` (trailing-dot `call.` formal +
-# missing `Never`, see header); `message`'s formals are expressible.
-print : <T> fn(x: T, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> T
+# missing `Never`, see header); `message`'s formals are expressible. `print.default` reads `quote` with
+# R's logical coercion, which takes the strings "FALSE" and "TRUE" as well.
+print : <T> fn(x: T, ...: Any, [digits]: Any, [quote]: logical | character, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> T
 cat : fn(...: Any, [file]: Any, [sep]: character, [fill]: Any, [labels]: Any, [append]: logical) -> NULL
 message : fn(...: Any, [domain]: Any, [appendLF]: logical) -> NULL
 stop : Any
