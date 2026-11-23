@@ -9,11 +9,11 @@ use {
         metadata::resolve_namespace_conditionals,
         stubs::shipped_stub_sources,
         testing::{
-            ProjectState, Workbench, check_metamorphic_relations, check_semantics_input,
-            check_stub_source, command_database, compare_renamed, compare_renderings,
-            fixture_state, for_each_session, for_each_stub_source, generate_session,
-            insert_leading_trivia, misplaced_declarations, plan_rename, render_afresh,
-            render_in_parallel, render_stub_source, stub_variant,
+            ProjectState, Workbench, check_metamorphic_relations, check_package_metadata,
+            check_semantics_input, check_stub_source, command_database, compare_renamed,
+            compare_renderings, fixture_state, for_each_session, for_each_stub_source,
+            generate_session, insert_leading_trivia, misplaced_declarations, plan_rename,
+            render_afresh, render_in_parallel, render_stub_source, stub_variant,
         },
     },
     std::{slice, sync::LazyLock},
@@ -653,6 +653,85 @@ fn stub_test_database() -> RootDatabase {
     AnalysisSettings::new(&db, true, false, true);
     ProjectFiles::new(&db, Vec::new());
     db
+}
+
+/// Generated `NAMESPACE` and `DESCRIPTION` text through the metadata parsers and a project that
+/// uses what they import ([`check_package_metadata`]), on one database that stays warm across
+/// seeds. A third of the `NAMESPACE` files are mutated or token soup, so the parsers meet
+/// broken directives.
+#[test]
+fn fuzz_package_metadata() {
+    let mut db = command_database();
+    for_each_seed_on_named_threads(100, |seed| {
+        let mut rng = SplitMix64(0x3E7A_DA7A ^ seed);
+        let generated = generated_namespace(&mut rng);
+        let namespace = match rng.below(6) {
+            0 => token_soup(&mut rng, NAMESPACE_DIRECTIVES),
+            1 => mutate_seed(&mut rng, &[generated.as_str()], 16),
+            _ => generated,
+        };
+        let description = generated_description(&mut rng);
+        check_package_metadata(&mut db, &namespace, &description);
+    });
+}
+
+/// `NAMESPACE` directives of every kind the parsers read, with some that R rejects.
+const NAMESPACE_DIRECTIVES: &[&str] = &[
+    "export(f)\n",
+    "export(g, `h i`)\n",
+    "export(\"quoted\")\n",
+    "exportPattern(\"^[a-z]\")\n",
+    "exportMethods(show)\n",
+    "exportClasses(Thing)\n",
+    "import(stats)\n",
+    "import(utils, except = c(head, tail))\n",
+    "importFrom(stats, median, sd)\n",
+    "importFrom(\"utils\", \"head\")\n",
+    "importClassesFrom(methods, show)\n",
+    "importMethodsFrom(methods, show)\n",
+    "S3method(print, thing)\n",
+    "S3method(base::format, thing, format_thing)\n",
+    "useDynLib(pkg, .registration = TRUE, .fixes = \"C_\")\n",
+    "useDynLib(pkg, alias = routine, other)\n",
+    "if (getRversion() >= \"4.0.0\") {\n  export(newer)\n}\n",
+    "if (.Platform$OS.type == \"windows\") importFrom(utils, winDialog)\n",
+    "# comment\n",
+    "\n",
+    "export(\n  f,\n  g\n)\n",
+    "export(",
+    ")",
+    "importFrom(",
+    "é",
+];
+
+/// A `NAMESPACE` of up to 60 directives, long enough that most split into chunks.
+fn generated_namespace(rng: &mut SplitMix64) -> String {
+    (0..rng.below(60))
+        .map(|_| NAMESPACE_DIRECTIVES[rng.below(NAMESPACE_DIRECTIVES.len() - 4)])
+        .collect()
+}
+
+/// A `DESCRIPTION` whose fields come in any order, some of them continued, empty or repeated.
+fn generated_description(rng: &mut SplitMix64) -> String {
+    const FIELDS: &[&str] = &[
+        "Package: pkg\n",
+        "Package:\n",
+        "Imports: stats, utils (>= 4.0.0),\n    methods\n",
+        "Depends: R (>= 4.1.0), data.table\n",
+        "Suggests: testthat (>= 3.0.0)\n",
+        "LazyData: true\n",
+        "LazyData: no\n",
+        "Collate: 'b.R' 'a.R'\n",
+        "Collate.unix: 'unix/a.R'\n",
+        "Collate.windows: \"windows/a.R\"\n",
+        "Title: A Package\n",
+        "  continued\n",
+        "Broken\n",
+        "\n",
+    ];
+    (0..rng.below(10))
+        .map(|_| FIELDS[rng.below(FIELDS.len())])
+        .collect()
 }
 
 /// Names a generated stub declares: short ones that also occur inside keywords, dotted and

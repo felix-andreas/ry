@@ -55,7 +55,7 @@ pub struct NativeSymbols {
 
 /// What the checker reads from `NAMESPACE`, all from one parse: a generated `NAMESPACE` can
 /// run to a megabyte, and parsing it is serial work before and after the parallel passes.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct NamespaceFile {
     pub imports: Vec<NamespaceImport>,
     /// Only explicit `export()` names: `exportPattern` is a load-time regex, and
@@ -100,7 +100,7 @@ pub fn parse_namespace(source: &str) -> NamespaceFile {
 /// Below this, one parse is faster than starting threads.
 const PARALLEL_NAMESPACE_BYTES: usize = 64 * 1024;
 
-fn parse_namespace_in_chunks(source: &str, chunks: &[usize]) -> NamespaceFile {
+pub(crate) fn parse_namespace_in_chunks(source: &str, chunks: &[usize]) -> NamespaceFile {
     if chunks.len() == 1 {
         return parse_namespace_chunk(source, TextSize::from(0));
     }
@@ -138,7 +138,7 @@ fn parse_namespace_in_chunks(source: &str, chunks: &[usize]) -> NamespaceFile {
     file
 }
 
-fn parse_namespace_chunk(source: &str, offset: TextSize) -> NamespaceFile {
+pub(crate) fn parse_namespace_chunk(source: &str, offset: TextSize) -> NamespaceFile {
     let root = syntax::parse(source).syntax_node();
     let directives = namespace_directives(&root);
     let mut imports = namespace_imports(&directives);
@@ -172,7 +172,7 @@ fn parse_namespace_chunk(source: &str, offset: TextSize) -> NamespaceFile {
 /// that opens with `name(` right after a line holding nothing but a complete top-level
 /// `name(...)` call. The parser ends a top-level expression at such a newline whatever came
 /// before it, while a looser rule would split an `if (cond)` from its body on the next line.
-fn call_boundaries(source: &str, parts: usize) -> Vec<usize> {
+pub(crate) fn call_boundaries(source: &str, parts: usize) -> Vec<usize> {
     use SyntaxKind::*;
     let (tokens, _) = syntax::lex(source);
     let significant: Vec<(SyntaxKind, usize)> = tokens
@@ -428,6 +428,7 @@ pub(crate) fn is_attach_call_ref(node: NodeRef<'_>) -> bool {
             })
 }
 
+#[derive(Debug)]
 pub struct NamespaceImport {
     pub namespace: String,
     /// `None` for a whole-namespace `import(pkg)`.

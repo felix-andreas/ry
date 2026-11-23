@@ -9,6 +9,12 @@ use {
         hir::{ExprId, PatId, Symbol},
         item_check, item_hir, item_naming, item_node, item_syntax, item_tree,
         lints::{LintConfig, LintLevel, NameStyle, lint_file},
+        metadata::{
+            NativeSymbols, PackageMetadata, call_boundaries, normalized_imports,
+            parse_description_collate, parse_description_dependencies, parse_description_depends,
+            parse_description_lazy_data, parse_description_package, parse_namespace_chunk,
+            parse_namespace_in_chunks, parse_namespace_spec, qualified_names,
+        },
         naming::BindingKind,
         stubs::{
             StubSources, install_shipped_stubs, shipped_export_manifests, shipped_stub_sources,
@@ -32,7 +38,7 @@ use {
         thread,
     },
     syntax::{
-        SyntaxKind, SyntaxToken,
+        SyntaxKind, SyntaxToken, TextSize,
         testing::{
             Entropy, FAILURES_PER_RUN, SplitMix64, fuzz_seeds, generate_program, generate_project,
             on_seed_thread, replay_command, run_seeds, running_test_name, small_edit, split_files,
@@ -1805,6 +1811,105 @@ fn render_stub_library(db: &RootDatabase) -> String {
     }
     lines.sort_unstable();
     lines.join("\n")
+}
+
+/// Derives a package's metadata from `NAMESPACE` and `DESCRIPTION` text and checks it on
+/// `db`, a warm database whose metadata and project this call owns. No parser panics. The
+/// `NAMESPACE` facts are the same in one piece as split at [`call_boundaries`] into two to four
+/// chunks parsed on threads, which is how a large file parses. A project file that calls the
+/// imported, exported and native names checks without a panic, and renders alike before and
+/// after the database holds other metadata. Returns the derived facts, rendered.
+pub fn check_package_metadata(db: &mut RootDatabase, namespace: &str, description: &str) -> String {
+    let whole = parse_namespace_chunk(namespace, TextSize::from(0));
+    let rendered = format!("{whole:#?}");
+    for parts in 2..=4 {
+        let chunks = call_boundaries(namespace, parts);
+        let chunked = format!("{:#?}", parse_namespace_in_chunks(namespace, &chunks));
+        if chunked != rendered {
+            panic!(
+                "NAMESPACE parses differently in {} chunks at {chunks:?}\n---- whole:\n{rendered}\n---- chunked:\n{chunked}\n---- NAMESPACE:\n{namespace}",
+                chunks.len()
+            );
+        }
+    }
+    let spec = parse_namespace_spec(namespace);
+    let metadata = DerivedMetadata {
+        imports: normalized_imports(&whole.imports),
+        dependencies: parse_description_dependencies(description),
+        attached: parse_description_depends(description).into_iter().collect(),
+        package: parse_description_package(description),
+        native_symbols: whole.native_symbols.clone(),
+        qualified_names: qualified_names(Some(&whole), Some(Vec::new())),
+    };
+    let facts = format!(
+        "{metadata:#?}\n{spec:#?}\nlazy data {}\ncollate {:?}",
+        parse_description_lazy_data(description),
+        parse_description_collate(description),
+    );
+    let called: BTreeSet<&str> = metadata
+        .imports
+        .iter()
+        .filter_map(|(_, name)| name.as_deref())
+        .chain(metadata.native_symbols.names.iter().map(String::as_str))
+        .chain(whole.exports.iter().map(|(name, _)| name.as_str()))
+        .filter(|name| !name.contains('`'))
+        .take(8)
+        .collect();
+    let probe: String = called
+        .iter()
+        .enumerate()
+        .map(|(index, name)| format!("probe{index} <- `{name}`(1L)\n"))
+        .collect();
+    let file = SourceFile::new(db, probe, DocumentKind::Package);
+    ProjectFiles::get(db).set_files(db).to(vec![file]);
+    set_package_metadata(db, &metadata);
+    let first = render_semantics(db, file);
+    set_package_metadata(db, &DerivedMetadata::default());
+    render_semantics(db, file);
+    set_package_metadata(db, &metadata);
+    let again = render_semantics(db, file);
+    if first != again {
+        panic!(
+            "a project checks differently after other package metadata\n---- first:\n{first}---- again:\n{again}---- NAMESPACE:\n{namespace}\n---- DESCRIPTION:\n{description}"
+        );
+    }
+    facts
+}
+
+/// The values of a [`PackageMetadata`] input, as a host derives them.
+#[derive(Debug, Default)]
+struct DerivedMetadata {
+    imports: Vec<(String, Option<String>)>,
+    dependencies: BTreeSet<String>,
+    attached: BTreeSet<String>,
+    package: Option<String>,
+    native_symbols: NativeSymbols,
+    qualified_names: Option<BTreeSet<String>>,
+}
+
+fn set_package_metadata(db: &mut RootDatabase, metadata: &DerivedMetadata) {
+    let Some(input) = PackageMetadata::try_get(db) else {
+        PackageMetadata::new(
+            db,
+            metadata.imports.clone(),
+            metadata.dependencies.clone(),
+            metadata.attached.clone(),
+            metadata.package.clone(),
+            metadata.native_symbols.clone(),
+            metadata.qualified_names.clone(),
+        );
+        return;
+    };
+    input.set_imports(db).to(metadata.imports.clone());
+    input.set_dependencies(db).to(metadata.dependencies.clone());
+    input.set_attached(db).to(metadata.attached.clone());
+    input.set_package(db).to(metadata.package.clone());
+    input
+        .set_native_symbols(db)
+        .to(metadata.native_symbols.clone());
+    input
+        .set_qualified_names(db)
+        .to(metadata.qualified_names.clone());
 }
 
 /// A fixture case as a project state: a `#~~~~ <path>` case as its files, with the kinds their
