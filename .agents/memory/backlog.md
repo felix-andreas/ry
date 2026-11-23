@@ -1613,6 +1613,15 @@ pass over a non-deterministic reproducer wastes an hour and can conclude the opp
 The corpus arm should force a single thread, and a minimizer (file level first, then statement level)
 belongs in `scripts/` instead of being rewritten for each crash.
 
+## Open: the frame fuzz kind and planted-bug audits
+
+`--kind frame` (`crates/oracle/src/fuzz.rs`, model `crates/oracle/src/frame_model.R`) checks DataFrame verb chains against a base-R model of `reference/dataframes.mdx`. What it leaves out:
+
+- **Not generated:** `read_csv`, `write_csv`, `read_parquet`, `write_parquet`, `scan_csv`, `scan_parquet`, `LazyFrame.explain`, `Expr.count`; Date and factor columns; string `<` and `>` (GNU R collates by locale, ry by bytes); `^` with an exponent other than 2, `2L` or `3L` (R's `^` and C's `pow` differ at `(-Inf)^0.5`, `(-0)^-1`, `NA^0`); pivot `agg` other than min, max, first and last; an alias nested inside another expression (ry names `Expr.is_null(x |> Expr.alias("p"))` after `x`); `agg` reading a group key column; `cor`, `var` and `std` over an infinite value (R gives NaN, ry NA or Inf).
+- **Relations not built:** `unique` is idempotent (DataFrame has no unique verb) and a `serialize` round trip (ry's `unserialize` of a DataFrame does not give a DataFrame).
+- **Contract silent**, so a model choice: aggregates over NA or NaN; `if_else` with an NA test and its output name; NA group and join keys; row order after `join` and `join_asof`; whether `join_asof` needs sorted input, and its ties under `nearest`; pivot with duplicate cells and no `agg`, `agg = "count"`, an empty cell under sum (ry 0) and mean (ry NaN); `with_columns` items reading one another; duplicate output names; the sign of a zero; float sum precision; `%%` of a huge quotient; the types of `median`, `min` and `max`; `set_key`'s NA order; the names of an unnamed `Expr.lit` and `Expr.len`; an aggregate broadcast outside `agg`.
+- **A planted-bug audit of the GNU R differential kinds.** Plant small realistic bugs in builtins and the evaluator, check that each `oracle fuzz` kind catches the class it claims, and add a canary per comparison. The frame kind caught all three of its plants within 24 seeds.
+
 ## Open: what the fuzzers actually feed the code
 
 An independent review measured the generators rather than reading them. Every number came from a
