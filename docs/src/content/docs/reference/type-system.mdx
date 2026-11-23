@@ -4500,6 +4500,25 @@ reported once, at its first step that names a column: a later step is not report
 step that names no column, such as `DataFrame.head(5L)` or `DataFrame.lazy()`, neither reports nor
 hides a report.
 
+A frame whose columns are unknown also passes wherever a frame type that lists columns is
+expected, so outside strict mode `as.DataFrame(frame)` on a plain `data.frame` satisfies any
+`DataFrame{...}`. In strict mode that is an error at each return, argument and annotated binding
+where it happens, naming the variable the frame was converted from:
+
+```r
+alias Rows = DataFrame{a: character, n: double}
+load <- function(frame: data.frame) -> Rows {
+  as.DataFrame(frame)
+}
+```
+
+```text ry check strict
+  x strict mode: the columns of `frame` are unknown, so nothing checks them against the columns this type lists. Give `frame` a type that lists its columns, as in `frame: data.frame{a: TYPE}`
+```
+
+With `frame: data.frame{a: character, n: double}`, a call passing a frame of other columns is a
+type error at the call.
+
 #### Tables in typed code
 
 A typed function holds a `DataFrame`, `LazyFrame`, `GroupBy`, `LazyGroupBy` or `Expr` as one opaque

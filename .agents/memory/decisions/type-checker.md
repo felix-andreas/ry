@@ -1017,3 +1017,11 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - Target: from round 2 on (`WIDENING_ROUND`), a member whose exports grew in size since its previous round is widened, and stays widened for the rest of the solve, so the group cannot oscillate. The first widening sets a function's result to `Unknown` and keeps its parameters; growing again widens every export to `Unknown`. Callee first, a group of finite types settles within two rounds, so widening touches only types that nest themselves. The same 400 members check in 0.35 s.
 - Strict mode reports a widened member as defined recursively, the same finding as a self-nesting binding, and an annotation on it fixes the type.
 - Rejected: lowering `TYPE_SIZE_CEILING` (it bounds one type, not the rounds, and still oscillates) and recursive types (the checker has no `μ` types; a widened `Unknown` is the honest answer).
+
+## Strict mode reports a frame of unknown columns where a type lists columns
+
+**Status:** built (`Checker::note_unlisted_columns`, `StrictOriginKind::UnlistedColumns` in `crates/semantics/src/check.rs`; `dataframes.R.test` group `strict_columns`; `reference/type-system.mdx`, "Tables in typed code" just above).
+
+- A test user's `load <- function(frame: data.frame) -> Rows as.DataFrame(frame)` checked clean in strict mode and returned frames of wrong types, missing columns or extra columns as `Rows`: a frame with unknown columns (`Frame(_, None)`) is gradual and compatible with every frame type.
+- Target: strict mode records an origin wherever such a frame meets a frame type that lists columns, at a declared return (each early return and tail leaf), an argument (`check_argument`) and an annotated binding. The finding names the variable the frame was converted from, looking through table verbs such as `as.DataFrame(frame)`, and suggests listing its columns. Outside strict mode the flow stays gradual, as every bare frame does.
+- Not done: a run-time check of a `DataFrame{...}` annotation. Its mask is 0 because the table lives behind an external pointer in the `frames` crate, which `interp` does not link, and an alias such as `Rows` is not checked at run time anyway. Extra columns and column order are width subtyping, which the open-table-type design decides.

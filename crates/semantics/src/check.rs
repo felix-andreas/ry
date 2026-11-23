@@ -754,6 +754,13 @@ pub enum StrictOriginKind {
         frame: Option<String>,
         column: String,
     },
+    /// A frame whose columns are unknown, where the expected type lists columns, so nothing
+    /// checks them. `source` names the variable the frame comes from and the head it is
+    /// spelled with, and `column` is the first column the expected type lists.
+    UnlistedColumns {
+        source: Option<(String, &'static str)>,
+        column: String,
+    },
     /// An unannotated parameter nothing constrains, so it accepts any value unchecked.
     /// `expression` is the function and `range` the parameter's name.
     UntypedParameter(Symbol),
@@ -5146,6 +5153,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         self.table.enter_rigid_binders(&declared.binders);
         self.record_expectation(value, declared.body);
+        self.note_unlisted_columns(value, value_ty, declared.body);
         if self.adapt_literal(value, declared.body) != LiteralFit::NotLiteral {
             return declared.body;
         }
@@ -12435,6 +12443,9 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }) {
                     continue;
                 }
+                if let Some(value) = value {
+                    self.note_unlisted_columns(value, returned, declared.ret);
+                }
                 if !matches!(returned.kind(self.db), TyKind::Unknown)
                     && !self.table.compatible(self.db, returned, declared.ret)
                 {
@@ -12456,6 +12467,10 @@ impl<'db, 'a> Checker<'db, 'a> {
                 _ => *body,
             };
             let body_range = self.blame_range(blamed);
+            for &leaf in &leaves {
+                let found = self.recorded_type(leaf);
+                self.note_unlisted_columns(leaf, found, declared.ret);
+            }
             // The trailing value alone: early returns already reported themselves.
             let resolved_body = self.table.resolve(self.db, trailing_ty);
             let tail_adapts = !leaves.is_empty()
@@ -14393,6 +14408,54 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         let frame = variable_name(module, subject).map(|name| name.to_string());
         self.record_strict_origin(subject, StrictOriginKind::UnknownColumns { frame, column });
+    }
+
+    /// Strict mode reports a frame whose columns are unknown where the expected type lists
+    /// columns: the frame is accepted as any frame, so nothing checks the names and types the
+    /// type promises. The finding names the variable the frame was converted from, looking
+    /// through conversions such as `as.DataFrame(frame)`.
+    fn note_unlisted_columns(&mut self, value: ExprId, found: Ty<'db>, expected: Ty<'db>) {
+        if !self.record_strict_origins {
+            return;
+        }
+        let db = self.db;
+        if !matches!(self.structural(found).kind(db), TyKind::Frame(_, None)) {
+            return;
+        }
+        let column = match self.structural(expected).kind(db) {
+            TyKind::Frame(_, Some([first, ..])) => first.name.text(db).to_owned(),
+            _ => return,
+        };
+        let module = self.module;
+        let mut inner = value;
+        let source = loop {
+            while let ExpressionKind::Paren(expression) = module.kind(inner) {
+                inner = *expression;
+            }
+            match module.kind(inner) {
+                ExpressionKind::NameRef(name) => {
+                    let ty = self.recorded.get(&inner).copied().unwrap_or(unknown(db));
+                    let class = self.class_chain(ty).first().map(|class| class.text(db));
+                    let head = match (class, self.structural(ty).kind(db)) {
+                        (Some("data.table"), _) => "data.table",
+                        (Some("data.frame"), _) => "data.frame",
+                        (_, TyKind::Frame(kind, _)) => kind.head(),
+                        _ => "DataFrame",
+                    };
+                    break Some((name.to_string(), head));
+                }
+                ExpressionKind::Call { callee, arguments }
+                    if self.dataframe_verb(*callee).is_some() =>
+                {
+                    match module[arguments].first().and_then(|first| first.value) {
+                        Some(subject) => inner = subject,
+                        None => break None,
+                    }
+                }
+                _ => break None,
+            }
+        };
+        self.record_strict_origin(value, StrictOriginKind::UnlistedColumns { source, column });
     }
 
     /// `DataFrame.join(left, right, on = "id")` has the left's columns, then the right's columns
@@ -19318,6 +19381,7 @@ impl<'db, 'a> Checker<'db, 'a> {
     ) -> Result<(), TypeError<'db>> {
         if let Some(value) = value {
             self.record_expectation(value, expected);
+            self.note_unlisted_columns(value, found, expected);
         }
         let resolved_found = self.table.resolve(self.db, found);
         if matches!(resolved_found.kind(self.db), TyKind::Unknown)

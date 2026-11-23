@@ -169,6 +169,46 @@ pick: fn(df: DataFrame) -> DataFrame
 51..55 warning[unused] `pick` is assigned but never used
 72..74 error[strict] strict mode: the columns of `df` are unknown, so the column names and types this query uses are not checked. Give `df` a type that lists its columns, as in `df: DataFrame{price: TYPE}`
 
+#---- strict_mode_reports_unknown_columns_where_a_type_lists_columns
+# typing: strict
+# A conversion keeps the source's columns, and a `data.frame` lists none, so the
+# result would pass as any frame type; strict mode reports it at each place a type
+# that lists columns takes it: a return, an argument and an annotated binding.
+alias Rows = DataFrame{a: character, n: double}
+load <- function(frame: data.frame) -> Rows {
+  as.DataFrame(frame)
+}
+count_rows <- function(rows: Rows) -> integer DataFrame.height(rows)
+count_raw <- function(raw: DataFrame) -> integer count_rows(raw)
+keep <- function(frame: data.frame) -> integer {
+  rows: Rows <- frame |> as.DataFrame() |> DataFrame.head(5L)
+  DataFrame.height(rows)
+}
+#++++
+load: fn(frame: data.frame) -> Rows
+count_rows: fn(rows: Rows) -> integer
+count_raw: fn(raw: DataFrame) -> integer
+keep: fn(frame: data.frame) -> integer
+308..312 warning[unused] `load` is assigned but never used
+447..456 warning[unused] `count_raw` is assigned but never used
+512..516 warning[unused] `keep` is assigned but never used
+356..375 error[strict] strict mode: the columns of `frame` are unknown, so nothing checks them against the columns this type lists. Give `frame` a type that lists its columns, as in `frame: data.frame{a: TYPE}`
+507..510 error[strict] strict mode: the columns of `raw` are unknown, so nothing checks them against the columns this type lists. Give `raw` a type that lists its columns, as in `raw: DataFrame{a: TYPE}`
+577..622 error[strict] strict mode: the columns of `frame` are unknown, so nothing checks them against the columns this type lists. Give `frame` a type that lists its columns, as in `frame: data.frame{a: TYPE}`
+
+#---- strict_mode_accepts_a_frame_whose_columns_are_listed
+# typing: strict
+alias Rows = DataFrame{a: character, n: double}
+load <- function(frame: data.frame{a: character, n: double}) -> Rows {
+  as.DataFrame(frame)
+}
+copy <- function(frame: DataFrame) -> DataFrame DataFrame.copy(frame)
+#++++
+load: fn(frame: data.frame{a: character[], n: double[]}) -> Rows
+copy: fn(frame: DataFrame) -> DataFrame
+65..69 warning[unused] `load` is assigned but never used
+160..164 warning[unused] `copy` is assigned but never used
+
 #---- strict_mode_reports_a_query_on_a_frame_that_is_not_a_variable
 # typing: strict
 path <- file.path("data", "sales.csv")

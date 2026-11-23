@@ -173,6 +173,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `ifelse` widens its branches, and an all-`NA` logical arrives as `character`
 - A qualified call reads a dormant namespace's declarations
 - A recursive group widens an export that keeps growing
+- Strict mode reports a frame of unknown columns where a type lists columns
 
 ## Analysis core
 
