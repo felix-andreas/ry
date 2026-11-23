@@ -16,8 +16,8 @@ use {
             is_whole_number_double,
         },
         infer::{
-            Entry, FunctionMismatch, InferenceTable, RecordMismatch, UNCHECKED_WITNESS, UnifyError,
-            apply_definition, constraint_rejects, numeric_join,
+            Entry, FunctionMismatch, InferenceTable, RecordMismatch, Snapshot, UNCHECKED_WITNESS,
+            UnifyError, apply_definition, constraint_rejects, numeric_join,
         },
         metadata::{
             imported_by_name, imports_every_name, is_own_package, own_package_reaches,
@@ -707,19 +707,35 @@ impl<'db> FromIterator<Option<Ty<'db>>> for ExpressionTypes<'db> {
 }
 
 /// The checker's working copy of [`ExpressionTypes`], before the inference table resolves it.
-struct RecordedTypes<'db>(Vec<Option<Ty<'db>>>);
+/// The type recorded on each expression. While an overload probe runs, every write is logged, so
+/// rolling the probe back restores the types it recorded along with the inference table: a type
+/// recorded in a probe may name a variable the rollback discards.
+struct RecordedTypes<'db> {
+    types: Vec<Option<Ty<'db>>>,
+    undo: Vec<(ExprId, Option<Ty<'db>>)>,
+    probes: u32,
+}
+
+/// The state an overload probe returns to when it is rolled back.
+struct Probe {
+    table: Snapshot,
+    records: usize,
+}
 
 impl<'db> RecordedTypes<'db> {
     fn get(&self, id: &ExprId) -> Option<&Ty<'db>> {
-        self.0.get(id.index())?.as_ref()
+        self.types.get(id.index())?.as_ref()
     }
 
     fn insert(&mut self, id: ExprId, ty: Ty<'db>) {
         let slot = self
-            .0
+            .types
             .get_mut(id.index())
             .unwrap_or_else(|| panic!("recorded type for {id:?} outside the item's module"));
-        *slot = Some(ty);
+        let previous = mem::replace(slot, Some(ty));
+        if self.probes > 0 {
+            self.undo.push((id, previous));
+        }
     }
 }
 
@@ -920,7 +936,11 @@ fn check_item_in<'db>(
         },
         scheme_arena: Vec::new(),
         literal_reads: Bitset::new_in(arena, expressions),
-        recorded: RecordedTypes(vec![None; expressions]),
+        recorded: RecordedTypes {
+            types: vec![None; expressions],
+            undo: Vec::new(),
+            probes: 0,
+        },
         recorded_patterns: Column::new_in(arena, module.pattern_count()),
         recorded_expectations: Column::new_in(arena, expressions),
         recorded_loop_variables: Column::new_in(arena, expressions),
@@ -1130,7 +1150,7 @@ fn check_item_in<'db>(
         }
     }
     context.default_literal_vars();
-    let recorded = mem::take(&mut context.recorded.0);
+    let recorded = mem::take(&mut context.recorded.types);
     let i64_literals = recorded
         .iter()
         .enumerate()
@@ -16453,7 +16473,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let mut fits = Vec::new();
         let mut fit_results = Vec::new();
         for (index, scheme) in schemes.iter().enumerate() {
-            let probe = self.table.snapshot();
+            let probe = self.begin_probe();
             if let Ok((_, function)) = self.probe_overload_candidate(callee, scheme, &probed, false)
             {
                 fit_results.push(self.table.resolve(self.db, function.ret));
@@ -16464,7 +16484,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     vec![narrowed],
                 ));
             }
-            self.table.rollback(probe);
+            self.end_probe(probe, false);
         }
         let preserved = self.preserved_caller_variable(&caller_entries, &fits, &fit_results);
         self.table.rollback(snapshot);
@@ -16707,17 +16727,18 @@ impl<'db, 'a> Checker<'db, 'a> {
         let mut fitting_courtesy = false;
         for &courtesy in rounds {
             for (index, scheme) in schemes.iter().enumerate() {
-                let snapshot = self.table.snapshot();
+                let probe = self.begin_probe();
                 match self.probe_overload_candidate(callee, scheme, call_arguments, courtesy) {
                     Ok((resolved, function)) => {
                         if unchecked_argument {
                             let result = self.table.resolve(self.db, function.ret);
-                            self.table.rollback(snapshot);
+                            self.end_probe(probe, false);
                             fits.push((index, true, vec![result]));
                             fitting_courtesy = courtesy;
                             continue;
                         }
                         if caller_entries.is_empty() {
+                            self.end_probe(probe, true);
                             self.recorded.insert(callee, resolved);
                             self.selected_overloads.insert(callee, index);
                             return self.committed_overload_return(id, function.ret);
@@ -16737,12 +16758,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                                     .resolve(self.db, Ty::new(self.db, TyKind::Var(*var))),
                             })
                             .collect();
-                        self.table.rollback(snapshot);
+                        self.end_probe(probe, false);
                         fits.push((index, free, narrowing));
                         fitting_courtesy = courtesy;
                     }
                     Err(outcome) => {
-                        self.table.rollback(snapshot);
+                        self.end_probe(probe, false);
                         if let Some(error) = outcome.into_iter().next()
                             && !courtesy
                         {
@@ -16811,13 +16832,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                 if let Some(&(first_index, _, _)) = fits.first()
                     && let Some(scheme) = schemes.get(first_index)
                 {
-                    let snapshot = self.table.snapshot();
-                    if self
+                    let probe = self.begin_probe();
+                    let fits = self
                         .probe_overload_candidate(callee, scheme, call_arguments, fitting_courtesy)
-                        .is_err()
-                    {
-                        self.table.rollback(snapshot);
-                    }
+                        .is_ok();
+                    self.end_probe(probe, fits);
                 }
                 return self.undecided_overload_result(id, call_arguments);
             }
@@ -16835,9 +16854,20 @@ impl<'db, 'a> Checker<'db, 'a> {
         {
             return Ty::new(self.db, TyKind::Var(var));
         }
-        let winner = fits
-            .iter()
-            .find(|(_, free, _)| *free)
+        // An undecided literal (`List.to_r([1, 2])`) takes the candidate its default picks, as
+        // the same literal bound to a variable first would, rather than the one leaving it open.
+        let literal_defaults = self.literal_defaults(&caller_entries);
+        let literal_fit = literal_defaults.iter().any(Option::is_some).then(|| {
+            fits.iter().find(|(_, _, narrowing)| {
+                narrowing
+                    .iter()
+                    .zip(&literal_defaults)
+                    .all(|(&narrowed, default)| default.is_none_or(|default| narrowed == default))
+            })
+        });
+        let winner = literal_fit
+            .flatten()
+            .or_else(|| fits.iter().find(|(_, free, _)| *free))
             .or_else(|| {
                 let (_, _, first) = fits.first()?;
                 fits.iter()
@@ -16880,14 +16910,15 @@ impl<'db, 'a> Checker<'db, 'a> {
         if let Some(&(index, _, _)) = winner
             && let Some(scheme) = schemes.get(index)
         {
-            let snapshot = self.table.snapshot();
+            let probe = self.begin_probe();
             match self.probe_overload_candidate(callee, scheme, call_arguments, fitting_courtesy) {
                 Ok((resolved, function)) => {
+                    self.end_probe(probe, true);
                     self.recorded.insert(callee, resolved);
                     self.selected_overloads.insert(callee, index);
                     return self.committed_overload_return(id, function.ret);
                 }
-                Err(_) => self.table.rollback(snapshot),
+                Err(_) => self.end_probe(probe, false),
             }
         }
 
@@ -17072,11 +17103,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             let Some(scheme) = schemes.get(*index) else {
                 return false;
             };
-            let snapshot = self.table.snapshot();
+            let probe = self.begin_probe();
             let fits = self
                 .probe_overload_candidate(callee, scheme, &witnessed, false)
                 .is_ok();
-            self.table.rollback(snapshot);
+            self.end_probe(probe, false);
             if !fits {
                 return false;
             }
@@ -17149,6 +17180,53 @@ impl<'db, 'a> Checker<'db, 'a> {
             Ok((resolved, *function))
         } else {
             Err(outcome)
+        }
+    }
+
+    /// The type each literal variable among `caller_entries` defaults to, `None` for any other
+    /// variable.
+    fn literal_defaults(
+        &mut self,
+        caller_entries: &[(InferenceVar, Entry<'db>)],
+    ) -> Vec<Option<Ty<'db>>> {
+        caller_entries
+            .iter()
+            .map(|&(var, _)| {
+                let (_, native) = self.table.literal_of(self.table.find(var))?;
+                let probe = self.begin_probe();
+                let ty = Ty::new(self.db, TyKind::Var(var));
+                self.default_literal_var(ty, native);
+                let default = self.table.resolve(self.db, ty);
+                self.end_probe(probe, false);
+                (!matches!(default.kind(self.db), TyKind::Var(_))).then_some(default)
+            })
+            .collect()
+    }
+
+    fn begin_probe(&mut self) -> Probe {
+        self.recorded.probes += 1;
+        Probe {
+            table: self.table.snapshot(),
+            records: self.recorded.undo.len(),
+        }
+    }
+
+    /// Ends a probe, undoing what it did to the table and the recorded types unless `keep`.
+    fn end_probe(&mut self, probe: Probe, keep: bool) {
+        if !keep {
+            self.table.rollback(probe.table);
+            while self.recorded.undo.len() > probe.records {
+                let Some((id, previous)) = self.recorded.undo.pop() else {
+                    break;
+                };
+                if let Some(slot) = self.recorded.types.get_mut(id.index()) {
+                    *slot = previous;
+                }
+            }
+        }
+        self.recorded.probes -= 1;
+        if self.recorded.probes == 0 {
+            self.recorded.undo.clear();
         }
     }
 

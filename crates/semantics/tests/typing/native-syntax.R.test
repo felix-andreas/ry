@@ -425,3 +425,13 @@ point <- (x = 1, y = 2.5)
 #++++
 replace_all: fn(text: Str) -> Str
 point: Record{x: double, y: double}
+
+#==== conversions
+#---- an_unsuffixed_list_literal_converts_through_the_overloads
+y <- List.to_r([1, 2])
+counts <- [1, 2]
+z <- List.to_r(counts)
+#++++
+y: integer[] | double[]
+counts: List<I64>
+z: integer[] | double[]
