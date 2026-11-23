@@ -84,7 +84,8 @@ interface group therefore resolves through an explicit canonical fixpoint in
   (a chain of 16 small functions through one annotated function) pinned to `Unknown` although its types
   were fully determined; in callee-first order such a chain settles in one or two rounds. A group still
   changing at the round cap (`SCHEME_ROUND_CAP`, 16, shared with the backstop) pins all members to
-  `Unknown`. Member checks run through `SalsaGlobals`, so no salsa cycle forms.
+  `Unknown`; a member whose exports keep growing is widened first (see "A recursive group widens an
+  export that keeps growing"). Member checks run through `SalsaGlobals`, so no salsa cycle forms.
 - `item_check` adopts the canonical exports as a member's scheme, and `global_scheme` reads only
   `item_check`, so there is one source of truth.
 - Salsa cycle recovery (`item_check_recover`, `global_scheme_recover`) is a backstop, and reaching it is a
@@ -1007,3 +1008,12 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - Target: a per-namespace tracked query lowers that namespace's declarations on demand, read only through `pkg::name`. Bare names stay out of scope, so the rule that dormant names never mask a typo holds, and stub assembly parses no extra source for projects that never write `pkg::`.
 - Left out, so they stay `Unknown`: a declaration that names a type the namespace defines (`as.data.table -> data.table`), because the type definition and its supertypes join only with the namespace and a bare nominal would fail every `data.frame` parameter; and one with `@masked`, `@opaque` or `@elementwise`, which the checker reads from the active library by bare name.
 - `warning` was `Any` for the same report, on a note that a trailing-dot parameter is not writable; the stub grammar accepts `[call.]`, so it is declared now, returning `character`. `stop` stays `Any` for the missing `Never`.
+
+## A recursive group widens an export that keeps growing
+
+**Status:** built (`WIDENING_ROUND`, `Widening`, `widen` and `exports_grew` in `crates/semantics/src/semantics.rs`; `strict.R.test` case `recursion__a_group_whose_results_nest_each_other_widens_the_growing_result`).
+
+- A test user's `ry check` of a package ran past ten minutes. The reproduction: functions in one recursion group that return a record holding the group's own results (`list(value = ..., parts = list(a, b))`). Each round nested the record one level deeper, about tenfold in size, until `TYPE_SIZE_CEILING` cut it to `Unknown`, after which the readers shrank and grew again. The group never settled, so it ran all 16 rounds on types near the ceiling (400 members: 18.6 s on one core) and then pinned every member to `Unknown` anyway.
+- Target: from round 2 on (`WIDENING_ROUND`), a member whose exports grew in size since its previous round is widened, and stays widened for the rest of the solve, so the group cannot oscillate. The first widening sets a function's result to `Unknown` and keeps its parameters; growing again widens every export to `Unknown`. Callee first, a group of finite types settles within two rounds, so widening touches only types that nest themselves. The same 400 members check in 0.35 s.
+- Strict mode reports a widened member as defined recursively, the same finding as a self-nesting binding, and an annotation on it fixes the type.
+- Rejected: lowering `TYPE_SIZE_CEILING` (it bounds one type, not the rounds, and still oscillates) and recursive types (the checker has no `μ` types; a widened `Unknown` is the honest answer).

@@ -3333,8 +3333,8 @@ pub struct MemberExports<'db> {
 }
 
 /// Independent of which member was queried first: each round re-checks every member in the
-/// group's solve order against the latest exports, and members still changing at the cap pin
-/// to `Unknown`. Members are checked directly, never via `item_check`, so no salsa cycle forms.
+/// group's solve order against the latest exports, a member whose exports keep growing is
+/// widened, and members still changing at the cap pin to `Unknown`. Members are checked directly, never via `item_check`, so no salsa cycle forms.
 #[salsa::tracked(
     returns(ref),
     cycle_fn = scc_exports_recover,
@@ -3352,13 +3352,30 @@ pub fn scc_exports<'db>(
     // Each member reads the exports its predecessors in the round just wrote, so a chain of
     // calls settles in one round when it is solved callee first, whatever its length.
     let order = solve_order(db, members);
-    for _round in 0..SCHEME_ROUND_CAP {
+    let mut widened: FxHashMap<Item<'db>, Widening> = FxHashMap::default();
+    for round in 0..SCHEME_ROUND_CAP {
         let mut changed = false;
         for &item in &order {
             let globals = SalsaGlobals::for_item(db, item, Some(&exports));
             let check = check_item_against(db, item, &globals);
-            let next = member_exports(db, check, globals.pending_reads.get() > 0);
-            if exports.get(&item) != Some(&next) {
+            let mut next = member_exports(db, check, globals.pending_reads.get() > 0);
+            let previous = exports.get(&item);
+            let widening = widened.get(&item).copied();
+            if round >= WIDENING_ROUND
+                && let Some(previous) = previous
+                && widening != Some(Widening::Everything)
+                && exports_grew(db, previous, &widen(db, next.clone(), widening))
+            {
+                let wider = match widening {
+                    None => Widening::Result,
+                    Some(_) => Widening::Everything,
+                };
+                widened.insert(item, wider);
+            }
+            if let Some(&widening) = widened.get(&item) {
+                next = widen(db, next, Some(widening));
+            }
+            if previous != Some(&next) {
                 exports.insert(item, next);
                 changed = true;
             }
@@ -3369,6 +3386,64 @@ pub fn scc_exports<'db>(
     }
     // Pinning every member is the only entry-order-free refusal.
     unknown_group_exports(db, files, representative)
+}
+
+/// From this round on, a member whose exports grow is widened. Solved callee first, a group
+/// settles in a round or two; an export still growing after that is a type that nests itself,
+/// such as a record holding the results of the group's own calls, which grows without bound
+/// (`.agents/memory/decisions/type-checker.md`, "A recursive group widens an export that keeps
+/// growing").
+const WIDENING_ROUND: u32 = 2;
+
+/// How far a member's exports are widened. Once widened, a member stays widened for the rest
+/// of the solve, so the group cannot oscillate between a large type and its collapse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Widening {
+    /// A function's result is `Unknown`, and its parameters stay.
+    Result,
+    /// Every export is `Unknown`.
+    Everything,
+}
+
+fn widen<'db>(
+    db: &'db dyn Db,
+    mut exports: MemberExports<'db>,
+    widening: Option<Widening>,
+) -> MemberExports<'db> {
+    let Some(widening) = widening else {
+        return exports;
+    };
+    let unknown = types::unknown(db);
+    exports.scheme.body = match (widening, exports.scheme.body.kind(db)) {
+        (Widening::Result, types::TyKind::Function(function)) => {
+            let mut function: types::FunctionType<'db> = **function;
+            function.ret = unknown;
+            types::Ty::new(db, types::TyKind::Function(&function))
+        }
+        _ => unknown,
+    };
+    for (_, binding) in &mut exports.top_level_bindings {
+        *binding = types::TypeScheme::monomorphic(unknown);
+    }
+    exports
+}
+
+fn exports_grew<'db>(
+    db: &'db dyn Db,
+    previous: &MemberExports<'db>,
+    next: &MemberExports<'db>,
+) -> bool {
+    let size = |exports: &MemberExports<'db>| {
+        exports
+            .top_level_bindings
+            .iter()
+            .map(|(_, binding)| types::type_size(db, binding.body))
+            .fold(
+                types::type_size(db, exports.scheme.body),
+                u64::saturating_add,
+            )
+    };
+    size(next) > size(previous)
 }
 
 /// The group's members callees first: a depth-first walk of the edges inside the group from

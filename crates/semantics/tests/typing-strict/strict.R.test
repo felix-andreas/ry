@@ -235,6 +235,36 @@ g18: fn(x: integer) -> integer
 g19: fn(x: integer) -> integer
 g20: fn(x: integer) -> integer
 
+#---- a_group_whose_results_nest_each_other_widens_the_growing_result
+# Each result holds the group's own results, so the record nests one level deeper
+# every round. The fixpoint widens a result still growing after the group has had
+# its rounds to settle, and the parameters keep their types.
+f <- function(x, depth) {
+  if (depth <= 0) return(list(value = x, parts = list()))
+  a <- g(x + 1, depth - 1)
+  b <- h(x * 2, depth - 1)
+  list(value = a$value + b$value, parts = list(a, b))
+}
+g <- function(x, depth) {
+  if (depth <= 0) return(list(value = x, parts = list()))
+  a <- h(x - 1, depth - 1)
+  b <- f(x, depth - 1)
+  list(value = a$value * b$value, parts = list(a, b))
+}
+h <- function(x, depth) {
+  if (depth <= 0) return(list(value = x, parts = list()))
+  a <- f(x, depth - 1)
+  b <- g(x, depth - 1)
+  list(value = a$value - b$value, parts = list(a, b))
+}
+#++++
+f: <T: arithmetic, U: arithmetic> fn(x: T, depth: U) -> list{value: T, parts: list{}} | list{value: Unknown, parts: list{Unknown, Unknown}}
+g: <T: arithmetic, U: arithmetic> fn(x: T, depth: U) -> Unknown
+h: <T: arithmetic, U: arithmetic> fn(x: T, depth: U) -> Unknown
+225..418 error[strict] strict mode: could not determine the full type of `f`, because it is defined recursively. Add a type annotation
+419..608 error[strict] strict mode: could not determine the full type of `g`, because it is defined recursively. Add a type annotation
+609..794 error[strict] strict mode: could not determine the full type of `h`, because it is defined recursively. Add a type annotation
+
 #---- growing_recursion_is_attributed
 x <- list(v = 1, w = x)
 #++++
