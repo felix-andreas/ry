@@ -278,6 +278,36 @@ The table is a Polars `DataFrame` held by the `table` crate; this entry holds th
 - **Writes:** `f$x <- v` and `f[["x"]] <- v` update one column; any other replacement step forgets the columns, because `names<-`, `[<-` and positional `[[<-` may rename or retype any of them. By-reference `setDT`/`setDF` rebind with the new class and the same columns, and `set`/`setattr` forget them (`refine_table_call`, recorded as writes in `naming.rs` and `semantics.rs`).
 - **Only base's or data.table's own constructor counts:** a project's `data.frame` function is an ordinary call, and `data.table::data.table` sharpens only when the project declares data.table (otherwise its stubs are not loaded and the callee is `Unknown`).
 
+## Missing keys, missing values and date-times in the table engine
+
+**Status:** built.
+
+- **A missing key matches a missing key in every kind of join** (inner, left, full, semi, anti, and `join_asof`'s `by`), set once as `nulls_equal` in `crates/table/src/lazy.rs`. R's `merge()` and data.table both match `NA` to `NA`, and a user moving from either expects it; Polars' default (match nothing) would silently drop rows in an inner join and differ by join kind. One rule for every kind keeps the docs to one sentence.
+- **Aggregations skip `NA` by default (`na_rm = TRUE`), Polars' rule**, and `na_rm = FALSE` gives R's rule, where one `NA` makes the result `NA` (`Expr::Aggregate { na_rm }`). The default follows Polars because the API is Polars' and a group's sum over a sparse column is the common question; the flag exists because porting `sum(x)` from R needs the other answer. `NaN` counts as missing.
+- **`Expr.count` counts the values that are not missing; `Expr.len` counts rows**, as in Polars. data.table's `.N` is `Expr.len`.
+- **Two date-time join keys meet as `Datetime(Microseconds, UTC)` and the result takes the left key's type back** (`comparison_types` in `crates/table/src/query.rs`, the Polars join path in `lazy.rs`), because a zone changes only how an instant prints; an integer key meets a double as a double.
+- **`Expr.if_else` with a bare `NA` branch takes the other branch's date or date-time type**, in the checker and the engine, so `if_else(cond, Expr.col("t"), NA)` keeps `POSIXct`.
+- **A `POSIXct` column is Polars `Datetime(Microseconds, zone)`**, the zone `None` when `tzone` is absent or `""`. Microseconds cover R's practical range with sub-second precision; nanoseconds overflow before year 2262. It prints through R's `format()` so the text matches a data.table print, and it converts back to a double vector with class `c("POSIXct", "POSIXt")` and its `tzone`. A date or date-time column stacks only with its own kind, because R's `c()` of a date and a number gives a number without warning.
+
+## Verbs take R vectors as values, and only a single string names a column
+
+**Status:** built.
+
+- **In `select` and `with_columns`, a named string of length one names a column; any other named vector is a column of its values** (`verb_arguments` with `vectors` in `crates/frames/src/dataframe.rs`), recycled when it has one value. `group_by`, `agg`, `sort` and `Expr.over` reject a vector, so a misspelt option such as `desc = TRUE` cannot pass as a constant column. An unnamed character vector names several columns. The rule is decided by length at run time, so the checker refines a named non-string vector into a column of its type and leaves a named character variable unknown, since it cannot tell one string from several.
+- **A vector inside an expression is `Expr::Values(Series)`**, built by `vector_literal` from the same conversion as a frame column, so `Expr.lit(v)`, `Expr.col("x") + v` and `Expr.is_in(e, v)` all accept factors, dates and date-times. A length-one vector stays a scalar literal, and a single factor value lowers as `lit(series).first()`, so Polars broadcasts both. Any other length must equal the frame's height, checked before Polars runs (`check_vector_lengths` in `crates/table/src/lazy.rs`) so the error names the expression and both lengths.
+- **`Expr.is_in` with constant values is row-wise; with an expression as values it reads the whole column, so it classifies as an aggregate** and the lazy optimizer keeps it after the steps that change rows. `is_in(x, NULL)` is `is.na(x) & FALSE`: `FALSE` everywhere, keeping `x`'s name.
+- **`filter` takes a logical vector as a row mask**, ANDed with the other conditions; on a lazy frame it applies at its position in the plan, so the optimizer does not push it past a step that changes the row count.
+- **`%in%` on an `Expr` stops with an error naming `Expr.is_in`** (`mtfrm.Expr`), because base `%in%` calls `match`, which cannot return an expression.
+
+## DataFrame.concat and unique, and base generics on a DataFrame
+
+**Status:** built.
+
+- **`DataFrame.concat(..., how)` follows Polars' names:** `"vertical"` stacks by column name and requires the same set of columns, `"diagonal"` fills missing columns with `NA`, `"horizontal"` puts frames of one height and named vectors side by side. A vertical column takes the widest type of logical, integer, double and character (`stacked_type` in `crates/table/src/ops.rs`), the same ladder as `rbindlist`.
+- **`DataFrame.unique(df, subset, keep)` is a lazy `Step::Unique`** that keeps the original row order; `keep = "none"` drops every duplicated row, as in Polars.
+- **`rbind`, `cbind`, `unique` and `duplicated` have S3 methods for `DataFrame`** that call the verbs, so base code keeps a DataFrame a DataFrame. `rbind` turns a `data.frame` or list into a DataFrame first and skips `NULL`; `cbind` names an unnamed vector after its deparsed argument, as base R does; `unique` and `duplicated` take `fromLast` and stop on `incomparables`, which has no Polars counterpart. The checker refines the base generics only when the first argument is a `DataFrame` (`DataFrameVerb::BaseGeneric`), so data.table's own methods keep their typing; that is a refinement on ry's type, not a special case for data.table.
+- **Columns of different types do not stack:** the checker reports the column and both types (`StackedColumnTypesDiffer`) instead of typing the result `Unknown` silently.
+
 ## A verb taking columns through `...` has no formal before them
 
 **Status:** built.

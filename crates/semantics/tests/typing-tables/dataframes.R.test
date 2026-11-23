@@ -288,6 +288,6 @@ kept: Unknown
 totals: Unknown
 96..100 warning[unused] `kept` is assigned but never used
 121..138 error[type-mismatch] expected `DataFrame`, found `Expr`
-145..146 error[type-mismatch] `df` is read as a column, not as the table: a named argument here is a column, which must be `Expr`. Pass the table first, without a name
+145..146 error[type-mismatch] `df` is read as a column, not as the table: a named argument here is a column, which must be `Expr | logical[]`. Pass the table first, without a name
 148..154 warning[unused] `totals` is assigned but never used
 207..214 error[type-mismatch] `group` is read as a column, not as the table: a named argument here is a column, which must be `Expr`. Pass the table first, without a name

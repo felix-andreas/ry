@@ -42,7 +42,7 @@ use {
         },
         query::{
             self, Aggregate, BinaryOp, Comparison, Expr, Join, Mult, On, Output, Query, Roll, Rows,
-            Select, SortKey, UnaryOp, Warning,
+            Select, SortKey, UnaryOp, Values, Warning,
         },
     },
 };
@@ -296,6 +296,20 @@ unsafe fn r_vector(vector: RVector) -> R<Sexp> {
             set_attr(vector, symbols().class, scalar_string("Date")?)?;
             vector
         }
+        RVector::Datetime { seconds, zone } => {
+            let vector = values::real_vector(&seconds)?;
+            set_attr(
+                vector,
+                symbols().class,
+                string_vector(&["POSIXct".to_string(), "POSIXt".to_string()])?,
+            )?;
+            set_attr(
+                vector,
+                install("tzone")?,
+                scalar_string(zone.as_deref().unwrap_or(""))?,
+            )?;
+            vector
+        }
     })
 }
 
@@ -313,6 +327,24 @@ unsafe fn column_contents(value: Sexp) -> R<Option<RVector>> {
                 codes: values::ints(value).to_vec(),
                 levels,
             }
+        }
+        SexpType::Real | SexpType::Integer if values::inherits(value, "POSIXct") => {
+            let seconds = if value.kind() == SexpType::Integer {
+                values::ints(value)
+                    .iter()
+                    .map(|seconds| match *seconds {
+                        NA_INTEGER => convert::NA_REAL,
+                        seconds => f64::from(seconds),
+                    })
+                    .collect()
+            } else {
+                values::reals(value).to_vec()
+            };
+            // An empty `tzone` means the session's zone.
+            let zone = values::string_at(values::get_attr(value, install("tzone")?), 0)
+                .map(|zone| zone.to_string())
+                .filter(|zone| !zone.is_empty());
+            RVector::Datetime { seconds, zone }
         }
         SexpType::Integer if values::inherits(value, "Date") => RVector::Date(
             values::ints(value)
@@ -351,7 +383,7 @@ unsafe fn column_contents(value: Sexp) -> R<Option<RVector>> {
 }
 
 /// `value` as a column of `height` rows, recycling a single value.
-unsafe fn to_column(name: &str, value: Sexp, height: usize, call: Sexp) -> R<Column> {
+pub(crate) unsafe fn to_column(name: &str, value: Sexp, height: usize, call: Sexp) -> R<Column> {
     let value = values::materialize(value)?;
     // Borrowing each element's text skips the owned copy `column_contents` would make, which
     // dominates building a frame from a long character vector.
@@ -402,6 +434,10 @@ fn recycle(contents: RVector, height: usize) -> Option<RVector> {
         RVector::Integer(items) => RVector::Integer(vec![items[0]; height]),
         RVector::Double(items) => RVector::Double(vec![items[0]; height]),
         RVector::Date(items) => RVector::Date(vec![items[0]; height]),
+        RVector::Datetime { seconds, zone } => RVector::Datetime {
+            seconds: vec![seconds[0]; height],
+            zone,
+        },
         RVector::Character(items) => RVector::Character(vec![items[0].clone(); height]),
         RVector::Factor { codes, levels } => RVector::Factor {
             codes: vec![codes[0]; height],
@@ -1022,6 +1058,7 @@ unsafe fn render(table: &mut Table) -> R<String> {
             ColumnType::Character => "<char>",
             ColumnType::Factor => "<fctr>",
             ColumnType::Date => "<Date>",
+            ColumnType::Datetime => "<POSc>",
         };
         let cell_width = cells
             .iter()
@@ -1050,6 +1087,15 @@ unsafe fn render(table: &mut Table) -> R<String> {
 unsafe fn format_cells(column: &Column, kind: ColumnType) -> R<Vec<String>> {
     let vector = column_value(column)?;
     Ok(match kind {
+        // R's own `format()` picks the layout from every value and reads the session's zone
+        // for a column without one.
+        ColumnType::Datetime => {
+            heap().root(vector);
+            values::strings(call_function("format", &[vector])?)
+                .into_iter()
+                .map(|value| value.unwrap_or_else(|| "<NA>".to_string()))
+                .collect()
+        }
         ColumnType::Double => {
             let data = values::reals(vector);
             let settings = Settings {
@@ -2300,6 +2346,22 @@ fn binary_op(name: &str) -> Option<BinaryOp> {
     })
 }
 
+/// An R vector as a literal of the IR: a single value as a scalar that broadcasts, and a longer
+/// or empty vector as a column of its values. `None` for a value no column can hold.
+pub(crate) unsafe fn vector_literal(value: Sexp) -> R<Option<Expr>> {
+    // A factor's levels have no scalar literal, so even a single one is a column of values.
+    if length(value) == 1 && !values::inherits(value, "factor") {
+        return Ok(literal(value));
+    }
+    let value = values::materialize(value)?;
+    let Some(contents) = column_contents(value)? else {
+        return Ok(None);
+    };
+    let series = convert::to_series(PlSmallStr::EMPTY, contents)
+        .map_err(|failure| error(failure.to_string()))?;
+    Ok(Some(Expr::Values(Values(series))))
+}
+
 /// A single R value as a literal of the IR, or `None` for anything longer or of another type.
 pub(crate) unsafe fn literal(value: Sexp) -> Option<Expr> {
     if length(value) != 1 {
@@ -2319,6 +2381,20 @@ pub(crate) unsafe fn literal(value: Sexp) -> Option<Expr> {
                 Expr::Na(ColumnType::Date)
             } else {
                 Expr::Date(days.floor() as i32)
+            }
+        }
+        SexpType::Real | SexpType::Integer if values::inherits(value, "POSIXct") => {
+            let Ok(Some(RVector::Datetime { seconds, zone })) = column_contents(value) else {
+                return None;
+            };
+            let micros = (seconds[0] * 1e6).round();
+            if micros.is_finite() && micros.abs() < 9.2e18 {
+                Expr::Datetime {
+                    micros: micros as i64,
+                    zone: zone.map(Into::into),
+                }
+            } else {
+                Expr::Na(ColumnType::Datetime)
             }
         }
         SexpType::Logical => match values::ints(value)[0] {

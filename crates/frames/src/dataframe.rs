@@ -9,7 +9,7 @@
 //! on a `LazyFrame` appends the step, and `LazyFrame.collect` optimizes and runs the whole plan.
 
 use {
-    crate::frame::{self, is_frame, literal, table_of, table_work},
+    crate::frame::{self, is_frame, table_of, table_work, vector_literal},
     heap::object::{Sexp, SexpType},
     interp::{
         builtins::{BuiltinDef, Call, builtin},
@@ -23,7 +23,7 @@ use {
         lazy::{self, How, Plan, Source, Step, Strategy},
         ops,
         polars::prelude::PlSmallStr,
-        query::{Aggregate, BinaryOp, Expr, Output, SortKey, UnaryOp, Warning},
+        query::{Aggregate, BinaryOp, Expr, Function, Output, SortKey, UnaryOp, Warning},
     },
 };
 
@@ -31,7 +31,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".expr_column", 1, table_work!(do_column)),
     builtin(".expr_literal", 1, table_work!(do_literal)),
     builtin(".expr_operator", 4, table_work!(do_operator)),
-    builtin(".expr_aggregate", 2, table_work!(do_aggregate)),
+    builtin(".expr_aggregate", 3, table_work!(do_aggregate)),
     builtin(".expr_len", 0, table_work!(do_len)),
     builtin(".expr_alias", 2, table_work!(do_alias)),
     builtin(".expr_if_else", 3, table_work!(do_if_else)),
@@ -40,6 +40,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".expr_format", 1, table_work!(do_format)),
     builtin(".expr_over", 2, table_work!(do_over)),
     builtin(".expr_rank", 3, table_work!(do_rank)),
+    builtin(".expr_call", 2, table_work!(do_call)),
     builtin(".df_select", 2, table_work!(do_select)),
     builtin(".df_with_columns", 2, table_work!(do_with_columns)),
     builtin(".df_filter", 2, table_work!(do_filter)),
@@ -54,6 +55,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".df_explain", 2, table_work!(do_explain)),
     builtin(".df_scan", 2, table_work!(do_scan)),
     builtin(".df_pivot", 6, table_work!(do_pivot)),
+    builtin(".df_concat", 3, table_work!(do_concat)),
+    builtin(".df_unique", 4, table_work!(do_unique)),
+    builtin(".df_duplicated", 3, table_work!(do_duplicated)),
 ];
 
 /// The API, bound in the `ry` namespace and attached with the rest of `package:ry`. Each verb
@@ -65,16 +69,16 @@ pub const PACKAGE: &str = r#"
 Expr.col <- function(name) .expr_column(name)
 Expr.lit <- function(value) .expr_literal(value)
 Expr.alias <- function(expr, name) .expr_alias(expr, name)
-Expr.sum <- function(expr) .expr_aggregate(expr, "sum")
-Expr.mean <- function(expr) .expr_aggregate(expr, "mean")
-Expr.min <- function(expr) .expr_aggregate(expr, "min")
-Expr.max <- function(expr) .expr_aggregate(expr, "max")
-Expr.first <- function(expr) .expr_aggregate(expr, "first")
-Expr.last <- function(expr) .expr_aggregate(expr, "last")
-Expr.median <- function(expr) .expr_aggregate(expr, "median")
-Expr.std <- function(expr) .expr_aggregate(expr, "std")
-Expr.var <- function(expr) .expr_aggregate(expr, "var")
-Expr.count <- function(expr) .expr_aggregate(expr, "count")
+Expr.sum <- function(expr, na_rm = TRUE) .expr_aggregate(expr, "sum", na_rm)
+Expr.mean <- function(expr, na_rm = TRUE) .expr_aggregate(expr, "mean", na_rm)
+Expr.min <- function(expr, na_rm = TRUE) .expr_aggregate(expr, "min", na_rm)
+Expr.max <- function(expr, na_rm = TRUE) .expr_aggregate(expr, "max", na_rm)
+Expr.first <- function(expr) .expr_aggregate(expr, "first", FALSE)
+Expr.last <- function(expr) .expr_aggregate(expr, "last", FALSE)
+Expr.median <- function(expr, na_rm = TRUE) .expr_aggregate(expr, "median", na_rm)
+Expr.std <- function(expr, na_rm = TRUE) .expr_aggregate(expr, "std", na_rm)
+Expr.var <- function(expr, na_rm = TRUE) .expr_aggregate(expr, "var", na_rm)
+Expr.count <- function(expr) .expr_aggregate(expr, "count", FALSE)
 Expr.head <- function(expr, n = 10L) .expr_head(expr, n, sys.call())
 Expr.is_null <- function(expr) .expr_operator("is_null", expr, NULL, TRUE)
 Expr.len <- function() .expr_len()
@@ -82,6 +86,7 @@ Expr.if_else <- function(test, yes, no) .expr_if_else(test, yes, no)
 Expr.cor <- function(first, second) .expr_cor(first, second)
 Expr.over <- function(...) .expr_over(list(...), sys.call())
 Expr.rank <- function(expr, descending = FALSE) .expr_rank(expr, descending, sys.call())
+Expr.is_in <- function(expr, values) .expr_call("is_in", list(expr, values))
 DataFrame.height <- function(df) dim(df)[[1L]]
 DataFrame.width <- function(df) dim(df)[[2L]]
 DataFrame.columns <- function(df) names(df)
@@ -99,6 +104,8 @@ DataFrame.join_asof <- function(df, other, on, by = NULL, strategy = "backward",
   .df_join(df, other, c(by, on), c(by, on), "asof", suffix, strategy, sys.call())
 }
 DataFrame.lazy <- function(df) .df_lazy(df)
+DataFrame.concat <- function(..., how = "vertical") .df_concat(list(...), how, sys.call())
+DataFrame.unique <- function(df, subset = NULL, keep = "first") .df_unique(df, subset, keep, sys.call())
 DataFrame.pivot <- function(df, on, index, values, agg = NULL) .df_pivot(df, on, index, values, agg, sys.call())
 GroupBy.agg <- function(...) .df_agg(list(...), sys.call())
 LazyFrame.scan_csv <- function(path) .df_scan(path, "csv")
@@ -113,6 +120,7 @@ LazyFrame.tail <- DataFrame.tail
 LazyFrame.join <- DataFrame.join
 LazyFrame.join_asof <- DataFrame.join_asof
 LazyFrame.pivot <- DataFrame.pivot
+LazyFrame.unique <- DataFrame.unique
 LazyFrame.collect <- function(lf) .df_collect(lf, sys.call())
 LazyFrame.explain <- function(lf) {
   plan <- .df_explain(lf, sys.call())
@@ -136,6 +144,49 @@ local({
     # expression instead of failing on conflicting `Ops.Expr` and `Ops.Date` methods.
     chooseOpsMethod.Expr = function(x, y, mx, my, cl, reverse) TRUE,
     format.Expr = function(x, ...) .expr_format(x),
+    # As for a data.frame, a list or data.frame argument is a frame of rows (matched to the
+    # DataFrame's columns by position when it has no names) and a NULL one is skipped.
+    rbind.DataFrame = function(..., deparse.level = 1) {
+      items <- Filter(Negate(is.null), list(...))
+      columns <- NULL
+      for (item in items) if (inherits(item, "DataFrame")) {
+        columns <- names(item)
+        break
+      }
+      items <- lapply(items, function(item) {
+        if (!is.list(item)) return(item)
+        if (is.null(names(item)) && length(item) == length(columns)) names(item) <- columns
+        as.DataFrame(item)
+      })
+      DataFrame.concat(items, how = "vertical")
+    },
+    # As for a data.frame, an unnamed vector argument is a column named after its expression.
+    cbind.DataFrame = function(..., deparse.level = 1) {
+      items <- list(...)
+      labels <- vapply(as.list(substitute(list(...)))[-1L], function(e) paste(deparse(e), collapse = " "), "")
+      given <- names(items)
+      if (is.null(given)) given <- character(length(items))
+      for (index in seq_along(items)) {
+        item <- items[[index]]
+        if (is.list(item)) items[[index]] <- as.DataFrame(item)
+        else if (!inherits(item, "DataFrame") && !nzchar(given[[index]])) given[[index]] <- labels[[index]]
+      }
+      kept <- !vapply(items, is.null, NA)
+      items <- items[kept]
+      names(items) <- given[kept]
+      DataFrame.concat(items, how = "horizontal")
+    },
+    unique.DataFrame = function(x, incomparables = FALSE, fromLast = FALSE, ...) {
+      if (!isFALSE(incomparables)) stop("`incomparables` is not supported for a DataFrame", call. = FALSE)
+      DataFrame.unique(x, keep = if (isTRUE(fromLast)) "last" else "first")
+    },
+    duplicated.DataFrame = function(x, incomparables = FALSE, fromLast = FALSE, ...) {
+      if (!isFALSE(incomparables)) stop("`incomparables` is not supported for a DataFrame", call. = FALSE)
+      .df_duplicated(x, isTRUE(fromLast), sys.call())
+    },
+    # `%in%` is not generic, so an expression on its left stops in `match()` with a pointer to the
+    # expression's own test instead of an error about coercing a pointer.
+    mtfrm.Expr = function(x) stop("`%in%` does not build an expression; write `Expr.is_in(x, values)`", call. = FALSE),
     print.Expr = function(x, ...) {
       cat(.expr_format(x), "\n", sep = "")
       invisible(x)
@@ -255,20 +306,29 @@ unsafe fn describe(value: Sexp) -> String {
         Some(Object::Lazy(_)) => "a LazyFrame".to_string(),
         Some(Object::Group { .. }) => "a GroupBy".to_string(),
         None if is_nil(value) => "NULL".to_string(),
-        None => format!("a {} vector", value.kind().name()),
+        None => {
+            let kind = value.kind().name();
+            let article = if kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                "an"
+            } else {
+                "a"
+            };
+            format!("{article} {kind} vector")
+        }
     }
 }
 
-/// An operand: an expression, or a single R value as a literal.
+/// An operand: an expression, or an R vector as a literal. A single value broadcasts to every
+/// row, and a longer vector is a column of its own, one value per row.
 unsafe fn operand(value: Sexp, call: Sexp) -> R<Expr> {
     if let Some(Object::Expr(named)) = object_of(value) {
         return Ok(named.expr.clone());
     }
-    literal(value).ok_or_else(|| {
+    vector_literal(value)?.ok_or_else(|| {
         error_in(
             call,
             format!(
-                "an expression combines with expressions and single values, not {}",
+                "an expression combines with expressions and vectors, not {}",
                 describe(value)
             ),
         )
@@ -346,7 +406,8 @@ unsafe fn do_operator(call: &Call<'_>) -> R<Sexp> {
     expr(Expr::Binary(op, Box::new(left), Box::new(right)))
 }
 
-/// An aggregation skips `NA`s, as Polars' does.
+/// `.expr_aggregate(expr, function, na_rm)`. An aggregation skips `NA`s, as Polars' does, unless
+/// `na_rm = FALSE` asks for R's rule, under which one `NA` makes the result `NA`.
 unsafe fn do_aggregate(call: &Call<'_>) -> R<Sexp> {
     let arg = expression(call.arg(0), call.call)?;
     let function = match values::require_str(call.arg(1), "function")?.as_ref() {
@@ -359,7 +420,7 @@ unsafe fn do_aggregate(call: &Call<'_>) -> R<Sexp> {
         "median" => Aggregate::Median,
         "std" => Aggregate::Sd,
         "var" => Aggregate::Var,
-        "count" => Aggregate::Length,
+        "count" => Aggregate::Count,
         other => {
             return Err(error_in(
                 call.call,
@@ -367,10 +428,7 @@ unsafe fn do_aggregate(call: &Call<'_>) -> R<Sexp> {
             ));
         }
     };
-    let na_rm = !matches!(
-        function,
-        Aggregate::First | Aggregate::Last | Aggregate::Length
-    );
+    let na_rm = values::require_flag(call.arg(2), "na_rm")?;
     wrap(Object::Expr(Named {
         alias: arg.alias,
         expr: Expr::Aggregate {
@@ -420,7 +478,7 @@ unsafe fn do_head_expr(call: &Call<'_>) -> R<Sexp> {
 /// columns, one value per row, as data.table's `:=` with `by` gives.
 unsafe fn do_over(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(1);
-    let (subject, columns) = verb_arguments(call.arg(0), "over", caller)?;
+    let (subject, columns) = verb_arguments(call.arg(0), "over", Vectors::None, caller)?;
     let named = expression(subject, caller)?;
     let mut keys = Vec::with_capacity(columns.len());
     for (_, column) in columns {
@@ -440,6 +498,36 @@ unsafe fn do_over(call: &Call<'_>) -> R<Sexp> {
         alias: named.alias,
         expr: Expr::Window(Box::new(named.expr), keys),
     }))
+}
+
+/// `.expr_call(function, arguments)`: a row-wise [`Function`] of expressions and vectors.
+unsafe fn do_call(call: &Call<'_>) -> R<Sexp> {
+    let name = values::require_str(call.arg(0), "function")?;
+    let function = match name.as_ref() {
+        "is_in" => Function::IsIn,
+        other => {
+            return Err(error_in(
+                call.call,
+                format!("no expression function `{other}`"),
+            ));
+        }
+    };
+    let list = call.arg(1);
+    // `x %in% NULL` is `FALSE` for every value of `x`, `NA` included; `is.na(x) & FALSE` keeps
+    // `x`'s name for the result.
+    if function == Function::IsIn && length(list) == 2 && is_nil(list.element(1)) {
+        let x = operand(list.element(0), call.call)?;
+        return expr(Expr::Binary(
+            BinaryOp::And,
+            Box::new(Expr::Unary(UnaryOp::IsNa, Box::new(x))),
+            Box::new(Expr::Logical(false)),
+        ));
+    }
+    let mut arguments = Vec::with_capacity(length(list));
+    for index in 0..length(list) {
+        arguments.push(operand(list.element(index), call.call)?);
+    }
+    expr(Expr::Call(function, arguments))
 }
 
 unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
@@ -479,6 +567,182 @@ unsafe fn plan_of(value: Sexp, call: Sexp) -> R<(Plan, bool)> {
             ),
         )),
     }
+}
+
+/// `.df_concat(items, how, call)`: the frames of `items` (or of the one list it holds) stacked
+/// by column name (`"vertical"`, every frame with the same columns; `"diagonal"`, a missing
+/// column filled with `NA`), or set side by side (`"horizontal"`), where a named vector is a
+/// column too.
+unsafe fn do_concat(call: &Call<'_>) -> R<Sexp> {
+    let caller = call.arg(2);
+    let mut items = call.arg(0);
+    if length(items) == 1 && items.element(0).kind() == SexpType::List {
+        items = items.element(0);
+    }
+    let how = values::require_str(call.arg(1), "how")?;
+    let names = values::names(items);
+    let argument_name = |index: usize| {
+        if is_nil(names) {
+            None
+        } else {
+            values::string_at(names, index).filter(|name| !name.is_empty())
+        }
+    };
+    let bind = match how.as_ref() {
+        "vertical" => ops::Bind::Name,
+        "diagonal" => ops::Bind::Fill,
+        "horizontal" => {
+            let height = (0..length(items))
+                .map(|index| items.element(index))
+                .find(|item| is_frame(*item))
+                .map(|item| table_of(item).map(|table| table.height()))
+                .transpose()?;
+            let Some(height) = height else {
+                return Err(error_in(caller, "`concat` needs at least one DataFrame"));
+            };
+            let mut columns = Vec::new();
+            for index in 0..length(items) {
+                let item = items.element(index);
+                if is_frame(item) {
+                    let table = table_of(item)?;
+                    if table.height() != height {
+                        return Err(error_in(
+                            caller,
+                            format!(
+                                "frame {} has {} rows, but the first frame has {height}",
+                                index + 1,
+                                table.height()
+                            ),
+                        ));
+                    }
+                    columns.extend(table.frame().columns().iter().cloned());
+                    continue;
+                }
+                let Some(name) = argument_name(index) else {
+                    return Err(error_in(
+                        caller,
+                        format!(
+                            "`concat` sets frames and named vectors side by side, not {}",
+                            describe(item)
+                        ),
+                    ));
+                };
+                columns.push(frame::to_column(&name, item, height, caller)?);
+            }
+            let duplicate = columns.iter().enumerate().find_map(|(index, column)| {
+                columns[..index]
+                    .iter()
+                    .any(|earlier| earlier.name() == column.name())
+                    .then(|| column.name().clone())
+            });
+            if let Some(duplicate) = duplicate {
+                return Err(error_in(
+                    caller,
+                    format!(
+                        "column `{duplicate}` appears in more than one of the frames and vectors set side by side; rename one first"
+                    ),
+                ));
+            }
+            let combined = table::polars::prelude::DataFrame::new(height, columns)
+                .map_err(|failure| error_in(caller, failure.to_string()))?;
+            return frame::wrap(
+                table::Table::new(combined)
+                    .map_err(|failure| table_error(caller, failure, None))?,
+            );
+        }
+        other => {
+            return Err(error_in(
+                caller,
+                format!("`how` is \"vertical\", \"diagonal\" or \"horizontal\", not \"{other}\""),
+            ));
+        }
+    };
+    let mut tables = Vec::with_capacity(length(items));
+    for index in 0..length(items) {
+        let item = items.element(index);
+        if !is_frame(item) {
+            return Err(error_in(
+                caller,
+                format!("`concat` stacks DataFrames, not {}", describe(item)),
+            ));
+        }
+        tables.push(&*table_of(item)?);
+    }
+    if bind == ops::Bind::Name
+        && let Some(first) = tables.first()
+    {
+        for (index, table) in tables.iter().enumerate().skip(1) {
+            let (missing, frame) = match first
+                .frame()
+                .get_column_names()
+                .into_iter()
+                .find(|name| table.frame().column(name).is_err())
+            {
+                Some(name) => (name.clone(), index + 1),
+                None => match table
+                    .frame()
+                    .get_column_names()
+                    .into_iter()
+                    .find(|name| first.frame().column(name).is_err())
+                {
+                    Some(name) => (name.clone(), 1),
+                    None => continue,
+                },
+            };
+            return Err(error_in(
+                caller,
+                format!(
+                    "frame {frame} has no column `{missing}`; to fill it with `NA`, use `how = \"diagonal\"`"
+                ),
+            ));
+        }
+    }
+    let stacked =
+        ops::rbind_list(&tables, bind).map_err(|failure| table_error(caller, failure, None))?;
+    frame::wrap(stacked)
+}
+
+/// `.df_unique(df, subset, keep, call)`.
+unsafe fn do_unique(call: &Call<'_>) -> R<Sexp> {
+    let caller = call.arg(3);
+    let (plan, lazy) = plan_of(call.arg(0), caller)?;
+    let mut subset = Vec::new();
+    if !is_nil(call.arg(1)) {
+        for name in values::strings(call.arg(1)) {
+            let Some(name) = name else {
+                return Err(error_in(caller, "`subset` names a column `NA`"));
+            };
+            subset.push(PlSmallStr::from(name));
+        }
+    }
+    let keep = values::require_str(call.arg(2), "keep")?;
+    let Some(keep) = ops::Keep::parse(&keep) else {
+        return Err(error_in(
+            caller,
+            format!("`keep` is \"first\", \"last\" or \"none\", not \"{keep}\""),
+        ));
+    };
+    finish(plan.with(Step::Unique { subset, keep }), lazy, caller)
+}
+
+/// `.df_duplicated(df, from_last, call)`: whether each row repeats an earlier row, or a later one
+/// with `from_last`.
+unsafe fn do_duplicated(call: &Call<'_>) -> R<Sexp> {
+    let caller = call.arg(2);
+    if !is_frame(call.arg(0)) {
+        return Err(error_in(
+            caller,
+            format!("expected a DataFrame, got {}", describe(call.arg(0))),
+        ));
+    }
+    let from_last = values::require_flag(call.arg(1), "fromLast")?;
+    let duplicated = ops::duplicated_rows(table_of(call.arg(0))?, &[], from_last)
+        .map_err(|failure| table_error(caller, failure, None))?;
+    let vector = values::alloc(SexpType::Logical, duplicated.len())?;
+    for (slot, flag) in values::ints_mut(vector).iter_mut().zip(duplicated) {
+        *slot = i32::from(flag);
+    }
+    Ok(vector)
 }
 
 /// Wraps an extended plan: a `LazyFrame` stays lazy, and a `DataFrame`'s one-step plan runs now.
@@ -529,9 +793,15 @@ unsafe fn table_error(
 }
 
 /// A verb's `...`: the value it works on, which is the first argument, and the named expressions
-/// after it. An expression keeps its alias or takes the argument's name, and a string names a
-/// column.
-unsafe fn verb_arguments(list: Sexp, verb: &str, call: Sexp) -> R<(Sexp, Vec<(PlSmallStr, Expr)>)> {
+/// after it. An expression keeps its alias, or takes the argument's name. Strings without an
+/// argument name name columns, and a single string with one names a column and renames it, as
+/// Polars reads a string. `vectors` says what any other R vector is.
+unsafe fn verb_arguments(
+    list: Sexp,
+    verb: &str,
+    vectors: Vectors,
+    call: Sexp,
+) -> R<(Sexp, Vec<(PlSmallStr, Expr)>)> {
     if length(list) == 0 {
         return Err(error_in(
             call,
@@ -565,41 +835,109 @@ unsafe fn verb_arguments(list: Sexp, verb: &str, call: Sexp) -> R<(Sexp, Vec<(Pl
             columns.push(named.output());
             continue;
         }
-        if item.kind() == SexpType::String {
-            for name in values::strings(item).into_iter().flatten() {
-                columns.push((name.as_str().into(), Expr::Column(name.into())));
+        if item.kind() == SexpType::String
+            && (argument_name.is_none() || length(item) == 1 || vectors != Vectors::Columns)
+        {
+            match argument_name.filter(|_| length(item) == 1) {
+                Some(name) => match values::string_at(item, 0) {
+                    Some(column) => {
+                        columns.push((name.as_ref().into(), Expr::Column(column.as_ref().into())))
+                    }
+                    None => {
+                        return Err(error_in(
+                            call,
+                            format!("`{name}` names no column, because it is `NA`"),
+                        ));
+                    }
+                },
+                None => {
+                    for name in values::strings(item).into_iter().flatten() {
+                        columns.push((name.as_str().into(), Expr::Column(name.into())));
+                    }
+                }
             }
             continue;
         }
-        return Err(error_in(
-            call,
-            format!(
-                "`{verb}` takes column names and expressions such as `Expr.col(\"x\")`, not {}",
-                describe(item)
-            ),
-        ));
+        match vectors {
+            Vectors::Columns => {}
+            Vectors::Masks if argument_name.is_none() && item.kind() == SexpType::Logical => {
+                columns.push((PlSmallStr::EMPTY, operand(item, call)?));
+                continue;
+            }
+            Vectors::Masks => {
+                return Err(error_in(
+                    call,
+                    format!(
+                        "`{verb}` takes expressions such as `Expr.col(\"x\") > 0` and logical vectors, not {}",
+                        describe(item)
+                    ),
+                ));
+            }
+            Vectors::None => {
+                return Err(error_in(
+                    call,
+                    format!(
+                        "`{verb}` takes column names and expressions such as `Expr.col(\"x\")`, not {}",
+                        describe(item)
+                    ),
+                ));
+            }
+        }
+        match (argument_name, vector_literal(item)?) {
+            (Some(name), Some(literal)) => columns.push((name.as_ref().into(), literal)),
+            (None, Some(_)) => {
+                return Err(error_in(
+                    call,
+                    format!(
+                        "`{verb}` needs a name for a vector, such as `{verb}(x = ...)`, to make it a column"
+                    ),
+                ));
+            }
+            (_, None) => {
+                return Err(error_in(
+                    call,
+                    format!(
+                        "`{verb}` takes column names, expressions such as `Expr.col(\"x\")` and named vectors, not {}",
+                        describe(item)
+                    ),
+                ));
+            }
+        }
     }
     Ok((list.element(0), columns))
 }
 
+/// What a verb's `...` takes an R vector that names no column as.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Vectors {
+    /// A named vector is a column of its values, for `select` and `with_columns`.
+    Columns,
+    /// An unnamed logical vector is a row mask, for `filter`.
+    Masks,
+    /// Nothing, so a misspelt option such as `sort`'s `desc = TRUE` cannot pass as a constant
+    /// column.
+    None,
+}
+
 unsafe fn do_select(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(1);
-    let (subject, columns) = verb_arguments(call.arg(0), "select", caller)?;
+    let (subject, columns) = verb_arguments(call.arg(0), "select", Vectors::Columns, caller)?;
     let (plan, lazy) = plan_of(subject, caller)?;
     finish(plan.with(Step::Select(columns)), lazy, caller)
 }
 
 unsafe fn do_with_columns(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(1);
-    let (subject, columns) = verb_arguments(call.arg(0), "with_columns", caller)?;
+    let (subject, columns) = verb_arguments(call.arg(0), "with_columns", Vectors::Columns, caller)?;
     let (plan, lazy) = plan_of(subject, caller)?;
     finish(plan.with(Step::WithColumns(columns)), lazy, caller)
 }
 
-/// Several predicates must all hold, as Polars' `filter(a, b)` is `filter(a & b)`.
+/// Several predicates must all hold, as Polars' `filter(a, b)` is `filter(a & b)`. A predicate
+/// is an expression or a logical vector with one value per row.
 unsafe fn do_filter(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(1);
-    let (subject, predicates) = verb_arguments(call.arg(0), "filter", caller)?;
+    let (subject, predicates) = verb_arguments(call.arg(0), "filter", Vectors::Masks, caller)?;
     let (plan, lazy) = plan_of(subject, caller)?;
     let predicate = predicates
         .into_iter()
@@ -616,7 +954,7 @@ unsafe fn do_filter(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_group_by(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(1);
-    let (subject, keys) = verb_arguments(call.arg(0), "group_by", caller)?;
+    let (subject, keys) = verb_arguments(call.arg(0), "group_by", Vectors::None, caller)?;
     let (plan, lazy) = plan_of(subject, caller)?;
     if keys.is_empty() {
         return Err(error_in(caller, "`group_by` needs at least one key column"));
@@ -626,7 +964,7 @@ unsafe fn do_group_by(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_agg(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(1);
-    let (group, aggregates) = verb_arguments(call.arg(0), "agg", caller)?;
+    let (group, aggregates) = verb_arguments(call.arg(0), "agg", Vectors::None, caller)?;
     let Some(Object::Group { plan, keys, lazy }) = object_of(group) else {
         return Err(error_in(
             caller,
@@ -645,7 +983,7 @@ unsafe fn do_agg(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_sort(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(2);
-    let (subject, columns) = verb_arguments(call.arg(0), "sort", caller)?;
+    let (subject, columns) = verb_arguments(call.arg(0), "sort", Vectors::None, caller)?;
     let (plan, lazy) = plan_of(subject, caller)?;
     if columns.is_empty() {
         return Err(error_in(
@@ -820,12 +1158,13 @@ unsafe fn do_pivot(call: &Call<'_>) -> R<Sexp> {
             "max" => Aggregate::Max,
             "first" => Aggregate::First,
             "last" => Aggregate::Last,
-            "count" => Aggregate::Length,
+            "count" => Aggregate::Count,
+            "len" => Aggregate::Length,
             other => {
                 return Err(error_in(
                     caller,
                     format!(
-                        "`agg` is one of \"sum\", \"mean\", \"min\", \"max\", \"first\", \"last\" and \"count\", not \"{other}\""
+                        "`agg` is one of \"sum\", \"mean\", \"min\", \"max\", \"first\", \"last\", \"count\" and \"len\", not \"{other}\""
                     ),
                 ));
             }

@@ -1042,12 +1042,12 @@ pub fn column_type<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
         TyKind::Scalar(_) => Ty::new(db, TyKind::Vector(ty)),
         TyKind::NamedVector(element) => Ty::new(db, TyKind::Vector(*element)),
         // A frame stores a `List` column of `F64`, `Bool` or `Str` as the R vector that shares
-        // its representation.
+        // its representation, and one of `I64` as an integer column, as `[1L, 2L]` reads in R.
         _ => match array_element(db, ty).map(|element| element.kind(db)) {
-            Some(TyKind::Native(native)) => match native.shared_atomic() {
-                Some(atomic) => Ty::new(db, TyKind::Vector(scalar(db, atomic))),
-                None => ty,
-            },
+            Some(TyKind::Native(native)) => {
+                let atomic = native.shared_atomic().unwrap_or(Atomic::Integer);
+                Ty::new(db, TyKind::Vector(scalar(db, atomic)))
+            }
             _ => ty,
         },
     }

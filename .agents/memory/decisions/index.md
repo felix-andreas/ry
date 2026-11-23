@@ -670,6 +670,9 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - String keys sort by rank, and merge pairs come from sorted codes
 - package:ry attaches no bare name another package exports
 - A base frame built by `data.frame()` or `data.table()` knows its columns
+- Missing keys, missing values and date-times in the table engine
+- Verbs take R vectors as values, and only a single string names a column
+- DataFrame.concat and unique, and base generics on a DataFrame
 - A verb taking columns through `...` has no formal before them
 - `Expr` `%%` and `%/%` on doubles are GNU R's `myfmod` and `myfloor`
 - The frame fuzz kind's reference is a base-R model of the documented contract

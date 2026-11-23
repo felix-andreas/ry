@@ -1,0 +1,49 @@
+# The base generics and the Polars-style verbs on a DataFrame give R's answers. duplicated and
+# unique honour fromLast; rbind and cbind take frames, lists and vectors; concat fills missing
+# columns; is_in works eagerly, lazily and against NULL; a filter takes an R logical vector of
+# one value per row; a single factor value fills a column; a date-time keeps its class through a
+# join across zones and an if_else with NA; pivot's "count" skips missing values while "len"
+# counts them; a missing key matches a missing key in every kind of join; and factor keys join
+# across level sets.
+
+requires ry-runtime
+
+file table.R
+| rows <- DataFrame(id = c(1L, 2L, 1L), name = c("a", "b", "a"))
+| print(duplicated(rows))
+| print(duplicated(rows, fromLast = TRUE))
+| print(nrow(unique(rows)))
+| more <- rbind(rows, data.frame(id = 3L, name = "c"), list(4L, "d"), NULL)
+| print(more$id)
+| wide <- cbind(DataFrame(id = 1:2), score = c(1.5, 2.5))
+| print(names(wide))
+| print(tryCatch(cbind(DataFrame(id = 1:2), DataFrame(id = 3:4)), error = conditionMessage))
+| stacked <- DataFrame.concat(DataFrame(x = 1L), DataFrame(y = 2L), how = "diagonal")
+| print(stacked$y)
+| nums <- DataFrame(x = c(1L, 9L), y = c(5L, 1L))
+| print(nrow(DataFrame.filter(nums, Expr.is_in(Expr.col("x"), c(1L, 2L)))))
+| print(nrow(nums |> DataFrame.lazy() |> LazyFrame.filter(Expr.is_in(Expr.col("x"), Expr.col("y"))) |> LazyFrame.collect()))
+| print(DataFrame.with_columns(nums, none = Expr.is_in(Expr.col("x"), NULL))$none)
+| print(DataFrame.filter(nums, c(TRUE, FALSE))$x)
+| print(tryCatch(DataFrame.filter(nums, c(TRUE, FALSE, TRUE)), error = conditionMessage))
+| print(tryCatch(DataFrame.filter(nums, Expr.col("x") %in% 1L), error = conditionMessage))
+| print(DataFrame.with_columns(nums, z = c(10, 20))$z)
+| print(levels(DataFrame.with_columns(nums, f = factor("u"))$f))
+| utc <- DataFrame(t = as.POSIXct("2024-01-01 12:00:00", tz = "UTC"), v = 1L)
+| ny <- DataFrame(t = as.POSIXct("2024-01-01 07:00:00", tz = "America/New_York"), w = 2L)
+| print(class(utc$t))
+| print(nrow(DataFrame.join(utc, ny, on = "t", how = "full")))
+| missing <- DataFrame.with_columns(utc, u = Expr.if_else(Expr.col("v") > 1L, Expr.col("t"), NA))
+| print(class(missing$u))
+| sales <- DataFrame(g = c("a", "a"), k = c("x", "x"), v = c(1, NA))
+| print(DataFrame.pivot(sales, on = "k", index = "g", values = "v", agg = "count")$x)
+| print(DataFrame.pivot(sales, on = "k", index = "g", values = "v", agg = "len")$x)
+| keys <- DataFrame(id = c(1L, NA), name = c("a", "missing"))
+| print(DataFrame.join(keys, DataFrame(id = c(NA, 1L), s = c(20L, 10L)), on = "id", how = "anti")$name)
+| a <- DataFrame(k = factor(c("x", "y")), v = 1:2)
+| b <- DataFrame(k = factor(c("y", "z")), w = 3:4)
+| print(as.character(DataFrame.join(a, b, on = "k", how = "full")$k))
+
+run ry run --runtime ry table.R
+expect exit 0
+expect stdout "[1] FALSE FALSE  TRUE\n[1]  TRUE FALSE FALSE\n[1] 2\n[1] 1 2 1 3 4\n[1] \"id\"    \"score\"\n[1] \"column `id` appears in more than one of the frames and vectors set side by side; rename one first\"\n[1] NA  2\n[1] 1\n[1] 1\n[1] FALSE FALSE\n[1] 1\n[1] \"invalid query: the filter has a vector of 3 values, but the frame has 2 rows; give one value or one per row\"\n[1] \"`%in%` does not build an expression; write `Expr.is_in(x, values)`\"\n[1] 10 20\n[1] \"u\"\n[1] \"POSIXct\" \"POSIXt\" \n[1] 1\n[1] \"POSIXct\" \"POSIXt\" \n[1] 1\n[1] 2\ncharacter(0)\n[1] \"y\" \"z\" \"x\""
