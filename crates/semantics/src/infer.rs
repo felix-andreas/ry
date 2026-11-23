@@ -929,7 +929,7 @@ impl<'db> InferenceTable<'db> {
                 db,
                 TyKind::Function(&FunctionType {
                     ret,
-                    ..target.clone()
+                    ..*target
                 }),
             );
             if !self.compatible_probe(db, member, each, depth + 1) {

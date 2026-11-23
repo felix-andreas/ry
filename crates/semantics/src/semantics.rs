@@ -4636,6 +4636,7 @@ mod tests {
             match_findings: ThinVec::new(),
             i64_literals: ThinVec::new(),
             checked_types: ThinVec::new(),
+            function_fallback_reads: Default::default(),
             top_level_bindings: vec![(
                 hir::Symbol::new("value"),
                 types::TypeScheme::monomorphic(integer),
