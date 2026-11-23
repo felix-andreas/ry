@@ -3678,9 +3678,9 @@ impl FrameGenerator {
             values.plain()
                 && match function {
                     "median" => values.cell == Cell::Double,
-                    // R's `cor` gives NaN over an infinite value where ry gives NA, and the
-                    // contract is silent on which one a correlation over Inf means.
-                    "cor" => {
+                    // Over an infinite value R's `cor`, `var` and `sd` give NaN where ry gives NA
+                    // or Inf, and the contract is silent on which one a spread over Inf means.
+                    "cor" | "var" | "std" => {
                         matches!(values.cell, Cell::Integer | Cell::Double) && !values.infinite
                     }
                     _ => matches!(values.cell, Cell::Integer | Cell::Double),
