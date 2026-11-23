@@ -811,8 +811,20 @@ pub(crate) unsafe fn list_from_r<const MISSING: u8>(call: &Call<'_>) -> R<Sexp> 
         let [vector] = arguments(call, ["vector"])?;
         (vector, nil())
     };
-    // A ry list holds no `NA`.
+    // A ry list holds no `NA`, but its siblings still refuse a list of ry values, which is no
+    // vector, and a default `fill` would refuse.
     let (list, gaps) = if vector.is_array() {
+        if MISSING != NA_REFUSED && arrays::items(vector) == arrays::Items::RyValues {
+            return Err(wrong(
+                call,
+                "vector",
+                "a double, integer, logical, character or raw vector",
+                vector,
+            ));
+        }
+        if MISSING == NA_FILLED {
+            fill(call, vector, &[], default)?;
+        }
         (vector, Vec::new())
     } else {
         let vector = values::materialize(vector)?;
@@ -869,7 +881,7 @@ pub(crate) unsafe fn list_from_r<const MISSING: u8>(call: &Call<'_>) -> R<Sexp> 
                 position + 1
             )));
         }
-        if MISSING == NA_FILLED && !gaps.is_empty() {
+        if MISSING == NA_FILLED {
             (fill(call, converted, &gaps, default)?, Vec::new())
         } else {
             (arrays::finish(converted), gaps)
@@ -895,6 +907,7 @@ pub(crate) unsafe fn list_from_r<const MISSING: u8>(call: &Call<'_>) -> R<Sexp> 
             SexpType::Real => scalar_real(values::reals(list)[position])?,
             SexpType::Logical => scalar_bool(values::ints(list)[position] != 0)?,
             SexpType::String => values::scalar_string_charsxp(list.element(position))?,
+            SexpType::Integer => alloc(i64::from(values::ints(list)[position]))?,
             _ => alloc(list.slice::<i64>()[position])?,
         };
         items.push(ok(item)?);
@@ -902,22 +915,27 @@ pub(crate) unsafe fn list_from_r<const MISSING: u8>(call: &Call<'_>) -> R<Sexp> 
     arrays::from_items(&items)?.map_err(error)
 }
 
-/// The ry list of the items of `converted`, a fresh unshared vector of `F64`, `Bool`, `Str` or
-/// `I64`, with `default` at each of `gaps`. A default wider than the items widens them as R
+/// The ry list of the items of `converted`, a vector of `F64`, `Bool`, `Str` or `I64` that is
+/// fresh and unshared unless `gaps` is empty, with `default` at each of `gaps`. The default is
+/// checked even where there is no gap. A default wider than the items widens them as R
 /// coerces: a whole number makes `Bool` items `I64`, and a fractional one makes `Bool` or `I64`
 /// items `F64`.
 unsafe fn fill(call: &Call<'_>, converted: Sexp, gaps: &[usize], default: Sexp) -> R<Sexp> {
-    let number = || match read(default) {
-        Some(number) => Some(Source::Int(number)),
-        None => r_source(default).ok(),
+    // A ry list holds no `NaN` either, since R reads it as missing.
+    let number = || {
+        match read(default) {
+            Some(number) => Some(Source::Int(number)),
+            None => r_source(default).ok(),
+        }
+        .filter(|source| !matches!(source, Source::F64(number) if number.is_nan()))
     };
-    let (mut whole, expected): (Vec<i64>, _) = match converted.kind() {
+    let expected = match converted.kind() {
         SexpType::Real => {
             let Some(source) = number() else {
                 return Err(wrong(
                     call,
                     "default",
-                    "a single number that is not `NA`",
+                    "a single number that is not `NA` or `NaN`",
                     default,
                 ));
             };
@@ -959,19 +977,22 @@ unsafe fn fill(call: &Call<'_>, converted: Sexp, gaps: &[usize], default: Sexp) 
                 }
                 return Ok(arrays::finish(converted));
             }
-            let flags = values::ints(converted).iter().map(|&flag| i64::from(flag));
-            (
-                flags.collect(),
-                "a single logical or number that is not `NA`",
-            )
+            "a single logical or number that is not `NA` or `NaN`"
         }
-        _ => (
-            converted.slice::<i64>().to_vec(),
-            "a single number that is not `NA`",
-        ),
+        _ => "a single number that is not `NA` or `NaN`",
     };
     let Some(source) = number() else {
         return Err(wrong(call, "default", expected, default));
+    };
+    if gaps.is_empty() {
+        return Ok(arrays::finish(converted));
+    }
+    let mut whole: Vec<i64> = match converted.kind() {
+        SexpType::Logical | SexpType::Integer => values::ints(converted)
+            .iter()
+            .map(|&number| i64::from(number))
+            .collect(),
+        _ => converted.slice::<i64>().to_vec(),
     };
     if let Some(number) = convert(source) {
         for &position in gaps {

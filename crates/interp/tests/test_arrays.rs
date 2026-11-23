@@ -189,7 +189,7 @@ const ERRORS: &[(&str, &str)] = &[
     ),
     (
         "List.from_r_or(c(1, NA), \"x\")",
-        "`default` must be a single number that is not `NA`, not a character value",
+        "`default` must be a single number that is not `NA` or `NaN`, not a character value",
     ),
     (
         "List.from_r_or(c(\"a\", NA), NA_character_)",
@@ -198,6 +198,30 @@ const ERRORS: &[(&str, &str)] = &[
     (
         "List.from_r_or(list(1, NA), 0)",
         "`vector` must be a double, integer, logical, character or raw vector, not a list",
+    ),
+    (
+        "List.from_r_or(c(1, NA), NaN)",
+        "`default` must be a single number that is not `NA` or `NaN`, not",
+    ),
+    (
+        "List.from_r_or(c(1L, NA), NaN)",
+        "`default` must be a single number that is not `NA` or `NaN`, not",
+    ),
+    (
+        "List.from_r_or(c(TRUE, NA), NaN)",
+        "`default` must be a single logical or number that is not `NA` or `NaN`, not",
+    ),
+    (
+        "List.from_r_or(xs, \"x\")",
+        "`default` must be a single number that is not `NA` or `NaN`, not a character value",
+    ),
+    (
+        "List.from_r_missing(points)",
+        "`vector` must be a double, integer, logical, character or raw vector, not",
+    ),
+    (
+        "List.from_r_or([(1, 2)], 0)",
+        "`vector` must be a double, integer, logical, character or raw vector, not",
     ),
     (
         "m <- c(1, NA); class(m) <- \"money\"; List.from_r_missing(m)",

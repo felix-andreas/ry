@@ -985,7 +985,7 @@ const PRINTS: &[(&str, &str)] = &[
 const ERRORS: &[(&str, &str)] = &[
     (
         "List.from_r_or(c(1, NA), \"x\")",
-        "`default` must be a single number that is not `NA`, not a character value",
+        "`default` must be a single number that is not `NA` or `NaN`, not a character value",
     ),
     // Compiled loops hand a failing call back to tier 0, which raises the same error.
     (

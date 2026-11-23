@@ -122,11 +122,15 @@ List.from_r : fn(vector: raw[]) -> List<I64>
 List.from_r : <T: item> fn(vector: list[T]) -> List<T>
 
 #' Converts an R vector into a `List` as `List.from_r` does, with `default` in place of every
-#' `NA` (and of `NaN`, which R also counts as missing).
+#' `NA` (and of `NaN`, which R also counts as missing). The default is never missing itself, and
+#' a number wider than the items widens them as R coerces, so a fractional default makes an
+#' `integer` vector a `List<F64>`.
 #'
 #' ```r dput
 #' List.from_r_or(c(1, NA, 3), 0)
 #' #> [1, 0, 3]
+#' List.from_r_or(c(1L, NA), 0.5)
+#' #> [1, 0.5]
 #' ```
 List.from_r_or : fn(vector: logical[], default: Bool) -> List<Bool>
 List.from_r_or : fn(vector: integer[], default: I64) -> List<I64>

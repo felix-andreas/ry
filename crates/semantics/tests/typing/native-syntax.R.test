@@ -443,6 +443,18 @@ counted: fn(values: integer) -> I64
 totals: List<F64>
 results: List<:Ok(F64) | :Err(:Missing)>
 
+#---- an_integer_vector_with_a_fractional_default_converts_to_f64
+# typing: strict
+halves <- function(values: integer[]) -> List<F64> List.from_r_or(values, 0.5)
+wholes <- function(values: integer[]) -> List<I64> List.from_r_or(values, 0)
+filled <- List.from_r_or(c(1L, NA), 2.5)
+kept <- List.from_r_or(c(1L, NA), 2)
+#++++
+halves: fn(values: integer[]) -> List<F64>
+wholes: fn(values: integer[]) -> List<I64>
+filled: List<F64>
+kept: List<I64>
+
 #---- an_unsuffixed_list_literal_converts_through_the_overloads
 y <- List.to_r([1, 2])
 counts <- [1, 2]

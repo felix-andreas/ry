@@ -103,8 +103,8 @@ pub struct RCall {
 pub enum RResult {
     /// The call is a statement, whose value is unused.
     Unused,
-    /// The value goes through this `Num.from_r`, `Str.from_r`, `Bool.from_r` or `List.from_r`
-    /// call, or one of `List.from_r`'s siblings, which gives this type.
+    /// The value goes through this `Num.from_r`, `Str.from_r`, `Bool.from_r`, `List.from_r`,
+    /// `List.from_r_or` or `List.from_r_missing` call, which gives this type.
     Converted(Conversion, Type),
     /// The call is one of the table API's that gives a table value
     /// ([`gives_table_value`]), which the code holds as it is.
@@ -6636,13 +6636,12 @@ unsafe fn tail_matches(expression: Sexp, tails: &mut SmallVec<[Sexp; 2]>) {
     }
 }
 
-/// Whether `function` is base R's or the standard library's own function of this name.
 /// The refusal of a call of the R function `head` whose value typed code uses directly.
 unsafe fn r_value_refusal(head: Sexp) -> Refusal {
     Refusal(Cow::Owned(format!(
         "it uses the value of R's `{}` directly, and typed code calls R only as a statement or \
-         inside `Num.from_r`, `Str.from_r`, `Bool.from_r` or `List.from_r`, which give the value \
-         a ry type",
+         inside `Num.from_r`, `Str.from_r`, `Bool.from_r`, `List.from_r`, `List.from_r_or` or \
+         `List.from_r_missing`, which give the value a ry type",
         interp::deparse::deparse_first_line(head)
     )))
 }

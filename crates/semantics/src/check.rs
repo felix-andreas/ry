@@ -19801,11 +19801,21 @@ impl<'db, 'a> Checker<'db, 'a> {
         {
             return Ok(());
         }
-        // A literal that does not fit reported itself.
-        if let Some(value) = value
-            && self.adapt_literal(value, expected) != LiteralFit::NotLiteral
-        {
-            return Ok(());
+        // A literal that does not fit reported itself, except while probing an overload, where
+        // it rules the candidate out: `List.from_r_or(x, 0.5)` with an integer `x` takes the
+        // `F64` candidate, not the `I64` one declared first.
+        if let Some(value) = value {
+            let errors = self.errors.len();
+            match self.adapt_literal(value, expected) {
+                LiteralFit::NotLiteral => {}
+                LiteralFit::OutOfRange if self.overload_probe_depth > 0 => {
+                    if let Some(error) = self.errors.drain(errors..).next() {
+                        return Err(error);
+                    }
+                    return Ok(());
+                }
+                LiteralFit::Fits | LiteralFit::OutOfRange => return Ok(()),
+            }
         }
         if self.table.compatible(self.db, resolved_found, expected) {
             return Ok(());
