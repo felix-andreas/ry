@@ -146,6 +146,18 @@ action: Add inferred type annotations for the whole file
 completion (71): price, prcomp, precip, predict, predict.glm, predict.lm, preplot, presidents
 hint @46: Money
 
+#---- no_action_restates_a_nominal_constructor
+type UserId = integer
+x <- @User$0Id(1L)
+#++++
+hover 28..34: type UserId = integer
+definition 5..11
+references: 5..11*, 28..34
+rename: 2 edit(s)
+type-definition 5..11
+signature: none
+completion (1): UserId
+
 #---- hover_on_an_opaque_definition
 opaque Met$0ers = list{value: double}
 f <- function(length: Meters) -> double length$value

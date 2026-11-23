@@ -2,7 +2,7 @@
 #---- duplicate_type_parameters_in_universal_binder
 <T, T> fn(T) -> T
 #++++
-error: duplicate type parameter name `T` in `<...>`.
+error: duplicate type parameter name `T` in `<...>`
 
 #---- duplicate_type_parameters_in_expanded_forall
 @forall T
@@ -10,31 +10,31 @@ error: duplicate type parameter name `T` in `<...>`.
 @param value {T}
 @return {T}
 #++++
-error: duplicate type parameter name `T` in expanded function annotation.
+error: duplicate type parameter name `T` in expanded function annotation
 
 #---- unknown_constraint_in_universal_binder
 <T: frobnicate> fn(values: T) -> T
 #++++
-error: unknown type-parameter constraint `frobnicate`; the available constraints are `numeric`, `atomic`, `key`, `scalar numeric`, `item`, `number`, or `eq`.
+error: unknown type-parameter constraint `frobnicate`; the available constraints are `numeric`, `arithmetic`, `atomic`, `key`, `scalar numeric`, `item`, `number`, or `eq`
 
 #---- unknown_constraint_in_expanded_forall
 @forall T: frobnicate
 @param value {T}
 @return {T}
 #++++
-error: unknown type-parameter constraint `frobnicate`; the available constraints are `numeric`, `atomic`, `key`, `scalar numeric`, `item`, `number`, or `eq`.
+error: unknown type-parameter constraint `frobnicate`; the available constraints are `numeric`, `arithmetic`, `atomic`, `key`, `scalar numeric`, `item`, `number`, or `eq`
 
 #---- consecutive_typing_comments
 integer
 character
 #++++
-error: only one compact annotation fits in a `#:` block. Separate the annotations with a blank line so each gets its own block.
+error: only one compact annotation fits in a `#:` block. Separate the annotations with a blank line so each gets its own block
 
 #---- expanded_param_after_return
 @return {integer}
 @param count {integer}
 #++++
-error: `@param` directives must appear before `@return` or `@returns` in the same `#:` block.
+error: `@param` directives must appear before `@return` or `@returns` in the same `#:` block
 
 #---- generic_arity_is_not_a_parse_error
 Pair<integer>

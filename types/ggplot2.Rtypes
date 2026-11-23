@@ -12,7 +12,7 @@
 # Two nominals carry the whole grammar. `ggplot` is the plot; `gg` is a component
 # — a layer, scale, theme, facet, coord or label set. Everything ggplot2 returns
 # for `+` has class `gg` in R, which is what makes one component type enough.
-@type ggplot
+@type ggplot {gg}
 @type gg
 
 # The grammar's operator. `p + geom_point() + theme_minimal()` chains left to

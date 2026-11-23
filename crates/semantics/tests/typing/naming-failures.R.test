@@ -5,7 +5,7 @@ x
 #++++
 == R/main.R
 Unknown
-0..1 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
+0..1 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins
 
 #---- nested_function_unknown_value_in_package
 #~~~~ R/main.R
@@ -13,7 +13,7 @@ f <- function() x
 #++++
 == R/main.R
 f: fn() -> Unknown
-16..17 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
+16..17 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins
 
 #---- a_name_a_stub_declares_only_as_a_type_is_no_value
 #~~~~ R/main.R
@@ -21,7 +21,7 @@ f <- function() conditionMessage(condition)
 #++++
 == R/main.R
 f: fn() -> character
-33..42 warning[unresolved] I could not resolve `condition` in this package, its imports, or builtins.
+33..42 warning[unresolved] I could not resolve `condition` in this package, its imports, or builtins
 
 #==== global_warnings
 #---- top_level_binding_may_shadow_a_builtin
@@ -40,12 +40,12 @@ x <- 2L
 #++++
 == R/a.R
 x: integer
-0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
-  = 0..1 the later binding is here.
+0..1 warning[duplicate] top-level binding `x` is overwritten by a later top-level binding in this package
+  = 0..1 the later binding is here
 == R/b.R
 x: integer
-0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
-  = 0..1 the earlier binding is here.
+0..1 warning[duplicate] top-level binding `x` overwrites an earlier top-level binding in this package
+  = 0..1 the earlier binding is here
 
 #---- duplicate_top_level_value_names_across_three_files_produce_full_warning_chain
 #~~~~ R/a.R
@@ -57,18 +57,18 @@ x <- 3L
 #++++
 == R/a.R
 x: integer
-0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
-  = 0..1 the later binding is here.
+0..1 warning[duplicate] top-level binding `x` is overwritten by a later top-level binding in this package
+  = 0..1 the later binding is here
 == R/b.R
 x: integer
-0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
-  = 0..1 the earlier binding is here.
-0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
-  = 0..1 the later binding is here.
+0..1 warning[duplicate] top-level binding `x` overwrites an earlier top-level binding in this package
+  = 0..1 the earlier binding is here
+0..1 warning[duplicate] top-level binding `x` is overwritten by a later top-level binding in this package
+  = 0..1 the later binding is here
 == R/c.R
 x: integer
-0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
-  = 0..1 the earlier binding is here.
+0..1 warning[duplicate] top-level binding `x` overwrites an earlier top-level binding in this package
+  = 0..1 the earlier binding is here
 
 #==== type_conflicts
 #---- duplicate_type_names_across_several_files_mark_every_conflicting_declaration
@@ -80,14 +80,14 @@ x: integer
 #: @alias Person {character}
 #++++
 == R/a.R
-3..25 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
-  = 3..24 another declaration of this name is here.
+3..25 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
+  = 3..24 another definition of this name is here
 == R/b.R
-3..24 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
-  = 3..25 another declaration of this name is here.
+3..24 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
+  = 3..25 another definition of this name is here
 == R/c.R
-3..28 error[annotation] the type name `Person` is declared more than once. `@type` and `@alias` declarations share one project-global namespace.
-  = 3..24 another declaration of this name is here.
+3..28 error[annotation] the type name `Person` is defined more than once. Type definitions, whether written `type`, `alias`, `@type` or `@alias`, share one namespace across the project
+  = 3..24 another definition of this name is here
 
 #==== mixed_package_failures
 #---- later_package_winner_does_not_beat_local_shadow
@@ -103,12 +103,12 @@ f <- function() {
 #++++
 == R/a.R
 x: integer
-0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
-  = 0..1 the later binding is here.
+0..1 warning[duplicate] top-level binding `x` is overwritten by a later top-level binding in this package
+  = 0..1 the later binding is here
 == R/b.R
 x: integer
-0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
-  = 0..1 the earlier binding is here.
+0..1 warning[duplicate] top-level binding `x` overwrites an earlier top-level binding in this package
+  = 0..1 the earlier binding is here
 == R/c.R
 f: fn() -> integer
 
@@ -123,7 +123,7 @@ x
 x: integer
 == R/b.R
 integer
-3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
+3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 
 #==== package_and_scripts
 #---- package_and_script_diagnostics_render_on_both_sides
@@ -135,11 +135,11 @@ value <- 1L
 #++++
 == R/main.R
 Unknown
-0..1 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
+0..1 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins
 == inst/scripts/helper.R
 value: integer
-3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a declared `@type` or `@alias` name, or a class from the standard-library stubs.
-10..15 warning[unused] `value` is assigned but never used.
+3..9 error[annotation] I do not know the type `Person`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
+10..15 warning[unused] `value` is assigned but never used
 
 #==== namespace_reads
 #---- known_namespace_and_export_is_clean
@@ -155,7 +155,7 @@ result <- foobar::bazqux(1L)
 #++++
 == R/main.R
 result: Unknown
-10..24 warning[unresolved] unknown package namespace `foobar`.
+10..24 warning[unresolved] unknown package namespace `foobar`
 
 #---- an_inactive_shipped_namespace_still_checks_its_exports
 #~~~~ analysis.R
@@ -167,10 +167,10 @@ internal <- dplyr:::mutat
 kept: Unknown
 typo: Unknown
 internal: Unknown
-0..4 warning[unused] `kept` is assigned but never used.
-22..26 warning[unused] `typo` is assigned but never used.
-30..42 warning[unresolved] `mutat` is not exported by `dplyr`.
-43..51 warning[unused] `internal` is assigned but never used.
+0..4 warning[unused] `kept` is assigned but never used
+22..26 warning[unused] `typo` is assigned but never used
+30..42 warning[unresolved] `mutat` is not exported by `dplyr`
+43..51 warning[unused] `internal` is assigned but never used
 
 #---- known_namespace_unknown_export_warns
 #~~~~ R/main.R
@@ -178,7 +178,7 @@ result <- stats::bazqux(1L)
 #++++
 == R/main.R
 result: Unknown
-10..23 warning[unresolved] `bazqux` is not exported by `stats`.
+10..23 warning[unresolved] `bazqux` is not exported by `stats`
 
 #==== typo_suggestions
 #---- a_read_inside_try_probes_the_export
@@ -204,10 +204,10 @@ called: Any
 warned: Unknown
 body: Unknown
 handler: double
-129..142 warning[unresolved] `bazqux` is not exported by `stats`.
-209..222 warning[unresolved] `bazqux` is not exported by `stats`.
-282..292 warning[unresolved] `sdd` is not exported by `stats`.
-368..381 warning[unresolved] `bazqux` is not exported by `stats`.
+129..142 warning[unresolved] `bazqux` is not exported by `stats`
+209..222 warning[unresolved] `bazqux` is not exported by `stats`
+282..292 warning[unresolved] `sdd` is not exported by `stats`
+368..381 warning[unresolved] `bazqux` is not exported by `stats`
 
 #---- a_windows_only_export_resolves
 #~~~~ R/main.R

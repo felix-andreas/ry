@@ -102,15 +102,15 @@ print(totl)
 ```text ry check
 assignment-operator
 
-  ! Use <-, not =, for assignment
+  ! use <-, not =, for assignment
 
 boolean-shorthand
 
-  ! Use TRUE, not T, for Boolean values
+  ! use TRUE, not T, for Boolean values
 
 trailing-comma
 
-  ! Unexpected comma after last argument
+  ! unexpected comma after last argument
 ```
 
 The other eight flag code that reads right but does something else:
@@ -237,11 +237,11 @@ type its body allows, which the editor shows on hover:
 
 ```r
 identity2 <- function(x) x           # <T> fn(x: T) -> T
-increment <- function(x) x + 1L      # <T: numeric> fn(x: T) -> T
+increment <- function(x) x + 1L      # <T: arithmetic> fn(x: T) -> T
 ```
 
-`T` is any type, and `T: numeric` is `integer` or `double`, so `increment(2.5)` is a `double` and
-`increment("a")` is an error. Argument names are part of a function's type, because R matches
+`T` is any type, and `T: arithmetic` is `integer`, `double` or a class with arithmetic such as
+`Date`, so `increment(2.5)` is a `double` and `increment("a")` is an error. Argument names are part of a function's type, because R matches
 arguments by name as often as by position:
 
 ```r
@@ -311,7 +311,9 @@ tab choice holds on every page.
 
 The body is checked against the signature too: a function declared `-> logical` that returns a
 string is an error at the return value. `[name]` in a `#:` signature marks a parameter callers may
-omit, as in `#: fn(name: character, [greeting]: character) -> character`. Annotate where code meets
+omit, as in `#: fn(name: character, [greeting]: character) -> character`, and `...: TYPE` types
+the arguments a function's `...` absorbs, as an S3 method needs: `#: fn(x: Celsius, ...: Any) ->
+character`. Annotate where code meets
 other code: exported functions, values read from files, and any contract you want enforced.
 Inference covers the rest.
 
@@ -386,8 +388,9 @@ An `is.null()` test *narrows* the type for the rest of the function, so adding
 
 Values ry cannot model have the type `Unknown`, which fits everywhere, so one unmodeled construct
 never causes a cascade of false errors. The main sources are base `data.frame` columns, S4 and R6
-objects, and packages ry has no stub for. An annotation gives such a value a type, as `settings`
-got one [above](#annotate), and every later use is checked against it.
+objects, and packages ry has no stub for. So a misspelled column in `read.csv("sales.csv")$totl`
+reports nothing, while the same typo on a `list(...)` record is an error. An annotation gives such a
+value a type, as `settings` got one [above](#annotate), and every later use is checked against it.
 
 ry ships types for base R, the default packages, `data.table`, `dplyr`, `ggplot2` and `testthat`,
 and export lists for the rest of the tidyverse and other common packages. For any other package, a
@@ -695,7 +698,9 @@ strict
 
 Typing `df` as a `data.frame` clears the first error but not the second, because a `data.frame`'s
 columns are `Unknown`; a `DataFrame{amount: double[]}` clears both. A value declared `Any` is a
-deliberate opt-out and is not reported. Under strict mode, `ry run`, `ry R` and `ry load` refuse
+deliberate opt-out and is not reported. A checked annotation such as `#: double[]` over an `Unknown`
+value checks nothing, so strict mode reports it as well; `#: @if-unknown double[]` says the value is
+accepted unchecked. Under strict mode, `ry run`, `ry R` and `ry load` refuse
 code with a strict-mode error, and a `# typing: strict` comment turns it on for one file.
 
 Most of what strict mode asks for is already known to inference. `ry check --annotate` writes the
@@ -727,6 +732,9 @@ strict
 added 1 inferred annotation
 2 problems in 1 file
 ```
+
+To see the type of one name or expression without an editor, `ry debug type FILE:LINE:COLUMN`
+prints what the editor shows on hover there, such as `label: <T> fn(shape: T) -> Unknown`.
 
 In strict mode, the top level of a file in `R/` may only define things (functions, types, classes,
 and constants computed without side effects), so loading a package has no side effects.

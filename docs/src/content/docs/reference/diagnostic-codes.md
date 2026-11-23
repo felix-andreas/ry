@@ -35,6 +35,18 @@ one exception you have reviewed and should not hide findings in code written lat
 off everywhere, use [`ry.toml`](/reference/configuration), and to turn type checking off for one
 file, put `# typing: off` in it.
 
+Write `expect` instead of `allow` when the finding is the point, such as a test fixture or a
+known false report you want to hear about once it is fixed:
+
+```r
+# ry: expect(type-mismatch)
+bad <- f("a")
+```
+
+An `expect` suppresses exactly like `allow`, and when its line and the next carry no finding with a
+code it names, ry reports `unfulfilled-expect` at the comment, so a suppression cannot outlive the
+problem it hid. `expect(all)` asks for any finding at all.
+
 The marker is found by scanning the line for its first `#`, so `#ry:allow(x)` and
 `# roughly: allow(x)` work too, but a `#` inside a string earlier on the line hides it. Findings on
 `NAMESPACE`, `ry.toml`, and stub files cannot be suppressed, because they have no R line to carry the
@@ -192,7 +204,7 @@ consumes a value. A format with `%1$s` positions, a format that is not a literal
 or a named argument other than `fmt` turns the check off for that call.
 
 ```text
-! This format wants 2 values but sprintf() gets 1 value, so R stops with "too few arguments"
+! this format wants 2 values but sprintf() gets 1 value, so R stops with "too few arguments"
 ```
 
 **`length-test`** (warning): a comparison inside `length()`, such as `length(x == 0)`. It counts
@@ -219,6 +231,28 @@ level says:
 x S4 classes are turned off in this project (`[check] object-systems = false`), so `setClass` cannot define an S4 class. Use a record or a tagged union instead
 ```
 
+**`s3-method-signature`** (warning): an S3 method whose parameters do not fit its generic, by the
+rule `R CMD check` applies. A package function `generic.class` is a method when `generic` is a
+package function that calls `UseMethod("generic")`. When the NAMESPACE registers methods of a
+generic with `S3method()`, only the registered functions are its methods, so a dotted helper next to the generic is not
+mistaken for one, and `S3method(generic, class, fn)` makes `fn` a method
+whatever its name. R re-matches the call's arguments against the
+method, so the method must take the generic's parameters in the generic's order up to the first
+`...`, must take every other parameter of the generic unless it has `...` itself, and may add
+parameters only when the generic has `...` to pass them on. A `.formula` method may call its first
+parameter `formula`.
+
+```r
+area <- function(shape, ...) UseMethod("area")
+area.circle <- function(x, ...) pi * x$radius^2
+```
+
+```text
+! this method of `area` takes `x` where the generic takes `shape`, so a call that passes `shape` by name fails for this class. Rename it to `shape`
+```
+
+Methods of generics from other packages, such as `print` or `format`, are not checked.
+
 **`stub`** (error): a line in your `stubs/*.Rtypes` files that ry could not load, so a broken
 declaration is never dropped in silence.
 
@@ -231,6 +265,14 @@ missing or unreachable cases.
 
 ```text
 ! this record is ry syntax that R cannot run, and inline annotations are turned off (`[check] inline-annotations = false`) to keep code runnable by R. Rewrite it in plain R, or turn inline annotations back on
+```
+
+**`unfulfilled-expect`** (warning): a `# ry: expect(code)` comment whose line and the next have no
+`code` finding, either because the code was fixed or because ry stopped reporting it. The message
+says to remove the comment when it names only that code, and the code otherwise:
+
+```text
+! no `type-mismatch` finding is on this line or the next, so this expectation is stale. Remove the comment
 ```
 
 **`config`** (error): invalid TOML or a value of the wrong type in `ry.toml`. The language server

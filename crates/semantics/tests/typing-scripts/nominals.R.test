@@ -26,7 +26,7 @@ Box<integer>
 person <- list(name = 1L)
 #++++
 person: Unknown
-56..62 warning[unused] `person` is assigned but never used.
+56..62 warning[unused] `person` is assigned but never used
 78..80 error[type-mismatch] expected `character` for field `name`, found `integer`
 
 #---- new_rejects_wrong_generic_argument
@@ -36,7 +36,7 @@ person: Unknown
 box <- list(value = 1L)
 #++++
 box: Unknown
-57..60 warning[unused] `box` is assigned but never used.
+57..60 warning[unused] `box` is assigned but never used
 77..79 error[type-mismatch] expected `character` for field `value`, found `integer`
 
 #---- new_accepts_already_nominal_value
@@ -50,7 +50,7 @@ same <- person
 #++++
 person: Person
 same: Person
-101..105 warning[unused] `same` is assigned but never used.
+101..105 warning[unused] `same` is assigned but never used
 
 #==== nominal_projection
 #---- dollar_access_projects_to_representation

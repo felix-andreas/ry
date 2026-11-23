@@ -258,7 +258,7 @@ asM <- function(x) {
   x + 0
 }
 #++++
-asM: <T: numeric> fn(x: T) -> Meters
+asM: <T: arithmetic> fn(x: T) -> Meters
 
 #---- new_noop_on_already_nominal
 #: @type Person {list{name: character}}

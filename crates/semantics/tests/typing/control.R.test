@@ -354,7 +354,7 @@ f <- function(record) {
   if (is.null(record$value)) 0L else record$value
 }
 #++++
-f: <T> fn(record: T) -> integer
+f: <T> fn(record: T) -> Unknown
 
 #---- a_field_null_test_narrows_the_field
 use <- function(x: character) -> character x
@@ -496,7 +496,7 @@ f <- function(x) {
   x + 1L
 }
 #++++
-f: <T: numeric> fn(x: T | NULL) -> T
+f: <T: arithmetic> fn(x: T | NULL) -> T
 
 #---- a_length_test_rules_out_null
 #: fn(flag: logical) -> integer[] | NULL
@@ -697,7 +697,7 @@ f <- function() {
 }
 #++++
 f: Unknown
-51..52 error[type-mismatch] this `for` sequence is `fn() -> integer`, which cannot be iterated. Expected a vector or list.
+51..52 error[type-mismatch] this `for` sequence is `fn() -> integer`, which cannot be iterated. Expected a vector or list
 
 #---- repeat_applies_exit_state
 f <- function() {
@@ -845,7 +845,7 @@ f <- function(flag) {
 }
 #++++
 f: fn(flag: logical) -> integer
-229..230 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
+229..230 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing
 
 #---- a_switch_with_no_default_reaches_the_read_unassigned
 f <- function(key) {
@@ -854,7 +854,7 @@ f <- function(key) {
 }
 #++++
 f: <T> fn(key: T) -> integer
-54..55 warning[maybe-undefined] `r` is only assigned on some paths here, so this read can find nothing.
+54..55 warning[maybe-undefined] `r` is only assigned on some paths here, so this read can find nothing
 
 #---- a_repeat_that_always_assigns_before_breaking_is_not_reported
 # R returns 1: the body runs at least once and the `break` follows the write,
@@ -883,7 +883,7 @@ f <- function(cond) {
 }
 #++++
 f: fn(cond: logical) -> integer
-148..149 warning[maybe-undefined] `y` is only assigned on some paths here, so this read can find nothing.
+148..149 warning[maybe-undefined] `y` is only assigned on some paths here, so this read can find nothing
 
 #---- a_loop_that_may_run_zero_times_reaches_the_read_unassigned
 f <- function(cond) {
@@ -894,7 +894,7 @@ f <- function(cond) {
 }
 #++++
 f: fn(cond: logical) -> integer
-57..58 warning[maybe-undefined] `z` is only assigned on some paths here, so this read can find nothing.
+57..58 warning[maybe-undefined] `z` is only assigned on some paths here, so this read can find nothing
 
 #---- a_diverging_switch_branch_never_reaches_the_read
 # Every key either assigns or ends the call, so nothing arrives at the read
@@ -1030,7 +1030,7 @@ f <- function(n) {
   even(n)
 }
 #++++
-f: <T: numeric> fn(n: T) -> logical
+f: <T: arithmetic> fn(n: T) -> logical
 
 #---- forward_capture_sees_the_frame_write
 f <- function() {
@@ -1051,7 +1051,7 @@ f <- function() {
 }
 #++++
 f: fn() -> double
-178..179 warning[unresolved] I could not resolve `a` in this package, its imports, or builtins.
+178..179 warning[unresolved] I could not resolve `a` in this package, its imports, or builtins
 
 #---- unresolved_reference_suggests_the_nearest_stub
 f <- function(x) lenght(x)
@@ -1158,7 +1158,7 @@ f <- function() {
 }
 #++++
 f: fn() -> fn() -> fn() -> logical
-20..21 warning[unused] `x` is assigned but never used.
+20..21 warning[unused] `x` is assigned but never used
 
 #---- rebinding_in_the_captured_frame_stays_alive
 f <- function() {
@@ -1180,7 +1180,7 @@ describe <- function(name, punct) {
 }
 #++++
 describe: Unknown
-77..82 error[type-mismatch] reading `punct` here would fail at run time: this branch runs only when `punct` is missing, and it has no default.
+77..82 error[type-mismatch] reading `punct` here would fail at run time: this branch runs only when `punct` is missing, and it has no default
 
 #---- supplying_the_formal_on_the_missing_branch_is_fine
 describe <- function(name, punct) {
@@ -1275,3 +1275,28 @@ use <- function(limit) {
 #++++
 check_limit: <T> fn(x: T) -> integer | character
 use: <T> fn(limit: T) -> integer
+
+#==== unknown_branches
+#---- an_unknown_branch_makes_the_if_unknown
+f <- function(flag, x) if (flag) 1L else x %then% 2L
+#++++
+f: <T> fn(flag: logical, [x]: T) -> Unknown
+
+#---- a_recursive_call_still_joins_as_the_typed_branch
+fact <- function(n) if (n <= 1L) 1L else n * fact(n - 1L)
+#++++
+fact: fn(n: integer) -> integer
+
+#---- mutual_recursion_converges_through_the_placeholder
+is_zero <- function(n) if (n == 0L) 1L else step_down(n)
+step_down <- function(n) is_zero(n - 1L)
+#++++
+is_zero: <T: arithmetic> fn(n: T) -> integer
+step_down: <T: arithmetic> fn(n: T) -> integer
+
+#---- a_cycle_with_a_genuine_unknown_stays_unknown
+first <- function(n) if (n == 0L) 1L %then% 2L else second(n)
+second <- function(n) first(n - 1L)
+#++++
+first: <T: arithmetic> fn(n: T) -> Unknown
+second: <T: arithmetic> fn(n: T) -> Unknown

@@ -577,12 +577,12 @@ rename: none
 signature: fn(principal: double, rate: double) -> double
 parameters: principal: double | [rate: double]
 action: Add inferred type annotations for the whole file
-  edit 16..16 -> "<T: numeric, U: numeric>"
+  edit 16..16 -> "<T: arithmetic, U: arithmetic>"
   edit 26..26 -> ": T"
   edit 32..32 -> ": U"
   edit 33..33 -> " -> double"
 completion (16): rate, rainbow, randu, range, range.Date, range.default, range.POSIXct, rank
-hint @16<T: numeric, U: numeric>
+hint @16<T: arithmetic, U: arithmetic>
 hint @26: T
 hint @32: U
 hint @33 -> double

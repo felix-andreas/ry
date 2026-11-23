@@ -269,7 +269,7 @@ reordered <- function(dt) {
 == R/dt.R
 ranked: <T> fn(dt: T) -> Unknown
 reordered: <T> fn(dt: T) -> Unknown
-130..135 warning[unresolved] I could not resolve `total` in this package, its imports, or builtins.
+130..135 warning[unresolved] I could not resolve `total` in this package, its imports, or builtins
 
 #---- base_indexing_still_reports_unresolved_names
 #~~~~ R/plain.R
@@ -279,7 +279,7 @@ pick <- function(m) {
 #++++
 == R/plain.R
 pick: <T> fn(m: T) -> Unknown
-26..38 warning[unresolved] I could not resolve `not_a_column` in this package, its imports, or builtins.
+26..38 warning[unresolved] I could not resolve `not_a_column` in this package, its imports, or builtins
 
 #---- global_variables_declarations_suppress_unresolved
 #~~~~ R/globals.R
@@ -306,7 +306,7 @@ f <- function() declared_name + genuinely_undefined
 character[]
 == R/use.R
 f: fn() -> Unknown
-32..51 warning[unresolved] I could not resolve `genuinely_undefined` in this package, its imports, or builtins.
+32..51 warning[unresolved] I could not resolve `genuinely_undefined` in this package, its imports, or builtins
 
 #==== top_level_recursion
 #---- self_recursive_top_level_function_stays_tolerant
@@ -335,7 +335,7 @@ is_odd <- function(n) if (n == 0L) FALSE else is_even(n - 1L)
 check <- is_even(4L)
 #++++
 == R/pair.R
-is_even: <T: numeric> fn(n: T) -> logical
-is_odd: <T: numeric> fn(n: T) -> logical
+is_even: <T: arithmetic> fn(n: T) -> logical
+is_odd: <T: arithmetic> fn(n: T) -> logical
 == R/use.R
 check: logical
