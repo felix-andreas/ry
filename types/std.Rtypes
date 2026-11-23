@@ -10,8 +10,8 @@
 # (`crates/interp/src/standard_library.rs`). Conventions shared by every module:
 # - The library works over ry's own types: numbers such as `I64` and `F64`, `Bool`, `Str`,
 #   `List<T>`, `Dict<K, V>`, `Set<T>`, records, tuples and tags. R values enter through the
-#   `from_r` functions (`Num.from_r`, `Bool.from_r`, `Str.from_r`, `List.from_r`) and leave
-#   through `Num.to_r` and `List.to_r`.
+#   `from_r` functions (`Num.from_r`, `Bool.from_r`, `Str.from_r`, `List.from_r` and its
+#   siblings) and leave through `Num.to_r` and `List.to_r`.
 # - A position or a length is an `I64`, and positions are 1-based.
 # - A function that can fail returns a `Result` whose error is a descriptive tag.
 # - Equality is structural, the same as `==` on ry values.
@@ -108,7 +108,7 @@ Result.on_err : <T, A, B> fn(result: Result<T, A>, f: fn(A) -> Result<T, B>) -> 
 #' Converts an R vector or list into a `List`, checking every item: it refuses `NA`, a classed
 #' object and a ragged list, and drops names. A `double` vector becomes a `List<F64>`, an
 #' `integer` or `raw` vector a `List<I64>`, a `logical` vector a `List<Bool>` and a `character`
-#' vector a `List<Str>`.
+#' vector a `List<Str>`. `List.from_r_or` and `List.from_r_missing` convert a vector with `NA`.
 #'
 #' ```r dput
 #' List.from_r(c(3, 1, 2))
@@ -120,6 +120,34 @@ List.from_r : fn(vector: double[]) -> List<F64>
 List.from_r : fn(vector: character[]) -> List<Str>
 List.from_r : fn(vector: raw[]) -> List<I64>
 List.from_r : <T: item> fn(vector: list[T]) -> List<T>
+
+#' Converts an R vector into a `List` as `List.from_r` does, with `default` in place of every
+#' `NA` (and of `NaN`, which R also counts as missing). The default is never missing itself, and
+#' a number wider than the items widens them as R coerces, so a fractional default makes an
+#' `integer` vector a `List<F64>`.
+#'
+#' ```r dput
+#' List.from_r_or(c(1, NA, 3), 0)
+#' #> [1, 0, 3]
+#' List.from_r_or(c(1L, NA), 0.5)
+#' #> [1, 0.5]
+#' ```
+List.from_r_or : fn(vector: logical[], default: Bool) -> List<Bool>
+List.from_r_or : fn(vector: integer[], default: I64) -> List<I64>
+List.from_r_or : fn(vector: double[], default: F64) -> List<F64>
+List.from_r_or : fn(vector: character[], default: Str) -> List<Str>
+
+#' Converts an R vector into a `List` of results as `List.from_r` does: each item becomes
+#' `:Ok(item)`, and each `NA` (or `NaN`) becomes `:Err(:Missing)`.
+#'
+#' ```r dput
+#' List.from_r_missing(c("a", NA))
+#' #> [:Ok("a"), :Err(:Missing)]
+#' ```
+List.from_r_missing : fn(vector: logical[]) -> List<Result<Bool, :Missing>>
+List.from_r_missing : fn(vector: integer[]) -> List<Result<I64, :Missing>>
+List.from_r_missing : fn(vector: double[]) -> List<Result<F64, :Missing>>
+List.from_r_missing : fn(vector: character[]) -> List<Result<Str, :Missing>>
 
 #' Converts a `List` into the R vector it shares a representation with. A `List<I64>`
 #' becomes an `integer` vector when every item fits in 32 bits and a `double` vector otherwise. A

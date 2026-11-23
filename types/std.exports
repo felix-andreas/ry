@@ -57,6 +57,8 @@ List.first
 List.for_each
 List.for_each_try
 List.from_r
+List.from_r_missing
+List.from_r_or
 List.get
 List.intersperse
 List.is_empty

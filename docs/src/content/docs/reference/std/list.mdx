@@ -20,6 +20,8 @@ a type error.
 | Function | Summary |
 | --- | --- |
 | [`List.from_r`](#listfrom_r) | Converts an R vector or list into a `List`, checking every item: it refuses `NA`, a classed object and a ragged list, and drops names. |
+| [`List.from_r_or`](#listfrom_r_or) | Converts an R vector into a `List` as `List.from_r` does, with `default` in place of every `NA` (and of `NaN`, which R also counts as missing). |
+| [`List.from_r_missing`](#listfrom_r_missing) | Converts an R vector into a `List` of results as `List.from_r` does: each item becomes `:Ok(item)`, and each `NA` (or `NaN`) becomes `:Err(:Missing)`. |
 | [`List.to_r`](#listto_r) | Converts a `List` into the R vector it shares a representation with. |
 | [`List.len`](#listlen) | The number of elements. |
 | [`List.is_empty`](#listis_empty) | Whether the list has no elements. |
@@ -141,7 +143,7 @@ List.from_r <- function(vector)
 Converts an R vector or list into a `List`, checking every item: it refuses `NA`, a classed
 object and a ragged list, and drops names. A `double` vector becomes a `List<F64>`, an
 `integer` or `raw` vector a `List<I64>`, a `logical` vector a `List<Bool>` and a `character`
-vector a `List<Str>`.
+vector a `List<Str>`. `List.from_r_or` and `List.from_r_missing` convert a vector with `NA`.
 
 ```r ry run runtime=ry dput
 List.from_r(c(3, 1, 2))
@@ -149,6 +151,94 @@ List.from_r(c(3, 1, 2))
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L117)
+
+## `List.from_r_or`
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+List.from_r_or <- function(vector: logical[], default: Bool) -> List<Bool>
+List.from_r_or <- function(vector: integer[], default: I64) -> List<I64>
+List.from_r_or <- function(vector: double[], default: F64) -> List<F64>
+List.from_r_or <- function(vector: character[], default: Str) -> List<Str>
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(vector: logical[], default: Bool) -> List<Bool>
+List.from_r_or <- function(vector, default)
+
+#: fn(vector: integer[], default: I64) -> List<I64>
+List.from_r_or <- function(vector, default)
+
+#: fn(vector: double[], default: F64) -> List<F64>
+List.from_r_or <- function(vector, default)
+
+#: fn(vector: character[], default: Str) -> List<Str>
+List.from_r_or <- function(vector, default)
+```
+
+</TabItem>
+</Tabs>
+
+Converts an R vector into a `List` as `List.from_r` does, with `default` in place of every
+`NA` (and of `NaN`, which R also counts as missing). The default is never missing itself, and
+a number wider than the items widens them as R coerces, so a fractional default makes an
+`integer` vector a `List<F64>`.
+
+```r ry run runtime=ry dput
+List.from_r_or(c(1, NA, 3), 0)
+#> [1, 0, 3]
+List.from_r_or(c(1L, NA), 0.5)
+#> [1, 0.5]
+```
+
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L135)
+
+## `List.from_r_missing`
+
+<Tabs syncKey="annotation-style">
+<TabItem label="Inline">
+
+```r
+List.from_r_missing <- function(vector: logical[]) -> List<Result<Bool, :Missing>>
+List.from_r_missing <- function(vector: integer[]) -> List<Result<I64, :Missing>>
+List.from_r_missing <- function(vector: double[]) -> List<Result<F64, :Missing>>
+List.from_r_missing <- function(vector: character[]) -> List<Result<Str, :Missing>>
+```
+
+</TabItem>
+<TabItem label="Comments">
+
+```r
+#: fn(vector: logical[]) -> List<Result<Bool, :Missing>>
+List.from_r_missing <- function(vector)
+
+#: fn(vector: integer[]) -> List<Result<I64, :Missing>>
+List.from_r_missing <- function(vector)
+
+#: fn(vector: double[]) -> List<Result<F64, :Missing>>
+List.from_r_missing <- function(vector)
+
+#: fn(vector: character[]) -> List<Result<Str, :Missing>>
+List.from_r_missing <- function(vector)
+```
+
+</TabItem>
+</Tabs>
+
+Converts an R vector into a `List` of results as `List.from_r` does: each item becomes
+`:Ok(item)`, and each `NA` (or `NaN`) becomes `:Err(:Missing)`.
+
+```r ry run runtime=ry dput
+List.from_r_missing(c("a", NA))
+#> [:Ok("a"), :Err(:Missing)]
+```
+
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L147)
 
 ## `List.to_r`
 
@@ -195,7 +285,7 @@ List.to_r([3i64, 1i64])
 #> c(3L, 1L)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L132)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L160)
 
 ## `List.len`
 
@@ -224,7 +314,7 @@ List.len(["a", "b"])
 #> 2i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L144)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L172)
 
 ## `List.is_empty`
 
@@ -253,7 +343,7 @@ List.is_empty([])
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L152)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L180)
 
 ## `List.get`
 
@@ -282,7 +372,7 @@ List.get(["a", "b"], 3)
 #> :Err(:OutOfBounds)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L160)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L188)
 
 ## `List.set`
 
@@ -311,7 +401,7 @@ List.set(["a", "b"], 2, "z")
 #> ["a", "z"]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L168)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L196)
 
 ## `List.update`
 
@@ -340,7 +430,7 @@ List.update([1, 2], 1, function(x) x + 10)
 #> [11i64, 2i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L176)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L204)
 
 ## `List.append`
 
@@ -369,7 +459,7 @@ List.append([1, 2], 3)
 #> [1i64, 2i64, 3i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L184)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L212)
 
 ## `List.prepend`
 
@@ -398,7 +488,7 @@ List.prepend([1, 2], 0)
 #> [0i64, 1i64, 2i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L192)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L220)
 
 ## `List.concat`
 
@@ -427,7 +517,7 @@ List.concat([1], [2, 3])
 #> [1i64, 2i64, 3i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L200)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L228)
 
 ## `List.single`
 
@@ -456,7 +546,7 @@ List.single("only")
 #> ["only"]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L208)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L236)
 
 ## `List.repeat`
 
@@ -485,7 +575,7 @@ List.repeat("x", 3)
 #> ["x", "x", "x"]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L216)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L244)
 
 ## `List.range`
 
@@ -520,7 +610,7 @@ List.range(3, 1)
 #> []
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L230)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L258)
 
 ## `List.reverse`
 
@@ -549,7 +639,7 @@ List.reverse([1, 2, 3])
 #> [3i64, 2i64, 1i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L238)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L266)
 
 ## `List.join`
 
@@ -578,7 +668,7 @@ List.join([[1], [], [2, 3]])
 #> [1i64, 2i64, 3i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L246)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L274)
 
 ## `List.map`
 
@@ -607,7 +697,7 @@ List.map([1, 2, 3], function(x) x * 2)
 #> [2i64, 4i64, 6i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L254)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L282)
 
 ## `List.map_with_index`
 
@@ -636,7 +726,7 @@ List.map_with_index(["a", "b"], function(x, i) Str.concat(x, Num.to_str(i)))
 #> ["a1", "b2"]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L262)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L290)
 
 ## `List.map2`
 
@@ -665,7 +755,7 @@ List.map2([1, 2, 3], [10, 20], function(a, b) a + b)
 #> [11i64, 22i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L270)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L298)
 
 ## `List.map3`
 
@@ -694,7 +784,7 @@ List.map3([1, 2], [10, 20], [100, 200], function(a, b, c) a + b + c)
 #> [111i64, 222i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L278)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L306)
 
 ## `List.map4`
 
@@ -723,7 +813,7 @@ List.map4([1], [2], [3], [4], function(a, b, c, d) a * b * c * d)
 #> [24i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L286)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L314)
 
 ## `List.join_map`
 
@@ -752,7 +842,7 @@ List.join_map([1, 2], function(x) [x, x])
 #> [1i64, 1i64, 2i64, 2i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L294)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L322)
 
 ## `List.keep_if`
 
@@ -781,7 +871,7 @@ List.keep_if([1, 5, 2], function(x) x > 1)
 #> [5i64, 2i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L302)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L330)
 
 ## `List.keep_if_try`
 
@@ -812,7 +902,7 @@ List.keep_if_try(["1", "x"], function(s) Result.map(Str.to_i64(s), function(n) n
 #> :Err(:InvalidNumStr)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L312)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L340)
 
 ## `List.drop_if`
 
@@ -841,7 +931,7 @@ List.drop_if([1, 5, 2], function(x) x > 1)
 #> [1i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L320)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L348)
 
 ## `List.keep_oks`
 
@@ -870,7 +960,7 @@ List.keep_oks(["1", "x", "3"], Str.to_i64)
 #> [1i64, 3i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L328)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L356)
 
 ## `List.keep_errs`
 
@@ -899,7 +989,7 @@ List.keep_errs(["1", "x"], Str.to_i64)
 #> [:InvalidNumStr]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L336)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L364)
 
 ## `List.map_try`
 
@@ -928,7 +1018,7 @@ List.map_try(["1", "2"], Str.to_i64)
 #> :Ok([1i64, 2i64])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L344)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L372)
 
 ## `List.walk`
 
@@ -957,7 +1047,7 @@ List.walk([1, 2, 3], 0, function(total, x) total + x)
 #> 6i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L352)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L380)
 
 ## `List.walk_backwards`
 
@@ -986,7 +1076,7 @@ List.walk_backwards(["a", "b", "c"], "", function(text, x) Str.concat(text, x))
 #> "cba"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L360)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L388)
 
 ## `List.walk_until`
 
@@ -1015,7 +1105,7 @@ List.walk_until([1, 2, 3, 4], 0, function(total, x) if (total >= 3) :Break(total
 #> 3i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L368)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L396)
 
 ## `List.walk_backwards_until`
 
@@ -1044,7 +1134,7 @@ List.walk_backwards_until([1, 5, 2, 3], 0, function(total, x) if (x > 4) :Break(
 #> 5i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L376)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L404)
 
 ## `List.walk_with_index`
 
@@ -1073,7 +1163,7 @@ List.walk_with_index([10, 20, 30], 0, function(total, x, i) total + x * i)
 #> 140i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L384)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L412)
 
 ## `List.walk_with_index_until`
 
@@ -1102,7 +1192,7 @@ List.walk_with_index_until(["a", "b", "c"], "", function(seen, x, i) if (i > 2) 
 #> "ab"
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L392)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L420)
 
 ## `List.walk_from`
 
@@ -1131,7 +1221,7 @@ List.walk_from([1, 2, 3, 4], 3, 0, function(total, x) total + x)
 #> 7i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L400)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L428)
 
 ## `List.walk_from_until`
 
@@ -1160,7 +1250,7 @@ List.walk_from_until([1, 2, 3, 4], 2, 0, function(total, x) if (total >= 5) :Bre
 #> 5i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L408)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L436)
 
 ## `List.walk_try`
 
@@ -1189,7 +1279,7 @@ List.walk_try(["1", "2", "x"], 0, function(total, s) Result.map(Str.to_i64(s), f
 #> :Err(:InvalidNumStr)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L416)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L444)
 
 ## `List.for_each`
 
@@ -1219,7 +1309,7 @@ List.for_each(["a", "b"], function(x) cat(x, "\n"))
 #> b
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L425)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L453)
 
 ## `List.for_each_try`
 
@@ -1248,7 +1338,7 @@ List.for_each_try([1, -2, 3], function(x) if (x < 0) :Err(:Negative(x)) else :Ok
 #> :Err(:Negative(-2i64))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L433)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L461)
 
 ## `List.any`
 
@@ -1277,7 +1367,7 @@ List.any([1, 5], function(x) x > 4)
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L441)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L469)
 
 ## `List.all`
 
@@ -1306,7 +1396,7 @@ List.all([1, 5], function(x) x > 4)
 #> FALSE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L449)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L477)
 
 ## `List.contains`
 
@@ -1335,7 +1425,7 @@ List.contains(["a", "b"], "b")
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L457)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L485)
 
 ## `List.count_if`
 
@@ -1364,7 +1454,7 @@ List.count_if([1, 5, 7], function(x) x > 4)
 #> 2i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L465)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L493)
 
 ## `List.find_first`
 
@@ -1393,7 +1483,7 @@ List.find_first([1, 5, 7], function(x) x > 4)
 #> :Ok(5i64)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L473)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L501)
 
 ## `List.find_last`
 
@@ -1422,7 +1512,7 @@ List.find_last([1, 5, 7], function(x) x > 4)
 #> :Ok(7i64)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L481)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L509)
 
 ## `List.find_first_index`
 
@@ -1451,7 +1541,7 @@ List.find_first_index([1, 5, 7], function(x) x > 4)
 #> :Ok(2i64)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L489)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L517)
 
 ## `List.find_last_index`
 
@@ -1480,7 +1570,7 @@ List.find_last_index([1, 5, 7], function(x) x > 9)
 #> :Err(:NotFound)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L497)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L525)
 
 ## `List.first`
 
@@ -1509,7 +1599,7 @@ List.first(["a", "b"])
 #> :Ok("a")
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L505)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L533)
 
 ## `List.last`
 
@@ -1538,7 +1628,7 @@ List.last([])
 #> :Err(:ListWasEmpty)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L513)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L541)
 
 ## `List.take_first`
 
@@ -1567,7 +1657,7 @@ List.take_first([1, 2, 3], 2)
 #> [1i64, 2i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L521)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L549)
 
 ## `List.take_last`
 
@@ -1596,7 +1686,7 @@ List.take_last([1, 2, 3], 2)
 #> [2i64, 3i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L529)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L557)
 
 ## `List.drop_first`
 
@@ -1625,7 +1715,7 @@ List.drop_first([1, 2, 3], 2)
 #> [3i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L537)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L565)
 
 ## `List.drop_last`
 
@@ -1654,7 +1744,7 @@ List.drop_last([1, 2, 3], 2)
 #> [1i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L545)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L573)
 
 ## `List.drop_at`
 
@@ -1683,7 +1773,7 @@ List.drop_at(["a", "b", "c"], 2)
 #> ["a", "c"]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L553)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L581)
 
 ## `List.sublist`
 
@@ -1712,7 +1802,7 @@ List.sublist([1, 2, 3, 4], 2, 2)
 #> [2i64, 3i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L561)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L589)
 
 ## `List.split_at`
 
@@ -1741,7 +1831,7 @@ List.split_at([1, 2, 3], 1)
 #> (before = [1i64], others = [2i64, 3i64])
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L569)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L597)
 
 ## `List.split_first`
 
@@ -1770,7 +1860,7 @@ List.split_first(["a", "-", "b", "-", "c"], "-")
 #> :Ok((after = ["b", "-", "c"], before = ["a"]))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L577)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L605)
 
 ## `List.split_last`
 
@@ -1799,7 +1889,7 @@ List.split_last(["a", "-", "b", "-", "c"], "-")
 #> :Ok((after = ["c"], before = ["a", "-", "b"]))
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L585)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L613)
 
 ## `List.split_on`
 
@@ -1828,7 +1918,7 @@ List.split_on([1, 0, 2, 3, 0, 4], 0)
 #> [[1i64], [2i64, 3i64], [4i64]]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L593)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L621)
 
 ## `List.split_on_list`
 
@@ -1857,7 +1947,7 @@ List.split_on_list([1, 0, 0, 2, 0, 3], [0, 0])
 #> [[1i64], [2i64, 0i64, 3i64]]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L601)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L629)
 
 ## `List.chunks_of`
 
@@ -1886,7 +1976,7 @@ List.chunks_of([1, 2, 3], 2)
 #> [[1i64, 2i64], [3i64]]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L609)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L637)
 
 ## `List.intersperse`
 
@@ -1915,7 +2005,7 @@ List.intersperse(["a", "b", "c"], "-")
 #> ["a", "-", "b", "-", "c"]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L617)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L645)
 
 ## `List.sort_with`
 
@@ -1944,7 +2034,7 @@ List.sort_with([3, 1, 2], Num.compare)
 #> [1i64, 2i64, 3i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L625)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L653)
 
 ## `List.sort_asc`
 
@@ -1973,7 +2063,7 @@ List.sort_asc([3, 1, 2])
 #> [1i64, 2i64, 3i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L633)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L661)
 
 ## `List.sort_desc`
 
@@ -2002,7 +2092,7 @@ List.sort_desc([1.5, 3, 2])
 #> [3, 2, 1.5]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L641)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L669)
 
 ## `List.swap`
 
@@ -2031,7 +2121,7 @@ List.swap(["a", "b", "c"], 1, 3)
 #> ["c", "b", "a"]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L649)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L677)
 
 ## `List.replace`
 
@@ -2060,7 +2150,7 @@ List.replace(["a", "b"], 2, "z")
 #> (list = ["a", "z"], value = "b")
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L657)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L685)
 
 ## `List.append_if_ok`
 
@@ -2089,7 +2179,7 @@ List.append_if_ok([1], Str.to_i64("2"))
 #> [1i64, 2i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L665)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L693)
 
 ## `List.prepend_if_ok`
 
@@ -2118,7 +2208,7 @@ List.prepend_if_ok([1], Str.to_i64("x"))
 #> [1i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L673)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L701)
 
 ## `List.concat_utf8`
 
@@ -2147,7 +2237,7 @@ List.concat_utf8([104], "i")
 #> [104i64, 105i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L681)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L709)
 
 ## `List.with_capacity`
 
@@ -2176,7 +2266,7 @@ List.len(List.with_capacity(1000))
 #> 0i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L689)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L717)
 
 ## `List.reserve`
 
@@ -2205,7 +2295,7 @@ List.reserve([1, 2], 100)
 #> [1i64, 2i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L697)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L725)
 
 ## `List.release_excess_capacity`
 
@@ -2235,7 +2325,7 @@ List.release_excess_capacity(List.reserve([1, 2], 100))
 #> [1i64, 2i64]
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L706)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L734)
 
 ## `List.sum`
 
@@ -2267,7 +2357,7 @@ List.sum([1, 2, 3])
 #> 6i64
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L717)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L745)
 
 ## `List.product`
 
@@ -2297,7 +2387,7 @@ List.product([2, 2.5])
 #> 5
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L726)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L754)
 
 ## `List.min`
 
@@ -2326,7 +2416,7 @@ List.min([3, 1, 2])
 #> :Ok(1i64)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L734)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L762)
 
 ## `List.max`
 
@@ -2355,7 +2445,7 @@ List.max([])
 #> :Err(:ListWasEmpty)
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L742)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L770)
 
 ## `List.starts_with`
 
@@ -2384,7 +2474,7 @@ List.starts_with([1, 2, 3], [1, 2])
 #> TRUE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L750)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L778)
 
 ## `List.ends_with`
 
@@ -2413,4 +2503,4 @@ List.ends_with([1, 2, 3], [2])
 #> FALSE
 ```
 
-[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L758)
+[Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L786)

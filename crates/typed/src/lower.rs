@@ -103,8 +103,8 @@ pub struct RCall {
 pub enum RResult {
     /// The call is a statement, whose value is unused.
     Unused,
-    /// The value goes through this `Num.from_r`, `Str.from_r`, `Bool.from_r` or `List.from_r`
-    /// call, which gives this type.
+    /// The value goes through this `Num.from_r`, `Str.from_r`, `Bool.from_r`, `List.from_r`,
+    /// `List.from_r_or` or `List.from_r_missing` call, which gives this type.
     Converted(Conversion, Type),
     /// The call is one of the table API's that gives a table value
     /// ([`gives_table_value`]), which the code holds as it is.
@@ -126,21 +126,25 @@ pub struct RArgument {
 pub struct Conversion {
     pub call: Sexp,
     pub function: Sexp,
-    /// The item type the checker gave a `List.from_r`, or the number type it gave a
-    /// `Num.from_r`, which the preflight writes around the call (`.ry_items(List.from_r(x),
-    /// "F64")`). It types the conversion before the interpreter has run it.
+    /// The item type the checker gave a `List.from_r` or `List.from_r_or` (for
+    /// `List.from_r_missing`, the type inside `:Ok`), or the number type it gave a `Num.from_r`,
+    /// which the preflight writes around the call (`.ry_items(List.from_r(x), "F64")`). It types
+    /// the conversion before the interpreter has run it.
     pub checked: Option<Item>,
+    /// The type of a `List.from_r_or`'s default, which the code computes before the R call and
+    /// passes after the call's arguments, so its words follow theirs.
+    pub default: Option<Type>,
 }
 
 impl Conversion {
     /// Whether the code takes the type of the value this conversion gives from what the
-    /// interpreter saw it give, which a later run may contradict: a `Num.from_r` or
-    /// `List.from_r` the checker did not type.
+    /// interpreter saw it give, which a later run may contradict: a `Num.from_r`, `List.from_r`,
+    /// `List.from_r_or` or `List.from_r_missing` the checker did not type.
     pub unsafe fn guessed(self) -> bool {
         self.checked.is_none()
             && matches!(
                 &*rvalues::symbol_name(self.call.car()),
-                "Num.from_r" | "List.from_r"
+                "Num.from_r" | "List.from_r" | "List.from_r_or" | "List.from_r_missing"
             )
     }
 }
@@ -160,7 +164,7 @@ pub fn awaits_interpreter(refusal: &Refusal) -> bool {
 /// What a refusal that waits on the interpreter waits for.
 #[derive(Clone, Copy)]
 pub enum Awaited {
-    /// A run of this `Num.from_r` or `List.from_r` call.
+    /// A run of this `Num.from_r` or `List.from_r` call, or of one of its siblings.
     Conversion(Sexp),
     /// The loading of the namespace of this package name.
     Namespace(Sexp),
@@ -444,7 +448,7 @@ struct Lowering<'c> {
     /// The destination of the last converted R call, which tells the conversion that its
     /// argument was one.
     converted: Option<Local>,
-    /// The item type the checker gave the `List.from_r` lowered next
+    /// The item type the checker gave the `List.from_r` or sibling lowered next
     /// ([`Conversion::checked`]).
     checked_items: Option<Item>,
     /// Each empty list literal of records or tags whose item type the code has not shown yet,
@@ -460,7 +464,8 @@ struct Lowering<'c> {
 #[derive(Clone, Copy)]
 enum RUse {
     Unused,
-    Converted(Conversion),
+    /// Through a conversion, with the local holding a `List.from_r_or`'s default.
+    Converted(Conversion, Option<Local>),
     Diverges,
     Table,
 }
@@ -1218,8 +1223,11 @@ impl Lowering<'_> {
         (r_use, result): (RUse, RResult),
         effect_free: bool,
         arguments: SmallVec<[RArgument; 4]>,
-        values: SmallVec<[Local; 4]>,
+        mut values: SmallVec<[Local; 4]>,
     ) -> Local {
+        if let RUse::Converted(_, Some(default)) = r_use {
+            values.push(default);
+        }
         self.r_calls.push(RCall {
             function,
             call,
@@ -1236,6 +1244,18 @@ impl Lowering<'_> {
                 self.builder.emit(Type::Null, Op::Const(Constant::Null))
             }
             RResult::Converted(_, ty) => {
+                // A `List.from_r_missing` makes its results' shapes.
+                if let Type::Vector {
+                    item: Item::Tag(union),
+                    ..
+                } = ty
+                {
+                    for shape in shapes::members(union).unwrap_or_default() {
+                        if !self.constructed.contains(&shape) {
+                            self.constructed.push(shape);
+                        }
+                    }
+                }
                 let dest = self.builder.emit(ty, Op::CallR(site, values));
                 self.converted = Some(dest);
                 dest
@@ -1345,6 +1365,7 @@ impl Lowering<'_> {
                 call: code,
                 function: speculation.function,
                 checked: None,
+                default: None,
             },
         ))
     }
@@ -3176,7 +3197,10 @@ impl Lowering<'_> {
                     self.checked_items = None;
                     return value;
                 }
-                if self.is_library_call(list, "List.from_r", 1)? {
+                if self.is_library_call(list, "List.from_r", 1)?
+                    || self.is_library_call(list, "List.from_r_or", 2)?
+                    || self.is_library_call(list, "List.from_r_missing", 1)?
+                {
                     self.checked_items = match constant_string(hint).as_deref() {
                         Some("I64") => Some(Item::I64),
                         Some("F64") => Some(Item::Dbl),
@@ -3455,15 +3479,57 @@ impl Lowering<'_> {
                     )),
                 }
             }
-            "Num.from_r" | "Str.from_r" | "Bool.from_r" | "List.from_r" => {
-                let [inner] = arguments.exactly(1)?[..] else {
-                    return Err(Refusal::new("a conversion of an unsupported form"));
+            "Num.from_r"
+            | "Str.from_r"
+            | "Bool.from_r"
+            | "List.from_r"
+            | "List.from_r_or"
+            | "List.from_r_missing" => {
+                let checked = self.checked_items.take();
+                let (inner, default) = if name == "List.from_r_or" {
+                    let mut positional = arguments.positional();
+                    let vector = arguments.named("vector").or_else(|| positional.next());
+                    let default = arguments.named("default").or_else(|| positional.next());
+                    match (vector, default) {
+                        (Some(vector), Some(default))
+                            if arguments.items.len() == 2
+                                && arguments.only_names(&["vector", "default"]) =>
+                        {
+                            (vector, Some(default))
+                        }
+                        _ => return Err(Refusal::new("a conversion of an unsupported form")),
+                    }
+                } else {
+                    let [inner] = arguments.exactly(1)?[..] else {
+                        return Err(Refusal::new("a conversion of an unsupported form"));
+                    };
+                    (inner, None)
                 };
-                self.r_use = Some(RUse::Converted(Conversion {
-                    call,
-                    function,
-                    checked: self.checked_items.take(),
-                }));
+                // The interpreter computes the default after the vector, and compiled code before
+                // it, which agree while the default calls no R function.
+                let default = match default {
+                    Some(code) => {
+                        let calls = self.r_calls.len();
+                        let value = self.value(code)?;
+                        if self.r_calls.len() != calls {
+                            return Err(Refusal::new(
+                                "it calls R in the default of `List.from_r_or`, which R computes \
+                                 after the vector: compute the default into a variable first",
+                            ));
+                        }
+                        Some(value)
+                    }
+                    None => None,
+                };
+                self.r_use = Some(RUse::Converted(
+                    Conversion {
+                        call,
+                        function,
+                        checked,
+                        default: default.map(|default| self.builder.ty(default)),
+                    },
+                    default,
+                ));
                 let value = self.value(inner);
                 self.r_use = None;
                 let value = value?;
@@ -3476,6 +3542,9 @@ impl Lowering<'_> {
                     "Num.from_r" => matches!(ty, Type::Dbl | Type::I64),
                     "Str.from_r" => ty == Type::Str,
                     "Bool.from_r" => ty == Type::Bool,
+                    // An `Array` holds no `NA`, so it has nothing to fill, but its items are not
+                    // results.
+                    "List.from_r_missing" => false,
                     _ => matches!(ty, Type::Vector { array: true, .. }),
                 };
                 if identity {
@@ -6567,13 +6636,12 @@ unsafe fn tail_matches(expression: Sexp, tails: &mut SmallVec<[Sexp; 2]>) {
     }
 }
 
-/// Whether `function` is base R's or the standard library's own function of this name.
 /// The refusal of a call of the R function `head` whose value typed code uses directly.
 unsafe fn r_value_refusal(head: Sexp) -> Refusal {
     Refusal(Cow::Owned(format!(
         "it uses the value of R's `{}` directly, and typed code calls R only as a statement or \
-         inside `Num.from_r`, `Str.from_r`, `Bool.from_r` or `List.from_r`, which give the value \
-         a ry type",
+         inside `Num.from_r`, `Str.from_r`, `Bool.from_r`, `List.from_r`, `List.from_r_or` or \
+         `List.from_r_missing`, which give the value a ry type",
         interp::deparse::deparse_first_line(head)
     )))
 }
@@ -6582,7 +6650,9 @@ unsafe fn r_value_refusal(head: Sexp) -> Refusal {
 unsafe fn r_result(r_use: RUse) -> Result<RResult, Refusal> {
     Ok(match r_use {
         RUse::Unused | RUse::Diverges => RResult::Unused,
-        RUse::Converted(conversion) => RResult::Converted(conversion, conversion_type(conversion)?),
+        RUse::Converted(conversion, _) => {
+            RResult::Converted(conversion, conversion_type(conversion)?)
+        }
         RUse::Table => RResult::Table,
     })
 }
@@ -6593,8 +6663,31 @@ unsafe fn r_result(r_use: RUse) -> Result<RResult, Refusal> {
 /// conversion that has given two types has no type to guess, so the code does not compile. A
 /// conversion the checker typed takes that type, which it gives or fails with when the code runs
 /// (`interp::arrays::checked_conversion` and `interp::numbers::checked_number`).
+/// `List.from_r_or` types as `List.from_r`, and `List.from_r_missing` gives a list of
+/// `:Ok(item)` or `:Err(:Missing)` for the item type `List.from_r` would give.
 unsafe fn conversion_type(conversion: Conversion) -> Result<Type, Refusal> {
     let name = rvalues::symbol_name(conversion.call.car());
+    let ty = items_type(conversion, &name)?;
+    if name != "List.from_r_missing" {
+        return Ok(ty);
+    }
+    let Type::Vector { item, .. } = ty else {
+        return Err(Refusal::new(
+            "a `List.from_r_missing` of an unexpected type",
+        ));
+    };
+    let ok = shapes::intern(tag_layout("Ok", 1)?, &[item])
+        .ok_or(Refusal::new("a value with more fields than a box holds"))?;
+    let missing = shapes::intern(tag_layout("Err", 1)?, &[Item::Tag(shapes::ANY)])
+        .ok_or(Refusal::new("a value with more fields than a box holds"))?;
+    Ok(Type::Vector {
+        item: Item::Tag(shapes::union_of(&[ok, missing])),
+        array: true,
+    })
+}
+
+/// [`conversion_type`] before `List.from_r_missing` wraps each item in a result.
+unsafe fn items_type(conversion: Conversion, name: &str) -> Result<Type, Refusal> {
     let awaiting = || {
         AWAITED.set(Some(Awaited::Conversion(conversion.call)));
         Refusal(Cow::Owned(format!(
@@ -6603,7 +6696,7 @@ unsafe fn conversion_type(conversion: Conversion) -> Result<Type, Refusal> {
         )))
     };
     let list = |item| Type::Vector { item, array: true };
-    let observed = match &*name {
+    let observed = match name {
         "Str.from_r" => return Ok(Type::Str),
         "Bool.from_r" => return Ok(Type::Lgl),
         "Num.from_r" if conversion.checked.is_some() => {
@@ -6619,7 +6712,7 @@ unsafe fn conversion_type(conversion: Conversion) -> Result<Type, Refusal> {
         _ => match interp::numbers::observed_conversion(conversion.call) {
             Some(Observed::Steady(kind)) => kind,
             Some(Observed::Changed(before, after)) => {
-                let named = |kind| observed_name(&name, kind);
+                let named = |kind| observed_name(name, kind);
                 return Err(Refusal(Cow::Owned(format!(
                     "`{}` gave {} in one call and {} in another, so its type is not known before \
                      it runs: convert the value to one type in R first",
@@ -6631,7 +6724,7 @@ unsafe fn conversion_type(conversion: Conversion) -> Result<Type, Refusal> {
             None => return Err(awaiting()),
         },
     };
-    match (&*name, observed) {
+    match (name, observed) {
         ("Num.from_r", SexpType::Real) => Ok(Type::Dbl),
         ("Num.from_r", SexpType::I64) => Ok(Type::I64),
         ("Num.from_r", _) => Err(Refusal::new("a `Num.from_r` of an unexpected type")),
@@ -6655,7 +6748,9 @@ pub fn observed_name(name: &str, kind: SexpType) -> String {
         SexpType::String => "Str",
         _ => kind.name(),
     };
-    if name == "List.from_r" {
+    if name == "List.from_r_missing" {
+        format!("`List<Result<{item}, :Missing>>`")
+    } else if name.starts_with("List.") {
         format!("`List<{item}>`")
     } else {
         format!("`{item}`")

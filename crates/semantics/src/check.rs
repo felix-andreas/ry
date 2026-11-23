@@ -455,8 +455,9 @@ pub enum NativeValueKind {
 }
 
 /// A type only the checker knows that the runtime needs: the storage of a list's items for a list
-/// the runtime may build empty, the key and value types of a dictionary built from no entries,
-/// or the number a `Num.from_r` gives.
+/// the runtime may build empty or convert from R (for `List.from_r_missing`, of the `:Ok`
+/// payloads), the key and value types of a dictionary built from no entries, or the number a
+/// `Num.from_r` gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum CheckedType {
     List(ListItems),
@@ -1245,6 +1246,8 @@ fn check_item_in<'db>(
         })
         .collect();
     let num_from_r = Symbol::lookup("Num.from_r");
+    let from_r_or = Symbol::lookup("List.from_r_or");
+    let from_r_missing = Symbol::lookup("List.from_r_missing");
     let mut checked_types: ThinVec<(ExprId, CheckedType)> = recorded
         .iter()
         .enumerate()
@@ -1273,6 +1276,23 @@ fn check_item_in<'db>(
                             _ => return None,
                         };
                         return Some((id, CheckedType::Number(number)));
+                    }
+                    // The overloads of these two fix the item type, so no scheme builds fresh
+                    // items, but the vector's storage can still differ from its checked type.
+                    ExpressionKind::NameRef(name)
+                        if Some(*name) == from_r_or || Some(*name) == from_r_missing =>
+                    {
+                        if !library(callee, *name) {
+                            return None;
+                        }
+                        let ty = context.table.resolve(db, (*slot)?);
+                        let item = crate::types::array_element(db, ty)?;
+                        let item = if Some(*name) == from_r_missing {
+                            ok_payload(db, item)?
+                        } else {
+                            item
+                        };
+                        return list_items(db, item).map(|items| (id, CheckedType::List(items)));
                     }
                     // `.ry_items` returns any other value unchanged, so a library name a project
                     // function shadows is wrapped harmlessly.
@@ -20249,11 +20269,21 @@ impl<'db, 'a> Checker<'db, 'a> {
         {
             return Ok(());
         }
-        // A literal that does not fit reported itself.
-        if let Some(value) = value
-            && self.adapt_literal(value, expected) != LiteralFit::NotLiteral
-        {
-            return Ok(());
+        // A literal that does not fit reported itself, except while probing an overload, where
+        // it rules the candidate out: `List.from_r_or(x, 0.5)` with an integer `x` takes the
+        // `F64` candidate, not the `I64` one declared first.
+        if let Some(value) = value {
+            let errors = self.errors.len();
+            match self.adapt_literal(value, expected) {
+                LiteralFit::NotLiteral => {}
+                LiteralFit::OutOfRange if self.overload_probe_depth > 0 => {
+                    if let Some(error) = self.errors.drain(errors..).next() {
+                        return Err(error);
+                    }
+                    return Ok(());
+                }
+                LiteralFit::Fits | LiteralFit::OutOfRange => return Ok(()),
+            }
         }
         if self.table.compatible(self.db, resolved_found, expected) {
             return Ok(());
@@ -24865,6 +24895,22 @@ fn list_items<'db>(db: &'db dyn Db, item: Ty<'db>) -> Option<ListItems> {
         _ if crate::types::is_ry_value_type(db, item) => Some(ListItems::RyValues),
         _ => None,
     }
+}
+
+/// The payload of the `:Ok` member of a `Result`, the item type of a `List.from_r_missing`.
+fn ok_payload<'db>(db: &'db dyn Db, result: Ty<'db>) -> Option<Ty<'db>> {
+    let TyKind::Union(members) = result.kind(db) else {
+        return None;
+    };
+    let payload = members.iter().find_map(|member| match member.kind(db) {
+        TyKind::Tag(name, payload) if name.text(db) == "Ok" => *payload,
+        _ => None,
+    })?;
+    // A positional payload is a tuple of its values.
+    Some(match payload.kind(db) {
+        TyKind::NativeTuple(items) if items.len() == 1 => items[0],
+        _ => payload,
+    })
 }
 
 /// Whether a tag or a tag union appears anywhere in `ty`, the part of a ry type that widens.
