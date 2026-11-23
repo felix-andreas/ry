@@ -520,6 +520,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Measured and not taken: a builtin path for `Rf_eval` and a cheaper protect stack
 - Measured and not taken: libdeflate for lazy-load records
 - Extracted runtimes and base trees are pruned by a ledger and held by locks
+- `bin/R` and `Rscript` behave as GNU R's front ends
 
 ## Typed ry and the standard library
 

@@ -504,16 +504,24 @@ R_INCLUDE_DIR='{home}/include'
 export R_INCLUDE_DIR
 R_DOC_DIR='{gnu_doc}'
 export R_DOC_DIR
-case "$1" in
-RHOME)
-    echo "$R_HOME"
-    exit 0
-    ;;
-CMD)
-    shift
-    exec "$R_HOME/bin/Rcmd" "$@"
-    ;;
-esac
+# As GNU R's script does, options before CMD or RHOME are read and dropped, up to --args.
+skipped=0
+for argument in "$@"; do
+    case "$argument" in
+    --args)
+        break
+        ;;
+    RHOME)
+        echo "$R_HOME"
+        exit 0
+        ;;
+    CMD)
+        shift $((skipped + 1))
+        exec "$R_HOME/bin/Rcmd" "$@"
+        ;;
+    esac
+    skipped=$((skipped + 1))
+done
 exec '{rcmd}' R "$@"
 "#
         ),
@@ -2075,7 +2083,8 @@ pub fn config(home: &Path, variable: &str) -> Result<String> {
         )));
     }
     let makeconf = home.join("etc/Makeconf");
-    let printer = format!("print-variable:\n\t@echo $({variable})\n");
+    // The origin first, because GNU R refuses a variable its configuration does not define.
+    let printer = format!("print-variable:\n\t@echo '$(origin {variable})|'$({variable})\n");
     let output = Command::new("make")
         .args(["-s", "--no-print-directory", "-f"])
         .arg(&makeconf)
@@ -2098,7 +2107,15 @@ pub fn config(home: &Path, variable: &str) -> Result<String> {
             String::from_utf8_lossy(&output.stderr).into_owned(),
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    let printed = String::from_utf8_lossy(&output.stdout);
+    let printed = printed.trim();
+    let (origin, value) = printed.split_once('|').unwrap_or((printed, ""));
+    if origin == "undefined" {
+        return Err(Error::Usage(format!(
+            "ERROR: no information for variable '{variable}'"
+        )));
+    }
+    Ok(value.trim().to_owned())
 }
 
 /// Why the shared library at `path` must not load, when it belongs to an installed package that ry

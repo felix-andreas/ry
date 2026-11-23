@@ -71,9 +71,21 @@ pub fn main(arguments: Vec<String>) -> ExitCode {
         unsafe { std::env::set_var("R_HOME", home.display().to_string().replace('\\', "/")) };
     }
     let arguments = match front_end.as_ref().map(|(name, _)| name.as_str()) {
-        Some("R") => match arguments.first().map(String::as_str) {
-            Some("CMD" | "RHOME" | "write-start-image") => arguments,
-            _ => [vec!["R".to_owned()], arguments].concat(),
+        // GNU R's `bin/R` reads options up to `--args` and drops those before a `CMD` or
+        // `RHOME` (renv runs `R --vanilla CMD INSTALL`).
+        Some("R") => match arguments
+            .iter()
+            .take_while(|argument| *argument != "--args")
+            .position(|argument| argument == "CMD" || argument == "RHOME")
+        {
+            Some(start) => arguments[start..].to_vec(),
+            None if arguments
+                .first()
+                .is_some_and(|first| first == "write-start-image") =>
+            {
+                arguments
+            }
+            None => [vec!["R".to_owned()], arguments].concat(),
         },
         Some("Rterm") => [vec!["R".to_owned()], arguments].concat(),
         Some("Rscript") => [vec!["Rscript".to_owned()], arguments].concat(),

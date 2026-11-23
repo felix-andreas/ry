@@ -1,0 +1,43 @@
+# Packages drive R as a subprocess and read what it prints (callr, renv, `R CMD BATCH`), so ry's
+# `bin/R` echoes input after its prompts, passes the command line through, reads the user's
+# Renviron, and finds `CMD` after leading options, as GNU R's front end does.
+
+requires ry-runtime
+hide gnu-r
+
+file input.R
+| x <- 1
+| x + 1
+
+file user.Renviron
+| GREETING=hello
+
+file drive.R
+| R <- file.path(R.home("bin"), "R")
+| echoed <- system2(R, c("-q", "-f", "input.R"), stdout = TRUE)
+| cat("echoed:", paste(echoed, collapse = "|"), "\n")
+| quiet <- system2(R, c("--no-echo", "-f", "input.R"), stdout = TRUE)
+| cat("quiet:", paste(quiet, collapse = "|"), "\n")
+| arguments <- system2(R, c("--no-echo", "-e", shQuote("cat(commandArgs(TRUE))"), "--args", "a", "b"), stdout = TRUE)
+| cat("arguments:", arguments, "\n")
+| stray <- system2(R, c("--no-echo", "stray", "-e", shQuote("cat(1)")), stdout = TRUE, stderr = TRUE)
+| cat("stray:", paste(stray, collapse = "|"), "\n")
+| environ <- system2(R, c("--no-echo", "-e", shQuote("cat(Sys.getenv('GREETING'))")), stdout = TRUE, env = "R_ENVIRON_USER=user.Renviron")
+| cat("environ:", environ, "\n")
+| vanilla <- system2(R, c("--vanilla", "--no-echo", "-e", shQuote("cat(nzchar(Sys.getenv('GREETING')))")), stdout = TRUE, env = "R_ENVIRON_USER=user.Renviron")
+| cat("vanilla:", vanilla, "\n")
+| config <- system2(R, c("--vanilla", "CMD", "config", "CC"), stdout = TRUE)
+| cat("config:", nzchar(config), "\n")
+| unknown <- suppressWarnings(system2(R, c("CMD", "config", "NO_SUCH_VARIABLE"), stdout = TRUE, stderr = TRUE))
+| cat("unknown:", attr(unknown, "status"), unknown, "\n")
+
+run ry run --runtime ry drive.R
+expect exit 0
+expect stdout "echoed: > x <- 1|> x + 1|[1] 2|> "
+expect stdout "quiet: [1] 2"
+expect stdout "arguments: a b"
+expect stdout "stray: ARGUMENT 'stray' __ignored__||1"
+expect stdout "environ: hello"
+expect stdout "vanilla: FALSE"
+expect stdout "config: TRUE"
+expect stdout "unknown: 1 ERROR: no information for variable 'NO_SUCH_VARIABLE'"

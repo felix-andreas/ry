@@ -718,8 +718,8 @@ unsafe fn do_sys_readlink(call: &Call<'_>) -> R<Sexp> {
     let count = length(paths);
     let result = alloc(SexpType::String, count)?;
     for index in 0..count {
-        let path = values::string_at(paths, index)
-            .map(|path| crate::connections::expand_path(&path));
+        let path =
+            values::string_at(paths, index).map(|path| crate::connections::expand_path(&path));
         let target = match path.as_deref().map(std::fs::read_link) {
             Some(_) if cfg!(windows) => Some(String::new()),
             Some(Ok(target)) => Some(target.display().to_string()),

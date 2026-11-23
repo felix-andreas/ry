@@ -405,6 +405,16 @@ A wider tier 1 is not first: JIT-compiled code is 1.3% of finbench and 0.1% to 0
 - **jsonlite passes 10 more tests on ry** because ry's datasets package is R 4.6's (`gait`, `penguins`, `penguins_raw`, `sunspot.m2014`); not a bug.
 - **The progress dashboard's package datasets are thin.** `cran_popular` is empty until a test run over popular CRAN packages exists, and per-dependency test results are recorded only for data.table, RcppSimdJson, xts and PerformanceAnalytics (`development/releasing.md`, "The progress dashboard").
 
+## Open: the dependency set's package suites
+
+`tools/bench/packages/suite.toml` runs the test suite of every package in the AGENTS.md dependency set that has one and runs offline. Most pass identically on both engines; network-bound tests (httr2, rvest, pool, odbc) fail identically on both. What is left:
+
+- **Packages without a parity check.** NlcOptim, rmgarch, rugarch, YieldCurve and uuid ship no tests; FLSSS has none at the top level; ROI.plugin.highs ships tinytest files that call ROI without attaching it and no `tests/` driver, so they never run upstream either. The Azure packages' suites need credentials and skip every test; Rblpapi needs a Bloomberg terminal; polars, azidentity, esgtoolkit and loadfast are not on CRAN; methods, parallel, stats, tools and utils test through R's source tree (`tests/`), not a package suite.
+- **callr: ry always loads its `std` and `ry` namespaces**, so the three "does not load anything" tests see two names beyond `base` in a child started with `R_DEFAULT_PACKAGES=NULL`. Deliberate, unless a way to load them lazily appears.
+- **ry's `R CMD INSTALL` prints its own progress on stdout** (`** code image: ...`, `* DONE`) where GNU R prints its step lines on stderr and "No man pages found" on stdout; callr's "stderr -> stdout" test matches GNU R's lines.
+- **renv** passes 1,500 tests with 10 failures and 7 errors on ry against 1,531 with 2 failures on GNU R, most of them in `test-install.R` and `test-restore.R`; not investigated further.
+- **devtools** passes 45 tests with 8 errors on ry against 58 with 6 on GNU R; not investigated.
+
 ## Open: native methods core
 
 The methods package's core runs in Rust behind hash-guarded prologues (`decisions/builtins.md`, "The
