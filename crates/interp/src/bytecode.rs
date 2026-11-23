@@ -1544,6 +1544,10 @@ pub mod profile {
     /// tier compiles or records feedback for: it runs without a call frame, and the tiers' frames
     /// and their resume points assume one. Negative, so the optimizing tier treats it as refused.
     pub const TIER_OFF: i32 = i32::MIN;
+    /// The one flag of a non-negative [`TIER_STATE`] that a code image keeps. The optimizing
+    /// tier sets it on a body it decided to compile, and reads it in a session started from the
+    /// image as that decision.
+    pub const TIER_TRAINED: i32 = 1 << 26;
     /// Nonzero while tier 0 records type feedback for this code, which only happens with the
     /// optimizing tier installed and while the code has no optimized code: during the first
     /// activation of a body with a loop, over the last eighth of the entry threshold
@@ -2490,6 +2494,10 @@ pub mod feedback {
     pub const INTEGER_SEQUENCE: u32 = 1 << 15;
     /// An attribute-free compact double sequence, such as `as.double(1:n)`.
     pub const DOUBLE_SEQUENCE: u32 = 1 << 16;
+    /// Compiled code kept handing the instruction to tier 0, so the optimizing tier compiles
+    /// it as tier 0's step. Compiled code records it, and the bit says nothing about the
+    /// value's type.
+    pub const HANDED_OFF: u32 = 1 << 17;
 }
 
 /// The feedback tier 0 recorded at `pc` of the byte code `code`: the [`feedback`] kinds of the
@@ -9328,8 +9336,9 @@ unsafe fn call_fast_left(
 ///
 /// Without `DISCARD` it takes the frames that handed out no environment. With it, it takes
 /// the ones that did while their code stayed on the slots (a callee asked for its parent
-/// frame, or a promise or a closure was made over the frame): when nothing counts a reference
-/// to that environment any more it dies here, as [`eval::leave`] would find.
+/// frame, or a promise or a closure was made over the frame): when nothing that outlives the
+/// frame names that environment ([`eval::outliving_cause`]) it dies here, as [`eval::leave`]
+/// would find.
 ///
 /// The value needs no root between the callee's registers and the caller's: giving up the
 /// slots' references frees nothing by itself, and nothing here allocates.
@@ -9380,7 +9389,12 @@ unsafe fn leave_fast<const DISCARD: bool, const STEPPED: bool, const HOOKS: u8>(
         return None;
     }
     debug_assert!(frame.env == nil && frame.slots as usize == state.machine.header);
-    if DISCARD && (pending.refcount() != 0 || value == pending || heap.is_preserved(pending)) {
+    // A counted reference to the environment may be one that dies with the frame, such as a
+    // closure only the frame's slots hold, which `outliving_cause` works out.
+    if DISCARD
+        && (pending.refcount() != 0 || value == pending || heap.is_preserved(pending))
+        && eval::outliving_cause(depth - 1, value).is_some()
+    {
         return None;
     }
     if HOOKS == SUMMARIZED {
@@ -13634,7 +13648,7 @@ unsafe fn op_for_init(state: &mut Activation<'_, '_>, instruction: Instruction) 
     };
     let count = match sequence.kind() {
         SexpType::Nil => 0,
-        SexpType::Pairlist | SexpType::Language => values::pairlist_length(sequence),
+        SexpType::Pairlist => values::pairlist_length(sequence),
         kind if kind.is_vector() => values::length(sequence),
         _ => return Err(error_in(call, "invalid for() loop sequence")),
     };

@@ -4,28 +4,57 @@
 # `just bench-packages lock` resolves these and their dependencies into lock.tsv.
 abind
 assertthat
+AzureAuth
+AzureKeyVault
+AzureStor
+AzureTableStor
 brio
 cachem
+callr ps
 cli
 data.table
 DBI
+devtools
 digest
+doParallel RUnit
 foreach
 fs
+git2r
+httr xml2
+httr2 webfakes jsonlite xml2 tibble later promises
 jsonlite
 lgr
 lubridate
 memoise
+odbc
+ompr magrittr
+ompr.roi magrittr ROI.plugin.glpk
+openxlsx
+partitions
+pdftools png
 PerformanceAnalytics
+plumber yaml base64enc readr
+pool RSQLite tibble
 progress
 purrr
+quadprog
 R6
 rappdirs
+RcppDE DEoptim
+RcppSimdJson bit64
+readr xml2 stringi
+readxl
+renv
+Rglpk
 rlang
+rvest purrr R6 readr
 snakecase tibble
 stringr
+testthat xml2 digest
+tryCatchLog futile.logger lgr
 uuid
 withr
+xml2 mockery
 xts
 zeallot
 zoo AER chron mondate strucchange timeDate tis tseries

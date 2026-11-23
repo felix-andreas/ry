@@ -647,7 +647,7 @@ because only the runtime reads such bytes. Its inputs are the source fragments o
 edits of generated programs. Each input is checked a second time with `#: ` before every line:
 that text is all comments to R, so both must accept it. `crates/jit/tests/test_tiers.rs` does the
 same one tier up: it runs random loop, branch and vector programs as closure bodies under tier 0 and under the JIT
-forced on (`jit::Mode::Force`, which compiles a body on its second call and a loop on its first
+forced on (`jit::Mode::Stress`, which compiles a body on its second call and a loop on its first
 backward jump), and every call must give the same value or error. Most generated programs must run
 to a value, so a generator that drifts into erroring early fails the test instead of passing
 without comparing anything. The test interpreter has no base R closures (`numeric`, `as.list`,
@@ -1687,7 +1687,7 @@ Three options build on the counts:
 #### What one mechanism costs
 
 `just bench-mechanisms` prices the mechanisms the suite's programs are made of. Each of about
-seventy operations is one expression (a closure call with a default argument, a `UseMethod`
+150 operations is one expression (a closure call with a default argument, a `UseMethod`
 dispatch, a `tryCatch` that catches nothing, `plain$b`) that a compiled loop evaluates. The tool
 runs the loop under callgrind for 20,000 and for 40,000 iterations and reports the difference per
 iteration, less the empty loop's, so start-up and warm-up cancel and the count repeats exactly.
@@ -1708,11 +1708,17 @@ just bench-mechanisms --ry target/release/ry --filter dispatch
 ...
 ```
 
-The whole table takes about five minutes on four cores, and one filtered group well under a
-minute. `--save FILE` keeps the counts and `--baseline FILE` prints the change against them,
-which is how a change to the call path or to dispatch is checked before the suite is run.
+The whole table takes about fifteen minutes on four cores, and one filtered group well under a
+minute. `--filter` may be given several times, and an operation is run when its name contains any
+of the texts. `--save FILE` keeps the counts and `--baseline FILE` prints the change against
+them, which is how a change to the call path or to dispatch is checked before the suite is run.
 `--profile NAME` prints the functions that hold one operation's instructions, on a build with
 symbols.
+
+`--gnu-r` counts each operation on GNU R too (the `R` on the `PATH`, under the same callgrind
+loop) and adds two columns, GNU R's instructions and ry's count over GNU R's. A ratio near or
+above 1 marks an operation whose path is longer than it has to be, which a timing run on a busy
+machine cannot show.
 
 #### How well the suite predicts the code bases
 

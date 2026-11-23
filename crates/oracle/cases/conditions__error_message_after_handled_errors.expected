@@ -1,0 +1,12 @@
+[stdout]
+| "plain" 
+| "seen by both" 
+| "from a call" 
+| "Error in try(stop(\"in try\"), silent = TRUE) : in try\n" 
+| "Error in try(stop(\"in try\"), silent = TRUE) : in try\n" 
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

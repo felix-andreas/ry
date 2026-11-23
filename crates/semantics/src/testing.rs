@@ -210,7 +210,7 @@ pub fn for_each_session(default: usize, mut session: impl FnMut(u64) -> Vec<Proj
         let (first_seed, workbench) = bench.get_or_insert_with(|| (seed, Workbench::default()));
         let states = session(seed);
         if let Ok(renderings) = on_seed_thread(seed, || check_session(workbench, &states)) {
-            if (seed - first_of_run) % CHILD_SAMPLE == 0 {
+            if (seed - first_of_run).is_multiple_of(CHILD_SAMPLE) {
                 samples.push((seed, renderings));
             }
             continue;
@@ -1586,7 +1586,7 @@ pub fn for_each_stub_source(default: usize, mut generate: impl FnMut(u64) -> Str
         let text = generate(seed);
         match on_seed_thread(seed, || check_stub_source(&mut db, &text)) {
             Ok(renderings) => {
-                if (seed - first_of_run) % CHILD_SAMPLE == 0 {
+                if (seed - first_of_run).is_multiple_of(CHILD_SAMPLE) {
                     samples.push((seed, vec![renderings]));
                 }
                 true

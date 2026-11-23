@@ -386,7 +386,10 @@ def short_floor(suite):
 
 
 def engines(args, suite):
-    base = {key: value for key, value in os.environ.items() if key not in ("RY_JIT", "RY_TYPED_LOG")}
+    # A harness's trace context changes between the engines' runs, so suites that compare a child
+    # process's environment (callr) would differ for reasons outside the engines.
+    dropped = ("RY_JIT", "RY_TYPED_LOG", "TRACEPARENT", "TRACESTATE", "BAGGAGE")
+    base = {key: value for key, value in os.environ.items() if key not in dropped}
     base.update(LC_ALL="C.UTF-8")
     if suite == RUST_SUITE:
         # The typed programs load no package, so neither engine gets a library, and `--jit-off`

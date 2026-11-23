@@ -426,7 +426,7 @@ GNU R's `tests/*.R` pin behaviors that come from its machine or implementation, 
   engine list, one summary line per engine) and `ry_matches_recorded_outcomes` report a listed
   failure as known and fail on an unlisted failure and on a listed case that passes, so a
   fix and its entry's deletion land together. Unknown engines, missing cases and duplicates are
-  refused. `ry-jit-gctorture` (`RY_JIT=force` plus `RY_GC_STRESS=1`) is its own engine because a
+  refused. `ry-jit-gctorture` (`RY_JIT=stress` plus `RY_GC_STRESS=1`) is its own engine because a
   dropped root in compiled code shows only with both on.
 
 ## A crash is never a known failure

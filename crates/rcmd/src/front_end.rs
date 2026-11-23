@@ -70,10 +70,34 @@ pub fn main(arguments: Vec<String>) -> ExitCode {
         // SAFETY: no other thread exists yet.
         unsafe { std::env::set_var("R_HOME", home.display().to_string().replace('\\', "/")) };
     }
+    // Variables to export as empty, so every R process a `CMD` starts skips those start-up files.
+    let mut skipped_start_up: Vec<&str> = Vec::new();
     let arguments = match front_end.as_ref().map(|(name, _)| name.as_str()) {
-        Some("R") => match arguments.first().map(String::as_str) {
-            Some("CMD" | "RHOME" | "write-start-image") => arguments,
-            _ => [vec!["R".to_owned()], arguments].concat(),
+        // GNU R's `bin/R` reads options up to `--args` and drops those before a `CMD` or
+        // `RHOME`, exporting the start-up files they turn off (renv runs
+        // `R --vanilla CMD INSTALL` so that a project's `.Rprofile` stays out of the install).
+        Some("R") => match command_start(&arguments) {
+            Some(start) => {
+                for option in &arguments[..start] {
+                    skipped_start_up.extend_from_slice(match option.as_str() {
+                        "--no-environ" => &["R_ENVIRON", "R_ENVIRON_USER"][..],
+                        "--no-site-file" => &["R_PROFILE"],
+                        "--no-init-file" => &["R_PROFILE_USER"],
+                        "--vanilla" => {
+                            &["R_ENVIRON", "R_ENVIRON_USER", "R_PROFILE", "R_PROFILE_USER"]
+                        }
+                        _ => &[],
+                    });
+                }
+                arguments[start..].to_vec()
+            }
+            None if arguments
+                .first()
+                .is_some_and(|first| first == "write-start-image") =>
+            {
+                arguments
+            }
+            None => [vec!["R".to_owned()], arguments].concat(),
         },
         Some("Rterm") => [vec!["R".to_owned()], arguments].concat(),
         Some("Rscript") => [vec!["Rscript".to_owned()], arguments].concat(),
@@ -91,7 +115,10 @@ pub fn main(arguments: Vec<String>) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        for (name, value) in assignments {
+        let skipped = skipped_start_up
+            .iter()
+            .map(|name| ((*name).to_owned(), String::new()));
+        for (name, value) in assignments.into_iter().chain(skipped) {
             // SAFETY: no other thread exists yet.
             unsafe { std::env::set_var(name, value) };
         }
@@ -134,6 +161,22 @@ pub fn main(arguments: Vec<String>) -> ExitCode {
 /// the front end starts the session those scripts would. Each script passes its arguments as
 /// one string, every argument after the separator `nextArg`, because the R function splits
 /// `commandArgs(TRUE)` on it.
+/// Where `R`'s arguments name a `CMD` or `RHOME`, as GNU R's `bin/R` reads them: options up to
+/// `--args`, skipping the values of those that take one.
+fn command_start(arguments: &[String]) -> Option<usize> {
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        match argument.as_str() {
+            "--args" => return None,
+            "CMD" | "RHOME" => return Some(index),
+            "-e" | "-f" | "-g" | "--gui" | "-d" | "--debugger" | "--arch" => index += 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
 fn tools_command(arguments: &[String]) -> Option<crate::Session> {
     let (command, rest) = arguments.split_first()?;
     // The function, `R_DEFAULT_PACKAGES`, whether `--vanilla` skips the profiles, and whether
@@ -154,7 +197,10 @@ fn tools_command(arguments: &[String]) -> Option<crate::Session> {
     Some(crate::Session::Run {
         file: None,
         expressions: Some(entry.to_owned()),
-        arguments: vec![
+        command_line: vec![
+            "--no-restore".to_owned(),
+            "--no-echo".to_owned(),
+            "--args".to_owned(),
             rest.iter()
                 .map(|argument| format!("nextArg{argument}"))
                 .collect(),
@@ -162,6 +208,9 @@ fn tools_command(arguments: &[String]) -> Option<crate::Session> {
         default_packages: default_packages.map(str::to_owned),
         site_profile: !vanilla,
         user_profile: !vanilla,
+        environ: !vanilla,
+        echo: false,
+        greeting: false,
     })
 }
 
@@ -292,35 +341,40 @@ const PROJECT_FLAGS: c_int = 0b10_0111;
 
 /// Runs a session on ry's runtime, the libR of the R home, which also holds the interpreter.
 fn run_r(home: &Path, session: &crate::Session) -> crate::Result<i32> {
-    let (file, expressions, arguments, default_packages, site_profile, user_profile) = match session
-    {
-        crate::Session::Print(text) => {
-            print!("{text}");
-            return Ok(0);
+    let crate::Session::Run {
+        file,
+        expressions,
+        command_line,
+        default_packages,
+        site_profile,
+        user_profile,
+        environ,
+        echo,
+        greeting,
+    } = session
+    else {
+        match session {
+            crate::Session::Print(text) => print!("{text}"),
+            crate::Session::Version { rscript } => {
+                print!("{}", crate::version_text(home, *rscript)?)
+            }
+            crate::Session::Run { .. } => {}
         }
-        crate::Session::Version { rscript } => {
-            print!("{}", crate::version_text(home, *rscript)?);
-            return Ok(0);
-        }
-        crate::Session::Run {
-            file,
-            expressions,
-            arguments,
-            default_packages,
-            site_profile,
-            user_profile,
-        } => (
-            file,
-            expressions,
-            arguments,
-            default_packages,
-            *site_profile,
-            *user_profile,
-        ),
+        return Ok(0);
     };
     if let Some(packages) = default_packages {
         // SAFETY: no other thread exists yet.
         unsafe { std::env::set_var("R_DEFAULT_PACKAGES", packages) };
+    }
+    // GNU R stops before its greeting when it cannot read the file, and says so on stdout.
+    if let Some(file) = file
+        && let Err(failure) = std::fs::File::open(file)
+    {
+        let reason = failure.to_string();
+        let reason = reason.split(" (os error").next().unwrap_or(&reason);
+        let message = format!("Fatal error: cannot open file '{file}': {reason}");
+        println!("{message}");
+        return Ok(2);
     }
     // With neither a file nor `-e`, `ry_run` reads stdin as a console, one expression at a time.
     let input = expressions.clone();
@@ -347,8 +401,12 @@ fn run_r(home: &Path, session: &crate::Session) -> crate::Result<i32> {
     };
     let file = file.as_deref().map(text).transpose()?;
     let input = input.as_deref().map(text).transpose()?;
-    let arguments = arguments
-        .iter()
+    // GNU R's `commandArgs()` starts with the path of the executable `bin/R` runs.
+    let program = std::env::current_exe()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "R".to_owned());
+    let arguments = std::iter::once(&program)
+        .chain(command_line)
         .map(|argument| text(argument))
         .collect::<crate::Result<Vec<_>>>()?;
     let pointers: Vec<*const c_char> = arguments.iter().map(|argument| argument.as_ptr()).collect();
@@ -365,8 +423,16 @@ fn run_r(home: &Path, session: &crate::Session) -> crate::Result<i32> {
         .ok()
         .and_then(|bits| bits.parse::<c_int>().ok())
         .map_or(0b11, |bits| bits & PROJECT_FLAGS);
-    let flags =
-        project | if site_profile { 1 << 3 } else { 0 } | if user_profile { 1 << 4 } else { 0 };
+    let flags = [
+        (*site_profile, 1 << 3),
+        (*user_profile, 1 << 4),
+        (*environ, 1 << 7),
+        (*echo, 1 << 8),
+        (*greeting, 1 << 9),
+    ]
+    .into_iter()
+    .filter(|(wanted, _)| *wanted)
+    .fold(project, |flags, (_, bit)| flags | bit);
     let status = unsafe {
         run(
             pointer(&file),

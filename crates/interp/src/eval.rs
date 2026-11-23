@@ -4286,7 +4286,13 @@ unsafe fn finish_frame(
         return result;
     }
     if env.has_gp(gp::SLOT_FRAME) {
-        match outliving_cause(depth - 1, &result) {
+        // An error return keeps the environment, since the unwind may carry it or anything
+        // made over it.
+        let cause = match result {
+            Ok(value) => outliving_cause(depth - 1, value),
+            Err(_) => Some(Site::PromiseOrEnvironmentOutlives),
+        };
+        match cause {
             Some(cause) => {
                 // The variables move while nothing else can run, as in a lookup's move.
                 crate::heap().inhibit_collection();
@@ -4320,12 +4326,8 @@ unsafe fn finish_frame(
 /// that only a slot or a cell of the frame holds (a default argument nobody read), and a
 /// closure the frame made that only its slots and cells hold. Any count beyond those is a
 /// holder that outlives the frame. Three holders are not counted and are checked by hand: the
-/// value returned, `R_PreserveObject`, and a global calling handler. An error return keeps the
-/// environment, since the unwind may carry it or anything made over it.
-unsafe fn outliving_cause(index: usize, result: &R<Sexp>) -> Option<Site> {
-    let Ok(value) = *result else {
-        return Some(Site::PromiseOrEnvironmentOutlives);
-    };
+/// value returned, `R_PreserveObject`, and a global calling handler.
+pub(crate) unsafe fn outliving_cause(index: usize, value: Sexp) -> Option<Site> {
     let state = interp();
     let frame = &state.frames[index];
     let env = frame.pending;
@@ -5767,7 +5769,7 @@ unsafe fn do_for(call: &Call<'_>) -> R<Sexp> {
     };
     let count = match sequence.kind() {
         SexpType::Nil => 0,
-        SexpType::Pairlist | SexpType::Language => values::pairlist_length(sequence),
+        SexpType::Pairlist => values::pairlist_length(sequence),
         SexpType::I64 if !sequence.is_array() => {
             return Err(crate::records::boundary_error(
                 sequence,

@@ -919,6 +919,7 @@ fn check_item_in<'db>(
         callee_targets: Column::new_in(arena, expressions),
         masked_reads: Bitset::new_in(arena, expressions),
         function_fallback_reads: Bitset::new_in(arena, expressions),
+        unforced_missing_reads: Bitset::new_in(arena, expressions),
         undecided_calls: Bitset::new_in(arena, expressions),
         unseen_frames: 0,
         column_scopes: Vec::new(),
@@ -1928,6 +1929,9 @@ struct Checker<'db, 'a> {
     callee_targets: Column<'a, ExprId, CalleeTarget>,
     masked_reads: Bitset<'a, ExprId>,
     function_fallback_reads: Bitset<'a, ExprId>,
+    /// Bare reads of a missing formal passed to a parameter the callee may leave unread, which
+    /// R never forces: `if (missing(x)) stop_type(x)` where `stop_type` tests `missing(x)`.
+    unforced_missing_reads: Bitset<'a, ExprId>,
     /// Library calls whose untyped arguments left the candidates disagreeing.
     undecided_calls: Bitset<'a, ExprId>,
     /// How many enclosing `[` index a value that may be a data.table of unknown columns.
@@ -4397,10 +4401,16 @@ impl<'db, 'a> Checker<'db, 'a> {
                 // `expression("density " * f[1] - f[2])` multiplies nothing. A project binding
                 // of the same name is an ordinary function.
                 if let ExpressionKind::NameRef(name) = module.kind(callee)
-                    && matches!(
+                    && (matches!(
                         name.as_str(),
                         "quote" | "bquote" | "substitute" | "expression"
-                    )
+                    ) || matches!(name.as_str(), "expr" | "exprs" | "quo" | "quos")
+                        && self
+                            .library
+                            .is_some_and(|library| library.exports("rlang", *name))
+                        && self
+                            .globals
+                            .is_some_and(|globals| globals.library_candidates(*name).is_some()))
                     && !self.naming.resolutions.contains_key(&callee)
                     && !self
                         .globals
@@ -4705,9 +4715,18 @@ impl<'db, 'a> Checker<'db, 'a> {
                             .map(|parameter| Name::new(self.db, parameter.name))
                             .collect::<Vec<_>>(),
                         default_reads: &default_reads,
+                        // A default the body writes or a callee supplies applies only through
+                        // missingness, so a missing argument forwarded here stays unread too.
                         missing_tested: &module[parameters]
                             .iter()
-                            .filter(|parameter| uses.missing_tested.contains(&parameter.name))
+                            .filter(|parameter| {
+                                uses.missing_tested.contains(&parameter.name)
+                                    || parameter.default.is_none()
+                                        && named.iter().any(|field| {
+                                            field.default.is_some()
+                                                && parameter.name == field.name.text(self.db)
+                                        })
+                            })
                             .map(|parameter| Name::new(self.db, parameter.name))
                             .collect::<Vec<_>>(),
                         condition_only: &self
@@ -5504,6 +5523,9 @@ impl<'db, 'a> Checker<'db, 'a> {
                 let scheme = self.scheme_arena[index as usize].clone();
                 let ty = self.instantiate(&scheme);
                 self.widen_captured_read(id, slot, ty)
+            }
+            Some(EnvEntry::MissingFormal(_)) if self.unforced_missing_reads.contains(id) => {
+                unknown(self.db)
             }
             Some(EnvEntry::MissingFormal(_)) => {
                 let name = self
@@ -8478,8 +8500,49 @@ impl<'db, 'a> Checker<'db, 'a> {
                 .and_then(|globals| globals.scheme(Symbol::new(name), true))
                 .map(|scheme| scheme.body),
         };
+        match callee_ty {
+            Some(ty) => self.arguments_left_unread(ty, arguments),
+            None => Bitset::new_in(self.arena, arguments.len()),
+        }
+    }
+
+    /// Marks each argument that passes a formal known to be missing here straight on to a
+    /// parameter `callee` may leave unread: R binds it to a promise the callee never forces.
+    fn mark_unforced_missing_reads(&mut self, callee: Ty<'db>, arguments: &[Argument]) {
+        let missing_value = |value: ExprId| {
+            matches!(self.module.kind(value), ExpressionKind::NameRef(_))
+                && self.naming.resolutions.get(&value).is_some_and(|&slot| {
+                    matches!(self.environment.get(slot), Some(EnvEntry::MissingFormal(_)))
+                })
+        };
+        if !arguments
+            .iter()
+            .any(|argument| argument.value.is_some_and(missing_value))
+        {
+            return;
+        }
+        let callee = self.table.resolve(self.db, callee);
+        // A library function forces what it is given (`formatC(x, width = w)` reads `width`);
+        // only a body the checker inferred records which parameters it may leave unread.
+        if !matches!(callee.kind(self.db), TyKind::Function(function) if function.inferred) {
+            return;
+        }
+        let targets = self.arguments_left_unread(callee, arguments);
+        for (index, argument) in arguments.iter().enumerate() {
+            if let Some(value) = argument.value
+                && targets.contains(index)
+                && missing_value(value)
+            {
+                self.unforced_missing_reads.insert(value);
+            }
+        }
+    }
+
+    /// For each argument of a call to a function of type `callee`, whether it binds a parameter
+    /// the callee may leave unread (`optional_argument_targets`).
+    fn arguments_left_unread(&self, callee: Ty<'db>, arguments: &[Argument]) -> Bitset<'a, usize> {
         let mut targets = Bitset::new_in(self.arena, arguments.len());
-        let Some(TyKind::Function(function)) = callee_ty.map(|ty| ty.kind(self.db)) else {
+        let TyKind::Function(function) = callee.kind(self.db) else {
             return targets;
         };
         let leaves_unread = |parameter: &Parameter<'db>| {
@@ -11469,7 +11532,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     | TyKind::Record(_)
                     | TyKind::Environment(_)
                     | TyKind::Unknown
-            )
+            ) || matches!(ty.kind(self.db), TyKind::Named(class, _) if class.text(self.db) == "environment")
         };
         if (may_dispatch(resolved_left) || may_dispatch(resolved_right))
             && self
@@ -13456,6 +13519,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             true => callee_ty,
             false => self.without_null_beside_functions(callee_ty),
         };
+        self.mark_unforced_missing_reads(callee_ty, arguments);
         let mut call_arguments = self.infer_call_arguments_against(range, arguments, &[callee_ty]);
         self.resolve_match_fun_arguments(callee, &mut call_arguments);
         if self.arity_tested_by_formals(callee, callee_ty, &call_arguments) {
@@ -18244,6 +18308,10 @@ impl<'db, 'a> Checker<'db, 'a> {
             arena,
         );
 
+        // A declared function's `...` goes to its callback (`apply(m, 1, fun)` calls
+        // `fun(row, ...)`), so an open callback is variadic even when this call forwards nothing.
+        let callback_forwarded = !forwarded_argument_indexes.is_empty()
+            || variadic_element.is_some() && !function.inferred;
         let forwards_dots = arguments.iter().any(|argument| argument.forwards_dots);
         let mut findings = Vec::new();
         // An unknown name throws off positional accounting, so its arity verdict would be noise.
@@ -18269,7 +18337,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         && let Some(ty) =
                             self.argument_type_for(expected, argument, function.inferred)
                         && let expected =
-                            self.forwarded_callback_shape(expected, ty, &forwarded_argument_indexes)
+                            self.forwarded_callback_shape(expected, ty, callback_forwarded)
                         && let Err(error) = self.check_argument(
                             expected,
                             ty,
@@ -18338,7 +18406,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         && let Some(ty) =
                             self.argument_type_for(expected, argument, function.inferred)
                         && let expected =
-                            self.forwarded_callback_shape(expected, ty, &forwarded_argument_indexes)
+                            self.forwarded_callback_shape(expected, ty, callback_forwarded)
                         && let Err(error) = self.check_argument(
                             expected,
                             ty,
@@ -18989,11 +19057,9 @@ impl<'db, 'a> Checker<'db, 'a> {
         &self,
         expected: Ty<'db>,
         actual: Ty<'db>,
-        forwarded_argument_indexes: &[usize],
+        forwards: bool,
     ) -> Ty<'db> {
-        if forwarded_argument_indexes.is_empty()
-            || !self.is_open_parameter(self.table.shallow_resolve(self.db, actual))
-        {
+        if !forwards || !self.is_open_parameter(self.table.shallow_resolve(self.db, actual)) {
             return expected;
         }
         match self.table.resolve(self.db, expected).kind(self.db) {

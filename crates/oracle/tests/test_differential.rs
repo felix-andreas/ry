@@ -1,5 +1,5 @@
 //! Differential fuzzing of ry's runtime: random programs from `oracle::fuzz` run under GNU R,
-//! under ry's tier-0 interpreter (`RY_JIT=off`) and under the JIT forced on (`RY_JIT=force`),
+//! under ry's tier-0 interpreter (`RY_JIT=off`) and with every body compiled (`RY_JIT=stress`),
 //! and all three must agree on stdout, messages, warnings, errors and the last value. A smaller
 //! pass runs the same programs under collection stress and compares them with ry unstressed.
 //!
