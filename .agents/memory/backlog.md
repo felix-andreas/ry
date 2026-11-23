@@ -411,6 +411,18 @@ A wider tier 1 is not first: JIT-compiled code is 1.3% of finbench and 0.1% to 0
 - **jsonlite passes 10 more tests on ry** because ry's datasets package is R 4.6's (`gait`, `penguins`, `penguins_raw`, `sunspot.m2014`); not a bug.
 - **The progress dashboard's package datasets are thin.** `cran_popular` is empty until a test run over popular CRAN packages exists, and per-dependency test results are recorded only for data.table, RcppSimdJson, xts and PerformanceAnalytics (`development/releasing.md`, "The progress dashboard").
 
+## Open: the dependency set's package suites
+
+`tools/bench/packages/suite.toml` runs the test suite of every package in the AGENTS.md dependency set that has one and runs offline. Most pass identically on both engines; network-bound tests (httr2, rvest, pool, odbc) fail identically on both. What is left:
+
+- **Packages without a parity check.** NlcOptim, rmgarch, rugarch, YieldCurve and uuid ship no tests; FLSSS has none at the top level; ROI.plugin.highs ships tinytest files that call ROI without attaching it and no `tests/` driver, so they never run upstream either. The Azure packages' suites need credentials and skip every test; Rblpapi needs a Bloomberg terminal; polars, azidentity, esgtoolkit and loadfast are not on CRAN; methods, parallel, stats, tools and utils test through R's source tree (`tests/`), not a package suite.
+- **callr: ry always loads its `std` and `ry` namespaces**, so the three "does not load anything" tests see two names beyond `base` in a child started with `R_DEFAULT_PACKAGES=NULL`. Deliberate, unless a way to load them lazily appears.
+- **ry's `R CMD INSTALL` prints its own progress on stdout** (`** code image: ...`, `* DONE`) where GNU R prints its step lines on stderr and "No man pages found" on stdout; callr's "stderr -> stdout" test matches GNU R's lines.
+- **renv** passes 1,500 tests with 10 failures and 7 errors on ry against 1,531 with 2 failures on GNU R. The tests that fail only on ry: in `test-install.R`, "install() writes out Github fields for backwards compatibility", "install() doesn't report rolled-back packages as failures", "install() reports failures when an older version remains installed" and "install() doesn't report up-to-date packages as failures after a rollback"; in `test-restore.R`, "library permissions are validated before restore" and "install.staged works as expected"; "renv can retrieve the latest release associated with a project" (`test-retrieve.R`), "an archive does not satisfy a binary-only request" (`test-available-packages.R`), "package installation does not fail with non-writable cache" (`test-cache.R`) and "renv_graph_install reports packages discarded by a transactional rollback" (`test-graph.R`). Not investigated.
+- **devtools** errors in 7 tests on ry against 6 on GNU R. The extra one is "uninstall() unloads and removes from library": `package:std` and `package:ry` carry no `path` attribute, so `searchpaths()` is two entries shorter than `search()` and `data.frame(package = search(), path = searchpaths())` in `devtools::loaded_packages()` fails. A fix needs a path for both that exists in every session; their namespaces' path is a directory created in the session's temporary directory on first use, which an attached environment written into the start-up image cannot hold.
+- **The greeting lacks GNU R's "Natural language support but running in an English locale" line**, which GNU R prints in an English `LC_MESSAGES` locale (such as `en_US.UTF-8`) because its `en` message catalog translates the licence paragraph into the paragraph plus that line. ry translates no messages.
+- **`Renviron` values strip quotes only at their ends**: `Q="a b"  # trailing` sets `a b"  # trailing`, where GNU R removes every quote and sets `a b  # trailing` (`read_environment_file`, `crates/interp/src/session.rs`).
+
 ## Open: native methods core
 
 The methods package's core runs in Rust behind hash-guarded prologues (`decisions/builtins.md`, "The
@@ -688,7 +700,6 @@ Rule and order: `development/design/memory-safety.md`, "Migration".
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
 `docs/.../guide.mdx`, step 3). Gaps, roughly in order of how often a real package hits them:
 
-- **The load-index cache never evicts.** `loader::index_cache` writes one `~/.cache/ry/load-index/<hash of root>.bin` per package root, and nothing removes an entry whose root is gone, so temporary roots (test and benchmark checkouts) pile up: one container held 782 entries, 1.9 GB. Store the root in the entry and drop entries whose root no longer exists, as the stale runtime directories are dropped.
 - **`ry test` workers under `--runtime gnu-r` still load with pkgload**, eagerly and without
   `ry.toml`'s switches, because a GNU R worker has no `.Internal(ryLoaderAttach())`. Attaching the
   GNU R loader in the worker hook (source `gnur.R` from the binary) would close it.

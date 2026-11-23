@@ -504,16 +504,49 @@ R_INCLUDE_DIR='{home}/include'
 export R_INCLUDE_DIR
 R_DOC_DIR='{gnu_doc}'
 export R_DOC_DIR
-case "$1" in
-RHOME)
-    echo "$R_HOME"
-    exit 0
-    ;;
-CMD)
-    shift
-    exec "$R_HOME/bin/Rcmd" "$@"
-    ;;
-esac
+# As GNU R's script does, options before CMD or RHOME are read and dropped, up to --args, and
+# those that turn off start-up files export it, so every R process the command starts obeys them.
+skipped=0
+value=
+for argument in "$@"; do
+    if [ -n "$value" ]; then
+        value=
+    else
+        case "$argument" in
+        --args)
+            break
+            ;;
+        RHOME)
+            echo "$R_HOME"
+            exit 0
+            ;;
+        CMD)
+            shift $((skipped + 1))
+            exec "$R_HOME/bin/Rcmd" "$@"
+            ;;
+        -e | -f | -g | --gui | -d | --debugger | --arch)
+            value=yes
+            ;;
+        --no-environ)
+            R_ENVIRON='' R_ENVIRON_USER=''
+            export R_ENVIRON R_ENVIRON_USER
+            ;;
+        --no-site-file)
+            R_PROFILE=''
+            export R_PROFILE
+            ;;
+        --no-init-file)
+            R_PROFILE_USER=''
+            export R_PROFILE_USER
+            ;;
+        --vanilla)
+            R_ENVIRON='' R_ENVIRON_USER='' R_PROFILE='' R_PROFILE_USER=''
+            export R_ENVIRON R_ENVIRON_USER R_PROFILE R_PROFILE_USER
+            ;;
+        esac
+    fi
+    skipped=$((skipped + 1))
+done
 exec '{rcmd}' R "$@"
 "#
         ),
@@ -1392,21 +1425,31 @@ pub enum Session {
     Run {
         file: Option<String>,
         expressions: Option<String>,
-        /// What follows `--args`, which `commandArgs(TRUE)` returns.
-        arguments: Vec<String>,
+        /// The command line after the program, as `commandArgs()` reports it after the
+        /// program's path: what follows `--args` in it is `commandArgs(TRUE)`.
+        command_line: Vec<String>,
         /// `Rscript --default-packages=`, which becomes `R_DEFAULT_PACKAGES`.
         default_packages: Option<String>,
         /// Off with `--vanilla` or `--no-site-file`.
         site_profile: bool,
         /// Off with `--vanilla` or `--no-init-file`.
         user_profile: bool,
+        /// Whether the site and user `Renviron` files are read: off with `--vanilla` or
+        /// `--no-environ`.
+        environ: bool,
+        /// Whether each line of input is echoed after its prompt: `R` without `--no-echo`.
+        echo: bool,
+        /// Whether GNU R's greeting comes first: `R` without `--no-echo` or `--quiet`.
+        greeting: bool,
     },
 }
 
-/// Which startup profiles a command line turns off, from GNU R's options for them.
+/// Which startup profiles and environment files a command line turns off, from GNU R's
+/// options for them.
 struct Profiles {
     site: bool,
     user: bool,
+    environ: bool,
 }
 
 impl Profiles {
@@ -1416,7 +1459,9 @@ impl Profiles {
             "--vanilla" => {
                 self.site = false;
                 self.user = false;
+                self.environ = false;
             }
+            "--no-environ" => self.environ = false,
             "--no-site-file" => self.site = false,
             "--no-init-file" => self.user = false,
             _ => return false,
@@ -1521,26 +1566,29 @@ impl BaseVersion {
 }
 
 /// Reads GNU R's `R [options] [< infile]` command line. `--vanilla`, `--no-site-file` and
-/// `--no-init-file` turn the startup profiles off; other session options that change nothing in
-/// a non-interactive run on ry (`--no-save`, `--no-echo`, memory sizes) are accepted and
-/// ignored.
+/// `--no-init-file` turn the startup profiles off, and `--no-echo` and `-q` the echo and the
+/// greeting; other session options that change nothing in a non-interactive run on ry
+/// (`--no-save`, memory sizes) are accepted and ignored. As in GNU R, an unknown option or a
+/// stray argument is reported on stdout and the session runs anyway, with the argument still in
+/// `commandArgs()` (callr's hooks append some).
 pub fn r_command_line(arguments: &[String]) -> Result<Session> {
     let mut file = None;
     let mut expressions: Vec<String> = Vec::new();
     let mut rest = arguments.iter();
-    let mut trailing = Vec::new();
+    let (mut echo, mut greeting) = (true, true);
     let mut profiles = Profiles {
         site: true,
         user: true,
+        environ: true,
     };
     while let Some(argument) = rest.next() {
         if profiles.read(argument) {
             continue;
         }
         match argument.as_str() {
-            "--args" => {
-                trailing.extend(rest.by_ref().cloned());
-            }
+            "--args" => break,
+            "--no-echo" | "--slave" | "-s" => (echo, greeting) = (false, false),
+            "-q" | "--quiet" | "--silent" => greeting = false,
             "--version" => return Ok(Session::Version { rscript: false }),
             "-h" | "--help" => {
                 return Ok(Session::Print(
@@ -1559,14 +1607,18 @@ pub fn r_command_line(arguments: &[String]) -> Result<Session> {
                     Error::Usage("option '-e' requires a non-empty argument".into())
                 })?);
             }
-            "-d" | "-g" | "--encoding" | "--debugger-args" => {
+            "-d" | "-g" | "--gui" | "--debugger" | "--arch" | "--encoding" => {
                 rest.next();
             }
             other => {
                 if let Some(path) = other.strip_prefix("--file=") {
                     file = Some(path.to_owned());
                 } else if !other.starts_with('-') {
-                    return Err(Error::Usage(format!("ARGUMENT '{other}' __ignored__")));
+                    println!("ARGUMENT '{other}' __ignored__\n");
+                } else if !KNOWN_R_OPTIONS.iter().any(|known| {
+                    other == *known || (known.ends_with('=') && other.starts_with(known))
+                }) {
+                    println!("WARNING: unknown option '{other}'\n");
                 }
             }
         }
@@ -1575,31 +1627,87 @@ pub fn r_command_line(arguments: &[String]) -> Result<Session> {
         // `-f -` and `--file=-` read stdin, as no file does.
         file: file.filter(|path| path != "-"),
         expressions: (!expressions.is_empty()).then(|| expressions.join("\n")),
-        arguments: trailing,
+        command_line: arguments.to_vec(),
         default_packages: None,
         site_profile: profiles.site,
         user_profile: profiles.user,
+        environ: profiles.environ,
+        echo,
+        greeting,
     })
 }
 
+/// The options GNU R's front end and `R_common_command_line` accept; one ending in `=` takes its
+/// value in the same argument. Anything else that starts with `-` draws GNU R's warning.
+const KNOWN_R_OPTIONS: &[&str] = &[
+    "--save",
+    "--no-save",
+    "--no-environ",
+    "--no-site-file",
+    "--no-init-file",
+    "--restore",
+    "--no-restore",
+    "--no-restore-data",
+    "--no-restore-history",
+    "--vanilla",
+    "--no-readline",
+    "--slave",
+    "--no-echo",
+    "-s",
+    "-q",
+    "--quiet",
+    "--silent",
+    "--interactive",
+    "--verbose",
+    "--min-vsize=",
+    "--max-vsize=",
+    "--min-nsize=",
+    "--max-nsize=",
+    "--max-ppsize=",
+    "--max-connections=",
+    "--encoding=",
+    "--debugger=",
+    "--debugger-args=",
+    "--gui=",
+    "--arch=",
+    "--default-packages=",
+];
+
 /// Reads `Rscript [options] (FILE | -e EXPR...) [args]`: options come first, then the file or
-/// the expressions, and everything after is for `commandArgs(TRUE)`.
+/// the expressions, and everything after is for `commandArgs(TRUE)`. The command line
+/// `commandArgs()` reports is the one GNU R's Rscript hands to R: `--no-echo --no-restore`, the
+/// options, `--file=FILE` or each `-e` with its spaces, newlines and tabs written `~+~`, `~n~`
+/// and `~t~`, and `--args` before any arguments.
 pub fn rscript_command_line(arguments: &[String]) -> Result<Session> {
+    let mut command_line = vec!["--no-echo".to_owned(), "--no-restore".to_owned()];
     let mut expressions: Vec<String> = Vec::new();
     let mut default_packages = None;
     let mut profiles = Profiles {
         site: true,
         user: true,
+        environ: true,
     };
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
-        if profiles.read(argument) {
+        if !expressions.is_empty() && argument != "-e" {
+            // As in GNU R's Rscript, only another `-e` follows the first one; anything else
+            // starts the arguments, options included.
+            break;
+        } else if profiles.read(argument) {
+            command_line.push(argument.clone());
             index += 1;
         } else if argument == "-e" {
             let expression = arguments
                 .get(index + 1)
                 .ok_or_else(|| Error::Usage("-e not followed by an expression".into()))?;
             expressions.push(expression.clone());
+            command_line.push("-e".to_owned());
+            command_line.push(
+                expression
+                    .replace(' ', "~+~")
+                    .replace('\n', "~n~")
+                    .replace('\t', "~t~"),
+            );
             index += 2;
         } else if argument == "--version" {
             return Ok(Session::Version { rscript: true });
@@ -1607,6 +1715,10 @@ pub fn rscript_command_line(arguments: &[String]) -> Result<Session> {
             default_packages = Some(packages.to_owned());
             index += 1;
         } else if argument.starts_with("--") {
+            // `--verbose` is Rscript's own; R sees every other option.
+            if argument != "--verbose" {
+                command_line.push(argument.clone());
+            }
             index += 1;
         } else {
             break;
@@ -1616,6 +1728,7 @@ pub fn rscript_command_line(arguments: &[String]) -> Result<Session> {
         let file = arguments
             .get(index)
             .ok_or_else(|| Error::Usage("Usage: Rscript [options] file [args]\n   or: Rscript [options] -e expr [-e expr2 ...] [args]".into()))?;
+        command_line.push(format!("--file={file}"));
         (
             Some(file.clone()),
             arguments.get(index + 1..).unwrap_or(&[]),
@@ -1623,13 +1736,20 @@ pub fn rscript_command_line(arguments: &[String]) -> Result<Session> {
     } else {
         (None, arguments.get(index..).unwrap_or(&[]))
     };
+    if !rest.is_empty() {
+        command_line.push("--args".to_owned());
+        command_line.extend(rest.iter().cloned());
+    }
     Ok(Session::Run {
         file: file.filter(|path| path != "-"),
         expressions: (!expressions.is_empty()).then(|| expressions.join("\n")),
-        arguments: rest.to_vec(),
+        command_line,
         default_packages,
         site_profile: profiles.site,
         user_profile: profiles.user,
+        environ: profiles.environ,
+        echo: false,
+        greeting: false,
     })
 }
 
@@ -1898,6 +2018,9 @@ pub fn run(home: &Path, arguments: &[String]) -> Result<String> {
                 while let Some(argument) = rest.next() {
                     match argument.as_str() {
                         "-l" | "--library" => library = rest.next().map(PathBuf::from),
+                        // GNU R's INSTALL drops empty arguments, which devtools passes in
+                        // place of options it leaves out.
+                        "" => {}
                         "--install-tests" => options.tests = true,
                         "--no-test-load" => options.test_load = false,
                         "--ry-no-code-image" => options.code_image = false,
@@ -1995,7 +2118,9 @@ pub fn config(home: &Path, variable: &str) -> Result<String> {
         )));
     }
     let makeconf = home.join("etc/Makeconf");
-    let printer = format!("print-variable:\n\t@echo $({variable})\n");
+    // The origin first, because GNU R answers only for variables its configuration defines, not
+    // for those make takes from the environment or its built-in rules.
+    let printer = format!("print-variable:\n\t@echo '$(origin {variable})|'$({variable})\n");
     let output = Command::new("make")
         .args(["-s", "--no-print-directory", "-f"])
         .arg(&makeconf)
@@ -2018,7 +2143,15 @@ pub fn config(home: &Path, variable: &str) -> Result<String> {
             String::from_utf8_lossy(&output.stderr).into_owned(),
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    let printed = String::from_utf8_lossy(&output.stdout);
+    let printed = printed.trim();
+    let (origin, value) = printed.split_once('|').unwrap_or((printed, ""));
+    if !matches!(origin, "file" | "override") {
+        return Err(Error::Usage(format!(
+            "ERROR: no information for variable '{variable}'"
+        )));
+    }
+    Ok(value.trim().to_owned())
 }
 
 /// Why the shared library at `path` must not load, when it belongs to an installed package that ry

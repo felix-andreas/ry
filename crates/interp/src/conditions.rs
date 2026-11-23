@@ -222,12 +222,14 @@ pub unsafe fn signal_error(failure: RError) -> Unwind {
     let classes: [&[u8]; 3] = [b"simpleError", b"error", b"condition"];
     while let Some(entry) = find_handler(&interp().handlers, &classes) {
         interp().handlers = entry.next.clone();
+        // GNU R copies the message into the `geterrmessage()` buffer for each handler it
+        // finds, calling or exiting, so a handled `stop("...")` is what it reports next.
+        interp().error_message = message.clone();
         if entry.calling {
             if let Err(unwind) = call_simple_error_handler(entry.handler, &message, call) {
                 return unwind;
             }
         } else {
-            interp().error_message = message.clone();
             return match exiting_result(nil(), call, entry.handler) {
                 Ok(result) => jump(Jump::Return {
                     env: entry.target,
