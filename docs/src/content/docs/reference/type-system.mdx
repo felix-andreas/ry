@@ -3299,7 +3299,9 @@ a local variable or parameter, or an assignment to a local written inside the te
   in whichever branch a length of zero cannot reach. So after
   `if (length(range) != 2) return(0L)`, `range` is no longer `NULL`, and `if (length(range))` or
   `if (0 < length(range))` drops it in the true branch. `length(range) < 3` admits zero and refines
-  nothing.
+  nothing. `length(x) == 1` also reads each vector member of the union as its scalar on the true
+  edge (the false edge of `!= 1`), so a `character | character[]` value passes to a `character`
+  parameter inside `if (length(new_row) == 1)`.
 - `!cond` swaps the two branches.
 
 Combined with a [diverging branch](#diverging-branches), the surviving edge's refinement persists

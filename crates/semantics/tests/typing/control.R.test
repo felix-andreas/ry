@@ -603,6 +603,31 @@ pick: fn(flag: logical) -> integer[] | NULL
 span: Unknown
 166..174 error[type-mismatch] expected a scalar numeric value (`integer` or `double`), found `integer | NULL`
 
+#---- a_length_of_one_test_reads_a_vector_as_its_scalar
+#: fn(x: character, many: logical) -> character | character[]
+build <- function(x, many) if (many) c(x, "b") else paste0(x, "a")
+#: fn(pattern: character, replacement: character, x: character) -> character
+replace_first <- function(pattern, replacement, x) sub(pattern, replacement, x)
+replace_one <- function(row, out, many) {
+  new_row: character | character[] <- build(row, many)
+  if (length(new_row) == 1) replace_first("a", new_row, out) else out
+}
+replace_many <- function(row, out, many) {
+  new_row: character | character[] <- build(row, many)
+  if (length(new_row) != 1) out else replace_first("a", new_row, out)
+}
+unguarded <- function(row, out, many) {
+  new_row: character | character[] <- build(row, many)
+  if (length(new_row) == 2) replace_first("a", new_row, out) else out
+}
+#++++
+build: fn(x: character, many: logical) -> character | character[]
+replace_first: fn(pattern: character, replacement: character, x: character) -> character
+replace_one: fn(row: character, out: character, many: logical) -> character
+replace_many: fn(row: character, out: character, many: logical) -> character
+unguarded: Unknown
+767..774 error[type-mismatch] expected `character`, found `character | character[]`
+
 #---- a_test_excluding_an_earlier_one_sees_the_value_before_its_write
 excluded <- function(case) {
   x <- 1

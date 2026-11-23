@@ -8741,6 +8741,23 @@ impl<'db, 'a> Checker<'db, 'a> {
                     return None;
                 }
                 let slot = self.guard_slot(value)?;
+                // `length(x) == 1` holds a value of one element, so a vector member reads as
+                // its scalar: kableExtra's `if (length(new_row) == 1) sub(regex, new_row, out)`.
+                if bound == 1.0
+                    && matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual)
+                    && let Some(edge) = self.length_one_edge(slot)
+                {
+                    return Some(match operator {
+                        BinaryOperator::Equal => GuardRefinement {
+                            true_edge: edge,
+                            false_edge: Vec::new(),
+                        },
+                        _ => GuardRefinement {
+                            true_edge: Vec::new(),
+                            false_edge: edge,
+                        },
+                    });
+                }
                 let edge = self.non_null_edge(slot)?;
                 let empty_passes = match operator {
                     BinaryOperator::Less => 0.0 < bound,
@@ -9113,6 +9130,31 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     /// The refinement that drops `NULL` from a slot whose union holds it. A value of no known
     /// shape is left alone, since a length test says nothing else about it.
+    /// The edge where `slot` holds one element: each `T[]` member reads as `T` and `NULL` drops.
+    /// `None` without a vector member, which leaves a `T | NULL` to the non-`NULL` edge.
+    fn length_one_edge(&mut self, slot: BindingId) -> Option<Vec<SlotRefinement<'db>>> {
+        let EnvEntry::Mono(current) = self.environment.get(slot)? else {
+            return None;
+        };
+        let resolved = self.table.resolve(self.db, current);
+        let TyKind::Union(members) = resolved.kind(self.db) else {
+            return None;
+        };
+        let mut vector = false;
+        let mut narrowed: SmallVec<[Ty<'db>; 4]> = SmallVec::new();
+        for &member in members.iter() {
+            match member.kind(self.db) {
+                TyKind::Null => {}
+                TyKind::Vector(element) if matches!(element.kind(self.db), TyKind::Scalar(_)) => {
+                    vector = true;
+                    narrowed.push(*element);
+                }
+                _ => narrowed.push(member),
+            }
+        }
+        vector.then(|| vec![SlotRefinement::Narrow(slot, union_of(self.db, narrowed))])
+    }
+
     fn non_null_edge(&mut self, slot: BindingId) -> Option<Vec<SlotRefinement<'db>>> {
         let EnvEntry::Mono(current) = self.environment.get(slot)? else {
             return None;
