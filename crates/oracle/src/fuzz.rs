@@ -3310,7 +3310,7 @@ impl FrameGenerator {
 
     /// An expression of any cell that gives one value per row.
     fn row_term(&mut self, schema: &FrameSchema, depth: usize) -> Option<Term> {
-        match self.rng.below(8) {
+        match self.rng.below(9) {
             0 | 1 => self.logical_term(schema, depth),
             2 if schema.ordered => {
                 let column = self.pick(schema, |values| !values.nan)?;
@@ -3338,6 +3338,16 @@ impl FrameGenerator {
             5 if depth > 0 => {
                 let column = self.pick(schema, |_| true)?;
                 Some(column_term(&column))
+            }
+            // Only the outermost term of a select or with_columns item (depth 2) is aliased:
+            // ry names `Expr.is_null(x |> Expr.alias("p"))` after x's column, and the contract
+            // is silent on an alias nested inside another expression.
+            6 if depth == 2 => {
+                let mut term = self.row_term(schema, depth - 1)?;
+                let name = self.fresh_name(&[]);
+                term.text = format!("({}) |> Expr.alias({})", term.text, string_literal(&name));
+                term.output = Some(name);
+                Some(term)
             }
             _ => self.numeric_term(schema, depth),
         }
@@ -3397,7 +3407,11 @@ impl FrameGenerator {
             } else {
                 &["1L", "2", "0.5", "-1L", "3", "0L", "Inf", "-2.5"]
             };
-            literal_term(literals[self.rng.below(literals.len())])
+            let mut literal = literal_term(literals[self.rng.below(literals.len())]);
+            if self.rng.chance(1, 4) {
+                literal.text = format!("Expr.lit({})", literal.text);
+            }
+            literal
         } else if divides {
             column_term(&self.pick(schema, |values| {
                 matches!(values.cell, Cell::Integer | Cell::Double) && !values.big
