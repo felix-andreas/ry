@@ -25,9 +25,31 @@
 | [1] 1 1
 | [1] 10
 | [1] 11
+| List of 6
+|  $ : int 3
+|  $ : num 2.5
+|  $ : logi FALSE
+|  $ : chr "k1"
+|  $ : int [1:2] 2 2
+|  $ : int 1
+| [1] "a"    "d"    "expr" "i"    "l"    "s"    "v"   
+| List of 6
+|  $ : int 41
+|  $ : num 1.25
+|  $ : logi TRUE
+|  $ : chr "k3"
+|  $ : int [1:2] 4 2
+|  $ : int 3
+| List of 6
+|  $ : int 4
+|  $ : num 4
+|  $ : logi FALSE
+|  $ : chr "k2"
+|  $ : int [1:2] 3 2
+|  $ : int 2
 [messages]
 [warnings]
 [errors]
 [value]
-integer
-| 11L
+NULL
+| NULL

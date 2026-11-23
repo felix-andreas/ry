@@ -40,8 +40,8 @@ use {
         bytecode::{self, Arith, Op, interp_layout},
         values,
     },
-    rustc_hash::FxHashMap,
-    smallvec::SmallVec,
+    rustc_hash::{FxHashMap, FxHashSet},
+    smallvec::{SmallVec, smallvec},
     ssa::{
         AbiParam, Allocator, Block as Label, Builder, CallConv, FloatCC, FrameState, Ieee64, IntCC,
         MemFlagsData, SigRef, Signature, Source, StackSlot, StackSlotData, StackSlotKind, Type,
@@ -93,6 +93,8 @@ pub struct Generated {
     pub exits: Box<[Exit]>,
     /// The body's own frame, then the frame of each closure call inlined in it.
     pub frames: Box<[Layout]>,
+    /// The write-back records the machine code holds the addresses of.
+    pub writes: Box<[Box<[u32]>]>,
     /// The size of the machine code in bytes.
     pub size: u32,
 }
@@ -149,6 +151,7 @@ pub unsafe fn compile(plan: &Plan, code: Sexp) -> Result<Generated, Refusal> {
         entry,
         exits,
         frames,
+        writes: translator.writes.into_iter().collect(),
         size,
     })
 }
@@ -177,6 +180,10 @@ struct Translator<'p> {
     exits: Vec<Exit>,
     /// The frames translated so far, the body's own first.
     layouts: Vec<Layout>,
+    /// The write-back records made so far ([`runtime::jit_write_back`]). Sites that write the
+    /// same slots back share one, and the machine code holds each record's address, which
+    /// moving the box does not change.
+    writes: FxHashSet<Box<[u32]>>,
     /// Whether the actions being translated evaluate an inlined call's arguments ahead of the
     /// call. Their reads of a formal force nothing: the callee's own read of the argument is
     /// where R forces what the argument mentions ([`Action::Frame`]'s `forces`).
@@ -202,7 +209,9 @@ struct Frame<'p> {
     /// than in a variable because nearly every slot's status is live across the whole body,
     /// so as variables they gave every merge a parameter per slot: construction and register
     /// allocation then grew with merges times slots, which dominated the compile time of
-    /// large bodies.
+    /// large bodies. The homes follow the statuses, 16 bytes per slot: where a site that
+    /// writes many slots back stores the values held in variables for the helper to read
+    /// ([`Translator::save_dirty`]).
     statuses: StackSlot,
     labels: Vec<Option<Label>>,
     edges: Vec<PendingEdge>,
@@ -278,6 +287,11 @@ fn exit_kind(ty: Ty) -> i32 {
     }
 }
 
+/// Where a frame of `slots` slots keeps its homes, in bytes from its statuses.
+fn homes_offset(slots: usize) -> usize {
+    (4 * slots).next_multiple_of(8)
+}
+
 fn flags() -> MemFlagsData {
     MemFlagsData::trusted()
 }
@@ -347,6 +361,7 @@ impl<'p> Translator<'p> {
             loop_steps,
             exits: Vec::new(),
             layouts: Vec::new(),
+            writes: FxHashSet::default(),
             evaluating_arguments: false,
             nil: values::nil().as_ptr() as i64,
         }
@@ -440,10 +455,11 @@ impl<'p> Translator<'p> {
         for variable in self.frame.doubles.iter().chain(&self.frame.slot_doubles) {
             self.builder.def_var(*variable, zero_double);
         }
+        let slots = self.frame.plan.slots.len();
         self.frame.statuses = self.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
-            (4 * self.frame.plan.slots.len()).max(4) as u32,
-            2,
+            (homes_offset(slots) + 16 * slots).max(8) as u32,
+            3,
         ));
         for slot in 0..self.frame.plan.slots.len() {
             self.set_status(slot, zero32);
@@ -3441,16 +3457,13 @@ impl<'p> Translator<'p> {
             let loaded = self.builder.create_block();
             self.builder.ins().brif(unloaded, load, &[], loaded, &[]);
             self.builder.switch_to_block(load);
-            self.expose_all(before, failed);
             let slot_constant = iconst(&mut self.builder, slot);
-            let result = self
-                .call(
-                    runtime::jit_load_slot as *const () as usize,
-                    &[I64, I64],
-                    Some(I32),
-                    &[self.frame.activation, slot_constant],
-                )
-                .ok_or(Refusal("a helper without a result"))?;
+            let result = self.exposed_load(
+                before,
+                runtime::jit_load_slot as *const () as usize,
+                runtime::jit_load_slot_exposed as *const () as usize,
+                &[self.frame.activation, slot_constant],
+            )?;
             let error =
                 self.builder
                     .ins()
@@ -3460,8 +3473,6 @@ impl<'p> Translator<'p> {
                 result,
                 outcome::LOAD_INVALIDATED as i64,
             );
-            let leaving = self.builder.ins().bor(error, invalid);
-            self.settle_exposed(before, leaving);
             let not_error = self.builder.create_block();
             self.builder.ins().brif(error, failed, &[], not_error, &[]);
             self.builder.switch_to_block(not_error);
@@ -4002,17 +4013,14 @@ impl<'p> Translator<'p> {
             self.probe_variable(symbol, lookup, slow, merged);
             self.builder.switch_to_block(slow);
         }
-        self.expose_all(before, failed);
         let pc_constant = iconst(&mut self.builder, pc);
         let slot_constant = iconst(&mut self.builder, slot);
-        let result = self
-            .call(
-                runtime::jit_load as *const () as usize,
-                &[I64, I64, I64],
-                Some(I32),
-                &[self.frame.activation, pc_constant, slot_constant],
-            )
-            .ok_or(Refusal("a helper without a result"))?;
+        let result = self.exposed_load(
+            before,
+            runtime::jit_load as *const () as usize,
+            runtime::jit_load_exposed as *const () as usize,
+            &[self.frame.activation, pc_constant, slot_constant],
+        )?;
         let error =
             self.builder
                 .ins()
@@ -4021,8 +4029,6 @@ impl<'p> Translator<'p> {
             self.builder
                 .ins()
                 .icmp_imm_s(IntCC::Equal, result, outcome::LOAD_INVALIDATED as i64);
-        let leaving = self.builder.ins().bor(error, invalid);
-        self.settle_exposed(before, leaving);
         let not_error = self.builder.create_block();
         self.builder.ins().brif(error, failed, &[], not_error, &[]);
         self.builder.switch_to_block(not_error);
@@ -4734,46 +4740,99 @@ impl<'p> Translator<'p> {
 
     /// Writes every dirty slot back to the environment.
     unsafe fn flush_all(&mut self, state: &StateRef<'p>, failed: Label) {
-        for slot in 0..state.slots.len() {
-            self.flush_slot(state, slot, failed);
+        let mut dirty =
+            (0..state.slots.len()).filter(|&slot| state.slots[slot].may_be(status::DIRTY));
+        let (first, second) = (dirty.next(), dirty.next());
+        let Some(first) = first else {
+            return;
+        };
+        if second.is_none() {
+            return self.flush_slot(state, first, failed);
         }
+        let record = self.save_dirty(state);
+        let statuses = self.builder.ins().stack_addr(I64, self.frame.statuses, 0);
+        let result = self
+            .call(
+                runtime::jit_write_back as *const () as usize,
+                &[I64, I64, I64],
+                Some(I32),
+                &[self.frame.activation, statuses, record],
+            )
+            .unwrap_or(record);
+        let ok = self.builder.ins().icmp_imm_s(IntCC::NotEqual, result, 0);
+        self.guard(ok, failed);
     }
 
-    /// Writes every dirty slot back before a load that reaches the runtime, where a forced
-    /// promise's code can look at the frame. A scalar held in variables stays dirty, as
-    /// [`crate::analysis::State`]'s `exposed` says.
-    unsafe fn expose_all(&mut self, state: &StateRef<'p>, failed: Label) {
-        for slot in 0..state.slots.len() {
-            self.write_slot(state, slot, failed, !state.slots[slot].ty.in_variables());
+    /// Calls the load helper `plain` with `arguments`, or `exposed` when a slot may be dirty:
+    /// a load that reaches the runtime can force a promise whose code looks at the frame, so
+    /// `exposed` writes the dirty slots back first ([`runtime::jit_load_exposed`]). A scalar
+    /// held in variables stays dirty, as [`crate::analysis::State`]'s `exposed` says.
+    unsafe fn exposed_load(
+        &mut self,
+        state: &StateRef<'p>,
+        plain: usize,
+        exposed: usize,
+        arguments: &[Value],
+    ) -> Result<Value, Refusal> {
+        let mut values: SmallVec<[Value; 6]> = SmallVec::from_slice(arguments);
+        let mut address = plain;
+        if state.slots.iter().any(|slot| slot.may_be(status::DIRTY)) {
+            let record = self.save_dirty(state);
+            values.push(self.builder.ins().stack_addr(I64, self.frame.statuses, 0));
+            values.push(record);
+            address = exposed;
         }
+        let params: SmallVec<[Type; 6]> = values.iter().map(|_| I64).collect();
+        self.call(address, &params, Some(I32), &values)
+            .ok_or(Refusal("a helper without a result"))
     }
 
-    /// Marks the scalars [`Self::expose_all`] wrote back and left dirty as clean when the load
-    /// hands the activation to tier 0: the exit writes dirty variables back, which would undo
-    /// what a forced promise assigned to one.
-    fn settle_exposed(&mut self, state: &StateRef<'p>, leaving: Value) {
+    /// Stores the value of every slot that may be dirty and is held in variables into its
+    /// home, and returns the address of the record that lists the slots that may be dirty,
+    /// which a write-back helper takes ([`runtime::jit_write_back`]).
+    unsafe fn save_dirty(&mut self, state: &StateRef<'p>) -> Value {
+        let slots = state.slots.len();
+        let homes = homes_offset(slots);
+        let mut record: SmallVec<[u32; 32]> = smallvec![0, homes as u32];
         for (slot, current) in state.slots.iter().enumerate() {
-            if !current.may_be(status::DIRTY) || !current.ty.in_variables() {
+            if !current.may_be(status::DIRTY) {
                 continue;
             }
-            let status = self.status(slot);
-            let dirty = self
-                .builder
-                .ins()
-                .icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
-            let written = self.builder.ins().band(dirty, leaving);
-            let local = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
-            let settled = self.builder.ins().select(written, local, status);
-            self.set_status(slot, settled);
+            record.push(runtime::record_entry(slot, exit_kind(current.ty)));
+            let home = (homes + 16 * slot) as i32;
+            if matches!(current.ty, Ty::Int | Ty::Lgl | Ty::Num) {
+                let value = self.builder.use_var(self.frame.slot_integers[slot]);
+                let offset = if current.ty == Ty::Num {
+                    home + 8
+                } else {
+                    home
+                };
+                self.builder
+                    .ins()
+                    .stack_store(I64, value, self.frame.statuses, offset);
+            }
+            if matches!(current.ty, Ty::Dbl | Ty::Num) {
+                let value = self.builder.use_var(self.frame.slot_doubles[slot]);
+                self.builder
+                    .ins()
+                    .stack_store(I64, value, self.frame.statuses, home);
+            }
         }
+        record[0] = (record.len() - runtime::RECORD_HEADER) as u32;
+        let address = match self.writes.get(&record[..]) {
+            Some(existing) => existing.as_ptr(),
+            None => {
+                let record: Box<[u32]> = record.as_slice().into();
+                let address = record.as_ptr();
+                self.writes.insert(record);
+                address
+            }
+        };
+        self.builder.ins().iconst(I64, address as i64)
     }
 
+    /// Writes `slot` back if it is dirty, and marks it clean.
     unsafe fn flush_slot(&mut self, state: &StateRef<'p>, slot: usize, failed: Label) {
-        self.write_slot(state, slot, failed, true);
-    }
-
-    /// Writes `slot` back if it is dirty, and marks it clean when `clean` is set.
-    unsafe fn write_slot(&mut self, state: &StateRef<'p>, slot: usize, failed: Label, clean: bool) {
         let current = state.slots[slot];
         if !current.may_be(status::DIRTY) {
             return;
@@ -4790,10 +4849,8 @@ impl<'p> Translator<'p> {
         let result = self.call_flush(slot, current.ty);
         let ok = self.builder.ins().icmp_imm_s(IntCC::NotEqual, result, 0);
         self.guard(ok, failed);
-        if clean {
-            let local = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
-            self.set_status(slot, local);
-        }
+        let local = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
+        self.set_status(slot, local);
         self.builder.ins().jump(done, &[]);
         self.builder.switch_to_block(done);
     }

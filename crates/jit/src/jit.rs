@@ -820,6 +820,7 @@ unsafe fn compile_in<'a>(
             entry,
             exits,
             frames,
+            writes,
             size,
         } = codegen::compile(&plan, machine.code)?;
         let generated = started.elapsed() - planned;
@@ -900,6 +901,7 @@ unsafe fn compile_in<'a>(
             speculations,
             osr,
             exits,
+            writes,
             declined_frames: Cell::new(0),
             declined_loads: Cell::new(0),
             leaves_since: Cell::new(

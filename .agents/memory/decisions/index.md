@@ -412,6 +412,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A loop compiles when its backward jumps repay the body
 - A back edge is counted in tier 0's fast jump handler
 - A load that reaches the runtime writes dirty variables back first
+- A write-back of several variables is one call driven by a record
 
 ## Heap and collector
 

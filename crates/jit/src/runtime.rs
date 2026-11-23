@@ -224,6 +224,12 @@ pub struct Compiled {
     /// Each deoptimization point's write-back, indexed by the number compiled code passes to
     /// [`jit_deopt_exit`].
     pub exits: Box<[Exit]>,
+    /// The write-back records the machine code embeds the addresses of ([`jit_write_back`]).
+    #[expect(
+        dead_code,
+        reason = "owned for the machine code, which reads the records"
+    )]
+    pub writes: Box<[Box<[u32]>]>,
     /// How often an inlined call could not start without its frame for a reason that is not
     /// the callee's: the stack was near its limit, or something observes every call. When that
     /// is frequent ([`frequent`]) the code is discarded and the body marked [`NO_FRAMES`].
@@ -2085,6 +2091,129 @@ pub unsafe extern "C" fn jit_flush(
             }
         }
         flush_guarded(activation, slot, kind, bits)
+    }
+}
+
+/// How many words of a write-back record precede its entries: the entry count, and the byte
+/// offset of the homes from the frame's statuses.
+pub const RECORD_HEADER: usize = 2;
+
+/// A write-back record's entry for `slot`, whose value has the [`representation`] `kind`.
+pub fn record_entry(slot: usize, kind: i32) -> u32 {
+    (slot as u32) << 3 | kind as u32
+}
+
+/// Writes every dirty slot `record` lists back to the environment and marks it clean. A site
+/// that writes many slots back passes one record instead of testing and flushing each slot in
+/// its own code, which is what made a large loop body's code grow with sites times slots.
+/// `statuses` is the frame's status cells, and the homes that follow them hold the values of
+/// the slots compiled code keeps unboxed, which the site stored there. Returns 1 on success.
+pub unsafe extern "C" fn jit_write_back(
+    activation: *mut Activation,
+    statuses: *mut i32,
+    record: *const u32,
+) -> i32 {
+    unsafe { i32::from(write_record(activation, statuses, record, false)) }
+}
+
+/// [`jit_load`] after writing the dirty slots of `record` back, because the load can force a
+/// promise whose code looks at the frame. An unboxed slot stays dirty, as
+/// `crate::analysis::State::exposed` says, unless the load hands the activation to tier 0:
+/// the exit writes dirty variables back, which would undo what the promise assigned to one.
+pub unsafe extern "C" fn jit_load_exposed(
+    activation: *mut Activation,
+    pc: i64,
+    slot: i64,
+    statuses: *mut i32,
+    record: *const u32,
+) -> i32 {
+    unsafe {
+        if !write_record(activation, statuses, record, true) {
+            return outcome::LOAD_FAILED;
+        }
+        let result = jit_load(activation, pc, slot);
+        settle_record(statuses, record, result);
+        result
+    }
+}
+
+/// [`jit_load_slot`] after writing the dirty slots of `record` back, as [`jit_load_exposed`].
+pub unsafe extern "C" fn jit_load_slot_exposed(
+    activation: *mut Activation,
+    slot: i64,
+    statuses: *mut i32,
+    record: *const u32,
+) -> i32 {
+    unsafe {
+        if !write_record(activation, statuses, record, true) {
+            return outcome::LOAD_FAILED;
+        }
+        let result = jit_load_slot(activation, slot);
+        settle_record(statuses, record, result);
+        result
+    }
+}
+
+/// Writes the dirty slots of `record` back. A written slot becomes clean, except an unboxed
+/// one when `exposing`. Returns whether every write succeeded; a failure is parked.
+unsafe fn write_record(
+    activation: *mut Activation,
+    statuses: *mut i32,
+    record: *const u32,
+    exposing: bool,
+) -> bool {
+    unsafe {
+        let homes = statuses.cast::<u8>().add(*record.add(1) as usize);
+        for index in 0..*record as usize {
+            let entry = *record.add(RECORD_HEADER + index);
+            let slot = (entry >> 3) as usize;
+            let status = statuses.add(slot);
+            if i64::from(*status) != status::RUNTIME_DIRTY {
+                continue;
+            }
+            let home = homes.add(16 * slot);
+            let (kind, bits) = match (entry & 7) as i32 {
+                representation::BOXED => (representation::BOXED, 0),
+                representation::DOUBLE => (representation::DOUBLE, home.cast::<i64>().read()),
+                representation::NUM => {
+                    let double = home.cast::<f64>().read();
+                    if home.add(8).cast::<i32>().read() == 0 {
+                        (representation::DOUBLE, double.to_bits() as i64)
+                    } else if double.is_nan() {
+                        (representation::INTEGER, i64::from(NA_INTEGER))
+                    } else {
+                        (representation::INTEGER, i64::from(double as i32))
+                    }
+                }
+                kind => (kind, i64::from(home.cast::<i32>().read())),
+            };
+            if jit_flush(activation, slot as i64, kind, bits) == 0 {
+                return false;
+            }
+            if kind == representation::BOXED || !exposing {
+                *status = status::RUNTIME_LOCAL as i32;
+            }
+        }
+        true
+    }
+}
+
+/// Marks the unboxed slots an exposing [`write_record`] left dirty as clean when the load's
+/// `result` hands the activation to tier 0.
+unsafe fn settle_record(statuses: *mut i32, record: *const u32, result: i32) {
+    unsafe {
+        if result != outcome::LOAD_FAILED && result != outcome::LOAD_INVALIDATED {
+            return;
+        }
+        for index in 0..*record as usize {
+            let entry = *record.add(RECORD_HEADER + index);
+            let status = statuses.add((entry >> 3) as usize);
+            if (entry & 7) as i32 != representation::BOXED
+                && i64::from(*status) == status::RUNTIME_DIRTY
+            {
+                *status = status::RUNTIME_LOCAL as i32;
+            }
+        }
     }
 }
 
