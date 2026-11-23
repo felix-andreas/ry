@@ -10,11 +10,13 @@ use {
         stubs::shipped_stub_sources,
         testing::{
             ProjectState, Workbench, check_metamorphic_relations, check_semantics_input,
-            check_stub_source, fixture_state, for_each_session, for_each_stub_source,
-            generate_session,
+            check_stub_source, command_database, compare_renamed, compare_renderings,
+            fixture_state, for_each_session, for_each_stub_source, generate_session,
+            insert_leading_trivia, misplaced_declarations, plan_rename, render_afresh,
+            render_in_parallel, render_stub_source, stub_variant,
         },
     },
-    std::sync::LazyLock,
+    std::{slice, sync::LazyLock},
     syntax::{
         SyntaxKind, SyntaxNode,
         ast::is_expression_kind,
@@ -326,11 +328,7 @@ fn edits_that_change_no_meaning_only_move_findings() {
     let mut renames_in_findings = 0;
     let mut cases = 0;
     for_each_seed_on_named_threads(METAMORPHIC_CASES, |seed| {
-        let mut rng = SplitMix64(0x3E7A_3021 ^ seed);
-        let mut state = generate_session(&mut rng, &POOL).swap_remove(0);
-        if rng.below(2) == 0 {
-            add_unresolved_reads(&mut rng, &mut state);
-        }
+        let (state, mut rng) = metamorphic_case(seed);
         let coverage = check_metamorphic_relations(&mut workbench, &state, &mut rng);
         cases += 1;
         leading_trivia += usize::from(coverage.leading_trivia);
@@ -352,6 +350,116 @@ fn edits_that_change_no_meaning_only_move_findings() {
              {free_renames} freely and {renames_in_findings} of a name in a finding"
         );
     }
+}
+
+/// The project of a metamorphic case, and the generator that goes on to place its edits.
+fn metamorphic_case(seed: u64) -> (ProjectState, SplitMix64) {
+    let mut rng = SplitMix64(0x3E7A_3021 ^ seed);
+    let mut state = generate_session(&mut rng, &POOL).swap_remove(0);
+    if rng.below(2) == 0 {
+        add_unresolved_reads(&mut rng, &mut state);
+    }
+    (state, rng)
+}
+
+/// The trivia relation reports an insertion whose findings stay where they were: the
+/// rendering of the unedited project stands in for that of the edited one.
+#[test]
+fn trivia_oracle_catches_unmoved_findings() {
+    let mut db = command_database();
+    let caught = (0..METAMORPHIC_CASES as u64).any(|seed| {
+        let (state, mut rng) = metamorphic_case(seed);
+        let original = render_afresh(&mut db, &state);
+        insert_leading_trivia(&state, &original, &mut rng)
+            .is_some_and(|trivia| compare_renderings(&trivia.expected, &original).is_err())
+    });
+    assert!(
+        caught,
+        "no case of {METAMORPHIC_CASES} reported findings that did not move"
+    );
+}
+
+/// The rename relation reports a renamed project that lost a finding: the real rendering of the
+/// renamed project, less one finding line.
+#[test]
+fn rename_oracle_catches_a_lost_finding() {
+    let mut db = command_database();
+    let caught = (0..METAMORPHIC_CASES as u64).any(|seed| {
+        let (state, mut rng) = metamorphic_case(seed);
+        let original = render_afresh(&mut db, &state);
+        // The trivia edit draws first, so the rename is the one the relation test makes.
+        insert_leading_trivia(&state, &original, &mut rng);
+        let Some(rename) = plan_rename(&db, &state, &original, &mut rng) else {
+            return false;
+        };
+        let mut renamed = render_afresh(&mut db, &rename.edited);
+        let Some(rendering) = renamed
+            .iter_mut()
+            .find(|rendering| rendering.lines().any(is_finding_line))
+        else {
+            return false;
+        };
+        *rendering = without_first_finding(rendering);
+        compare_renamed(&rename.rename, &original, &renamed).is_err()
+    });
+    assert!(
+        caught,
+        "no case of {METAMORPHIC_CASES} reported a renamed project that lost a finding"
+    );
+}
+
+/// The parallel relation reports a worker whose rendering of one file lists the same lines in
+/// another order: the real rendering of the first worker with one file's lines reversed.
+#[test]
+fn parallel_oracle_catches_a_reordered_rendering() {
+    let mut db = command_database();
+    let caught = (0..SESSIONS as u64).any(|seed| {
+        let state = generate_session(&mut SplitMix64(0x5E55_10A5 ^ seed), &POOL).swap_remove(0);
+        let sequential = render_afresh(&mut db, &state);
+        let mut parallel = render_in_parallel(&mut db, &state);
+        let Some(rendering) = parallel.first_mut().and_then(|worker| {
+            worker.iter_mut().find(|rendering| {
+                let lines: Vec<&str> = rendering.lines().collect();
+                lines.windows(2).any(|pair| pair[0] != pair[1])
+            })
+        }) else {
+            return false;
+        };
+        *rendering = rendering
+            .lines()
+            .rev()
+            .map(|line| format!("{line}\n"))
+            .collect();
+        parallel
+            .iter()
+            .any(|worker| compare_renderings(&sequential, worker).is_err())
+    });
+    assert!(
+        caught,
+        "no session of {SESSIONS} reported a reordered parallel rendering"
+    );
+}
+
+/// Whether a line of a [`render_semantics`] rendering is a finding (`START..END [code] ...`).
+fn is_finding_line(line: &str) -> bool {
+    line.split_once(' ').is_some_and(|(range, rest)| {
+        range.split_once("..").is_some_and(|(start, end)| {
+            start.parse::<usize>().is_ok() && end.parse::<usize>().is_ok()
+        }) && rest.starts_with('[')
+    })
+}
+
+/// `rendering` without its first finding line.
+fn without_first_finding(rendering: &str) -> String {
+    let mut dropped = false;
+    rendering
+        .split_inclusive('\n')
+        .filter(|line| {
+            let drop = !dropped && is_finding_line(line);
+            dropped |= drop;
+            !drop
+        })
+        .collect()
 }
 
 /// Appends reads of names nothing defines to a file of `state`, so a rename meets `unresolved`
@@ -445,39 +553,106 @@ fn fuzz_stub_sources() {
         .into_iter()
         .map(|(_, text)| text)
         .collect();
-    let mut db = RootDatabase::default();
-    AnalysisSettings::new(&db, true, false, true);
-    ProjectFiles::new(&db, Vec::new());
+    let mut db = stub_test_database();
     for input in STUB_REGRESSIONS {
         check_stub_source(&mut db, input);
     }
-    for_each_stub_source(400, |seed| {
-        let mut rng = SplitMix64(0x57AB_5EED ^ seed);
-        let window = |rng: &mut SplitMix64| {
-            let lines: Vec<&str> = shipped[rng.below(shipped.len())].lines().collect();
-            let start = rng.below(lines.len().max(1));
-            let end = (start + 1 + rng.below(40)).min(lines.len());
-            lines.get(start..end).unwrap_or_default().join("\n") + "\n"
-        };
-        match rng.below(6) {
-            0 => token_soup(&mut rng, STUB_ALPHABET),
-            1 => window(&mut rng),
-            2 => {
-                let seeds = [window(&mut rng), window(&mut rng)];
-                mutate_seed(&mut rng, &[&seeds[0], &seeds[1]], 24)
-            }
-            _ => {
-                let source = generated_stub(&mut rng);
-                match rng.chance(1, 3) {
-                    true => {
-                        let insertion = STUB_ALPHABET[rng.below(STUB_ALPHABET.len())];
-                        small_edit(&mut rng, &source, insertion)
-                    }
-                    false => source,
+    for_each_stub_source(STUB_SOURCES, |seed| stub_source(&shipped, seed));
+}
+
+/// The default budget of [`fuzz_stub_sources`].
+const STUB_SOURCES: usize = 400;
+
+/// The stub source of a seed: token soup, a window of a shipped stub, two windows mutated into
+/// one, or a generated stub, perhaps with one small edit.
+fn stub_source(shipped: &[String], seed: u64) -> String {
+    let mut rng = SplitMix64(0x57AB_5EED ^ seed);
+    let window = |rng: &mut SplitMix64| {
+        let lines: Vec<&str> = shipped[rng.below(shipped.len())].lines().collect();
+        let start = rng.below(lines.len().max(1));
+        let end = (start + 1 + rng.below(40)).min(lines.len());
+        lines.get(start..end).unwrap_or_default().join("\n") + "\n"
+    };
+    match rng.below(6) {
+        0 => token_soup(&mut rng, STUB_ALPHABET),
+        1 => window(&mut rng),
+        2 => {
+            let seeds = [window(&mut rng), window(&mut rng)];
+            mutate_seed(&mut rng, &[&seeds[0], &seeds[1]], 24)
+        }
+        _ => {
+            let source = generated_stub(&mut rng);
+            match rng.chance(1, 3) {
+                true => {
+                    let insertion = STUB_ALPHABET[rng.below(STUB_ALPHABET.len())];
+                    small_edit(&mut rng, &source, insertion)
                 }
+                false => source,
             }
         }
+    }
+}
+
+/// The stub range check reports a declaration whose range starts one byte late: the real
+/// rendering of the library with every declared range's start moved by one.
+#[test]
+fn stub_range_oracle_catches_a_shifted_range() {
+    let shipped: Vec<String> = shipped_stub_sources()
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect();
+    let mut db = stub_test_database();
+    let caught = (0..STUB_SOURCES as u64).any(|seed| {
+        let text = stub_source(&shipped, seed);
+        let rendering = render_stub_source(&mut db, &text);
+        let shifted: String = rendering
+            .lines()
+            .map(|line| {
+                let shifted = line.rsplit_once(" at ").and_then(|(head, range)| {
+                    let (start, end) = range.split_once("..")?;
+                    Some(format!(
+                        "{head} at {}..{end}",
+                        start.parse::<usize>().ok()? + 1
+                    ))
+                });
+                shifted.unwrap_or_else(|| line.to_owned()) + "\n"
+            })
+            .collect();
+        misplaced_declarations(&text, &shifted).is_err()
     });
+    assert!(
+        caught,
+        "no stub of {STUB_SOURCES} reported a declaration range that starts late"
+    );
+}
+
+/// The stub history relation reports a loader that keeps the library of the source it loaded
+/// before: the real rendering of the variant stands in for the second load of the source.
+#[test]
+fn stub_history_oracle_catches_a_stale_library() {
+    let shipped: Vec<String> = shipped_stub_sources()
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect();
+    let mut db = stub_test_database();
+    let caught = (0..STUB_SOURCES as u64).any(|seed| {
+        let text = stub_source(&shipped, seed);
+        let first = render_stub_source(&mut db, &text);
+        let stale = render_stub_source(&mut db, &stub_variant(&text));
+        compare_renderings(slice::from_ref(&first), slice::from_ref(&stale)).is_err()
+    });
+    assert!(
+        caught,
+        "no stub of {STUB_SOURCES} reported a library left from the source before"
+    );
+}
+
+/// A database for stub sources: it installs none of the shipped stubs.
+fn stub_test_database() -> RootDatabase {
+    let db = RootDatabase::default();
+    AnalysisSettings::new(&db, true, false, true);
+    ProjectFiles::new(&db, Vec::new());
+    db
 }
 
 /// Names a generated stub declares: short ones that also occur inside keywords, dotted and

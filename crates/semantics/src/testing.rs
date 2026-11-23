@@ -119,9 +119,8 @@ pub struct Workbench {
 impl Default for Workbench {
     fn default() -> Workbench {
         let incremental = RootDatabase::default();
-        let reference = RootDatabase::for_command(false);
         let editor_reference = RootDatabase::default();
-        for db in [&incremental, &reference, &editor_reference] {
+        for db in [&incremental, &editor_reference] {
             install_shipped_stubs(db);
             AnalysisSettings::new(db, true, false, true);
             ProjectFiles::new(db, Vec::new());
@@ -129,11 +128,20 @@ impl Default for Workbench {
         Workbench {
             incremental,
             inputs: Vec::new(),
-            reference,
+            reference: command_database(),
             editor_reference,
             sessions: 0,
         }
     }
+}
+
+/// A command's database (`ry check`) with the shipped stubs and an empty project.
+pub fn command_database() -> RootDatabase {
+    let db = RootDatabase::for_command(false);
+    install_shipped_stubs(&db);
+    AnalysisSettings::new(&db, true, false, true);
+    ProjectFiles::new(&db, Vec::new());
+    db
 }
 
 /// Runs one session per seed of [`fuzz_seeds`] on a warm [`Workbench`], each on a thread named
@@ -252,10 +260,7 @@ pub fn check_session(workbench: &mut Workbench, states: &[ProjectState]) -> Vec<
         match &first {
             None => {
                 if workbench.sessions % 64 == 0 {
-                    let mut pristine = RootDatabase::for_command(false);
-                    install_shipped_stubs(&pristine);
-                    AnalysisSettings::new(&pristine, true, false, true);
-                    ProjectFiles::new(&pristine, Vec::new());
+                    let mut pristine = command_database();
                     assert!(
                         render_afresh(&mut pristine, state) == reference,
                         "the output depends on what the database analyzed before\n{}",
@@ -446,7 +451,7 @@ const PARALLEL_WORKERS: usize = 3;
 /// finds may not depend on which thread got to an item first. The interners are process-global,
 /// so this cannot vary the order in which ids were handed out before; the child process of
 /// [`compare_with_child_process`] does.
-fn render_in_parallel(db: &mut RootDatabase, state: &ProjectState) -> Vec<Vec<String>> {
+pub fn render_in_parallel(db: &mut RootDatabase, state: &ProjectState) -> Vec<Vec<String>> {
     let files = set_new_inputs(db, state);
     let files = &files;
     thread::scope(|scope| {
@@ -824,24 +829,66 @@ pub fn check_metamorphic_relations(
 ) -> MetamorphicCoverage {
     let db = &mut workbench.reference;
     let original = render_afresh(db, state);
-    let leading_trivia = check_leading_trivia(db, state, &original, rng);
-    let rename = check_consistent_rename(db, state, &original, rng);
+    let trivia = insert_leading_trivia(state, &original, rng);
+    if let Some(trivia) = &trivia {
+        let actual = render_afresh(db, &trivia.edited);
+        if let Err(difference) = compare_renderings(&trivia.expected, &actual) {
+            panic!(
+                "{} changes more than the positions after it\n{}\n---- {difference}",
+                trivia.description,
+                describe_session(slice::from_ref(state)),
+            );
+        }
+    }
+    let rename = plan_rename(db, state, &original, rng);
+    if let Some(rename) = &rename {
+        let renamed = render_afresh(db, &rename.edited);
+        if let Err(difference) = compare_renamed(&rename.rename, &original, &renamed) {
+            let names: Vec<String> = rename
+                .rename
+                .names
+                .iter()
+                .map(|(old, new)| format!("`{old}` to `{new}`"))
+                .collect();
+            panic!(
+                "renaming {} throughout changes more than the names\n{}\n---- renamed project:\n{}\n---- {difference}",
+                names.join(", "),
+                describe_session(slice::from_ref(state)),
+                rename
+                    .edited
+                    .files
+                    .iter()
+                    .map(|(_, text, _)| text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n----\n"),
+            );
+        }
+    }
     MetamorphicCoverage {
-        leading_trivia,
+        leading_trivia: trivia.is_some(),
         rename: rename.is_some(),
-        free_rename: rename.is_some_and(|(free, _)| free),
-        rename_in_finding: rename.is_some_and(|(_, in_finding)| in_finding),
+        free_rename: rename.as_ref().is_some_and(|rename| rename.free),
+        rename_in_finding: rename.as_ref().is_some_and(|rename| rename.in_finding),
     }
 }
 
-fn check_leading_trivia(
-    db: &mut RootDatabase,
+/// A blank line or comment line inserted into a project, with the renderings it must have.
+pub struct TriviaEdit {
+    pub edited: ProjectState,
+    /// The unedited renderings with every finding after the insertion moved by its length.
+    pub expected: Vec<String>,
+    pub description: String,
+}
+
+/// Inserts a blank line or a comment line before a top-level expression of `state` where `rng`
+/// places it, or `None` when no file has such a place. `original` renders `state`.
+pub fn insert_leading_trivia(
     state: &ProjectState,
     original: &[String],
     rng: &mut dyn Entropy,
-) -> bool {
+) -> Option<TriviaEdit> {
     if state.files.is_empty() {
-        return false;
+        return None;
     }
     let target = rng.below(state.files.len());
     let text = &state.files[target].1;
@@ -859,7 +906,7 @@ fn check_leading_trivia(
         })
         .collect();
     if starts.is_empty() {
-        return false;
+        return None;
     }
     let offset = starts[rng.below(starts.len())];
     let inserted = ["\n", "# note\n"][rng.below(2)];
@@ -873,15 +920,11 @@ fn check_leading_trivia(
             false => rendering.clone(),
         })
         .collect();
-    let actual = render_afresh(db, &edited);
-    assert!(
-        actual == expected,
-        "inserting {inserted:?} at byte {offset} of file {target} changes more than the positions after it\n{}\n---- expected:\n{}\n---- after the insertion:\n{}",
-        describe_session(slice::from_ref(state)),
-        expected.join("----\n"),
-        actual.join("----\n"),
-    );
-    true
+    Some(TriviaEdit {
+        edited,
+        expected,
+        description: format!("inserting {inserted:?} at byte {offset} of file {target}"),
+    })
 }
 
 /// Moves every finding of a [`render_semantics`] rendering that lies at or after `offset` by
@@ -1098,15 +1141,25 @@ pub fn compare_renamed(
     }
 }
 
-/// Renames one to three identifiers throughout `state` and checks the result with
-/// [`compare_renamed`]. Returns whether the rename was free and whether a renamed name occurs
-/// in a finding, or `None` when no identifier or no new name qualifies.
-fn check_consistent_rename(
-    db: &mut RootDatabase,
+/// A rename of one to three identifiers throughout a project.
+pub struct RenameEdit {
+    pub edited: ProjectState,
+    pub rename: Rename,
+    /// The new names may differ in length, first letter and script, and be backquoted.
+    pub free: bool,
+    /// A renamed name occurs in a finding of the unedited project.
+    pub in_finding: bool,
+}
+
+/// Picks one to three identifiers of `state` and new names for them where `rng` decides, or
+/// `None` when no identifier or no new name qualifies. `original` renders `state` on `db`,
+/// whose library decides which names belong to a package.
+pub fn plan_rename(
+    db: &RootDatabase,
     state: &ProjectState,
     original: &[String],
     rng: &mut dyn Entropy,
-) -> Option<(bool, bool)> {
+) -> Option<RenameEdit> {
     let files: Vec<Vec<(SyntaxKind, String, bool)>> = state
         .files
         .iter()
@@ -1245,26 +1298,13 @@ fn check_consistent_rename(
                 .zip(&files)
                 .all(|((_, text, _), tokens)| same_token_kinds(text, tokens))
         })?;
-    let renamed = render_afresh(db, &edited);
-    if let Err(difference) = compare_renamed(&rename, original, &renamed) {
-        let names: Vec<String> = names
-            .iter()
-            .map(|(old, new)| format!("`{old}` to `{new}`"))
-            .collect();
-        panic!(
-            "renaming {} throughout changes more than the names\n{}\n---- renamed project:\n{}\n---- {difference}",
-            names.join(", "),
-            describe_session(slice::from_ref(state)),
-            edited
-                .files
-                .iter()
-                .map(|(_, text, _)| text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n----\n"),
-        );
-    }
     let in_finding = names.iter().any(|(old, _)| in_findings.contains(old));
-    Some((free, in_finding))
+    Some(RenameEdit {
+        edited,
+        rename,
+        free,
+        in_finding,
+    })
 }
 
 /// `state` with every identifier token spelled as an old name of `names` respelled as its new
@@ -1576,9 +1616,18 @@ pub fn stub_variant(text: &str) -> String {
         .collect()
 }
 
-/// Installs `text` as the only stub source on `db`, checks its declaration ranges, and renders
-/// the library.
+/// [`render_stub_source`], with its declaration ranges checked.
 fn load_stub_source(db: &mut RootDatabase, text: &str) -> String {
+    let rendering = render_stub_source(db, text);
+    if let Err(misplaced) = misplaced_declarations(text, &rendering) {
+        panic!("{misplaced}\n---- stub:\n{text}");
+    }
+    rendering
+}
+
+/// Installs `text` as the only stub source on `db` and renders the library: every fact it
+/// holds, one sorted line each.
+pub fn render_stub_source(db: &mut RootDatabase, text: &str) -> String {
     let sources = vec![(String::from("pkg"), text.to_owned())];
     match StubSources::try_get(db) {
         Some(input) => {
@@ -1588,11 +1637,7 @@ fn load_stub_source(db: &mut RootDatabase, text: &str) -> String {
             StubSources::new(db, sources, Vec::new());
         }
     }
-    let rendering = render_stub_library(db);
-    if let Err(misplaced) = misplaced_declarations(text, &rendering) {
-        panic!("{misplaced}\n---- stub:\n{text}");
-    }
-    rendering
+    render_stub_library(db)
 }
 
 /// A database that has loaded no stub source but `text`.
