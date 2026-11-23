@@ -2957,3 +2957,27 @@ add_after_large <- function(data) {
 #++++
 add_rows: <T, U: scalar numeric, V: scalar numeric> fn([data]: T, before: U | NULL, [after]: V | NULL) -> Unknown
 add_after_large: <T> fn(data: T) -> Unknown
+
+#---- an_element_write_into_null_starts_a_vector
+# `NULL` is the empty vector, so a `[` write gives it the written value's type.
+collect <- function(n) {
+  out <- c()
+  for (i in seq_len(n)) out[i] <- paste0("row", i)
+  sub(out[1], out[2], "text")
+}
+first <- function() {
+  out <- NULL
+  out[1] <- 2L
+  out
+}
+#++++
+collect: <T> fn(n: T) -> character
+first: fn() -> integer[]
+
+#---- a_choice_between_sub_and_gsub_takes_a_string_replacement
+rewrite <- function(all, pattern, text) {
+  replace <- if (all) gsub else sub
+  replace(pattern, paste0(pattern, "!"), text, perl = TRUE)
+}
+#++++
+rewrite: <T> fn(all: logical, pattern: character, text: T) -> character

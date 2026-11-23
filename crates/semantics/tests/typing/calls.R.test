@@ -364,6 +364,22 @@ drop_value: <T> fn(data: T) -> Unknown
 negated: Unknown
 82..89 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
+#---- a_library_call_quotes_code_that_reads_a_name_placeholder
+# `.x <- ".x"` quiets R CMD check about a name that only the callee's
+# `substitute()` reads, so the argument is code, not a power of a string.
+log_labels <- function() {
+  .x <- ".x"
+  scales::math_format(2^.x)
+}
+power <- function() {
+  .x <- ".x"
+  2^.x
+}
+#++++
+log_labels: fn() -> Unknown
+power: Unknown
+253..255 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
 #---- a_missing_named_formal_is_named_in_the_message
 g <- function(a, b = NULL) {
   print(a)

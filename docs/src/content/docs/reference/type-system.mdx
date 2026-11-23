@@ -2183,6 +2183,10 @@ which any function satisfies, including one with required parameters such as
 expands an argument whose value is `...` whatever its name, so `func(x, ... = ...)` forwards the
 dots exactly as `func(x, ...)` does.
 
+An unannotated parameter passed as the callback of a library function that forwards its own extra
+arguments, as in `apply(v, 2, FUN = fun, na.rm = na.rm)`, takes those arguments too, so it is
+typed `fn(Any, ...: Any) -> Any` and a later direct call `fun(v, na.rm = na.rm)` is clean.
+
 ### Higher-order function types
 
 A function type may appear inside another function type, as in
@@ -2383,7 +2387,8 @@ scalar condition admits:
 - A vector is accepted, because a vector type carries no length, and the vector a test produces,
   such as `x >= 1` on a `double[]`, has length one at run time far more often than not. Only a
   `c()` call with two or more arguments is known to be longer than one, so `if (c(TRUE, FALSE))` is
-  a type error, as it is in R.
+  a type error, as it is in R. A `matrix` is accepted the same way, as in `if (!m[i, j])`, and a
+  named vector is accepted exactly when the unnamed vector of its element is.
 - A condition whose type is still undetermined becomes `logical`, so `function(flag) if (flag) 1L`
   infers `flag: logical`. A value already required to be numeric keeps that requirement, so
   `function(n) if (n %% 2L) "odd" else "even"` is `<T: numeric> fn(n: T) -> character`. An
@@ -2729,16 +2734,21 @@ R rejects a `NULL` endpoint, and so does the checker, except for an endpoint rea
 field of a value the body computed (`b$off[i]`, with `b` returned by a call). Such a field is
 typically filled under a flag, as in mgcv's `off`, and read only by callers that set the flag, so
 its `NULL` member is dropped. A local, a value indexed directly, and a field of a parameter keep
-their `NULL`, so `cfg$off:3L` on a parameter `cfg: list{off: integer | NULL}` is reported.
+their `NULL`, so `cfg$off:3L` on a parameter `cfg: list{off: integer | NULL}` is reported. The
+`NULL` of an unannotated parameter's default and of a variable the body computes is the
+placeholder that [function calls](#function-calls) drop, so it is dropped here too:
+`rows[1:.after]` on `.after = NULL` is clean when the code sets `.after` before it builds the
+sequence.
 
 Base R's `seq(from, to)` without `by` or `length.out` returns `from:to`, so it follows the same
 rule: `seq(1, 10)` is `integer[]`, and so is `seq(n)` with one argument, while `seq(0.5, 3)` and
 `seq(1, 10, by = 2)` are `double[]`. A project that defines its own `seq` gets its own typing.
 
-An unannotated operand, as in `1:n`, is required to be a scalar `integer` or `double`. Passing a
-numeric vector through the enclosing function is therefore a type error at the call, because R's
-warning about truncating the endpoint marks a bug. The result is `double[]`, because the endpoint may
-turn out to be a `double`.
+An unannotated operand, as in `1:n`, is required to be a scalar `integer` or `double`, and the
+result is `double[]`, because the endpoint may turn out to be a `double`. Like any
+[inferred scalar](#argument-compatibility), that requirement records a use, not a length, so a
+caller may pass a numeric vector such as the `integer[]` of `which()`, whose first element R takes.
+A `c()` call of two or more arguments is reported at the call, because it is known to be too long.
 
 ### Combine `c(...)`
 
@@ -2904,7 +2914,18 @@ Length works the same way. A variable the body computes as `character | characte
 helper returns a vector on some path, passes to a parameter that takes one `character` as that one
 string, so `pattern <- format_message("^%s=", name)` followed by `sub(pattern, "", spec)` is clean.
 Only such a union qualifies: a variable known to hold a vector, as `flags <- c(TRUE, FALSE)` does,
-is still reported at a `logical` parameter, and so is a declared vector.
+is still reported at a `logical` parameter, and so is a declared vector. An element `x[i]` of such a
+variable, passed as an argument, drops the variable's placeholder `NULL` too, since an element can
+be `NULL` only through the vector. As an endpoint of `:` it keeps the `NULL`, because a test such as
+`length(range) < 3` admits the empty vector.
+
+A call of an unannotated helper, written directly as the argument, makes the same claim about
+length but keeps its `NULL`, because a test can narrow only a variable. With `format_maybe`
+returning its `character[]` argument when no values follow and `sprintf(fmt, ...)` otherwise,
+`gsub(format_maybe("$%s", name), "value", x)` is clean. An unannotated function passed by name
+as a callback drops the `NULL` an `if` without `else` adds to its return, so
+`vapply(rows, render_row, character(1L), type = "row")` checks when `render_row` returns a string
+for every `type` the code passes.
 
 A call is a type error when a required argument is missing, when it passes too many arguments to a
 callee without a rest parameter, or when an argument is incompatible with its parameter's type. The
@@ -3029,8 +3050,12 @@ Arguments are checked for compatibility, not exact equality:
 - An argument bound to a formal that the callee reads only through `substitute()`, or rlang's
   `enquo()`, `enquo0()`, `enexpr()` or `ensym()`, is code the callee captures, not a value, so it is
   not typed in the caller's frame. An exclusion by name, `-"value"`, passed to a library function no
-  stub types is captured code too, because R rejects it as a value, so
-  `dplyr::select(data, -"value")` reports nothing.
+  stub types is captured code too, because R rejects it as a value, and so is code that reads a
+  variable holding its own name (`.x <- ".x"` before `scales::math_format(2^.x)`), a placeholder
+  such code splices into an expression. In the data-mask arguments of a verb a stub marks `@masked`,
+  tidyselect reads `-"value"` as a column exclusion, so `dplyr::select(data, -"value")` and
+  `tidyr::pivot_longer(data, cols = -"row")` report nothing. Base `with(data, -"value")` evaluates
+  the negation and is reported.
   withr's `wrap <- function(f, pre) { pre <- substitute(pre); ... }` splices `pre` into a function
   that takes `f`'s formals, so `wrap(sink_to, { if (append) "a" else "w" })` reads `sink_to`'s
   `append`, not base's `append`. A callee that also evaluates the formal checks the argument as usual,
@@ -3167,7 +3192,11 @@ widths <- nchar(c("a", "bb"))          # integer[]
 scaled <- function(x) sqrt(x) / 2      # checks
 ```
 
-A union argument lifts member by member, so `log(if (flag) 2 else xs)` is `double | double[]`. An
+A `matrix` records no element type, so it lifts only a `double` result: `is.finite(m)` stays
+`logical`, which a condition accepts. A union argument lifts member by member, so
+`log(if (flag) 2 else xs)` is `double | double[]`. `sapply(columns, toupper)` over elements whose
+shape is unknown is no vector of strings, since each element may be a whole column that `sapply`
+stacks into a matrix, so the call keeps `sapply`'s general result. An
 argument whose shape is not yet known keeps the scalar result, so an unannotated
 `wrap <- function(x) sqrt(x)` infers `<T> fn(x: T) -> double`; annotate the wrapper to give it a
 vector result. `array` has no type of its own, and `array()` is `Any`.
@@ -3754,6 +3783,9 @@ upper_names <- function(x) {
   computed it, such as `handler <- switch(kind, ...)` without a default, because the code presumably
   rules the `NULL` path out. A parameter, or a variable whose last assignment is annotated, admits
   that `NULL` on purpose, so calling it is reported until an `is.null()` test rules it out.
+- An unannotated parameter whose default is a string, number or logical literal, as in
+  `function(r, cor = "cor")`, holds no function unless the caller passes one, so the lookup skips
+  it and `cor(r, r)` calls `stats::cor`.
 - A binding with no type information yet, such as an unannotated parameter nothing has constrained
   or a parameter annotated with a type parameter `T`, may hold anything. When the body only ever
   calls it, it is a callback, and the call checks against it as usual: both
@@ -3939,12 +3971,17 @@ slot, so the slot's type reflects the update:
   - a list-like `list[T]` becomes `list[T | V]`, and stays list-like;
   - a record-like `list{a: A, b: B}` becomes `list[named: A | B | V]`, because the write may add a
     field or replace any one, so `globals[[key]]` afterwards may be `v`;
-  - a tuple-like container is left unchanged.
+  - a tuple-like `list(A, B)` becomes `list[A | B | V]`, because the write may replace any item or
+    add one.
+- A write at a literal position of a tuple-like `x`, `x[[2]] <- v`, sets that item's type, and a
+  write at the position just past the last item appends one, so after
+  `d <- list(3L); d[[2]] <- list(x = 1, y = 2)`, `d[[2]]$y` is a `double`.
 - A write through `[`, `x[i] <- v` or `x[i, j] <- v`, on an atomic `x` with an atomic `v` coerces
   `x` to the wider of the two atomic types, as R does. So after `prob <- rep(NA, n)`, the write
   `prob[i] <- 0.5` makes `prob` a `double[]`, and `x[1] <- "a"` makes a numeric `x` a
-  `character[]`. A scalar `x` stays a scalar, because a type carries no length. A `[` write on a
-  list, or of a value that is not atomic, leaves `x` as it was.
+  `character[]`. A scalar `x` stays a scalar, because a type carries no length. A `NULL` `x` is the
+  empty vector, so `out <- c(); out[i] <- paste0("row", i)` makes `out` a `character[]`. A `[`
+  write on a list, or of a value that is not atomic, leaves `x` as it was.
 - A write through a chain of accessors, such as `x[[1]]$private <- v` or `x$a$b <- v`, rewrites
   each container on the way back to the root: the innermost one takes `v` by the rules above, and
   each enclosing one takes the rewritten child at its own step. A step whose position is known
@@ -4134,6 +4171,14 @@ local, rather than an outer one, so after
 `delayedAssign("length", parse_int(read_bytes(2)))` the call `read_bytes(length)` does not read
 base's `length`. A call that names an environment, as in `assign("x", 1, envir = globalenv())`,
 binds nothing locally.
+
+An `assign` whose name is computed, as in `for (name in ls(env)) assign(name, env[[name]])`, and a
+`list2env(values, environment())` may bind any name in the running function's frame. From that
+call on, a read in the function of a name that no visible binding holds is not reported and types
+as `Unknown`, and so is a read of a package function's name such as `layout$panels`, which may now
+be a local. A called name keeps its function lookup, a read before the call is reported as usual,
+and a call that writes into another environment (`envir = env` for a parameter `env`) changes
+nothing.
 
 A top-level `globalVariables(c("a", "b"))` or `utils::globalVariables(...)` call with literal string
 arguments declares those names as bound dynamically for the whole package, which suppresses the

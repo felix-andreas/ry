@@ -946,6 +946,7 @@ fn check_item_in<'db>(
         value_read_slots: None,
         computed_slots: Bitset::new_in(arena, bindings),
         lookup_slots: Bitset::new_in(arena, bindings),
+        name_placeholder_slots: Bitset::new_in(arena, bindings),
         valued_slots: Bitset::new_in(arena, bindings),
         super_assigned: super_assigned_names(module),
         template_call: module
@@ -1893,6 +1894,9 @@ struct Checker<'db, 'a> {
     /// Slots whose latest write so far is a lookup in a collection (`handler <- handlers[[name]]`),
     /// so a call through them must suit every member the collection holds.
     lookup_slots: Bitset<'a, BindingId>,
+    /// Slots whose latest write is the string of their own name (`.x <- ".x"`), the placeholder
+    /// that quiets R CMD check about a name only non-standard evaluation reads.
+    name_placeholder_slots: Bitset<'a, BindingId>,
     /// Slots that some write so far gave a type other than `NULL`, so a `NULL` read from them
     /// is a path the code takes rather than a placeholder.
     valued_slots: Bitset<'a, BindingId>,
@@ -4195,6 +4199,17 @@ impl<'db, 'a> Checker<'db, 'a> {
                         true => self.lookup_slots.insert(slot),
                         false => self.lookup_slots.remove(slot),
                     };
+                    let names_itself = match (module.kind(target), module.kind(value)) {
+                        (
+                            ExpressionKind::NameRef(name),
+                            ExpressionKind::Literal(LiteralKind::String(text)),
+                        ) => name.as_str() == &module[*text],
+                        _ => false,
+                    };
+                    match names_itself {
+                        true => self.name_placeholder_slots.insert(slot),
+                        false => self.name_placeholder_slots.remove(slot),
+                    };
                     // A `<<-` write reaches the readers in sibling closures only once the
                     // defining frame joins it, so until then they still read the `NULL`.
                     if spelling != AssignSpelling::Super
@@ -4212,6 +4227,18 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
                 self.write_target(spelling, target, value, value_ty);
                 value_ty
+            }
+            // tidyselect's `cols = -"value"` in a `@masked` verb's arguments drops a column.
+            ExpressionKind::Unary {
+                operator: UnaryOperator::Minus,
+                operand,
+            } if self.naming.extras().tidyselect_arguments.contains(&id)
+                && matches!(
+                    module.kind(*operand),
+                    ExpressionKind::Literal(LiteralKind::String(_))
+                ) =>
+            {
+                unknown(self.db)
             }
             ExpressionKind::Unary { operator, operand } => {
                 let (operator, operand) = (*operator, *operand);
@@ -6225,7 +6252,10 @@ impl<'db, 'a> Checker<'db, 'a> {
         if let TyKind::Union(members) = prior.kind(self.db)
             && matches!(
                 step,
-                ReplacementStep::Field(_) | ReplacementStep::Element | ReplacementStep::Position(_)
+                ReplacementStep::Field(_)
+                    | ReplacementStep::Element
+                    | ReplacementStep::Position(_)
+                    | ReplacementStep::Slice
             )
         {
             let written = members
@@ -16743,6 +16773,25 @@ impl<'db, 'a> Checker<'db, 'a> {
         call_arguments
     }
 
+    /// Whether `expression` reads a local whose value is a string of its own name.
+    fn reads_name_placeholder(&self, expression: ExprId) -> bool {
+        let mut pending = vec![expression];
+        while let Some(next) = pending.pop() {
+            if let ExpressionKind::NameRef(_) = self.module.kind(next)
+                && self
+                    .naming
+                    .resolutions
+                    .get(&next)
+                    .is_some_and(|slot| self.name_placeholder_slots.contains(*slot))
+            {
+                return true;
+            }
+            self.module
+                .for_each_child(next, |child| pending.push(child));
+        }
+        false
+    }
+
     /// The arguments every candidate callee binds to a quoted formal: code the callee captures
     /// with `substitute()`, which reads names from a frame the caller cannot see.
     fn quoted_arguments(
@@ -16761,7 +16810,8 @@ impl<'db, 'a> Checker<'db, 'a> {
         for &callee in callees {
             let resolved = self.table.resolve(self.db, callee);
             // Base R rejects `-"value"`, so beside a callee no stub types it is a tidyselect
-            // exclusion (`dplyr::select(df, -"value")`) the callee quotes.
+            // exclusion (`dplyr::select(df, -"value")`) the callee quotes. So is code that reads
+            // a name placeholder, as in ggpubr's `.x <- ".x"` before `scales::math_format(2^.x)`.
             if matches!(resolved.kind(self.db), TyKind::Unknown) {
                 for (index, argument) in arguments.iter().enumerate() {
                     let excludes_by_name = argument.value.is_some_and(|value| {
@@ -16769,6 +16819,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                             operator: UnaryOperator::Minus,
                             operand,
                         } if matches!(self.module.kind(*operand), ExpressionKind::Literal(LiteralKind::String(_))))
+                            || self.reads_name_placeholder(value)
                     });
                     if !excludes_by_name {
                         quoted.remove(index);
@@ -18282,7 +18333,9 @@ impl<'db, 'a> Checker<'db, 'a> {
         };
         let ty = self.joined_list_union(expected, ty);
         match argument.value {
-            Some(value) if self.names_computed_value(value) => {
+            Some(value)
+                if self.names_computed_value(value) || self.indexes_computed_value(value) =>
+            {
                 let ty = self.without_inferred_null(expected, ty);
                 Some(self.without_inferred_length(expected, ty, self.binds_parameter(value)))
             }
@@ -18411,8 +18464,9 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// A variable the body computed, or a `switch()` call written in place of one: Matrix's
-    /// `new(switch(shape, g = "dgeMatrix", t = "dtrMatrix"))` lists an arm for every shape.
+    /// A variable the body computed, an element `x[i]` of one, or a `switch()` call written in
+    /// place of one: Matrix's `new(switch(shape, g = "dgeMatrix", t = "dtrMatrix"))` lists an
+    /// arm for every shape.
     fn names_computed_value(&self, value: ExprId) -> bool {
         match self.module.kind(value) {
             ExpressionKind::NameRef(_) => self
@@ -18424,6 +18478,23 @@ impl<'db, 'a> Checker<'db, 'a> {
                 self.module.kind(*callee),
                 ExpressionKind::NameRef(name) if name.as_str() == "switch"
             ),
+            _ => false,
+        }
+    }
+
+    /// An element `x[i]` of a computed variable passed on: it has `NULL` only through the
+    /// vector itself (kableExtra's `new_contents[i]` after a loop that filled
+    /// `new_contents <- c()`). An operand of `:` keeps it, since a length test can admit zero.
+    fn indexes_computed_value(&self, value: ExprId) -> bool {
+        match self.module.kind(value) {
+            ExpressionKind::Index {
+                double: false,
+                target,
+                ..
+            } => {
+                matches!(self.module.kind(*target), ExpressionKind::NameRef(_))
+                    && self.names_computed_value(*target)
+            }
             _ => false,
         }
     }
@@ -22373,8 +22444,13 @@ fn single<T>(items: Vec<T>) -> Option<T> {
 /// The type an atomic vector `prior` has after an element or slice write of the atomic `value`.
 /// R coerces the whole vector when the written value has a wider type, so
 /// `prob <- rep(NA, n); prob[i] <- 0.5` and `x <- 1:3; x[[2]] <- 2.5` both leave a `double[]`.
-/// `None` when either is not atomic.
+/// `NULL` is the empty vector, so `out <- c(); out[i] <- "a"` leaves a `character[]`. `None`
+/// when either is not atomic.
 fn atomic_write<'db>(db: &'db dyn Db, prior: Ty<'db>, value: Ty<'db>) -> Option<Ty<'db>> {
+    if let TyKind::Null = prior.kind(db) {
+        let written = combine_operand_atomic(db, value)?;
+        return Some(Ty::new(db, TyKind::Vector(scalar(db, written))));
+    }
     let container = combine_operand_atomic(db, prior)?;
     let written = combine_operand_atomic(db, value)?;
     let element = scalar(db, promote_combine_atomic(container, written));

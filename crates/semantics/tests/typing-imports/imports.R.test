@@ -238,6 +238,17 @@ g: <T> fn(d: T) -> Any
 84..92 warning[unresolved] I could not resolve `scale_it` in this package, its imports, or builtins
 147..155 warning[unresolved] I could not resolve `keep_row` in this package, its imports, or builtins
 
+#---- a_masked_verb_reads_a_string_exclusion_as_tidyselect
+#description Imports: dplyr, tidyr
+drop_value <- function(d) dplyr::select(d, -"value")
+longer <- function(d) d |> tidyr::pivot_longer(cols = -"row", names_to = "column")
+negated <- function(d) with(d, -"value")
+#++++
+drop_value: <T> fn(d: T) -> T
+longer: <T> fn(d: T) -> Any
+negated: Unknown
+203..210 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
 #---- a_called_name_inside_with_may_be_a_function_of_the_data
 #description Imports: dplyr
 f <- function(callbacks) with(callbacks, on_line("x"))

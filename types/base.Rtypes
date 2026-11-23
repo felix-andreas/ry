@@ -304,11 +304,13 @@ prettyNum : @pure fn(x: Any, [big.mark]: character, ...: Any) -> character
 # reads); `regexec`'s per-group structure and `regmatches` itself stay `Any`.
 # R matches only the first element of a longer `pattern`, with a warning, so `grepl`, `grep`,
 # `regexpr` and `gregexpr` also take a vector there. It is a second overload so that an open
-# variable passed as `pattern` still binds to `character`.
+# variable passed as `pattern` still binds to `character`. The same holds for the `replacement`
+# of `sub` and `gsub`, whose general overload comes last because a name passed as a value takes
+# the last declaration (`if (all) gsub else sub`).
 gsub : @pure fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
-gsub : @pure fn(pattern: character, replacement: double | integer | logical, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
+gsub : @pure fn(pattern: character, replacement: character | double | integer | logical, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
 sub : @pure fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
-sub : @pure fn(pattern: character, replacement: double | integer | logical, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
+sub : @pure fn(pattern: character, replacement: character | double | integer | logical, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
 grepl : @pure fn(pattern: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> logical
 grepl : @pure fn(pattern: character[], x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> logical
 grep : @pure fn(pattern: character, x: Any, [ignore.case]: logical, [perl]: logical, [value]: logical, [fixed]: logical, [useBytes]: logical, [invert]: logical) -> Any

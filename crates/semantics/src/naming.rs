@@ -111,6 +111,9 @@ pub struct NamingExtras {
     pub for_variables: SortedMap<ExprId, BindingId>,
     /// data.table `[`s: indexes evaluate in the data's frame, and the bracket types `Unknown`.
     pub masked_subsets: SortedSet<ExprId>,
+    /// Arguments a stub's `@masked` verb evaluates in its data mask, where tidyselect reads
+    /// `-"name"` as an exclusion rather than R's negation of a string.
+    pub tidyselect_arguments: SortedSet<ExprId>,
     /// `f[, y := v]` statements whose subject the current scope owns: ry models the update as
     /// a new write of that slot, so later reads see the added or removed column.
     pub column_updates: SortedMap<ExprId, BindingId>,
@@ -188,6 +191,7 @@ struct NamingDraft {
     loop_bound_slots: BTreeSet<BindingId>,
     for_variables: BTreeMap<ExprId, BindingId>,
     masked_subsets: BTreeSet<ExprId>,
+    tidyselect_arguments: BTreeSet<ExprId>,
     column_updates: BTreeMap<ExprId, BindingId>,
     run_time_writes: BTreeMap<ExprId, BindingId>,
     namespace_reads: BTreeMap<ExprId, NamespaceRead>,
@@ -212,6 +216,7 @@ impl NamingDraft {
             loop_bound_slots: self.loop_bound_slots.into(),
             for_variables: self.for_variables.into(),
             masked_subsets: self.masked_subsets.into(),
+            tidyselect_arguments: self.tidyselect_arguments.into(),
             column_updates: self.column_updates.into(),
             run_time_writes: self.run_time_writes.into(),
             super_globals: self.super_globals.into(),
@@ -1035,6 +1040,7 @@ impl Context<'_> {
                 // `with` and `within` evaluate in any list or environment, which often holds
                 // functions, so only a table's mask makes its called names loud.
                 let table_mask = u32::from(!matches!(accessor, Some("with" | "within")));
+                let tidyselect = accessor.is_none_or(|name| base_masking_family(name).is_none());
                 let flags = data_argument_flags(module, &module[arguments], &leading);
                 for (argument, data_argument) in module[arguments].iter().zip(flags) {
                     let Some(value) = argument.value else {
@@ -1043,6 +1049,9 @@ impl Context<'_> {
                     if data_argument {
                         self.resolve(value);
                     } else {
+                        if tidyselect {
+                            self.naming.tidyselect_arguments.insert(value);
+                        }
                         // The argument evaluates in an environment made from the data, so an
                         // assignment in it, as in `within(d, total <- a + b)`, binds there and
                         // never in the caller's scope.
