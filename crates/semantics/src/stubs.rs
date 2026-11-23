@@ -292,7 +292,7 @@ fn dormant_exports(db: &dyn Db, sources: StubSources, package: Symbol) -> Option
             let content = strip_comment(line).trim();
             if let Some(definition) = type_definition_line(db, content) {
                 names.insert(Symbol::new(definition.name.text(db)));
-            } else if let Some(rest) = content.strip_prefix("@type") {
+            } else if let Some(rest) = after_keyword(content, "@type") {
                 names.insert(Symbol::new(rest.trim()));
             } else if let Some(separator) = top_level_colon(content) {
                 let name = content[..separator].trim();
@@ -423,10 +423,22 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             if content.is_empty() {
                 continue;
             }
-            // Only whitespace or `@type` precede the name, so its first occurrence is the name token.
+            // Only whitespace and a leading `@type` or `@alias` precede the name, so its first
+            // occurrence past the keyword is the name token; a short name such as `t` also
+            // occurs inside the keyword.
+            let keyword_end = {
+                let stripped = strip_comment(raw_line);
+                let indent = stripped.len() - stripped.trim_start().len();
+                indent
+                    + ["@alias", "@type"]
+                        .into_iter()
+                        .find(|keyword| content.starts_with(keyword))
+                        .map_or(0, str::len)
+            };
             let name_range = |name: &str| {
-                strip_comment(raw_line).find(name).map(|at| {
-                    let start = (this_line_start + at) as u32;
+                let stripped = strip_comment(raw_line);
+                stripped.get(keyword_end..)?.find(name).map(|at| {
+                    let start = (this_line_start + keyword_end + at) as u32;
                     TextRange::new(start.into(), (start + name.len() as u32).into())
                 })
             };
@@ -446,7 +458,7 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
                 library.type_definitions.insert(definition.name, definition);
                 continue;
             }
-            if let Some(rest) = content.strip_prefix("@type") {
+            if let Some(rest) = after_keyword(content, "@type") {
                 let name = rest.trim();
                 if is_nominal_name(name) {
                     let name = Symbol::new(name);
@@ -549,6 +561,26 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             }
         }
     }
+    // An alias that expands back into itself never stands for a type, and expanding it at a
+    // use never ends, so it loads as an abstract type of that name.
+    let cyclic: Vec<Name<'db>> = library
+        .type_definitions
+        .values()
+        .filter(|definition| {
+            definition.alias
+                && alias_reaches(
+                    db,
+                    &library.type_definitions,
+                    definition.body,
+                    definition.name,
+                    &mut FxHashSet::default(),
+                )
+        })
+        .map(|definition| definition.name)
+        .collect();
+    for name in cyclic {
+        library.type_definitions.remove(&name);
+    }
     for (namespace, text) in sources.manifests(db) {
         let active =
             project_overridden.contains(namespace.as_str()) || namespace_active(db, namespace);
@@ -580,6 +612,33 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
         }
     }
     library
+}
+
+/// Whether expanding the aliases in `ty` reaches the alias `target`. `visited` holds the aliases
+/// already walked, so a diamond or a cycle elsewhere ends the walk.
+fn alias_reaches<'db>(
+    db: &'db dyn Db,
+    definitions: &FxHashMap<Name<'db>, NamedDefinition<'db>>,
+    ty: Ty<'db>,
+    target: Name<'db>,
+    visited: &mut FxHashSet<Name<'db>>,
+) -> bool {
+    if let TyKind::Named(name, _) = ty.kind(db)
+        && let Some(definition) = definitions.get(name).filter(|definition| definition.alias)
+    {
+        if *name == target {
+            return true;
+        }
+        if visited.insert(*name) && alias_reaches(db, definitions, definition.body, target, visited)
+        {
+            return true;
+        }
+    }
+    let mut found = false;
+    for_each_child_type(db, ty, &mut |child| {
+        found = found || alias_reaches(db, definitions, child, target, visited);
+    });
+    found
 }
 
 struct DeclarationMarkers<'text> {
@@ -697,13 +756,15 @@ pub struct StubProblem {
 pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
     let library_nominals = stubs(db).map(|library| &library.nominals);
     let mut own_nominals: FxHashSet<&str> = FxHashSet::default();
+    let mut own_definitions = FxHashMap::default();
     for raw_line in text.lines() {
         let content = strip_comment(raw_line).trim();
         if let Some(name) = definition_line_name(content) {
-            if type_definition_line(db, content).is_some() {
+            if let Some(definition) = type_definition_line(db, content) {
                 own_nominals.insert(name);
+                own_definitions.insert(definition.name, definition);
             }
-        } else if let Some(rest) = content.strip_prefix("@type") {
+        } else if let Some(rest) = after_keyword(content, "@type") {
             let name = rest.trim();
             if is_nominal_name(name) {
                 own_nominals.insert(name);
@@ -723,6 +784,24 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
         }
         if definition_line_name(content).is_some() {
             match type_definition_line(db, content) {
+                Some(definition)
+                    if definition.alias
+                        && alias_reaches(
+                            db,
+                            &own_definitions,
+                            definition.body,
+                            definition.name,
+                            &mut FxHashSet::default(),
+                        ) =>
+                {
+                    problems.push(StubProblem {
+                        line,
+                        message: format!(
+                            "the alias `{}` expands back into itself, so it loads as an abstract type. A recursive type needs a name of its own: declare it with `@type` instead of `@alias`.",
+                            definition.name.text(db)
+                        ),
+                    });
+                }
                 Some(definition) => {
                     let mut unknown = Vec::new();
                     collect_unknown_nominals(db, definition.body, &is_known, &mut unknown);
@@ -748,7 +827,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
             }
             continue;
         }
-        if let Some(rest) = content.strip_prefix("@type") {
+        if let Some(rest) = after_keyword(content, "@type") {
             let name = rest.trim();
             if name.is_empty() {
                 problems.push(StubProblem {
@@ -882,15 +961,20 @@ fn collect_unknown_nominals<'db>(
 /// {TYPE}` line with a representation. A plain `@type NAME` is the older abstract form, handled on
 /// its own.
 fn definition_line_name(content: &str) -> Option<&str> {
-    let rest = content.strip_prefix("@alias").or_else(|| {
-        content
-            .strip_prefix("@type")
-            .filter(|rest| rest.contains(['<', '{']))
-    })?;
+    let rest = after_keyword(content, "@alias")
+        .or_else(|| after_keyword(content, "@type").filter(|rest| rest.contains(['<', '{'])))?;
     let rest = rest.trim_start();
     let end = rest.find(['<', ' ', '{']).unwrap_or(rest.len());
     let name = &rest[..end];
     is_nominal_name(name).then_some(name)
+}
+
+/// What follows `keyword` at the start of `content`, when the keyword is a whole word: `@typeX`
+/// is not `@type X`.
+pub fn after_keyword<'text>(content: &'text str, keyword: &str) -> Option<&'text str> {
+    content.strip_prefix(keyword).filter(|rest| {
+        !rest.starts_with(|character: char| character.is_alphanumeric() || "._".contains(character))
+    })
 }
 
 /// An `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>` line, lowered through the

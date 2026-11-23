@@ -10,7 +10,8 @@ use {
         stubs::shipped_stub_sources,
         testing::{
             ProjectState, Workbench, check_metamorphic_relations, check_semantics_input,
-            check_stub_source, fixture_state, for_each_session, generate_session,
+            check_stub_source, fixture_state, for_each_session, for_each_stub_source,
+            generate_session,
         },
     },
     std::sync::LazyLock,
@@ -380,10 +381,22 @@ const STUB_ALPHABET: &[&str] = &[
 ];
 
 /// Stub sources that once broke the loader.
-const STUB_REGRESSIONS: &[&str] = &[];
+const STUB_REGRESSIONS: &[&str] = &[
+    // A short type name also occurs inside the `@type` or `@alias` keyword, where its
+    // declaration range once pointed.
+    "@type t\n",
+    "@alias a {integer}\n",
+    // A keyword glued to a name is not that keyword: `@typet` declares no type `t`.
+    "@typet\n@aliasa {integer}\n",
+    // An alias that expands back into itself once overflowed the stack, and one that does so
+    // through two positions took exponential time, when a declaration used it.
+    "@alias z {z | integer}\nx : z\n",
+    "@alias z {list[named: w]}\n@alias w {fn(y: z) -> Any | list[named: z]}\nx : fn(a: z) -> w\n",
+];
 
 /// Generated, windowed and mutated `.Rtypes` text through the stub loader
-/// ([`check_stub_source`]), on one database that stays warm across seeds.
+/// ([`check_stub_source`]), on one database that stays warm across seeds. Half the sources come
+/// from the grammar of the shipped stubs ([`generated_stub`]), so most load declarations.
 #[test]
 fn fuzz_stub_sources() {
     let shipped: Vec<String> = shipped_stub_sources()
@@ -396,7 +409,7 @@ fn fuzz_stub_sources() {
     for input in STUB_REGRESSIONS {
         check_stub_source(&mut db, input);
     }
-    for_each_seed_on_named_threads(400, |seed| {
+    for_each_stub_source(400, |seed| {
         let mut rng = SplitMix64(0x57AB_5EED ^ seed);
         let window = |rng: &mut SplitMix64| {
             let lines: Vec<&str> = shipped[rng.below(shipped.len())].lines().collect();
@@ -404,16 +417,137 @@ fn fuzz_stub_sources() {
             let end = (start + 1 + rng.below(40)).min(lines.len());
             lines.get(start..end).unwrap_or_default().join("\n") + "\n"
         };
-        let input = match rng.below(3) {
+        match rng.below(6) {
             0 => token_soup(&mut rng, STUB_ALPHABET),
             1 => window(&mut rng),
-            _ => {
+            2 => {
                 let seeds = [window(&mut rng), window(&mut rng)];
                 mutate_seed(&mut rng, &[&seeds[0], &seeds[1]], 24)
             }
-        };
-        check_stub_source(&mut db, &input);
+            _ => {
+                let source = generated_stub(&mut rng);
+                match rng.chance(1, 3) {
+                    true => {
+                        let insertion = STUB_ALPHABET[rng.below(STUB_ALPHABET.len())];
+                        small_edit(&mut rng, &source, insertion)
+                    }
+                    false => source,
+                }
+            }
+        }
     });
+}
+
+/// Names a generated stub declares: short ones that also occur inside keywords, dotted and
+/// operator names, and one beyond ASCII.
+const STUB_NAMES: &[&str] = &[
+    "t", "a", "ty", "x", "f", "zoo", "is.zoo", "[.zoo", "%+%", "as_thing", "média",
+];
+
+/// Type names a generated stub defines, short ones among them because they also occur inside
+/// the `@type` and `@alias` keywords.
+const STUB_NOMINALS: &[&str] = &["t", "a", "pe", "Shape", "zoo", "data.thing"];
+
+/// A `.Rtypes` source from the grammar the shipped stubs use: documentation lines, `@type` and
+/// `@alias` definitions (generic or not), and declarations of values and functions with
+/// optional and variadic parameters, unions, generics and the `@pure`, `@masked` and `@opaque`
+/// markers.
+fn generated_stub(rng: &mut SplitMix64) -> String {
+    let mut nominals: Vec<String> = Vec::new();
+    let mut lines = Vec::new();
+    for _ in 0..1 + rng.below(10) {
+        if rng.chance(1, 3) {
+            lines.push(format!("#' Documents the next line, {}.", rng.below(100)));
+        }
+        let name = STUB_NAMES[rng.below(STUB_NAMES.len())];
+        match rng.below(6) {
+            0 => {
+                let nominal = STUB_NOMINALS[rng.below(STUB_NOMINALS.len())].to_owned();
+                lines.push(match rng.below(4) {
+                    0 => format!("@type {nominal}"),
+                    1 => format!("@type {nominal}<T>"),
+                    2 => format!(
+                        "@type {nominal} {{{}}}",
+                        stub_type(rng, &nominals, false, 2)
+                    ),
+                    _ => format!(
+                        "@alias {nominal}<T> {{{}}}",
+                        stub_type(rng, &nominals, true, 2)
+                    ),
+                });
+                nominals.push(nominal);
+            }
+            1 => {
+                let alias = STUB_NOMINALS[rng.below(STUB_NOMINALS.len())].to_owned();
+                lines.push(format!(
+                    "@alias {alias} {{{}}}",
+                    stub_type(rng, &nominals, false, 2)
+                ));
+                nominals.push(alias);
+            }
+            _ => {
+                let generic = rng.chance(1, 3);
+                let marker = match rng.below(6) {
+                    0 => "@pure ",
+                    1 => "@pure(f) ",
+                    2 => "@masked ",
+                    3 => "@opaque(x) ",
+                    _ => "",
+                };
+                let binders = if generic { "<T> " } else { "" };
+                let mut parameters: Vec<String> = Vec::new();
+                for (index, parameter) in ["x", "f", "n"].iter().enumerate().take(rng.below(4)) {
+                    let ty = match *parameter == "f" {
+                        true => format!("fn({}) -> Any", stub_type(rng, &nominals, generic, 1)),
+                        false => stub_type(rng, &nominals, generic, 2),
+                    };
+                    parameters.push(match index > 0 && rng.chance(1, 2) {
+                        true => format!("[{parameter}]: {ty}"),
+                        false => format!("{parameter}: {ty}"),
+                    });
+                }
+                if rng.chance(1, 3) {
+                    parameters.push("...: Any".to_owned());
+                }
+                let body = match rng.chance(1, 5) {
+                    true => stub_type(rng, &nominals, false, 2),
+                    false => format!(
+                        "{binders}fn({}) -> {}",
+                        parameters.join(", "),
+                        stub_type(rng, &nominals, generic, 2)
+                    ),
+                };
+                lines.push(format!("{name} : {marker}{body}"));
+            }
+        }
+    }
+    lines.join("\n") + "\n"
+}
+
+fn stub_type(rng: &mut SplitMix64, nominals: &[String], generic: bool, depth: usize) -> String {
+    let leaves = ["integer", "double[]", "character", "logical", "Any", "NULL"];
+    match rng.below(if depth == 0 { 3 } else { 7 }) {
+        0 if generic => "T".to_owned(),
+        1 if !nominals.is_empty() => nominals[rng.below(nominals.len())].clone(),
+        3 => format!(
+            "list{{v: {}}}",
+            stub_type(rng, nominals, generic, depth - 1)
+        ),
+        4 => format!(
+            "list[named: {}]",
+            stub_type(rng, nominals, generic, depth - 1)
+        ),
+        5 => format!(
+            "{} | {}",
+            stub_type(rng, nominals, generic, depth - 1),
+            stub_type(rng, nominals, generic, depth - 1)
+        ),
+        6 => format!(
+            "fn(y: {}) -> Any",
+            stub_type(rng, nominals, generic, depth - 1)
+        ),
+        _ => leaves[rng.below(leaves.len())].to_owned(),
+    }
 }
 
 #[test]

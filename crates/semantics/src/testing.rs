@@ -34,7 +34,7 @@ use {
         SyntaxKind, SyntaxToken,
         testing::{
             Entropy, FAILURES_PER_RUN, SplitMix64, fuzz_seeds, generate_program, generate_project,
-            on_seed_thread, replay_command, running_test_name, small_edit, split_files,
+            on_seed_thread, replay_command, run_seeds, running_test_name, small_edit, split_files,
         },
     },
 };
@@ -535,7 +535,7 @@ fn compare_with_child_process(samples: &[(u64, Vec<Vec<String>>)]) {
                 .collect();
             if let Err(difference) = compare_renderings(expected, &actual) {
                 failures.push(format!(
-                    "seed {seed}, state {state}: the rendering depends on the interning order\n{difference}\nreplay with\n{}",
+                    "seed {seed}, state {state}: a child process renders it differently, so the rendering depends on the interning order or on state the process kept\n{difference}\nreplay with\n{}",
                     replay(*seed)
                 ));
             }
@@ -1132,48 +1132,76 @@ fn declared_outside(db: &RootDatabase, word: &str) -> bool {
     })
 }
 
+/// Runs [`check_stub_source`] on the stub source `generate` makes from each seed of
+/// [`fuzz_seeds`], on a database that stays warm across seeds, each seed on a thread named after
+/// the test and the seed. One child process then loads the sampled seeds' sources again
+/// ([`compare_with_child_process`]), each first on a database of its own: a loader that keeps
+/// state outside the database, such as a process-wide cache, gives every database of this
+/// process the same stale answer, but not a process that never loaded the other sources.
+pub fn for_each_stub_source(default: usize, mut generate: impl FnMut(u64) -> String + Send) {
+    if let Some(seeds) = interning_child_seeds() {
+        let mut out = io::stdout().lock();
+        for &seed in seeds.iter().rev() {
+            let text = generate(seed);
+            for (index, source) in [text.clone(), stub_variant(&text)].iter().enumerate().rev() {
+                let db = stub_database(source);
+                let rendering = render_stub_library(&db);
+                write!(
+                    out,
+                    "\n{CHILD_FRAME} {seed} 0 {index} {}\n{rendering}",
+                    rendering.len()
+                )
+                .expect("the child writes its renderings to stdout");
+            }
+        }
+        out.flush().expect("the child flushes its renderings");
+        return;
+    }
+    let mut db = RootDatabase::default();
+    AnalysisSettings::new(&db, true, false, true);
+    ProjectFiles::new(&db, Vec::new());
+    let mut samples = Vec::new();
+    let first_of_run = fuzz_seeds(default).start;
+    run_seeds(default, |seed| {
+        let text = generate(seed);
+        match on_seed_thread(seed, || check_stub_source(&mut db, &text)) {
+            Ok(renderings) => {
+                if (seed - first_of_run) % CHILD_SAMPLE == 0 {
+                    samples.push((seed, vec![renderings]));
+                }
+                true
+            }
+            Err(_) => false,
+        }
+    });
+    compare_with_child_process(&samples);
+}
+
 /// Loads `text` as a project's only stub source on `db`, a warm database whose stub input this
-/// call owns, and checks the loader: it never panics, every problem names a line of the text
-/// and every declaration a range inside it, the library is the same after loading another
-/// source and this one again, and a database that never saw another source loads it alike.
-/// A few declared names are then called from a project file, which must check without a panic.
-pub fn check_stub_source(db: &mut RootDatabase, text: &str) {
-    let sources = vec![(String::from("pkg"), text.to_owned())];
-    let line_count = text.lines().count();
-    for problem in stub_source_problems(db, text) {
-        assert!(
-            problem.line < line_count,
-            "a problem on line {} of a stub of {line_count} lines: {}\n{text}",
-            problem.line,
-            problem.message
+/// call owns, and checks the loader. It never panics; every problem names a line that holds
+/// what the problem quotes from it ([`misplaced_stub_problems`]); every declaration's range
+/// covers the name it declares ([`misplaced_declarations`]); and after a variant of the source
+/// with other documentation and types loads, loading the source again gives the first library,
+/// documentation included ([`compare_renderings`]). A few declared names are then called from
+/// a project file, which must check without a panic. Returns the renderings of the source and
+/// of its variant on the warm database.
+pub fn check_stub_source(db: &mut RootDatabase, text: &str) -> Vec<String> {
+    let problems: Vec<(usize, String)> = stub_source_problems(db, text)
+        .into_iter()
+        .map(|problem| (problem.line, problem.message))
+        .collect();
+    if let Err(misplaced) = misplaced_stub_problems(text, &problems) {
+        panic!("{misplaced}\n---- stub:\n{text}");
+    }
+    let variant = stub_variant(text);
+    let first = load_stub_source(db, text);
+    let other = load_stub_source(db, &variant);
+    let again = load_stub_source(db, text);
+    if let Err(difference) = compare_renderings(slice::from_ref(&first), slice::from_ref(&again)) {
+        panic!(
+            "the stub loads differently after a variant of it\n{difference}\n---- stub:\n{text}\n---- variant:\n{variant}"
         );
     }
-    let stub_input = match StubSources::try_get(db) {
-        Some(input) => {
-            input.set_sources(db).to(sources.clone());
-            input
-        }
-        None => StubSources::new(db, sources.clone(), Vec::new()),
-    };
-    let first = render_stub_library(db, text);
-    let other = "other : fn(x: Any) -> Any\n";
-    stub_input
-        .set_sources(db)
-        .to(vec![(String::from("pkg"), other.to_owned())]);
-    render_stub_library(db, other);
-    stub_input.set_sources(db).to(sources.clone());
-    assert!(
-        render_stub_library(db, text) == first,
-        "the stub loads differently after another one\n{text}"
-    );
-    let pristine = RootDatabase::default();
-    AnalysisSettings::new(&pristine, true, false, true);
-    ProjectFiles::new(&pristine, Vec::new());
-    StubSources::new(&pristine, sources, Vec::new());
-    assert!(
-        render_stub_library(&pristine, text) == first,
-        "the stub loads differently on a database with no history\n{text}"
-    );
     let called: Vec<String> = stubs(db)
         .map(|library| {
             let mut names: Vec<String> = library
@@ -1194,11 +1222,144 @@ pub fn check_stub_source(db: &mut RootDatabase, text: &str) {
     let file = SourceFile::new(db, probe, DocumentKind::Package);
     ProjectFiles::get(db).set_files(db).to(vec![file]);
     render_semantics(db, file);
+    vec![first, other]
 }
 
-/// Every fact a stub library holds, one sorted line each, asserting each declaration's range
-/// lies inside `text`.
-fn render_stub_library(db: &RootDatabase, text: &str) -> String {
+/// `text` with every documentation line reworded and every `integer` read as `double`, so a
+/// load of it changes the documentation and the types of the names `text` declares.
+pub fn stub_variant(text: &str) -> String {
+    text.split_inclusive('\n')
+        .map(|line| match line.trim_start().starts_with("#'") {
+            true => line.replacen("#'", "#' Reworded:", 1),
+            false => line.replace("integer", "double"),
+        })
+        .collect()
+}
+
+/// Installs `text` as the only stub source on `db`, checks its declaration ranges, and renders
+/// the library.
+fn load_stub_source(db: &mut RootDatabase, text: &str) -> String {
+    let sources = vec![(String::from("pkg"), text.to_owned())];
+    match StubSources::try_get(db) {
+        Some(input) => {
+            input.set_sources(db).to(sources);
+        }
+        None => {
+            StubSources::new(db, sources, Vec::new());
+        }
+    }
+    let rendering = render_stub_library(db);
+    if let Err(misplaced) = misplaced_declarations(text, &rendering) {
+        panic!("{misplaced}\n---- stub:\n{text}");
+    }
+    rendering
+}
+
+/// A database that has loaded no stub source but `text`.
+fn stub_database(text: &str) -> RootDatabase {
+    let db = RootDatabase::default();
+    AnalysisSettings::new(&db, true, false, true);
+    ProjectFiles::new(&db, Vec::new());
+    StubSources::new(
+        &db,
+        vec![(String::from("pkg"), text.to_owned())],
+        Vec::new(),
+    );
+    db
+}
+
+/// Quotes in a stub problem that name the grammar, not text of the line.
+const STUB_GRAMMAR_QUOTES: &[&str] = &[
+    "@alias NAME<T> {TYPE}",
+    "@type NAME {TYPE}",
+    "@type NAME<T>",
+    "@type",
+    "@alias",
+    "name : TYPE",
+    ":",
+    "@masked",
+    "...",
+];
+
+/// `Ok` when every problem sits on a line of `text` that has content, and that line holds each
+/// text the problem quotes from it, unless the line holds a backtick. Lines are counted here from the bytes: a line ends at `\n`,
+/// a `\r` before it belongs to the break, and a final break starts no line.
+pub fn misplaced_stub_problems(text: &str, problems: &[(usize, String)]) -> Result<(), String> {
+    let lines: Vec<&str> = text
+        .split_inclusive('\n')
+        .map(|line| line.trim_end_matches('\n').trim_end_matches('\r'))
+        .collect();
+    for (line, message) in problems {
+        let Some(&content) = lines.get(*line) else {
+            return Err(format!(
+                "a problem on line {line} of a stub of {} lines: {message}",
+                lines.len()
+            ));
+        };
+        let code = content.split_once('#').map_or(content, |(code, _)| code);
+        if content.trim().is_empty() || content.trim_start().starts_with('#') {
+            return Err(format!(
+                "a problem on line {line}, which holds no declaration ({content:?}): {message}"
+            ));
+        }
+        // A backtick in the line would end a quote early, so such a line is held only to
+        // having content.
+        let quotes = message
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|_| !content.contains('`'));
+        for quote in quotes {
+            let quoted = quote.strip_suffix(" :").unwrap_or(quote);
+            if !STUB_GRAMMAR_QUOTES.contains(&quote) && !content.contains(quoted) {
+                return Err(format!(
+                    "a problem on line {line} quotes `{quoted}`, which the line ({code:?}) does not hold: {message}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `Ok` when every declaration a library rendering lists (`value NAME at START..END`) covers
+/// exactly the bytes of `NAME` in `text`, as a whole token.
+pub fn misplaced_declarations(text: &str, rendering: &str) -> Result<(), String> {
+    for line in rendering.lines() {
+        let Some(rest) = line
+            .strip_prefix("value ")
+            .or_else(|| line.strip_prefix("type "))
+        else {
+            continue;
+        };
+        let Some((name, range)) = rest.rsplit_once(" at ") else {
+            continue;
+        };
+        let bounds = range.split_once("..").and_then(|(start, end)| {
+            Some((start.parse::<usize>().ok()?, end.parse::<usize>().ok()?))
+        });
+        let covered = bounds.and_then(|(start, end)| text.get(start..end));
+        if covered != Some(name) {
+            return Err(format!(
+                "`{name}` is declared at {range}, which covers {covered:?}"
+            ));
+        }
+        // The covered bytes must also be a whole token: a short name occurs inside the
+        // `@type` keyword too.
+        let is_name_character =
+            |character: char| character.is_alphanumeric() || "@._".contains(character);
+        let before = bounds.and_then(|(start, _)| text.get(..start)?.chars().next_back());
+        let after = bounds.and_then(|(_, end)| text.get(end..)?.chars().next());
+        if before.is_some_and(is_name_character) || after.is_some_and(is_name_character) {
+            return Err(format!(
+                "`{name}` is declared at {range}, inside a longer token ({before:?} before it, {after:?} after it)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Every fact a stub library holds, one sorted line each.
+fn render_stub_library(db: &RootDatabase) -> String {
     let Some(library) = stubs(db) else {
         return String::new();
     };
@@ -1217,11 +1378,11 @@ fn render_stub_library(db: &RootDatabase, text: &str) -> String {
     ] {
         for (name, declaration) in declarations.iter() {
             let range = declaration.range;
-            assert!(
-                usize::from(range.end()) <= text.len(),
-                "the {kind} `{name}` is declared at {range:?}, past the end of the stub\n{text}"
-            );
-            lines.push(format!("{kind} {name} at {range:?}"));
+            lines.push(format!(
+                "{kind} {name} at {}..{}",
+                u32::from(range.start()),
+                u32::from(range.end())
+            ));
         }
     }
     lines.extend(

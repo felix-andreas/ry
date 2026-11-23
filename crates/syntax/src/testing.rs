@@ -588,7 +588,9 @@ pub fn running_test_name() -> String {
 /// thread name, which [`replay_command`] strips to recover the test.
 const SEED_THREAD_MARKER: &str = " FUZZ_SEED=";
 
-fn run_seeds(default: usize, mut passes: impl FnMut(u64) -> bool) {
+/// Runs `passes` on each seed of [`fuzz_seeds`], and fails with a replay command for each seed
+/// it returned `false` for, stopping at [`FAILURES_PER_RUN`].
+pub fn run_seeds(default: usize, mut passes: impl FnMut(u64) -> bool) {
     let mut failed: Vec<u64> = Vec::new();
     for seed in fuzz_seeds(default) {
         if !passes(seed) {
