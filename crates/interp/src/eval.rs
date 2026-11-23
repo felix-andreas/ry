@@ -951,7 +951,7 @@ unsafe fn leave_slots(owner: usize) {
 /// environment from the start would list them, formals first. `cause` names what makes the
 /// environment outlive a frame that is returning, for the profile summary. The caller has
 /// suspended collection.
-unsafe fn lift_frame(index: usize, cause: Option<Site>) -> R<()> {
+pub(crate) unsafe fn lift_frame(index: usize, cause: Option<Site>) -> R<()> {
     let frame = &mut interp().frames[index];
     if activity::enabled()
         && frame.env == nil()

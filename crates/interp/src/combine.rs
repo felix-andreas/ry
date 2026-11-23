@@ -47,7 +47,49 @@ unsafe fn do_c(call: &Call<'_>) -> R<Sexp> {
         }
     }
     if options == 0 {
-        return combine_items(Items::Args(call.args), recursive, use_names);
+        if call.args.iter().all(|arg| arg.tag == nil()) {
+            let values: smallvec::SmallVec<[Sexp; 8]> =
+                call.args.iter().map(|arg| arg.value).collect();
+            if let Some(result) = direct_c(call.call, &values)? {
+                return Ok(result);
+            }
+            return combine_items(Items::Args(call.args), recursive, use_names);
+        }
+        // `c(a = 1, b = 2)`: a tagged argument of one element without attributes takes its tag
+        // as its name, and the elements of an untagged one have no names, so the result is the
+        // concatenation and one names vector, without the naming walk.
+        let mut kind = SexpType::Nil;
+        let mut total = 0;
+        let plain = call.args.iter().all(|arg| {
+            let value = arg.value;
+            if arg.tag == nil() && value == nil() {
+                return true;
+            }
+            if !value.kind().is_atomic() || value.is_altrep() || value.attrib() != nil() {
+                return false;
+            }
+            if arg.tag != nil() && (length(value) != 1 || values::is_blank(arg.tag.car())) {
+                return false;
+            }
+            kind = coerce::higher_type(kind, value.kind());
+            total += length(value);
+            true
+        });
+        if !plain {
+            return combine_items(Items::Args(call.args), recursive, use_names);
+        }
+        let result = concatenate(kind, total, call.args.iter().map(|arg| arg.value))?;
+        // A fresh character vector holds blank strings, the name of an untagged element.
+        let names = alloc(SexpType::String, total)?;
+        let mut position = 0;
+        for arg in call.args {
+            if arg.tag != nil() {
+                values::set_elt(names, position, arg.tag.car());
+            }
+            position += length(arg.value);
+        }
+        values::set_attr(result, symbols.names, names)?;
+        return Ok(result);
     }
     let args: smallvec::SmallVec<[Arg; 8]> = call
         .args
@@ -200,31 +242,42 @@ pub(crate) unsafe fn do_unlist(call: &Call<'_>) -> R<Sexp> {
         object
     };
     let names = values::names(list);
-    if names == nil() {
-        // Without names on the list, elements that are `NULL` or atomic vectors without
-        // attributes give no names either, so they combine as `direct_c` combines them.
-        let mut kind = SexpType::Nil;
-        let mut total = 0;
-        let mut plain = true;
-        for index in 0..length(list) {
-            let value = list.element(index);
-            if value == nil() {
-                continue;
-            }
-            if !value.kind().is_atomic() || value.is_altrep() || value.attrib() != nil() {
-                plain = false;
-                break;
-            }
-            kind = coerce::higher_type(kind, value.kind());
-            total += length(value);
+    // Elements that are `NULL` or atomic vectors without attributes have no names of their own,
+    // so they combine as `direct_c` combines them, and only the list's names can name the result.
+    let count = length(list);
+    let mut kind = SexpType::Nil;
+    let mut total = 0;
+    let mut plain = true;
+    for index in 0..count {
+        let value = list.element(index);
+        if value == nil() {
+            continue;
         }
-        if plain {
-            return concatenate(
-                kind,
-                total,
-                (0..length(list)).map(|index| list.element(index)),
-            );
+        if !value.kind().is_atomic() || value.is_altrep() || value.attrib() != nil() {
+            plain = false;
+            break;
         }
+        kind = coerce::higher_type(kind, value.kind());
+        total += length(value);
+    }
+    if plain && (names == nil() || !use_names || total == 0) {
+        return concatenate(kind, total, (0..count).map(|index| list.element(index)));
+    }
+    // One element each: every element takes the list's name at its position, blank and `NA`
+    // names included. The names are a copy, because native code such as data.table's
+    // `setnames` rewrites a table's names vector in place.
+    if plain
+        && total == count
+        && (0..count).all(|index| length(list.element(index)) == 1)
+        && names.kind() == SexpType::String
+        && !names.is_altrep()
+        && names.attrib() == nil()
+        && length(names) == count
+    {
+        let result = concatenate(kind, total, (0..count).map(|index| list.element(index)))?;
+        let names = values::shallow_duplicate(names)?;
+        values::set_attr(result, symbols().names, names)?;
+        return Ok(result);
     }
     combine_items(Items::List { list, names }, recursive, use_names)
 }

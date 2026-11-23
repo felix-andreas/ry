@@ -9391,19 +9391,33 @@ unsafe fn leave_fast<const DISCARD: bool, const STEPPED: bool, const HOOKS: u8>(
     debug_assert!(frame.env == nil && frame.slots as usize == state.machine.header);
     // A counted reference to the environment may be one that dies with the frame, such as a
     // closure only the frame's slots hold, which `outliving_cause` works out.
-    if DISCARD
+    let outlived = DISCARD
         && (pending.refcount() != 0 || value == pending || heap.is_preserved(pending))
-        && eval::outliving_cause(depth - 1, value).is_some()
-    {
-        return None;
-    }
+        && match eval::outliving_cause(depth - 1, value) {
+            Some(cause) => {
+                // The variables move while nothing else can run, as in a lookup's move.
+                heap.inhibit_collection();
+                let lifted = eval::lift_frame(depth - 1, Some(cause));
+                heap.allow_collection();
+                // A failed lift leaves each variable in its slot or its cell and the frame
+                // on its slots, so the general return lifts again and raises the error.
+                if lifted.is_err() {
+                    return None;
+                }
+                true
+            }
+            None => false,
+        };
+    let frame = &interp.frames[depth - 1];
     if HOOKS == SUMMARIZED {
         let args = interp.frame_args.get_unchecked(frame.args as usize..);
         eval::count_package_call(frame.function, Some(frame), args);
     }
-    if DISCARD {
+    if DISCARD && !outlived {
         crate::forget_pending_closures(interp, depth - 1);
         heap.discard_frame(pending, value);
+    }
+    if DISCARD {
         pending.set_gp_bits(gp::COMPILED_FRAME, false);
     }
     let frame = &interp.frames[depth - 1];
@@ -9418,6 +9432,11 @@ unsafe fn leave_fast<const DISCARD: bool, const STEPPED: bool, const HOOKS: u8>(
     interp.restarts = restarts;
     interp.frame_args.truncate(args as usize);
     interp.method_vars.truncate(method_vars as usize);
+    if outlived {
+        // The environment is complete and the frame is gone, as after the general return.
+        let created = interp.frame_closures.get_unchecked(closures as usize..);
+        heap.release_frame(pending, value, created);
+    }
     interp.frame_closures.truncate(closures as usize);
     let header = state.machine.header;
     let registers = &mut interp.bytecode.registers;
@@ -11535,8 +11554,8 @@ unsafe fn prepare_plan(state: &Activation<'_, '_>, id: u32, arguments: Sexp) {
 /// `None`, having run nothing, when the call is anything else: `quote` or `envir` given, an
 /// argument that is not a value reading runs no R code for, `args` not a list, an element
 /// that `do.call` would evaluate (a name or a call), or a target found by name that the
-/// caller's own slots may bind. A builtin target with S3 dispatch runs only from a frame with
-/// an environment, because dispatch reads the caller's environment.
+/// caller's own slots may bind. A builtin target with S3 or S4 dispatch runs from a slot
+/// frame only when no element is an object, because dispatch reads the caller's environment.
 unsafe fn call_do_call(
     state: &mut Activation<'_, '_>,
     function: Sexp,
@@ -11602,22 +11621,22 @@ unsafe fn call_do_call(
         }
         _ => return Ok(None),
     };
-    match target.kind() {
-        SexpType::Closure => {}
-        SexpType::Builtin if !in_slots || eval::builtin_def(target)?.generic == Generic::None => {}
+    // A builtin dispatches only on an object, so from slots it runs when no argument is one.
+    let dispatches = match target.kind() {
+        SexpType::Closure => false,
+        SexpType::Builtin => in_slots && eval::builtin_def(target)?.generic != Generic::None,
         _ => return Ok(None),
-    }
+    };
     let count = length(list);
     let names = values::names(list);
     let mut args = eval::Args::new();
-    let mut items: SmallVec<[(Sexp, Sexp); 8]> = SmallVec::new();
-    items.push((nil(), head));
     for index in 0..count {
         let value = list.element(index);
         if matches!(
             value.kind(),
             SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode
-        ) {
+        ) || (dispatches && (value.is_object() || value.has_gp(gp::S4_OBJECT)))
+        {
             return Ok(None);
         }
         // As the internal does: an empty name tags nothing, and `NA` tags its argument `NA`.
@@ -11633,12 +11652,13 @@ unsafe fn call_do_call(
                 values::install_charsxp(name)?
             }
         };
-        items.push((tag, value));
         args.push(Arg { tag, value });
     }
-    let target_call = values::pairlist(&items, SexpType::Language)?;
-    let heap = crate::heap();
-    heap.root(target_call);
+    let mut target_call = nil();
+    for arg in args.iter().rev() {
+        target_call = values::triple(SexpType::Pairlist, arg.value, target_call, arg.tag)?;
+    }
+    let target_call = values::triple(SexpType::Language, head, target_call, nil())?;
     // The frame's slots hold `what` and `args`; `quote` and `envir` are missing and hold their
     // defaults, which a reify of the frame turns into promises.
     let slot_count = length(function.cdr().cdr().element(SLOTS).element(1));
@@ -15484,20 +15504,15 @@ unsafe fn lookup_outside(
             if value.car() != unbound() {
                 return Ok(value.car());
             }
-            return holding(held, || {
-                eval::eval_symbol_reporting(symbol, env, || lexical.call(), ArgumentReader::Getvar)
-            });
+            // The frame search found the promise, so force it here rather than repeat the
+            // search `eval_symbol` does.
+            let forced = holding(held, || eval::force_promise(value))?;
+            crate::heap().root(forced);
+            return Ok(forced);
         }
         Err(FrameBinding::Cell(cell)) => {
             let value = cell.cdr();
-            if value.kind() == SexpType::Promise && value.car() != unbound() {
-                return Ok(value.car());
-            }
-            if cell.has_gp(gp::ACTIVE_BINDING)
-                || value == missing_arg()
-                || value == unbound()
-                || value.kind() == SexpType::Promise
-            {
+            if cell.has_gp(gp::ACTIVE_BINDING) || value == missing_arg() || value == unbound() {
                 return holding(held, || {
                     eval::eval_symbol_reporting(
                         symbol,
@@ -15506,6 +15521,14 @@ unsafe fn lookup_outside(
                         ArgumentReader::Getvar,
                     )
                 });
+            }
+            if value.kind() == SexpType::Promise {
+                if value.car() != unbound() {
+                    return Ok(value.car());
+                }
+                let forced = holding(held, || eval::force_promise(value))?;
+                crate::heap().root(forced);
+                return Ok(forced);
             }
             return Ok(value);
         }
@@ -15518,9 +15541,9 @@ unsafe fn lookup_outside(
             if value.car() != unbound() {
                 return Ok(value.car());
             }
-            return holding(held, || {
-                eval::eval_symbol_reporting(symbol, env, || lexical.call(), ArgumentReader::Getvar)
-            });
+            let forced = holding(held, || eval::force_promise(value))?;
+            crate::heap().root(forced);
+            return Ok(forced);
         }
         if value != missing_arg() && value != unbound() {
             return Ok(value);

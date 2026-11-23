@@ -1,0 +1,54 @@
+[stdout]
+| List of 3
+|  $ before: Named num [1:2] 1 2
+|   ..- attr(*, "names")= chr [1:2] "a" "b"
+|  $ after : Named num [1:2] 1 2
+|   ..- attr(*, "names")= chr [1:2] "z" "b"
+|  $ names : chr [1:2] "z" "b"
+| List of 3
+|  $ before: Named num [1:2] 1 2
+|   ..- attr(*, "names")= chr [1:2] "a" "b"
+|  $ after : Named num [1:2] 1 2
+|   ..- attr(*, "names")= chr [1:2] "z" "b"
+|  $ names : chr [1:2] "z" "b"
+| List of 3
+|  $ before: Named num [1:2] 1 2
+|   ..- attr(*, "names")= chr [1:2] "a" "b"
+|  $ after : Named num [1:2] 1 2
+|   ..- attr(*, "names")= chr [1:2] "z" "b"
+|  $ names : chr [1:2] "z" "b"
+| -- a list made into a table by reference and renamed
+| List of 2
+|  $ : Named int [1:2] 1 2
+|   ..- attr(*, "names")= chr [1:2] "a" "b"
+|  $ : Named int [1:2] 1 2
+|   ..- attr(*, "names")= chr [1:2] "p" "q"
+| List of 2
+|  $ : Named int [1:2] 1 2
+|   ..- attr(*, "names")= chr [1:2] "a" "b"
+|  $ : Named int [1:2] 1 2
+|   ..- attr(*, "names")= chr [1:2] "p" "q"
+| List of 2
+|  $ : Named int [1:2] 1 2
+|   ..- attr(*, "names")= chr [1:2] "a" "b"
+|  $ : Named int [1:2] 1 2
+|   ..- attr(*, "names")= chr [1:2] "p" "q"
+| -- the unlisted vector's names change without the table's
+| List of 2
+|  $ : Named chr [1:2] "x" "y"
+|   ..- attr(*, "names")= chr [1:2] "changed" "b"
+|  $ : chr [1:2] "a" "b"
+| List of 2
+|  $ : Named chr [1:2] "x" "y"
+|   ..- attr(*, "names")= chr [1:2] "changed" "b"
+|  $ : chr [1:2] "a" "b"
+| List of 2
+|  $ : Named chr [1:2] "x" "y"
+|   ..- attr(*, "names")= chr [1:2] "changed" "b"
+|  $ : chr [1:2] "a" "b"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

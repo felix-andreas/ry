@@ -488,9 +488,13 @@ class Mechanisms(unittest.TestCase):
         self.assertNotIn(mechanisms.EMPTY, names)
 
     def test_the_loop_runs_inside_a_closure_and_takes_its_count_from_the_command_line(self):
-        script = mechanisms.program("k1(i)")
+        script = mechanisms.program("call: k1(i)", "k1(i)")
         self.assertIn("for (i in seq_len(n)) result <- k1(i)\n", script)
         self.assertIn("run(as.integer(commandArgs(TRUE)[1]))", script)
+
+    def test_only_an_s4_operation_loads_the_methods_prelude(self):
+        self.assertNotIn(mechanisms.S4_PRELUDE, mechanisms.program("call: k1(i)", "k1(i)"))
+        self.assertIn(mechanisms.S4_PRELUDE, mechanisms.program("s4: generic", "k1(i)"))
 
 
 class HotSelection(unittest.TestCase):

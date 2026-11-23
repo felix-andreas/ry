@@ -296,6 +296,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - An S4 method runs in place on a slot frame above its generic's (settled)
 - `object@name` is an instruction, and a slot write is checked without a call (settled)
 - String equality is a kernel, and the fast return asks what outlives the frame (settled)
+- Small combines skip the naming walk, and a lookup forces the promise it found (settled)
 
 ## Builtins and base R
 
