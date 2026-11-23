@@ -389,8 +389,8 @@ An `is.null()` test *narrows* the type for the rest of the function, so adding
 Values ry cannot model have the type `Unknown`, which fits everywhere, so one unmodeled construct
 never causes a cascade of false errors. The main sources are base `data.frame` columns, S4 and R6
 objects, and packages ry has no stub for. So a misspelled column in `read.csv("sales.csv")$totl`
-reports nothing, while the same typo on a `list(...)` record is an error. An annotation gives such a value a type, as `settings`
-got one [above](#annotate), and every later use is checked against it.
+reports nothing, while the same typo on a `list(...)` record is an error. An annotation gives such a
+value a type, as `settings` got one [above](#annotate), and every later use is checked against it.
 
 ry ships types for base R, the default packages, `data.table`, `dplyr`, `ggplot2` and `testthat`,
 and export lists for the rest of the tidyverse and other common packages. For any other package, a
@@ -698,7 +698,9 @@ strict
 
 Typing `df` as a `data.frame` clears the first error but not the second, because a `data.frame`'s
 columns are `Unknown`; a `DataFrame{amount: double[]}` clears both. A value declared `Any` is a
-deliberate opt-out and is not reported. Under strict mode, `ry run`, `ry R` and `ry load` refuse
+deliberate opt-out and is not reported. A checked annotation such as `#: double[]` over an `Unknown`
+value checks nothing, so strict mode reports it as well; `#: @if-unknown double[]` says the value is
+accepted unchecked. Under strict mode, `ry run`, `ry R` and `ry load` refuse
 code with a strict-mode error, and a `# typing: strict` comment turns it on for one file.
 
 Most of what strict mode asks for is already known to inference. `ry check --annotate` writes the

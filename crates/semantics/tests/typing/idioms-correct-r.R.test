@@ -180,7 +180,7 @@ retries <- function(config = NULL) {
 }
 second <- function(config = NULL) config[["name"]]
 #++++
-retries: <T> fn([config]: T) -> integer
+retries: <T> fn([config]: T) -> Unknown
 second: <T> fn([config]: T) -> Unknown
 
 #---- a_name_missing_from_an_array_like_list_reads_as_null
@@ -197,7 +197,7 @@ f <- function(...) {
   if (is.null(dots$main)) "untitled" else dots$main
 }
 #++++
-f: fn(...: Any) -> character
+f: fn(...: Any) -> Unknown
 
 #---- matrix_indexing_is_unchecked
 cell <- function(m) {

@@ -409,11 +409,11 @@ run <- function() {
   list(total = total, head = head, payload = payload, front = front)
 }
 #++++
-sum_tree: <T> fn(node: T | NULL) -> integer
+sum_tree: <T> fn(node: T | NULL) -> Unknown
 first_element: <T> fn(x: T) -> Unknown
 field_of: <T> fn(record: T) -> Unknown
 leading_slice: <T> fn(x: T) -> Unknown
-run: fn() -> list{total: integer, head: Unknown, payload: Unknown, front: Unknown}
+run: fn() -> list{total: Unknown, head: Unknown, payload: Unknown, front: Unknown}
 
 #---- combine_tolerates_non_concrete_arguments
 prepend_zero <- function(x) c(x, 0L)

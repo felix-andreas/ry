@@ -3148,7 +3148,9 @@ join does not merge or coerce branch types beyond unification; it records the al
 - Two branches that are both still open are tied to each other.
   `function(value, fallback) if (is.null(value)) fallback else value` is
   `<T> fn(value: T | NULL, [fallback]: T) -> T`.
-- An `Unknown` branch makes the whole conditional `Unknown`.
+- An `Unknown` branch makes the whole conditional `Unknown`, so `if (flag) 1L else df$count` is
+  `Unknown`. The exception is a branch whose `Unknown` comes from a recursive call the checker is
+  still working out: it joins as the other branch, which is how `fact` converges.
 - An `if` whose value is discarded, such as a statement in the middle of a block, does not join its
   branches at all, so a branch that only has a side effect never ties its types to the other
   branch's.
@@ -5026,11 +5028,29 @@ be typed. A declaration whose return type is `Unknown` produces no finding at it
 A reference to a binding defined in this project is not an origin; the binding's own definition is
 reported instead, so one undetermined value does not produce a finding in every file that reads it.
 An unresolved bare name is not an origin either, because naming already reports it. An unresolved
-`pkg::name` is currently reported both ways. A value under any `#:` annotation (checked, `@trust`,
+`pkg::name` is reported both ways. A value under any `#:` annotation (checked, `@trust`,
 `@if-unknown`, or `@new`) is not an origin, because the annotation gives it a type, and neither is
 anything inside that value: `#: double[]` above `x <- as.numeric(df$age)` covers `df$age`. A function
 literal or a braced block inside the value keeps its own origins, because its statements can be
 annotated where they are.
+
+The one exception is a checked annotation over a value whose own type is `Unknown`. Such an
+annotation checks nothing, because `Unknown` satisfies every type, so it is reported in place of the
+origins it covers, and `@if-unknown` is the way to accept the value unchecked:
+
+```r
+total <- function(df: data.frame) -> double {
+  #: double[]
+  amount <- as.numeric(df$amount)   # covered: `as.numeric` returns `double[]`
+
+  #: double[]
+  prices <- df$price                # strict: the annotation checks nothing
+
+  #: @if-unknown double[]
+  costs <- df$cost                  # accepted unchecked
+  sum(amount) + sum(prices) + sum(costs)
+}
+```
 
 ### Native functions
 

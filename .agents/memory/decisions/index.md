@@ -153,6 +153,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `new()` is checked against the slots `setClass` writes out (settled)
 - S3 methods are held to their package generic's formals, by `R CMD check`'s rule
 - `sapply`, `mapply` and `Map` take their shape from the callback's return, after the stub call
+- In strict mode, a checked annotation over an `Unknown` value is reported
+- An `Unknown` branch makes an `if` `Unknown`, unless it read a recursion placeholder
 
 ## Analysis core
 

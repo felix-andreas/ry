@@ -354,7 +354,7 @@ f <- function(record) {
   if (is.null(record$value)) 0L else record$value
 }
 #++++
-f: <T> fn(record: T) -> integer
+f: <T> fn(record: T) -> Unknown
 
 #---- a_field_null_test_narrows_the_field
 use <- function(x: character) -> character x
@@ -1275,3 +1275,28 @@ use <- function(limit) {
 #++++
 check_limit: <T> fn(x: T) -> integer | character
 use: <T> fn(limit: T) -> integer
+
+#==== unknown_branches
+#---- an_unknown_branch_makes_the_if_unknown
+f <- function(flag, x) if (flag) 1L else x %then% 2L
+#++++
+f: <T> fn(flag: logical, [x]: T) -> Unknown
+
+#---- a_recursive_call_still_joins_as_the_typed_branch
+fact <- function(n) if (n <= 1L) 1L else n * fact(n - 1L)
+#++++
+fact: fn(n: integer) -> integer
+
+#---- mutual_recursion_converges_through_the_placeholder
+is_zero <- function(n) if (n == 0L) 1L else step_down(n)
+step_down <- function(n) is_zero(n - 1L)
+#++++
+is_zero: <T: arithmetic> fn(n: T) -> integer
+step_down: <T: arithmetic> fn(n: T) -> integer
+
+#---- a_cycle_with_a_genuine_unknown_stays_unknown
+first <- function(n) if (n == 0L) 1L %then% 2L else second(n)
+second <- function(n) first(n - 1L)
+#++++
+first: <T: arithmetic> fn(n: T) -> Unknown
+second: <T: arithmetic> fn(n: T) -> Unknown

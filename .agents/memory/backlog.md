@@ -2206,12 +2206,6 @@ same shape of problem.
 One trap came out of the work that returned the `matrix` nominal: making a constructor return a real
 nominal without also declaring that class's operator methods turns every `m + 1` into a false error.
 
-### Everything from a `data.frame` is `Unknown`, and `Unknown` satisfies every annotation
-
-On data-frame-heavy code, annotations therefore look protective and are not. This is the design
-consequence that decides the tool's value for analysis users. It needs at minimum a way to see that
-a check was skipped, which is what strict mode does once it reports origins.
-
 ### An unannotated helper that wraps an operator over a class fails, and the tie is why
 
 `add_layer <- function(plot, layer) plot + layer` infers `<T: numeric> fn(plot: T, layer: T)`, which
@@ -2279,14 +2273,6 @@ Only a shape-mirroring return, meaning "the same record", fixes it, and the type
 for a stub to say that. `rev` is the case where that claim would be exactly right, because it
 reorders and drops nothing, while `head`, `tail` and `Filter` genuinely may drop a name and are
 correctly nullable. This is the same family as the data.frame row-type and matrix-shape designs.
-
-### `Unknown` is both the gradual top and the recursion fixpoint's seed
-
-The fixpoint starts every member at `Unknown`, so a join must keep the other side of an `Unknown`
-branch, or recursion never sharpens. That is why `if (c) 1L else untyped()` is `integer` rather than
-`integer | Unknown`, and the reference says so. Absorbing `Unknown` at joins, which is the gradual
-reading, broke recursion convergence when it was tried. The clean fix is a separate bottom for the
-seed, so a join can absorb a genuine `Unknown` while the fixpoint starts from nothing.
 
 ### Overload candidates worth adding when the area is touched
 

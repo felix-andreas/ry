@@ -174,7 +174,7 @@ f <- function(cond) {
 }
 #++++
 == R/main.R
-f: fn(cond: logical) -> integer
+f: fn(cond: logical) -> Unknown
 63..64 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins
 
 #---- while_body_read_sees_write_around_back_edge

@@ -2159,3 +2159,21 @@ lowering path and a third way for two annotations to disagree, for no case `#:` 
 - The checker types the call through the stub first (so the callback is checked against the elements), then refines: a scalar-like return gives `T[]`, a literal `simplify = FALSE` gives `list[T]`, anything else keeps `Any`. Names follow R (a named input, or a character input unless `USE.NAMES = FALSE`).
 - The scalar-like claim is trusted as length one, the same trust the vector rules already extend, so a callback typed scalar that returns several elements is a missed matrix rather than a false error.
 - `tapply` stays `Any`: its result is an array shaped by the groups, which needs the matrix-shape design.
+
+## In strict mode, a checked annotation over an `Unknown` value is reported
+
+**Status:** built (`StrictOriginKind::UncheckedAnnotation` in `crates/semantics/src/check.rs`).
+
+- `Unknown` satisfies every type, so `#: double[]` over `df$price` checks nothing, yet it covered the value's strict origins and left no trace. On data-frame code that made annotations look protective when they were not.
+- The annotation still covers the origins inside the value (one finding, not one per `Unknown` read), and is reported in their place at the value's range. `@if-unknown` is the explicit "accept unchecked" form, so it, `@trust` and `@new` stay silent, and so does a checked annotation whose declared type is `Any` or `Unknown`.
+- Only the value's own type counts: `#: double[]` over `as.numeric(df$age)` checks a known `double[]` and covers `df$age` as before.
+- The strict messages for an undetermined binding and an undeclared reference name `#: @if-unknown TYPE` as the fix, because a plain annotation would now be reported in turn.
+
+## An `Unknown` branch makes an `if` `Unknown`, unless it read a recursion placeholder
+
+**Status:** built (`MemberExports::pending`, `GlobalEnv::pending_reads` and `Checker::placeholder_reads`).
+
+- `Unknown` served two roles: the gradual top and the seed of the recursion fixpoint (a group member's export in round 0, a local function's read of itself before its write). Joining an `Unknown` branch away let recursion converge, but also typed `if (flag) 1L else df$count` as `integer`, a false type on untyped data.
+- A separate bottom type would need a new `TyKind` handled at every `Unknown` site. Instead the placeholder is tracked by provenance: a group export is `pending` when it is the seed, or when its member read a pending export and still exports an `Unknown`. A read of a captured slot before any write is a placeholder too. `infer_if` compares the read counts before and after each branch.
+- An `Unknown` branch that read no placeholder makes the `if` `Unknown`; one that did joins as the other branch. Later rounds read computed exports, so a genuine `Unknown` still wins at the fixpoint (`a_cycle_with_a_genuine_unknown_stays_unknown`), while `pending` keeps mutual recursion from oscillating between rounds.
+- A branch that mixes a genuine `Unknown` with a placeholder read keeps the old join. That is imprecise but never a false error.

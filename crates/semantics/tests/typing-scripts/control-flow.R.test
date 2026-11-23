@@ -478,7 +478,7 @@ u <- 1L %undeclared% 2L
 if (TRUE) 1L else u
 #++++
 u: Unknown
-integer
+Unknown
 
 #==== variable_joins
 #---- conditional_retype_joins_with_prior_state

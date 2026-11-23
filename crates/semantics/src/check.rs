@@ -747,6 +747,8 @@ pub enum StrictOriginKind {
     /// An unannotated parameter nothing constrains, so it accepts any value unchecked.
     /// `expression` is the function and `range` the parameter's name.
     UntypedParameter(Symbol),
+    /// A checked annotation over a value whose type is undetermined, so it checks nothing.
+    UncheckedAnnotation,
 }
 
 /// No method has a default body: adding a fact must be a compile error at every
@@ -796,6 +798,10 @@ pub trait GlobalEnv<'db> {
     /// Whether the project or the file defines a `$` method (`$.vs`), which R dispatches on a
     /// class attribute that `class(x) <- "vs"` sets on an atomic vector no type tracks.
     fn defines_dollar_method(&self) -> bool;
+
+    /// How many reads so far served a cyclic-group export that may still hold the fixpoint's
+    /// seed, so an `Unknown` read after it may be a value the fixpoint has not computed yet.
+    fn pending_reads(&self) -> usize;
 }
 
 /// Perf-witness instrument; fixpoint re-runs make it exceed the item count.
@@ -923,6 +929,7 @@ fn check_item_in<'db>(
         late_triggers: SmallVec::new(),
         body_range: TextRange::default(),
         capture_repass_needed: false,
+        placeholder_reads: 0,
         superassign_seeds: SmallVec::new(),
         pre_materialized: Column::new_in(arena, bindings),
         loop_jumps: Vec::new(),
@@ -1835,6 +1842,9 @@ struct Checker<'db, 'a> {
     body_range: TextRange,
     /// Closures were inferred against an incomplete capture join, so the body re-checks once.
     capture_repass_needed: bool,
+    /// Reads of a captured slot before any write, whose `Unknown` is a placeholder the
+    /// capture repass replaces, like a pending group export ([`GlobalEnv::pending_reads`]).
+    placeholder_reads: usize,
     /// Per function body: the variable each `<<-`-written enclosing slot reads beside its
     /// enclosing type on entry, and whether the body's first write has bound it yet. A body
     /// seeds the few slots it writes with `<<-`, so the list is searched, not indexed.
@@ -4841,7 +4851,21 @@ impl<'db, 'a> Checker<'db, 'a> {
             return value_ty;
         };
         if annotation.declared.is_some() || annotation.new_nominal.is_some() {
-            self.annotation_covers(value);
+            // A checked annotation over a value of undetermined type checks nothing, so strict
+            // mode says so at the annotated value instead of accepting it as a declaration.
+            let unchecked = annotation.new_nominal.is_none()
+                && !annotation.trusted
+                && !annotation.if_unknown
+                && annotation.declared.as_ref().is_some_and(|declared| {
+                    !matches!(declared.body.kind(self.db), TyKind::Unknown | TyKind::Any)
+                })
+                && matches!(
+                    self.table.resolve(self.db, value_ty).kind(self.db),
+                    TyKind::Unknown
+                );
+            if self.annotation_covers(value) && unchecked {
+                self.record_strict_origin(value, StrictOriginKind::UncheckedAnnotation);
+            }
         }
         if let Some((name, arguments, _)) = &annotation.new_nominal {
             let scheme = self.check_new_nominal(*name, arguments, value, value_ty);
@@ -5020,9 +5044,10 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// the value it types: `#: double[]` over `as.numeric(d$age)` covers `d$age`. A function
     /// literal or braced block inside keeps its findings, because its own statements can be
     /// annotated where they are.
-    fn annotation_covers(&mut self, value: ExprId) {
+    /// Drops the strict origins inside an annotated value, and says whether there were any.
+    fn annotation_covers(&mut self, value: ExprId) -> bool {
         if self.strict_origins.is_empty() {
-            return;
+            return false;
         }
         let mut covered = FxHashSet::default();
         let mut pending = vec![value];
@@ -5038,8 +5063,10 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             self.module.for_each_child(id, |child| pending.push(child));
         }
+        let before = self.strict_origins.len();
         self.strict_origins
             .retain(|origin| !covered.contains(&origin.expression));
+        self.strict_origins.len() < before
     }
 
     fn literal_ty(&mut self, literal: &LiteralKind) -> Ty<'db> {
@@ -5261,6 +5288,9 @@ impl<'db, 'a> Checker<'db, 'a> {
                     if let Some(&join) = self.capture_joins.get(slot) {
                         return join;
                     }
+                    // A local function's read of itself or of a later local function: the
+                    // repass fills the slot in, so this `Unknown` is a placeholder.
+                    self.placeholder_reads += 1;
                 } else if let Some(observed) = self.materialize_pre_state(slot, false) {
                     return observed;
                 }
@@ -6412,7 +6442,9 @@ impl<'db, 'a> Checker<'db, 'a> {
         if let Some(guard) = &guard {
             self.apply_refinements(&guard.true_edge);
         }
+        let pending_before = self.pending_reads();
         let then_ty = self.infer(then_branch);
+        let then_pending = self.pending_reads() != pending_before;
         let then_diverges = self.diverges(then_branch);
         let mut then_writes = self.environment.writes_since(mark);
         // A refinement the branch never overwrote is the value it narrowed, not a new one.
@@ -6443,10 +6475,12 @@ impl<'db, 'a> Checker<'db, 'a> {
         if let Some(guard) = &guard {
             self.apply_refinements(&guard.false_edge);
         }
+        let pending_before = self.pending_reads();
         let (else_ty, else_diverges) = match else_branch {
             Some(else_branch) => (self.infer(else_branch), self.diverges(else_branch)),
             None => (null(self.db), false),
         };
+        let else_pending = self.pending_reads() != pending_before;
 
         // `if (exists("emptyenv")) emptyenv() else NULL` probes for a function the library
         // ships, so the else branch is a fallback for older R that never runs here.
@@ -6515,17 +6549,19 @@ impl<'db, 'a> Checker<'db, 'a> {
                 for fact in correlations {
                     self.environment.establish(fact);
                 }
-                // A library call its untyped arguments left undecided may return anything, so
-                // the `if` may too: renv's `if (is.null(FUN.VALUE)) lapply(...) else vapply(...,
-                // FUN.VALUE = FUN.VALUE)` is a list only on one path. Any other `Unknown` branch
-                // still joins as the typed one, because a recursive call's placeholder is one.
-                let undecided = |checker: &mut Self, branch: ExprId, ty: Ty<'db>| {
+                // An `Unknown` branch may be anything, so the `if` may be too. The exception is
+                // a branch that read a recursive group's export the fixpoint has not computed
+                // yet: that `Unknown` is a placeholder, and joining it away is what lets
+                // `if (n <= 1) 1L else n * fact(n - 1)` converge. A library call its untyped
+                // arguments left undecided is `Unknown` whatever it read.
+                let unknown_branch = |checker: &mut Self, branch: ExprId, ty: Ty<'db>, pending| {
                     let ty = checker.table.resolve(checker.db, ty);
-                    checker.ends_in_undecided_call(branch)
-                        && matches!(ty.kind(checker.db), TyKind::Unknown)
+                    matches!(ty.kind(checker.db), TyKind::Unknown)
+                        && (!pending || checker.ends_in_undecided_call(branch))
                 };
-                let joined = if undecided(self, then_branch, then_ty)
-                    || else_branch.is_some_and(|branch| undecided(self, branch, else_ty))
+                let joined = if unknown_branch(self, then_branch, then_ty, then_pending)
+                    || else_branch
+                        .is_some_and(|branch| unknown_branch(self, branch, else_ty, else_pending))
                 {
                     self.join_branch_values(then_ty, else_ty);
                     unknown(self.db)
@@ -8423,6 +8459,10 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     /// Whether `id`'s value is the result of a library call its untyped arguments left
     /// undecided between candidates.
+    fn pending_reads(&self) -> usize {
+        self.placeholder_reads + self.globals.map_or(0, |globals| globals.pending_reads())
+    }
+
     fn ends_in_undecided_call(&self, id: ExprId) -> bool {
         match self.module.kind(id) {
             ExpressionKind::Call { .. } => self.undecided_calls.contains(id),

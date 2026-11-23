@@ -3136,21 +3136,26 @@ pub fn strict_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 StrictOriginKind::LoopWidened(_)
                 | StrictOriginKind::RecursiveUnknown(_)
                 | StrictOriginKind::UntypedParameter(_)
-                | StrictOriginKind::UnknownColumns { .. } => None,
+                | StrictOriginKind::UnknownColumns { .. }
+                | StrictOriginKind::UncheckedAnnotation => None,
                 _ => assignment_targets.get(&origin.expression),
             };
             let message = if let Some(name) = assignment_target {
                 format!(
-                    "strict mode: could not determine the type of `{name}`; add a type annotation"
+                    "strict mode: could not determine the type of `{name}`. Annotate it with `#: @if-unknown TYPE` to accept it unchecked"
                 )
             } else {
                 match &origin.kind {
+                    StrictOriginKind::UncheckedAnnotation => {
+                        "strict mode: this value's type is undetermined (`Unknown`), so its annotation checks nothing. Write the annotation as `@if-unknown TYPE` to accept the value unchecked"
+                            .to_owned()
+                    }
                     StrictOriginKind::UnsupportedConstruct => {
                         "strict mode: this expression has an undetermined type (`Unknown`)"
                             .to_owned()
                     }
                     StrictOriginKind::UndeterminedReference(name) => format!(
-                        "strict mode: could not determine the type of `{name}`; it has no known type"
+                        "strict mode: `{name}` has no declared type, so the code that uses it is not checked. Declare it in a `.Rtypes` stub, or annotate the result with `#: @if-unknown TYPE`"
                     ),
                     StrictOriginKind::LoopWidened(name) => format!(
                         "strict mode: could not determine the type of `{name}`, because it does not stabilize across loop iterations. Add a type annotation"

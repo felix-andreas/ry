@@ -32,7 +32,7 @@ use {
     salsa::plumbing::AsId,
     smallvec::SmallVec,
     std::{
-        cell::RefCell,
+        cell::{Cell, RefCell},
         collections::{BTreeMap, BTreeSet},
         num::NonZero,
         sync::{
@@ -3238,6 +3238,10 @@ fn canonical_position<'db>(
 pub struct MemberExports<'db> {
     pub scheme: types::TypeScheme<'db>,
     pub top_level_bindings: ThinVec<(Symbol, types::TypeScheme<'db>)>,
+    /// Whether an `Unknown` in these exports may come from the fixpoint's seed rather than from
+    /// the code: the seed itself, or a member that read a pending export and still carries an
+    /// `Unknown`. A reader treats such an `Unknown` as a value not computed yet.
+    pub pending: bool,
 }
 
 /// Independent of which member was queried first: each round re-checks every member
@@ -3262,9 +3266,10 @@ pub fn scc_exports<'db>(
             .iter()
             .map(|&item| {
                 let globals = SalsaGlobals::for_item(db, item, Some(&exports));
+                let check = check_item_against(db, item, &globals);
                 (
                     item,
-                    member_exports(db, check_item_against(db, item, &globals)),
+                    member_exports(db, check, globals.pending_reads.get() > 0),
                 )
             })
             .collect();
@@ -3280,16 +3285,28 @@ pub fn scc_exports<'db>(
 fn member_exports<'db>(
     db: &'db dyn Db,
     check: Option<check::ItemCheck<'db>>,
+    read_pending: bool,
 ) -> MemberExports<'db> {
     let unknown = || types::TypeScheme::monomorphic(types::unknown(db));
     match check {
-        Some(check) => MemberExports {
-            scheme: check.scheme.unwrap_or_else(unknown),
-            top_level_bindings: check.top_level_bindings,
-        },
+        Some(check) => {
+            let scheme = check.scheme.unwrap_or_else(unknown);
+            let pending = read_pending
+                && (types::contains_unknown(db, scheme.body)
+                    || check
+                        .top_level_bindings
+                        .iter()
+                        .any(|(_, binding)| types::contains_unknown(db, binding.body)));
+            MemberExports {
+                scheme,
+                top_level_bindings: check.top_level_bindings,
+                pending,
+            }
+        }
         None => MemberExports {
             scheme: unknown(),
             top_level_bindings: ThinVec::new(),
+            pending: read_pending,
         },
     }
 }
@@ -3312,6 +3329,7 @@ fn unknown_group_exports<'db>(
                     let exports = MemberExports {
                         scheme: unknown.clone(),
                         top_level_bindings,
+                        pending: true,
                     };
                     (item, exports)
                 })
@@ -3582,7 +3600,10 @@ struct SalsaGlobals<'db, 'a> {
     /// The scheme each linked name resolved to in this check, at twice the name's position
     /// plus one for a deferred read. A body reads the same few globals many times, and
     /// resolving one reads the binder's check through salsa and copies its scheme.
-    schemes: RefCell<Vec<Option<Option<types::TypeScheme<'db>>>>>,
+    /// with whether the read served a pending group export.
+    schemes: RefCell<Vec<Option<(Option<types::TypeScheme<'db>>, bool)>>>,
+    /// How many reads served a pending group export ([`MemberExports::pending`]).
+    pending_reads: Cell<usize>,
 }
 
 /// The type definitions a file sees, looked up one name at a time: a script's own
@@ -3878,6 +3899,7 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
             library: stubs::stubs(db),
             links: item_links(db, item),
             schemes: RefCell::default(),
+            pending_reads: Cell::new(0),
         }
     }
 
@@ -3952,8 +3974,17 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
 
     fn item_scheme(&self, item: Item<'db>) -> types::TypeScheme<'db> {
         match self.group.and_then(|group| group.get(&item)) {
-            Some(exports) => exports.scheme.clone(),
+            Some(exports) => {
+                self.note_pending(exports);
+                exports.scheme.clone()
+            }
             None => global_scheme(self.db, item),
+        }
+    }
+
+    fn note_pending(&self, exports: &MemberExports<'db>) {
+        if exports.pending {
+            self.pending_reads.set(self.pending_reads.get() + 1);
         }
     }
 
@@ -3961,6 +3992,7 @@ impl<'db, 'a> SalsaGlobals<'db, 'a> {
         let Some(exports) = self.group.and_then(|group| group.get(&item)) else {
             return statement_binding_scheme(self.db, item, types::Name::new(self.db, name));
         };
+        self.note_pending(exports);
         exports
             .top_level_bindings
             .iter()
@@ -4060,10 +4092,14 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
             .position(name)
             .map(|position| 2 * position + usize::from(deferred));
         if let Some(slot) = slot
-            && let Some(Some(scheme)) = self.schemes.borrow().get(slot)
+            && let Some(Some((scheme, pending))) = self.schemes.borrow().get(slot)
         {
+            if *pending {
+                self.pending_reads.set(self.pending_reads.get() + 1);
+            }
             return scheme.clone();
         }
+        let before = self.pending_reads.get();
         let scheme = self.lookup_scheme(name, deferred);
         if let Some(slot) = slot {
             let mut schemes = self.schemes.borrow_mut();
@@ -4071,10 +4107,14 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
                 schemes.resize(2 * self.links.name_count(), None);
             }
             if let Some(resolved) = schemes.get_mut(slot) {
-                *resolved = Some(scheme.clone());
+                *resolved = Some((scheme.clone(), self.pending_reads.get() != before));
             }
         }
         scheme
+    }
+
+    fn pending_reads(&self) -> usize {
+        self.pending_reads.get()
     }
 
     fn defined_in_project(&self, name: Symbol, deferred: bool) -> bool {

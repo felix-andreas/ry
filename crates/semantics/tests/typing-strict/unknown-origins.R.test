@@ -14,7 +14,7 @@ x <- 1L %then% 2L
 #++++
 == R/main.R
 x: Unknown
-5..17 error[strict] strict mode: could not determine the type of `x`; add a type annotation
+5..17 error[strict] strict mode: could not determine the type of `x`. Annotate it with `#: @if-unknown TYPE` to accept it unchecked
 5..17 error[strict] strict mode: this calls `%then%`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
 
 #---- cascade_single_origin_one_origin_used_downstream_flags_once
@@ -27,7 +27,7 @@ z <- x * 2L
 x: Unknown
 y: Unknown
 z: Unknown
-5..17 error[strict] strict mode: could not determine the type of `x`; add a type annotation
+5..17 error[strict] strict mode: could not determine the type of `x`. Annotate it with `#: @if-unknown TYPE` to accept it unchecked
 5..17 error[strict] strict mode: this calls `%then%`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
 
 #---- existing_type_error_does_not_also_strict_flag
@@ -57,7 +57,7 @@ y <- x
 #++++
 == R/a.R
 x: Unknown
-5..17 error[strict] strict mode: could not determine the type of `x`; add a type annotation
+5..17 error[strict] strict mode: could not determine the type of `x`. Annotate it with `#: @if-unknown TYPE` to accept it unchecked
 5..17 error[strict] strict mode: this calls `%then%`, which is not declared pure, so it runs every time the package loads. A file in `R/` may only define things at its top level: move the call into a function, `.onLoad`, or the script `ry run` starts
 == R/b.R
 y: Unknown
@@ -146,7 +146,7 @@ port <- config@port
 == R/main.R
 config: I64
 port: Unknown
-21..32 error[strict] strict mode: could not determine the type of `port`; add a type annotation
+21..32 error[strict] strict mode: could not determine the type of `port`. Annotate it with `#: @if-unknown TYPE` to accept it unchecked
 
 #---- a_slot_of_an_any_value_is_any
 # The value is already unchecked, so its slot is too, as with `$` on `Any`.
@@ -261,7 +261,7 @@ f <- function(x) {
 == R/main.R
 f: fn(x: integer) -> integer
 
-#---- plain_annotation_on_a_binding_covers_an_unknown_source
+#---- a_checked_annotation_over_an_unknown_value_reports_the_skipped_check
 #~~~~ R/main.R
 #: fn(x: integer) -> integer
 f <- function(x) {
@@ -272,6 +272,19 @@ f <- function(x) {
 #++++
 == R/main.R
 f: fn(x: integer) -> integer
+68..79 error[strict] strict mode: this value's type is undetermined (`Unknown`), so its annotation checks nothing. Write the annotation as `@if-unknown TYPE` to accept the value unchecked
+
+#---- a_checked_annotation_over_a_known_value_covers_the_unknown_inside
+#~~~~ R/main.R
+#: fn(x: integer) -> double[]
+f <- function(x) {
+  #: double[]
+  y <- as.numeric(x %then% 2L)
+  y
+}
+#++++
+== R/main.R
+f: fn(x: integer) -> double[]
 
 #---- unannotated_binding_of_an_unknown_source_is_the_origin
 #~~~~ R/main.R
@@ -283,7 +296,7 @@ f <- function(x) {
 #++++
 == R/main.R
 f: fn(x: integer) -> integer
-55..66 error[strict] strict mode: could not determine the type of `y`; add a type annotation
+55..66 error[strict] strict mode: could not determine the type of `y`. Annotate it with `#: @if-unknown TYPE` to accept it unchecked
 
 #==== strict_package_origins
 #---- r6_constructor_result_is_a_strict_origin
@@ -299,7 +312,7 @@ opening <- function() {
 == R/main.R
 Account: Any
 opening: fn() -> double
-142..155 error[strict] strict mode: could not determine the type of `account`; add a type annotation
+142..155 error[strict] strict mode: could not determine the type of `account`. Annotate it with `#: @if-unknown TYPE` to accept it unchecked
 
 #---- qualified_untyped_export_is_a_strict_origin
 #~~~~ R/main.R
@@ -309,7 +322,7 @@ f <- function(x) glue::glue("a {x}")
 #++++
 == R/main.R
 f: fn(x: character) -> character
-77..87 error[strict] strict mode: could not determine the type of `glue`; it has no known type
+77..87 error[strict] strict mode: `glue` has no declared type, so the code that uses it is not checked. Declare it in a `.Rtypes` stub, or annotate the result with `#: @if-unknown TYPE`
 
 #---- bare_untyped_export_of_an_imported_package_is_a_strict_origin
 #~~~~ R/main.R
@@ -320,7 +333,7 @@ f <- function(x) glue("a {x}")
 #++++
 == R/main.R
 f: fn(x: character) -> character
-101..105 error[strict] strict mode: could not determine the type of `glue`; it has no known type
+101..105 error[strict] strict mode: `glue` has no declared type, so the code that uses it is not checked. Declare it in a `.Rtypes` stub, or annotate the result with `#: @if-unknown TYPE`
 
 #---- bare_untyped_export_of_an_attached_package_is_a_strict_origin
 #~~~~ scripts/run.R
@@ -332,7 +345,7 @@ greeting <- glue("a {1}")
 Any
 greeting: Unknown
 41..49 warning[unused] `greeting` is assigned but never used
-53..57 error[strict] strict mode: could not determine the type of `glue`; it has no known type
+53..57 error[strict] strict mode: `glue` has no declared type, so the code that uses it is not checked. Declare it in a `.Rtypes` stub, or annotate the result with `#: @if-unknown TYPE`
 
 #---- a_call_to_an_undeclared_base_function_is_a_strict_origin
 #~~~~ R/main.R
@@ -347,7 +360,7 @@ home_coerced <- function() {
 == R/main.R
 home: fn() -> character
 home_coerced: fn() -> character
-40..46 error[strict] strict mode: could not determine the type of `R.home`; it has no known type
+40..46 error[strict] strict mode: `R.home` has no declared type, so the code that uses it is not checked. Declare it in a `.Rtypes` stub, or annotate the result with `#: @if-unknown TYPE`
 
 #---- a_project_function_named_like_an_undeclared_base_function_is_not_an_origin
 #~~~~ R/main.R
