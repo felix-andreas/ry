@@ -4455,7 +4455,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .expect("return frames stay balanced around body inference");
                 let return_ty = self.join_early_returns(&early_returns, trailing_ty, *body);
                 let default_reads = self.default_reads(&module[parameters], &uses, &named);
-                let flag_return = self.flag_return(&module[parameters], *body, early_returns.len());
+                let flag_return = self.flag_return(&module[parameters], *body, &early_returns);
                 let null_unless =
                     self.null_unless(&module[parameters], *body, &early_returns, trailing_ty);
                 let reduces = if early_returns.is_empty() {
@@ -10884,6 +10884,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let mut fitting_returns: Vec<Ty<'db>> = Vec::new();
         let mut fits_another_class = false;
         let mut declared_any = false;
+        let mut declared_own = false;
         for (class_index, class) in classes.iter().enumerate() {
             for method in [
                 method_symbol(spelling, class),
@@ -10903,6 +10904,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     continue;
                 };
                 declared_any = true;
+                declared_own |= class_index < own_classes;
                 for scheme in candidates.iter() {
                     let snapshot = self.table.snapshot();
                     let instantiated = self.instantiate(scheme);
@@ -10957,7 +10959,12 @@ impl<'db, 'a> Checker<'db, 'a> {
             });
         }
         // A class that declares the operator but fits no candidate is a real contract
-        // mismatch (`Date + Date` errors in R too).
+        // mismatch (`Date + Date` errors in R too). Only other classes' methods were tried
+        // for an untyped operand, and when the project registers a method on a class no
+        // type tracks (an S7 `method(`+`, ...)`), the operand may be of that class.
+        if declared_any && !declared_own && globals.has_untracked_arithmetic_class() {
+            return Some(unknown(self.db));
+        }
         if declared_any {
             let left = self.table.resolve(self.db, left);
             let right = self.table.resolve(self.db, right);
@@ -11546,6 +11553,12 @@ impl<'db, 'a> Checker<'db, 'a> {
             || matches!(resolved_right.kind(self.db), TyKind::Any | TyKind::Unknown)
         {
             return unknown(self.db);
+        }
+        // R deparses a language object to a string before comparing it, so ape's
+        // `formula(object) == ~1` is a plain test.
+        let language = |ty: Ty<'db>| matches!(ty.kind(self.db), TyKind::Named(name, _) if name.text(self.db) == "formula");
+        if language(resolved_left) || language(resolved_right) {
+            return scalar(self.db, Atomic::Logical);
         }
 
         let is_list = |ty: Ty<'db>| {
@@ -12144,12 +12157,14 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// from the call alone, so its two branch types are kept beside the joined return. A
     /// branch may also end in `return(value)`, as pracma's `gcd(..., extended = FALSE)` does,
     /// or be an earlier `if (flag) return(value)` before the tail, as in Matrix's `iam(j, both =
-    /// FALSE)`, provided those are the body's only early returns.
+    /// FALSE)`, provided those are the body's only early returns. That guard may be a block
+    /// holding every early return, as survival's `is.ratetable(x, verbose = FALSE)` checks
+    /// under `if (!verbose) { ...; return(TRUE) }`, and the flag may be negated.
     fn flag_return(
         &self,
         parameters: &[Formal],
         body: ExprId,
-        early_returns: usize,
+        early_returns: &[EarlyReturn<'db>],
     ) -> Option<FlagReturn<'db>> {
         let module = self.module;
         let strip = |mut id: ExprId| {
@@ -12157,6 +12172,35 @@ impl<'db, 'a> Checker<'db, 'a> {
                 id = *inner;
             }
             id
+        };
+        let flag = |condition: ExprId| match module.kind(strip(condition)) {
+            ExpressionKind::NameRef(name) => Some((*name, false)),
+            ExpressionKind::Unary {
+                operator: UnaryOperator::Not,
+                operand,
+            } => match module.kind(strip(*operand)) {
+                ExpressionKind::NameRef(name) => Some((*name, true)),
+                _ => None,
+            },
+            _ => None,
+        };
+        let returned = |branch: ExprId| {
+            let mut value = strip(branch);
+            if let ExpressionKind::Block { statements } = module.kind(value)
+                && let Some(&last) = module[statements].last()
+            {
+                value = strip(last);
+            }
+            match module.kind(value) {
+                ExpressionKind::Call { callee, arguments } if matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "return") => {
+                    Some(
+                        module[arguments]
+                            .first()
+                            .and_then(|argument| argument.value),
+                    )
+                }
+                _ => None,
+            }
         };
         let mut statements: &[ExprId] = &[];
         let mut tail = strip(body);
@@ -12166,81 +12210,85 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         // Either the tail branches on the flag, or a statement before it returns early on the
         // flag (`if (both) return(list(row.index = j))`) and the tail is the other value.
-        let (condition, then_branch, else_branch) = match module.kind(tail) {
+        let (name, negated, when_set, when_unset) = match module.kind(tail) {
             ExpressionKind::If {
                 condition,
                 then_branch,
                 else_branch: Some(else_branch),
-            } => (condition, then_branch, else_branch),
-            _ => {
-                let returns_early = |branch: ExprId| {
-                    let mut value = strip(branch);
-                    if let ExpressionKind::Block { statements } = module.kind(value)
-                        && let Some(&last) = module[statements].last()
-                    {
-                        value = strip(last);
-                    }
-                    matches!(
-                        module.kind(value),
-                        ExpressionKind::Call { callee, .. }
-                            if matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "return")
-                    )
+            } if flag(*condition).is_some() => {
+                let (name, negated) = flag(*condition)?;
+                let mut returns = 0;
+                let mut branch_ty = |branch: ExprId| {
+                    let value = match returned(branch) {
+                        Some(value) => {
+                            returns += 1;
+                            value?
+                        }
+                        None => branch,
+                    };
+                    self.recorded.get(&value).copied()
                 };
-                let guard = statements[..statements.len().saturating_sub(1)]
+                let then_ty = branch_ty(*then_branch)?;
+                let else_ty = branch_ty(*else_branch)?;
+                if returns != early_returns.len() {
+                    return None;
+                }
+                (name, negated, then_ty, else_ty)
+            }
+            _ => {
+                let (condition, guard) = statements[..statements.len().saturating_sub(1)]
                     .iter()
                     .find_map(|&statement| match module.kind(strip(statement)) {
                         ExpressionKind::If {
                             condition,
                             then_branch,
                             else_branch: None,
-                        } if matches!(
-                            module.kind(strip(*condition)),
-                            ExpressionKind::NameRef(_)
-                        ) && returns_early(*then_branch) =>
-                        {
-                            Some((condition, then_branch))
+                        } if flag(*condition).is_some() && returned(*then_branch).is_some() => {
+                            Some((*condition, *then_branch))
                         }
                         _ => None,
                     })?;
-                (guard.0, guard.1, statements.last()?)
+                let (name, negated) = flag(condition)?;
+                // Every early return is the guard's or the tail's own `return(value)`.
+                let guard_range = module.range(guard);
+                let tail_range = module.range(tail);
+                let (guarded, rest): (Vec<EarlyReturn<'db>>, Vec<EarlyReturn<'db>>) = early_returns
+                    .iter()
+                    .copied()
+                    .partition(|early| guard_range.contains_range(early.range));
+                if rest
+                    .iter()
+                    .any(|early| !tail_range.contains_range(early.range))
+                {
+                    return None;
+                }
+                let guard_ty = self.join_early_returns(&guarded, unknown(self.db), guard);
+                let tail_value = match returned(tail) {
+                    Some(value) => value?,
+                    None => tail,
+                };
+                (name, negated, guard_ty, *self.recorded.get(&tail_value)?)
             }
         };
-        let ExpressionKind::NameRef(name) = module.kind(strip(*condition)) else {
-            return None;
-        };
-        let formal = parameters.iter().find(|formal| formal.name == *name)?;
+        let formal = parameters.iter().find(|formal| formal.name == name)?;
         let ExpressionKind::Literal(LiteralKind::Logical(default)) =
             module.kind(strip(formal.default?))
         else {
             return None;
         };
-        if self.writes_name(body, *name) {
+        if self.writes_name(body, name) {
             return None;
         }
-        let mut returns = 0;
-        let mut branch_value = |branch: ExprId| {
-            let mut value = strip(branch);
-            if let ExpressionKind::Block { statements } = module.kind(value) {
-                value = strip(*module[statements].last()?);
-            }
-            if let ExpressionKind::Call { callee, arguments } = module.kind(value)
-                && matches!(module.kind(*callee), ExpressionKind::NameRef(name) if name == "return")
-            {
-                returns += 1;
-                return module[arguments].first()?.value;
-            }
-            Some(branch)
+        let (when_true, when_false) = if negated {
+            (when_unset, when_set)
+        } else {
+            (when_set, when_unset)
         };
-        let then_value = branch_value(*then_branch)?;
-        let else_value = branch_value(*else_branch)?;
-        if returns != early_returns {
-            return None;
-        }
         Some(FlagReturn {
             parameter: Name::new(self.db, name),
             default: *default,
-            when_true: *self.recorded.get(&then_value)?,
-            when_false: *self.recorded.get(&else_value)?,
+            when_true,
+            when_false,
         })
     }
 

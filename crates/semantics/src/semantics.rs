@@ -2944,6 +2944,9 @@ pub struct ItemSyntaxFlags {
     /// code or parameter list. It may overcount; `file_code_rewrites` reads the item's HIR to
     /// confirm.
     pub rewrites_code: bool,
+    /// It registers an arithmetic method through S7 or S4 (`S7::method(`+`, list(a, b)) <- f`,
+    /// `setMethod("Arith", ...)`), which dispatches on a class no type declares.
+    pub registers_arithmetic_method: bool,
 }
 
 #[salsa::tracked(returns(copy))]
@@ -2992,7 +2995,39 @@ pub fn item_syntax_flags<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemSyntaxFla
                     )
                 })
         }),
+        registers_arithmetic_method: registers_arithmetic_method(&root),
     }
+}
+
+fn registers_arithmetic_method(root: &SyntaxNode) -> bool {
+    // `S7::method(`+`, ...) <- f` names the generic in the call on the left;
+    // `setMethod("+", ...)` is the whole statement.
+    let call = match BinaryExpr::cast(root.clone()) {
+        Some(assignment) => assignment.lhs(),
+        None => Some(root.clone()),
+    };
+    let Some(call) = call.filter(|call| call.kind() == SyntaxKind::CALL_EXPR) else {
+        return false;
+    };
+    let mut children = call.children();
+    let Some(callee) = children.next() else {
+        return false;
+    };
+    if !matches!(
+        callee.text().to_string().as_str(),
+        "method" | "S7::method" | "setMethod" | "methods::setMethod"
+    ) {
+        return false;
+    }
+    let Some(generic) = children
+        .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
+        .and_then(|arguments| arguments.children().next())
+    else {
+        return false;
+    };
+    let generic = generic.text().to_string();
+    let generic = generic.trim().trim_matches(['`', '"', '\'']);
+    check::arithmetic_method_prefixes().any(|prefix| prefix.strip_suffix('.') == Some(generic))
 }
 
 pub fn item_binds_only_own_name<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
@@ -3876,6 +3911,23 @@ fn has_untracked_arithmetic_class(db: &dyn Db, file: SourceFile) -> bool {
         .flat_map(stubs::SymbolSet::iter)
         .chain(file_arithmetic_classes(db, file).iter())
         .any(|class| !tracked(class))
+        || *file_registers_arithmetic_method(db, file)
+        || ProjectFiles::try_get(db)
+            .is_some_and(|files| *project_registers_arithmetic_method(db, files))
+}
+
+#[salsa::tracked]
+fn project_registers_arithmetic_method(db: &dyn Db, files: ProjectFiles) -> bool {
+    files.files(db).iter().any(|&file| {
+        *file.kind(db) == DocumentKind::Package && *file_registers_arithmetic_method(db, file)
+    })
+}
+
+#[salsa::tracked]
+fn file_registers_arithmetic_method(db: &dyn Db, file: SourceFile) -> bool {
+    item_tree(db, file)
+        .iter()
+        .any(|&item| item_syntax_flags(db, item).registers_arithmetic_method)
 }
 
 /// Past this many conditional writers a slot is `Unknown`: each writer costs an item

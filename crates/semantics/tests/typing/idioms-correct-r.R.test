@@ -553,6 +553,27 @@ build <- function(plot) plot + layer()
 layer: fn() -> environment
 build: <T> fn(plot: T) -> T
 
+#---- arithmetic_registered_through_s4_may_dispatch_on_an_environment
+# A package may register `+` for a class no type tracks (ggplot2 does it through S7's
+# `method()`), so an untyped operand added to an environment may be of that class.
+setMethod("+", signature("layer", "ANY"), function(e1, e2) e1)
+layer <- function() {
+  self <- new.env()
+  class(self) <- "layer"
+  self
+}
+build <- function(plot) plot + layer()
+#++++
+character
+layer: fn() -> environment
+build: <T> fn(plot: T) -> Unknown
+
+#---- a_formula_compares_by_its_text
+# R deparses language objects before comparing them, as ape's `formula(object) == ~1` relies on.
+intercept_only <- function(model) formula(model) == ~1
+#++++
+intercept_only: <T> fn(model: T) -> logical
+
 #---- a_reduce_callback_may_return_either_operand
 bind_pair <- function(x, y) {
   if (length(x) == 0) return(y)
@@ -1547,6 +1568,26 @@ lcm <- function(a, b) a / gcd(a, b, extended = FALSE) * b
 #++++
 gcd: <T: numeric, U> fn(a: T, b: T, [extended]: U) -> list{g: T, c: T} | T
 lcm: <T: numeric> fn(a: T, b: T) -> double
+
+#---- a_negated_flag_guard_block_selects_its_returns
+# survival's `is.ratetable(x, verbose = FALSE)` answers `TRUE` or `FALSE` under `if (!verbose)`
+# and collects messages otherwise, so a call that leaves the flag out is a logical test.
+valid <- function(x, verbose = FALSE) {
+  if (!verbose) {
+    if (!is.list(x)) return(FALSE)
+    if (length(x) == 0) return(FALSE)
+    return(TRUE)
+  }
+  msg <- NULL
+  if (!is.list(x)) msg <- c(msg, "not a list")
+  if (length(msg) == 0) TRUE else msg
+}
+use <- function(x) if (valid(x)) 1 else 0
+why <- function(x) valid(x, verbose = TRUE)
+#++++
+valid: <T> fn(x: Unknown, [verbose]: T) -> logical | character[]
+use: <T> fn(x: T) -> double
+why: <T> fn(x: T) -> logical | character[]
 
 #---- the_other_branch_of_a_flag_default_is_still_checked
 p_dist <- function(q, valueOnly = TRUE) {
