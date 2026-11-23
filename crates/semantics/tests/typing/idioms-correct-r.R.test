@@ -745,6 +745,22 @@ fast_svd: <T, U> fn(m: T, [tol]: U) -> list{T, U}
 pseudoinverse: <T, U> fn(m: T, [tol]: U) -> list{T, U}
 inverse: <T> fn(m: T) -> list{T, double}
 
+#---- forwarding_a_forwarded_missing_path_default_leaves_it_to_the_callee
+# `pseudoinverse` only hands `tol` to a function that tests `missing(tol)`, so its own caller
+# may leave `tol` out as well, two forwards away from the default.
+fast_svd <- function(m, tol) {
+  if (missing(tol)) tol <- 1e-8
+  list(m, tol)
+}
+pseudoinverse <- function(m, tol) fast_svd(m, tol)
+outer <- function(m, tol) pseudoinverse(m, tol)
+use <- function(m) outer(m)
+#++++
+fast_svd: <T, U> fn(m: T, [tol]: U) -> list{T, U}
+pseudoinverse: <T, U> fn(m: T, [tol]: U) -> list{T, U}
+outer: <T, U> fn(m: T, [tol]: U) -> list{T, U}
+use: <T> fn(m: T) -> list{T, double}
+
 #---- a_value_written_on_the_missing_path_is_a_default
 # `if (missing(tol)) tol <- 1e-8` is a default written in the body: `tol` keeps its parameter
 # type, so `m * tol` bounds what a caller passes, and a call that omits it gets `double`.
@@ -912,6 +928,28 @@ fifo_mode <- function(read = NULL, write = NULL) {
 }
 #++++
 fifo_mode: fn([read]: logical | NULL, [write]: logical | NULL) -> logical
+
+#---- a_missing_formal_passed_to_a_parameter_that_tests_missing_is_not_read
+# `stop_type` hands `x` to `friendly`, which tests `missing(x)`, so passing the missing `x` on
+# never forces it. `strict` reads its `x`, so the same call there fails.
+friendly <- function(x) if (missing(x)) "absent" else class(x)[[1]]
+stop_type <- function(x, what) stop(paste("expected", what, "not", friendly(x)))
+strict <- function(x, what) stop(paste("expected", what, "not", class(x)[[1]]))
+check_len <- function(x) {
+  if (missing(x)) stop_type(x, "a vector")
+  length(x)
+}
+broken <- function(x) {
+  if (missing(x)) strict(x, "a vector")
+  length(x)
+}
+#++++
+friendly: fn([x]: Unknown) -> character
+stop_type: <T, U> fn([x]: T, what: U) -> Any
+strict: <T> fn(x: Unknown, what: T) -> Any
+check_len: <T> fn([x]: T) -> integer
+broken: Unknown
+530..531 error[type-mismatch] reading `x` here would fail at run time: this branch runs only when `x` is missing, and it has no default
 
 #---- a_formal_passed_to_a_parameter_base_r_tests_with_missing_is_optional
 reduce <- function(.x, .f, ..., .init) {

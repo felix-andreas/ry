@@ -13,7 +13,7 @@ use {
         file_type_definitions, global_scheme,
         hir::{
             Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind, Module,
-            NameSite, PatId, PatternKind, Symbol, UnaryOperator,
+            NameSite, PatId, PatternKind, Symbol, UnaryOperator, destructure_leaves,
         },
         infer::apply_definition,
         inline_annotations_enabled, item_annotation_syntax, item_annotations, item_check, item_hir,
@@ -8278,6 +8278,12 @@ fn slot_occurrences(db: &dyn Db, item: Item<'_>, binding: BindingId, result: &mu
     let targets: BTreeSet<ExprId> = hir
         .expressions()
         .flat_map(|expression| match &expression.kind {
+            // zeallot's `c(a, b) %<-% value` declares each name of its pattern.
+            ExpressionKind::Assign {
+                spelling: AssignSpelling::Destructure,
+                target,
+                ..
+            } => destructure_leaves(hir, *target).unwrap_or_default(),
             ExpressionKind::Assign { target, .. } => vec![*target],
             ExpressionKind::Match { arms, .. } => hir[arms]
                 .iter()
