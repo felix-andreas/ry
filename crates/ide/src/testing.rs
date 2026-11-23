@@ -2,7 +2,9 @@
 //! `fuzz/` target so both check exactly the same properties.
 
 use {
-    crate::{DefinitionTarget, DocumentSymbol, Occurrence, TextEdit},
+    crate::{
+        DefinitionTarget, DocumentSymbol, HoverDefinition, Occurrence, TextEdit, spelled_variable,
+    },
     salsa::{Setter as _, plumbing::AsId as _},
     semantics::{
         AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase, SourceFile,
@@ -191,6 +193,9 @@ fn check_file(db: &RootDatabase, files: ProjectFiles, file: SourceFile) {
     }
     // A name's occurrences are compared from each of them once, not once per offset inside.
     let mut compared: HashSet<Vec<(SourceFile, TextRange)>> = HashSet::new();
+    // A name is completed once per definition it resolves to, so a parameter and a global of
+    // one name are both checked.
+    let mut completed: HashSet<(&str, Option<(SourceFile, TextRange)>)> = HashSet::new();
     for (index, offset) in offsets.into_iter().enumerate() {
         let offset = TextSize::from(offset as u32);
         let at = |what: &str| format!("{what} in {source:?} at {offset:?}");
@@ -231,6 +236,29 @@ fn check_file(db: &RootDatabase, files: ProjectFiles, file: SourceFile) {
         let definitions = crate::definition(db, files, file, offset);
         for definition in &definitions {
             check_target(db, Some(definition), &at("definition"));
+        }
+        // The link a hover shows is where "go to definition" leads.
+        if let Some(link) = hover.as_ref().and_then(|hover| hover.definition.as_ref()) {
+            let agrees = match link {
+                HoverDefinition::Local { target, .. } | HoverDefinition::Global { target } => {
+                    definitions.contains(&DefinitionTarget::Project(*target))
+                }
+                HoverDefinition::Stub {
+                    declaration: Some(declaration),
+                    ..
+                } => definitions.contains(&DefinitionTarget::Stub(*declaration)),
+                HoverDefinition::Stub {
+                    declaration: None, ..
+                }
+                | HoverDefinition::Package(_) => definitions
+                    .iter()
+                    .any(|definition| matches!(definition, DefinitionTarget::Package(_))),
+            };
+            assert!(
+                agrees,
+                "{}: the hover links to {link:?} but the definition is {definitions:?}",
+                at("hover")
+            );
         }
         let target = crate::target_at(db, files, file, offset);
         // A by-name guess at a field's declaration is not reciprocal: the declaration's references
@@ -324,6 +352,30 @@ fn check_file(db: &RootDatabase, files: ProjectFiles, file: SourceFile) {
                     at("round trip")
                 );
             }
+            // Where a name is defined, the hover is about that name too. A data.table `..name`
+            // read spells the variable `name` with a prefix the definition lacks.
+            if let Some(here) = &hover
+                && here.definition.is_some()
+            {
+                let there = crate::hover(db, files, target_file, target_range.start());
+                let label = |hover: &crate::Hover| {
+                    hover
+                        .lines
+                        .first()
+                        .and_then(|line| line.split(':').next())
+                        .map(|label| unquote(label.trim()).trim_start_matches("..").to_owned())
+                };
+                assert!(
+                    there
+                        .as_ref()
+                        .is_some_and(|there| label(there) == label(here)),
+                    "{}: the hover says {:?} and the hover at its definition {target_range:?} \
+                     says {:?}",
+                    at("hover"),
+                    here.lines,
+                    there.map(|there| there.lines)
+                );
+            }
             // Where a name is defined, it is its own definition.
             let again = crate::definition(db, files, target_file, target_range.start());
             assert!(
@@ -404,6 +456,75 @@ fn check_file(db: &RootDatabase, files: ProjectFiles, file: SourceFile) {
                     at("completion")
                 );
             }
+        }
+
+        // A name the editor resolves is one it offers to whoever has typed it in full.
+        // Where the name is being declared, it is the one name not worth offering, and the
+        // `..` of a data.table `..name` read is no part of the name completion matches.
+        let start = cursor_name.map_or(0, |name| name.as_ptr() as usize - source.as_ptr() as usize);
+        // A variable written twice declares at both writes, and only the first is its definition.
+        let declares = references.iter().any(|occurrence| {
+            occurrence.is_declaration
+                && occurrence.file == file
+                && occurrence
+                    .range
+                    .contains_inclusive(TextSize::from(start as u32))
+        });
+        // The hover of a `package::name` is about `name` wherever the cursor is in it.
+        let hovers_name = |hover: &crate::Hover| {
+            hover.lines.first().is_some_and(|line| {
+                cursor_name.is_some_and(|name| {
+                    unquote(line.split(':').next().unwrap_or(line).trim()) == name
+                })
+            })
+        };
+        // A member completes from its receiver's type. Where that is unknown, the hover links to
+        // the stub of the call that made the receiver, which says nothing about its members.
+        let member = source
+            .get(..start)
+            .is_some_and(|before| before.trim_end().ends_with(['$', '@']));
+        if let Some(name) = cursor_name
+            && hover.as_ref().is_some_and(|hover| {
+                hovers_name(hover)
+                    && match hover.definition {
+                        Some(HoverDefinition::Local { .. } | HoverDefinition::Global { .. }) => {
+                            true
+                        }
+                        Some(HoverDefinition::Stub { .. }) => !member,
+                        _ => false,
+                    }
+            })
+            && !declares
+            && !name.starts_with('`')
+            && !name.starts_with("..")
+            && completed.insert((
+                name,
+                match hover.as_ref().and_then(|hover| hover.definition.as_ref()) {
+                    Some(
+                        HoverDefinition::Local { target, .. } | HoverDefinition::Global { target },
+                    ) => Some((target.file, target.range)),
+                    _ => None,
+                },
+            ))
+        {
+            let end = start + name.len();
+            let offered = crate::completion(db, files, file, TextSize::from(end as u32));
+            assert!(
+                offered
+                    .iter()
+                    .flat_map(|result| &result.items)
+                    .any(|item| item.label == name),
+                "{}: completion after {name:?} does not offer it but {:?}",
+                at("completion"),
+                offered.map(|result| {
+                    result
+                        .items
+                        .into_iter()
+                        .map(|item| item.label)
+                        .take(8)
+                        .collect::<Vec<_>>()
+                })
+            );
         }
 
         let type_definition = crate::type_definition(db, files, file, offset);
@@ -863,7 +984,9 @@ fn check_names(
     cursor_name: Option<&str>,
     what: &str,
 ) {
-    let Some(cursor_name) = cursor_name.map(unquote) else {
+    // A rest pattern (`..rest`) lexes as one name and binds the part after the dots, and a
+    // quoted or raw string target spells the name inside its delimiters.
+    let Some(cursor_name) = cursor_name.map(spelled_variable) else {
         return;
     };
     for (file, range) in ranges {
@@ -871,10 +994,9 @@ fn check_names(
         let Some(spelled) = text.get(usize::from(range.start())..usize::from(range.end())) else {
             continue;
         };
-        // A rest pattern (`..rest`) lexes as one name and binds the part after the dots.
-        let spelled = unquote(spelled);
+        let spelled = spelled_variable(spelled);
         assert!(
-            spelled == cursor_name || cursor_name.strip_prefix("..") == Some(spelled),
+            spelled == cursor_name,
             "{what}: range {range:?} covers {spelled:?}, not the name under the cursor \
              ({cursor_name:?})"
         );

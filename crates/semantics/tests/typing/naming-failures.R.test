@@ -15,6 +15,14 @@ f <- function() x
 f: fn() -> Unknown
 16..17 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins
 
+#---- a_name_a_stub_declares_only_as_a_type_is_no_value
+#~~~~ R/main.R
+f <- function() conditionMessage(condition)
+#++++
+== R/main.R
+f: fn() -> character
+33..42 warning[unresolved] I could not resolve `condition` in this package, its imports, or builtins
+
 #==== global_warnings
 #---- top_level_binding_may_shadow_a_builtin
 #~~~~ R/main.R

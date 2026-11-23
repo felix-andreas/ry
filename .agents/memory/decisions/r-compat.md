@@ -123,7 +123,10 @@ GNU R's `tests/*.R` pin behaviors that come from its machine or implementation, 
   against GNU R's tests.
 - **S4 arguments to `cbind`/`rbind`** go to `methods:::cbind`/`rbind` with `deparse.level` tagged;
   level -1 marks methods' own `cbind2`/`rbind2` defaults and binds directly.
-- **`LC_CTYPE` is C.UTF-8** at start, so `iconv(..., "ASCII//TRANSLIT")` transliterates as GNU R.
+- **Start-up takes each locale category from the environment, as GNU R does** (`system::init_locale`).
+  A category the system cannot provide falls back to "C" and start-up warns `Setting LC_X failed,
+  using "C"` after every other start-up warning, so `l10n_info()` and `iconv(..., "ASCII//TRANSLIT")`
+  agree with the C library. Forcing C.UTF-8 instead claimed UTF-8 that GNU R does not have there.
 - **URL transfers use `reqwest`, not libcurl** (`crates/services/src/http.rs`), already linked
   through polars; it honors the proxy variables and the platform's roots (`SSL_CERT_FILE`). A `url()` connection fetches its whole body on open and reads from memory, like `unz()`. Failures use libcurl's codes
   and wording, which R code matches on. Each request runs on a scoped thread

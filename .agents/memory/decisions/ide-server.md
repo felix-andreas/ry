@@ -267,6 +267,17 @@ The Zed extension bundles no binary: it locates `ry` at run time through the LSP
 - **Selection ranges always cover the cursor.** A cursor on a string's quote or in a block's indentation starts from the smallest node that covers it; an editor drops an answer whose first range does not hold the position.
 - **Why.** Each was a rename or a reference list that left the code meaning something else, found by the IDE battery's rename check (`testing.md`, "The editor features") and pinned in `crates/ide/tests/ide/rename_ported.R.test` and `tests/structure/selection.R.test`.
 
+## A hover's link is the definition's resolution, and a name that resolves is one completion offers
+
+**Status:** built.
+
+- **Previous source of truth.** `hover_definition` resolved a name by its own copy of `expression_target`'s rules, so the link a hover showed and the place "go to definition" jumped to could differ (`x[[1]] <- 3` with the cursor on `x`, a top-level loop variable, a replacement copy).
+- **Shape.** One resolution: `expression_target`, then `through_copies`, then `single_definition`. The hover's link reads it, and `target_at` is `through_copies(written_target_at)`.
+- **A declaring string is the name.** The string of `"x" <- 1` and of `setGeneric("show", ...)` hovers as the variable it declares (the item's `global_scheme` for an item name), and `spelled_names` counts it, so completion does not drop the name as the word being typed.
+- **Completion follows scope as written.** A cursor at the end of a function whose body has no braces is inside it. A word after a complete inline return type starts the body, so it completes values. An assignment nested in a top-level statement binds a global. A `match` guard is an expression, not a pattern position. A quoted name and a `..name` read count as the name they spell. An annotation completes a stub's `@type` classes beside its type definitions.
+- **Cost.** A hover costs what go-to-definition costs, including the project-wide occurrence search for a global with no package-definition winner (`single_definition`).
+- **Why.** Each was a disagreement between two answers about one name, found by the battery's relations (`testing.md`, "The editor features") and pinned in `crates/ide/tests/ide/editor-completeness.R.test` and the `REGRESSIONS` of `crates/ide/tests/test_fuzz.rs`.
+
 ## `--annotate` and the code action write a lambda argument's signature
 
 **Status:** built.

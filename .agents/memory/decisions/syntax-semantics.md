@@ -1125,6 +1125,15 @@ are already broken, so the fallback is cheap.
   `parser` kind for GNU R's side.
 - **Open.** `semantics/src/hir.rs` recognizes a pipe's shape with rules of its own (`pipe_shape`).
 
+## A stub type name is no value, and a type and a value of one name each have a declaration
+
+**Status:** built.
+
+- **Previous source of truth.** `StubLibrary.declarations` held one site per name for `@type` names and value schemes alike, and `package_scheme_exists_in` resolved a name that had any stub declaration. An unbound variable named like a stub class (`condition`, `connection`, `Date`) was not reported unresolved, and `factor` the function and `factor` the class shared one site.
+- **Shape.** `declarations` holds value names and `type_declarations` type names (`stub_declaration`, `stub_type_declaration`). A name resolves as a value through `schemes` or `known_exports` only.
+- **Impact.** The checker reports the unbound read, and an annotation navigates to the class while a call navigates to the function. Pinned by `naming-failures.R.test` (`a_name_a_stub_declares_only_as_a_type_is_no_value`) and the two `named_like` cases of `editor-completeness.R.test`.
+- **Also here.** `"x" <- 1` inside a function binds `x` in the checker as it does in naming (`write_target`), and a top-level function with a `#:` annotation records its declared type on the literal and on the target, so editor reads of its parameters see the declared types.
+
 ## A `#:` block in an argument list types the argument after it
 
 **Status:** built.

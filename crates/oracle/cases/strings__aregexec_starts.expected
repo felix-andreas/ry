@@ -1,0 +1,128 @@
+[stdout]
+| [[1]]
+| [1] 1 1 4 5
+| attr(,"match.length")
+| [1] 4 3 1 0
+| 
+| [[2]]
+| [1] 1 1 4 5
+| attr(,"match.length")
+| [1] 5 3 1 1
+| 
+| [[3]]
+| [1] 1 1 3 4
+| attr(,"match.length")
+| [1] 3 2 1 0
+| 
+| [[4]]
+| [1] 3 3 5 6
+| attr(,"match.length")
+| [1] 4 2 1 1
+| 
+| [[1]]
+| [1] "xbcd" "xbc"  "d"    ""    
+| 
+| [[2]]
+| [1] "aXcde" "aXc"   "d"     "e"    
+| 
+| [[3]]
+| [1] "bcd" "bc"  "d"   ""   
+| 
+| [[4]]
+| [1] "bcde" "bc"   "d"    "e"   
+| 
+| [[1]]
+| [1] 1
+| attr(,"match.length")
+| [1] 4
+| 
+| [[1]]
+| [1] "xbcd"
+| 
+| [[1]]
+| [1] 1
+| attr(,"match.length")
+| [1] 4
+| 
+| [[1]]
+| [1] "xbcd"
+| 
+| [[1]]
+| [1] 2
+| attr(,"match.length")
+| [1] 3
+| 
+| [[2]]
+| [1] 3
+| attr(,"match.length")
+| [1] 3
+| 
+| [[1]]
+| [1] "bcd"
+| 
+| [[2]]
+| [1] "bcd"
+| 
+| [[1]]
+| [1] 2
+| attr(,"match.length")
+| [1] 3
+| 
+| [[2]]
+| [1] 2
+| attr(,"match.length")
+| [1] 4
+| 
+| [[1]]
+| [1] "bcd"
+| 
+| [[2]]
+| [1] "abcd"
+| 
+| [[1]]
+| [1] 2 6
+| attr(,"match.length")
+| [1] 7 2
+| 
+| [[2]]
+| [1] 1 3
+| attr(,"match.length")
+| [1] 5 2
+| 
+| [[1]]
+| [1] "abababc" "ab"     
+| 
+| [[2]]
+| [1] "abXbc" "Xb"   
+| 
+| [[1]]
+| [1] 5 7
+| attr(,"match.length")
+| [1] 11  1
+| 
+| [[2]]
+| [1] 3 5
+| attr(,"match.length")
+| [1] 11  1
+| 
+| [[3]]
+| [1] 1 2
+| attr(,"match.length")
+| [1] 8 1
+| 
+| [[1]]
+| [1] "quick brown" "i"          
+| 
+| [[2]]
+| [1] "quack brawn" "a"          
+| 
+| [[3]]
+| [1] "qick brn" "i"       
+| 
+[messages]
+[warnings]
+[errors]
+[value]
+list
+| list(c("quick brown", "i"), c("quack brawn", "a"), c("qick brn", 
+| "i"))

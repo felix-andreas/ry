@@ -1,0 +1,79 @@
+[stdout]
+| <2 x 3 x 0 array of integer>
+|      [,1] [,2] [,3]
+| [1,]
+| [2,]
+| 
+| , , 1
+| 
+|      [,1] [,2] [,3]
+| 
+| , , 2
+| 
+|      [,1] [,2] [,3]
+| 
+| , , 1
+| 
+|     
+| [1,]
+| [2,]
+| 
+| , , 2
+| 
+|     
+| [1,]
+| [2,]
+| 
+| <2 x 3 x 0 x 2 array of integer>
+|      [,1] [,2] [,3]
+| [1,]
+| [2,]
+| 
+| , , p
+| 
+|  
+| a
+| b
+| 
+| , , q
+| 
+|  
+| a
+| b
+| 
+| <2 x 3 x 0 array of integer>
+|    B
+| A   u v w
+|   a
+|   b
+| 
+| <2 x 3 x 0 array of character>
+|      [,1] [,2] [,3]
+| [1,]
+| [2,]
+| 
+| <0 x 0 x 0 array of logical>
+|     
+| 
+| <0 x 3 x 0 array of integer>
+|      [,1] [,2] [,3]
+| 
+| <2 x 0 x 0 array of integer>
+|     
+| [1,]
+| [2,]
+| 
+| <1 x 1 x 0 array of complex>
+|      [,1]
+| [1,]
+| 
+| <1 x 2 x 0 array of character>
+|      [,1] [,2]
+| [1,]
+| 
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| structure(character(0), dim = c(1L, 2L, 0L))

@@ -76,6 +76,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A function has one signature, resolved in `syntax::annotation`
 - A splice reparse shares what the parser's recorded lookahead proves untouched
 - One syntax verdict, in the `syntax` crate, for `ry check` and the runtime
+- A stub type name is no value, and a type and a value of one name each have a declaration
 - A `#:` block in an argument list types the argument after it
 - A value whose code a later top-level write replaces is a template
 - A key test reads within the tests that enclose it
@@ -227,6 +228,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Completion pushes down names whose declared type cannot fit, and never promotes
 - The console's crossterm is patched to drain the terminal, and R reads console input one line per chunk
 - An editor target is what the code means, and rename refuses what it cannot trace
+- A hover's link is the definition's resolution, and a name that resolves is one completion offers
 - `--annotate` and the code action write a lambda argument's signature
 - A cancellation flips the worker's token only inside an armed scope
 - A local typed by a signature's type parameter reads as that parameter
@@ -332,12 +334,15 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Small base closures with call arguments run their bodies natively behind prologues
 - `c`, `unlist`, `rep` and positional `[` copy handle vectors a run at a time
 - The radix string order ranks bytes with integer keys, and plain POSIX patterns capture on the automata
+- POSIX capture groups come from a port of TRE's tagged automaton
 - `x[] <- value` and `x[a:b] <- value` write whole copies of the value
 - `order`, `sort.int` and `sort.default` run natively on plain vectors
 - Strings collate with ICU4X's CLDR collator, as GNU R's ICU does
 - `abbreviate` is GNU R's `stripchars`, pass for pass (settled)
 - Vector kernels: one typed loop per case, exact sizes, and GNU R's polygamma and Bessel functions (settled)
 - Base and stats kernels: exact shortcuts, GNU R's quirks kept, and one prepared state per call
+- Approximate repetitions expand as TRE's do
+- Fortran-style ports keep C's `pow` call for constant bases
 
 ## R compatibility
 
@@ -478,6 +483,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A vector kind has no `downcast`: the caller chooses `standard` or `dense`
 - glibc's malloc keeps freed package buffers (settled)
 - Profiles run over the start-up image
+- Native routines enter through the same safe entry as builtins
 
 ## C API, R home and packages
 

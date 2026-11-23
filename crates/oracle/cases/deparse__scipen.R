@@ -1,0 +1,18 @@
+# deparse writes doubles and complex parts under options(scipen), as print does, and so does the
+# call of a warning.
+options(scipen = -10)
+print(deparse(c(10, 1.5, 100000, 0)))
+print(deparse(3 + 2i))
+print(deparse(quote(f(-10, 2.5))))
+print(deparse(complex(real = NaN, imaginary = 10)))
+f <- function(x) warning("careful")
+tryCatch(f(25), warning = function(w) print(conditionCall(w)))
+options(scipen = 100)
+print(deparse(c(1e10, 1e-20, 1e15, 1e300)))
+print(deparse(1e5))
+print(deparse(1e15 + 2i))
+dput(1e20)
+options(scipen = 3)
+print(deparse(c(1e5, 123456789)))
+options(scipen = 0)
+print(deparse(c(1e5, 100000, 1e15)))

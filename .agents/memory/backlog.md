@@ -370,7 +370,7 @@ Unverified until a Windows release smoke test runs:
 
 `just bench-compare` gives the current numbers; "Measured state at the full benchmark size" below records the last ones.
 
-- **xts peaks 34% above GNU R.** In the packages suite (`tools/bench/packages/results.json`), xts's tests peak at 451.7 MiB on ry against 338.0 MiB on GNU R, the only package far above GNU R's peak. Owner: B4 (xts and zoo), after ALTREP. Start with what xts allocates that GNU R shares or frees earlier: index copies through `[.xts`, attribute duplication, and survivors the collector promotes.
+- **xts peaks 17% above GNU R** (its tinytest suite in one process: 372 MiB against 318 MiB; `tools/bench/packages/results.json` holds an older 451.7 against 338.0). The peak is `test-endpoints.R` (358 against 328 MiB when run alone under tinytest, 339 against 330 as a plain script). It builds a 2.1-million-row series, and each step (`seq.POSIXct`, `.xts`, `storage.mode<-`, `endpoints` by days, weeks and months) peaks below GNU R in isolation, so the rest is when collections fall, not what stays live. Every other test file is at parity. A dev build without `libRblas.so` beside its libR (`tools/base-r/lapack.sh`, which needs the full R source tree) cannot load quadprog, so tseries and `test-irts.R` are skipped silently and the suite runs 4,034 assertions instead of 4,038.
 
 - **Package install speed.** `R CMD INSTALL` of Matrix takes 39 s on ry against GNU R's 177 s (74 s with `MAKEFLAGS=-j4`), and almost all of it is the compiler (`decisions/libr-rcmd.md`, "Package builds run `make` in parallel and link BLAS and LAPACK by versioned file"). The R half is about 10% slower than GNU R's on the same `tools` calls: MASS's Rd objects take 0.55 s and help indices 0.27 s; Matrix's S4 sourcing takes 2.7 s. Levers: Rd parsing (`tools:::.install_package_Rd_objects`), and the separate test-load process (about 0.2 s per package).
 
@@ -401,6 +401,7 @@ A wider tier 1 is not first: JIT-compiled code is 1.3% of finbench and 0.1% to 0
   - Known divergence: `match()`, `unique()`, `duplicated()` and `split()` expand a compact sequence argument in place, through `values::materialize` in `crates/interp/src/sort.rs`, so `.Internal(inspect(x))` reports `(expanded)` afterwards where GNU R reports `(compact)`. Peak memory is below GNU R's (13.3 MB against 17.6 MB for `match(1:1e6, 5e5:1e6)`), and only `inspect()` shows the difference, so it stays as is. A fix would read through `values::read_contents`, a transient copy on every call, which costs instructions for no visible gain.
 - **Compact-sequence reads in JIT loops.** A compact read costs a flag test, the info pointer, three loads and the element arithmetic, so convolution runs at about 1.06 to 1.08x the Ir of plain vectors. A preheader hoist of the sequence info (defined on the OSR entry path too, which enters with unloaded slots), loop-variable provenance for the index, and strength reduction of `x[j]` to a carried induction value should bring it to about 1.0x. Each is a single pass, which fits the compile-time budget. `decisions/r-compat.md`, "Runtime semantics settled by the corpus package tests", item "ALTREP vectors are first-class at GNU R's thresholds".
 - **withr skips one test on ry** that GNU R runs ("warns if LC_ALL=C"), because ry's `capabilities("NLS")` is FALSE: ry has no message translations, so this is not a bug.
+- **rlang runs one assertion fewer on ry** (env_poke() with unrepresentable characters): ry keeps native strings UTF-8 in a Latin-1 locale (`decisions/interp.md`), so `enc2native` changes no string and the test skips; not a bug.
 - **jsonlite passes 10 more tests on ry** because ry's datasets package is R 4.6's (`gait`, `penguins`, `penguins_raw`, `sunspot.m2014`); not a bug.
 - **The progress dashboard's package datasets are thin.** `cran_popular` is empty until a test run over popular CRAN packages exists, and per-dependency test results are recorded only for data.table, RcppSimdJson, xts and PerformanceAnalytics (`development/releasing.md`, "The progress dashboard").
 
@@ -595,32 +596,24 @@ About seven in ten of the hot suite's closure calls from compiled code take `cal
 
 `tools/bench/builtins/slower.txt` lists every export of base, stats and utils that the builtins sweep finds slower than GNU R (or failing) in at least one case; `sweep.py ratchet --update` shrinks it as fixes land, and `sweep.py weights` orders the work by call frequency in the code bases and the oracle corpus.
 
-- **Largest gap left:** `rpois` with a vector `mu` (about 0.85x) and `rgeom` (about 0.9x), both unexplained (`decisions/builtins.md`); `slower.txt` has the rest. `cumprod` of products that underflow a double pays an x87 store assist per element, as GNU R does; skipping that store would beat it.
-- **Failing on ry in the sweep:** `arima0` and `ar.mle` need the `setup_starma` family (`starma.c` and the Starma half of `pacf.c`, about 800 lines of C, holding its state behind an external pointer, which the stats crate has no helper for yet), and `ppr` needs `setppr` and `smart` (`ppr.f`, about 1,500 lines of Fortran). `sweep.py validate --with-ry` lists the rest.
-- **`aregexec` over many texts is about 4x GNU R's time** (1,000 sentences: 7 ms against 1.8 ms). A quarter of it is `memcpy` of `approximate::Reach` (about 280 bytes) on every path step, where TRE copies only the cost levels up to the current depth. Shrink it below the inline-copy size: `i32` fields, no stored edit count (the sum of the three kinds), and copy only the active levels.
-- **POSIX repeated groups:** `(a)?(ab)?b*` on "abb" fills the first optional group where TRE fills the second (`strings__posix_repeated_group`, a known failure). TRE's tag priorities, not a leftmost-longest rule, decide the split: GNU R gives `(a*)(ab)?b*` on "abb" `[][ab]`, `(a|ab)(bc|c)?` on "abc" `[ab][c]`, `(a|ab)(c|bcd)(d*)` on "abcd" `[a][bcd][]` (ry agrees), `(a?)((ab)?)(b?)` on "ab" `[][ab][ab][]` and `(aa)?(aab)?b*` on "aabb" `[][aab]`, and every variant with `?`, `*`, `{0,1}` or a class before `(ab)?` leaves the first group empty. Matching them needs TRE's tagged-NFA priorities in the POSIX matcher.
+- **`rpois` with a vector `mu` and `rgeom` measure at GNU R's speed within noise** (0.95x to 1.3x over repeated sweeps); they stay in `slower.txt` until a sweep clears them. `slower.txt` has the rest. `cumprod` of products that underflow a double pays an x87 store assist per element, as GNU R does; skipping that store would beat it.
+- **`aregexec` is 1.4 to 2.5x GNU R's wall time on long patterns at about TRE's instruction count** (`"lazy"` with `max.distance = 0.1` over 1,000 sentences: 25M instructions per call in `search_levels` against 22M in `tre_tnfa_run_approx`, with as many mispredicted branches; `"qu(i|a)ck"` is faster than GNU R). Entries are 32 bytes (`Reach<1>`, settings by index into `ParamsTable`), so the remaining gap is not entry copies or instruction count; measure cycles with a hardware profiler (no `perf` in the cloud container) before redesigning.
 
 ## Open: base R kernels against GNU R
 
 `just bench-base` times base R's kernels against GNU R with checksums (`tools/bench/internal/base`). Kernels that take a few milliseconds swing by 2x between runs, so judge them with `--rows 1e7`. At 1e7 rows these are still slower:
 
 - **Instruction counts on the application workloads vary between runs, mostly from data.table's threads.** Under callgrind with default threads, a data.table script's Ir varies run to run from libgomp scheduling and spin-waits in data.table's OpenMP regions, and turning ASLR off (`setarch -R`) does not remove it. With `OMP_NUM_THREADS=1` and `R_DATATABLE_NUM_THREADS=1` a data.table micro script spreads by about 1e-5, like a pure-R script (2e-5), but the full `tables` workload still spreads by 0.04% warm and 0.02% cold over five runs; that remainder is not yet attributed. Pin both variables for any Ir comparison that touches data.table, and report the median and the range of several runs; nothing under `tools/bench` pins them yet.
-- **Strings:** everything measured is at or below GNU R (`paste(collapse =)` 0.80, `format` 0.90, `sub` 0.93, `grepl(fixed = TRUE)` 0.97). `as.character(double)` is deferred on both, so it is timed forced. data.table's `tstrsplit(s, "_", fixed = TRUE)` on 2e6 strings took 1.1 s against GNU R's 0.46 s (one thread); re-measure.
+- **Strings:** everything measured is at or below GNU R (`paste(collapse =)` 0.80, `format` 0.90, `sub` 0.93, `grepl(fixed = TRUE)` 0.97). `as.character(double)` is deferred on both, so it is timed forced. data.table's `tstrsplit(s, "_", fixed = TRUE)` on 2e6 strings runs below GNU R's time on one thread.
 - **Matrix and time series:** xts `period.apply(xt, endpoints(xt, "hours"), function(x) mean(x))` on 2e6 minutes (33,335 periods) takes 1.4 to 1.5 s against GNU R's 0.89 s, at 250k instructions per period against 204k, so part of the gap is not instruction count. Callgrind's cache simulation (`--cache-sim=yes`, marginal over two run counts) puts it in the instruction cache: about 7,040 L1 instruction misses per period against GNU R's 3,716, while data misses are close (2,382 against 1,872 reads, 700 against 822 writes). The extra misses cost roughly 0.4 s. They are spread thinly (`execute_code` about 460 per period, then `run_closure`, `native_call`, `bind_arguments`, `match_args` and `mk_char` at 120 to 190 each), so outlining cold arms of `step` alone has little room; the open lever is function ordering and keeping cold paths out of the whole call path. The release build's PGO and BOLT layout (`decisions/heap-gc.md`, "The runtime's object model, collector and native boundary", item "The Linux release build is profile-guided") cut misses from 5,450 to about 3,050 and instructions from 185k to 160k per period, and period.apply 2e6 from 0.70 s to 0.56 s, measured on a faster machine than the figures above, which come from an earlier run of the plain build. The bench recipes measure the plain build. Closure-call overhead is a broader target than this one case: a closure call costs 0.75 µs against GNU R's 0.35 µs and `vapply` 8.2 µs against 3.4, and this per-call cost is why ggplot2, lattice and PerformanceAnalytics take 1.2 to 1.9x GNU R's time to render. The aim is a closure call at or below GNU R, measured with `oracle gallery` (149 timed figures) beside period.apply. Two more levers are queued: the `frame_cell` lookups in the fill loop of the finance benchmark's `ledger` template (`tools/bench/tooling/templates/finance/ledger.R`, cost not yet measured in isolation), and the S4 metadata-cache-miss path (`slot<-`, `list()`, `possibleExtends`; see the start-up item in `MEMORY.md`). The remaining instruction cost is spread: `execute_code` 27.5k (level with GNU R's `bcEval`), `method_symbol` formatting and interning about 21 method names per period (4.3k), `is_top_env` probing `.packageName` (2.4k), and xts' own `Rf_install` calls (4.4k). `apply` over rows is below GNU R per row; zoo `rollmean` 1.4x.
 - **Array subscripts with an empty dimension:** `X[, , k]` reads walk the selected offsets without listing them (`ArrayOffsets` in `crates/interp/src/subset.rs`), and `X[, , k] <- W` takes the slab write path, so both beat GNU R on a 1000 x 1000 x 20 double array. An empty subscript still resolves to a position list as long as its extent, which a range selection that never materializes would avoid.
-- **Printing an array with a zero extent:** `array(integer(0), c(2, 3, 0))` prints nothing in ry; GNU R prints `<2 x 3 x 0 array of integer>` and the empty row and column headers (`print_array` in `crates/interp/src/print.rs`).
-- **Dates, `pmin`/`pmax` and `attributes<-` differ from GNU R on rare inputs**, with and without the prologues. `strptime("1700000000", "%s", tz = "UTC")` gives NA (GNU R parses the epoch seconds). `%D` reads as `%m/%d/%y`, and GNU R's own parser reads it as `%y/%m/%d`. `as.Date("\t2024-01-02")` parses, and GNU R stops with "character string is not in a standard unambiguous format". `strptime(x, f, tz = NA)` is accepted (GNU R: "invalid 'tz' value"). `pmax(1:3, integer(0), 2)` gives `numeric(0)` (GNU R `integer(0)`) and `pmin(NULL)` gives `integer(0)` (GNU R `NULL`). `attributes(x) <- list(comment = 1)` is accepted (GNU R: "attempt to set invalid 'comment' attribute"), and `attributes(y) <- list(row.names = 1:3)` stores the compact form `c(NA, -3L)` where GNU R stores `c(NA, 3L)`.
-- **A warning raised under `NextMethod` names the default method as its call.** With `"[<-.tagged" <- function(x, i, value) NextMethod("[<-")`, a recycling `x[] <- c(1, 2)` on a three-element object warns `In \`[<-.default\`(\`*tmp*\`, , value = c(1, 2))` where GNU R prints `In NextMethod("[<-")`. zoo's and xts's `[<-` methods show the same label.
-- **`||` and `&&` accept an operand GNU R 4.6.2 rejects.** `FALSE || NULL`, `NULL || TRUE` and `TRUE && NULL` give `NA` or `TRUE`, and `FALSE || "TRUE"` gives `TRUE`, where GNU R reports `invalid 'y' type in 'x || y'` (or `'x'`) with the operator call. `sort(x, na.last = NULL)` reaches it through `is.na(na.last) || na.last`.
-- **Small condition and binding gaps:** base bindings are not locked (`assign("toupper", 1, envir = baseenv())` succeeds; GNU R: "cannot change value of locked binding"). `typeof(rep)`, `typeof(log)` and `typeof(round)` are "builtin" (GNU R: "special"). Infinite recursion is a `simpleError` (GNU R: `CStackOverflowError`). A failed `UseMethod("zz")` names the enclosing call.
-- **String equality across encodings in the C locale.** GNU R's `Seql` treats a native ("unknown") string and a UTF-8 string with the same bytes as unequal in the C locale; ry compares the bytes and calls them equal.
+- **`ppr` with the spline smoother on fewer than four rows** errors "too few observations for the spline smoother"; GNU R runs `sbart` with fewer knots than the cubic basis needs and returns a fit whose values depend on memory the Fortran never set.
+- **`typeof(rep)`, `typeof(log)` and `typeof(round)` are "builtin"** (GNU R: "special"). Making them specials changes how their arguments reach them, so it belongs with the builtin calling convention.
 - **Collation gaps** (`sort.rs`): ICU4X always normalizes, so text not in FCD form (`"ê"` + U+0323) ties where GNU R's ICU orders it. ICU locale keywords other than `collation=` (`en@colNumeric=yes`, `en-u-kn`) are dropped. U+10FF80 to U+10FFFF collate as U+FFFD. `icuGetCollate()` echoes the requested name, and `french_collation` errors. Mixed-encoding strings in the C locale; `<` on `bytes` strings compares where GNU R errors.
 - **Small calls at or above GNU R's time** in a survey of about 110 one-line base calls (the rest run 1.3x to 10x faster): `Sys.time()` 2.3 µs against 1.5, `split(1:10, g)` 13.5 against 9.3 (the R body of `as.factor`), `Reduce("+", 1:10)` with the function named by a string 7.8 against 7.3 (the prologue declines it). At parity: `iris[2, "Sepal.Length"]`, `rbind(df, df)`, `do.call(rbind, dfs)`, `tapply`, `apply(m, 1, sum)` and `is.element`, all flat interpretation of base R closures with no single hot builtin.
 - **Matrix products** (`linalg.rs`, `real_product`) are ry's own kernels in reference BLAS's summation order (`decisions/builtins.md`, "Base R's linear algebra"), so they run at reference BLAS's speed, not OpenBLAS's; not yet timed against a GNU R on OpenBLAS. A faster kernel may block over rows and columns and thread across columns, but must keep each entry's sum sequential in the inner index and use no FMA, or the bits move. CI has only OpenBLAS (setup-r installs it), so `test_linalg.rs` compares its LAPACK cases there with live GNU R; adding `libblas3 liblapack3` to the workflow's apt line (a human edit: workflow scope) would make CI check the pinned reference bits too.
 - **Package kernels** (`kernels.R`, zoo, xts, lubridate, stringr, jsonlite, readr) at 1e7 rows are at or below GNU R except xts `period.apply` (per-call interpreter cost, tier-0 work). Single runs swing by 30%, mostly with when collections fall: `str_split` read 1.1 to 1.5x in single runs but costs 1.10 s per repetition against GNU R's 1.31 s at 2e6 strings over five repetitions, collections included.
 - **Unscaled `besselI` is 10 to 20% slower than GNU R at large x** (1e6 points, x in [0, 50]) although callgrind counts the same instructions; scaled I, J, Y and K are at parity.
-- **Deparse ignores `scipen`.** `options(scipen = -10)` warns `invalid 'scipen' -10, used -9` on both, but GNU R deparses the call as `options(scipen = -1e+01)`, because its deparse formats numbers under the scipen in force, and ry prints `-10`.
-- **Complex printing** does not share significant digits between the two parts as GNU R's `formatComplex` does: `print((1+2i)^0.5)` gives `1.27202+0.7861514i` against GNU R's `1.27202+0.786151i`, and `print((-1+0i)^0.5)` gives `6.123234e-17+1i` against `0+1i`. The values are bit-identical; only the formatter differs.
 - **Peak memory** (`run.py --memory`) at 1e6 rows is within 1.13 times GNU R's for every kernel (`decisions/frames-table.md`, "String keys sort by rank, and merge pairs come from sorted codes"). The highest are `unsplit` 1.13 (184 MB against 163), `gsub(perl = TRUE)` 1.08, `xts period.apply` and `as.character(double)` 1.07. `make.unique` on 1e6 non-ASCII names peaks at 182 MB against GNU R's 177 MB.
 - **`mkChar` on the C API boundary's direct path is measured and not taken.** Interning `mkChar`, `mkCharCE`, `mkCharLen` and `mkCharLenCE` without leaving the direct path, with the string-table probe inlined, cuts a 16-byte `Rf_mkCharLenCE` from 868 to 765 instructions (fresh) and 376 to 288 (re-interned), and the marginal cost of `str_split(s, "_")` on 1e6 strings by 4.1%. Whole package runs move by less than the bar (single process, `TESTTHAT_PARALLEL=false`): testthat -0.25%, purrr -0.17%, rlang -0.11%, and it adds about 40 lines. Revisit if a profile shows `mkChar*` call overhead above a few percent.
 - **Long strings through `mkCharLenCE` are measured and not taken.** processx hands it chunks of 45 to 95 KB, about 2.2G instructions in vctrs' test run (1.7%). Per byte of a 64 KB string under callgrind, ry re-interns an existing string in 1.7 instructions (1.57 in the one pass that does the NUL test, the ASCII test and the hash, 0.14 in the `memcmp` of the hit) and creates a new one in 4.0 (the same pass, a 1.0 copy and the allocation), against GNU R's 14.1 and 15.6. A 32-byte NUL and ASCII test with the copy folded in, plus hashing only a sample of a long string, might bring the pass to about 0.15 (an estimate), which would save under 1% of that run. Hashing a sample would also chain strings that share their ends in one bucket.
@@ -664,6 +657,7 @@ Rule and order: `development/design/memory-safety.md`, "Migration".
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
 `docs/.../guide.mdx`, step 3). Gaps, roughly in order of how often a real package hits them:
 
+- **The load-index cache never evicts.** `loader::index_cache` writes one `~/.cache/ry/load-index/<hash of root>.bin` per package root, and nothing removes an entry whose root is gone, so temporary roots (test and benchmark checkouts) pile up: one container held 782 entries, 1.9 GB. Store the root in the entry and drop entries whose root no longer exists, as the stale runtime directories are dropped.
 - **`ry test` workers under `--runtime gnu-r` still load with pkgload**, eagerly and without
   `ry.toml`'s switches, because a GNU R worker has no `.Internal(ryLoaderAttach())`. Attaching the
   GNU R loader in the worker hook (source `gnur.R` from the binary) would close it.
@@ -1580,31 +1574,24 @@ well formed?" cannot see a wrong answer. These are the concrete follow-ups.
 ### Assert invariants in the code, not only properties in the harness
 
 A `debug_assert` at a seam turns every input of every suite, fixtures included, into a test of that
-invariant, at no release cost. The export-edge assertion (a closed scheme carries no inference
-variable) landed with the fix. Candidates for the next ones:
+invariant, at no release cost (`testing.md`, "The editor features", lists the ones in place). The
+next candidate: every expression type an item records resolves in the table that produced it, which
+is the escaped inference variable seen from the other end.
 
-- Every expression type an item records resolves in the table that produced it. This is the same
-  defect seen from the other end.
-- An item's declared-name range lies inside the item and spells the item's name. The fuzzer needed
-  1,200 iterations to stumble on a jump that landed on the wrong token. This assertion would catch it
-  on the first fixture that uses `->`.
-- HIR expression ranges and naming binding ranges lie inside their item's range.
-- The occurrences returned by references and rename are all spelled alike. The IDE battery checks
-  this locally. Promote it so that every caller is covered.
+### Gaps the editor relations left open
 
-### Add more relational oracles
-
-The IDE battery asks what must hold between answers (`testing.md`, "The editor features"). Two
-relations nobody asks yet, each one extra call with no expected output:
-
-- hover at the definition target names the same symbol as hover at the cursor;
-- completion at a name's first character offers that name;
-- the link a hover carries is one of the targets "go to definition" gives. `hover_definition`
-  resolves a name by its own copy of `expression_target`'s rules, and a default pass of the battery
-  with this check finds about ten disagreements: `x[[1]] <- 3` with the cursor on `x` links the hover
-  to the statement while the definition is empty; the others, in generated projects of several
-  files, are not reduced. The end shape is one resolution (`target_at`) that the hover's link
-  reads, with the check in the battery.
+- A member after `$` or `@` whose receiver has no known type is exempt from "completion offers what
+  resolves": `Gen <- setRefClass("Gen"); Gen$new` links the hover of `new` to the `setRefClass`
+  stub while completion offers only names spelled after a `$` elsewhere. The end shape types the
+  generator, so both read its members.
+- A stub's namespace exports hold its `@type` names beside its values, so `base::condition`
+  validates as an export although `condition` is only a class.
+- An unresolved name's definition offers the default packages although their export manifests
+  rule the name out: in `if (condition) 1`, hover and go to definition list `condition` as
+  installed in base, stats, utils, methods, graphics, grDevices and datasets.
+- A project `stubs/*.Rtypes` that declares `@type X` for a namespace without an `.exports` manifest
+  does not make a bare `X` resolve as a value (`unresolved`), since `@type` names stay out of the
+  value declarations.
 
 ### Run the pinned CRAN corpus as a test, one project per package
 
@@ -2985,10 +2972,7 @@ What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pres
   `agrepl` and `adist` still use the older edit-cost NFA in `crates/interp/src/approximate.rs`.
   Move them onto `ApproximateRegex`, which already has TRE's cost model (`aregexec` runs on it).
   Ties between equally costly paths follow the POSIX subexpression rule over the capture slots
-  rather than TRE's tag order. Some match starts differ too, for a reason not yet found:
-  `aregexec("([a-c]+)(d)(e?)", "xbcdy", max.distance = 1)`
-  gives `"xbcd"` on GNU R (an earlier start bought with a substitution) and `"bcd"` on ry, and
-  `aregexec("([a-c]+)(d)(e?)", "aXcde", max.distance = 1)` gives `"aXcde"` against `"cde"`.
+  rather than TRE's tag order.
 - **`strptime` drops a leap second.** `strptime("2020-01-01 10:59:60.5", "%Y-%m-%d %H:%M:%OS")`
   gives 11:00:00.5 where GNU R keeps `sec = 60.5`, because the parsed time is stored as epoch
   seconds before the `POSIXlt` fields are built.

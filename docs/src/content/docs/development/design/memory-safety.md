@@ -557,7 +557,10 @@ and `crates/heap/tests/test_handles.rs` running them on a heap that collects bef
 allocation. `interp::handles` is the interpreter's side: a safe builtin has the signature
 `fn(&mut Cx<'s>, &Args<'_, 's>) -> R<Local<'s>>`, the `safe!` macro makes the raw entry the
 builtin table holds, and each value helper a safe builtin calls has a safe form there that wraps
-the raw one and says why the handle types make the call sound. The wrappers are where a migrated
+the raw one and says why the handle types make the call sound. A native routine of a builtin
+library has the same form over `NativeArgs`, whose errors name the calling closure as GNU R's do,
+and `safe!(native ...)` makes its raw entry, so a crate above the interpreter writes its routines
+without `unsafe`. The wrappers are where a migrated
 function meets an unmigrated one, so that boundary is visible and counted, and a wrapper
 disappears when the helper under it is migrated.
 
@@ -566,7 +569,8 @@ element reads and stores, and `[`, `[[`, `$`, `@` with their replacement forms (
 attribute readers and setters with their fast-path entries (`attr`, `attributes`, `names`, `dim`,
 `dimnames`, `class`, `oldClass`, `levels<-`, `comment`, `length<-`, `inherits`, `unclass` and the
 replacement forms); `strings.rs` except `paste`, `paste0`, `sprintf`, `strsplit` and
-`make.unique`; and the bit conversions in `arith.rs`. Two pieces of the API are not built: the
+`make.unique`; the bit conversions in `arith.rs`; and the `arima0` and `ppr` routines of the
+stats crate. Two pieces of the API are not built: the
 bytecode loop's register accessor and `Held<T>` fields in traced structures.
 
 An unmigrated caller reaches a migrated function through a raw entry, an `unsafe fn` over `Sexp`
