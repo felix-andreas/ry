@@ -917,3 +917,136 @@ fn dates_split_shift_by_calendar_months_and_format() {
         na_strings(&[Some("31.01.2024"), None])
     );
 }
+
+fn failure(plan: Plan) -> String {
+    match lazy::collect(plan) {
+        Ok(_) => panic!("the plan should fail"),
+        Err(error) => error.to_string(),
+    }
+}
+
+/// R's integer `cumsum` gives `NA` from the first sum outside the integer range on.
+#[test]
+fn integer_cum_sum_is_missing_from_the_first_overflow_on() {
+    let table = frame(vec![("x", ints(&[i32::MAX - 1, 1, 1, -5, 3]))]);
+    let plan = Plan::new(Source::Table(table)).with(Step::Select(vec![named(
+        "running",
+        call(Function::CumSum, vec![column("x")]),
+    )]));
+    let na = table::convert::NA_INTEGER;
+    assert_eq!(
+        column_values(&collect(plan), "running"),
+        ints(&[i32::MAX - 1, i32::MAX, na, na, na])
+    );
+}
+
+#[test]
+fn factors_cast_to_their_codes_and_fill_by_their_labels() {
+    let na = table::convert::NA_INTEGER;
+    let levels = |labels: &[&str]| labels.iter().map(|label| label.to_string()).collect();
+    let table = frame(vec![
+        (
+            "f",
+            RVector::Factor {
+                codes: vec![2, 1, na],
+                levels: levels(&["10", "20"]),
+            },
+        ),
+        (
+            "g",
+            RVector::Factor {
+                codes: vec![1, 1, 2],
+                levels: levels(&["a", "b"]),
+            },
+        ),
+    ]);
+    let plan = Plan::new(Source::Table(table)).with(Step::Select(vec![
+        named(
+            "codes",
+            call(Function::Cast(ColumnType::Integer), vec![column("f")]),
+        ),
+        named(
+            "numbers",
+            call(Function::Cast(ColumnType::Double), vec![column("f")]),
+        ),
+        named(
+            "filled",
+            call(Function::FillNull, vec![column("f"), column("g")]),
+        ),
+    ]));
+    let result = collect(plan);
+    assert_eq!(column_values(&result, "codes"), ints(&[2, 1, na]));
+    assert_eq!(na_doubles(&result, "numbers"), [Some(2.0), Some(1.0), None]);
+    let RVector::Factor { codes, levels } = column_values(&result, "filled") else {
+        panic!("`fill_null` of two factors is not a factor");
+    };
+    let labels: Vec<&str> = codes
+        .iter()
+        .map(|&code| levels[usize::try_from(code - 1).unwrap_or(usize::MAX)].as_str())
+        .collect();
+    assert_eq!(labels, ["20", "10", "b"]);
+}
+
+#[test]
+fn text_casts_to_numbers_as_as_numeric_reads_them() {
+    let table = frame(vec![(
+        "text",
+        strings(&[" 1.5", "0x10", "1e3 ", "abc", "", "2.7"]),
+    )]);
+    let plan = Plan::new(Source::Table(table)).with(Step::Select(vec![
+        named(
+            "number",
+            call(Function::Cast(ColumnType::Double), vec![column("text")]),
+        ),
+        named(
+            "whole",
+            call(Function::Cast(ColumnType::Integer), vec![column("text")]),
+        ),
+    ]));
+    let result = collect(plan);
+    let na = table::convert::NA_INTEGER;
+    assert_eq!(
+        na_doubles(&result, "number"),
+        [Some(1.5), Some(16.0), Some(1000.0), None, None, Some(2.7)]
+    );
+    assert_eq!(
+        column_values(&result, "whole"),
+        ints(&[1, 16, 1000, na, na, 2])
+    );
+}
+
+#[test]
+fn bad_patterns_durations_and_fills_are_refused_by_name() {
+    let table = frame(vec![
+        ("city", strings(&["a"])),
+        ("day", RVector::Date(vec![19753.0])),
+        ("units", ints(&[1])),
+    ]);
+    let select = |expr: Expr| {
+        Plan::new(Source::Table(table.clone())).with(Step::Select(vec![named("out", expr)]))
+    };
+    let pattern = failure(select(call(
+        Function::Contains { literal: false },
+        vec![column("city"), Expr::Character("(".into())],
+    )));
+    assert!(
+        pattern.contains("`str_contains` cannot read the regular expression \"(\""),
+        "{pattern}"
+    );
+    let offset = failure(select(call(
+        Function::OffsetBy { by: "12h".into() },
+        vec![column("day")],
+    )));
+    assert!(
+        offset.contains("`dt_offset_by` moves a Date by whole days"),
+        "{offset}"
+    );
+    let fill = failure(select(call(
+        Function::Coalesce,
+        vec![column("day"), column("units")],
+    )));
+    assert!(
+        fill.contains("`coalesce` fills Date values only from values of the same type"),
+        "{fill}"
+    );
+}

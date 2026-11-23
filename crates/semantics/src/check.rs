@@ -237,6 +237,30 @@ pub enum TypeErrorKind<'db> {
         columns: Vec<String>,
         suggestion: Option<String>,
     },
+    /// A column a verb would add, or rename another to, under a name the frame already has, such
+    /// as `DataFrame.with_row_index(f, "id")` on a frame with an `id` column.
+    DuplicateColumn {
+        column: String,
+        verb: &'static str,
+    },
+    /// `Expr.cast` to a type the value cannot become, such as a `Date` to `logical`.
+    UnsupportedCast {
+        from: Ty<'db>,
+        to: String,
+    },
+    /// A duration `Expr.dt_offset_by` cannot read, or, with `part_of_day`, one that moves a
+    /// `Date` by part of a day.
+    InvalidDuration {
+        text: String,
+        part_of_day: bool,
+    },
+    /// `Expr.coalesce` or `Expr.fill_null` filling dates or date-times from values of another
+    /// type, whose common type would be text.
+    FilledTypesDiffer {
+        function: String,
+        first: Ty<'db>,
+        second: Ty<'db>,
+    },
     /// A column in `GroupBy.agg` that gives one value per row instead of one per group.
     NotAnAggregation {
         column: String,
@@ -493,6 +517,8 @@ pub enum ExpressionNeeds {
     Text,
     /// The `dt_` functions: `Date` or `POSIXct` columns.
     Temporal,
+    /// `Expr.cum_sum`: logical, integer or double columns, and no dates.
+    Summable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
@@ -14515,14 +14541,30 @@ impl<'db, 'a> Checker<'db, 'a> {
                         }),
                     }
                 }
+                let mut seen = FxHashSet::default();
+                if let Some((column, _)) = result.iter().find(|(name, _)| !seen.insert(name)) {
+                    let renamed = rest.iter().rev().find(|argument| {
+                        module.argument_name(argument).as_deref() == Some(column.as_str())
+                    });
+                    self.errors.push(TypeError {
+                        range: renamed
+                            .and_then(|argument| argument.value)
+                            .map_or_else(|| module.range(subject), |value| module.range(value)),
+                        kind: TypeErrorKind::DuplicateColumn {
+                            column: column.clone(),
+                            verb: "rename",
+                        },
+                    });
+                    return None;
+                }
                 known.then(|| frame_of(db, frame_kind(lazy), result))
             }
             DataFrameVerb::WithRowIndex { lazy } => {
-                let name = match match_formals(module, rest, &["name"])
+                let given = match_formals(module, rest, &["name"])
                     .first()
                     .copied()
-                    .flatten()
-                {
+                    .flatten();
+                let name = match given {
                     None => "index".to_owned(),
                     Some(value) => match module.kind(value) {
                         ExpressionKind::Literal(LiteralKind::String(text)) => {
@@ -14531,6 +14573,16 @@ impl<'db, 'a> Checker<'db, 'a> {
                         _ => return None,
                     },
                 };
+                if columns.iter().any(|column| column.name.text(db) == name) {
+                    self.errors.push(TypeError {
+                        range: module.range(given.unwrap_or(subject)),
+                        kind: TypeErrorKind::DuplicateColumn {
+                            column: name,
+                            verb: "with_row_index",
+                        },
+                    });
+                    return None;
+                }
                 let mut result = vec![(
                     name,
                     Ty::new(db, TyKind::Vector(scalar(db, Atomic::Integer))),
@@ -15136,12 +15188,37 @@ impl<'db, 'a> Checker<'db, 'a> {
                     "Expr.dt_year" | "Expr.dt_month" | "Expr.dt_day" | "Expr.dt_offset_by"
                     | "Expr.dt_to_string" => {
                         let column = argument(self)?;
-                        self.check_expression_operand(
+                        let fits = self.check_expression_operand(
                             name.as_str(),
                             first?,
                             &column,
                             ExpressionNeeds::Temporal,
                         );
+                        let by = match_formals(module, &module[arguments], &["expr", "by"])
+                            .get(1)
+                            .copied()
+                            .flatten();
+                        if let (true, "Expr.dt_offset_by", Some(by)) = (fits, name.as_str(), by)
+                            && let ExpressionKind::Literal(LiteralKind::String(text)) =
+                                module.kind(by)
+                        {
+                            let text = &module[text];
+                            let date = temporal_column(db, column.ty) == Some(Temporal::Date);
+                            let part_of_day = match duration_has_part_of_day(text) {
+                                Some(false) => None,
+                                Some(true) => date.then_some(true),
+                                None => Some(false),
+                            };
+                            if let Some(part_of_day) = part_of_day {
+                                self.errors.push(TypeError {
+                                    range: module.range(by),
+                                    kind: TypeErrorKind::InvalidDuration {
+                                        text: text.to_owned(),
+                                        part_of_day,
+                                    },
+                                });
+                            }
+                        }
                         let ty = match name.as_str() {
                             "Expr.dt_offset_by" => column.ty,
                             "Expr.dt_to_string" => vector(Atomic::Character),
@@ -15173,14 +15250,14 @@ impl<'db, 'a> Checker<'db, 'a> {
                         let ty = if name == "Expr.concat_str" {
                             vector(Atomic::Character)
                         } else {
-                            // A bare `NA` takes the type of the values it stands among, as
-                            // the engine's supertype does.
+                            // A bare `NA` of any type yields to the values it stands among, as
+                            // the engine leaves it out of the common type.
                             let types: Vec<Ty<'db>> = operands
                                 .iter()
                                 .filter(|(value, _)| {
                                     !matches!(
                                         module.kind(*value),
-                                        ExpressionKind::Literal(LiteralKind::Na(NaAtom::Logical))
+                                        ExpressionKind::Literal(LiteralKind::Na(_))
                                     )
                                 })
                                 .map(|(_, operand)| operand.ty)
@@ -15188,7 +15265,26 @@ impl<'db, 'a> Checker<'db, 'a> {
                             match types.split_first() {
                                 None => vector(Atomic::Logical),
                                 Some((&first, rest)) if rest.iter().all(|&ty| ty == first) => first,
-                                Some(_) => widest_column(db, &types, false)?,
+                                Some((&first, rest)) => {
+                                    let temporal = std::iter::once(&first)
+                                        .chain(rest)
+                                        .find(|ty| temporal_column(db, **ty).is_some());
+                                    if let Some(&temporal) = temporal {
+                                        let other = std::iter::once(&first)
+                                            .chain(rest)
+                                            .find(|ty| **ty != temporal)?;
+                                        self.errors.push(TypeError {
+                                            range: self.blame_range(value),
+                                            kind: TypeErrorKind::FilledTypesDiffer {
+                                                function: name.to_string(),
+                                                first: temporal,
+                                                second: *other,
+                                            },
+                                        });
+                                        return None;
+                                    }
+                                    widest_column(db, &types, false)?
+                                }
                             }
                         };
                         if operands.is_empty() {
@@ -15206,7 +15302,8 @@ impl<'db, 'a> Checker<'db, 'a> {
                         else {
                             return None;
                         };
-                        let ty = match &module[text] {
+                        let to = &module[text];
+                        let ty = match to {
                             "logical" => vector(Atomic::Logical),
                             "integer" => vector(Atomic::Integer),
                             "double" => vector(Atomic::Double),
@@ -15215,6 +15312,24 @@ impl<'db, 'a> Checker<'db, 'a> {
                             "Date" => date_type(db),
                             _ => return None,
                         };
+                        // R's `as.logical` of a date and `as.Date` of a logical are errors.
+                        let from = temporal_column(db, column.ty);
+                        let refused = match to {
+                            "logical" => from.is_some(),
+                            "Date" => join_class(db, column.ty) == Some(JoinClass::Logical),
+                            _ => false,
+                        };
+                        if refused {
+                            let from = self.shown_operand_type(first?, &column);
+                            self.errors.push(TypeError {
+                                range: module.range(target),
+                                kind: TypeErrorKind::UnsupportedCast {
+                                    from,
+                                    to: to.to_owned(),
+                                },
+                            });
+                            return None;
+                        }
                         Some(ComputedColumn { ty, ..column })
                     }
                     "Expr.shift" => argument(self),
@@ -15224,7 +15339,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                             name.as_str(),
                             first?,
                             &column,
-                            ExpressionNeeds::Numbers,
+                            ExpressionNeeds::Summable,
                         )
                         .then_some(())?;
                         let ty = match element_atomic(db, column.ty) {
@@ -15514,6 +15629,10 @@ impl<'db, 'a> Checker<'db, 'a> {
             },
             ExpressionNeeds::Temporal => {
                 class.is_none() || temporal_column(db, operand.ty).is_some()
+            }
+            ExpressionNeeds::Summable => {
+                matches!(class, Some(JoinClass::Logical | JoinClass::Number))
+                    || (class.is_none() && temporal_column(db, operand.ty).is_none())
             }
         };
         if fits {
@@ -23850,6 +23969,32 @@ fn temporal_column(db: &dyn Db, ty: Ty<'_>) -> Option<Temporal> {
 }
 
 /// The column type of an R vector a verb takes as a column's values. A string is left out,
+/// Whether a Polars duration such as `"1mo"` or `"-3d12h"` has a part shorter than a day, or
+/// `None` when it does not read as a duration.
+fn duration_has_part_of_day(text: &str) -> Option<bool> {
+    let mut rest = text.strip_prefix('-').unwrap_or(text);
+    let mut part_of_day = false;
+    if rest.is_empty() {
+        return None;
+    }
+    while !rest.is_empty() {
+        let digits = rest.find(|character: char| !character.is_ascii_digit())?;
+        if digits == 0 {
+            return None;
+        }
+        let unit_end = rest[digits..]
+            .find(|character: char| character.is_ascii_digit())
+            .map_or(rest.len(), |end| digits + end);
+        match &rest[digits..unit_end] {
+            "d" | "w" | "mo" | "q" | "y" => {}
+            "ns" | "us" | "µs" | "ms" | "s" | "m" | "h" => part_of_day = true,
+            _ => return None,
+        }
+        rest = &rest[unit_end..];
+    }
+    Some(part_of_day)
+}
+
 /// because a single string names a column instead.
 fn vector_column<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Ty<'db>> {
     match column_element(db, ty).kind(db) {

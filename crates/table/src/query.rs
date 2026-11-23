@@ -16,7 +16,7 @@ use {
         group, join,
         kernel::{Evaluator, Vector, scatter, scatters, selected_rows},
     },
-    numeric::long_double::{real_integer_divide, real_modulo},
+    numeric::long_double::{Exactness, real_integer_divide, real_modulo, strtod},
     polars::prelude::{
         AnyValue, AsOfOptions, AsofStrategy, ChunkAgg, Column, DataFrame, DataType, Duration,
         ExplodeOptions, Expr as PolarsExpr, Field, Float64Chunked, Int32Chunked, IntoColumn,
@@ -2949,6 +2949,21 @@ fn conversion_warning(
 }
 
 /// Formats a double as R's `as.character` does: fifteen significant digits without trailing
+/// Text read as a number as R's `as.numeric` reads it (`RealFromString`): white space around the
+/// number is allowed, hexadecimal and `Inf` are numbers, and anything else is `NA`.
+fn r_number(text: &str) -> Option<f64> {
+    let bytes = text.as_bytes();
+    let blank = |rest: &[u8]| rest.iter().all(u8::is_ascii_whitespace);
+    if blank(bytes) {
+        return None;
+    }
+    let number = strtod(bytes, b'.', false, Exactness::Allow);
+    match number.length > 0 && blank(bytes.get(number.length..).unwrap_or_default()) {
+        true => Some(number.value),
+        false => None,
+    }
+}
+
 /// zeros, in fixed notation unless scientific notation (`1e+05`) is shorter.
 fn r_double(value: f64) -> String {
     if value.is_nan() {
@@ -3321,12 +3336,14 @@ impl Typer<'_> {
             ) => {
                 text(*x)?;
                 text(*pattern)?;
+                checked_pattern(function, args)?;
                 ColumnType::Logical
             }
             (Function::Replace { .. }, [x, pattern, replacement]) => {
                 text(*x)?;
                 text(*pattern)?;
                 text(*replacement)?;
+                checked_pattern(function, args)?;
                 ColumnType::Character
             }
             (Function::Slice { .. } | Function::Uppercase | Function::Lowercase, [x]) => {
@@ -3340,11 +3357,16 @@ impl Typer<'_> {
             }
             (Function::OffsetBy { by }, [x]) => {
                 temporal(*x)?;
-                Duration::try_parse(by).map_err(|_| {
+                let duration = Duration::try_parse(by).map_err(|_| {
                     Error::Query(format!(
                         "`{name}` takes a duration such as \"1mo\" or \"-2d\", not \"{by}\""
                     ))
                 })?;
+                if *x == ColumnType::Date && duration.nanoseconds() != 0 {
+                    return Err(Error::Query(format!(
+                        "`{name}` moves a Date by whole days, weeks, months or years, not \"{by}\""
+                    )));
+                }
                 *x
             }
             (Function::Format { .. }, [x]) => {
@@ -3356,7 +3378,7 @@ impl Typer<'_> {
                 ColumnType::Date
             }
             (Function::FillNull, [_, _]) | (Function::Coalesce, [_, ..]) => {
-                coalesced_type(args, &kinds)
+                coalesced_type(name, args, &kinds)?
             }
             (Function::Cast(target), [x]) => {
                 if !castable(*x, *target) {
@@ -3460,17 +3482,56 @@ impl Function {
 }
 
 /// The type of `coalesce` and `fill_null`: the common type of the arguments, leaving out a bare
-/// `NA`, which only ever yields to the next argument.
-fn coalesced_type(args: &[Expr], kinds: &[ColumnType]) -> ColumnType {
-    let given = args
+/// `NA`, which only ever yields to the next argument. A date or date-time fills only from its own
+/// type, because the common type of a date and a number is text, which nobody filling gaps wants.
+fn coalesced_type(name: &str, args: &[Expr], kinds: &[ColumnType]) -> Result<ColumnType> {
+    let given: Vec<ColumnType> = args
         .iter()
         .zip(kinds)
         .filter(|(arg, _)| !matches!(arg, Expr::Na(_)))
         .map(|(_, kind)| *kind)
-        .reduce(supertype);
-    given
+        .collect();
+    if let Some(temporal) = given.iter().find(|kind| is_temporal(**kind))
+        && let Some(other) = given.iter().find(|kind| *kind != temporal)
+    {
+        return Err(Error::Query(format!(
+            "`{name}` fills {temporal} values only from values of the same type, not from {other}"
+        )));
+    }
+    Ok(given
+        .into_iter()
+        .reduce(supertype)
         .or_else(|| kinds.iter().copied().reduce(supertype))
-        .unwrap_or(ColumnType::Logical)
+        .unwrap_or(ColumnType::Logical))
+}
+
+/// A regular expression written as a literal, checked before the plan runs, so its mistake is
+/// reported in R's terms rather than as a failed query.
+fn checked_pattern(function: &Function, args: &[Expr]) -> Result<()> {
+    let literal = match function {
+        Function::Contains { literal } | Function::Replace { literal, .. } => *literal,
+        _ => true,
+    };
+    match (literal, args.get(1)) {
+        (false, Some(Expr::Character(pattern))) => {
+            regex::Regex::new(pattern).map(|_| ()).map_err(|failure| {
+                let reason = match failure {
+                    regex::Error::Syntax(message) => message
+                        .lines()
+                        .rev()
+                        .find_map(|line| line.strip_prefix("error: "))
+                        .unwrap_or("it does not parse")
+                        .to_owned(),
+                    other => other.to_string(),
+                };
+                Error::Query(format!(
+                    "`{}` cannot read the regular expression \"{pattern}\": {reason}",
+                    function.name()
+                ))
+            })
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Whether `cast` converts a `from` value to `to`. R's `as.logical` of a date and `as.Date` of a
@@ -3492,6 +3553,10 @@ fn r_cast(value: PolarsExpr, from: ColumnType, to: ColumnType) -> Result<PolarsE
     let null = |kind: ColumnType| lit(NULL).cast(dtype(kind));
     Ok(match (from, to) {
         _ if from == to => value,
+        (ColumnType::Factor, ColumnType::Integer) => factor::codes_expr(value),
+        (ColumnType::Factor, ColumnType::Double) => {
+            factor::codes_expr(value).cast(DataType::Float64)
+        }
         (ColumnType::Factor, to) => r_cast(factor::text_expr(value), ColumnType::Character, to)?,
         (from, ColumnType::Factor) => {
             factor::factor_expr(r_cast(value, from, ColumnType::Character)?)
@@ -3530,8 +3595,21 @@ fn r_cast(value: PolarsExpr, from: ColumnType, to: ColumnType) -> Result<PolarsE
             .then(null(to))
             .otherwise(value.neq(lit(0.0))),
         (_, ColumnType::Logical) => value.neq(lit(0)),
+        (ColumnType::Character, ColumnType::Double) => value.map(
+            |column| {
+                let numbers: Float64Chunked = column
+                    .as_materialized_series()
+                    .str()?
+                    .iter()
+                    .map(|text| text.and_then(r_number))
+                    .collect();
+                Ok(numbers.with_name(column.name().clone()).into_column())
+            },
+            |_, field| Ok(Field::new(field.name().clone(), DataType::Float64)),
+        ),
         (ColumnType::Character, ColumnType::Integer) => {
-            r_cast(value.cast(DataType::Float64), ColumnType::Double, to)?
+            let number = r_cast(value, ColumnType::Character, ColumnType::Double)?;
+            r_cast(number, ColumnType::Double, to)?
         }
         (ColumnType::Datetime, ColumnType::Integer | ColumnType::Double) => {
             let seconds = value.cast(DataType::Int64).cast(DataType::Float64) / lit(1e6);
@@ -3963,22 +4041,43 @@ impl Lowering<'_> {
                 cache: true,
             }),
             (Function::FillNull | Function::Coalesce, args) => {
+                // Polars cannot coalesce extension columns, so factors fill by their labels.
+                let target = match kind {
+                    ColumnType::Factor => ColumnType::Character,
+                    kind => kind,
+                };
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
                     if !matches!(arg, Expr::Na(_)) {
-                        values.push(r_cast(self.expr(arg)?, typer.expr(arg)?, kind)?);
+                        values.push(r_cast(self.expr(arg)?, typer.expr(arg)?, target)?);
                     }
                 }
-                match values.len() {
-                    0 => lit(NULL).cast(dtype(kind)),
+                let filled = match values.len() {
+                    0 => lit(NULL).cast(dtype(target)),
                     1 => values.remove(0),
                     _ => coalesce(&values),
+                };
+                match kind {
+                    ColumnType::Factor if values.len() > 1 => factor::factor_expr(filled),
+                    _ => filled,
                 }
             }
             (Function::Cast(target), [x]) => r_cast(self.expr(x)?, typer.expr(x)?, *target)?,
             (Function::Shift(rows), [x]) => self.expr(x)?.shift(lit(*rows)),
             (Function::CumSum, [x]) if kind == ColumnType::Integer => {
-                checked_int32(self.expr(x)?.cast(DataType::Int64).cum_sum(false))
+                // As in R's integer `cumsum`, every row from the first overflow on is `NA`.
+                let sum = self.expr(x)?.cast(DataType::Int64).cum_sum(false);
+                let limit = i64::from(i32::MAX);
+                let overflowed = sum
+                    .clone()
+                    .gt(lit(limit))
+                    .or(sum.clone().lt(lit(-limit)))
+                    .cast(DataType::UInt8)
+                    .fill_null(lit(0u8))
+                    .cum_max(false);
+                when(overflowed.eq(lit(0u8)))
+                    .then(sum.cast(DataType::Int32))
+                    .otherwise(lit(NULL).cast(DataType::Int32))
             }
             (Function::CumSum, [x]) => self.expr(x)?.cum_sum(false),
             (Function::RowIndex(offset), []) => checked_int32(
