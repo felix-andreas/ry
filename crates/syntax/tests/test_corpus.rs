@@ -216,6 +216,16 @@ fn in_tree_acceptance() {
          legitimate (R as referee) and belongs in tests/in-tree-acceptance-allowlist.txt",
         unexplained.len()
     );
+    let stale: Vec<&String> = allowlist
+        .iter()
+        .filter(|id| !accepted_only_by_us.contains(*id))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "{} allowlist entr(ies) no longer accepted only by us: {stale:?}\n\
+         Delete them from tests/in-tree-acceptance-allowlist.txt",
+        stale.len()
+    );
 }
 
 /// Release only: tree-sitter's C is compiled optimized even in debug profiles.

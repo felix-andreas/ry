@@ -2,8 +2,8 @@
 //! their exported contracts (`ry::config::check_config_invariants`,
 //! `ry::position::check_position_invariants`, `ry::executable::testing`), over seeds, mutations
 //! of them, and random bytes, and the editor's two diagnostic waves over generated sessions.
-//! Each generated case is one seed of [`for_each_seed`], so `FUZZ_SEED` replays a failure and
-//! `FUZZ_ITERS` sets the budget.
+//! Each generated case is one seed of [`for_each_seed_on_named_threads`], so `FUZZ_SEED`
+//! replays a failure and `FUZZ_ITERS` sets the budget.
 
 use {
     ry::{
@@ -20,8 +20,8 @@ use {
         testing::generate_session,
     },
     syntax::testing::{
-        SplitMix64, fixture_case_sources, for_each_seed, mutate_seed, program_corpus_sources,
-        random_bytes, split_files, token_soup,
+        SplitMix64, fixture_case_sources, for_each_seed_on_named_threads, mutate_seed,
+        program_corpus_sources, random_bytes, split_files, token_soup,
     },
 };
 
@@ -97,7 +97,7 @@ fn config_seeds_hold_invariants() {
 
 #[test]
 fn fuzz_config() {
-    for_each_seed(2000, |seed| {
+    for_each_seed_on_named_threads(2000, |seed| {
         let mut rng = SplitMix64(0xc0f1_9000 ^ seed);
         let input = match rng.below(3) {
             0 => random_bytes(&mut rng),
@@ -117,7 +117,7 @@ fn position_seeds_hold_invariants() {
 
 #[test]
 fn fuzz_positions() {
-    for_each_seed(2000, |seed| {
+    for_each_seed_on_named_threads(2000, |seed| {
         let mut rng = SplitMix64(0x000f_f5e7 ^ seed);
         let input = match rng.below(2) {
             0 => random_bytes(&mut rng),
@@ -129,7 +129,7 @@ fn fuzz_positions() {
 
 #[test]
 fn fuzz_executable_payloads() {
-    for_each_seed(2000, |seed| {
+    for_each_seed_on_named_threads(2000, |seed| {
         let mut rng = SplitMix64(0x0e8e_c0de ^ seed);
         let bytes = random_bytes(&mut rng).into_bytes();
         executable_testing::check_round_trip(&bytes);
@@ -179,7 +179,7 @@ fn fuzz_first_wave_is_a_subset_of_the_settled_wave() {
     install_shipped_stubs(&db);
     AnalysisSettings::new(&db, true, false, true);
     ProjectFiles::new(&db, Vec::new());
-    for_each_seed(300, |seed| {
+    for_each_seed_on_named_threads(300, |seed| {
         let mut rng = SplitMix64(0x2_FA7E_5E75 ^ seed);
         let states = generate_session(&mut rng, &pool);
         let mut config = Config::default();

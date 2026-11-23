@@ -18,8 +18,8 @@ use {
         SyntaxKind, SyntaxNode,
         ast::is_expression_kind,
         testing::{
-            SplitMix64, fixture_case_sources, for_each_seed, mutate_seed, program_corpus_sources,
-            small_edit, split_files, token_soup,
+            SplitMix64, fixture_case_sources, for_each_seed_on_named_threads, mutate_seed,
+            program_corpus_sources, small_edit, split_files, token_soup,
         },
     },
 };
@@ -319,7 +319,7 @@ fn edits_that_change_no_meaning_only_move_findings() {
     let mut leading_trivia = 0;
     let mut renames = 0;
     let mut cases = 0;
-    for_each_seed(METAMORPHIC_CASES, |seed| {
+    for_each_seed_on_named_threads(METAMORPHIC_CASES, |seed| {
         let mut rng = SplitMix64(0x3E7A_3021 ^ seed);
         let states = generate_session(&mut rng, &POOL);
         let coverage = check_metamorphic_relations(&mut workbench, &states[0], &mut rng);
@@ -393,7 +393,7 @@ fn fuzz_stub_sources() {
     for input in STUB_REGRESSIONS {
         check_stub_source(&mut db, input);
     }
-    for_each_seed(400, |seed| {
+    for_each_seed_on_named_threads(400, |seed| {
         let mut rng = SplitMix64(0x57AB_5EED ^ seed);
         let mut window = |rng: &mut SplitMix64| {
             let lines: Vec<&str> = shipped[rng.below(shipped.len())].lines().collect();
@@ -446,7 +446,7 @@ enum Directive {
 /// in file order; values that are missing, short or long leave the file unresolved.
 #[test]
 fn namespace_conditionals_resolve_to_the_taken_branches() {
-    for_each_seed(400, |seed| {
+    for_each_seed_on_named_threads(400, |seed| {
         let mut rng = SplitMix64(seed);
         let mut counter = 0;
         let directives: Vec<Directive> = (0..1 + rng.below(6))
