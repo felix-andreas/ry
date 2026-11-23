@@ -233,7 +233,10 @@ x S4 classes are turned off in this project (`[check] object-systems = false`), 
 
 **`s3-method-signature`** (warning): an S3 method whose parameters do not fit its generic, by the
 rule `R CMD check` applies. A package function `generic.class` is a method when `generic` is a
-package function that calls `UseMethod("generic")`. R re-matches the call's arguments against the
+package function that calls `UseMethod("generic")`. When the NAMESPACE registers methods of a
+generic with `S3method()`, only the registered functions are its methods, so a dotted helper next to the generic is not
+mistaken for one, and `S3method(generic, class, fn)` makes `fn` a method
+whatever its name. R re-matches the call's arguments against the
 method, so the method must take the generic's parameters in the generic's order up to the first
 `...`, must take every other parameter of the generic unless it has `...` itself, and may add
 parameters only when the generic has `...` to pass them on. A `.formula` method may call its first
