@@ -166,6 +166,21 @@ pub mod outcome {
     /// Load results: the slot's new status, or one of these.
     pub const LOAD_FAILED: i32 = 0;
     pub const LOAD_INVALIDATED: i32 = 4;
+    /// [`jit_call_builtin`] ran nothing: the builtin could run R code for an argument, so
+    /// compiled code steps the call with the frame written back.
+    pub const OBSERVED: i32 = 7;
+}
+
+/// How [`jit_step`] runs its instruction.
+pub mod stepping {
+    /// The instruction runs no R code, so its signals wait ([`Signalling`]) and nothing needs
+    /// validating.
+    pub const QUIET: i32 = 0;
+    /// The instruction may run R code, so the speculations are checked afterwards.
+    pub const VALIDATED: i32 = 1;
+    /// The instruction signals where it raises, and the code after it relies on no speculation
+    /// it could break.
+    pub const PLAIN: i32 = 2;
 }
 
 /// What [`jit_element_step`] did with an element read or store.
@@ -311,8 +326,8 @@ pub struct Inlined {
     /// How often the call started without a frame or tried to.
     pub entries: Cell<u32>,
     /// How often the call needed its real frame because of what the callee is or does: it
-    /// handed an instruction to tier 0, or the closure is being debugged or has another body
-    /// by now. When that is frequent ([`frequent`]) the code is discarded and the callee is
+    /// handed an instruction to tier 0, an instruction of it had a condition to signal, or
+    /// the closure is being debugged or has another body by now. When that is frequent ([`frequent`]) the code is discarded and the callee is
     /// no longer inlined ([`NO_ELISION`]).
     pub handoffs: Cell<u32>,
 }
@@ -770,13 +785,18 @@ unsafe fn slot_cell(activation: &Activation, slot: i64) -> *mut Sexp {
     }
 }
 
-/// Runs `step`, one tier-0 instruction of an activation. In a closure call without a frame,
-/// which `inlined` says the activation is, the instruction signals nothing ([`Signalling`]): an error it raises comes back unsignalled, and
-/// the exit it takes builds the call's frame and signals it there. `None` says the instruction
-/// gave up before a signal that runs R code, so the exit must carry no error, which makes
-/// tier 0 run the instruction again in the call's frame. The instruction runs no R code, so
-/// nothing nests.
-fn step_unsignalled<T>(inlined: bool, step: impl FnOnce() -> T) -> Option<T> {
+/// Runs `step`, one tier-0 instruction of an activation. When `deferred` is set the
+/// instruction signals nothing ([`Signalling`]): an error it raises comes back unsignalled, and
+/// tier 0 signals it after the exit the error takes. `None` says the instruction gave up before
+/// a signal that runs R code, so the exit must carry no error, which makes tier 0 run the
+/// instruction again. The instruction runs no R code, so nothing nests.
+///
+/// A closure call without a frame always defers, because a handler would see a stack without
+/// the call. A body's own frame defers where the instruction runs no R code otherwise: a
+/// handler reads the frame, so the variables compiled code holds must be written back first,
+/// which the exit does and which a write-back before every such instruction would cost each
+/// time.
+fn step_unsignalled<T>(deferred: bool, step: impl FnOnce() -> T) -> Option<T> {
     struct Restore;
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -784,7 +804,7 @@ fn step_unsignalled<T>(inlined: bool, step: impl FnOnce() -> T) -> Option<T> {
         }
     }
     // `step` runs from one call site, so that it inlines into the caller.
-    let restore = inlined.then(|| {
+    let restore = deferred.then(|| {
         interp::interp().signalling = Signalling::Deferred;
         Restore
     });
@@ -794,17 +814,18 @@ fn step_unsignalled<T>(inlined: bool, step: impl FnOnce() -> T) -> Option<T> {
     (!abandoned).then_some(result)
 }
 
-/// Runs the tier-0 instruction at `pc`, then checks the speculations when `validate` is set.
-pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate: i32) -> i32 {
+/// Runs the tier-0 instruction at `pc` as `mode` says, one of [`stepping`]'s.
+pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, mode: i32) -> i32 {
     unsafe {
         checked(activation, outcome::FAILED, |activation| {
             let machine = machine(activation);
             let heap = heap();
             let epoch = heap.binding_epoch();
             let mark = heap.handle_mark();
-            let inlined = layout(activation).inlined.is_some();
+            let deferred = mode == stepping::QUIET || layout(activation).inlined.is_some();
+            let validate = mode == stepping::VALIDATED;
             let stepper = &mut activation.stepper;
-            let stepped = step_unsignalled(inlined, || {
+            let stepped = step_unsignalled(deferred, || {
                 bytecode::step_one(stepper, machine, pc as usize)
             });
             if heap.handle_mark() < mark {
@@ -813,7 +834,7 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
             heap.release_handles(mark);
             match stepped {
                 Some(StepEnd::Next)
-                    if validate != 0 && !still_valid(compiled(activation), machine, epoch) =>
+                    if validate && !still_valid(compiled(activation), machine, epoch) =>
                 {
                     outcome::INVALIDATED
                 }
@@ -835,9 +856,11 @@ pub unsafe extern "C" fn jit_step(activation: *mut Activation, pc: i64, validate
     }
 }
 
-/// Runs the builtin call at `pc` ([`bytecode::call_builtin_step`]), which compiled code calls
-/// only where the call runs no R code, so nothing needs validating: [`outcome::OK`] or
-/// [`outcome::FAILED`]. A nonzero `record` records the result's type.
+/// Runs the call at `pc` of a builtin that runs no R code for plain arguments
+/// ([`bytecode::call_builtin_step`]), so nothing needs validating: [`outcome::OK`] or
+/// [`outcome::FAILED`]. An argument the builtin could run R code for ([`observed`]) declines
+/// the call with [`outcome::OBSERVED`] before anything ran. A nonzero `record` records the
+/// result's type.
 pub unsafe extern "C" fn jit_call_builtin(
     activation: *mut Activation,
     pc: i64,
@@ -846,9 +869,15 @@ pub unsafe extern "C" fn jit_call_builtin(
     unsafe {
         checked(activation, outcome::FAILED, |activation| {
             let machine = machine(activation);
-            let inlined = layout(activation).inlined.is_some();
+            let code = machine.code.car().data().cast::<i32>().cast_const();
+            let first = *code.add(pc as usize + 4) as usize;
+            let count = *code.add(pc as usize + 5) as usize;
+            let arguments = std::slice::from_raw_parts(activation.registers.add(first), count);
+            if arguments.iter().any(|&argument| observed(argument)) {
+                return outcome::OBSERVED;
+            }
             let stepper = &mut activation.stepper;
-            let called = step_unsignalled(inlined, || {
+            let called = step_unsignalled(true, || {
                 scoped(|| bytecode::call_builtin_step(stepper, machine, pc as usize, record != 0))
             });
             match called {
@@ -860,6 +889,17 @@ pub unsafe extern "C" fn jit_call_builtin(
                 None => outcome::FAILED,
             }
         })
+    }
+}
+
+/// Whether a builtin that runs no R code for plain arguments could run some for `value`: an
+/// object's method, an environment's active binding, or the methods of an ALTREP class, which
+/// a package may write in R. A compact sequence is an ALTREP vector of ry's own classes.
+unsafe fn observed(value: Sexp) -> bool {
+    unsafe {
+        value.is_object()
+            || value.kind() == SexpType::Environment
+            || (value.is_altrep() && values::compact_sequence(value).is_none())
     }
 }
 
@@ -883,11 +923,9 @@ pub unsafe extern "C" fn jit_element_step(activation: *mut Activation, pc: i64, 
         }
         checked(activation, element::FAILED, |activation| {
             let machine = machine(activation);
-            let inlined = layout(activation).inlined.is_some();
             let stepper = &mut activation.stepper;
-            let stepped = step_unsignalled(inlined, || {
-                bytecode::quiet_step(stepper, machine, pc as usize)
-            });
+            let stepped =
+                step_unsignalled(true, || bytecode::quiet_step(stepper, machine, pc as usize));
             match stepped {
                 Some(None) => element::DECLINED,
                 Some(Some(Ok(()))) => element::STEPPED,
@@ -1459,7 +1497,10 @@ unsafe fn materialize(
                 let counters = values::ints_mut(inlined_of(innermost).code.cdr().element(PROFILE));
                 std::mem::replace(&mut counters[profile::RECORDING], 1)
             });
-        if innermost.why == reason::HANDOFF {
+        // A condition the callee has to signal under its frame is the callee's doing as much
+        // as an instruction it hands to tier 0: a builtin that warns under a calling handler
+        // on every call would otherwise leave every time.
+        if innermost.why == reason::HANDOFF || innermost.why == reason::PENDING {
             count_handoff(compiled, inlined_of(innermost));
         }
 
@@ -2927,11 +2968,6 @@ pub unsafe extern "C" fn jit_colon(activation: *mut Activation, from: f64, to: f
             }
         })
     }
-}
-
-/// Whether a calling handler is established, so a warning would run R code.
-pub extern "C" fn jit_handlers_present() -> i32 {
-    interp::interp().handlers.is_some() as i32
 }
 
 /// How many closure calls may still nest before R's expression depth limit, which a native

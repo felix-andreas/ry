@@ -17,13 +17,13 @@
 use {
     crate::{
         analysis::{
-            self, Action, Argument, Effect, Fast, Fold, Intrinsic, Numeric, Passing, Plan, Refusal,
-            StateId, StateRef, Store, Ty, jump_target, status,
+            self, Action, Argument, Effect, Fast, Fold, Inspection, Intrinsic, Numeric, Passing,
+            Plan, Refusal, StateId, StateRef, Store, Ty, jump_target, status,
         },
         native,
         runtime::{
             self, Activation, ArgumentSource, Exit, Inlined, Layout, element, offset, outcome,
-            reason, representation,
+            reason, representation, stepping,
         },
     },
     heap::{
@@ -70,6 +70,15 @@ const ALTREP_FLAG: i64 = 1 << 1;
 /// plain vector, whose operator and indexing rules differ.
 const ARRAY_FLAG: i64 = 1 << 4;
 pub(crate) const OBJECT_FLAG: i64 = 1 << 0;
+
+/// Whether the code after a tier-0 step forgets the variables it holds.
+#[derive(Clone, Copy)]
+enum Forget {
+    Never,
+    Always,
+    /// When this value, the step's mode, is not [`stepping::QUIET`].
+    When(Value),
+}
 
 /// The subscripts of an element assignment: one position, or a matrix's row and column.
 #[derive(Clone, Copy)]
@@ -943,8 +952,11 @@ impl<'p> Translator<'p> {
                 self.box_reads(position, &before);
                 let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
                 self.flush_all(&before, failed);
-                let validate = self.builder.ins().iconst(I32, 1);
-                let result = self.call_step(pc, validate)?;
+                let validated = self
+                    .builder
+                    .ins()
+                    .iconst(I32, i64::from(stepping::VALIDATED));
+                let result = self.call_step(pc, validated)?;
                 let after = self.after_with_boxed(position, Some(dst))?;
                 let next = self.next_pc(position)?;
                 let invalidated =
@@ -1473,13 +1485,55 @@ impl<'p> Translator<'p> {
             self.hand_off(position, before);
             return Ok(true);
         }
+        let inspected = match (fast, dst) {
+            (
+                Fast::Inspect {
+                    argument,
+                    inspection,
+                },
+                Some((register, _)),
+            ) => {
+                // An unboxed scalar has no class and one element, so its answer is a constant.
+                let answer = match (inspection, before.registers[argument]) {
+                    (Inspection::Length, Ty::Int | Ty::Dbl | Ty::Lgl) => Some(1),
+                    (Inspection::Kind { kinds, .. }, Ty::Int) => {
+                        Some(kinds >> SexpType::Integer as u32 & 1)
+                    }
+                    (Inspection::Kind { kinds, .. }, Ty::Dbl) => {
+                        Some(kinds >> SexpType::Real as u32 & 1)
+                    }
+                    (Inspection::Kind { kinds, .. }, Ty::Lgl) => {
+                        Some(kinds >> SexpType::Logical as u32 & 1)
+                    }
+                    _ => None,
+                };
+                if let Some(answer) = answer {
+                    let answer = self.builder.ins().iconst(I32, i64::from(answer));
+                    self.def_register(register, inspection.result(), answer);
+                    self.set_visible(before, true);
+                    return Ok(false);
+                }
+                Some((argument, inspection, register))
+            }
+            _ => None,
+        };
         self.box_reads(position, before);
         let failed = self.deopt(pc, before.id, None, position, reason::PENDING);
+        let done = self.builder.create_block();
+        if let Some((argument, inspection, register)) = inspected {
+            let builtin = self.builder.create_block();
+            self.builder.set_cold_block(builtin);
+            let answer = self.inspect(argument, inspection, builtin);
+            self.def_register(register, inspection.result(), answer);
+            self.set_visible(before, true);
+            self.builder.ins().jump(done, &[]);
+            self.builder.switch_to_block(builtin);
+        }
         // Tier 0's fast handler runs no R code, so where it applies the step needs none of the
         // write-back, validation and reload below, and the compiled op costs no more than
         // tier 0's.
         let refining = self.builder.create_block();
-        if fast != Fast::No {
+        if matches!(fast, Fast::Read | Fast::Store(_)) {
             if let Fast::Store(slot) = fast {
                 self.flush_slot(before, slot, failed);
             }
@@ -1502,34 +1556,53 @@ impl<'p> Translator<'p> {
             self.builder.ins().jump(refining, &[]);
             self.builder.switch_to_block(generic);
         }
-        let validate = match effect {
-            Effect::Pure => Some(self.builder.ins().iconst(I32, 0)),
+        // How the instruction steps, and whether the variables are forgotten after it: a step
+        // that may have run R code forgets them, and one that ran none keeps them.
+        let step = match effect {
+            Effect::Pure => {
+                let mode = self.builder.ins().iconst(I32, i64::from(stepping::PLAIN));
+                Some((mode, Forget::Never))
+            }
             Effect::Opaque => {
                 self.flush_all(before, failed);
-                Some(self.builder.ins().iconst(I32, 1))
+                let mode = self
+                    .builder
+                    .ins()
+                    .iconst(I32, i64::from(stepping::VALIDATED));
+                Some((mode, Forget::Always))
+            }
+            // A builtin call that runs no R code needs none of the step's write-back,
+            // validation and reload, so it runs tier 0's handler body directly, and the
+            // helper declines an argument the builtin could run R code for.
+            Effect::PureUnlessObserved if op == Op::CallBuiltin => {
+                // `refine` records the result's type when its check fails, but it checks no
+                // unrefined type, so then the step records it.
+                let record = dst.is_some_and(|(_, ty)| !refined(ty));
+                self.call_builtin_quietly(pc, record, refining, failed)?;
+                if inlined {
+                    // A call without a frame runs no R code, so tier 0 takes the call in the
+                    // frame the exit builds.
+                    self.hand_off(position, before);
+                    None
+                } else {
+                    self.flush_all(before, failed);
+                    let mode = self
+                        .builder
+                        .ins()
+                        .iconst(I32, i64::from(stepping::VALIDATED));
+                    Some((mode, Forget::Always))
+                }
             }
             Effect::PureUnlessObserved => {
-                // An instruction run for an inlined call signals nothing while the call has
-                // no frame, so there only an operand that dispatches could run R code.
-                let mut any = if inlined {
-                    self.builder.ins().iconst(I32, 0)
-                } else {
-                    self.call(
-                        runtime::jit_handlers_present as *const () as usize,
-                        &[],
-                        Some(I32),
-                        &[],
-                    )
-                    .ok_or(Refusal("a helper without a result"))?
-                };
+                let quiet = self.builder.ins().iconst(I32, i64::from(stepping::QUIET));
+                let mut any = None;
                 for &register in objects {
                     let value = self.load_register(register);
                     let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
-                    let observed = self
+                    let mut observed = self
                         .builder
                         .ins()
                         .band_imm_u(bits, OBJECT_FLAG | ALTREP_FLAG);
-                    any = self.builder.ins().bor(any, observed);
                     let kind = self.builder.ins().uload8(I32, flags(), value, KIND);
                     let environment = self.builder.ins().icmp_imm_s(
                         IntCC::Equal,
@@ -1537,70 +1610,61 @@ impl<'p> Translator<'p> {
                         SexpType::Environment as i64,
                     );
                     let environment = self.builder.ins().uextend(I32, environment);
-                    any = self.builder.ins().bor(any, environment);
+                    observed = self.builder.ins().bor(observed, environment);
+                    any = Some(match any {
+                        Some(any) => self.builder.ins().bor(any, observed),
+                        None => observed,
+                    });
                 }
-                let zero = self.builder.ins().iconst(I32, 0);
-                // A builtin call that runs no R code needs none of the step's write-back,
-                // validation and reload, so it runs tier 0's handler body directly.
-                let call = op == Op::CallBuiltin;
-                // `refine` records the result's type when its check fails, but it checks no
-                // unrefined type, so then the step records it.
-                let record = dst.is_some_and(|(_, ty)| !refined(ty));
-                if inlined {
-                    let unobserved = self.builder.ins().icmp_imm_s(IntCC::Equal, any, 0);
-                    self.hand_off_unless(position, before, unobserved);
-                    if call {
-                        self.call_builtin_quietly(pc, record, failed)?;
-                        self.builder.ins().jump(refining, &[]);
-                        None
-                    } else {
-                        Some(zero)
+                match any {
+                    None => Some((quiet, Forget::Never)),
+                    // An instruction run for an inlined call runs no R code while the call
+                    // has no frame.
+                    Some(any) if inlined => {
+                        let unobserved = self.builder.ins().icmp_imm_s(IntCC::Equal, any, 0);
+                        self.hand_off_unless(position, before, unobserved);
+                        Some((quiet, Forget::Never))
                     }
-                } else if call {
-                    let quiet = self.builder.create_block();
-                    let dispatching = self.builder.create_block();
-                    self.builder.ins().brif(any, dispatching, &[], quiet, &[]);
-                    self.builder.switch_to_block(quiet);
-                    self.call_builtin_quietly(pc, record, failed)?;
-                    self.builder.ins().jump(refining, &[]);
-                    self.builder.switch_to_block(dispatching);
-                    self.flush_all(before, failed);
-                    Some(self.builder.ins().iconst(I32, 1))
-                } else {
-                    let dispatching = self.builder.create_block();
-                    let join = self.builder.create_block();
-                    self.builder.append_block_param(join, I32);
-                    self.builder
-                        .ins()
-                        .brif(any, dispatching, &[], join, &[zero]);
-                    self.builder.switch_to_block(dispatching);
-                    self.flush_all(before, failed);
-                    let one = self.builder.ins().iconst(I32, 1);
-                    self.builder.ins().jump(join, &[one]);
-                    self.builder.switch_to_block(join);
-                    Some(self.builder.block_params(join)[0])
+                    Some(any) => {
+                        let dispatching = self.builder.create_block();
+                        let join = self.builder.create_block();
+                        self.builder.append_block_param(join, I32);
+                        self.builder
+                            .ins()
+                            .brif(any, dispatching, &[], join, &[quiet]);
+                        self.builder.switch_to_block(dispatching);
+                        self.flush_all(before, failed);
+                        let validated = self
+                            .builder
+                            .ins()
+                            .iconst(I32, i64::from(stepping::VALIDATED));
+                        self.builder.ins().jump(join, &[validated]);
+                        self.builder.switch_to_block(join);
+                        let mode = self.builder.block_params(join)[0];
+                        Some((mode, Forget::When(mode)))
+                    }
                 }
             }
         };
-        if let Some(validate) = validate {
-            let result = self.call_step(pc, validate)?;
+        if let Some((mode, forget)) = step {
+            let result = self.call_step(pc, mode)?;
             let after = self.after_with_boxed(position, dst.map(|(register, _)| register))?;
             let next = self.next_pc(position)?;
             let invalidated = self.deopt(next, after.0, after.1, position + 1, reason::SPECULATION);
             let continued = self.builder.create_block();
             self.branch_on_outcome(result, continued, failed, invalidated);
             self.builder.switch_to_block(continued);
-            match effect {
-                Effect::Pure => {}
-                Effect::Opaque => self.forget_slots(before),
-                Effect::PureUnlessObserved if inlined => {}
-                Effect::PureUnlessObserved => {
+            match forget {
+                Forget::Never => {}
+                Forget::Always => self.forget_slots(before),
+                // [`stepping::QUIET`] is zero.
+                Forget::When(validated) => {
                     let forgetting = self.builder.create_block();
                     let joined = self.builder.create_block();
                     self.builder.set_cold_block(forgetting);
                     self.builder
                         .ins()
-                        .brif(validate, forgetting, &[], joined, &[]);
+                        .brif(validated, forgetting, &[], joined, &[]);
                     self.builder.switch_to_block(forgetting);
                     self.forget_slots(before);
                     self.builder.ins().jump(joined, &[]);
@@ -1615,7 +1679,80 @@ impl<'p> Translator<'p> {
             let after = self.after_with_boxed(position, Some(register))?;
             self.refine(register, ty, next, after, position + 1);
         }
+        self.builder.ins().jump(done, &[]);
+        self.builder.switch_to_block(done);
         Ok(false)
+    }
+
+    /// The answer of `inspection` for the boxed value in register `argument`. A value the
+    /// inspection leaves to the builtin goes to `declined`.
+    fn inspect(&mut self, argument: usize, inspection: Inspection, declined: Label) -> Value {
+        const NATIVE: u32 = 1 << SexpType::Record as u32 | 1 << SexpType::I64 as u32;
+        const SIZED: u32 = 1 << SexpType::Nil as u32
+            | 1 << SexpType::Logical as u32
+            | 1 << SexpType::Integer as u32
+            | 1 << SexpType::Real as u32
+            | 1 << SexpType::Complex as u32
+            | 1 << SexpType::String as u32
+            | 1 << SexpType::List as u32
+            | 1 << SexpType::Expression as u32
+            | 1 << SexpType::Raw as u32;
+        let value = self.load_register(argument);
+        let kind = self.builder.ins().uload8(I32, flags(), value, KIND);
+        let bits = self.builder.ins().uload8(I32, flags(), value, FLAGS);
+        let answered = self.builder.create_block();
+        match inspection {
+            Inspection::Kind { kinds, unclassed } => {
+                let mut left = self.kind_in(kind, NATIVE);
+                if unclassed {
+                    let object = self.builder.ins().band_imm_u(bits, OBJECT_FLAG);
+                    left = self.builder.ins().bor(left, object);
+                }
+                self.builder.ins().brif(left, declined, &[], answered, &[]);
+                self.builder.switch_to_block(answered);
+                self.kind_in(kind, kinds)
+            }
+            Inspection::Length => {
+                let sized = self.kind_in(kind, SIZED);
+                let special = self
+                    .builder
+                    .ins()
+                    .band_imm_u(bits, OBJECT_FLAG | ALTREP_FLAG);
+                // `sized` is 1 or 0, so it exceeds the flag bits only for a sized value with
+                // neither flag.
+                let plain = self
+                    .builder
+                    .ins()
+                    .icmp(IntCC::UnsignedGreaterThan, sized, special);
+                let measured = self.builder.create_block();
+                self.builder.ins().brif(plain, measured, &[], declined, &[]);
+                self.builder.switch_to_block(measured);
+                let length = self.builder.ins().load(I64, flags(), value, LENGTH);
+                // Longer vectors have a double length, which the builtin makes.
+                let fits = self.builder.ins().icmp_imm_s(
+                    IntCC::SignedLessThanOrEqual,
+                    length,
+                    i32::MAX as i64,
+                );
+                self.builder.ins().brif(fits, answered, &[], declined, &[]);
+                self.builder.switch_to_block(answered);
+                // `NULL` has the field, as tier 0 reads it, but it need not hold zero.
+                let null = self
+                    .builder
+                    .ins()
+                    .icmp_imm_s(IntCC::Equal, kind, SexpType::Nil as i64);
+                let count = self.builder.ins().ireduce(I32, length);
+                let zero = self.builder.ins().iconst(I32, 0);
+                self.builder.ins().select(null, zero, count)
+            }
+        }
+    }
+
+    /// Whether `kind`, a value's type code, is in the bit set `kinds`: 1 or 0.
+    fn kind_in(&mut self, kind: Value, kinds: u32) -> Value {
+        let kinds = self.builder.ins().iconst(I32, i64::from(kinds));
+        let shifted = self.builder.ins().ushr(kinds, kind);
+        self.builder.ins().band_imm_u(shifted, 1)
     }
 
     /// Runs a fused pass in tier 0. When it computes the expression, its value in `dst` is
@@ -3666,8 +3803,8 @@ impl<'p> Translator<'p> {
         self.builder.ins().jump(done, &[]);
         self.builder.switch_to_block(stepping);
         self.flush_all(before, failed);
-        let zero = self.builder.ins().iconst(I32, 0);
-        let result = self.call_step(pc, zero)?;
+        let plain = self.builder.ins().iconst(I32, i64::from(stepping::PLAIN));
+        let result = self.call_step(pc, plain)?;
         let ok = self
             .builder
             .ins()
@@ -5750,12 +5887,15 @@ impl<'p> Translator<'p> {
         Ok([handled, stepped, declined])
     }
 
-    /// Runs the builtin call at `pc` through [`runtime::jit_call_builtin`], where it runs no R
-    /// code, recording the result's type when `record` is set. An error leaves through `failed`.
+    /// Runs the builtin call at `pc` through [`runtime::jit_call_builtin`], recording the
+    /// result's type when `record` is set, and goes on at `called`. An error leaves through
+    /// `failed`. The block this leaves the builder in is reached when the helper declined the
+    /// call, so nothing ran.
     fn call_builtin_quietly(
         &mut self,
         pc: usize,
         record: bool,
+        called: Label,
         failed: Label,
     ) -> Result<(), Refusal> {
         let pc = iconst(&mut self.builder, pc);
@@ -5772,18 +5912,27 @@ impl<'p> Translator<'p> {
             .builder
             .ins()
             .icmp_imm_s(IntCC::Equal, result, outcome::OK as i64);
-        self.guard(ok, failed);
+        let declined = self.builder.create_block();
+        self.builder.set_cold_block(declined);
+        self.builder.ins().brif(ok, called, &[], declined, &[]);
+        self.builder.switch_to_block(declined);
+        let observed =
+            self.builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, result, outcome::OBSERVED as i64);
+        self.guard(observed, failed);
         Ok(())
     }
 
-    /// Runs the tier-0 instruction at `pc` through [`runtime::jit_step`].
-    fn call_step(&mut self, pc: usize, validate: Value) -> Result<Value, Refusal> {
+    /// Runs the tier-0 instruction at `pc` through [`runtime::jit_step`] in `mode`, one of
+    /// [`stepping`]'s.
+    fn call_step(&mut self, pc: usize, mode: Value) -> Result<Value, Refusal> {
         let pc = iconst(&mut self.builder, pc);
         self.call(
             runtime::jit_step as *const () as usize,
             &[I64, I64, I32],
             Some(I32),
-            &[self.frame.activation, pc, validate],
+            &[self.frame.activation, pc, mode],
         )
         .ok_or(Refusal("a helper without a result"))
     }

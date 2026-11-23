@@ -413,6 +413,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A back edge is counted in tier 0's fast jump handler
 - A load that reaches the runtime writes dirty variables back first
 - A write-back of several variables is one call driven by a record
+- A builtin call from compiled code defers its signals
+- Type predicates and `length` compile to a test of the value's header
 
 ## Heap and collector
 

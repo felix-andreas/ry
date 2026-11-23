@@ -7,7 +7,7 @@ use {
     crate::{
         Frame,
         annotations::Entry,
-        builtins::{Arg, BuiltinDef, Call, Generic, Kind, builtin, internal, special},
+        builtins::{Arg, BuiltinDef, Call, Generic, Kind, Visibility, builtin, internal, special},
         eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
         handles::{
             self, Cx, Local, Str, attribute_copy, attributes_unshared, dense, get_attribute, is_s4,
@@ -1718,156 +1718,167 @@ pub unsafe fn try_builtin_dispatch(
     args: &[Arg],
     env: Sexp,
 ) -> R<Option<Sexp>> {
-    // From R 4.4 on, the matrix products count their arguments before they dispatch, so
-    // `` `%*%`(x) `` is an error even when `x` has a method.
-    if definition.generic == Generic::MatrixOps && crate::system::r_at_least(4, 4) {
-        let required = if definition.name == "%*%" { 2 } else { 1 };
-        let passed = args.len().min(2);
-        if passed < required {
-            let noun = if passed == 1 { "argument" } else { "arguments" };
-            return Err(error_in(
-                call,
-                format!(
-                    "{passed} {noun} passed to '{}' which requires at least {required}",
-                    definition.name
-                ),
-            ));
-        }
-    }
-    let Some(first) = args.first() else {
-        return Ok(None);
-    };
-    match definition.generic {
-        Generic::None => Ok(None),
-        Generic::Internal if definition.name == "c" => {
-            // GNU R's `do_c` drops every `NULL` argument after the first, named or not, before
-            // it dispatches, so neither an S3 nor an S4 method sees them, and `nargs()` in the
-            // method does not count them. It then dispatches through `DispatchAnyOrEval`,
-            // which tries the S4 methods when any argument is an S4 object, not only the first.
-            let kept = |position: usize, arg: &Arg| position == 0 || arg.value != nil();
-            if args
-                .iter()
-                .enumerate()
-                .any(|(position, arg)| kept(position, arg) && arg.value.has_gp(gp::S4_OBJECT))
-            {
-                // The promises pair each value with its expression in the call, which still
-                // holds the dropped arguments, so they are made before the `NULL`s go.
-                let promised: Args = promised_args(call, args)?
-                    .into_iter()
-                    .zip(args)
-                    .enumerate()
-                    .filter(|(position, (_, arg))| kept(*position, arg))
-                    .map(|(_, (promise, _))| promise)
-                    .collect();
-                if let Some(value) = s4_dispatch(op, call, &promised, env)? {
-                    return Ok(Some(value));
+    let method_value =
+        (|| {
+            // From R 4.4 on, the matrix products count their arguments before they dispatch, so
+            // `` `%*%`(x) `` is an error even when `x` has a method.
+            if definition.generic == Generic::MatrixOps && crate::system::r_at_least(4, 4) {
+                let required = if definition.name == "%*%" { 2 } else { 1 };
+                let passed = args.len().min(2);
+                if passed < required {
+                    let noun = if passed == 1 { "argument" } else { "arguments" };
+                    return Err(error_in(
+                        call,
+                        format!(
+                            "{passed} {noun} passed to '{}' which requires at least {required}",
+                            definition.name
+                        ),
+                    ));
                 }
             }
-            if !first.value.is_object() {
-                return Ok(None);
-            }
-            let kept: Args = args
-                .iter()
-                .enumerate()
-                .filter(|(position, arg)| kept(*position, arg))
-                .map(|(_, arg)| *arg)
-                .collect();
-            internal_dispatch(symbols().c, call, &kept, env)
-        }
-        Generic::Internal => {
-            if !first.value.is_object() {
-                return Ok(None);
-            }
-            if first.value.has_gp(gp::S4_OBJECT)
-                && let Some(value) = s4_dispatch(op, call, args, env)?
-            {
-                return Ok(Some(value));
-            }
-            // `seq.int` is the primitive behind the `seq` generic, so it finds `seq` methods.
-            let generic = match definition.symbol {
-                _ if definition.name == "seq.int" => symbols().seq,
-                Some(symbol) => symbol,
-                None => values::install(definition.name)?,
-            };
-            internal_dispatch(generic, call, args, env)
-        }
-        Generic::Ops | Generic::MatrixOps => {
-            let any_object = args.iter().take(2).any(|arg| arg.value.is_object());
-            if !any_object {
-                return Ok(None);
-            }
-            if args
-                .iter()
-                .take(2)
-                .any(|arg| arg.value.has_gp(gp::S4_OBJECT))
-                && let Some(value) = s4_dispatch(op, call, args, env)?
-            {
-                return Ok(Some(value));
-            }
-            let group = if definition.generic == Generic::Ops {
-                "Ops"
-            } else {
-                "matrixOps"
-            };
-            group_dispatch(group, definition.name, call, args, env)
-        }
-        Generic::Summary => {
-            // GNU R's `fixup_NaRm` moves `na.rm` last, adding `na.rm = FALSE` when the call has
-            // none, before it looks for an object to dispatch on, so a method may declare
-            // `na.rm` without a default. The method's call holds the evaluated arguments, as
-            // `do_summary` builds it.
-            let na_rm = symbols().na_rm;
-            let Some(first) = args.iter().find(|arg| arg.tag != na_rm).copied() else {
+            let Some(first) = args.first() else {
                 return Ok(None);
             };
-            if !first.value.is_object() {
-                return Ok(None);
+            match definition.generic {
+                Generic::None => Ok(None),
+                Generic::Internal if definition.name == "c" => {
+                    // GNU R's `do_c` drops every `NULL` argument after the first, named or not, before
+                    // it dispatches, so neither an S3 nor an S4 method sees them, and `nargs()` in the
+                    // method does not count them. It then dispatches through `DispatchAnyOrEval`,
+                    // which tries the S4 methods when any argument is an S4 object, not only the first.
+                    let kept = |position: usize, arg: &Arg| position == 0 || arg.value != nil();
+                    if args.iter().enumerate().any(|(position, arg)| {
+                        kept(position, arg) && arg.value.has_gp(gp::S4_OBJECT)
+                    }) {
+                        // The promises pair each value with its expression in the call, which still
+                        // holds the dropped arguments, so they are made before the `NULL`s go.
+                        let promised: Args = promised_args(call, args)?
+                            .into_iter()
+                            .zip(args)
+                            .enumerate()
+                            .filter(|(position, (_, arg))| kept(*position, arg))
+                            .map(|(_, (promise, _))| promise)
+                            .collect();
+                        if let Some(value) = s4_dispatch(op, call, &promised, env)? {
+                            return Ok(Some(value));
+                        }
+                    }
+                    if !first.value.is_object() {
+                        return Ok(None);
+                    }
+                    let kept: Args = args
+                        .iter()
+                        .enumerate()
+                        .filter(|(position, arg)| kept(*position, arg))
+                        .map(|(_, arg)| *arg)
+                        .collect();
+                    internal_dispatch(symbols().c, call, &kept, env)
+                }
+                Generic::Internal => {
+                    if !first.value.is_object() {
+                        return Ok(None);
+                    }
+                    if first.value.has_gp(gp::S4_OBJECT)
+                        && let Some(value) = s4_dispatch(op, call, args, env)?
+                    {
+                        return Ok(Some(value));
+                    }
+                    // `seq.int` is the primitive behind the `seq` generic, so it finds `seq` methods.
+                    let generic = match definition.symbol {
+                        _ if definition.name == "seq.int" => symbols().seq,
+                        Some(symbol) => symbol,
+                        None => values::install(definition.name)?,
+                    };
+                    internal_dispatch(generic, call, args, env)
+                }
+                Generic::Ops | Generic::MatrixOps => {
+                    let any_object = args.iter().take(2).any(|arg| arg.value.is_object());
+                    if !any_object {
+                        return Ok(None);
+                    }
+                    if args
+                        .iter()
+                        .take(2)
+                        .any(|arg| arg.value.has_gp(gp::S4_OBJECT))
+                        && let Some(value) = s4_dispatch(op, call, args, env)?
+                    {
+                        return Ok(Some(value));
+                    }
+                    let group = if definition.generic == Generic::Ops {
+                        "Ops"
+                    } else {
+                        "matrixOps"
+                    };
+                    group_dispatch(group, definition.name, call, args, env)
+                }
+                Generic::Summary => {
+                    // GNU R's `fixup_NaRm` moves `na.rm` last, adding `na.rm = FALSE` when the call has
+                    // none, before it looks for an object to dispatch on, so a method may declare
+                    // `na.rm` without a default. The method's call holds the evaluated arguments, as
+                    // `do_summary` builds it.
+                    let na_rm = symbols().na_rm;
+                    let Some(first) = args.iter().find(|arg| arg.tag != na_rm).copied() else {
+                        return Ok(None);
+                    };
+                    if !first.value.is_object() {
+                        return Ok(None);
+                    }
+                    if first.value.has_gp(gp::S4_OBJECT)
+                        && let Some(value) = s4_dispatch(op, call, args, env)?
+                    {
+                        return Ok(Some(value));
+                    }
+                    let value = match args.iter().rev().find(|arg| arg.tag == na_rm) {
+                        Some(arg) => arg.value,
+                        None => values::scalar_logical(0)?,
+                    };
+                    let mut fixed: Args = args
+                        .iter()
+                        .filter(|arg| arg.tag != na_rm)
+                        .copied()
+                        .collect();
+                    fixed.push(Arg { tag: na_rm, value });
+                    let head = if call.kind() == SexpType::Language {
+                        call.car()
+                    } else {
+                        op
+                    };
+                    let mut builder = values::PairlistBuilder::new(SexpType::Language);
+                    builder.push(nil(), head)?;
+                    for arg in &fixed {
+                        builder.push(arg.tag, arg.value)?;
+                    }
+                    let fixed_call = builder.finish();
+                    group_dispatch("Summary", definition.name, fixed_call, &fixed, env)
+                }
+                Generic::Math | Generic::Complex => {
+                    if !first.value.is_object() {
+                        return Ok(None);
+                    }
+                    if first.value.has_gp(gp::S4_OBJECT)
+                        && let Some(value) = s4_dispatch(op, call, args, env)?
+                    {
+                        return Ok(Some(value));
+                    }
+                    let group = if definition.generic == Generic::Math {
+                        "Math"
+                    } else {
+                        "Complex"
+                    };
+                    group_dispatch(group, definition.name, call, args, env)
+                }
             }
-            if first.value.has_gp(gp::S4_OBJECT)
-                && let Some(value) = s4_dispatch(op, call, args, env)?
-            {
-                return Ok(Some(value));
-            }
-            let value = match args.iter().rev().find(|arg| arg.tag == na_rm) {
-                Some(arg) => arg.value,
-                None => values::scalar_logical(0)?,
-            };
-            let mut fixed: Args = args
-                .iter()
-                .filter(|arg| arg.tag != na_rm)
-                .copied()
-                .collect();
-            fixed.push(Arg { tag: na_rm, value });
-            let head = if call.kind() == SexpType::Language {
-                call.car()
-            } else {
-                op
-            };
-            let mut builder = values::PairlistBuilder::new(SexpType::Language);
-            builder.push(nil(), head)?;
-            for arg in &fixed {
-                builder.push(arg.tag, arg.value)?;
-            }
-            let fixed_call = builder.finish();
-            group_dispatch("Summary", definition.name, fixed_call, &fixed, env)
-        }
-        Generic::Math | Generic::Complex => {
-            if !first.value.is_object() {
-                return Ok(None);
-            }
-            if first.value.has_gp(gp::S4_OBJECT)
-                && let Some(value) = s4_dispatch(op, call, args, env)?
-            {
-                return Ok(Some(value));
-            }
-            let group = if definition.generic == Generic::Math {
-                "Math"
-            } else {
-                "Complex"
-            };
-            group_dispatch(group, definition.name, call, args, env)
+        })()?;
+    // A primitive sets visibility after it returns, whether its own code or a method ran, so
+    // a method's `invisible()` does not reach the caller.
+    if method_value.is_some() {
+        match definition.visibility {
+            Visibility::On => interp().visible = true,
+            Visibility::Off => interp().visible = false,
+            Visibility::Keep => {}
         }
     }
+    Ok(method_value)
 }
 
 /// Where a builtin's caller looks S3 methods up.

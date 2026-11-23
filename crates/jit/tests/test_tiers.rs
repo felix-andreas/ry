@@ -1551,6 +1551,52 @@ fn a_body_that_leaves_on_every_call_is_retired() {
     });
 }
 
+/// A compiled body calls a builtin without asking whether a handler is established, and a
+/// builtin that has a condition to signal under a calling handler leaves compiled code so that
+/// tier 0 signals it under the body's frame. A handler alone therefore costs no exit. A body
+/// whose builtin warns under a handler on every call stops being inlined after 16 such calls
+/// and is retired after 16 more on its own. What the handler sees needs base R, so the oracle
+/// case `jit__builtin_conditions_from_compiled_code` pins it.
+#[test]
+fn a_builtin_that_warns_under_a_handler_on_every_call_is_retired() {
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Force);
+        run("count <- function(text) { parsed <- as.integer(text); if (is.na(parsed)) 0L else parsed + 1L }
+             handled <- function(text) {
+               .Internal(.addCondHands('warning', list(function(w) NULL), globalenv(), NULL, TRUE))
+               count(text)
+             }");
+        for _ in 0..3 {
+            run("count('7')");
+        }
+        assert!(has_compiled_code("count"), "count compiles");
+
+        let before = jit::deoptimizations();
+        let expected = run("count('7')");
+        for _ in 0..200 {
+            assert_eq!(run("handled('7')"), expected);
+        }
+        assert_eq!(
+            jit::deoptimizations(),
+            before,
+            "a handler makes no builtin call leave"
+        );
+
+        let expected = run("handled('seven')");
+        let before = jit::deoptimizations();
+        for _ in 0..500 {
+            assert_eq!(run("handled('seven')"), expected);
+        }
+        let left = jit::deoptimizations() - before;
+        assert!(
+            left <= 48,
+            "count left compiled code {left} times in 500 calls"
+        );
+        assert!(!has_compiled_code("count"), "count is retired");
+        jit::install_mode(Mode::Off);
+    });
+}
+
 /// Random callers that loop over a call of a random three-formal closure. The callee computes
 /// with its arguments and two globals, may pass a formal on to a second closure that reads it
 /// past a threshold only, and past a threshold it does something only a real frame can answer
@@ -1976,7 +2022,7 @@ fn formal_shadows_enclosing_function() {
 #[test]
 fn a_body_that_could_run_nothing_natively_never_records() {
     // The closures take `...` so that they are not wrappers, which compiled code, a top-level
-    // loop's included, runs without entering. `is.null` has no native form, so whatever its
+    // loop's included, runs without entering. `oldClass` has no native form, so whatever its
     // profile, compiled code for `wrap` would hand its only call back to tier 0. It is refused
     // when its recording window would open, and never records. `twice` and `sum_of` do
     // arithmetic, so they record. `sum_of` then compiles, but one multiplication saves less
@@ -2000,7 +2046,7 @@ fn a_body_that_could_run_nothing_natively_never_records() {
             values::ints(code.cdr().element(PROFILE)).to_vec()
         };
         run(concat!(
-            "wrap <- function(x, ...) is.null(x)\n",
+            "wrap <- function(x, ...) oldClass(x)\n",
             "twice <- function(x, ...) x * 2\n",
             "sum_of <- function(x, ...) {\n",
             "  y <- x * 2 + 1; z <- y * y - x; (z - y) * (y + x) + z\n",

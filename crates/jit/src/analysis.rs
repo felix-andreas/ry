@@ -606,6 +606,33 @@ pub enum Fast {
     /// A store into this slot's vector, which the handler finds in the frame and changes in
     /// place.
     Store(usize),
+    /// No handler: compiled code answers a builtin call from the header of its one argument,
+    /// in register `argument`, and steps only for a value the inspection leaves to the builtin.
+    Inspect {
+        argument: usize,
+        inspection: Inspection,
+    },
+}
+
+/// What a builtin call reads from its argument's header, so compiled code makes no call for it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Inspection {
+    /// A type predicate such as `is.null(x)`: whether the argument's type is one of `kinds`, a
+    /// bit set indexed by [`SexpType`]. The builtin answers for a ry record or `I64`, which it
+    /// converts first, and where `unclassed` is set for an object, whose class decides.
+    Kind { kinds: u32, unclassed: bool },
+    /// `length(x)` of a vector that is neither an object nor ALTREP, or of `NULL`.
+    Length,
+}
+
+impl Inspection {
+    /// The type of the builtin's result.
+    pub fn result(self) -> Ty {
+        match self {
+            Inspection::Kind { .. } => Ty::Lgl,
+            Inspection::Length => Ty::Int,
+        }
+    }
 }
 
 /// Scalar arithmetic the JIT does inline.
@@ -1449,7 +1476,7 @@ pub unsafe fn shape(code: Sexp) -> Shape {
                         calls += 1;
                         false
                     } else {
-                        name == "[" || has_intrinsic(&name)
+                        name == "[" || has_intrinsic(&name) || inspection_for(&name).is_some()
                     }
                 }
             }
@@ -1606,6 +1633,10 @@ impl Plan<'_> {
                 {
                     continue;
                 }
+                Action::Step {
+                    fast: Fast::Inspect { .. },
+                    ..
+                } => (1, 0, 0, 0),
                 // A step that runs tier 0's fast handler, or a builtin's direct entry, makes
                 // no round trip through the stepping helper, so it costs what tier 0 pays.
                 Action::Step { effect, fast, .. }
@@ -4871,6 +4902,22 @@ impl<'a> Builder<'a> {
                 result,
             });
         }
+        // A site whose builtin has answered with another type, as a class's `length` method
+        // may, keeps the call, since the compiled check would fail on every such value.
+        if untagged
+            && let [argument] = *args
+            && let Some((inspection, effect)) = inspection_for(name)
+            && (self.never_ran(inst.pc) || self.feedback_at(inst.pc) == inspection.result())
+        {
+            let fast = Fast::Inspect {
+                argument,
+                inspection,
+            };
+            let result = Some((dst, inspection.result()));
+            let action = self.fast_step(state, result, &[], effect, fast);
+            state.visible = Some(true);
+            return Ok(action);
+        }
         // Before the call has returned, its result type comes from what the builtin computes
         // for these argument types, so a first-call compile need not wait for feedback. The
         // refinement after the call checks the guess like any other.
@@ -4888,15 +4935,10 @@ impl<'a> Builder<'a> {
         // A library leaf never dispatches, but reading an ALTREP argument runs its class's
         // methods, which a package may write in R, so every boxed argument is observed.
         if definition.accepts_native && interp::standard_library::is_leaf(name) {
-            let observed = self.slice(
-                args.iter()
-                    .copied()
-                    .filter(|&register| !state.registers[register].in_variables()),
-            );
             return Ok(self.opaque_step(
                 state,
                 Some((dst, feedback)),
-                observed,
+                &[],
                 Effect::PureUnlessObserved,
             ));
         }
@@ -4922,15 +4964,10 @@ impl<'a> Builder<'a> {
             Fast::No
         };
         if PURE_BUILTINS.contains(&name) {
-            let objects = self.slice(
-                args.iter()
-                    .copied()
-                    .filter(|&register| !state.registers[register].is_plain()),
-            );
             return Ok(self.fast_step(
                 state,
                 Some((dst, feedback)),
-                objects,
+                &[],
                 Effect::PureUnlessObserved,
                 fast,
             ));
@@ -5202,6 +5239,39 @@ fn integer_sequence() -> Ty {
     } else {
         Ty::IntVec
     }
+}
+
+/// The inspection that answers a call of builtin `name` with one argument, and what the builtin
+/// may do where the inspection leaves the call to it: a predicate that is no internal generic
+/// runs no R code for any argument.
+fn inspection_for(name: &str) -> Option<(Inspection, Effect)> {
+    use SexpType::{
+        Builtin, Closure, Complex, Environment, Expression, Integer, Language, List, Logical, Nil,
+        Pairlist, Raw, Real, Special, String, Symbol,
+    };
+    let (kinds, unclassed, effect): (&[SexpType], bool, Effect) = match name {
+        "length" => return Some((Inspection::Length, Effect::PureUnlessObserved)),
+        "is.null" => (&[Nil], false, Effect::Pure),
+        "is.logical" => (&[Logical], false, Effect::Pure),
+        "is.double" => (&[Real], false, Effect::Pure),
+        "is.complex" => (&[Complex], false, Effect::Pure),
+        "is.character" => (&[String], false, Effect::Pure),
+        "is.raw" => (&[Raw], false, Effect::Pure),
+        "is.symbol" | "is.name" => (&[Symbol], false, Effect::Pure),
+        "is.environment" => (&[Environment], false, Effect::Pure),
+        "is.list" => (&[List, Pairlist], false, Effect::Pure),
+        "is.pairlist" => (&[Pairlist, Nil], false, Effect::Pure),
+        "is.expression" => (&[Expression], false, Effect::Pure),
+        "is.call" => (&[Language], false, Effect::Pure),
+        "is.function" => (&[Closure, Builtin, Special], false, Effect::Pure),
+        "is.primitive" => (&[Builtin, Special], false, Effect::Pure),
+        // A factor is stored as integers and is no integer vector, which the builtin decides.
+        "is.integer" => (&[Integer], true, Effect::Pure),
+        "is.numeric" => (&[Integer, Real], true, Effect::PureUnlessObserved),
+        _ => return None,
+    };
+    let kinds = kinds.iter().fold(0, |bits, &kind| bits | 1 << kind as u32);
+    Some((Inspection::Kind { kinds, unclassed }, effect))
 }
 
 /// Whether [`intrinsic_for`] has an intrinsic for builtin `name` given some argument types. It
