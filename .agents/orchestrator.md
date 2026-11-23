@@ -52,7 +52,7 @@ No release unless the user asks (user). User 2026-11-23: sessions finish their c
 - session_0111kWqCHzz5KgPTQQvkUSXS (Opus high, checker): #692, #695, #697 merged (fresh sample 1,449 to 112 reports). IDLE, all work landed; the review gaps, edit re-stamping and code-base latency are in the backlog.
 - session_0111kWqCXYKiR937Au74eL55 (Opus high, kernels): #698 merged (aa444fb; dependency-set suites, callr 264/8, renv runs, load-index eviction). IDLE; leftovers in backlog "the dependency set's package suites".
 - session_0111kWqEyHh2WBFnP93ZvPEM (Fable, JIT): #691 merged (53a849b6; app suite 1.02x). IDLE; compiled-to-compiled calls, stretches and the Op::At compiled step are in the backlog.
-- session_0111kWqD8G8GVR8fbHetepcc (Fable, calls): #694 merged (S4 generic call 11,325 to 3,183 instructions; S4 section 2.65x to 3.99x over GNU R). Now builtin calls, then .Call with test user requests 4 and 1.
+- session_0111kWqD8G8GVR8fbHetepcc (Fable, calls): #694, #696 merged (string equality kernel, fast return for frames whose closure dies with them). IDLE; .Call (test user requests 4 and 1) and the ranked small-value operations are in the backlog.
 - session_0111kWqDs8aQ1MWFmKMxX9HQ (Fable, fuzz): #649, #693 merged (analysis oracles with canaries). Now a frame fuzz kind plus fixes for the column-partial-match and Expr %% Inf bugs, then a planted-bug audit of the differential kinds.
 
 User-only items (never ask; note in the final report): a history rewrite dropping an old customer-project name, the Marketplace trusted-publishing policy, the Zed listing, a real Windows run, deleting remote branches `feat/runtime-stats` and `runtime-packages-round4`.
