@@ -568,6 +568,27 @@ character
 layer: fn() -> environment
 build: <T> fn(plot: T) -> Unknown
 
+#---- arithmetic_registered_through_s7_may_dispatch_on_a_returned_environment
+# ggplot2's `ggplot()` returns an environment of a class its S7 `+` method handles, so adding a
+# facet to the result is that method, not arithmetic on an environment.
+class_plot <- "plot"
+class_any <- "ANY"
+method(`+`, list(class_plot, class_any)) <- function(e1, e2) e1
+plot_of <- function() new.env()
+facet <- function() list()
+build <- function(facets) {
+  p <- plot_of()
+  if (is.null(facets)) p <- p + facet() else p <- p + 2
+  p
+}
+#++++
+class_plot: character
+class_any: character
+fn(e1: T, [e2]: U) -> T
+plot_of: fn() -> environment
+facet: fn() -> list{}
+build: <T> fn(facets: T | NULL) -> Unknown
+
 #---- a_formula_compares_by_its_text
 # R deparses language objects before comparing them, as ape's `formula(object) == ~1` relies on.
 intercept_only <- function(model) formula(model) == ~1

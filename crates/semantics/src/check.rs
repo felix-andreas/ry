@@ -4394,10 +4394,16 @@ impl<'db, 'a> Checker<'db, 'a> {
                 // `expression("density " * f[1] - f[2])` multiplies nothing. A project binding
                 // of the same name is an ordinary function.
                 if let ExpressionKind::NameRef(name) = module.kind(callee)
-                    && matches!(
+                    && (matches!(
                         name.as_str(),
                         "quote" | "bquote" | "substitute" | "expression"
-                    )
+                    ) || matches!(name.as_str(), "expr" | "exprs" | "quo" | "quos")
+                        && self
+                            .library
+                            .is_some_and(|library| library.exports("rlang", *name))
+                        && self
+                            .globals
+                            .is_some_and(|globals| globals.library_candidates(*name).is_some()))
                     && !self.naming.resolutions.contains_key(&callee)
                     && !self
                         .globals
@@ -11514,7 +11520,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     | TyKind::Record(_)
                     | TyKind::Environment(_)
                     | TyKind::Unknown
-            )
+            ) || matches!(ty.kind(self.db), TyKind::Named(class, _) if class.text(self.db) == "environment")
         };
         if (may_dispatch(resolved_left) || may_dispatch(resolved_right))
             && self
