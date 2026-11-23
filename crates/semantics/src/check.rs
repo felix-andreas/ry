@@ -19,7 +19,10 @@ use {
             Entry, FunctionMismatch, InferenceTable, RecordMismatch, UNCHECKED_WITNESS, UnifyError,
             apply_definition, constraint_rejects, numeric_join,
         },
-        metadata::{imported_by_name, imports_every_name, is_own_package, own_package_reaches},
+        metadata::{
+            imported_by_name, imports_every_name, is_own_package, own_package_reaches,
+            registered_methods,
+        },
         naming::{
             BindingId, BindingKind, ForeachLoop, ItemNaming, MATCH_FUN_CALLERS, dot_dot_variable,
             foreach_iterators, foreach_loop, is_column_update, query_index_arguments,
@@ -8317,9 +8320,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                 self.module.kind(*callee),
                 ExpressionKind::NameRef(name) if name == "return" || name == "stop"
             ),
+            // Code after a `stop()` never runs, as psych's placeholder definitions after
+            // `stop("needs Rgraphviz")` never bind.
             ExpressionKind::Block { statements, .. } => self.module[statements]
-                .last()
-                .is_some_and(|&last| self.diverges(last)),
+                .iter()
+                .any(|&statement| self.diverges(statement)),
             ExpressionKind::If {
                 then_branch,
                 else_branch: Some(else_branch),
@@ -12888,6 +12893,9 @@ impl<'db, 'a> Checker<'db, 'a> {
                 return unknown(self.db);
             }
         }
+        if self.project_method_may_run(callee, &call_arguments) {
+            return unknown(self.db);
+        }
         let valueless_candidates = if named_callee {
             self.supplied_parameter_variables(callee_ty, &call_arguments, instantiated.clone())
         } else {
@@ -15750,7 +15758,42 @@ impl<'db, 'a> Checker<'db, 'a> {
         if let Some(ty) = self.s3_method_call(range, &name, &call_arguments) {
             return Some(ty);
         }
-        Some(self.overloaded_call(id, range, callee, name, schemes, &call_arguments))
+        let result = self.overloaded_call(id, range, callee, name, schemes, &call_arguments);
+        if self.project_method_may_run(callee, &call_arguments) {
+            return Some(unknown(self.db));
+        }
+        Some(result)
+    }
+
+    /// A stub describes a base generic's default method, but a package that registers its own
+    /// method (R.utils' `S3method(str, Verbose)`) runs it for a first argument of that class,
+    /// and the stub does not describe what it returns. An atomic first argument, `NULL` or a
+    /// function carries no class the package could have given it.
+    fn project_method_may_run(&self, callee: ExprId, arguments: &[CallArgument<'db>]) -> bool {
+        let db = self.db;
+        let ExpressionKind::NameRef(name) = self.module.kind(callee) else {
+            return false;
+        };
+        let Some(globals) = self.globals else {
+            return false;
+        };
+        if self.naming.resolutions.contains_key(&callee)
+            || globals.defined_in_project(*name, self.naming.deferred_non_locals.contains(&callee))
+            || registered_methods(db, QueryName::new(db, Name::new(db, name.as_str()))).is_none()
+        {
+            return false;
+        }
+        let Some(first) = arguments.first().and_then(|argument| argument.ty) else {
+            return false;
+        };
+        !matches!(
+            self.table.shallow_resolve(db, first).kind(db),
+            TyKind::Scalar(_)
+                | TyKind::Vector(_)
+                | TyKind::NamedVector(_)
+                | TyKind::Null
+                | TyKind::Function(_)
+        )
     }
 
     /// R dispatches a call to an overloaded generic on its first argument's class before the
@@ -16877,8 +16920,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             // `match.fun` looks a bare name up with `mode = "function"`, past a binding that
             // holds no function, so sessioninfo's mocking placeholder `getNamespaceVersion <-
             // NULL` leaves `vapply(pkgs, getNamespaceVersion, "")` calling base's function.
+            // A local list named like the function (psych's `apply(m, 1, prod)` beside a
+            // `prod` list) is passed over the same way; a local string names the function to use.
             if let ExpressionKind::NameRef(name) = self.module.kind(value)
-                && !self.naming.resolutions.contains_key(&value)
+                && (!self.naming.resolutions.contains_key(&value)
+                    || !is_character(self.db, resolved))
                 && !matches!(
                     resolved.kind(self.db),
                     TyKind::Function(_) | TyKind::Var(_) | TyKind::Any | TyKind::Unknown

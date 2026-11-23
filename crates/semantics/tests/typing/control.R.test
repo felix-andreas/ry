@@ -40,6 +40,18 @@ best <- function(rates) Reduce(function(best, rate) if (rate > best) rate else b
 #++++
 best: fn(rates: list[double] | double[]) -> double
 
+#---- a_definition_after_stop_never_binds
+f <- function(g) {
+  if (!requireNamespace("graphpkg")) {
+    stop("graphpkg is required")
+    nodes <- function() {}
+  }
+  nodes(g)
+}
+#++++
+f: <T> fn(g: T) -> Unknown
+124..129 warning[maybe-undefined] `nodes` is only assigned on some paths here, so this read can find nothing
+
 #---- a_constrained_branch_may_unify_so_recursion_converges
 fact <- function(n) if (n <= 1L) 1L else n * fact(n - 1L)
 #++++

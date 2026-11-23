@@ -648,18 +648,18 @@ sapply : @pure(FUN) fn(X: Any, FUN: fn(Any) -> Any, ...: Any, [simplify]: Any, [
 # R checks the callback's result length at run time, and a length the checker
 # cannot see types as a vector (`str_c(x, collapse = " ")` is `character[]`), so
 # an atomic template accepts a callback returning that vector type.
-vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> logical[], FUN.VALUE: logical[] | logical, ...: Any, [USE.NAMES]: logical) -> logical[]
-vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> integer[] | logical[], FUN.VALUE: integer[] | integer, ...: Any, [USE.NAMES]: logical) -> integer[]
-vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> double | integer | logical, FUN.VALUE: double[] | double, ...: Any, [USE.NAMES]: logical) -> double[]
+vapply : @pure(FUN) <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> logical[], FUN.VALUE: logical[] | logical, ...: Any, [USE.NAMES]: logical) -> logical[]
+vapply : @pure(FUN) <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> integer[] | logical[], FUN.VALUE: integer[] | integer, ...: Any, [USE.NAMES]: logical) -> integer[]
+vapply : @pure(FUN) <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> double | integer | logical, FUN.VALUE: double[] | double, ...: Any, [USE.NAMES]: logical) -> double[]
 # A vector-valued `FUN` gives a matrix when `FUN.VALUE` has several elements and a vector when it has
 # one, which the types cannot tell apart, and R coerces an integer or logical result to double.
-vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double[], ...: Any, [USE.NAMES]: logical) -> matrix | double[]
-vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double, ...: Any, [USE.NAMES]: logical) -> double[]
-vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> character[], FUN.VALUE: character[] | character, ...: Any, [USE.NAMES]: logical) -> character[]
-vapply : @pure(FUN) <T, V> fn(X: list[T] | T[], FUN: fn(T) -> V, FUN.VALUE: V[] | V, ...: Any, [USE.NAMES]: logical) -> V[]
+vapply : @pure(FUN) <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double[], ...: Any, [USE.NAMES]: logical) -> matrix | double[]
+vapply : @pure(FUN) <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double, ...: Any, [USE.NAMES]: logical) -> double[]
+vapply : @pure(FUN) <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> character[], FUN.VALUE: character[] | character, ...: Any, [USE.NAMES]: logical) -> character[]
+vapply : @pure(FUN) <T, V> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> V, FUN.VALUE: V[] | V, ...: Any, [USE.NAMES]: logical) -> V[]
 # Tried last, because a generic `FUN` would also match it. A matrix carries no element
 # type, so a matrix-valued `FUN` accepts any template, and R stacks the results into a matrix.
-vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> matrix, FUN.VALUE: Any, ...: Any, [USE.NAMES]: logical) -> matrix
+vapply : @pure(FUN) <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> matrix, FUN.VALUE: Any, ...: Any, [USE.NAMES]: logical) -> matrix
 mapply : @pure(FUN) fn(FUN: fn(...: Any) -> Any, ...: Any, [MoreArgs]: Any, [SIMPLIFY]: Any, [USE.NAMES]: logical) -> Any
 Map : @pure(f) fn(f: fn(...: Any) -> Any, ...: Any) -> list[Any]
 # `tapply`'s result is an array whose shape follows `INDEX` (value-dependent).

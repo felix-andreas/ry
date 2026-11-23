@@ -368,7 +368,7 @@ use: Unknown
 # `FUN.VALUE` instead of being matched against `FUN`.
 label <- function(xs) vapply(xs, character(1), FUN = as.character)
 #++++
-label: <T> fn(xs: list[T] | T[]) -> character[]
+label: <T> fn(xs: list[T] | T[] | NULL) -> character[]
 
 #==== omitted_defaults
 #---- an_omitted_argument_takes_the_defaults_type
@@ -487,7 +487,7 @@ f <- function(x) {
 }
 #++++
 f: Unknown
-63..68 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list[T] | T[]`
+63..68 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list[T] | T[] | NULL`
 
 #---- a_settled_bound_checks_a_later_caller
 f <- function(x) {
@@ -500,7 +500,7 @@ g <- function() f("a")
 f: Unknown
 g: fn() -> Unknown
 63..64 warning[unused] `y` is assigned but never used
-68..73 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list[T] | T[]`
+68..73 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list[T] | T[] | NULL`
 
 #---- a_bounded_variable_unified_into_its_own_bound_settles
 #: <T> fn(a: T, b: T) -> T
@@ -748,6 +748,16 @@ too_many: Unknown
 too_few: Unknown
 398..407 error[type-mismatch] expected `fn(integer) -> integer`, found `fn(a: integer, b: integer) -> integer`
 439..449 error[type-mismatch] expected `fn(integer) -> integer`, found `fn() -> integer`
+
+#---- match_fun_passes_over_a_local_list_named_like_the_function
+f <- function(data, groups) {
+  prod <- groups
+  out <- numeric(length(prod))
+  for (i in seq_along(prod)) out[i] <- sum(apply(data[, prod[[i]]], 1, prod))
+  out
+}
+#++++
+f: <T> fn([data]: T, groups: fn(Any) -> Any) -> double[]
 
 #---- a_list_of_functions_maps
 # Every member of the element union must serve the callback interface; the
