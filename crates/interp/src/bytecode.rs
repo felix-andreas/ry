@@ -9336,8 +9336,9 @@ unsafe fn call_fast_left(
 ///
 /// Without `DISCARD` it takes the frames that handed out no environment. With it, it takes
 /// the ones that did while their code stayed on the slots (a callee asked for its parent
-/// frame, or a promise or a closure was made over the frame): when nothing counts a reference
-/// to that environment any more it dies here, as [`eval::leave`] would find.
+/// frame, or a promise or a closure was made over the frame): when nothing that outlives the
+/// frame names that environment ([`eval::outliving_cause`]) it dies here, as [`eval::leave`]
+/// would find.
 ///
 /// The value needs no root between the callee's registers and the caller's: giving up the
 /// slots' references frees nothing by itself, and nothing here allocates.
@@ -9388,7 +9389,12 @@ unsafe fn leave_fast<const DISCARD: bool, const STEPPED: bool, const HOOKS: u8>(
         return None;
     }
     debug_assert!(frame.env == nil && frame.slots as usize == state.machine.header);
-    if DISCARD && (pending.refcount() != 0 || value == pending || heap.is_preserved(pending)) {
+    // A counted reference to the environment may be one that dies with the frame, such as a
+    // closure only the frame's slots hold, which `outliving_cause` works out.
+    if DISCARD
+        && (pending.refcount() != 0 || value == pending || heap.is_preserved(pending))
+        && eval::outliving_cause(depth - 1, value).is_some()
+    {
         return None;
     }
     if HOOKS == SUMMARIZED {

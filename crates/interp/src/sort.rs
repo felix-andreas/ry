@@ -3732,7 +3732,8 @@ impl TableKey for Sexp {
 /// four distinct values zero 512 KB once and probe a few cache lines of it, where sizing by
 /// elements would take 16 MB.
 struct PositionTable {
-    slots: SmallVec<[u64; 16]>,
+    /// The smallest table lives inline, so a lookup among up to 16 keys allocates nothing.
+    slots: SmallVec<[u64; 32]>,
     /// The table's slot index is the top `32 - shift` bits of the 32 stored hash bits.
     shift: u32,
     /// Inserts left before the table is more than half full, counted down so that an insert

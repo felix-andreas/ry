@@ -249,7 +249,8 @@ bench-hot-track dir +configurations:
     python3 -I tools/bench/tooling/hot.py track --codebases {{ dir }} --out target/hot-track.json {{ configurations }}
 
 # Prints what each R-level mechanism costs on ry in instructions (a closure call, an S3 dispatch, a `tryCatch`, a builtin call),
-# counted under callgrind, e.g. `just bench-mechanisms --ry target/profiling/ry --filter dispatch`.
+# counted under callgrind, e.g. `just bench-mechanisms --ry target/profiling/ry --filter dispatch`. `--gnu-r` adds GNU R's
+# counts beside ry's.
 bench-mechanisms *args:
     python3 -I tools/bench/tooling/mechanisms.py {{ args }}
 

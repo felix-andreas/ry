@@ -1,0 +1,197 @@
+[stdout]
+| -- two strings
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| [1] FALSE
+| [1] FALSE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| [1] FALSE
+| [1] FALSE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] NA
+| [1] NA
+| [1] NA
+| [1] NA
+| [1] NA
+| [1] NA
+| [1] NA
+| [1] NA
+| [1] NA
+| [1] NA
+| [1] NA
+| [1] NA
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| -- a vector and a string, and two vectors
+| [1] FALSE  TRUE    NA FALSE  TRUE
+| [1] FALSE  TRUE    NA FALSE  TRUE
+| [1] FALSE  TRUE    NA FALSE  TRUE
+| [1]  TRUE FALSE    NA  TRUE FALSE
+| [1]  TRUE FALSE    NA  TRUE FALSE
+| [1]  TRUE FALSE    NA  TRUE FALSE
+| [1]  TRUE FALSE    NA    NA  TRUE
+| [1]  TRUE FALSE    NA    NA  TRUE
+| [1]  TRUE FALSE    NA    NA  TRUE
+| [1] FALSE  TRUE    NA    NA FALSE
+| [1] FALSE  TRUE    NA    NA FALSE
+| [1] FALSE  TRUE    NA    NA FALSE
+| [1] TRUE TRUE   NA TRUE TRUE
+| [1] TRUE TRUE   NA TRUE TRUE
+| [1] TRUE TRUE   NA TRUE TRUE
+| [1] "logical"
+| [1] "logical"
+| [1] "logical"
+| -- an `if` chain on a string
+| [1] 1
+| [1] 2
+| [1] 4
+| [1] 3
+| [1] 1
+| [1] "missing value where TRUE/FALSE needed"
+| [1] "argument is of length zero"
+| -- lengths that recycle, and none
+| [1] TRUE TRUE TRUE TRUE
+| [1] TRUE TRUE TRUE TRUE
+| [1] TRUE TRUE TRUE TRUE
+| warning: longer object length is not a multiple of shorter object length 
+| [1] TRUE TRUE TRUE
+| warning: longer object length is not a multiple of shorter object length 
+| [1] TRUE TRUE TRUE
+| warning: longer object length is not a multiple of shorter object length 
+| [1] TRUE TRUE TRUE
+| logical(0)
+| logical(0)
+| logical(0)
+| logical(0)
+| logical(0)
+| logical(0)
+| logical(0)
+| logical(0)
+| logical(0)
+| -- attributes stay with the builtin
+|  first second 
+|   TRUE  FALSE 
+|  first second 
+|   TRUE  FALSE 
+|  first second 
+|   TRUE  FALSE 
+|  first second 
+|   TRUE  FALSE 
+|  first second 
+|   TRUE  FALSE 
+|  first second 
+|   TRUE  FALSE 
+|  first second 
+|   TRUE   TRUE 
+|  first second 
+|   TRUE   TRUE 
+|  first second 
+|   TRUE   TRUE 
+|       [,1]  [,2]
+| [1,]  TRUE FALSE
+| [2,] FALSE  TRUE
+|       [,1]  [,2]
+| [1,]  TRUE FALSE
+| [2,] FALSE  TRUE
+|       [,1]  [,2]
+| [1,]  TRUE FALSE
+| [2,] FALSE  TRUE
+|       [,1]  [,2]
+| [1,] FALSE  TRUE
+| [2,]  TRUE FALSE
+|       [,1]  [,2]
+| [1,] FALSE  TRUE
+| [2,]  TRUE FALSE
+|       [,1]  [,2]
+| [1,] FALSE  TRUE
+| [2,]  TRUE FALSE
+| [1]  TRUE FALSE
+| [1]  TRUE FALSE
+| [1]  TRUE FALSE
+| [1]  TRUE FALSE  TRUE
+| [1]  TRUE FALSE  TRUE
+| [1]  TRUE FALSE  TRUE
+| [1] FALSE  TRUE FALSE
+| [1] FALSE  TRUE FALSE
+| [1] FALSE  TRUE FALSE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] "from the method"
+| [1] "from the method"
+| [1] "from the method"
+| [1] "from the method"
+| [1] "from the method"
+| [1] "from the method"
+| -- encodings: the same text under two marks is equal, bytes only equal bytes
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| [1] FALSE
+| [1] FALSE
+| [1] TRUE TRUE TRUE
+| [1] TRUE TRUE TRUE
+| [1] TRUE TRUE TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE TRUE   NA
+| [1] TRUE TRUE   NA
+| [1] TRUE TRUE   NA
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| -- an ordering comparison collates
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE TRUE   NA TRUE TRUE
+| [1] TRUE TRUE   NA TRUE TRUE
+| [1] TRUE TRUE   NA TRUE TRUE
+| [1]  TRUE FALSE
+| [1]  TRUE FALSE
+| [1]  TRUE FALSE
+| -- a string against another type
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE
+| [1] FALSE
+| [1] FALSE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] FALSE  TRUE
+| [1] FALSE  TRUE
+| [1] FALSE  TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1]  TRUE FALSE
+| [1]  TRUE FALSE
+| [1]  TRUE FALSE
+| -- the result is a new value each time
+|  [1]  TRUE  TRUE    NA FALSE  TRUE FALSE  TRUE    NA FALSE  TRUE
+|  [1]  TRUE  TRUE    NA FALSE  TRUE FALSE  TRUE    NA FALSE  TRUE
+|  [1]  TRUE  TRUE    NA FALSE  TRUE FALSE  TRUE    NA FALSE  TRUE
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

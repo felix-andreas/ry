@@ -2269,11 +2269,13 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
                 {
                     NA_LOGICAL
                 } else if matches!(comparison, Comparison::Equal | Comparison::NotEqual) {
-                    comparison.holds(if a == b || values::same_text(a, b) {
-                        std::cmp::Ordering::Equal
-                    } else {
-                        std::cmp::Ordering::Less
-                    }) as i32
+                    comparison.holds(
+                        if handles::equal_strings(handles::Gc::adopt(a), handles::Gc::adopt(b)) {
+                            std::cmp::Ordering::Equal
+                        } else {
+                            std::cmp::Ordering::Less
+                        },
+                    ) as i32
                 } else {
                     let ordering = crate::sort::collate(&values::char_str(a), &values::char_str(b));
                     comparison.holds(ordering) as i32
