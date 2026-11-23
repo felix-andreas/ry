@@ -1260,6 +1260,56 @@ calls: DataFrame{id: integer[], at: POSIXct}
 later: DataFrame{id: integer[], at: POSIXct, due: POSIXct, waited: double[]}
 recent: DataFrame{id: integer[], at: POSIXct}
 
+#---- vectors_become_columns_and_filters
+sales <- DataFrame(region = c("eu", "us", "eu"), units = c(1L, 2L, 3L))
+weights <- c(0.5, 1, 2)
+labelled <- sales |> DataFrame.with_columns(weight = weights, one = 1, area = "region")
+label <- paste0(sales$region, "_", sales$units)
+unchecked <- sales |> DataFrame.with_columns(label = label)
+kept <- sales |> DataFrame.filter(c(TRUE, FALSE, TRUE), Expr.is_in(Expr.col("region"), c("eu", "asia")))
+flags <- sales |> DataFrame.select(Expr.is_in(Expr.col("units"), 2:3))
+#++++
+sales: DataFrame{region: character[], units: integer[]}
+weights: double[]
+labelled: DataFrame{region: character[], units: integer[], weight: double[], one: double[], area: character[]}
+label: character
+unchecked: DataFrame
+kept: DataFrame{region: character[], units: integer[]}
+flags: DataFrame{units: logical[]}
+
+#---- frames_stack_and_keep_distinct_rows
+first <- DataFrame(id = 1:2, name = c("a", "b"))
+second <- DataFrame(name = "c", id = 3.5)
+stacked <- DataFrame.concat(first, second)
+filled <- DataFrame.concat(first, DataFrame(id = 9L), how = "diagonal")
+wide <- DataFrame.concat(first, DataFrame(score = c(0.5, 1)), how = "horizontal")
+bound <- rbind(first, second)
+beside <- cbind(first, flag = c(TRUE, FALSE))
+distinct <- DataFrame.unique(first, "name", keep = "last")
+once <- unique(first)
+repeated <- duplicated(first)
+lazy_distinct <- DataFrame.lazy(first) |> LazyFrame.unique()
+#++++
+first: DataFrame{id: integer[], name: character[]}
+second: DataFrame{name: character[], id: double[]}
+stacked: DataFrame{id: double[], name: character[]}
+filled: DataFrame{id: integer[], name: character[]}
+wide: DataFrame{id: integer[], name: character[], score: double[]}
+bound: DataFrame{id: double[], name: character[]}
+beside: DataFrame{id: integer[], name: character[], flag: logical[]}
+distinct: DataFrame{id: integer[], name: character[]}
+once: DataFrame{id: integer[], name: character[]}
+repeated: logical
+lazy_distinct: LazyFrame{id: integer[], name: character[]}
+
+#---- unique_names_columns_the_frame_has
+first <- DataFrame(id = 1:2, name = c("a", "b"))
+distinct <- DataFrame.unique(first, "nmae")
+#++++
+first: DataFrame{id: integer[], name: character[]}
+distinct: Unknown
+85..91 error[type-mismatch] the frame `first` has no column `nmae`. Did you mean `name`?
+
 #---- a_cross_join_appends_the_right_columns
 patients <- DataFrame(id = 1:2)
 visits <- DataFrame(visit = 1:3)

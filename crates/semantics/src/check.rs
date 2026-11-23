@@ -566,10 +566,16 @@ enum DataFrameVerb {
     WithColumns {
         lazy: bool,
     },
-    /// `filter`, `sort`, `head` and `tail`, which keep the columns as they are.
+    /// `filter`, `sort`, `head`, `tail` and `unique`, which keep the columns as they are.
     KeepColumns {
         lazy: bool,
     },
+    /// `DataFrame.concat`, whose `how` argument says how the frames stack, or `rbind` and
+    /// `cbind` with a fixed direction.
+    Concat(Option<Stack>),
+    /// Base `unique`, `rbind` or `cbind`, which ry's table methods answer only for a DataFrame;
+    /// any other value keeps the base declaration.
+    BaseGeneric(BaseGeneric),
     GroupBy {
         lazy: bool,
     },
@@ -581,6 +587,24 @@ enum DataFrameVerb {
     /// `lazy` and `collect`, which keep the columns and change the kind.
     Convert(FrameKind),
     ReadCsv(FrameKind),
+}
+
+/// How `DataFrame.concat` puts frames together.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stack {
+    /// Rows under rows, matching columns by name; every frame has the same columns.
+    Vertical,
+    /// Rows under rows, with every column of any frame and `NA` where a frame lacks one.
+    Diagonal,
+    /// Columns beside columns.
+    Horizontal,
+}
+
+#[derive(Clone, Copy)]
+enum BaseGeneric {
+    Unique,
+    Rbind,
+    Cbind,
 }
 
 /// The column a DataFrame expression computes. `reads_column` tells an expression from a
@@ -14183,6 +14207,17 @@ impl<'db, 'a> Checker<'db, 'a> {
                 .reaches_library(callee)
                 .then_some(DataFrameVerb::Convert(kind));
         }
+        let generic = match &**name {
+            "unique" => Some(BaseGeneric::Unique),
+            "rbind" => Some(BaseGeneric::Rbind),
+            "cbind" => Some(BaseGeneric::Cbind),
+            _ => None,
+        };
+        if let Some(generic) = generic {
+            return self
+                .reaches_library(callee)
+                .then_some(DataFrameVerb::BaseGeneric(generic));
+        }
         let (receiver, verb) = name.split_once('.')?;
         let lazy = match receiver {
             "DataFrame" => false,
@@ -14195,7 +14230,8 @@ impl<'db, 'a> Checker<'db, 'a> {
         let verb = match verb {
             "select" => DataFrameVerb::Select { lazy },
             "with_columns" => DataFrameVerb::WithColumns { lazy },
-            "filter" | "sort" | "head" | "tail" => DataFrameVerb::KeepColumns { lazy },
+            "filter" | "sort" | "head" | "tail" | "unique" => DataFrameVerb::KeepColumns { lazy },
+            "concat" if !lazy => DataFrameVerb::Concat(None),
             "group_by" => DataFrameVerb::GroupBy { lazy },
             "join" => DataFrameVerb::Join { lazy, asof: false },
             "join_asof" => DataFrameVerb::Join { lazy, asof: true },
@@ -14224,6 +14260,31 @@ impl<'db, 'a> Checker<'db, 'a> {
             return self.read_csv_type(kind, arguments);
         }
         let subject_ty = *self.recorded.get(&subject)?;
+        let verb = match verb {
+            DataFrameVerb::BaseGeneric(generic) => {
+                let TyKind::Frame(FrameKind::DataFrame, columns) =
+                    *self.structural(subject_ty).kind(db)
+                else {
+                    return None;
+                };
+                let unknown_columns = Ty::new(db, TyKind::Frame(FrameKind::DataFrame, None));
+                match generic {
+                    BaseGeneric::Unique if columns.is_some() => {
+                        DataFrameVerb::KeepColumns { lazy: false }
+                    }
+                    BaseGeneric::Unique => return Some(unknown_columns),
+                    BaseGeneric::Rbind => DataFrameVerb::Concat(Some(Stack::Vertical)),
+                    BaseGeneric::Cbind => DataFrameVerb::Concat(Some(Stack::Horizontal)),
+                }
+            }
+            verb => verb,
+        };
+        if let DataFrameVerb::Concat(stack) = verb {
+            return Some(
+                self.concat_type(stack, arguments)
+                    .unwrap_or_else(|| Ty::new(db, TyKind::Frame(FrameKind::DataFrame, None))),
+            );
+        }
         let rest = &arguments[1..];
         let (subject_kind, columns) = match *self.structural(subject_ty).kind(db) {
             TyKind::Frame(kind, Some(columns)) => (kind, columns),
@@ -14249,7 +14310,22 @@ impl<'db, 'a> Checker<'db, 'a> {
                 {
                     continue;
                 }
-                match checker.frame_argument(value, columns, frame) {
+                let column = match checker.frame_argument(value, columns, frame) {
+                    Some(column) => Some(column),
+                    // A named vector is a column of its own values.
+                    None if module.argument_name(argument).is_some() => checker
+                        .recorded
+                        .get(&value)
+                        .and_then(|&ty| vector_column(db, ty))
+                        .map(|ty| ComputedColumn {
+                            name: String::new(),
+                            ty,
+                            reads_column: false,
+                            shape: Shape::PerRow,
+                        }),
+                    None => None,
+                };
+                match column {
                     Some(mut column) => {
                         if let Some(name) = module.argument_name(argument) {
                             column.name = name.to_string();
@@ -14297,7 +14373,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 Some(frame_of(db, frame_kind(lazy), result))
             }
             DataFrameVerb::KeepColumns { lazy } => {
-                expressions(self, &|name| name != "descending" && name != "n");
+                expressions(self, &|name| !matches!(name, "descending" | "n" | "keep"));
                 Some(Ty::new(db, TyKind::Frame(frame_kind(lazy), Some(columns))))
             }
             DataFrameVerb::GroupBy { lazy } => {
@@ -14349,8 +14425,84 @@ impl<'db, 'a> Checker<'db, 'a> {
             DataFrameVerb::Join { lazy, asof } => self.join_type(lazy, asof, columns, frame, rest),
             DataFrameVerb::Convert(_) if matches!(subject_kind, FrameKind::GroupBy { .. }) => None,
             DataFrameVerb::Convert(kind) => Some(Ty::new(db, TyKind::Frame(kind, Some(columns)))),
-            DataFrameVerb::ReadCsv(_) => None,
+            DataFrameVerb::ReadCsv(_)
+            | DataFrameVerb::Concat(_)
+            | DataFrameVerb::BaseGeneric(_) => None,
         }
+    }
+
+    /// `DataFrame.concat(a, b)` stacks `b`'s rows under `a`'s, each column taking the widest
+    /// type of its pieces. `how = "diagonal"` keeps every column of any frame, in the order they
+    /// first appear, and `how = "horizontal"` puts frames' columns and named vectors side by
+    /// side. `None` when a piece's columns are unknown.
+    fn concat_type(&mut self, stack: Option<Stack>, arguments: &[Argument]) -> Option<Ty<'db>> {
+        let db = self.db;
+        let module = self.module;
+        let mut how = stack;
+        let mut pieces: Vec<(Option<String>, ExprId)> = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            let value = argument.value?;
+            let name = module.argument_name(argument).map(|name| name.to_string());
+            if stack.is_none() && name.as_deref() == Some("how") {
+                let ExpressionKind::Literal(LiteralKind::String(text)) = module.kind(value) else {
+                    return None;
+                };
+                how = Some(match &module[text] {
+                    "vertical" => Stack::Vertical,
+                    "diagonal" => Stack::Diagonal,
+                    "horizontal" => Stack::Horizontal,
+                    _ => return None,
+                });
+                continue;
+            }
+            pieces.push((name, value));
+        }
+        let how = how.unwrap_or(Stack::Vertical);
+        let mut result: Vec<(String, Vec<Ty<'db>>)> = Vec::new();
+        for (index, (name, value)) in pieces.into_iter().enumerate() {
+            let ty = *self.recorded.get(&value)?;
+            let columns = match *self.structural(ty).kind(db) {
+                TyKind::Frame(FrameKind::DataFrame, Some(columns)) => columns,
+                _ if how == Stack::Horizontal => {
+                    result.push((name?, vec![vector_column(db, ty)?]));
+                    continue;
+                }
+                _ => return None,
+            };
+            if how == Stack::Vertical && index > 0 {
+                let same = columns.len() == result.len()
+                    && columns.iter().all(|column| {
+                        result
+                            .iter()
+                            .any(|(name, _)| name.as_str() == column.name.text(db))
+                    });
+                if !same {
+                    return None;
+                }
+            }
+            for column in columns {
+                let name = column.name.text(db);
+                match result
+                    .iter_mut()
+                    .find(|(existing, _)| existing.as_str() == name)
+                {
+                    Some((_, types)) if how != Stack::Horizontal => types.push(column.ty),
+                    _ => result.push((name.to_owned(), vec![column.ty])),
+                }
+            }
+        }
+        let columns = result
+            .into_iter()
+            .map(|(name, types)| {
+                let ty = if types.iter().all(|&ty| ty == types[0]) {
+                    types[0]
+                } else {
+                    widest_column(db, &types, true).unwrap_or_else(|| unknown(db))
+                };
+                (name, ty)
+            })
+            .collect();
+        Some(frame_of(db, FrameKind::DataFrame, columns))
     }
 
     /// Strict mode reports a query that names columns of a frame whose columns are unknown,
@@ -14701,7 +14853,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                             ..column
                         })
                     }
-                    "Expr.is_null" => {
+                    "Expr.is_null" | "Expr.is_in" => {
                         let column = argument(self)?;
                         Some(ComputedColumn {
                             ty: vector(Atomic::Logical),
@@ -14799,7 +14951,8 @@ impl<'db, 'a> Checker<'db, 'a> {
                 {
                     return None;
                 }
-                if temporal_column(db, left.ty).is_some() || temporal_column(db, right.ty).is_some() {
+                if temporal_column(db, left.ty).is_some() || temporal_column(db, right.ty).is_some()
+                {
                     let ty =
                         self.date_operation(value, *operator, (*lhs, &left), (*rhs, &right))?;
                     return Some(ComputedColumn {
@@ -23274,6 +23427,20 @@ fn temporal_column(db: &dyn Db, ty: Ty<'_>) -> Option<Temporal> {
     match column_element(db, ty).kind(db) {
         TyKind::Named(name, _) if name.text(db) == "Date" => Some(Temporal::Date),
         TyKind::Named(name, _) if name.text(db) == "POSIXct" => Some(Temporal::Datetime),
+        _ => None,
+    }
+}
+
+/// The column type of an R vector a verb takes as a column's values. A string is left out,
+/// because a single string names a column instead.
+fn vector_column<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Ty<'db>> {
+    match column_element(db, ty).kind(db) {
+        TyKind::Scalar(Atomic::Logical | Atomic::Integer | Atomic::Double) => {
+            Some(column_type(db, ty))
+        }
+        TyKind::Named(name, _) if matches!(name.text(db), "factor" | "Date" | "POSIXct") => {
+            Some(column_type(db, ty))
+        }
         _ => None,
     }
 }

@@ -8,6 +8,7 @@ as.tag
 as.tuple
 DataFrame
 DataFrame.columns
+DataFrame.concat
 DataFrame.copy
 DataFrame.filter
 DataFrame.group_by
@@ -25,6 +26,7 @@ DataFrame.select
 DataFrame.set_key
 DataFrame.sort
 DataFrame.tail
+DataFrame.unique
 DataFrame.width
 DataFrame.with_columns
 DataFrame.write_csv
@@ -36,6 +38,7 @@ Expr.count
 Expr.first
 Expr.head
 Expr.if_else
+Expr.is_in
 Expr.is_null
 Expr.last
 Expr.len
@@ -64,6 +67,7 @@ LazyFrame.scan_parquet
 LazyFrame.select
 LazyFrame.sort
 LazyFrame.tail
+LazyFrame.unique
 LazyFrame.with_columns
 LazyGroupBy.agg
 DataFrame.pivot
