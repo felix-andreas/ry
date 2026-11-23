@@ -395,7 +395,7 @@ unsafe fn time_zone(value: Sexp) -> Option<String> {
 }
 
 /// `value` as a column of `height` rows, recycling a single value.
-unsafe fn to_column(name: &str, value: Sexp, height: usize, call: Sexp) -> R<Column> {
+pub(crate) unsafe fn to_column(name: &str, value: Sexp, height: usize, call: Sexp) -> R<Column> {
     let value = values::materialize(value)?;
     // Borrowing each element's text skips the owned copy `column_contents` would make, which
     // dominates building a frame from a long character vector.

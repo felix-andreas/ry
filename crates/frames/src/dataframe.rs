@@ -55,6 +55,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".df_explain", 2, table_work!(do_explain)),
     builtin(".df_scan", 2, table_work!(do_scan)),
     builtin(".df_pivot", 6, table_work!(do_pivot)),
+    builtin(".df_concat", 3, table_work!(do_concat)),
+    builtin(".df_unique", 4, table_work!(do_unique)),
+    builtin(".df_duplicated", 3, table_work!(do_duplicated)),
 ];
 
 /// The API, bound in the `ry` namespace and attached with the rest of `package:ry`. Each verb
@@ -98,6 +101,8 @@ DataFrame.join_asof <- function(df, other, on, by = NULL, strategy = "backward",
   .df_join(df, other, c(by, on), c(by, on), "asof", suffix, strategy, sys.call())
 }
 DataFrame.lazy <- function(df) .df_lazy(df)
+DataFrame.concat <- function(..., how = "vertical") .df_concat(list(...), how, sys.call())
+DataFrame.unique <- function(df, subset = NULL, keep = "first") .df_unique(df, subset, keep, sys.call())
 DataFrame.pivot <- function(df, on, index, values, agg = NULL) .df_pivot(df, on, index, values, agg, sys.call())
 GroupBy.agg <- function(group, ...) .df_agg(group, list(...), sys.call())
 LazyFrame.scan_csv <- function(path) .df_scan(path, "csv")
@@ -112,6 +117,7 @@ LazyFrame.tail <- DataFrame.tail
 LazyFrame.join <- DataFrame.join
 LazyFrame.join_asof <- DataFrame.join_asof
 LazyFrame.pivot <- DataFrame.pivot
+LazyFrame.unique <- DataFrame.unique
 LazyFrame.collect <- function(lf) .df_collect(lf, sys.call())
 LazyFrame.explain <- function(lf) {
   plan <- .df_explain(lf, sys.call())
@@ -135,6 +141,10 @@ local({
     # expression instead of failing on conflicting `Ops.Expr` and `Ops.Date` methods.
     chooseOpsMethod.Expr = function(x, y, mx, my, cl, reverse) TRUE,
     format.Expr = function(x, ...) .expr_format(x),
+    rbind.DataFrame = function(..., deparse.level = 1) DataFrame.concat(..., how = "vertical"),
+    cbind.DataFrame = function(..., deparse.level = 1) DataFrame.concat(..., how = "horizontal"),
+    unique.DataFrame = function(x, incomparables = FALSE, ...) DataFrame.unique(x),
+    duplicated.DataFrame = function(x, incomparables = FALSE, ...) .df_duplicated(x, NULL, sys.call()),
     # `%in%` is not generic, so an expression on its left stops in `match()` with a pointer to the
     # expression's own test instead of an error about coercing a pointer.
     mtfrm.Expr = function(x) stop("`%in%` does not build an expression; write `Expr.is_in(x, values)`", call. = FALSE),
@@ -500,6 +510,173 @@ unsafe fn plan_of(value: Sexp, call: Sexp) -> R<(Plan, bool)> {
             ),
         )),
     }
+}
+
+/// `.df_concat(items, how, call)`: the frames of `items` (or of the one list it holds) stacked
+/// by column name (`"vertical"`, every frame with the same columns; `"diagonal"`, a missing
+/// column filled with `NA`), or set side by side (`"horizontal"`), where a named vector is a
+/// column too.
+unsafe fn do_concat(call: &Call<'_>) -> R<Sexp> {
+    let caller = call.arg(2);
+    let mut items = call.arg(0);
+    if length(items) == 1 && items.element(0).kind() == SexpType::List {
+        items = items.element(0);
+    }
+    let how = values::require_str(call.arg(1), "how")?;
+    let names = values::names(items);
+    let argument_name = |index: usize| {
+        if is_nil(names) {
+            None
+        } else {
+            values::string_at(names, index).filter(|name| !name.is_empty())
+        }
+    };
+    let bind = match how.as_ref() {
+        "vertical" => ops::Bind::Name,
+        "diagonal" => ops::Bind::Fill,
+        "horizontal" => {
+            let height = (0..length(items))
+                .map(|index| items.element(index))
+                .find(|item| is_frame(*item))
+                .map(|item| table_of(item).map(|table| table.height()))
+                .transpose()?;
+            let Some(height) = height else {
+                return Err(error_in(caller, "`concat` needs at least one DataFrame"));
+            };
+            let mut columns = Vec::new();
+            for index in 0..length(items) {
+                let item = items.element(index);
+                if is_frame(item) {
+                    let table = table_of(item)?;
+                    if table.height() != height {
+                        return Err(error_in(
+                            caller,
+                            format!(
+                                "frame {} has {} rows, but the first frame has {height}",
+                                index + 1,
+                                table.height()
+                            ),
+                        ));
+                    }
+                    columns.extend(table.frame().columns().iter().cloned());
+                    continue;
+                }
+                let Some(name) = argument_name(index) else {
+                    return Err(error_in(
+                        caller,
+                        format!(
+                            "`concat` sets frames and named vectors side by side, not {}",
+                            describe(item)
+                        ),
+                    ));
+                };
+                columns.push(frame::to_column(&name, item, height, caller)?);
+            }
+            let combined = table::polars::prelude::DataFrame::new(height, columns)
+                .map_err(|failure| error_in(caller, failure.to_string()))?;
+            return frame::wrap(table::Table::new(combined).map_err(|failure| {
+                table_error(caller, failure, None)
+            })?);
+        }
+        other => {
+            return Err(error_in(
+                caller,
+                format!(
+                    "`how` is \"vertical\", \"diagonal\" or \"horizontal\", not \"{other}\""
+                ),
+            ));
+        }
+    };
+    let mut tables = Vec::with_capacity(length(items));
+    for index in 0..length(items) {
+        let item = items.element(index);
+        if !is_frame(item) {
+            return Err(error_in(
+                caller,
+                format!("`concat` stacks DataFrames, not {}", describe(item)),
+            ));
+        }
+        tables.push(&*table_of(item)?);
+    }
+    if bind == ops::Bind::Name
+        && let Some(first) = tables.first()
+    {
+        for (index, table) in tables.iter().enumerate().skip(1) {
+            let (missing, frame) = match first
+                .frame()
+                .get_column_names()
+                .into_iter()
+                .find(|name| table.frame().column(name).is_err())
+            {
+                Some(name) => (name.clone(), index + 1),
+                None => match table
+                    .frame()
+                    .get_column_names()
+                    .into_iter()
+                    .find(|name| first.frame().column(name).is_err())
+                {
+                    Some(name) => (name.clone(), 1),
+                    None => continue,
+                },
+            };
+            return Err(error_in(
+                caller,
+                format!(
+                    "frame {frame} has no column `{missing}`; to fill it with `NA`, use `how = \"diagonal\"`"
+                ),
+            ));
+        }
+    }
+    let stacked =
+        ops::rbind_list(&tables, bind).map_err(|failure| table_error(caller, failure, None))?;
+    frame::wrap(stacked)
+}
+
+/// `.df_unique(df, subset, keep, call)`.
+unsafe fn do_unique(call: &Call<'_>) -> R<Sexp> {
+    let caller = call.arg(3);
+    let (plan, lazy) = plan_of(call.arg(0), caller)?;
+    let subset = if is_nil(call.arg(1)) {
+        Vec::new()
+    } else {
+        values::strings(call.arg(1))
+            .into_iter()
+            .flatten()
+            .map(PlSmallStr::from)
+            .collect()
+    };
+    let keep = values::require_str(call.arg(2), "keep")?;
+    let Some(keep) = ops::Keep::parse(&keep) else {
+        return Err(error_in(
+            caller,
+            format!("`keep` is \"first\", \"last\" or \"none\", not \"{keep}\""),
+        ));
+    };
+    finish(plan.with(Step::Unique { subset, keep }), lazy, caller)
+}
+
+/// `.df_duplicated(df, subset, call)`: whether each row repeats an earlier row.
+unsafe fn do_duplicated(call: &Call<'_>) -> R<Sexp> {
+    let caller = call.arg(2);
+    if !is_frame(call.arg(0)) {
+        return Err(error_in(
+            caller,
+            format!("expected a DataFrame, got {}", describe(call.arg(0))),
+        ));
+    }
+    let subset: Vec<String> = if is_nil(call.arg(1)) {
+        Vec::new()
+    } else {
+        values::strings(call.arg(1)).into_iter().flatten().collect()
+    };
+    let subset: Vec<&str> = subset.iter().map(String::as_str).collect();
+    let duplicated = ops::duplicated_rows(table_of(call.arg(0))?, &subset)
+        .map_err(|failure| table_error(caller, failure, None))?;
+    let vector = values::alloc(SexpType::Logical, duplicated.len())?;
+    for (slot, flag) in values::ints_mut(vector).iter_mut().zip(duplicated) {
+        *slot = i32::from(flag);
+    }
+    Ok(vector)
 }
 
 /// Wraps an extended plan: a `LazyFrame` stays lazy, and a `DataFrame`'s one-step plan runs now.

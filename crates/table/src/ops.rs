@@ -199,6 +199,60 @@ pub fn unique_rows(table: &Table, by: &[&str]) -> Result<Table> {
     Ok(Table::from_normalized(unique))
 }
 
+/// Which of the rows that share a key a distinct-rows step keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keep {
+    First,
+    Last,
+    /// Only the rows whose key no other row has.
+    None,
+}
+
+impl Keep {
+    pub fn parse(text: &str) -> Option<Keep> {
+        Some(match text {
+            "first" => Keep::First,
+            "last" => Keep::Last,
+            "none" => Keep::None,
+            _ => return None,
+        })
+    }
+}
+
+/// The distinct rows by `by` (every column when empty) in their original order, keeping the
+/// first, the last, or none of the rows that share a key.
+pub fn unique_rows_keeping(table: &Table, by: &[&str], keep: Keep) -> Result<Table> {
+    let strategy = match keep {
+        Keep::First => return unique_rows(table, by),
+        Keep::Last => UniqueKeepStrategy::Last,
+        Keep::None => UniqueKeepStrategy::None,
+    };
+    let subset = subset(table, by)?;
+    let unique = table
+        .frame()
+        .unique_stable(Some(&subset), strategy, None)?;
+    Ok(Table::from_normalized(unique))
+}
+
+/// Whether each row repeats an earlier row's `by` values (every column when `by` is empty), as
+/// R's `duplicated()` marks a row: the first of each combination is `false`.
+pub fn duplicated_rows(table: &Table, by: &[&str]) -> Result<Vec<bool>> {
+    let subset = subset(table, by)?;
+    let index = PlSmallStr::from_static("__ry_row");
+    let first = table
+        .frame()
+        .select(subset.iter().cloned())?
+        .with_row_index(index.clone(), None)?
+        .unique_stable(Some(&subset), UniqueKeepStrategy::First, None)?;
+    let mut duplicated = vec![true; table.height()];
+    for row in first.column(&index)?.idx()?.into_no_null_iter() {
+        if let Some(slot) = duplicated.get_mut(row as usize) {
+            *slot = false;
+        }
+    }
+    Ok(duplicated)
+}
+
 /// How many distinct combinations of `by` the table holds, as `uniqueN(x, by = ...)` does.
 pub fn unique_count(table: &Table, by: &[&str]) -> Result<usize> {
     let subset = subset(table, by)?;
@@ -1894,6 +1948,26 @@ fn stacked_type(pieces: &[Option<Column>]) -> Result<DataType> {
         .filter_map(|column| ColumnType::of(column.dtype()))
         .collect();
     let has = |kind: ColumnType| kinds.contains(&kind);
+    // A date or date-time stacks only with its own kind; date-times take the first piece's zone.
+    if let Some(&temporal) = kinds
+        .iter()
+        .find(|kind| matches!(kind, ColumnType::Date | ColumnType::Datetime))
+    {
+        if let Some(other) = kinds.iter().find(|kind| **kind != temporal) {
+            return Err(Error::Query(format!(
+                "a {} column stacks only with {} columns, not with a {} column",
+                temporal.name(),
+                temporal.name(),
+                other.name()
+            )));
+        }
+        return pieces
+            .iter()
+            .flatten()
+            .next()
+            .map(|column| column.dtype().clone())
+            .ok_or_else(|| Error::Query("no column to stack".to_string()));
+    }
     if has(ColumnType::Factor)
         && kinds
             .iter()

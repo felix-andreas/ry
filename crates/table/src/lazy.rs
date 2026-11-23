@@ -19,6 +19,7 @@ use {
     crate::{
         Error, Result, Schema, Table,
         io::{self, ReadOptions},
+        ops::{self, Keep},
         query::{
             self, Aggregate, BinaryOp, Expr, Join, On, Output, Query, ResultType, Roll, Rows,
             Select, SortKey, UnaryOp, Warning, collapses, column_references, join_layout,
@@ -75,6 +76,9 @@ pub enum Step {
         how: How,
         suffix: PlSmallStr,
     },
+    /// The distinct rows by the `subset` columns (every column when empty), in their original
+    /// order.
+    Unique { subset: Vec<PlSmallStr>, keep: Keep },
 }
 
 /// Which rows a join keeps.
@@ -545,6 +549,8 @@ fn needed_columns(source_schema: &Schema, steps: &[Step]) -> Vec<PlSmallStr> {
                     needed = None;
                 }
             }
+            Step::Unique { subset, .. } if subset.is_empty() => needed = None,
+            Step::Unique { subset, .. } => read.extend(subset.iter().cloned()),
             Step::Head(_) | Step::Tail(_) => {}
         }
         if let Some(needed) = &mut needed {
@@ -598,6 +604,20 @@ pub fn step_schema(schema: &Schema, step: &Step) -> Result<Schema> {
             ..Query::default()
         }),
         Step::Head(_) | Step::Tail(_) => Ok(schema.clone()),
+        Step::Unique { subset, .. } => {
+            if let Some(missing) = subset.iter().find(|name| schema.column(name).is_none()) {
+                return Err(Error::Query(format!(
+                    "there is no column `{missing}`; the columns are {}",
+                    schema
+                        .names()
+                        .iter()
+                        .map(|name| format!("`{name}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+            Ok(schema.clone())
+        }
         Step::Select(columns) => {
             check_unique(columns.iter().map(|(name, _)| name))?;
             table_type(&Query {
@@ -758,6 +778,11 @@ fn run(plan: Plan) -> Result<Collected> {
                     &suffix,
                     &mut warnings,
                 )?;
+                continue;
+            }
+            Step::Unique { subset, keep } => {
+                let subset: Vec<&str> = subset.iter().map(PlSmallStr::as_str).collect();
+                table = ops::unique_rows_keeping(&table, &subset, keep)?;
                 continue;
             }
             step => {
@@ -972,6 +997,15 @@ fn write_plan(text: &mut String, plan: &Plan, depth: usize) {
                 text.push_str(&format!("SORT BY [{}]\n", keys.join(", ")));
             }
             Step::Head(count) => text.push_str(&format!("HEAD {count}\n")),
+            Step::Unique { subset, keep } => {
+                let keep = match keep {
+                    Keep::First => "first",
+                    Keep::Last => "last",
+                    Keep::None => "none",
+                };
+                let subset: Vec<&str> = subset.iter().map(PlSmallStr::as_str).collect();
+                text.push_str(&format!("UNIQUE [{}] KEEP {keep}\n", subset.join(", ")));
+            }
             Step::Tail(count) => text.push_str(&format!("TAIL {count}\n")),
             Step::Join {
                 other,
