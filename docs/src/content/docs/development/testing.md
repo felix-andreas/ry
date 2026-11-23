@@ -343,6 +343,12 @@ reaches the parser, the formatter, the checker and the editor features at once:
 A battery reports up to eight failing seeds per run (`FAILURES_PER_RUN`), each with its replay
 command, so one run of a deep campaign shows whether it found one defect or several.
 
+A deep run belongs in the `fuzz` profile, which optimizes like `iterate` but keeps debug
+assertions and overflow checks, since the batteries rely on both:
+`FUZZ_ITERS=3000 cargo test --profile fuzz -p semantics --test test_fuzz fuzz_sessions -- --exact`.
+`just fuzz-deep` builds the analysis crates' harnesses with it; the runtime crates keep the dev
+profile, because their suites run `target/debug/ry`.
+
 ### The semantic pipeline
 
 `crates/semantics/tests/test_fuzz.rs` checks *sessions*. A session is a project of one to four
@@ -352,18 +358,83 @@ the project, reclassify a file (package, script, test, test helper) or flip stri
 prelude. Files start as generated programs, fixture cases, corpus programs, programs of a few
 colliding names, or token soup.
 
-Two databases outlive the sessions (`semantics::testing::Workbench`). The incremental one is an
+Three databases outlive the sessions (`semantics::testing::Workbench`). The incremental one is an
 editor's: it keeps one input per file and moves from state to state through the salsa setters,
 across sessions too, so every state is reached by an edit from an unrelated history. The reference
-one is a command's (`ry check`), with a bounded tree store and new inputs for every state. On every
-state the harness checks:
+one is a command's (`ry check`), with a bounded tree store and new inputs for every state. The
+editor reference records editor facts like the incremental one but gets new inputs for every state.
+On every state the harness checks:
 
 - **Nothing panics**, which among other things means every salsa fixpoint converges.
 - **Incremental equals fresh.** The incremental database renders every file as the reference does,
   and returning to the session's first state restores its first rendering.
 - **Diagnostic ranges are well formed.**
-- **The output is deterministic** across interning orders: every sixty-fourth session also compares
-  its first state with a database that has no history at all.
+- **The output does not depend on history.** Every sixty-fourth session compares its first state
+  with a database that has analyzed nothing before.
+- **The output does not depend on interning order.** `Ty` and `Symbol` ids are process-global, so
+  every database of one process agrees on them and no comparison inside it can see output that
+  sorts by an id. After the run, one child process of the same test binary renders every eighth
+  session again (`CHILD_SAMPLE`; a replay of one seed always samples it). It interns the sessions' words before the stubs', each list
+  in reverse, and checks sessions, states, files and items in reverse, which flips the order of
+  almost every pair of ids. Its renderings must equal the parent's. The child takes its seeds from
+  the parent through `FUZZ_INTERNING_CHILD`, and a failure prints the command that replays the
+  child alone.
+- **A parallel check equals the sequential one.** Every fourth session also checks each state on
+  three threads, each a handle of the warm reference database with new inputs, checking the items
+  in a different rotation, and every thread's rendering must equal the reference.
+- **The editor facts equal a fresh check's.** On every second session's last state, every fact
+  the incremental database's checks recorded for the editor (each expression's and pattern's type
+  as hover renders it, literal expectations, loop variables, selected overloads, callee targets)
+  must equal what the editor reference records from new inputs.
+
+In debug builds the checker also asserts, for every item it checks, that each type it records for
+the editor resolves in the item's own inference table, and that it is the checked type resolved
+there, derived apart from the recording (`assert_facts_match_resolution`). Every input of every
+suite then tests that no inference variable escapes its item and that hover shows the type the
+check found.
+
+Two metamorphic relations compare a program with an edit that changes no meaning
+(`edits_that_change_no_meaning_only_move_findings`). A blank line or `# note` inserted before a
+top-level statement must give the same findings with their ranges moved by its length. Renaming
+one to three of the project's own names throughout must give, file by file, the same multiset of
+lines once each finding's range moves to where the rename puts it and the new names are spelled
+back. Half the renames keep each name's length and character classes. The other half pick free
+names of one to ten characters that start with another letter, may hold non-ASCII letters, and
+are backquoted at some occurrences. Three times in four a renamed name occurs in a finding, and
+half the cases add reads of names nothing defines, so renames meet `unresolved` findings. The
+rename leaves alone what it cannot rename without changing meaning: names a shipped stub or an
+export manifest spells, members and named arguments a stub spells, annotation-language words,
+R6's bound names, a prefix R's partial matching could complete, and any name within the typo
+distance of another, since a typo check reports or suggests by spelling. So it does not check
+those names, or the order of findings within a file.
+
+The stub loader has its own arm (`fuzz_stub_sources`) over token soup, windows of the shipped
+`.Rtypes` files, splices of two windows, and stubs generated from the shipped stubs' grammar. Every
+problem must name a line that holds what the problem quotes, with lines counted from the bytes
+apart from the loader. Every declaration range must cover exactly the name it declares, as a whole
+token. Loading the stub, then a variant with other documentation and types, then the stub again
+must give the first library, and the child process loads every sampled stub again on a database
+of its own, which catches state a loader keeps outside the database.
+
+`fuzz_package_metadata` generates `NAMESPACE` and `DESCRIPTION` files. The parsers must not panic,
+a `NAMESPACE` must give the same facts in one piece as split into two to four chunks on threads
+(the path a large file takes), and a project that calls the imported, exported and native names
+must render alike before and after the database holds other metadata.
+
+`crates/ry/tests/test_fuzz.rs` checks the editor's two diagnostic waves
+(`fuzz_first_wave_is_a_subset_of_the_settled_wave`): under a random check and lint configuration,
+every finding the fast first wave publishes must also be in the settled diagnostics, or the editor
+shows a finding that then flickers away. Both waves lint with one configuration, so the relation
+checks the parse-stage findings and the suppressions, not the lints. A failing seed is retried on
+a fresh database, and the failure says whether only the warm database disagrees.
+
+Each relation whose comparison reads two renderings has a canary (`*_oracle_catches_*`): it feeds
+the comparison a deliberately wrong side built from the real rendering and asserts that the
+comparison reports it within the relation's default seed count. The canaries cover the trivia
+relation (unmoved findings), the rename relation (a lost finding), the parallel check (one file's
+lines reversed), the stub ranges (every start one byte late), the stub history (the variant's
+library) and the two waves (a dropped settled finding). A failing canary means its comparison
+can no longer see the class of bug it exists to catch.
 
 The rendering folds every lint, under a configuration that turns them all on, so the lint layer
 inherits the same invariants. Two further arms run every fixture case as the project its suite
@@ -379,10 +450,10 @@ of seeds that replays it. `FUZZ_ITERS` scales the budgets, a bounded default run
 
 `crates/format/tests/test_fuzz.rs` feeds the formatter valid-program seeds, byte-level mutations of
 those seeds, token soup, generated programs and fixture cases with one small edit each, every
-fixture case source in the repository, the program corpus, and real corpus files once they are
-fetched. It checks that nothing panics (the formatter either succeeds or refuses with a structured
-error), that the output is deterministic, that the code is preserved, and that formatting is
-idempotent, meaning that formatting a successful output again succeeds and reproduces it byte for
+fixture case source in the repository, the program corpus, and mutations of real corpus files,
+or of the program corpus when `corpus/` is not fetched. It checks that nothing panics (the
+formatter either succeeds or refuses with a structured error), that the output is deterministic,
+that the code is preserved, and that formatting is idempotent, meaning that formatting a successful output again succeeds and reproduces it byte for
 byte.
 
 The refusal path is part of the contract, and the battery holds the formatter to it: a refusal is
@@ -553,7 +624,8 @@ on in-tree input, which is full of `#:` annotations (comments, to tree-sitter) a
 broken sources. Accepting what tree-sitter rejects is gated there against
 `crates/syntax/tests/in-tree-acceptance-allowlist.txt`. Each allowlist entry is adjudicated by
 running R itself, and must say which of two things it is: tree-sitter being wrong, or a known gap in
-this parser.
+this parser. An entry that is no longer accepted only by us fails the test too, so a closed gap
+leaves the list.
 
 Inline type annotations are ry syntax that R rejects by design, so tree-sitter judges the plain R
 program a source erases to (`syntax::erase_inline_annotations`), not the source itself. That makes

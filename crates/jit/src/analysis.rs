@@ -1525,6 +1525,7 @@ pub unsafe fn shape(code: Sexp) -> Shape {
             | Op::Replace
             | Op::ComplexAssign
             | Op::Missing
+            | Op::At
             | Op::Namespace
             | Op::SuperAssign
             | Op::SuperSubAssign
@@ -3017,6 +3018,13 @@ impl<'a> Builder<'a> {
             // `missing` reads the frame's bindings, so the variables must be written back first,
             // and `::` may load a namespace, which runs arbitrary code.
             Op::Ast | Op::Missing | Op::Namespace => self.opaque_step(
+                state,
+                Some((operand(0), self.feedback_at(inst.pc))),
+                &[],
+                Effect::Opaque,
+            ),
+            // On an S3 object `@` dispatches a method, which runs arbitrary code.
+            Op::At => self.opaque_step(
                 state,
                 Some((operand(0), self.feedback_at(inst.pc))),
                 &[],
@@ -5493,7 +5501,8 @@ pub fn reads(inst: &Inst) -> SmallVec<[usize; 4]> {
         | Op::CallTailUpdate
         | Op::Field
         | Op::Item
-        | Op::Slot => smallvec![operand(1)],
+        | Op::Slot
+        | Op::At => smallvec![operand(1)],
         Op::MatchShape | Op::MatchTag | Op::MatchLiteral | Op::MatchFail => smallvec![operand(0)],
         Op::Construct => (operand(2)..operand(2) + operand(3)).collect(),
         Op::Move => smallvec![operand(1)],
@@ -5600,7 +5609,8 @@ fn apply_liveness(inst: &Inst, live: &mut [u64]) {
         | Op::CallTailUpdate
         | Op::Field
         | Op::Item
-        | Op::Slot => {
+        | Op::Slot
+        | Op::At => {
             kill(operand(0), live);
             gen_(operand(1), live);
         }

@@ -13,7 +13,9 @@ use {
         builtins::Arg,
         conditions::{self, Handler},
         dispatch::{self, MethodsState},
-        eval, interp,
+        eval,
+        handles::{self, Cx, Expression, List, Local, NativeArgs, Str, StringFill, Symbol, safe},
+        interp,
         unwind::{Jump, R, Unwind, error, error_in},
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
     },
@@ -29,29 +31,32 @@ use {
 
 pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("R_M_setPrimitiveMethods", set_primitive_methods_routine),
-    ("R_clear_method_selection", clear_method_selection),
-    ("R_dummy_extern_place", dummy_extern_place),
-    ("R_el_named", element_named),
+    (
+        "R_clear_method_selection",
+        safe!(native clear_method_selection),
+    ),
+    ("R_dummy_extern_place", safe!(native dummy_extern_place)),
+    ("R_el_named", safe!(native element_named)),
     ("R_externalptr_prototype_object", external_pointer_prototype),
     ("R_getClassFromCache", class_from_cache),
     ("R_getGeneric", get_generic_routine),
     ("R_get_slot", get_slot),
     ("R_hasSlot", has_slot_routine),
-    ("R_identC", identical_strings),
+    ("R_identC", safe!(native identical_strings)),
     ("R_initMethodDispatch", init_method_dispatch),
-    ("R_methodsPackageMetaName", package_meta_name),
+    ("R_methodsPackageMetaName", safe!(native package_meta_name)),
     ("R_methods_test_MAKE_CLASS", test_make_class),
     ("R_methods_test_NEW", test_new),
     ("R_missingArg", missing_arg_routine),
     ("R_nextMethodCall", next_method_call),
     ("R_quick_method_check", quick_method_check_routine),
     ("R_selectMethod", select_method),
-    ("R_set_el_named", set_element_named),
+    ("R_set_el_named", safe!(native set_element_named)),
     ("R_set_slot", set_slot),
     ("R_standardGeneric", standard_generic),
     ("do_substitute_direct", substitute_direct),
     ("Rf_allocS4Object", alloc_s4_object),
-    ("R_set_method_dispatch", set_method_dispatch),
+    ("R_set_method_dispatch", safe!(native set_method_dispatch)),
     ("R_get_primname", primitive_name),
     ("new_object", new_object_routine),
 ];
@@ -140,7 +145,7 @@ pub unsafe fn dispatch_generic(name: Sexp, env: Sexp, generic: Sexp) -> R<Sexp> 
         force_deferred(generic_name().as_bytes(), Lookup::Generic)?;
     }
     let generic_env = generic.tag();
-    let mut method = match site_signature(generic, generic_env) {
+    let mut method = match valid_site(generic).map(|site| site.signature.clone()) {
         Some(signature) => {
             let values = signature_values(&signature, env, &generic_name)?;
             let classes = class_keys(&signature, &values)?;
@@ -175,6 +180,110 @@ pub unsafe fn dispatch_generic(name: Sexp, env: Sexp, generic: Sexp) -> R<Sexp> 
     }
 }
 
+/// A method [`select_in_slots`] found in the generic's site, with what
+/// [`eval::enter_method`] takes to run it on the generic's slots.
+pub(crate) struct Selected {
+    pub method: Sexp,
+    /// The dispatch variables the method's frame binds, `.Generic` last
+    /// ([`plain_method_vars`]).
+    pub vars: MethodVars,
+    /// [`S4Site::standard`].
+    pub standard: bool,
+}
+
+/// [`dispatch_generic`]'s selection for a call of `standardGeneric(name)` from the slot frame
+/// at `position` that has no environment: the classes of the signature arguments are read
+/// from the frame's slots, which hold what the generic's formals hold when it dispatches.
+/// `None` when the generic's frame has to have an environment ([`dispatch_generic`] then
+/// selects the method): the site holds no method for these classes, the method needs more
+/// than its dispatch variables ([`S4Entry::plain`]), a loader holds definitions back, or
+/// forcing an argument gave the frame its environment.
+pub(crate) unsafe fn select_in_slots(name: Sexp, position: usize) -> R<Option<Selected>> {
+    let state = interp();
+    if position + 1 != state.frames.len() || !state.globals.deferred_definitions.is_empty() {
+        return Ok(None);
+    }
+    let (generic, header, missing) = {
+        let frame = &state.frames[position];
+        (frame.function, frame.slots as usize, frame.missing)
+    };
+    let Some(mut site) = valid_site(generic) else {
+        return Ok(None);
+    };
+    // `standardGeneric` dispatches for the innermost generic on the stack that `name` names,
+    // which is this frame's function when its `generic` attribute is that name.
+    let attribute = values::get_attr(generic, symbols().generic);
+    if site.positions.is_empty()
+        || attribute.kind() != SexpType::String
+        || length(attribute) == 0
+        || !values::same_string(
+            values::string_elt(attribute, 0),
+            values::string_elt(name, 0),
+        )
+    {
+        return Ok(None);
+    }
+    activity::count(Counter::S4Dispatches);
+    let _selecting = activity::enter(Activity::S4Dispatch, 0);
+    // Every argument is forced before any class is read, as `dispatch_generic` does: forcing
+    // runs code that may define classes and methods.
+    let mut arguments: SmallVec<[Sexp; 2]> = SmallVec::new();
+    let mut index = 0;
+    while let Some(&place) = site.positions.get(index) {
+        let place = place as usize;
+        let mut value = *crate::bytecode::register_address(header + 1 + place);
+        if missing & (1 << place) != 0 {
+            value = missing_arg();
+        } else if value.kind() == SexpType::Promise {
+            let promise = value;
+            value = promise.car();
+            if value == unbound() {
+                value = match eval::settled_without_code(promise)? {
+                    Some(value) => value,
+                    None => {
+                        let symbol = site.signature[index];
+                        let forced = catching_errors(nil(), || eval::force_promise(promise))?;
+                        let value = forced.map_err(|message| {
+                            let generic_name = values::first_string(name).unwrap_or_default();
+                            argument_error(symbol, &generic_name, &message)
+                        })?;
+                        // The argument's code may have defined a method or left the frame
+                        // with an environment, so the site and the frame are read again.
+                        let state = interp();
+                        if position + 1 != state.frames.len() || state.frames[position].env != nil()
+                        {
+                            return Ok(None);
+                        }
+                        match valid_site(generic) {
+                            Some(again) if again.positions.len() > index => site = again,
+                            _ => return Ok(None),
+                        }
+                        value
+                    }
+                };
+            }
+        }
+        arguments.push(value);
+        index += 1;
+    }
+    let classes = class_keys(&site.signature, &arguments)?;
+    let Some(entry) = site
+        .entries
+        .iter()
+        .find(|entry| entry.classes.as_slice() == classes.as_slice())
+    else {
+        return Ok(None);
+    };
+    if !entry.plain || entry.cell.cdr() != entry.method {
+        return Ok(None);
+    }
+    Ok(Some(Selected {
+        method: entry.method,
+        vars: MethodVars::from_slice(&entry.vars),
+        standard: site.standard,
+    }))
+}
+
 /// The inline cache of S4 dispatch, one site per generic: the generic's signature and methods
 /// table as they were when the site was made, and up to [`S4_ENTRIES`] methods by the classes
 /// of the signature arguments.
@@ -202,7 +311,17 @@ struct S4Site {
     /// The `.SigArgs`, `.SigLength` and `.AllMTable` bindings in the generic's environment and
     /// the values they held.
     bindings: [(Sexp, Sexp); 3],
+    /// The generic's own `.Generic` binding and the value it held, when it has one.
+    name: Option<(Sexp, Sexp)>,
     signature: SmallVec<[Sexp; 2]>,
+    /// The place of each signature argument among the generic's formals, which is its slot in
+    /// the generic's slot frame ([`select_in_slots`]). Empty when one of them is `...`, no
+    /// formal, or past the formals a slot frame keeps a missing bit for, and dispatch then
+    /// reads the generic's environment.
+    positions: SmallVec<[u8; 2]>,
+    /// Whether the generic's body is the call `standardGeneric("name")` and nothing else, so
+    /// its frame's formals hold what the call bound when it dispatches.
+    standard: bool,
     entries: SmallVec<[S4Entry; S4_ENTRIES]>,
 }
 
@@ -211,7 +330,15 @@ struct S4Entry {
     classes: SmallVec<[Sexp; 2]>,
     cell: Sexp,
     method: Sexp,
+    /// Whether the method can run on the generic's arguments as they are: it is a closure
+    /// with the generic's formals, and loading it binds nothing but `vars`
+    /// ([`plain_method_vars`]).
+    plain: bool,
+    /// The dispatch variables a plain method's frame binds.
+    vars: MethodVars,
 }
+
+type MethodVars = SmallVec<[(Sexp, Sexp); 4]>;
 
 pub unsafe fn trace_s4_cache(cache: &S4Cache, marker: &mut Marker<'_>) {
     for (&generic, site) in &cache.sites {
@@ -229,7 +356,7 @@ pub(crate) unsafe fn trace_s4_site(cache: &S4Cache, generic: Sexp, marker: &mut 
 unsafe fn mark_s4_site(generic: Sexp, site: &S4Site, marker: &mut Marker<'_>) {
     marker.mark(generic);
     marker.mark(site.env);
-    for (cell, value) in site.bindings {
+    for (cell, value) in site.bindings.into_iter().chain(site.name) {
         marker.mark(cell);
         marker.mark(value);
     }
@@ -239,18 +366,22 @@ unsafe fn mark_s4_site(generic: Sexp, site: &S4Site, marker: &mut Marker<'_>) {
         }
         marker.mark(entry.cell);
         marker.mark(entry.method);
+        for &(_, value) in &entry.vars {
+            marker.mark(value);
+        }
     }
 }
 
-/// The signature arguments of `generic` from its site, when the site is still valid.
-unsafe fn site_signature(generic: Sexp, generic_env: Sexp) -> Option<SmallVec<[Sexp; 2]>> {
+/// The site of `generic`, when the bindings it was made from hold what they held.
+unsafe fn valid_site(generic: Sexp) -> Option<&'static S4Site> {
     let site = interp().method_cache.s4.sites.get(&generic)?;
-    (site.env == generic_env
+    (site.env == generic.tag()
         && site
             .bindings
             .iter()
+            .chain(&site.name)
             .all(|&(cell, value)| cell.cdr() == value))
-    .then(|| site.signature.clone())
+    .then_some(site)
 }
 
 unsafe fn cached_method(generic: Sexp, classes: &[Sexp]) -> Option<Sexp> {
@@ -376,6 +507,10 @@ unsafe fn remember_method(
         }
         *slot = (binding, binding.cdr());
     }
+    let name = heap
+        .frame_cell(generic_env, symbols.dot_generic)
+        .filter(|binding| !binding.has_gp(gp::ACTIVE_BINDING))
+        .map(|binding| (binding, binding.cdr()));
     // Classes that are not interned strings would never compare equal.
     if !classes.iter().all(|class| class.has_gp(gp::CACHED)) {
         return;
@@ -389,22 +524,52 @@ unsafe fn remember_method(
     let site = cache.sites.entry(generic).or_insert_with(|| S4Site {
         env: generic_env,
         bindings,
+        name,
         signature: SmallVec::new(),
+        positions: SmallVec::new(),
+        standard: false,
         entries: SmallVec::new(),
     });
     if site.env != generic_env
         || site.bindings != bindings
+        || site.name != name
         || site.signature.as_slice() != signature
     {
         site.env = generic_env;
         site.bindings = bindings;
+        site.name = name;
         site.signature = signature.into();
+        site.positions.clear();
+        let dots = symbols.dots;
+        for &symbol in signature {
+            let mut formal = generic.car();
+            let mut place = 0;
+            while formal.kind() == SexpType::Pairlist && formal.tag() != symbol {
+                formal = formal.cdr();
+                place += 1;
+            }
+            if formal.kind() != SexpType::Pairlist || symbol == dots || place >= 64 {
+                site.positions.clear();
+                break;
+            }
+            site.positions.push(place as u8);
+        }
+        let body = crate::bytecode::closure_body(generic);
+        site.standard = body.kind() == SexpType::Language
+            && body.car() == symbols.standard_generic
+            && body.cdr().kind() == SexpType::Pairlist
+            && body.cdr().cdr() == nil()
+            && body.cdr().tag() == nil()
+            && body.cdr().car().kind() == SexpType::String;
         site.entries.clear();
     }
+    let vars = name.and_then(|(_, name)| plain_method_vars(generic, method, name));
     let entry = S4Entry {
         classes: classes.into(),
         cell,
         method,
+        plain: vars.is_some(),
+        vars: vars.unwrap_or_default(),
     };
     if let Some(stale) = site
         .entries
@@ -415,6 +580,50 @@ unsafe fn remember_method(
     } else if site.entries.len() < S4_ENTRIES {
         site.entries.push(entry);
     }
+}
+
+/// The dispatch variables the frame of `method` binds when `generic`, whose `.Generic` is
+/// `generic_name`, runs it on its own arguments, or `None` when running it takes more than
+/// that: the method is no closure, it stands for a primitive's own code, its formals are not
+/// the generic's, or it is a method definition with attributes that only the methods
+/// package's `loadMethod` knows how to load ([`load_method`]).
+unsafe fn plain_method_vars(generic: Sexp, method: Sexp, generic_name: Sexp) -> Option<MethodVars> {
+    if method.kind() != SexpType::Closure || values::inherits(method, "internalDispatchMethod") {
+        return None;
+    }
+    let (mut formal, mut generic_formal) = (method.car(), generic.car());
+    while formal.kind() == SexpType::Pairlist && generic_formal.kind() == SexpType::Pairlist {
+        if formal.tag() != generic_formal.tag() {
+            return None;
+        }
+        formal = formal.cdr();
+        generic_formal = generic_formal.cdr();
+    }
+    if formal.kind() == SexpType::Pairlist || generic_formal.kind() == SexpType::Pairlist {
+        return None;
+    }
+    let symbols = symbols();
+    let mut vars = MethodVars::new();
+    if method.is_object() {
+        let mut attribute = method.attrib();
+        while attribute.kind() == SexpType::Pairlist {
+            let tag = attribute.tag();
+            if tag == symbols.target {
+                vars.push((symbols.dot_target, attribute.car()));
+            } else if tag == symbols.defined {
+                vars.push((symbols.dot_defined, attribute.car()));
+            } else if tag != symbols.generic && tag != symbols.class && tag != symbols.srcref {
+                return None;
+            }
+            attribute = attribute.cdr();
+        }
+        vars.push((symbols.dot_method, method));
+    }
+    if generic_name.kind() == SexpType::Promise {
+        return None;
+    }
+    vars.push((symbols.dot_generic, generic_name));
+    Some(vars)
 }
 
 /// `R_quick_dispatch`: the method already in the table of generic `generic` for the classes of
@@ -536,8 +745,10 @@ pub unsafe fn signature_arguments(args: &[Arg], generic: Sexp) -> R<Option<Sexp>
 
 /// `R_execMethod`: runs `method` in place of the generic whose frame is `generic_env`. The
 /// method's frame binds each formal to the generic's binding of it, so a missing argument stays
-/// missing and gets its default from the method's own formals, evaluated in the method's frame.
-/// The frame also gets the dispatch variables, and takes over the generic's call, caller and
+/// missing. Where the generic bound its own default and has not read it, both frames bind one
+/// promise of the method's default instead, evaluated in the method's frame; a formal the generic
+/// gives no default stays without a value whatever the method declares, as in GNU R. The
+/// frame also gets the dispatch variables, and takes over the generic's call, caller and
 /// arguments, which is what `sys.call()`, `parent.frame()` and `match.call()` see.
 pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
     let state = interp();
@@ -564,8 +775,14 @@ pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
         let missing = cell.has_gp(gp::BINDING_MISSING) || cell.cdr() == missing_arg();
         let absent = cell.has_gp(gp::BINDING_ABSENT) || cell.cdr() == missing_arg();
         let mut value = cell.cdr();
-        if missing && formal.car() != missing_arg() {
+        if cell.has_gp(gp::BINDING_MISSING)
+            && value != missing_arg()
+            && (value.kind() != SexpType::Promise || value.car() == unbound())
+        {
+            // GNU R hands the method the generic's own promise with the method's default in
+            // it, so the generic's body reads the method's default after the dispatch too.
             value = eval::make_promise(formal.car(), method_env)?;
+            heap.set_binding_value(cell, value)?;
         }
         eval::define(symbol, value, method_env)?;
         if missing && let Some(new_cell) = heap.frame_cell(method_env, symbol) {
@@ -794,29 +1011,44 @@ unsafe fn evaluate_argument(symbol: Sexp, env: Sexp, generic_name: &dyn Fn() -> 
             return Ok(value.car());
         }
     }
-    match try_eval(symbol, env)? {
+    match catching_errors(env, || eval::eval(symbol, env))? {
         Ok(value) => Ok(value),
-        Err(message) => {
-            let simple_error = values::call(
-                values::install("simpleError")?,
-                &[values::install("msg")?, values::install("call")?],
-            )?;
-            let handler_call = values::call(values::install("h")?, &[simple_error])?;
-            Err(error_in(
-                handler_call,
-                format!(
-                    "error in evaluating the argument '{}' in selecting a method for function '{}': {message}",
-                    symbol_name(symbol),
-                    generic_name()
-                ),
-            ))
-        }
+        Err(message) => Err(argument_error(symbol, &generic_name(), &message)),
     }
 }
 
-/// Evaluates `expression` in `env` under an exiting handler for errors: `Err` holds the
-/// message of the error it caught.
-unsafe fn try_eval(expression: Sexp, env: Sexp) -> R<Result<Sexp, String>> {
+/// The error dispatch raises when evaluating the signature argument `symbol` of the generic
+/// `generic_name` failed with `message`.
+unsafe fn argument_error(symbol: Sexp, generic_name: &str, message: &str) -> Unwind {
+    let handler_call = match handler_call() {
+        Ok(call) => call,
+        Err(unwind) => return unwind,
+    };
+    error_in(
+        handler_call,
+        format!(
+            "error in evaluating the argument '{}' in selecting a method for function '{generic_name}': {message}",
+            symbol_name(symbol),
+        ),
+    )
+}
+
+/// `h(simpleError(msg, call))`, the call of the handler GNU R evaluates a signature argument
+/// under.
+unsafe fn handler_call() -> R<Sexp> {
+    let simple_error = values::call(
+        values::install("simpleError")?,
+        &[values::install("msg")?, values::install("call")?],
+    )?;
+    values::call(values::install("h")?, &[simple_error])
+}
+
+/// Runs `evaluate` under an exiting handler for errors established from `env`: `Err` holds
+/// the message of the error it caught.
+unsafe fn catching_errors(
+    env: Sexp,
+    evaluate: impl FnOnce() -> R<Sexp>,
+) -> R<Result<Sexp, String>> {
     let state = interp();
     let saved = state.handlers.clone();
     let target = values::new_env(values::empty_env())?;
@@ -829,7 +1061,7 @@ unsafe fn try_eval(expression: Sexp, env: Sexp) -> R<Result<Sexp, String>> {
         target,
         next: saved.clone(),
     }));
-    let result = eval::eval(expression, env);
+    let result = evaluate();
     interp().handlers = saved;
     match result {
         Ok(value) => Ok(Ok(value)),
@@ -945,67 +1177,106 @@ unsafe fn set_primitive_methods_routine(call: &NativeCall<'_>) -> R<Sexp> {
     Ok(name)
 }
 
-unsafe fn clear_method_selection(_call: &NativeCall<'_>) -> R<Sexp> {
-    Ok(nil())
+fn clear_method_selection<'s>(
+    _context: &mut Cx<'s>,
+    _arguments: &NativeArgs<'_, 's>,
+) -> R<Local<'s>> {
+    Ok(handles::null())
 }
 
-unsafe fn dummy_extern_place(call: &NativeCall<'_>) -> R<Sexp> {
-    Err(call.error("calling the C routine used as an initializer for 'externalptr' objects"))
+fn dummy_extern_place<'s>(_context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    Err(arguments.error("calling the C routine used as an initializer for 'externalptr' objects"))
 }
 
-unsafe fn element_named(call: &NativeCall<'_>) -> R<Sexp> {
-    let name = element_name(call, call.arg(1))?;
-    Ok(values::list_get(call.arg(0), &name))
-}
-
-unsafe fn set_element_named(call: &NativeCall<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let name = element_name(call, call.arg(1))?;
-    let value = call.arg(2);
-    if object.kind() != SexpType::List {
-        return Err(call.error("R_set_el_named: the object must be a list"));
-    }
-    let names = values::names(object);
-    let count = length(object);
-    let position = (0..count).find(|&index| {
-        names.kind() == SexpType::String && names.element(index).bytes() == name.as_bytes()
-    });
-    let result = match position {
-        Some(index) => {
-            let result = values::shallow_duplicate(object)?;
-            values::set_elt(result, index, value);
-            result
-        }
-        None => {
-            let mut items = values::list_items(object);
-            items.push(value);
-            let result = values::list_vector(&items)?;
-            values::copy_most_attributes(object, result, false)?;
-            let mut new_names: Vec<String> = (0..count)
-                .map(|index| {
-                    if names.kind() == SexpType::String {
-                        values::char_str(names.element(index)).into_owned()
-                    } else {
-                        String::new()
-                    }
-                })
-                .collect();
-            new_names.push(name);
-            values::set_attr(result, symbols().names, values::string_vector(&new_names)?)?;
-            result
-        }
+fn element_named<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let name = element_name(context, arguments, arguments.value(1))?;
+    let list = arguments.value(0);
+    let names = handles::names_of(context, list)?;
+    let Some(names) = handles::dense::<Str>(context, names)? else {
+        return Ok(handles::null());
     };
-    Ok(result)
+    let Some(index) = names
+        .iter(context)
+        .position(|element| element.bytes() == name.as_bytes())
+    else {
+        return Ok(handles::null());
+    };
+    if let Some(elements) = handles::dense::<List>(context, list)?
+        && index < elements.len()
+    {
+        return Ok(context.root(elements.get(context, index)));
+    }
+    if let Some(expressions) = handles::dense::<Expression>(context, list)?
+        && index < expressions.len()
+    {
+        return Ok(context.root(expressions.get(context, index)));
+    }
+    Ok(handles::null())
 }
 
-unsafe fn element_name(call: &NativeCall<'_>, what: Sexp) -> R<String> {
-    if what.kind() == SexpType::String && length(what) == 1 {
-        return Ok(values::char_str(what.element(0)).into_owned());
+fn set_element_named<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    let name = element_name(context, arguments, arguments.value(1))?;
+    let value = arguments.value(2);
+    let Some(list) = handles::dense::<List>(context, object)? else {
+        return Err(arguments.error("R_set_el_named: the object must be a list"));
+    };
+    let names = handles::names_of(context, object)?;
+    let names = handles::dense::<Str>(context, names)?;
+    let count = list.len();
+    let position = names.and_then(|names| {
+        names
+            .iter(context)
+            .take(count)
+            .position(|element| element.bytes() == name.as_bytes())
+    });
+    if let Some(index) = position {
+        let mut result = handles::shallow_duplicate(context, list)?;
+        result.set(context, index, value);
+        return Ok(result.finish().value());
     }
-    if what.kind() == SexpType::Symbol {
-        return Ok(symbol_name(what).into_owned());
+    let mut result = context.alloc::<List>(count + 1)?;
+    for index in 0..count {
+        result.set(context, index, list.get(context, index));
     }
-    Err(call.error("invalid element name: expected a single string"))
+    result.set(context, count, value);
+    let mut result = result.owned();
+    handles::copy_most_attributes(context, object, &mut result, false)?;
+    let mut new_names = StringFill::new(context, count + 1)?;
+    for index in 0..count {
+        let text = match names {
+            Some(names) if index < names.len() => {
+                handles::text(names.get(context, index)).into_owned()
+            }
+            _ => String::new(),
+        };
+        new_names.push_text(context, &text)?;
+    }
+    new_names.push_text(context, &name)?;
+    let new_names = new_names.finish().finish().value();
+    handles::set_attribute(
+        context,
+        &mut result,
+        handles::symbol(|symbols| symbols.names),
+        new_names,
+    )?;
+    Ok(result.finish().value())
+}
+
+fn element_name<'s>(
+    context: &mut Cx<'s>,
+    arguments: &NativeArgs<'_, 's>,
+    what: Local<'s>,
+) -> R<String> {
+    if let Some(what) = handles::dense::<Str>(context, what)?
+        && what.len() == 1
+    {
+        return Ok(handles::text(what.get(context, 0)).into_owned());
+    }
+    if let Some(symbol) = what.downcast::<Symbol>() {
+        return Ok(handles::text(symbol.read(context).name()).into_owned());
+    }
+    Err(arguments.error("invalid element name: expected a single string"))
 }
 
 unsafe fn external_pointer_prototype(_call: &NativeCall<'_>) -> R<Sexp> {
@@ -1213,14 +1484,16 @@ unsafe fn has_slot_routine(call: &NativeCall<'_>) -> R<Sexp> {
     values::scalar_bool(has_slot(call.arg(0), call.arg(1))?)
 }
 
-unsafe fn identical_strings(call: &NativeCall<'_>) -> R<Sexp> {
-    let (left, right) = (call.arg(0), call.arg(1));
-    let same = left.kind() == SexpType::String
-        && right.kind() == SexpType::String
-        && length(left) == 1
-        && length(right) == 1
-        && left.element(0).bytes() == right.element(0).bytes();
-    values::scalar_bool(same)
+fn identical_strings<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let left = handles::dense::<Str>(context, arguments.value(0))?;
+    let right = handles::dense::<Str>(context, arguments.value(1))?;
+    let same = match (left, right) {
+        (Some(left), Some(right)) if left.len() == 1 && right.len() == 1 => {
+            left.get(context, 0).bytes() == right.get(context, 0).bytes()
+        }
+        _ => false,
+    };
+    handles::logical_constant(context, i32::from(same))
 }
 
 /// Turns S4 dispatch on, with `where` as the methods namespace.
@@ -1239,23 +1512,26 @@ unsafe fn init_method_dispatch(call: &NativeCall<'_>) -> R<Sexp> {
 
 /// `.__<prefix>__<name>`, with `:<package>` appended for a non-empty package: the name the
 /// methods package stores its metadata objects under.
-unsafe fn package_meta_name(call: &NativeCall<'_>) -> R<Sexp> {
+fn package_meta_name<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
     let mut parts = Vec::with_capacity(3);
     for (index, what) in ["prefix", "name", "package"].iter().enumerate() {
-        let value = call.arg(index);
-        if value.kind() != SexpType::String || length(value) != 1 {
-            return Err(call.error(format!(
-                "The internal argument \"{what}\" to methodsPackageMetaName must be a single string"
-            )));
-        }
-        parts.push(values::char_str(value.element(0)).into_owned());
+        let value = handles::dense::<Str>(context, arguments.value(index))?
+            .filter(|value| value.len() == 1)
+            .ok_or_else(|| {
+                arguments.error(format!(
+                    "The internal argument \"{what}\" to methodsPackageMetaName must be a single string"
+                ))
+            })?;
+        parts.push(handles::text(value.get(context, 0)).into_owned());
     }
     let mut result = format!(".__{}__{}", parts[0], parts[1]);
     if !parts[2].is_empty() {
         result.push(':');
         result.push_str(&parts[2]);
     }
-    values::scalar_string(&result)
+    let mut text = StringFill::new(context, 1)?;
+    text.push_text(context, &result)?;
+    Ok(text.finish().finish().value())
 }
 
 unsafe fn test_make_class(call: &NativeCall<'_>) -> R<Sexp> {
@@ -1448,12 +1724,12 @@ unsafe fn alloc_s4_object(_call: &NativeCall<'_>) -> R<Sexp> {
 
 /// Reports whether table dispatch is on, which it always is here: GNU R can switch back to its
 /// older `MethodsList` dispatch, but the tables are the only representation ry dispatches on.
-unsafe fn set_method_dispatch(call: &NativeCall<'_>) -> R<Sexp> {
+fn set_method_dispatch<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
     let previous = interp().globals.methods_dispatch;
-    if values::as_logical_scalar(call.arg(0)) == 1 {
+    if handles::logical_scalar(context, arguments.value(0)) == 1 {
         interp().globals.methods_dispatch = true;
     }
-    values::scalar_bool(previous)
+    handles::logical_constant(context, i32::from(previous))
 }
 
 unsafe fn primitive_name(call: &NativeCall<'_>) -> R<Sexp> {

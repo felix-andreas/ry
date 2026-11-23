@@ -282,6 +282,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Every closure call that can run on slots enters through the lean path (settled)
 - An element `<<-` stores into the enclosing binding cell (settled)
 - `tryCatch` pushes its chain of frames natively (settled)
+- An S4 method runs in place on a slot frame above its generic's (settled)
+- `object@name` is an instruction, and a slot write is checked without a call (settled)
 
 ## Builtins and base R
 
@@ -705,6 +707,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A package `ry load` loaded counts as a pkgload dev package
 - Typed benchmark templates do R-level work in boundary functions
 - ry test forks its workers
+- Analysis oracles compare two computations that must agree
 - `ry debug type FILE:LINE:COLUMN` prints the hover at a position
 
 ## Docs, process and positioning

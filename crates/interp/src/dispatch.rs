@@ -2650,6 +2650,20 @@ pub unsafe fn do_standard_generic(call: &Call<'_>) -> R<Sexp> {
             call.error("argument to 'standardGeneric' must be a non-empty character string")
         );
     }
+    // From a generic on its slots, a method its site holds runs on the generic's slots, and
+    // tier 0 enters it in place of this call wherever its loop can
+    // (`bytecode::standard_generic_in_place`).
+    if let Some(position) = call.slot_frame()
+        && let Some(selected) = crate::methods::select_in_slots(name, position)?
+        && let Some(entered) =
+            eval::enter_method(position, selected.method, &selected.vars, selected.standard)?
+    {
+        let slots = crate::bytecode::slot_count(entered.value);
+        let header = entered.header as usize;
+        let result =
+            eval::on_large_stack(|| crate::bytecode::run_slots(selected.method, header, slots));
+        return eval::leave(entered.depth as usize, result);
+    }
     let env = call.env()?;
     let generic = this_generic(name)?;
     if generic == nil() {

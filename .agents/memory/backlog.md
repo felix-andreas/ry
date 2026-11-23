@@ -442,12 +442,37 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch costs 2.3 to
   4.5 µs per call.
 - **Per-object frames in `new()`.** Every `new()` of a class with a validity method makes four
-  environments: `standardGeneric("initialize")` reifies the generic's slot frame
+  environments: `standardGeneric("initialize")` reifies the generic's slot frame, because the
+  default `initialize` method has no slot table, so `eval::enter_method` declines
   (`dispatch::do_standard_generic` takes `call.env()`, and `methods::exec_method` copies its
   binding cells into the method's environment), and the prologues of `new`, the default
   `initialize` and `validObject` pass `environment()`. Fix: read the signature arguments and the
   formals' bindings from the generic's slot frame without reifying it, and give the prologues
   frame access that does not reify (`decisions/builtins.md`, "`validObject` runs validity methods without its slot loop, and `new()` copies the prototype shallowly").
+- **An S4 generic call costs more than three plain closure calls** (`just bench-mechanisms --filter
+  "s4: "`: `id(item)` 3,183 instructions against 937 for a closure call). It makes two slot
+  frames and no environment (`decisions/interp.md`, "An S4 method runs in place on a slot frame
+  above its generic's"). What is left, in instructions per call: selecting the method about 540
+  (`select_in_slots` 211, `class_keys` 74, `settled_without_code` 74, `valid_site` 60,
+  `class_of` 56), `enter_method` about 680 (190 of it `Args::from_slice` and the frame's
+  argument list in `push_slot_frame`), `enter_in_place` 139, and `fast_return` about 231 for
+  each of the two frames. Levers: a method frame that shares the generic's argument list
+  instead of copying it, a site check that is one comparison (a version stamp on the generic's
+  tables instead of `valid_site`'s binding walk), and class keys read from the object's class
+  attribute without `class_of`.
+- **S4 operations that run the methods package's R code on each call**, in instructions: `callNextMethod()`
+  195,634 (the methods package's closure, which rebuilds the call and looks the next method up
+  each time), `new()` of a two-slot class 102,286, `validObject()` 60,917, `isVirtualClass()`
+  23,359, a replacement generic 8,564, a method with more arguments than its generic 5,906 (the
+  `.local` closure inside the method). `slot(x, name)` and `slot(x, name) <- v` are closures
+  around `.Call`. A generic called through `lapply` or `sapply` enters its method from Rust
+  (`do_standard_generic`, `run_slots`), which recurses into the interpreter loop for each
+  element.
+- **A slot write is checked in Rust only where the class cache answers** (`subset::slot_accepts`):
+  the slot's class is `ANY`, the value's first class, or one the value's cached class
+  definition lists in `contains`. A value whose class is defined in two packages, a class the
+  cache does not hold yet, and a declared class that knows the value's class only through its
+  own `subclasses` call `checkAtAssignment` (about 20,000 instructions).
 - `setDataPart()` (R code, about 28 µs per call), which the default `initialize` calls for every
   data part, so `new("MethodDefinition", f)` costs about 50 µs (GNU R about 340 µs).
   `.mergeAttrs` decides the attribute order, so a native version must reproduce it exactly.
@@ -1295,6 +1320,7 @@ overhead, not allocation.
   - `print(1:10, max = 0)` prints one element, GNU R none.
   - `D(expression(), "x")` returns `NA` (GNU R: an error); `forceAndCall("a", sum, 1, 2)` does not warn.
   - `structure(1:.Machine$integer.max, names = letters[1:8])` is killed for memory (GNU R: "cannot allocate").
+  - *DataFrame.* `%%` and `%/%` on an `Expr` with an infinite divisor: `5 %% Inf` gives `NaN` (GNU R: 5), `-5 %% Inf` `NaN` (GNU R: `Inf`) and `-5 %/% Inf` 0 (GNU R: -1). A named column whose name partially matches a verb's first formal is taken as that argument: `DataFrame.with_columns(y, d = Expr.col("a"))` fails with "expected a DataFrame or a LazyFrame, got an expression", and `GroupBy.agg(g, g = ...)` with "`agg` needs the result of `group_by`, got an expression".
   - *Parser.* `oracle::parser::known_difference` leaves the grammar ones out of `--kind parser`; an entry leaves both with its fix.
     - ry accepts what GNU R rejects: `1 < 2 < 3`; `=` assignment in an argument, a condition, an index or a default (`if (a = b) c`, `f(TRUE = 1)`); `::` after anything but a name or a string (`a::b::c`); a line break after an operand of an `if` branch inside parentheses or brackets (`(if (a) b`, line break, `+ c)`), which GNU R's lexer returns as a token there; `function(y, ) 1` (decide whether the trailing comma is ry syntax).
     - Raw strings: as an argument name (`c(r"(a)" = 1)` assigns `a` and returns an unnamed value; GNU R names the argument) and after `$` or `@` (`x$r"(a)"` is a syntax error; GNU R reads `x$a`). The parser takes only a plain string there.
@@ -1573,13 +1599,6 @@ to fresh), so all four batteries were green while every package in the pinned CR
 such a variable and a quarter of them crashed `ry check`. An oracle that only asks "is this answer
 well formed?" cannot see a wrong answer. These are the concrete follow-ups.
 
-### Assert invariants in the code, not only properties in the harness
-
-A `debug_assert` at a seam turns every input of every suite, fixtures included, into a test of that
-invariant, at no release cost (`testing.md`, "The editor features", lists the ones in place). The
-next candidate: every expression type an item records resolves in the table that produced it, which
-is the escaped inference variable seen from the other end.
-
 ### Gaps the editor relations left open
 
 - A member after `$` or `@` whose receiver has no known type is exempt from "completion offers what
@@ -1597,9 +1616,8 @@ is the escaped inference variable seen from the other end.
 
 ### Run the pinned CRAN corpus as a test, one project per package
 
-`scripts/corpus-manifest.txt` pins 69 packages, but `corpus/` is gitignored and nothing fetches it.
-The review in the next section found two arms silently contributing zero inputs for that reason.
-Twenty packages found five distinct crashes in ten minutes of wall clock. Two details decide whether
+`scripts/corpus-manifest.txt` pins 69 packages, but `corpus/` is gitignored and nothing fetches it,
+so `fuzz_corpus_seeded` in `syntax` and `format` mutates the in-tree programs instead. Twenty packages found five distinct crashes in ten minutes of wall clock. Two details decide whether
 the arm is worth running:
 
 - Each package must be its own project, with one `ry.toml` and its own `R/`. The defects live on the
@@ -1670,17 +1688,6 @@ coverage is unmeasured: the figures on record (`parser.rs` 87%, 60 diagnostic sh
     `crates/ide/src/ide.rs` covers a backticked name with an escape for a global, and the S4
     target and the own-package `pkg::name` branch have the same text test without it (not
     reproduced).
-- **Two arms silently contribute no inputs.** `corpus/` does not exist and nothing in CI or the
-  justfile fetches it, so `fuzz_corpus_seeded` in `syntax` and in `format` returns early. That is
-  about 1,050 budgeted inputs that never run, behind a skip line `cargo test` hides. It is the same
-  "green means nothing ran" species the `FIXTURE_FILTER` guard already fixed.
-- **Two surfaces have no fuzz coverage at all.** Generated `.Rtypes` text never reaches the stub
-  loader, which leaves `stubs.rs` at 60.67%. `PackageMetadata` appears in no harness.
-- **The review's fourth item here was wrong, and the correction is the useful part.** It reported
-  `syntax::literate::r_source_of_literate` as having no test of any kind. It has eight unit tests,
-  and three of them already assert the byte-length invariant, including one for multibyte prose. The
-  real gap was only that the invariant was pinned on four hand-written documents rather than over
-  generated input, which the `syntax` battery now closes.
 
 ## Open: what each hour of fuzzing compute buys
 
@@ -1694,25 +1701,14 @@ at 68.8 s, and `crates/ry`, which is the only thing CI runs, at 22.4 s.
 This review disagrees with the input-generation review above, and the disagreement is real. That one
 wants the generated arms shrunk across the board. This one measures per-arm cost and wants `syntax`
 and `format` grown, at 0.19 to 0.31 ms per input, while `ide` and `semantics` shrink, at 257 to
-644 ms per input. Both conclude independently that `format::fuzz_random_bytes` should be deleted.
+644 ms per input.
 
-### The live CI runs 171 of the workspace's tests
+### The blocking gate re-samples the same fixed window of each generator
 
-The live workflow tests only `crates/ry` (`default-members`). Its staged replacement in
-`.github/pending/workflows/ci.yml` runs `just gate`'s recipes over the whole workspace and no
-ignored suite, so a human moving it into place closes this (`decisions/tooling-bench-ci.md`, "CI runs `just gate` against GNU R 4.6.2, and nothing ignored").
-
-### This is not a fuzzer, it is a fixed 498-program corpus re-derived at 124 s a run
-
-Every generator seeds `SplitMix64` from compile-time constants with no entropy. Two runs of the
-semantics generator produce an identical set of 498 distinct programs, while drawing 100,000 times
-from the same generator reaches 87,203 distinct programs. The default budget samples 0.57% of its
-own generator's reach and re-samples exactly that 0.57% forever.
-
-Split the two jobs it conflates. Keep a small fixed-seed arm as the regression net it actually is.
-Give the exploratory arms a `FUZZ_SEED` environment variable defaulting to random, print the seed on
-every failure, and run them on a schedule rather than in the blocking gate. Do not randomize the
-blocking gate, because a failure surfacing on an unrelated change is a worse trade.
+The gate runs seeds `0..default`, about 0.57% of the semantics generator's reach (498 distinct
+programs per run against 87,203 in 100,000 draws). `FUZZ_SEED` and `FUZZ_ITERS` move the window,
+but nothing runs a fresh window on a schedule. Keep the gate fixed, because a failure surfacing on
+an unrelated change is a worse trade, and give a scheduled job a fresh base (`just fuzz-deep`).
 
 ### The syntax arm is the best asset in the test architecture and gets 0.5% of the budget
 
@@ -1744,65 +1740,17 @@ completion fix.
 
 Building the four release test binaries costs 143 s warm.
 
-The semantics figure has one root cause, measured directly. `install_shipped_stubs` is 0.4 ms,
-because it sets an input, but a fresh database plus stubs plus a render is 118.2 ms against 5.0 ms
-without stubs. That is 113.2 ms of stub re-parse per fresh database.
-`check_semantics_invariants` builds three fresh databases per input, at 394.8 ms, so 86% is stub
-re-parse, and 97.7% in release. A render on a warm shared database is 3.8 ms, which is thirty times
-cheaper. An earlier fix reduced the database count from four and the ratio barely moved, because it
-was never about database count alone.
-
-Run the fuzz targets in release from `just gate`, and make a shared database the default arm, with
-fresh ones only where determinism or incrementality genuinely needs them.
+The `fuzz` profile (`iterate` with debug assertions and overflow checks) runs `fuzz_sessions` about
+ten times as fast as debug. `just fuzz-deep` builds the analysis crates with it; `just gate` and
+`just battery` build in debug, and the runtime suites need `target/debug/ry`, so only the analysis
+crates can move.
 
 ### Coverage-guided fuzzing has no ratchet, so nothing it learns survives the run
 
-`fuzz/` does compile on stable today. `cargo check --all-targets` inside it takes 75 s cold with an
-isolated target directory and 1.6 s warm, so the compile-rot risk flagged earlier is real but has
-not happened.
-
-`scripts/seed-fuzz-corpus.rs` writes 1,416 files and 5.7 MB into each of three corpora in 2 s, but
-it globs `.Rtypes` under `crates/`, where there are none. All 11 `.Rtypes` files, and 33 `.exports`
-files, live in the top-level `types/`. It therefore seeds no stub files, none of the 1,967 mined
-`programs/*.R.corpus` programs, and it never looks at `corpus/`. Its own doc comment claims it
-adds the shipped stubs, and the testing page repeats that. Both are false.
-
-`fuzz/corpus`, `fuzz/artifacts` and `fuzz/Cargo.lock` are gitignored and no job persists them, so
-every run restarts from the same seeds and rediscovers the same shallow frontier. `REGRESSIONS`
-exists in `format` with 21 entries and in `semantics` with 2, and in neither `syntax` nor `ide`.
-Both constants were last modified about 60 commits ago, so the pinning path works, at 0.12 s for
-`format` and 0.94 s for `semantics`, and is simply not being fed.
-
-In value order: persist the corpus, fix the seeder to read `types/` and
-`crates/syntax/tests/programs/`, and add the 1.6 s `cargo check` of `fuzz/` to the gate.
-
-The gitignored `fuzz/Cargo.lock` is also a trap. A fresh resolution can pick a `salsa-macro-rules`
-that does not match the exactly pinned `salsa`, and `semantics` then fails to compile inside `fuzz/`
-with "missing hash in implementation" on every interned struct. Commit that lockfile, or seed it
-with `cargo update --precise` from the workspace lock.
-
-### The one failure mode fuzzing exists to catch is the one that prints no input
-
-`catch_unwind` appears once in `syntax`, once in `format`, twice in `semantics` and not at all in
-`ide`. In `syntax` and `format` the single wrapper is on the program-corpus arm only.
-
-Every `assert!` in `check_parse_invariants` and `check_format_invariants` embeds `{input:?}`, so an
-assertion failure replays fine. A genuine panic inside a generative arm prints a backtrace with no
-input, and a stack overflow aborts printing nothing. A stack overflow is a live risk the harness
-itself acknowledges, through `deep_nesting_is_refused_not_fatal`.
-
-This is recoverable today only because the seed is fixed, and that property disappears the moment
-`FUZZ_SEED` lands, so this has to land with it. The semantics fuzz harness's `run_single_file` is
-the correct pattern and is already in the tree.
-
-### Two arms are silently dead and one is 99% wasted
-
-`syntax::fuzz_corpus_seeded` costs 0.11 s and `format::fuzz_corpus_seeded` costs 0.16 s, which is
-process startup only. Both skip through an `eprintln!` the blocking job never displays.
-
-`format::fuzz_random_bytes` reaches the formatter body 14 times in 1500, which is 0.9%, against
-token soup's 90. So 1,396 of its 1,500 iterations only re-test a refusal path `syntax` already
-covers on the same generator. Drop it and give the budget to `fuzz_seed_mutations`.
+`fuzz/corpus` and `fuzz/artifacts` are gitignored and no job persists them, so every run restarts
+from the seeds `scripts/seed-fuzz-corpus.rs` writes and rediscovers the same shallow frontier.
+Persist the corpus, and add the 1.6 s warm `cargo check` of `fuzz/` to the gate (75 s cold), since
+nothing but `just fuzz-all` compiles it.
 
 ### Radical alternatives, costed
 
@@ -1812,21 +1760,17 @@ covers on the same generator. Drop it and give the budget to `fuzz_seed_mutation
   30 minutes a night on a free runner. Worth it only with persistence. Without it, that is 30
   minutes a night rediscovering the same frontier. A human has to add it, because it needs workflow
   scope.
-- **OSS-Fuzz.** The three targets are already thin wrappers over exported batteries, so it is a good
-  fit. Do it only after the replay path, meaning `catch_unwind` plus seed printing, and the pinning
-  path exist. Otherwise reports arrive with nowhere to go.
+- **OSS-Fuzz.** The targets are thin wrappers over exported batteries, and the replay and pinning
+  paths exist, so it is a good fit.
 - **`cargo-llvm-cov` over the batteries.** Not attempted. The saturation curves above answer the
   same question in about 7 s. Reach for llvm-cov when deciding which invariants to add, not how many
   iterations to run.
 
 ### Who lands what
 
-An agent can land all of these today: completion sampling, the release profile in `just gate`, the
-syntax budget raise, `catch_unwind` plus seed printing, `FUZZ_SEED`, the seeder fix, the `fuzz/`
-type-check guard, and the dead-arm cleanup.
-
-A human is required for three things: moving the staged workflows in `.github/pending/` into place,
-which needs workflow scope, any scheduled fuzz job and its corpus cache, and an OSS-Fuzz submission.
+An agent can land completion sampling, the release profile in `just gate`, the syntax budget raise
+and the `fuzz/` type-check guard. A human is required for a scheduled fuzz job with its corpus
+cache and for an OSS-Fuzz submission, which need workflow scope or an account.
 
 ## Open: robustness harnesses
 
@@ -2345,39 +2289,11 @@ sources.
 
 What follows is what the review left open.
 
-### The parser accepts escape sequences R rejects
-
-The lexer's string scanner skips any escaped character wholesale, with a comment calling escape
-validity a semantic concern. No semantic layer checks it, so every malformed escape is silently
-accepted. Verified with R as the referee: `"\u{1F600}"` has five hex digits and `\u` takes at most
-four, so R refuses it with `invalid \u{xxxx} sequence` while ry reports nothing.
-
-R's rules to implement are `\x` with 1 to 2 hex digits, `\u` with 1 to 4 hex digits either bare or
-braced, `\U` with 1 to 8 hex digits either bare or braced, `\0` through `\7` as octal with 1 to 3
-digits, the named escapes, and `unrecognized escape in character string` for anything else.
-
-The fixture case `syntax/tests/syntax::quoting__escape_soup` sits in
-`crates/syntax/tests/in-tree-acceptance-allowlist.txt` labelled as this gap. Implementing the check
-should remove that entry and re-bless the case.
-
 ### One surface has no oracle at all
 
 `PackageMetadata` is referenced by no fuzz arm, so the attach tolerance, `imports_every_name` and the
 whole NAMESPACE and DESCRIPTION layer are dark to fuzzing. Fixtures cannot reach them either. Only
 `crates/ry/tests/test_cli.rs` can.
-
-### Oracles that hold, each measured, none of which found a bug
-
-These are coverage the fuzzers lack. Each is worth adding on its own terms.
-
-| oracle | result | cost |
-|---|---|---|
-| **Middle edits** through incremental equivalence. The in-tree arm replaces whole text and the cargo-fuzz target truncates and appends, so neither covers a common prefix and suffix together. | 568 checked, none divergent | 9 s |
-| **Project-file-set churn.** No arm ever changes `ProjectFiles`, though hosts add and remove files constantly. | 120 removals, none divergent | 2 s |
-| **Parallel against sequential** on generated input. `ry check` really does fan out, and `test_parallel.rs` covers three hand-written programs. | 30 runs over 8 files, none divergent | 0.9 s |
-| **Two-wave superset.** A `parse_stage_diagnostics` finding that vanishes from `file_diagnostics` is an editor flicker, and this is asserted only for hand-written cases. | 3,159 sources, none lost | 25 s |
-| **Leading-comment metamorphic.** | 2,197 compared, none divergent | 36 s |
-| **Alpha-rename metamorphic.** 3 of 1,162 hits, all three the transform's own fault: an edit-distance suggestion, a stub-shadowing name, and string-form binders an IDENT-only rename missed. A capture-avoiding transform hit 0 of 994. | usable only with the filters | 20 s |
 
 ### One hypothesis killed
 

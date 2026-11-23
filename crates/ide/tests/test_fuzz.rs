@@ -6,8 +6,8 @@ use {
     ide::testing::{Project, check_refactor_invariants, for_each_session},
     semantics::{DocumentKind, testing::fixture_state},
     syntax::testing::{
-        SplitMix64, fixture_case_sources, for_each_seed, generate_project, mutate_seed,
-        program_corpus_sources, small_edit,
+        SplitMix64, fixture_case_sources, for_each_seed_on_named_threads, generate_project,
+        mutate_seed, program_corpus_sources, small_edit,
     },
 };
 
@@ -183,7 +183,7 @@ fn refactor_seeds_keep_code_valid() {
 
 #[test]
 fn refactor_seed_mutations_keep_code_valid() {
-    for_each_seed(40, |seed| {
+    for_each_seed_on_named_threads(40, |seed| {
         let mut rng = SplitMix64(0x0EF0_C7A1 ^ seed);
         check_refactor_invariants(&mutate_seed(&mut rng, REFACTOR_SEEDS, 8));
     });

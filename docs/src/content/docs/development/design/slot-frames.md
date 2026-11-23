@@ -217,7 +217,7 @@ compile-time probe (`Heap::probe`), the walk it emits (`codegen.rs`) and `jit_en
 | `parent.frame()`, `sys.function`, `sys.frame(s)`, `environment()`, `as.environment(-1)`, `eval`'s numeric `envir` | empty, then whatever the code that receives it reads | `frame_env`, `frame_sys_parent` |
 | Code that the compiler did not translate and that runs in the frame | partial, for the variables it reads | `Op::Ast` (`<<-` targets other than one element of a variable, `...` forms), `BoundEval`, the debugger and `browser()` |
 | S3 dispatch from a builtin on an object argument | empty | `bytecode::call_builtin` |
-| S4 dispatch reading the generic's frame | partial | `standardGeneric`, which reads the signature arguments from the generic's frame (`do_standard_generic`), `exec_method` and `callNextMethod` (`methods.rs`) |
+| S4 dispatch reading the generic's frame | partial | `standardGeneric` when the method cannot start on a slot frame of its own (see "S4 methods" below), `exec_method` and `callNextMethod` (`methods.rs`) |
 | Condition handlers and restarts that record a frame | empty | `.addCondHands`, `.addRestart` (`conditions.rs`) |
 | The C API | empty, then whatever the native code reads | `R_GetCurrentEnv`, `PRENV` on a promise over the frame, `.External` and `.External2` (which pass the environment) |
 | Subassignment or a replacement call whose target has a method for it, or whose setter is a closure that cannot run on slots, and `x$name` on an object | partial, for the variable assigned | `op_sub_assign`, `op_replace`, `op_complex_assign`, `op_field` in `bytecode.rs` |
@@ -378,7 +378,7 @@ register holding it); otherwise the slot gets a copy, so `y <- x; x[1] <- 0` lea
 |---|---|
 | Not an object, builtin setter | In the slot. A special such as `[<-`, `attr<-` or `@<-` runs through its direct entry (`BuiltinDef::direct`), which takes evaluated arguments. |
 | An object whose class has no method for the setter | In the slot. The method lookup starts from the frame's enclosure (`dispatch::has_internal_method` with `Caller::SlotFrame`), because a slot frame defines no functions a lookup could find first. |
-| An S4 object, `x@name <- v` | In the slot, with the validity check `do_at_assign` makes (`at_assign_values`). |
+| An S4 object, `x@name <- v` | In the slot (`at_assign_values`). The class cache answers the check of the value's class without a call when the slot's declared class is `ANY`, the value's own first class, or a class that the cached definition of the value's class lists in `contains` (`subset::slot_accepts`); any other value calls the methods package's `checkAtAssignment`, which raises the errors. |
 | A closure setter whose other arguments are constants, `f(x) <- v` or `f(x, "a") <- v` | The closure is called from the slot frame with forced promises for `*tmp*` and the value (`replace_with_closure`). Each promise counts a reference to what it holds while the closure's frame holds the promise, so the closure reads both as shared, and a frame that outlives the call keeps the caller from changing the target in place. The caller's frame gets an environment only if the closure asks for its caller's. |
 | An object with a method for the setter, a closure setter with computed arguments, a nested target such as `names(x)[2] <- v` | `eval::complex_assign` in the frame's environment, which moves the assigned variable into a cell. A level whose setter is a primitive, on an object without a method for it, is called with its evaluated values (`replace_through_primitive`); any other level builds its call, its argument list and a promise for `*tmp*` and for the value. |
 
@@ -598,6 +598,35 @@ Such a call has no site, so it has no plan, and it binds per call:
   frame has no environment and no pending one, no `on.exit` code, no pending annotation check
   and no frame above it, so the exit releases the frame's handles, slots and argument
   references and pops it. Any other frame, and every error, takes the general exit.
+
+### S4 methods
+
+`standardGeneric("name")` in a generic that runs on its slots starts the method in place
+(`bytecode::standard_generic_in_place`), so an S4 call makes two slot frames and no environment:
+
+- The generic's call site holds the methods it has selected, keyed by the classes of the
+  signature arguments. `methods::select_in_slots` reads those arguments from the generic's
+  slots, forcing each as the dispatch needs its class.
+- `eval::enter_method` pushes the method's slot frame above the generic's with the generic's
+  call, caller and arguments, as GNU R's `R_execMethod` runs a method. Each formal takes what
+  the generic's formal holds. A formal the call left out takes the method's default where the
+  generic has not read its own, and has no value where the generic declares none. The
+  generic's frame binds the method and its classes (`.Method`, `.target`, `.defined`) as the
+  method's does.
+- Tier 0 switches to the method's code as it does for a closure call (`enter_in_place`), so
+  the method's return resumes the generic after its `standardGeneric` call.
+
+So `sys.calls()` shows the call twice, `parent.frame()` in the method is the generic's caller,
+and `sys.function(sys.nframe() - 1)` is the generic. The builtin answers the call through the
+generic's environment instead when the site holds no method for these classes (the first call
+with them), the method is not a compiled closure with a slot table, a default fits no slot, a
+generic whose body does more than call `standardGeneric` left a default unread (its body then
+shares the method's default), a loader holds S4 definitions back, or something observes calls
+(the debugger, a recorder).
+`standardGeneric` called from Rust (`lapply(objects, generic)`, `do.call`) selects and binds the
+same way and runs the method through `run_slots`.
+
+`crates/oracle/cases/s4__method_frames.R` pins what a method sees of the two frames.
 
 ## Checking it
 

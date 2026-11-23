@@ -17,6 +17,7 @@ use {
             Arc,
             atomic::{AtomicBool, Ordering},
         },
+        thread,
     },
 };
 
@@ -189,7 +190,7 @@ pub fn in_parallel<T: Sync, R: Send>(
 ) -> Vec<Result<R, String>> {
     let workers = test_workers().min(items.len().max(1));
     let work = &work;
-    let mut results: Vec<(usize, Result<R, String>)> = std::thread::scope(|scope| {
+    let mut results: Vec<(usize, Result<R, String>)> = thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
             .map(|worker| {
                 scope.spawn(move || {
@@ -224,7 +225,7 @@ pub fn test_workers() -> usize {
     env_var("TEST_WORKERS")
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|count| *count > 0)
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |count| count.get()))
+        .unwrap_or_else(|| thread::available_parallelism().map_or(1, |count| count.get()))
 }
 
 /// The variable assignment that replays a run with the partition this run used.
@@ -545,9 +546,54 @@ impl Entropy for ByteStream<'_> {
 /// the case builds its generator with `SplitMix64(seed)` and must draw nothing else, so the
 /// replay reproduces the failure byte for byte.
 pub fn for_each_seed(default: usize, mut case: impl FnMut(u64)) {
+    run_seeds(default, |seed| {
+        panic::catch_unwind(AssertUnwindSafe(|| case(seed))).is_ok()
+    });
+}
+
+/// [`for_each_seed`] with each seed on its own thread, named after the test and the seed. A
+/// stack overflow aborts the process before any replay can print, and its one line of output
+/// names the overflowing thread, so the name carries the replay. The thread gets the default
+/// stack, as libtest's test thread does, so a case overflows where it would there.
+pub fn for_each_seed_on_named_threads(default: usize, mut case: impl FnMut(u64) + Send) {
+    run_seeds(default, |seed| on_seed_thread(seed, || case(seed)).is_ok());
+}
+
+/// Runs `case` on a thread named after the running test and `seed`, as
+/// [`for_each_seed_on_named_threads`] does, for a harness with its own seed loop. A panic comes
+/// back as the `Err` of [`thread::Result`].
+pub fn on_seed_thread<R: Send>(seed: u64, case: impl FnOnce() -> R + Send) -> thread::Result<R> {
+    let test = running_test_name();
+    thread::scope(|scope| {
+        match thread::Builder::new()
+            .name(format!("{test}{SEED_THREAD_MARKER}{seed}"))
+            .spawn_scoped(scope, case)
+        {
+            Ok(handle) => handle.join(),
+            Err(error) => panic!("could not start the thread for seed {seed}: {error}"),
+        }
+    })
+}
+
+/// The name of the running test, without the seed a seed thread's name adds.
+pub fn running_test_name() -> String {
+    let name = thread::current().name().unwrap_or("").to_owned();
+    match name.split_once(SEED_THREAD_MARKER) {
+        Some((test, _)) => test.to_owned(),
+        None => name,
+    }
+}
+
+/// What separates the test's name from the seed in a [`for_each_seed_on_named_threads`]
+/// thread name, which [`replay_command`] strips to recover the test.
+const SEED_THREAD_MARKER: &str = " FUZZ_SEED=";
+
+/// Runs `passes` on each seed of [`fuzz_seeds`], and fails with a replay command for each seed
+/// it returned `false` for, stopping at [`FAILURES_PER_RUN`].
+pub fn run_seeds(default: usize, mut passes: impl FnMut(u64) -> bool) {
     let mut failed: Vec<u64> = Vec::new();
     for seed in fuzz_seeds(default) {
-        if panic::catch_unwind(AssertUnwindSafe(|| case(seed))).is_err() {
+        if !passes(seed) {
             failed.push(seed);
             if failed.len() == FAILURES_PER_RUN {
                 break;
@@ -627,7 +673,7 @@ fn cargo_test_command() -> String {
     } else {
         "--lib".to_owned()
     };
-    let test = std::thread::current().name().unwrap_or("").to_owned();
+    let test = running_test_name();
     format!("cargo test -p {package} {target} {test} -- --exact")
 }
 

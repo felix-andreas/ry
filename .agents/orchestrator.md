@@ -51,7 +51,7 @@ No release unless the user asks (user). The weekly limit reset Mon Nov 23 10:00 
 - session_0111kWqCXYKiR937Au74eL55 (Opus high, kernels; replaced the archived session_0111kWqE86VPq98yVE2JgLVm, whose disk filled after #685, #689, #690): branch fix/dependency-suites, test-suite parity for the benchmark dependency set beyond the 27 pinned packages, and load-index cache eviction. Stays out of the JIT, calls, the builtin calling convention and semantics/ide. BLOCKED since Fri: its git commit/push was denied by the permission classifier ("Undermining Oversight"); waiting on the user.
 - session_0111kWqEyHh2WBFnP93ZvPEM (Fable, JIT): draft #691 (claude/generic-tier-calls): compile-time growth, mean.default, call-storm and merge() slowdown (test user requests 2, 3) fixed via an exit profile. Now trimming forced-mode overhead; then proposes a compiled-to-compiled call interface directly to the calls session.
 - session_0111kWqD8G8GVR8fbHetepcc (Fable, calls): step 4 S4 generic call, builtins, .Call; test user requests 4 (single-.Call closures keep slot frames) and 1 (small data.table calls).
-- session_0111kWqDs8aQ1MWFmKMxX9HQ (Fable, fuzz): IDE relational oracles PR via Opus subagents.
+- session_0111kWqDs8aQ1MWFmKMxX9HQ (Fable, fuzz): #649, #693 merged (analysis oracles with canaries). Now a frame fuzz kind plus fixes for the column-partial-match and Expr %% Inf bugs, then a planted-bug audit of the differential kinds.
 
 User-only items (never ask; note in the final report): a history rewrite dropping an old customer-project name, the Marketplace trusted-publishing policy, the Zed listing, a real Windows run, deleting remote branches `feat/runtime-stats` and `runtime-packages-round4`.
 

@@ -13,7 +13,9 @@ use {
         },
         bytecode,
         coerce::{CoercionWarnings, real_to_int},
-        conditions, deparse, dispatch, interp, moves, scope,
+        conditions, deparse, dispatch,
+        handles::{self, Cx, List, Local, StringFill, safe},
+        interp, moves, scope,
         unwind::{
             ArgumentReader, Jump, R, Rooted, Unwind, error, error_in, jump, missing_argument,
         },
@@ -2929,6 +2931,148 @@ pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<C
     }))
 }
 
+/// Starts the call of the S4 method `method` that the generic running on the slot frame at
+/// `position` dispatches to, as GNU R's `R_execMethod` runs a method: the method's frame is a
+/// new slot frame with the generic's call, caller and arguments, whose formals, the generic's
+/// by name and order, take what the generic's hold when it dispatches. A formal the call left
+/// out takes the method's default where the generic has a default it has not read, and stays
+/// without a value where the generic has none, whatever the method declares. The frame binds
+/// the dispatch variables `vars`, and the generic's frame all of them but the last, which is
+/// `.Generic`. The caller runs the body and calls [`leave`], as after [`enter`].
+///
+/// `None`, with nothing changed, when the method needs the general path: what makes
+/// [`bind_slots`] or [`enter`] take it, a default that fits no slot, a formal the generic
+/// gives a default and the method none, or, in a generic whose body is more than the call of
+/// `standardGeneric` (`standard` is false), a default the generic has not read, which its
+/// body shares with the method from here on ([`crate::methods::exec_method`]).
+pub unsafe fn enter_method(
+    position: usize,
+    method: Sexp,
+    vars: &[(Sexp, Sexp)],
+    standard: bool,
+) -> R<Option<Entered>> {
+    let state = interp();
+    let hooks = activity::hooks();
+    if hooks & (activity::CAPTURE | activity::DEBUGGER | activity::MOVES) != 0
+        || (hooks != 0 && !state.object_systems)
+        || method == state.namespace_loader
+        || method.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
+        || crate::annotations::is_typed(method)
+    {
+        return Ok(None);
+    }
+    let mut body = method.cdr();
+    if body.kind() != SexpType::Bytecode {
+        body = bytecode::compile_before_call(method)?;
+        if body.kind() != SexpType::Bytecode {
+            return Ok(None);
+        }
+    }
+    let constants = body.cdr();
+    let table = constants.element(bytecode::SLOTS);
+    if table == nil() {
+        return Ok(None);
+    }
+    let _activity = activity::enter(Activity::CallSetup, 0);
+    let names: &[Sexp] = table.element(1).slice();
+    let state = interp();
+    let frame = &state.frames[position];
+    let (call, sys_parent, caller) = (frame.call, frame.sys_parent, frame.caller);
+    let (source, source_missing) = (frame.slots as usize, frame.missing);
+    let generic_vars = frame.method_vars as usize;
+    if (sys_parent == nil() && caller == crate::NO_SLOTS) || position + 1 != state.frames.len() {
+        return Ok(None);
+    }
+    let header = state.bytecode.registers.len();
+    let register_count = values::ints(constants.element(bytecode::REGISTERS))[0] as usize;
+    bytecode::reserve_registers(header + 1 + names.len() + register_count)?;
+    let registers = bytecode::register_address(header);
+    let sources = bytecode::register_address(source);
+    let (mut missing, mut promised) = (0u64, 0u64);
+    let mut defaults = None;
+    let mut formal = method.car();
+    let mut index = 0;
+    while formal.kind() == SexpType::Pairlist {
+        let held = *sources.add(1 + index);
+        let left_out = index < 64 && source_missing & (1 << index) != 0;
+        let default = formal.car();
+        // A default the generic's body forced is the promise GNU R hands on. One it left alone
+        // gives way to the method's.
+        let read = left_out && held.kind() == SexpType::Promise && held.car() != unbound();
+        let fits = if names.get(index) != Some(&formal.tag()) {
+            Ok(false)
+        } else if !left_out || read {
+            Ok(true)
+        } else if default == missing_arg() || !standard {
+            Ok(false)
+        } else {
+            slot_default_fits(method, default, index, &mut defaults)
+        };
+        if !matches!(fits, Ok(true)) {
+            // The slots written so far give their counts back without `release_slots`, which
+            // would empty a promise the generic's frame holds too.
+            for written in 0..index {
+                (*registers.add(1 + written)).decrement_refcount();
+            }
+            bytecode::release_registers(header);
+            return fits.map(|_| None);
+        }
+        let value = if left_out && !read {
+            if !(default.kind().is_atomic() || default == nil()) {
+                promised |= 1 << index;
+            }
+            default
+        } else {
+            held
+        };
+        if left_out {
+            missing |= 1 << index;
+        }
+        value.increment_refcount();
+        *registers.add(1 + index) = value;
+        formal = formal.cdr();
+        index += 1;
+    }
+    let unbound = unbound();
+    for index in index..names.len() {
+        *registers.add(1 + index) = unbound;
+    }
+    // GNU R's `R_loadMethod` binds the method and its classes in the generic's frame, where a
+    // later dispatch from the same frame replaces them.
+    let (shared, _) = vars.split_at(vars.len().saturating_sub(1));
+    if state.method_vars.len() == generic_vars {
+        state.method_vars.extend_from_slice(shared);
+    } else {
+        for &(symbol, value) in shared {
+            let bound = state.method_vars.iter_mut().skip(generic_vars);
+            match bound.into_iter().find(|(name, _)| *name == symbol) {
+                Some(binding) => binding.1 = value,
+                None => state.method_vars.push((symbol, value)),
+            }
+        }
+    }
+    let generic_env = state.frames[position].pending;
+    if generic_env != nil() {
+        let names = shared.iter().map(|&(symbol, _)| symbol);
+        crate::heap().expect_dispatch_variables(generic_env, names);
+    }
+    // The frame's arguments are the generic's. Pushing a frame grows the list they are in.
+    let args = Args::from_slice(crate::frame_args(state, position));
+    push_slot_frame(
+        call,
+        method,
+        sys_parent,
+        caller,
+        &args,
+        vars,
+        header as u32,
+        missing,
+        promised,
+        true,
+    )
+    .map(Some)
+}
+
 /// The source [`direct_sources`] gives a `...` formal, whose arguments follow the formals'.
 pub const DOTS_SOURCE: i32 = -2;
 
@@ -3789,16 +3933,47 @@ pub unsafe fn enter(
             depth: 0,
         });
     }
-    if state.frames.len() as u32 >= state.max_depth {
-        release_window(header);
-        return Err(crate::unwind::expression_stack_overflow());
-    }
     // A `NULL` `sys_parent` comes from byte code running on a slot frame's slots, the caller.
     let caller = if sys_parent == nil() {
         state.slot_owner
     } else {
         crate::NO_SLOTS
     };
+    push_slot_frame(
+        call,
+        function,
+        sys_parent,
+        caller,
+        args,
+        method_vars,
+        header,
+        missing,
+        promised,
+        entering == Entering::Start,
+    )
+}
+
+/// The half of [`enter`] past its checks: the frame of the call, whose caller is the frame at
+/// `caller` when `sys_parent` is `NULL`, with the promises of the defaults `promised` names.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+unsafe fn push_slot_frame(
+    call: Sexp,
+    function: Sexp,
+    sys_parent: Sexp,
+    caller: u32,
+    args: &[Arg],
+    method_vars: &[(Sexp, Sexp)],
+    header: u32,
+    missing: u64,
+    promised: u64,
+    counted: bool,
+) -> R<Entered> {
+    let state = interp();
+    if state.frames.len() as u32 >= state.max_depth {
+        release_window(header);
+        return Err(crate::unwind::expression_stack_overflow());
+    }
     let (depth, sampled) = push_frame(
         call,
         function,
@@ -3809,7 +3984,7 @@ pub unsafe fn enter(
         header,
         missing,
         caller,
-        entering == Entering::Start,
+        counted,
     );
     let defaults = sampled.and_then(|()| match promised {
         0 => Ok(()),
@@ -5257,7 +5432,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     special("<-", 2, do_assign).invisible(),
     special("=", 2, do_assign).invisible(),
     special("<<-", 2, do_assign).invisible(),
-    special("quote", 1, do_quote),
+    special("quote", 1, safe!(do_quote)),
     special("&&", 2, do_and2),
     special("||", 2, do_or2),
     special("switch", -1, do_switch).keep_visibility(),
@@ -5265,14 +5440,14 @@ pub const BUILTINS: &[BuiltinDef] = &[
     special("on.exit", -1, do_on_exit).invisible(),
     special(".Internal", 1, do_internal).keep_visibility(),
     special("substitute", -1, do_substitute),
-    builtin("invisible", -1, do_invisible).invisible(),
+    builtin("invisible", -1, safe!(do_invisible)).invisible(),
     builtin("nargs", 0, do_nargs),
     special("forceAndCall", -1, do_force_and_call).keep_visibility(),
     special("Tailcall", -1, do_tailcall).keep_visibility(),
     special("Exec", -1, do_exec).keep_visibility(),
     special("declare", -1, |_| Ok(nil())).invisible(),
     internal("eval", 3, do_eval).keep_visibility(),
-    internal("withVisible", 1, do_with_visible),
+    internal("withVisible", 1, safe!(do_with_visible)),
     internal_special("Recall", -1, do_recall).keep_visibility(),
     builtin(".Primitive", 1, do_primitive),
     internal("identity", 1, |call| Ok(call.arg(0))),
@@ -5300,7 +5475,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("address", 1, |call| unsafe {
         values::scalar_string(&format!("{:p}", call.arg(0).as_ptr()))
     }),
-    internal("builtins", 1, do_builtins),
+    internal("builtins", 1, safe!(do_builtins)),
 ];
 
 unsafe fn do_call(call: &Call<'_>) -> R<Sexp> {
@@ -5392,8 +5567,8 @@ unsafe fn do_all_names(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-unsafe fn do_builtins(call: &Call<'_>) -> R<Sexp> {
-    let internal_too = values::as_logical_scalar(call.arg(0)) == 1;
+fn do_builtins<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let internal_too = handles::logical_scalar(context, arguments.value(0)) == 1;
     let mut names: Vec<&str> = interp()
         .builtins
         .iter()
@@ -5404,7 +5579,11 @@ unsafe fn do_builtins(call: &Call<'_>) -> R<Sexp> {
         .collect();
     names.sort_unstable();
     names.dedup();
-    values::string_vector(&names)
+    let mut result = StringFill::new(context, names.len())?;
+    for name in names {
+        result.push_text(context, name)?;
+    }
+    Ok(result.finish().finish().value())
 }
 
 unsafe fn do_begin(call: &Call<'_>) -> R<Sexp> {
@@ -5866,9 +6045,9 @@ pub unsafe fn make_closure(formals: Sexp, body: Sexp, srcref: Sexp, env: Sexp) -
     Ok(closure)
 }
 
-unsafe fn do_quote(call: &Call<'_>) -> R<Sexp> {
-    call.check_arity(1)?;
-    Ok(call.arg(0))
+fn do_quote<'s>(_context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    arguments.check_arity(1)?;
+    Ok(arguments.value(0))
 }
 
 unsafe fn do_and2(call: &Call<'_>) -> R<Sexp> {
@@ -6167,8 +6346,8 @@ unsafe fn do_internal(call: &Call<'_>) -> R<Sexp> {
     call_builtin(definition, inner, function, &args, call.env()?)
 }
 
-unsafe fn do_invisible(call: &Call<'_>) -> R<Sexp> {
-    Ok(call.arg(0))
+fn do_invisible<'s>(_context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    Ok(arguments.value(0))
 }
 
 unsafe fn do_nargs(call: &Call<'_>) -> R<Sexp> {
@@ -6727,11 +6906,23 @@ unsafe fn invalid_envir(env: Sexp) -> Unwind {
     ))
 }
 
-unsafe fn do_with_visible(call: &Call<'_>) -> R<Sexp> {
-    let value = call.arg(0);
-    let visible = interp().visible;
-    let flag = values::scalar_bool(visible)?;
-    values::named_list(&[("value", value), ("visible", flag)])
+fn do_with_visible<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let flag = handles::logical_constant(context, i32::from(interp().visible))?;
+    let mut list = context.alloc::<List>(2)?;
+    list.set(context, 0, arguments.value(0));
+    list.set(context, 1, flag);
+    let mut names = StringFill::new(context, 2)?;
+    names.push_text(context, "value")?;
+    names.push_text(context, "visible")?;
+    let names = names.finish().finish().value();
+    let mut list = list.owned();
+    handles::set_attribute(
+        context,
+        &mut list,
+        handles::symbol(|symbols| symbols.names),
+        names,
+    )?;
+    Ok(list.finish().value())
 }
 
 /// `Recall(...)`: calls the function that called `Recall` again, with that call's call and its

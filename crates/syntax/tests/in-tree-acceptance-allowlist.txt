@@ -8,10 +8,3 @@
 # is allowed. R parses it. The case was mined from tree-sitter's own error
 # corpus, which is what its name records.
 syntax/tests/tsr::expressions-errors__unsupported_subset2_with_over_multiple_lines_177_ts_error
-
-# KNOWN GAP in this parser, not a tree-sitter defect. `"\u{1F600}"` has five hex
-# digits and `\u` takes at most four, so R rejects it ("invalid \u{xxxx}
-# sequence") and we accept it. The lexer skips any escaped character wholesale
-# and calls escape validity a semantic concern, but no semantic layer checks it,
-# so every malformed escape is silently accepted.
-syntax/tests/syntax::quoting__escape_soup

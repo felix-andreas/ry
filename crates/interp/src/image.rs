@@ -52,7 +52,7 @@ pub unsafe fn host_environment() -> Option<Sexp> {
 /// The start-up image's format stamp. Its last byte goes up whenever what an image holds or
 /// how it lays it out changes, so that an image from an older format reads as stale and is
 /// written again rather than misread.
-pub const MAGIC: &[u8; 8] = b"RYSTART\x08";
+pub const MAGIC: &[u8; 8] = b"RYSTART\x09";
 
 /// Whether the file at `path` is a start-up image the runtime build `identity` loads: one of this
 /// format that the same build wrote. A missing or unreadable file is not.
@@ -605,6 +605,8 @@ unsafe fn save_state(roots: &mut Vec<Sexp>) -> Vec<u8> {
     out.u32(root(globals.host_environment));
     out.u32(root(globals.methods_namespace));
     out.u32(root(globals.methods_templates));
+    out.u32(root(globals.check_at_assignment));
+    out.u32(root(globals.answered_slot_check));
     out.u8(u8::from(globals.methods_dispatch));
     out.u8(u8::from(globals.allow_primitive_methods));
 
@@ -673,6 +675,8 @@ unsafe fn restore_state(
     globals.host_environment = root(&mut input)?;
     globals.methods_namespace = root(&mut input)?;
     globals.methods_templates = root(&mut input)?;
+    globals.check_at_assignment = root(&mut input)?;
+    globals.answered_slot_check = root(&mut input)?;
     globals.methods_dispatch = input.u8()? != 0;
     globals.allow_primitive_methods = input.u8()? != 0;
 
