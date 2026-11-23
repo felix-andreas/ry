@@ -1545,3 +1545,102 @@ totals <- flags |> DataFrame.group_by("g") |> GroupBy.agg(lo = Expr.col("ok") |>
 #++++
 flags: DataFrame{g: character[], ok: logical[]}
 totals: DataFrame{g: character[], lo: integer[], first: logical[]}
+
+#==== dataframe_functions
+#---- text_functions_give_logical_or_text_columns
+people <- DataFrame(city = c("Oslo", NA), code = factor(c("a", "b")), n = c(1L, NA))
+texts <- people |> DataFrame.select(
+  has = Expr.str_contains(Expr.col("city"), "s"),
+  starts = Expr.col("code") |> Expr.str_starts_with("a"),
+  swapped = Expr.str_replace_all(Expr.col("city"), "o", "0"),
+  part = Expr.str_slice(Expr.col("city"), 1L, 2L),
+  upper = Expr.str_to_uppercase(Expr.col("code")),
+  Expr.concat_str(Expr.col("city"), Expr.col("n"), separator = "-"),
+  parsed = Expr.str_to_date(Expr.col("city"), "%d.%m.%Y")
+)
+#++++
+people: DataFrame{city: character[], code: factor, n: integer[]}
+texts: DataFrame{has: logical[], starts: logical[], swapped: character[], part: character[], upper: character[], city: character[], parsed: Date}
+
+#---- date_functions_give_parts_shifted_dates_and_text
+events <- DataFrame(day = as.Date(c("2024-01-31", NA)), at = as.POSIXct("2024-01-01 09:00:00", tz = "UTC") + c(0, 60))
+parts <- events |> DataFrame.select(
+  Expr.dt_year(Expr.col("day")),
+  month = Expr.dt_month(Expr.col("at")),
+  later = Expr.dt_offset_by(Expr.col("day"), "1mo"),
+  shown = Expr.dt_to_string(Expr.col("at"), "%H:%M")
+)
+#++++
+events: DataFrame{day: Date, at: POSIXct}
+parts: DataFrame{day: integer[], month: integer[], later: Date, shown: character[]}
+
+#---- missing_values_casts_and_running_values
+values <- DataFrame(x = c(1.5, NA), n = c(1L, NA), code = factor(c("a", NA)))
+filled <- values |> DataFrame.with_columns(
+  Expr.fill_null(Expr.col("n"), 0L),
+  either = Expr.coalesce(Expr.col("n"), Expr.col("x")),
+  kept = Expr.coalesce(Expr.col("code"), NA),
+  label = Expr.fill_null(Expr.col("code"), "none"),
+  text = Expr.cast(Expr.col("n"), "character"),
+  level = Expr.cast(Expr.col("x"), "factor"),
+  previous = Expr.shift(Expr.col("x"), -1L),
+  running = Expr.cum_sum(Expr.col("n")),
+  total = Expr.cum_sum(Expr.col("x"))
+)
+cities <- values |> DataFrame.group_by("code") |> GroupBy.agg(distinct = Expr.n_unique(Expr.col("x")))
+#++++
+values: DataFrame{x: double[], n: integer[], code: factor}
+filled: DataFrame{x: double[], n: integer[], code: factor, either: double[], kept: factor, label: character[], text: character[], level: factor, previous: double[], running: integer[], total: double[]}
+cities: DataFrame{code: factor, distinct: integer[]}
+
+#---- drop_rename_and_row_index_name_their_columns
+sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L), price = c(1.5, 2))
+dropped <- sales |> DataFrame.drop("units", "price")
+renamed <- sales |> DataFrame.rename(area = "region", count = "units")
+numbered <- sales |> DataFrame.with_row_index("row")
+plan <- DataFrame.lazy(sales) |> LazyFrame.with_row_index() |> LazyFrame.drop(c("units", "price"))
+#++++
+sales: DataFrame{region: character[], units: integer[], price: double[]}
+dropped: DataFrame{region: character[]}
+renamed: DataFrame{area: character[], count: integer[], price: double[]}
+numbered: DataFrame{row: integer[], region: character[], units: integer[], price: double[]}
+plan: LazyFrame{index: integer[], region: character[]}
+
+#---- unpivot_stacks_columns_into_variable_and_value
+sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L), price = c(1.5, 2))
+long <- sales |> DataFrame.unpivot(on = c("units", "price"), index = "region")
+named <- sales |> DataFrame.unpivot(index = "region", variable_name = "measure", value_name = "amount")
+values_only <- sales |> DataFrame.unpivot(on = "units")
+everything <- sales |> DataFrame.select("units", "price") |> DataFrame.unpivot()
+#++++
+sales: DataFrame{region: character[], units: integer[], price: double[]}
+long: DataFrame{region: character[], variable: factor, value: double[]}
+named: DataFrame{region: character[], measure: factor, amount: double[]}
+values_only: DataFrame{variable: factor, value: integer[]}
+everything: DataFrame{variable: factor, value: double[]}
+
+#---- function_operands_and_names_are_checked
+sales <- DataFrame(region = c("eu", "us"), units = c(1L, 2L), day = as.Date(c("2024-01-01", "2024-02-01")))
+texts <- sales |> DataFrame.select(Expr.str_contains(Expr.col("units"), "1"))
+years <- sales |> DataFrame.select(Expr.dt_year(Expr.col("region")))
+dates <- sales |> DataFrame.select(Expr.str_to_uppercase(Expr.col("day")))
+sums <- sales |> DataFrame.select(Expr.cum_sum(Expr.col("region")))
+dropped <- sales |> DataFrame.drop("unit")
+renamed <- sales |> DataFrame.rename(area = "regoin")
+long <- sales |> DataFrame.unpivot(on = "unit", index = "region")
+#++++
+sales: DataFrame{region: character[], units: integer[], day: Date}
+texts: Unknown
+years: Unknown
+dates: Unknown
+sums: Unknown
+dropped: Unknown
+renamed: Unknown
+long: Unknown
+161..178 error[type-mismatch] `Expr.str_contains` needs text, but the column `units` is `integer[]`
+234..252 error[type-mismatch] `Expr.dt_year` needs a `Date` or `POSIXct`, but the column `region` is `character[]`
+312..327 error[type-mismatch] `Expr.str_to_uppercase` needs text, but the column `day` is `Date`
+377..395 error[type-mismatch] `Expr.cum_sum` needs numbers, but the column `region` is `character[]`
+433..439 error[type-mismatch] the frame `sales` has no column `unit`. Did you mean `units`?
+485..493 error[type-mismatch] the frame `sales` has no column `regoin`. Did you mean `region`?
+535..541 error[type-mismatch] the frame `sales` has no column `unit`. Did you mean `units`?

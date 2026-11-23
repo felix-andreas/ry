@@ -3771,6 +3771,8 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 ExpressionNeeds::Numbers => "needs numbers",
                 ExpressionNeeds::LogicalOrNumbers => "needs logical values or numbers",
                 ExpressionNeeds::Logical => "needs a `logical` test",
+                ExpressionNeeds::Text => "needs text",
+                ExpressionNeeds::Temporal => "needs a `Date` or `POSIXct`",
             };
             let subject = match column {
                 Some(column) => format!("the column `{column}`"),

@@ -13,7 +13,7 @@ column is reported before the query runs ([Types](#types)). Code you already wro
 keeps working on data.table itself ([Existing data.table code](#existing-datatable-code)).
 
 You query it with Polars' verbs (`select`, `with_columns`, `filter`, `group_by` and `agg`, `sort`,
-`join`, `join_asof`, `concat`, `unique` and `head`) and column expressions written as `Expr.col("x")`. DataFrames need ry's own runtime,
+`join`, `join_asof`, `concat`, `unique`, `drop`, `rename`, `unpivot` and `head`) and column expressions written as `Expr.col("x")`. DataFrames need ry's own runtime,
 so run scripts that use them with `ry run script.R`:
 
 ```r
@@ -130,7 +130,8 @@ points to `Expr.is_in`.
 `NaN`, but a column never raises R's "probable complete loss of accuracy in modulus" warning.
 
 Aggregations reduce a column to one value: `Expr.sum`, `Expr.mean`, `Expr.median`, `Expr.min`,
-`Expr.max`, `Expr.first`, `Expr.last`, `Expr.std`, `Expr.var` and `Expr.count`. `Expr.len()`
+`Expr.max`, `Expr.first`, `Expr.last`, `Expr.std`, `Expr.var`, `Expr.count` and `Expr.n_unique`,
+which counts the distinct values with `NA` as one value, as `length(unique(x))` does. `Expr.len()`
 counts rows, `Expr.cor(a, b)` correlates two columns, `Expr.is_null` tests for missing values, and
 `Expr.if_else(test, yes, no)` picks per row.
 
@@ -175,6 +176,100 @@ expression in parentheses first.
 (col("price") * 2.0).alias("double")
 ```
 
+### Text
+
+The text functions take a character or factor column and give `NA` for a missing value:
+
+| Function | Gives |
+| --- | --- |
+| `Expr.str_contains(expr, pattern, literal = FALSE)` | whether the text matches `pattern` |
+| `Expr.str_starts_with(expr, prefix)`, `Expr.str_ends_with(expr, suffix)` | whether the text starts or ends with the string |
+| `Expr.str_replace(expr, pattern, replacement, literal = FALSE)` | the text with the first match replaced; `Expr.str_replace_all` replaces every match |
+| `Expr.str_slice(expr, start, length = NULL)` | `length` characters from position `start`, counting from 1, or from the end when `start` is negative |
+| `Expr.str_to_uppercase(expr)`, `Expr.str_to_lowercase(expr)` | the text in upper or lower case |
+| `Expr.str_to_date(expr, format = "%Y-%m-%d")` | a `Date`, or `NA` for text that does not match `format` |
+| `Expr.concat_str(..., separator = "")` | the values joined into one string per row |
+
+A pattern is a regular expression in the syntax of Rust's `regex` crate, which Polars uses: it has
+no look-around or back-references, and a replacement refers to a group as `$1` rather than R's
+`\\1`. `literal = TRUE` matches the pattern as plain text. The pattern, prefix, suffix and
+replacement may also be expressions, which give one per row. `Expr.concat_str` turns numbers into
+text as `as.character` does, and gives `NA` for a row where any value is missing, where `paste`
+would write `"NA"`:
+
+```r
+customers <- DataFrame(name = c("Ana Silva", "bo lind", NA), code = c("SE-114", "NO-20", "SE-9"))
+customers |> DataFrame.select(
+  country = Expr.str_slice(Expr.col("code"), 1L, 2L),
+  sweden = Expr.str_starts_with(Expr.col("code"), "SE"),
+  first = Expr.str_replace(Expr.col("name"), "^(\\w+) .*", "$1"),
+  shout = Expr.str_to_uppercase(Expr.col("name")),
+  label = Expr.concat_str(Expr.col("code"), Expr.col("name"), separator = ": ")
+)
+```
+
+```text ry run runtime=ry exact continue
+   country sweden  first     shout             label
+    <char> <lgcl> <char>    <char>            <char>
+1:      SE   TRUE    Ana ANA SILVA SE-114: Ana Silva
+2:      NO  FALSE     bo   BO LIND    NO-20: bo lind
+3:      SE   TRUE   <NA>      <NA>              <NA>
+```
+
+### Missing values and types
+
+`Expr.fill_null(expr, value)` replaces each missing value with `value`, a plain value or an
+expression, and `Expr.coalesce(...)` takes each row's first value that is not missing. Both give
+the common type of their values, so filling an integer column with `0.5` gives a double column and
+filling a factor with a string gives a character column; a bare `NA` does not count.
+
+`Expr.cast(expr, type)` converts a column to `"logical"`, `"integer"`, `"double"`, `"character"`,
+`"factor"` or `"Date"`, as R's `as.logical`, `as.integer` and the others do: a double prints with
+15 significant digits, text that is not a number becomes `NA`, and `"T"` or `"false"` become
+logical values. A conversion R has no meaning for, such as a logical to a date, is an error.
+
+```r
+readings <- DataFrame(sensor = c("a", "b", "c"), value = c(1.5, NA, NA), backup = c(NA, 2, NA))
+readings |> DataFrame.with_columns(
+  filled = Expr.fill_null(Expr.col("value"), 0),
+  best = Expr.coalesce(Expr.col("value"), Expr.col("backup"), -1),
+  label = Expr.cast(Expr.col("value"), "character")
+)
+```
+
+```text ry run runtime=ry exact continue
+   sensor value backup filled  best  label
+   <char> <num>  <num>  <num> <num> <char>
+1:      a   1.5     NA    1.5   1.5    1.5
+2:      b    NA      2    0.0   2.0   <NA>
+3:      c    NA     NA    0.0  -1.0   <NA>
+```
+
+### Running values
+
+`Expr.shift(expr, n = 1L)` gives the value `n` rows earlier, or later for a negative `n`, with `NA`
+where there is none. `Expr.cum_sum(expr)` gives the running total of a numeric column; a missing
+value stays `NA` and the total skips it, as in Polars, where R's `cumsum` would make every later
+value `NA`. Both read the rows in their current order, so sort first, and wrap them in `Expr.over`
+to restart in each group:
+
+```r
+sales |> DataFrame.with_columns(
+  previous = Expr.shift(Expr.col("units")),
+  running = Expr.cum_sum(Expr.col("units"))
+)
+```
+
+```text ry run runtime=ry exact continue
+   region units price previous running
+   <char> <int> <num>    <int>   <int>
+1:     eu     3   1.5       NA       3
+2:     us     5   2.0        3       8
+3:     eu     2   3.0        5      10
+4:   asia     7   0.5        2      17
+5:     us     1   4.0        7      18
+```
+
 ## Verbs
 
 | Verb | What it does |
@@ -189,6 +284,10 @@ expression in parentheses first.
 | `DataFrame.join_asof(df, other, on, by = NULL)` | joins each row to the nearest row of `other` |
 | `DataFrame.concat(..., how = "vertical")` | stacks DataFrames |
 | `DataFrame.unique(df, subset = NULL, keep = "first")` | keeps one row of each set of equal rows |
+| `DataFrame.drop(df, ...)` | removes the columns named |
+| `DataFrame.rename(df, new = "old", ...)` | renames columns, keeping their place |
+| `DataFrame.with_row_index(df, name = "index", offset = 1L)` | puts the row numbers first |
+| `DataFrame.unpivot(df, on = NULL, index = NULL)` | stacks columns into rows |
 
 A string names a column wherever a verb takes an expression, so `DataFrame.select(df, "region")`
 is short for `DataFrame.select(df, Expr.col("region"))`. `select` and `with_columns` also take a
@@ -383,6 +482,31 @@ DataFrame.key(sales)
 NULL
 ```
 
+### Dropping, renaming and numbering columns
+
+`DataFrame.drop(df, ...)` removes the columns its strings name and keeps the rest in order.
+`DataFrame.rename(df, new = "old", ...)` gives each named column a new name in place, the new name
+first as in `dplyr::rename`. `DataFrame.with_row_index(df, name = "index", offset = 1L)` puts a
+column of row numbers first, counting from 1 as R does, where Polars counts from 0. Each one stops
+with an error on a column the frame does not have, and the checker reports it first:
+
+```r
+sales |>
+  DataFrame.drop("price") |>
+  DataFrame.rename(area = "region") |>
+  DataFrame.with_row_index("row")
+```
+
+```text ry run runtime=ry exact continue
+     row   area units
+   <int> <char> <int>
+1:     1     eu     3
+2:     2     us     5
+3:     3     eu     2
+4:     4   asia     7
+5:     5     us     1
+```
+
 ### Stacking and distinct rows
 
 `DataFrame.concat(...)` takes DataFrames, or one list of them. With the default
@@ -478,6 +602,25 @@ sales |> DataFrame.pivot(on = "region", index = "units", values = "price")
 5:     7   0.5    NA    NA
 ```
 
+`DataFrame.unpivot(df, on = NULL, index = NULL, variable_name = "variable", value_name = "value")`
+goes the other way, like data.table's `melt`: the `index` columns repeat for each column of `on`,
+the `variable` column names that column as a factor, and the `value` column holds its values. `on`
+left out is every column not in `index`. The value column takes the widest type of the `on`
+columns, and a warning says when numbers or logical values became text:
+
+```r
+sales |> DataFrame.head(2L) |> DataFrame.unpivot(on = c("units", "price"), index = "region")
+```
+
+```text ry run runtime=ry exact continue
+   region variable value
+   <char>   <fctr> <num>
+1:     eu    units   3.0
+2:     us    units   5.0
+3:     eu    price   1.5
+4:     us    price   2.0
+```
+
 ### Dates
 
 A column of R `Date` values stays a date column. Adding or subtracting a number of days gives a
@@ -501,6 +644,29 @@ shipped |> DataFrame.filter(Expr.col("due") >= as.Date("2024-02-15"))
       id     placed        due
    <int>     <Date>     <Date>
 1:     2 2024-02-03 2024-02-17
+```
+
+The date functions take a `Date` or `POSIXct` column. `Expr.dt_year`, `Expr.dt_month` and
+`Expr.dt_day` give integer parts. `Expr.dt_offset_by(expr, by)` moves by a calendar duration such
+as `"1mo"`, `"-2y"` or `"3d12h"`, in Polars' units (`ns`, `us`, `ms`, `s`, `m`, `h`, `d`, `w`,
+`mo`, `q`, `y`), and keeps a month's end within the month, so January 31 plus a month is
+February 29 in a leap year. `Expr.dt_to_string(expr, format)` formats with `strftime` codes, and
+`Expr.str_to_date` parses text back ([Text](#text)):
+
+```r
+orders <- DataFrame(id = [1L, 2L], placed = as.Date(c("2024-01-31", "2024-02-03")))
+orders |> DataFrame.with_columns(
+  month = Expr.dt_month(Expr.col("placed")),
+  renewal = Expr.dt_offset_by(Expr.col("placed"), "1mo"),
+  shown = Expr.dt_to_string(Expr.col("placed"), "%d.%m.%Y")
+)
+```
+
+```text ry run runtime=ry exact continue
+      id     placed month    renewal      shown
+   <int>     <Date> <int>     <Date>     <char>
+1:     1 2024-01-31     1 2024-02-29 31.01.2024
+2:     2 2024-02-03     2 2024-03-03 03.02.2024
 ```
 
 ## Lazy queries

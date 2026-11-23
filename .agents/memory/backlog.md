@@ -1660,11 +1660,11 @@ belongs in `scripts/` instead of being rewritten for each crash.
 `--kind frame` (`crates/oracle/src/fuzz.rs`, model `crates/oracle/src/frame_model.R`) checks DataFrame verb chains against a base-R model of `reference/dataframes.mdx`. What it leaves out:
 
 - **Not generated:** `read_csv`, `write_csv`, `read_parquet`, `write_parquet`, `scan_csv`, `scan_parquet`, `LazyFrame.explain`, `Expr.count`; Date and factor columns; `^` with an exponent other than 2, `2L` or `3L` (R's `^` and C's `pow` differ at `(-Inf)^0.5`, `(-0)^-1`, `NA^0`); pivot `agg` other than min, max, first and last; an alias nested inside another expression (ry names `Expr.is_null(x |> Expr.alias("p"))` after `x`); `agg` reading a group key column; `cor`, `var` and `std` over an infinite value (R gives NaN, ry NA or Inf).
-- **Relations not built:** `unique` is idempotent (DataFrame has no unique verb) and a `serialize` round trip (ry's `unserialize` of a DataFrame does not give a DataFrame).
+- **Relations not built:** `DataFrame.unique` is idempotent and a `serialize` round trip (ry's `unserialize` of a DataFrame does not give a DataFrame).
 - **Contract silent**, so a model choice: aggregates over NA or NaN; `if_else` with an NA test and its output name; NA group and join keys; row order after `join` and `join_asof`; whether `join_asof` needs sorted input, and its ties under `nearest`; pivot with duplicate cells and no `agg`, `agg = "count"`, an empty cell under sum (ry 0) and mean (ry NaN); `with_columns` items reading one another; duplicate output names; the sign of a zero; float sum precision; `%%` and `%/%` of an aggregate, a window or a column that may hold a sum (summation order changes the last bit, which the remainder magnifies); the types of `median`, `min` and `max`; `set_key`'s NA order; the names of an unnamed `Expr.lit` and `Expr.len`; an aggregate broadcast outside `agg`.
 - **Expressions of different lengths need a rule.** `Expr.col("a") %% Expr.head(Expr.col("a"), 2L)` silently keeps 2 rows, eager and lazy, where `-` on the same operands raises Polars' "lengths don't match". Decide (an error, or R's recycling with its warning) and make every operator follow it.
 - **The default pass is a smoke test.** `test_differential` runs 8 frame seeds; a planted `head` default of 4 first failed at seed 82. Depth comes from `just fuzz-long` and the Fuzz workflow, which run `--kind all`, frame included.
-- **Table features the generator does not emit:** `na_rm = FALSE` and `Expr.count` (the model has both, unchecked against GNU R), an NA key matching an NA key in every join kind and in as-of `by` keys, date-time keys in different zones, `DataFrame.unique`, `DataFrame.concat`, `Expr.is_in`, the base generics `rbind`/`cbind`/`unique`/`duplicated`, and R vectors as column or filter-mask elements of `select`/`with_columns`/`filter`. The model and the generator gain them, and the "NA keys" exclusion is lifted.
+- **Table features the generator does not emit:** `na_rm = FALSE` and `Expr.count` (the model has both, unchecked against GNU R), an NA key matching an NA key in every join kind and in as-of `by` keys, date-time keys in different zones, `DataFrame.unique`, `DataFrame.concat`, `Expr.is_in`, the base generics `rbind`/`cbind`/`unique`/`duplicated`, R vectors as column or filter-mask elements of `select`/`with_columns`/`filter`, the `str_` and `dt_` functions, `concat_str`, `fill_null`, `coalesce`, `cast`, `shift`, `cum_sum`, `n_unique`, and the verbs `drop`, `rename`, `with_row_index` and `unpivot`. The model and the generator gain them, and the "NA keys" exclusion is lifted.
 - **A planted-bug audit of the GNU R differential kinds.** Plant small realistic bugs in builtins and the evaluator, check that each `oracle fuzz` kind catches the class it claims, and add a canary per comparison. The frame kind caught all three of its plants within 24 seeds.
 
 ## Open: what the fuzzers actually feed the code
@@ -2609,10 +2609,9 @@ The end-to-end guard rests on the corpus suites.
   median) and a per-query arena are the alternatives. Fresh huge pages also make a query's
   time depend on the kernel's compaction: the 1e8 joins took 8.1 s in one run and 11.1 s in
   another on the same build.
-- **API gaps against Polars:** no string or date namespaces (`str.contains`, `dt.year`, so
-  `lubridate::floor_date` runs on R vectors in the `trials` module), no `cast`, `n_unique`,
-  `top_k` (`Expr.head` after a sort covers the per-group case), `unique`, `rename`, `drop`,
-  `unpivot`, or `when/then/otherwise` chains beyond `Expr.if_else`. None of the db-benchmark questions needs them. `LazyFrame.scan_*`
+- **API gaps against Polars:** no date truncation (`dt.truncate`, so `lubridate::floor_date`
+  runs on R vectors in the `trials` module), no `top_k` (`Expr.head` after a sort covers the
+  per-group case), and no `when/then/otherwise` chains beyond `Expr.if_else`. None of the db-benchmark questions needs them. `LazyFrame.scan_*`
   has no parquet predicate statistics use beyond what Polars' reader does.
 - **IDE:** rename of a column (across `Expr.col("x")` strings and `$x`) and goto-definition from a
   column string to the verb or constructor argument that created it are not implemented; hover and

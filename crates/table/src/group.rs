@@ -1103,8 +1103,8 @@ impl Aggregation {
             Aggregate::First => Function::First,
             Aggregate::Last => Function::Last,
             Aggregate::Length => Function::Count,
-            // Counting the values that are not missing is left to Polars' `count`.
-            Aggregate::Count => return None,
+            // Counting the values that are not missing, or the distinct ones, is left to Polars.
+            Aggregate::Count | Aggregate::NUnique => return None,
             Aggregate::Median => Function::Median,
             Aggregate::Sd => Function::Sd,
             Aggregate::Var => Function::Var,

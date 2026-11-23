@@ -201,6 +201,16 @@ sales |> DataFrame.sort("region", "units", descending = c(FALSE, TRUE))
 | `rbindlist(list(a, b), fill = TRUE)` | `DataFrame.concat(a, b, how = "diagonal")` |
 | `unique(dt, by = "g")` | `DataFrame.unique(df, "g")` |
 | `dt[g %in% values]` | `DataFrame.filter(df, Expr.is_in(Expr.col("g"), values))` |
+| `melt(dt, id.vars = "g", measure.vars = c("a", "b"))` | `DataFrame.unpivot(df, on = c("a", "b"), index = "g")` |
+| `setnames(dt, "old", "new")` | `DataFrame.rename(df, new = "old")` |
+| `dt[, c("a", "b") := NULL]` | `DataFrame.drop(df, "a", "b")` |
+| `dt[, row := .I]` | `DataFrame.with_row_index(df, "row")` |
+| `dt[, .(n = uniqueN(x)), by = g]` | `DataFrame.group_by(df, "g") \|> GroupBy.agg(n = Expr.n_unique(Expr.col("x")))` |
+| `dt[, prev := shift(x)]` | `DataFrame.with_columns(df, prev = Expr.shift(Expr.col("x")))` |
+| `dt[, total := cumsum(x)]` | `DataFrame.with_columns(df, total = Expr.cum_sum(Expr.col("x")))`, which skips `NA` |
+| `dt[, x := fcoalesce(x, y, 0)]` | `DataFrame.with_columns(df, x = Expr.coalesce(Expr.col("x"), Expr.col("y"), 0))` |
+| `dt[grepl("^a", name)]` | `DataFrame.filter(df, Expr.str_contains(Expr.col("name"), "^a"))` |
+| `dt[, m := month(day)]` | `DataFrame.with_columns(df, m = Expr.dt_month(Expr.col("day")))` |
 
 [Working with DataFrames](/reference/dataframes/#windows-and-ranks) shows each with its output.
 

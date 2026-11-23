@@ -50,6 +50,10 @@ DataFrame.lazy : fn(df: DataFrame) -> LazyFrame
 DataFrame.concat : fn(...: DataFrame | list[DataFrame] | logical[] | integer[] | double[] | character[] | factor | Date | POSIXct, [how]: character) -> DataFrame
 DataFrame.unique : fn(df: DataFrame, [subset]: character[] | NULL, [keep]: character) -> DataFrame
 DataFrame.pivot : fn(df: DataFrame, on: character, index: character, values: character, [agg]: character | NULL) -> DataFrame
+DataFrame.unpivot : fn(df: DataFrame, [on]: character[] | NULL, [index]: character[] | NULL, [variable_name]: character, [value_name]: character) -> DataFrame
+DataFrame.drop : fn(DataFrame, ...: character[]) -> DataFrame
+DataFrame.rename : fn(DataFrame, ...: character) -> DataFrame
+DataFrame.with_row_index : fn(df: DataFrame, [name]: character, [offset]: integer | double) -> DataFrame
 GroupBy.agg : fn(GroupBy, ...: Expr) -> DataFrame
 LazyFrame.scan_csv : fn(path: character) -> LazyFrame
 LazyFrame.scan_parquet : fn(path: character) -> LazyFrame
@@ -66,6 +70,10 @@ LazyFrame.collect : fn(lf: LazyFrame) -> DataFrame
 LazyFrame.unique : fn(lf: LazyFrame, [subset]: character[] | NULL, [keep]: character) -> LazyFrame
 LazyFrame.explain : fn(lf: LazyFrame) -> character
 LazyFrame.pivot : fn(lf: LazyFrame, on: character, index: character, values: character, [agg]: character | NULL) -> DataFrame
+LazyFrame.unpivot : fn(lf: LazyFrame, [on]: character[] | NULL, [index]: character[] | NULL, [variable_name]: character, [value_name]: character) -> LazyFrame
+LazyFrame.drop : fn(LazyFrame, ...: character[]) -> LazyFrame
+LazyFrame.rename : fn(LazyFrame, ...: character) -> LazyFrame
+LazyFrame.with_row_index : fn(lf: LazyFrame, [name]: character, [offset]: integer | double) -> LazyFrame
 LazyGroupBy.agg : fn(LazyGroupBy, ...: Expr) -> LazyFrame
 
 # Arithmetic, comparison and logic on an expression build a bigger expression, and a plain value
@@ -94,3 +102,30 @@ Expr.cor : fn(first: Expr, second: Expr) -> Expr
 Expr.over : fn(Expr, ...: character) -> Expr
 Expr.rank : fn(expr: Expr, [descending]: logical) -> Expr
 Expr.is_in : fn(expr: Expr, values: Expr | logical[] | integer[] | double[] | character[] | factor | Date | POSIXct) -> Expr
+Expr.n_unique : fn(expr: Expr) -> Expr
+
+# Text functions take a character or factor column; the pattern of `str_contains` and
+# `str_replace` is a regular expression unless `literal` is `TRUE`.
+Expr.str_contains : fn(expr: Expr, pattern: Expr | character, [literal]: logical) -> Expr
+Expr.str_starts_with : fn(expr: Expr, prefix: Expr | character) -> Expr
+Expr.str_ends_with : fn(expr: Expr, suffix: Expr | character) -> Expr
+Expr.str_replace : fn(expr: Expr, pattern: Expr | character, replacement: Expr | character, [literal]: logical) -> Expr
+Expr.str_replace_all : fn(expr: Expr, pattern: Expr | character, replacement: Expr | character, [literal]: logical) -> Expr
+Expr.str_slice : fn(expr: Expr, start: integer | double, [length]: integer | double | NULL) -> Expr
+Expr.str_to_uppercase : fn(expr: Expr) -> Expr
+Expr.str_to_lowercase : fn(expr: Expr) -> Expr
+Expr.str_to_date : fn(expr: Expr, [format]: character) -> Expr
+Expr.concat_str : fn(...: Expr | logical | integer | double | character | factor | Date | POSIXct, [separator]: character) -> Expr
+
+# Date functions take a Date or POSIXct column.
+Expr.dt_year : fn(expr: Expr) -> Expr
+Expr.dt_month : fn(expr: Expr) -> Expr
+Expr.dt_day : fn(expr: Expr) -> Expr
+Expr.dt_offset_by : fn(expr: Expr, by: character) -> Expr
+Expr.dt_to_string : fn(expr: Expr, format: character) -> Expr
+
+Expr.fill_null : fn(expr: Expr, value: Expr | logical | integer | double | character | factor | Date | POSIXct) -> Expr
+Expr.coalesce : fn(...: Expr | logical | integer | double | character | factor | Date | POSIXct) -> Expr
+Expr.cast : fn(expr: Expr, type: character) -> Expr
+Expr.shift : fn(expr: Expr, [n]: integer | double) -> Expr
+Expr.cum_sum : fn(expr: Expr) -> Expr

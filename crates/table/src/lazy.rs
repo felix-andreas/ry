@@ -553,6 +553,7 @@ fn contains_aggregate(expr: &Expr) -> bool {
         // The values of `is_in` are a set over every row unless they are given ones.
         Expr::Call(function, args) => match (function, args.as_slice()) {
             (Function::IsIn, [x, values]) => contains_aggregate(x) || !is_constant(values),
+            (function, _) if function.reads_order() => true,
             _ => args.iter().any(contains_aggregate),
         },
         Expr::Unary(_, arg) => contains_aggregate(arg),
@@ -582,6 +583,7 @@ fn reads_order(expr: &Expr) -> bool {
             (Function::IsIn, [x, values]) => {
                 reads_order(x) || (!is_constant(values) && reads_order(values))
             }
+            (function, _) if function.reads_order() => true,
             _ => args.iter().any(reads_order),
         },
         Expr::Binary(_, left, right) | Expr::Correlation(left, right) => {
@@ -1252,14 +1254,24 @@ impl fmt::Display for Expr {
             Expr::Datetime { micros, .. } => write!(formatter, "datetime({micros})"),
             Expr::Values(values) => write!(formatter, "lit(<{} values>)", values.0.len()),
             Expr::Call(function, args) => {
-                let mut args = args.iter();
-                match args.next() {
-                    Some(first) => write!(formatter, "{}.{}(", Receiver(first), function.name())?,
-                    None => write!(formatter, "{}(", function.name())?,
-                }
-                for (index, arg) in args.enumerate() {
-                    let separator = if index == 0 { "" } else { ", " };
+                let rest = match args.split_first() {
+                    Some((first, rest)) if !function.is_free() => {
+                        write!(formatter, "{}.{}(", Receiver(first), function.name())?;
+                        rest
+                    }
+                    _ => {
+                        write!(formatter, "{}(", function.name())?;
+                        args.as_slice()
+                    }
+                };
+                let mut separator = "";
+                for arg in rest {
                     write!(formatter, "{separator}{arg}")?;
+                    separator = ", ";
+                }
+                for option in options(function) {
+                    write!(formatter, "{separator}{option}")?;
+                    separator = ", ";
                 }
                 formatter.write_str(")")
             }
@@ -1306,6 +1318,7 @@ impl fmt::Display for Expr {
                     Aggregate::Var => "var",
                     Aggregate::Length => "len",
                     Aggregate::Count => "count",
+                    Aggregate::NUnique => "n_unique",
                 };
                 write!(formatter, "{}.{name}()", Receiver(arg))
             }
@@ -1332,6 +1345,27 @@ impl fmt::Display for Expr {
                 formatter.write_str(")")
             }
         }
+    }
+}
+
+/// The options of a function as R arguments, in the order the `Expr` API takes them.
+fn options(function: &Function) -> Vec<String> {
+    let flag = |value: bool| if value { "TRUE" } else { "FALSE" };
+    match function {
+        Function::Contains { literal } | Function::Replace { literal, .. } if *literal => {
+            vec![format!("literal = {}", flag(*literal))]
+        }
+        Function::Slice { start, length } => {
+            let mut options = vec![format!("{start}L")];
+            options.extend(length.map(|length| format!("{length}L")));
+            options
+        }
+        Function::ConcatStr { separator } => vec![format!("separator = {separator:?}")],
+        Function::OffsetBy { by } => vec![format!("{by:?}")],
+        Function::Format { format } | Function::ToDate { format } => vec![format!("{format:?}")],
+        Function::Cast(kind) => vec![format!("{:?}", kind.cast_name())],
+        Function::Shift(rows) | Function::RowIndex(rows) => vec![format!("{rows}L")],
+        _ => Vec::new(),
     }
 }
 
