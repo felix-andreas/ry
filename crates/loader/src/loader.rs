@@ -30,7 +30,8 @@ use {
     serde::{Deserialize, Serialize},
     std::{
         collections::BTreeSet,
-        fmt, fs, io,
+        fmt, fs,
+        io::{self, Read},
         panic::AssertUnwindSafe,
         path::{Path, PathBuf},
         sync::Arc,
@@ -2434,17 +2435,21 @@ fn parse_detached(db: &RootDatabase, files: Vec<SourceFile>) {
     }
 }
 
-/// Where a package's load index is cached, and the key of the sources it must match.
+/// Where a package's load index is cached, the key of the sources it must match, and the
+/// package root the entry records, which lets a later write drop the entries of removed roots.
 struct IndexCache {
     path: PathBuf,
     key: u128,
+    root: PathBuf,
 }
 
 /// The cache entry for `inputs`, which must hold the text of every file. The cache lives in
 /// the user's cache directory, one file per package root, and its key covers everything the
-/// load index is derived from: the sources, the strict setting, and the build of ry.
+/// load index is derived from: the sources, the strict setting, and the build of ry. A root
+/// that the entry cannot record (not UTF-8, off Unix) is not cached.
 fn index_cache(root: &Path, inputs: &PackageInputs) -> Option<IndexCache> {
     let directory = cache_directory()?;
+    root_bytes(root)?;
     let mut hasher = Xxh3::new();
     let mut field = |bytes: &[u8]| {
         hasher.update(&(bytes.len() as u64).to_le_bytes());
@@ -2463,6 +2468,7 @@ fn index_cache(root: &Path, inputs: &PackageInputs) -> Option<IndexCache> {
     Some(IndexCache {
         path: directory.join("ry").join("load-index").join(name),
         key,
+        root: root.to_owned(),
     })
 }
 
@@ -2481,12 +2487,16 @@ pub(crate) fn cache_directory() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".cache")))
 }
 
-/// The cached load index, when there is one for exactly the cache's key. An entry that is
-/// missing, stale or unreadable means deriving the index again.
+/// The cached load index, when there is one for exactly the cache's key and root. An entry
+/// that is missing, stale or unreadable means deriving the index again.
 fn read_index_cache(cache: &IndexCache) -> Option<CachedIndex> {
     let bytes = fs::read(&cache.path).ok()?;
-    let (key, body) = bytes.split_at_checked(16)?;
+    let (key, rest) = bytes.split_at_checked(16)?;
     if u128::from_le_bytes(key.try_into().ok()?) != cache.key {
+        return None;
+    }
+    let (root, body) = split_entry_root(rest)?;
+    if Some(root) != root_bytes(&cache.root) {
         return None;
     }
     let ((index, r_texts), _): ((PackageIndex, FxHashMap<String, String>), usize) =
@@ -2497,17 +2507,24 @@ fn read_index_cache(cache: &IndexCache) -> Option<CachedIndex> {
     })
 }
 
-/// Saves `index` under the cache's key. The entry is written beside its final path and
-/// renamed into place, so a process reading it never sees half of it.
+/// Saves `index` under the cache's key and root, then drops the entries of package roots that
+/// no longer exist, which temporary checkouts would otherwise pile up without bound. The entry
+/// is written beside its final path and renamed into place, so a process reading it never sees
+/// half of it. Only a cache miss writes, so a hit never pays for the sweep.
 fn write_index_cache(
     cache: &IndexCache,
     index: &PackageIndex,
     r_texts: &FxHashMap<String, String>,
 ) -> io::Result<()> {
+    let root = root_bytes(&cache.root)
+        .ok_or_else(|| io::Error::other("the package root cannot be recorded"))?;
+    let root_length = u32::try_from(root.len()).map_err(io::Error::other)?;
     let body = bincode::serde::encode_to_vec((index, r_texts), bincode::config::standard())
         .map_err(io::Error::other)?;
-    let mut bytes = Vec::with_capacity(16 + body.len());
+    let mut bytes = Vec::with_capacity(20 + root.len() + body.len());
     bytes.extend_from_slice(&cache.key.to_le_bytes());
+    bytes.extend_from_slice(&root_length.to_le_bytes());
+    bytes.extend_from_slice(root);
     bytes.extend_from_slice(&body);
     let directory = cache
         .path
@@ -2518,7 +2535,79 @@ fn write_index_cache(
     temporary.push(format!(".{}", std::process::id()));
     let temporary = PathBuf::from(temporary);
     fs::write(&temporary, &bytes)?;
-    fs::rename(&temporary, &cache.path)
+    fs::rename(&temporary, &cache.path)?;
+    drop_orphaned_index_entries(directory, &cache.path)
+}
+
+/// Removes every entry in `directory` but `own` whose recorded root is not a directory any
+/// more, or that records none (an unreadable entry, or one from a format without the root).
+/// Temporary files of writers in flight end in a process id, not `.bin`, so they are left alone.
+fn drop_orphaned_index_entries(directory: &Path, own: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path == own || path.extension().is_none_or(|extension| extension != "bin") {
+            continue;
+        }
+        if entry_root(&path).is_some_and(|root| root.is_dir()) {
+            continue;
+        }
+        // Another process sweeping at the same time may have removed it first.
+        if let Err(error) = fs::remove_file(&path)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+/// The package root an index entry records, read from its header without its body.
+fn entry_root(path: &Path) -> Option<PathBuf> {
+    // A path longer than this is not a root ry wrote, so the header is not one of its entries.
+    const LONGEST_ROOT: usize = 1 << 16;
+    let mut file = fs::File::open(path).ok()?;
+    let mut header = [0; 20];
+    file.read_exact(&mut header).ok()?;
+    let length = usize::try_from(u32::from_le_bytes(header[16..].try_into().ok()?)).ok()?;
+    if length > LONGEST_ROOT {
+        return None;
+    }
+    let mut root = vec![0; length];
+    file.read_exact(&mut root).ok()?;
+    root_path(&root)
+}
+
+/// Splits an entry after its key into the recorded root and the body.
+fn split_entry_root(rest: &[u8]) -> Option<(&[u8], &[u8])> {
+    let (length, rest) = rest.split_at_checked(4)?;
+    let length = usize::try_from(u32::from_le_bytes(length.try_into().ok()?)).ok()?;
+    rest.split_at_checked(length)
+}
+
+/// A package root as an index entry records it: its bytes on Unix, its UTF-8 text elsewhere.
+fn root_bytes(root: &Path) -> Option<&[u8]> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Some(root.as_os_str().as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        root.to_str().map(str::as_bytes)
+    }
+}
+
+/// The inverse of [`root_bytes`].
+fn root_path(bytes: &[u8]) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+    }
+    #[cfg(not(unix))]
+    {
+        std::str::from_utf8(bytes).ok().map(PathBuf::from)
+    }
 }
 
 /// A hash of the names, sizes and modification times of `DESCRIPTION`, `NAMESPACE`, the code

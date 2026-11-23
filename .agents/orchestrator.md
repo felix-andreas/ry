@@ -45,12 +45,13 @@ The goal, the mandate and the benchmark are in `AGENTS.md`. On top of them:
 
 ## In flight
 
-No release unless the user asks (user). User 2026-11-23: sessions finish their current items in full and land them, but get no new work for now; next steps are discussed with the user (Fable weekly usage at 30%). One Opus high session handles the test user's 2026-11-23 feedback.
+No release unless the user asks (user). User 2026-11-23: sessions finish their current items in full and land them, but get no new work for now; next steps are discussed with the user (Fable weekly usage at 30%). Two Opus high sessions handle the test user's 2026-11-23 feedback (user).
 
-- session_0111kWqDhzuJBe41777RLh3T (Opus high, feedback): the test user's 2026-11-23 feedback (GC crash in typed List free, recursion-group Unknown at 16+, unchecked as.DataFrame, table functions, native-function limits, open table/record types); branch claude/feedback-tables-native. Point 1.3 (column partial match) is the fuzz session's.
+- session_0111kWqDhzuJBe41777RLh3T (Opus high, feedback checker/native): test user's 2026-11-23 feedback: GC crash in typed List free, recursion-group Unknown at 16+, ifelse, untyped base functions, slow pathless check, as.DataFrame and column-read checking, native-function limits, open table/record types; branch claude/feedback-tables-native.
+- session_0111kWqCeEttf5DbxkVg6gJs (Opus high, feedback tables): same feedback's table side: POSIXct columns, join NA-key rule, List.from_r with NA, 15 missing DataFrame/Expr functions, Expr.count; branch claude/feedback-dataframe. Column partial match stays with the fuzz session.
 - session_0111kWqCHzz5KgPTQQvkUSXS (Opus high, checker): #692, #695, #697 merged (fresh sample 1,449 to 112 reports). IDLE, all work landed; the review gaps, edit re-stamping and code-base latency are in the backlog.
-- session_0111kWqCXYKiR937Au74eL55 (Opus high, kernels; replaced the archived session_0111kWqE86VPq98yVE2JgLVm, whose disk filled after #685, #689, #690): branch fix/dependency-suites, test-suite parity for the benchmark dependency set beyond the 27 pinned packages, and load-index cache eviction. Stays out of the JIT, calls, the builtin calling convention and semantics/ide. The user approved its commit/push; landing.
-- session_0111kWqEyHh2WBFnP93ZvPEM (Fable, JIT): draft #691 (claude/generic-tier-calls): compile-time growth, mean.default, call-storm and merge() slowdown (test user requests 2, 3) fixed via an exit profile. Now trimming forced-mode overhead; then proposes a compiled-to-compiled call interface directly to the calls session.
+- session_0111kWqCXYKiR937Au74eL55 (Opus high, kernels): #698 merged (aa444fb; dependency-set suites, callr 264/8, renv runs, load-index eviction). IDLE; leftovers in backlog "the dependency set's package suites".
+- session_0111kWqEyHh2WBFnP93ZvPEM (Fable, JIT): #691 merged (53a849b6; app suite 1.02x). IDLE; compiled-to-compiled calls, stretches and the Op::At compiled step are in the backlog.
 - session_0111kWqD8G8GVR8fbHetepcc (Fable, calls): #694 merged (S4 generic call 11,325 to 3,183 instructions; S4 section 2.65x to 3.99x over GNU R). Now builtin calls, then .Call with test user requests 4 and 1.
 - session_0111kWqDs8aQ1MWFmKMxX9HQ (Fable, fuzz): #649, #693 merged (analysis oracles with canaries). Now a frame fuzz kind plus fixes for the column-partial-match and Expr %% Inf bugs, then a planted-bug audit of the differential kinds.
 

@@ -1,0 +1,42 @@
+[stdout]
+| [1] 9
+| [1] "<t1><t22><t333>"
+| [1] "<1.5><2.5><4>"
+| [1] "<19724><19725><19726>"
+| [1] "<high><low><high>"
+| [1] "<1><2><3>"
+| [1] "<TRUE><NA>"
+| [1] "<1><two>"
+| [1] "character" "character" "character"
+| [1] "numeric" "numeric" "numeric"
+| [1] "numeric" "numeric" "numeric"
+| [1] "character" "character" "character"
+| [1] "integer"   "character" "numeric"   "NULL"      "list"     
+| [1] "numeric" "numeric"
+| [1] "integer" "integer" "integer"
+| [1] "complex" "complex"
+| [1] "raw" "raw"
+| [1] 4
+| [1] 19726
+| [1] "high"
+| [[1]]
+| [1] 5
+| 
+| NULL
+| NULL
+| [1] 0
+| [1] "invalid for() loop sequence"
+| [1] "invalid for() loop sequence"
+| [1] "invalid for() loop sequence"
+| [1] "b"
+| b + 1
+| [1] "<t1><t22><t333>"
+| [1] "<high><low><high>"
+| [1] 3 6
+| [1] 3 6
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| c(3L, 6L)

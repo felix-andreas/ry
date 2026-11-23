@@ -69,3 +69,56 @@ for (round in 1:600) total <- total + resume(round)
 print(total)
 print(tryCatch(flaky(2L), warning = function(w) conditionMessage(w)))
 print(flaky(3L))
+
+# One instruction keeps leaving while the rest of the body runs compiled: a subscript that
+# selects with a negative index after reads of one element, a read past the end, and an
+# integer sum that overflows. Each is compiled as the interpreter's own step afterwards.
+rewrite <- function(e) {
+  if (is.call(e) && !is.function(e[[1L]])) {
+    if (e[[1L]] == ".") e[[1L]] <- quote(list)
+    for (i in seq_along(e)[-1L]) if (!is.null(e[[i]])) e[[i]] <- rewrite(e[[i]])
+  }
+  e
+}
+expression <- quote(.(key, total = sum(value), .(nested, .(deep))))
+for (round in 1:400) rewritten <- rewrite(expression)
+print(rewritten)
+pick <- function(x, i) {
+  value <- x[i]
+  n <- 0L
+  for (k in 1:2) n <- n + k
+  value + n
+}
+for (round in 1:30) pick(c(3L, 5L, 8L), 2L)
+picked <- integer()
+for (round in 1:400) picked[[round]] <- pick(c(3L, 5L, 8L), if (round %% 2L == 0L) 9L else -1L)[1L]
+print(table(picked, useNA = "always"))
+print(pick(c(3L, 5L, 8L), 3L))
+add <- function(a, b) {
+  total <- a + b
+  n <- 0L
+  for (k in 1:2) n <- n + k
+  total + n
+}
+for (round in 1:30) add(1L, 2L)
+warned <- 0L
+for (round in 1:400) {
+  withCallingHandlers(
+    add(.Machine$integer.max, round),
+    warning = function(w) {
+      warned <<- warned + 1L
+      invokeRestart("muffleWarning")
+    }
+  )
+}
+print(warned)
+print(add(3L, 4L))
+empty <- function(values) {
+  total <- 0L
+  for (value in values) total <- total + value
+  total
+}
+for (round in 1:30) empty(1:3)
+for (round in 1:400) empty(integer())
+print(empty(integer()))
+print(empty(1:4))

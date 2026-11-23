@@ -20,6 +20,34 @@ runner = "testthat"
 summary = "Easy pre and post assertions, tested through many small predicate calls"
 
 [[programs]]
+id = "AzureAuth"
+display = "AzureAuth"
+version = "1.3.5"
+runner = "testthat"
+summary = "Azure Active Directory authentication, whose tests skip without Azure credentials and check token caching offline"
+
+[[programs]]
+id = "AzureKeyVault"
+display = "AzureKeyVault"
+version = "1.0.6"
+runner = "testthat"
+summary = "Azure Key Vault client, whose tests skip without a vault"
+
+[[programs]]
+id = "AzureStor"
+display = "AzureStor"
+version = "3.7.2"
+runner = "testthat"
+summary = "Azure storage client, with offline tests of endpoints and signatures and the rest skipped without an account"
+
+[[programs]]
+id = "AzureTableStor"
+display = "AzureTableStor"
+version = "1.0.0"
+runner = "testthat"
+summary = "Azure table storage client, whose tests skip without an account"
+
+[[programs]]
 id = "brio"
 display = "brio"
 version = "1.1.5"
@@ -32,6 +60,13 @@ display = "cachem"
 version = "1.1.0"
 runner = "testthat"
 summary = "Caches R objects with automatic pruning, in memory and on disk"
+
+[[programs]]
+id = "callr"
+display = "callr"
+version = "3.8.0"
+runner = "testthat"
+summary = "Calls R from R in subprocesses, so its tests start many child R sessions"
 
 [[programs]]
 id = "cli"
@@ -55,11 +90,25 @@ runner = "testthat"
 summary = "The R database interface, a set of S4 generics, with tests of SQL quoting, interpolation and a dummy driver"
 
 [[programs]]
+id = "devtools"
+display = "devtools"
+version = "2.5.2"
+runner = "testthat"
+summary = "Package development tools, with tests that build, document and check small packages"
+
+[[programs]]
 id = "digest"
 display = "digest"
 version = "0.6.39"
 runner = "tinytest"
 summary = "Compact hash digests of R objects, with tests that compare many hash algorithms against known values"
+
+[[programs]]
+id = "doParallel"
+display = "doParallel"
+version = "1.0.17"
+runner = "scripts"
+summary = "foreach backend for the parallel package, tested through RUnit"
 
 [[programs]]
 id = "foreach"
@@ -74,6 +123,27 @@ display = "fs"
 version = "2.1.0"
 runner = "testthat"
 summary = "Cross-platform file system operations based on libuv, with tests that create and inspect real files"
+
+[[programs]]
+id = "git2r"
+display = "git2r"
+version = "0.36.2"
+runner = "scripts"
+summary = "libgit2 bindings, with scripts that create, commit to and query local repositories"
+
+[[programs]]
+id = "httr"
+display = "httr"
+version = "1.4.9"
+runner = "testthat"
+summary = "HTTP client over curl, with offline tests of URL, header and response handling"
+
+[[programs]]
+id = "httr2"
+display = "httr2"
+version = "1.3.0"
+runner = "testthat"
+summary = "HTTP client with request objects, with tests against a local webfakes server"
 
 [[programs]]
 id = "jsonlite"
@@ -107,11 +177,67 @@ runner = "testthat"
 summary = "Memoisation of functions, with tests of in-memory and file system caches"
 
 [[programs]]
+id = "odbc"
+display = "odbc"
+version = "1.7.2"
+runner = "testthat"
+summary = "DBI driver for ODBC, whose tests skip without a data source"
+
+[[programs]]
+id = "ompr"
+display = "ompr"
+version = "1.0.4"
+runner = "testthat"
+summary = "Mixed integer linear programming models, with tests that build models through non-standard evaluation"
+
+[[programs]]
+id = "ompr.roi"
+display = "ompr.roi"
+version = "1.0.2"
+runner = "testthat"
+summary = "ROI solver backend for ompr, solving small models with GLPK"
+
+[[programs]]
+id = "openxlsx"
+display = "openxlsx"
+version = "4.2.9"
+runner = "testthat"
+summary = "Reads and writes xlsx files through C++, with tests of workbooks, styles and dates"
+
+[[programs]]
+id = "partitions"
+display = "partitions"
+version = "1.11-1"
+runner = "testthat"
+summary = "Integer partitions and set partitions, computed in C"
+
+[[programs]]
+id = "pdftools"
+display = "pdftools"
+version = "3.9.1"
+runner = "testthat"
+summary = "Text and metadata extraction from PDF files through poppler"
+
+[[programs]]
 id = "PerformanceAnalytics"
 display = "PerformanceAnalytics"
 version = "2.1.0"
 runner = "testthat"
 summary = "Econometric tools for performance and risk analysis of xts return series"
+
+[[programs]]
+id = "plumber"
+display = "plumber"
+version = "1.3.3"
+runner = "testthat"
+summary = "Turns R functions into a web API, with tests of routing, parsing and serializers"
+
+[[programs]]
+id = "pool"
+display = "pool"
+version = "1.0.5"
+runner = "testthat"
+summary = "Database connection pooling over DBI, with tests against SQLite"
 
 [[programs]]
 id = "progress"
@@ -128,6 +254,13 @@ runner = "testthat"
 summary = "Functional programming tools, with tests of map functions and their error handling built on rlang and vctrs"
 
 [[programs]]
+id = "quadprog"
+display = "quadprog"
+version = "1.5-8"
+runner = "scripts"
+summary = "Quadratic programming in Fortran, with small solver scripts"
+
+[[programs]]
 id = "R6"
 display = "R6"
 version = "2.6.1"
@@ -142,11 +275,60 @@ runner = "testthat"
 summary = "Determines where to save data, caches and logs, with tests over platform and environment variables"
 
 [[programs]]
+id = "RcppDE"
+display = "RcppDE"
+version = "0.1.9"
+runner = "scripts"
+summary = "Differential evolution optimization in C++, with scripts that minimize test functions"
+
+[[programs]]
+id = "RcppSimdJson"
+display = "RcppSimdJson"
+version = "0.1.17"
+runner = "tinytest"
+summary = "Fast JSON parsing with simdjson, with tinytest suites of parsing and type conversion"
+
+[[programs]]
+id = "readr"
+display = "readr"
+version = "2.2.0"
+runner = "testthat"
+summary = "Reads rectangular text data through vroom, with tests of parsing, type guessing and writing"
+
+[[programs]]
+id = "readxl"
+display = "readxl"
+version = "1.6.0"
+runner = "testthat"
+summary = "Reads xls and xlsx files through C++, with tests over many sample sheets"
+
+[[programs]]
+id = "renv"
+display = "renv"
+version = "1.3.1"
+runner = "testthat"
+summary = "Project-local package libraries, with tests that snapshot and restore from local repositories"
+
+[[programs]]
+id = "Rglpk"
+display = "Rglpk"
+version = "0.6-5.1"
+runner = "scripts"
+summary = "GLPK solver bindings, with a script of linear and mixed integer programs"
+
+[[programs]]
 id = "rlang"
 display = "rlang"
 version = "1.3.0"
 runner = "testthat"
 summary = "Functions for base types and core R features, with a large suite of tests on environments, quosures and conditions"
+
+[[programs]]
+id = "rvest"
+display = "rvest"
+version = "1.0.5"
+runner = "testthat"
+summary = "Web scraping over xml2, with tests on local HTML"
 
 [[programs]]
 id = "snakecase"
@@ -163,11 +345,32 @@ runner = "testthat"
 summary = "Consistent wrappers for common string operations, built on stringi"
 
 [[programs]]
+id = "testthat"
+display = "testthat"
+version = "3.3.2"
+runner = "testthat"
+summary = "The unit testing framework itself, with a large suite of expectations, reporters and snapshots"
+
+[[programs]]
+id = "tryCatchLog"
+display = "tryCatchLog"
+version = "1.3.3"
+runner = "testthat"
+summary = "Error handling with logged call stacks, tested with futile.logger and lgr"
+
+[[programs]]
 id = "withr"
 display = "withr"
 version = "3.0.3"
 runner = "testthat"
 summary = "Runs code with temporarily modified global state, with tests of options, environment variables and on.exit handlers"
+
+[[programs]]
+id = "xml2"
+display = "xml2"
+version = "1.6.0"
+runner = "testthat"
+summary = "XML parsing and XPath through libxml2, with tests of documents, nodes and namespaces"
 
 [[programs]]
 id = "xts"

@@ -70,7 +70,7 @@ often costs more than the callee's body.
 
 Each number is a difference in callgrind instructions between the compiled path and tier 0's path
 for the same work. The cost model's constants (`crates/jit/src/jit.rs`) follow these numbers:
-`ENTRY_COST`, `LOAD_COST`, `STEP_COST` and `SAVING_PER_FRAME` are measured, and
+`ENTRY_COST`, `LOAD_COST`, `STEP_COST`, `WRITE_BACK_COST` and `SAVING_PER_FRAME` are measured, and
 `SAVING_PER_NATIVE` and `SAVING_PER_CALL` are the model's estimates for work that varies with the
 instruction.
 
@@ -78,7 +78,8 @@ instruction.
 |---|---|---|
 | Entering compiled code instead of starting the body in the dispatch loop | About 560 more: the tier's entry (246), the scheduled entry's dispatch and return path (107), the register window (36 to 53), the caller's feedback (55) and the code's prologue. End to end, two bodies that differ by four native instructions (`a + a + a + a + a` and the same with nine operands, each called through a closure made on every call) differ by 550, and the smaller one runs 132 more compiled than in tier 0 | `ENTRY_COST` |
 | A variable read from the frame, against one kept in a machine register | About 30 more when the inline probe answers, about 125 more when the runtime forces an argument's promise. A body that adds five arguments runs 130 more than one that adds one argument five times | `LOAD_COST` (60) |
-| An instruction handed to tier 0 (a step) | 60 to 70 more for the helper call alone; about 180 with the variables written back before it and reloaded after it | `STEP_COST` |
+| An instruction handed to tier 0 (a step) | 60 to 70 more for the helper call alone; about 180 with the registers reloaded after it | `STEP_COST` |
+| A variable written back to the frame before a step that can run R code | About 170 to 210 more than tier 0's assignment, which stores into the frame as it goes. In a body of 20 lines whose plan has seven such write-backs, the write-back path (the flush, the boxed scalar, the assignment) runs 1,940 instructions a call against 435 for tier 0's assignments | `WRITE_BACK_COST` |
 | A call inlined with a frame, no arguments | About 600 fewer. The functions involved account for 585: tier 0's call (368) and return (459), less the first start (152), the start (12), the register window (40) and the compiled code (38). The `f()` row of "Measured" with the entry added back gives about 640 | `SAVING_PER_FRAME` |
 | A call inlined with a frame, three arguments | 510 to 630 fewer | |
 | The first start of an inlined call in an entry | 152, once per entry of the compiled body for each call | |
@@ -193,7 +194,8 @@ than one for every eight entries (`runtime::frequent`).
 | What keeps leaving | Counted by | When frequent |
 |---|---|---|
 | An inlined frame that needs its real frame | `count_handoff`, per callee | The callee is marked to keep its frame, and the caller recompiles with the call as a step |
-| The compiled body itself, through a pending unwind or a hand-off | `count_leave`, per body | The code is discarded and the body stays in tier 0 for good |
+| The compiled body itself, through a pending unwind | `count_leave`, per body | The code is discarded and the body stays in tier 0 for good |
+| One instruction of the body, through a hand-off or an abandoned signal | `count_exit`, per exit | The instruction is marked in the feedback (`feedback::HANDED_OFF`), and the body recompiles with it as a step |
 
 The body's count covers a window: when 16 exits were not frequent among the entries since the
 count began, the count starts again, so exits spread thinly over a long run never add up to a
@@ -201,6 +203,15 @@ retirement. A retirement is final, because the model has no evidence that a seco
 same body would leave less often. A body with a loop is exempt, because a loop entered by on-stack
 replacement runs compiled without an entry being counted, so its entries do not say how much the
 code ran.
+
+An exit's count is measured against the work between its hand-offs: the body's entries plus the
+passes of the innermost `for` loop around the instruction, so a read past the end on every pass
+of a long loop is frequent and one at the end of each run of a loop is not. The remedy keeps the
+body: the native form of `x[i]`, of integer arithmetic or of a builtin call has tier 0's step as
+its general form, and the step handles in place what the native form left for. This is
+JavaScriptCore's frequent exit site, with a step where the DFG would drop a speculation. An
+instruction with no step to fall back on (a `for` over an empty sequence) refuses the body, and
+so does a marked instruction that leaves again.
 
 ### The cost model counts the work saved
 
@@ -213,6 +224,7 @@ the compile (`jit.rs`, `unpaid`). The saving is counted in tier-0 instructions t
 | An inlined body, a native call, a traversal | `SAVING_PER_CALL` |
 | A native instruction | `SAVING_PER_NATIVE` |
 | A step | Minus `STEP_COST` |
+| A variable that may differ from the frame before a step that can run R code | Minus `WRITE_BACK_COST` |
 | The entry | Minus `ENTRY_COST` |
 | A variable read from the frame outside the loops | Minus `LOAD_COST` |
 
@@ -256,31 +268,67 @@ its passes save, and most sessions never run that many. Waiting until tier 0 has
 the loss, because the compile then costs at most what tier 0 has spent on the saving it would have
 made.
 
-A body with loops can also turn hot by its calls. It compiles then when the mean pass through its
-loops meets the first row, because any of its loops would compile it at the back-edge threshold.
-Otherwise it is asked `unpaid` with the work around its loops plus the work of its loops, each
-weighted by its nesting depth as for a loop's request, so a call cannot compile what its loops
-would not, and a refusal leaves its loops free to ask.
+A hot `for` loop also says how many passes one run of it takes, and entering compiled code in
+the middle of it costs an entry. A loop over a call's two arguments turns hot because the call
+does, and each activation enters compiled code for a pass or two. So the model prices one call
+of the body from the running loop: the work around the loops once, plus the loop's run length in
+passes, less the entry. The loop's request is refused while that saves nothing (`jit.rs`,
+`short_loop`), and the loop asks again after as many backward jumps again as the body has taken,
+which a loop that sometimes runs long reaches soon. The run length decides, not the passes left
+at the request: a loop of ten passes reaches the threshold on the same pass of every call, often
+its last, and it repays the entry on the next call all the same. A `while` or `repeat` loop does
+not say how long it runs and is not asked, and neither is a loop nested in another, whose passes
+the outer loop multiplies.
 
-### Native forms on boxed values (stage 2, planned)
+A body with loops can also turn hot by its calls. Its profile holds the backward jumps it has
+taken and the entries it has counted, so the model prices one call by measurement: the work
+around the loops once, plus the mean pass through a loop for each backward jump the body takes
+per entry, less the entry (`jit.rs`, `saving_per_call_with_loops`). That saving is asked the
+same question as a loop-free body's (`unpaid`). A body whose loops run two passes per call is
+thereby priced as the short body it is, and a body whose work around the loops is steps that
+save nothing is left to its loops (`MOSTLY_TIER0`), which enter compiled code past those steps.
+
+A body trained into a code image arrives hot by its entries at its first call, before the
+session has counted a backward jump or a call rate for it. The session that trained the image
+measured both, so the image keeps its decision: a body the training session compiled in the
+default mode is flagged (`runtime::TRAINED`), and the measured tests pass a flagged body. The
+tests that read only the plan apply to it as to any other body.
+
+### Native forms on boxed values (stage 2, partly built)
 
 The planner's types describe numbers and numeric vectors, and every other value is `Boxed`. Generic
-code needs three more facts about a boxed value, each of which tier 0's feedback already records
-as a value kind: it is a string scalar, it is `NULL`, or it is a plain list (no class attribute,
-not ALTREP). With them these calls compile to a kind test on the object's header and a few loads,
-under the guard on the builtin's binding that every speculated function has:
+code asks a boxed value a few questions that the object's header answers, so these calls compile
+to a test of the header and a few loads, under the guard on the builtin's binding that every
+speculated function has:
 
-| Call | Native form |
-|---|---|
-| `is.null(x)`, `is.list(x)`, `is.character(x)`, `is.function(x)` | A compare of the kind byte |
-| `length(x)` on a plain vector or list | A load of the length |
-| `x$name`, `x[["name"]]` on a plain list | The position cached for the list's names, then a load |
-| `a == b`, `a != b` on string scalars | A pointer compare of the interned strings, `NA` aside |
-| `missing(x)` in an inlined call | The call's own passing record, a constant |
-| `nchar(x)`, `identical(a, b)` on scalars, `inherits(x, "class")` | A helper that runs no R code |
+| Call | Native form | State |
+|---|---|---|
+| `is.null(x)`, `is.list(x)`, `is.character(x)`, `is.function(x)` and the other type predicates | A test of the kind byte against a set of kinds | Built |
+| `length(x)` on a vector that is neither an object nor ALTREP | A load of the length | Built |
+| `for (v in x)` over a character vector, a vector with attributes or a factor | The loop's counter in a register; the start prepares the sequence as tier 0 does, and each pass reads one element through tier 0's reader | Built |
+| `x$name`, `x[["name"]]` on a plain list | The position cached for the list's names, then a load | Planned |
+| `a == b`, `a != b` on string scalars | A pointer compare of the interned strings, `NA` aside | Planned |
+| `missing(x)` in an inlined call | The call's own passing record, a constant | Planned |
+| `nchar(x)`, `identical(a, b)` on scalars, `inherits(x, "class")` | A helper that runs no R code | Planned |
 
-A value of an unexpected kind takes the instruction's tier-0 step, not an exit, so a call site
-that sees two kinds keeps its compiled code.
+A value the test cannot answer (an object, where a method or a class decides, or an ALTREP
+vector) calls the builtin on a cold path of the same code, not an exit, so a call site that sees
+both keeps its compiled code.
+
+A `for` loop over a pairlist stays in tier 0, because only tier 0's loop state holds the
+position in the list: the loop's start hands the instruction to tier 0, and an entry in the
+middle of such a loop is declined.
+
+Arithmetic and comparison on boxed operands, such as `a == b` on strings or `x + y` on vectors
+with attributes, runs as tier 0's step. The step dispatches only when an operand is an object,
+which it tests, so in a call inlined without its frame it needs no frame and the callee keeps its
+inlined form. An operand whose type the planner does not know keeps the step opaque.
+
+Every other builtin call from compiled code is one helper call with its signals deferred. The
+helper tests the arguments itself for a value that could run R code, and a builtin that has a
+condition to signal while a handler waits abandons the call, so the body leaves and tier 0 signals
+under the real frame. The call therefore needs no handler test and no write-back of the variables
+before it, with or without handlers established.
 
 ### Stretches (stage 3, planned)
 
@@ -288,111 +336,145 @@ Consecutive steps run as one stretch: compiled code writes back the variables on
 dispatch loop runs from the first instruction to the last, and compiled code reloads once. A body
 whose plan is one stretch is not compiled.
 
-`RY_JIT=force` compiles every body at its second entry, so its total time includes every compile.
-The rule it must meet is per compiled body: in the steady state a compiled activation runs at most
-the instructions tier 0 runs for it. The "Forced" columns below measure that directly. The rows
-above tier 0 there are bodies of steps, and stretches are designed to bring them to tier 0's cost.
+The measurements that motivate stretches come from the "helper of 20 lines" body of
+`r15_plain_function_bodies.R`: two inlined frames, ten native instructions, four steps that can
+run R code and a loop over strings. Compiled, it runs within 1% of tier 0's instructions. What
+the inlined frames and the native instructions save is spent on the entry, on the steps' helper
+calls, and above all on writing the variables back before each step that can read the frame. The
+model charges each of those write-backs, so the body stays in tier 0 in every mode but `stress`.
+One write-back and one reload per stretch is the structural answer for such a body, and a direct
+call from compiled code into a callee's compiled code (stage 4) removes the entry that every
+compiled callee pays.
+
+### Forced compilation costs no more than tier 0
+
+`RY_JIT=force` asks for compiled code as early as possible: a body is asked about at its second
+entry and a loop at its first backward jump. It skips the model's payback tests, which weigh the
+compile against the calls a body expects, and keeps the steady-state tests: a body or loop whose
+compiled activation the model prices above tier 0's is refused in this mode too (`SMALL` for a
+saving per call of zero, `STEPPING_LOOP`, `MOSTLY_TIER0`, `SHORT_LOOP`). The rule forced
+compilation meets is therefore per compiled body: in the steady state a compiled activation runs
+at most the instructions tier 0 runs for it. The "Forced" columns below measure that. The
+session's total time includes every compile, which is the cost the mode is asked to pay.
+
+`RY_JIT=stress` compiles every body that compiles at all, whatever the model says. The
+differential tests, the everything-compiled oracle engine and the fuzzers run it, because their
+subject is whether compiled code agrees with tier 0, and the bodies the model refuses reach the
+most exits.
 
 ## Measured
 
 Each row is one pattern of `tools/bench/appsuite/patterns/r15_plain_function_bodies.R`: a closure
 called from a loop, in callgrind instructions per call, the loop included. The counts cover 32,000
-calls that start after a collection. "Before" is tier 1 without the changes of stage 1, and
-"Forced" is `RY_JIT=force`.
+calls that start after a collection. "Default" is the tier as a session runs it, and "Forced" is
+`RY_JIT=force`.
 
-| Body | JIT off | Before | Stage 1 | Forced, before | Forced, stage 1 |
-|---|---|---|---|---|---|
-| f() with no argument | 1,661 | 2,598 | 1,554 | 3,310 | 1,936 |
-| a function that defines and calls a function | 5,458 | 5,508 | 5,475 | 10,102 | 9,674 |
-| lapply over 3 with a function that reads a local | 19,786 | 19,889 | 19,836 | 26,361 | 25,502 |
-| two argument guards with stop() | 3,995 | 3,507 | 3,382 | 3,979 | 3,770 |
-| a function that passes ... on | 3,816 | 5,542 | 3,833 | 7,397 | 6,281 |
-| field(x, name) as x[[name]] | 2,240 | 2,290 | 2,222 | 4,162 | 2,611 |
-| 10 scalar assignments | 4,377 | 2,160 | 1,995 | 2,636 | 2,385 |
-| if / else if chain on a string | 5,843 | 5,893 | 5,862 | 8,239 | 7,731 |
-| switch() on a string | 2,250 | 2,302 | 2,267 | 4,210 | 2,692 |
-| reads of x$a, x$a$b, x[['a']][['b']] | 5,080 | 5,135 | 5,097 | 7,423 | 7,111 |
-| writes of x$a, x[['a']], x$a$b | 13,824 | 13,986 | 13,841 | 16,253 | 15,704 |
-| f(a) with one argument | 1,811 | 3,088 | 1,746 | 2,521 | 2,272 |
-| for loop that sums 10 elements | 9,580 | 5,121 | 3,987 | 5,605 | 5,072 |
-| for loop that fills 10 elements | 9,100 | 5,166 | 5,013 | 6,247 | 5,932 |
-| for loop that copies 5 list fields | 17,490 | 17,774 | 17,593 | 18,908 | 18,555 |
-| list() of 4 named fields with paste0() | 9,137 | 9,213 | 9,152 | 11,300 | 10,854 |
-| helper of 20 lines | 22,850 | 23,089 | 22,898 | 25,644 | 25,010 |
-| f(a, b, c) by position | 1,932 | 3,547 | 1,768 | 2,541 | 2,295 |
-| f(a, b = , c = ) by name | 1,932 | 1,982 | 1,768 | 2,544 | 2,294 |
-| f(a) with two default arguments | 3,075 | 4,575 | 3,092 | 5,715 | 4,911 |
-| a function that passes 3 arguments on | 2,908 | 5,930 | 1,988 | 2,838 | 2,512 |
-| a chain of 5 calls | 5,129 | 10,759 | 3,816 | 6,921 | 5,735 |
-| a function that tests missing(b) | 3,095 | 3,147 | 3,112 | 5,402 | 5,083 |
-| a function that returns early | 1,951 | 2,075 | 1,911 | 2,550 | 2,302 |
+| Body | JIT off | Default | Forced |
+|---|---|---|---|
+| f() with no argument | 1,627 | 1,544 | 1,544 |
+| a function that defines and calls a function | 5,422 | 5,437 | 5,437 |
+| lapply over 3 with a function that reads a local | 18,566 | 18,578 | 18,579 |
+| two argument guards with stop() | 3,961 | 2,379 | 2,379 |
+| a function that passes ... on | 3,777 | 3,793 | 3,794 |
+| field(x, name) as x[[name]] | 2,201 | 2,213 | 2,212 |
+| 10 scalar assignments | 4,339 | 1,988 | 1,987 |
+| if / else if chain on a string | 5,807 | 5,824 | 5,826 |
+| switch() on a string | 2,218 | 2,230 | 2,230 |
+| reads of x$a, x$a$b, x[['a']][['b']] | 5,047 | 4,204 | 4,204 |
+| writes of x$a, x[['a']], x$a$b | 14,203 | 14,221 | 14,220 |
+| f(a) with one argument | 1,776 | 1,735 | 1,736 |
+| for loop that sums 10 elements | 9,543 | 3,967 | 3,967 |
+| for loop that fills 10 elements | 9,066 | 5,010 | 5,010 |
+| for loop that copies 5 list fields | 17,131 | 17,273 | 17,241 |
+| list() of 4 named fields with paste0() | 9,129 | 9,143 | 9,143 |
+| helper of 20 lines | 22,140 | 22,187 | 22,189 |
+| f(a, b, c) by position | 1,896 | 1,758 | 1,758 |
+| f(a, b = , c = ) by name | 1,899 | 1,758 | 1,758 |
+| f(a) with two default arguments | 3,051 | 3,065 | 3,065 |
+| a function that passes 3 arguments on | 2,852 | 1,985 | 1,985 |
+| a chain of 5 calls | 5,016 | 3,784 | 3,784 |
+| a function that tests missing(b) | 3,066 | 3,082 | 3,080 |
+| a function that returns early | 1,915 | 1,904 | 1,903 |
 
 The same loops inside `withCallingHandlers`, as a test suite runs them:
 
-| Body, under a calling handler | JIT off | Before | Stage 1 |
+| Body | JIT off | Default | Forced |
 |---|---|---|---|
-| f() with no argument | 1,860 | 2,560 | 1,747 |
-| a function that defines and calls a function | 5,518 | 5,566 | 5,535 |
-| lapply over 3 with a function that reads a local | 19,752 | 19,859 | 19,802 |
-| two argument guards with stop() | 3,993 | 4,046 | 3,380 |
-| a function that passes ... on | 4,698 | 5,570 | 4,712 |
-| field(x, name) as x[[name]] | 3,179 | 3,230 | 2,438 |
-| 10 scalar assignments | 5,404 | 4,745 | 2,414 |
-| if / else if chain on a string | 6,065 | 6,115 | 6,079 |
-| switch() on a string | 2,259 | 2,307 | 2,273 |
-| reads of x$a, x$a$b, x[['a']][['b']] | 5,085 | 5,130 | 5,097 |
-| writes of x$a, x[['a']], x$a$b | 13,842 | 14,000 | 13,855 |
-| f(a) with one argument | 2,781 | 3,666 | 2,164 |
-| for loop that sums 10 elements | 10,569 | 6,422 | 5,503 |
-| for loop that fills 10 elements | 9,103 | 5,526 | 5,269 |
-| for loop that copies 5 list fields | 17,487 | 17,774 | 17,588 |
-| list() of 4 named fields with paste0() | 9,134 | 9,213 | 9,151 |
-| helper of 20 lines | 24,073 | 24,318 | 24,120 |
-| f(a, b, c) by position | 2,901 | 3,783 | 2,187 |
-| f(a, b = , c = ) by name | 2,899 | 2,952 | 2,187 |
-| f(a) with two default arguments | 4,063 | 4,940 | 4,080 |
-| a function that passes 3 arguments on | 4,684 | 6,354 | 2,406 |
-| a chain of 5 calls | 7,842 | 11,894 | 4,995 |
-| a function that tests missing(b) | 3,096 | 3,148 | 3,112 |
-| a function that returns early | 2,974 | 3,858 | 2,330 |
+| f() with no argument | 1,825 | 1,737 | 1,744 |
+| a function that defines and calls a function | 5,478 | 5,495 | 5,495 |
+| lapply over 3 with a function that reads a local | 18,632 | 18,649 | 18,649 |
+| two argument guards with stop() | 3,961 | 2,380 | 2,380 |
+| a function that passes ... on | 4,662 | 4,679 | 4,679 |
+| field(x, name) as x[[name]] | 3,142 | 2,429 | 2,429 |
+| 10 scalar assignments | 5,370 | 2,407 | 2,407 |
+| if / else if chain on a string | 6,028 | 6,045 | 6,045 |
+| switch() on a string | 2,218 | 2,235 | 2,235 |
+| reads of x$a, x$a$b, x[['a']][['b']] | 5,047 | 4,204 | 4,204 |
+| writes of x$a, x[['a']], x$a$b | 14,221 | 14,238 | 14,238 |
+| f(a) with one argument | 2,746 | 2,154 | 2,154 |
+| for loop that sums 10 elements | 10,536 | 5,456 | 5,456 |
+| for loop that fills 10 elements | 9,070 | 5,015 | 5,015 |
+| for loop that copies 5 list fields | 17,129 | 17,272 | 17,241 |
+| list() of 4 named fields with paste0() | 9,125 | 9,143 | 9,143 |
+| helper of 20 lines | 23,462 | 23,510 | 23,510 |
+| f(a, b, c) by position | 2,867 | 2,177 | 2,177 |
+| f(a, b = , c = ) by name | 2,867 | 2,177 | 2,177 |
+| f(a) with two default arguments | 4,043 | 4,060 | 4,060 |
+| a function that passes 3 arguments on | 4,636 | 2,404 | 2,404 |
+| a chain of 5 calls | 7,746 | 4,963 | 4,963 |
+| a function that tests missing(b) | 3,063 | 3,080 | 3,080 |
+| a function that returns early | 2,942 | 2,323 | 2,323 |
 
 The patterns of `tools/bench/appsuite/patterns/r02_argument_checks.R`:
 
-| Body | JIT off | Before | Stage 1 | Forced, before | Forced, stage 1 |
-|---|---|---|---|---|---|
-| function with an argument check | 146,465 | 147,070 | 146,599 | 183,236 | 177,196 |
-| match.arg() | 9,167 | 9,240 | 9,203 | 10,936 | 10,557 |
-| stopifnot() with two conditions | 6,425 | 6,497 | 6,464 | 7,496 | 7,314 |
-| identical() of two short vectors | 4,032 | 4,083 | 4,048 | 5,135 | 4,920 |
-| check_args(...) alone | 106,154 | 106,648 | 106,222 | 138,114 | 133,130 |
-| list(...) of three values | 5,862 | 5,911 | 5,880 | 7,690 | 7,340 |
-| ifelse() on a scalar | 4,203 | 4,256 | 4,221 | 5,295 | 5,106 |
-| nested ifelse() with is.na() | 11,289 | 11,337 | 11,306 | 12,862 | 12,590 |
-| isTRUE() | 4,540 | 4,591 | 4,557 | 5,535 | 5,344 |
-| inherits(x, 'Date') | 1,903 | 1,954 | 1,920 | 3,297 | 3,072 |
-| is(x, 'character') | 4,421 | 4,474 | 4,439 | 6,897 | 6,396 |
-| missing() and default arguments | 4,924 | 4,975 | 4,940 | 7,370 | 6,985 |
+| Body | JIT off | Default | Forced |
+|---|---|---|---|
+| function with an argument check | 145,301 | 145,403 | 145,377 |
+| match.arg() | 9,102 | 9,134 | 9,115 |
+| stopifnot() with two conditions | 6,379 | 6,419 | 6,396 |
+| identical() of two short vectors | 3,987 | 4,000 | 4,000 |
+| check_args(...) alone | 106,406 | 106,474 | 106,475 |
+| list(...) of three values | 5,863 | 5,880 | 5,880 |
+| ifelse() on a scalar | 4,129 | 4,144 | 4,144 |
+| nested ifelse() with is.na() | 11,169 | 11,183 | 11,184 |
+| isTRUE() | 4,092 | 4,104 | 4,104 |
+| inherits(x, 'Date') | 1,873 | 1,889 | 1,889 |
+| is(x, 'character') | 4,393 | 4,405 | 4,405 |
+| missing() and default arguments | 4,899 | 4,914 | 4,917 |
 
 With the tier on, tier 0 counts back edges and entries for it: 17 instructions per back edge, the
-measuring loop's included. A "Stage 1" count that is 17 above "JIT off" is therefore a body that
-runs in tier 0 unchanged, and a body with loops of its own or with closures called from a builtin
-pays the same counts again. No row is above "JIT off" by more than those counts, which stay under
-1% of every row. Before, the rows that call a closure from compiled code ran up to twice tier 0's
-instructions.
+measuring loop's included. A count that is 17 above "JIT off" is therefore a body that runs in
+tier 0 unchanged, and a body with loops of its own or with closures called from a builtin pays the
+same counts again. No row of either mode is above "JIT off" by more than those counts, which stay
+under 1% of every row.
 
-The rows that gain are the ones with an inlined frame, and they gain most under a handler, where
-tier 0's call makes promises: a chain of five calls runs in under two thirds of tier 0's
-instructions there. Every body of `r02_argument_checks.R` is steps around builtins and closures
-that keep their frame, so none compiles and the default mode matches tier 0.
+The rows that gain are bodies with an inlined frame, native arithmetic, a loop with a native
+counter or a field read, and they gain most under a handler, where tier 0's call makes promises:
+a chain of five calls runs in under two thirds of tier 0's instructions there. Every body of
+`r02_argument_checks.R` is steps around builtins and closures that keep their frame, so none
+compiles and both modes match tier 0.
 
-Forced mode runs fewer instructions than before on every row and more than tier 0 on most. The
-few rows below tier 0 have native arithmetic or a wrapper whose callee is inlined. The rows above
-it are bodies of steps, which is what stretches (stage 3) are for.
+The two modes agree on every row, because forced compilation keeps the tests of what a compiled
+activation costs. What it adds is the compiles. The `bodies` section of the app-suite workload
+(`tools/bench/appsuite/app_workload.R`) shows both, in instructions for the whole process at two
+scales:
 
-On the app-suite workload stage 1 removes the loss and adds little gain. The compiled share of
-the time stays near zero, because most of its hot callees keep their frame: they pass `...`, run
-an instruction only tier 0 has, or call a closure that needs its own frame. Stages 2 and 4 are
-what move that share.
+| Scale | JIT off | Default | Forced |
+|---|---|---|---|
+| 0.1 | 1,377,828,236 | 1,384,168,284 | 3,089,804,953 |
+| 0.2 | 2,337,249,486 | 2,348,551,206 | 4,050,783,519 |
+| Difference | 959,421,250 | 964,382,922 | 960,978,566 |
+
+The difference between the scales is the section's steady state, where the three modes are
+within 1% of each other. The rest of the forced column is compiling every body that passes the
+steady-state tests at its second entry.
+
+On the app-suite workload the default mode compiles nothing. Its hot bodies are steps around
+calls that keep their frame (they pass `...`, run an instruction only tier 0 has, or call a
+closure that needs its own frame), with a few native instructions between them, and the model
+prices their write-backs above what the native instructions save. Stretches (stage 3), the
+remaining native forms of stage 2 and direct calls into compiled code (stage 4) are what bring
+such bodies into compiled code.
 
 ## How it compares
 
@@ -412,7 +494,13 @@ the per-pattern instruction counts above, and the kernels, public and code-bases
 1. **Built.** Inlined frames for generic callees (no feedback, constant arguments, calling
    handlers, the profile summary), tier 0's own call in place of compiled code's, steps on a kept
    view, the leaner entry, retiring code that keeps leaving, and the cost model in saved work.
-2. Planned. Boxed kinds in the planner and the native forms in the table.
-3. Planned. Stretches of tier-0 instructions, and forced compilation checked per body.
-4. Planned. Calls with a frame made from an inlined frame, `...` passed through, and argument
-   expressions that are effect-free builtin calls.
+2. **Partly built.** Type predicates and `length` on the value's header, builtin calls with
+   deferred signals, loops over boxed sequences, boxed arithmetic inside inlined frames, the exit
+   profile that turns an instruction that keeps leaving into a step, a body with loops priced by
+   its measured passes per call, write-backs charged in the model, and forced compilation held
+   to tier 0's cost per body. Planned:
+   the other native forms in the table.
+3. Planned. Stretches of tier-0 instructions.
+4. Planned. Calls with a frame made from an inlined frame, a direct call from compiled code
+   into a callee's compiled code, `...` passed through, and argument expressions that are
+   effect-free builtin calls.

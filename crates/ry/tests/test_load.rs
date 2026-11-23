@@ -887,6 +887,76 @@ fn a_second_load_reads_the_cached_index_and_an_edit_misses_it() {
 }
 
 #[test]
+fn a_cache_miss_drops_the_entries_of_removed_package_roots() {
+    if !r_available() {
+        return;
+    }
+    let cache = tempfile::tempdir().expect("temp dir");
+    let load = |root: &Path| {
+        let output = Command::new(env!("CARGO_BIN_EXE_ry"))
+            .arg("load")
+            .arg(root)
+            .arg("-e")
+            .arg("cat('loaded\\n')")
+            .env("XDG_CACHE_HOME", cache.path())
+            .output()
+            .expect("run ry load");
+        assert!(output.status.success(), "{}", text(&output));
+    };
+    let entries = || {
+        let mut names: Vec<_> = fs::read_dir(cache.path().join("ry").join("load-index"))
+            .expect("the cache directory")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect();
+        names.sort();
+        names
+    };
+    let kept = package(&[
+        ("DESCRIPTION", "Package: kept\nVersion: 1.0\n"),
+        ("R/a.R", "a <- function() 1\n"),
+    ]);
+    let removed = package(&[
+        ("DESCRIPTION", "Package: gone\nVersion: 1.0\n"),
+        ("R/a.R", "b <- function() 2\n"),
+    ]);
+    load(kept.path());
+    let only_kept = entries();
+    load(removed.path());
+    assert_eq!(entries().len(), 2, "each root has its own entry");
+    drop(removed);
+    // A hit writes nothing, so the removed root's entry outlives it until some load misses.
+    load(kept.path());
+    assert_eq!(entries().len(), 2);
+    let added = package(&[
+        ("DESCRIPTION", "Package: added\nVersion: 1.0\n"),
+        ("R/a.R", "c <- function() 3\n"),
+    ]);
+    load(added.path());
+    let after = entries();
+    assert_eq!(
+        after.len(),
+        2,
+        "the miss dropped the removed root's entry: {after:?}"
+    );
+    assert!(
+        after.contains(&only_kept[0]),
+        "the existing root's entry stays: {after:?}"
+    );
+    // A legacy or truncated entry records no root and goes too.
+    fs::write(
+        cache.path().join("ry/load-index/0000000000000000.bin"),
+        [0; 8],
+    )
+    .expect("write");
+    let other = package(&[
+        ("DESCRIPTION", "Package: other\nVersion: 1.0\n"),
+        ("R/a.R", "d <- function() 4\n"),
+    ]);
+    load(other.path());
+    assert_eq!(entries().len(), 3, "{:?}", entries());
+}
+
+#[test]
 fn source_references_point_into_the_file() {
     if !r_available() {
         return;

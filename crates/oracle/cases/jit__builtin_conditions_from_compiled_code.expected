@@ -1,0 +1,66 @@
+[stdout]
+| [1] 0
+| [1] NA
+| [1] 14
+| [1] NA
+| List of 2
+|  $ :List of 4
+|   ..$ message: chr "NAs introduced by coercion"
+|   ..$ call   : chr "scaled(1:3, \"four\")"
+|   ..$ locals : chr [1:3] "factor" "text" "values"
+|   ..$ factor : int 6
+|  $ :List of 4
+|   ..$ message: chr "NAs introduced by coercion"
+|   ..$ call   : chr "scaled(c(1.5, 2.5), \"x\")"
+|   ..$ locals : chr [1:3] "factor" "text" "values"
+|   ..$ factor : int 4
+| [1] 10
+| [1] NA
+| [1] 11
+| [1] "NAs introduced by coercion"
+| [1] "scaled(1:3, \"x\")"
+| [1] NA
+| [1] 12
+| [1] "(converted from warning) NAs introduced by coercion"
+| [1] "caught"
+| [1] "calling" "exiting"
+| [1] NA
+| [1] 13
+| [1] 60
+| [1] 9
+| [1] "subscript out of bounds in items[[index]]"
+| [1] "non-numeric argument to binary operator in chosen * size"
+| integer(0)
+| [1] "unwound"
+| [1] "index"   "items"   "size"    "2"       "finally"
+| [1] 1
+| [1] TRUE
+| [1] "subscript out of bounds in items[[index]]"
+| [1] 9
+| List of 2
+|  $ value   : num 2
+|  $ messages: chr(0) 
+| List of 2
+|  $ value   : num 2
+|  $ messages: chr "longer object length is not a multiple of shorter object length in left + right"
+| List of 2
+|  $ value   : num NaN
+|  $ messages: chr "NaNs produced in sqrt(sum)"
+| List of 2
+|  $ value   : num NaN
+|  $ messages: chr [1:2] "longer object length is not a multiple of shorter object length in left + right" "NaNs produced in sqrt(sum)"
+| List of 2
+|  $ value   : num -Inf
+|  $ messages: chr "no non-missing arguments to max; returning -Inf in max(root)"
+| [1] "non-numeric argument to binary operator in left + right"
+| [1] "non-numeric argument to binary operator in left + right"
+| List of 2
+|  $ value   : num 2
+|  $ messages: chr(0) 
+[messages]
+[warnings]
+- NAs introduced by coercion (in scaled(1:3, "x"))
+[errors]
+[value]
+NULL
+| NULL

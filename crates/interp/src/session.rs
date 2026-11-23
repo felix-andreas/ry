@@ -28,6 +28,10 @@ pub struct StartOptions {
     /// Sources the user profile (`R_PROFILE_USER`, else `./.Rprofile`, else `~/.Rprofile`) into
     /// the global environment, which `--vanilla` and `--no-init-file` turn off.
     pub user_profile: bool,
+    /// Reads the site and user environment files (`R_ENVIRON`, else
+    /// `R_HOME/etc/Renviron.site`; `R_ENVIRON_USER`, else `./.Renviron`, else `~/.Renviron`),
+    /// which `--vanilla` and `--no-environ` turn off.
+    pub environ: bool,
     /// `interactive()`, which also makes `keep.source` default to `TRUE` (base R's system
     /// profile sets it from `interactive()`).
     pub interactive: bool,
@@ -46,7 +50,7 @@ pub unsafe fn start(options: StartOptions) -> R<()> {
     interp().command_args = options.command_args;
     interp().interactive = options.interactive;
     interp().code_image.build = options.build;
-    let locale_failures = prepare_process();
+    let locale_failures = prepare_process(options.environ);
     let home = crate::system::r_home();
     let site_profile = options.site_profile.then(site_profile_path).flatten();
     let user_profile = options.user_profile.then(user_profile_path).flatten();
@@ -89,7 +93,7 @@ pub unsafe fn write_start_image(
     layout: Option<&std::path::Path>,
 ) -> R<()> {
     interp().interactive = false;
-    let locale_failures = prepare_process();
+    let locale_failures = prepare_process(false);
     let home = crate::system::r_home();
     let before = crate::image::before(&host).map_err(error)?;
     if start_slowly(&home, None, None, &locale_failures)? {
@@ -99,11 +103,39 @@ pub unsafe fn write_start_image(
     crate::image::write(&host, &home, path, layout, &before).map_err(error)
 }
 
-/// The process state every start sets before R code runs: the system `Renviron` and the
-/// locale. Returns the locale categories that fell back to "C", which start-up warns about
-/// after every other start-up warning, as GNU R does.
-unsafe fn prepare_process() -> Vec<&'static str> {
+/// GNU R's start-up greeting, which its `R` prints before the profiles run unless `--quiet` or
+/// `--no-echo` is given.
+pub fn greeting() -> String {
+    let version = crate::system::r_version();
+    format!(
+        "\nR version {} ({}) -- \"{}\"\nCopyright (C) {} The R Foundation for Statistical \
+         Computing\nPlatform: {}\n\n\
+         R is free software and comes with ABSOLUTELY NO WARRANTY.\n\
+         You are welcome to redistribute it under certain conditions.\n\
+         Type 'license()' or 'licence()' for distribution details.\n\n\
+         R is a collaborative project with many contributors.\n\
+         Type 'contributors()' for more information and\n\
+         'citation()' on how to cite R or R packages in publications.\n\n\
+         Type 'demo()' for some demos, 'help()' for on-line help, or\n\
+         'help.start()' for an HTML browser interface to help.\n\
+         Type 'q()' to quit R.\n\n",
+        version.number(),
+        version.date,
+        version.nickname,
+        version.date.get(0..4).unwrap_or(""),
+        crate::system::platform_triple(),
+    )
+}
+
+/// The process state every start sets before R code runs: the system `Renviron`, with
+/// `environ` the site and user environment files, and the locale, which those files may set.
+/// Returns the locale categories that fell back to "C", which start-up warns about after every
+/// other start-up warning, as GNU R does.
+unsafe fn prepare_process(environ: bool) -> Vec<&'static str> {
     read_renviron();
+    if environ {
+        read_site_and_user_renviron();
+    }
     crate::system::init_locale()
 }
 
@@ -320,22 +352,23 @@ unsafe fn remove_library_site() -> R<()> {
 }
 
 /// The site profile to source: `R_PROFILE`, else `R_HOME/etc/Rprofile.site`, if it exists.
+/// `R_PROFILE` set to the empty string means none, which is how `R --vanilla CMD` keeps the
+/// profile out of the R processes the command starts.
 fn site_profile_path() -> Option<String> {
-    let site = std::env::var("R_PROFILE")
-        .ok()
-        .filter(|path| !path.is_empty())
-        .unwrap_or_else(|| format!("{}/etc/Rprofile.site", crate::system::r_home()));
+    let site = match std::env::var("R_PROFILE") {
+        Ok(path) if path.is_empty() => return None,
+        Ok(path) => crate::connections::expand_path(&path),
+        Err(_) => format!("{}/etc/Rprofile.site", crate::system::r_home()),
+    };
     std::path::Path::new(&site).exists().then_some(site)
 }
 
 /// The user profile to source: `R_PROFILE_USER`, else `./.Rprofile`, else `~/.Rprofile`, if it
 /// exists. A set `R_PROFILE_USER` is the only candidate, even when the file is missing (callr
-/// points it at its own profile).
+/// points it at its own profile), and set to the empty string it means none.
 fn user_profile_path() -> Option<String> {
-    let user = match std::env::var("R_PROFILE_USER")
-        .ok()
-        .filter(|path| !path.is_empty())
-    {
+    let user = match std::env::var("R_PROFILE_USER").ok() {
+        Some(path) if path.is_empty() => None,
         Some(path) => Some(crate::connections::expand_path(&path)),
         None => [
             ".Rprofile".to_owned(),
@@ -770,26 +803,69 @@ fn gnu_r_site_libraries() -> Vec<String> {
 /// Sets the variables of the first system `Renviron` that exists.
 fn read_renviron_file(home: &str) {
     for path in [format!("{home}/etc/Renviron"), "/etc/R/Renviron".to_owned()] {
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        if read_environment_file(&path, false) {
+            break;
+        }
+    }
+}
+
+/// GNU R's `process_site_Renviron` and `process_user_Renviron`: `R_ENVIRON` names the site
+/// file and `R_ENVIRON_USER` the user's, and either set to the empty string reads none. Their
+/// variables replace the process's own, so a user's `.Renviron` can override `R_LIBS_USER`.
+fn read_site_and_user_renviron() {
+    match std::env::var("R_ENVIRON") {
+        Ok(path) => {
+            if !path.is_empty() {
+                read_environment_file(&path, true);
+            }
+        }
+        Err(_) => {
+            let home = crate::system::r_home();
+            read_environment_file(&format!("{home}/etc/Renviron.site"), true);
+        }
+    }
+    match std::env::var("R_ENVIRON_USER") {
+        Ok(path) => {
+            if !path.is_empty() {
+                read_environment_file(&crate::connections::expand_path(&path), true);
+            }
+        }
+        Err(_) => {
+            if !read_environment_file(".Renviron", true)
+                && let Some(home) = std::env::var_os("HOME")
+            {
+                let path = std::path::Path::new(&home).join(".Renviron");
+                read_environment_file(&path.to_string_lossy(), true);
+            }
+        }
+    }
+}
+
+/// Sets the `NAME=value` variables of the environment file at `path`, expanding `${NAME}`
+/// references, and returns whether the file could be read. Without `replace`, a variable the
+/// process has keeps its value. An empty value sets nothing, as in GNU R.
+fn read_environment_file(path: &str, replace: bool) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
             continue;
         };
-        for line in text.lines() {
-            let line = line.trim();
-            if line.starts_with('#') || line.is_empty() {
-                continue;
-            }
-            let Some((name, value)) = line.split_once('=') else {
-                continue;
-            };
-            let name = name.trim();
-            if std::env::var_os(name).is_some() {
-                continue;
-            }
-            let value = expand_environment(value.trim().trim_matches(|c| c == '\'' || c == '"'));
+        let name = name.trim();
+        if name.is_empty() || (!replace && std::env::var_os(name).is_some()) {
+            continue;
+        }
+        let value = expand_environment(value.trim().trim_matches(|c| c == '\'' || c == '"'));
+        if !value.is_empty() {
             set_start_variable(name, value);
         }
-        break;
     }
+    true
 }
 
 /// GNU R's `bin/R` shell wrapper exports `R_SHARE_DIR`, `R_INCLUDE_DIR` and `R_DOC_DIR`
@@ -1056,6 +1132,10 @@ pub unsafe fn run_console(
     loop {
         let prompt = if buffer.is_empty() { "> " } else { "+ " };
         let Some(chunk) = read(prompt) else {
+            if halt_on_error && !buffer.trim().is_empty() {
+                write_console(b"Error: unexpected end of input\nExecution halted\n", true);
+                return Outcome::Failed;
+            }
             break;
         };
         buffer.push_str(&chunk);
