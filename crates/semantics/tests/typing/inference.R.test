@@ -5,7 +5,7 @@ increment <- function(x) x + 1L
 anything <- 1L
 result <- increment(anything)
 #++++
-increment: <T: numeric> fn(x: T) -> T
+increment: <T: arithmetic> fn(x: T) -> T
 anything: Any
 result: double
 
@@ -26,7 +26,7 @@ id: <T> fn(x: T) -> T
 #---- arithmetic_generalizes
 add1 <- function(x) x + 1L
 #++++
-add1: <T: numeric> fn(x: T) -> T
+add1: <T: arithmetic> fn(x: T) -> T
 
 #---- two_operands_tie
 add <- function(a, b) a + b
@@ -36,7 +36,7 @@ add: <T: numeric> fn(a: T, b: T) -> T
 #---- division_is_double
 half <- function(x) x / 2
 #++++
-half: <T: numeric> fn(x: T) -> double
+half: <T: arithmetic> fn(x: T) -> double
 
 #---- comparison_leaves_the_operand_open
 positive <- function(x) x > 0L
@@ -104,7 +104,7 @@ x: Unknown
 f <- function(g) g(g)
 #++++
 f: Unknown
-17..21 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`.
+17..21 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`
 
 #==== constants
 #---- reserved_constants_infer_fixed_types
@@ -141,7 +141,7 @@ h <- function(x) x ^ 2L
 #++++
 f: fn() -> double
 g: fn() -> double
-h: <T: numeric> fn(x: T) -> double
+h: <T: arithmetic> fn(x: T) -> double
 
 #---- unary_minus_keeps_the_atom_and_shape
 f <- function() -1L
@@ -275,7 +275,7 @@ f: <T: numeric> fn(x: T) -> T
 #---- division_by_literal_keeps_the_parameter_numeric
 f <- function(x) x / 2
 #++++
-f: <T: numeric> fn(x: T) -> double
+f: <T: arithmetic> fn(x: T) -> double
 
 #---- a_long_arithmetic_chain_checks_in_linear_time
 # Both operands of an arithmetic or comparison operator infer once, at the

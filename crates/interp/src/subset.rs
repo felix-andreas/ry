@@ -4,6 +4,7 @@
 use {
     crate::{
         attribute_access::names_factor,
+        base_fast_paths::fast_paths_enabled,
         builtins::{
             Arg, BuiltinDef, Call, Generic, builtin, internal, internal_special, is_native_value,
             special,
@@ -41,7 +42,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
         .dispatch_or_eval()
         .direct(direct_subset2),
     special("$", 2, do_dollar),
-    special("@", 2, do_at),
+    special("@", 2, safe!(do_at)),
     special("[<-", -1, do_subassign)
         .dispatch_or_eval()
         .direct(handles::safe_direct!(assign_slab)),
@@ -3249,40 +3250,60 @@ fn slot_name<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s, Symbol>>
     Err(error("invalid type or length for slot name"))
 }
 
-/// `object@name`. Only S4 objects have slots: on any other object `@` reads `.Data` (the
-/// object itself) or dispatches an S3 `@` method, and otherwise is an error.
-unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
-    handles::with(|context| {
-        let environment = handles::call_environment(context, call)?;
-        let subject = handles::held(context, call.arg(0));
-        let object = handles::evaluate(context, subject, environment)?;
-        let name = handles::held(context, call.arg(1));
-        let slot = slot_name(context, name)?;
-        let call_value = handles::held(context, call.call);
-        // Since R 4.3 `@` is an internal generic for S3 objects, which is how S7 reads
-        // properties.
-        if handles::is_object(object) && !is_s4(object) {
-            let name = context.root(slot.read(context).name());
-            let mut text = context.alloc::<Str>(1)?;
-            text.set(context, 0, name);
-            let arguments = [object, text.finish().value()];
-            let generic = symbol(|symbols| symbols.at);
-            if let Some(value) =
-                handles::dispatch_builtin(context, generic, call_value, arguments, environment)?
-            {
-                return Ok(value.raw());
-            }
+/// `object@name`, the special: the subject is evaluated and the slot name is read from the
+/// second argument's expression.
+fn do_at<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let environment = arguments.environment(context)?;
+    let object = handles::evaluate(context, arguments.value(0), environment)?;
+    let slot = slot_name(context, arguments.value(1))?;
+    at(
+        context,
+        object,
+        slot.value(),
+        arguments.expression(),
+        |_| Ok(environment),
+    )
+}
+
+/// `object@slot` for an evaluated `object` and the symbol `slot`. Only S4 objects have slots:
+/// on any other object `@` reads `.Data` (the object itself) or dispatches an S3 `@` method
+/// from `environment`, which is asked for only then, and otherwise is an error.
+pub(crate) fn at<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    slot: Local<'s>,
+    call: Local<'s>,
+    environment: impl FnOnce(&mut Cx<'s>) -> R<Local<'s, Environment>>,
+) -> R<Local<'s>> {
+    let slot = exact::<Symbol>(slot)?;
+    // Since R 4.3 `@` is an internal generic for S3 objects, which is how S7 reads
+    // properties.
+    if handles::is_object(object) && !is_s4(object) {
+        let name = context.root(slot.read(context).name());
+        let mut text = context.alloc::<Str>(1)?;
+        text.set(context, 0, name);
+        let arguments = [object, text.finish().value()];
+        let generic = symbol(|symbols| symbols.at);
+        let environment = environment(context)?;
+        if let Some(value) =
+            handles::dispatch_builtin(context, generic, call, arguments, environment)?
+        {
+            return Ok(value);
         }
-        if !is_s4(object) && slot.raw() != symbol(|symbols| symbols.dot_data).raw() {
-            let class = handles::class_of(context, object)?;
-            let class = handles::first_string(context, class).map(|class| class.into_owned());
-            return Err(call.error(format!(
+    }
+    if !is_s4(object) && slot.raw() != symbol(|symbols| symbols.dot_data).raw() {
+        let class = handles::class_of(context, object)?;
+        let class = handles::first_string(context, class).map(|class| class.into_owned());
+        return Err(call_error(
+            Some(call),
+            format!(
                 "no applicable method for `@` applied to an object of class \"{}\"",
                 class.unwrap_or_default()
-            )));
-        }
-        get_slot(object.raw(), slot.raw(), call.call)
-    })
+            ),
+        ));
+    }
+    // GNU R reports a missing slot against the function that runs, not against the read.
+    slot_of(context, object, slot, None)
 }
 
 /// `R_do_slot`: an S4 slot, which is an attribute, with `.Data` and `.S3Class` special. Raw
@@ -3294,15 +3315,25 @@ unsafe fn do_at(call: &Call<'_>) -> R<Sexp> {
 pub unsafe fn get_slot(object: Sexp, symbol: Sexp, call: Sexp) -> R<Sexp> {
     handles::with_result(|context| {
         let object = handles::adopt(context, object);
-        if symbol == symbols().dot_data
-            && let Some(function) = methods_function(context, "getDataPart")?
-        {
-            return handles::call_value(context, function, &[object]).map(Local::raw);
-        }
         let slot = exact::<Symbol>(handles::adopt(context, symbol))?;
         let call = (call != unbound()).then(|| handles::adopt(context, call));
-        slot_value(context, object, slot, call).map(Local::raw)
+        slot_of(context, object, slot, call).map(Local::raw)
     })
+}
+
+/// [`get_slot`] on handles.
+fn slot_of<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    slot: Local<'s, Symbol>,
+    call: Option<Local<'s>>,
+) -> R<Local<'s>> {
+    if slot.raw() == symbol(|symbols| symbols.dot_data).raw()
+        && let Some(function) = methods_value(context, symbol(|symbols| symbols.get_data_part))?
+    {
+        return handles::call_value(context, function, &[object]);
+    }
+    slot_value(context, object, slot, call)
 }
 
 /// The slot `slot` of `object` once `.Data` is ruled out.
@@ -3318,10 +3349,14 @@ fn slot_value<'s>(
         let null_slot = value
             .downcast::<Symbol>()
             .is_some_and(|value| value.name().bytes() == b"\x01NULL\x01");
-        return Ok(match null_slot {
-            true => null(),
-            false => context.root(value),
-        });
+        if null_slot {
+            return Ok(null());
+        }
+        let value = context.root(value);
+        if slot.raw() == symbol(|symbols| symbols.row_names).raw() {
+            return crate::attribute_access::expand_row_names(context, value);
+        }
+        return Ok(value);
     }
     if slot.raw() == symbol(|symbols| symbols.dot_s3_class).raw() {
         return handles::class_of(context, object);
@@ -3348,9 +3383,9 @@ fn slot_value<'s>(
     Err(call_error(call, message))
 }
 
-/// The function the methods package binds to `name` in its namespace, or `None` while the
-/// package is not loaded or binds no such name.
-fn methods_function<'s>(context: &mut Cx<'s>, name: &str) -> R<Option<Local<'s>>> {
+/// The value of `name` as the methods package's namespace sees it, or `None` when the package
+/// is not loaded or does not bind it.
+fn methods_value<'s>(context: &mut Cx<'s>, name: Gc<'static, Symbol>) -> R<Option<Local<'s>>> {
     // SAFETY: the namespace is rooted for the session, the lookup may force a promise, which
     // `&mut Cx` permits, and its result is rooted before anything else allocates.
     unsafe {
@@ -3358,7 +3393,7 @@ fn methods_function<'s>(context: &mut Cx<'s>, name: &str) -> R<Option<Local<'s>>
         if methods == nil() {
             return Ok(None);
         }
-        let value = eval::find_var(values::install(name)?, methods)?;
+        let value = eval::find_var(name.raw(), methods)?;
         if value == unbound() {
             return Ok(None);
         }
@@ -3462,16 +3497,165 @@ fn check_at_assignment<'s>(
     slot: Gc<'static, Symbol>,
     value: Local<'s>,
 ) -> R<()> {
-    let Some(check) = methods_function(context, "checkAtAssignment")? else {
+    let Some((check, answered)) = slot_check(context)? else {
         return Ok(());
     };
+    if answered && slot_accepts(context, object, slot, value)? {
+        return Ok(());
+    }
     let class = handles::class_of(context, object)?;
+    let value_class = handles::class_of(context, value)?;
     let mut name_string = context.alloc::<Str>(1)?;
     name_string.set(context, 0, slot.name());
     let name_string = name_string.finish().value();
-    let value_class = handles::class_of(context, value)?;
     handles::call_value(context, check, &[class, name_string, value_class])?;
     Ok(())
+}
+
+/// GNU R's `checkAt` of `check_slot_assign`: the methods package's `checkAtAssignment` as the
+/// first slot assignment finds it, which every later one calls whatever the namespace binds by
+/// then, and whether [`slot_accepts`] answers for it. `None` while the package is not loaded or
+/// binds no such function.
+fn slot_check<'s>(context: &mut Cx<'s>) -> R<Option<(Local<'s>, bool)>> {
+    let recorded = crate::interp().globals.check_at_assignment;
+    let check = if recorded == nil() {
+        let name = symbol(|symbols| symbols.check_at_assignment);
+        let Some(check) = methods_value(context, name)? else {
+            return Ok(None);
+        };
+        if !matches!(
+            check.r_type(),
+            SexpType::Closure | SexpType::Builtin | SexpType::Special
+        ) {
+            return Ok(None);
+        }
+        crate::interp().globals.check_at_assignment = check.raw();
+        check
+    } else {
+        // SAFETY: the session's globals root the function.
+        unsafe { handles::adopt(context, recorded) }
+    };
+    let answered =
+        fast_paths_enabled() && check.raw() == crate::interp().globals.answered_slot_check;
+    Ok(Some((check, answered)))
+}
+
+/// Whether `checkAtAssignment(class(object), slot, class(value))` returns `TRUE` from the class
+/// cache alone: the cache holds one definition of the object's class, and the class it declares
+/// for the slot is `ANY`, the first class of the value, or a class the cached definition of the
+/// value's class lists in its `contains`. `false` leaves the answer to the R function, which
+/// searches further, looks at the declared class's subclasses and raises the errors. A value of
+/// the declared class itself is accepted without an allocation.
+fn slot_accepts<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    slot: Gc<'static, Symbol>,
+    value: Local<'s>,
+) -> R<bool> {
+    let class_symbol = symbol(|symbols| symbols.class);
+    let class = context.root(get_attribute(context, object, class_symbol));
+    let Some(table) = methods_value(context, symbol(|symbols| symbols.class_table))? else {
+        return Ok(false);
+    };
+    if table.r_type() != SexpType::Environment {
+        return Ok(false);
+    }
+    let Some(definition) = cached_definition(context, table, class)? else {
+        return Ok(false);
+    };
+    let slots = get_attribute(context, definition, symbol(|symbols| symbols.slots));
+    let Some(declared) = named_item(context, slots, slot.name().bytes())
+        .and_then(|declared| declared.standard::<Str>())
+    else {
+        return Ok(false);
+    };
+    if declared.len() != 1 || is_na(declared.get(0)) {
+        return Ok(false);
+    }
+    let declared = context.root(declared.get(0));
+    if declared.read(context).bytes() == b"ANY" {
+        return Ok(true);
+    }
+    let value_class = get_attribute(context, value, class_symbol);
+    let same = match value_class.standard::<Str>() {
+        Some(value_class) if !value_class.is_empty() => {
+            value_class.get(0).bytes() == declared.read(context).bytes()
+        }
+        // A value with dimensions has the class `matrix` or `array`.
+        _ => {
+            value_class.r_type() == SexpType::Nil
+                && get_attribute(context, value, symbol(|symbols| symbols.dim)).r_type()
+                    == SexpType::Nil
+                && handles::basic_class(value).as_bytes() == declared.read(context).bytes()
+        }
+    };
+    if same {
+        return Ok(true);
+    }
+    let value_class = handles::class_of(context, value)?;
+    let Some(value_definition) = cached_definition(context, table, value_class)? else {
+        return Ok(false);
+    };
+    let contains = get_attribute(
+        context,
+        value_definition,
+        symbol(|symbols| symbols.contains),
+    );
+    let extension = named_item(context, contains, declared.read(context).bytes());
+    Ok(extension.is_some_and(|extension| extension.r_type() != SexpType::Nil))
+}
+
+/// `getClassDef(class)` where the class cache `table` answers it with one definition, as
+/// `methods_core::cached_class` does for the native class definitions. `None` when the R code
+/// would look further: the cache has no entry under the class's first name, the entry is the
+/// plain list of several packages' definitions, from which the R code picks one by where it is
+/// called from, or the entry belongs to another package than the class names.
+fn cached_definition<'s>(
+    context: &mut Cx<'s>,
+    table: Local<'s>,
+    class: Local<'s>,
+) -> R<Option<Local<'s>>> {
+    let Some(class) = class.standard::<Str>() else {
+        return Ok(None);
+    };
+    if class.is_empty() {
+        return Ok(None);
+    }
+    let name = context.root(class.read(context).get(0));
+    if is_na(name.read(context)) {
+        return Ok(None);
+    }
+    let Some(definition) = handles::frame_value(context, table, name)? else {
+        return Ok(None);
+    };
+    if !is_s4(definition) {
+        return Ok(None);
+    }
+    let package = symbol(|symbols| symbols.package);
+    if let Some(wanted) = get_attribute(context, class, package).standard::<Str>()
+        && let Some(defined) = get_attribute(context, definition, package).standard::<Str>()
+        && !wanted.is_empty()
+        && defined.len() == 1
+        && wanted.get(0).bytes() != defined.get(0).bytes()
+    {
+        return Ok(None);
+    }
+    Ok(Some(definition))
+}
+
+/// `list[[name]]` for a plain list with names: the first item under `name`, or `None` when
+/// `list` is another kind of value or has no such item.
+fn named_item<'a>(context: &'a Cx<'_>, list: Gc<'a>, name: &[u8]) -> Option<Gc<'a>> {
+    if handles::is_object(list) {
+        return None;
+    }
+    let list = list.standard::<List>()?;
+    let handles::Names::Standard(names) = handles::names(context, list) else {
+        return None;
+    };
+    (0..names.len().min(list.len()))
+        .find(|&index| !is_na(names.get(index)) && names.get(index).bytes() == name)
+        .map(|index| list.get(index))
 }
 
 /// `R_do_slot_assign`.
@@ -3525,7 +3709,7 @@ fn store_slot<'s>(
     value: Local<'s>,
 ) -> R<Local<'s>> {
     if slot.is(symbol(|symbols| symbols.dot_data))
-        && let Some(function) = methods_function(context, "setDataPart")?
+        && let Some(function) = methods_value(context, symbol(|symbols| symbols.set_data_part))?
     {
         return handles::call_value(context, function, &[object.get(), value]);
     }

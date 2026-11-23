@@ -60,7 +60,7 @@ f <- function() {
 #++++
 == R/main.R
 f: <T> fn() -> fn(x: T) -> T
-20..21 warning[unused] `x` is assigned but never used.
+20..21 warning[unused] `x` is assigned but never used
 
 #---- closure_local_shadows_enclosing_binding
 #~~~~ R/main.R
@@ -88,7 +88,7 @@ f <- function() {
 == R/main.R
 x: integer
 f: fn() -> fn() -> fn() -> logical
-28..29 warning[unused] `x` is assigned but never used.
+28..29 warning[unused] `x` is assigned but never used
 
 #==== cross_file_globals
 #---- nested_function_closes_over_global_from_other_file
@@ -117,14 +117,15 @@ f <- function() {
 #++++
 == R/a.R
 x: integer
-0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
-  = 0..1 the later binding is here.
+0..1 warning[duplicate] top-level binding `x` is overwritten by a later top-level binding in this package
+  = 0..1 the later binding is here
 == R/b.R
 x: integer
-0..1 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
-  = 0..1 the earlier binding is here.
+0..1 warning[duplicate] top-level binding `x` overwrites an earlier top-level binding in this package
+  = 0..1 the earlier binding is here
 == R/c.R
 f: fn() -> fn() -> integer
+
 #==== late_capture_writes
 #---- a_write_after_a_closure_undoes_the_narrowing_it_reads
 f <- function(x: character | NULL) -> character {

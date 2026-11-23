@@ -119,7 +119,7 @@ double[]
 value <- 1L
 #++++
 value: integer[named]
-18..23 warning[unused] `value` is assigned but never used.
+18..23 warning[unused] `value` is assigned but never used
 27..29 error[type-mismatch] expected `integer[named]`, found `integer`
 
 #---- array_to_named_map_rejected
@@ -127,7 +127,7 @@ value: integer[named]
 value <- c(1L, 2L)
 #++++
 value: integer[named]
-18..23 warning[unused] `value` is assigned but never used.
+18..23 warning[unused] `value` is assigned but never used
 27..36 error[type-mismatch] expected `integer[named]`, found `integer[]`
 
 #---- named_map_to_named_map_ok
@@ -325,7 +325,7 @@ integer[]
 value <- c(1L, 2L)
 #++++
 value: integer
-11..16 warning[unused] `value` is assigned but never used.
+11..16 warning[unused] `value` is assigned but never used
 20..29 error[type-mismatch] expected `integer`, found `integer[]`
 
 #==== combine_edge_cases

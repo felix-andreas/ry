@@ -15,7 +15,7 @@ total <- function(x, i) sum(x[[i]])
 check <- function(x, i) vapply(i, function(j) sum(x[[j]]), numeric(1))
 #++++
 total: <T, U> fn(x: T, i: U) -> Unknown
-check: <T, U> fn([x]: T, i: list[U] | U[]) -> double[]
+check: <T, U> fn([x]: T, i: list[U] | U[] | NULL) -> double[]
 
 #---- an_unknown_template_beside_an_open_callback_leaves_vapply_unchecked
 #: <T> fn(x: T, template: Unknown)
@@ -41,7 +41,7 @@ plain <- !!TRUE
 inject: <T> fn([query]: T) -> Unknown
 twice: <T> fn(x: T) -> Unknown
 plain: logical
-35..42 warning[unresolved] I could not resolve `request` in this package, its imports, or builtins.
+35..42 warning[unresolved] I could not resolve `request` in this package, its imports, or builtins
 
 #---- zeallot_destructuring_binds_the_pattern_names
 span <- function(dates) {
@@ -126,7 +126,7 @@ accepts <- function() {
 }
 #++++
 weigh: <T: numeric> fn(a: T, H: T) -> T
-outer: <T: numeric> fn(H: T) -> double
+outer: <T: arithmetic> fn(H: T) -> double
 whole: double
 accepts: fn() -> NULL
 

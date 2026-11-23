@@ -5,19 +5,24 @@
 use {
     rustc_hash::FxHashMap,
     semantics::{
-        DocumentKind,
+        AnalysisSettings, DocumentKind, ProjectFiles, RootDatabase,
         metadata::resolve_namespace_conditionals,
+        stubs::shipped_stub_sources,
         testing::{
-            ProjectState, check_semantics_input, fixture_state, for_each_session, generate_session,
+            ProjectState, Workbench, check_metamorphic_relations, check_package_metadata,
+            check_semantics_input, check_stub_source, command_database, compare_renamed,
+            compare_renderings, fixture_state, for_each_session, for_each_stub_source,
+            generate_session, insert_leading_trivia, misplaced_declarations, plan_rename,
+            render_afresh, render_in_parallel, render_stub_source, stub_variant,
         },
     },
-    std::sync::LazyLock,
+    std::{slice, sync::LazyLock},
     syntax::{
         SyntaxKind, SyntaxNode,
         ast::is_expression_kind,
         testing::{
-            SplitMix64, fixture_case_sources, for_each_seed, mutate_seed, program_corpus_sources,
-            small_edit, split_files,
+            SplitMix64, fixture_case_sources, for_each_seed_on_named_threads, mutate_seed,
+            program_corpus_sources, small_edit, split_files, token_soup,
         },
     },
 };
@@ -104,6 +109,9 @@ const TEMPLATES: &[&str] = &[
     "{n} <- List.from_r({m})",
     "{n} <- [({m}, 1L), (2L, {m})]",
     "#: List<double[]>\n{n} <- [{m}]",
+    // Two names one alternative lacks are reported at one range, in the order of their
+    // symbols, so the child process of the session arms sees an order that follows ids.
+    "{n} <- match ({m}) {\n  :Pair(zorp_{n}, quib_{n}) | :Empty => 1L\n  _ => 2L\n}",
 ];
 
 const DIRECTIVES: &[&str] = &[
@@ -305,6 +313,539 @@ fn program_corpus_holds_invariants() {
     });
 }
 
+/// The default budget of [`edits_that_change_no_meaning_only_move_findings`].
+const METAMORPHIC_CASES: usize = 400;
+
+/// The metamorphic relations over the first state of a generated session. A run of the default
+/// budget must find a place for each edit in most cases, or its preconditions have drifted so
+/// far that the oracle checks nothing.
+#[test]
+fn edits_that_change_no_meaning_only_move_findings() {
+    let mut workbench = Workbench::default();
+    let mut leading_trivia = 0;
+    let mut renames = 0;
+    let mut free_renames = 0;
+    let mut renames_in_findings = 0;
+    let mut cases = 0;
+    for_each_seed_on_named_threads(METAMORPHIC_CASES, |seed| {
+        let (state, mut rng) = metamorphic_case(seed);
+        let coverage = check_metamorphic_relations(&mut workbench, &state, &mut rng);
+        cases += 1;
+        leading_trivia += usize::from(coverage.leading_trivia);
+        renames += usize::from(coverage.rename);
+        free_renames += usize::from(coverage.free_rename);
+        renames_in_findings += usize::from(coverage.rename_in_finding);
+    });
+    eprintln!(
+        "{cases} cases: {leading_trivia} with a line inserted, {renames} renamed, \
+         {free_renames} of them freely and {renames_in_findings} of a name in a finding"
+    );
+    if cases >= METAMORPHIC_CASES {
+        assert!(
+            leading_trivia * 2 > cases
+                && renames * 4 > cases
+                && free_renames * 8 > cases
+                && renames_in_findings * 8 > cases,
+            "{cases} cases: only {leading_trivia} with a line inserted, {renames} renamed, \
+             {free_renames} freely and {renames_in_findings} of a name in a finding"
+        );
+    }
+}
+
+/// The project of a metamorphic case, and the generator that goes on to place its edits.
+fn metamorphic_case(seed: u64) -> (ProjectState, SplitMix64) {
+    let mut rng = SplitMix64(0x3E7A_3021 ^ seed);
+    let mut state = generate_session(&mut rng, &POOL).swap_remove(0);
+    if rng.below(2) == 0 {
+        add_unresolved_reads(&mut rng, &mut state);
+    }
+    (state, rng)
+}
+
+/// The trivia relation reports an insertion whose findings stay where they were: the
+/// rendering of the unedited project stands in for that of the edited one.
+#[test]
+fn trivia_oracle_catches_unmoved_findings() {
+    let mut db = command_database();
+    let caught = (0..METAMORPHIC_CASES as u64).any(|seed| {
+        let (state, mut rng) = metamorphic_case(seed);
+        let original = render_afresh(&mut db, &state);
+        insert_leading_trivia(&state, &original, &mut rng)
+            .is_some_and(|trivia| compare_renderings(&trivia.expected, &original).is_err())
+    });
+    assert!(
+        caught,
+        "no case of {METAMORPHIC_CASES} reported findings that did not move"
+    );
+}
+
+/// The rename relation reports a renamed project that lost a finding: the real rendering of the
+/// renamed project, less one finding line.
+#[test]
+fn rename_oracle_catches_a_lost_finding() {
+    let mut db = command_database();
+    let caught = (0..METAMORPHIC_CASES as u64).any(|seed| {
+        let (state, mut rng) = metamorphic_case(seed);
+        let original = render_afresh(&mut db, &state);
+        // The trivia edit draws first, so the rename is the one the relation test makes.
+        insert_leading_trivia(&state, &original, &mut rng);
+        let Some(rename) = plan_rename(&db, &state, &original, &mut rng) else {
+            return false;
+        };
+        let mut renamed = render_afresh(&mut db, &rename.edited);
+        let Some(rendering) = renamed
+            .iter_mut()
+            .find(|rendering| rendering.lines().any(is_finding_line))
+        else {
+            return false;
+        };
+        *rendering = without_first_finding(rendering);
+        compare_renamed(&rename.rename, &original, &renamed).is_err()
+    });
+    assert!(
+        caught,
+        "no case of {METAMORPHIC_CASES} reported a renamed project that lost a finding"
+    );
+}
+
+/// The parallel relation reports a worker whose rendering of one file lists the same lines in
+/// another order: the real rendering of the first worker with one file's lines reversed.
+#[test]
+fn parallel_oracle_catches_a_reordered_rendering() {
+    let mut db = command_database();
+    let caught = (0..SESSIONS as u64).any(|seed| {
+        let state = generate_session(&mut SplitMix64(0x5E55_10A5 ^ seed), &POOL).swap_remove(0);
+        let sequential = render_afresh(&mut db, &state);
+        let mut parallel = render_in_parallel(&mut db, &state);
+        let Some(rendering) = parallel.first_mut().and_then(|worker| {
+            worker.iter_mut().find(|rendering| {
+                let lines: Vec<&str> = rendering.lines().collect();
+                lines.windows(2).any(|pair| pair[0] != pair[1])
+            })
+        }) else {
+            return false;
+        };
+        *rendering = rendering
+            .lines()
+            .rev()
+            .map(|line| format!("{line}\n"))
+            .collect();
+        parallel
+            .iter()
+            .any(|worker| compare_renderings(&sequential, worker).is_err())
+    });
+    assert!(
+        caught,
+        "no session of {SESSIONS} reported a reordered parallel rendering"
+    );
+}
+
+/// Whether a line of a [`render_semantics`] rendering is a finding (`START..END [code] ...`).
+fn is_finding_line(line: &str) -> bool {
+    line.split_once(' ').is_some_and(|(range, rest)| {
+        range.split_once("..").is_some_and(|(start, end)| {
+            start.parse::<usize>().is_ok() && end.parse::<usize>().is_ok()
+        }) && rest.starts_with('[')
+    })
+}
+
+/// `rendering` without its first finding line.
+fn without_first_finding(rendering: &str) -> String {
+    let mut dropped = false;
+    rendering
+        .split_inclusive('\n')
+        .filter(|line| {
+            let drop = !dropped && is_finding_line(line);
+            dropped |= drop;
+            !drop
+        })
+        .collect()
+}
+
+/// Appends reads of names nothing defines to a file of `state`, so a rename meets `unresolved`
+/// findings, which generated programs rarely have. The names vary in length and first letter,
+/// because a rename to a free name crosses both.
+fn add_unresolved_reads(rng: &mut SplitMix64, state: &mut ProjectState) {
+    let Some(file) = (!state.files.is_empty()).then(|| rng.below(state.files.len())) else {
+        return;
+    };
+    for index in 0..1 + rng.below(3) {
+        let name: String = (0..3 + rng.below(8))
+            .map(|position| match position > 0 && rng.below(5) == 0 {
+                true => '_',
+                false => (b'a' + rng.below(26) as u8) as char,
+            })
+            .collect();
+        let read = match rng.below(3) {
+            0 => format!("unresolved_{index} <- {name}"),
+            1 => format!("{name}(1L)"),
+            _ => format!("reader_{index} <- function(x) {name}(x)"),
+        };
+        let text = &mut state.files[file].1;
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&read);
+        text.push('\n');
+    }
+}
+
+/// The words and punctuation of the `.Rtypes` grammar, for token soup.
+const STUB_ALPHABET: &[&str] = &[
+    "name",
+    "zoo",
+    "[.zoo",
+    "%+%",
+    " : ",
+    ":",
+    "fn(",
+    ")",
+    "(",
+    "[x]",
+    "x: ",
+    "...: ",
+    "Any",
+    "integer",
+    "double[]",
+    "list{",
+    "}",
+    "<T>",
+    "T",
+    " -> ",
+    "|",
+    ", ",
+    "@type ",
+    "@alias ",
+    "@pure",
+    "@pure(FUN)",
+    "@masked",
+    "@opaque(x)",
+    "#' ",
+    "# ",
+    "\n",
+    "\n\n",
+    " ",
+    "`",
+    "\"",
+    "é",
+];
+
+/// Stub sources that once broke the loader.
+const STUB_REGRESSIONS: &[&str] = &[
+    // A short type name also occurs inside the `@type` or `@alias` keyword, where its
+    // declaration range once pointed.
+    "@type t\n",
+    "@alias a {integer}\n",
+    // A keyword glued to a name is not that keyword: `@typet` declares no type `t`.
+    "@typet\n@aliasa {integer}\n",
+    // An alias that expands back into itself once overflowed the stack, and one that does so
+    // through two positions took exponential time, when a declaration used it.
+    "@alias z {z | integer}\nx : z\n",
+    "@alias z {list[named: w]}\n@alias w {fn(y: z) -> Any | list[named: z]}\nx : fn(a: z) -> w\n",
+];
+
+/// Generated, windowed and mutated `.Rtypes` text through the stub loader
+/// ([`check_stub_source`]), on one database that stays warm across seeds. Half the sources come
+/// from the grammar of the shipped stubs ([`generated_stub`]), so most load declarations.
+#[test]
+fn fuzz_stub_sources() {
+    let shipped: Vec<String> = shipped_stub_sources()
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect();
+    let mut db = stub_test_database();
+    for input in STUB_REGRESSIONS {
+        check_stub_source(&mut db, input);
+    }
+    for_each_stub_source(STUB_SOURCES, |seed| stub_source(&shipped, seed));
+}
+
+/// The default budget of [`fuzz_stub_sources`].
+const STUB_SOURCES: usize = 400;
+
+/// The stub source of a seed: token soup, a window of a shipped stub, two windows mutated into
+/// one, or a generated stub, perhaps with one small edit.
+fn stub_source(shipped: &[String], seed: u64) -> String {
+    let mut rng = SplitMix64(0x57AB_5EED ^ seed);
+    let window = |rng: &mut SplitMix64| {
+        let lines: Vec<&str> = shipped[rng.below(shipped.len())].lines().collect();
+        let start = rng.below(lines.len().max(1));
+        let end = (start + 1 + rng.below(40)).min(lines.len());
+        lines.get(start..end).unwrap_or_default().join("\n") + "\n"
+    };
+    match rng.below(6) {
+        0 => token_soup(&mut rng, STUB_ALPHABET),
+        1 => window(&mut rng),
+        2 => {
+            let seeds = [window(&mut rng), window(&mut rng)];
+            mutate_seed(&mut rng, &[&seeds[0], &seeds[1]], 24)
+        }
+        _ => {
+            let source = generated_stub(&mut rng);
+            match rng.chance(1, 3) {
+                true => {
+                    let insertion = STUB_ALPHABET[rng.below(STUB_ALPHABET.len())];
+                    small_edit(&mut rng, &source, insertion)
+                }
+                false => source,
+            }
+        }
+    }
+}
+
+/// The stub range check reports a declaration whose range starts one byte late: the real
+/// rendering of the library with every declared range's start moved by one.
+#[test]
+fn stub_range_oracle_catches_a_shifted_range() {
+    let shipped: Vec<String> = shipped_stub_sources()
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect();
+    let mut db = stub_test_database();
+    let caught = (0..STUB_SOURCES as u64).any(|seed| {
+        let text = stub_source(&shipped, seed);
+        let rendering = render_stub_source(&mut db, &text);
+        let shifted: String = rendering
+            .lines()
+            .map(|line| {
+                let shifted = line.rsplit_once(" at ").and_then(|(head, range)| {
+                    let (start, end) = range.split_once("..")?;
+                    Some(format!(
+                        "{head} at {}..{end}",
+                        start.parse::<usize>().ok()? + 1
+                    ))
+                });
+                shifted.unwrap_or_else(|| line.to_owned()) + "\n"
+            })
+            .collect();
+        misplaced_declarations(&text, &shifted).is_err()
+    });
+    assert!(
+        caught,
+        "no stub of {STUB_SOURCES} reported a declaration range that starts late"
+    );
+}
+
+/// The stub history relation reports a loader that keeps the library of the source it loaded
+/// before: the real rendering of the variant stands in for the second load of the source.
+#[test]
+fn stub_history_oracle_catches_a_stale_library() {
+    let shipped: Vec<String> = shipped_stub_sources()
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect();
+    let mut db = stub_test_database();
+    let caught = (0..STUB_SOURCES as u64).any(|seed| {
+        let text = stub_source(&shipped, seed);
+        let first = render_stub_source(&mut db, &text);
+        let stale = render_stub_source(&mut db, &stub_variant(&text));
+        compare_renderings(slice::from_ref(&first), slice::from_ref(&stale)).is_err()
+    });
+    assert!(
+        caught,
+        "no stub of {STUB_SOURCES} reported a library left from the source before"
+    );
+}
+
+/// A database for stub sources: it installs none of the shipped stubs.
+fn stub_test_database() -> RootDatabase {
+    let db = RootDatabase::default();
+    AnalysisSettings::new(&db, true, false, true);
+    ProjectFiles::new(&db, Vec::new());
+    db
+}
+
+/// Generated `NAMESPACE` and `DESCRIPTION` text through the metadata parsers and a project that
+/// uses what they import ([`check_package_metadata`]), on one database that stays warm across
+/// seeds. A third of the `NAMESPACE` files are mutated or token soup, so the parsers meet
+/// broken directives.
+#[test]
+fn fuzz_package_metadata() {
+    let mut db = command_database();
+    for_each_seed_on_named_threads(50, |seed| {
+        let mut rng = SplitMix64(0x3E7A_DA7A ^ seed);
+        let generated = generated_namespace(&mut rng);
+        let namespace = match rng.below(6) {
+            0 => token_soup(&mut rng, NAMESPACE_DIRECTIVES),
+            1 => mutate_seed(&mut rng, &[generated.as_str()], 16),
+            _ => generated,
+        };
+        let description = generated_description(&mut rng);
+        check_package_metadata(&mut db, &namespace, &description);
+    });
+}
+
+/// `NAMESPACE` directives of every kind the parsers read, with some that R rejects.
+const NAMESPACE_DIRECTIVES: &[&str] = &[
+    "export(f)\n",
+    "export(g, `h i`)\n",
+    "export(\"quoted\")\n",
+    "exportPattern(\"^[a-z]\")\n",
+    "exportMethods(show)\n",
+    "exportClasses(Thing)\n",
+    "import(stats)\n",
+    "import(utils, except = c(head, tail))\n",
+    "importFrom(stats, median, sd)\n",
+    "importFrom(\"utils\", \"head\")\n",
+    "importClassesFrom(methods, show)\n",
+    "importMethodsFrom(methods, show)\n",
+    "S3method(print, thing)\n",
+    "S3method(base::format, thing, format_thing)\n",
+    "useDynLib(pkg, .registration = TRUE, .fixes = \"C_\")\n",
+    "useDynLib(pkg, alias = routine, other)\n",
+    "if (getRversion() >= \"4.0.0\") {\n  export(newer)\n}\n",
+    "if (.Platform$OS.type == \"windows\") importFrom(utils, winDialog)\n",
+    "# comment\n",
+    "\n",
+    "export(\n  f,\n  g\n)\n",
+    "export(",
+    ")",
+    "importFrom(",
+    "é",
+];
+
+/// A `NAMESPACE` of up to 60 directives, long enough that most split into chunks.
+fn generated_namespace(rng: &mut SplitMix64) -> String {
+    (0..rng.below(60))
+        .map(|_| NAMESPACE_DIRECTIVES[rng.below(NAMESPACE_DIRECTIVES.len() - 4)])
+        .collect()
+}
+
+/// A `DESCRIPTION` whose fields come in any order, some of them continued, empty or repeated.
+fn generated_description(rng: &mut SplitMix64) -> String {
+    const FIELDS: &[&str] = &[
+        "Package: pkg\n",
+        "Package:\n",
+        "Imports: stats, utils (>= 4.0.0),\n    methods\n",
+        "Depends: R (>= 4.1.0), data.table\n",
+        "Suggests: testthat (>= 3.0.0)\n",
+        "LazyData: true\n",
+        "LazyData: no\n",
+        "Collate: 'b.R' 'a.R'\n",
+        "Collate.unix: 'unix/a.R'\n",
+        "Collate.windows: \"windows/a.R\"\n",
+        "Title: A Package\n",
+        "  continued\n",
+        "Broken\n",
+        "\n",
+    ];
+    (0..rng.below(10))
+        .map(|_| FIELDS[rng.below(FIELDS.len())])
+        .collect()
+}
+
+/// Names a generated stub declares: short ones that also occur inside keywords, dotted and
+/// operator names, and one beyond ASCII.
+const STUB_NAMES: &[&str] = &[
+    "t", "a", "ty", "x", "f", "zoo", "is.zoo", "[.zoo", "%+%", "as_thing", "média",
+];
+
+/// Type names a generated stub defines, short ones among them because they also occur inside
+/// the `@type` and `@alias` keywords.
+const STUB_NOMINALS: &[&str] = &["t", "a", "pe", "Shape", "zoo", "data.thing"];
+
+/// A `.Rtypes` source from the grammar the shipped stubs use: documentation lines, `@type` and
+/// `@alias` definitions (generic or not), and declarations of values and functions with
+/// optional and variadic parameters, unions, generics and the `@pure`, `@masked` and `@opaque`
+/// markers.
+fn generated_stub(rng: &mut SplitMix64) -> String {
+    let mut nominals: Vec<String> = Vec::new();
+    let mut lines = Vec::new();
+    for _ in 0..1 + rng.below(10) {
+        if rng.chance(1, 3) {
+            lines.push(format!("#' Documents the next line, {}.", rng.below(100)));
+        }
+        let name = STUB_NAMES[rng.below(STUB_NAMES.len())];
+        match rng.below(6) {
+            0 => {
+                let nominal = STUB_NOMINALS[rng.below(STUB_NOMINALS.len())].to_owned();
+                lines.push(match rng.below(4) {
+                    0 => format!("@type {nominal}"),
+                    1 => format!("@type {nominal}<T>"),
+                    2 => format!(
+                        "@type {nominal} {{{}}}",
+                        stub_type(rng, &nominals, false, 2)
+                    ),
+                    _ => format!(
+                        "@alias {nominal}<T> {{{}}}",
+                        stub_type(rng, &nominals, true, 2)
+                    ),
+                });
+                nominals.push(nominal);
+            }
+            1 => {
+                let alias = STUB_NOMINALS[rng.below(STUB_NOMINALS.len())].to_owned();
+                lines.push(format!(
+                    "@alias {alias} {{{}}}",
+                    stub_type(rng, &nominals, false, 2)
+                ));
+                nominals.push(alias);
+            }
+            _ => {
+                let generic = rng.chance(1, 3);
+                let marker = match rng.below(6) {
+                    0 => "@pure ",
+                    1 => "@pure(f) ",
+                    2 => "@masked ",
+                    3 => "@opaque(x) ",
+                    _ => "",
+                };
+                let binders = if generic { "<T> " } else { "" };
+                let mut parameters: Vec<String> = Vec::new();
+                for (index, parameter) in ["x", "f", "n"].iter().enumerate().take(rng.below(4)) {
+                    let ty = match *parameter == "f" {
+                        true => format!("fn({}) -> Any", stub_type(rng, &nominals, generic, 1)),
+                        false => stub_type(rng, &nominals, generic, 2),
+                    };
+                    parameters.push(match index > 0 && rng.chance(1, 2) {
+                        true => format!("[{parameter}]: {ty}"),
+                        false => format!("{parameter}: {ty}"),
+                    });
+                }
+                if rng.chance(1, 3) {
+                    parameters.push("...: Any".to_owned());
+                }
+                let body = match rng.chance(1, 5) {
+                    true => stub_type(rng, &nominals, false, 2),
+                    false => format!(
+                        "{binders}fn({}) -> {}",
+                        parameters.join(", "),
+                        stub_type(rng, &nominals, generic, 2)
+                    ),
+                };
+                lines.push(format!("{name} : {marker}{body}"));
+            }
+        }
+    }
+    lines.join("\n") + "\n"
+}
+
+fn stub_type(rng: &mut SplitMix64, nominals: &[String], generic: bool, depth: usize) -> String {
+    let leaves = ["integer", "double[]", "character", "logical", "Any", "NULL"];
+    match rng.below(if depth == 0 { 3 } else { 7 }) {
+        0 if generic => "T".to_owned(),
+        1 if !nominals.is_empty() => nominals[rng.below(nominals.len())].clone(),
+        3 => format!(
+            "list{{v: {}}}",
+            stub_type(rng, nominals, generic, depth - 1)
+        ),
+        4 => format!(
+            "list[named: {}]",
+            stub_type(rng, nominals, generic, depth - 1)
+        ),
+        5 => format!(
+            "{} | {}",
+            stub_type(rng, nominals, generic, depth - 1),
+            stub_type(rng, nominals, generic, depth - 1)
+        ),
+        6 => format!(
+            "fn(y: {}) -> Any",
+            stub_type(rng, nominals, generic, depth - 1)
+        ),
+        _ => leaves[rng.below(leaves.len())].to_owned(),
+    }
+}
+
 #[test]
 fn fuzz_regressions_hold_invariants() {
     for input in REGRESSIONS {
@@ -338,7 +879,7 @@ enum Directive {
 /// in file order; values that are missing, short or long leave the file unresolved.
 #[test]
 fn namespace_conditionals_resolve_to_the_taken_branches() {
-    for_each_seed(400, |seed| {
+    for_each_seed_on_named_threads(400, |seed| {
         let mut rng = SplitMix64(seed);
         let mut counter = 0;
         let directives: Vec<Directive> = (0..1 + rng.below(6))

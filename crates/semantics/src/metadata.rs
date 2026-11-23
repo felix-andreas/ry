@@ -8,7 +8,11 @@ use {
         types::QueryName,
     },
     rustc_hash::FxHashMap,
-    std::{collections::BTreeSet, num::NonZero, thread},
+    std::{
+        collections::{BTreeMap, BTreeSet},
+        num::NonZero,
+        thread,
+    },
     syntax::{
         NodeOrToken, NodeRef, SyntaxKind, SyntaxNode, TextRange, TextSize, ast::is_expression_kind,
         node_text,
@@ -38,6 +42,11 @@ pub struct PackageMetadata {
     /// or `None` when they are unknowable.
     #[returns(ref)]
     pub qualified_names: Option<BTreeSet<String>>,
+    /// The functions `NAMESPACE` registers as S3 methods of the package's own generics, by
+    /// generic (see [`registered_s3_methods`]).
+    #[default]
+    #[returns(ref)]
+    pub s3_methods: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// The bindings `NAMESPACE`'s `useDynLib` directives create in the package namespace.
@@ -55,7 +64,7 @@ pub struct NativeSymbols {
 
 /// What the checker reads from `NAMESPACE`, all from one parse: a generated `NAMESPACE` can
 /// run to a megabyte, and parsing it is serial work before and after the parallel passes.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct NamespaceFile {
     pub imports: Vec<NamespaceImport>,
     /// Only explicit `export()` names: `exportPattern` is a load-time regex, and
@@ -66,6 +75,22 @@ pub struct NamespaceFile {
     /// Whether any `exportPattern()` directive exports names chosen at load time.
     pub export_pattern: bool,
     pub native_symbols: NativeSymbols,
+    pub s3_methods: Vec<S3MethodDirective>,
+}
+
+/// The functions `S3method()` registers for generics named without a namespace, by generic.
+/// A qualified generic belongs to another package.
+pub fn registered_s3_methods(namespace: &NamespaceFile) -> BTreeMap<String, BTreeSet<String>> {
+    let mut methods: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for directive in &namespace.s3_methods {
+        if !directive.generic.contains("::") {
+            methods
+                .entry(directive.generic.clone())
+                .or_default()
+                .insert(directive.function.clone());
+        }
+    }
+    methods
 }
 
 /// The names `pkg::name` reaches in a package: its `export()` and `exportMethods()` names and
@@ -100,7 +125,7 @@ pub fn parse_namespace(source: &str) -> NamespaceFile {
 /// Below this, one parse is faster than starting threads.
 const PARALLEL_NAMESPACE_BYTES: usize = 64 * 1024;
 
-fn parse_namespace_in_chunks(source: &str, chunks: &[usize]) -> NamespaceFile {
+pub(crate) fn parse_namespace_in_chunks(source: &str, chunks: &[usize]) -> NamespaceFile {
     if chunks.len() == 1 {
         return parse_namespace_chunk(source, TextSize::from(0));
     }
@@ -134,17 +159,19 @@ fn parse_namespace_in_chunks(source: &str, chunks: &[usize]) -> NamespaceFile {
             .registered_prefixes
             .extend(symbols.registered_prefixes);
         file.native_symbols.registers |= symbols.registers;
+        file.s3_methods.extend(part.s3_methods);
     }
     file
 }
 
-fn parse_namespace_chunk(source: &str, offset: TextSize) -> NamespaceFile {
+pub(crate) fn parse_namespace_chunk(source: &str, offset: TextSize) -> NamespaceFile {
     let root = syntax::parse(source).syntax_node();
     let directives = namespace_directives(&root);
     let mut imports = namespace_imports(&directives);
     for import in &mut imports {
         import.range += offset;
     }
+    let spec = namespace_spec_of(&root);
     NamespaceFile {
         imports,
         exports: directives
@@ -164,7 +191,8 @@ fn parse_namespace_chunk(source: &str, offset: TextSize) -> NamespaceFile {
         export_pattern: directives
             .iter()
             .any(|(directive, _)| directive == "exportPattern"),
-        native_symbols: native_symbols(namespace_spec_of(&root)),
+        s3_methods: spec.s3_methods.clone(),
+        native_symbols: native_symbols(spec),
     }
 }
 
@@ -172,7 +200,7 @@ fn parse_namespace_chunk(source: &str, offset: TextSize) -> NamespaceFile {
 /// that opens with `name(` right after a line holding nothing but a complete top-level
 /// `name(...)` call. The parser ends a top-level expression at such a newline whatever came
 /// before it, while a looser rule would split an `if (cond)` from its body on the next line.
-fn call_boundaries(source: &str, parts: usize) -> Vec<usize> {
+pub(crate) fn call_boundaries(source: &str, parts: usize) -> Vec<usize> {
     use SyntaxKind::*;
     let (tokens, _) = syntax::lex(source);
     let significant: Vec<(SyntaxKind, usize)> = tokens
@@ -320,6 +348,32 @@ pub fn own_package_reaches<'db>(db: &'db dyn Db, name: QueryName<'db>) -> Option
     own_qualified_names(db).map(|names| names.contains(name.name(db).text(db)))
 }
 
+/// The functions `NAMESPACE` registers as methods of the package's generic `generic`, or
+/// `None` when it registers none, so that any `generic.class` function is one. Asked per
+/// generic, so a `NAMESPACE` edit re-checks only that generic's methods.
+#[salsa::tracked(returns(ref))]
+pub fn registered_methods<'db>(
+    db: &'db dyn Db,
+    generic: QueryName<'db>,
+) -> Option<BTreeSet<String>> {
+    PackageMetadata::try_get(db)?
+        .s3_methods(db)
+        .get(generic.name(db).text(db))
+        .cloned()
+}
+
+/// The package generic `NAMESPACE` registers the function `function` as a method of, when the
+/// registration names the function, as `S3method(generic, class, function)` does.
+#[salsa::tracked(returns(ref))]
+pub fn registered_generic<'db>(db: &'db dyn Db, function: QueryName<'db>) -> Option<String> {
+    let function = function.name(db).text(db);
+    PackageMetadata::try_get(db)?
+        .s3_methods(db)
+        .iter()
+        .find(|(_, functions)| functions.contains(function))
+        .map(|(generic, _)| generic.clone())
+}
+
 /// Whether attaching `namespace` can change a finding. A gated namespace the project does not
 /// declare can, even when it is the project's own package, because the attach switches its
 /// shipped stubs on. Otherwise it cannot for the project's own package, nor for a namespace the
@@ -428,6 +482,7 @@ pub(crate) fn is_attach_call_ref(node: NodeRef<'_>) -> bool {
             })
 }
 
+#[derive(Debug)]
 pub struct NamespaceImport {
     pub namespace: String,
     /// `None` for a whole-namespace `import(pkg)`.

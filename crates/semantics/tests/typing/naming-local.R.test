@@ -10,7 +10,7 @@ a
 == R/main.R
 integer
 Unknown
-25..26 warning[unresolved] I could not resolve `a` in this package, its imports, or builtins.
+25..26 warning[unresolved] I could not resolve `a` in this package, its imports, or builtins
 
 #---- local_sees_enclosing_local_binding
 #~~~~ R/main.R

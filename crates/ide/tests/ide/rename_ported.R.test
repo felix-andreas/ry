@@ -144,12 +144,13 @@ for (i in 1:3) print(i)
 print(i$0)
 #++++
 hover 30..31: i: integer
+hover-definition: global 5..6
 definition 5..6
 references: 5..6*, 21..22, 30..31
 rename: 3 edit(s)
-signature: fn(x: integer, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> integer
-parameters: [x: integer] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
-completion (128+): in, if, iconv, iconvlist, icuGetCollate, icuSetCollate, identical, identify
+signature: fn(x: integer, ...: Any, [digits]: Any, [quote]: logical | character, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> integer
+parameters: [x: integer] | ...: Any | [digits]: Any | [quote]: logical | character | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
+completion (128+): i, in, if, iconv, iconvlist, icuGetCollate, icuSetCollate, identical
 hint @6: integer
 
 #---- variable_named_like_a_column_skips_the_column_read

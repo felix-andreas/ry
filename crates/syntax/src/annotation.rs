@@ -263,13 +263,13 @@ pub fn misplaced_directives(annotation: &SyntaxNode) -> Vec<(&'static str, TextR
     {
         match directive_name(&directive).as_str() {
             "forall" if saw_param || saw_return => misplaced.push((
-                "`@forall` directives must appear before `@param`, `@return`, or `@returns` in the same `#:` block.",
+                "`@forall` directives must appear before `@param`, `@return`, or `@returns` in the same `#:` block",
                 directive.text_range(),
             )),
             "param" => {
                 if saw_return {
                     misplaced.push((
-                        "`@param` directives must appear before `@return` or `@returns` in the same `#:` block.",
+                        "`@param` directives must appear before `@return` or `@returns` in the same `#:` block",
                         directive.text_range(),
                     ));
                 }
@@ -278,7 +278,7 @@ pub fn misplaced_directives(annotation: &SyntaxNode) -> Vec<(&'static str, TextR
             "return" | "returns" => {
                 if saw_return {
                     misplaced.push((
-                        "cannot use more than one `@return` or `@returns` directive in the same `#:` block.",
+                        "cannot use more than one `@return` or `@returns` directive in the same `#:` block",
                         directive.text_range(),
                     ));
                 }
@@ -398,12 +398,32 @@ pub fn assigned_function(statement: &SyntaxNode) -> Option<SyntaxNode> {
 pub enum AnnotationTarget {
     Attached(SyntaxNode),
     BlankLineSeparated,
+    /// The block's first `#:` follows code on its line, as in `x <- 1 #: integer`. It would
+    /// otherwise attach to the next line's statement, which it does not describe.
+    AfterCode,
     Dangling,
 }
 
 /// The single source of the annotation association rule: what the `#:` block `annotation`
 /// applies to, read from the elements that follow it in its sequence.
 pub fn annotation_target(annotation: &SyntaxNode) -> AnnotationTarget {
+    let mut previous = annotation.prev_sibling_or_token();
+    while let Some(element) = &previous
+        && element.kind() == SyntaxKind::WHITESPACE
+    {
+        previous = element.prev_sibling_or_token();
+    }
+    // Only code that ends a construct counts, so a block after an argument list's `(` or `,`
+    // still types the argument on the next line.
+    if let Some(NodeOrToken::Node(node)) = &previous
+        && (is_expression_kind(node.kind())
+            || matches!(
+                node.kind(),
+                SyntaxKind::TYPE_DEFINITION | SyntaxKind::ARGUMENT
+            ))
+    {
+        return AnnotationTarget::AfterCode;
+    }
     let mut newlines = 0;
     let mut next = annotation.next_sibling_or_token();
     while let Some(element) = next {
@@ -497,7 +517,7 @@ pub fn argument_value(argument: &SyntaxNode) -> Option<SyntaxNode> {
 }
 
 pub enum BlockRefusal {
-    FormMixing(&'static str),
+    FormMixing(String),
     /// Silent: the parser already reported what was wrong.
     Unparsed,
 }
@@ -538,6 +558,7 @@ pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
     let mut current: Option<(usize, BlockForm)> = None;
     // A `<T, U>` binder list prefixes the compact type after it, so the pair is one item.
     let mut awaiting_bound_type = false;
+    let mut directives: Vec<String> = Vec::new();
     for child in node.children() {
         let line = line_of(child.text_range().start());
         if current.is_some_and(|(at, _)| at != line) {
@@ -549,13 +570,27 @@ pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
             continue;
         }
         let form = match child.kind() {
-            SyntaxKind::ANNOTATION_DIRECTIVE => match directive_name(&child).as_str() {
-                // A flag on the function, not a type, so it fits beside any form.
-                "pure" => continue,
-                name if is_definition_keyword(name) => BlockForm::Definition,
-                "param" | "return" | "returns" | "forall" => BlockForm::Expanded,
-                _ => BlockForm::Compact,
-            },
+            SyntaxKind::ANNOTATION_DIRECTIVE => {
+                let name = directive_name(&child);
+                let form = match name.as_str() {
+                    // A flag on the function, not a type, so it fits beside any form.
+                    "pure" => continue,
+                    name if is_definition_keyword(name) => BlockForm::Definition,
+                    "param" | "return" | "returns" | "forall" => BlockForm::Expanded,
+                    _ => BlockForm::Compact,
+                };
+                // A compact directive said twice, as two `@new` lines, is a slip, and naming
+                // it beats the generic "one compact annotation" refusal.
+                if form == BlockForm::Compact {
+                    if directives.contains(&name) {
+                        return Some(BlockRefusal::FormMixing(format!(
+                            "`@{name}` appears more than once in this `#:` block. Keep one"
+                        )));
+                    }
+                    directives.push(name);
+                }
+                form
+            }
             SyntaxKind::TYPE_BINDER_LIST => {
                 awaiting_bound_type = true;
                 BlockForm::Compact
@@ -572,18 +607,18 @@ pub fn block_refusal(node: &SyntaxNode) -> Option<BlockRefusal> {
             | (Some(BlockForm::Definition), BlockForm::Definition)
             | (Some(BlockForm::Expanded), BlockForm::Expanded) => None,
             (Some(BlockForm::Compact), BlockForm::Compact) => Some(
-                "only one compact annotation fits in a `#:` block. Separate the annotations with a blank line so each gets its own block.",
+                "only one compact annotation fits in a `#:` block. Separate the annotations with a blank line so each gets its own block",
             ),
             (Some(BlockForm::Definition), _) | (_, BlockForm::Definition) => Some(
-                "`@type` and `@alias` declarations need their own `#:` block. Separate them from other annotations with a blank line.",
+                "a type definition needs its own `#:` block. Separate it from other annotations with a blank line",
             ),
             (Some(BlockForm::Compact), BlockForm::Expanded)
             | (Some(BlockForm::Expanded), BlockForm::Compact) => Some(
-                "a `#:` block uses either one compact annotation or `@param`/`@return` lines, not both. Separate the two forms with a blank line.",
+                "a `#:` block uses either one compact annotation or `@param`/`@return` lines, not both. Separate the two forms with a blank line",
             ),
         };
         if let Some(message) = mixing {
-            return Some(BlockRefusal::FormMixing(message));
+            return Some(BlockRefusal::FormMixing(message.to_owned()));
         }
         previous = Some(form);
     }

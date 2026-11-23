@@ -1,0 +1,163 @@
+[stdout]
+| -- slots of each kind
+| [1] 1.5 2.0
+| [1] 1.5 2.0
+| [1] 1.5 2.0
+| [1] "a"
+| [1] "a"
+| [1] "a"
+| NULL
+| NULL
+| NULL
+| sym
+| sym
+| sym
+| f(x)
+| f(x)
+| f(x)
+| [[1]]
+| [1] 1
+| 
+| [[2]]
+| [1] "b"
+| 
+| [[1]]
+| [1] 1
+| 
+| [[2]]
+| [1] "b"
+| 
+| [[1]]
+| [1] 1
+| 
+| [[2]]
+| [1] "b"
+| 
+| [1] "p" "q"
+| [1] "p" "q"
+| [1] "p" "q"
+| [1] 2
+| [1] 2
+| [1] 2
+| [1] 1.5 2.0
+| [1] 1.5 2.0
+| [1] 1.5 2.0
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| -- the subject is evaluated once, the name is never evaluated
+| evaluating the subject
+| [1] 1.5 2.0
+| evaluating the subject
+| [1] 1.5 2.0
+| evaluating the subject
+| [1] 1.5 2.0
+| [1] 1.5 2.0
+| [1] 1.5 2.0
+| [1] 1.5 2.0
+| -- the class, the data part and the S3 class
+| [1] 1 2 3
+| [1] 1 2 3
+| [1] 1 2 3
+| [1] "m"
+| [1] "m"
+| [1] "m"
+| [1] ".GlobalEnv"
+| [1] ".GlobalEnv"
+| [1] ".GlobalEnv"
+| [1] "data.frame"
+| [1] "data.frame"
+| [1] "data.frame"
+| [1] "a"
+| [1] "a"
+| [1] "a"
+| [1] 1 2
+| [1] 1 2
+| [1] 1 2
+| [1] "n"
+| [1] "n"
+| [1] "n"
+| [1] 1 2 3
+| [1] 1 2 3
+| [1] 1 2 3
+| [1] 1 2 3
+| -- a slot the object does not have
+| [1] "no slot of name \"absent\" for this object of class \"Holder\""
+| [2] "reads_absent(holder)"                                          
+| [1] "no slot of name \"absent\" for this object of class \"Holder\""
+| [2] "reads_absent(holder)"                                          
+| [1] "no slot of name \"absent\" for this object of class \"Holder\""
+| [2] "reads_absent(holder)"                                          
+| [1] "doTryCatch(return(expr), name, parentenv, handler)"
+| [1] "eval(quote(holder@absent))"
+| [1] "eval(quote(holder@absent), new.env())"
+| [1] "identity(holder@absent)"
+| [1] "FUN(X[[i]], ...)"
+| -- a value that is not an S4 object
+| [1] "no applicable method for `@` applied to an object of class \"numeric\""
+| [2] "object@value"                                                          
+| [1] "no applicable method for `@` applied to an object of class \"numeric\""
+| [2] "object@value"                                                          
+| [1] "no applicable method for `@` applied to an object of class \"character\""
+| [2] "object@value"                                                            
+| [1] "no applicable method for `@` applied to an object of class \"character\""
+| [2] "object@value"                                                            
+| [1] "no applicable method for `@` applied to an object of class \"NULL\""
+| [2] "object@value"                                                       
+| [1] "no applicable method for `@` applied to an object of class \"NULL\""
+| [2] "object@value"                                                       
+| [1] "no applicable method for `@` applied to an object of class \"list\""
+| [2] "object@value"                                                       
+| [1] "no applicable method for `@` applied to an object of class \"list\""
+| [2] "object@value"                                                       
+| [1] "no applicable method for `@` applied to an object of class \"name\""
+| [2] "object@value"                                                       
+| [1] "no applicable method for `@` applied to an object of class \"name\""
+| [2] "object@value"                                                       
+| [1] "no applicable method for `@` applied to an object of class \"function\""
+| [2] "object@value"                                                           
+| [1] "no applicable method for `@` applied to an object of class \"function\""
+| [2] "object@value"                                                           
+| [1] 1 2
+| [1] 1 2
+| [1] 1 2
+| -- an S3 object dispatches a method of `@`
+| [1] "no applicable method for `@` applied to an object of class \"record\""
+| [1] "no applicable method for `@` applied to an object of class \"record\""
+| method for value from reads_value(record) 
+| [1] 10
+| method for value from reads_value(record) 
+| [1] 10
+| method for value from reads_value(record) 
+| [1] 10
+| -- one site reads S4 objects, S3 objects and plain values in turn
+| [1] 1.5 2.0
+| [1] "from the method"
+| [1] "no slot of name \"value\" for this object of class \"Counts\""
+| [1] 1.5 2.0
+| -- a local `@` is called instead
+| [1] "local value"
+| [1] "local value"
+| [1] "local value"
+| [1] 1.5 2.0
+| [1] "assigned later"
+| [1] 1.5 2.0
+| -- a method reads its object's slots
+| [1] "total"
+| [1] 5.5
+| [1] 5.5
+| [1] 5.5
+| [1] "6 m"
+| [1] "6 m"
+| [1] "6 m"
+| -- a slot read after the object changes
+| [1] 1
+| [1] 2
+| [1] 3
+| [1] 1.5 2.0
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| c(1.5, 2)

@@ -426,3 +426,25 @@ contract in the type-system reference.
 - **Temp directories.** `mc_exit` removes a renewed session temp directory (the owner check leaves a shared one alone), and the parent unlinks the directory of a worker it had to kill.
 - **What remains.** Each worker pays first-call costs for the code its files reach (lazy-load fetches, closure compilation, about 0.1 s per worker on stringr), so a short suite costs relatively more. Warming that code in the parent before forking cost as much wall time as it saved CPU, so it was rejected.
 - **Rejected:** long-lived callr workers (they already were; the cost was the per-worker start and the relay), and forking per file (each file would pay the warm-up again).
+
+## Analysis oracles compare two computations that must agree
+
+**Status:** built (`semantics` `test_fuzz`, `ry` `test_fuzz`, `semantics::check`).
+
+- **What was weak.** The analysis batteries asked whether an answer was well formed (no panic, ranges in bounds, deterministic, incremental equal to fresh), so a uniformly wrong answer passed every arm: an inference variable escaping its item shipped that way.
+- **Interning order needs a second process.** `Ty` and `Symbol` ids are process-global, so every database of one process agrees on them, and output sorted by an id passes every in-process comparison (planted: `union_of` sorting by id was invisible before). After a run, one child process of the same test binary renders every eighth session (`CHILD_SAMPLE`, chosen to keep the debug suite's growth within a third; a symbol-order plant only two of 600 seeds expose then needs `FUZZ_DEPTH` or `just fuzz-deep`) with the words interned in reverse, sessions before stubs, and everything checked in reverse. Seeds go through `FUZZ_INTERNING_CHILD`; the child reads no clock. The stub arm uses the same child to catch loader state kept outside the database.
+- **Parallel against sequential.** Every fourth session renders each state on three handles of the warm reference database with new inputs, each checking items in a rotated order. Compared as text, so a failure shows the differing finding.
+- **Editor facts.** Every second session's last-state editor facts must equal those of an editor database given new inputs, and a debug assertion (`assert_facts_match_resolution`) re-derives each recorded type from the item's table apart from `Context::editor_type`, because a recording bug gives both databases the same wrong type.
+- **Metamorphic relations.** Inserted trivia must move findings by its length. A rename of one to three names must give per file the same multiset of lines once ranges move and new names are spelled back. Half keep length and character classes; half are free (other length and first letter, non-ASCII letters, backquoted occurrences), because a suppression keyed on spelling (planted: `unresolved` skipped for names starting with `d`, or of five or more characters) is invisible to a same-shape rename. Unchecked: names any shipped stub or manifest spells (ry models some, such as `setnames`, by spelling), names within typo distance of another (suggestions and union field checks depend on it), and finding order within a file.
+- **Two waves.** First-wave findings must be in the settled diagnostics. Both waves call `lint_file` with one config, so the relation covers parse-stage findings and suppressions only. A failure is retried on a fresh database to tell a stale incremental finding from a wave bug.
+- **Stub loader.** Problems are checked against lines split independently of the loader; each declaration range must cover exactly its name as a whole token; the library must survive a variant load and back (A-B-A).
+- **Package metadata.** A `NAMESPACE` parsed in chunks must equal one parse; a project using the metadata must render alike after other metadata.
+- **Canaries.** Each comparison of two renderings has a test that feeds it a perturbed side wrapped around the real rendering and asserts a failure within the default seeds. The perturbation lives in the test; ry's non-test code has no fault-injection seam.
+- **Stack overflow.** Analysis batteries run each seed on a thread named after the test and the seed, because the overflow abort prints only the thread's name. Batteries whose cases are not `Send` (the runtime's) keep `for_each_seed`.
+
+## `ry debug type FILE:LINE:COLUMN` prints the hover at a position
+
+**Status:** built (`cli::type_at`).
+
+- A CLI-only user had no way to ask what the checker inferred, which made an inference surprise guesswork. The command analyzes the project as `ry check` does, with typing forced on, and prints `ide::hover` at the position: one code path with the editor, so the two never disagree.
+- It sits under `debug` because it explains a result rather than checking code; the line and the column count from 1, the column in characters, as `ry check` reports them.

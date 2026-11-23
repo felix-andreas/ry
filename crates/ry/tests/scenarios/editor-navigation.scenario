@@ -52,7 +52,7 @@ expect fold R/ledger.R "report <- function" "  balance(entries"
 expect selection R/ledger.R "opening = 1" "entries, opening = 1"
 
 # Signature help follows the named argument.
-expect signature R/ledger.R after "balance(entries, opening = " "[opening: U = 0]"
+expect signature R/ledger.R after "balance(entries, opening = " "[opening: double = 0]"
 
 # A `pkg::name` call into the package's own code is not colored as a library function.
 expect token R/ledger.R "balance(entries) +" "function"
@@ -80,7 +80,7 @@ rename R/ledger.R "start = 0" opening
 expect buffer tests/testthat/test-ledger.R "balance(c(1, 2), opening = 3)"
 
 # Lint fixes come from the diagnostics they resolve.
-expect diagnostics R/ledger.R "Use TRUE, not T"
+expect diagnostics R/ledger.R "use TRUE, not T"
 fix R/ledger.R "T\n" "Change to `TRUE`"
 fix R/ledger.R "= TRUE" "Change to `<-`"
 expect buffer R/ledger.R "ok <- TRUE"
@@ -94,7 +94,7 @@ expect buffer R/ledger.R "  balance(entries, opening = 1)"
 
 # The fix-all action applies every safe fix at once and leaves the guesses alone.
 replace R/ledger.R "  balance(entries, opening = 1)" "  flag = T\n  c(balanse, 0,)"
-expect diagnostics R/ledger.R "Use TRUE, not T"
+expect diagnostics R/ledger.R "use TRUE, not T"
 fix R/ledger.R "flag" "Apply all safe fixes"
 expect buffer R/ledger.R "flag <- TRUE"
 expect buffer R/ledger.R "c(balanse, 0)"

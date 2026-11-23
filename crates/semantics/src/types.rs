@@ -593,7 +593,8 @@ pub struct FunctionType<'db> {
     pub dispatch: Option<Name<'db>>,
     /// The body returns `NULL` only through `if (!predicate(parameter)) return(NULL)`, so a
     /// call where the caller already showed `predicate` holds of its argument returns the
-    /// other members alone. Inferred only.
+    /// other members alone, or only from the last `else` of a chain of tests of `parameter`'s
+    /// class, which an argument that may carry a class passes. Inferred only.
     pub null_unless: Option<NullUnless<'db>>,
     /// The body ends in `Reduce(f, x, init = init)` over its own formals, with `f` a formal
     /// or a closure that only forwards to one, so a call folds like a direct `Reduce` and its
@@ -641,11 +642,14 @@ pub struct ReduceForward<'db> {
     pub init: Option<Name<'db>>,
 }
 
-/// `ns_env <- function(package) { if (!is_loaded(package)) return(NULL); asNamespace(package) }`.
+/// `ns_env <- function(package) { if (!is_loaded(package)) return(NULL); asNamespace(package) }`,
+/// or with `class_fallback` the class dispatch `if (is.mcmc(x)) 1 else if (is.mcmc.list(x))
+/// length(x) else NULL`, whose `NULL` is the answer for an object of no class it handles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub struct NullUnless<'db> {
     pub predicate: Name<'db>,
     pub parameter: Name<'db>,
+    pub class_fallback: bool,
 }
 
 /// `formal` is required by a call that leaves out `default_of`, whose default reads it.
@@ -676,7 +680,13 @@ pub struct RestParameter<'db> {
 pub enum Constraint {
     #[default]
     Unconstrained,
+    /// A number, or a class whose arithmetic takes two of it (`Money + Money`), so `a + b` on
+    /// two values of the type is legal R.
     Numeric,
+    /// A number, or a class that declares any arithmetic method: `Date + 1` is legal R, while
+    /// `Date + Date` is not. It is what `x + 1` asks of `x`, and two values of it combine only
+    /// once it is `Numeric`.
+    Arithmetic,
     AtomicElement,
     /// A dictionary key or set element: a `logical`, `integer`, `double` or `character` scalar.
     /// `complex` and `raw` are left out because they have no total order or hash that the
@@ -713,8 +723,9 @@ pub enum Constraint {
 impl Constraint {
     /// Shared by rendering and parsing, so every constraint the checker prints can
     /// be written back in an annotation.
-    pub const SPELLINGS: [(&'static str, Constraint); 7] = [
+    pub const SPELLINGS: [(&'static str, Constraint); 8] = [
         ("numeric", Constraint::Numeric),
+        ("arithmetic", Constraint::Arithmetic),
         ("atomic", Constraint::AtomicElement),
         ("key", Constraint::Key),
         ("scalar numeric", Constraint::ScalarNumeric),
@@ -741,6 +752,23 @@ impl Constraint {
     /// is never a ry number, and an integer type is never a fraction type.
     pub fn join(self, other: Constraint) -> Option<Constraint> {
         use Constraint::*;
+        // `arithmetic` meets everything as `numeric` does, and only `numeric` itself or a
+        // stronger constraint makes the result closed.
+        let loosen = |joined: Option<Constraint>| match joined {
+            Some(Numeric) if self != Numeric && other != Numeric => Some(Arithmetic),
+            joined => joined,
+        };
+        let tighten = |constraint: Constraint| match constraint {
+            Arithmetic => Numeric,
+            constraint => constraint,
+        };
+        if self == Arithmetic || other == Arithmetic {
+            return match (self, other) {
+                (Unconstrained | Eq | Arithmetic, Arithmetic)
+                | (Arithmetic, Unconstrained | Eq) => Some(Arithmetic),
+                _ => loosen(tighten(self).join(tighten(other))),
+            };
+        }
         Some(match (self, other) {
             (Unconstrained, c) | (c, Unconstrained) => c,
             (a, b) if a == b => a,

@@ -1,5 +1,5 @@
-//! Each generated case is one seed of [`for_each_seed`], so `FUZZ_SEED` replays a failure and
-//! `FUZZ_ITERS` sets the budget.
+//! Each generated case is one seed of [`for_each_seed_on_named_threads`], so `FUZZ_SEED`
+//! replays a failure and `FUZZ_ITERS` sets the budget.
 
 use {
     std::{panic::catch_unwind, sync::LazyLock},
@@ -9,8 +9,8 @@ use {
         parse, reparse,
         testing::{
             SplitMix64, check_parse_invariants as check_invariants, corpus_sample,
-            fixture_case_sources, for_each_seed, generate_program, mutate_bytes, mutate_seed,
-            program_corpus_sources, random_bytes, small_edit, splice_of, split_files,
+            fixture_case_sources, for_each_seed_on_named_threads, generate_program, mutate_bytes,
+            mutate_seed, program_corpus_sources, random_bytes, small_edit, splice_of, split_files,
             statement_ranges, token_soup,
         },
     },
@@ -424,7 +424,7 @@ fn literate_conversion_never_moves_a_byte() {
         "\r\n",
         "#| echo: false\n",
     ];
-    for_each_seed(ITERATIONS, |seed| {
+    for_each_seed_on_named_threads(ITERATIONS, |seed| {
         let mut rng = SplitMix64(0x11_7E_A7 ^ seed);
         let mut document = String::new();
         for _ in 0..rng.below(12) {
@@ -511,11 +511,17 @@ fn fixture_sources_hold_invariants() {
 
 #[test]
 fn fuzz_corpus_seeded() {
-    let Some(files) = corpus_sample(24) else {
-        eprintln!("fuzz_corpus_seeded: corpus not fetched; skipping");
-        return;
-    };
-    for_each_seed(ITERATIONS / 3, |seed| {
+    // Without the fetched corpus the arm runs on the in-tree programs, so it never passes
+    // without checking anything.
+    let files = corpus_sample(24).unwrap_or_else(|| {
+        eprintln!("fuzz_corpus_seeded: corpus not fetched; mutating the in-tree programs");
+        program_corpus_sources()
+            .into_iter()
+            .map(|(_, source)| source)
+            .collect()
+    });
+    assert!(!files.is_empty(), "fuzz_corpus_seeded: no source to mutate");
+    for_each_seed_on_named_threads(ITERATIONS / 3, |seed| {
         let mut rng = SplitMix64(0xC0_2B_05 ^ seed);
         let source = &files[rng.below(files.len())];
         let mut bytes = mutate_bytes(&mut rng, source);
@@ -556,28 +562,28 @@ fn deep_nesting_is_refused_not_fatal() {
 }
 
 fn run_random_bytes(budget: usize) {
-    for_each_seed(budget, |seed| {
+    for_each_seed_on_named_threads(budget, |seed| {
         let mut rng = SplitMix64(0xDEC0_DE01 ^ seed);
         check_invariants(&random_bytes(&mut rng));
     });
 }
 
 fn run_token_soup(budget: usize) {
-    for_each_seed(budget, |seed| {
+    for_each_seed_on_named_threads(budget, |seed| {
         let mut rng = SplitMix64(0x50_D4_11 ^ seed);
         check_invariants(&token_soup(&mut rng, ALPHABET));
     });
 }
 
 fn run_seed_mutations(budget: usize) {
-    for_each_seed(budget, |seed| {
+    for_each_seed_on_named_threads(budget, |seed| {
         let mut rng = SplitMix64(0x5EED_F00D ^ seed);
         check_invariants(&mutate_seed(&mut rng, SEEDS, 16));
     });
 }
 
 fn run_token_level_mutations(budget: usize) {
-    for_each_seed(budget, |seed| {
+    for_each_seed_on_named_threads(budget, |seed| {
         let mut rng = SplitMix64(0x70C3_2015 ^ seed);
         let sample = POOL[rng.below(POOL.len())].as_str();
         let (tokens, _) = lex(sample);
@@ -616,7 +622,7 @@ fn run_token_level_mutations(budget: usize) {
 /// A generated program is valid by construction, so a syntax error in one is a bug in the
 /// parser or in the generator.
 fn run_generated_programs(budget: usize) {
-    for_each_seed(budget, |seed| {
+    for_each_seed_on_named_threads(budget, |seed| {
         let mut rng = SplitMix64(0x6E4E_0001 ^ seed);
         let program = generate_program(&mut rng);
         let parsed = parse(&program);
@@ -633,7 +639,7 @@ fn run_generated_programs(budget: usize) {
 /// generated program: every state holds the parse invariants, and the splice reparse of each
 /// edit equals a full parse.
 fn run_small_edits(budget: usize) {
-    for_each_seed(budget, |seed| {
+    for_each_seed_on_named_threads(budget, |seed| {
         let mut rng = SplitMix64(0x5A11_ED17 ^ seed);
         let mut text = match rng.below(3) {
             0 => generate_program(&mut rng),
@@ -656,7 +662,7 @@ fn run_small_edits(budget: usize) {
 /// because random byte edits degrade a program into token soup within a few dozen steps, and
 /// the splice reparse matters on text that still has statements to keep.
 fn run_edit_stream(sessions: usize) {
-    for_each_seed(sessions, |seed| {
+    for_each_seed_on_named_threads(sessions, |seed| {
         let mut rng = SplitMix64(0xED17_57EA ^ seed);
         let mut buffer = POOL[rng.below(POOL.len())].clone();
         buffer.truncate(buffer.floor_char_boundary(4096));

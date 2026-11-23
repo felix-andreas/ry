@@ -21,12 +21,12 @@ identity2: <T> fn(x: T) -> T
 #---- a_type_variable_shared_by_two_parameters_is_generic
 choose <- function(flag, a, b) if (flag) a else b
 #++++
-choose: <T> fn(flag: logical, [a]: T, [b]: T) -> T
+choose: <T, U> fn(flag: logical, [a]: T, [b]: U) -> T | U
 
 #---- a_constrained_parameter_is_typed
 increment <- function(x) x + 1L
 #++++
-increment: <T: numeric> fn(x: T) -> T
+increment: <T: arithmetic> fn(x: T) -> T
 
 #---- partial_annotation_reports_the_rest
 add <- function(x: integer, unused) x
@@ -72,7 +72,7 @@ Counter <- R6::R6Class("Counter", public = list(
 ))
 #++++
 Counter: Unknown
-124..135 error[strict] strict mode: could not determine the type of `R6Class`; it has no known type
+124..135 error[strict] strict mode: `R6Class` has no declared type, so the code that uses it is not checked. Declare it in a `.Rtypes` stub, or annotate the result with `#: @if-unknown TYPE`
 179..180 error[strict] strict mode: parameter `k` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `k: TYPE`
 
 #---- package_hooks_take_the_arguments_r_passes
@@ -104,5 +104,5 @@ g <- function(y) y + 1L
 #++++
 == R/main.R
 f: <T> fn(x: T) -> Unknown
-g: <T: numeric> fn(y: T) -> T
+g: <T: arithmetic> fn(y: T) -> T
 28..29 error[syntax-error] expected an expression after `+`

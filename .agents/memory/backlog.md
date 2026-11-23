@@ -49,7 +49,7 @@ crates", has the shape and the measurements behind this list.
 
 ## Open: the analysis core after the type store
 
-`decisions/syntax-semantics.md` has the shape and the measurements behind this list, in "Types
+`decisions/analysis-core.md` has the shape and the measurements behind this list, in "Types
 and symbols are four-byte ids into append-only columns", "An item's syntax has a stamp, so an edit
 lowers only the items it changed" and "The analysis core's per-item and per-file tables after the
 type store".
@@ -450,12 +450,37 @@ lubridate,data.table,xts`) a cold first `new()` costs 80 to 87 ms.
 - A reload after editing a method or a class takes 0.2 to 0.45 s, and dispatch costs 2.3 to
   4.5 µs per call.
 - **Per-object frames in `new()`.** Every `new()` of a class with a validity method makes four
-  environments: `standardGeneric("initialize")` reifies the generic's slot frame
+  environments: `standardGeneric("initialize")` reifies the generic's slot frame, because the
+  default `initialize` method has no slot table, so `eval::enter_method` declines
   (`dispatch::do_standard_generic` takes `call.env()`, and `methods::exec_method` copies its
   binding cells into the method's environment), and the prologues of `new`, the default
   `initialize` and `validObject` pass `environment()`. Fix: read the signature arguments and the
   formals' bindings from the generic's slot frame without reifying it, and give the prologues
   frame access that does not reify (`decisions/builtins.md`, "`validObject` runs validity methods without its slot loop, and `new()` copies the prototype shallowly").
+- **An S4 generic call costs more than three plain closure calls** (`just bench-mechanisms --filter
+  "s4: "`: `id(item)` 3,183 instructions against 937 for a closure call). It makes two slot
+  frames and no environment (`decisions/interp.md`, "An S4 method runs in place on a slot frame
+  above its generic's"). What is left, in instructions per call: selecting the method about 540
+  (`select_in_slots` 211, `class_keys` 74, `settled_without_code` 74, `valid_site` 60,
+  `class_of` 56), `enter_method` about 680 (190 of it `Args::from_slice` and the frame's
+  argument list in `push_slot_frame`), `enter_in_place` 139, and `fast_return` about 231 for
+  each of the two frames. Levers: a method frame that shares the generic's argument list
+  instead of copying it, a site check that is one comparison (a version stamp on the generic's
+  tables instead of `valid_site`'s binding walk), and class keys read from the object's class
+  attribute without `class_of`.
+- **S4 operations that run the methods package's R code on each call**, in instructions: `callNextMethod()`
+  195,634 (the methods package's closure, which rebuilds the call and looks the next method up
+  each time), `new()` of a two-slot class 102,286, `validObject()` 60,917, `isVirtualClass()`
+  23,359, a replacement generic 8,564, a method with more arguments than its generic 5,906 (the
+  `.local` closure inside the method). `slot(x, name)` and `slot(x, name) <- v` are closures
+  around `.Call`. A generic called through `lapply` or `sapply` enters its method from Rust
+  (`do_standard_generic`, `run_slots`), which recurses into the interpreter loop for each
+  element.
+- **A slot write is checked in Rust only where the class cache answers** (`subset::slot_accepts`):
+  the slot's class is `ANY`, the value's first class, or one the value's cached class
+  definition lists in `contains`. A value whose class is defined in two packages, a class the
+  cache does not hold yet, and a declared class that knows the value's class only through its
+  own `subclasses` call `checkAtAssignment` (about 20,000 instructions).
 - `setDataPart()` (R code, about 28 µs per call), which the default `initialize` calls for every
   data part, so `new("MethodDefinition", f)` costs about 50 µs (GNU R about 340 µs).
   `.mergeAttrs` decides the attribute order, so a native version must reproduce it exactly.
@@ -727,7 +752,7 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-gives 28 errors: 26 true package bugs and 2 known limitations, and no false report on correct R. The
+gives 27 errors: 25 true package bugs and 2 known limitations, and no false report on correct R. The
 three generated benchmark packages (`tools/bench/tooling/generate.py`) report nothing. To reproduce, give
 each package a `ry.toml` with `[check]` `typing = true` (typing is off by default) and run
 `ry check --output json R` inside it. A fix also deletes its line here and, for a user-visible
@@ -747,7 +772,6 @@ gap, in the Limitations section of `reference/type-system.mdx`.
 - gmp `Stirling-n-etc.R` 277: `if (log)` with no `log` formal reads base `log`.
 - httr `oauth-token-utils.R` 34: `revoke_oauth2.0(x)` leaves out `credentials`.
 - kernlab `kqr.R` 173 and 263: `ramloss(...)` is a typo for `ramploss`.
-- kernlab `gausspr.R` 194: passes a `double` where the callee multiplies a `matrix`.
 - mclust `toremove.R` 259: leaves out `k`.
 - processx `process.R` 748: `new_not_implemented_error` without `call`.
 - renv `r.R` 137: `diagnostics$suggestion` reads the list of records where the loop variable
@@ -759,7 +783,7 @@ gap, in the Limitations section of `reference/type-system.mdx`.
 - devtools `test.R` 72 and knitr `citation.R` 163: a vector of statically unknown length
   (`p[file.exists(p)]` returned through a function) reaches a stub's scalar `character` parameter.
   The value has length one at run time, but no type says so, and no sound rule can say so
-  (`decisions/syntax-semantics.md`, "Corpus false reports: the narrowing and overload rules that cleared them").
+  (`decisions/type-checker.md`, "Corpus false reports: the narrowing and overload rules that cleared them").
 
 ### Scalar-claim chains
 
@@ -773,46 +797,31 @@ constraint now fills a vector parameter. The forms once seen in ks `kfe.1d`, pra
 
 The top 100 CRAN packages by reverse dependencies that are not in the corpus (99 checked,
 1,210,157 lines, sources only) first gave 1,449 errors, of which 1,384 were false (114 per 100,000
-lines). After the fixes they give 468, about 400 of them false (33 per 100,000 lines); the rest are
-50 true bugs and 15 debatable ones (psych's `print(quote = "FALSE")` works by coercion). Remaining
-false classes, largest first:
+lines). They give 112 with the fourth pass. VGAM, psych, raster and ggplot2 are classified in full, and every report
+left there is a true bug except these limitations:
 
-- Return types selected by a flag the body reassigns or nests (VGAM `iam`, about 60 in `.q` files
-  that are now checked).
-- Dead code after `stop()` still binds names that shadow outer ones (psych, 44).
-- An unannotated parameter over-inferred from one use, a default or one branch (21).
-- A variable correlated with a flag tested elsewhere (20, measured before tests of the same local
-  were correlated; not re-measured).
-- A union of function types where a function is expected (lme4, kableExtra, 18).
-- A missing argument forwarded to `[` or to a callee that tests `missing()` (flextable, 10).
-- An element write `d[[i]] <- v` does not update the container type (psych, 10).
-- `vapply` over a parameter turns it into `list[T] | T[]`, so a later `$` fails (ggplot2, 10).
-- A project S3 method for a stubbed generic is ignored (R.utils, 9); NSE arguments checked (9);
-  narrowing gaps after `tryCatch` and inside `&&` (8); Windows-only NAMESPACE imports (8).
+- VGAM's `eval(code)` in the running frame rewrites locals the checker still holds as `NULL`
+  (`cqo.fit.q` 505); modeling it would rewrite every visible local's slot at the call.
+- VGAM's `OriginC` after `match.arg` is one of two strings that both branches replace, but no
+  string literal type carries that (`family.rrr.R` 2910). VGAM's `family.bivariate.R` 2050 does
+  not reproduce in isolation.
+- raster's `extractPolygons` reads a captured `fun` whose join keeps the `NULL` default.
+- One or two each in about 25 other packages (gt formatter callbacks, reticulate's conda paths,
+  forecast, igraph, sandwich, spatstat's missing `f`, lavaan, pROC, boot), not reclassified.
 
-### Other open checker items found on the corpus
+### Checker gaps found in review
 
-- **A flag-selected return stops at the first guard.** `flag_return` in `crates/semantics/src/check.rs`
-  reads only the first `if (flag) return(...)` on a parameter, so a second flag guard later in the
-  body falls back to the union of every return. Low priority: no corpus or fresh-sample report
-  depends on it.
-- **A NULL default written back as an annotation is checked.** An inferred `[H]: T | NULL` passes
-  on as a placeholder, but the same signature declared reports the call, so the round-trip test
-  lists `a_null_default_is_a_placeholder_at_a_numeric_parameter` as known unwritable. Either a
-  declared optional `NULL` default should read as a placeholder too, or the renderer should mark
-  it. Flag-selected returns (`p_dist`, `iam`) are listed there for the same reason: an annotation
-  cannot say that a literal flag picks the branch.
-- **A local variable named like a function** (missed error). After `if (flag) t2 <- 5`, a read
-  `t2 + 1` types as the local writes alone when a project, enclosing or base function `t2`
-  exists, so the path that skips the write and reads the function is not reported, even with
-  `maybe-undefined = true` (naming counts the function as a fallback). Leaving the function out
-  cleared mgcv's guarded reads; reporting the unguarded one needs naming to tell a function
-  fallback from a value fallback.
-- **`m * tol` after `if (missing(tol)) tol <- 1e-8` leaves both parameters unbounded**, so
-  `fast_svd("a", 1)` is not reported (missed error). The join of an open parameter and a value
-  written on one path is `Unknown` (`join_written_values`), so that `omega <- omega + m %*% m` on
-  one path leaves a caller free to pass a plain vector. Keeping `U | double` instead would bound
-  `U` by the later use; it needs a rule for which uses of a joined parameter bound it.
+- **A default is never checked against the bound the body puts on its formal**:
+  `function(m, tol = "abc") m * tol` and the same default written on the `missing()` path both
+  type as `<T: numeric> fn(m: T, [tol]: T) -> T`, and an omitted call returns `double`. The default
+  loop after the body skips a settled type that still holds a variable; checking a literal default
+  against the bound would report at the default.
+- **`class_fallback` reads a list, record or tuple as possibly classed**, so `1:chain_count(list(1))`
+  keeps no `NULL`. A list literal and a record or tuple type carry no class.
+- **The `inherits()` true edge drops vector members**, but stubs type some classed values as plain
+  vectors (`table` returns `integer[]`), and so does a `class(x) <- "k"` write.
+- **A formal passed to a field or `[[` callee is never forced** (`self$m(x)`, `handlers[[k]](x)`),
+  so a call that leaves it out is never reported.
 
 ## Open: where findings point, and what the type system still refuses
 
@@ -954,10 +963,7 @@ The rule ships (`decisions/syntax-semantics.md`, "A strict library file's top le
 
 ## Open: strict-mode friction from typing finbench
 
-Porting the synthetic finance benchmark to fully typed strict code hit these. Each repro is a project with `[check] strict = true` (and `Imports:` naming the packages it uses); the quoted output is what `ry check` prints.
-
-- **Vectorised math types are wrong.** `exp`, `sqrt` and `nchar` return a scalar for any input, and there is no `array` type (an `array` annotation suggests `Array`, ry's own type). `#: fn(x: double[]) -> double` over `exp(x)` or `sqrt(x)` checks clean, as does `#: fn(x: character[]) -> integer` over `nchar(x)`; `#: fn(rates: matrix) -> matrix` over `exp(-rates)` gives `` expected `matrix`, found `double` ``. Overloads that keep the input's shape (`fn(x: double) -> double`, `fn(x: double[]) -> double[]`, `fn(x: Any) -> Any`) were tried and dropped: an unannotated wrapper such as `function(x) sqrt(x)` then matches several candidates that disagree, so the overload-set rules give it `Unknown` or a `numeric` bound, and inference regresses across the typing fixtures. The fix needs one shape-generic signature (a result with the shape of `x` and element type `double`) rather than an overload set.
-
+- **An unannotated wrapper of vectorised math returns a scalar.** `@elementwise(x)` gives `sqrt(x)` the shape of a known `x` (`decisions/type-checker.md`, "`@elementwise(x)` gives a scalar result the shape of its argument"), but `function(x) sqrt(x)` infers `<T> fn(x: T) -> double`, so `wrap(xs)` over a `double[]` is still `double`. A shape variable (the shape of `T` with a `double` element) would fix it; no `array` type exists either.
 
 ## Open: the JIT
 
@@ -1302,6 +1308,7 @@ overhead, not allocation.
   - `print(1:10, max = 0)` prints one element, GNU R none.
   - `D(expression(), "x")` returns `NA` (GNU R: an error); `forceAndCall("a", sum, 1, 2)` does not warn.
   - `structure(1:.Machine$integer.max, names = letters[1:8])` is killed for memory (GNU R: "cannot allocate").
+  - *DataFrame.* `%%` and `%/%` on an `Expr` with an infinite divisor: `5 %% Inf` gives `NaN` (GNU R: 5), `-5 %% Inf` `NaN` (GNU R: `Inf`) and `-5 %/% Inf` 0 (GNU R: -1). A named column whose name partially matches a verb's first formal is taken as that argument: `DataFrame.with_columns(y, d = Expr.col("a"))` fails with "expected a DataFrame or a LazyFrame, got an expression", and `GroupBy.agg(g, g = ...)` with "`agg` needs the result of `group_by`, got an expression".
   - *Parser.* `oracle::parser::known_difference` leaves the grammar ones out of `--kind parser`; an entry leaves both with its fix.
     - ry accepts what GNU R rejects: `1 < 2 < 3`; `=` assignment in an argument, a condition, an index or a default (`if (a = b) c`, `f(TRUE = 1)`); `::` after anything but a name or a string (`a::b::c`); a line break after an operand of an `if` branch inside parentheses or brackets (`(if (a) b`, line break, `+ c)`), which GNU R's lexer returns as a token there; `function(y, ) 1` (decide whether the trailing comma is ry syntax).
     - Raw strings: as an argument name (`c(r"(a)" = 1)` assigns `a` and returns an unnamed value; GNU R names the argument) and after `$` or `@` (`x$r"(a)"` is a syntax error; GNU R reads `x$a`). The parser takes only a plain string there.
@@ -1580,40 +1587,25 @@ to fresh), so all four batteries were green while every package in the pinned CR
 such a variable and a quarter of them crashed `ry check`. An oracle that only asks "is this answer
 well formed?" cannot see a wrong answer. These are the concrete follow-ups.
 
-### Assert invariants in the code, not only properties in the harness
+### Gaps the editor relations left open
 
-A `debug_assert` at a seam turns every input of every suite, fixtures included, into a test of that
-invariant, at no release cost. The export-edge assertion (a closed scheme carries no inference
-variable) landed with the fix. Candidates for the next ones:
-
-- Every expression type an item records resolves in the table that produced it. This is the same
-  defect seen from the other end.
-- An item's declared-name range lies inside the item and spells the item's name. The fuzzer needed
-  1,200 iterations to stumble on a jump that landed on the wrong token. This assertion would catch it
-  on the first fixture that uses `->`.
-- HIR expression ranges and naming binding ranges lie inside their item's range.
-- The occurrences returned by references and rename are all spelled alike. The IDE battery checks
-  this locally. Promote it so that every caller is covered.
-
-### Add more relational oracles
-
-The IDE battery asks what must hold between answers (`testing.md`, "The editor features"). Two
-relations nobody asks yet, each one extra call with no expected output:
-
-- hover at the definition target names the same symbol as hover at the cursor;
-- completion at a name's first character offers that name;
-- the link a hover carries is one of the targets "go to definition" gives. `hover_definition`
-  resolves a name by its own copy of `expression_target`'s rules, and a default pass of the battery
-  with this check finds about ten disagreements: `x[[1]] <- 3` with the cursor on `x` links the hover
-  to the statement while the definition is empty; the others, in generated projects of several
-  files, are not reduced. The end shape is one resolution (`target_at`) that the hover's link
-  reads, with the check in the battery.
+- A member after `$` or `@` whose receiver has no known type is exempt from "completion offers what
+  resolves": `Gen <- setRefClass("Gen"); Gen$new` links the hover of `new` to the `setRefClass`
+  stub while completion offers only names spelled after a `$` elsewhere. The end shape types the
+  generator, so both read its members.
+- A stub's namespace exports hold its `@type` names beside its values, so `base::condition`
+  validates as an export although `condition` is only a class.
+- An unresolved name's definition offers the default packages although their export manifests
+  rule the name out: in `if (condition) 1`, hover and go to definition list `condition` as
+  installed in base, stats, utils, methods, graphics, grDevices and datasets.
+- A project `stubs/*.Rtypes` that declares `@type X` for a namespace without an `.exports` manifest
+  does not make a bare `X` resolve as a value (`unresolved`), since `@type` names stay out of the
+  value declarations.
 
 ### Run the pinned CRAN corpus as a test, one project per package
 
-`scripts/corpus-manifest.txt` pins 69 packages, but `corpus/` is gitignored and nothing fetches it.
-The review in the next section found two arms silently contributing zero inputs for that reason.
-Twenty packages found five distinct crashes in ten minutes of wall clock. Two details decide whether
+`scripts/corpus-manifest.txt` pins 69 packages, but `corpus/` is gitignored and nothing fetches it,
+so `fuzz_corpus_seeded` in `syntax` and `format` mutates the in-tree programs instead. Twenty packages found five distinct crashes in ten minutes of wall clock. Two details decide whether
 the arm is worth running:
 
 - Each package must be its own project, with one `ry.toml` and its own `R/`. The defects live on the
@@ -1684,17 +1676,6 @@ coverage is unmeasured: the figures on record (`parser.rs` 87%, 60 diagnostic sh
     `crates/ide/src/ide.rs` covers a backticked name with an escape for a global, and the S4
     target and the own-package `pkg::name` branch have the same text test without it (not
     reproduced).
-- **Two arms silently contribute no inputs.** `corpus/` does not exist and nothing in CI or the
-  justfile fetches it, so `fuzz_corpus_seeded` in `syntax` and in `format` returns early. That is
-  about 1,050 budgeted inputs that never run, behind a skip line `cargo test` hides. It is the same
-  "green means nothing ran" species the `FIXTURE_FILTER` guard already fixed.
-- **Two surfaces have no fuzz coverage at all.** Generated `.Rtypes` text never reaches the stub
-  loader, which leaves `stubs.rs` at 60.67%. `PackageMetadata` appears in no harness.
-- **The review's fourth item here was wrong, and the correction is the useful part.** It reported
-  `syntax::literate::r_source_of_literate` as having no test of any kind. It has eight unit tests,
-  and three of them already assert the byte-length invariant, including one for multibyte prose. The
-  real gap was only that the invariant was pinned on four hand-written documents rather than over
-  generated input, which the `syntax` battery now closes.
 
 ## Open: what each hour of fuzzing compute buys
 
@@ -1708,25 +1689,14 @@ at 68.8 s, and `crates/ry`, which is the only thing CI runs, at 22.4 s.
 This review disagrees with the input-generation review above, and the disagreement is real. That one
 wants the generated arms shrunk across the board. This one measures per-arm cost and wants `syntax`
 and `format` grown, at 0.19 to 0.31 ms per input, while `ide` and `semantics` shrink, at 257 to
-644 ms per input. Both conclude independently that `format::fuzz_random_bytes` should be deleted.
+644 ms per input.
 
-### The live CI runs 171 of the workspace's tests
+### The blocking gate re-samples the same fixed window of each generator
 
-The live workflow tests only `crates/ry` (`default-members`). Its staged replacement in
-`.github/pending/workflows/ci.yml` runs `just gate`'s recipes over the whole workspace and no
-ignored suite, so a human moving it into place closes this (`decisions/tooling-bench-ci.md`, "CI runs `just gate` against GNU R 4.6.2, and nothing ignored").
-
-### This is not a fuzzer, it is a fixed 498-program corpus re-derived at 124 s a run
-
-Every generator seeds `SplitMix64` from compile-time constants with no entropy. Two runs of the
-semantics generator produce an identical set of 498 distinct programs, while drawing 100,000 times
-from the same generator reaches 87,203 distinct programs. The default budget samples 0.57% of its
-own generator's reach and re-samples exactly that 0.57% forever.
-
-Split the two jobs it conflates. Keep a small fixed-seed arm as the regression net it actually is.
-Give the exploratory arms a `FUZZ_SEED` environment variable defaulting to random, print the seed on
-every failure, and run them on a schedule rather than in the blocking gate. Do not randomize the
-blocking gate, because a failure surfacing on an unrelated change is a worse trade.
+The gate runs seeds `0..default`, about 0.57% of the semantics generator's reach (498 distinct
+programs per run against 87,203 in 100,000 draws). `FUZZ_SEED` and `FUZZ_ITERS` move the window,
+but nothing runs a fresh window on a schedule. Keep the gate fixed, because a failure surfacing on
+an unrelated change is a worse trade, and give a scheduled job a fresh base (`just fuzz-deep`).
 
 ### The syntax arm is the best asset in the test architecture and gets 0.5% of the budget
 
@@ -1758,65 +1728,17 @@ completion fix.
 
 Building the four release test binaries costs 143 s warm.
 
-The semantics figure has one root cause, measured directly. `install_shipped_stubs` is 0.4 ms,
-because it sets an input, but a fresh database plus stubs plus a render is 118.2 ms against 5.0 ms
-without stubs. That is 113.2 ms of stub re-parse per fresh database.
-`check_semantics_invariants` builds three fresh databases per input, at 394.8 ms, so 86% is stub
-re-parse, and 97.7% in release. A render on a warm shared database is 3.8 ms, which is thirty times
-cheaper. An earlier fix reduced the database count from four and the ratio barely moved, because it
-was never about database count alone.
-
-Run the fuzz targets in release from `just gate`, and make a shared database the default arm, with
-fresh ones only where determinism or incrementality genuinely needs them.
+The `fuzz` profile (`iterate` with debug assertions and overflow checks) runs `fuzz_sessions` about
+ten times as fast as debug. `just fuzz-deep` builds the analysis crates with it; `just gate` and
+`just battery` build in debug, and the runtime suites need `target/debug/ry`, so only the analysis
+crates can move.
 
 ### Coverage-guided fuzzing has no ratchet, so nothing it learns survives the run
 
-`fuzz/` does compile on stable today. `cargo check --all-targets` inside it takes 75 s cold with an
-isolated target directory and 1.6 s warm, so the compile-rot risk flagged earlier is real but has
-not happened.
-
-`scripts/seed-fuzz-corpus.rs` writes 1,416 files and 5.7 MB into each of three corpora in 2 s, but
-it globs `.Rtypes` under `crates/`, where there are none. All 11 `.Rtypes` files, and 33 `.exports`
-files, live in the top-level `types/`. It therefore seeds no stub files, none of the 1,967 mined
-`programs/*.R.corpus` programs, and it never looks at `corpus/`. Its own doc comment claims it
-adds the shipped stubs, and the testing page repeats that. Both are false.
-
-`fuzz/corpus`, `fuzz/artifacts` and `fuzz/Cargo.lock` are gitignored and no job persists them, so
-every run restarts from the same seeds and rediscovers the same shallow frontier. `REGRESSIONS`
-exists in `format` with 21 entries and in `semantics` with 2, and in neither `syntax` nor `ide`.
-Both constants were last modified about 60 commits ago, so the pinning path works, at 0.12 s for
-`format` and 0.94 s for `semantics`, and is simply not being fed.
-
-In value order: persist the corpus, fix the seeder to read `types/` and
-`crates/syntax/tests/programs/`, and add the 1.6 s `cargo check` of `fuzz/` to the gate.
-
-The gitignored `fuzz/Cargo.lock` is also a trap. A fresh resolution can pick a `salsa-macro-rules`
-that does not match the exactly pinned `salsa`, and `semantics` then fails to compile inside `fuzz/`
-with "missing hash in implementation" on every interned struct. Commit that lockfile, or seed it
-with `cargo update --precise` from the workspace lock.
-
-### The one failure mode fuzzing exists to catch is the one that prints no input
-
-`catch_unwind` appears once in `syntax`, once in `format`, twice in `semantics` and not at all in
-`ide`. In `syntax` and `format` the single wrapper is on the program-corpus arm only.
-
-Every `assert!` in `check_parse_invariants` and `check_format_invariants` embeds `{input:?}`, so an
-assertion failure replays fine. A genuine panic inside a generative arm prints a backtrace with no
-input, and a stack overflow aborts printing nothing. A stack overflow is a live risk the harness
-itself acknowledges, through `deep_nesting_is_refused_not_fatal`.
-
-This is recoverable today only because the seed is fixed, and that property disappears the moment
-`FUZZ_SEED` lands, so this has to land with it. The semantics fuzz harness's `run_single_file` is
-the correct pattern and is already in the tree.
-
-### Two arms are silently dead and one is 99% wasted
-
-`syntax::fuzz_corpus_seeded` costs 0.11 s and `format::fuzz_corpus_seeded` costs 0.16 s, which is
-process startup only. Both skip through an `eprintln!` the blocking job never displays.
-
-`format::fuzz_random_bytes` reaches the formatter body 14 times in 1500, which is 0.9%, against
-token soup's 90. So 1,396 of its 1,500 iterations only re-test a refusal path `syntax` already
-covers on the same generator. Drop it and give the budget to `fuzz_seed_mutations`.
+`fuzz/corpus` and `fuzz/artifacts` are gitignored and no job persists them, so every run restarts
+from the seeds `scripts/seed-fuzz-corpus.rs` writes and rediscovers the same shallow frontier.
+Persist the corpus, and add the 1.6 s warm `cargo check` of `fuzz/` to the gate (75 s cold), since
+nothing but `just fuzz-all` compiles it.
 
 ### Radical alternatives, costed
 
@@ -1826,21 +1748,17 @@ covers on the same generator. Drop it and give the budget to `fuzz_seed_mutation
   30 minutes a night on a free runner. Worth it only with persistence. Without it, that is 30
   minutes a night rediscovering the same frontier. A human has to add it, because it needs workflow
   scope.
-- **OSS-Fuzz.** The three targets are already thin wrappers over exported batteries, so it is a good
-  fit. Do it only after the replay path, meaning `catch_unwind` plus seed printing, and the pinning
-  path exist. Otherwise reports arrive with nowhere to go.
+- **OSS-Fuzz.** The targets are thin wrappers over exported batteries, and the replay and pinning
+  paths exist, so it is a good fit.
 - **`cargo-llvm-cov` over the batteries.** Not attempted. The saturation curves above answer the
   same question in about 7 s. Reach for llvm-cov when deciding which invariants to add, not how many
   iterations to run.
 
 ### Who lands what
 
-An agent can land all of these today: completion sampling, the release profile in `just gate`, the
-syntax budget raise, `catch_unwind` plus seed printing, `FUZZ_SEED`, the seeder fix, the `fuzz/`
-type-check guard, and the dead-arm cleanup.
-
-A human is required for three things: moving the staged workflows in `.github/pending/` into place,
-which needs workflow scope, any scheduled fuzz job and its corpus cache, and an OSS-Fuzz submission.
+An agent can land completion sampling, the release profile in `just gate`, the syntax budget raise
+and the `fuzz/` type-check guard. A human is required for a scheduled fuzz job with its corpus
+cache and for an OSS-Fuzz submission, which need workflow scope or an account.
 
 ## Open: robustness harnesses
 
@@ -2013,33 +1931,6 @@ triggering shape is unknown. Do not guess at it. The `unused` warning has severa
 script liveness, the package top level, parameters, and the interaction with `shadows-namespace`. A
 fix aimed at the wrong one is worse than none. Ask for the snippet before working it.
 
-## Open: diagnostic wording is not styled consistently
-
-Six findings shown side by side in the README read as though five people wrote them. Three
-`type-mismatch` messages are lowercase sentence fragments. `Unexpected comma after last argument` and
-`Use TRUE, not T, for Boolean values` are capitalized, and the second is imperative. ``` `tmp` is
-assigned but never used. ``` is the only one carrying a full stop. A README reviewer caught it,
-noticing that the page claims a finding says the same thing everywhere while the sample visibly
-disagrees with itself.
-
-**The obvious rule does not survive measurement.** Across 62 message literals in `diagnostics.rs`,
-36 are lowercase with no period, 14 are lowercase with a period, and 9 are capitalized. So
-"lowercase fragment, no period" is the plurality and nothing like a convention. It also cannot be
-applied blanket, because the capitalized ones are capitalized for a reason. `R's $ operator` opens
-with a proper noun, and three messages are first-person sentences: `I could not resolve ...`,
-`I do not know the type ...` and `I cannot construct an infinite type`. Lowercasing those yields
-`r's` and `i could not`.
-
-The rule that fits the corpus has two shapes. A message that is a complete sentence is sentence-cased
-and ends with a period. A message that is a fragment, which is the expected-and-found family, is
-lowercase with no period. Under that rule the real violations are far fewer than "five people wrote
-them" suggests, and are mostly sentences missing their period.
-
-This is unblocked. The reporter change that re-captured every rendered sample has landed, so
-rewording a message now invalidates only the samples that quote it. Those samples have to be
-re-captured in the same change. There is no harness for that yet, so it is a manual pass over the
-pages named in the next item.
-
 ## Open: findings from the second simulated-user round
 
 Five simulated users each worked on a distinct project of their own writing, learned the tool from
@@ -2047,113 +1938,28 @@ the docs alone with no source access, and tried to reach a clean run. The report
 `users/feedback-*.md` files from that round. What follows is what is still open, by theme, with the tester who found it
 named where their judgment is the point.
 
-### A clean run still does not mean enough
-
-Every tester reached this conclusion independently, and it is the round's headline. The Shiny
-dashboard tester finished with exit code 0 and five real bugs still in the code. The ETL engineer
-would not use `typing = true` as a merge gate, not because it is noisy but because "after these, a
-green run doesn't yet mean what it needs to mean at 3am". The Quarto analyst would have been "fully
-off by end of day, never knowing the default checks were not running".
-
-Two holes of that kind are still open.
+### Still open
 
 - **A package with no manifest still buys the blanket tolerance.** Fifteen manifest-only CRAN
-  namespaces now close the common case, but a package a user names, such as `janitor`, still
-  switches unresolved detection off project-wide. The remedy is a two-line project stub, and the
-  limitations page says so on the user-facing side.
-- **A column name inside `DT[...]` is never validated.** `orders[, net := gross_ammount * 1.19]`
-  and `by = currrency` are both silently accepted, while the only name that did report was a correct
-  one. That is exactly inverted: silent where the typo is real and noisy where the name is right.
-  `limitations.md` should say plainly that column names are never validated.
-
-### Two configuration defects that break CI
-
-- **Setting `[check] exclude` disables the built-in `renv/` and `packrat/` skip.** With no key the
-  walk finds 1 file. With `exclude = []` it finds 1 file. With `exclude = ["nothing-here/"]`, which
-  matches nothing, it walks renv and packrat both. The docs' own example, `exclude = ["scripts/"]`,
-  would drag an entire renv library into CI. A user-supplied list must extend the vendored defaults
-  rather than replace them.
-- **Any file in `stubs/` deactivates the shipped conditional namespaces.** One stub for an unrelated
-  package made 19 `data.table::` calls unresolved while bare `fread` still resolved, and it made
-  `data.table` unusable as an annotation type name, which silently suppressed a real type error.
-
-### The traits tripwire, tripped a fifth time
-
-A `<T: numeric>` bound admits a `Date`, and the body's arithmetic then fails in R. A helper
-annotated `#: <T: numeric> fn(a: T, b: T) -> T` and called as `add_them(d1, d2)` is accepted, while
-the direct `d1 + d2` is correctly rejected with ``\`+\` is not defined between \`Date\` and \`Date\```.
-A one-line helper therefore launders a real error.
-
-The mechanism is the `declares_arithmetic` relaxation: a class that declares any arithmetic method
-satisfies `Numeric` wholesale. That does not follow. `Date` declares `+.Date` for `Date + integer`
-and has no `Date + Date`.
-
-A constraint meaning "supports this operator with these operands" replaces both this relaxation and
-the operand tie. Do not patch it again. Design it.
-
-One related leak: `sort`, `head` and `rev` on dates report ``found \`T[]\```, which leaks an unbound
-type variable.
-
-### Nominal subtyping, which is the same deferred design as S4 and R6 inheritance
-
-`data.table` is rejected where `data.frame` is expected, and the wrong direction is accepted.
-`needs_df(data.table(a = 1L))` is legal R and reports `expected data.frame, found data.table`, while
-`needs_dt(data.frame(a = 1L))`, the direction that really is wrong, reports nothing. R's class vector
-for a data.table is `c("data.table", "data.frame")`.
-
-`TyKind::Named` matches by exact name and nothing in the compatibility relation carries a hierarchy.
-The tractable corner is a declared, acyclic nominal-extends-nominal relation in the stub vocabulary.
-Do it as that design, not as a data.table special case.
-
-### `Date` does not survive real code
-
-It survives `d + 1L`, `d2 - d1`, `d1 < d2`, `format`, `seq.Date` and a `while` cursor. It is lost to
-`Unknown` through `dates[i]`, `dates[mask]`, `for (d in dates)` and `Reduce`. It is wrong through
-`min` and `max`. The same bug is therefore caught in one place and missed in another: `cursor + cursor`
-after a `while` loop is flagged, and the identical `d + d` inside `for (d in dates)` is not. No doc
-describes this boundary.
-
-Two related gaps. `#: @type TradeDate {Date}` disables all Date arithmetic, so `settle - trade` is
-rejected, which kills the guide's own recipe for domain types over dates. The working route is a
-project `.Rtypes` declaring `-.SettleDate`, which the guide never mentions, and a stub cannot see an
-inline `@type` anyway. Separately, `Date[]` is inexpressible, and `Days + Days` yields `double`, so a
-units tag dies on arithmetic.
-
-### Strict mode's own advice does not work
-
-The message says to add a type annotation, and no annotation form silences it. `#:`, `@if-unknown`,
-`@trust` and `#: Any` all still report, and the last contradicts the reference directly. Only
-`# ry: allow(strict)` works.
-
-### Missing type-system coverage, each with its repro
-
+  namespaces close the common case, but a package a user names, such as `janitor`, switches
+  unresolved detection off project-wide. The remedy is a two-line project stub, and the limitations
+  page says so.
+- **`Reduce(f, dates)` is rejected** (``expected `list[T] | T[]`, found `Date` ``). A `Date`
+  candidate on `Reduce` was measured: every wrapper over an open argument then loses its signature
+  (`function(xs) Reduce(`+`, xs)` degrades from `fn(xs: list[double] | double[]) -> double` to an
+  open `T`), because two candidates narrow differently. It waits for `Date[]`, which is
+  inexpressible, like `Days + Days` giving `double`.
 - **A parameter's type is not seeded from its default value.** `f <- function(s = settings) s$hsot`
-  is missed while `settings$hsot` and a local alias are both caught. The obvious fix generates false
-  positives, so this needs the design rather than a patch. Binding the parameter to its default's
-  type makes every caller passing anything else wrong, and reporting the field against the default's
-  shape breaks the commonest idiom of all, `function(x = list()) x$name`, where the default is an
-  empty accumulator and callers supply the real record. R answers `NULL` there, so an error would be
-  plain wrong. The honest model is that such a parameter is the default's type unioned with whatever
-  callers pass, which is still open, so a field access on it should be at most `T | NULL`, the same
-  rule the accumulator fix established for unions. Recovering the tester's case needs to know the
-  argument is never supplied anywhere, which is whole-program information the checker does not have.
-  Leave it missed rather than trade it for the class of false positive this round spent its time
-  removing.
-- **`&` and `|` are unmodelled**, so `TRUE & FALSE` is `Unknown` and every logical mask kills
-  downstream checking. The reference documents `&&` and `||` with no counterpart, and the only
-  mention of `&` is a parenthetical inside the non-standard-evaluation discussion.
-- **A maybe-`NULL` value is only caught by arithmetic.** `toupper`, `nchar` and `substr` on a
-  `character | NULL` all pass, despite the guide promising this class of check.
-- **Recursion defeats `is.logical()` narrowing.** The identical non-recursive function is clean.
+  is missed while `settings$hsot` is caught. Binding the parameter to its default's type breaks
+  `function(x = list()) x$name`, where callers supply the real record and R answers `NULL`. The
+  honest model unions the default with what callers pass, so a field read is at most `T | NULL`.
+  Recovering the tester's case needs whole-program knowledge that the argument is never supplied, so
+  it stays missed rather than traded for a false-positive class.
 - **`$` on an unannotated parameter constrains nothing**, so the parameter accepts anything.
-- **`#: @new` does not stop `structure()` being a strict origin**, so the documented S3 remedy fails
-  at exactly the site it exists for.
-- **S3 generic and method signature consistency is unchecked.** Both planted violations were missed,
-  and `R CMD check` catches both. ry already does the rarer undefined-export check.
-- **`vapply(x, f, numeric(1))` errors whenever the callback is not statically `double`.** R accepts
-  a wider template, which the tester confirmed with `ry run` on
-  `vapply(1:3, function(i) i, numeric(1))`.
-- **A function name inside `mutate` and `filter` is swallowed** along with the column names.
+
+Not a defect, recorded so it is not re-filed: `toupper`, `nchar` and `substr` on a
+`character | NULL` pass, because R returns `character(0)` (or `integer(0)`) for `NULL` there, so a
+report would be a false one.
 
 ### Two lints need a model change rather than a patch
 
@@ -2169,34 +1975,16 @@ The message says to add a type annotation, and no annotation form silences it. `
   class and a testthat suite, in the package author's words. Two of the three causes are fixed. The
   shadow lint above is the third.
 
-### Formatter and message defects
+### Two format questions left from the round
 
-- **`m[i, , drop = FALSE]` becomes `m[i,, drop = FALSE]`**, which removes the space that makes the
-  empty dimension slot visible, in exactly the code where miscounting slots is the bug. It is
-  idempotent, so it is deliberate, and it is undocumented.
-- **Any `X[Y]` annotation reports "only one compact annotation fits in a `#:` block, separate the
-  annotations with a blank line" when there is only one annotation.**
-- **The unknown-type and duplicate-definition messages name only `@type` or `@alias`**, although a
-  definition may also be written inline as `type` or `alias`.
 - **A bodyless abstract type (`@type Dict<K, V>`) is a stub-format form only.** If project files ever
   accept it, the inline `type Name<K, V>` must accept a missing `= TYPE` in the same change, so the
   two spellings stay one grammar.
-- **"Add inferred type annotation" is offered on `x <- @UserId(1L)`**, where the constructor already
-  states the type.
-- **An unclosed chunk reports the tester's English prose as an unresolved variable** rather than the
-  missing fence.
-
-### Documentation gaps the round hit
-
-- The adjacency rules say a plain `#` comment breaks `#:` attachment and never mention `#'`. So
-  interleaving `#: @param` with roxygen's `#' @param`, which is the first thing a roxygen user
-  tries, fails.
-- The guide never shows `...` or `[optional]` in an annotation, and every S3 method needs both.
-- `configuration.md` omits `DESCRIPTION` as a project root marker, and a three-line `DESCRIPTION`
-  with `Imports:` was what fixed 30 of the ETL engineer's 34 first-run warnings. The path the docs do
-  recommend, hand-writing `stubs/*.Rtypes`, cost five files, fixed less, and was actively harmful.
-- The guide's showcase uses `list(...)`. Swapping it for `read.csv()` makes the identical mistake
-  report nothing, and the page calls that the whole pitch with no caveat at the point of contact.
+- **An unclosed literate chunk reports the prose after it as unresolved names** rather than the
+  missing fence. Deferred because analysis sees only the blanked script that
+  `r_source_of_literate` produces, so semantics cannot see a fence: the fix needs the hosts (the
+  CLI's `analysable_source` and the server) to report literate findings of their own. The fix then
+  reports the missing fence at the opening one and ends the chunk at the next chunk start.
 
 ### What the round praised
 
@@ -2293,16 +2081,11 @@ Three independent black-box adoption reviews simulated real projects from the do
 only, with no source access. They were an analysis-script user, a CRAN package author and a
 numerical-computing user, and they converged on the same walls. What remains is below, ranked by how often a real user hits it.
 
-### The apply family is unblocked but still untyped where its result shape depends on a value
+### `tapply` and a non-scalar `sapply` return `Any`
 
-Overload selection with a flexible argument works now, through fact-versus-guess probing that
-`decisions/syntax-semantics.md` records. `sapply`, `mapply`, `Map` and `tapply` stay `Any`, because `simplify = FALSE`
-and a vector-returning callback change the result shape without changing any argument type, so no
-overload set can discriminate them.
-
-The reachable win is typing only their parameters and leaving the return `Any`. That costs R's
-function-name-as-string form, so `sapply(x, "length")` would be rejected, as it already is for
-`lapply`.
+`sapply` and `mapply` follow the callback's return when it is scalar-like or `simplify = FALSE`.
+A vector-returning callback gives a matrix in R, and `tapply` gives an array shaped by the groups,
+so both wait for the matrix-shape design below.
 
 ### The three object systems, re-measured
 
@@ -2323,24 +2106,16 @@ Two of the four claims this entry used to make were stale, including the one it 
   deliberate. What is actually missing is typed declarations. The class, its fields and its methods
   are `Unknown`, so `obj$typo()` is silent and completion after `self$` offers every record field in
   the workspace.
-- **Still true: an S4 slot typo is silent.** `setClass("A", representation(x = "numeric"))` followed
-  by `new("A", y = 1)` reports nothing, where R halts with `invalid name for slot of class "A": y`.
-  `x@slot` has no type either, and `setClass`, `setMethod` and `new` are `Any` stubs.
+- **Still true: S4 slots have no types.** `x@slot` is `Unknown`, and `setClass`, `setMethod` and
+  `new` are `Any` stubs. `new("A", y = 1)` with no slot `y` is reported (`s4.rs`).
 - **Still true: `UseMethod` is not modelled**, so a generic call is `Unknown`, and
   `structure(list(...), class = "dog")` produces a plain record, so the class attribute is data. S3
   operator dispatch is real, because `+.Date`, `Arith.X` and `Ops.X` are built and dispatched, and
   the linter knows `generic.class` names.
 
 All three systems are recognized structurally by the IDE outline, in `classify_symbol_call`, which
-is where the type-side work can start. The fix order, cheapest real win first, is the S4 slot-name
-check, then R6 class typing, then S4 slot types, then `UseMethod`.
-
-The slot check is bounded, because `setClass` names the slots and `new("Class", ...)` names its
-arguments. But `contains =` is the trap. A subclass legitimately takes its parent's slots, verified
-against R, where `setClass("C", contains = "P", ...)` followed by `new("C", x = 1, y = 2)` runs. A
-check that does not follow the inheritance chain therefore turns correct code into a false positive.
-Both the `representation(...)` and the `slots =` form need reading, and a class assembled
-dynamically must fall back to silence.
+is where the type-side work can start. The fix order, cheapest real win first, is R6 class typing,
+then S4 slot types, then `UseMethod`.
 
 ### Matrix shape is untracked
 
@@ -2351,12 +2126,6 @@ same shape of problem.
 
 One trap came out of the work that returned the `matrix` nominal: making a constructor return a real
 nominal without also declaring that class's operator methods turns every `m + 1` into a false error.
-
-### Everything from a `data.frame` is `Unknown`, and `Unknown` satisfies every annotation
-
-On data-frame-heavy code, annotations therefore look protective and are not. This is the design
-consequence that decides the tool's value for analysis users. It needs at minimum a way to see that
-a check was skipped, which is what strict mode does once it reports origins.
 
 ### An unannotated helper that wraps an operator over a class fails, and the tie is why
 
@@ -2373,41 +2142,26 @@ This is the same third-constraint-kind question recorded above and in
 place of `Numeric`, replacing both the tie and the `declares_arithmetic` relaxation. The next stub
 corpus addition that returns a real nominal will trip it again.
 
-### A project's own `%op%` stays untyped by design
-
-The result is `Unknown`, which is a strict-mode origin. It may be a non-standard-evaluation wrapper
-whose right operand is quoted, as magrittr's `%>%` is, and checking that as an ordinary call would
-reject correct code.
-
-Lowering `%op%` to the call it is, following the documented `|>` precedent, would type it and give
-goto-definition and references on the operator. Weigh that against the non-standard-evaluation risk
-and the `unresolved` finding a bare-script `%>%` would gain.
-
-### Only the stub route to an operator method on a project nominal is blocked
-
-Declaring the method as an annotated R function works, and that is what an author writes anyway for
-a real S3 class. The gap is narrower than "operator methods need ergonomics". A `.Rtypes` stub
-cannot see a `@type` the R source declares, reporting instead that the declaration does not load
-because it does not know the type. So only the stub spelling is unreachable.
-
-Decide whether a stub source should see a project's `@type` declarations at all, or whether the
-R-side declaration is simply the answer and the docs should say so.
-
-### The stronger suppression form
-
-A type error inside `expect_error(...)` stays reported, and `# ry: allow(type-mismatch)` is the
-answer. `decisions/syntax-semantics.md` holds the record and the diagnostics page documents it. The open follow-up is
-the stronger form, which is a suppression that reports when the expected finding does not appear,
-like `@ts-expect-error`. That is a feature for every code, not a special case.
-
 ### Smaller items, each with a one-line repro in the reports
 
-- A message leaks an unbound type variable, as `list[T] | T[]`, and expands an alias on only one
-  side of an expected-and-found pair.
-- Closure re-entry is unmodelled, so the memo idiom
-  `if (!is.null(cache)) return(cache); cache <<- v` yields `T | NULL`.
-- There is no `--fix`, no stdin input, and no CLI way to ask what type an expression has, which
-  makes debugging an inference surprise guesswork for a CLI-only user.
+- A message expands an alias on only one side of an expected-and-found pair (no repro yet on a
+  valid `@alias`). A type variable in an expected type, as `Find(f, mean)` printing
+  ``expected `list[T] | T[]` ``, is kept: it says what the parameter accepts.
+- The memo idiom `if (!is.null(cache)) return(cache); cache <<- v` is precise inside a factory
+  (`fn() -> integer`), but a script's top-level `cache` written by `<<-` stays `integer | NULL`,
+  because joining would make a binding's type depend on every item that writes it.
+- There is no stdin input for `ry check`.
+- `Reduce(function(a, b) max(a, b), dates)` is a false error (``expected `list[T] | T[]`, found
+  `Date` ``), because a nominal vector has no element type. A `Date` candidate in the stub fixes it
+  but leaves an unannotated `Reduce(f, x)` over a parameter undecided, so `x` loses its
+  `list[T] | T[]` type. The fix is letting a class with a `[[.Class` method match `T[]`.
+- A project's own top-level `new` is still held to `setClass` slots, because the diagnostics pass
+  sees only local shadowing (`diagnostics.rs`, the `new()` loop).
+- A `# ry: expect(code)` inside a string literal counts as a directive, as every `#` on the line is
+  tried, so it can raise `unfulfilled-expect`.
+- `sapply` over a zero-length input is `list()` in R but types `T[]`.
+- A project `%op%` that captures an operand with `match.call`, `enquo` or `enexpr` instead of
+  `substitute` is checked as a call.
 
 Two items from the reports were checked and are not defects, recorded so they are not re-filed. A
 generic parameter rejecting a non-`NULL` default is correct, because `<T> fn(x: T, [fallback]: T)`
@@ -2421,12 +2175,6 @@ the space serves, and the `trailing-comma` lint reports the mistake.
 
 ## Open: semantics
 
-### A `#:` comment after a type definition annotates the next binding
-
-After `type P = Record{x: double} #: integer`, the line `p: P <- ...` reports
-`annotation-mismatch` against `integer`. The comment should annotate nothing, or be reported
-where it stands.
-
 ### A list operation over a record still loses the field types
 
 `rev`, `unique`, `head`, `tail` and `Filter` declare a `list[named: T]` candidate ahead of the plain
@@ -2438,21 +2186,6 @@ Only a shape-mirroring return, meaning "the same record", fixes it, and the type
 for a stub to say that. `rev` is the case where that claim would be exactly right, because it
 reorders and drops nothing, while `head`, `tail` and `Filter` genuinely may drop a name and are
 correctly nullable. This is the same family as the data.frame row-type and matrix-shape designs.
-
-### One residual on annotating a lambda
-
-Reporting that an annotation in a call's argument list is silent does not give the lambda parameter
-an annotatable position. That stays the one genuine expressiveness argument for inline type syntax,
-which `development/design/inline-type-syntax.md` records. The message says to lift the function to
-its own binding, rather than to move it up a line, which would annotate the wrong thing.
-
-### `Unknown` is both the gradual top and the recursion fixpoint's seed
-
-The fixpoint starts every member at `Unknown`, so a join must keep the other side of an `Unknown`
-branch, or recursion never sharpens. That is why `if (c) 1L else untyped()` is `integer` rather than
-`integer | Unknown`, and the reference says so. Absorbing `Unknown` at joins, which is the gradual
-reading, broke recursion convergence when it was tried. The clean fix is a separate bottom for the
-seed, so a join can absorb a genuine `Unknown` while the fixpoint starts from nothing.
 
 ### Overload candidates worth adding when the area is touched
 
@@ -2544,39 +2277,11 @@ sources.
 
 What follows is what the review left open.
 
-### The parser accepts escape sequences R rejects
-
-The lexer's string scanner skips any escaped character wholesale, with a comment calling escape
-validity a semantic concern. No semantic layer checks it, so every malformed escape is silently
-accepted. Verified with R as the referee: `"\u{1F600}"` has five hex digits and `\u` takes at most
-four, so R refuses it with `invalid \u{xxxx} sequence` while ry reports nothing.
-
-R's rules to implement are `\x` with 1 to 2 hex digits, `\u` with 1 to 4 hex digits either bare or
-braced, `\U` with 1 to 8 hex digits either bare or braced, `\0` through `\7` as octal with 1 to 3
-digits, the named escapes, and `unrecognized escape in character string` for anything else.
-
-The fixture case `syntax/tests/syntax::quoting__escape_soup` sits in
-`crates/syntax/tests/in-tree-acceptance-allowlist.txt` labelled as this gap. Implementing the check
-should remove that entry and re-bless the case.
-
 ### One surface has no oracle at all
 
 `PackageMetadata` is referenced by no fuzz arm, so the attach tolerance, `imports_every_name` and the
 whole NAMESPACE and DESCRIPTION layer are dark to fuzzing. Fixtures cannot reach them either. Only
 `crates/ry/tests/test_cli.rs` can.
-
-### Oracles that hold, each measured, none of which found a bug
-
-These are coverage the fuzzers lack. Each is worth adding on its own terms.
-
-| oracle | result | cost |
-|---|---|---|
-| **Middle edits** through incremental equivalence. The in-tree arm replaces whole text and the cargo-fuzz target truncates and appends, so neither covers a common prefix and suffix together. | 568 checked, none divergent | 9 s |
-| **Project-file-set churn.** No arm ever changes `ProjectFiles`, though hosts add and remove files constantly. | 120 removals, none divergent | 2 s |
-| **Parallel against sequential** on generated input. `ry check` really does fan out, and `test_parallel.rs` covers three hand-written programs. | 30 runs over 8 files, none divergent | 0.9 s |
-| **Two-wave superset.** A `parse_stage_diagnostics` finding that vanishes from `file_diagnostics` is an editor flicker, and this is asserted only for hand-written cases. | 3,159 sources, none lost | 25 s |
-| **Leading-comment metamorphic.** | 2,197 compared, none divergent | 36 s |
-| **Alpha-rename metamorphic.** 3 of 1,162 hits, all three the transform's own fault: an edit-distance suggestion, a stub-shadowing name, and string-form binders an IDENT-only rename missed. A capture-avoiding transform hit 0 of 994. | usable only with the filters | 20 s |
 
 ### One hypothesis killed
 

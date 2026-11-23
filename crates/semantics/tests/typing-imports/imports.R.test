@@ -9,7 +9,7 @@ f: <T> fn(x: T) -> data.table
 f <- function(x) setDT(x)
 #++++
 f: <T> fn(x: T) -> Unknown
-17..22 warning[unresolved] I could not resolve `setDT` in this package, its imports, or builtins.
+17..22 warning[unresolved] I could not resolve `setDT` in this package, its imports, or builtins
 
 #---- imports_in_both_branches_of_a_namespace_if_count
 #namespace if (.Platform$OS.type == "windows") { importFrom(data.table, setDT) } else importFrom(data.table, fread)
@@ -36,7 +36,7 @@ f: <T> fn(x: T) -> Unknown
 f <- function(x) zzz_not_exported(x)
 #++++
 f: <T> fn(x: T) -> Unknown
-42..58 warning[unresolved] I could not resolve `zzz_not_exported` in this package, its imports, or builtins.
+42..58 warning[unresolved] I could not resolve `zzz_not_exported` in this package, its imports, or builtins
 
 #---- r6_injects_self_and_private_into_method_bodies
 #namespace importFrom(R6, R6Class)
@@ -67,7 +67,7 @@ f <- function(x) zzframboz(x)
 #++++
 Any
 f: <T> fn(x: T) -> Unknown
-291..300 warning[unresolved] I could not resolve `zzframboz` in this package, its imports, or builtins.
+291..300 warning[unresolved] I could not resolve `zzframboz` in this package, its imports, or builtins
 
 #---- attaching_a_different_unstubbed_package_still_tolerates
 #description Package: tallyr
@@ -76,7 +76,7 @@ f <- function(x) zzframboz(x)
 #++++
 Any
 f: <T> fn(x: T) -> Unknown
-64..73 warning[unresolved] I could not resolve `zzframboz` in this package, its imports, or builtins.
+64..73 warning[unresolved] I could not resolve `zzframboz` in this package, its imports, or builtins
 
 #---- a_blanket_tolerance_still_reports_a_typo_of_the_project_s_own_name
 library(testthat)
@@ -124,7 +124,7 @@ g <- function(d) zzframboz(d)
 f: <T> fn(x: T) -> Unknown
 g: <T> fn(d: T) -> Unknown
 17..23 warning[unresolved] I could not resolve `lenght` in this package, its imports, or builtins. Did you mean `length`?
-44..53 warning[unresolved] I could not resolve `zzframboz` in this package, its imports, or builtins.
+44..53 warning[unresolved] I could not resolve `zzframboz` in this package, its imports, or builtins
 
 #==== ggplot2
 #---- a_plot_pipeline_types_end_to_end
@@ -146,6 +146,15 @@ build <- function(frame) ggplot(frame) + geom_poimt()
 #++++
 build: <T> fn(frame: T) -> ggplot
 71..81 warning[unresolved] I could not resolve `geom_poimt` in this package, its imports, or builtins. Did you mean `geom_point`?
+
+#---- a_plot_is_a_component
+#description Imports: ggplot2
+#: fn(component: gg) -> gg
+keep <- function(component) component
+kept <- function(df) keep(ggplot(df))
+#++++
+keep: fn(component: gg) -> gg
+kept: <T> fn(df: T) -> gg
 
 #---- a_non_component_is_not_addable_to_a_plot
 #description Imports: ggplot2
@@ -203,7 +212,7 @@ f: <T> fn(d: T) -> T
 f <- function(d) unshipped::mutate(d, x = 1)
 #++++
 f: <T> fn(d: T) -> Unknown
-17..34 warning[unresolved] unknown package namespace `unshipped`.
+17..34 warning[unresolved] unknown package namespace `unshipped`
 
 #---- a_shipped_package_may_be_read_by_qualification_alone
 f <- function(d) dplyr::mutate(d, x = 1)
@@ -216,12 +225,42 @@ f <- function(d) dplyr::filter(d)
 #++++
 f: <T> fn(d: T) -> T
 
+#---- a_called_name_inside_a_table_mask_still_resolves
+#description Imports: dplyr, tidyr
+f <- function(d) {
+  out <- dplyr::mutate(d, b = scale_it(a), c = mean(a), k = dplyr::n())
+  dplyr::filter(out, keep_row(a), dplyr::if_any(dplyr::starts_with("a")))
+}
+g <- function(d) tidyr::pivot_longer(d, cols = where(is.numeric))
+#++++
+f: <T> fn(d: T) -> T
+g: <T> fn(d: T) -> Any
+84..92 warning[unresolved] I could not resolve `scale_it` in this package, its imports, or builtins
+147..155 warning[unresolved] I could not resolve `keep_row` in this package, its imports, or builtins
+
+#---- a_masked_verb_reads_a_string_exclusion_as_tidyselect
+#description Imports: dplyr, tidyr
+drop_value <- function(d) dplyr::select(d, -"value")
+longer <- function(d) d |> tidyr::pivot_longer(cols = -"row", names_to = "column")
+negated <- function(d) with(d, -"value")
+#++++
+drop_value: <T> fn(d: T) -> T
+longer: <T> fn(d: T) -> Any
+negated: Unknown
+203..210 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+
+#---- a_called_name_inside_with_may_be_a_function_of_the_data
+#description Imports: dplyr
+f <- function(callbacks) with(callbacks, on_line("x"))
+#++++
+f: <T> fn(callbacks: T) -> Any
+
 #---- a_package_qualifying_its_own_name_reads_its_own_definition
 #description Package: withr
 defer <- function(x) x + 1L
 call_it <- function() withr::defer(2L)
 #++++
-defer: <T: numeric> fn(x: T) -> T
+defer: <T: arithmetic> fn(x: T) -> T
 call_it: fn() -> integer
 
 #---- an_own_package_name_with_no_definition_in_view_stays_quiet
@@ -250,7 +289,7 @@ call_it <- function() tallyr::helper(1:3)
 tally: <T> fn(x: T) -> integer
 helper: <T> fn(x: T) -> integer
 call_it: fn() -> Unknown
-290..304 warning[unresolved] `helper` is not exported by `tallyr`, so this read fails once the package is installed. Export it in `NAMESPACE`, or write `tallyr:::helper`.
+290..304 warning[unresolved] `helper` is not exported by `tallyr`, so this read fails once the package is installed. Export it in `NAMESPACE`, or write `tallyr:::helper`
 
 #---- an_own_read_of_a_misspelled_export_suggests_it
 #description Package: tallyr
@@ -272,7 +311,7 @@ call_it <- function() tallyr::zzqqxx(1:3)
 #++++
 tally: <T> fn(x: T) -> integer
 call_it: fn() -> Unknown
-202..216 warning[unresolved] `zzqqxx` is not exported by `tallyr`.
+202..216 warning[unresolved] `zzqqxx` is not exported by `tallyr`
 
 #---- an_own_read_of_an_internal_name_is_not_respelled
 # `tally_one` is a letter away from the export `tally_all`, but the package
@@ -286,7 +325,7 @@ call_it <- function() tallyr::tally_one(1:3)
 tally_all: <T> fn(x: T) -> integer
 tally_one: <T> fn(x: T) -> integer
 call_it: fn() -> Unknown
-294..311 warning[unresolved] `tally_one` is not exported by `tallyr`, so this read fails once the package is installed. Export it in `NAMESPACE`, or write `tallyr:::tally_one`.
+294..311 warning[unresolved] `tally_one` is not exported by `tallyr`, so this read fails once the package is installed. Export it in `NAMESPACE`, or write `tallyr:::tally_one`
 
 #---- an_own_triple_colon_read_reaches_internals
 #description Package: tallyr
@@ -326,7 +365,7 @@ call_it: fn() -> Unknown
 call_it <- function(d) unshipped::mutate(d, x = 1)
 #++++
 call_it: <T> fn(d: T) -> Unknown
-51..68 warning[unresolved] unknown package namespace `unshipped`.
+51..68 warning[unresolved] unknown package namespace `unshipped`
 
 #==== datatable
 #---- declared_dependency_activates_the_stub
@@ -339,7 +378,7 @@ load: fn(path: character) -> data.table
 load <- function(path) fread(path)
 #++++
 load: <T> fn(path: T) -> Unknown
-23..28 warning[unresolved] I could not resolve `fread` in this package, its imports, or builtins.
+23..28 warning[unresolved] I could not resolve `fread` in this package, its imports, or builtins
 
 #---- manifest_only_and_qualified_only_names_stay_dark_until_activated
 # `alloc.col` is a data.table export with no typed declaration, and `parallel` is
@@ -349,7 +388,7 @@ spread <- function(xs) mclapply(xs, length)
 #++++
 grow: <T> fn(x: T) -> Unknown
 spread: <T> fn(xs: T) -> Unknown
-153..162 warning[unresolved] I could not resolve `alloc.col` in this package, its imports, or builtins.
+153..162 warning[unresolved] I could not resolve `alloc.col` in this package, its imports, or builtins
 189..197 warning[unresolved] I could not resolve `mclapply` in this package, its imports, or builtins. Did you mean `lapply`?
 
 #---- activation_reaches_manifest_only_and_qualified_only_names
@@ -422,6 +461,21 @@ wrong <- function(path) as.data.table(read.csv(path))[, .(m = 1)]
 wrong: fn(path: character) -> integer
 91..132 error[type-mismatch] expected `integer`, found `data.table`
 
+#---- a_data_table_is_a_data_frame_and_not_the_reverse
+#namespace import(data.table)
+#: fn(x: data.frame) -> integer
+needs_df <- function(x) nrow(x)
+#: fn(x: data.table) -> integer
+needs_dt <- function(x) nrow(x)
+fine <- needs_df(data.table(a = 1L))
+wrong <- needs_dt(data.frame(a = 1L))
+#++++
+needs_df: fn(x: data.frame) -> integer
+needs_dt: fn(x: data.table) -> integer
+fine: integer
+wrong: Unknown
+213..231 error[type-mismatch] expected `data.table`, found `data.frame{a: integer[]}`
+
 #==== dplyr
 #---- verbs_mask_columns_and_preserve_the_class
 #description Imports: dplyr
@@ -457,7 +511,7 @@ counts: <T> fn(df: T) -> T
 f <- function(df) mutate(df, x = 1)
 #++++
 f: <T> fn(df: T) -> Unknown
-18..24 warning[unresolved] I could not resolve `mutate` in this package, its imports, or builtins.
+18..24 warning[unresolved] I could not resolve `mutate` in this package, its imports, or builtins
 
 #==== native_symbols
 #---- registered_routines_with_a_prefix_resolve
@@ -475,7 +529,7 @@ other <- function() C_size
 #++++
 size: <T> fn(x: T) -> Unknown
 other: fn() -> Unknown
-108..114 warning[unresolved] I could not resolve `C_size` in this package, its imports, or builtins.
+108..114 warning[unresolved] I could not resolve `C_size` in this package, its imports, or builtins
 
 #---- listed_symbols_resolve_with_their_prefix
 #namespace useDynLib(memo, hash, alias = digest_impl, .fixes = "c_")
@@ -486,13 +540,13 @@ plain <- function(x) .Call(hash, x)
 h: <T> fn(x: T) -> Unknown
 a: <T> fn(x: T) -> Unknown
 plain: <T> fn(x: T) -> Unknown
-165..169 warning[unresolved] I could not resolve `hash` in this package, its imports, or builtins.
+165..169 warning[unresolved] I could not resolve `hash` in this package, its imports, or builtins
 
 #---- without_use_dyn_lib_a_routine_is_unresolved
 f <- function(x) .Call(C_endpoints, x)
 #++++
 f: <T> fn(x: T) -> Unknown
-23..34 warning[unresolved] I could not resolve `C_endpoints` in this package, its imports, or builtins.
+23..34 warning[unresolved] I could not resolve `C_endpoints` in this package, its imports, or builtins
 
 #---- a_parameter_named_like_an_unknown_import_calls_the_import
 #namespace import(fs)
@@ -516,7 +570,7 @@ package_file: fn(path: character) -> Any
 apply_twice <- function(path) path(path)
 #++++
 apply_twice: Unknown
-30..40 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`.
+30..40 error[type-mismatch] I cannot construct an infinite type: T occurs inside `fn(T) -> U`
 
 #---- an_xml_nodeset_is_a_list_of_nodes_and_keeps_its_class_when_subset
 #namespace import(xml2)
@@ -534,7 +588,7 @@ nodes_are_not_numbers: Unknown
 encode_all <- function(values) vapply(values, function(x) toJSON(x), character(1))
 json_is_not_a_number <- function(x) toJSON(x) + 1L
 #++++
-encode_all: <T> fn(values: list[T] | T[]) -> character[]
+encode_all: <T> fn(values: list[T] | T[] | NULL) -> character[]
 json_is_not_a_number: Unknown
 147..156 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
@@ -567,7 +621,7 @@ qp <- function(sigma) {
   solve.QP(Dmat = 2 * sigma, dvec = rep(0, n), Amat = diag(n), bvec = rep(0, n))
 }
 #++++
-qp: <T: numeric> fn(sigma: T) -> list{solution: double[], value: double, unconstrained.solution: double[], iterations: integer[], Lagrangian: double[], iact: integer[]}
+qp: <T: arithmetic> fn(sigma: T) -> list{solution: double[], value: double, unconstrained.solution: double[], iterations: integer[], Lagrangian: double[], iact: integer[]}
 
 #---- arithmetic_on_a_known_number_is_still_not_a_matrix
 #namespace import(quadprog)
@@ -583,7 +637,7 @@ business_days <- function(start, days = 45L) {
   candidates[!wday(candidates) %in% c(1L, 7L)]
 }
 #++++
-business_days: <T, U: numeric> fn(start: T, [days]: U) -> Unknown
+business_days: <T, U: arithmetic> fn(start: T, [days]: U) -> Unknown
 
 #---- a_string_plus_a_period_is_still_an_error
 #namespace import(lubridate)
@@ -604,7 +658,7 @@ f <- function(x) {
   d < as.Date("2021-01-01")
 }
 #++++
-f: <T: numeric> fn(x: T) -> logical
+f: <T: arithmetic> fn(x: T) -> logical
 
 #---- polars_members_are_typed
 library(polars)
@@ -727,7 +781,7 @@ fields: fn(groups: list[integer[]]) -> Any
 pairs: fn(n: integer) -> list[list[integer]]
 running: fn(xs: double[]) -> double
 weighted: fn(groups: list[double[]], weights: double[]) -> list[double]
-245..251 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `integer[]`. Extract an element with `[[` instead.
+245..251 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `integer[]`. Extract an element with `[[` instead
 
 #---- a_subclass_subsets_with_its_own_method_before_its_representation
 #namespace importFrom(xts, xts)
@@ -738,3 +792,62 @@ f <- function(x, at, n) {
 }
 #++++
 f: <T, U, V: scalar numeric> fn(x: T, at: U, n: V) -> xts
+
+#==== s3_registrations
+#---- a_registered_method_of_a_stubbed_generic_leaves_its_result_unchecked
+#namespace S3method(str, Logger)
+str.Logger <- function(object, ...) {
+  cat("logger\n")
+  invisible(TRUE)
+}
+report <- function(x) {
+  log <- structure(list(level = 1), class = "Logger")
+  if (str(log, x)) "shown" else "hidden"
+}
+#++++
+str.Logger: <T> fn([object]: T, ...: Any) -> logical
+report: <T> fn(x: T) -> character
+
+#---- a_registered_method_of_a_stubbed_generic_runs_on_a_parameter_used_as_logical
+#namespace S3method(str, Verbose)
+str.Verbose <- function(object, ...) invisible(TRUE)
+show_step <- function(verbose, x) {
+  verbose && str(verbose, x)
+}
+#++++
+str.Verbose: <T> fn([object]: T, ...: Any) -> logical
+show_step: <T> fn(verbose: logical, [x]: T) -> logical
+
+#---- without_a_registration_the_stubbed_generic_s_result_is_checked
+#namespace export(report)
+report <- function(x) {
+  log <- structure(list(level = 1), class = "Logger")
+  if (str(log, x)) "shown" else "hidden"
+}
+#++++
+report: Unknown
+110..121 error[type-mismatch] expected `logical`, found `NULL`
+
+#---- a_package_that_registers_its_methods_checks_only_those
+#namespace S3method(mpfr, default)
+#namespace S3method(mpfr, bigz, mpfr_from_bigz)
+#namespace S3method(mpfr, character, mpfr_from_text)
+mpfr <- function(x, precBits, ...) UseMethod("mpfr")
+mpfr.default <- function(x, ...) x
+mpfr_from_bigz <- function(x, precBits, ...) x
+mpfr_from_text <- function(text, ...) text
+mpfr.is.0 <- function(x) x == 0
+#++++
+mpfr: <T, U> fn([x]: T, [precBits]: U, ...: Any) -> Any
+mpfr.default: <T> fn(x: T, ...: Any) -> T
+mpfr_from_bigz: <T, U> fn(x: T, [precBits]: U, ...: Any) -> T
+mpfr_from_text: <T> fn(text: T, ...: Any) -> T
+mpfr.is.0: <T> fn(x: T) -> logical
+298..302 warning[s3-method-signature] this method of `mpfr` takes `text` where the generic takes `x`, so a call that passes `x` by name fails for this class. Rename it to `x`
+
+#---- rlang_exprs_quotes_its_arguments
+# `exprs()` returns its arguments as code, so `lapply(guides, f)` inside it is never called.
+#namespace import(rlang)
+hashables <- function(title, guides, f) exprs(title, lapply(guides, f), sum("a"))
+#++++
+hashables: <T, U, V> fn(title: T, guides: U, f: V) -> Any

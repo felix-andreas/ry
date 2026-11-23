@@ -169,7 +169,7 @@ bare name is then unbound unless the project defines it itself:
 ```text
 unresolved
 
-  ! `List.map` is in ry's standard library, which `[check] prelude = false` keeps out of scope. Write `std::List.map`.
+  ! `List.map` is in ry's standard library, which `[check] prelude = false` keeps out of scope. Write `std::List.map`
    --[a.R:1:6]
  1 | x <- List.map(list(1L, 2L), function(v) v + 1L)
    |      ^^^^^^^^

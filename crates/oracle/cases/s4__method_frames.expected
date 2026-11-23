@@ -1,0 +1,176 @@
+[stdout]
+| -- the stack: the call twice, the generic below the method
+| [1] "stack"
+| List of 7
+|  $ calls     : chr [1:20] "local({" "eval.parent(substitute(eval(quote(expr), envir)))" "eval(expr, p)" "eval(expr, p)" ...
+|  $ nframe    : int 20
+|  $ parent    : int 18
+|  $ generic_is: chr "standardGeneric"
+|  $ method_is : chr "MethodDefinition"
+|  $ call      : chr "stack(thing, extra = 1)"
+|  $ matched   : chr "stack(object = thing, extra = 1)"
+| List of 7
+|  $ calls     : chr [1:20] "local({" "eval.parent(substitute(eval(quote(expr), envir)))" "eval(expr, p)" "eval(expr, p)" ...
+|  $ nframe    : int 20
+|  $ parent    : int 18
+|  $ generic_is: chr "standardGeneric"
+|  $ method_is : chr "MethodDefinition"
+|  $ call      : chr "stack(thing, extra = 1)"
+|  $ matched   : chr "stack(object = thing, extra = 1)"
+| List of 7
+|  $ calls     : chr [1:20] "local({" "eval.parent(substitute(eval(quote(expr), envir)))" "eval(expr, p)" "eval(expr, p)" ...
+|  $ nframe    : int 20
+|  $ parent    : int 18
+|  $ generic_is: chr "standardGeneric"
+|  $ method_is : chr "MethodDefinition"
+|  $ call      : chr "stack(thing, extra = 1)"
+|  $ matched   : chr "stack(object = thing, extra = 1)"
+| -- parent.frame() is the generic's caller
+| [1] "whose"
+| [1] "the caller's local"
+| [1] "the caller's local"
+| [1] "the caller's local"
+| [1] "global"
+| [1] "global"
+| [1] "global"
+| -- dispatch variables
+| [1] "vars"
+| List of 6
+|  $ generic: chr "vars"
+|  $ package: chr ".GlobalEnv"
+|  $ target : chr "Item"
+|  $ defined: chr "Item"
+|  $ method : chr "MethodDefinition"
+|  $ names  : chr [1:5] "..." ".defined" ".Generic" ".Method" ...
+| List of 6
+|  $ generic: chr "vars"
+|  $ package: chr ".GlobalEnv"
+|  $ target : chr "Item"
+|  $ defined: chr "Item"
+|  $ method : chr "MethodDefinition"
+|  $ names  : chr [1:5] "..." ".defined" ".Generic" ".Method" ...
+| List of 6
+|  $ generic: chr "vars"
+|  $ package: chr ".GlobalEnv"
+|  $ target : chr "Item"
+|  $ defined: chr "Item"
+|  $ method : chr "MethodDefinition"
+|  $ names  : chr [1:5] "..." ".defined" ".Generic" ".Method" ...
+| List of 6
+|  $ generic: chr "vars"
+|  $ package: chr ".GlobalEnv"
+|  $ target : chr "SubItem"
+|  $ defined: chr "Item"
+|  $ method : chr "MethodDefinition"
+|  $ names  : chr [1:5] "..." ".defined" ".Generic" ".Method" ...
+| List of 6
+|  $ generic: chr "vars"
+|  $ package: chr ".GlobalEnv"
+|  $ target : chr "SubItem"
+|  $ defined: chr "Item"
+|  $ method : chr "MethodDefinition"
+|  $ names  : chr [1:5] "..." ".defined" ".Generic" ".Method" ...
+| List of 6
+|  $ generic: chr "vars"
+|  $ package: chr ".GlobalEnv"
+|  $ target : chr "SubItem"
+|  $ defined: chr "Item"
+|  $ method : chr "MethodDefinition"
+|  $ names  : chr [1:5] "..." ".defined" ".Generic" ".Method" ...
+| -- the generic's frame binds the method and its classes
+| [1] "below"
+| List of 4
+|  $ : chr [1:4] ".defined" ".Method" ".target" "object"
+|  $ : chr "Item"
+|  $ : chr "Item"
+|  $ : logi TRUE
+| List of 4
+|  $ : chr [1:4] ".defined" ".Method" ".target" "object"
+|  $ : chr "Item"
+|  $ : chr "Item"
+|  $ : logi TRUE
+| List of 4
+|  $ : chr [1:4] ".defined" ".Method" ".target" "object"
+|  $ : chr "Item"
+|  $ : chr "Item"
+|  $ : logi TRUE
+| List of 4
+|  $ : chr [1:4] ".defined" ".Method" ".target" "object"
+|  $ : chr "SubItem"
+|  $ : chr "Item"
+|  $ : logi TRUE
+| List of 4
+|  $ : chr [1:4] ".defined" ".Method" ".target" "object"
+|  $ : chr "SubItem"
+|  $ : chr "Item"
+|  $ : logi TRUE
+| List of 4
+|  $ : chr [1:4] ".defined" ".Method" ".target" "object"
+|  $ : chr "SubItem"
+|  $ : chr "Item"
+|  $ : logi TRUE
+| [1] "twice"
+| [1] "Item"    "SubItem" "SubItem" "SubItem"
+| [1] "Item"    "SubItem" "SubItem" "SubItem"
+| [1] "Item"    "SubItem" "SubItem" "SubItem"
+| [1] "target"
+| [1] "SubItem"
+| [1] "SubItem"
+| [1] "SubItem"
+| [1] "defined"
+| [1] "Base"
+| [1] "Base"
+| [1] "Base"
+| -- missing arguments and defaults
+| [1] "miss"
+| List of 4
+|  $ : logi TRUE
+|  $ : chr "method default for a"
+|  $ : int 1
+|  $ : NULL
+| List of 4
+|  $ : logi TRUE
+|  $ : chr "method default for a"
+|  $ : int 1
+|  $ : NULL
+| List of 4
+|  $ : logi TRUE
+|  $ : chr "method default for a"
+|  $ : int 1
+|  $ : NULL
+| List of 4
+|  $ : logi FALSE
+|  $ : chr "given"
+|  $ : int 2
+|  $ : NULL
+| List of 4
+|  $ : logi FALSE
+|  $ : chr "given"
+|  $ : int 2
+|  $ : NULL
+| List of 4
+|  $ : logi FALSE
+|  $ : chr "given"
+|  $ : int 2
+|  $ : NULL
+| List of 4
+|  $ : logi TRUE
+|  $ : chr "method default for a"
+|  $ : int 3
+|  $ : chr "tag"
+| List of 4
+|  $ : logi TRUE
+|  $ : chr "method default for a"
+|  $ : int 3
+|  $ : chr "tag"
+| List of 4
+|  $ : logi TRUE
+|  $ : chr "method default for a"
+|  $ : int 3
+|  $ : chr "tag"
+[messages]
+- Creating a new generic function for ‘stack’ in the global environment
+[warnings]
+[errors]
+- argument "extent" is missing, with no default (in passes_missing(item))
+[value]

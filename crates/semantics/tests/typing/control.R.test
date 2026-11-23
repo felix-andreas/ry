@@ -17,10 +17,40 @@ fmt: fn(x: Unknown) -> Unknown
 a: Unknown
 b: Unknown
 
-#---- two_open_branches_still_tie_to_each_other
+#---- two_independent_open_branches_join_by_union
 coalesce <- function(value, fallback) if (is.null(value)) fallback else value
 #++++
-coalesce: <T> fn(value: T | NULL, [fallback]: T) -> T
+coalesce: <T, U> fn(value: T | NULL, [fallback]: U) -> U | T
+
+#---- a_project_coalesce_operator_takes_any_fallback
+`%||%` <- function(x, y) if (is.null(x)) y else x
+f <- function(options) {
+  enabled <- options$enabled %||% FALSE
+  extra <- options$extra %||% list()
+  if (enabled) length(extra) else 0L
+}
+g <- function() NULL %||% "none"
+#++++
+%||%: <T, U> fn(x: T | NULL, [y]: U) -> U | T
+f: <T> fn(options: T) -> integer
+g: fn() -> character
+
+#---- a_callback_ties_its_two_open_parameters
+best <- function(rates) Reduce(function(best, rate) if (rate > best) rate else best, rates, 0)
+#++++
+best: fn(rates: list[double] | double[]) -> double
+
+#---- a_definition_after_stop_never_binds
+f <- function(g) {
+  if (!requireNamespace("graphpkg")) {
+    stop("graphpkg is required")
+    nodes <- function() {}
+  }
+  nodes(g)
+}
+#++++
+f: <T> fn(g: T) -> Unknown
+124..129 warning[maybe-undefined] `nodes` is only assigned on some paths here, so this read can find nothing
 
 #---- a_constrained_branch_may_unify_so_recursion_converges
 fact <- function(n) if (n <= 1L) 1L else n * fact(n - 1L)
@@ -230,6 +260,45 @@ compared <- function(A = NULL, b = NULL) {
 paired: <T, U: numeric> fn([A]: T | NULL, [b]: U | NULL) -> U | NULL
 compared: <T, U: numeric> fn([A]: T | NULL, [b]: U | NULL) -> U | NULL
 
+#---- inherits_a_class_rules_out_unclassed_members
+fetch <- function(url) {
+  res <- tryCatch(download.file(url, tempfile()), error = function(e) e)
+  if (inherits(res, "simpleError")) stop(res$message)
+  res
+}
+plain <- function(x) {
+  value <- if (x) 1L else list(message = "m")
+  if (inherits(value, "integer")) value$message else NULL
+}
+#++++
+fetch: <T> fn(url: T) -> integer | condition
+plain: fn(x: logical) -> Unknown
+
+#---- a_handler_returning_its_condition_joins_the_value
+root <- function(f) {
+  r <- tryCatch(uniroot(f, c(0, 1))$root, error = function(e) e)
+  if (inherits(r, "error")) stop(conditionMessage(r), r$message)
+  r
+}
+#++++
+root: fn(f: fn(double) -> double[]) -> double
+
+#---- a_class_dispatch_null_fallback_passes_an_object_that_may_carry_the_class
+is.chain <- function(x) inherits(x, "chain")
+is.chains <- function(x) inherits(x, "chains")
+chain_count <- function(x) if (is.chain(x)) 1 else if (is.chains(x)) length(x) else NULL
+each_chain <- function(x) {
+  for (i in 1:chain_count(x)) print(x[[i]])
+}
+of_string <- function() 1:chain_count("a")
+#++++
+is.chain: fn(x: Unknown) -> logical
+is.chains: fn(x: Unknown) -> logical
+chain_count: fn(x: Unknown) -> double | integer | NULL
+each_chain: <T> fn(x: T) -> NULL
+of_string: Unknown
+281..297 error[type-mismatch] expected a scalar numeric value (`integer` or `double`), found `double | integer | NULL`
+
 #---- a_predicate_the_caller_tested_rules_out_the_callee_null_return
 is_loaded <- function(package) package %in% loadedNamespaces()
 ns_env <- function(package) {
@@ -299,7 +368,7 @@ f: fn(x: integer | NULL) -> integer
 #---- coalesce_idiom_shapes
 coalesce <- function(value, fallback) if (is.null(value)) fallback else value
 #++++
-coalesce: <T> fn(value: T | NULL, [fallback]: T) -> T
+coalesce: <T, U> fn(value: T | NULL, [fallback]: U) -> U | T
 
 #---- family_guard_filters
 f <- function(flag) {
@@ -354,7 +423,7 @@ f <- function(record) {
   if (is.null(record$value)) 0L else record$value
 }
 #++++
-f: <T> fn(record: T) -> integer
+f: <T> fn(record: T) -> Unknown
 
 #---- a_field_null_test_narrows_the_field
 use <- function(x: character) -> character x
@@ -496,7 +565,7 @@ f <- function(x) {
   x + 1L
 }
 #++++
-f: <T: numeric> fn(x: T | NULL) -> T
+f: <T: arithmetic> fn(x: T | NULL) -> T
 
 #---- a_length_test_rules_out_null
 #: fn(flag: logical) -> integer[] | NULL
@@ -533,6 +602,31 @@ span <- function(flag) {
 pick: fn(flag: logical) -> integer[] | NULL
 span: Unknown
 166..174 error[type-mismatch] expected a scalar numeric value (`integer` or `double`), found `integer | NULL`
+
+#---- a_length_of_one_test_reads_a_vector_as_its_scalar
+#: fn(x: character, many: logical) -> character | character[]
+build <- function(x, many) if (many) c(x, "b") else paste0(x, "a")
+#: fn(pattern: character, replacement: character, x: character) -> character
+replace_first <- function(pattern, replacement, x) sub(pattern, replacement, x)
+replace_one <- function(row, out, many) {
+  new_row: character | character[] <- build(row, many)
+  if (length(new_row) == 1) replace_first("a", new_row, out) else out
+}
+replace_many <- function(row, out, many) {
+  new_row: character | character[] <- build(row, many)
+  if (length(new_row) != 1) out else replace_first("a", new_row, out)
+}
+unguarded <- function(row, out, many) {
+  new_row: character | character[] <- build(row, many)
+  if (length(new_row) == 2) replace_first("a", new_row, out) else out
+}
+#++++
+build: fn(x: character, many: logical) -> character | character[]
+replace_first: fn(pattern: character, replacement: character, x: character) -> character
+replace_one: fn(row: character, out: character, many: logical) -> character
+replace_many: fn(row: character, out: character, many: logical) -> character
+unguarded: Unknown
+767..774 error[type-mismatch] expected `character`, found `character | character[]`
 
 #---- a_test_excluding_an_earlier_one_sees_the_value_before_its_write
 excluded <- function(case) {
@@ -697,7 +791,7 @@ f <- function() {
 }
 #++++
 f: Unknown
-51..52 error[type-mismatch] this `for` sequence is `fn() -> integer`, which cannot be iterated. Expected a vector or list.
+51..52 error[type-mismatch] this `for` sequence is `fn() -> integer`, which cannot be iterated. Expected a vector or list
 
 #---- repeat_applies_exit_state
 f <- function() {
@@ -845,7 +939,7 @@ f <- function(flag) {
 }
 #++++
 f: fn(flag: logical) -> integer
-229..230 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
+229..230 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing
 
 #---- a_switch_with_no_default_reaches_the_read_unassigned
 f <- function(key) {
@@ -854,7 +948,7 @@ f <- function(key) {
 }
 #++++
 f: <T> fn(key: T) -> integer
-54..55 warning[maybe-undefined] `r` is only assigned on some paths here, so this read can find nothing.
+54..55 warning[maybe-undefined] `r` is only assigned on some paths here, so this read can find nothing
 
 #---- a_repeat_that_always_assigns_before_breaking_is_not_reported
 # R returns 1: the body runs at least once and the `break` follows the write,
@@ -883,7 +977,7 @@ f <- function(cond) {
 }
 #++++
 f: fn(cond: logical) -> integer
-148..149 warning[maybe-undefined] `y` is only assigned on some paths here, so this read can find nothing.
+148..149 warning[maybe-undefined] `y` is only assigned on some paths here, so this read can find nothing
 
 #---- a_loop_that_may_run_zero_times_reaches_the_read_unassigned
 f <- function(cond) {
@@ -894,7 +988,7 @@ f <- function(cond) {
 }
 #++++
 f: fn(cond: logical) -> integer
-57..58 warning[maybe-undefined] `z` is only assigned on some paths here, so this read can find nothing.
+57..58 warning[maybe-undefined] `z` is only assigned on some paths here, so this read can find nothing
 
 #---- a_diverging_switch_branch_never_reaches_the_read
 # Every key either assigns or ends the call, so nothing arrives at the read
@@ -1030,7 +1124,7 @@ f <- function(n) {
   even(n)
 }
 #++++
-f: <T: numeric> fn(n: T) -> logical
+f: <T: arithmetic> fn(n: T) -> logical
 
 #---- forward_capture_sees_the_frame_write
 f <- function() {
@@ -1051,7 +1145,7 @@ f <- function() {
 }
 #++++
 f: fn() -> double
-178..179 warning[unresolved] I could not resolve `a` in this package, its imports, or builtins.
+178..179 warning[unresolved] I could not resolve `a` in this package, its imports, or builtins
 
 #---- unresolved_reference_suggests_the_nearest_stub
 f <- function(x) lenght(x)
@@ -1158,7 +1252,7 @@ f <- function() {
 }
 #++++
 f: fn() -> fn() -> fn() -> logical
-20..21 warning[unused] `x` is assigned but never used.
+20..21 warning[unused] `x` is assigned but never used
 
 #---- rebinding_in_the_captured_frame_stays_alive
 f <- function() {
@@ -1180,7 +1274,7 @@ describe <- function(name, punct) {
 }
 #++++
 describe: Unknown
-77..82 error[type-mismatch] reading `punct` here would fail at run time: this branch runs only when `punct` is missing, and it has no default.
+77..82 error[type-mismatch] reading `punct` here would fail at run time: this branch runs only when `punct` is missing, and it has no default
 
 #---- supplying_the_formal_on_the_missing_branch_is_fine
 describe <- function(name, punct) {
@@ -1275,3 +1369,28 @@ use <- function(limit) {
 #++++
 check_limit: <T> fn(x: T) -> integer | character
 use: <T> fn(limit: T) -> integer
+
+#==== unknown_branches
+#---- an_unknown_branch_makes_the_if_unknown
+f <- function(flag, x) if (flag) 1L else x %then% 2L
+#++++
+f: <T> fn(flag: logical, [x]: T) -> Unknown
+
+#---- a_recursive_call_still_joins_as_the_typed_branch
+fact <- function(n) if (n <= 1L) 1L else n * fact(n - 1L)
+#++++
+fact: fn(n: integer) -> integer
+
+#---- mutual_recursion_converges_through_the_placeholder
+is_zero <- function(n) if (n == 0L) 1L else step_down(n)
+step_down <- function(n) is_zero(n - 1L)
+#++++
+is_zero: <T: arithmetic> fn(n: T) -> integer
+step_down: <T: arithmetic> fn(n: T) -> integer
+
+#---- a_cycle_with_a_genuine_unknown_stays_unknown
+first <- function(n) if (n == 0L) 1L %then% 2L else second(n)
+second <- function(n) first(n - 1L)
+#++++
+first: <T: arithmetic> fn(n: T) -> Unknown
+second: <T: arithmetic> fn(n: T) -> Unknown

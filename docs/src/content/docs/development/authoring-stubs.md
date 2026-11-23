@@ -180,6 +180,24 @@ or by position. A name the function type does not declare is a stub problem. Lik
 attribute belongs to the name, combines with the others in any order, and a later source that
 redeclares the name without it clears it.
 
+### Results that keep the argument's shape
+
+The `@elementwise(...)` attribute marks a function whose declared scalar result describes one
+element, with the shape following the named argument:
+
+```
+sqrt : @pure @elementwise(x) fn(x: Any) -> double
+nchar : @pure @elementwise(x) fn(x: Any, [type]: character, [allowNA]: logical, [keepNA]: logical) -> integer
+```
+
+`sqrt(xs)` over a `double[]` is a `double[]`, over a named vector a named `double[named]`, and over a
+`matrix` a `matrix`; `sqrt(4)` is a `double`. With several names, as in `atan2 : @elementwise(y, x)`,
+the first argument that is a vector or a matrix decides. A union lifts member by member, and any
+other argument, an open type variable among them, keeps the declared scalar, so an unannotated
+`function(x) sqrt(x)` returns `double`. The declared result must be a scalar type. Mark only
+functions that keep names and `dim`: `as.integer` drops both, so it is not marked. Like `@opaque`,
+the attribute belongs to the name, and a later source that redeclares the name without it clears it.
+
 ## Overloads and generics
 
 Declaring the same name more than once in one file builds an ordered *overload set*, with each
@@ -365,9 +383,10 @@ declarations can be:
 Type-preserving reductions declare [overload sets](#overloads-and-generics), and element-preserving
 functions declare generic `T[]` signatures. A function serves a callback interface whenever it
 accepts every call shape the interface promises, so a callback-style stub can declare its real
-signature, spare optional formals included. What remains a scalar claim is a function whose result's
-atomic type differs from its input's while its shape follows the input, such as `nchar` or
-`toupper`.
+signature, spare optional formals included. A function whose result's atomic type differs from its
+input's while its shape follows the input, such as `nchar` or `toupper`, declares
+[`@elementwise`](#results-that-keep-the-arguments-shape); through an unannotated wrapper its result
+is still the scalar claim.
 
 ## Loading and namespacing
 
@@ -386,6 +405,7 @@ source:
 - `nominals` is the set of `@type` names.
 - `masked` maps each `@masked` name to the formals declared before its `...`.
 - `opaque` maps each `@opaque` name to the parameters it names.
+- `elementwise` maps each `@elementwise` name to the parameters whose shape its result takes.
 - `pure_by_namespace` maps each declaring namespace to its `@pure` names, each with the parameters
   `@pure(...)` names (empty when the function is pure whatever its arguments). A bare call reads the
   namespace of the name's winning declaration, and `pkg::name` the named one.
@@ -450,7 +470,7 @@ stubs. An `importFrom(pkg, name)` whose namespace the corpus knows (shipped or p
 does not export `name` is an error at the import:
 
 ```text
-`medain` is not exported by `stats`, so this package will not load.
+`medain` is not exported by `stats`, so this package will not load
 ```
 
 R refuses to load a package with such an import, so the code cannot run at all; it is the same rule

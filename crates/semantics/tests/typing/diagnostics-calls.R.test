@@ -19,7 +19,7 @@ integer
 zzz_unknown(1L)
 #++++
 Unknown
-0..11 warning[unresolved] I could not resolve `zzz_unknown` in this package, its imports, or builtins.
+0..11 warning[unresolved] I could not resolve `zzz_unknown` in this package, its imports, or builtins
 
 #---- unknown_callee_after_valid_polymorphic_use
 mirror <- function(x) x
@@ -29,7 +29,7 @@ zzz_unknown(mirror("ok"))
 mirror: <T> fn(x: T) -> T
 integer
 Unknown
-35..46 warning[unresolved] I could not resolve `zzz_unknown` in this package, its imports, or builtins.
+35..46 warning[unresolved] I could not resolve `zzz_unknown` in this package, its imports, or builtins
 
 #---- named_argument_not_in_interface
 mirror <- function(x) x

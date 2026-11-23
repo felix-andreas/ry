@@ -52,10 +52,10 @@ x
 x: integer
 x: character
 character
-0..1 warning[duplicate] Top-level binding `x` is overwritten by a later top-level binding in this package.
-  = 8..9 the later binding is here.
-8..9 warning[duplicate] Top-level binding `x` overwrites an earlier top-level binding in this package.
-  = 0..1 the earlier binding is here.
+0..1 warning[duplicate] top-level binding `x` is overwritten by a later top-level binding in this package
+  = 8..9 the later binding is here
+8..9 warning[duplicate] top-level binding `x` overwrites an earlier top-level binding in this package
+  = 0..1 the earlier binding is here
 
 #---- earlier_use_resolves_to_final_global_binding
 #~~~~ R/main.R
@@ -119,10 +119,10 @@ tmp <- 5
 tmp: double
 f: fn() -> double
 tmp: double
-0..3 warning[duplicate] Top-level binding `tmp` is overwritten by a later top-level binding in this package.
-  = 29..32 the later binding is here.
-29..32 warning[duplicate] Top-level binding `tmp` overwrites an earlier top-level binding in this package.
-  = 0..3 the earlier binding is here.
+0..3 warning[duplicate] top-level binding `tmp` is overwritten by a later top-level binding in this package
+  = 29..32 the later binding is here
+29..32 warning[duplicate] top-level binding `tmp` overwrites an earlier top-level binding in this package
+  = 0..3 the earlier binding is here
 
 #---- a_loop_that_updates_the_binding_reads_it
 #~~~~ R/main.R

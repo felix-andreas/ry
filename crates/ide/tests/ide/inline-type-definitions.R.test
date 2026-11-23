@@ -64,7 +64,7 @@ definition 10..11
 references: 10..11*, 27..28
 rename: 2 edit(s)
 signature: none
-completion (17): Box, Any, character, complex, double, fn, integer, list
+completion (27): Box, Any, character, complex, double, fn, integer, list
 
 #---- nominal_constructor_name_navigates
 type UserId = integer
@@ -145,6 +145,18 @@ action: Add inferred type annotations for the whole file
   edit 46..46 -> ": Money"
 completion (71): price, prcomp, precip, predict, predict.glm, predict.lm, preplot, presidents
 hint @46: Money
+
+#---- no_action_restates_a_nominal_constructor
+type UserId = integer
+x <- @User$0Id(1L)
+#++++
+hover 28..34: type UserId = integer
+definition 5..11
+references: 5..11*, 28..34
+rename: 2 edit(s)
+type-definition 5..11
+signature: none
+completion (1): UserId
 
 #---- hover_on_an_opaque_definition
 opaque Met$0ers = list{value: double}

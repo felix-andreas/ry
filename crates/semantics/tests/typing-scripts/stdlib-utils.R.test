@@ -126,4 +126,4 @@ pick <- function() utils::menu(choices)
 #++++
 choices: list{character, character}
 pick: fn() -> integer
-29..33 warning[unused] `pick` is assigned but never used.
+29..33 warning[unused] `pick` is assigned but never used

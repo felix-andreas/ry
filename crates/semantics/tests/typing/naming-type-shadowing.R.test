@@ -50,4 +50,4 @@ value <- 1L
 #++++
 == R/main.R
 value: integer
-16..17 error[annotation] duplicate type parameter name `T` in named type definition.
+16..17 error[annotation] duplicate type parameter name `T` in named type definition

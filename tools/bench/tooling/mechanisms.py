@@ -79,6 +79,37 @@ kkeep_list <- local({ kept <- list(1, 2); function(v) { kept[[2L]] <<- v; 0L } }
 kkeep_field <- local({ kept <- list(a = 1, b = 2); function(v) { kept$b <<- v; 0L } })
 """
 
+# Bindings of the `s4:` operations, which only their scripts define, so the other operations'
+# counts do not depend on what the methods package has registered.
+S4_PRELUDE = """
+setClass("Base", representation("VIRTUAL", id = "character"))
+setClass("Item", contains = "Base", representation(value = "numeric", meta = "list"),
+  validity = function(object) if (length(object@id) != 1L) "id must have length 1" else TRUE
+)
+setClass("SubItem", contains = "Item", representation(factor = "numeric"))
+setGeneric("id", function(object) standardGeneric("id"))
+setMethod("id", "Base", function(object) object@id)
+setGeneric("getValue", function(object, ...) standardGeneric("getValue"))
+setMethod("getValue", "Item", function(object, key = NA_character_, scale = 1, ...) {
+  if (!is.na(key)) return(object@meta[[key]])
+  object@value * scale
+})
+setMethod("getValue", "SubItem", function(object, key = NA_character_, scale = 1, ...) {
+  callNextMethod() * object@factor
+})
+setGeneric("combine", function(left, right) standardGeneric("combine"))
+setMethod("combine", signature("Item", "Item"), function(left, right) left@value + right@value)
+setMethod("combine", signature("Item", "missing"), function(left, right) left@value)
+setGeneric("value<-", function(object, value) standardGeneric("value<-"))
+setReplaceMethod("value", "Item", function(object, value) {
+  object@value <- value
+  object
+})
+setMethod("length", "Item", function(x) 3L)
+item <- new("Item", id = "a", value = 1, meta = list(k = 2))
+sub <- new("SubItem", id = "b", value = 1, meta = list(k = 2), factor = 3)
+"""
+
 # (name, expression). The loop assigns the expression's value, so an operation's count includes
 # one assignment to a local, as the empty loop's does.
 OPERATIONS = [
@@ -126,6 +157,20 @@ OPERATIONS = [
     ("dispatch: `$` to a method", "child$a"),
     ("dispatch: `format` generic", "format(object)"),
     ("dispatch: `inherits`", 'inherits(object, "widget")'),
+    ("s4: generic with one argument", "id(item)"),
+    ("s4: generic, method inherited from a superclass", "id(sub)"),
+    ("s4: generic on two arguments", "combine(item, sub)"),
+    ("s4: generic, a signature argument missing", "combine(item)"),
+    ("s4: method with more arguments than its generic", "getValue(item, scale = 2)"),
+    ("s4: `callNextMethod()`", "getValue(sub)"),
+    ("s4: replacement generic", "{ value(item) <- i; 0L }"),
+    ("s4: builtin to a method (`length`)", "length(item)"),
+    ("s4: slot read", "item@value"),
+    ("s4: slot write", "{ item@value <- 2; 0L }"),
+    ("s4: `new`", 'new("Item", id = "a", value = 1)'),
+    ("s4: `is`", 'is(item, "Base")'),
+    ("s4: `isVirtualClass`", 'isVirtualClass("Base")'),
+    ("s4: `validObject`", "validObject(item)"),
     ("condition: `tryCatch`, no condition", "tryCatch(i + 1L, error = function(e) 0L)"),
     ("condition: `tryCatch` with `finally`", "tryCatch(i + 1L, finally = NULL)"),
     ("condition: `tryCatch` catches `stop`", 'tryCatch(stop("no"), error = function(e) 0L)'),
@@ -231,7 +276,7 @@ def main():
             index, iterations = run
             script = work / f"{index}.R"
             if not script.exists():
-                script.write_text(program(operations[index][1]))
+                script.write_text(program(*operations[index]))
             dump = work / f"{index}.{iterations}.callgrind"
             command = ["valgrind", "--tool=callgrind", f"--callgrind-out-file={dump}", "--smc-check=all-non-file",
                        ry, "run", str(script), str(iterations)]
@@ -245,7 +290,7 @@ def main():
             return run, int(total[1])
 
         for index in range(len(operations)):
-            (work / f"{index}.R").write_text(program(operations[index][1]))
+            (work / f"{index}.R").write_text(program(*operations[index]))
         # A build's first start writes its start-up image, and a counted run that raced that
         # write would start the slow way and shift every count, so one start comes first.
         warm = subprocess.run([ry, "run", str(work / "0.R"), "1"], capture_output=True, text=True)
@@ -277,9 +322,10 @@ def main():
             file.write("\n")
 
 
-def program(expression):
+def program(name, expression):
     """The script for one operation: its loop runs inside a closure, so it runs compiled."""
-    return (PRELUDE + "\nrun <- function(n) {\n    result <- 0L\n    for (i in seq_len(n)) result <- "
+    prelude = PRELUDE + (S4_PRELUDE if name.startswith("s4: ") else "")
+    return (prelude + "\nrun <- function(n) {\n    result <- 0L\n    for (i in seq_len(n)) result <- "
             + expression + "\n    result\n}\ninvisible(run(as.integer(commandArgs(TRUE)[1])))\n")
 
 

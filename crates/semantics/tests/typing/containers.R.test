@@ -414,7 +414,7 @@ g: fn() -> Unknown
 f <- function(v: character | NULL) v$name
 #++++
 f: fn(v: character | NULL) -> Unknown
-35..41 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `character | NULL`. Extract an element with `[[` instead.
+35..41 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `character | NULL`. Extract an element with `[[` instead
 
 #---- dollar_on_atomic_vector
 f <- function() {
@@ -423,7 +423,7 @@ f <- function() {
 }
 #++++
 f: Unknown
-37..40 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `integer[named]`. Extract an element with `[[` instead.
+37..40 error[type-mismatch] R's `$` operator is invalid on atomic vectors, and this value is `integer[named]`. Extract an element with `[[` instead
 
 #---- matrix_indexing_unsupported
 f <- function() {
@@ -482,12 +482,12 @@ f: fn() -> integer[]
 #---- matrix_style_single_selection_refuses_silently
 pick <- function(m, i) m[, i]
 #++++
-pick: <T, U> fn(m: T, i: U) -> Unknown
+pick: <T, U> fn(m: T, [i]: U) -> Unknown
 
 #---- two_filled_indexes_report_the_filled_count
 cell <- function(m, k) m[k, , drop = FALSE]
 #++++
-cell: <T, U> fn(m: T, k: U) -> Unknown
+cell: <T, U> fn(m: T, [k]: U) -> Unknown
 
 #==== vector_subsetting
 #---- scalar_index_selects_one_element

@@ -10,7 +10,7 @@ f <- function() {
 #++++
 == R/main.R
 f: fn() -> integer
-67..72 warning[maybe-undefined] `value` is only assigned on some paths here, so this read can find nothing.
+67..72 warning[maybe-undefined] `value` is only assigned on some paths here, so this read can find nothing
 
 #---- while_body_introduction_might_be_undefined_after_loop
 #~~~~ R/main.R
@@ -23,7 +23,7 @@ f <- function() {
 #++++
 == R/main.R
 f: fn() -> integer
-53..54 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
+53..54 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing
 
 #---- repeat_body_introduction_is_defined_after_loop
 #~~~~ R/main.R
@@ -86,7 +86,7 @@ f <- function(cond) {
 #++++
 == R/main.R
 f: fn(cond: logical) -> integer
-54..55 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
+54..55 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing
 
 #---- else_branch_introduction_might_be_undefined_after_conditional
 #~~~~ R/main.R
@@ -101,7 +101,7 @@ f <- function(cond) {
 #++++
 == R/main.R
 f: fn(cond: logical) -> integer
-72..73 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
+72..73 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing
 
 #---- nested_if_introduction_might_be_undefined_after_outer_conditional
 #~~~~ R/main.R
@@ -116,7 +116,7 @@ f <- function(cond) {
 #++++
 == R/main.R
 f: fn(cond: logical) -> integer
-78..79 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
+78..79 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing
 
 #---- nested_loop_introduction_might_be_undefined_after_conditional
 #~~~~ R/main.R
@@ -131,7 +131,7 @@ f <- function(cond) {
 #++++
 == R/main.R
 f: fn(cond: logical) -> integer
-91..92 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
+91..92 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing
 
 #---- no_warning_when_existing_name_is_assigned_in_all_branches
 #~~~~ R/main.R
@@ -147,7 +147,7 @@ f <- function(cond) {
 #++++
 == R/main.R
 f: fn(cond: logical) -> integer
-24..25 warning[unused] `x` is assigned but never used.
+24..25 warning[unused] `x` is assigned but never used
 
 #---- no_warning_when_fresh_name_is_assigned_in_all_branches
 #~~~~ R/main.R
@@ -174,8 +174,8 @@ f <- function(cond) {
 }
 #++++
 == R/main.R
-f: fn(cond: logical) -> integer
-63..64 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins.
+f: fn(cond: logical) -> Unknown
+63..64 warning[unresolved] I could not resolve `x` in this package, its imports, or builtins
 
 #---- while_body_read_sees_write_around_back_edge
 #~~~~ R/main.R
@@ -189,8 +189,8 @@ f <- function(cond) {
 #++++
 == R/main.R
 f: fn(cond: logical) -> Unknown
-48..49 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing.
-68..69 warning[maybe-undefined] `y` is only assigned on some paths here, so this read can find nothing.
+48..49 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing
+68..69 warning[maybe-undefined] `y` is only assigned on some paths here, so this read can find nothing
 
 #---- a_closure_reads_the_enclosing_value_on_paths_that_skip_its_superassignment
 #~~~~ R/main.R
@@ -216,7 +216,7 @@ f <- function(flag) {
 #++++
 == R/main.R
 f: fn(flag: logical) -> fn() -> integer
-67..72 warning[maybe-undefined] `cache` is only assigned on some paths here, so this read can find nothing.
+67..72 warning[maybe-undefined] `cache` is only assigned on some paths here, so this read can find nothing
 
 #==== outer_bindings
 #---- a_top_level_binding_serves_the_unassigned_path
@@ -278,10 +278,12 @@ g <- function(ok: logical) -> double {
 #++++
 == R/main.R
 g: fn(ok: logical) -> double
+75..78 warning[maybe-undefined] `max` is only assigned on some paths here, so on the others this reads the function `max`
 
 #---- a_package_function_under_a_local_variable_is_left_out
 # mgcv's timing: the read is guarded like the write, so it never reaches the
-# package's own `t2`.
+# package's own `t2`. The type leaves the function out; the opt-in finding
+# treats the two tests as independent branches, as it does for any local.
 #~~~~ R/main.R
 fit <- function(trace: logical) {
   if (trace) t2 <- proc.time()
@@ -293,8 +295,20 @@ t2 <- function(..., k = NA) list(k = k)
 #++++
 == R/main.R
 fit: fn(trace: logical) -> NULL
+98..100 warning[maybe-undefined] `t2` is only assigned on some paths here, so on the others this reads the function `t2`
 == R/smooth.R
 t2: <T> fn(...: Any, [k]: T) -> list{k: T}
+
+#---- a_read_that_skips_the_write_may_reach_a_function
+#~~~~ R/main.R
+shift <- function(flag) {
+  if (flag) t <- 5
+  t + 1
+}
+#++++
+== R/main.R
+shift: fn(flag: logical) -> double
+47..48 warning[maybe-undefined] `t` is only assigned on some paths here, so on the others this reads the function `t`
 
 #---- an_enclosing_function_under_a_local_variable_is_left_out
 # mgcv's Newton loop: `ls` is bound by every iteration, and the enclosing
@@ -338,7 +352,7 @@ f <- function(xs: list[double]) {
 == R/main.R
 f: fn(xs: list[double]) -> NULL
 79..83 warning[unresolved] I could not resolve `late` in this package, its imports, or builtins. Did you mean `date`?
-89..93 warning[unused] `late` is assigned but never used.
+89..93 warning[unused] `late` is assigned but never used
 
 #---- literals_on_both_paths_read_as_r_types
 #~~~~ R/main.R
@@ -363,4 +377,4 @@ f <- function(ok) {
 == R/main.R
 limit: character
 f: fn(ok: logical) -> integer
-59..64 warning[maybe-undefined] `other` is only assigned on some paths here, so this read can find nothing.
+59..64 warning[maybe-undefined] `other` is only assigned on some paths here, so this read can find nothing

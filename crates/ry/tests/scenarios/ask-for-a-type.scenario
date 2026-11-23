@@ -1,0 +1,27 @@
+# A user with only a terminal asks what the checker inferred at a position, and gets what the
+# editor would show on hover there.
+
+file ry.toml
+| [check]
+| typing = false
+file prices.R
+| prices <- c(a = 1.5, b = 2)
+| cheap <- prices[prices < 2]
+| label <- function(shape) shape$name
+
+# Typing is on for the query even though `ry.toml` turns it off for `ry check`.
+run ry debug type prices.R:2:10
+expect exit 0
+expect stdout "prices: double[named]"
+
+run ry debug type prices.R:3:1
+expect exit 0
+expect stdout "label: <T> fn(shape: T) -> Unknown"
+
+run ry debug type prices.R:9:1
+expect exit 2
+expect stderr "prices.R has 3 lines"
+
+run ry debug type prices.R:2
+expect exit 2
+expect stderr "expected FILE:LINE:COLUMN"

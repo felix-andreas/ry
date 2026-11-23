@@ -177,3 +177,13 @@ error: expected `]` after the optional parameter name
  --> 1:9
   | #: fn([x: integer) -> integer
   |         ^
+
+#==== bracketed_type_arguments
+#---- square_brackets_after_a_type_name
+#: Box[integer]
+items <- list(1L)
+#++++
+error: type arguments go in angle brackets, as `Box<...>`. Only `list` takes its element type in square brackets
+ --> 1:7
+  | #: Box[integer]
+  |       ^^^^^^^^^

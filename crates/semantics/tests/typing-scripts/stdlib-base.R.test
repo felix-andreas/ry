@@ -139,13 +139,13 @@ double
 #---- toupper_accepts_vector
 toupper(c("a", "b"))
 #++++
-character
+character[]
 
 #---- nchar_accepts_vector_and_coerced_input
 nchar(c("aa", "b"))
 nchar(42L)
 #++++
-integer
+integer[]
 integer
 
 #---- gsub_accepts_vector_subject_and_flags
@@ -757,10 +757,10 @@ grep("a", "banana")
 #++++
 Any
 
-#---- sapply_is_any
+#---- sapply_of_a_scalar_callback_is_a_vector
 sapply(list(1L), is.numeric)
 #++++
-Any
+logical[]
 
 #---- arbitrary_named_argument_sinks
 data.frame(x = 1L)
@@ -799,14 +799,14 @@ Any
 deviation <- stats::sd(c(1, 2, 3))
 #++++
 deviation: double
-0..9 warning[unused] `deviation` is assigned but never used.
+0..9 warning[unused] `deviation` is assigned but never used
 
 #---- unknown_namespace_read_is_unknown
 mystery <- foobar::bazqux
 #++++
 mystery: Unknown
-0..7 warning[unused] `mystery` is assigned but never used.
-11..25 warning[unresolved] unknown package namespace `foobar`.
+0..7 warning[unused] `mystery` is assigned but never used
+11..25 warning[unresolved] unknown package namespace `foobar`
 
 #==== opaque_nominal_types
 #---- sys_date_returns_the_date_nominal
@@ -851,7 +851,7 @@ grow <- function() {
 }
 #++++
 grow: fn() -> double[] | NULL
-0..4 warning[unused] `grow` is assigned but never used.
+0..4 warning[unused] `grow` is assigned but never used
 
 #==== callback_forwarding
 #---- lapply_forwards_named_arguments_into_the_callback
@@ -901,8 +901,8 @@ greet <- function(name, punct) {
 }
 greet("ada")
 #++++
-greet: <T> fn([name]: T, [punct]: T) -> T
-character
+greet: <T, U> fn([name]: T, [punct]: U) -> T | U
+Unknown
 
 #---- unguarded_formal_stays_required
 join2 <- function(left, right) {
@@ -923,7 +923,7 @@ pick <- function(x) {
 }
 pick(2L)
 #++++
-pick: <T: numeric> fn([x]: T) -> T | integer
+pick: <T: arithmetic> fn([x]: T) -> T | integer
 integer
 
 #---- seq_from_beyond_the_integer_range_is_double_vector
