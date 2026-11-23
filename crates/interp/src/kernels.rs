@@ -17,14 +17,17 @@ use {
     crate::{
         arith::{self, Math, Op, complex_multiply},
         bytecode::Arith,
-        conditions,
+        conditions, handles,
         long_double::{self, LongDouble},
         system::r_at_least,
         unwind::R,
         values,
         vector_math::{self, Rounding},
     },
-    heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, is_na_real},
+    heap::{
+        handle::{Chars, Cx, Gc, Local, Logical, Str},
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, is_na_real},
+    },
     std::cmp::Ordering,
 };
 
@@ -106,6 +109,12 @@ pub unsafe fn binary(
 ) -> R<Option<Sexp>> {
     if left.kind() == SexpType::Complex || right.kind() == SexpType::Complex {
         return complex_binary(operator, left, right, destination);
+    }
+    if left.kind() == SexpType::String && right.kind() == SexpType::String {
+        return handles::with(|context| {
+            let (left, right) = (handles::held(context, left), handles::held(context, right));
+            Ok(string_equality(context, operator, left, right)?.map(Local::raw))
+        });
     }
     if !plain(left) || !plain(right) {
         return Ok(None);
@@ -336,6 +345,64 @@ pub fn payload_from_right(
         && !has_integer
         && left_length != right_length
         && right_length != 1
+}
+
+/// `==` or `!=` on two character vectors with no attributes, of one length or one of them a
+/// single string. Strings are interned, so two elements are equal when they are one object, and
+/// only strings that differ in encoding have their text compared. `None` leaves an ordering
+/// comparison, which collates, and every other operand to the builtin.
+fn string_equality<'s>(
+    context: &mut Cx<'s>,
+    operator: Arith,
+    left: Local<'s>,
+    right: Local<'s>,
+) -> R<Option<Local<'s>>> {
+    let equal = match operator {
+        Arith::Equal => true,
+        Arith::NotEqual => false,
+        _ => return Ok(None),
+    };
+    let (Some(left), Some(right)) = (left.standard::<Str>(), right.standard::<Str>()) else {
+        return Ok(None);
+    };
+    let bare = |vector: Local<'s, Str>| vector.attributes(context).is(handles::null());
+    if !bare(left) || !bare(right) {
+        return Ok(None);
+    }
+    let count = match (left.len(), right.len()) {
+        (0, _) | (_, 0) => return Ok(None),
+        (left_length, right_length) if left_length == right_length => left_length,
+        (left_length, 1) => left_length,
+        (1, right_length) => right_length,
+        _ => return Ok(None),
+    };
+    let compare = |a: Gc<'_, Chars>, b: Gc<'_, Chars>| {
+        if handles::is_na(a) || handles::is_na(b) {
+            NA_LOGICAL
+        } else {
+            (handles::equal_strings(a, b) == equal) as i32
+        }
+    };
+    if count == 1 {
+        let answer = compare(left.get(context, 0), right.get(context, 0));
+        return Ok(Some(handles::logical_constant(context, answer)?));
+    }
+    let result = context.alloc_unfilled::<Logical>(count)?;
+    let reader = &*context;
+    let result = if right.len() == 1 {
+        let single = right.get(reader, 0);
+        result.fill(left.iter(reader).map(|element| compare(element, single)))
+    } else if left.len() == 1 {
+        let single = left.get(reader, 0);
+        result.fill(right.iter(reader).map(|element| compare(single, element)))
+    } else {
+        result.fill(
+            left.iter(reader)
+                .zip(right.iter(reader))
+                .map(|(a, b)| compare(a, b)),
+        )
+    };
+    Ok(Some(result.finish().value()))
 }
 
 /// Whether a kernel may read `value`: a logical, integer or double vector with no attributes

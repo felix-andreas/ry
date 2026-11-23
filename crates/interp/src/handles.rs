@@ -444,6 +444,44 @@ pub fn same_text(left: Gc<'_, Chars>, right: Gc<'_, Chars>) -> bool {
     unsafe { values::same_string(left.raw(), right.raw()) }
 }
 
+/// Whether `==` holds for two strings, neither of them `NA`: they are one object, or their text
+/// is the same under different encoding marks and neither is marked as bytes.
+///
+/// Strings intern by bytes and encoding, so a native string and a UTF-8 one with the same bytes
+/// are distinct objects, and so are a latin1 string and its UTF-8 translation. GNU R's `Seql`
+/// calls both pairs equal because it compares their UTF-8 translations.
+#[inline]
+pub fn equal_strings(left: Gc<'_, Chars>, right: Gc<'_, Chars>) -> bool {
+    left.raw() == right.raw() || same_text_under_marks(left, right)
+}
+
+/// [`equal_strings`] for two distinct objects, out of line because one object is the usual
+/// answer for equal strings.
+fn same_text_under_marks(left: Gc<'_, Chars>, right: Gc<'_, Chars>) -> bool {
+    if left.has_mark(gp::BYTES) || right.has_mark(gp::BYTES) {
+        return false;
+    }
+    // Two distinct strings of the same encoding differ in their bytes, which keeps `x == "a"`
+    // from decoding every element.
+    if [gp::LATIN1, gp::UTF8]
+        .iter()
+        .all(|&mark| left.has_mark(mark) == right.has_mark(mark))
+    {
+        return false;
+    }
+    // Outside a UTF-8 locale, GNU R reads a non-ASCII string of unknown encoding as native bytes
+    // that do not translate to the text of a marked string.
+    let native_non_ascii = |string: Gc<'_, Chars>| {
+        !string.has_mark(gp::LATIN1 | gp::UTF8) && !string.bytes().is_ascii()
+    };
+    if (native_non_ascii(left) || native_non_ascii(right))
+        && !crate::platform::native_codeset().eq_ignore_ascii_case("UTF-8")
+    {
+        return false;
+    }
+    text(left) == text(right)
+}
+
 /// The cross-check behind [`values::same_string`]'s identity rule: a cached ASCII string is the
 /// only string that holds its text, so a different string with the same text means some path
 /// made a `CHARSXP` without the string cache. `NA` is uncached and spells "NA".
