@@ -100,7 +100,12 @@ references: none
 rename: none
 signature: fn(count, wait = TRUE)
 parameters: count | [wait = TRUE]
+action: Add inferred type annotation for `Pool`
+  edit 4..4 -> ": Any"
+action: Add inferred type annotations for the whole file
+  edit 4..4 -> ": Any"
 completion (58): wait = , while, warnErrList, warning, warningCondition, warnings, warpbreaks, weekdays
+hint @4: Any
 
 #---- r6_method_on_an_instance
 Pool <- R6::R6Class("Pool", public = list(
@@ -117,7 +122,10 @@ references: none
 rename: none
 signature: fn(count, wait = TRUE)
 parameters: count | [wait = TRUE]
+action: Add inferred type annotations for the whole file
+  edit 4..4 -> ": Any"
 completion (128+): wait = , pool, Pool, use, new, function, TRUE, list
+hint @4: Any
 
 #---- function_stored_in_a_list
 helpers <- list(scale = function(x, by = 2) x * by)

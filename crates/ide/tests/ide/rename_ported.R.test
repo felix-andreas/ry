@@ -170,7 +170,7 @@ action: Add inferred type annotations for the whole file
   edit 5..5 -> ": character"
   edit 30..30 -> ": DataFrame{id: integer[], price: double[]}"
   edit 81..81 -> ": double[]"
-completion (19): price, prices, pairwise.wilcox.test, print.connection, print.numeric_version, print.octmode, print.packageInfo, print.proc_time
+completion (20): price, prices, pairwise.wilcox.test, print.connection, print.numeric_version, print.octmode, print.packageInfo, print.proc_time
 hint @5: character
 hint @30: DataFrame{id: integer[], price: double[]}
 hint @81: double[]
@@ -247,7 +247,7 @@ action: Add inferred type annotation for `sales`
   edit 5..5 -> ": DataFrame{id: integer[], amount: double[]}"
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{id: integer[], amount: double[]}"
-completion (113): addNextMethod, anyNA.numeric_version, ARMAtoMA, as.character.hexmode, as.character.numeric_version, as.character.octmode, as.data.frame.complex, as.data.frame.factor
+completion (120): addNextMethod, anyNA.numeric_version, ARMAtoMA, as.character.hexmode, as.character.numeric_version, as.character.octmode, as.data.frame.complex, as.data.frame.factor
 hint @5: DataFrame{id: integer[], amount: double[]}
 
 #---- call_past_a_local_value_is_the_library_function

@@ -125,7 +125,7 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": DataFrame{region: character[], units: integer[]}"
-completion (22): DataFrame.columns, DataFrame.copy, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height, DataFrame.join, DataFrame.join_asof
+completion (28): DataFrame.columns, DataFrame.concat, DataFrame.copy, DataFrame.drop, DataFrame.filter, DataFrame.group_by, DataFrame.head, DataFrame.height
 hint @5: DataFrame{region: character[], units: integer[]}
 
 #---- df_column_hover_after_dollar
@@ -376,7 +376,7 @@ action: Add inferred type annotation for `frame`
   edit 5..5 -> ": data.frame{region: character[], units: integer[]}"
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": data.frame{region: character[], units: integer[]}"
-completion (128+): frame, format.data.frame, xtfrm.data.frame, DataFrame, DataFrame.columns, DataFrame.copy, DataFrame.filter, DataFrame.group_by
+completion (128+): frame, format.data.frame, xtfrm.data.frame, DataFrame, DataFrame.columns, DataFrame.concat, DataFrame.copy, DataFrame.drop
 hint @5: data.frame{region: character[], units: integer[]}
 
 #---- base_matrix_hover
@@ -411,7 +411,7 @@ action: Add inferred type annotations for the whole file
   edit 24..24 -> ": T"
   edit 32..32 -> ": T"
   edit 37..37 -> " -> T"
-completion (73): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
+completion (74): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
 hint @17<T: numeric>
 hint @24: T
 hint @32: T
@@ -437,7 +437,7 @@ action: Add inferred type annotations for the whole file
   edit 24..24 -> ": T"
   edit 32..32 -> ": T"
   edit 37..37 -> " -> T"
-completion (73): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
+completion (74): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
 hint @17<T: numeric>
 hint @24: T
 hint @32: T
@@ -461,7 +461,7 @@ action: Add inferred type annotation for `doubled`
 action: Add inferred type annotations for the whole file
   edit 7..7 -> ": double"
   edit 39..39 -> ": double"
-completion (73): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
+completion (74): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
 hint @7: double
 hint @39: double
 
@@ -511,7 +511,7 @@ action: Add inferred type annotations for the whole file
   edit 71..71 -> "<T>"
   edit 78..78 -> ": T"
   edit 79..79 -> " -> T"
-completion (73): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
+completion (74): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
 hint @17<T: numeric>
 hint @24: T
 hint @32: T
@@ -696,7 +696,12 @@ references: 107..112*, 121..126
 rename: 2 edit(s)
 signature: fn(...: Any) -> list[Any]
 parameters: [...: Any]
+action: Add inferred type annotation for `Counter`
+  edit 7..7 -> ": Any"
+action: Add inferred type annotations for the whole file
+  edit 7..7 -> ": Any"
 completion (1): count
+hint @7: Any
 
 #---- field_r6_private
 Account <- R6::R6Class("Account",
@@ -714,7 +719,12 @@ references: 98..105*, 117..124
 rename: 2 edit(s)
 signature: fn(...: Any) -> list[Any]
 parameters: [...: Any]
+action: Add inferred type annotation for `Account`
+  edit 7..7 -> ": Any"
+action: Add inferred type annotations for the whole file
+  edit 7..7 -> ": Any"
 completion (1): balance
+hint @7: Any
 
 #---- field_r6_new
 Counter <- R6::R6Class("Counter",
@@ -732,7 +742,10 @@ references: 71..74*, 143..146
 rename: 2 edit(s)
 signature: fn()
 parameters:
+action: Add inferred type annotations for the whole file
+  edit 7..7 -> ": Any"
 completion (1): add
+hint @7: Any
 
 #---- field_r6_inherit
 Base <- R6::R6Class("Base", public = list(greet = function() "hi"))
@@ -747,9 +760,15 @@ references: 42..47*, 154..159
 rename: 2 edit(s)
 signature: fn()
 parameters:
+action: Add inferred type annotation for `Child`
+  edit 73..73 -> ": Any"
 action: Add inferred type annotations for the whole file
+  edit 4..4 -> ": Any"
   edit 60..60 -> " -> character"
+  edit 73..73 -> ": Any"
 completion (1): greet
+hint @4: Any
+hint @73: Any
 
 #---- field_record
 point <- (x = 1, y = 2)
@@ -837,7 +856,10 @@ references: 67..71*, 81..85, 127..131
 rename: 3 edit(s)
 signature: fn(deep = FALSE)
 parameters: [deep = FALSE]
+action: Add inferred type annotations for the whole file
+  edit 7..7 -> ": Any"
 completion (54): de, deep, de.ncols, de.restore, de.setup, debug, debugcall, debugger
+hint @7: Any
 
 #---- block_function_argument
 encapsulate <- function(expr) eval(substitute(expr), globalenv())
@@ -854,7 +876,7 @@ signature: fn(x, envir = NULL)
 parameters: x | [envir = NULL]
 action: Add inferred type annotations for the whole file
   edit 0..0 -> "#: <T> fn([expr]: T) -> Any\n"
-completion (64): envir, env.profile, environment, environmentIsLocked, environmentName, emptyenv, .expand_R_libs_env_var, getGraphicsEventEnv
+completion (66): envir, env.profile, environment, environmentIsLocked, environmentName, emptyenv, .expand_R_libs_env_var, getGraphicsEventEnv
 hint @11: <T> fn([expr]: T) -> Any
 hint @35expr =
 hint @53envir =
@@ -1079,7 +1101,7 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": logical[]"
-completion (36): expiry, exists, example, existsFunction, existsMethod, exp, expand.grid, expand.model.frame
+completion (58): expiry, exists, example, existsFunction, existsMethod, exp, expand.grid, expand.model.frame
 hint @5: logical[]
 
 #---- completion_of_a_call_ranks_locals_with_the_globals
@@ -1096,7 +1118,7 @@ rename: none
 signature: none
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": logical[]"
-completion (36): exists, expiry, example, existsFunction, existsMethod, exp, expand.grid, expand.model.frame
+completion (58): exists, expiry, example, existsFunction, existsMethod, exp, expand.grid, expand.model.frame
 hint @5: logical[]
 
 #---- hover_on_a_parameter_shows_its_type
@@ -1261,7 +1283,7 @@ signature: fn(x: double[], ...: Any, [digits]: Any, [quote]: logical | character
 parameters: [x: double[]] | ...: Any | [digits]: Any | [quote]: logical | character | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": double"
-completion (16): parts, packageStartupMessage, pairwise.prop.test, pairwise.t.test, pairwise.wilcox.test, print.NativeRoutineList, suppressPackageStartupMessages, .deparseOpts
+completion (17): parts, packageStartupMessage, pairwise.prop.test, pairwise.t.test, pairwise.wilcox.test, print.NativeRoutineList, Expr.str_starts_with, suppressPackageStartupMessages
 hint @5: double
 hint @18: double[]
 
@@ -1323,7 +1345,7 @@ references: 49..53*, 58..62
 rename: 2 edit(s)
 type-definition: stub source std at `List`
 signature: none
-completion (115): rest, restartDescription, restartFormals, print.restart, tryInvokeRestart, isRestart, de.restore, USArrests
+completion (116): rest, restartDescription, restartFormals, print.restart, tryInvokeRestart, isRestart, de.restore, USArrests
 
 #---- completion_offers_a_top_level_pattern_variable
 match (:Some(1L)) {
@@ -1418,7 +1440,7 @@ rename: 4 edit(s)
 calls area: in (top level) [132..136] | out
 signature: <T> fn(x: T, ...: Any, [digits]: Any, [quote]: logical | character, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> T
 parameters: [x: T] | ...: Any | [digits]: Any | [quote]: logical | character | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
-completion (84): area, state.area, abbreviate, aggregate, aggregate.data.frame, aggregate.ts, all.equal.envRefClass, aperm.default
+completion (87): area, state.area, abbreviate, aggregate, aggregate.data.frame, aggregate.ts, all.equal.envRefClass, aperm.default
 hint @11name =
 hint @19def =
 hint @83signature =

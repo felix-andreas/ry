@@ -629,7 +629,7 @@ definition: installed fun from base, stats, utils, methods, graphics, grDevices,
 references: none
 rename: none
 signature: none
-completion (56): function, functionBody, findFunction, .Defunct, as.function, as.function.default, getFunction, is.function
+completion (60): function, functionBody, findFunction, .Defunct, as.function, as.function.default, getFunction, is.function
 
 #==== annotation_types
 #---- goto_type_definition
@@ -988,7 +988,7 @@ definition 0..2
 references: 0..2*, 56..58, 71..73
 rename: 3 edit(s)
 signature: none
-completion (55): D, DT, DataFrame, DataFrame.columns, DataFrame.copy, DataFrame.filter, DataFrame.group_by, DataFrame.head
+completion (61): D, DT, DataFrame, DataFrame.columns, DataFrame.concat, DataFrame.copy, DataFrame.drop, DataFrame.filter
 
 #---- a_top_level_update_keeps_the_first_definition
 DT <- data.table::data.table(x = 1)
@@ -1001,7 +1001,7 @@ definition 0..2
 references: 0..2*, 36..38, 49..51
 rename: 3 edit(s)
 signature: none
-completion (55): D, DT, DataFrame, DataFrame.columns, DataFrame.copy, DataFrame.filter, DataFrame.group_by, DataFrame.head
+completion (61): D, DT, DataFrame, DataFrame.columns, DataFrame.concat, DataFrame.copy, DataFrame.drop, DataFrame.filter
 
 #---- a_frame_update_types_later_reads
 sales <- DataFrame(a = 1)

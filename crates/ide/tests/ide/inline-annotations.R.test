@@ -169,7 +169,7 @@ action: Add inferred type annotations for the whole file
   edit 10..10 -> "<T: arithmetic>"
   edit 12..12 -> ": T"
   edit 13..13 -> " -> T"
-completion (59): twice, getWindowsHandle, getWindowsHandles, getWindowTitle, getWinProgressBar, setWindowTitle, setWinProgressBar, HoltWinters
+completion (63): twice, getWindowsHandle, getWindowsHandles, getWindowTitle, getWinProgressBar, setWindowTitle, setWinProgressBar, HoltWinters
 hint @10<T: arithmetic>
 hint @12: T
 hint @13 -> T
