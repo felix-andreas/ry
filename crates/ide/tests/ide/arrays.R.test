@@ -85,7 +85,7 @@ hover-definition: global 5..9
 definition 5..9
 references: 5..9*, 31..35
 rename: 2 edit(s)
-signature: fn(x: Str, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> Str
-parameters: [x: Str] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
+signature: fn(x: Str, ...: Any, [digits]: Any, [quote]: logical | character, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> Str
+parameters: [x: Str] | ...: Any | [digits]: Any | [quote]: logical | character | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
 completion (1): item
 hint @9: Str

@@ -45,7 +45,7 @@ a4: Any
 a5: character
 a6: character
 a7: double[]
-a8: logical
+a8: logical[]
 a9: integer
 a10: logical
 a11: logical
@@ -57,7 +57,7 @@ a16: double
 a17: integer[]
 a18: logical
 a19: Any
-a20: double
+a20: double[]
 a21: logical
 a22: logical
 a23: character[]
@@ -111,21 +111,21 @@ a33: integer
 a34: integer[]
 a35: integer
 a36: Any
-a37: double
+a37: double[]
 a38: character
-a39: integer
+a39: integer[]
 a40: character
 a41: integer[]
 a42: Any
 a43: double[]
 a44: integer[]
-a45: double
+a45: double[]
 a46: character
 a47: logical
 a48: Any
 a49: character
 a50: logical
-a51: character
+a51: character[]
 a52: double[]
 
 #---- vectors_and_strings_3
@@ -166,7 +166,7 @@ words: character[]
 flags: logical[]
 a53: character[]
 a54: double[]
-a55: double
+a55: double[]
 a56: Any
 a57: double
 a58: integer[]
@@ -174,9 +174,9 @@ a59: character
 a60: integer[]
 a61: logical[]
 a62: double[]
-a63: double
+a63: double[]
 a64: Any
-a65: logical
+a65: logical[]
 a66: character[]
 a67: integer[]
 a68: character
@@ -187,7 +187,7 @@ a72: double[]
 a73: Any
 a74: character[]
 a75: double[named]
-a76: double
+a76: double[]
 a77: double
 a78: logical
 
@@ -240,8 +240,8 @@ a88: character
 a89: double[]
 a90: integer[]
 a91: logical
-a92: logical
-a93: double
+a92: logical[]
+a93: double[]
 a94: double[]
 a95: double
 a96: double[]
@@ -535,3 +535,39 @@ labels <- Map(function(a, b) paste(a, b), c("x", "y"), c("z", "w"))
 #++++
 sums: list[Any]
 labels: list[named: character]
+
+#---- vectorised_math_keeps_the_shape_of_its_argument
+# `@elementwise(x)` declares the result per element, and the call takes the shape of `x`.
+xs <- c(1.5, 2, 3)
+named <- c(a = 1, b = 4)
+m <- matrix(1:4, 2)
+widths <- nchar(c("a", "bb"))
+roots <- sqrt(xs)
+one <- sqrt(4)
+kept <- sqrt(named)
+grown <- exp(-m)
+upper <- toupper(c("a", "b"))
+missing_values <- is.na(xs)
+angles <- atan2(1, xs)
+either <- function(flag) log(if (flag) 2 else xs)
+wrap <- function(x) sqrt(x)
+#: fn(rates: matrix) -> matrix
+discount <- function(rates) exp(-rates)
+#: fn(x: double[]) -> double[]
+scaled <- function(x) sqrt(x) / 2
+#++++
+xs: double[]
+named: double[named]
+m: matrix
+widths: integer[]
+roots: double[]
+one: double
+kept: double[named]
+grown: matrix
+upper: character[]
+missing_values: logical[]
+angles: double[]
+either: fn(flag: logical) -> double | double[]
+wrap: <T> fn(x: T) -> double
+discount: fn(rates: matrix) -> matrix
+scaled: fn(x: double[]) -> double[]

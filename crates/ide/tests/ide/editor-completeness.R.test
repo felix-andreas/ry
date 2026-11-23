@@ -230,8 +230,8 @@ hover-definition: global 5..6
 definition 5..6
 references: 5..6*, 29..30
 rename: 2 edit(s)
-signature: fn(x: integer, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> integer
-parameters: [x: integer] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
+signature: fn(x: integer, ...: Any, [digits]: Any, [quote]: logical | character, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> integer
+parameters: [x: integer] | ...: Any | [digits]: Any | [quote]: logical | character | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
 completion (128+): i, in, if, iconv, iconvlist, icuGetCollate, icuSetCollate, identical
 hint @6: integer
 
@@ -1195,8 +1195,8 @@ hover-definition: global 0..7
 definition 0..7
 references: 0..7*, 21..26
 rename: 2 edit(s)
-signature: fn(x: integer, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> integer
-parameters: [x: integer] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
+signature: fn(x: integer, ...: Any, [digits]: Any, [quote]: logical | character, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> integer
+parameters: [x: integer] | ...: Any | [digits]: Any | [quote]: logical | character | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
 completion (7): limit, limitedLabels, memory.limit, setTimeLimit, setSessionTimeLimit, List.map_with_index, .__C__LinearMethodsList
 
 #---- completion_offers_a_parameter_at_the_end_of_a_braceless_body
@@ -1257,8 +1257,8 @@ hover-definition: global 13..18
 definition 13..18
 references: 13..18*, 37..42
 rename: 2 edit(s)
-signature: fn(x: double[], ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> double[]
-parameters: [x: double[]] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
+signature: fn(x: double[], ...: Any, [digits]: Any, [quote]: logical | character, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> double[]
+parameters: [x: double[]] | ...: Any | [digits]: Any | [quote]: logical | character | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
 action: Add inferred type annotations for the whole file
   edit 5..5 -> ": double"
 completion (16): parts, packageStartupMessage, pairwise.prop.test, pairwise.t.test, pairwise.wilcox.test, print.NativeRoutineList, suppressPackageStartupMessages, .deparseOpts
@@ -1336,8 +1336,8 @@ hover-definition: local 28..33
 definition 28..33
 references: 28..33*, 44..49
 rename: 2 edit(s)
-signature: fn(x: integer, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> integer
-parameters: [x: integer] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
+signature: fn(x: integer, ...: Any, [digits]: Any, [quote]: logical | character, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> integer
+parameters: [x: integer] | ...: Any | [digits]: Any | [quote]: logical | character | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
 completion (2): found, packageNotFoundError
 
 #---- a_function_named_like_a_stub_type_navigates_to_the_function
@@ -1416,8 +1416,8 @@ definition 12..16
 references: 12..16*, 57..61, 76..80, 132..136
 rename: 4 edit(s)
 calls area: in (top level) [132..136] | out
-signature: <T> fn(x: T, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> T
-parameters: [x: T] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
+signature: <T> fn(x: T, ...: Any, [digits]: Any, [quote]: logical | character, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> T
+parameters: [x: T] | ...: Any | [digits]: Any | [quote]: logical | character | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
 completion (84): area, state.area, abbreviate, aggregate, aggregate.data.frame, aggregate.ts, all.equal.envRefClass, aperm.default
 hint @11name =
 hint @19def =

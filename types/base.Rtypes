@@ -219,10 +219,10 @@ missing : fn(x: Any) -> logical
 
 # Elementwise NA/finiteness predicates: one logical PER ELEMENT in R (unlike the predicates above);
 # scalar-claim so `if (is.na(x))` stays clean on scalars.
-is.na : @pure fn(x: Any) -> logical
-is.finite : @pure fn(x: Any) -> logical
-is.infinite : @pure fn(x: Any) -> logical
-is.nan : @pure fn(x: Any) -> logical
+is.na : @pure @elementwise(x) fn(x: Any) -> logical
+is.finite : @pure @elementwise(x) fn(x: Any) -> logical
+is.infinite : @pure @elementwise(x) fn(x: Any) -> logical
+is.nan : @pure @elementwise(x) fn(x: Any) -> logical
 anyNA : @pure fn(x: Any, [recursive]: logical) -> logical
 
 # Coercions: the target atomic type is fixed by the function; elementwise, scalar-claim.
@@ -251,18 +251,18 @@ as.environment : Any
 # `nchar`'s optional formals are declarable because callback positions tolerate surplus optional
 # formals: `lapply(words, nchar)` re-checks the callback as the forwarded invocation the callee
 # performs, so extra defaults no longer break the idiom.
-nchar : @pure fn(x: Any, [type]: character, [allowNA]: logical, [keepNA]: logical) -> integer
+nchar : @pure @elementwise(x) fn(x: Any, [type]: character, [allowNA]: logical, [keepNA]: logical) -> integer
 nzchar : @pure fn(x: Any, [keepNA]: logical) -> logical
-toupper : @pure fn(x: Any) -> character
-tolower : @pure fn(x: Any) -> character
-casefold : @pure fn(x: Any, [upper]: logical) -> character
+toupper : @pure @elementwise(x) fn(x: Any) -> character
+tolower : @pure @elementwise(x) fn(x: Any) -> character
+casefold : @pure @elementwise(x) fn(x: Any, [upper]: logical) -> character
 substr : @pure fn(x: Any, start: Any, stop: Any) -> character
 substring : @pure fn(text: Any, first: Any, [last]: Any) -> character
 startsWith : @pure fn(x: Any, prefix: Any) -> logical
 endsWith : @pure fn(x: Any, suffix: Any) -> logical
-trimws : @pure fn(x: Any, [which]: character, [whitespace]: character) -> character
+trimws : @pure @elementwise(x) fn(x: Any, [which]: character, [whitespace]: character) -> character
 strrep : @pure fn(x: Any, times: Any) -> character
-chartr : @pure fn(old: character, new: character, x: Any) -> character
+chartr : @pure @elementwise(x) fn(old: character, new: character, x: Any) -> character
 utf8ToInt : @pure fn(x: character) -> integer[]
 intToUtf8 : @pure fn(x: Any, [multiple]: logical, [allow_surrogate_pairs]: logical) -> character[]
 toString : @pure fn(x: Any, ...: Any, [sep]: character) -> character
@@ -423,24 +423,24 @@ cummin : fn(x: double[]) -> double[]
 cummin : fn(x: NULL) -> double[]
 cummin : fn(x: Any) -> Any
 
-# Math with a fixed double result (elementwise, scalar-claim, Any-param). `abs` is type-preserving.
-sqrt : @pure fn(x: Any) -> double
-exp : @pure fn(x: Any) -> double
-log : @pure fn(x: Any, [base]: Any) -> double
-log2 : @pure fn(x: Any) -> double
-log10 : @pure fn(x: Any) -> double
-log1p : @pure fn(x: Any) -> double
-expm1 : @pure fn(x: Any) -> double
-sin : @pure fn(x: Any) -> double
-cos : @pure fn(x: Any) -> double
-tan : @pure fn(x: Any) -> double
-asin : @pure fn(x: Any) -> double
-acos : @pure fn(x: Any) -> double
-atan : @pure fn(x: Any) -> double
-atan2 : @pure fn(y: Any, x: Any) -> double
-sign : @pure fn(x: Any) -> double
-choose : @pure fn(n: Any, k: Any) -> double
-factorial : @pure fn(x: Any) -> double
+# Math with a double result per element: `@elementwise(x)` gives the call the shape of `x`. `abs` keeps the type too.
+sqrt : @pure @elementwise(x) fn(x: Any) -> double
+exp : @pure @elementwise(x) fn(x: Any) -> double
+log : @pure @elementwise(x) fn(x: Any, [base]: Any) -> double
+log2 : @pure @elementwise(x) fn(x: Any) -> double
+log10 : @pure @elementwise(x) fn(x: Any) -> double
+log1p : @pure @elementwise(x) fn(x: Any) -> double
+expm1 : @pure @elementwise(x) fn(x: Any) -> double
+sin : @pure @elementwise(x) fn(x: Any) -> double
+cos : @pure @elementwise(x) fn(x: Any) -> double
+tan : @pure @elementwise(x) fn(x: Any) -> double
+asin : @pure @elementwise(x) fn(x: Any) -> double
+acos : @pure @elementwise(x) fn(x: Any) -> double
+atan : @pure @elementwise(x) fn(x: Any) -> double
+atan2 : @pure @elementwise(y, x) fn(y: Any, x: Any) -> double
+sign : @pure @elementwise(x) fn(x: Any) -> double
+choose : @pure @elementwise(n, k) fn(n: Any, k: Any) -> double
+factorial : @pure @elementwise(x) fn(x: Any) -> double
 # `abs` is shape- and type-preserving on numerics (integer stays integer, scalar stays scalar), so
 # each shape gets a candidate; logical input (which R coerces to integer) falls to `Any`.
 abs : @pure fn(x: integer) -> integer
@@ -450,11 +450,11 @@ abs : fn(x: double[]) -> double[]
 abs : fn(x: Any) -> Any
 
 # Rounding: the result is a double regardless of the (numeric) input; `digits` is Any-param.
-round : @pure fn(x: Any, [digits]: Any, ...: Any) -> double
-signif : @pure fn(x: Any, [digits]: Any) -> double
-floor : @pure fn(x: Any) -> double
-ceiling : @pure fn(x: Any) -> double
-trunc : @pure fn(x: Any, ...: Any) -> double
+round : @pure @elementwise(x) fn(x: Any, [digits]: Any, ...: Any) -> double
+signif : @pure @elementwise(x) fn(x: Any, [digits]: Any) -> double
+floor : @pure @elementwise(x) fn(x: Any) -> double
+ceiling : @pure @elementwise(x) fn(x: Any) -> double
+trunc : @pure @elementwise(x) fn(x: Any, ...: Any) -> double
 
 # Sorting, ordering, sets: element-preserving, so the vector forms carry a generic `T[]` element
 # (any atomic) and the list forms thread the item type; an `Any` fallback ends each overload set for

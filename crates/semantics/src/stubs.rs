@@ -41,6 +41,9 @@ pub struct StubLibrary<'db> {
     /// `@opaque(name, ...)` parameters: the callee forces the argument and may hand it back,
     /// but never inspects it as an R object, so a ry value may pass there.
     pub opaque: SymbolMap<Vec<String>>,
+    /// `@elementwise(x, ...)` parameters: the declared scalar result takes the shape of the
+    /// first of these arguments that is a vector or a matrix (`sqrt(x)` over a `double[]`).
+    pub elementwise: SymbolMap<Vec<String>>,
     /// `@pure` names per declaring namespace, each with the parameters whose function arguments
     /// must be pure as well (`@pure(FUN)` on `lapply`); an empty list is pure whatever the
     /// arguments. A bare call takes its purity from the namespace of the name's winning
@@ -487,6 +490,10 @@ pub fn stub_library<'db>(db: &'db dyn Db, sources: StubSources) -> StubLibrary<'
             let first_here = seen_here.insert(name);
             if first_here {
                 library.opaque.remove(name);
+                library.elementwise.remove(name);
+            }
+            if let Some(parameters) = markers.elementwise {
+                library.elementwise.insert(name, parameters);
             }
             // Like purity, every candidate's marker counts toward the name.
             if let Some(parameters) = markers.opaque {
@@ -587,16 +594,18 @@ struct DeclarationMarkers<'text> {
     /// `@pure`, with the parameters `@pure(FUN, ...)` names.
     pure: Option<Vec<String>>,
     opaque: Option<Vec<String>>,
+    elementwise: Option<Vec<String>>,
     type_text: &'text str,
 }
 
-/// The `@masked`, `@pure`, `@pure(...)` and `@opaque(...)` markers that may precede a
+/// The `@masked`, `@pure`, `@pure(...)`, `@opaque(...)` and `@elementwise(...)` markers that may precede a
 /// declaration's type, in any order.
 fn declaration_markers(mut type_text: &str) -> DeclarationMarkers<'_> {
     let mut markers = DeclarationMarkers {
         masked: false,
         pure: None,
         opaque: None,
+        elementwise: None,
         type_text,
     };
     loop {
@@ -604,6 +613,7 @@ fn declaration_markers(mut type_text: &str) -> DeclarationMarkers<'_> {
         for (prefix, list) in [
             ("@opaque(", &mut markers.opaque),
             ("@pure(", &mut markers.pure),
+            ("@elementwise(", &mut markers.elementwise),
         ] {
             if let Some(rest) = type_text.strip_prefix(prefix)
                 && let Some((names, rest)) = rest.split_once(')')
@@ -799,6 +809,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
         type_text = markers.type_text;
         let masked = markers.masked;
         let opaque = markers.opaque;
+        let elementwise = markers.elementwise;
         let pure_callbacks = markers.pure.unwrap_or_default();
         let Some(scheme) = lower_type_text(db, type_text) else {
             problems.push(StubProblem {
@@ -841,6 +852,30 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
                     ),
                 });
             }
+        }
+        for parameter in elementwise.iter().flatten() {
+            if !formals.contains(&parameter.as_str()) {
+                problems.push(StubProblem {
+                    line,
+                    message: format!(
+                        "`@elementwise({parameter})` on `{name}` names no parameter of its function type"
+                    ),
+                });
+            }
+        }
+        if elementwise.is_some()
+            && !matches!(
+                scheme.body.kind(db),
+                TyKind::Function(function) if matches!(function.ret.kind(db), TyKind::Scalar(_))
+            )
+        {
+            problems.push(StubProblem {
+                line,
+                message: format!(
+                    "`@elementwise` on `{name}` requires a scalar result, which takes the shape \
+                     of the argument"
+                ),
+            });
         }
         for parameter in &pure_callbacks {
             if !formals.contains(&parameter.as_str()) {

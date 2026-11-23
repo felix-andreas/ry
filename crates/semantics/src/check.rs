@@ -4751,14 +4751,27 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// The positions of the arguments that reach a library function's `@opaque` parameters,
-    /// matched as R matches them against the declaration's first candidate.
+    /// The positions of the arguments that reach a library function's `@opaque` parameters.
     fn opaque_arguments(&self, function: &str, arguments: &[Argument]) -> SmallVec<[usize; 2]> {
+        match self
+            .library
+            .and_then(|library| library.opaque.get(function))
+        {
+            Some(parameters) => self.library_parameter_arguments(function, parameters, arguments),
+            None => SmallVec::new(),
+        }
+    }
+
+    /// The positions of the arguments that reach the named parameters of a library function,
+    /// matched as R matches them against the declaration's first candidate, in argument order.
+    fn library_parameter_arguments(
+        &self,
+        function: &str,
+        parameters: &[String],
+        arguments: &[Argument],
+    ) -> SmallVec<[usize; 2]> {
         let mut positions = SmallVec::new();
         let Some(library) = self.library else {
-            return positions;
-        };
-        let Some(parameters) = library.opaque.get(function) else {
             return positions;
         };
         let Some(TyKind::Function(declared)) = library
@@ -12892,6 +12905,9 @@ impl<'db, 'a> Checker<'db, 'a> {
         if let Some(sequence) = self.integer_seq(callee, arguments, ty) {
             return self.record(id, sequence);
         }
+        if let Some(lifted) = self.elementwise_result(callee, arguments, ty) {
+            return self.record(id, lifted);
+        }
         if let Some(verb) = self.dataframe_verb(callee) {
             return self.refine_dataframe_call(verb, arguments).unwrap_or(ty);
         }
@@ -12959,6 +12975,58 @@ impl<'db, 'a> Checker<'db, 'a> {
                 .first()
                 .is_some_and(|argument| argument.name.is_none());
         (whole || alone).then(|| self.shaped(OperandShape::Vector, Atomic::Integer))
+    }
+
+    /// A library function marked `@elementwise(x)` declares its result for one element, and
+    /// the call's result takes the shape of `x`: `sqrt` over a `double[]` is a `double[]`, over
+    /// a named vector a named one, and over a `matrix` a `matrix`. An argument of any other
+    /// shape, an open variable among them, keeps the declared scalar.
+    fn elementwise_result(
+        &self,
+        callee: ExprId,
+        arguments: &[Argument],
+        ty: Ty<'db>,
+    ) -> Option<Ty<'db>> {
+        let ExpressionKind::NameRef(name) = self.module.kind(callee) else {
+            return None;
+        };
+        let parameters = self.library?.elementwise.get(name.as_str())?;
+        if !self.calls_base(callee) {
+            return None;
+        }
+        let element = self.table.resolve(self.db, ty);
+        if !matches!(element.kind(self.db), TyKind::Scalar(_)) {
+            return None;
+        }
+        let lift = |shape: Ty<'db>| match shape.kind(self.db) {
+            TyKind::Vector(_) => Some(Ty::new(self.db, TyKind::Vector(element))),
+            TyKind::NamedVector(_) => Some(Ty::new(self.db, TyKind::NamedVector(element))),
+            TyKind::Named(class, _) if class.text(self.db) == "matrix" => Some(shape),
+            _ => None,
+        };
+        self.library_parameter_arguments(name.as_str(), parameters, arguments)
+            .iter()
+            .filter_map(|&index| arguments.get(index)?.value)
+            .filter_map(|value| self.recorded.get(&value))
+            .find_map(|&argument| {
+                let argument = self.table.resolve(self.db, argument);
+                match argument.kind(self.db) {
+                    // `double | double[]` stays a scalar or a vector, member by member.
+                    TyKind::Union(members) => {
+                        let lifted = members
+                            .iter()
+                            .map(|&member| lift(member))
+                            .collect::<Vec<_>>();
+                        lifted.iter().any(Option::is_some).then(|| {
+                            union_of(
+                                self.db,
+                                lifted.into_iter().map(|member| member.unwrap_or(element)),
+                            )
+                        })
+                    }
+                    _ => lift(argument),
+                }
+            })
     }
 
     fn infer_ordinary_call(

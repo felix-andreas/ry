@@ -291,7 +291,7 @@ hover 16..21: print: fn(
 hover 16..21:   x: double,
 hover 16..21:   ...: Any,
 hover 16..21:   [digits]: Any,
-hover 16..21:   [quote]: logical,
+hover 16..21:   [quote]: logical | character,
 hover 16..21:   [right]: logical,
 hover 16..21:   [max]: Any,
 hover 16..21:   [width]: Any,
@@ -303,8 +303,8 @@ hover-definition: package base (1 declaration(s), declared in stub source base a
 definition: stub source base at `print`
 references: none
 rename: none
-signature: fn(x: double, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> double
-parameters: [x: double] | ...: Any | [digits]: Any | [quote]: logical | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
+signature: fn(x: double, ...: Any, [digits]: Any, [quote]: logical | character, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> double
+parameters: [x: double] | ...: Any | [digits]: Any | [quote]: logical | character | [right]: logical | [max]: Any | [width]: Any | [n]: Any | [na.print]: Any | [row.names]: Any
 action: Add inferred type annotation for `f`
   edit 15..15 -> " -> double"
 action: Add inferred type annotations for the whole file
