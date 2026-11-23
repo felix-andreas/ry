@@ -171,6 +171,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The fresh sample's false-report classes, third pass
 - The fresh sample's false-report classes, fourth pass
 - `ifelse` widens its branches, and an all-`NA` logical arrives as `character`
+- A qualified call reads a dormant namespace's declarations
 
 ## Analysis core
 

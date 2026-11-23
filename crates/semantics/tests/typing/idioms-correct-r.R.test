@@ -1222,7 +1222,7 @@ warn_header <- function(header) {
   warn(header)
 }
 #++++
-compat: <T, U> fn(fn: T) -> (fn() -> logical) | (fn(msg: U) -> Unknown)
+compat: <T, U> fn(fn: T) -> (fn() -> logical) | (fn(msg: U) -> character)
 warn_header: <T> fn(header: T) -> Unknown
 
 #---- a_function_picked_by_an_argument_value_still_needs_one_member_to_fit
@@ -1239,7 +1239,7 @@ warn_twice <- function(header) {
   warn(header, header, header)
 }
 #++++
-compat: <T, U> fn(fn: T) -> (fn() -> logical) | (fn(msg: U) -> Unknown)
+compat: <T, U> fn(fn: T) -> (fn() -> logical) | (fn(msg: U) -> character)
 warn_twice: Unknown
 253..259 error[type-mismatch] this call passes 3 positional arguments, but the function only takes 0
 

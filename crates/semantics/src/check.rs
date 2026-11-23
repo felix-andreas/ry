@@ -29,7 +29,10 @@ use {
         },
         native::{Judged, NativeBlocker, has_r_bound, native_blockers},
         sorted::{SortedMap, SortedSet},
-        stubs::{NATIVE_NAMESPACES, StubLibrary, SymbolSet, is_ry_type, lower_type_text, stubs},
+        stubs::{
+            NATIVE_NAMESPACES, StubLibrary, SymbolSet, dormant_namespace_schemes, is_ry_type,
+            lower_type_text, stubs,
+        },
         top_level::super_assigned_names,
         types::{
             Atomic, Binder, Bound, Constraint, DefaultRead, FlagReturn, FrameKind, FunctionType,
@@ -4476,11 +4479,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     if reaches_project {
                         globals.namespace_scheme(name)
                     } else {
-                        let package = (*package)?;
-                        self.library?
-                            .namespace_schemes(package, name)?
-                            .last()
-                            .cloned()
+                        self.qualified_schemes((*package)?, name)?.last().cloned()
                     }
                 }) {
                     Some(namespace_scheme) => self.instantiate(&namespace_scheme),
@@ -16385,6 +16384,20 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
+    /// The declarations `package::name` reads: an active namespace's from the library, and a
+    /// dormant shipped namespace's from its own stubs.
+    fn qualified_schemes(
+        &self,
+        package: Symbol,
+        name: Symbol,
+    ) -> Option<&'db Vec<TypeScheme<'db>>> {
+        let library = self.library?;
+        if library.knows_namespace(package.as_str()) {
+            return library.namespace_schemes(package, name);
+        }
+        dormant_namespace_schemes(self.db, package.as_str(), name.as_str())
+    }
+
     fn try_overloaded_call(
         &mut self,
         id: ExprId,
@@ -16408,7 +16421,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 let name =
                     validated_namespace_name(self.db, self.library, *internal, package, name)?;
                 if !namespace_reaches_project(self.db, package) {
-                    let schemes = self.library?.namespace_schemes((*package)?, name)?;
+                    let schemes = self.qualified_schemes((*package)?, name)?;
                     if schemes.len() < 2 {
                         return None;
                     }
@@ -23696,7 +23709,9 @@ fn validated_namespace_name(
     }
     match library.map(|library| library.knows_namespace(package.as_str())) {
         None => Some(name),
-        Some(false) => None,
+        Some(false) => dormant_namespace_schemes(db, package.as_str(), name.as_str())
+            .is_some()
+            .then_some(name),
         Some(true) => {
             if internal
                 || library.is_some_and(|library| library.exports(package.as_str(), name.as_str()))

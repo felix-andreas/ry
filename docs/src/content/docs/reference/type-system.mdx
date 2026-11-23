@@ -4884,7 +4884,12 @@ in projects that never use them. So a conditional namespace activates only when:
   `loadNamespace()` call whose package argument is a literal name or string; or
 - the project ships its own `stubs/<pkg>.Rtypes` override for the namespace.
 
-While a namespace is inactive, it behaves exactly like any package the stubs do not describe.
+While a namespace is inactive, its bare names behave exactly like those of any package the stubs do
+not describe. A qualified call still reads its declarations, because `::` loads a package without
+attaching it, so `data.table::fifelse(test, 1, 2)` is `double[]` in a script that never declares
+data.table. A declaration that names one of the package's own types, such as `as.data.table`'s
+`data.table` result, or that carries `@masked`, `@opaque` or `@elementwise`, needs the namespace
+active and is `Unknown` through `::` until then.
 
 The shipped dplyr verbs preserve their data argument's class, as `<T> fn(.data: T, ...) -> T`, so a
 native-pipe chain keeps its class from end to end: `fread(path) |> mutate(r = a / b)` stays a
