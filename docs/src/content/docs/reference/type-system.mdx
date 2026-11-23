@@ -761,7 +761,9 @@ constraint: `middle("a")` under `<N: scalar numeric>` reports "expected a scalar
 as the annotation spells it, and an inferred one `T`, `U` and so on in order of appearance. A
 call's message prints the parameter as the fresh variable the call instantiated, so `wrap(gh)`
 under `<R> fn(f: fn(...: double) -> R) -> R` expects `fn(...: double) -> T`. A union satisfies a
-constraint when every member does, so `double | integer` satisfies `numeric`. A vector `U[]`
+constraint when every member does, so `double | integer` satisfies `numeric`, and an undetermined
+member takes the constraint: a `NULL` default replaced by a number, `T | double`, passed where a
+number is needed makes `T` a number. A vector `U[]`
 satisfies `numeric` when its element is a number, and an undetermined element becomes a
 `scalar numeric` one. A constrained value that meets a union takes the union whole when the
 constraint admits every member, so a number meeting `integer | double` stays `integer | double`.
@@ -1892,7 +1894,9 @@ A body that ends in `if (flag) a else b`, where `flag` is a formal with a litera
 default that the body never reassigns, returns the union of both branches, as any `if` does. A
 branch may also end in `return(value)`, and the flag may instead guard an earlier
 `if (flag) return(value)` with no `else`, whose return is then the true branch and the rest of the
-body the false one, provided those `return()` calls are the body's only early returns. A call that leaves the flag out, or passes a literal, selects one branch,
+body the false one, provided those `return()` calls are the body's only early returns. The guard may
+be a block that ends in `return(value)`, and the flag may be negated, so `if (!verbose) { ...;
+return(TRUE) }` makes the block the false branch. A call that leaves the flag out, or passes a literal, selects one branch,
 so it returns that branch's type alone:
 
 ```r
@@ -2077,6 +2081,16 @@ is expected. The other direction is rejected, because a variadic interface may s
 arguments and a fixed-arity function cannot receive them. Between two variadic types, the rest
 element types are contravariant like any parameter, and both sides must declare the same number of
 parameters before `...`. This rejects some safe pairings, but never admits an unsound one.
+
+A union of functions, such as a local chosen by `switch(type, a = up_a, b = up_b)`, is accepted
+where one function type is expected when each member is, with its own return, and the union of
+those returns satisfies the expected return. Arguments a call forwards to the callback, as in
+`lapply(names, chosen, new = NULL)`, reach every member.
+
+A function whose parameter types are still being inferred is the one exception to exact parameter
+types: after `uniroot(f, interval, scontrol = scontrol)` binds `scontrol`'s parameter to `double`,
+the same body may call `scontrol(times)` on a `double[]`, because R's numeric functions are
+vectorised. An annotated callback keeps its exact type.
 
 `sapply` and `mapply` simplify their results to a vector, a matrix or a list depending on what the
 callback returns, so their type follows the callback's return type and the `simplify` flag
@@ -2628,7 +2642,8 @@ operands both take a `Money`, as `function(e1: Money, e2: Money)` does.
 
 R also dispatches on a class that `class(x) <- "string"` sets on a plain list or an environment
 (ggplot2's ggproto objects are classed environments), and no type tracks that attribute. So when the
-project defines an arithmetic or `Ops` method for a class that no type declares, arithmetic with a
+project defines an arithmetic or `Ops` method for a class that no type declares, or registers one
+through S4's `setMethod("+", ...)` or S7's `method(\`+\`, ...)`, arithmetic with a
 list or environment operand is left to that method: `result + "text"` on such a list, and the rest
 of a chain `result + a + b`, give `Unknown` and report nothing. Without such a method,
 `list(a = 1) + 1` is a type error, as it is in R.
@@ -2839,7 +2854,8 @@ vector, so the operator gives `Unknown` and strict mode reports it; annotate the
 A formula, one-sided (`~ x`) or two-sided (`y ~ x + z`), is the nominal type `formula`. Its operands
 name model variables, which are usually columns of a data frame rather than bindings in scope, so
 they are not checked: `y ~ undefined_name + "text"` reports nothing. Annotate a formula variable or
-parameter as `formula`.
+parameter as `formula`. `==` and `!=` compare two formulas by their text, as R deparses them first,
+so `formula(model) == ~1` is `logical`.
 
 ## Calls
 
@@ -3134,6 +3150,28 @@ A local or package binding that shadows a stub name switches its overload set of
 used everywhere, calls included. A project override stub may declare overload sets, because a
 `.Rtypes` file is a declaration file wherever it lives.
 
+### Vectorised math
+
+Elementwise base functions, such as `sqrt`, `exp`, `log`, `round`, `nchar`, `toupper` and `is.na`,
+declare one signature whose result describes a single element, and the call's result takes the
+shape of the argument:
+
+```r
+xs <- c(1.5, 2, 3)
+roots <- sqrt(xs)                      # double[]
+one <- sqrt(4)                         # double
+kept <- sqrt(c(a = 1, b = 4))          # double[named]
+grown <- exp(-matrix(1:4, 2))          # matrix
+widths <- nchar(c("a", "bb"))          # integer[]
+#: fn(x: double[]) -> double[]
+scaled <- function(x) sqrt(x) / 2      # checks
+```
+
+A union argument lifts member by member, so `log(if (flag) 2 else xs)` is `double | double[]`. An
+argument whose shape is not yet known keeps the scalar result, so an unannotated
+`wrap <- function(x) sqrt(x)` infers `<T> fn(x: T) -> double`; annotate the wrapper to give it a
+vector result. `array` has no type of its own, and `array()` is `Any`.
+
 ## Control flow
 
 ### `if` expressions
@@ -3278,7 +3316,10 @@ The details:
   So after `res <- tryCatch(download.file(url, path), error = function(e) e)`,
   `if (inherits(res, "simpleError")) stop(res$message)` reads the condition's field. A class such
   as `"integer"`, `"numeric"` or `"list"` narrows nothing, because R reports it for unclassed
-  values too.
+  values too. The false edge keeps every member, since an object may lack the class, except for
+  `"error"` and `"condition"`, which drop a `condition` member there: in
+  `tryCatch(f(), error = function(e) e)` the handler's value is a condition, so
+  `if (!inherits(res, "error")) res + 1` reads the expression's value.
 - An unannotated parameter whose runtime type the body inspects is `Unknown`, because code that
   inspects a type uses the value as a different type on each branch, so no one type describes it.
   The inspections are `typeof()`, `class()`, `mode()`, `storage.mode()`, `inherits()`,
@@ -3916,7 +3957,11 @@ slot, so the slot's type reflects the update:
   and calls to it are not checked. When the last top-level write of `f` in its file is
   `body(f) <- v` (or `base::body(f) <- v`), the earlier `f <- make(g)` builds a template whose code
   never runs as written, so a function argument such as `g` is not held to what that code would do
-  with it. `formals(f) <- v` keeps the body, so it makes no template.
+  with it. `formals(f) <- v` keeps the body, so it makes no template. When `formals(f) <- v`,
+  `formals(f)[["x"]] <- v` or `formals(f)$x <- v` is that last write, `f` takes `...: Any` in place
+  of its written parameters and keeps the result its body computes, because the new parameter list
+  is computed: after `formals(glm_control) <- c(formals(glm_control), list(compDev = TRUE))`,
+  `glm_control(compDev = FALSE)` checks.
 - `names(x) <- c("a", "b")` with literal names, as many as `x` has items, turns a list of known
   items into a record with those fields and renames a record's fields. Computed names leave a list
   whose fields are not tracked, so `x$a` may read any item. Other replacement calls, such as

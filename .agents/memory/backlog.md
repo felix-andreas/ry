@@ -945,10 +945,7 @@ The rule ships (`decisions/syntax-semantics.md`, "A strict library file's top le
 
 ## Open: strict-mode friction from typing finbench
 
-Porting the synthetic finance benchmark to fully typed strict code hit these. Each repro is a project with `[check] strict = true` (and `Imports:` naming the packages it uses); the quoted output is what `ry check` prints.
-
-- **Vectorised math types are wrong.** `exp`, `sqrt` and `nchar` return a scalar for any input, and there is no `array` type (an `array` annotation suggests `Array`, ry's own type). `#: fn(x: double[]) -> double` over `exp(x)` or `sqrt(x)` checks clean, as does `#: fn(x: character[]) -> integer` over `nchar(x)`; `#: fn(rates: matrix) -> matrix` over `exp(-rates)` gives `` expected `matrix`, found `double` ``. Overloads that keep the input's shape (`fn(x: double) -> double`, `fn(x: double[]) -> double[]`, `fn(x: Any) -> Any`) were tried and dropped: an unannotated wrapper such as `function(x) sqrt(x)` then matches several candidates that disagree, so the overload-set rules give it `Unknown` or a `numeric` bound, and inference regresses across the typing fixtures. The fix needs one shape-generic signature (a result with the shape of `x` and element type `double`) rather than an overload set.
-
+- **An unannotated wrapper of vectorised math returns a scalar.** `@elementwise(x)` gives `sqrt(x)` the shape of a known `x` (`decisions/type-checker.md`, "`@elementwise(x)` gives a scalar result the shape of its argument"), but `function(x) sqrt(x)` infers `<T> fn(x: T) -> double`, so `wrap(xs)` over a `double[]` is still `double`. A shape variable (the shape of `T` with a `double` element) would fix it; no `array` type exists either.
 
 ## Open: the JIT
 

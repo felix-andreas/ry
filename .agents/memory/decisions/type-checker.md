@@ -922,3 +922,27 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - **A formal passed to a callee read from a field or `[[` is optional**: the checker cannot see whether that function reads it.
 - **A class-dispatch chain ending in `NULL`** (`if (is.a(x)) ... else if (is.b(x)) ... else NULL`, each test a one-argument project predicate) excludes `NULL` only for an argument that cannot carry a class, so `chain_count(obj)` over an untyped object is not reported, and `chain_count("a")` is.
 - **`inherits(x, "cls")` narrows the true edge** to members that may carry a class, dropping atomic, `NULL` and function members. A class R gives unclassed values implicitly (`"integer"`, `"list"`, `"function"` and the rest) narrows nothing, and the false edge narrows nothing because an object may lack the class.
+
+## `@elementwise(x)` gives a scalar result the shape of its argument
+
+**Status:** built (`Library::elementwise` in `crates/semantics/src/stubs.rs`, `elementwise_result` in `crates/semantics/src/check.rs`; `base-functions.R.test`, `vectorised_math_keeps_the_shape_of_its_argument`).
+
+- `sqrt`, `exp`, `log`, the trigonometric and rounding functions, `nchar`, `toupper`, `tolower`, `trimws`, `chartr`, `is.na` and its siblings declared one scalar result for any input, so `#: fn(x: double[]) -> double` over `sqrt(x)` checked clean and `#: fn(rates: matrix) -> matrix` over `exp(-rates)` failed.
+- An overload set per shape was tried and dropped: an unannotated `function(x) sqrt(x)` then matches candidates that disagree, and the overload rules give it `Unknown` or a `numeric` bound across the typing fixtures.
+- Target shape: one declaration, `sqrt : @pure @elementwise(x) fn(x: Any) -> double`. After the call types, its scalar result takes the shape of the first marked argument that is a vector (`double[]`), a named vector (`double[named]`, since these functions keep names) or a `matrix` (which records no element type). A union lifts member by member. Any other argument, a scalar, `Any` or an open variable among them, keeps the declared scalar.
+- No `array` type: `array()` stays `Any`, which keeps the scalar claim, as before. A base `array` type would need `dim` tracking that no fixture asks for yet.
+- Limit: an unannotated wrapper `function(x) sqrt(x)` infers `<T> fn(x: T) -> double`, because no type form says "the shape of `T` with a `double` element". A shape variable would fix it; it waits for a case that needs it.
+- `as.integer` and the other `as.*` drop names and `dim`, so they are not marked; they keep the scalar claim.
+
+## The fresh sample's false-report classes, second pass
+
+**Status:** built (`crates/semantics/src/check.rs`, `crates/semantics/src/infer.rs`; the fixtures named per bullet).
+
+- **A top-level `formals(name) <- ...` that is the file's last write of `name`** makes the function accept any argument and keep its body's result (`a_computed_formals_rewrite_accepts_any_argument`): the new parameter list is computed, so no type describes it.
+- **An unbound variable in a union takes a bound the union meets.** `character | U` passed to `list[T] | T[] | NULL` binds `U` instead of failing, and a `NULL` default joined with a number (`T | double`) passed to arithmetic makes `T` a number (`a_null_default_joined_with_a_number_passes_a_numeric_parameter`). `constraint_rejects` admits a variable whose own bound implies the required one, and `bind` gives each open member that bound first.
+- **`tryCatch` handlers take a `condition`**, not `Any`, so `function(e) conditionMessage(e)` and `e$message` type. `inherits(e, "error")` or `"condition"` narrows the false edge too, because inside a handler the value is a condition; for a handler of another class this is an approximation that only drops `condition`.
+- **A union of functions fits a function parameter** when each member fits with its own return and the join of those returns fits the parameter's return (`function_union_fits`). A local holding one of two functions passes `lapply`. Forwarded arguments reach each member of such a union (`a_local_holding_one_of_two_functions_takes_forwarded_arguments`).
+- **A flag guard block** (`if (!flag) { ...; return(a) }`) selects returns as the one-line guard does, and a negated flag is the same flag (`a_negated_flag_guard_block_selects_its_returns`).
+- **Two formulas compare by their text** (`a_formula_compares_by_its_text`), as R's `==` deparses them.
+- **Arithmetic registered through S4 or S7** (`setMethod("+", ...)`, `method(\`+\`, ...)`) counts as arithmetic for a class no type declares, like a project `+.cls` (`registers_arithmetic_method`), so an environment operand may dispatch there and gives `Unknown` (`arithmetic_registered_through_s4_may_dispatch_on_an_environment`). A class-dispatch error then needs a mismatch on a class the operand declares itself.
+- **An inferred callback bound to a scalar by a forwarded call takes a vector later** (`a_callback_bound_to_a_scalar_by_a_forwarded_call_takes_a_vector_later`): `uniroot` calls `f` with one number, and the same `f` over a grid is R's ordinary vectorised use. Only a parameter variable bound by inference relaxes; an annotation stays exact.
