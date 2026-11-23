@@ -420,21 +420,15 @@ unsafe fn do_head_expr(call: &Call<'_>) -> R<Sexp> {
 /// columns, one value per row, as data.table's `:=` with `by` gives.
 unsafe fn do_over(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(1);
-    let arguments = call.arg(0);
-    let named = expression(subject(arguments, "over", caller)?, caller)?;
-    let mut keys = Vec::new();
-    for index in 1..length(arguments) {
-        let key = arguments.element(index);
-        if key.kind() != SexpType::String {
+    let (subject, columns) = verb_arguments(call.arg(0), "over", caller)?;
+    let named = expression(subject, caller)?;
+    let mut keys = Vec::with_capacity(columns.len());
+    for (_, column) in columns {
+        let Expr::Column(name) = column else {
             keys.clear();
             break;
-        }
-        keys.extend(
-            values::strings(key)
-                .into_iter()
-                .flatten()
-                .map(PlSmallStr::from),
-        );
+        };
+        keys.push(name);
     }
     if keys.is_empty() {
         return Err(error_in(
@@ -534,20 +528,16 @@ unsafe fn table_error(
     error_in(call, message)
 }
 
-/// The first argument of a verb's `...`, the value it works on.
-unsafe fn subject(list: Sexp, verb: &str, call: Sexp) -> R<Sexp> {
+/// A verb's `...`: the value it works on, which is the first argument, and the named expressions
+/// after it. An expression keeps its alias or takes the argument's name, and a string names a
+/// column.
+unsafe fn verb_arguments(list: Sexp, verb: &str, call: Sexp) -> R<(Sexp, Vec<(PlSmallStr, Expr)>)> {
     if length(list) == 0 {
         return Err(error_in(
             call,
             format!("`{verb}` needs the value it works on as its first argument"),
         ));
     }
-    Ok(list.element(0))
-}
-
-/// The named expressions of a verb's `...` after its first argument: an expression keeps its
-/// alias, or takes the argument's name, and a string names a column.
-unsafe fn named_expressions(list: Sexp, verb: &str, call: Sexp) -> R<Vec<(PlSmallStr, Expr)>> {
     let names = values::names(list);
     let mut columns = Vec::with_capacity(length(list));
     for index in 1..length(list) {
@@ -579,36 +569,32 @@ unsafe fn named_expressions(list: Sexp, verb: &str, call: Sexp) -> R<Vec<(PlSmal
             ),
         ));
     }
-    Ok(columns)
+    Ok((list.element(0), columns))
 }
 
 unsafe fn do_select(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(1);
-    let (plan, lazy) = plan_of(subject(call.arg(0), "select", caller)?, caller)?;
-    let columns = named_expressions(call.arg(0), "select", caller)?;
+    let (subject, columns) = verb_arguments(call.arg(0), "select", caller)?;
+    let (plan, lazy) = plan_of(subject, caller)?;
     finish(plan.with(Step::Select(columns)), lazy, caller)
 }
 
 unsafe fn do_with_columns(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(1);
-    let (plan, lazy) = plan_of(subject(call.arg(0), "with_columns", caller)?, caller)?;
-    let columns = named_expressions(call.arg(0), "with_columns", caller)?;
+    let (subject, columns) = verb_arguments(call.arg(0), "with_columns", caller)?;
+    let (plan, lazy) = plan_of(subject, caller)?;
     finish(plan.with(Step::WithColumns(columns)), lazy, caller)
 }
 
 /// Several predicates must all hold, as Polars' `filter(a, b)` is `filter(a & b)`.
 unsafe fn do_filter(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(1);
-    let list = call.arg(0);
-    let (plan, lazy) = plan_of(subject(list, "filter", caller)?, caller)?;
-    let mut predicate: Option<Expr> = None;
-    for index in 1..length(list) {
-        let next = expression(list.element(index), caller)?.expr;
-        predicate = Some(match predicate {
-            Some(earlier) => Expr::Binary(BinaryOp::And, Box::new(earlier), Box::new(next)),
-            None => next,
-        });
-    }
+    let (subject, predicates) = verb_arguments(call.arg(0), "filter", caller)?;
+    let (plan, lazy) = plan_of(subject, caller)?;
+    let predicate = predicates
+        .into_iter()
+        .map(|(_, next)| next)
+        .reduce(|earlier, next| Expr::Binary(BinaryOp::And, Box::new(earlier), Box::new(next)));
     let Some(predicate) = predicate else {
         return Err(error_in(
             caller,
@@ -620,8 +606,8 @@ unsafe fn do_filter(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_group_by(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(1);
-    let (plan, lazy) = plan_of(subject(call.arg(0), "group_by", caller)?, caller)?;
-    let keys = named_expressions(call.arg(0), "group_by", caller)?;
+    let (subject, keys) = verb_arguments(call.arg(0), "group_by", caller)?;
+    let (plan, lazy) = plan_of(subject, caller)?;
     if keys.is_empty() {
         return Err(error_in(caller, "`group_by` needs at least one key column"));
     }
@@ -630,7 +616,7 @@ unsafe fn do_group_by(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_agg(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(1);
-    let group = subject(call.arg(0), "agg", caller)?;
+    let (group, aggregates) = verb_arguments(call.arg(0), "agg", caller)?;
     let Some(Object::Group { plan, keys, lazy }) = object_of(group) else {
         return Err(error_in(
             caller,
@@ -640,7 +626,6 @@ unsafe fn do_agg(call: &Call<'_>) -> R<Sexp> {
             ),
         ));
     };
-    let aggregates = named_expressions(call.arg(0), "agg", caller)?;
     let step = Step::Aggregate {
         keys: keys.clone(),
         aggregates,
@@ -650,8 +635,8 @@ unsafe fn do_agg(call: &Call<'_>) -> R<Sexp> {
 
 unsafe fn do_sort(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(2);
-    let (plan, lazy) = plan_of(subject(call.arg(0), "sort", caller)?, caller)?;
-    let columns = named_expressions(call.arg(0), "sort", caller)?;
+    let (subject, columns) = verb_arguments(call.arg(0), "sort", caller)?;
+    let (plan, lazy) = plan_of(subject, caller)?;
     if columns.is_empty() {
         return Err(error_in(
             caller,
