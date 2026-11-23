@@ -251,9 +251,7 @@ the locale.
 differ. `how` is `"inner"`, `"left"`, `"full"`, `"semi"`, `"anti"` or `"cross"`, which pairs every
 left row with every right row and takes no keys. The result has the left
 columns, then the right's non-key columns, and a right column whose name is already taken gets the
-`suffix` (`"_right"` by default), as in Polars. A missing key matches a missing key in every kind
-of join, as in data.table and `merge()`, so a left row whose key is `NA` is kept by a semi join and
-dropped by an anti join when the right side has an `NA` key too.
+`suffix` (`"_right"` by default), as in Polars.
 
 ```r
 regions <- DataFrame(region = ["eu", "us"], manager = ["Ana", "Bo"])
@@ -372,29 +370,6 @@ shipped |> DataFrame.filter(Expr.col("due") >= as.Date("2024-02-15"))
       id     placed        due
    <int>     <Date>     <Date>
 1:     2 2024-02-03 2024-02-17
-```
-
-### Times
-
-A `POSIXct` column stays a time column and keeps its time zone (`tzone`), stored to the
-microsecond. A time compares with another time, such as one from `as.POSIXct`, whatever either
-one's zone. The checker reports arithmetic on a time and a comparison with anything else; shift a
-time in R before it enters the frame.
-
-```r
-calls <- DataFrame(
-  id = [1L, 2L],
-  at = as.POSIXct(c("2024-01-30 09:15:00", "2024-01-30 17:40:00"), tz = "UTC")
-)
-calls |> DataFrame.filter(Expr.col("at") > as.POSIXct("2024-01-30 12:00:00", tz = "UTC"))
-attr(calls$at, "tzone")
-```
-
-```text ry run runtime=ry exact
-      id                  at
-   <int>              <POSc>
-1:     2 2024-01-30 17:40:00
-[1] "UTC"
 ```
 
 ## Lazy queries

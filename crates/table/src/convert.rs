@@ -13,8 +13,8 @@ use {
         kernel::{gather_values, pack_rows},
     },
     polars::prelude::{
-        BooleanChunked, DataType, Float64Chunked, Int32Chunked, Int64Chunked, IntoSeries,
-        NewChunkedArray, PlSmallStr, Series, StringChunked, TimeUnit, TimeZone,
+        BooleanChunked, DataType, Float64Chunked, Int32Chunked, IntoSeries, NewChunkedArray,
+        PlSmallStr, Series, StringChunked,
     },
     polars_arrow::{
         array::{Array, PrimitiveArray, Utf8ViewArray},
@@ -54,12 +54,6 @@ pub enum RVector {
     },
     /// Days since 1970-01-01 with [`NA_REAL`] for `NA`: a `Date` vector without its class.
     Date(Vec<f64>),
-    /// Seconds since 1970-01-01 UTC with [`NA_REAL`] for `NA`, and the `tzone` attribute when it
-    /// names a zone: a `POSIXct` vector without its class.
-    Datetime {
-        seconds: Vec<f64>,
-        zone: Option<String>,
-    },
 }
 
 impl RVector {
@@ -67,7 +61,6 @@ impl RVector {
         match self {
             RVector::Logical(values) | RVector::Integer(values) => values.len(),
             RVector::Double(values) | RVector::Date(values) => values.len(),
-            RVector::Datetime { seconds, .. } => seconds.len(),
             RVector::Character(values) => values.len(),
             RVector::Factor { codes, .. } => codes.len(),
         }
@@ -99,17 +92,6 @@ pub fn to_series(name: PlSmallStr, vector: RVector) -> Result<Series> {
             }),
         )
         .into_date()
-        .into_series(),
-        RVector::Datetime { seconds, zone } => Int64Chunked::from_iter_options(
-            name,
-            seconds.iter().map(|value| {
-                // Microseconds keep the six decimals R prints. A time past the range of an `i64`
-                // of microseconds (about 292,000 years) becomes `NA` rather than wrapping.
-                let micros = (value * 1e6).round();
-                (micros.is_finite() && micros.abs() < 9.2e18).then_some(micros as i64)
-            }),
-        )
-        .into_datetime(TimeUnit::Microseconds, TimeZone::opt_try_new(zone)?)
         .into_series(),
         RVector::Logical(values) => BooleanChunked::from_iter_options(
             name,
@@ -222,22 +204,6 @@ pub fn to_r(series: &Series) -> Result<RVector> {
                 .map(|day| day.map_or(NA_REAL, f64::from))
                 .collect(),
         ),
-        DataType::Datetime(unit, zone) => {
-            let per_second = match unit {
-                TimeUnit::Nanoseconds => 1e9,
-                TimeUnit::Microseconds => 1e6,
-                TimeUnit::Milliseconds => 1e3,
-            };
-            RVector::Datetime {
-                seconds: series
-                    .datetime()?
-                    .physical()
-                    .iter()
-                    .map(|value| value.map_or(NA_REAL, |value| value as f64 / per_second))
-                    .collect(),
-                zone: zone.as_ref().map(|zone| zone.to_string()),
-            }
-        }
         DataType::Boolean => RVector::Logical(
             series
                 .bool()?

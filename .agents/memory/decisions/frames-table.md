@@ -278,22 +278,6 @@ The table is a Polars `DataFrame` held by the `table` crate; this entry holds th
 - **Writes:** `f$x <- v` and `f[["x"]] <- v` update one column; any other replacement step forgets the columns, because `names<-`, `[<-` and positional `[[<-` may rename or retype any of them. By-reference `setDT`/`setDF` rebind with the new class and the same columns, and `set`/`setattr` forget them (`refine_table_call`, recorded as writes in `naming.rs` and `semantics.rs`).
 - **Only base's or data.table's own constructor counts:** a project's `data.frame` function is an ordinary call, and `data.table::data.table` sharpens only when the project declares data.table (otherwise its stubs are not loaded and the callee is `Unknown`).
 
-## A missing key matches a missing key in every join
-
-**Status:** built (`join` in `crates/table/src/lazy.rs`; `a_missing_key_matches_a_missing_key_in_every_join` in `crates/table/tests/test_table/lazy.rs`; `reference/dataframes.mdx`, "Joins").
-
-- The inner and left joins matched `NA` to `NA`, as data.table and `merge()` do, but the full, semi and anti joins ran as Polars joins with Polars' default `nulls_equal = false`, so a semi join dropped a row with an `NA` key that the right side also had, and an anti join kept it. One join call disagreed with itself across `how`.
-- Target: every `how` sets `nulls_equal = true`. R users expect the data.table rule, and the table type replaces data.table, so Polars' SQL-style rule loses.
-
-## A `POSIXct` column is a time column in microseconds with its zone
-
-**Status:** built (`ColumnType::Datetime`, `RVector::Datetime`; `a_time_keeps_its_zone_and_compares_with_a_time` in `crates/table/tests/test_table/lazy.rs`; `reference/dataframes.mdx`, "Times").
-
-- The checker typed `DataFrame(at = as.POSIXct(...))` as `DataFrame{at: POSIXct}`, but the engine had no time type, so the column entered as `double[]` and came back without its class: the schema and the values disagreed with the type.
-- Target: Polars `Datetime(Microseconds, zone)`, with R's `tzone` as the zone (`None` for no attribute or `""`, the session's zone). Microseconds keep the six decimals R prints and an `i64` range of about 292,000 years; a Parquet time in another unit converts to microseconds on load. The zone lives only in the Polars dtype, so `ColumnType` stays `Copy` and has one source for it.
-- A query compares two times on their instants whatever their zones, and refuses arithmetic: a duration column would be a second temporal model beside `Date`'s whole days, so a time shifts in R before it enters a frame. A cast between equal column types is skipped, because casting to `ColumnType`'s zone-less dtype would drop the column's zone.
-- Printing calls R's `format`, because only R knows the zone database (`frames::format_cells`); the label is `<POSc>`, as data.table prints.
-
 ## A verb taking columns through `...` has no formal before them
 
 **Status:** built.

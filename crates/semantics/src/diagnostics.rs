@@ -3804,22 +3804,11 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             renderer.render(db, *right)
         ),
         TypeErrorKind::DateOperation {
-            time: false,
             operator,
             left,
             right,
         } => format!(
             "`{operator}` is not defined between `{}` and `{}`. A date adds or subtracts a number of days, subtracting two dates gives the days between them, and dates compare only with dates",
-            renderer.render(db, *left),
-            renderer.render(db, *right)
-        ),
-        TypeErrorKind::DateOperation {
-            time: true,
-            operator,
-            left,
-            right,
-        } => format!(
-            "`{operator}` is not defined between `{}` and `{}`. A `POSIXct` column in a query compares only with another `POSIXct`, and takes no arithmetic",
             renderer.render(db, *left),
             renderer.render(db, *right)
         ),

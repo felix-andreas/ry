@@ -86,7 +86,6 @@ pub unsafe fn expose_column(table: &Table, name: &str) -> ApiResult<Sexp> {
             }
             Some(ColumnType::Factor) => return factor_vector(&series),
             Some(ColumnType::Date) => return date_vector(&series),
-            Some(ColumnType::Datetime) => return time_vector(&series),
             None => return Err(error(format!("column `{name}` has no R type"))),
         };
         new_altrep(payload)
@@ -147,21 +146,7 @@ pub unsafe fn import_column(name: PlSmallStr, vector: Sexp) -> ApiResult<Series>
                         .map(Option::unwrap_or_default)
                         .collect();
                     RVector::Factor { codes, levels }
-                } else if has_class(vector, "POSIXct")? {
-                    RVector::Datetime {
-                        seconds: codes
-                            .into_iter()
-                            .map(|second| {
-                                if second == NA_INTEGER {
-                                    NA_REAL
-                                } else {
-                                    f64::from(second)
-                                }
-                            })
-                            .collect(),
-                        zone: time_zone(vector)?,
-                    }
-                } else if has_class(vector, "Date")? {
+                } else if is_date(vector)? {
                     // R stores some dates as whole days in an integer vector, `seq()` of dates
                     // among them, and they must not arrive as plain integers.
                     RVector::Date(
@@ -183,13 +168,8 @@ pub unsafe fn import_column(name: PlSmallStr, vector: Sexp) -> ApiResult<Series>
             SexpType::Logical => RVector::Logical(read_slice::<i32>(vector, length)?.to_vec()),
             SexpType::Real => {
                 let values = read_slice::<f64>(vector, length)?.to_vec();
-                if has_class(vector, "Date")? {
+                if is_date(vector)? {
                     RVector::Date(values)
-                } else if has_class(vector, "POSIXct")? {
-                    RVector::Datetime {
-                        seconds: values,
-                        zone: time_zone(vector)?,
-                    }
                 } else {
                     RVector::Double(values)
                 }
@@ -206,30 +186,15 @@ pub unsafe fn import_column(name: PlSmallStr, vector: Sexp) -> ApiResult<Series>
     }
 }
 
-/// Whether `vector`'s class vector holds `name`.
-unsafe fn has_class(vector: Sexp, name: &str) -> ApiResult<bool> {
+/// Whether `vector` has class `"Date"`.
+unsafe fn is_date(vector: Sexp) -> ApiResult<bool> {
     unsafe {
         let class = get_attrib(vector, R_ClassSymbol.get())?;
         Ok(class.kind() == SexpType::String
             && read_strings(class)?
                 .iter()
                 .flatten()
-                .any(|class| class == name))
-    }
-}
-
-/// A `POSIXct` vector's `tzone`, or `None` for the session's zone (no attribute or `""`).
-unsafe fn time_zone(vector: Sexp) -> ApiResult<Option<String>> {
-    unsafe {
-        let zone = get_attrib(vector, runtime().heap.install(b"tzone")?)?;
-        if zone.kind() != SexpType::String {
-            return Ok(None);
-        }
-        Ok(read_strings(zone)?
-            .into_iter()
-            .next()
-            .flatten()
-            .filter(|zone| !zone.is_empty()))
+                .any(|class| class == "Date"))
     }
 }
 
@@ -651,31 +616,6 @@ unsafe fn date_vector(series: &Series) -> ApiResult<Sexp> {
         let vector = alloc_vector(SexpType::Real, days.len() as R_xlen_t)?;
         vector.slice_mut::<f64>().copy_from_slice(&days);
         set_attrib(vector, R_ClassSymbol.get(), strings(&["Date"])?)?;
-        Ok(vector)
-    }
-}
-
-/// A time column materializes as a double vector of seconds with class `c("POSIXct", "POSIXt")`
-/// and the column's zone as `tzone`, R's own layout.
-unsafe fn time_vector(series: &Series) -> ApiResult<Sexp> {
-    unsafe {
-        let RVector::Datetime { seconds, zone } = to_r(series).map_err(table_error)? else {
-            return Err(error("a time column must convert to times"));
-        };
-        let vector = alloc_vector(SexpType::Real, seconds.len() as R_xlen_t)?;
-        vector.slice_mut::<f64>().copy_from_slice(&seconds);
-        set_attrib(
-            vector,
-            R_ClassSymbol.get(),
-            strings(&["POSIXct", "POSIXt"])?,
-        )?;
-        if let Some(zone) = zone {
-            set_attrib(
-                vector,
-                runtime().heap.install(b"tzone")?,
-                strings(&[&zone])?,
-            )?;
-        }
         Ok(vector)
     }
 }

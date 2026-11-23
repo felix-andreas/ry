@@ -267,8 +267,6 @@ pub enum TypeErrorKind<'db> {
     /// An operator in a DataFrame expression that dates do not support, such as `Expr.col("day") * 2`
     /// or a date compared with a number.
     DateOperation {
-        /// Whether an operand is a `POSIXct` rather than a `Date`.
-        time: bool,
         operator: &'static str,
         left: Ty<'db>,
         right: Ty<'db>,
@@ -14871,10 +14869,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 {
                     return None;
                 }
-                if [left.ty, right.ty]
-                    .iter()
-                    .any(|ty| is_date_column(db, *ty) || is_time_column(db, *ty))
-                {
+                if is_date_column(db, left.ty) || is_date_column(db, right.ty) {
                     let ty =
                         self.date_operation(value, *operator, (*lhs, &left), (*rhs, &right))?;
                     return Some(ComputedColumn {
@@ -14934,11 +14929,10 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// Types a binary operator with a `Date` or `POSIXct` operand. The engine stores a date as
-    /// whole days: a date plus or minus a number of days is a date, one date minus another is
-    /// the integer number of days between them, and two dates compare. Two times compare and take
-    /// no arithmetic. Anything else is reported, and gives `None` so that the enclosing
-    /// expression is not reported again.
+    /// Types a binary operator with a `Date` operand, which the engine stores as whole days: a
+    /// date plus or minus a number of days is a date, one date minus another is the integer
+    /// number of days between them, and two dates compare. Anything else on a date is reported,
+    /// and gives `None` so that the enclosing expression is not reported again.
     fn date_operation(
         &mut self,
         value: ExprId,
@@ -14963,8 +14957,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             | BinaryOperator::GreaterEq
             | BinaryOperator::Equal
             | BinaryOperator::NotEqual
-                if (is_date(left.ty) && is_date(right.ty))
-                    || (is_time_column(db, left.ty) && is_time_column(db, right.ty)) =>
+                if is_date(left.ty) && is_date(right.ty) =>
             {
                 Some(Ty::new(db, TyKind::Vector(scalar(db, Atomic::Logical))))
             }
@@ -14976,9 +14969,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 BinaryOperator::Or => "|",
                 _ => operator_spelling(operator)?,
             };
-            let time = is_time_column(db, left.ty) || is_time_column(db, right.ty);
             let kind = TypeErrorKind::DateOperation {
-                time,
                 operator,
                 left: self.shown_operand_type(lhs, left),
                 right: self.shown_operand_type(rhs, right),
@@ -23410,10 +23401,6 @@ fn element_atomic(db: &dyn Db, ty: Ty<'_>) -> Option<Atomic> {
 
 fn is_date_column(db: &dyn Db, ty: Ty<'_>) -> bool {
     matches!(column_element(db, ty).kind(db), TyKind::Named(name, _) if name.text(db) == "Date")
-}
-
-fn is_time_column(db: &dyn Db, ty: Ty<'_>) -> bool {
-    matches!(column_element(db, ty).kind(db), TyKind::Named(name, _) if name.text(db) == "POSIXct")
 }
 
 fn is_expr_type(db: &dyn Db, ty: Ty<'_>) -> bool {

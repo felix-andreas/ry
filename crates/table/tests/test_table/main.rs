@@ -4474,17 +4474,9 @@ fn r_order(vector: &RVector, left: usize, right: usize, descending: bool) -> std
                 2 * u8::from(values[row] != NA_INTEGER)
             }
             RVector::Factor { codes, .. } => 2 * u8::from(codes[row] != NA_INTEGER),
-            RVector::Double(values)
-            | RVector::Date(values)
-            | RVector::Datetime {
-                seconds: values, ..
-            } if is_na_real(values[row]) => 0,
-            RVector::Double(values)
-            | RVector::Date(values)
-            | RVector::Datetime {
-                seconds: values, ..
-            } if values[row].is_nan() => 1,
-            RVector::Double(_) | RVector::Date(_) | RVector::Datetime { .. } => 2,
+            RVector::Double(values) | RVector::Date(values) if is_na_real(values[row]) => 0,
+            RVector::Double(values) | RVector::Date(values) if values[row].is_nan() => 1,
+            RVector::Double(_) | RVector::Date(_) => 2,
             RVector::Character(values) => 2 * u8::from(values[row].is_some()),
         }
     };
@@ -4495,11 +4487,7 @@ fn r_order(vector: &RVector, left: usize, right: usize, descending: bool) -> std
     let ordering = match vector {
         RVector::Logical(values) | RVector::Integer(values) => values[left].cmp(&values[right]),
         RVector::Factor { codes, .. } => codes[left].cmp(&codes[right]),
-        RVector::Double(values)
-        | RVector::Date(values)
-        | RVector::Datetime {
-            seconds: values, ..
-        } => values[left]
+        RVector::Double(values) | RVector::Date(values) => values[left]
             .partial_cmp(&values[right])
             .unwrap_or(Ordering::Equal),
         RVector::Character(values) => values[left]
@@ -4582,10 +4570,6 @@ fn permuted(vector: &RVector, rows: &[usize]) -> RVector {
         RVector::Integer(values) => RVector::Integer(rows.iter().map(|row| values[*row]).collect()),
         RVector::Double(values) => RVector::Double(rows.iter().map(|row| values[*row]).collect()),
         RVector::Date(values) => RVector::Date(rows.iter().map(|row| values[*row]).collect()),
-        RVector::Datetime { seconds, zone } => RVector::Datetime {
-            seconds: rows.iter().map(|row| seconds[*row]).collect(),
-            zone: zone.clone(),
-        },
         RVector::Character(values) => {
             RVector::Character(rows.iter().map(|row| values[*row].clone()).collect())
         }

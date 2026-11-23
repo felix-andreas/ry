@@ -477,7 +477,6 @@ fn reads_order(expr: &Expr) -> bool {
         | Expr::Logical(_)
         | Expr::Character(_)
         | Expr::Date(_)
-        | Expr::Datetime(_)
         | Expr::Na(_)
         | Expr::Count => false,
     }
@@ -825,7 +824,7 @@ fn execute(table: &mut Table, query: Query, warnings: &mut Vec<Warning>) -> Resu
 /// Joins `left` with `right`. An inner or left equi join runs as data.table's `right[left, on]`
 /// on the engine's join kernel, then has its columns renamed and reordered into Polars' layout:
 /// the left columns, then the right's other columns, a name the left side has taking `suffix`.
-/// A full, semi or anti join runs as a Polars join. A missing key matches a missing key in each.
+/// A full, semi or anti join runs as a Polars join.
 fn join(
     left: Table,
     right: Table,
@@ -913,12 +912,9 @@ fn join(
                 How::Semi => JoinType::Semi,
                 _ => JoinType::Anti,
             };
-            // A missing key matches a missing key in every kind of join, as in the inner and
-            // left joins above, data.table and `merge()`.
-            let mut args = JoinArgs::new(join_type)
+            let args = JoinArgs::new(join_type)
                 .with_coalesce(JoinCoalesce::CoalesceColumns)
                 .with_suffix(Some(PlSmallStr::from(suffix)));
-            args.nulls_equal = true;
             let left_keys: Vec<_> = left_on.iter().map(|name| col(name.clone())).collect();
             let right_keys: Vec<_> = right_on.iter().map(|name| col(name.clone())).collect();
             let frame = left
@@ -1063,7 +1059,6 @@ impl fmt::Display for Expr {
             Expr::Logical(false) => formatter.write_str("FALSE"),
             Expr::Character(value) => write!(formatter, "{value:?}"),
             Expr::Date(days) => write!(formatter, "date({days})"),
-            Expr::Datetime(micros) => write!(formatter, "datetime({micros})"),
             Expr::Na(_) => formatter.write_str("NA"),
             Expr::Unary(UnaryOp::Negate, arg) => write!(formatter, "-{arg}"),
             Expr::Unary(UnaryOp::Not, arg) => write!(formatter, "!{arg}"),
