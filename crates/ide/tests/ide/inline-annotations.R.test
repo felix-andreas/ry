@@ -260,22 +260,22 @@ hover-definition: local 63..64
 definition 63..64
 references: 63..64*, 66..67
 rename: 2 edit(s)
-signature: <T> fn(X: list[T] | T[], FUN: fn(T) -> logical[], FUN.VALUE: logical[] | logical, ...: Any, [USE.NAMES]: logical) -> logical[]
-parameters: X: list[T] | T[] | [FUN: fn(T) -> logical[]] | FUN.VALUE: logical[] | logical | ...: Any | [USE.NAMES]: logical
-signature: <T> fn(X: list[T] | T[], FUN: fn(T) -> integer[] | logical[], FUN.VALUE: integer[] | integer, ...: Any, [USE.NAMES]: logical) -> integer[]
-parameters: X: list[T] | T[] | [FUN: fn(T) -> integer[] | logical[]] | FUN.VALUE: integer[] | integer | ...: Any | [USE.NAMES]: logical
-signature: fn(X: list[integer] | integer[], FUN: fn(integer) -> double | integer | logical, FUN.VALUE: double[] | double, ...: Any, [USE.NAMES]: logical) -> double[] (active)
-parameters: X: list[integer] | integer[] | [FUN: fn(integer) -> double | integer | logical] | FUN.VALUE: double[] | double | ...: Any | [USE.NAMES]: logical
-signature: <T> fn(X: list[T] | T[], FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double[], ...: Any, [USE.NAMES]: logical) -> matrix | double[]
-parameters: X: list[T] | T[] | [FUN: fn(T) -> double[] | integer[] | logical[]] | FUN.VALUE: double[] | ...: Any | [USE.NAMES]: logical
-signature: <T> fn(X: list[T] | T[], FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double, ...: Any, [USE.NAMES]: logical) -> double[]
-parameters: X: list[T] | T[] | [FUN: fn(T) -> double[] | integer[] | logical[]] | FUN.VALUE: double | ...: Any | [USE.NAMES]: logical
-signature: <T> fn(X: list[T] | T[], FUN: fn(T) -> character[], FUN.VALUE: character[] | character, ...: Any, [USE.NAMES]: logical) -> character[]
-parameters: X: list[T] | T[] | [FUN: fn(T) -> character[]] | FUN.VALUE: character[] | character | ...: Any | [USE.NAMES]: logical
-signature: <T, V> fn(X: list[T] | T[], FUN: fn(T) -> V, FUN.VALUE: V[] | V, ...: Any, [USE.NAMES]: logical) -> V[]
-parameters: X: list[T] | T[] | [FUN: fn(T) -> V] | FUN.VALUE: V[] | V | ...: Any | [USE.NAMES]: logical
-signature: <T> fn(X: list[T] | T[], FUN: fn(T) -> matrix, FUN.VALUE: Any, ...: Any, [USE.NAMES]: logical) -> matrix
-parameters: X: list[T] | T[] | [FUN: fn(T) -> matrix] | FUN.VALUE: Any | ...: Any | [USE.NAMES]: logical
+signature: <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> logical[], FUN.VALUE: logical[] | logical, ...: Any, [USE.NAMES]: logical) -> logical[]
+parameters: X: list[T] | T[] | NULL | [FUN: fn(T) -> logical[]] | FUN.VALUE: logical[] | logical | ...: Any | [USE.NAMES]: logical
+signature: <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> integer[] | logical[], FUN.VALUE: integer[] | integer, ...: Any, [USE.NAMES]: logical) -> integer[]
+parameters: X: list[T] | T[] | NULL | [FUN: fn(T) -> integer[] | logical[]] | FUN.VALUE: integer[] | integer | ...: Any | [USE.NAMES]: logical
+signature: fn(X: list[integer] | integer[] | NULL, FUN: fn(integer) -> double | integer | logical, FUN.VALUE: double[] | double, ...: Any, [USE.NAMES]: logical) -> double[] (active)
+parameters: X: list[integer] | integer[] | NULL | [FUN: fn(integer) -> double | integer | logical] | FUN.VALUE: double[] | double | ...: Any | [USE.NAMES]: logical
+signature: <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double[], ...: Any, [USE.NAMES]: logical) -> matrix | double[]
+parameters: X: list[T] | T[] | NULL | [FUN: fn(T) -> double[] | integer[] | logical[]] | FUN.VALUE: double[] | ...: Any | [USE.NAMES]: logical
+signature: <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double, ...: Any, [USE.NAMES]: logical) -> double[]
+parameters: X: list[T] | T[] | NULL | [FUN: fn(T) -> double[] | integer[] | logical[]] | FUN.VALUE: double | ...: Any | [USE.NAMES]: logical
+signature: <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> character[], FUN.VALUE: character[] | character, ...: Any, [USE.NAMES]: logical) -> character[]
+parameters: X: list[T] | T[] | NULL | [FUN: fn(T) -> character[]] | FUN.VALUE: character[] | character | ...: Any | [USE.NAMES]: logical
+signature: <T, V> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> V, FUN.VALUE: V[] | V, ...: Any, [USE.NAMES]: logical) -> V[]
+parameters: X: list[T] | T[] | NULL | [FUN: fn(T) -> V] | FUN.VALUE: V[] | V | ...: Any | [USE.NAMES]: logical
+signature: <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> matrix, FUN.VALUE: Any, ...: Any, [USE.NAMES]: logical) -> matrix
+parameters: X: list[T] | T[] | NULL | [FUN: fn(T) -> matrix] | FUN.VALUE: Any | ...: Any | [USE.NAMES]: logical
 action: Add the inferred signature of the function passed to `vapply`
   edit 64..64 -> ": integer"
   edit 65..65 -> " -> double"

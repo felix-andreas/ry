@@ -15,7 +15,7 @@ total <- function(x, i) sum(x[[i]])
 check <- function(x, i) vapply(i, function(j) sum(x[[j]]), numeric(1))
 #++++
 total: <T, U> fn(x: T, i: U) -> Unknown
-check: <T, U> fn([x]: T, i: list[U] | U[]) -> double[]
+check: <T, U> fn([x]: T, i: list[U] | U[] | NULL) -> double[]
 
 #---- an_unknown_template_beside_an_open_callback_leaves_vapply_unchecked
 #: <T> fn(x: T, template: Unknown)

@@ -482,12 +482,12 @@ f: fn() -> integer[]
 #---- matrix_style_single_selection_refuses_silently
 pick <- function(m, i) m[, i]
 #++++
-pick: <T, U> fn(m: T, i: U) -> Unknown
+pick: <T, U> fn(m: T, [i]: U) -> Unknown
 
 #---- two_filled_indexes_report_the_filled_count
 cell <- function(m, k) m[k, , drop = FALSE]
 #++++
-cell: <T, U> fn(m: T, k: U) -> Unknown
+cell: <T, U> fn(m: T, [k]: U) -> Unknown
 
 #==== vector_subsetting
 #---- scalar_index_selects_one_element

@@ -32,7 +32,7 @@ f <- function(xs) {
   vapply(xs, "shout", character(1))
 }
 #++++
-f: <T> fn(xs: list[T] | T[]) -> character[]
+f: <T> fn(xs: list[T] | T[] | NULL) -> character[]
 
 #==== reaching_writes
 #---- conditional_update_before_read_is_used

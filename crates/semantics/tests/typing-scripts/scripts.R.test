@@ -461,7 +461,7 @@ integer
 fallback <- NULL %||% 3L
 print(fallback)
 #++++
-%||%: <T> fn(a: T | NULL, [b]: T) -> T
+%||%: <T, U> fn(a: T | NULL, [b]: U) -> U | T
 fallback: integer
 integer
 

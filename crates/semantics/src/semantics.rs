@@ -2940,9 +2940,13 @@ pub struct ItemSyntaxFlags {
     /// It binds a function marked `@pure function`, which counts only while inline
     /// annotations are enabled.
     pub inline_pure: bool,
-    /// It may be a `body(name) <-` write, which replaces a function's code. It may overcount;
-    /// `file_code_rewrites` reads the item's HIR to confirm.
+    /// It may be a `body(name) <-` or `formals(name) <-` write, which replaces a function's
+    /// code or parameter list. It may overcount; `file_code_rewrites` reads the item's HIR to
+    /// confirm.
     pub rewrites_code: bool,
+    /// It registers an arithmetic method through S7 or S4 (`S7::method(`+`, list(a, b)) <- f`,
+    /// `setMethod("Arith", ...)`), which dispatches on a class no type declares.
+    pub registers_arithmetic_method: bool,
 }
 
 #[salsa::tracked(returns(copy))]
@@ -2971,11 +2975,59 @@ pub fn item_syntax_flags<'db>(db: &'db dyn Db, item: Item<'db>) -> ItemSyntaxFla
             [assignment.lhs(), assignment.rhs()]
                 .into_iter()
                 .flatten()
-                .filter(|side| side.kind() == SyntaxKind::CALL_EXPR)
+                .filter_map(|mut side| {
+                    // `formals(f)[["x"]] <- v` and `formals(f)$x <- v` rewrite the list too.
+                    while matches!(
+                        side.kind(),
+                        SyntaxKind::SUBSET_EXPR
+                            | SyntaxKind::SUBSET2_EXPR
+                            | SyntaxKind::DOLLAR_EXPR
+                    ) {
+                        side = side.first_child()?;
+                    }
+                    (side.kind() == SyntaxKind::CALL_EXPR).then_some(side)
+                })
                 .filter_map(|side| side.first_child())
-                .any(|callee| matches!(callee.text().to_string().as_str(), "body" | "base::body"))
+                .any(|callee| {
+                    matches!(
+                        callee.text().to_string().as_str(),
+                        "body" | "base::body" | "formals" | "base::formals"
+                    )
+                })
         }),
+        registers_arithmetic_method: registers_arithmetic_method(&root),
     }
+}
+
+fn registers_arithmetic_method(root: &SyntaxNode) -> bool {
+    // `S7::method(`+`, ...) <- f` names the generic in the call on the left;
+    // `setMethod("+", ...)` is the whole statement.
+    let call = match BinaryExpr::cast(root.clone()) {
+        Some(assignment) => assignment.lhs(),
+        None => Some(root.clone()),
+    };
+    let Some(call) = call.filter(|call| call.kind() == SyntaxKind::CALL_EXPR) else {
+        return false;
+    };
+    let mut children = call.children();
+    let Some(callee) = children.next() else {
+        return false;
+    };
+    if !matches!(
+        callee.text().to_string().as_str(),
+        "method" | "S7::method" | "setMethod" | "methods::setMethod"
+    ) {
+        return false;
+    }
+    let Some(generic) = children
+        .find(|child| child.kind() == SyntaxKind::ARGUMENT_LIST)
+        .and_then(|arguments| arguments.children().next())
+    else {
+        return false;
+    };
+    let generic = generic.text().to_string();
+    let generic = generic.trim().trim_matches(['`', '"', '\'']);
+    check::arithmetic_method_prefixes().any(|prefix| prefix.strip_suffix('.') == Some(generic))
 }
 
 pub fn item_binds_only_own_name<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
@@ -3409,7 +3461,8 @@ fn check_item_against<'db>(
     let module = item_hir(db, item).as_ref()?;
     let naming = item_naming(db, item).as_ref()?;
     let annotations = item_annotations(db, item);
-    Some(check::check_item_with_annotation(
+    let rewrite = code_rewritten_later(db, item);
+    let mut check = check::check_item_with_annotation(
         db,
         module,
         naming,
@@ -3418,65 +3471,103 @@ fn check_item_against<'db>(
         Some(globals),
         file_is_strict(db, *item.file(db)),
         *file_holds_ry_values(db, *item.file(db)),
-        code_rewritten_later(db, item),
-    ))
+        rewrite == Some(CodeRewrite::Body),
+    );
+    // The new parameter list is computed (lme4's `formals(g) <- c(formals(g), list(...))`), so
+    // a call may pass any argument, and the body it runs keeps its result.
+    if rewrite == Some(CodeRewrite::Formals)
+        && let Some(scheme) = check.scheme.as_mut()
+        && let types::TyKind::Function(function) = scheme.body.kind(db)
+    {
+        let any_arguments = types::RestParameter {
+            element: types::any(db),
+            preceding_named: 0,
+        };
+        scheme.body = types::Ty::new(
+            db,
+            types::TyKind::Function(&types::FunctionType::declared(
+                &[],
+                &[],
+                Some(any_arguments),
+                function.ret,
+            )),
+        );
+    }
+    Some(check)
 }
 
-/// Whether the file's last top-level write of the item's name is `body(name) <- ...` in another
-/// item, so the item's value is a template whose code R replaces before anything calls it.
-/// `formals(name) <-` keeps the body, so that body still runs as written.
-fn code_rewritten_later<'db>(db: &'db dyn Db, item: Item<'db>) -> bool {
-    if *item.kind(db) != ItemKind::Value {
-        return false;
-    }
-    let Some(name) = item.name(db) else {
-        return false;
-    };
+/// What a top-level `body(name) <-` or `formals(name) <-` replaces in a function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::SalsaValue)]
+enum CodeRewrite {
+    Body,
+    Formals,
+}
+
+/// What the file's last top-level write of the item's name rewrites, when that write is
+/// `body(name) <- ...` or `formals(name) <- ...` in another item. After a body rewrite the
+/// item's value is a template whose code R replaces before anything calls it. A formals
+/// rewrite keeps the body, so that body still runs as written, but its calls follow the new
+/// parameter list.
+fn code_rewritten_later<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<CodeRewrite> {
+    let name = item.name(db)?;
     // The file's list is empty almost always, so an ordinary value never reads the file's
     // binders, which change whenever an item is inserted.
     if !file_code_rewrites(db, *item.file(db)).contains(&name) {
-        return false;
+        return None;
     }
-    frame_binder(db, item, types::Name::new(db, name), true)
-        .is_some_and(|writer| writer != item && code_rewrite_target(db, writer) == Some(name))
+    let writer = frame_binder(db, item, types::Name::new(db, name), true)?;
+    match code_rewrite_target(db, writer)? {
+        (target, rewrite) if writer != item && target == name => match rewrite {
+            CodeRewrite::Body => (*item.kind(db) == ItemKind::Value).then_some(rewrite),
+            CodeRewrite::Formals => Some(rewrite),
+        },
+        _ => None,
+    }
 }
 
-/// The names a top-level `body(name) <-` of the file rewrites. It
+/// The names a top-level `body(name) <-` or `formals(name) <-` of the file rewrites. It
 /// backdates on every edit that adds or removes no such write.
 #[salsa::tracked(returns(ref))]
 fn file_code_rewrites(db: &dyn Db, file: SourceFile) -> ThinVec<Symbol> {
     let mut names: ThinVec<Symbol> = item_tree(db, file)
         .iter()
         .filter(|&&item| item_syntax_flags(db, item).rewrites_code)
-        .filter_map(|&item| code_rewrite_target(db, item))
+        .filter_map(|&item| code_rewrite_target(db, item).map(|(name, _)| name))
         .collect();
     names.sort_unstable();
     names.dedup();
     names
 }
 
-fn code_rewrite_target<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<Symbol> {
+fn code_rewrite_target<'db>(db: &'db dyn Db, item: Item<'db>) -> Option<(Symbol, CodeRewrite)> {
     let module = item_hir(db, item).as_ref()?;
-    let ExpressionKind::Assign { target, .. } = module.kind(module.root?) else {
+    let ExpressionKind::Assign { mut target, .. } = *module.kind(module.root?) else {
         return None;
     };
-    let ExpressionKind::Call { callee, arguments } = module.kind(*target) else {
+    while let ExpressionKind::Index { target: inner, .. }
+    | ExpressionKind::Field { target: inner, .. } = *module.kind(target)
+    {
+        target = inner;
+    }
+    let ExpressionKind::Call { callee, arguments } = *module.kind(target) else {
         return None;
     };
-    let replaces_body = match *module.kind(*callee) {
-        ExpressionKind::NameRef(head) => head.as_str() == "body",
+    let head = match *module.kind(callee) {
+        ExpressionKind::NameRef(head) => head,
         ExpressionKind::Namespace {
             package: Some(package),
             name: Some(name),
             ..
-        } => package.as_str() == "base" && name.as_str() == "body",
-        _ => false,
+        } if package.as_str() == "base" => name,
+        _ => return None,
     };
-    if !replaces_body {
-        return None;
-    }
+    let rewrite = match head.as_str() {
+        "body" => CodeRewrite::Body,
+        "formals" => CodeRewrite::Formals,
+        _ => return None,
+    };
     match module.kind(module[arguments].first()?.value?) {
-        ExpressionKind::NameRef(read) => Some(*read),
+        ExpressionKind::NameRef(read) => Some((*read, rewrite)),
         _ => None,
     }
 }
@@ -3820,6 +3911,23 @@ fn has_untracked_arithmetic_class(db: &dyn Db, file: SourceFile) -> bool {
         .flat_map(stubs::SymbolSet::iter)
         .chain(file_arithmetic_classes(db, file).iter())
         .any(|class| !tracked(class))
+        || *file_registers_arithmetic_method(db, file)
+        || ProjectFiles::try_get(db)
+            .is_some_and(|files| *project_registers_arithmetic_method(db, files))
+}
+
+#[salsa::tracked]
+fn project_registers_arithmetic_method(db: &dyn Db, files: ProjectFiles) -> bool {
+    files.files(db).iter().any(|&file| {
+        *file.kind(db) == DocumentKind::Package && *file_registers_arithmetic_method(db, file)
+    })
+}
+
+#[salsa::tracked]
+fn file_registers_arithmetic_method(db: &dyn Db, file: SourceFile) -> bool {
+    item_tree(db, file)
+        .iter()
+        .any(|&item| item_syntax_flags(db, item).registers_arithmetic_method)
 }
 
 /// Past this many conditional writers a slot is `Unknown`: each writer costs an item
@@ -4528,6 +4636,7 @@ mod tests {
             match_findings: ThinVec::new(),
             i64_literals: ThinVec::new(),
             checked_types: ThinVec::new(),
+            function_fallback_reads: Default::default(),
             top_level_bindings: vec![(
                 hir::Symbol::new("value"),
                 types::TypeScheme::monomorphic(integer),

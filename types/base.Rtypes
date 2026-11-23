@@ -219,10 +219,10 @@ missing : fn(x: Any) -> logical
 
 # Elementwise NA/finiteness predicates: one logical PER ELEMENT in R (unlike the predicates above);
 # scalar-claim so `if (is.na(x))` stays clean on scalars.
-is.na : @pure fn(x: Any) -> logical
-is.finite : @pure fn(x: Any) -> logical
-is.infinite : @pure fn(x: Any) -> logical
-is.nan : @pure fn(x: Any) -> logical
+is.na : @pure @elementwise(x) fn(x: Any) -> logical
+is.finite : @pure @elementwise(x) fn(x: Any) -> logical
+is.infinite : @pure @elementwise(x) fn(x: Any) -> logical
+is.nan : @pure @elementwise(x) fn(x: Any) -> logical
 anyNA : @pure fn(x: Any, [recursive]: logical) -> logical
 
 # Coercions: the target atomic type is fixed by the function; elementwise, scalar-claim.
@@ -251,18 +251,18 @@ as.environment : Any
 # `nchar`'s optional formals are declarable because callback positions tolerate surplus optional
 # formals: `lapply(words, nchar)` re-checks the callback as the forwarded invocation the callee
 # performs, so extra defaults no longer break the idiom.
-nchar : @pure fn(x: Any, [type]: character, [allowNA]: logical, [keepNA]: logical) -> integer
+nchar : @pure @elementwise(x) fn(x: Any, [type]: character, [allowNA]: logical, [keepNA]: logical) -> integer
 nzchar : @pure fn(x: Any, [keepNA]: logical) -> logical
-toupper : @pure fn(x: Any) -> character
-tolower : @pure fn(x: Any) -> character
-casefold : @pure fn(x: Any, [upper]: logical) -> character
+toupper : @pure @elementwise(x) fn(x: Any) -> character
+tolower : @pure @elementwise(x) fn(x: Any) -> character
+casefold : @pure @elementwise(x) fn(x: Any, [upper]: logical) -> character
 substr : @pure fn(x: Any, start: Any, stop: Any) -> character
 substring : @pure fn(text: Any, first: Any, [last]: Any) -> character
 startsWith : @pure fn(x: Any, prefix: Any) -> logical
 endsWith : @pure fn(x: Any, suffix: Any) -> logical
-trimws : @pure fn(x: Any, [which]: character, [whitespace]: character) -> character
+trimws : @pure @elementwise(x) fn(x: Any, [which]: character, [whitespace]: character) -> character
 strrep : @pure fn(x: Any, times: Any) -> character
-chartr : @pure fn(old: character, new: character, x: Any) -> character
+chartr : @pure @elementwise(x) fn(old: character, new: character, x: Any) -> character
 utf8ToInt : @pure fn(x: character) -> integer[]
 intToUtf8 : @pure fn(x: Any, [multiple]: logical, [allow_surrogate_pairs]: logical) -> character[]
 toString : @pure fn(x: Any, ...: Any, [sep]: character) -> character
@@ -304,11 +304,13 @@ prettyNum : @pure fn(x: Any, [big.mark]: character, ...: Any) -> character
 # reads); `regexec`'s per-group structure and `regmatches` itself stay `Any`.
 # R matches only the first element of a longer `pattern`, with a warning, so `grepl`, `grep`,
 # `regexpr` and `gregexpr` also take a vector there. It is a second overload so that an open
-# variable passed as `pattern` still binds to `character`.
+# variable passed as `pattern` still binds to `character`. The same holds for the `replacement`
+# of `sub` and `gsub`, whose general overload comes last because a name passed as a value takes
+# the last declaration (`if (all) gsub else sub`).
 gsub : @pure fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
-gsub : @pure fn(pattern: character, replacement: double | integer | logical, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
+gsub : @pure fn(pattern: character, replacement: character | double | integer | logical, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
 sub : @pure fn(pattern: character, replacement: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
-sub : @pure fn(pattern: character, replacement: double | integer | logical, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
+sub : @pure fn(pattern: character, replacement: character | double | integer | logical, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> character
 grepl : @pure fn(pattern: character, x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> logical
 grepl : @pure fn(pattern: character[], x: Any, [ignore.case]: logical, [perl]: logical, [fixed]: logical, [useBytes]: logical) -> logical
 grep : @pure fn(pattern: character, x: Any, [ignore.case]: logical, [perl]: logical, [value]: logical, [fixed]: logical, [useBytes]: logical, [invert]: logical) -> Any
@@ -334,8 +336,9 @@ strsplit : @pure fn(x: Any, split: character[] | NULL, [fixed]: logical, [perl]:
 # Output and messages. `print` returns its argument invisibly, so it is a genuine `<T> -> T`; its named
 # formals cover the common method arguments (`digits`, `n`, `row.names`, ...) that would otherwise be
 # false "unknown named argument" errors. `stop`/`warning` stay `Any` (trailing-dot `call.` formal +
-# missing `Never`, see header); `message`'s formals are expressible.
-print : <T> fn(x: T, ...: Any, [digits]: Any, [quote]: logical, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> T
+# missing `Never`, see header); `message`'s formals are expressible. `print.default` reads `quote` with
+# R's logical coercion, which takes the strings "FALSE" and "TRUE" as well.
+print : <T> fn(x: T, ...: Any, [digits]: Any, [quote]: logical | character, [right]: logical, [max]: Any, [width]: Any, [n]: Any, [na.print]: Any, [row.names]: Any) -> T
 cat : fn(...: Any, [file]: Any, [sep]: character, [fill]: Any, [labels]: Any, [append]: logical) -> NULL
 message : fn(...: Any, [domain]: Any, [appendLF]: logical) -> NULL
 stop : Any
@@ -348,8 +351,8 @@ stopifnot : fn(...: Any, [exprs]: Any, [exprObject]: Any, [local]: Any) -> NULL
 # Conditions and exits. `tryCatch` takes arbitrary condition-class names as named handlers, and its
 # value is the body's or a handler's. `withCallingHandlers` handlers run for effect and the value is
 # value-dependent, so it stays `Any`. `suppress*` pass the body's value through: genuine generics.
-tryCatch : <T> fn(expr: T, ...: fn(condition: Any) -> T, [finally]: Any) -> T
-tryCatch : <T, H> fn(expr: T, ...: fn(condition: Any) -> H, [finally]: Any) -> T | H
+tryCatch : <T> fn(expr: T, ...: fn(condition: condition) -> T, [finally]: Any) -> T
+tryCatch : <T, H> fn(expr: T, ...: fn(condition: condition) -> H, [finally]: Any) -> T | H
 tryCatch : fn(expr: Any, ...: Any, [finally]: Any) -> Any
 withCallingHandlers : Any
 try : fn(expr: Any, [silent]: logical, [outFile]: Any) -> Any
@@ -422,24 +425,24 @@ cummin : fn(x: double[]) -> double[]
 cummin : fn(x: NULL) -> double[]
 cummin : fn(x: Any) -> Any
 
-# Math with a fixed double result (elementwise, scalar-claim, Any-param). `abs` is type-preserving.
-sqrt : @pure fn(x: Any) -> double
-exp : @pure fn(x: Any) -> double
-log : @pure fn(x: Any, [base]: Any) -> double
-log2 : @pure fn(x: Any) -> double
-log10 : @pure fn(x: Any) -> double
-log1p : @pure fn(x: Any) -> double
-expm1 : @pure fn(x: Any) -> double
-sin : @pure fn(x: Any) -> double
-cos : @pure fn(x: Any) -> double
-tan : @pure fn(x: Any) -> double
-asin : @pure fn(x: Any) -> double
-acos : @pure fn(x: Any) -> double
-atan : @pure fn(x: Any) -> double
-atan2 : @pure fn(y: Any, x: Any) -> double
-sign : @pure fn(x: Any) -> double
-choose : @pure fn(n: Any, k: Any) -> double
-factorial : @pure fn(x: Any) -> double
+# Math with a double result per element: `@elementwise(x)` gives the call the shape of `x`. `abs` keeps the type too.
+sqrt : @pure @elementwise(x) fn(x: Any) -> double
+exp : @pure @elementwise(x) fn(x: Any) -> double
+log : @pure @elementwise(x) fn(x: Any, [base]: Any) -> double
+log2 : @pure @elementwise(x) fn(x: Any) -> double
+log10 : @pure @elementwise(x) fn(x: Any) -> double
+log1p : @pure @elementwise(x) fn(x: Any) -> double
+expm1 : @pure @elementwise(x) fn(x: Any) -> double
+sin : @pure @elementwise(x) fn(x: Any) -> double
+cos : @pure @elementwise(x) fn(x: Any) -> double
+tan : @pure @elementwise(x) fn(x: Any) -> double
+asin : @pure @elementwise(x) fn(x: Any) -> double
+acos : @pure @elementwise(x) fn(x: Any) -> double
+atan : @pure @elementwise(x) fn(x: Any) -> double
+atan2 : @pure @elementwise(y, x) fn(y: Any, x: Any) -> double
+sign : @pure @elementwise(x) fn(x: Any) -> double
+choose : @pure @elementwise(n, k) fn(n: Any, k: Any) -> double
+factorial : @pure @elementwise(x) fn(x: Any) -> double
 # `abs` is shape- and type-preserving on numerics (integer stays integer, scalar stays scalar), so
 # each shape gets a candidate; logical input (which R coerces to integer) falls to `Any`.
 abs : @pure fn(x: integer) -> integer
@@ -449,11 +452,11 @@ abs : fn(x: double[]) -> double[]
 abs : fn(x: Any) -> Any
 
 # Rounding: the result is a double regardless of the (numeric) input; `digits` is Any-param.
-round : @pure fn(x: Any, [digits]: Any, ...: Any) -> double
-signif : @pure fn(x: Any, [digits]: Any) -> double
-floor : @pure fn(x: Any) -> double
-ceiling : @pure fn(x: Any) -> double
-trunc : @pure fn(x: Any, ...: Any) -> double
+round : @pure @elementwise(x) fn(x: Any, [digits]: Any, ...: Any) -> double
+signif : @pure @elementwise(x) fn(x: Any, [digits]: Any) -> double
+floor : @pure @elementwise(x) fn(x: Any) -> double
+ceiling : @pure @elementwise(x) fn(x: Any) -> double
+trunc : @pure @elementwise(x) fn(x: Any, ...: Any) -> double
 
 # Sorting, ordering, sets: element-preserving, so the vector forms carry a generic `T[]` element
 # (any atomic) and the list forms thread the item type; an `Any` fallback ends each overload set for
@@ -648,18 +651,18 @@ sapply : @pure(FUN) fn(X: Any, FUN: fn(Any) -> Any, ...: Any, [simplify]: Any, [
 # R checks the callback's result length at run time, and a length the checker
 # cannot see types as a vector (`str_c(x, collapse = " ")` is `character[]`), so
 # an atomic template accepts a callback returning that vector type.
-vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> logical[], FUN.VALUE: logical[] | logical, ...: Any, [USE.NAMES]: logical) -> logical[]
-vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> integer[] | logical[], FUN.VALUE: integer[] | integer, ...: Any, [USE.NAMES]: logical) -> integer[]
-vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> double | integer | logical, FUN.VALUE: double[] | double, ...: Any, [USE.NAMES]: logical) -> double[]
+vapply : @pure(FUN) <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> logical[], FUN.VALUE: logical[] | logical, ...: Any, [USE.NAMES]: logical) -> logical[]
+vapply : @pure(FUN) <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> integer[] | logical[], FUN.VALUE: integer[] | integer, ...: Any, [USE.NAMES]: logical) -> integer[]
+vapply : @pure(FUN) <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> double | integer | logical, FUN.VALUE: double[] | double, ...: Any, [USE.NAMES]: logical) -> double[]
 # A vector-valued `FUN` gives a matrix when `FUN.VALUE` has several elements and a vector when it has
 # one, which the types cannot tell apart, and R coerces an integer or logical result to double.
-vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double[], ...: Any, [USE.NAMES]: logical) -> matrix | double[]
-vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double, ...: Any, [USE.NAMES]: logical) -> double[]
-vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> character[], FUN.VALUE: character[] | character, ...: Any, [USE.NAMES]: logical) -> character[]
-vapply : @pure(FUN) <T, V> fn(X: list[T] | T[], FUN: fn(T) -> V, FUN.VALUE: V[] | V, ...: Any, [USE.NAMES]: logical) -> V[]
+vapply : @pure(FUN) <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double[], ...: Any, [USE.NAMES]: logical) -> matrix | double[]
+vapply : @pure(FUN) <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> double[] | integer[] | logical[], FUN.VALUE: double, ...: Any, [USE.NAMES]: logical) -> double[]
+vapply : @pure(FUN) <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> character[], FUN.VALUE: character[] | character, ...: Any, [USE.NAMES]: logical) -> character[]
+vapply : @pure(FUN) <T, V> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> V, FUN.VALUE: V[] | V, ...: Any, [USE.NAMES]: logical) -> V[]
 # Tried last, because a generic `FUN` would also match it. A matrix carries no element
 # type, so a matrix-valued `FUN` accepts any template, and R stacks the results into a matrix.
-vapply : @pure(FUN) <T> fn(X: list[T] | T[], FUN: fn(T) -> matrix, FUN.VALUE: Any, ...: Any, [USE.NAMES]: logical) -> matrix
+vapply : @pure(FUN) <T> fn(X: list[T] | T[] | NULL, FUN: fn(T) -> matrix, FUN.VALUE: Any, ...: Any, [USE.NAMES]: logical) -> matrix
 mapply : @pure(FUN) fn(FUN: fn(...: Any) -> Any, ...: Any, [MoreArgs]: Any, [SIMPLIFY]: Any, [USE.NAMES]: logical) -> Any
 Map : @pure(f) fn(f: fn(...: Any) -> Any, ...: Any) -> list[Any]
 # `tapply`'s result is an array whose shape follows `INDEX` (value-dependent).

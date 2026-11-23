@@ -278,10 +278,12 @@ g <- function(ok: logical) -> double {
 #++++
 == R/main.R
 g: fn(ok: logical) -> double
+75..78 warning[maybe-undefined] `max` is only assigned on some paths here, so on the others this reads the function `max`
 
 #---- a_package_function_under_a_local_variable_is_left_out
 # mgcv's timing: the read is guarded like the write, so it never reaches the
-# package's own `t2`.
+# package's own `t2`. The type leaves the function out; the opt-in finding
+# treats the two tests as independent branches, as it does for any local.
 #~~~~ R/main.R
 fit <- function(trace: logical) {
   if (trace) t2 <- proc.time()
@@ -293,8 +295,20 @@ t2 <- function(..., k = NA) list(k = k)
 #++++
 == R/main.R
 fit: fn(trace: logical) -> NULL
+98..100 warning[maybe-undefined] `t2` is only assigned on some paths here, so on the others this reads the function `t2`
 == R/smooth.R
 t2: <T> fn(...: Any, [k]: T) -> list{k: T}
+
+#---- a_read_that_skips_the_write_may_reach_a_function
+#~~~~ R/main.R
+shift <- function(flag) {
+  if (flag) t <- 5
+  t + 1
+}
+#++++
+== R/main.R
+shift: fn(flag: logical) -> double
+47..48 warning[maybe-undefined] `t` is only assigned on some paths here, so on the others this reads the function `t`
 
 #---- an_enclosing_function_under_a_local_variable_is_left_out
 # mgcv's Newton loop: `ls` is bound by every iteration, and the enclosing
