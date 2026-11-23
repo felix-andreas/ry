@@ -162,7 +162,7 @@ line 3: this declaration does not load: I do not know the type `structural`. A s
 #---- a_keyword_glued_to_a_name_is_not_the_keyword
 @typet
 #++++
-line 0: this line is not a declaration (`name : TYPE`).
+line 0: this line is not a declaration (`name : TYPE`)
 
 #---- an_alias_that_expands_into_itself_loads_as_an_abstract_type
 @alias z {list[named: z] | fn(y: z) -> Any}
