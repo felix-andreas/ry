@@ -926,3 +926,105 @@ p: Point
 s: Unknown
 l: list[Any]
 77..78 error[type-mismatch] `sum` is an R function, and this value is a ry record, not an R object. Convert it with `as.list()` first
+
+#==== open_records
+
+#---- a_function_reads_one_field_and_keeps_the_others
+# typing: strict
+keep <- function<R>(x: Record{a: I64, ..R}) -> Record{a: I64, ..R} x
+y <- keep((a = 1L, b = "x"))
+b <- y$b
+c <- y$c
+z <- keep((b = 1L,))
+read_b <- function<R>(x: Record{a: I64, ..R}) -> I64 x$b
+#++++
+keep: <R> fn(x: Record{a: I64, ..R}) -> Record{a: I64, ..R}
+y: Record{a: I64, b: character}
+b: character
+c: Unknown
+z: Unknown
+read_b: <R> fn(x: Record{a: I64, ..R}) -> I64
+131..132 error[type-mismatch] field `c` does not exist in `Record{a: I64, b: character}`
+143..152 error[type-mismatch] expected `Record{a: I64, ..T}`, found `Record{b: integer}`
+209..210 error[type-mismatch] field `b` does not exist in `Record{a: I64, ..R}`
+
+#---- a_literal_adapts_to_the_listed_fields
+# typing: strict
+keep <- function<R>(x: Record{a: I64, ..R}) -> Record{a: I64, ..R} x
+one <- keep((a = 1,))
+two <- keep((a = 1, b = 2))
+#++++
+keep: <R> fn(x: Record{a: I64, ..R}) -> Record{a: I64, ..R}
+one: Record{a: I64}
+two: Record{a: I64, b: double}
+
+#---- the_row_carries_through_an_update
+# typing: strict
+rename_a <- function<R>(x: Record{a: I64, ..R}) -> Record{b: I64, ..R} {
+  (..x, a = 2L)
+}
+set_a <- function<R>(x: Record{a: I64, ..R}) -> Record{a: I64, ..R} {
+  (..x, a = 2L)
+}
+#++++
+rename_a: <R> fn(x: Record{a: I64, ..R}) -> Record{b: I64, ..R}
+set_a: <R> fn(x: Record{a: I64, ..R}) -> Record{a: I64, ..R}
+92..105 error[type-mismatch] expected `Record{b: I64, ..R}`, found `Record{a: I64, ..R}`
+
+#---- positional_access_on_an_open_record
+# typing: strict
+first <- function<R>(x: Record{a: I64, ..R}) x[[1]]
+#++++
+first: <R> fn(x: Record{a: I64, ..R}) -> Unknown
+65..66 error[type-mismatch] a position cannot pick a field of `Record{a: I64, ..R}`, because the fields of the row sort among the listed ones. Read the field by name
+
+#---- a_closed_record_does_not_take_a_rigid_row
+# typing: strict
+close <- function<R>(x: Record{a: I64, ..R}) -> Record{a: I64} x
+build <- function<R>(x: Record{a: I64, ..R}) -> Record{a: I64, ..R} (a = 1L,)
+#++++
+close: <R> fn(x: Record{a: I64, ..R}) -> Record{a: I64}
+build: <R> fn(x: Record{a: I64, ..R}) -> Record{a: I64, ..R}
+80..81 error[type-mismatch] expected `Record{a: I64}`, found `Record{a: I64, ..R}`
+150..159 error[type-mismatch] expected `Record{a: I64, ..R}`, found `Record{a: I64}`
+
+#---- rows_that_do_not_lower
+# typing: strict
+unbound <- function(x: Record{a: I64, ..R}) x
+not_last <- function<R>(x: Record{..R, a: I64}) x
+in_list <- function<R>(x: list{a: double, ..R}) x
+alone <- function<R>(x: ..R) x
+in_tuple <- function<R>(x: Tuple{I64, ..R}) x
+r_table <- function<R>(x: data.table{a: double, ..R}) x
+#++++
+unbound: <T> fn(x: T) -> T
+not_last: <T> fn(x: T) -> T
+in_list: <T> fn(x: T) -> T
+alone: <T> fn(x: T) -> T
+in_tuple: <T> fn(x: T) -> T
+r_table: <T> fn(x: T) -> T
+55..58 error[annotation] `R` in `..R` must be a type parameter: declare it, as in `<R> fn(...)` or `function<R>(...)`
+97..100 error[annotation] a row such as `..R` stands for the remaining columns or fields, so it comes last
+139..159 error[annotation] only a `DataFrame{...}`, `LazyFrame{...}` or `Record{...}` type can end in a row such as `..R`. A `list{...}` type ends in `..` to accept more fields
+187..190 error[annotation] `..R` stands for the other columns of a `DataFrame{...}` or the other fields of a `Record{...}`, so it can only end one of those types
+221..236 error[annotation] a `Tuple{...}` type lists a fixed number of items, so it cannot end in a row such as `..R`. Use `Record{...}` for named fields
+266..292 error[annotation] only a `DataFrame{...}`, `LazyFrame{...}` or `Record{...}` type can end in a row such as `..R`. A `data.table{...}` type lists every column
+
+#---- a_pattern_on_an_open_record_matches_by_name
+# typing: strict
+pick <- function<R>(x: Record{a: I64, ..R}) -> I64 {
+  match (x) {
+    (a = value, ..) => value
+  }
+}
+closed <- function<R>(x: Record{a: I64, ..R}) -> I64 {
+  match (x) {
+    (a = value,) => value
+  }
+}
+same <- function<R>(x: Record{a: I64, ..R}, y: Record{a: I64, ..R}) x == y
+#++++
+pick: <R> fn(x: Record{a: I64, ..R}) -> I64
+closed: <R> fn(x: Record{a: I64, ..R}) -> I64
+same: <R> fn(x: Record{a: I64, ..R}, y: Record{a: I64, ..R}) -> Bool
+192..204 error[type-mismatch] this pattern can never match: the value is `Record{a: I64, ..R}`. Its row may hold more fields, so end the pattern in `..`, as in `(a = p, ..)`

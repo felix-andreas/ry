@@ -717,7 +717,7 @@ impl<'db> Migration<'_, 'db> {
             .expression_id(node)
             .and_then(|id| self.check?.editor().expression_types.get(&id))
             .is_some_and(|ty| match ty.kind(self.db) {
-                TyKind::Frame(FrameKind::DataTable, _) => true,
+                TyKind::Frame(FrameKind::DataTable, _, _) => true,
                 TyKind::Named(name, _) => name.text(self.db) == "data.table",
                 _ => false,
             });
@@ -1285,7 +1285,7 @@ impl<'db> Migration<'_, 'db> {
             return Table::Other;
         };
         match ty.kind(self.db) {
-            TyKind::Frame(FrameKind::DataFrame | FrameKind::DataTable, Some(columns)) => {
+            TyKind::Frame(FrameKind::DataFrame | FrameKind::DataTable, Some(columns), _) => {
                 let mut renderer = TypeRenderer::default();
                 Table::Known(
                     columns
@@ -1299,7 +1299,7 @@ impl<'db> Migration<'_, 'db> {
                         .collect(),
                 )
             }
-            TyKind::Frame(FrameKind::DataFrame | FrameKind::DataTable, None) => Table::Unknown,
+            TyKind::Frame(FrameKind::DataFrame | FrameKind::DataTable, None, _) => Table::Unknown,
             TyKind::Named(name, _) if name.text(self.db) == "data.table" => Table::Unknown,
             _ => Table::Other,
         }

@@ -656,7 +656,7 @@ fn side<'db>(
         TyKind::Null | TyKind::Var(_) => Side::Neutral,
         TyKind::Native(_) | TyKind::Rigid(_) | TyKind::OtherTags => Side::Ry,
         TyKind::NativeTuple(items) => all(&mut items.iter().copied(), expanding),
-        TyKind::NativeRecord(fields) => all(&mut fields.iter().map(|field| field.ty), expanding),
+        TyKind::NativeRecord(fields, _) => all(&mut fields.iter().map(|field| field.ty), expanding),
         TyKind::Tag(_, payload) => all(&mut payload.iter().copied(), expanding),
         // A union of tags is a ry type; any other union, `F64 | NULL` included, is how R code
         // spells a value of several types.
@@ -670,7 +670,7 @@ fn side<'db>(
                 Side::R
             }
         }
-        TyKind::Frame(kind, _) if kind.class().is_some() => Side::R,
+        TyKind::Frame(kind, _, _) if kind.class().is_some() => Side::R,
         TyKind::Frame(..) => Side::Ry,
         TyKind::Function(function) => all(
             &mut function
@@ -1355,7 +1355,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                 let compiles = one_position
                     && match target_type.map(|ty| ty.kind(db)) {
                         Some(TyKind::NativeTuple(_)) => double && literal_position,
-                        Some(TyKind::NativeRecord(_)) => false,
+                        Some(TyKind::NativeRecord(_, _)) => false,
                         _ => true,
                     };
                 if !compiles {
@@ -1411,7 +1411,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                 self.walk(scrutinee, Use::Value);
                 let matched = self.ty(scrutinee).map(|ty| self.peel(ty));
                 let matches_shape = matched.is_none_or(|ty| match ty.kind(db) {
-                    TyKind::NativeRecord(_)
+                    TyKind::NativeRecord(_, _)
                     | TyKind::NativeTuple(_)
                     | TyKind::Tag(..)
                     | TyKind::OtherTags => true,
@@ -1882,7 +1882,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             return first != later;
         }
         match (first.kind(db), later.kind(db)) {
-            (TyKind::NativeRecord(first), TyKind::NativeRecord(later)) => {
+            (TyKind::NativeRecord(first, _), TyKind::NativeRecord(later, _)) => {
                 first.len() != later.len()
                     || first.iter().zip(later.iter()).any(|(first, later)| {
                         first.name != later.name || self.layout_differs(first.ty, later.ty)
@@ -1919,11 +1919,11 @@ impl<'a, 'db> Judge<'a, 'db> {
         }
         Some(match ty.kind(db) {
             TyKind::Null => 32,
-            TyKind::NativeRecord(_) => 33,
+            TyKind::NativeRecord(_, _) => 33,
             TyKind::NativeTuple(_) => 34,
             TyKind::Tag(..) | TyKind::OtherTags => 35,
             TyKind::Union(_) if !self.is_mixed_union(ty) => 35,
-            TyKind::Frame(kind, _) if kind.class().is_none() => 36,
+            TyKind::Frame(kind, _, _) if kind.class().is_none() => 36,
             TyKind::Named(name, _) => match name.text(db) {
                 "Expr" => 36,
                 "List" => 37,

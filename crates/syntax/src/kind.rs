@@ -188,6 +188,8 @@ pub enum SyntaxKind {
     TYPE_TAG_PAYLOAD,
     /// `..`, the last member of an open tag union.
     TYPE_OTHER_TAGS,
+    /// `..R`, the row variable that ends an open `DataFrame{...}` or `Record{...}` type.
+    TYPE_ROW,
     /// `type Name<T> = TYPE` or `alias Name = TYPE`, an inline type definition statement.
     TYPE_DEFINITION,
     /// The `@Name` or `@Name<Args>` head of a [`NEW_EXPR`].
@@ -420,6 +422,7 @@ impl SyntaxKind {
             TYPE_TAG => "tag type",
             TYPE_TAG_PAYLOAD => "tag payload type",
             TYPE_OTHER_TAGS => "`..`",
+            TYPE_ROW => "row variable",
             TYPE_DEFINITION => "type definition",
             NEW_TYPE => "nominal type",
             PURE_MARKER => "purity marker",

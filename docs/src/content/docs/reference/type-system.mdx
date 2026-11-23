@@ -441,8 +441,7 @@ these rules:
   `ry build` on ry's runtime write each one-line parameter and return annotation of a typed package
   as the type it stands for ([CLI reference](/reference/cli#build-and-install)), so an installed
   function with a parameter `p: Point`, where `alias Point = Record{x: F64, y: F64}`, checks `p` as
-  a record. A type with no such spelling, such as the open record `Record{a: I64, ..}`, and an
-  annotation that spans lines stay as written.
+  a record. An annotation that spans lines stays as written.
 - **A function with no parameters whose body is a constant or a bare name is not checked**, because
   it has no language object to carry its signature.
 
@@ -614,8 +613,9 @@ does not list reads as `Unknown` (the field may or may not be there), except a n
 listed field, which is reported as a typo. A positional `[[` and a `[` subset read `Unknown`,
 because the listed fields need not be the first ones. An open record does not pass its unlisted
 fields through: `fn(t: list{tick: fn() -> NULL, ..}) -> list{tick: fn() -> NULL, ..}` returns
-only what it lists. Every item of an open record is named, and a frame type such as
-`data.frame{a: double, ..}` cannot be open, because a frame type lists every column.
+only what it lists. Every item of an open record is named. A `data.frame{...}` or
+`data.table{...}` type lists every column, and only ry's own `Record{...}` and `DataFrame{...}`
+types pass unlisted fields or columns through, with a [row](#rows).
 
 #### The empty list
 
@@ -1256,6 +1256,64 @@ their R meaning. A literal is all fields or all items, and a repeated field name
   and the record keeps its type. The value must be compatible with the field's type, and a field the
   record lacks is a `type-mismatch`, because a record's fields are fixed.
 
+### Rows
+
+A `Record{...}`, `DataFrame{...}` or `LazyFrame{...}` type may end in a *row* `..R`, where `R` is a
+type parameter of the function. The type lists some fields or columns, and `R` stands for all the
+others, so a function can take any table that has a `code` column and return it with one more
+column:
+
+```r
+ids <- DataFrame(code = c("a", "b"), id = c(10L, 20L))
+
+add_id <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], id: integer[], ..R} {
+  DataFrame.join(data, ids, on = "code")
+}
+
+out <- add_id(DataFrame(code = c("a", "b"), price = c(1.5, 2.5)))
+print(out$volume)
+add_id(DataFrame(name = "a"))
+```
+
+`out` is a `DataFrame{code: character[], id: integer[], price: double[]}`, so the checker knows
+both which columns it has and which it lacks:
+
+```text ry check typing
+type-mismatch
+
+  x the frame `out` has no column `volume`. Its columns are `code`, `id`, `price`
+
+type-mismatch
+
+  x expected `DataFrame{code: character[], ..T}`, found `DataFrame{name: character[]}`
+```
+
+- `R` must be declared with `function<R>(...)` or `<R> fn(...)`, and the row comes last. A
+  `list{...}` type ends in a bare `..` instead ([open records](#open-records)), and a
+  `Tuple{...}`, a tag's payload, a `data.frame{...}` and a `data.table{...}` type list everything,
+  so a row there is an `annotation` error.
+- At a call, `R` binds to the fields or columns the argument has beyond the listed ones, so the
+  result carries them with their types. A listed field takes precedence over a field of the same
+  name in the row.
+- Inside the function, `R` is unknown. Reading a field or column the type does not list is a
+  `type-mismatch`, and so is a positional `[[` on a record, because the row's fields sort among the
+  listed ones. A record pattern needs a trailing `..`, as in `(a = p, ..)`.
+- A value with a row fits a type with the same row, never a closed type: returning
+  `Record{a: I64, ..R}` as `Record{a: I64}` is a `type-mismatch`, and so is building a closed
+  `(a = 1L,)` where `Record{a: I64, ..R}` is expected.
+- A table verb that keeps every column keeps the row: `filter`, `sort`, `head`, `tail`, `unique`,
+  `with_columns`, `drop`, `rename`, `with_row_index`, `group_by`, `lazy` and `collect`, and a join
+  whose left table has the row. `select` and `GroupBy.agg` build their result from the columns they name, so it has no
+  row, and a join whose right table has a row, or `concat` of a table with a row, types as a plain
+  `DataFrame`.
+
+```r ry run runtime=ry
+bump <- function<R>(x: Record{a: I64, ..R}) -> Record{a: I64, ..R} (..x, a = x$a + 1L)
+y <- bump((a = 1L, b = "x"))
+print(y$b)
+#> [1] "x"
+```
+
 ### Tag types
 
 A tag's type is written the way its value is, with types in place of values: `:None` has type
@@ -1278,7 +1336,7 @@ A union that lists `..` as a member is *open*: it also holds every tag it does n
 - An open union never fits a closed union. It fits another open union only when every tag the
   target lists is also listed by the source, with a compatible payload.
 
-There are no row variables, so a function cannot pass the unlisted tags of an open union through
+A tag union has no [row](#rows), so a function cannot pass the unlisted tags of an open union through
 with their types. Generic tag unions come from aliases, such as
 `#: @alias Option<T> {:Some(T) | :None}`. One is built in: the
 [standard library](/reference/standard-library/) defines `Result<T, E>` as `{:Ok(T) | :Err(E)}`, and a

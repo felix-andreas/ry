@@ -887,6 +887,14 @@ impl Parser<'_> {
             }
             Some(COLON) if self.next_token_is(IDENT) => self.ann_tag(end),
             Some(IDENT) if self.token_str(self.pos) == ".." => self.wrap(TYPE_OTHER_TAGS),
+            Some(IDENT)
+                if self
+                    .token_str(self.pos)
+                    .strip_prefix("..")
+                    .is_some_and(|name| name.starts_with(|c: char| c.is_alphabetic())) =>
+            {
+                self.wrap(TYPE_ROW)
+            }
             Some(IDENT | NULL_KW) => {
                 match self.token_str(self.pos) {
                     old @ ("frame" | "record" | "tuple")

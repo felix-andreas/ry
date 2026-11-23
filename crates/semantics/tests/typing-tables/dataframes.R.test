@@ -369,3 +369,117 @@ rows: Rows <- DataFrame(kind = c("Bond", "Cash"), v = c(1, 2))
 rows: Rows
 72..76 warning[unused] `rows` is assigned but never used
 86..134 error[type-mismatch] expected `DataFrame{kind: :Bond | :Cash, v: double[]}`, found `DataFrame{kind: character[], v: double[]}`
+
+#==== open_tables
+#---- a_function_adds_a_column_to_any_table_with_a_key
+# typing: strict
+add_id <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], id: double[], ..R} {
+  DataFrame.with_columns(data, id = Expr.rank(Expr.col("code")))
+}
+prices <- DataFrame(code = c("a", "bb"), price = c(1.5, 2.5))
+out <- add_id(prices)
+price <- out$price
+missing <- out$nothing
+#++++
+add_id: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], id: double[], ..R}
+prices: DataFrame{code: character[], price: double[]}
+out: DataFrame{code: character[], id: double[], price: double[]}
+price: double[]
+missing: Unknown
+284..289 warning[unused] `price` is assigned but never used
+303..310 warning[unused] `missing` is assigned but never used
+318..325 error[type-mismatch] the frame `out` has no column `nothing`. Its columns are `code`, `id`, `price`
+
+#---- a_table_without_the_listed_column_does_not_fit
+# typing: strict
+keep <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], ..R} data
+bad <- keep(DataFrame(name = c("a")))
+wrong <- keep(DataFrame(code = c(1, 2)))
+#++++
+keep: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], ..R}
+bad: Unknown
+wrong: Unknown
+120..123 warning[unused] `bad` is assigned but never used
+132..156 error[type-mismatch] expected `DataFrame{code: character[], ..T}`, found `DataFrame{name: character[]}`
+158..163 warning[unused] `wrong` is assigned but never used
+172..197 error[type-mismatch] expected `DataFrame{code: character[], ..T}`, found `DataFrame{code: double[]}`
+
+#---- the_body_reads_only_the_listed_columns
+# typing: strict
+first_price <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame {
+  DataFrame.select(data, Expr.col("price"))
+}
+#++++
+first_price: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame
+17..28 warning[unused] `first_price` is assigned but never used
+134..141 error[type-mismatch] the frame `data` has no column `price`. Its columns are `code`
+
+#---- the_body_keeps_the_other_columns
+# typing: strict
+closed <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[]} data
+filtered <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], ..R} {
+  DataFrame.filter(data, Expr.col("code") == "a")
+}
+sorted <- function<R>(data: DataFrame{code: character[], ..R}) -> LazyFrame{code: character[], ..R} {
+  DataFrame.lazy(DataFrame.sort(data, "code"))
+}
+dropped <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{..R} {
+  DataFrame.drop(data, "code")
+}
+selected <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[]} {
+  DataFrame.select(data, Expr.col("code"))
+}
+#++++
+closed: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[]}
+filtered: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], ..R}
+sorted: <R> fn(data: DataFrame{code: character[], ..R}) -> LazyFrame{code: character[], ..R}
+dropped: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{..R}
+selected: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[]}
+17..23 warning[unused] `closed` is assigned but never used
+112..116 error[type-mismatch] expected `DataFrame{code: character[]}`, found `DataFrame{code: character[], ..R}`
+117..125 warning[unused] `filtered` is assigned but never used
+273..279 warning[unused] `sorted` is assigned but never used
+424..431 warning[unused] `dropped` is assigned but never used
+541..549 warning[unused] `selected` is assigned but never used
+
+
+#---- an_open_table_passes_through_another_function
+# typing: strict
+add_id <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], id: double[], ..R} {
+  DataFrame.with_columns(data, id = Expr.rank(Expr.col("code")))
+}
+twice <- function<S>(data: DataFrame{code: character[], ..S}) -> DataFrame{code: character[], id: double[], ..S} {
+  add_id(data)
+}
+out <- twice(DataFrame(code = "a", flag = TRUE))
+#++++
+add_id: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], id: double[], ..R}
+twice: <S> fn(data: DataFrame{code: character[], ..S}) -> DataFrame{code: character[], id: double[], ..S}
+out: DataFrame{code: character[], id: double[], flag: logical[]}
+332..335 warning[unused] `out` is assigned but never used
+
+#---- joins_and_groups_on_an_open_table
+# typing: strict
+codes <- DataFrame(code = c("a", "b"), id = c(1, 2))
+joined <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], id: double[], ..R} {
+  DataFrame.join(data, codes, on = "code")
+}
+right_open <- function<R>(data: DataFrame{code: character[], ..R}) {
+  DataFrame.join(codes, data, on = "code")
+}
+kept <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], ..R} {
+  DataFrame.join(data, codes, on = "code", how = "semi")
+}
+counted <- function<R>(data: DataFrame{code: character[], ..R}) {
+  GroupBy.agg(DataFrame.group_by(data, "code"), n = Expr.len())
+}
+#++++
+codes: DataFrame{code: character[], id: double[]}
+joined: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], id: double[], ..R}
+right_open: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame
+kept: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], ..R}
+counted: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], n: integer[]}
+70..76 warning[unused] `joined` is assigned but never used
+231..241 warning[unused] `right_open` is assigned but never used
+345..349 warning[unused] `kept` is assigned but never used
+504..511 warning[unused] `counted` is assigned but never used

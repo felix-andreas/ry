@@ -3808,6 +3808,11 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "position {position} does not exist in `{}`",
             renderer.render(db, *container)
         ),
+        TypeErrorKind::PositionInOpenRecord { container } => format!(
+            "a position cannot pick a field of `{}`, because the fields of the row sort among \
+             the listed ones. Read the field by name",
+            renderer.render(db, *container)
+        ),
         TypeErrorKind::OpaqueOutsideHome { name, creating, .. } => {
             let name = name.text(db);
             if *creating {
@@ -4413,8 +4418,10 @@ impl<'db> TypeRenderer<'db> {
                 format!("list{{{}, ..}}", self.render_fields(db, fields))
             }
             TyKind::NativeTuple(items) => format!("Tuple{{{}}}", self.render_items(db, items)),
-            TyKind::NativeRecord(fields) => {
-                format!("Record{{{}}}", self.render_native_fields(db, fields))
+            TyKind::NativeRecord(fields, row) => {
+                let fields = self.render_native_fields(db, fields);
+                let fields = self.with_row(db, fields, *row);
+                format!("Record{{{fields}}}")
             }
             TyKind::Tag(name, payload) => {
                 let name = name.text(db);
@@ -4423,23 +4430,28 @@ impl<'db> TypeRenderer<'db> {
                     Some(TyKind::NativeTuple(items)) => {
                         format!(":{name}({})", self.render_items(db, items))
                     }
-                    Some(TyKind::NativeRecord(fields)) => {
+                    Some(TyKind::NativeRecord(fields, _)) => {
                         format!(":{name}({})", self.render_native_fields(db, fields))
                     }
                     Some(_) => format!(":{name}(Unknown)"),
                 }
             }
             TyKind::OtherTags => "..".to_owned(),
-            TyKind::Frame(kind @ FrameKind::GroupBy { keys, .. }, Some(columns)) if *keys > 0 => {
+            TyKind::Frame(kind @ FrameKind::GroupBy { keys, .. }, Some(columns), row)
+                if *keys > 0 =>
+            {
                 let (keys, rest) = columns.split_at((*keys as usize).min(columns.len()));
                 let keys = self.render_fields(db, keys);
                 let rest = self.render_fields(db, rest);
+                let rest = self.with_row(db, rest, *row);
                 format!("{}{{{keys}; {rest}}}", kind.head())
             }
-            TyKind::Frame(kind, Some(columns)) => {
-                format!("{}{{{}}}", kind.head(), self.render_fields(db, columns))
+            TyKind::Frame(kind, Some(columns), row) => {
+                let columns = self.render_fields(db, columns);
+                let columns = self.with_row(db, columns, *row);
+                format!("{}{{{columns}}}", kind.head())
             }
-            TyKind::Frame(kind, None) => kind.head().to_owned(),
+            TyKind::Frame(kind, None, _) => kind.head().to_owned(),
             TyKind::Function(function) => self.render_function(db, function),
             TyKind::Union(members) => {
                 let members: Vec<String> = members
@@ -4508,6 +4520,19 @@ impl<'db> TypeRenderer<'db> {
     fn render_items(&mut self, db: &'db dyn Db, items: &[Ty<'db>]) -> String {
         let items: Vec<String> = items.iter().map(|&item| self.render(db, item)).collect();
         items.join(", ")
+    }
+
+    /// `fields` followed by `..R` when a row stands for more of them.
+    fn with_row(&mut self, db: &'db dyn Db, fields: String, row: Option<Ty<'db>>) -> String {
+        let Some(row) = row else {
+            return fields;
+        };
+        let row = self.render(db, row);
+        if fields.is_empty() {
+            format!("..{row}")
+        } else {
+            format!("{fields}, ..{row}")
+        }
     }
 
     fn render_native_fields(&mut self, db: &'db dyn Db, fields: &[NativeField<'db>]) -> String {

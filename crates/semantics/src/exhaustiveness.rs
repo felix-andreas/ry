@@ -346,7 +346,7 @@ impl<'db> Coverage<'db> {
                 Constructor::Tuple(items.len()),
                 items.iter().map(|&item| self.sample(item)).collect(),
             ),
-            TyKind::NativeRecord(fields) => Pat::Constructed(
+            TyKind::NativeRecord(fields, _) => Pat::Constructed(
                 Constructor::Record(
                     fields
                         .iter()
@@ -422,7 +422,7 @@ fn type_constructors(db: &dyn Db, ty: Ty<'_>) -> (Vec<Constructor>, bool) {
             true,
         ),
         TyKind::NativeTuple(items) => (vec![Constructor::Tuple(items.len())], true),
-        TyKind::NativeRecord(fields) => (
+        TyKind::NativeRecord(fields, _) => (
             vec![Constructor::Record(
                 fields
                     .iter()
@@ -463,7 +463,7 @@ fn constructor_field_types<'db>(
             (Constructor::Tuple(length), TyKind::NativeTuple(items)) if items.len() == *length => {
                 Some(items.to_vec())
             }
-            (Constructor::Record(names), TyKind::NativeRecord(fields))
+            (Constructor::Record(names), TyKind::NativeRecord(fields, _))
                 if fields.len() == names.len()
                     && fields
                         .iter()
@@ -574,7 +574,7 @@ fn lower<'db>(
                 _ => std::slice::from_ref(&ty),
             };
             let shape = members.iter().find_map(|member| match member.kind(db) {
-                TyKind::NativeRecord(native)
+                TyKind::NativeRecord(native, _)
                     if (rest.is_some() || native.len() == fields.len())
                         && module[fields].iter().all(|field| {
                             native

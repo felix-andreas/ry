@@ -281,8 +281,10 @@ pub enum TyKind<'db> {
     /// `Tuple{A, B}`: ry's native tuple, which is not a list and never fits a list type.
     NativeTuple(&'db [Ty<'db>]),
     /// `Record{a: A, b: B}`: ry's native record. Field order is not part of the type, so the
-    /// fields are kept sorted by name and every field is required.
-    NativeRecord(&'db [NativeField<'db>]),
+    /// fields are kept sorted by name and every field is required. A row, as in
+    /// `Record{a: A, ..R}`, stands for the fields the type does not list; it is a type variable
+    /// or parameter, never a record, because `native_record_with_row` merges a resolved one.
+    NativeRecord(&'db [NativeField<'db>], Option<Ty<'db>>),
     /// `:Name` or `:Name(...)`. The payload is always a `NativeTuple` (positional) or a
     /// `NativeRecord` (named), so a payload types and compares exactly like that literal.
     Tag(Name<'db>, Option<Ty<'db>>),
@@ -292,8 +294,10 @@ pub enum TyKind<'db> {
     /// A table whose type is a record of column vectors: ry's `DataFrame{a: A[], b: B[]}`,
     /// a `LazyFrame{...}` plan, a `GroupBy{...}`, or a `data.table{...}` whose columns are known.
     /// `None` is a table whose columns are not known (`DataFrame`), which every column reference
-    /// treats as silent.
-    Frame(FrameKind, Option<&'db [RecordField<'db>]>),
+    /// treats as silent. A row, as in `DataFrame{a: A[], ..R}`, stands for the columns the type
+    /// does not list; only a frame with known columns has one, and it is a type variable or
+    /// parameter, never a frame, because `frame_with_row` merges a resolved one.
+    Frame(FrameKind, Option<&'db [RecordField<'db>]>, Option<Ty<'db>>),
     Function(&'db FunctionType<'db>),
     /// Normalized; build only through `union_of`, never directly.
     Union(&'db [Ty<'db>]),
@@ -948,7 +952,7 @@ pub fn is_tag_type(db: &dyn Db, ty: Ty<'_>) -> bool {
 /// library collection, or one of its scalars), the values a `List` holds.
 pub fn is_ry_value_type(db: &dyn Db, ty: Ty<'_>) -> bool {
     match ty.kind(db) {
-        TyKind::NativeRecord(_)
+        TyKind::NativeRecord(_, _)
         | TyKind::NativeTuple(_)
         | TyKind::Tag(..)
         | TyKind::OtherTags
@@ -969,9 +973,74 @@ pub fn native_record<'db>(
     db: &'db dyn Db,
     fields: impl IntoIterator<Item = NativeField<'db>>,
 ) -> Ty<'db> {
+    native_record_with_row(db, fields, None)
+}
+
+/// A record whose `row` stands for the fields it does not list. A row that resolved to a record
+/// merges into it, so a row is only ever a type variable or parameter: a listed field wins over
+/// a row's field of the same name, and the row's own row carries on. A row that resolved to
+/// anything else, such as `Unknown`, leaves the fields unknown, so the record is `Unknown`.
+pub fn native_record_with_row<'db>(
+    db: &'db dyn Db,
+    fields: impl IntoIterator<Item = NativeField<'db>>,
+    row: Option<Ty<'db>>,
+) -> Ty<'db> {
     let mut fields: SmallVec<[NativeField<'db>; 8]> = fields.into_iter().collect();
+    let mut row = row;
+    while let Some(tail) = row {
+        match tail.kind(db) {
+            TyKind::Var(_) | TyKind::Rigid(_) => break,
+            TyKind::NativeRecord(more, rest) => {
+                let listed = fields.len();
+                fields.extend(
+                    more.iter()
+                        .filter(|field| !fields[..listed].iter().any(|own| own.name == field.name))
+                        .copied()
+                        .collect::<SmallVec<[NativeField<'db>; 8]>>(),
+                );
+                row = *rest;
+            }
+            _ => return Ty::new(db, TyKind::Unknown),
+        }
+    }
     fields.sort_by(|left, right| left.name.text(db).cmp(right.name.text(db)));
-    Ty::new(db, TyKind::NativeRecord(&fields))
+    Ty::new(db, TyKind::NativeRecord(&fields, row))
+}
+
+/// A frame whose `row` stands for the columns it does not list. A row that resolved to a table
+/// merges into it, so a row is only ever a type variable or parameter: the row's columns follow
+/// the listed ones, a listed column wins over a row's column of the same name, and the row's own
+/// row carries on. A row that resolved to anything else, such as `Unknown`, leaves the columns
+/// unknown.
+pub fn frame_with_row<'db>(
+    db: &'db dyn Db,
+    kind: FrameKind,
+    columns: &[RecordField<'db>],
+    row: Option<Ty<'db>>,
+) -> Ty<'db> {
+    let mut merged: SmallVec<[RecordField<'db>; 8]> = SmallVec::new();
+    let mut row = row;
+    while let Some(tail) = row {
+        match tail.kind(db) {
+            TyKind::Var(_) | TyKind::Rigid(_) => break,
+            TyKind::Frame(_, Some(more), rest) => {
+                if merged.is_empty() {
+                    merged.extend(columns.iter().copied());
+                }
+                let listed = merged.len();
+                let extra: SmallVec<[RecordField<'db>; 8]> = more
+                    .iter()
+                    .filter(|column| !merged[..listed].iter().any(|own| own.name == column.name))
+                    .copied()
+                    .collect();
+                merged.extend(extra);
+                row = *rest;
+            }
+            _ => return Ty::new(db, TyKind::Frame(kind, None, None)),
+        }
+    }
+    let columns = if merged.is_empty() { columns } else { &merged };
+    Ty::new(db, TyKind::Frame(kind, Some(columns), row))
 }
 
 /// The payload's shape: its item count, or its field names. Two tags with one name and one
@@ -1009,7 +1078,7 @@ fn payload_shape<'db>(db: &'db dyn Db, payload: Option<Ty<'db>>) -> PayloadShape
     };
     match payload.kind(db) {
         TyKind::NativeTuple(items) => PayloadShape::Positional(items.len()),
-        TyKind::NativeRecord(fields) => PayloadShape::Named(fields),
+        TyKind::NativeRecord(fields, _) => PayloadShape::Named(fields),
         _ => PayloadShape::Other(payload),
     }
 }
@@ -1155,7 +1224,7 @@ fn merge_tags<'db>(db: &'db dyn Db, first: Ty<'db>, second: Ty<'db>) -> Ty<'db> 
                 .collect();
             Ty::new(db, TyKind::NativeTuple(&items))
         }
-        (TyKind::NativeRecord(left), TyKind::NativeRecord(right)) => {
+        (TyKind::NativeRecord(left, _), TyKind::NativeRecord(right, _)) => {
             let fields: SmallVec<[NativeField<'db>; 8]> = left
                 .iter()
                 .zip(right.iter())
@@ -1164,7 +1233,7 @@ fn merge_tags<'db>(db: &'db dyn Db, first: Ty<'db>, second: Ty<'db>) -> Ty<'db> 
                     ty: union_of(db, [left.ty, right.ty]),
                 })
                 .collect();
-            Ty::new(db, TyKind::NativeRecord(&fields))
+            Ty::new(db, TyKind::NativeRecord(&fields, None))
         }
         _ => return first,
     };
@@ -1257,7 +1326,7 @@ fn rebuilt_type<'db>(
         | TyKind::OtherTags
         | TyKind::Var(_)
         | TyKind::Rigid(_)
-        | TyKind::Frame(_, None)
+        | TyKind::Frame(_, None, _)
         | TyKind::Union(_) => Ty::new(db, *kind),
         TyKind::Vector(inner) => Ty::new(db, TyKind::Vector(map(*inner))),
         TyKind::NamedVector(inner) => Ty::new(db, TyKind::NamedVector(map(*inner))),
@@ -1276,7 +1345,7 @@ fn rebuilt_type<'db>(
             let items: TypeList<'db> = items.iter().map(|&item| map(item)).collect();
             Ty::new(db, TyKind::NativeTuple(&items))
         }
-        TyKind::NativeRecord(fields) => {
+        TyKind::NativeRecord(fields, row) => {
             let fields: SmallVec<[NativeField<'db>; 8]> = fields
                 .iter()
                 .map(|field| NativeField {
@@ -1284,13 +1353,13 @@ fn rebuilt_type<'db>(
                     ty: map(field.ty),
                 })
                 .collect();
-            Ty::new(db, TyKind::NativeRecord(&fields))
+            native_record_with_row(db, fields, row.map(&mut *map))
         }
         TyKind::Tag(name, payload) => Ty::new(db, TyKind::Tag(*name, payload.map(&mut *map))),
-        TyKind::Frame(frame, Some(columns)) => Ty::new(
-            db,
-            TyKind::Frame(*frame, Some(&mapped_fields(columns, map))),
-        ),
+        TyKind::Frame(frame, Some(columns), row) => {
+            let columns = mapped_fields(columns, map);
+            frame_with_row(db, *frame, &columns, row.map(&mut *map))
+        }
         TyKind::Function(function) => {
             let positional: TypeList<'db> = function.positional.iter().map(|&ty| map(ty)).collect();
             let named: SmallVec<[Parameter<'db>; 8]> = function
@@ -1354,13 +1423,19 @@ fn for_each_child<'db>(kind: &TyKind<'db>, visit: &mut impl FnMut(Ty<'db>)) {
         TyKind::Tuple(items) | TyKind::NativeTuple(items) | TyKind::Union(items) => {
             items.iter().copied().for_each(visit)
         }
-        TyKind::NativeRecord(fields) => fields.iter().for_each(|field| visit(field.ty)),
+        TyKind::NativeRecord(fields, row) => {
+            fields.iter().for_each(|field| visit(field.ty));
+            row.iter().copied().for_each(visit);
+        }
         TyKind::Tag(_, payload) => payload.iter().copied().for_each(visit),
-        TyKind::Record(fields)
-        | TyKind::OpenRecord(fields)
-        | TyKind::Environment(fields)
-        | TyKind::Frame(_, Some(fields)) => fields.iter().for_each(|field| visit(field.ty)),
-        TyKind::Frame(_, None) => {}
+        TyKind::Record(fields) | TyKind::OpenRecord(fields) | TyKind::Environment(fields) => {
+            fields.iter().for_each(|field| visit(field.ty))
+        }
+        TyKind::Frame(_, Some(fields), row) => {
+            fields.iter().for_each(|field| visit(field.ty));
+            row.iter().copied().for_each(visit);
+        }
+        TyKind::Frame(_, None, _) => {}
         TyKind::Function(function) => {
             function.positional.iter().copied().for_each(&mut *visit);
             function
@@ -1590,9 +1665,11 @@ fn stored_kind<'a>(arena: &'a Bump, kind: TyKind<'a>) -> TyKind<'a> {
         TyKind::OpenRecord(fields) => TyKind::OpenRecord(arena.alloc_slice_copy(fields)),
         TyKind::Environment(fields) => TyKind::Environment(arena.alloc_slice_copy(fields)),
         TyKind::NativeTuple(items) => TyKind::NativeTuple(arena.alloc_slice_copy(items)),
-        TyKind::NativeRecord(fields) => TyKind::NativeRecord(arena.alloc_slice_copy(fields)),
-        TyKind::Frame(frame, Some(columns)) => {
-            TyKind::Frame(frame, Some(arena.alloc_slice_copy(columns)))
+        TyKind::NativeRecord(fields, row) => {
+            TyKind::NativeRecord(arena.alloc_slice_copy(fields), row)
+        }
+        TyKind::Frame(frame, Some(columns), row) => {
+            TyKind::Frame(frame, Some(arena.alloc_slice_copy(columns)), row)
         }
         TyKind::Function(function) => TyKind::Function(arena.alloc(FunctionType {
             positional: arena.alloc_slice_copy(function.positional),
@@ -1616,7 +1693,7 @@ fn stored_kind<'a>(arena: &'a Bump, kind: TyKind<'a>) -> TyKind<'a> {
         | TyKind::NamedList(_)
         | TyKind::Tag(..)
         | TyKind::OtherTags
-        | TyKind::Frame(_, None)
+        | TyKind::Frame(_, None, _)
         | TyKind::Var(_)
         | TyKind::Rigid(_) => kind,
     }

@@ -178,6 +178,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A nominal record updates with `..` and keeps its nominal type
 - `==` on ry's records, tuples and tags is structural, and a crossing names the R side's conversion
 - ry's immutable containers are covariant
+- A `Record{...}` or `DataFrame{...}` type may end in a row variable
 
 ## Analysis core
 

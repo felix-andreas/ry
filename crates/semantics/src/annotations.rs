@@ -10,8 +10,8 @@ use {
         types::{
             Atomic, Binder, Bound, Constraint, FrameKind, FunctionType, Name, NativeField,
             NativeScalar, Parameter, RecordField, RestParameter, Ty, TyKind, TypeScheme, any,
-            column_type, conflicting_tags, is_ry_value_type, native_record, null, scalar,
-            substitute_rigid, union_of, unknown,
+            column_type, conflicting_tags, is_ry_value_type, native_record, native_record_with_row,
+            null, scalar, substitute_rigid, union_of, unknown,
         },
     },
     rustc_hash::FxHashSet,
@@ -860,6 +860,10 @@ pub fn statement_inline_site(statement: &SyntaxNode) -> Option<SyntaxNode> {
 }
 
 /// `Record{...}` and `Tuple{...}` share the brace grammar of `list{...}` too.
+fn has_row(node: &SyntaxNode) -> bool {
+    node.children().any(|c| c.kind() == SyntaxKind::TYPE_ROW)
+}
+
 fn native_head(node: &SyntaxNode) -> Option<NativeHead> {
     match name_text(node).as_deref() {
         Some("Record") => Some(NativeHead::Record),
@@ -1193,6 +1197,13 @@ impl<'db> Lowering<'db> {
                 union
             }
             SyntaxKind::TYPE_OTHER_TAGS => Ty::new(self.db, TyKind::OtherTags),
+            SyntaxKind::TYPE_ROW => {
+                self.errors.push((
+                    "`..R` stands for the other columns of a `DataFrame{...}` or the other fields of a `Record{...}`, so it can only end one of those types".to_owned(),
+                    node.text_range(),
+                ));
+                unknown(self.db)
+            }
             SyntaxKind::TYPE_TAG => {
                 let name = Name::new(self.db, name_text(node).unwrap_or_default());
                 let payload = match node
@@ -1200,6 +1211,16 @@ impl<'db> Lowering<'db> {
                     .find(|c| c.kind() == SyntaxKind::TYPE_TAG_PAYLOAD)
                 {
                     Some(payload) => {
+                        if let Some(row) = payload
+                            .children()
+                            .find(|c| c.kind() == SyntaxKind::TYPE_ROW)
+                        {
+                            self.errors.push((
+                                "a tag's payload lists every field, so it cannot end in a row such as `..R`".to_owned(),
+                                row.text_range(),
+                            ));
+                            return unknown(self.db);
+                        }
                         let named = payload
                             .children()
                             .any(|c| c.kind() == SyntaxKind::TYPE_FIELD);
@@ -1225,11 +1246,20 @@ impl<'db> Lowering<'db> {
             }
             SyntaxKind::TYPE_TUPLE | SyntaxKind::TYPE_RECORD if native_head(node).is_some() => {
                 let named = node.children().any(|c| c.kind() == SyntaxKind::TYPE_FIELD);
-                let positional = node.children().any(|c| is_type_kind(c.kind()));
+                let positional = node
+                    .children()
+                    .any(|c| is_type_kind(c.kind()) && c.kind() != SyntaxKind::TYPE_ROW);
                 match native_head(node) {
                     Some(NativeHead::Record) if positional => {
                         self.errors.push((
                             "a `Record{...}` type names every field: write each one as `name: TYPE`, or use `Tuple{...}` for unnamed items".to_owned(),
+                            node.text_range(),
+                        ));
+                        unknown(self.db)
+                    }
+                    Some(NativeHead::Tuple) if has_row(node) => {
+                        self.errors.push((
+                            "a `Tuple{...}` type lists a fixed number of items, so it cannot end in a row such as `..R`. Use `Record{...}` for named fields".to_owned(),
                             node.text_range(),
                         ));
                         unknown(self.db)
@@ -1242,7 +1272,16 @@ impl<'db> Lowering<'db> {
                         unknown(self.db)
                     }
                     Some(NativeHead::Record) => {
-                        self.lower_native_fields(node, "this `Record{...}` type")
+                        let Ok(row) = self.lower_row(node) else {
+                            return unknown(self.db);
+                        };
+                        let record = self.lower_native_fields(node, "this `Record{...}` type");
+                        match (row, record.kind(self.db)) {
+                            (Some(row), TyKind::NativeRecord(fields, None)) => {
+                                native_record_with_row(self.db, fields.iter().copied(), Some(row))
+                            }
+                            _ => record,
+                        }
                     }
                     _ => self.lower_native_items(node),
                 }
@@ -1276,8 +1315,25 @@ impl<'db> Lowering<'db> {
                 self.lower_open_record(node)
             }
             SyntaxKind::TYPE_TUPLE | SyntaxKind::TYPE_RECORD
+                if has_row(node) && frame_kind(node).is_none_or(|kind| kind.class().is_some()) =>
+            {
+                // A data.table or data.frame type comes from R code, whose verbs build every
+                // column of their result, so it lists them all.
+                let hint = match frame_kind(node).and_then(FrameKind::class) {
+                    Some(class) => format!(". A `{class}{{...}}` type lists every column"),
+                    None => ". A `list{...}` type ends in `..` to accept more fields".to_owned(),
+                };
+                self.errors.push((
+                    format!("only a `DataFrame{{...}}`, `LazyFrame{{...}}` or `Record{{...}}` type can end in a row such as `..R`{hint}"),
+                    node.text_range(),
+                ));
+                unknown(self.db)
+            }
+            SyntaxKind::TYPE_TUPLE | SyntaxKind::TYPE_RECORD
                 if node.children().any(|c| c.kind() == SyntaxKind::TYPE_FIELD)
-                    && node.children().any(|c| is_type_kind(c.kind())) =>
+                    && node
+                        .children()
+                        .any(|c| is_type_kind(c.kind()) && c.kind() != SyntaxKind::TYPE_ROW) =>
             {
                 self.errors.push((
                     if let Some(kind) = frame_kind(node) {
@@ -1291,7 +1347,10 @@ impl<'db> Lowering<'db> {
             }
             SyntaxKind::TYPE_TUPLE if frame_kind(node).is_some() => {
                 let kind = frame_kind(node).unwrap_or(FrameKind::DataFrame);
-                if node.children().any(|c| is_type_kind(c.kind())) {
+                if node
+                    .children()
+                    .any(|c| is_type_kind(c.kind()) && c.kind() != SyntaxKind::TYPE_ROW)
+                {
                     self.errors.push((
                         format!(
                             "a `{}{{...}}` type names every column: write each one as `name: TYPE`",
@@ -1301,7 +1360,10 @@ impl<'db> Lowering<'db> {
                     ));
                     return unknown(self.db);
                 }
-                Ty::new(self.db, TyKind::Frame(kind, Some(&[])))
+                let Ok(row) = self.lower_row(node) else {
+                    return unknown(self.db);
+                };
+                Ty::new(self.db, TyKind::Frame(kind, Some(&[]), row))
             }
             SyntaxKind::TYPE_TUPLE => {
                 let items = node
@@ -1313,6 +1375,9 @@ impl<'db> Lowering<'db> {
             }
             SyntaxKind::TYPE_RECORD => {
                 let frame = frame_kind(node);
+                let Ok(row) = self.lower_row(node) else {
+                    return unknown(self.db);
+                };
                 let fields: Vec<(String, SyntaxNode)> = node
                     .children()
                     .filter(|c| c.kind() == SyntaxKind::TYPE_FIELD)
@@ -1377,7 +1442,7 @@ impl<'db> Lowering<'db> {
                 Ty::new(
                     self.db,
                     if let Some(kind) = frame {
-                        TyKind::Frame(kind, Some(&fields))
+                        TyKind::Frame(kind, Some(&fields), row)
                     } else {
                         TyKind::Record(&fields)
                     },
@@ -1446,6 +1511,38 @@ impl<'db> Lowering<'db> {
             SyntaxKind::TYPE_FUNCTION => self.lower_function_type(node),
             _ => unknown(self.db),
         }
+    }
+
+    /// The type parameter a brace type's closing `..R` names, `None` without one, or `Err` after
+    /// reporting a row that is not last or names no type parameter in scope.
+    fn lower_row(&mut self, node: &SyntaxNode) -> Result<Option<Ty<'db>>, ()> {
+        let Some(row) = node.children().find(|c| c.kind() == SyntaxKind::TYPE_ROW) else {
+            return Ok(None);
+        };
+        if row
+            .next_sibling()
+            .is_some_and(|next| next.kind() == SyntaxKind::TYPE_FIELD || is_type_kind(next.kind()))
+        {
+            self.errors.push((
+                "a row such as `..R` stands for the remaining columns or fields, so it comes last"
+                    .to_owned(),
+                row.text_range(),
+            ));
+            return Err(());
+        }
+        let text = row.text().to_string();
+        let name = text.trim().trim_start_matches("..");
+        let binder = Name::new(self.db, name.to_owned());
+        if !self.binders.contains(&binder) {
+            self.errors.push((
+                format!(
+                    "`{name}` in `..{name}` must be a type parameter: declare it, as in `<{name}> fn(...)` or `function<{name}>(...)`"
+                ),
+                row.text_range(),
+            ));
+            return Err(());
+        }
+        Ok(Some(Ty::new(self.db, TyKind::Rigid(binder))))
     }
 
     fn lower_native_items(&mut self, node: &SyntaxNode) -> Ty<'db> {
@@ -1585,8 +1682,12 @@ impl<'db> Lowering<'db> {
             _ if let Some(native) = NativeScalar::from_name(text) => {
                 return Ty::new(self.db, TyKind::Native(native));
             }
-            "DataFrame" => return Ty::new(self.db, TyKind::Frame(FrameKind::DataFrame, None)),
-            "LazyFrame" => return Ty::new(self.db, TyKind::Frame(FrameKind::LazyFrame, None)),
+            "DataFrame" => {
+                return Ty::new(self.db, TyKind::Frame(FrameKind::DataFrame, None, None));
+            }
+            "LazyFrame" => {
+                return Ty::new(self.db, TyKind::Frame(FrameKind::LazyFrame, None, None));
+            }
             "GroupBy" => {
                 return Ty::new(
                     self.db,
@@ -1595,6 +1696,7 @@ impl<'db> Lowering<'db> {
                             lazy: false,
                             keys: 0,
                         },
+                        None,
                         None,
                     ),
                 );
@@ -1607,6 +1709,7 @@ impl<'db> Lowering<'db> {
                             lazy: true,
                             keys: 0,
                         },
+                        None,
                         None,
                     ),
                 );
