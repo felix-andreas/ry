@@ -29,7 +29,7 @@ Most important first. Each line names the open item, and the detail is at its po
 
 - Failures main already has: "Open: broken on main".
 - Memory safety: interpreter code moves onto handle types that make holding an unrooted value across an allocation a compile error (`development/design/memory-safety.md`). Tier 0's stores, the attribute setters, name matching and the subset forms are on them, and the order of the rest is in "Open: the handle migration".
-- Open bug: with `RY_JIT=force`, compiled code misses a write that an argument promise makes to its caller's variable, so `crates/oracle/cases/environments__code_argument_references.R` fails in force mode ("Open: the JIT").
+- Open bug: with `RY_JIT=stress`, compiled code misses a write that an argument promise makes to its caller's variable, so `crates/oracle/cases/environments__code_argument_references.R` fails in that mode ("Open: the JIT").
 - Runtime gaps, among them annotations at run time, graphics ("Graphics gaps"), the corpus packages' own tests ("Corpus package tests: what still fails"), the top CRAN packages' tests ("Top CRAN packages: what still fails") and GNU R's regression tests: "Open: the runtime".
 - The three benchmark code bases pass every generated test, and their per-test time trails GNU R's. Close that gap, then run `ry check` over the generated code for false reports ("Open: the benchmark packages under ry's runtime").
 - Windows has no crash report handler ("Open: Windows", "Crash reports").

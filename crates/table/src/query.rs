@@ -11,10 +11,12 @@
 use {
     crate::{
         ColumnType, Error, Result, RowIndex, Schema, Table,
+        convert::{NA_REAL, is_na_real},
         factor::{self, Levels},
         group, join,
         kernel::{Evaluator, Vector, scatter, scatters, selected_rows},
     },
+    numeric::long_double::{real_integer_divide, real_modulo},
     polars::prelude::{
         AnyValue, AsOfOptions, AsofStrategy, ChunkAgg, Column, DataFrame, DataType, ExplodeOptions,
         Expr as PolarsExpr, Field, Float64Chunked, Int32Chunked, IntoColumn, IntoLazy, JoinType,
@@ -22,7 +24,7 @@ use {
         SortMultipleOptions, TimeUnit, UnionArgs, by_name, col, concat, len, lit, pearson_corr,
         when,
     },
-    polars_arrow::bitmap::MutableBitmap,
+    polars_arrow::bitmap::{Bitmap, MutableBitmap},
     std::{collections::HashSet, fmt, sync::Arc},
 };
 
@@ -3461,18 +3463,17 @@ impl Lowering<'_> {
                     .then(lit(polars::prelude::Null {}).cast(DataType::Int32))
                     .otherwise(l.floor_div(r))
             }
-            BinaryOp::IntegerDivide => self
-                .numeric(left, kind)?
-                .floor_div(self.numeric(right, kind)?),
-            BinaryOp::Modulo => {
-                // R's `%%` takes the sign of the divisor: x - floor(x / y) * y.
-                let (l, r) = (
-                    self.numeric(left, ColumnType::Double)?,
-                    self.numeric(right, ColumnType::Double)?,
-                );
-                let value = l.clone() - l.floor_div(r.clone()) * r;
-                value.cast(dtype(kind))
-            }
+            BinaryOp::IntegerDivide => rowwise_double(
+                self.numeric(left, ColumnType::Double)?,
+                self.numeric(right, ColumnType::Double)?,
+                real_integer_divide,
+            ),
+            BinaryOp::Modulo => rowwise_double(
+                self.numeric(left, ColumnType::Double)?,
+                self.numeric(right, ColumnType::Double)?,
+                real_modulo,
+            )
+            .cast(dtype(kind)),
             BinaryOp::Equal
             | BinaryOp::NotEqual
             | BinaryOp::Less
@@ -3503,6 +3504,85 @@ impl Lowering<'_> {
             BinaryOp::And => self.logical(left)?.and(self.logical(right)?),
             BinaryOp::Or => self.logical(left)?.or(self.logical(right)?),
         })
+    }
+}
+
+/// `apply` on each row of two double columns, either of which may be a single value. A missing
+/// value enters `apply` as R's `NA_real_`, and the row is missing only when the result is that
+/// `NA`, so `NA %% 0` is `NaN` and `NaN %/% NA` is `NaN`, as in R. The kernel's lowering of the same operators shares
+/// `apply`, so the two never disagree on R's edge cases.
+fn rowwise_double(x1: PolarsExpr, x2: PolarsExpr, apply: fn(f64, f64) -> f64) -> PolarsExpr {
+    x1.map_many(
+        move |columns: &mut [Column]| {
+            let left = columns[0]
+                .as_materialized_series()
+                .f64()?
+                .rechunk()
+                .into_owned();
+            let right = columns[1]
+                .as_materialized_series()
+                .f64()?
+                .rechunk()
+                .into_owned();
+            // A single value broadcasts to the other side's length, zero included.
+            let len = match (left.len(), right.len()) {
+                (1, other) | (other, 1) => other,
+                (left_len, right_len) => left_len.min(right_len),
+            };
+            let (left_values, left_validity) = contiguous(&left);
+            let (right_values, right_validity) = contiguous(&right);
+            let (left_step, right_step) =
+                (usize::from(left.len() != 1), usize::from(right.len() != 1));
+            let mut values = Vec::with_capacity(len);
+            let validity = if left_validity.is_none() && right_validity.is_none() {
+                if left_step == 1 && right_step == 1 {
+                    values.extend(
+                        left_values[..len]
+                            .iter()
+                            .zip(&right_values[..len])
+                            .map(|(lhs, rhs)| apply(*lhs, *rhs)),
+                    );
+                } else {
+                    values.extend((0..len).map(|row| {
+                        apply(left_values[row * left_step], right_values[row * right_step])
+                    }));
+                }
+                None
+            } else {
+                let mut validity = MutableBitmap::with_capacity(len);
+                for row in 0..len {
+                    let (left_row, right_row) = (row * left_step, row * right_step);
+                    let lhs = if left_validity.is_none_or(|bits| bits.get_bit(left_row)) {
+                        left_values[left_row]
+                    } else {
+                        NA_REAL
+                    };
+                    let rhs = if right_validity.is_none_or(|bits| bits.get_bit(right_row)) {
+                        right_values[right_row]
+                    } else {
+                        NA_REAL
+                    };
+                    let value = apply(lhs, rhs);
+                    values.push(value);
+                    validity.push(!is_na_real(value));
+                }
+                Some(validity.into())
+            };
+            Ok(
+                Float64Chunked::from_vec_validity(left.name().clone(), values, validity)
+                    .into_column(),
+            )
+        },
+        &[x2],
+        |_, fields| Ok(Field::new(fields[0].name().clone(), DataType::Float64)),
+    )
+}
+
+/// A single-chunk column's values and validity, read in place.
+fn contiguous(values: &Float64Chunked) -> (&[f64], Option<&Bitmap>) {
+    match values.downcast_iter().next() {
+        Some(array) => (array.values().as_slice(), array.validity()),
+        None => (&[], None),
     }
 }
 

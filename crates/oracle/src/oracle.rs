@@ -430,7 +430,7 @@ impl ProcessEngine {
         engine.name = "ry-jit-gctorture".to_string();
         engine
             .environment
-            .push(("RY_JIT".to_string(), "force".to_string()));
+            .push(("RY_JIT".to_string(), "stress".to_string()));
         engine
     }
 
@@ -457,7 +457,7 @@ impl ProcessEngine {
         engine.name = "ry-jit".to_string();
         engine
             .environment
-            .push(("RY_JIT".to_string(), "force".to_string()));
+            .push(("RY_JIT".to_string(), "stress".to_string()));
         engine
     }
 

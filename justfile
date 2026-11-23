@@ -249,7 +249,8 @@ bench-hot-track dir +configurations:
     python3 -I tools/bench/tooling/hot.py track --codebases {{ dir }} --out target/hot-track.json {{ configurations }}
 
 # Prints what each R-level mechanism costs on ry in instructions (a closure call, an S3 dispatch, a `tryCatch`, a builtin call),
-# counted under callgrind, e.g. `just bench-mechanisms --ry target/profiling/ry --filter dispatch`.
+# counted under callgrind, e.g. `just bench-mechanisms --ry target/profiling/ry --filter dispatch`. `--gnu-r` adds GNU R's
+# counts beside ry's.
 bench-mechanisms *args:
     python3 -I tools/bench/tooling/mechanisms.py {{ args }}
 
@@ -787,7 +788,8 @@ fuzz-differential seed="0" count="200" engines="ry-tier0,ry-jit":
 # function of base, stats and utils), `io` (round trips through files and connections), `language`
 # (closures over promises, frames, conditions, dispatch and quoted code, called repeatedly),
 # `perturbed` (a generated program with dead and effect-free statements inserted into its function
-# bodies), `parser` (source fragments handed to `parse(text =)`), `corpus`, or `all`, e.g. `just fuzz-kind metamorphic 0 500`.
+# bodies), `parser` (source fragments handed to `parse(text =)`), `frame` (DataFrame verb chains
+# against a base-R model of their documented contract), `corpus`, or `all`, e.g. `just fuzz-kind metamorphic 0 500`.
 # Diverging programs and their reports go to target/fuzz-findings.
 fuzz-kind kind="all" seed="0" count="200" engines="ry-tier0,ry-jit":
     cargo build -q -p ry-lang -p libr -p rcmd -p oracle

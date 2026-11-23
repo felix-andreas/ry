@@ -114,7 +114,8 @@ enum Command {
         /// `io` (values written to files and connections and read back), `language` (closures
         /// over the call stack, evaluation order and dispatch), `perturbed` (such programs in
         /// bodies the compiler sees differently), `parser` (source fragments through
-        /// `parse(text =)`), `corpus` (mutated snippets of real R code,
+        /// `parse(text =)`), `frame` (DataFrame verb chains against a base-R model of their
+        /// contract), `corpus` (mutated snippets of real R code,
         /// `oracle::corpus`), a comma-separated list of them, or `all` for each of them on
         /// every seed.
         #[arg(long, default_value = "grammar")]
@@ -259,7 +260,7 @@ fn main() -> ExitCode {
             Some([FuzzKind::Corpus]) => print_corpus_program(*seed),
             _ => {
                 eprintln!(
-                    "--print takes one --kind: grammar, metamorphic, builtins, api, io, language, perturbed, parser or corpus"
+                    "--print takes one --kind: grammar, metamorphic, builtins, api, io, language, perturbed, parser, frame or corpus"
                 );
                 ExitCode::from(2)
             }
@@ -1076,7 +1077,7 @@ fn check_fuzz_seed(
 fn run_fuzz(run: FuzzRun) -> ExitCode {
     let Some(kinds) = fuzz_kinds(run.kind) else {
         eprintln!(
-            "unknown --kind `{}`: grammar, metamorphic, builtins, api, io, language, perturbed, parser, corpus or all",
+            "unknown --kind `{}`: grammar, metamorphic, builtins, api, io, language, perturbed, parser, frame, corpus or all",
             run.kind
         );
         return ExitCode::from(2);
@@ -1191,6 +1192,7 @@ fn run_fuzz(run: FuzzRun) -> ExitCode {
                                             | ProgramKind::Api
                                             | ProgramKind::Io
                                             | ProgramKind::Language
+                                            | ProgramKind::Frame
                                     )
                                 ) {
                                     println!("STOPS   {label} under GNU R: {error}");

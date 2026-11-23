@@ -157,11 +157,24 @@ pub fn run_on_ry_runtime(
         .map(CString::new)
         .transpose()
         .map_err(|_| ReplError("the R input contains a NUL byte".into()))?;
-    let arguments: Vec<CString> = arguments
-        .iter()
-        .map(|argument| CString::new(argument.as_bytes()))
-        .collect::<Result<_, _>>()
-        .map_err(|_| ReplError("an argument contains a NUL byte".into()))?;
+    // `commandArgs()` reads as an `Rscript` run of the script: `ry --file=FILE --args ...`.
+    let mut command_line = vec![CString::from(c"ry")];
+    if let Some(path) = &path {
+        let mut option = b"--file=".to_vec();
+        option.extend_from_slice(path.as_bytes());
+        command_line.push(
+            CString::new(option)
+                .map_err(|_| ReplError("the script path contains a NUL byte".into()))?,
+        );
+    }
+    command_line.push(CString::from(c"--args"));
+    for argument in arguments {
+        command_line.push(
+            CString::new(argument.as_bytes())
+                .map_err(|_| ReplError("an argument contains a NUL byte".into()))?,
+        );
+    }
+    let arguments = command_line;
     let pointers: Vec<*const c_char> = arguments.iter().map(|argument| argument.as_ptr()).collect();
     let nullable =
         |value: &Option<CString>| value.as_ref().map_or(std::ptr::null(), |v| v.as_ptr());

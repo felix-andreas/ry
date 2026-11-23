@@ -152,6 +152,13 @@ pub enum TypeErrorKind<'db> {
         suggestion: Option<String>,
         expected_parameters: Vec<String>,
     },
+    /// A named argument that went to `...` of a function whose first parameter is positional
+    /// only, holding a value of that parameter's type. Only the DataFrame verbs declare that shape,
+    /// and they read every named argument after the table as a column, so `df = x` is a column.
+    NamedPositional {
+        argument: String,
+        expected: Ty<'db>,
+    },
     MaybeNullCallee {
         found: Ty<'db>,
     },
@@ -18435,6 +18442,8 @@ impl<'db, 'a> Checker<'db, 'a> {
         let mut findings = Vec::new();
         // An unknown name throws off positional accounting, so its arity verdict would be noise.
         let mut unknown_name = false;
+        // A table passed by name leaves the first slot empty, and that is the one mistake.
+        let mut named_positional = false;
         for (index, argument) in arguments.iter().enumerate() {
             if let Some(element) = variadic_element
                 && let Some(ty) = argument.ty
@@ -18554,7 +18563,25 @@ impl<'db, 'a> Checker<'db, 'a> {
                             argument.value,
                         )
                     {
-                        findings.push(error);
+                        match (&argument.name, function.positional.first()) {
+                            (Some(name), Some(&first))
+                                if self.table.compatible(
+                                    self.db,
+                                    self.table.resolve(self.db, ty),
+                                    first,
+                                ) =>
+                            {
+                                findings.push(TypeError {
+                                    range: argument.range,
+                                    kind: TypeErrorKind::NamedPositional {
+                                        argument: name.to_string(),
+                                        expected: element,
+                                    },
+                                });
+                                named_positional = true;
+                            }
+                            _ => findings.push(error),
+                        }
                     }
                 }
                 ArgumentTarget::UndeclaredName => {}
@@ -18618,7 +18645,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
         }
 
-        if unknown_name {
+        if unknown_name || named_positional {
             return findings;
         }
         match shape_verdict(self.db, callee_range, function, arguments, targets) {

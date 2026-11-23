@@ -294,6 +294,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `tryCatch` pushes its chain of frames natively (settled)
 - An S4 method runs in place on a slot frame above its generic's (settled)
 - `object@name` is an instruction, and a slot write is checked without a call (settled)
+- String equality is a kernel, and the fast return asks what outlives the frame (settled)
 
 ## Builtins and base R
 
@@ -444,6 +445,14 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A loop compiles when its backward jumps repay the body
 - A back edge is counted in tier 0's fast jump handler
 - A load that reaches the runtime writes dirty variables back first
+- A write-back of several variables is one call driven by a record
+- A builtin call from compiled code defers its signals
+- Type predicates and `length` compile to a test of the value's header
+- An exit that keeps handing off compiles its instruction as a step
+- Forced compilation keeps the steady-state tests, and `stress` compiles everything
+- A hot `for` loop whose runs are short is not entered
+- A `for` loop over a boxed sequence compiles, and a pairlist loop stays in tier 0
+- The cost model charges each variable written back before a step
 
 ## Heap and collector
 
@@ -552,6 +561,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Measured and not taken: a builtin path for `Rf_eval` and a cheaper protect stack
 - Measured and not taken: libdeflate for lazy-load records
 - Extracted runtimes and base trees are pruned by a ledger and held by locks
+- `bin/R` and `Rscript` behave as GNU R's front ends
 
 ## Typed ry and the standard library
 
@@ -661,6 +671,10 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A base frame built by `data.frame()` or `data.table()` knows its columns
 - A missing key matches a missing key in every join
 - A `POSIXct` column is a time column in microseconds with its zone
+- A verb taking columns through `...` has no formal before them
+- `Expr` `%%` and `%/%` on doubles are GNU R's `myfmod` and `myfloor`
+- The frame fuzz kind's reference is a base-R model of the documented contract
+- A DataFrame sort puts missing values last and compares text by bytes
 
 ## Build, benchmarks and CI
 

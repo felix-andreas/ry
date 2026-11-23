@@ -293,3 +293,32 @@ The table is a Polars `DataFrame` held by the `table` crate; this entry holds th
 - Target: Polars `Datetime(Microseconds, zone)`, with R's `tzone` as the zone (`None` for no attribute or `""`, the session's zone). Microseconds keep the six decimals R prints and an `i64` range of about 292,000 years; a Parquet time in another unit converts to microseconds on load. The zone lives only in the Polars dtype, so `ColumnType` stays `Copy` and has one source for it.
 - A query compares two times on their instants whatever their zones, and refuses arithmetic: a duration column would be a second temporal model beside `Date`'s whole days, so a time shifts in R before it enters a frame. A cast between equal column types is skipped, because casting to `ColumnType`'s zone-less dtype would drop the column's zone.
 - Printing calls R's `format`, because only R knows the zone database (`frames::format_cells`); the label is `<POSc>`, as data.table prints.
+
+## A verb taking columns through `...` has no formal before them
+
+**Status:** built.
+
+- **`DataFrame.select`, `with_columns`, `filter`, `group_by`, `sort`, `GroupBy.agg` and `Expr.over`** (and their `LazyFrame.`/`LazyGroupBy.` aliases) are `function(...)`, plus an exact-match `descending` after `...` on `sort`. The table, group or expression is the first element of `...`, taken by position (`subject` in `crates/frames/src/dataframe.rs`). With `function(df, ...)`, R's partial matching bound a column named `d` to `df` (and `g` to `group`), and a column named exactly `df` could never be written. Per-verb renames of the formal (`.df`) would only move the collision, so no formal precedes the columns at all.
+- The rule: the table (group, expression) is the first positional argument, and every named argument in a column position is a column, so `df`, `d`, `group` and `n` are ordinary column names. A named table is an error at run time (`verb_arguments`) and under `ry check`.
+- The stubs in `types/ry.Rtypes` declare that first parameter unnamed (positional only), so the checker matches exactly as the runtime does. A named argument that fails its `...` element type but fits the first parameter is reported as `NamedPositional` ("read as a column, not as the table"), not as a bare mismatch.
+
+## `Expr` `%%` and `%/%` on doubles are GNU R's `myfmod` and `myfloor`
+
+**Status:** built.
+
+- The interpreter, the JIT, typed code, the eager kernel and the lazy lowering share one pair of kernels, `real_modulo` and `real_integer_divide` in `crates/numeric/src/long_double.rs`, which compute in R's long double through `LongDouble`, so `1e308 %% 5` is `0` and `4.9e-324 %% -5` is `-5` everywhere. The lowering runs them row-wise through `map_many` because Polars' own `%` and floor division give `NaN` for an infinite divisor and differ on signs.
+- A missing value enters the kernel as R's `NA_real_`, and a row is missing only when the result is that `NA`, so `NA %% 0` and `NaN %/% NA` are `NaN` as in R. Integer columns keep R's `NA` for a zero divisor.
+- R warns "probable complete loss of accuracy in modulus" when the quotient is too large (`modulus_loses_accuracy`). The interpreter warns; a table column has no call to warn from and returns the same value silently.
+
+## The frame fuzz kind's reference is a base-R model of the documented contract
+
+**Status:** built.
+
+- `oracle fuzz --kind frame` runs one program on GNU R and ry; under GNU R a prelude (`crates/oracle/src/frame_model.R`) defines `DataFrame.*`, `Expr.*` and `GroupBy.*` in plain base R from `reference/dataframes.mdx`. The reference is the contract, not Polars, so a Polars default the docs do not state shows up as a difference to decide rather than as the expected answer, and GNU R needs no Polars. Shapes the docs leave open are not generated (the report lists them); row order is compared only where a verb defines it.
+
+## A DataFrame sort puts missing values last and compares text by bytes
+
+**Status:** built.
+
+- `sort` puts `NA` and `NaN` last in both directions as one missing class, keeps input order among them and among equal keys (descending included), and compares strings by their bytes whatever `LC_COLLATE` says; string `<` and `>` in an expression compare bytes too. This is what the engine does and what R's `order(method = "radix")` does, so it is the contract in `reference/dataframes.mdx` rather than a Polars accident.
+- The frame fuzz kind's model sets `LC_COLLATE` to `C` (`crates/oracle/src/frame_model.R`), so its base-R `<` on strings compares bytes and the generator emits every string comparison.

@@ -30,7 +30,7 @@ use {
         handles::{self, Args, Cx, Integer, Local, Logical, Raw, Real, dense, safe},
         interp,
         kernels::{self, Comparison, Extremes, Integers, Reals},
-        long_double::{self, LongDouble},
+        long_double::{self, LongDouble, modulus_loses_accuracy, real_integer_divide, real_modulo},
         rmath,
         system::r_at_least,
         unwind::{ArgumentReader, R, Unwind, error, missing_argument},
@@ -1758,40 +1758,6 @@ pub fn power(base: f64, exponent: f64) -> f64 {
     f64::NAN
 }
 
-/// `a %% b`, bit for bit as GNU R computes it (`myfmod` in its `arithmetic.c`, built with an
-/// x87 `long double`): the remainder is corrected in extended precision, so `1e17 %% 7` is the
-/// exact 5 rather than the 0 a double computation gives.
-pub fn real_modulo(a: f64, b: f64) -> f64 {
-    // GNU R tests for a zero divisor first, so `NA %% 0` is `NaN`.
-    if b == 0.0 {
-        return f64::NAN;
-    }
-    if let Some((remainder, _)) = whole_division(a, b) {
-        return remainder as f64;
-    }
-    if a.is_nan() || b.is_nan() {
-        return extended_nan(a, b);
-    }
-    // The extended-precision steps subtract two infinities of one sign, which gives the x87
-    // default NaN, whose sign bit is set.
-    if a.is_infinite() {
-        return f64::from_bits(0xFFF8_0000_0000_0000);
-    }
-    // A divisor so large that `a / b` carries no precision: the result follows from the signs.
-    if b.abs() > EXTENDED_PRECISION_LIMIT && a.abs() <= b.abs() {
-        return if a.abs() == b.abs() {
-            0.0
-        } else if (a < 0.0 && b > 0.0) || (a > 0.0 && b < 0.0) {
-            a + b
-        } else {
-            a
-        };
-    }
-    let divisor = LongDouble::from(b);
-    let rough = LongDouble::from(a) - LongDouble::from((a / b).floor()) * divisor;
-    (rough - (rough / divisor).floor() * divisor).to_f64()
-}
-
 /// `a %% b` on integers: `NA` for an `NA` operand or a zero divisor, and otherwise a remainder
 /// whose sign follows the divisor.
 pub fn integer_modulo(a: i32, b: i32) -> i32 {
@@ -1826,93 +1792,6 @@ pub fn floored_quotient(a: i32, b: i32) -> i32 {
     let quotient = f64::from(a) / f64::from(b);
     let truncated = quotient as i32;
     truncated.wrapping_sub(i32::from(f64::from(truncated) > quotient))
-}
-
-/// `a %/% b`, bit for bit as GNU R computes it (`myfloor`), and consistent with
-/// [`real_modulo`]: `a == (a %/% b) * b + a %% b` up to rounding.
-pub fn real_integer_divide(a: f64, b: f64) -> f64 {
-    if let Some((_, quotient)) = whole_division(a, b) {
-        return quotient as f64;
-    }
-    // A NaN operand, a zero divisor and a quotient too large to have a fractional part all
-    // pass the division through, a NaN with the payload the division gives it.
-    let quotient = a / b;
-    if b == 0.0 || quotient.abs() > EXTENDED_PRECISION_LIMIT || !quotient.is_finite() {
-        return quotient;
-    }
-    // A quotient below one floors to 0 or -1 by its sign alone. One that underflowed to zero
-    // has lost its sign, so the operands' signs decide.
-    if quotient.abs() < 1.0 {
-        let negative = quotient < 0.0 || (a < 0.0 && b > 0.0) || (a > 0.0 && b < 0.0);
-        return if negative { -1.0 } else { 0.0 };
-    }
-    let whole = LongDouble::from(quotient.floor());
-    let divisor = LongDouble::from(b);
-    let rough = LongDouble::from(a) - whole * divisor;
-    (whole + (rough / divisor).floor()).to_f64()
-}
-
-/// 2^63, the reciprocal of the x87 `long double` epsilon: above it a quotient has no
-/// fractional part even in extended precision, and GNU R stops correcting.
-const EXTENDED_PRECISION_LIMIT: f64 = 9_223_372_036_854_775_808.0;
-
-/// The remainder and quotient of `a` by `b` for whole numbers below 2^53 in magnitude and a
-/// non-zero `b`, where 64-bit integer division is exact and agrees with the extended-precision
-/// model, so the common case (counts, dates and times in seconds) skips that model and the
-/// bit-by-bit software `fmod` behind `%` on doubles. The remainder takes the divisor's sign.
-/// A zero remainder or quotient is the integer zero, so it converts to `+0.0` whatever the
-/// operands' signs, as in GNU R: `-6 %% 3` is the difference of two equal products there, and
-/// `0 %/% -3` is the constant zero of a quotient below one.
-#[inline]
-fn whole_division(a: f64, b: f64) -> Option<(i64, i64)> {
-    const LIMIT: u64 = 1 << 53;
-    // The cast saturates and maps NaN to zero, so comparing back rejects every operand that is
-    // not a whole number an `i64` holds, without a call of `trunc`.
-    let (dividend, divisor) = (a as i64, b as i64);
-    if dividend as f64 != a
-        || divisor as f64 != b
-        || divisor == 0
-        || dividend.unsigned_abs() >= LIMIT
-        || divisor.unsigned_abs() >= LIMIT
-    {
-        return None;
-    }
-    let truncated = dividend % divisor;
-    let remainder = if truncated != 0 && (truncated ^ divisor) < 0 {
-        truncated + divisor
-    } else {
-        truncated
-    };
-    Some((remainder, (dividend - remainder) / divisor))
-}
-
-/// The NaN an x87 operation on `a` and `b` returns when at least one of them is a NaN, which
-/// is what `%%` propagates in GNU R: the NaN operand, quieted, and of two NaNs the one with
-/// the larger payload, the positive one when the payloads are equal. `NA` is a NaN with a
-/// payload, so it wins over a plain `NaN` on either side.
-fn extended_nan(a: f64, b: f64) -> f64 {
-    const QUIET: u64 = 1 << 51;
-    const PAYLOAD: u64 = (1 << 52) - 1;
-    let (left, right) = (a.to_bits() | QUIET, b.to_bits() | QUIET);
-    let chosen = if !b.is_nan() {
-        left
-    } else if !a.is_nan() {
-        right
-    } else {
-        match (left & PAYLOAD).cmp(&(right & PAYLOAD)) {
-            std::cmp::Ordering::Greater => left,
-            std::cmp::Ordering::Less => right,
-            std::cmp::Ordering::Equal => left.min(right),
-        }
-    };
-    f64::from_bits(chosen)
-}
-
-/// Whether `a %% b` warns that its result has lost all accuracy, as R does when the
-/// quotient is too large for the remainder to mean anything.
-pub fn modulus_loses_accuracy(a: f64, b: f64) -> bool {
-    let quotient = a / b;
-    quotient.is_finite() && quotient.abs() > EXTENDED_PRECISION_LIMIT
 }
 
 unsafe fn integer_arithmetic(call: Sexp, op: Op, left: Sexp, right: Sexp, count: usize) -> R<Sexp> {
@@ -2269,11 +2148,13 @@ unsafe fn comparison(call: &Call<'_>, comparison: Comparison) -> R<Sexp> {
                 {
                     NA_LOGICAL
                 } else if matches!(comparison, Comparison::Equal | Comparison::NotEqual) {
-                    comparison.holds(if a == b || values::same_text(a, b) {
-                        std::cmp::Ordering::Equal
-                    } else {
-                        std::cmp::Ordering::Less
-                    }) as i32
+                    comparison.holds(
+                        if handles::equal_strings(handles::Gc::adopt(a), handles::Gc::adopt(b)) {
+                            std::cmp::Ordering::Equal
+                        } else {
+                            std::cmp::Ordering::Less
+                        },
+                    ) as i32
                 } else {
                     let ordering = crate::sort::collate(&values::char_str(a), &values::char_str(b));
                     comparison.holds(ordering) as i32

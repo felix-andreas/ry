@@ -647,7 +647,7 @@ because only the runtime reads such bytes. Its inputs are the source fragments o
 edits of generated programs. Each input is checked a second time with `#: ` before every line:
 that text is all comments to R, so both must accept it. `crates/jit/tests/test_tiers.rs` does the
 same one tier up: it runs random loop, branch and vector programs as closure bodies under tier 0 and under the JIT
-forced on (`jit::Mode::Force`, which compiles a body on its second call and a loop on its first
+forced on (`jit::Mode::Stress`, which compiles a body on its second call and a loop on its first
 backward jump), and every call must give the same value or error. Most generated programs must run
 to a value, so a generator that drifts into erroring early fails the test instead of passing
 without comparing anything. The test interpreter has no base R closures (`numeric`, `as.list`,
@@ -688,7 +688,7 @@ released. A second battery drives random API sequences under collection stress a
 
 `oracle fuzz` runs whole R programs under GNU R and ry's engines and reports every program on
 which an engine differs. A seed and a kind name a program, so `oracle fuzz --kind K --seed N
---print` prints it and `--engines` replays it. The nine kinds find different bugs:
+--print` prints it and `--engines` replays it. The ten kinds find different bugs:
 
 | Kind | A program is | It finds |
 | --- | --- | --- |
@@ -700,7 +700,15 @@ which an engine differs. A seed and a kind name a program, so `oracle fuzz --kin
 | `language` (`oracle::language::program`) | a few closures, each built from statements of the construct families its seed enables (`on.exit`, frame inspection, `...`, promises, replacement functions, `<<-`, conditions and restarts, S3, S4 and Reference Class dispatch, `eval` and quoted code, environments, regular expressions over Unicode text, control flow) and called one, a few or sixty times; the first and the last call's visible value, log entries and warnings are recorded | a difference in evaluation order, in what a frame or a condition reports, or in dispatch, and one that appears only on a later call |
 | `perturbed` (`oracle::mutate::perturb`) | a grammar, metamorphic or language program with up to twelve statements inserted into its function bodies: dead code (such as `if (FALSE)` around a statement taken from elsewhere in the program, an unused local closure, a loop over `NULL`) and code without effect on the result (such as `sys.call()`, `gc(FALSE)`, a `tryCatch` around `NULL`, and `force(x)` or `x <- x` in a function with parameters) | compiled code that depends on a slot number, a constant index, a branch offset or an inlining decision |
 | `parser` (`oracle::parser::program`) | sixty source fragments (`syntax::testing::source_fragment`) handed to `parse(text =)`, from the families its seed enables: operator chains without parentheses, nested constructs, the same constructs across line breaks and comments, number and string literals, names, and such text with one token damaged or drawn as blind tokens; each fragment prints a dump of its tree (a number by type and bits, a string by bytes and encoding mark), its warnings, or the fact that it was rejected, and a literal fragment its whole error message (without the line number GNU R leaves uninitialized after "invalid \u{xxxx} sequence") | a precedence, a line-break rule, a literal's value or mark, and text one parser accepts and the other rejects |
+| `frame` (`oracle::fuzz::frame_program`) | two to four tables built from generated columns, each put through a chain of one to six `DataFrame` verbs (eagerly or through `LazyFrame`), a pivot, a keyed table or a description, and dumped as a plain data frame; some seeds add relations that must hold within ry (lazy equals eager, filters partition the rows, group sums add up, sort is idempotent, select-all and rename-and-back are the identity, a self join on a unique key is the identity, the `as.data.frame` round trip), a deliberate error, special values and column names that collide with the verbs' formals | a verb or an expression that differs from the documented contract, and a crash in the table engine |
 | `corpus` (`oracle::corpus`) | a snippet of real R code with one to four mutations | what no grammar author thought of |
+
+Under GNU R, a frame program's prelude (`crates/oracle/src/frame_model.R`) defines `DataFrame.*`,
+`Expr.*` and `GroupBy.*` as a base-R model of `reference/dataframes.mdx`, so the program text is
+the same on both engines. The dump prints names, types and every cell, and sorts the rows where
+the contract leaves their order open (after a join). The generator never writes a shape the
+contract leaves open, such as an aggregate over `NA`; each exclusion carries a comment that says
+why, and one that ry gets wrong against the contract names its backlog line.
 
 A metamorphic trial draws its value from a zoo: every atomic type and lists, with `NA`, `NaN`,
 `Inf` and `-0`; zero-length vectors and lengths on both sides of the sizes where storage changes
@@ -798,7 +806,7 @@ The count is a close upper bound, because a name inside a string literal counts 
 Every fuzzed engine runs with at most 2 GiB of writable memory (`oracle::fuzz::MEMORY_LIMIT`,
 `RLIMIT_DATA`), so a call that asks for a huge vector gets R's "cannot allocate" error in GNU R
 and in ry instead of taking the machine's memory. `just fuzz-differential` runs the grammar,
-`just fuzz-kind KIND` any kind, and `just fuzz-long HOURS BASE` all nine for a time budget, under
+`just fuzz-kind KIND` any kind, and `just fuzz-long HOURS BASE` all ten for a time budget, under
 tier 0, the forced JIT and seeded collection stress.
 
 `crates/oracle/tests/test_differential.rs` holds the bounded passes. Grammar programs run under
@@ -809,7 +817,7 @@ each other, print no `DIFFERENT` and never crash (`fuzz_metamorphic_forms_agree_
 `fuzz_io_round_trips_agree_across_tiers`, `fuzz_language_constructs_agree_across_tiers`); their
 comparison with GNU R is the long run's, because ry differs from GNU R on many builtin and api
 programs and a default test must pass. Parser programs run under GNU R and tier 0, which must
-agree on every fragment (`fuzz_parser_matches_gnu_r`). A construct ry and GNU R are known to read
+agree on every fragment (`fuzz_parser_matches_gnu_r`). Frame programs run under GNU R with the model, tier 0 and the JIT, which must agree, together with fixed programs that pin past fixes (`fuzz_frame_queries_match_their_model`). A construct ry and GNU R are known to read
 differently is not generated: `oracle::parser::known_difference` names each one, the backlog
 lists it under "Differences the fuzz kinds report", and an entry leaves the function with its fix.
 
@@ -1679,7 +1687,7 @@ Three options build on the counts:
 #### What one mechanism costs
 
 `just bench-mechanisms` prices the mechanisms the suite's programs are made of. Each of about
-seventy operations is one expression (a closure call with a default argument, a `UseMethod`
+150 operations is one expression (a closure call with a default argument, a `UseMethod`
 dispatch, a `tryCatch` that catches nothing, `plain$b`) that a compiled loop evaluates. The tool
 runs the loop under callgrind for 20,000 and for 40,000 iterations and reports the difference per
 iteration, less the empty loop's, so start-up and warm-up cancel and the count repeats exactly.
@@ -1700,11 +1708,17 @@ just bench-mechanisms --ry target/release/ry --filter dispatch
 ...
 ```
 
-The whole table takes about five minutes on four cores, and one filtered group well under a
-minute. `--save FILE` keeps the counts and `--baseline FILE` prints the change against them,
-which is how a change to the call path or to dispatch is checked before the suite is run.
+The whole table takes about fifteen minutes on four cores, and one filtered group well under a
+minute. `--filter` may be given several times, and an operation is run when its name contains any
+of the texts. `--save FILE` keeps the counts and `--baseline FILE` prints the change against
+them, which is how a change to the call path or to dispatch is checked before the suite is run.
 `--profile NAME` prints the functions that hold one operation's instructions, on a build with
 symbols.
+
+`--gnu-r` counts each operation on GNU R too (the `R` on the `PATH`, under the same callgrind
+loop) and adds two columns, GNU R's instructions and ry's count over GNU R's. A ratio near or
+above 1 marks an operation whose path is longer than it has to be, which a timing run on a busy
+machine cannot show.
 
 #### How well the suite predicts the code bases
 

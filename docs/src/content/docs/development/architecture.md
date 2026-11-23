@@ -92,8 +92,10 @@ illegal dependency unrepresentable.
   been entered often or a loop has jumped back often, and the compiled code runs on tier 0's own
   register window, so a failed speculation hands the activation back to the interpreter mid-body.
   It depends on `heap` and `interp`, and `libr` installs it after the interpreter. `RY_JIT` picks
-  the mode: `on` (the default), `off`, or `force`, which the tier tests and the `ry-jit` oracle
-  engine use.
+  the mode: `on` (the default), `off`, `force`, which compiles a body at its second call when
+  the cost model expects compiled code to run it no slower than tier 0, or `stress`, which
+  compiles everything that compiles and is what the tier tests and the `ry-jit` oracle engine
+  use.
 - **`typed`** is the typed core. A strict typed closure called with values whose types it accepts
   is lowered from its body to a typed IR at its first call, given reference counts, and compiled
   with Cranelift to run on native values: scalars in registers, 16-byte strings, lists that

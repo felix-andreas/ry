@@ -4607,6 +4607,7 @@ dependencies = [
  "libmimalloc-sys",
  "memmap2",
  "mimalloc",
+ "numeric",
  "polars",
  "polars-arrow",
  "polars-buffer",

@@ -74,7 +74,7 @@ In the order of expected yield.
 
 ### The JIT's schedule from the seed
 
-`RY_JIT=force` compiles a body at its second call and a loop at its first back edge. That is one
+`RY_JIT=stress` compiles a body at its second call and a loop at its first back edge. That is one
 schedule, and bugs hide in the others: a body compiled with ten calls of type feedback, a loop
 compiled at its fortieth iteration, a callee compiled before its caller. `RY_JIT_THRESHOLDS`
 sets the entry and back-edge thresholds, and no oracle engine uses it: a seeded engine draws

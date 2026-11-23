@@ -573,8 +573,10 @@ Rust frame, matches nothing, and allocates nothing unless the argument reference
 - **Return.** `return_fast` takes the return of a frame whose code is still on its slots, with
   no `on.exit` code and nothing observing calls. When the frame handed out an environment while
   its code stayed on the slots (a callee asked for its parent frame, or a promise or a closure
-  was made over it), the return discards that environment if nothing counts a reference to it,
-  it is not the result and `R_PreserveObject` does not hold it. Any other frame returns through
+  was made over it), the return discards that environment when nothing that outlives the frame
+  holds it: `outliving_cause` is asked whenever the environment has a counted reference, is the
+  result or is held by `R_PreserveObject`. A function that defines a helper closure and calls it
+  (`inner <- function() ...; inner()`) therefore returns here. Any other frame returns through
   `eval::leave`.
 
 `crates/oracle/cases/calls__fast_calls_from_frames_read_by_name.R`,
