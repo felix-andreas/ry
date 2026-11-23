@@ -80,3 +80,25 @@ print(sized(1:3, {
   assign("y", 1:5, envir = frame_of(sized))
   2L
 }))
+
+# The function holds several locals of different kinds when it forces the promise: the promise
+# sees all of them, and the function reads the ones the promise assigned.
+several <- function(expr, a) {
+  i <- a + 1L
+  d <- a * 1.5
+  l <- a > 0L
+  s <- paste0("k", a)
+  v <- c(i, 2L)
+  expr
+  list(i + 1L, d + 1, !l, s, v, a)
+}
+for (k in 1:5000) several(0, 1L)
+str(several(mget(c("i", "d", "l", "s", "v"), envir = frame_of(several)), 1L))
+str(several({
+  frame <- frame_of(several)
+  assign("i", 40L, envir = frame)
+  assign("d", 0.25, envir = frame)
+  assign("l", FALSE, envir = frame)
+  print(sort(ls(frame)))
+}, 3L))
+str(several(0, 2L))

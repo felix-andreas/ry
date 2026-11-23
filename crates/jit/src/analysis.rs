@@ -206,7 +206,7 @@ fn declared_ty(declared: Declared) -> Ty {
 
 /// The type tier 0's feedback bits speculate on.
 pub fn from_feedback(bits: u32) -> Ty {
-    let bits = bits & !feedback::ACTIVE_BINDING;
+    let bits = bits & !(feedback::ACTIVE_BINDING | feedback::HANDED_OFF);
     let within = |mask: u32| bits & !mask == 0;
     match bits {
         0 => Ty::Boxed,
@@ -606,6 +606,33 @@ pub enum Fast {
     /// A store into this slot's vector, which the handler finds in the frame and changes in
     /// place.
     Store(usize),
+    /// No handler: compiled code answers a builtin call from the header of its one argument,
+    /// in register `argument`, and steps only for a value the inspection leaves to the builtin.
+    Inspect {
+        argument: usize,
+        inspection: Inspection,
+    },
+}
+
+/// What a builtin call reads from its argument's header, so compiled code makes no call for it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Inspection {
+    /// A type predicate such as `is.null(x)`: whether the argument's type is one of `kinds`, a
+    /// bit set indexed by [`SexpType`]. The builtin answers for a ry record or `I64`, which it
+    /// converts first, and where `unclassed` is set for an object, whose class decides.
+    Kind { kinds: u32, unclassed: bool },
+    /// `length(x)` of a vector that is neither an object nor ALTREP, or of `NULL`.
+    Length,
+}
+
+impl Inspection {
+    /// The type of the builtin's result.
+    pub fn result(self) -> Ty {
+        match self {
+            Inspection::Kind { .. } => Ty::Lgl,
+            Inspection::Length => Ty::Int,
+        }
+    }
 }
 
 /// Scalar arithmetic the JIT does inline.
@@ -1181,6 +1208,11 @@ pub const STEPPING_LOOP: &str = "the loops would hand too many instructions to t
 /// it has.
 pub const UNPAID_LOOP: &str = "the loop has not run long enough to repay compiling the body";
 
+/// The refusal for a body whose hot `for` loop runs too few passes in the running activation
+/// for what compiled code saves on a call to repay entering it. Like [`UNPAID_LOOP`] it is
+/// not final: the loop asks again once the body has taken as many backward jumps again.
+pub const SHORT_LOOP: &str = "the loop ends too soon to repay entering compiled code";
+
 /// The refusal for compiling a fully typed closure at its first call when the call cannot run
 /// long: the body has no loop and calls no closure or native function directly, so the
 /// activation ends after a few instructions. Compiling costs about a millisecond, a thousand
@@ -1310,6 +1342,11 @@ impl From<ssa::Error> for Refusal {
 /// which a later attempt may well get past.
 pub const COLD: &str = "the body has no type feedback yet";
 
+/// The refusal for a body one of whose instructions kept leaving compiled code
+/// ([`feedback::HANDED_OFF`]) and has no form that stays in it, such as the start of a `for`
+/// loop over an empty sequence. It is final.
+pub const LEAVING: &str = "an instruction keeps leaving compiled code";
+
 /// The refusal for a body without a loop whose compiled code would hand every instruction that
 /// does real work back to tier 0, such as a wrapper around one `.Internal` call. Such code saves
 /// tier 0 only its dispatch, which repays the compilation after far more calls than most such
@@ -1355,6 +1392,9 @@ pub struct Work {
     pub frames: usize,
     /// The instructions compiled code hands to tier 0 one at a time.
     pub steps: usize,
+    /// The variables compiled code writes back to the frame before those instructions: one
+    /// for each variable that may differ from the frame before each step that can read it.
+    pub writes: usize,
     /// The variables compiled code reads from the frame outside the body's loops, where each
     /// call reads them once. A variable first read inside a loop is read from the frame on the
     /// first pass only, so it is not counted.
@@ -1391,6 +1431,7 @@ impl Shape {
             calls: self.calls,
             frames: self.frames,
             steps: 0,
+            writes: 0,
             loads: 0,
         }
     }
@@ -1449,7 +1490,7 @@ pub unsafe fn shape(code: Sexp) -> Shape {
                         calls += 1;
                         false
                     } else {
-                        name == "[" || has_intrinsic(&name)
+                        name == "[" || has_intrinsic(&name) || inspection_for(&name).is_some()
                     }
                 }
             }
@@ -1572,9 +1613,9 @@ impl Plan<'_> {
                 work.outside.loads += 1;
                 work.whole.loads += 1;
             }
-            let (native, calls, frames, steps) = match action {
+            let (native, calls, frames, steps, writes) = match action {
                 Action::Inline { .. } | Action::Traverse { .. } | Action::NativeCall { .. } => {
-                    (0, 1, 0, 0)
+                    (0, 1, 0, 0, 0)
                 }
                 Action::Frame {
                     callee, function, ..
@@ -1586,7 +1627,13 @@ impl Plan<'_> {
                             .work(values::ints(constants.element(FEEDBACK)), None)
                             .whole
                     };
-                    (inner.native, inner.calls, inner.frames + 1, inner.steps)
+                    (
+                        inner.native,
+                        inner.calls,
+                        inner.frames + 1,
+                        inner.steps,
+                        inner.writes,
+                    )
                 }
                 Action::Step { .. }
                     if matches!(inst.op, Op::CallGeneric | Op::CallBuiltin | Op::Internal)
@@ -1607,6 +1654,10 @@ impl Plan<'_> {
                 {
                     continue;
                 }
+                Action::Step {
+                    fast: Fast::Inspect { .. },
+                    ..
+                } => (1, 0, 0, 0, 0),
                 // A step that runs tier 0's fast handler, or a builtin's direct entry, makes
                 // no round trip through the stepping helper, so it costs what tier 0 pays.
                 Action::Step { effect, fast, .. }
@@ -1616,8 +1667,22 @@ impl Plan<'_> {
                 {
                     continue;
                 }
-                Action::Step { .. } => (0, 0, 0, 1),
-                action if native(action) || backward(inst) => (1, 0, 0, 0),
+                // A step that may run R code writes back every variable that may be dirty.
+                Action::Step {
+                    effect: Effect::Opaque,
+                    ..
+                } => {
+                    let dirty = self.before(position).map_or(0, |state| {
+                        state
+                            .slots
+                            .iter()
+                            .filter(|slot| slot.may_be(status::DIRTY))
+                            .count()
+                    });
+                    (0, 0, 0, 1, dirty)
+                }
+                Action::Step { .. } => (0, 0, 0, 1, 0),
+                action if native(action) || backward(inst) => (1, 0, 0, 0, 0),
                 _ => continue,
             };
             let (part, weight) = match depth.checked_sub(1) {
@@ -1643,6 +1708,7 @@ impl Plan<'_> {
                 part.calls += weight * calls;
                 part.frames += weight * frames;
                 part.steps += weight * steps;
+                part.writes += weight * writes;
             }
         }
         work
@@ -2242,7 +2308,13 @@ impl<'a> Builder<'a> {
 
     /// Whether the instruction at `pc` has never recorded a value.
     fn never_ran(&self, pc: usize) -> bool {
-        self.feedback.get(pc).copied().unwrap_or(0) == 0
+        self.feedback_bits(pc) & !feedback::HANDED_OFF == 0
+    }
+
+    /// Whether compiled code kept handing the instruction at `pc` to tier 0
+    /// ([`feedback::HANDED_OFF`]), so that a fast path for it would leave again.
+    fn handed_off(&self, pc: usize) -> bool {
+        self.feedback_bits(pc) & feedback::HANDED_OFF != 0
     }
 
     /// The type a load at `pc` of the variable in `slot` expects: what tier 0 has read there, or
@@ -2494,6 +2566,14 @@ impl<'a> Builder<'a> {
         let inst = self.insts[position];
         let operand = |index: usize| inst.operand(index);
         let next_pc = self.insts.get(position + 1).map(|next| next.pc);
+        if self.handed_off(inst.pc)
+            && !matches!(
+                inst.op,
+                Op::CallBuiltin | Op::Arithmetic | Op::CallGeneric | Op::CallRebinding
+            )
+        {
+            return Err(Refusal(LEAVING));
+        }
         let action = match inst.op {
             // The global frame's variables are its environment's bindings, which an active
             // binding or code the loop calls may read or rebind.
@@ -2884,11 +2964,13 @@ impl<'a> Builder<'a> {
                 // `x <- f(x, ...)` may move a ry dictionary or set into the call to update it in
                 // place, which only tier 0 does, so the call is inlined only when the variable
                 // cannot hold one.
-                let inlinable = inst.op == Op::CallGeneric
-                    || self
-                        .slot_of
-                        .get(&self.constant(operand(3)))
-                        .is_some_and(|&slot| state.slots[slot].ty.is_plain());
+                // A call that kept needing its frame from the start is made by tier 0.
+                let inlinable = !self.handed_off(inst.pc)
+                    && (inst.op == Op::CallGeneric
+                        || self
+                            .slot_of
+                            .get(&self.constant(operand(3)))
+                            .is_some_and(|&slot| state.slots[slot].ty.is_plain()));
                 let inlined = match state.registers[operand(1)] {
                     _ if !inlinable => None,
                     Ty::Closure(formals, body) => {
@@ -3123,21 +3205,22 @@ impl<'a> Builder<'a> {
                             // and a wrong guess deoptimizes and recompiles with real feedback.
                             Ty::IntVec
                         };
-                        if !matches!(
-                            speculated,
+                        match speculated {
                             Ty::IntVec
-                                | Ty::DblVec
-                                | Ty::LglVec
-                                | Ty::List
-                                | Ty::Int
-                                | Ty::Dbl
-                                | Ty::Lgl
-                        ) {
-                            return Err(Refusal(
-                                "a for loop over something other than a plain vector",
-                            ));
+                            | Ty::DblVec
+                            | Ty::LglVec
+                            | Ty::List
+                            | Ty::Int
+                            | Ty::Dbl
+                            | Ty::Lgl => Some(speculated.vector()),
+                            Ty::Bottom => {
+                                return Err(Refusal("a for loop over a sequence of unknown type"));
+                            }
+                            // A character vector, a vector with attributes, a factor: the
+                            // loop's start prepares the sequence as tier 0 does and its step
+                            // reads each element through tier 0's reader.
+                            _ => Some(Ty::Boxed),
                         }
-                        Some(speculated.vector())
                     }
                 };
                 // From here on the register is only the loop's sequence, which `ForStep` reads
@@ -3365,6 +3448,7 @@ impl<'a> Builder<'a> {
                 // operand is a double; every other operator converts to double anyway.
                 scalar(a)
                     && scalar(b)
+                    && !self.handed_off(inst.pc)
                     && !(remainder && (a == Ty::Num || b == Ty::Num))
                     && (!matches!(
                         ARITHS[inst.operand(0)].0,
@@ -4716,7 +4800,11 @@ impl<'a> Builder<'a> {
         let (dst, left, right) = (operand(1), operand(2), operand(3));
         let (a, b) = (state.registers[left], state.registers[right]);
         state.visible = Some(true);
+        // Integer arithmetic that overflows leaves for tier 0 to warn, so a site that kept
+        // overflowing takes tier 0's step.
+        let handed_off = self.handed_off(inst.pc);
         if remainder_operator(arith)
+            && !handed_off
             && let Some((intrinsic, result)) = intrinsic_for(ARITHS[operand(0)].1, &[a, b])
         {
             state.registers[dst] = result;
@@ -4729,7 +4817,7 @@ impl<'a> Builder<'a> {
             });
         }
         let scalar = |ty: Ty| ty.is_numeric_scalar() || ty == Ty::Num;
-        if scalar(a) && scalar(b) && !remainder_operator(arith) {
+        if scalar(a) && scalar(b) && !remainder_operator(arith) && !handed_off {
             let integers = !matches!(a, Ty::Dbl | Ty::Num) && !matches!(b, Ty::Dbl | Ty::Num);
             let comparison = matches!(
                 arith,
@@ -4779,12 +4867,19 @@ impl<'a> Builder<'a> {
         } else {
             Ty::Boxed
         };
-        let effect = if a.is_plain() && b.is_plain() {
-            Effect::PureUnlessObserved
+        // An operand of unknown type dispatches only when it is an object, which the step
+        // checks, so comparing strings or adding plain vectors needs no frame.
+        let unknown = |ty: Ty| matches!(ty, Ty::Bottom | Ty::Closure(..));
+        let (effect, objects) = if handed_off || unknown(a) || unknown(b) {
+            (Effect::Opaque, &[][..])
         } else {
-            Effect::Opaque
+            let boxed = [(left, a), (right, b)]
+                .into_iter()
+                .filter(|&(_, ty)| ty == Ty::Boxed)
+                .map(|(register, _)| register);
+            (Effect::PureUnlessObserved, self.slice(boxed))
         };
-        let action = self.opaque_step(state, Some((dst, ty)), &[], effect);
+        let action = self.opaque_step(state, Some((dst, ty)), objects, effect);
         state.visible = Some(true);
         Ok(action)
     }
@@ -4803,6 +4898,7 @@ impl<'a> Builder<'a> {
         let subscript = |ty: Ty| matches!(ty, Ty::Int | Ty::Dbl | Ty::Num);
         let feedback = self.feedback_at(inst.pc);
         let matches = matches!(name, "[" | "[[")
+            && !self.handed_off(inst.pc)
             && count == 3
             && state.registers[first] == Ty::Boxed
             && subscript(state.registers[first + 1])
@@ -4828,6 +4924,12 @@ impl<'a> Builder<'a> {
             let feedback = self.feedback_at(inst.pc);
             return Ok(self.opaque_step(state, Some((dst, feedback)), &[], Effect::Opaque));
         };
+        // Every native form of the call and its deferred signals can leave compiled code, and
+        // at this site one of them kept doing so, so the call takes the step that cannot.
+        if self.handed_off(inst.pc) {
+            let feedback = self.feedback_at(inst.pc);
+            return Ok(self.opaque_step(state, Some((dst, feedback)), &[], Effect::Opaque));
+        }
         let definition = interp::eval::builtin_def(function)
             .map_err(|_| Refusal("a builtin without a definition"))?;
         let name = definition.name;
@@ -4860,13 +4962,20 @@ impl<'a> Builder<'a> {
         let doubles = name == ":"
             && !self.never_ran(inst.pc)
             && !matches!(self.feedback_at(inst.pc), Ty::Int | Ty::IntSeq | Ty::IntVec);
+        // A site that has made something other than one element, as `x[-1L]` does, keeps the
+        // builtin call, since the compiled read only takes a positive index in range.
+        let feedback = self.feedback_at(inst.pc);
+        let selects = name == "["
+            && !self.never_ran(inst.pc)
+            && types.first().is_some_and(|ty| *ty != Ty::List)
+            && !feedback.is_unboxed();
         if untagged
             && !doubles
+            && !selects
             && let Some((intrinsic, mut result)) = intrinsic_for(name, &types)
         {
             // A list element is boxed, so its type comes from what the site has read so far,
             // which the compiled read checks before it unboxes the element.
-            let feedback = self.feedback_at(inst.pc);
             if intrinsic == Intrinsic::Element && types[0] == Ty::List && feedback.is_unboxed() {
                 result = feedback;
             }
@@ -4878,6 +4987,22 @@ impl<'a> Builder<'a> {
                 args,
                 result,
             });
+        }
+        // A site whose builtin has answered with another type, as a class's `length` method
+        // may, keeps the call, since the compiled check would fail on every such value.
+        if untagged
+            && let [argument] = *args
+            && let Some((inspection, effect)) = inspection_for(name)
+            && (self.never_ran(inst.pc) || self.feedback_at(inst.pc) == inspection.result())
+        {
+            let fast = Fast::Inspect {
+                argument,
+                inspection,
+            };
+            let result = Some((dst, inspection.result()));
+            let action = self.fast_step(state, result, &[], effect, fast);
+            state.visible = Some(true);
+            return Ok(action);
         }
         // Before the call has returned, its result type comes from what the builtin computes
         // for these argument types, so a first-call compile need not wait for feedback. The
@@ -4896,15 +5021,10 @@ impl<'a> Builder<'a> {
         // A library leaf never dispatches, but reading an ALTREP argument runs its class's
         // methods, which a package may write in R, so every boxed argument is observed.
         if definition.accepts_native && interp::standard_library::is_leaf(name) {
-            let observed = self.slice(
-                args.iter()
-                    .copied()
-                    .filter(|&register| !state.registers[register].in_variables()),
-            );
             return Ok(self.opaque_step(
                 state,
                 Some((dst, feedback)),
-                observed,
+                &[],
                 Effect::PureUnlessObserved,
             ));
         }
@@ -4930,15 +5050,10 @@ impl<'a> Builder<'a> {
             Fast::No
         };
         if PURE_BUILTINS.contains(&name) {
-            let objects = self.slice(
-                args.iter()
-                    .copied()
-                    .filter(|&register| !state.registers[register].is_plain()),
-            );
             return Ok(self.fast_step(
                 state,
                 Some((dst, feedback)),
-                objects,
+                &[],
                 Effect::PureUnlessObserved,
                 fast,
             ));
@@ -5210,6 +5325,39 @@ fn integer_sequence() -> Ty {
     } else {
         Ty::IntVec
     }
+}
+
+/// The inspection that answers a call of builtin `name` with one argument, and what the builtin
+/// may do where the inspection leaves the call to it: a predicate that is no internal generic
+/// runs no R code for any argument.
+fn inspection_for(name: &str) -> Option<(Inspection, Effect)> {
+    use SexpType::{
+        Builtin, Closure, Complex, Environment, Expression, Integer, Language, List, Logical, Nil,
+        Pairlist, Raw, Real, Special, String, Symbol,
+    };
+    let (kinds, unclassed, effect): (&[SexpType], bool, Effect) = match name {
+        "length" => return Some((Inspection::Length, Effect::PureUnlessObserved)),
+        "is.null" => (&[Nil], false, Effect::Pure),
+        "is.logical" => (&[Logical], false, Effect::Pure),
+        "is.double" => (&[Real], false, Effect::Pure),
+        "is.complex" => (&[Complex], false, Effect::Pure),
+        "is.character" => (&[String], false, Effect::Pure),
+        "is.raw" => (&[Raw], false, Effect::Pure),
+        "is.symbol" | "is.name" => (&[Symbol], false, Effect::Pure),
+        "is.environment" => (&[Environment], false, Effect::Pure),
+        "is.list" => (&[List, Pairlist], false, Effect::Pure),
+        "is.pairlist" => (&[Pairlist, Nil], false, Effect::Pure),
+        "is.expression" => (&[Expression], false, Effect::Pure),
+        "is.call" => (&[Language], false, Effect::Pure),
+        "is.function" => (&[Closure, Builtin, Special], false, Effect::Pure),
+        "is.primitive" => (&[Builtin, Special], false, Effect::Pure),
+        // A factor is stored as integers and is no integer vector, which the builtin decides.
+        "is.integer" => (&[Integer], true, Effect::Pure),
+        "is.numeric" => (&[Integer, Real], true, Effect::PureUnlessObserved),
+        _ => return None,
+    };
+    let kinds = kinds.iter().fold(0, |bits, &kind| bits | 1 << kind as u32);
+    Some((Inspection::Kind { kinds, unclassed }, effect))
 }
 
 /// Whether [`intrinsic_for`] has an intrinsic for builtin `name` given some argument types. It

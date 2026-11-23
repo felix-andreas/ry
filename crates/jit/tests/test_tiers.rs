@@ -2,7 +2,7 @@
 //! JIT the same value or error. The programs cover the JIT's specialized shapes (scalar and
 //! vector loops, element reads and writes, branches, `break` and `next`, integer overflow, `NA`)
 //! and its slow paths (defaults that read or assign the body's variables, failed speculation).
-//! The JIT runs with `Mode::Force`, which compiles a body on its second call and a loop on its
+//! The JIT runs with `Mode::Stress`, which compiles a body on its second call and a loop on its
 //! first backward jump, so both entry and on-stack replacement are exercised.
 //!
 //! `FUZZ_ITERS` raises the budget.
@@ -470,7 +470,7 @@ fn a_failed_speculation_after_forcing_keeps_the_value_invisible() {
     with_interpreter(|| {
         // SAFETY: the interpreter is installed.
         unsafe {
-            jit::install_mode(Mode::Force);
+            jit::install_mode(Mode::Stress);
             run("visibility <- function(x) .Internal(withVisible(x))[[2L]]");
             let outcomes: Vec<String> = ["n <- 0", "3L", "3L", "n <- 0", "3L", "n <- 0"]
                 .iter()
@@ -514,7 +514,7 @@ fn collection_lengths_keep_their_type_in_compiled_code() {
         assert_eq!(interpreted[..4], ["\"I64\""; 4], "{interpreted:?}");
         assert_eq!(interpreted[4], "\"logical\"", "{interpreted:?}");
         assert_eq!(calls(Mode::On), interpreted);
-        assert_eq!(calls(Mode::Force), interpreted);
+        assert_eq!(calls(Mode::Stress), interpreted);
     });
 }
 
@@ -900,7 +900,7 @@ fn run_time_binding_shadows_cached_global_function() {
     // `environments__hidden_function_bindings` covers `assign` into `parent.frame()`, which needs
     // base R's closures.
     with_interpreter(|| unsafe {
-        jit::install_mode(Mode::Force);
+        jit::install_mode(Mode::Stress);
         run("g <- function() \"global\"");
         let definitions = [
             "via_default <- function(set, x = if (set) (g <- function() \"local\")) { x; g() }",
@@ -949,7 +949,7 @@ fn closures_from_one_site_share_code_but_not_lookups() {
     // own `g` must reach it, and a closure that calls a function local to its enclosure must
     // call its own.
     with_interpreter(|| unsafe {
-        jit::install_mode(Mode::Force);
+        jit::install_mode(Mode::Stress);
         run("g <- function(v) v + 1\napply1 <- function(f, x) f(x)");
         run(
             "make <- function(shadow) { if (shadow) g <- function(v) \"local\"; apply1(function(v) g(v), 1) }",
@@ -1013,7 +1013,7 @@ fn inline_variable_loads_agree_with_tier_zero() {
     ];
     let mut outcomes = Vec::new();
     with_interpreter(|| unsafe {
-        for mode in [Mode::Off, Mode::Force] {
+        for mode in [Mode::Off, Mode::Stress] {
             jit::install_mode(mode);
             run("make <- function(k) function(x) { s <- 0; for (i in 1:3) s <- s + x * k; s }");
             run("g <- make(2L)");
@@ -1167,7 +1167,7 @@ fn inlined_frames_agree_with_tier_zero() {
     let mut outcomes = Vec::new();
     let mut inlined = 0;
     with_interpreter(|| unsafe {
-        for mode in [Mode::Off, Mode::Force] {
+        for mode in [Mode::Off, Mode::Stress] {
             jit::install_mode(mode);
             let mut results = Vec::new();
             for (warm, setup, calls) in programs {
@@ -1179,7 +1179,7 @@ fn inlined_frames_agree_with_tier_zero() {
                 let first = calls.first().copied().unwrap_or("caller(80L)");
                 results.push(run(first));
                 results.push(run(first));
-                if mode == Mode::Force
+                if mode == Mode::Stress
                     && let Ok(caller) = eval::eval(
                         lower::parse_text("caller", "<test>")
                             .map(|parsed| parsed.element(0))
@@ -1263,7 +1263,7 @@ fn stepped_closure_calls_agree_with_tier_zero() {
     ];
     let mut outcomes = Vec::new();
     with_interpreter(|| unsafe {
-        for mode in [Mode::Off, Mode::Force] {
+        for mode in [Mode::Off, Mode::Stress] {
             jit::install_mode(mode);
             let mut results = Vec::new();
             for (index, (setup, calls, steady)) in programs.iter().enumerate() {
@@ -1422,7 +1422,7 @@ fn inlined_frames_keep_passed_formals_lazy() {
     let mut outcomes = Vec::new();
     let mut inlined = 0;
     with_interpreter(|| unsafe {
-        for mode in [Mode::Off, Mode::Force] {
+        for mode in [Mode::Off, Mode::Stress] {
             jit::install_mode(mode);
             let mut results = Vec::new();
             for (index, (warm, setup, calls, steady)) in programs.iter().enumerate() {
@@ -1430,7 +1430,7 @@ fn inlined_frames_keep_passed_formals_lazy() {
                 for _ in 0..3 {
                     results.push(run(warm));
                 }
-                if mode == Mode::Force
+                if mode == Mode::Stress
                     && let Ok(parsed) = lower::parse_text("caller", "<test>")
                     && let Ok(caller) = eval::eval(parsed.element(0), values::global_env())
                 {
@@ -1466,7 +1466,7 @@ fn inlined_frames_keep_passed_formals_lazy() {
 #[test]
 fn inlined_frames_run_under_calling_handlers() {
     with_interpreter(|| unsafe {
-        jit::install_mode(Mode::Force);
+        jit::install_mode(Mode::Stress);
         run("first <- function(x) { if (x < 0) stop('negative'); x + 1 }
              second <- function(x) { if (x < 0) stop('negative'); x * 2 }
              third <- function(x) { if (x < 0) stop('negative'); x - 3 }
@@ -1519,7 +1519,7 @@ fn inlined_frames_run_under_calling_handlers() {
 #[test]
 fn a_body_that_leaves_on_every_call_is_retired() {
     with_interpreter(|| unsafe {
-        jit::install_mode(Mode::Force);
+        jit::install_mode(Mode::Stress);
         run(
             "kind <- function(x) { if (x < 0) return('negative'); 'other' }
              test <- function(x) { if (x < 0) return(TRUE); FALSE }
@@ -1546,6 +1546,307 @@ fn a_body_that_leaves_on_every_call_is_retired() {
                 "{caller} left compiled code {left} times in 500 calls"
             );
             assert_eq!(has_compiled_code(caller), !retired, "{caller}");
+        }
+        jit::install_mode(Mode::Off);
+    });
+}
+
+/// A compiled body calls a builtin without asking whether a handler is established, and a
+/// builtin that has a condition to signal under a calling handler leaves compiled code so that
+/// tier 0 signals it under the body's frame. A handler alone therefore costs no exit. A body
+/// whose builtin warns under a handler on every call stops being inlined after 16 such calls,
+/// and after 16 more on its own it recompiles with that call as tier 0's step, which signals
+/// in place. What the handler sees needs base R, so the oracle case
+/// `jit__builtin_conditions_from_compiled_code` pins it.
+#[test]
+fn a_builtin_that_warns_under_a_handler_on_every_call_becomes_a_step() {
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Stress);
+        run("count <- function(text) { parsed <- as.integer(text); if (is.na(parsed)) 0L else parsed + 1L }
+             handled <- function(text) {
+               .Internal(.addCondHands('warning', list(function(w) NULL), globalenv(), NULL, TRUE))
+               count(text)
+             }");
+        for _ in 0..3 {
+            run("count('7')");
+        }
+        assert!(has_compiled_code("count"), "count compiles");
+
+        let before = jit::deoptimizations();
+        let expected = run("count('7')");
+        for _ in 0..200 {
+            assert_eq!(run("handled('7')"), expected);
+        }
+        assert_eq!(
+            jit::deoptimizations(),
+            before,
+            "a handler makes no builtin call leave"
+        );
+
+        let expected = run("handled('seven')");
+        assert!(expected.starts_with("0L"), "{expected}");
+        let before = jit::deoptimizations();
+        for _ in 0..500 {
+            assert_eq!(run("handled('seven')"), expected);
+        }
+        let left = jit::deoptimizations() - before;
+        assert!(
+            (1..=48).contains(&left),
+            "count left compiled code {left} times in 500 calls"
+        );
+        assert!(has_compiled_code("count"), "count recompiles");
+        jit::install_mode(Mode::Off);
+    });
+}
+
+/// An instruction whose native form keeps handing it to tier 0 is recompiled as tier 0's step,
+/// and the rest of the body stays compiled. `pick` reads `x[i]` natively until every call
+/// reads past the end, which only tier 0 answers; `total` does the same on every iteration of
+/// its loop, where the body's entries say nothing and the loop's index measures how close
+/// together the hand-offs are; `add` overflows on every call, which only tier 0 warns about.
+#[test]
+fn an_instruction_that_keeps_leaving_becomes_a_step() {
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Stress);
+        run("x <- c(3L, 5L, 8L)
+             big <- 2147483647L
+             pick <- function(x, i) { v <- x[i]; n <- 0L; for (k in 1:2) n <- n + k; v + n }
+             total <- function(x, n) { s <- 0L; for (k in 1:n) { v <- x[k]; if (!is.na(v)) s <- s + v }; s }
+             add <- function(a, b) { s <- a + b; n <- 0L; for (k in 1:2) n <- n + k; s + n }");
+        for (warm, storm, most) in [
+            ("pick(x, 2L)", "pick(x, 9L)", 40),
+            ("total(x, 3L)", "total(x, 2000L)", 40),
+            ("add(1L, 2L)", "add(big, 1L)", 40),
+        ] {
+            let name = warm.split('(').next().unwrap_or(warm);
+            for _ in 0..5 {
+                run(warm);
+            }
+            assert!(has_compiled_code(name), "{name} compiles");
+            let before = jit::deoptimizations();
+            for _ in 0..5 {
+                run(warm);
+            }
+            assert_eq!(jit::deoptimizations(), before, "{name} stays compiled");
+
+            jit::install_mode(Mode::Off);
+            let expected = run(storm);
+            jit::install_mode(Mode::Stress);
+            let before = jit::deoptimizations();
+            for _ in 0..300 {
+                assert_eq!(run(storm), expected, "{storm}");
+            }
+            let left = jit::deoptimizations() - before;
+            assert!(
+                (16..=most).contains(&left),
+                "{name} left compiled code {left} times"
+            );
+            assert!(has_compiled_code(name), "{name} recompiles");
+            assert_eq!(run(warm), {
+                jit::install_mode(Mode::Off);
+                let value = run(warm);
+                jit::install_mode(Mode::Stress);
+                value
+            });
+        }
+        jit::install_mode(Mode::Off);
+    });
+}
+
+/// An instruction that has no step to fall back on and keeps leaving ends the body's compiled
+/// code: a `for` over an empty sequence binds its variable to `NULL`, which only tier 0 does.
+#[test]
+fn a_body_whose_loop_keeps_starting_empty_is_refused() {
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Stress);
+        run("x <- c(3L, 5L, 8L)
+             none <- x[0L]
+             sum_of <- function(v) { s <- 0L; for (e in v) s <- s + e; s }");
+        for _ in 0..5 {
+            run("sum_of(x)");
+        }
+        assert!(has_compiled_code("sum_of"), "sum_of compiles");
+        let before = jit::deoptimizations();
+        for _ in 0..300 {
+            assert_eq!(run("sum_of(none)"), "0L");
+        }
+        let left = jit::deoptimizations() - before;
+        assert!(
+            (16..=32).contains(&left),
+            "sum_of left compiled code {left} times"
+        );
+        assert!(!has_compiled_code("sum_of"), "sum_of is refused");
+        assert_eq!(run("sum_of(x)"), "16L");
+        jit::install_mode(Mode::Off);
+    });
+}
+
+/// A `for` loop over a sequence whose elements have no unboxed form (strings, a vector with
+/// names or a class, a factor) runs compiled: its start prepares the sequence as tier 0 does
+/// and its step reads each element with tier 0's reader, so no sequence with an element
+/// leaves compiled code. A loop over no elements binds `NULL`, which only tier 0 does.
+#[test]
+fn loops_over_boxed_sequences_agree_with_tier_zero() {
+    let calls = [
+        "count(tags)",
+        "gathered(tags)",
+        "last(tags)",
+        "gathered(named)",
+        "last(named)",
+        "gathered(dated)",
+        "last(dated)",
+        "count(level)",
+        "gathered(level)",
+        "gathered(pieces)",
+        "last(pieces)",
+        "gathered(1:3)",
+        "last(seq_len(4L))",
+        "gathered(c(TRUE, NA))",
+        "gathered(2.5)",
+    ];
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Stress);
+        run("tags <- c('a', 'bb', 'ccc')
+             named <- c(a = 1, b = 2.5, c = 4)
+             dated <- c(10, 20); class(dated) <- 'Date'
+             level <- c(2L, 1L, 2L); attr(level, 'levels') <- c('bb', 'high'); class(level) <- 'factor'
+             pieces <- list('x', 2L, 3.5)
+             count <- function(v) { n <- 0L; for (e in v) if (e == 'bb') n <- n + 10L else n <- n + length(e); n }
+             gathered <- function(v) { out <- NULL; for (e in v) out <- c(out, e); out }
+             last <- function(v) { for (e in v) kept <- e; kept }");
+        for name in ["count", "gathered", "last"] {
+            for _ in 0..12 {
+                run(&format!("{name}(tags)"));
+            }
+            assert!(has_compiled_code(name), "{name} compiles");
+        }
+        jit::install_mode(Mode::Off);
+        let expected: Vec<String> = calls.iter().map(|call| run(call)).collect();
+        assert_eq!(expected[0], "12L");
+        assert_eq!(expected[8], "c(\"high\", \"bb\", \"high\")");
+        let empty = run("gathered(tags[0L])");
+        jit::install_mode(Mode::Stress);
+        let before = jit::deoptimizations();
+        for _ in 0..3 {
+            for (call, expected) in calls.iter().zip(&expected) {
+                assert_eq!(&run(call), expected, "{call}");
+            }
+        }
+        assert_eq!(
+            jit::deoptimizations(),
+            before,
+            "a loop over elements stays compiled"
+        );
+        for _ in 0..300 {
+            assert_eq!(run("gathered(tags[0L])"), empty);
+            assert_eq!(run("gathered(NULL)"), empty);
+        }
+        let left = jit::deoptimizations() - before;
+        assert!(
+            (16..=32).contains(&left),
+            "gathered left compiled code {left} times"
+        );
+        assert_eq!(run("gathered(tags)"), expected[1]);
+        jit::install_mode(Mode::Off);
+    });
+}
+
+/// Comparing strings and arithmetic on plain vectors run no R code, so a callee made of them
+/// is inlined without a frame. An operand with a class may dispatch to a method, which needs
+/// the callee's frame: the call leaves compiled code and tier 0 runs it.
+#[test]
+fn inlined_arithmetic_on_boxed_values_agrees_with_tier_zero() {
+    let calls = [
+        "total(kinds)",
+        "scaled(v, 5L)",
+        "total(c('a', NA))",
+        "scaled(c(1L, NA), 3L)",
+        "total(list('a', 'b'))",
+        "total(list('a', tagged))",
+        "scaled(tagged, 2L)",
+        "total(kinds)",
+        "scaled(v, 5L)",
+    ];
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Stress);
+        run("kinds <- c('a', 'b', 'a')
+             v <- c(1, 2, 3)
+             tagged <- 'b'; class(tagged) <- 'tagged'
+             `==.tagged` <- function(e1, e2) TRUE
+             `*.tagged` <- function(e1, e2) 40
+             weight <- function(kind) if (kind == 'a') 1 else 2
+             scale <- function(x, k) x * k + 1
+             total <- function(kinds) { s <- 0; for (kind in kinds) s <- s + weight(kind); s }
+             scaled <- function(x, n) { s <- 0; for (i in 1:n) s <- s + sum(scale(x, i)); s }");
+        for warm in [
+            "weight('a')",
+            "scale(v, 2L)",
+            "total(kinds)",
+            "scaled(v, 5L)",
+        ] {
+            for _ in 0..5 {
+                run(warm);
+            }
+        }
+        jit::install_mode(Mode::Off);
+        let expected: Vec<String> = calls.iter().map(|call| run(call)).collect();
+        jit::install_mode(Mode::Stress);
+        for name in ["total", "scaled"] {
+            let closure = eval::eval(
+                lower::parse_text(name, "<test>")
+                    .map(|parsed| parsed.element(0))
+                    .unwrap_or(values::nil()),
+                values::global_env(),
+            );
+            assert!(
+                closure.is_ok_and(|closure| jit::inlined_frames(closure) > 0),
+                "{name} inlines its callee"
+            );
+        }
+        let before = jit::deoptimizations();
+        for _ in 0..5 {
+            assert_eq!(run("total(kinds)"), expected[0]);
+            assert_eq!(run("scaled(v, 5L)"), expected[1]);
+        }
+        assert_eq!(
+            jit::deoptimizations(),
+            before,
+            "plain operands stay compiled"
+        );
+        for _ in 0..3 {
+            for (call, expected) in calls.iter().zip(&expected) {
+                assert_eq!(&run(call), expected, "{call}");
+            }
+        }
+        jit::install_mode(Mode::Off);
+    });
+}
+
+/// A hand-off that is rare among a loop's iterations keeps the instruction's native form:
+/// one read in 200 is past the end, and each of them leaves.
+#[test]
+fn a_rare_hand_off_in_a_loop_keeps_its_native_form() {
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Stress);
+        run("x <- c(3L, 5L, 8L)
+             index <- rep(c(rep(2L, 199), 9L), 40)
+             total <- function(x, index) { s <- 0L; for (k in seq_along(index)) { v <- x[index[k]]; if (!is.na(v)) s <- s + v }; s }
+             near <- rep(2L, 50)");
+        for _ in 0..5 {
+            run("total(x, near)");
+        }
+        assert!(has_compiled_code("total"), "total compiles");
+        jit::install_mode(Mode::Off);
+        let expected = run("total(x, index)");
+        jit::install_mode(Mode::Stress);
+        for _ in 0..3 {
+            let before = jit::deoptimizations();
+            assert_eq!(run("total(x, index)"), expected);
+            assert_eq!(
+                jit::deoptimizations() - before,
+                40,
+                "each read past the end leaves once"
+            );
         }
         jit::install_mode(Mode::Off);
     });
@@ -1582,7 +1883,7 @@ fn fuzz_inlined_frames_agree_with_tier_zero() {
                 run(&setup);
                 outcomes.push(calls.iter().map(|call| run(call)).collect::<Vec<_>>());
                 for stress in stresses {
-                    jit::install_mode(Mode::Force);
+                    jit::install_mode(Mode::Stress);
                     run(&setup);
                     let mut results = Vec::new();
                     for (index, call) in calls.iter().enumerate() {
@@ -1795,7 +2096,7 @@ fn inlined_program(rng: &mut SplitMix64) -> (String, Vec<String>) {
 fn a_loop_calling_an_argument_named_like_a_global_compiles_once() {
     let (value, compiles) = with_interpreter(|| unsafe {
         use heap::activity::{self, Counter};
-        jit::install_mode(Mode::Force);
+        jit::install_mode(Mode::Stress);
         run("f <- function(x) x");
         run(
             "repeat_call <- function(n, f) { s <- 0L\ni <- 0L\nwhile (i < n) { s <- s + f(i)\ni <- i + 1L }\ns }",
@@ -1824,7 +2125,7 @@ fn active_bindings_are_called_at_every_compiled_read() {
     let mut calls = Vec::new();
     with_interpreter(|| unsafe {
         use heap::activity::{self, Counter};
-        jit::install_mode(Mode::Force);
+        jit::install_mode(Mode::Stress);
         run("reads <- 0L");
         let bound = run(
             ".Internal(makeActiveBinding(quote(counted), function() { reads <<- reads + 1L; reads }, .Internal(environment(NULL))))",
@@ -1888,7 +2189,7 @@ fn active_bindings_are_called_at_every_compiled_read() {
 #[test]
 fn a_summary_counts_calls_without_leaving_the_fast_paths() {
     const CALLS: u64 = 5000;
-    for mode in [Mode::Off, Mode::Force] {
+    for mode in [Mode::Off, Mode::Stress] {
         let (plain, summarized, closures, builtins) = with_interpreter(|| unsafe {
             use heap::activity::{self, Counter};
             jit::install_mode(mode);
@@ -1928,7 +2229,7 @@ fn a_summary_counts_calls_without_leaving_the_fast_paths() {
 fn a_summary_counts_a_deoptimized_inlined_call_once() {
     let (value, inlined, counted, deoptimized) = with_interpreter(|| unsafe {
         use heap::activity::{self, Counter};
-        jit::install_mode(Mode::Force);
+        jit::install_mode(Mode::Stress);
         run("pick <- function(x) { if (x < 0) stop('negative'); x + 1 }
              twice <- function(x) pick(x) + pick(x)");
         run("for (i in 1:5) pick(1)");
@@ -1961,7 +2262,7 @@ fn a_summary_counts_a_deoptimized_inlined_call_once() {
 fn formal_shadows_enclosing_function() {
     // `sum` names a base function, but the call must reach the function passed in its place.
     with_interpreter(|| unsafe {
-        jit::install_mode(Mode::Force);
+        jit::install_mode(Mode::Stress);
         run("shadowing <- function(sum, n) {\nfor (i in 1:n) NULL\nsum(1, 2)\n}");
         let outcomes: Vec<String> = (0..4)
             .map(|_| run("shadowing(function(...) 99, 3L)"))
@@ -1976,7 +2277,7 @@ fn formal_shadows_enclosing_function() {
 #[test]
 fn a_body_that_could_run_nothing_natively_never_records() {
     // The closures take `...` so that they are not wrappers, which compiled code, a top-level
-    // loop's included, runs without entering. `is.null` has no native form, so whatever its
+    // loop's included, runs without entering. `oldClass` has no native form, so whatever its
     // profile, compiled code for `wrap` would hand its only call back to tier 0. It is refused
     // when its recording window would open, and never records. `twice` and `sum_of` do
     // arithmetic, so they record. `sum_of` then compiles, but one multiplication saves less
@@ -2000,7 +2301,7 @@ fn a_body_that_could_run_nothing_natively_never_records() {
             values::ints(code.cdr().element(PROFILE)).to_vec()
         };
         run(concat!(
-            "wrap <- function(x, ...) is.null(x)\n",
+            "wrap <- function(x, ...) oldClass(x)\n",
             "twice <- function(x, ...) x * 2\n",
             "sum_of <- function(x, ...) {\n",
             "  y <- x * 2 + 1; z <- y * y - x; (z - y) * (y + x) + z\n",
@@ -2108,6 +2409,169 @@ fn a_body_that_only_reads_its_arguments_does_not_compile() {
         ));
         assert!(!has_compiled_code("thin"), "thin compiled");
         assert!(has_compiled_code("thick"), "thick did not compile");
+        jit::install_mode(Mode::Off);
+    });
+}
+
+/// `Mode::Force` leaves out the tests of whether a body runs often enough to repay its compile
+/// and keeps the tests of what one compiled activation costs. `twice` saves less than entering
+/// compiled code costs, so only `Mode::Stress` compiles it, and `sum_of` compiles in both.
+#[test]
+fn forced_compilation_refuses_a_body_that_costs_more_than_tier_zero() {
+    for (mode, twice_compiles) in [(Mode::Force, false), (Mode::Stress, true)] {
+        with_interpreter(|| unsafe {
+            jit::install_mode(mode);
+            run(concat!(
+                "twice <- function(x, ...) x * 2\n",
+                "sum_of <- function(x, ...) {\n",
+                "  y <- x * 2 + 1; z <- y * y - x; (z - y) * (y + x) + z\n",
+                "}",
+            ));
+            for _ in 0..6 {
+                assert_eq!(run("twice(4)"), "8");
+                assert_eq!(run("sum_of(2)"), "149");
+            }
+            assert!(has_compiled_code("sum_of"), "{mode:?}: sum_of compiles");
+            assert_eq!(
+                has_compiled_code("twice"),
+                twice_compiles,
+                "{mode:?}: twice"
+            );
+            jit::install_mode(Mode::Off);
+        });
+    }
+}
+
+/// A `for` loop turns hot in a body whose calls stay in tier 0. Its runs are one pass long,
+/// which saves less than entering compiled code costs, so the body waits, and it compiles when
+/// the loop runs long.
+#[test]
+fn a_hot_loop_whose_runs_are_short_waits_for_a_long_run() {
+    with_interpreter(|| unsafe {
+        use interp::bytecode::{PROFILE, profile};
+        jit::install_mode(Mode::Force);
+        run(concat!(
+            "check <- function(a, ...) {\n",
+            "  oldClass(a); n <- 0L\n",
+            "  for (v in a) n <- n + v * 2L + 1L\n",
+            "  n\n",
+            "}",
+        ));
+        for _ in 0..200 {
+            assert_eq!(run("check(1L)"), "3L");
+        }
+        let function = values::install("check")
+            .and_then(|symbol| eval::eval(symbol, values::global_env()))
+            .expect("check is defined");
+        let counters = values::ints(function.cdr().cdr().element(PROFILE)).to_vec();
+        assert!(
+            !has_compiled_code("check"),
+            "check compiled for a loop of one pass: {counters:?}"
+        );
+        assert!(
+            counters[profile::TIER_STATE] >= 0,
+            "check was refused for good: {counters:?}"
+        );
+        assert_eq!(run("check(1:2000)"), "4004000L");
+        assert!(has_compiled_code("check"), "check did not compile");
+        assert_eq!(run("check(1L)"), "3L");
+        jit::install_mode(Mode::Off);
+    });
+}
+
+/// A loop of ten passes repays an entry on every call, whichever pass its backward jumps turn
+/// hot on. The body takes ten backward jumps per call, so the threshold falls on the last pass
+/// of a call, where the running activation has nothing left to gain.
+#[test]
+fn a_short_loop_that_repays_an_entry_compiles_on_its_last_pass() {
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::On);
+        let threshold = interp::bytecode::tier().map_or(0, |tier| tier.back_edge_threshold);
+        run(concat!(
+            "fill <- function(x) {\n",
+            "  oldClass(x)\n",
+            "  for (k in seq_along(x)) x[k] <- k * 2\n",
+            "  x\n",
+            "}",
+        ));
+        run("ten <- c(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)");
+        for _ in 0..threshold / 10 + 100 {
+            assert_eq!(run("fill(ten)[10]"), "20");
+        }
+        assert!(has_compiled_code("fill"), "fill did not compile");
+        jit::install_mode(Mode::Off);
+    });
+}
+
+/// A body with a loop that turns hot by its calls is priced by the passes its loop has run per
+/// call. `few` and `many` are the same body. `few` runs one pass per call, which saves less than
+/// entering compiled code costs, so its calls stop asking and its loop may still compile it.
+/// `many` runs three passes per call and compiles.
+#[test]
+fn a_body_with_a_loop_is_priced_by_its_passes_per_call() {
+    with_interpreter(|| unsafe {
+        use interp::bytecode::{PROFILE, profile};
+        jit::install_mode(Mode::On);
+        let entries = interp::bytecode::tier().map_or(0, |tier| tier.entry_threshold);
+        let body = "function(x) { n <- 0L; for (v in x) n <- n + v * 2L + 1L; n }";
+        run(&format!("few <- {body}; many <- {body}"));
+        for _ in 0..entries + 100 {
+            assert_eq!(run("few(5L)"), "11L");
+            assert_eq!(run("many(c(1L, 2L, 3L))"), "15L");
+        }
+        let function = values::install("few")
+            .and_then(|symbol| eval::eval(symbol, values::global_env()))
+            .expect("few is defined");
+        let counters = values::ints(function.cdr().cdr().element(PROFILE)).to_vec();
+        assert!(
+            !has_compiled_code("few"),
+            "few compiled for one pass per call: {counters:?}"
+        );
+        assert!(
+            counters[profile::TIER_STATE] >= 0,
+            "few was refused for good: {counters:?}"
+        );
+        assert!(has_compiled_code("many"), "many did not compile");
+        assert_eq!(run("few(1:20000)"), "400040000L");
+        assert!(
+            has_compiled_code("few"),
+            "few did not compile for a long loop"
+        );
+        jit::install_mode(Mode::Off);
+    });
+}
+
+/// A body that held compiled code when its code image was written compiles at its first call
+/// in a session started from the image, where its entries come from the image and no backward
+/// jump is counted. `trained` and `fresh` arrive the same way, hot by entries with one pass of
+/// the loop per call, and only `trained` carries the image's flag. The scenario
+/// `install-code-image` runs the same through a real image.
+#[test]
+fn a_body_trained_into_a_code_image_compiles_at_its_first_call() {
+    with_interpreter(|| unsafe {
+        use interp::bytecode::{PROFILE, profile};
+        jit::install_mode(Mode::On);
+        let entries = interp::bytecode::tier().map_or(0, |tier| tier.entry_threshold);
+        let body = "function(x) { n <- 0L; for (v in x) n <- n + v * 2L + 1L; n }";
+        run(&format!("trained <- {body}; fresh <- {body}"));
+        for (name, state) in [("trained", profile::TIER_TRAINED), ("fresh", 0)] {
+            assert_eq!(run(&format!("{name}(5L)")), "11L");
+            let function = values::install(name)
+                .and_then(|symbol| eval::eval(symbol, values::global_env()))
+                .unwrap_or_else(|_| panic!("{name} is not defined"));
+            let counters = values::ints_mut(function.cdr().cdr().element(PROFILE));
+            counters[profile::ENTRIES] = entries;
+            counters[profile::BACK_EDGES] = 0;
+            counters[profile::EDGES_BEFORE] = 0;
+            counters[profile::TIER_STATE] = state;
+            counters[profile::NEXT] = i32::MIN;
+            assert_eq!(run(&format!("{name}(5L)")), "11L");
+        }
+        assert!(has_compiled_code("trained"), "trained did not compile");
+        assert!(
+            !has_compiled_code("fresh"),
+            "fresh compiled for one pass per call"
+        );
         jit::install_mode(Mode::Off);
     });
 }
@@ -2460,7 +2924,7 @@ fn fuzz_argument_expressions_agree_with_tier_zero() {
             let text = format!("(function() {body})()");
             jit::install_mode(Mode::Off);
             let reference = run(&text);
-            jit::install_mode(Mode::Force);
+            jit::install_mode(Mode::Stress);
             let compiled = run(&text);
             jit::install_mode(Mode::Off);
             assert_eq!(
@@ -2528,7 +2992,7 @@ fn break_and_next_route_through_nested_steps() {
     ];
     let mut outcomes = Vec::new();
     with_interpreter(|| unsafe {
-        for mode in [Mode::Off, Mode::Force] {
+        for mode in [Mode::Off, Mode::Stress] {
             jit::install_mode(mode);
             for definition in definitions {
                 run(definition);
@@ -2621,7 +3085,7 @@ fn fuzz_typed_closures_agree_with_tier_zero() {
                 })
                 .collect();
             let mode = if rng.chance(1, 4) {
-                Mode::Force
+                Mode::Stress
             } else {
                 Mode::On
             };
@@ -2694,7 +3158,7 @@ unsafe fn outcomes(case: usize, body: &str, call: &str) -> (String, Vec<String>)
         let reference_name = format!("reference_{case}");
         define(&reference_name);
         let reference = calls(&reference_name);
-        jit::install_mode(Mode::Force);
+        jit::install_mode(Mode::Stress);
         let compiled_name = format!("compiled_{case}");
         define(&compiled_name);
         let compiled = calls(&compiled_name);
@@ -3634,7 +4098,7 @@ fn fuzz_typed_record_natives_agree_with_tier_zero() {
                     format!("({n}L, {x}, {k})")
                 })
                 .collect();
-            let modes = [Mode::Off, Mode::On, Mode::Force];
+            let modes = [Mode::Off, Mode::On, Mode::Stress];
             // SAFETY: the interpreter is installed.
             let outcomes: Vec<Vec<String>> = unsafe {
                 modes
@@ -5202,7 +5666,7 @@ fn a_body_at_a_dead_bodys_address_runs_its_own_code() {
     // a body dies, the allocator places new bodies at its address, and each must run its own
     // code rather than the dead one's.
     with_interpreter(|| unsafe {
-        for mode in [Mode::Off, Mode::Force] {
+        for mode in [Mode::Off, Mode::Stress] {
             jit::install_mode(mode);
             for i in 1..=300 {
                 run(&format!(
@@ -5226,7 +5690,7 @@ fn a_parked_return_value_survives_its_exit() {
     // the deoptimization exit hands it to tier 0. The exit writes `i` back first, which
     // allocates, and the returned list exists nowhere but in the parked unwind.
     with_interpreter(|| unsafe {
-        jit::install_mode(Mode::Force);
+        jit::install_mode(Mode::Stress);
         run("g <- function(n, x) { i <- n + 1L; x; i }");
         run("h <- function(n) g(n, return(list(n, n * 2L)))");
         for n in 1..=3 {
@@ -5257,7 +5721,7 @@ fn element_ops_cost_no_more_than_tier_zero() {
         let body = ELEMENT_OPS[shape.parse::<usize>().expect("a shape index")];
         with_interpreter(|| unsafe {
             jit::install_mode(if mode == "force" {
-                Mode::Force
+                Mode::Stress
             } else {
                 Mode::Off
             });
