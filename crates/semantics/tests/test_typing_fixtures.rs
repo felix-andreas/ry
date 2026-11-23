@@ -7,7 +7,8 @@ use {
         SourceFile,
         annotations::lower_annotation,
         diagnostics::{
-            Diagnostic, TypeRenderer, file_diagnostics, strict_diagnostics, top_level_diagnostics,
+            Applicability, Diagnostic, TypeRenderer, file_diagnostics, strict_diagnostics,
+            top_level_diagnostics,
         },
         file_typing_mode,
         hir::Symbol,
@@ -165,11 +166,12 @@ fn render_file(db: &RootDatabase, file: SourceFile) -> String {
             output.push('\n');
         }
     }
-    render_diagnostics(&mut output, &file_diagnostics(db, file));
+    render_diagnostics(&mut output, &file_diagnostics(db, file), false);
     output
 }
 
-fn render_diagnostics(output: &mut String, diagnostics: &[Diagnostic]) {
+/// `fixes` also renders each finding's fix, which strict mode's findings are checked with.
+fn render_diagnostics(output: &mut String, diagnostics: &[Diagnostic], fixes: bool) {
     for diagnostic in diagnostics {
         assert_message_style(&diagnostic.message);
         output.push_str(&format!(
@@ -187,6 +189,18 @@ fn render_diagnostics(output: &mut String, diagnostics: &[Diagnostic]) {
                 u32::from(related.range.start()),
                 u32::from(related.range.end()),
                 related.message
+            ));
+        }
+        if let Some(fix) = diagnostic.fix.as_ref().filter(|_| fixes) {
+            let applicability = match fix.applicability {
+                Applicability::Safe => "safe",
+                Applicability::Unsafe => "unsafe",
+            };
+            output.push_str(&format!(
+                "  {applicability} fix {}..{} {:?}\n",
+                u32::from(fix.range.start()),
+                u32::from(fix.range.end()),
+                fix.replacement
             ));
         }
     }
@@ -244,7 +258,7 @@ fn render_strict_file(db: &RootDatabase, file: SourceFile) -> String {
         output.push_str(&format!("typing mode: {mode:?}\n"));
     }
     output.push_str(&render_file(db, file));
-    render_diagnostics(&mut output, &strict_diagnostics(db, file));
+    render_diagnostics(&mut output, &strict_diagnostics(db, file), true);
     output
 }
 
@@ -288,7 +302,7 @@ fn render_with_data_files(source: &str) -> String {
             output.push_str(&format!("== {path}\n"));
         }
         output.push_str(&render_file(&db, *file));
-        render_diagnostics(&mut output, &strict_diagnostics(&db, *file));
+        render_diagnostics(&mut output, &strict_diagnostics(&db, *file), true);
     }
     output
 }
@@ -325,7 +339,7 @@ fn render_top_level(db: &RootDatabase, file: SourceFile) -> String {
         };
         output.push_str(&format!("{behavior}{pure}: {line}\n"));
     }
-    render_diagnostics(&mut output, &top_level_diagnostics(db, file));
+    render_diagnostics(&mut output, &top_level_diagnostics(db, file), false);
     output
 }
 

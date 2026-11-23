@@ -116,8 +116,8 @@ happens when:
 - a blank line separates the block from the expression;
 - a plain `#` comment separates them, or no expression follows at all. A roxygen2 `#'` line is a
   plain comment here, so the `#:` block goes below the roxygen block, directly above the definition;
-- the block follows code on its own line, as in `x <- 1 #: integer`, which would otherwise read as
-  an annotation on the next line's statement;
+- the block follows code on its own line, as in `x <- 1 #: integer` or `x <- 1; #: integer`,
+  which would otherwise read as an annotation on the next line's statement;
 - the block has no content beyond the `#:` marker.
 
 A definition block, one that contains only `@type`, `@alias` and `@opaque` lines, attaches to nothing, and
@@ -5451,7 +5451,10 @@ finding for the call. An R value is reported once, where it first appears, and n
 expression it flows into.
 
 **An R call whose value is used.** The first example shows it. The fix names the conversion that
-fits the R function's result type, when the checker knows it.
+fits the R function's result type, when the checker knows it, and `ry check --fix` wraps the call
+in it. It makes no change when the call's value is assigned to a variable that a later conversion
+reads, as `width` in the first example, or that an R call reads as a number or a list, which would
+then need `Num.to_r` or `List.to_r`. There the conversion moves by hand.
 
 **An R call inside the arguments of another R call.** R evaluates an argument only when the function
 reads it, so native code cannot run the two calls in a fixed order. A conversion around the inner
@@ -5473,6 +5476,30 @@ native
     function reads it, so native code cannot run the two in a fixed order. Compute the inner call
     into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
 ```
+
+`ry check --fix` makes that rewrite. It computes the inner call, converted, into a new variable on
+a line of its own just before the statement, above any `#:` lines of the statement, and passes the
+variable. The variable is `value`, or `value2` and on when the function already uses that name:
+
+```r
+report <- function(label: Str, amount: F64) -> NULL {
+  value <- Str.from_r(format(amount, nsmall = 2))
+  cat(label, value, "\n")
+  NULL
+}
+report("total", 12.5)
+```
+
+```text ry check typing strict exact
+1 file checked, no problems
+```
+
+The rewrite runs the inner call before the statement, which is the one order native code can run.
+So `--fix` moves a call only where the statement runs it exactly once: never out of a branch, a
+loop, the condition of a `while`, the right side of `&&` or `||`, a function literal without braces,
+or the arguments of an R function that may evaluate them late, more than once or not at all, such as
+`tryCatch`, `switch`, `ifelse`, `quote` or a `with...` or `suppress...` function. The condition of
+an `if` runs first and once, so a call there moves before the `if`.
 
 **A variable that holds an R value, outside an R call's arguments.** A native function reads its
 own parameters and variables. A global that holds an R value may stand directly as an argument of
@@ -5532,6 +5559,9 @@ native
   x reading a column gives an R vector, and a native function holds only ry values. Convert it where
     it is read: `List.from_r(sales$units)`
 ```
+
+`ry check --fix` wraps a column read in `List.from_r` where it is read, under the same condition as
+an R call's result.
 
 **An R value written as a literal or an operator.** `a:b` builds an R vector, and `NA` and complex
 literals have no ry type, so each is a `native` error outside the arguments of an R call. Write

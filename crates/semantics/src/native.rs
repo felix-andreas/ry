@@ -40,6 +40,21 @@ use {
 pub struct NativeBlocker {
     pub range: TextRange,
     pub kind: NativeBlockerKind,
+    /// The rewrite the message names, when it is one exact edit that keeps the program's meaning.
+    pub fix: Option<NativeFix>,
+}
+
+/// The mechanical rewrite of a blocked construct, which `ry check --fix` applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::SalsaValue)]
+pub enum NativeFix {
+    /// Wrap the construct in the conversion, as in `Num.from_r(nchar(label))`.
+    Convert(Conversion),
+    /// Compute the construct into a new variable just before the statement at `before`, wrapped
+    /// in `convert` when it is not a conversion already, and use the variable in its place.
+    Hoist {
+        before: TextRange,
+        convert: Option<Conversion>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
@@ -276,7 +291,7 @@ impl NativeBlockerKind {
 }
 
 impl Conversion {
-    fn module(self) -> &'static str {
+    pub fn module(self) -> &'static str {
         match self {
             Conversion::Num => "Num",
             Conversion::Str => "Str",
@@ -595,6 +610,8 @@ pub fn native_blockers(judged: Judged<'_, '_>) -> ThinVec<NativeBlocker> {
         local_functions: Vec::new(),
         r_arguments: None,
         invisible: None,
+        hoist: None,
+        converted_locals: Vec::new(),
     };
     judge.find(root);
     let mut blockers = judge.blockers;
@@ -802,6 +819,15 @@ struct Judge<'a, 'db> {
     r_arguments: Option<Symbol>,
     /// The expression already reported for making the function's result invisible.
     invisible: Option<ExprId>,
+    /// The statement of a `{` block that an R call found here may be computed before, which
+    /// is none where that would change when or whether the call runs: in a branch, in a loop,
+    /// after `&&` or `||`, in a function literal, or among the arguments of an R function
+    /// that evaluates them in its own way ([`defers_arguments`]).
+    hoist: Option<ExprId>,
+    /// Each local assigned an R value whose blocker offers to convert it, with that blocker's
+    /// index. A later read of the local that converts it or passes it to R withdraws the fix,
+    /// because converting at the assignment would break that read.
+    converted_locals: Vec<(Symbol, usize)>,
 }
 
 impl<'a, 'db> Judge<'a, 'db> {
@@ -810,7 +836,24 @@ impl<'a, 'db> Judge<'a, 'db> {
     }
 
     fn block_at(&mut self, range: TextRange, kind: NativeBlockerKind) {
-        self.blockers.push(NativeBlocker { range, kind });
+        self.blockers.push(NativeBlocker {
+            range,
+            kind,
+            fix: None,
+        });
+    }
+
+    fn block_with_fix(
+        &mut self,
+        expression: ExprId,
+        kind: NativeBlockerKind,
+        fix: Option<NativeFix>,
+    ) {
+        self.blockers.push(NativeBlocker {
+            range: self.judged.module.range(expression),
+            kind,
+            fix,
+        });
     }
 
     fn uncompiled(&mut self, expression: ExprId, construct: Uncompiled) {
@@ -878,6 +921,8 @@ impl<'a, 'db> Judge<'a, 'db> {
         self.local_functions.clear();
         self.r_arguments = None;
         self.invisible = None;
+        self.hoist = None;
+        self.converted_locals.clear();
         self.collect_locals(function);
         if self.judged.aliased.contains(function) {
             let parameters = &module[parameters];
@@ -1064,7 +1109,9 @@ impl<'a, 'db> Judge<'a, 'db> {
                     } else {
                         Use::Value
                     };
+                    let hoist = self.hoist.replace(statement);
                     self.walk(statement, statement_use);
+                    self.hoist = hoist;
                 }
             }
             ExpressionKind::Assign {
@@ -1085,6 +1132,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                 };
                 let mark = self.scope.len();
                 self.control_depth += 1;
+                let hoist = self.hoist.take();
                 self.walk(then_branch, branch_use);
                 let then_names = self.scope.split_off(mark);
                 let else_names = match else_branch {
@@ -1094,6 +1142,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                     }
                     None => Vec::new(),
                 };
+                self.hoist = hoist;
                 self.control_depth -= 1;
                 // A name outlives the `if` when every branch that reaches its end set it.
                 let then_ends = !self.diverges(then_branch);
@@ -1151,7 +1200,9 @@ impl<'a, 'db> Judge<'a, 'db> {
                 self.in_loop(body, mark);
             }
             ExpressionKind::While { condition, body } => {
+                let hoist = self.hoist.take();
                 self.walk(condition, Use::Value);
+                self.hoist = hoist;
                 self.in_loop(body, self.scope.len());
             }
             ExpressionKind::Repeat { body } => self.in_loop(body, self.scope.len()),
@@ -1203,7 +1254,9 @@ impl<'a, 'db> Judge<'a, 'db> {
                 BinaryOperator::And2 | BinaryOperator::Or2 => {
                     self.walk(lhs, Use::Value);
                     let mark = self.scope.len();
+                    let hoist = self.hoist.take();
                     self.walk(rhs, Use::Value);
+                    self.hoist = hoist;
                     self.scope.truncate(mark);
                 }
                 _ => {
@@ -1380,7 +1433,9 @@ impl<'a, 'db> Judge<'a, 'db> {
                     if let Some(guard) = arm.guard {
                         self.uncompiled(guard, Uncompiled::MatchGuard);
                     }
+                    let hoist = self.hoist.take();
                     self.walk(arm.body, branch_use);
+                    self.hoist = hoist;
                     self.scope.truncate(mark);
                     self.control_depth -= 1;
                 }
@@ -1483,7 +1538,9 @@ impl<'a, 'db> Judge<'a, 'db> {
 
     fn in_loop(&mut self, body: ExprId, mark: usize) {
         self.control_depth += 1;
+        let hoist = self.hoist.take();
         self.walk(body, Use::Unused);
+        self.hoist = hoist;
         self.control_depth -= 1;
         self.scope.truncate(mark);
     }
@@ -1573,7 +1630,22 @@ impl<'a, 'db> Judge<'a, 'db> {
                 self.uncompiled(id, Uncompiled::FunctionValue);
                 return;
             }
-            Some(_) => return,
+            Some(_) => {
+                // Passed to R, a converted `I64` or list of them would need `Num.to_r`.
+                for &(local, index) in &self.converted_locals {
+                    let blocker = &mut self.blockers[index];
+                    let withdrawn = usage == Use::Converted
+                        || (is_r_argument(usage)
+                            && matches!(
+                                blocker.fix,
+                                Some(NativeFix::Convert(Conversion::Num | Conversion::List))
+                            ));
+                    if local == name && withdrawn {
+                        blocker.fix = None;
+                    }
+                }
+                return;
+            }
             None => {}
         }
         if self.locals.contains(&name) {
@@ -1680,7 +1752,15 @@ impl<'a, 'db> Judge<'a, 'db> {
                     self.bind(name, Slot::Function(value));
                     return;
                 }
+                let first = self.blockers.len();
                 self.walk(value, Use::Value);
+                let range = module.range(value);
+                if let Some(index) = (first..self.blockers.len()).find(|&index| {
+                    self.blockers[index].range == range
+                        && matches!(self.blockers[index].fix, Some(NativeFix::Convert(_)))
+                }) {
+                    self.converted_locals.push((name, index));
+                }
                 let ty = self.ty(value);
                 let source = match *module.kind(value) {
                     ExpressionKind::Call { callee, .. } => match self.callee(callee) {
@@ -1892,9 +1972,11 @@ impl<'a, 'db> Judge<'a, 'db> {
         }
         let control_depth = std::mem::replace(&mut self.control_depth, 0);
         let r_arguments = self.r_arguments.take();
+        let hoist = self.hoist.take();
         self.nested += 1;
         self.walk(body, Use::Value);
         self.nested -= 1;
+        self.hoist = hoist;
         self.r_arguments = r_arguments;
         self.control_depth = control_depth;
         self.scope.truncate(mark);
@@ -2051,13 +2133,16 @@ impl<'a, 'db> Judge<'a, 'db> {
                     if let Some(outer) = self.r_arguments
                         && let Some(inner) = self.r_function(value)
                     {
-                        self.block(
+                        let conversion = self.ty(id).and_then(|ty| self.conversion(ty));
+                        let fix = self.hoist_fix(conversion, true);
+                        self.block_with_fix(
                             id,
                             NativeBlockerKind::NestedRCall {
                                 outer,
                                 inner,
-                                conversion: self.ty(id).and_then(|ty| self.conversion(ty)),
+                                conversion,
                             },
+                            fix,
                         );
                     }
                     self.walk(value, Use::Converted);
@@ -2158,10 +2243,15 @@ impl<'a, 'db> Judge<'a, 'db> {
     ) {
         self.r_position(id, name, origin, usage);
         let outer = self.r_arguments.replace(name);
+        let hoist = self.hoist;
+        if defers_arguments(name.as_str()) {
+            self.hoist = None;
+        }
         for &(_, value) in arguments {
             self.r_argument(name, value);
             self.walk(value, Use::Argument(name));
         }
+        self.hoist = hoist;
         self.r_arguments = outer;
     }
 
@@ -2209,31 +2299,52 @@ impl<'a, 'db> Judge<'a, 'db> {
 
     /// Reports an R call whose value is used where only a ry value may stand.
     fn r_position(&mut self, id: ExprId, function: Symbol, origin: ROrigin, usage: Use) {
+        let conversion = self.ty(id).and_then(|ty| self.conversion(ty));
         match usage {
             Use::Unused | Use::Converted => {}
-            Use::Argument(outer) => self.block(
-                id,
-                NativeBlockerKind::NestedRCall {
-                    outer,
-                    inner: function,
-                    conversion: self.ty(id).and_then(|ty| self.conversion(ty)),
-                },
-            ),
-            Use::Value | Use::TableArgument => self.block(
+            Use::Argument(outer) => {
+                let fix = self.hoist_fix(conversion, false);
+                self.block_with_fix(
+                    id,
+                    NativeBlockerKind::NestedRCall {
+                        outer,
+                        inner: function,
+                        conversion,
+                    },
+                    fix,
+                );
+            }
+            Use::Value | Use::TableArgument => self.block_with_fix(
                 id,
                 NativeBlockerKind::RValue {
                     function,
                     origin,
-                    conversion: self.ty(id).and_then(|ty| self.conversion(ty)),
+                    conversion,
                 },
+                conversion.map(NativeFix::Convert),
             ),
         }
     }
 
     fn column_read(&mut self, id: ExprId, usage: Use) {
         if !matches!(usage, Use::Unused | Use::Converted) {
-            self.block(id, NativeBlockerKind::ColumnRead);
+            self.block_with_fix(
+                id,
+                NativeBlockerKind::ColumnRead,
+                Some(NativeFix::Convert(Conversion::List)),
+            );
         }
+    }
+
+    /// The fix that computes an R call among another R call's arguments into a variable first,
+    /// which needs a conversion to give the variable a ry type and a statement to stand before.
+    /// `converted` says the blocked construct is that conversion already.
+    fn hoist_fix(&self, conversion: Option<Conversion>, converted: bool) -> Option<NativeFix> {
+        let conversion = conversion?;
+        Some(NativeFix::Hoist {
+            before: self.judged.module.range(self.hoist?),
+            convert: (!converted).then_some(conversion),
+        })
     }
 }
 
@@ -2244,6 +2355,39 @@ fn named_values<'a>(
     arguments
         .iter()
         .filter_map(|argument| Some((argument.name.map(|name| module.name(name)), argument.value?)))
+}
+
+/// Whether the R function `name` may evaluate an argument late, more than once, not at all, in a
+/// condition handler or in another environment, so computing the argument before the call could
+/// change what the program does.
+fn defers_arguments(name: &str) -> bool {
+    const DEFERRING: [&str; 21] = [
+        "Recall",
+        "bquote",
+        "capture.output",
+        "delayedAssign",
+        "eval",
+        "evalq",
+        "expression",
+        "ifelse",
+        "invokeRestart",
+        "local",
+        "missing",
+        "on.exit",
+        "quote",
+        "replicate",
+        "stopifnot",
+        "substitute",
+        "switch",
+        "system.time",
+        "try",
+        "tryCatch",
+        "tryCatchLog",
+    ];
+    DEFERRING.contains(&name)
+        || ["with", "suppress", "expect_", "local_", "test_"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
 }
 
 /// What a name of R, of a package or of ry's own library calls.

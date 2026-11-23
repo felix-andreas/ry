@@ -28,6 +28,7 @@ cat(announce(1.5), "\n")
 announce: fn(amount: F64) -> F64
 NULL
 117..143 error[native] this calls R's `format` inside the arguments of R's `cat`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
+  safe fix 113..143 "value <- Str.from_r(format(amount, nsmall = 2))\n  cat(value"
 
 #---- global_that_holds_an_r_value
 #~~~~ script.R
@@ -59,7 +60,9 @@ text_length: fn(text: character) -> F64
 total_length: fn(first: Str, second: Str) -> F64
 NULL
 267..285 error[native] `text_length` has an R type in its signature, so here it counts as an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(text_length(first))`
+  safe fix 267..285 "Num.from_r(text_length(first))"
 288..307 error[native] `text_length` has an R type in its signature, so here it counts as an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(text_length(second))`
+  safe fix 288..307 "Num.from_r(text_length(second))"
 
 #---- unannotated_function_called_for_its_value
 #~~~~ script.R
@@ -866,6 +869,7 @@ recent <- function(sales: DataFrame{day: double[]}) -> DataFrame{day: double[]} 
 recent: fn(sales: DataFrame{day: double[]}) -> DataFrame{day: double[]}
 0..6 warning[unused] `recent` is assigned but never used
 126..135 error[native] `max` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(max(1, 2))`
+  safe fix 126..135 "Num.from_r(max(1, 2))"
 
 #---- comment_annotations_are_judged
 #~~~~ script.R
@@ -967,10 +971,14 @@ describe: fn(label: Str, amount: F64) -> NULL
 135..140 warning[unused] `parts` is assigned but never used
 166..174 warning[unused] `repeated` is assigned but never used
 67..79 error[native] `nchar` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(nchar(label))`
+  safe fix 67..79 "Num.from_r(nchar(label))"
 91..105 error[native] `toupper` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Str.from_r(toupper(label))`
+  safe fix 91..105 "Str.from_r(toupper(label))"
 119..132 error[native] `is.na` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Bool.from_r(is.na(amount))`
+  safe fix 119..132 "Bool.from_r(is.na(amount))"
 144..163 error[native] `strsplit` is an R function, and a native function holds only ry values, so its result cannot be used here. If only its effect matters, call it in a statement of its own. Otherwise move the call into a function with an R type in its signature, which is where R values and ry values meet
 178..193 error[native] `rep` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `List.from_r(rep(amount, 3L))`
+  safe fix 178..193 "List.from_r(rep(amount, 3L))"
 
 #---- arguments_of_an_r_call
 #~~~~ script.R
@@ -1060,6 +1068,7 @@ label_width <- function(label: Str) -> F64 {
 label_width: fn(label: Str) -> F64
 0..11 warning[unused] `label_width` is assigned but never used
 56..68 error[native] `nchar` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(nchar(label))`
+  safe fix 56..68 "Num.from_r(nchar(label))"
 
 #---- operator_on_a_table_expression_of_another_form
 #~~~~ script.R
@@ -1333,7 +1342,9 @@ ahead: fn(amount: F64) -> F64
 115..120 warning[unused] `table` is assigned but never used
 256..261 warning[unused] `ahead` is assigned but never used
 58..96 error[native] this calls R's `format` inside the arguments of R's `cat`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
+  safe fix 45..96 "value <- Str.from_r(format(amount, nsmall = 2))\n  cat(\"value\", value"
 181..201 error[native] this calls R's `c` inside the arguments of R's `DataFrame`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- List.from_r(c(...))`, and pass the variable
+  safe fix 159..201 "value <- List.from_r(c(1, 2))\n  made <- DataFrame(a = value"
 
 #---- table_forms_the_typed_core_does_not_compile
 #~~~~ script.R
@@ -1443,3 +1454,133 @@ through_a_variable: fn(sales: Sales) -> DataFrame
 129..135 warning[unused] `direct` is assigned but never used
 226..244 warning[unused] `through_a_variable` is assigned but never used
 203..217 warning[interpreted] this function runs in the interpreter, because an operator applied directly to a table expression that a local function, a function whose result type is an alias, an `if` or a `match` gives is not compiled natively yet. Assign the expression to a variable first, and apply the operator to the variable
+
+#---- a_nested_r_call_moves_into_a_variable_before_its_statement
+#~~~~ script.R
+alias Rows = DataFrame{k: character, v: double}
+with_key <- function(rows: Rows, key: Str) -> Rows {
+  rows |> DataFrame.filter(Expr.col("k") == Str.from_r(toupper(key)))
+}
+#++++
+== script.R
+with_key: fn(rows: Rows, key: Str) -> Rows
+48..56 warning[unused] `with_key` is assigned but never used
+145..169 error[native] this calls R's `toupper` inside the arguments of R's `DataFrame.filter`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(toupper(...))`, and pass the variable
+  safe fix 103..169 "value <- Str.from_r(toupper(key))\n  rows |> DataFrame.filter(Expr.col(\"k\") == value"
+
+#---- a_moved_call_takes_a_name_the_function_does_not_use
+#~~~~ script.R
+labelled <- function(amount: F64, value: Str) -> Str {
+  value2 <- Str.concat(value, ": ")
+  cat(format(amount, nsmall = 2), "\n")
+  cat(value2, format(amount, nsmall = 3), "\n")
+  value2
+}
+#++++
+== script.R
+labelled: fn(amount: F64, value: Str) -> Str
+0..8 warning[unused] `labelled` is assigned but never used
+97..123 error[native] this calls R's `format` inside the arguments of R's `cat`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
+  safe fix 93..123 "value3 <- Str.from_r(format(amount, nsmall = 2))\n  cat(value3"
+145..171 error[native] this calls R's `format` inside the arguments of R's `cat`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
+  safe fix 133..171 "value4 <- Str.from_r(format(amount, nsmall = 3))\n  cat(value2, value4"
+
+#---- a_moved_call_goes_above_the_annotation_of_its_statement
+#~~~~ script.R
+alias Rows = DataFrame{k: character, v: double}
+kept <- function(rows: Rows, key: Str) -> Rows {
+  #: Rows
+  picked <- DataFrame.filter(rows, Expr.col("k") == Str.from_r(toupper(key)))
+  picked
+}
+#++++
+== script.R
+kept: fn(rows: Rows, key: Str) -> Rows
+48..52 warning[unused] `kept` is assigned but never used
+159..183 error[native] this calls R's `toupper` inside the arguments of R's `DataFrame.filter`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(toupper(...))`, and pass the variable
+  safe fix 99..183 "value <- Str.from_r(toupper(key))\n  #: Rows\n  picked <- DataFrame.filter(rows, Expr.col(\"k\") == value"
+
+#---- a_moved_call_on_a_line_with_other_statements_ends_with_a_semicolon
+#~~~~ script.R
+shown <- function(amount: F64) -> F64 { cat(format(amount), "\n"); amount }
+#++++
+== script.R
+shown: fn(amount: F64) -> F64
+0..5 warning[unused] `shown` is assigned but never used
+44..58 error[native] this calls R's `format` inside the arguments of R's `cat`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
+  safe fix 40..58 "value <- Str.from_r(format(amount)); cat(value"
+
+#---- a_nested_r_call_that_might_not_run_is_not_moved
+#~~~~ script.R
+# A branch, a loop, the right side of `&&`, a function literal's bare body and an argument of
+# `tryCatch` run the call under a condition, so computing it first would change the program.
+guarded <- function(amount: F64, flag: Bool) -> F64 {
+  if (flag) cat(format(amount), "\n")
+  while (Num.from_r(nchar(format(amount))) > 10) {
+    amount <- amount / 10
+  }
+  ok <- flag && Num.from_r(nchar(format(amount))) > 3
+  labels <- List.map([amount], function(x: F64) -> Str Str.from_r(paste0("n", format(x))))
+  tryCatch(cat(Str.from_r(format(amount)), "\n"), error = function(e) NULL)
+  amount
+}
+#++++
+== script.R
+guarded: fn(amount: F64, flag: Bool) -> F64
+187..194 warning[unused] `guarded` is assigned but never used
+362..364 warning[unused] `ok` is assigned but never used
+416..422 warning[unused] `labels` is assigned but never used
+257..271 error[native] this calls R's `format` inside the arguments of R's `cat`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
+305..319 error[native] this calls R's `format` inside the arguments of R's `nchar`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
+393..407 error[native] this calls R's `format` inside the arguments of R's `nchar`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
+492..501 error[native] this calls R's `format` inside the arguments of R's `paste0`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
+516..553 error[native] this calls R's `cat` inside the arguments of R's `tryCatch`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Call `cat` in a statement of its own if only its effect matters, or make both calls in a function with an R type in its signature
+520..546 error[native] this calls R's `format` inside the arguments of R's `cat`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
+563..579 warning[interpreted] this function runs in the interpreter, because a function used as a value is not compiled natively yet. Native code runs a function literal only where it is called, or where a standard library function such as `List.map` takes it
+
+#---- a_local_converted_where_it_is_read_gets_no_conversion_fix
+#~~~~ script.R
+# Converting at the assignment would break the read that converts the local, or passes it to R
+# as an `I64`.
+lengths_of <- function(label: Str) -> I64 {
+  width <- nchar(label)
+  shown <- nchar(label)
+  cat(shown, "\n")
+  Num.from_r(width)
+}
+#++++
+== script.R
+lengths_of: fn(label: Str) -> I64
+110..120 warning[unused] `lengths_of` is assigned but never used
+165..177 error[native] `nchar` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(nchar(label))`
+189..201 error[native] `nchar` is an R function, and a native function holds only ry values, so its result cannot be used here. Convert the result where it returns: `Num.from_r(nchar(label))`
+
+#---- a_column_read_is_converted_where_it_is_read
+#~~~~ script.R
+revenue <- function(sales: DataFrame{units: integer[], price: double[]}) -> F64 {
+  List.sum(sales$price)
+}
+#++++
+== script.R
+revenue: fn(sales: DataFrame{units: integer[], price: double[]}) -> F64
+0..7 warning[unused] `revenue` is assigned but never used
+93..104 error[type-mismatch] expected `List<T>`, found `double[]`. Convert an R vector with `List.from_r()`
+93..104 error[native] reading a column gives an R vector, and a native function holds only ry values. Convert it where it is read: `List.from_r(sales$price)`
+  safe fix 93..104 "List.from_r(sales$price)"
+
+#---- a_nested_r_call_in_an_if_condition_moves_before_the_if
+#~~~~ script.R
+# The condition runs first and once, so computing its call before the `if` keeps the order.
+long <- function(amount: F64) -> Bool {
+  if (Num.from_r(nchar(format(amount))) > 3) {
+    TRUE
+  } else {
+    FALSE
+  }
+}
+#++++
+== script.R
+long: fn(amount: F64) -> Bool
+92..96 warning[unused] `long` is assigned but never used
+155..169 error[native] this calls R's `format` inside the arguments of R's `nchar`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
+  safe fix 134..169 "value <- Str.from_r(format(amount))\n  if (Num.from_r(nchar(value"

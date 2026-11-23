@@ -98,6 +98,8 @@ what you meant or silences a finding without handling it, so it needs `--unsafe-
 | `length-test` | `length(x == y)` to `length(x) == y` | unsafe |
 | `scalar-in` | `x %in% "a"` to `x == "a"` | unsafe |
 | `order-subset` | `x[order(x)]` to `sort(x, na.last = TRUE)` | unsafe |
+| `native` | `nchar(label)` to `Num.from_r(nchar(label))`, and `sales$price` to `List.from_r(sales$price)`, unless a later read of the variable assigned there converts it or passes it to R | safe |
+| `native` | an R call among another R call's arguments, as in `cat(format(x))`, computed into a new variable before the statement: `value <- Str.from_r(format(x))` then `cat(value)`, when the statement always runs the call once | safe |
 | `matrix-apply` | `apply(x, 1, sum)` to `rowSums(x)`, and `colSums`, `rowMeans`, `colMeans` alike | unsafe |
 | `unnecessary-lambda` | `lapply(x, function(y) f(y))` to `lapply(x, f)` | unsafe |
 | `yoda-test` | `expect_equal(2, x)` to `expect_equal(x, 2)` | unsafe |

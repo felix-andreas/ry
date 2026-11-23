@@ -1,0 +1,33 @@
+# A user's native function calls R inside the arguments of a table function. `ry check --fix`
+# computes the inner call into a variable before the statement, the check comes back clean, and
+# the function runs.
+
+requires ry-runtime
+
+file keyed.R
+| # typing: strict
+| alias Rows = DataFrame{k: character, v: double}
+| withKey <- function(rows: Rows, key: Str) -> Rows {
+|   rows |> DataFrame.filter(Expr.col("k") == Str.from_r(toupper(key)))
+| }
+| keyed <- DataFrame(k = c("A", "B"), v = c(1, 2))
+| print(withKey(keyed, "a"))
+
+run ry check keyed.R
+expect exit 1
+expect stderr "this calls R's `toupper` inside the arguments of R's `DataFrame.filter`"
+expect stdout "1 fixable with `ry check --fix`"
+
+run ry check --fix keyed.R
+expect exit 0
+expect stdout "applied 1 fix"
+expect file keyed.R "  value <- Str.from_r(toupper(key))\n  rows |> DataFrame.filter(Expr.col(\"k\") == value)"
+
+# The fix leaves nothing to fix, so a second pass changes nothing.
+run ry check --fix keyed.R
+expect exit 0
+expect stdout "1 file checked, no problems"
+
+run ry run keyed.R
+expect exit 0
+expect stdout "1:      A     1"
