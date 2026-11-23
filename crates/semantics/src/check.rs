@@ -1313,7 +1313,7 @@ fn check_item_in<'db>(
             .iter()
             .map(|(id, &ty)| (id, context.editor_type(ty, &mut binder_types)))
             .collect();
-        editor = Some(Box::new(EditorFacts {
+        let facts = EditorFacts {
             expression_types,
             pattern_types,
             literal_expectations,
@@ -1328,7 +1328,11 @@ fn check_item_in<'db>(
                 .iter()
                 .map(|(callee, &target)| (callee, target))
                 .collect(),
-        }));
+        };
+        if cfg!(debug_assertions) {
+            assert_facts_resolve(db, &context.table, &facts);
+        }
+        editor = Some(Box::new(facts));
     }
     // A failed item exports `Unknown` so downstream items do not cascade off an
     // untrustworthy shape. Failing expressions record `Unknown`, so later checks inside
@@ -1402,6 +1406,54 @@ fn check_item_in<'db>(
         column_misses: context.column_misses.drain().collect(),
         top_level_bindings: ThinVec::from(top_level_bindings),
     }
+}
+
+/// Every type an item records for an editor resolves in the table that produced it: a variable
+/// it still holds is one of this table's and unbound. A variable past the table's end belongs
+/// to another item's table and names an unrelated variable here, and a bound one means the
+/// type left the check unresolved, so a hover would show a variable for a known type.
+fn assert_facts_resolve<'db>(
+    db: &'db dyn Db,
+    table: &InferenceTable<'db>,
+    facts: &EditorFacts<'db>,
+) {
+    let mut seen = FxHashSet::default();
+    let recorded = facts
+        .expression_types
+        .palette
+        .iter()
+        .copied()
+        .chain(facts.pattern_types.0.iter().flatten().copied())
+        .chain(facts.literal_expectations.values().copied())
+        .chain(facts.loop_variables.values().copied());
+    for ty in recorded {
+        assert_type_resolves(db, table, ty, &mut seen);
+    }
+}
+
+fn assert_type_resolves<'db>(
+    db: &'db dyn Db,
+    table: &InferenceTable<'db>,
+    ty: Ty<'db>,
+    seen: &mut FxHashSet<Ty<'db>>,
+) {
+    if !contains_inference_var(db, ty) || !seen.insert(ty) {
+        return;
+    }
+    if let TyKind::Var(var) = *ty.kind(db) {
+        assert!(
+            table.is_unbound_root(var),
+            "a recorded type holds the inference variable {var:?}, which is {} in this item's table",
+            match table.holds(var) {
+                true => "bound or merged",
+                false => "not",
+            }
+        );
+        return;
+    }
+    for_each_child_type(db, ty, &mut |child| {
+        assert_type_resolves(db, table, child, seen)
+    });
 }
 
 /// Unbound constrained variables generalize into fresh binders; unconstrained ones
