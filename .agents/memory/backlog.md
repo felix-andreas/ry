@@ -718,7 +718,7 @@ The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/lo
 ## Open: what `ry check` still reports on the GNU R corpus
 
 Running `ry check` with typing on over the `R/` sources of the corpus packages (`corpus-and-oracle.md`)
-gives 28 errors: 26 true package bugs and 2 known limitations, and no false report on correct R. The
+gives 27 errors: 25 true package bugs and 2 known limitations, and no false report on correct R. The
 three generated benchmark packages (`tools/bench/tooling/generate.py`) report nothing. To reproduce, give
 each package a `ry.toml` with `[check]` `typing = true` (typing is off by default) and run
 `ry check --output json R` inside it. A fix also deletes its line here and, for a user-visible
@@ -738,7 +738,6 @@ gap, in the Limitations section of `reference/type-system.mdx`.
 - gmp `Stirling-n-etc.R` 277: `if (log)` with no `log` formal reads base `log`.
 - httr `oauth-token-utils.R` 34: `revoke_oauth2.0(x)` leaves out `credentials`.
 - kernlab `kqr.R` 173 and 263: `ramloss(...)` is a typo for `ramploss`.
-- kernlab `gausspr.R` 194: passes a `double` where the callee multiplies a `matrix`.
 - mclust `toremove.R` 259: leaves out `k`.
 - processx `process.R` 748: `new_not_implemented_error` without `call`.
 - renv `r.R` 137: `diagnostics$suggestion` reads the list of records where the loop variable
@@ -764,22 +763,18 @@ constraint now fills a vector parameter. The forms once seen in ks `kfe.1d`, pra
 
 The top 100 CRAN packages by reverse dependencies that are not in the corpus (99 checked,
 1,210,157 lines, sources only) first gave 1,449 errors, of which 1,384 were false (114 per 100,000
-lines). After the fixes they give 468, about 400 of them false (33 per 100,000 lines); the rest are
-50 true bugs and 15 debatable ones (psych's `print(quote = "FALSE")` works by coercion). Remaining
-false classes, largest first:
+lines). They now give 119, about 39 of them true bugs (psych about 23, `parent.env` misuse in
+Hmisc, XML and rgl, survival, survey, VGAM's `qt` with a numeric `lower.tail`), so about 80 are
+false (7 per 100,000 lines). Remaining false classes, largest first:
 
-- Return types selected by a flag the body reassigns or nests (VGAM `iam`, about 60 in `.q` files
-  that are now checked).
-- Dead code after `stop()` still binds names that shadow outer ones (psych, 44).
-- An unannotated parameter over-inferred from one use, a default or one branch (21).
-- A variable correlated with a flag tested elsewhere (20, measured before tests of the same local
-  were correlated; not re-measured).
-- A union of function types where a function is expected (lme4, kableExtra, 18).
-- A missing argument forwarded to `[` or to a callee that tests `missing()` (flextable, 10).
-- An element write `d[[i]] <- v` does not update the container type (psych, 10).
-- `vapply` over a parameter turns it into `list[T] | T[]`, so a later `$` fails (ggplot2, 10).
-- A project S3 method for a stubbed generic is ignored (R.utils, 9); NSE arguments checked (9);
-  narrowing gaps after `tryCatch` and inside `&&` (8); Windows-only NAMESPACE imports (8).
+- VGAM (14, not classified in detail): `new("vglmff", link = ...)` slots, `binomialff(dispersion =
+  ...)` with arguments its formals lack (possibly true), `qt(u, nu, 1, 0)` inside `if (FALSE)`.
+- psych (about 7 of 30): a function used as a condition or compared (`summary.psych.R` 377,
+  `print.psych.R` 14) and a function where a number is expected (`ICLUST.graph.R` 24).
+- raster (6): `calc` and `extractPolygons`.
+- ggplot2 (5): quick-plot, `guide-axis-stack`'s `lapply`, a missing `x` in `utilities-checks`.
+- One or two each in about 25 packages (gt formatter callbacks, reticulate's conda paths, forecast,
+  igraph, sandwich, spatstat's missing `f`, lavaan, pROC, boot).
 
 ### Other open checker items found on the corpus
 
