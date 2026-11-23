@@ -206,7 +206,7 @@ fn declared_ty(declared: Declared) -> Ty {
 
 /// The type tier 0's feedback bits speculate on.
 pub fn from_feedback(bits: u32) -> Ty {
-    let bits = bits & !feedback::ACTIVE_BINDING;
+    let bits = bits & !(feedback::ACTIVE_BINDING | feedback::HANDED_OFF);
     let within = |mask: u32| bits & !mask == 0;
     match bits {
         0 => Ty::Boxed,
@@ -1337,6 +1337,11 @@ impl From<ssa::Error> for Refusal {
 /// which a later attempt may well get past.
 pub const COLD: &str = "the body has no type feedback yet";
 
+/// The refusal for a body one of whose instructions kept leaving compiled code
+/// ([`feedback::HANDED_OFF`]) and has no form that stays in it, such as the start of a `for`
+/// loop over an empty sequence. It is final.
+pub const LEAVING: &str = "an instruction keeps leaving compiled code";
+
 /// The refusal for a body without a loop whose compiled code would hand every instruction that
 /// does real work back to tier 0, such as a wrapper around one `.Internal` call. Such code saves
 /// tier 0 only its dispatch, which repays the compilation after far more calls than most such
@@ -2272,7 +2277,13 @@ impl<'a> Builder<'a> {
 
     /// Whether the instruction at `pc` has never recorded a value.
     fn never_ran(&self, pc: usize) -> bool {
-        self.feedback.get(pc).copied().unwrap_or(0) == 0
+        self.feedback_bits(pc) & !feedback::HANDED_OFF == 0
+    }
+
+    /// Whether compiled code kept handing the instruction at `pc` to tier 0
+    /// ([`feedback::HANDED_OFF`]), so that a fast path for it would leave again.
+    fn handed_off(&self, pc: usize) -> bool {
+        self.feedback_bits(pc) & feedback::HANDED_OFF != 0
     }
 
     /// The type a load at `pc` of the variable in `slot` expects: what tier 0 has read there, or
@@ -2524,6 +2535,14 @@ impl<'a> Builder<'a> {
         let inst = self.insts[position];
         let operand = |index: usize| inst.operand(index);
         let next_pc = self.insts.get(position + 1).map(|next| next.pc);
+        if self.handed_off(inst.pc)
+            && !matches!(
+                inst.op,
+                Op::CallBuiltin | Op::Arithmetic | Op::CallGeneric | Op::CallRebinding
+            )
+        {
+            return Err(Refusal(LEAVING));
+        }
         let action = match inst.op {
             // The global frame's variables are its environment's bindings, which an active
             // binding or code the loop calls may read or rebind.
@@ -2914,11 +2933,13 @@ impl<'a> Builder<'a> {
                 // `x <- f(x, ...)` may move a ry dictionary or set into the call to update it in
                 // place, which only tier 0 does, so the call is inlined only when the variable
                 // cannot hold one.
-                let inlinable = inst.op == Op::CallGeneric
-                    || self
-                        .slot_of
-                        .get(&self.constant(operand(3)))
-                        .is_some_and(|&slot| state.slots[slot].ty.is_plain());
+                // A call that kept needing its frame from the start is made by tier 0.
+                let inlinable = !self.handed_off(inst.pc)
+                    && (inst.op == Op::CallGeneric
+                        || self
+                            .slot_of
+                            .get(&self.constant(operand(3)))
+                            .is_some_and(|&slot| state.slots[slot].ty.is_plain()));
                 let inlined = match state.registers[operand(1)] {
                     _ if !inlinable => None,
                     Ty::Closure(formals, body) => {
@@ -3388,6 +3409,7 @@ impl<'a> Builder<'a> {
                 // operand is a double; every other operator converts to double anyway.
                 scalar(a)
                     && scalar(b)
+                    && !self.handed_off(inst.pc)
                     && !(remainder && (a == Ty::Num || b == Ty::Num))
                     && (!matches!(
                         ARITHS[inst.operand(0)].0,
@@ -4739,7 +4761,11 @@ impl<'a> Builder<'a> {
         let (dst, left, right) = (operand(1), operand(2), operand(3));
         let (a, b) = (state.registers[left], state.registers[right]);
         state.visible = Some(true);
+        // Integer arithmetic that overflows leaves for tier 0 to warn, so a site that kept
+        // overflowing takes tier 0's step.
+        let handed_off = self.handed_off(inst.pc);
         if remainder_operator(arith)
+            && !handed_off
             && let Some((intrinsic, result)) = intrinsic_for(ARITHS[operand(0)].1, &[a, b])
         {
             state.registers[dst] = result;
@@ -4752,7 +4778,7 @@ impl<'a> Builder<'a> {
             });
         }
         let scalar = |ty: Ty| ty.is_numeric_scalar() || ty == Ty::Num;
-        if scalar(a) && scalar(b) && !remainder_operator(arith) {
+        if scalar(a) && scalar(b) && !remainder_operator(arith) && !handed_off {
             let integers = !matches!(a, Ty::Dbl | Ty::Num) && !matches!(b, Ty::Dbl | Ty::Num);
             let comparison = matches!(
                 arith,
@@ -4802,7 +4828,7 @@ impl<'a> Builder<'a> {
         } else {
             Ty::Boxed
         };
-        let effect = if a.is_plain() && b.is_plain() {
+        let effect = if a.is_plain() && b.is_plain() && !handed_off {
             Effect::PureUnlessObserved
         } else {
             Effect::Opaque
@@ -4826,6 +4852,7 @@ impl<'a> Builder<'a> {
         let subscript = |ty: Ty| matches!(ty, Ty::Int | Ty::Dbl | Ty::Num);
         let feedback = self.feedback_at(inst.pc);
         let matches = matches!(name, "[" | "[[")
+            && !self.handed_off(inst.pc)
             && count == 3
             && state.registers[first] == Ty::Boxed
             && subscript(state.registers[first + 1])
@@ -4851,6 +4878,12 @@ impl<'a> Builder<'a> {
             let feedback = self.feedback_at(inst.pc);
             return Ok(self.opaque_step(state, Some((dst, feedback)), &[], Effect::Opaque));
         };
+        // Every native form of the call and its deferred signals can leave compiled code, and
+        // at this site one of them kept doing so, so the call takes the step that cannot.
+        if self.handed_off(inst.pc) {
+            let feedback = self.feedback_at(inst.pc);
+            return Ok(self.opaque_step(state, Some((dst, feedback)), &[], Effect::Opaque));
+        }
         let definition = interp::eval::builtin_def(function)
             .map_err(|_| Refusal("a builtin without a definition"))?;
         let name = definition.name;
@@ -4883,13 +4916,20 @@ impl<'a> Builder<'a> {
         let doubles = name == ":"
             && !self.never_ran(inst.pc)
             && !matches!(self.feedback_at(inst.pc), Ty::Int | Ty::IntSeq | Ty::IntVec);
+        // A site that has made something other than one element, as `x[-1L]` does, keeps the
+        // builtin call, since the compiled read only takes a positive index in range.
+        let feedback = self.feedback_at(inst.pc);
+        let selects = name == "["
+            && !self.never_ran(inst.pc)
+            && types.first().is_some_and(|ty| *ty != Ty::List)
+            && !feedback.is_unboxed();
         if untagged
             && !doubles
+            && !selects
             && let Some((intrinsic, mut result)) = intrinsic_for(name, &types)
         {
             // A list element is boxed, so its type comes from what the site has read so far,
             // which the compiled read checks before it unboxes the element.
-            let feedback = self.feedback_at(inst.pc);
             if intrinsic == Intrinsic::Element && types[0] == Ty::List && feedback.is_unboxed() {
                 result = feedback;
             }

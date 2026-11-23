@@ -2494,6 +2494,10 @@ pub mod feedback {
     pub const INTEGER_SEQUENCE: u32 = 1 << 15;
     /// An attribute-free compact double sequence, such as `as.double(1:n)`.
     pub const DOUBLE_SEQUENCE: u32 = 1 << 16;
+    /// Compiled code kept handing the instruction to tier 0, so the optimizing tier compiles
+    /// it as tier 0's step. Compiled code records it, and the bit says nothing about the
+    /// value's type.
+    pub const HANDED_OFF: u32 = 1 << 17;
 }
 
 /// The feedback tier 0 recorded at `pc` of the byte code `code`: the [`feedback`] kinds of the

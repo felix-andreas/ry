@@ -193,7 +193,8 @@ than one for every eight entries (`runtime::frequent`).
 | What keeps leaving | Counted by | When frequent |
 |---|---|---|
 | An inlined frame that needs its real frame | `count_handoff`, per callee | The callee is marked to keep its frame, and the caller recompiles with the call as a step |
-| The compiled body itself, through a pending unwind or a hand-off | `count_leave`, per body | The code is discarded and the body stays in tier 0 for good |
+| The compiled body itself, through a pending unwind | `count_leave`, per body | The code is discarded and the body stays in tier 0 for good |
+| One instruction of the body, through a hand-off or an abandoned signal | `count_exit`, per exit | The instruction is marked in the feedback (`feedback::HANDED_OFF`), and the body recompiles with it as a step |
 
 The body's count covers a window: when 16 exits were not frequent among the entries since the
 count began, the count starts again, so exits spread thinly over a long run never add up to a
@@ -201,6 +202,15 @@ retirement. A retirement is final, because the model has no evidence that a seco
 same body would leave less often. A body with a loop is exempt, because a loop entered by on-stack
 replacement runs compiled without an entry being counted, so its entries do not say how much the
 code ran.
+
+An exit's count is measured against the work between its hand-offs: the body's entries plus the
+passes of the innermost `for` loop around the instruction, so a read past the end on every pass
+of a long loop is frequent and one at the end of each run of a loop is not. The remedy keeps the
+body: the native form of `x[i]`, of integer arithmetic or of a builtin call has tier 0's step as
+its general form, and the step handles in place what the native form left for. This is
+JavaScriptCore's frequent exit site, with a step where the DFG would drop a speculation. An
+instruction with no step to fall back on (a `for` over an empty sequence) refuses the body, and
+so does a marked instruction that leaves again.
 
 ### The cost model counts the work saved
 
@@ -262,25 +272,31 @@ Otherwise it is asked `unpaid` with the work around its loops plus the work of i
 weighted by its nesting depth as for a loop's request, so a call cannot compile what its loops
 would not, and a refusal leaves its loops free to ask.
 
-### Native forms on boxed values (stage 2, planned)
+### Native forms on boxed values (stage 2, partly built)
 
 The planner's types describe numbers and numeric vectors, and every other value is `Boxed`. Generic
-code needs three more facts about a boxed value, each of which tier 0's feedback already records
-as a value kind: it is a string scalar, it is `NULL`, or it is a plain list (no class attribute,
-not ALTREP). With them these calls compile to a kind test on the object's header and a few loads,
-under the guard on the builtin's binding that every speculated function has:
+code asks a boxed value a few questions that the object's header answers, so these calls compile
+to a test of the header and a few loads, under the guard on the builtin's binding that every
+speculated function has:
 
-| Call | Native form |
-|---|---|
-| `is.null(x)`, `is.list(x)`, `is.character(x)`, `is.function(x)` | A compare of the kind byte |
-| `length(x)` on a plain vector or list | A load of the length |
-| `x$name`, `x[["name"]]` on a plain list | The position cached for the list's names, then a load |
-| `a == b`, `a != b` on string scalars | A pointer compare of the interned strings, `NA` aside |
-| `missing(x)` in an inlined call | The call's own passing record, a constant |
-| `nchar(x)`, `identical(a, b)` on scalars, `inherits(x, "class")` | A helper that runs no R code |
+| Call | Native form | State |
+|---|---|---|
+| `is.null(x)`, `is.list(x)`, `is.character(x)`, `is.function(x)` and the other type predicates | A test of the kind byte against a set of kinds | Built |
+| `length(x)` on a vector that is neither an object nor ALTREP | A load of the length | Built |
+| `x$name`, `x[["name"]]` on a plain list | The position cached for the list's names, then a load | Planned |
+| `a == b`, `a != b` on string scalars | A pointer compare of the interned strings, `NA` aside | Planned |
+| `missing(x)` in an inlined call | The call's own passing record, a constant | Planned |
+| `nchar(x)`, `identical(a, b)` on scalars, `inherits(x, "class")` | A helper that runs no R code | Planned |
 
-A value of an unexpected kind takes the instruction's tier-0 step, not an exit, so a call site
-that sees two kinds keeps its compiled code.
+A value the test cannot answer (an object, where a method or a class decides, or an ALTREP
+vector) calls the builtin on a cold path of the same code, not an exit, so a call site that sees
+both keeps its compiled code.
+
+Every other builtin call from compiled code is one helper call with its signals deferred. The
+helper tests the arguments itself for a value that could run R code, and a builtin that has a
+condition to signal while a handler waits abandons the call, so the body leaves and tier 0 signals
+under the real frame. The call therefore needs no handler test and no write-back of the variables
+before it, with or without handlers established.
 
 ### Stretches (stage 3, planned)
 
@@ -412,7 +428,9 @@ the per-pattern instruction counts above, and the kernels, public and code-bases
 1. **Built.** Inlined frames for generic callees (no feedback, constant arguments, calling
    handlers, the profile summary), tier 0's own call in place of compiled code's, steps on a kept
    view, the leaner entry, retiring code that keeps leaving, and the cost model in saved work.
-2. Planned. Boxed kinds in the planner and the native forms in the table.
+2. **Partly built.** Type predicates and `length` on the value's header, builtin calls with
+   deferred signals, and the exit profile that turns an instruction that keeps leaving into a
+   step. Planned: the other native forms in the table.
 3. Planned. Stretches of tier-0 instructions, and forced compilation checked per body.
 4. Planned. Calls with a frame made from an inlined frame, `...` passed through, and argument
    expressions that are effect-free builtin calls.

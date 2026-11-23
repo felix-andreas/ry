@@ -19,7 +19,9 @@ use {
     interp::{
         Signalling, arith,
         builtins::Arg,
-        bytecode::{self, LoopState, Machine, PROFILE, StepEnd, Stepper, TIER1, profile},
+        bytecode::{
+            self, FEEDBACK, LoopState, Machine, PROFILE, StepEnd, Stepper, TIER1, feedback, profile,
+        },
         eval::{self, Entering},
         heap, moves,
         standard_library::{self, CompiledKey},
@@ -384,8 +386,23 @@ pub struct Exit {
     /// Slots that may be dirty: one cell for the status, then the value cells as for a
     /// register, none for a [`representation::BOXED`] slot.
     pub slots: Box<[(u32, i32)]>,
-    /// The loops around `pc`, [`LOOP_WORDS`] cells each.
+    /// The loops around `pc`, [`LOOP_WORDS`] cells each, outermost first.
     pub loops: Box<[u32]>,
+    pub handoffs: Handoffs,
+}
+
+/// How often a deoptimization point of a body's own frame handed its instruction to tier 0
+/// ([`count_exit`]).
+#[derive(Default)]
+pub struct Handoffs {
+    count: Cell<u32>,
+    /// The body's entry count when `count` started.
+    since: Cell<i32>,
+    /// How many iterations the innermost `for` loop around the point ran between the
+    /// hand-offs counted.
+    iterations: Cell<u32>,
+    /// That loop's index at the last hand-off.
+    index: Cell<i64>,
 }
 
 /// Whether every function lookup compiled code assumed still resolves the same way for an
@@ -1325,8 +1342,10 @@ pub unsafe extern "C" fn jit_deopt_exit(
             });
         }
         write_back(activation, exit, scratch);
-        if exit.why == reason::PENDING || exit.why == reason::HANDOFF {
+        if exit.why == reason::PENDING && (*(*activation).parked).pending.is_some() {
             count_leave(compiled);
+        } else if exit.why == reason::PENDING || exit.why == reason::HANDOFF {
+            count_exit(&*activation, compiled, exit);
         }
         jit_deopt(activation, exit.pc as i64, exit.why)
     }
@@ -1760,6 +1779,96 @@ unsafe fn count_handoff(compiled: &Compiled, inlined: &Inlined) {
             ..0 => NEVER_ELIDED,
             _ => state | NO_ELISION,
         };
+        retire(compiled, 0);
+    }
+}
+
+/// Counts a time the body's own frame handed the instruction of `exit` to tier 0, or gave
+/// it up before a signal. A hand-off costs several times what a step of the instruction
+/// does, so once the hand-offs are frequent ([`frequent`]) among the body's entries and the
+/// iterations of the loop around the instruction, the instruction is marked
+/// ([`feedback::HANDED_OFF`]) and the code discarded: the recompile makes the instruction
+/// tier 0's step, which never leaves. Otherwise the count starts again, so only hand-offs
+/// close together mark it.
+///
+/// Compiled code counts no iterations, so those between two hand-offs come from the loop's
+/// index: its advance since the last one, or the index itself where the loop started again.
+unsafe fn count_exit(activation: &Activation, compiled: &Compiled, exit: &Exit) {
+    if compiled.retired.get() {
+        return;
+    }
+    unsafe {
+        let constants = compiled.code.cdr();
+        let entered = values::ints(constants.element(PROFILE))[profile::ENTRIES];
+        let handoffs = &exit.handoffs;
+        let count = handoffs.count.get().saturating_add(1);
+        handoffs.count.set(count);
+        let index = match exit.loops.last() {
+            Some(&innermost) => *activation.loops.add(LOOP_WORDS * innermost as usize),
+            None => 0,
+        };
+        let last = handoffs.index.replace(index);
+        if count == 1 {
+            handoffs.since.set(entered.saturating_sub(1));
+            handoffs.iterations.set(0);
+        } else {
+            let advance = if index > last { index - last } else { index };
+            let advance = u32::try_from(advance).unwrap_or(u32::MAX);
+            handoffs
+                .iterations
+                .set(handoffs.iterations.get().saturating_add(advance));
+        }
+        if count < MAX_FRAME_HANDOFFS {
+            return;
+        }
+        // Code a failed speculation discarded keeps running in the activations that entered
+        // it, and the body's entries then count for the code that replaced it.
+        let tier1 = constants.element(TIER1);
+        if tier1 == values::nil()
+            || !std::ptr::eq(tier1.external_address().cast::<Compiled>(), compiled)
+        {
+            return;
+        }
+        let work = |handoffs: &Handoffs| {
+            let entries = entered.saturating_sub(handoffs.since.get());
+            u64::try_from(entries).unwrap_or(0) + u64::from(handoffs.iterations.get())
+        };
+        if !frequent(count, work(handoffs)) {
+            handoffs.count.set(0);
+            return;
+        }
+        let bits = values::ints_mut(constants.element(FEEDBACK));
+        let marked = bits
+            .get(exit.pc)
+            .is_none_or(|&bits| bits as u32 & feedback::HANDED_OFF != 0);
+        if crate::logging() {
+            eprintln!(
+                "jit: {} handed pc {} to tier 0 {count} times{}",
+                crate::describe(compiled.code),
+                exit.pc,
+                if marked { " as a step" } else { "" },
+            );
+        }
+        // The instruction is already what the mark asks for, so no recompile keeps it in
+        // compiled code, and the body is cheaper in tier 0.
+        if marked {
+            retire(compiled, 0);
+            let counters = values::ints_mut(constants.element(PROFILE));
+            counters[profile::TIER_STATE] = refused(counters[profile::TIER_STATE]);
+            counters[profile::RECORDING] = 0;
+            return;
+        }
+        // One recompile serves every point that is on its way to the same verdict.
+        for other in &compiled.exits {
+            let halfway = other.handoffs.count.get() * 2 >= MAX_FRAME_HANDOFFS
+                && u64::from(other.handoffs.count.get()) * 8 > work(&other.handoffs);
+            if other.parent.is_none()
+                && (std::ptr::eq(other, exit) || halfway)
+                && let Some(bits) = bits.get_mut(other.pc)
+            {
+                *bits |= feedback::HANDED_OFF as i32;
+            }
+        }
         retire(compiled, 0);
     }
 }

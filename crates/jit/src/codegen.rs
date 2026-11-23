@@ -22,8 +22,8 @@ use {
         },
         native,
         runtime::{
-            self, Activation, ArgumentSource, Exit, Inlined, Layout, element, offset, outcome,
-            reason, representation, stepping,
+            self, Activation, ArgumentSource, Exit, Handoffs, Inlined, Layout, element, offset,
+            outcome, reason, representation, stepping,
         },
     },
     heap::{
@@ -5320,6 +5320,7 @@ impl<'p> Translator<'p> {
             registers,
             slots,
             loops,
+            handoffs: Handoffs::default(),
         });
         frame_state
     }

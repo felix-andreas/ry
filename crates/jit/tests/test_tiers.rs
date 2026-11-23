@@ -1554,11 +1554,12 @@ fn a_body_that_leaves_on_every_call_is_retired() {
 /// A compiled body calls a builtin without asking whether a handler is established, and a
 /// builtin that has a condition to signal under a calling handler leaves compiled code so that
 /// tier 0 signals it under the body's frame. A handler alone therefore costs no exit. A body
-/// whose builtin warns under a handler on every call stops being inlined after 16 such calls
-/// and is retired after 16 more on its own. What the handler sees needs base R, so the oracle
-/// case `jit__builtin_conditions_from_compiled_code` pins it.
+/// whose builtin warns under a handler on every call stops being inlined after 16 such calls,
+/// and after 16 more on its own it recompiles with that call as tier 0's step, which signals
+/// in place. What the handler sees needs base R, so the oracle case
+/// `jit__builtin_conditions_from_compiled_code` pins it.
 #[test]
-fn a_builtin_that_warns_under_a_handler_on_every_call_is_retired() {
+fn a_builtin_that_warns_under_a_handler_on_every_call_becomes_a_step() {
     with_interpreter(|| unsafe {
         jit::install_mode(Mode::Force);
         run("count <- function(text) { parsed <- as.integer(text); if (is.na(parsed)) 0L else parsed + 1L }
@@ -1592,7 +1593,119 @@ fn a_builtin_that_warns_under_a_handler_on_every_call_is_retired() {
             left <= 48,
             "count left compiled code {left} times in 500 calls"
         );
-        assert!(!has_compiled_code("count"), "count is retired");
+        assert!(has_compiled_code("count"), "count recompiles");
+        jit::install_mode(Mode::Off);
+    });
+}
+
+/// An instruction whose native form keeps handing it to tier 0 is recompiled as tier 0's step,
+/// and the rest of the body stays compiled. `pick` reads `x[i]` natively until every call
+/// reads past the end, which only tier 0 answers; `total` does the same on every iteration of
+/// its loop, where the body's entries say nothing and the loop's index measures how close
+/// together the hand-offs are; `add` overflows on every call, which only tier 0 warns about.
+#[test]
+fn an_instruction_that_keeps_leaving_becomes_a_step() {
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Force);
+        run("x <- c(3L, 5L, 8L)
+             big <- 2147483647L
+             pick <- function(x, i) { v <- x[i]; n <- 0L; for (k in 1:2) n <- n + k; v + n }
+             total <- function(x, n) { s <- 0L; for (k in 1:n) { v <- x[k]; if (!is.na(v)) s <- s + v }; s }
+             add <- function(a, b) { s <- a + b; n <- 0L; for (k in 1:2) n <- n + k; s + n }");
+        for (warm, storm, most) in [
+            ("pick(x, 2L)", "pick(x, 9L)", 40),
+            ("total(x, 3L)", "total(x, 2000L)", 40),
+            ("add(1L, 2L)", "add(big, 1L)", 40),
+        ] {
+            let name = warm.split('(').next().unwrap_or(warm);
+            for _ in 0..5 {
+                run(warm);
+            }
+            assert!(has_compiled_code(name), "{name} compiles");
+            let before = jit::deoptimizations();
+            for _ in 0..5 {
+                run(warm);
+            }
+            assert_eq!(jit::deoptimizations(), before, "{name} stays compiled");
+
+            jit::install_mode(Mode::Off);
+            let expected = run(storm);
+            jit::install_mode(Mode::Force);
+            let before = jit::deoptimizations();
+            for _ in 0..300 {
+                assert_eq!(run(storm), expected, "{storm}");
+            }
+            let left = jit::deoptimizations() - before;
+            assert!(
+                (16..=most).contains(&left),
+                "{name} left compiled code {left} times"
+            );
+            assert!(has_compiled_code(name), "{name} recompiles");
+            assert_eq!(run(warm), {
+                jit::install_mode(Mode::Off);
+                let value = run(warm);
+                jit::install_mode(Mode::Force);
+                value
+            });
+        }
+        jit::install_mode(Mode::Off);
+    });
+}
+
+/// An instruction that has no step to fall back on and keeps leaving ends the body's compiled
+/// code: a `for` over an empty sequence binds its variable to `NULL`, which only tier 0 does.
+#[test]
+fn a_body_whose_loop_keeps_starting_empty_is_refused() {
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Force);
+        run("x <- c(3L, 5L, 8L)
+             none <- x[0L]
+             sum_of <- function(v) { s <- 0L; for (e in v) s <- s + e; s }");
+        for _ in 0..5 {
+            run("sum_of(x)");
+        }
+        assert!(has_compiled_code("sum_of"), "sum_of compiles");
+        let before = jit::deoptimizations();
+        for _ in 0..300 {
+            assert_eq!(run("sum_of(none)"), "0L");
+        }
+        let left = jit::deoptimizations() - before;
+        assert!(
+            (16..=32).contains(&left),
+            "sum_of left compiled code {left} times"
+        );
+        assert!(!has_compiled_code("sum_of"), "sum_of is refused");
+        assert_eq!(run("sum_of(x)"), "16L");
+        jit::install_mode(Mode::Off);
+    });
+}
+
+/// A hand-off that is rare among a loop's iterations keeps the instruction's native form:
+/// one read in 200 is past the end, and each of them leaves.
+#[test]
+fn a_rare_hand_off_in_a_loop_keeps_its_native_form() {
+    with_interpreter(|| unsafe {
+        jit::install_mode(Mode::Force);
+        run("x <- c(3L, 5L, 8L)
+             index <- rep(c(rep(2L, 199), 9L), 40)
+             total <- function(x, index) { s <- 0L; for (k in seq_along(index)) { v <- x[index[k]]; if (!is.na(v)) s <- s + v }; s }
+             near <- rep(2L, 50)");
+        for _ in 0..5 {
+            run("total(x, near)");
+        }
+        assert!(has_compiled_code("total"), "total compiles");
+        jit::install_mode(Mode::Off);
+        let expected = run("total(x, index)");
+        jit::install_mode(Mode::Force);
+        for _ in 0..3 {
+            let before = jit::deoptimizations();
+            assert_eq!(run("total(x, index)"), expected);
+            assert_eq!(
+                jit::deoptimizations() - before,
+                40,
+                "each read past the end leaves once"
+            );
+        }
         jit::install_mode(Mode::Off);
     });
 }
