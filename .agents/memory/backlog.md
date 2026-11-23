@@ -1586,6 +1586,12 @@ is the escaped inference variable seen from the other end.
   generator, so both read its members.
 - A stub's namespace exports hold its `@type` names beside its values, so `base::condition`
   validates as an export although `condition` is only a class.
+- An unresolved name's definition offers the default packages although their export manifests
+  rule the name out: in `if (condition) 1`, hover and go to definition list `condition` as
+  installed in base, stats, utils, methods, graphics, grDevices and datasets.
+- A project `stubs/*.Rtypes` that declares `@type X` for a namespace without an `.exports` manifest
+  does not make a bare `X` resolve as a value (`unresolved`), since `@type` names stay out of the
+  value declarations.
 
 ### Run the pinned CRAN corpus as a test, one project per package
 

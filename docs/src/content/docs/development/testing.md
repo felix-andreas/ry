@@ -455,8 +455,11 @@ must hold between answers:
   targets, and where the cursor navigates to a declaration, the hover there names the same symbol
   as the hover at the cursor.
 - **Completion offers what resolves**: at the end of a name whose hover links to a declaration,
-  completion offers that name. The position that declares the name is left out, and so is a
-  member after `$` or `@` whose receiver has no known type.
+  completion offers that name. A name is checked once per definition it resolves to, so a
+  parameter and a global of one name are both checked. The sweep skips a position that declares
+  the name, a backquoted name, a `..name`, a hover whose first label is not the cursor's name
+  (the `stats` of `stats::sd`), a member after `$` or `@` whose hover links to a stub (its
+  receiver has no known type), and a hover that links to an installed package's help page.
 - **Rename edits never overlap**, and neither do the edits of a quick fix or of "fix all".
 - **Hover and selection ranges cover the cursor**, each selection range strictly inside the next.
   An editor rejects the whole answer otherwise.
@@ -485,7 +488,7 @@ fixture and every battery of every crate tests them, at no cost in a release bui
 | --- | --- |
 | `semantics::item_spans` | an item's name range lies inside the item and spells its name |
 | `semantics::item_hir` | every expression range lies inside the item |
-| `semantics::item_naming` | every binding range lies inside the item |
+| `semantics::item_naming` | every binding range lies inside the item's expressions |
 | `ide`'s `occurrences` | the occurrences of one name are spelled alike, quoting and a `..` prefix aside |
 
 The data.table rewrites are checked once per input: they never overlap, every range lies inside
