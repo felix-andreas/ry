@@ -768,10 +768,15 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
         if name.is_empty() || !is_stub_name(name) {
             problems.push(StubProblem {
                 line,
-                message: if name.is_empty() {
-                    "expected a name before `:`".to_owned()
-                } else {
-                    format!("`{name}` is not a valid declaration name")
+                message: match name
+                    .strip_prefix('`')
+                    .and_then(|inner| inner.strip_suffix('`'))
+                {
+                    _ if name.is_empty() => "expected a name before `:`".to_owned(),
+                    Some(inner) if is_stub_name(inner) => {
+                        format!("a stub name is written without backticks, as `{inner}`")
+                    }
+                    _ => format!("`{name}` is not a valid declaration name"),
                 },
             });
             continue;
@@ -846,7 +851,7 @@ pub fn stub_source_problems(db: &dyn Db, text: &str) -> Vec<StubProblem> {
             problems.push(StubProblem {
                 line,
                 message: format!(
-                    "this declaration does not load: I do not know the type `{unknown_name}`"
+                    "this declaration does not load: I do not know the type `{unknown_name}`. A stub sees only the types stubs define, so a function over a type your R code defines is declared as an annotated function in that code"
                 ),
             });
         }

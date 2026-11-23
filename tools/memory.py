@@ -51,7 +51,9 @@ LINE_LIMITS = {
 # Area file name, title, and what belongs there. The order is the index's order.
 AREAS = [
     ("syntax-semantics", "Syntax and semantics",
-     "The parser and syntax tree, name resolution, and the type checker."),
+     "The parser and syntax tree, name resolution, stubs, and the foundations of the type system."),
+    ("type-checker", "Type checker",
+     "Type inference: overloads, narrowing, unions, nominal types, recursion and strict mode."),
     ("analysis-core", "Analysis core",
      "The analysis core's incremental structure, memory layout and cold-check cost: item identity, firewalls, tree storage, interning and per-item tables."),
     ("ide-server", "Editor and language server",
@@ -94,6 +96,140 @@ RECORD_PREFIX = "Decision record: "
 # Classification overrides by heading (after folding), for entries the keyword scores misplace or
 # score with low confidence. Pinned by reading each entry.
 OVERRIDES = {
+    '`is.null` shapes an unconstrained inference variable':
+        "type-checker",
+    'Recursion in a function-valued assignment is monomorphic':
+        "type-checker",
+    'Deep resolve cuts a cycle to `Unknown` and resolves a shared subtree once':
+        "type-checker",
+    'The interface fixpoint is canonical per group, so a cyclic scheme does not depend on forcing order':
+        "type-checker",
+    'There is no third constraint kind, so two flexible comparison operands stay unconstrained':
+        "type-checker",
+    'Union compatibility commits a flexible argument at first use, in program order':
+        "type-checker",
+    'Strict mode attributes a recursive binding the fixpoint cannot fully type':
+        "type-checker",
+    'An undeclared type name errors once at the reference and compares like `Unknown`':
+        "type-checker",
+    "A call's result drops unconstrained type-parameter members of a union":
+        "type-checker",
+    "Call checking follows R's lazy argument and matching rules":
+        "type-checker",
+    'Comparisons coerce across atomic types':
+        "type-checker",
+    'A test-guarded write to a formal normalizes it; inferred types admit the default':
+        "type-checker",
+    "An open `T | NULL` parameter binds `T` to the argument's non-`NULL` part":
+        "type-checker",
+    '`switch(typeof(x), ...)` narrows `x` per arm':
+        "type-checker",
+    'A computed function that may be `NULL` is called as the function':
+        "type-checker",
+    'A function literal in a call argument is typed in context':
+        "type-checker",
+    'Strict mode implies type errors':
+        "type-checker",
+    'An all-`Any` overload does not veto agreement among unchecked fits':
+        "type-checker",
+    'A formula is the nominal `formula`, and its operands are not judged':
+        "type-checker",
+    "`$`, `[` and `[[` dispatch to a class's subset method":
+        "type-checker",
+    'A conditional write of a formal covers the paths that run it':
+        "type-checker",
+    '`<<-` writes flow forward, and a NULL-initialized cache reads its own first write':
+        "type-checker",
+    "The overload probe's unchecked-argument witness is a nominal no candidate declares":
+        "type-checker",
+    'A call on a parameter whose arity the body tests is unchecked, and a later sibling does not force':
+        "type-checker",
+    'Strict-friction rules for matrices, unions, `...: Any` and `$` members':
+        "type-checker",
+    '`$` fields resolve through the values that built the receiver':
+        "type-checker",
+    'Inferred signatures carry body facts that a call reads':
+        "type-checker",
+    '`Reduce` folds a named function instead of matching `fn(U, T) -> U`':
+        "type-checker",
+    'An `if` with an `Any` branch is `Any`; a two-path write still unifies':
+        "type-checker",
+    '`length(x)` guards drop `NULL`':
+        "type-checker",
+    'A numeric binding yields to a matrix or a generic argument':
+        "type-checker",
+    'Alias cycles are reported at the declaration, and short names get narrow suggestions':
+        "type-checker",
+    'Overload probes reject by call shape first':
+        "type-checker",
+    '`[[` by name on a named atomic vector is the element, not `T | NULL`':
+        "type-checker",
+    'Correlated-path allowances added for the fresh sample':
+        "type-checker",
+    'Corpus false reports: the narrowing and overload rules that cleared them':
+        "type-checker",
+    '`@opaque` parameters accept ry values':
+        "type-checker",
+    'The stats d/p/q functions follow the scalar claim':
+        "type-checker",
+    "A function literal default takes its parameter's declared function type":
+        "type-checker",
+    'A type variable may be bounded by a union':
+        "type-checker",
+    'Strict mode reports where `Unknown` enters, not every type it reaches':
+        "type-checker",
+    'An all-`logical` call of a numeric function keeps `logical`':
+        "type-checker",
+    'A wrapper over a numeric overload set takes the `numeric` bound':
+        "type-checker",
+    "Branches decide each other's literal items, and `c()` decides a literal as R's type":
+        "type-checker",
+    "A loop's `break`s and `next`s join where they land":
+        "type-checker",
+    "An error against a fixed type keeps the item's export":
+        "type-checker",
+    'An annotation that misuses the type vocabulary carries no payload':
+        "type-checker",
+    'A declared type parameter keeps its name in messages':
+        "type-checker",
+    'A nominal field narrows through a fact, not a rewritten type':
+        "type-checker",
+    'A type past the size ceiling widens to `Unknown`, never to a recursive nominal':
+        "type-checker",
+    'A `logical` argument binds a numeric type parameter to `integer`':
+        "type-checker",
+    'An empty list adds no element to `c()` or a loop':
+        "type-checker",
+    "A signature's type parameters are in scope in its body":
+        "type-checker",
+    "`opaque` makes a type's representation private to its file":
+        "type-checker",
+    'Open records are explicit, with no row variables':
+        "type-checker",
+    'Recursive types are nominal; an alias never recurses':
+        "type-checker",
+    'S4 is typed through a nominal wrapper, not from `setClass`':
+        "type-checker",
+    'A typed environment lists its bindings and never changes type':
+        "type-checker",
+    'S3 subsetting dispatches on the declared class first':
+        "type-checker",
+    "A generic's dispatch formal is forced when an argument reaches it":
+        "type-checker",
+    'A nominal over a nominal extends it':
+        "type-checker",
+    '`numeric` is closed under arithmetic, `arithmetic` is not':
+        "type-checker",
+    '`new()` is checked against the slots `setClass` writes out':
+        "type-checker",
+    "`sapply`, `mapply` and `Map` take their shape from the callback's return, after the stub call":
+        "type-checker",
+    'In strict mode, a checked annotation over an `Unknown` value is reported':
+        "type-checker",
+    'An `Unknown` branch makes an `if` `Unknown`, unless it read a recursion placeholder':
+        "type-checker",
+    "A project's top-level `%op%` is checked as a call unless it quotes an operand":
+        "type-checker",
     'One source of truth for where an item spells its name':
         "analysis-core",
     'A check reads per-name firewalls, never project-wide maps':
@@ -546,6 +682,10 @@ OVERRIDES = {
 
 # Keyword weights per area. A heading hit counts HEADING_WEIGHT times a body hit.
 KEYWORDS = {
+    "type-checker": [
+        "inference", "unif", "overload", "union", "narrow", "nominal", "strict mode", "fixpoint",
+        "type parameter", "type error", "generaliz", "checker",
+    ],
     "analysis-core": [
         "salsa", "cold check", "green tree", "hir", "intern", "firewall", "arena", "memoiz",
         "item_links", "item_stamp", "tree store", "durability",

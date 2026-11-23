@@ -733,6 +733,9 @@ added 1 inferred annotation
 2 problems in 1 file
 ```
 
+To see the type of one name or expression without an editor, `ry debug type FILE:LINE:COLUMN`
+prints what the editor shows on hover there, such as `label: <T> fn(shape: T) -> Unknown`.
+
 In strict mode, the top level of a file in `R/` may only define things (functions, types, classes,
 and constants computed without side effects), so loading a package has no side effects.
 `[check] object-systems = false` also rejects new S4, R6 and Reference Classes.

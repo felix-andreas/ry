@@ -462,7 +462,29 @@ fallback <- NULL %||% 3L
 print(fallback)
 #++++
 %||%: <T> fn(a: T | NULL, [b]: T) -> T
-fallback: Unknown
+fallback: integer
+integer
+
+#---- a_project_operator_checks_its_operands_as_a_call
+#: fn(a: double, b: double) -> double
+`%plus%` <- function(a, b) a + b
+total <- 1 %plus% 2
+wrong <- 1 %plus% "a"
+print(c(total, wrong))
+#++++
+%plus%: fn(a: double, b: double) -> double
+total: double
+wrong: Unknown
+T
+109..112 error[type-mismatch] expected `double`, found `character`
+
+#---- a_project_operator_that_quotes_an_operand_stays_unchecked
+`%with%` <- function(data, code) eval(substitute(code), data)
+answer <- list(x = 1) %with% (x + "a")
+print(answer)
+#++++
+%with%: <T, U> fn(data: T, [code]: U) -> Any
+answer: Unknown
 T
 
 #---- an_operator_nothing_uses_still_warns

@@ -10507,22 +10507,23 @@ impl<'db, 'a> Checker<'db, 'a> {
         lhs: ExprId,
         rhs: ExprId,
     ) -> Option<Ty<'db>> {
-        let library = self.library?;
-        if !library.schemes.contains_key(name) {
+        let globals = self.globals?;
+        let symbol = Symbol::new(name);
+        let in_project = globals.defined_in_project(symbol, false);
+        if !in_project && !self.library?.schemes.contains_key(name) {
             return None;
         }
-        if self
-            .globals
-            .is_some_and(|globals| globals.defined_in_project(Symbol::new(name), false))
-        {
-            return None;
-        }
-        let scheme = self.globals?.scheme(Symbol::new(name), false)?;
+        let scheme = globals.scheme(symbol, false)?;
         let instantiated = self.instantiate(&scheme);
         let resolved = self.table.shallow_resolve(self.db, instantiated);
         let TyKind::Function(function) = resolved.kind(self.db) else {
             return None;
         };
+        // A project operator that captures an operand's code (`substitute(rhs)`, as magrittr's
+        // `%>%` does) is non-standard evaluation, so its operands are not ordinary arguments.
+        if in_project && !function.quoted.is_empty() {
+            return None;
+        }
         let left = self.infer(lhs);
         let right = self.infer(rhs);
         let arguments = [

@@ -2589,7 +2589,10 @@ behaves like `d + 30L`. The method name's suffix is the nominal type's name, not
 vector, so a class declared as `@type ggplot` takes `+.ggplot`, even though R registers the method
 as `+.gg`.
 
-A method is declared under the name R gives it, in a stub or an annotation, so the result stays
+A method is declared under the name R gives it, in a stub or an annotation. A stub sees only the
+types stubs define, so the methods of a type your R code defines, such as `@type Money {double}`, are
+annotated R functions beside it (`` `+.Money` <- function(e1, e2) ... `` under
+`#: fn(e1: Money, e2: Money) -> Money`). Declaring each method keeps the result
 precise for each pairing of operands: subtracting two `Date` values gives a `difftime`, and offsetting
 one by a count gives a `Date`. A class that declares an operator but has no candidate that accepts
 the operands at hand is a `type-mismatch` error rather than a fall-through to the numeric rules, just
@@ -2629,11 +2632,15 @@ has no element type to write. A nominal with no such method loses
 its class but keeps its data, as R's default `c()` does, so two values of `@type Money {double}`
 combine to `double[]`. An abstract nominal has no representation, so combining it gives `Unknown`.
 
-`a %op% b` is the call `` `%op%`(a, b) ``. A `%…%` operator that the standard-library stubs declare
-is checked and typed as that call, so `"a" %in% valid` is `logical` and `m %*% m` is a `matrix`.
-Every other `%…%` operator, including a project's own, gives `Unknown`, because a user operator may
-quote its right operand instead of evaluating it, as magrittr's `%>%` does. Using any `%…%` operator
-still counts as a read of its name, so a project's own operator is never reported as unused.
+`a %op% b` is the call `` `%op%`(a, b) ``. A `%…%` operator that the standard-library stubs declare,
+or that the project defines as a top-level function, is checked and typed as that call, so
+`"a" %in% valid` is `logical`, `m %*% m` is a `matrix`, and with
+`` `%plus%` <- function(a, b) a + b `` annotated `fn(a: double, b: double) -> double`,
+`1 %plus% "a"` is reported at `"a"`. A project operator that captures an operand's code with
+`substitute()` is non-standard evaluation, as magrittr's `%>%` is, so it gives `Unknown` and its
+operands are not judged. An operator of a package without stubs, or one defined inside a function,
+gives `Unknown` too. Using any `%…%` operator still counts as a read of its name, so a project's own
+operator is never reported as unused.
 
 ### Comparison operators
 
@@ -5363,8 +5370,8 @@ Not checked:
   follow.
 - **A placeholder local**, a variable whose only visible value is `NULL` or a bare `NA`, filled
   later by `assign()` or `<<-`, where it is passed as an argument or tested as a condition.
-- **A project's own `%op%` operators**, because one may quote its right operand, as magrittr's `%>%`
-  does.
+- **A project `%op%` operator that quotes an operand** with `substitute()`, as magrittr's `%>%`
+  does, and any `%op%` operator defined inside a function.
 
 Known bugs, where correct code is reported:
 

@@ -49,7 +49,7 @@ crates", has the shape and the measurements behind this list.
 
 ## Open: the analysis core after the type store
 
-`decisions/syntax-semantics.md` has the shape and the measurements behind this list, in "Types
+`decisions/analysis-core.md` has the shape and the measurements behind this list, in "Types
 and symbols are four-byte ids into append-only columns", "An item's syntax has a stamp, so an edit
 lowers only the items it changed" and "The analysis core's per-item and per-file tables after the
 type store".
@@ -756,7 +756,7 @@ gap, in the Limitations section of `reference/type-system.mdx`.
 - devtools `test.R` 72 and knitr `citation.R` 163: a vector of statically unknown length
   (`p[file.exists(p)]` returned through a function) reaches a stub's scalar `character` parameter.
   The value has length one at run time, but no type says so, and no sound rule can say so
-  (`decisions/syntax-semantics.md`, "Corpus false reports: the narrowing and overload rules that cleared them").
+  (`decisions/type-checker.md`, "Corpus false reports: the narrowing and overload rules that cleared them").
 
 ### Scalar-claim chains
 
@@ -2221,34 +2221,15 @@ This is the same third-constraint-kind question recorded above and in
 place of `Numeric`, replacing both the tie and the `declares_arithmetic` relaxation. The next stub
 corpus addition that returns a real nominal will trip it again.
 
-### A project's own `%op%` stays untyped by design
-
-The result is `Unknown`, which is a strict-mode origin. It may be a non-standard-evaluation wrapper
-whose right operand is quoted, as magrittr's `%>%` is, and checking that as an ordinary call would
-reject correct code.
-
-Lowering `%op%` to the call it is, following the documented `|>` precedent, would type it and give
-goto-definition and references on the operator. Weigh that against the non-standard-evaluation risk
-and the `unresolved` finding a bare-script `%>%` would gain.
-
-### Only the stub route to an operator method on a project nominal is blocked
-
-Declaring the method as an annotated R function works, and that is what an author writes anyway for
-a real S3 class. The gap is narrower than "operator methods need ergonomics". A `.Rtypes` stub
-cannot see a `@type` the R source declares, reporting instead that the declaration does not load
-because it does not know the type. So only the stub spelling is unreachable.
-
-Decide whether a stub source should see a project's `@type` declarations at all, or whether the
-R-side declaration is simply the answer and the docs should say so.
-
 ### Smaller items, each with a one-line repro in the reports
 
-- A message leaks an unbound type variable, as `list[T] | T[]`, and expands an alias on only one
-  side of an expected-and-found pair.
-- Closure re-entry is unmodelled, so the memo idiom
-  `if (!is.null(cache)) return(cache); cache <<- v` yields `T | NULL`.
-- There is no `--fix`, no stdin input, and no CLI way to ask what type an expression has, which
-  makes debugging an inference surprise guesswork for a CLI-only user.
+- A message expands an alias on only one side of an expected-and-found pair (no repro yet on a
+  valid `@alias`). A type variable in an expected type, as `Find(f, mean)` printing
+  ``expected `list[T] | T[]` ``, is kept: it says what the parameter accepts.
+- The memo idiom `if (!is.null(cache)) return(cache); cache <<- v` is precise inside a factory
+  (`fn() -> integer`), but a script's top-level `cache` written by `<<-` stays `integer | NULL`,
+  because joining would make a binding's type depend on every item that writes it.
+- There is no stdin input for `ry check`.
 
 Two items from the reports were checked and are not defects, recorded so they are not re-filed. A
 generic parameter rejecting a non-`NULL` default is correct, because `<T> fn(x: T, [fallback]: T)`

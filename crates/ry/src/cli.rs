@@ -2893,6 +2893,81 @@ pub fn ast(path: &Path) -> Result<(), CommandError> {
     Ok(())
 }
 
+/// `ry debug type FILE:LINE:COLUMN`: the editor's hover at that position, so a user with only
+/// the command line can see what the checker inferred. Typing is on whatever `ry.toml` says,
+/// because the question is about the checker's types.
+pub fn type_at(position: &str) -> Result<(), CommandError> {
+    let parsed = position.rsplitn(3, ':').collect::<Vec<_>>();
+    let [column, line, path] = parsed[..] else {
+        error(&format!("expected FILE:LINE:COLUMN, found `{position}`"));
+        return Err(CommandError);
+    };
+    let (Ok(line), Ok(column)) = (line.parse::<usize>(), column.parse::<usize>()) else {
+        error(&format!(
+            "expected a line and a column counted from 1 in `{position}`"
+        ));
+        return Err(CommandError);
+    };
+    let groups = project_groups(Some(&[PathBuf::from(path)]))?;
+    let Some((root, mut config, requested)) = groups.into_iter().next() else {
+        return Err(CommandError);
+    };
+    config.check.typing = true;
+    let analysis = analyze_project(
+        &root,
+        &root,
+        config,
+        &requested,
+        CacheUse::Off,
+        Purpose::Rewrites,
+    )?;
+    let Some(file) = analysis.files.iter().find(|file| file.requested) else {
+        error(&format!("{path} is not an R file ry analyzes"));
+        return Err(CommandError);
+    };
+    let text = analysis.source(file);
+    let index = LineIndex::new(text);
+    if line == 0 || column == 0 {
+        error("lines and columns count from 1");
+        return Err(CommandError);
+    }
+    let lines = text.lines().count();
+    if line > lines {
+        error(&format!("{path} has {lines} lines"));
+        return Err(CommandError);
+    }
+    let line = line as u32 - 1;
+    let start = index.line_start(line) as usize;
+    let line_text = &text[start..start + index.line_length(line, text) as usize];
+    let Some(byte_column) = line_text
+        .char_indices()
+        .map(|(byte, _)| byte)
+        .chain(iter::once(line_text.len()))
+        .nth(column - 1)
+    else {
+        error(&format!(
+            "line {} of {path} has {} characters",
+            line + 1,
+            line_text.chars().count()
+        ));
+        return Err(CommandError);
+    };
+    let offset = syntax::TextSize::from((start + byte_column) as u32);
+    let hover = ProjectFiles::try_get(&analysis.db)
+        .and_then(|project| ide::hover(&analysis.db, project, file.file, offset));
+    match hover {
+        Some(hover) => println!("{}", hover.lines.join("\n")),
+        None => {
+            error(&format!("no name or expression with a type at {position}"));
+            return Err(CommandError);
+        }
+    }
+    // Freeing every memo one by one costs close to a second on a large project, and the process
+    // is about to exit.
+    mem::forget(analysis);
+    Ok(())
+}
+
 /// Names features had while they were experimental. They are always on now,
 /// but editor configurations still pass them.
 const GRADUATED_EXPERIMENTAL_FEATURES: &[&str] = &["range_formatting"];

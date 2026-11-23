@@ -138,6 +138,17 @@ length : fn(x: Any) -> integer
 pi : double
 line 1: this line is not a declaration (`name : TYPE`)
 
+#---- a_backtick_quoted_name_says_to_drop_the_backticks
+`+.Money` : fn(e1: double, e2: double) -> double
+#++++
+line 0: a stub name is written without backticks, as `+.Money`
+
+#---- a_type_only_the_project_defines_is_unknown_to_a_stub
++.Money : fn(e1: Money, e2: Money) -> Money
+#++++
++.Money : fn(e1: Money, e2: Money) -> Money
+line 0: this declaration does not load: I do not know the type `Money`. A stub sees only the types stubs define, so a function over a type your R code defines is declared as an annotated function in that code
+
 #---- a_structural_representation_is_refused_and_so_is_its_use
 # The use reports too, so an author who reads only the second problem is not
 # sent to a correct line.
@@ -146,7 +157,7 @@ mk : fn() -> structural
 #++++
 mk : fn() -> structural
 line 2: this type declaration does not load: write `@alias NAME<T> {TYPE}`, `@type NAME {TYPE}` or `@type NAME<T>`
-line 3: this declaration does not load: I do not know the type `structural`
+line 3: this declaration does not load: I do not know the type `structural`. A stub sees only the types stubs define, so a function over a type your R code defines is declared as an annotated function in that code
 
 #==== purity
 #---- pure_marker_declares_the_name_pure

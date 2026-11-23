@@ -3600,10 +3600,17 @@ struct SalsaGlobals<'db, 'a> {
     /// The scheme each linked name resolved to in this check, at twice the name's position
     /// plus one for a deferred read. A body reads the same few globals many times, and
     /// resolving one reads the binder's check through salsa and copies its scheme.
-    /// with whether the read served a pending group export.
-    schemes: RefCell<Vec<Option<(Option<types::TypeScheme<'db>>, bool)>>>,
+    schemes: RefCell<Vec<Option<ResolvedScheme<'db>>>>,
     /// How many reads served a pending group export ([`MemberExports::pending`]).
     pending_reads: Cell<usize>,
+}
+
+/// A global's scheme as one check resolved it, and whether the read served a pending group
+/// export ([`MemberExports::pending`]), which a cached read must count again.
+#[derive(Clone)]
+struct ResolvedScheme<'db> {
+    scheme: Option<types::TypeScheme<'db>>,
+    pending: bool,
 }
 
 /// The type definitions a file sees, looked up one name at a time: a script's own
@@ -4092,12 +4099,12 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
             .position(name)
             .map(|position| 2 * position + usize::from(deferred));
         if let Some(slot) = slot
-            && let Some(Some((scheme, pending))) = self.schemes.borrow().get(slot)
+            && let Some(Some(resolved)) = self.schemes.borrow().get(slot)
         {
-            if *pending {
+            if resolved.pending {
                 self.pending_reads.set(self.pending_reads.get() + 1);
             }
-            return scheme.clone();
+            return resolved.scheme.clone();
         }
         let before = self.pending_reads.get();
         let scheme = self.lookup_scheme(name, deferred);
@@ -4107,7 +4114,10 @@ impl<'db> check::GlobalEnv<'db> for SalsaGlobals<'db, '_> {
                 schemes.resize(2 * self.links.name_count(), None);
             }
             if let Some(resolved) = schemes.get_mut(slot) {
-                *resolved = Some((scheme.clone(), self.pending_reads.get() != before));
+                *resolved = Some(ResolvedScheme {
+                    scheme: scheme.clone(),
+                    pending: self.pending_reads.get() != before,
+                });
             }
         }
         scheme
