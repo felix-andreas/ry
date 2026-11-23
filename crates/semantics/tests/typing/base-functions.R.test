@@ -571,3 +571,16 @@ either: fn(flag: logical) -> double | double[]
 wrap: <T> fn(x: T) -> double
 discount: fn(rates: matrix) -> matrix
 scaled: fn(x: double[]) -> double[]
+
+#---- a_logical_test_over_a_matrix_or_a_named_vector_is_a_condition
+# `is.finite(m)` keeps its logical claim, since `matrix` carries no element type, and a named
+# vector tests like an unnamed one.
+m <- matrix(c(1, Inf, 3, 4), 2)
+labels <- c(first = "a", second = NA)
+finite <- function() if (!is.finite(m[1]) || any(!is.finite(m))) 0 else 1
+absent <- function() if (is.na(labels) || TRUE) "missing" else "present"
+#++++
+m: matrix
+labels: character[named]
+finite: fn() -> double
+absent: fn() -> character

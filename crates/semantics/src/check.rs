@@ -11146,7 +11146,9 @@ impl<'db, 'a> Checker<'db, 'a> {
             | TyKind::Native(NativeScalar::Bool) => true,
             // A vector type carries no length, and the vectors code tests (`if (x >= 1)` on a
             // `double[]`) are length one at run time far more often than not.
-            TyKind::Vector(element) => self.condition_coerces(*element),
+            TyKind::Vector(element) | TyKind::NamedVector(element) => {
+                self.condition_coerces(*element)
+            }
             TyKind::Union(members) => members.iter().all(|&member| self.condition_coerces(member)),
             // A value already required to be numeric (`if (n %% 2L)`) coerces like a number.
             TyKind::Var(_) => matches!(
@@ -13001,7 +13003,14 @@ impl<'db, 'a> Checker<'db, 'a> {
         let lift = |shape: Ty<'db>| match shape.kind(self.db) {
             TyKind::Vector(_) => Some(Ty::new(self.db, TyKind::Vector(element))),
             TyKind::NamedVector(_) => Some(Ty::new(self.db, TyKind::NamedVector(element))),
-            TyKind::Named(class, _) if class.text(self.db) == "matrix" => Some(shape),
+            // `matrix` carries no element type, so a logical or text result (`is.na(m)`) keeps
+            // its scalar claim rather than becoming a matrix no condition or `!` accepts.
+            TyKind::Named(class, _)
+                if class.text(self.db) == "matrix"
+                    && matches!(element.kind(self.db), TyKind::Scalar(Atomic::Double)) =>
+            {
+                Some(shape)
+            }
             _ => None,
         };
         self.library_parameter_arguments(name.as_str(), parameters, arguments)
