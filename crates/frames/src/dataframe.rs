@@ -19,7 +19,7 @@ use {
     },
     std::{cell::Cell, ffi::c_void},
     table::{
-        Error as TableError, Schema,
+        ColumnType, Error as TableError, Schema,
         lazy::{self, How, Plan, Source, Step, Strategy},
         ops,
         polars::prelude::PlSmallStr,
@@ -40,7 +40,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".expr_format", 1, table_work!(do_format)),
     builtin(".expr_over", 2, table_work!(do_over)),
     builtin(".expr_rank", 3, table_work!(do_rank)),
-    builtin(".expr_call", 2, table_work!(do_call)),
+    builtin(".expr_call", 4, table_work!(do_call)),
     builtin(".df_select", 2, table_work!(do_select)),
     builtin(".df_with_columns", 2, table_work!(do_with_columns)),
     builtin(".df_filter", 2, table_work!(do_filter)),
@@ -58,6 +58,10 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".df_concat", 3, table_work!(do_concat)),
     builtin(".df_unique", 4, table_work!(do_unique)),
     builtin(".df_duplicated", 3, table_work!(do_duplicated)),
+    builtin(".df_drop", 2, table_work!(do_drop)),
+    builtin(".df_rename", 2, table_work!(do_rename)),
+    builtin(".df_with_row_index", 4, table_work!(do_with_row_index)),
+    builtin(".df_unpivot", 6, table_work!(do_unpivot)),
 ];
 
 /// The API, bound in the `ry` namespace and attached with the rest of `package:ry`. Each verb
@@ -86,7 +90,32 @@ Expr.if_else <- function(test, yes, no) .expr_if_else(test, yes, no)
 Expr.cor <- function(first, second) .expr_cor(first, second)
 Expr.over <- function(...) .expr_over(list(...), sys.call())
 Expr.rank <- function(expr, descending = FALSE) .expr_rank(expr, descending, sys.call())
-Expr.is_in <- function(expr, values) .expr_call("is_in", list(expr, values))
+Expr.is_in <- function(expr, values) .expr_call("is_in", list(expr, values), NULL, sys.call())
+Expr.n_unique <- function(expr) .expr_aggregate(expr, "n_unique", FALSE)
+Expr.str_contains <- function(expr, pattern, literal = FALSE) .expr_call("str_contains", list(expr, pattern), list(literal), sys.call())
+Expr.str_starts_with <- function(expr, prefix) .expr_call("str_starts_with", list(expr, prefix), NULL, sys.call())
+Expr.str_ends_with <- function(expr, suffix) .expr_call("str_ends_with", list(expr, suffix), NULL, sys.call())
+Expr.str_replace <- function(expr, pattern, replacement, literal = FALSE) {
+  .expr_call("str_replace", list(expr, pattern, replacement), list(literal), sys.call())
+}
+Expr.str_replace_all <- function(expr, pattern, replacement, literal = FALSE) {
+  .expr_call("str_replace_all", list(expr, pattern, replacement), list(literal), sys.call())
+}
+Expr.str_slice <- function(expr, start, length = NULL) .expr_call("str_slice", list(expr), list(start, length), sys.call())
+Expr.str_to_uppercase <- function(expr) .expr_call("str_to_uppercase", list(expr), NULL, sys.call())
+Expr.str_to_lowercase <- function(expr) .expr_call("str_to_lowercase", list(expr), NULL, sys.call())
+Expr.str_to_date <- function(expr, format = "%Y-%m-%d") .expr_call("str_to_date", list(expr), list(format), sys.call())
+Expr.concat_str <- function(..., separator = "") .expr_call("concat_str", list(...), list(separator), sys.call())
+Expr.dt_year <- function(expr) .expr_call("dt_year", list(expr), NULL, sys.call())
+Expr.dt_month <- function(expr) .expr_call("dt_month", list(expr), NULL, sys.call())
+Expr.dt_day <- function(expr) .expr_call("dt_day", list(expr), NULL, sys.call())
+Expr.dt_offset_by <- function(expr, by) .expr_call("dt_offset_by", list(expr), list(by), sys.call())
+Expr.dt_to_string <- function(expr, format) .expr_call("dt_to_string", list(expr), list(format), sys.call())
+Expr.fill_null <- function(expr, value) .expr_call("fill_null", list(expr, value), NULL, sys.call())
+Expr.coalesce <- function(...) .expr_call("coalesce", list(...), NULL, sys.call())
+Expr.cast <- function(expr, type) .expr_call("cast", list(expr), list(type), sys.call())
+Expr.shift <- function(expr, n = 1L) .expr_call("shift", list(expr), list(n), sys.call())
+Expr.cum_sum <- function(expr) .expr_call("cum_sum", list(expr), NULL, sys.call())
 DataFrame.height <- function(df) dim(df)[[1L]]
 DataFrame.width <- function(df) dim(df)[[2L]]
 DataFrame.columns <- function(df) names(df)
@@ -107,6 +136,12 @@ DataFrame.lazy <- function(df) .df_lazy(df)
 DataFrame.concat <- function(..., how = "vertical") .df_concat(list(...), how, sys.call())
 DataFrame.unique <- function(df, subset = NULL, keep = "first") .df_unique(df, subset, keep, sys.call())
 DataFrame.pivot <- function(df, on, index, values, agg = NULL) .df_pivot(df, on, index, values, agg, sys.call())
+DataFrame.unpivot <- function(df, on = NULL, index = NULL, variable_name = "variable", value_name = "value") {
+  .df_unpivot(df, on, index, variable_name, value_name, sys.call())
+}
+DataFrame.drop <- function(...) .df_drop(list(...), sys.call())
+DataFrame.rename <- function(...) .df_rename(list(...), sys.call())
+DataFrame.with_row_index <- function(df, name = "index", offset = 1L) .df_with_row_index(df, name, offset, sys.call())
 GroupBy.agg <- function(...) .df_agg(list(...), sys.call())
 LazyFrame.scan_csv <- function(path) .df_scan(path, "csv")
 LazyFrame.scan_parquet <- function(path) .df_scan(path, "parquet")
@@ -121,6 +156,10 @@ LazyFrame.join <- DataFrame.join
 LazyFrame.join_asof <- DataFrame.join_asof
 LazyFrame.pivot <- DataFrame.pivot
 LazyFrame.unique <- DataFrame.unique
+LazyFrame.unpivot <- DataFrame.unpivot
+LazyFrame.drop <- DataFrame.drop
+LazyFrame.rename <- DataFrame.rename
+LazyFrame.with_row_index <- DataFrame.with_row_index
 LazyFrame.collect <- function(lf) .df_collect(lf, sys.call())
 LazyFrame.explain <- function(lf) {
   plan <- .df_explain(lf, sys.call())
@@ -421,6 +460,7 @@ unsafe fn do_aggregate(call: &Call<'_>) -> R<Sexp> {
         "std" => Aggregate::Sd,
         "var" => Aggregate::Var,
         "count" => Aggregate::Count,
+        "n_unique" => Aggregate::NUnique,
         other => {
             return Err(error_in(
                 call.call,
@@ -500,14 +540,81 @@ unsafe fn do_over(call: &Call<'_>) -> R<Sexp> {
     }))
 }
 
-/// `.expr_call(function, arguments)`: a row-wise [`Function`] of expressions and vectors.
+/// `.expr_call(function, arguments, options, call)`: a [`Function`] of expressions and vectors,
+/// with its options as R values in the order the `Expr` function takes them.
 unsafe fn do_call(call: &Call<'_>) -> R<Sexp> {
+    let caller = call.arg(3);
     let name = values::require_str(call.arg(0), "function")?;
+    let options = call.arg(2);
+    let option = |index: usize| {
+        if index < length(options) {
+            options.element(index)
+        } else {
+            nil()
+        }
+    };
+    let text = |index: usize, what: &str| -> R<PlSmallStr> {
+        Ok(values::require_str(option(index), what)?.as_ref().into())
+    };
     let function = match name.as_ref() {
         "is_in" => Function::IsIn,
+        "str_contains" => Function::Contains {
+            literal: values::require_flag(option(0), "literal")?,
+        },
+        "str_starts_with" => Function::StartsWith,
+        "str_ends_with" => Function::EndsWith,
+        "str_replace" | "str_replace_all" => Function::Replace {
+            all: name == "str_replace_all",
+            literal: values::require_flag(option(0), "literal")?,
+        },
+        "str_slice" => {
+            let length = match is_nil(option(1)) {
+                true => None,
+                false => Some(u64::try_from(whole(option(1), "length", caller)?).map_err(
+                    |_| error_in(caller, "`length` must be a count of characters, 0 or more"),
+                )?),
+            };
+            Function::Slice {
+                start: whole(option(0), "start", caller)?,
+                length,
+            }
+        }
+        "str_to_uppercase" => Function::Uppercase,
+        "str_to_lowercase" => Function::Lowercase,
+        "str_to_date" => Function::ToDate {
+            format: text(0, "format")?,
+        },
+        "concat_str" => Function::ConcatStr {
+            separator: text(0, "separator")?,
+        },
+        "dt_year" => Function::Year,
+        "dt_month" => Function::Month,
+        "dt_day" => Function::Day,
+        "dt_offset_by" => Function::OffsetBy { by: text(0, "by")? },
+        "dt_to_string" => Function::Format {
+            format: text(0, "format")?,
+        },
+        "fill_null" => Function::FillNull,
+        "coalesce" => Function::Coalesce,
+        "cast" => {
+            let target = text(0, "type")?;
+            match ColumnType::from_cast_name(&target) {
+                Some(kind) if kind != ColumnType::Datetime => Function::Cast(kind),
+                _ => {
+                    return Err(error_in(
+                        caller,
+                        format!(
+                            "`type` is \"logical\", \"integer\", \"double\", \"character\", \"factor\" or \"Date\", not \"{target}\""
+                        ),
+                    ));
+                }
+            }
+        }
+        "shift" => Function::Shift(whole(option(0), "n", caller)?),
+        "cum_sum" => Function::CumSum,
         other => {
             return Err(error_in(
-                call.call,
+                caller,
                 format!("no expression function `{other}`"),
             ));
         }
@@ -516,7 +623,7 @@ unsafe fn do_call(call: &Call<'_>) -> R<Sexp> {
     // `x %in% NULL` is `FALSE` for every value of `x`, `NA` included; `is.na(x) & FALSE` keeps
     // `x`'s name for the result.
     if function == Function::IsIn && length(list) == 2 && is_nil(list.element(1)) {
-        let x = operand(list.element(0), call.call)?;
+        let x = operand(list.element(0), caller)?;
         return expr(Expr::Binary(
             BinaryOp::And,
             Box::new(Expr::Unary(UnaryOp::IsNa, Box::new(x))),
@@ -525,9 +632,23 @@ unsafe fn do_call(call: &Call<'_>) -> R<Sexp> {
     }
     let mut arguments = Vec::with_capacity(length(list));
     for index in 0..length(list) {
-        arguments.push(operand(list.element(index), call.call)?);
+        arguments.push(operand(list.element(index), caller)?);
     }
     expr(Expr::Call(function, arguments))
+}
+
+/// A whole number option, such as `shift`'s `n`.
+unsafe fn whole(value: Sexp, what: &str, call: Sexp) -> R<i64> {
+    let number = match value.kind() {
+        SexpType::Integer | SexpType::Real if length(value) == 1 => {
+            values::as_real_scalar_warning(value)?
+        }
+        _ => f64::NAN,
+    };
+    if !number.is_finite() || number.fract() != 0.0 || number.abs() > f64::from(i32::MAX) {
+        return Err(error_in(call, format!("`{what}` must be a whole number")));
+    }
+    Ok(number as i64)
 }
 
 unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
@@ -743,6 +864,214 @@ unsafe fn do_duplicated(call: &Call<'_>) -> R<Sexp> {
         *slot = i32::from(flag);
     }
     Ok(vector)
+}
+
+/// `.df_drop(list(df, ...), call)`: every column but the named ones, which must exist.
+unsafe fn do_drop(call: &Call<'_>) -> R<Sexp> {
+    let caller = call.arg(1);
+    let list = call.arg(0);
+    let (plan, lazy, schema) = verb_frame(list, "drop", caller)?;
+    let mut dropped: Vec<PlSmallStr> = Vec::new();
+    for index in 1..length(list) {
+        let item = list.element(index);
+        if item.kind() != SexpType::String {
+            return Err(error_in(
+                caller,
+                format!("`drop` takes column names, not {}", describe(item)),
+            ));
+        }
+        for name in values::strings(item) {
+            let Some(name) = name else {
+                return Err(error_in(caller, "`drop` names a column `NA`"));
+            };
+            let name = PlSmallStr::from(name);
+            if schema.column(&name).is_none() {
+                return Err(table_error(
+                    caller,
+                    TableError::NoColumn(name.to_string()),
+                    Some(&schema),
+                ));
+            }
+            dropped.push(name);
+        }
+    }
+    let kept = schema
+        .names()
+        .into_iter()
+        .filter(|name| !dropped.contains(name))
+        .map(|name| (name.clone(), Expr::Column(name.clone())))
+        .collect();
+    finish(plan.with(Step::Select(kept)), lazy, caller)
+}
+
+/// `.df_rename(list(df, new = "old", ...), call)`: the columns in place, each `old` one named
+/// `new`, as `select` reads `new = "old"`.
+unsafe fn do_rename(call: &Call<'_>) -> R<Sexp> {
+    let caller = call.arg(1);
+    let list = call.arg(0);
+    let (plan, lazy, schema) = verb_frame(list, "rename", caller)?;
+    let names = values::names(list);
+    let mut renames: Vec<(PlSmallStr, PlSmallStr)> = Vec::new();
+    for index in 1..length(list) {
+        let item = list.element(index);
+        let new = match is_nil(names) {
+            true => None,
+            false => values::string_at(names, index).filter(|name| !name.is_empty()),
+        };
+        let old = match item.kind() {
+            SexpType::String if length(item) == 1 => values::string_at(item, 0),
+            _ => None,
+        };
+        let (Some(new), Some(old)) = (new, old) else {
+            return Err(error_in(
+                caller,
+                "`rename` takes each new name with the column it renames, as `new = \"old\"`",
+            ));
+        };
+        let old = PlSmallStr::from(old.as_ref());
+        if schema.column(&old).is_none() {
+            return Err(table_error(
+                caller,
+                TableError::NoColumn(old.to_string()),
+                Some(&schema),
+            ));
+        }
+        if renames.iter().any(|(earlier, _)| *earlier == old) {
+            return Err(error_in(caller, format!("`rename` renames `{old}` twice")));
+        }
+        renames.push((old, new.as_ref().into()));
+    }
+    let mut columns: Vec<(PlSmallStr, Expr)> = Vec::with_capacity(schema.columns.len());
+    for (name, _) in &schema.columns {
+        let output = renames
+            .iter()
+            .find(|(old, _)| old == name)
+            .map_or_else(|| name.clone(), |(_, new)| new.clone());
+        if columns.iter().any(|(taken, _)| *taken == output) {
+            return Err(error_in(
+                caller,
+                format!("`rename` gives two columns the name `{output}`"),
+            ));
+        }
+        columns.push((output, Expr::Column(name.clone())));
+    }
+    finish(plan.with(Step::Select(columns)), lazy, caller)
+}
+
+/// `.df_with_row_index(df, name, offset, call)`: a first column numbering the rows from `offset`.
+unsafe fn do_with_row_index(call: &Call<'_>) -> R<Sexp> {
+    let caller = call.arg(3);
+    let (plan, lazy) = plan_of(call.arg(0), caller)?;
+    let name = PlSmallStr::from(values::require_str(call.arg(1), "name")?.as_ref());
+    let offset = whole(call.arg(2), "offset", caller)?;
+    let schema = plan
+        .schema()
+        .map_err(|failure| table_error(caller, failure, plan.valid_schema().as_ref()))?;
+    if schema.column(&name).is_some() {
+        return Err(error_in(
+            caller,
+            format!("the frame already has a column `{name}`; pass another `name`"),
+        ));
+    }
+    let mut columns = Vec::with_capacity(schema.columns.len() + 1);
+    columns.push((name, Expr::Call(Function::RowIndex(offset), Vec::new())));
+    columns.extend(
+        schema
+            .columns
+            .iter()
+            .map(|(name, _)| (name.clone(), Expr::Column(name.clone()))),
+    );
+    finish(plan.with(Step::Select(columns)), lazy, caller)
+}
+
+/// `.df_unpivot(df, on, index, variable_name, value_name, call)`: wide to long, as data.table's
+/// `melt` reshapes. `on` defaults to every column outside `index`. A LazyFrame is collected first,
+/// and the result stays lazy.
+unsafe fn do_unpivot(call: &Call<'_>) -> R<Sexp> {
+    let caller = call.arg(5);
+    let (table, lazy) = materialized(call.arg(0), caller)?;
+    let schema = table.schema();
+    let column_names = |value: Sexp, what: &str| -> R<Option<Vec<String>>> {
+        if is_nil(value) {
+            return Ok(None);
+        }
+        if value.kind() != SexpType::String {
+            return Err(error_in(
+                caller,
+                format!("`{what}` names columns, as `{what} = c(\"a\", \"b\")`"),
+            ));
+        }
+        let mut names = Vec::with_capacity(length(value));
+        for name in values::strings(value) {
+            let Some(name) = name else {
+                return Err(error_in(caller, format!("`{what}` names a column `NA`")));
+            };
+            names.push(name);
+        }
+        Ok(Some(names))
+    };
+    let index = column_names(call.arg(2), "index")?.unwrap_or_default();
+    let on = match column_names(call.arg(1), "on")? {
+        Some(on) => on,
+        None => schema
+            .names()
+            .into_iter()
+            .filter(|name| !index.iter().any(|kept| kept == name.as_str()))
+            .map(|name| name.to_string())
+            .collect(),
+    };
+    let variable = values::require_str(call.arg(3), "variable_name")?;
+    let value = values::require_str(call.arg(4), "value_name")?;
+    let index: Vec<&str> = index.iter().map(String::as_str).collect();
+    let on: Vec<&str> = on.iter().map(String::as_str).collect();
+    let executed = ops::melt(&table, &index, &on, &variable, &value)
+        .map_err(|failure| table_error(caller, failure, Some(&schema)))?;
+    raise(&executed.warnings, caller)?;
+    let Output::Table(result) = executed.output else {
+        return Err(error_in(caller, "`unpivot` gave no table"));
+    };
+    match lazy {
+        true => wrap(Object::Lazy(Plan::new(Source::Table(result)))),
+        false => frame::wrap(result),
+    }
+}
+
+/// The table a verb that needs the data works on: a DataFrame's own, or a LazyFrame's, collected.
+unsafe fn materialized(value: Sexp, caller: Sexp) -> R<(table::Table, bool)> {
+    match object_of(value) {
+        Some(Object::Lazy(plan)) => {
+            let schema = plan.valid_schema();
+            let collected = lazy::collect(plan.clone())
+                .map_err(|failure| table_error(caller, failure, schema.as_ref()))?;
+            raise(&collected.warnings, caller)?;
+            Ok((collected.table, true))
+        }
+        _ if is_frame(value) => Ok((table_of(value)?.fork(), false)),
+        _ => Err(error_in(
+            caller,
+            format!(
+                "expected a DataFrame or a LazyFrame, got {}",
+                describe(value)
+            ),
+        )),
+    }
+}
+
+/// The frame a column verb's `...` starts with, as its plan and its schema.
+unsafe fn verb_frame(list: Sexp, verb: &str, caller: Sexp) -> R<(Plan, bool, Schema)> {
+    let names = values::names(list);
+    let named = !is_nil(names) && values::string_at(names, 0).is_some_and(|name| !name.is_empty());
+    if length(list) == 0 || named {
+        return Err(error_in(
+            caller,
+            format!("`{verb}` takes the frame as its first argument, without a name"),
+        ));
+    }
+    let (plan, lazy) = plan_of(list.element(0), caller)?;
+    let schema = plan
+        .schema()
+        .map_err(|failure| table_error(caller, failure, plan.valid_schema().as_ref()))?;
+    Ok((plan, lazy, schema))
 }
 
 /// Wraps an extended plan: a `LazyFrame` stays lazy, and a `DataFrame`'s one-step plan runs now.
@@ -1117,25 +1446,7 @@ unsafe fn do_explain(call: &Call<'_>) -> R<Sexp> {
 /// on the data.
 unsafe fn do_pivot(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(5);
-    let table = match object_of(call.arg(0)) {
-        Some(Object::Lazy(plan)) => {
-            let schema = plan.valid_schema();
-            let collected = lazy::collect(plan.clone())
-                .map_err(|failure| table_error(caller, failure, schema.as_ref()))?;
-            raise(&collected.warnings, caller)?;
-            collected.table
-        }
-        _ if is_frame(call.arg(0)) => table_of(call.arg(0))?.fork(),
-        _ => {
-            return Err(error_in(
-                caller,
-                format!(
-                    "expected a DataFrame or a LazyFrame, got {}",
-                    describe(call.arg(0))
-                ),
-            ));
-        }
-    };
+    let (table, _) = materialized(call.arg(0), caller)?;
     let on = values::require_str(call.arg(1), "on")?;
     let index = call.arg(2);
     if index.kind() != SexpType::String || length(index) == 0 {

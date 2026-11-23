@@ -3768,6 +3768,32 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "`{argument}` is read as a column, not as the table: a named argument here is a column, which must be `{}`. Pass the table first, without a name",
             renderer.render(db, *expected)
         ),
+        TypeErrorKind::DuplicateColumn { column, verb } => match *verb {
+            "rename" => format!("`rename` gives two columns the name `{column}`"),
+            _ => format!("the frame already has a column `{column}`; pass another `name`"),
+        },
+        TypeErrorKind::UnsupportedCast { from, to } => format!(
+            "`Expr.cast` cannot convert `{}` to `{to}`",
+            renderer.render(db, *from)
+        ),
+        TypeErrorKind::InvalidDuration {
+            text,
+            part_of_day: true,
+        } => format!(
+            "`Expr.dt_offset_by` moves a `Date` by whole days, weeks, months or years, not \"{text}\""
+        ),
+        TypeErrorKind::InvalidDuration { text, .. } => format!(
+            "`Expr.dt_offset_by` takes a duration such as \"1mo\" or \"-2d\", not \"{text}\""
+        ),
+        TypeErrorKind::FilledTypesDiffer {
+            function,
+            first,
+            second,
+        } => format!(
+            "`{function}` fills `{}` values only from values of the same type, not from `{}`",
+            renderer.render(db, *first),
+            renderer.render(db, *second)
+        ),
         TypeErrorKind::NotAnAggregation { column } => format!(
             "`{column}` gives one value per row, but `agg` needs one value per group. Aggregate it, for example with `Expr.sum` or `Expr.first`"
         ),
@@ -3784,6 +3810,9 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 ExpressionNeeds::Numbers => "needs numbers",
                 ExpressionNeeds::LogicalOrNumbers => "needs logical values or numbers",
                 ExpressionNeeds::Logical => "needs a `logical` test",
+                ExpressionNeeds::Text => "needs text",
+                ExpressionNeeds::Temporal => "needs a `Date` or `POSIXct`",
+                ExpressionNeeds::Summable => "needs numbers",
             };
             let subject = match column {
                 Some(column) => format!("the column `{column}`"),

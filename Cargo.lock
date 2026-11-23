@@ -4709,6 +4709,7 @@ dependencies = [
  "polars-buffer",
  "polars-core",
  "rayon",
+ "regex",
  "rustc-hash",
  "ryu",
  "sniff",
