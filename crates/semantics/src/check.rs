@@ -18404,13 +18404,80 @@ impl<'db, 'a> Checker<'db, 'a> {
     ) -> bool {
         let expected = self.table.resolve(self.db, expected_parameter);
         let actual = self.table.resolve(self.db, actual_argument);
-        let (TyKind::Function(expected_callback), TyKind::Function(actual_callback)) =
-            (expected.kind(self.db), actual.kind(self.db))
-        else {
+        let TyKind::Function(expected_callback) = expected.kind(self.db) else {
             return false;
         };
+        // A local holding one of several functions forwards to whichever one it holds, so
+        // each takes the call with a return of its own, and their join is the result.
+        let members: Vec<&FunctionType<'db>> = match actual.kind(self.db) {
+            TyKind::Function(function) => vec![function],
+            TyKind::Union(members) => {
+                let functions: Vec<&FunctionType<'db>> = members
+                    .iter()
+                    .filter_map(|member| match member.kind(self.db) {
+                        TyKind::Function(function) => Some(*function),
+                        _ => None,
+                    })
+                    .collect();
+                if functions.len() != members.len() {
+                    return false;
+                }
+                functions
+            }
+            _ => return false,
+        };
         let snapshot = self.table.snapshot();
-        let verdict = 'probe: {
+        let verdict = if let [function] = members.as_slice() {
+            self.forwarded_call_fits(
+                expected_callback,
+                function,
+                expected_callback.ret,
+                forwarded_argument_indexes,
+                arguments,
+                callback_range,
+            )
+        } else {
+            let mut returns = Vec::with_capacity(members.len());
+            let mut fits = true;
+            for function in members {
+                let ret = self.fresh(Constraint::Unconstrained);
+                if !self.forwarded_call_fits(
+                    expected_callback,
+                    function,
+                    ret,
+                    forwarded_argument_indexes,
+                    arguments,
+                    callback_range,
+                ) {
+                    fits = false;
+                    break;
+                }
+                returns.push(self.table.resolve(self.db, ret));
+            }
+            fits && {
+                let joined = union_of(self.db, returns);
+                self.table
+                    .compatible(self.db, joined, expected_callback.ret)
+            }
+        };
+        if !verdict {
+            self.table.rollback(snapshot);
+        }
+        verdict
+    }
+
+    /// Whether `actual_callback`, called as the apply family calls it with the forwarded
+    /// arguments, takes `expected_callback`'s elements and returns what fits `ret`.
+    fn forwarded_call_fits(
+        &mut self,
+        expected_callback: &FunctionType<'db>,
+        actual_callback: &FunctionType<'db>,
+        ret: Ty<'db>,
+        forwarded_argument_indexes: &[usize],
+        arguments: &[CallArgument<'db>],
+        callback_range: TextRange,
+    ) -> bool {
+        'probe: {
             let mut open_positionals = actual_callback.positional.to_vec();
             let mut open_named = actual_callback.named.to_vec();
             let mut pre_rest_open = match &actual_callback.variadic {
@@ -18506,14 +18573,8 @@ impl<'db, 'a> Checker<'db, 'a> {
 
             open_positionals.is_empty()
                 && open_named.iter().all(|field| field.optional)
-                && self
-                    .table
-                    .compatible(self.db, actual_callback.ret, expected_callback.ret)
-        };
-        if !verdict {
-            self.table.rollback(snapshot);
+                && self.table.compatible(self.db, actual_callback.ret, ret)
         }
-        verdict
     }
 
     /// Whether `expected` is an open type variable that only a number fits, or a vector of

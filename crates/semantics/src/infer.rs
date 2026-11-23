@@ -899,6 +899,42 @@ impl<'db> InferenceTable<'db> {
         self.compatible_probe(db, actual, expected, 0)
     }
 
+    /// Whether each function of a union fits `target` with its own return, and the join
+    /// of those returns fits the target's return. Leaves no binding behind on failure.
+    fn function_union_fits(
+        &mut self,
+        db: &'db dyn Db,
+        members: &[Ty<'db>],
+        target: &FunctionType<'db>,
+        depth: usize,
+    ) -> bool {
+        let snapshot = self.snapshot();
+        let mut returns = Vec::with_capacity(members.len());
+        for &member in members {
+            let ret = self.fresh_ty(db, Constraint::Unconstrained);
+            let each = Ty::new(
+                db,
+                TyKind::Function(&FunctionType {
+                    ret,
+                    ..target.clone()
+                }),
+            );
+            if !self.compatible_probe(db, member, each, depth + 1) {
+                self.rollback(snapshot);
+                return false;
+            }
+            returns.push(ret);
+        }
+        let resolved: Vec<Ty<'db>> = returns.iter().map(|&ret| self.resolve(db, ret)).collect();
+        let joined = union_of(db, resolved);
+        if self.compatible_probe(db, joined, target.ret, depth + 1) {
+            true
+        } else {
+            self.rollback(snapshot);
+            false
+        }
+    }
+
     fn compatible_probe(
         &mut self,
         db: &'db dyn Db,
@@ -1238,30 +1274,15 @@ impl<'db> InferenceTable<'db> {
             // A union of functions fits a function target when each member does, and the
             // call returns whichever member ran: `F <- if (wrap) function(i) list(i) else
             // function(i) i + 1` maps with `lapply(n, F)` to `list{T} | double` elements.
+            // When the joined return does not fit (a member returning `Any` where the target
+            // returns a number), each member fits the target as it is, below.
             (TyKind::Union(members), TyKind::Function(target))
                 if members
                     .iter()
-                    .all(|member| matches!(member.kind(db), TyKind::Function(_))) =>
+                    .all(|member| matches!(member.kind(db), TyKind::Function(_)))
+                    && self.function_union_fits(db, members, target, depth) =>
             {
-                let mut returns = Vec::with_capacity(members.len());
-                for &member in members.iter() {
-                    let ret = self.fresh_ty(db, Constraint::Unconstrained);
-                    let each = Ty::new(
-                        db,
-                        TyKind::Function(&FunctionType {
-                            ret,
-                            ..(*target).clone()
-                        }),
-                    );
-                    if !self.compatible_probe(db, member, each, depth + 1) {
-                        return false;
-                    }
-                    returns.push(ret);
-                }
-                let resolved: Vec<Ty<'db>> =
-                    returns.iter().map(|&ret| self.resolve(db, ret)).collect();
-                let joined = union_of(db, resolved);
-                self.compatible_probe(db, joined, target.ret, depth + 1)
+                true
             }
             (TyKind::Union(members), _) => {
                 if members

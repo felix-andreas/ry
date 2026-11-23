@@ -571,8 +571,13 @@ build: <T> fn(plot: T) -> Unknown
 #---- a_formula_compares_by_its_text
 # R deparses language objects before comparing them, as ape's `formula(object) == ~1` relies on.
 intercept_only <- function(model) formula(model) == ~1
+cor_matrix <- function(object) {
+  if (formula(object) == ~1) return(1)
+  2
+}
 #++++
 intercept_only: <T> fn(model: T) -> logical
+cor_matrix: <T> fn(object: T) -> double
 
 #---- a_reduce_callback_may_return_either_operand
 bind_pair <- function(x, y) {

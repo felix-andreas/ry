@@ -815,6 +815,27 @@ f <- function(wrap) {
 #++++
 f: fn(wrap: logical) -> list[list{integer} | double]
 
+#---- a_local_holding_one_of_two_functions_takes_forwarded_arguments
+# `lapply(x, update, new = NULL)` calls whichever function `update` holds with the extra
+# argument, as it would call either one alone.
+up_a <- function(geom, new) list(geom, new)
+up_b <- function(stat, new) list(stat, new)
+both <- function(type, names) {
+  update <- switch(type, geom = up_a, up_b)
+  lapply(names, update, new = NULL)
+}
+apply_at <- function(func, x, ...) func(x, ...)
+pick <- function(type, object) {
+  if (type == "a") f <- function(x, model, ...) x else f <- function(x, model, table) x
+  apply_at(func = f, x = 1, model = object)
+}
+#++++
+up_a: <T, U> fn(geom: T, new: U) -> list{T, U}
+up_b: <T, U> fn(stat: T, new: U) -> list{T, U}
+both: <T> fn(type: T, names: Unknown) -> Unknown
+apply_at: <T, U> fn(func: fn(T, ...: Any) -> U, x: T, ...: Any) -> U
+pick: <T, U> fn(type: T, object: U) -> double
+
 #---- a_list_of_functions_maps
 # Every member of the element union must serve the callback interface; the
 # stdlib reductions do, despite their optional parameters.
