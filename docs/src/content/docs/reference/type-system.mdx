@@ -1896,7 +1896,9 @@ branch may also end in `return(value)`, and the flag may instead guard an earlie
 `if (flag) return(value)` with no `else`, whose return is then the true branch and the rest of the
 body the false one, provided those `return()` calls are the body's only early returns. The guard may
 be a block that ends in `return(value)`, and the flag may be negated, so `if (!verbose) { ...;
-return(TRUE) }` makes the block the false branch. A call that leaves the flag out, or passes a literal, selects one branch,
+return(TRUE) }` makes the block the false branch. Several such guards of the same flag all
+return the same branch, so `if (both) return(a)` early and `if (both) return(b)` later join `a`
+and `b` as the true branch. A call that leaves the flag out, or passes a literal, selects one branch,
 so it returns that branch's type alone:
 
 ```r
@@ -4063,7 +4065,8 @@ Definite assignment follows four rules:
   binds `limit <- "all"`. A function outside does not join: a local variable that shares a
   function's name, such as `if (trace) t2 <- proc.time()` in a package that also defines a
   function `t2`, is a different thing that happens to have the same name, so the read types as the
-  local writes alone. A path that skips every write and reaches the function is not reported. The finding is off by default; turn it on with
+  local writes alone. A path that skips every write and reaches the function is reported with
+  the same finding, which names the function. The finding is off by default; turn it on with
   `[check] maybe-undefined = true`. Two conditions that always agree at run time are still two
   branches to the checker, so `if (ok) v <- …` followed by `if (ok) use(v)` is reported, although it
   is safe.

@@ -741,9 +741,9 @@ fast_svd <- function(m, tol) {
 pseudoinverse <- function(m, tol) fast_svd(m, tol)
 inverse <- function(m) pseudoinverse(m)
 #++++
-fast_svd: <T, U> fn(m: T, [tol]: U) -> list{T, Unknown}
-pseudoinverse: <T, U> fn(m: T, [tol]: U) -> list{T, Unknown}
-inverse: <T> fn(m: T) -> list{T, Unknown}
+fast_svd: <T, U> fn(m: T, [tol]: U) -> list{T, U}
+pseudoinverse: <T, U> fn(m: T, [tol]: U) -> list{T, U}
+inverse: <T, U> fn(m: T) -> list{T, U}
 
 #---- forwarding_a_formal_to_a_required_parameter_still_requires_it
 scale_by <- function(m, factor) m * factor
@@ -1593,6 +1593,21 @@ why <- function(x) valid(x, verbose = TRUE)
 valid: <T> fn(x: Unknown, [verbose]: T) -> logical | character[]
 use: <T> fn(x: T) -> double
 why: <T> fn(x: T) -> logical | character[]
+
+#---- a_second_guard_of_the_same_flag_selects_the_same_returns
+lookup <- function(table, key, both = FALSE) {
+  row <- match(key, names(table))
+  if (both) return(list(row = row, value = NA))
+  value <- as.numeric(table[[row]])
+  if (both) return(list(row = row, value = value))
+  value
+}
+first <- function(table) lookup(table, "a") + 1
+pair <- function(table) lookup(table, "a", both = TRUE)$row
+#++++
+lookup: <T, U, V> fn(table: T, key: U, [both]: V) -> list{row: integer, value: logical} | list{row: integer, value: double} | double
+first: <T> fn(table: T) -> double
+pair: <T> fn(table: T) -> integer
 
 #---- the_other_branch_of_a_flag_default_is_still_checked
 p_dist <- function(q, valueOnly = TRUE) {

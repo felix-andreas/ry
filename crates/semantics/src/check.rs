@@ -496,6 +496,10 @@ pub struct ItemCheck<'db> {
     /// Reads inside a `data.table` bracket's index arguments: they evaluate in the
     /// data's own frame, so bare names are columns and skip the unresolved-name check.
     pub masked_reads: SortedSet<ExprId>,
+    /// Reads of a local that some path reaches unassigned, where R finds a function of the same
+    /// name instead (`if (trace) t <- 5; t + 1` reads base `t`). The read is typed as the local
+    /// alone, and the opt-in `maybe-undefined` rule reports it.
+    pub function_fallback_reads: SortedSet<ExprId>,
     /// Bare names inside a query on a frame with known columns that name no column and
     /// no lexical binding. Reported only when nothing else (a global, a builtin) defines
     /// the name, because R falls back to the enclosing scope for a non-column.
@@ -907,6 +911,7 @@ fn check_item_in<'db>(
         selected_overloads: Column::new_in(arena, expressions),
         callee_targets: Column::new_in(arena, expressions),
         masked_reads: Bitset::new_in(arena, expressions),
+        function_fallback_reads: Bitset::new_in(arena, expressions),
         undecided_calls: Bitset::new_in(arena, expressions),
         unseen_frames: 0,
         column_scopes: Vec::new(),
@@ -940,7 +945,7 @@ fn check_item_in<'db>(
         no_default_formals: Bitset::new_in(arena, bindings),
         defaulted_formals: Bitset::new_in(arena, bindings),
         value_defaulted_formals: Bitset::new_in(arena, bindings),
-        missing_path_functions: Bitset::new_in(arena, bindings),
+        missing_path_defaults: Bitset::new_in(arena, bindings),
         non_local_slots: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
         string_values: Column::new_in(arena, bindings),
         value_read_slots: None,
@@ -1412,6 +1417,7 @@ fn check_item_in<'db>(
         scheme,
         editor,
         masked_reads: context.masked_reads.iter().collect(),
+        function_fallback_reads: context.function_fallback_reads.iter().collect(),
         column_misses: context.column_misses.drain().collect(),
         top_level_bindings: ThinVec::from(top_level_bindings),
     }
@@ -1794,6 +1800,7 @@ struct Checker<'db, 'a> {
     selected_overloads: Column<'a, ExprId, usize>,
     callee_targets: Column<'a, ExprId, CalleeTarget>,
     masked_reads: Bitset<'a, ExprId>,
+    function_fallback_reads: Bitset<'a, ExprId>,
     /// Library calls whose untyped arguments left the candidates disagreeing.
     undecided_calls: Bitset<'a, ExprId>,
     /// How many enclosing `[` index a value that may be a data.table of unknown columns.
@@ -1872,9 +1879,9 @@ struct Checker<'db, 'a> {
     /// Formals whose default is a string, number or logical literal: R's call lookup skips
     /// such a value, so `cor = "cor"` and a call `cor(x, y)` reach `stats::cor`.
     value_defaulted_formals: Bitset<'a, BindingId>,
-    /// Formals given a function on their `missing()` path, which the branch join reads as a
+    /// Formals given a value on their `missing()` path, which the branch join reads as a
     /// default rather than a rewrite.
-    missing_path_functions: Bitset<'a, BindingId>,
+    missing_path_defaults: Bitset<'a, BindingId>,
     /// Slots for names this item reads but another item binds, so guard refinements live
     /// in the environment like any slot's. Ids are minted above naming's so they never collide.
     non_local_slots: ArenaMap<'a, Symbol, BindingId>,
@@ -5314,14 +5321,16 @@ impl<'db, 'a> Checker<'db, 'a> {
             self.instantiate(&scheme)
         };
         // A function under a local variable, as base's `max` under `max <- 3` or a package's
-        // `t2` under `if (trace) t2 <- proc.time()`, is left out: a variable named like a
-        // function is the common case, a read guarded like its write never reaches the
-        // function. A read that does reach it goes unreported (`backlog.md`, "A local
-        // variable named like a function").
+        // `t2` under `if (trace) t2 <- proc.time()`, is left out of the type: a variable named
+        // like a function is the common case, and a read guarded like its write never reaches
+        // the function. The opt-in `maybe-undefined` rule reports the read instead.
         let function = matches!(
             self.table.resolve(self.db, ty).kind(self.db),
             TyKind::Function(_)
         );
+        if function {
+            self.function_fallback_reads.insert(id);
+        }
         (!function).then_some(ty)
     }
 
@@ -5757,10 +5766,10 @@ impl<'db, 'a> Checker<'db, 'a> {
                 } else {
                     // Let-polymorphism: only function values generalize.
                     let resolved = self.table.shallow_resolve(self.db, value_ty);
+                    if matches!(self.environment.get(slot), Some(EnvEntry::MissingFormal(_))) {
+                        self.missing_path_defaults.insert(slot);
+                    }
                     if matches!(resolved.kind(self.db), TyKind::Function(_)) {
-                        if matches!(self.environment.get(slot), Some(EnvEntry::MissingFormal(_))) {
-                            self.missing_path_functions.insert(slot);
-                        }
                         let scheme = self.generalize(value_ty);
                         let index = self.scheme_arena.len() as u32;
                         self.scheme_arena.push(scheme);
@@ -12372,26 +12381,38 @@ impl<'db, 'a> Checker<'db, 'a> {
                 (name, negated, then_ty, else_ty)
             }
             _ => {
-                let (condition, guard) = statements[..statements.len().saturating_sub(1)]
+                let guards: SmallVec<[(Symbol, bool, ExprId); 2]> = statements
+                    [..statements.len().saturating_sub(1)]
                     .iter()
-                    .find_map(|&statement| match module.kind(strip(statement)) {
+                    .filter_map(|&statement| match module.kind(strip(statement)) {
                         ExpressionKind::If {
                             condition,
                             then_branch,
                             else_branch: None,
-                        } if flag(*condition).is_some() && returned(*then_branch).is_some() => {
-                            Some((*condition, *then_branch))
+                        } if returned(*then_branch).is_some() => {
+                            let (name, negated) = flag(*condition)?;
+                            Some((name, negated, *then_branch))
                         }
                         _ => None,
-                    })?;
-                let (name, negated) = flag(condition)?;
-                // Every early return is the guard's or the tail's own `return(value)`.
-                let guard_range = module.range(guard);
+                    })
+                    .collect();
+                let &(name, negated, guard) = guards.first()?;
+                // Every early return is under a guard of this flag (a second guard of the same
+                // flag returns the same branch) or the tail's own `return(value)`.
+                let guard_ranges: SmallVec<[TextRange; 2]> = guards
+                    .iter()
+                    .filter(|&&(other, other_negated, _)| other == name && other_negated == negated)
+                    .map(|&(_, _, branch)| module.range(branch))
+                    .collect();
                 let tail_range = module.range(tail);
                 let (guarded, rest): (Vec<EarlyReturn<'db>>, Vec<EarlyReturn<'db>>) = early_returns
                     .iter()
                     .copied()
-                    .partition(|early| guard_range.contains_range(early.range));
+                    .partition(|early| {
+                        guard_ranges
+                            .iter()
+                            .any(|range| range.contains_range(early.range))
+                    });
                 if rest
                     .iter()
                     .any(|early| !tail_range.contains_range(early.range))
@@ -22192,6 +22213,20 @@ impl<'db, 'a> Checker<'db, 'a> {
             };
             let joined = match (current, branch_entry) {
                 (Some(entry), Some(_)) if same_resolved => Some(entry),
+                // `if (missing(tol)) tol <- 1e-8` supplies a default, so the formal keeps its
+                // open type and a later `m * tol` bounds what callers pass.
+                (Some(EnvEntry::Mono(a)), Some(EnvEntry::Mono(b)))
+                    if a != b && self.missing_path_defaults.contains(slot) =>
+                {
+                    self.missing_path_defaults.remove(slot);
+                    let formal = [a, b]
+                        .into_iter()
+                        .find(|&ty| self.is_open_formal(slot, ty));
+                    Some(EnvEntry::Mono(match formal {
+                        Some(formal) => formal,
+                        None => self.join_written_values(a, b),
+                    }))
+                }
                 (Some(EnvEntry::Mono(a)), Some(EnvEntry::Mono(b))) if a != b => {
                     self.default_join_literals(a, b);
                     let unknown_side = [a, b].into_iter().any(|ty| {
@@ -22216,7 +22251,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 // literal's parameters do not pin to the first call's arguments.
                 (Some(EnvEntry::Mono(formal)), Some(EnvEntry::Scheme(_)))
                 | (Some(EnvEntry::Scheme(_)), Some(EnvEntry::Mono(formal)))
-                    if self.missing_path_functions.remove(slot)
+                    if self.missing_path_defaults.remove(slot)
                         && self.is_open_formal(slot, formal) =>
                 {
                     Some(EnvEntry::Mono(formal))
