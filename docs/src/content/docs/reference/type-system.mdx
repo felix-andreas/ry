@@ -1948,10 +1948,12 @@ Defaults are type-checked, and they interact with the parameter's type in four w
 - A default that names a function the checker has no type for, such as `timefun = bit::repeat.time`
   in a package it cannot read, makes the parameter's own type open, so calling it with any
   arguments checks.
-- A function written to a formal on its `missing()` path, as in
-  `if (missing(col.fun)) col.fun <- function(n) rep("a", n)`, types like the same function given as
-  the default: it fills in for an omitted argument and does not rewrite a supplied one. A function
-  written on any other path is a rewrite, so later calls meet both values.
+- A value written to a formal on its `missing()` path types like the same value given as the
+  default: it fills in for an omitted argument and does not rewrite a supplied one. So after
+  `if (missing(tol)) tol <- 1e-8`, `m * tol` bounds what a caller passes as `tol`, and a call that
+  omits `tol` sees `double`. A function written there, as in
+  `if (missing(col.fun)) col.fun <- function(n) rep("a", n)`, is a default the same way. A value
+  written on any other path is a rewrite, so later uses meet both values.
 
 An `if` without `else` that writes a formal under a test reading that same formal *normalizes* the
 input, as in `if (is.logical(type)) type <- if (type) "q" else "m"` or
@@ -3490,8 +3492,11 @@ exceptions and additions:
   or tested with `missing()` in the callee's body. A missing formal passed on does not take the
   callee's default, so in `table_of <- function(x, format) pick_format(format)`, `format` is
   optional when `pick_format <- function(format = NULL)` tests `missing(format)`, and required when
-  `pick_format` never tests it. As for a formal's own `missing()` test, the order of the test and
-  the reads is not checked.
+  `pick_format` never tests it. A caller that omits such an optional formal sees the type of the
+  callee's default, whether declared or written on its `missing()` path, so
+  `inverse <- function(m) pseudoinverse(m)` over `pseudoinverse <- function(m, tol) fast_svd(m, tol)`
+  returns `tol` as `double`. As for a formal's own `missing()` test, the order of the test and the
+  reads is not checked.
 - Passing the formal bare to a function read from a field or a list element, as in
   `dist$quantile(p, parms)` or `handlers[[1]](p, parms)`, does not force it, because the checker
   cannot see what that function reads.

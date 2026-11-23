@@ -776,14 +776,6 @@ false (7 per 100,000 lines). Remaining false classes, largest first:
 - One or two each in about 25 packages (gt formatter callbacks, reticulate's conda paths, forecast,
   igraph, sandwich, spatstat's missing `f`, lavaan, pROC, boot).
 
-### Other open checker items found on the corpus
-
-- **`m * tol` after `if (missing(tol)) tol <- 1e-8` leaves both parameters unbounded**, so
-  `fast_svd("a", 1)` is not reported (missed error). The join of an open parameter and a value
-  written on one path is `Unknown` (`join_written_values`), so that `omega <- omega + m %*% m` on
-  one path leaves a caller free to pass a plain vector. Keeping `U | double` instead would bound
-  `U` by the later use; it needs a rule for which uses of a joined parameter bound it.
-
 ## Open: where findings point, and what the type system still refuses
 
 Three simulated users probed the type checker itself rather than package coverage, working from the

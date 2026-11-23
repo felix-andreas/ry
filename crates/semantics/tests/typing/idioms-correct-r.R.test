@@ -743,7 +743,29 @@ inverse <- function(m) pseudoinverse(m)
 #++++
 fast_svd: <T, U> fn(m: T, [tol]: U) -> list{T, U}
 pseudoinverse: <T, U> fn(m: T, [tol]: U) -> list{T, U}
-inverse: <T, U> fn(m: T) -> list{T, U}
+inverse: <T> fn(m: T) -> list{T, double}
+
+#---- a_value_written_on_the_missing_path_is_a_default
+# `if (missing(tol)) tol <- 1e-8` is a default written in the body: `tol` keeps its parameter
+# type, so `m * tol` bounds what a caller passes, and a call that omits it gets `double`.
+scale_by <- function(m, tol) {
+  if (missing(tol)) tol <- 1e-8
+  m * tol
+}
+pair <- function(m, tol) {
+  if (missing(tol)) tol <- 1e-8
+  list(m, tol)
+}
+fine <- function() scale_by(2, 1)
+omitted <- function(m) pair(m)
+broken <- function() scale_by("a", 1)
+#++++
+scale_by: <T: numeric> fn(m: T, [tol]: T) -> T
+pair: <T, U> fn(m: T, [tol]: U) -> list{T, U}
+fine: fn() -> double
+omitted: <T> fn(m: T) -> list{T, double}
+broken: Unknown
+430..433 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
 
 #---- forwarding_a_formal_to_a_required_parameter_still_requires_it
 scale_by <- function(m, factor) m * factor

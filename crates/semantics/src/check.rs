@@ -946,6 +946,7 @@ fn check_item_in<'db>(
         defaulted_formals: Bitset::new_in(arena, bindings),
         value_defaulted_formals: Bitset::new_in(arena, bindings),
         missing_path_defaults: Bitset::new_in(arena, bindings),
+        missing_path_values: Vec::new(),
         non_local_slots: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
         string_values: Column::new_in(arena, bindings),
         value_read_slots: None,
@@ -1882,6 +1883,9 @@ struct Checker<'db, 'a> {
     /// Formals given a value on their `missing()` path, which the branch join reads as a
     /// default rather than a rewrite.
     missing_path_defaults: Bitset<'a, BindingId>,
+    /// The values written on those paths, which become the parameter's default type, so a
+    /// call that omits the argument gets the written value as a default would give it.
+    missing_path_values: Vec<(BindingId, Ty<'db>)>,
     /// Slots for names this item reads but another item binds, so guard refinements live
     /// in the environment like any slot's. Ids are minted above naming's so they never collide.
     non_local_slots: ArenaMap<'a, Symbol, BindingId>,
@@ -4421,6 +4425,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 let mut probed = FxHashSet::default();
                 self.collect_type_probed(*body, &mut probed);
                 let mut named = Vec::new();
+                let mut formal_slots: SmallVec<[Option<BindingId>; 4]> = SmallVec::new();
                 let mut variadic = None;
                 for parameter in &module[parameters] {
                     if parameter.name == "..." {
@@ -4456,6 +4461,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         .iter()
                         .find(|(_, info)| info.range == parameter.range)
                         .map(|(id, _)| *id);
+                    formal_slots.push(formal_slot);
                     if let Some(slot) = formal_slot {
                         self.environment.set(slot, EnvEntry::Mono(parameter_ty));
                         self.computed_slots.insert(slot);
@@ -4498,6 +4504,20 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .pop()
                     .expect("return frames stay balanced around body inference");
                 let return_ty = self.join_early_returns(&early_returns, trailing_ty, *body);
+                for (parameter, slot) in named.iter_mut().zip(&formal_slots) {
+                    if parameter.default.is_some() || !parameter.optional {
+                        continue;
+                    }
+                    let writes: SmallVec<[Ty<'db>; 2]> = self
+                        .missing_path_values
+                        .iter()
+                        .filter(|(written_slot, _)| Some(*written_slot) == *slot)
+                        .map(|&(_, ty)| ty)
+                        .collect();
+                    parameter.default = writes
+                        .into_iter()
+                        .reduce(|a, b| self.join_written_values(a, b));
+                }
                 let default_reads = self.default_reads(&module[parameters], &uses, &named);
                 let flag_return = self.flag_return(&module[parameters], *body, &early_returns);
                 let null_unless =
@@ -5768,6 +5788,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                     let resolved = self.table.shallow_resolve(self.db, value_ty);
                     if matches!(self.environment.get(slot), Some(EnvEntry::MissingFormal(_))) {
                         self.missing_path_defaults.insert(slot);
+                        // A function's own variables generalize at the write, not with the
+                        // signature, so only a plain value becomes the parameter's default.
+                        if !matches!(resolved.kind(self.db), TyKind::Function(_)) {
+                            self.missing_path_values.push((slot, value_ty));
+                        }
                     }
                     if matches!(resolved.kind(self.db), TyKind::Function(_)) {
                         let scheme = self.generalize(value_ty);
@@ -12405,10 +12430,8 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .map(|&(_, _, branch)| module.range(branch))
                     .collect();
                 let tail_range = module.range(tail);
-                let (guarded, rest): (Vec<EarlyReturn<'db>>, Vec<EarlyReturn<'db>>) = early_returns
-                    .iter()
-                    .copied()
-                    .partition(|early| {
+                let (guarded, rest): (Vec<EarlyReturn<'db>>, Vec<EarlyReturn<'db>>) =
+                    early_returns.iter().copied().partition(|early| {
                         guard_ranges
                             .iter()
                             .any(|range| range.contains_range(early.range))
@@ -18217,6 +18240,24 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
         }
 
+        // `fast_svd(m, tol)` hands a missing `tol` on, and R's `missing(tol)` in the callee
+        // sees it, so the callee's default is the forwarding formal's default too.
+        for (argument, target) in arguments.iter().zip(targets) {
+            let Some(ArgumentTarget::Named(formal)) = target else {
+                continue;
+            };
+            let Some(default) = function.named.get(*formal).and_then(|field| field.default) else {
+                continue;
+            };
+            if let Some(value) = argument.value
+                && let ExpressionKind::NameRef(_) = self.module.kind(value)
+                && let Some(&slot) = self.naming.resolutions.get(&value)
+                && self.no_default_formals.contains(slot)
+            {
+                self.missing_path_values.push((slot, default));
+            }
+        }
+
         // An omitted formal holds its default's type on this call; left free it would be
         // `Any` and silence every downstream check. Skipped when `...` is forwarded, since
         // the formal may arrive through the dots.
@@ -22219,9 +22260,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     if a != b && self.missing_path_defaults.contains(slot) =>
                 {
                     self.missing_path_defaults.remove(slot);
-                    let formal = [a, b]
-                        .into_iter()
-                        .find(|&ty| self.is_open_formal(slot, ty));
+                    let formal = [a, b].into_iter().find(|&ty| self.is_open_formal(slot, ty));
                     Some(EnvEntry::Mono(match formal {
                         Some(formal) => formal,
                         None => self.join_written_values(a, b),
