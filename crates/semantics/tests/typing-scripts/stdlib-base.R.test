@@ -778,9 +778,10 @@ integer[]
 #==== ifelse
 #---- the_result_is_either_branch_in_the_shape_of_the_test
 # R takes each element's type from the branch the test selects, so the result is the union
-# of the branches, and a bare `NA` fits either one. A scalar test gives a scalar. A test that
-# may carry attributes (a matrix keeps its `dim`) and a branch that is not a plain atomic vector
-# (a factor becomes its codes) give `Any`.
+# of the branches, and a bare `NA` fits either one. A test made of literals gives a scalar. A
+# test that may carry attributes (a matrix keeps its `dim`, and a comparison on one types as a
+# scalar) and a branch that is not a plain atomic vector (a factor becomes its codes) give `Any`.
+m <- matrix(1:4, 2)
 ifelse(TRUE, 1L, 2L)
 ifelse(c(TRUE, FALSE), 1L, 2.5)
 ifelse(c(TRUE, FALSE), "yes", NA)
@@ -789,8 +790,14 @@ ifelse(c(TRUE, FALSE), NA, NA)
 ifelse(c(TRUE, FALSE), factor("a"), "b")
 ifelse(NA, "a", "b")
 ifelse(matrix(TRUE), 1, 0)
-ifelse(matrix(1:4, 2) > 0, 1, 0)
+ifelse(m > 0, 1, 0)
+ifelse(!(m > 0), 1, 0)
+ifelse(m > 0 & TRUE, 1, 0)
+ifelse(is.na(m), 1, 0)
+positive <- m > 0
+ifelse(positive, 1, 0)
 #++++
+m: matrix
 integer
 integer[] | double[]
 character[]
@@ -799,6 +806,11 @@ Any
 Any
 character
 Any
+Any
+Any
+Any
+Any
+positive: logical
 Any
 
 #==== declared_in_base

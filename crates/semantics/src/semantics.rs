@@ -3365,7 +3365,7 @@ pub fn scc_exports<'db>(
             if round >= WIDENING_ROUND
                 && let Some(previous) = previous
                 && widening != Some(Widening::Everything)
-                && exports_grew(db, previous, &widen(db, next.clone(), widening))
+                && exports_grew(db, previous, &widen(db, next.clone(), widening), widening)
             {
                 let wider = match widening {
                     None => Widening::Result,
@@ -3431,14 +3431,16 @@ fn widen<'db>(
 /// Whether an export of `next` is larger than the same export of `previous` that was already a
 /// type of its own. A finite type can arrive late, after several back edges, and arriving from
 /// the seed's `Unknown` is not growth; a type that nests the group's own results grows from one
-/// built type to a larger one every round.
+/// built type to a larger one every round. A function's result is measured until it is widened,
+/// and the whole function, parameters included, after.
 fn exports_grew<'db>(
     db: &'db dyn Db,
     previous: &MemberExports<'db>,
     next: &MemberExports<'db>,
+    widening: Option<Widening>,
 ) -> bool {
-    let surface = |ty: types::Ty<'db>| match ty.kind(db) {
-        types::TyKind::Function(function) => function.ret,
+    let surface = |ty: types::Ty<'db>| match (widening, ty.kind(db)) {
+        (None, types::TyKind::Function(function)) => function.ret,
         _ => ty,
     };
     let grew = |previous: types::Ty<'db>, next: types::Ty<'db>| {

@@ -751,6 +751,7 @@ struct RecordedTypes<'db> {
 struct Probe {
     table: Snapshot,
     records: usize,
+    expectations: usize,
 }
 
 impl<'db> RecordedTypes<'db> {
@@ -974,6 +975,7 @@ fn check_item_in<'db>(
         },
         recorded_patterns: Column::new_in(arena, module.pattern_count()),
         recorded_expectations: Column::new_in(arena, expressions),
+        expectation_undo: Vec::new(),
         recorded_loop_variables: Column::new_in(arena, expressions),
         root_binders: FxHashMap::default(),
         selected_overloads: Column::new_in(arena, expressions),
@@ -1982,6 +1984,8 @@ struct Checker<'db, 'a> {
     recorded: RecordedTypes<'db>,
     recorded_patterns: Column<'a, PatId, Ty<'db>>,
     recorded_expectations: Column<'a, ExprId, Ty<'db>>,
+    /// The expectations an overload probe overwrote, restored when it is rolled back.
+    expectation_undo: Vec<(ExprId, Option<Ty<'db>>)>,
     recorded_loop_variables: Column<'a, ExprId, Ty<'db>>,
     /// The variables the item's own generalization turned into binders, so a local the
     /// signature's `T` types reads as that `T` in the editor rather than as a fresh variable.
@@ -3538,6 +3542,19 @@ fn is_number_value(module: &Module, id: ExprId) -> bool {
 
 /// Whether `id` is a logical expression of literals alone: `TRUE`, `!`, `&&` and `||` over such
 /// expressions, or a comparison of number literals or literal arithmetic.
+/// Whether `id` is a literal, or operators and parentheses over literals alone.
+fn made_of_literals(module: &Module, id: ExprId) -> bool {
+    match module.kind(id) {
+        ExpressionKind::Literal(_) => true,
+        ExpressionKind::Paren(inner) => made_of_literals(module, *inner),
+        ExpressionKind::Unary { operand, .. } => made_of_literals(module, *operand),
+        ExpressionKind::Binary { lhs, rhs, .. } => {
+            made_of_literals(module, *lhs) && made_of_literals(module, *rhs)
+        }
+        _ => false,
+    }
+}
+
 fn is_literal_logic(module: &Module, id: ExprId) -> bool {
     match module.kind(id) {
         ExpressionKind::Paren(inner) => is_literal_logic(module, *inner),
@@ -4058,10 +4075,16 @@ impl<'db, 'a> Checker<'db, 'a> {
             module.kind(inner),
             ExpressionKind::Record(_) | ExpressionKind::Tuple(_) | ExpressionKind::Tag { .. }
         );
-        if is_literal {
-            self.recorded_expectations.insert(inner, expected);
+        let key = if is_literal {
+            inner
         } else if inner != value {
-            self.recorded_expectations.insert(value, expected);
+            value
+        } else {
+            return;
+        };
+        let previous = self.recorded_expectations.insert(key, expected);
+        if self.recorded.probes > 0 {
+            self.expectation_undo.push((key, previous));
         }
     }
 
@@ -14637,6 +14660,13 @@ impl<'db, 'a> Checker<'db, 'a> {
             TyKind::Union(members) => members,
             _ => &single,
         };
+        // A member that is itself a frame of unknown columns (`Rows | DataFrame`) admits it.
+        if members.iter().any(|&member| {
+            matches!(self.structural(member).kind(db), TyKind::Frame(_, None))
+                && self.table.compatible(db, found, member)
+        }) {
+            return;
+        }
         let Some(column) =
             members
                 .iter()
@@ -15970,32 +16000,10 @@ impl<'db, 'a> Checker<'db, 'a> {
         let matched = match_formals(self.module, arguments, &["test", "yes", "no"]);
         let test = matched[0]?;
         let scalar_test = match self.structural(*self.recorded.get(&test)?).kind(db) {
-            // A comparison on anything but scalars and plain vectors types as a scalar
-            // (`Compare.matrix`), so a scalar test is a scalar only over scalar operands, a
-            // vector over vector operands or ones of unknown shape, and undetermined over a
-            // matrix.
-            TyKind::Scalar(_) => {
-                let operands: SmallVec<[ExprId; 2]> = match module.kind(test) {
-                    ExpressionKind::Unary { operand, .. } => smallvec![*operand],
-                    ExpressionKind::Binary { lhs, rhs, .. } => smallvec![*lhs, *rhs],
-                    _ => SmallVec::new(),
-                };
-                let mut scalar = true;
-                for operand in operands {
-                    let ty = *self.recorded.get(&operand)?;
-                    match self.structural(ty).kind(db) {
-                        TyKind::Scalar(_) => {}
-                        TyKind::Vector(element)
-                            if matches!(element.kind(db), TyKind::Scalar(_)) =>
-                        {
-                            scalar = false;
-                        }
-                        TyKind::Unknown | TyKind::Any | TyKind::Var(_) => scalar = false,
-                        _ => return None,
-                    }
-                }
-                scalar
-            }
+            // A comparison on a matrix, and `is.na` of one, type as a scalar (`Compare.matrix`),
+            // and any value may hold such a test, so a scalar test is a scalar only when it is
+            // made of literals.
+            TyKind::Scalar(_) if made_of_literals(module, test) => true,
             TyKind::Vector(element) if matches!(element.kind(db), TyKind::Scalar(_)) => false,
             TyKind::Unknown | TyKind::Any | TyKind::Var(_) => false,
             _ => return None,
@@ -16794,7 +16802,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
 
         // Arguments infer once, before any probe: the probe snapshot does not reverse
-        // environment or recorded-type writes.
+        // environment writes.
         let callees = self.hinting_callees(schemes, arguments);
         let mut call_arguments = self.infer_call_arguments_against(range, arguments, &callees);
         self.resolve_match_fun_arguments(callee, &mut call_arguments);
@@ -17072,13 +17080,22 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         // An undecided literal (`List.to_r([1, 2])`) takes the candidate its default picks, as
         // the same literal bound to a variable first would, rather than the one leaving it open.
-        let literal_defaults = self.literal_defaults(&caller_entries);
+        // Any other caller variable must stay open, as the free fit would leave it.
+        let literal_defaults = if fits.len() > 1 {
+            self.literal_defaults(&caller_entries)
+        } else {
+            Vec::new()
+        };
         let literal_fit = literal_defaults.iter().any(Option::is_some).then(|| {
             fits.iter().find(|(_, _, narrowing)| {
                 narrowing
                     .iter()
                     .zip(&literal_defaults)
-                    .all(|(&narrowed, default)| default.is_none_or(|default| narrowed == default))
+                    .zip(&caller_entries)
+                    .all(|((&narrowed, default), &(var, _))| match default {
+                        Some(default) => narrowed == *default,
+                        None => narrowed == Ty::new(self.db, TyKind::Var(var)),
+                    })
             })
         });
         let winner = literal_fit
@@ -17424,25 +17441,31 @@ impl<'db, 'a> Checker<'db, 'a> {
         Probe {
             table: self.table.snapshot(),
             records: self.recorded.undo.len(),
+            expectations: self.expectation_undo.len(),
         }
     }
 
-    /// Ends a probe, undoing what it did to the table and the recorded types unless `keep`.
+    /// Ends a probe, undoing what it did to the table, the recorded types and the recorded
+    /// expectations unless `keep`.
     fn end_probe(&mut self, probe: Probe, keep: bool) {
         if !keep {
             self.table.rollback(probe.table);
-            while self.recorded.undo.len() > probe.records {
-                let Some((id, previous)) = self.recorded.undo.pop() else {
-                    break;
-                };
+            for (id, previous) in self.recorded.undo.drain(probe.records..).rev() {
                 if let Some(slot) = self.recorded.types.get_mut(id.index()) {
                     *slot = previous;
                 }
+            }
+            for (id, previous) in self.expectation_undo.drain(probe.expectations..).rev() {
+                match previous {
+                    Some(ty) => self.recorded_expectations.insert(id, ty),
+                    None => self.recorded_expectations.remove(id),
+                };
             }
         }
         self.recorded.probes -= 1;
         if self.recorded.probes == 0 {
             self.recorded.undo.clear();
+            self.expectation_undo.clear();
         }
     }
 

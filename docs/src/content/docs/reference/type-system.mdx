@@ -2160,10 +2160,11 @@ expected a function that takes `double`, found `double`
 `list[Any]` when the return is undetermined.
 
 `ifelse(test, yes, no)` takes the shape of `test` and is either branch's type, so
-`ifelse(x > 0, 1L, 2.5)` is `integer[] | double[]` and `ifelse(TRUE, 1L, 2L)` is `integer`. A bare
-`NA` fits the other branch, so `ifelse(x > 0, "positive", NA)` is `character[]`. A branch that is
-not a plain vector, such as a factor, whose class `ifelse` drops, gives `Any`, and so does a test on
-a matrix, whose result keeps the matrix's dimensions.
+`ifelse(x > 0, 1L, 2.5)` is `integer[] | double[]` for a vector `x`, and `ifelse(TRUE, 1L, 2L)`, whose
+test is made of literals, is `integer`. A bare `NA` fits the other branch, so
+`ifelse(x > 0, "positive", NA)` is `character[]`. A branch that is not a plain vector, such as a
+factor, whose class `ifelse` drops, gives `Any`, and so does any other test that types as a scalar,
+because a comparison on a matrix types as one and the result keeps the matrix's dimensions.
 
 The base functions that take a function argument and resolve it with `match.fun` (`lapply`,
 `sapply`, `vapply`, `mapply`, `Map`, `Filter`, `Find`, `Position`, `Reduce`, `do.call`, `outer`,
