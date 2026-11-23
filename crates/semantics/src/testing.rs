@@ -5,13 +5,14 @@ use {
     crate::{
         ANALYSIS_STACK_SIZE, AnalysisSettings, DataFiles, Db, DocumentKind, ItemKind, ProjectFiles,
         RootDatabase, SourceFile, TreeStore, binds_only_own_name,
-        diagnostics::{TypeRenderer, file_diagnostics, strict_diagnostics},
+        diagnostics::{TypeRenderer, file_diagnostics, nearest_name, strict_diagnostics},
         hir::{ExprId, PatId, Symbol},
         item_check, item_hir, item_naming, item_node, item_syntax, item_tree,
         lints::{LintConfig, LintLevel, NameStyle, lint_file},
         naming::BindingKind,
         stubs::{
-            StubSources, install_shipped_stubs, shipped_stub_sources, stub_source_problems, stubs,
+            StubSources, install_shipped_stubs, shipped_export_manifests, shipped_stub_sources,
+            stub_source_problems, stubs,
         },
         test_document_kind,
     },
@@ -22,7 +23,7 @@ use {
         collections::{BTreeMap, BTreeSet},
         env,
         io::{self, Write as _},
-        mem,
+        iter, mem,
         ops::Bound,
         panic,
         process::Command,
@@ -797,6 +798,11 @@ pub fn generate_session(rng: &mut dyn Entropy, pool: &[String]) -> Vec<ProjectSt
 pub struct MetamorphicCoverage {
     pub leading_trivia: bool,
     pub rename: bool,
+    /// The rename was free: the new name may differ in length, first letter and script, and
+    /// some occurrences may be backquoted.
+    pub free_rename: bool,
+    /// The renamed identifier occurs in a finding of the unedited project.
+    pub rename_in_finding: bool,
 }
 
 /// Checks two edits that change no meaning against the rendering of `state` on the
@@ -804,8 +810,13 @@ pub struct MetamorphicCoverage {
 ///
 /// - A blank line or a comment line inserted before a top-level expression moves the findings
 ///   after it by its length and changes nothing else.
-/// - Renaming every occurrence of an identifier the project alone spells, to a fresh name of
-///   the same length and character classes, changes nothing but that name in the findings.
+/// - Renaming every occurrence of one to three identifiers the project alone spells changes
+///   nothing but those names and the ranges after them ([`compare_renamed`]). Half the
+///   renames keep each name's length and character classes; the other half pick free
+///   snake_case names, which may be longer or shorter, start with another letter, hold
+///   non-ASCII letters, and be backquoted at some occurrences. Each name is drawn, three times
+///   in four, from those that occur in a finding. A name near another in spelling is never
+///   renamed or picked, because a typo check reports or suggests by that distance.
 pub fn check_metamorphic_relations(
     workbench: &mut Workbench,
     state: &ProjectState,
@@ -813,9 +824,13 @@ pub fn check_metamorphic_relations(
 ) -> MetamorphicCoverage {
     let db = &mut workbench.reference;
     let original = render_afresh(db, state);
+    let leading_trivia = check_leading_trivia(db, state, &original, rng);
+    let rename = check_consistent_rename(db, state, &original, rng);
     MetamorphicCoverage {
-        leading_trivia: check_leading_trivia(db, state, &original, rng),
-        rename: check_consistent_rename(db, state, &original, rng),
+        leading_trivia,
+        rename: rename.is_some(),
+        free_rename: rename.is_some_and(|(free, _)| free),
+        rename_in_finding: rename.is_some_and(|(_, in_finding)| in_finding),
     }
 }
 
@@ -872,26 +887,46 @@ fn check_leading_trivia(
 /// Moves every finding of a [`render_semantics`] rendering that lies at or after `offset` by
 /// `length` bytes; a finding that spans `offset` grows by it.
 fn shift_ranges(rendering: &str, offset: usize, length: usize) -> String {
-    let mut shifted = String::with_capacity(rendering.len());
+    map_ranges(
+        rendering,
+        |start| match start >= offset {
+            true => start + length,
+            false => start,
+        },
+        |end| match end > offset {
+            true => end + length,
+            false => end,
+        },
+    )
+}
+
+/// Rewrites the range of every finding of a [`render_semantics`] rendering, its start through
+/// `start` and its end through `end`, and keeps every other line.
+fn map_ranges(
+    rendering: &str,
+    start: impl Fn(usize) -> usize,
+    end: impl Fn(usize) -> usize,
+) -> String {
+    let mut mapped = String::with_capacity(rendering.len());
     for line in rendering.split_inclusive('\n') {
-        let finding = line.split_once(' ').and_then(|(range, rest)| {
-            let (start, end) = range.split_once("..")?;
-            let start: usize = start.parse().ok()?;
-            let end: usize = end.parse().ok()?;
-            rest.starts_with('[').then_some((start, end, rest))
-        });
-        let Some((start, end, rest)) = finding else {
-            shifted.push_str(line);
-            continue;
-        };
-        let (start, end) = match start >= offset {
-            true => (start + length, end + length),
-            false if end > offset => (start, end + length),
-            false => (start, end),
-        };
-        shifted.push_str(&format!("{start}..{end} {rest}"));
+        match finding_range(line) {
+            Some((from, to, rest)) => {
+                mapped.push_str(&format!("{}..{} {rest}", start(from), end(to)));
+            }
+            None => mapped.push_str(line),
+        }
     }
-    shifted
+    mapped
+}
+
+/// The range of a finding line of a [`render_semantics`] rendering and the rest of the line,
+/// or `None` for a line that is not a finding.
+fn finding_range(line: &str) -> Option<(usize, usize, &str)> {
+    let (range, rest) = line.split_once(' ')?;
+    let (start, end) = range.split_once("..")?;
+    let start: usize = start.parse().ok()?;
+    let end: usize = end.parse().ok()?;
+    rest.starts_with('[').then_some((start, end, rest))
 }
 
 /// Whether an identifier names something outside the project, which a rename of the
@@ -936,6 +971,28 @@ fn names_foreign(token: &SyntaxToken) -> bool {
         || (member && stub_words().contains(token.text()))
 }
 
+/// Every name a shipped stub declares or an export manifest lists.
+fn package_names() -> &'static FxHashSet<String> {
+    static NAMES: LazyLock<FxHashSet<String>> = LazyLock::new(|| {
+        let declared = shipped_stub_sources().into_iter().flat_map(|(_, text)| {
+            text.lines()
+                .filter_map(|line| Some(line.split_once(" : ")?.0.trim().trim_matches('`')))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        });
+        let listed = shipped_export_manifests()
+            .into_iter()
+            .flat_map(|(_, text)| {
+                text.lines()
+                    .filter(|line| !line.starts_with('#'))
+                    .map(|line| line.trim().to_owned())
+                    .collect::<Vec<_>>()
+            });
+        declared.chain(listed).collect()
+    });
+    &NAMES
+}
+
 /// Every word the shipped stubs spell, which includes each parameter and field name they
 /// declare.
 fn stub_words() -> &'static FxHashSet<String> {
@@ -953,12 +1010,103 @@ fn stub_words() -> &'static FxHashSet<String> {
     &WORDS
 }
 
+/// Identifiers renamed throughout a project, as [`compare_renamed`] reads it.
+#[derive(Clone, Debug)]
+pub struct Rename {
+    /// Each renamed identifier and its new name as a finding spells it, without backquotes.
+    /// No name contains another of the list.
+    pub names: Vec<(String, String)>,
+    /// Per file, the byte range of each renamed occurrence before the rename and its length
+    /// after it, in file order.
+    pub occurrences: Vec<Vec<(usize, usize, usize)>>,
+}
+
+/// Whether the renderings of a project after `rename` say what the renderings before it say,
+/// file by file: the multiset of lines of each file must be equal once every finding of the
+/// unedited rendering moves to where the rename puts its range and the new name is spelled
+/// back as the old one. A finding's place in the rendering is left out of the comparison.
+pub fn compare_renamed(
+    rename: &Rename,
+    original: &[String],
+    renamed: &[String],
+) -> Result<(), String> {
+    if original.len() != renamed.len() || original.len() != rename.occurrences.len() {
+        return Err(format!(
+            "{} renderings before the rename, {} after it and {} files renamed",
+            original.len(),
+            renamed.len(),
+            rename.occurrences.len()
+        ));
+    }
+    let mut differences = String::new();
+    for (file, ((before, after), occurrences)) in original
+        .iter()
+        .zip(renamed)
+        .zip(&rename.occurrences)
+        .enumerate()
+    {
+        let moved = |offset: usize| {
+            let growth: i64 = occurrences
+                .iter()
+                .filter(|(_, end, _)| *end <= offset)
+                .map(|(start, end, length)| *length as i64 - (end - start) as i64)
+                .sum();
+            (offset as i64 + growth) as usize
+        };
+        let mut expected: Vec<String> = map_ranges(before, moved, moved)
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let mut actual: Vec<String> = after
+            .lines()
+            .map(|line| {
+                rename
+                    .names
+                    .iter()
+                    .fold(line.to_owned(), |line, (old, new)| {
+                        line.replace(new.as_str(), old)
+                    })
+            })
+            .collect();
+        expected.sort_unstable();
+        actual.sort_unstable();
+        if expected == actual {
+            continue;
+        }
+        let only = |lines: &[String], others: &[String]| {
+            let mut others = others.to_vec();
+            let mut only = Vec::new();
+            for line in lines {
+                match others.iter().position(|other| other == line) {
+                    Some(index) => {
+                        others.swap_remove(index);
+                    }
+                    None => only.push(line.clone()),
+                }
+            }
+            only.join("\n")
+        };
+        differences.push_str(&format!(
+            "file {file}, only before the rename (ranges moved):\n{}\nonly after it (new names spelled back):\n{}\n",
+            only(&expected, &actual),
+            only(&actual, &expected),
+        ));
+    }
+    match differences.is_empty() {
+        true => Ok(()),
+        false => Err(differences),
+    }
+}
+
+/// Renames one to three identifiers throughout `state` and checks the result with
+/// [`compare_renamed`]. Returns whether the rename was free and whether a renamed name occurs
+/// in a finding, or `None` when no identifier or no new name qualifies.
 fn check_consistent_rename(
     db: &mut RootDatabase,
     state: &ProjectState,
     original: &[String],
     rng: &mut dyn Entropy,
-) -> bool {
+) -> Option<(bool, bool)> {
     let files: Vec<Vec<(SyntaxKind, String, bool)>> = state
         .files
         .iter()
@@ -986,58 +1134,222 @@ fn check_consistent_rename(
         .filter(|word| renameable(db, word, &tokens))
         .collect();
     if candidates.is_empty() {
-        return false;
+        return None;
     }
-    let old = candidates[rng.below(candidates.len())];
-    let Some(new) = fresh_name(db, old, &tokens, original, rng) else {
-        return false;
+    let in_findings: Vec<&str> = candidates
+        .iter()
+        .copied()
+        .filter(|word| occurs_in_finding(original, word))
+        .collect();
+    let free = rng.below(2) == 0;
+    // A typo check reports a name, or suggests one, by its spelling's distance from the others,
+    // so a rename into or out of a near miss changes findings for a reason.
+    let project_words: BTreeSet<&str> = tokens
+        .iter()
+        .flat_map(|(_, text, _)| text.split(|character: char| !is_name_character(character)))
+        .filter(|word| !word.is_empty())
+        .collect();
+    let library = stubs(db);
+    let outside_words = || {
+        library.into_iter().flat_map(|library| {
+            library
+                .declarations
+                .keys()
+                .chain(library.schemes.keys())
+                .chain(library.known_exports.iter())
+                .chain(
+                    library
+                        .exports_by_namespace
+                        .values()
+                        .flat_map(|names| names.iter()),
+                )
+                .map(|name| name.as_str())
+        })
     };
-    let mut edited = state.clone();
-    for ((_, text, _), tokens) in edited.files.iter_mut().zip(&files) {
-        *text = tokens
+    // Each pair is asked alone: a short name gets a suggestion only when exactly one candidate
+    // qualifies, so a larger candidate set than the checker's could hide one.
+    let near = |typo: &str, target: &str| {
+        typo.chars().count().abs_diff(target.chars().count()) <= 2
+            && nearest_name(typo, iter::once(target)).is_some()
+    };
+    // The names after the rename are the project's words without the renamed ones, and the
+    // new names.
+    let near_miss = |name: &str, names: &[(&str, String)]| {
+        let others: Vec<&str> = project_words
             .iter()
-            .map(
-                |(kind, text, _)| match *kind == SyntaxKind::IDENT && text == old {
-                    true => new.as_str(),
-                    false => text.as_str(),
-                },
-            )
+            .copied()
+            .filter(|word| *word != name && names.iter().all(|(old, _)| old != word))
+            .chain(names.iter().map(|(_, new)| new.as_str()))
+            .filter(|word| *word != name)
             .collect();
-    }
-    let renamed = render_afresh(db, &edited);
-    // A near-miss suggestion picks by spelling, so a rename may change which name it offers.
-    let suggests = |renderings: &[String], word: &str| {
-        renderings
+        let outside = stub_words()
+            .iter()
+            .map(String::as_str)
+            .chain(outside_words());
+        others
+            .iter()
+            .any(|word| near(name, word) || near(word, name))
+            || outside.into_iter().any(|word| near(name, word))
+    };
+    // Two renamed names never share a rendered line, where the order of two new names could
+    // differ from the order of the old ones.
+    let share_a_line = |first: &str, second: &str| {
+        original
             .iter()
             .flat_map(|rendering| rendering.lines())
-            .any(|line| line.contains("Did you mean") && line.contains(word))
+            .any(|line| {
+                let mut words = line.split(|character: char| !is_name_character(character));
+                let words: Vec<&str> = words.by_ref().collect();
+                words.contains(&first) && words.contains(&second)
+            })
     };
-    if suggests(original, old) || suggests(&renamed, &new) {
-        return false;
+    let mut names: Vec<(&str, String)> = Vec::new();
+    for _ in 0..1 + rng.below(3) {
+        let pool = match !in_findings.is_empty() && rng.below(4) != 0 {
+            true => &in_findings,
+            false => &candidates,
+        };
+        let old = pool[rng.below(pool.len())];
+        if names
+            .iter()
+            .any(|(chosen, _)| *chosen == old || share_a_line(chosen, old))
+            || near_miss(old, &names)
+        {
+            continue;
+        }
+        let new = (0..8)
+            .filter_map(|_| fresh_name(db, old, &tokens, original, free, rng))
+            .find(|new| {
+                names.iter().all(|(_, chosen)| {
+                    !chosen.contains(new.as_str()) && !new.contains(chosen.as_str())
+                }) && !near_miss(new, &names)
+            });
+        if let Some(new) = new {
+            names.push((old, new));
+        }
     }
-    let sorted_lines = |rendering: &str| {
-        let mut lines: Vec<&str> = rendering.lines().collect();
-        lines.sort_unstable();
-        lines.join("\n")
+    if names.is_empty() {
+        return None;
+    }
+    let backquote_share = match free && rng.below(3) == 0 {
+        true => 2,
+        false => 0,
     };
-    let expected: Vec<String> = original.iter().map(|text| sorted_lines(text)).collect();
-    let actual: Vec<String> = renamed
+    let (edited, rename) = [backquote_share, 0]
+        .into_iter()
+        .map(|share| apply_rename(state, &files, &names, share, rng))
+        .find(|(edited, _)| {
+            edited
+                .files
+                .iter()
+                .zip(&files)
+                .all(|((_, text, _), tokens)| same_token_kinds(text, tokens))
+        })?;
+    let renamed = render_afresh(db, &edited);
+    if let Err(difference) = compare_renamed(&rename, original, &renamed) {
+        let names: Vec<String> = names
+            .iter()
+            .map(|(old, new)| format!("`{old}` to `{new}`"))
+            .collect();
+        panic!(
+            "renaming {} throughout changes more than the names\n{}\n---- renamed project:\n{}\n---- {difference}",
+            names.join(", "),
+            describe_session(slice::from_ref(state)),
+            edited
+                .files
+                .iter()
+                .map(|(_, text, _)| text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n----\n"),
+        );
+    }
+    let in_finding = names.iter().any(|(old, _)| in_findings.contains(old));
+    Some((free, in_finding))
+}
+
+/// `state` with every identifier token spelled as an old name of `names` respelled as its new
+/// name, each occurrence backquoted with chance one in `backquote_share` (never for 0), and the
+/// [`Rename`] that describes the edit.
+fn apply_rename(
+    state: &ProjectState,
+    files: &[Vec<(SyntaxKind, String, bool)>],
+    names: &[(&str, String)],
+    backquote_share: usize,
+    rng: &mut dyn Entropy,
+) -> (ProjectState, Rename) {
+    let mut edited = state.clone();
+    let mut occurrences = Vec::with_capacity(files.len());
+    for ((_, text, _), tokens) in edited.files.iter_mut().zip(files) {
+        let mut offset = 0;
+        let mut renamed = String::with_capacity(text.len());
+        let mut file_occurrences = Vec::new();
+        for (kind, token, _) in tokens {
+            let new = names
+                .iter()
+                .find(|(old, _)| *kind == SyntaxKind::IDENT && token == old)
+                .map(|(_, new)| new);
+            match new {
+                Some(new) => {
+                    let spelling = match backquote_share != 0 && rng.below(backquote_share) == 0 {
+                        true => format!("`{new}`"),
+                        false => new.clone(),
+                    };
+                    file_occurrences.push((offset, offset + token.len(), spelling.len()));
+                    renamed.push_str(&spelling);
+                }
+                None => renamed.push_str(token),
+            }
+            offset += token.len();
+        }
+        *text = renamed;
+        occurrences.push(file_occurrences);
+    }
+    let rename = Rename {
+        names: names
+            .iter()
+            .map(|(old, new)| ((*old).to_owned(), new.clone()))
+            .collect(),
+        occurrences,
+    };
+    (edited, rename)
+}
+
+/// Whether `text` lexes to tokens of the kinds `tokens` lists, so a rename left the shape of
+/// the file alone.
+fn same_token_kinds(text: &str, tokens: &[(SyntaxKind, String, bool)]) -> bool {
+    syntax::parse(text)
+        .syntax_node()
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .map(|token| token.kind())
+        .eq(tokens.iter().map(|(kind, _, _)| *kind))
+}
+
+/// Whether a character can be part of an R name.
+fn is_name_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '.' || character == '_'
+}
+
+/// Whether `word` is a whole word of a finding line of a rendering.
+fn occurs_in_finding(renderings: &[String], word: &str) -> bool {
+    let is_word =
+        |character: char| character.is_ascii_alphanumeric() || character == '.' || character == '_';
+    renderings
         .iter()
-        .map(|text| sorted_lines(&text.replace(new.as_str(), old)))
-        .collect();
-    assert!(
-        actual == expected,
-        "renaming `{old}` to `{new}` throughout changes more than the name\n{}\n---- before, sorted:\n{}\n---- after, renamed back and sorted:\n{}",
-        describe_session(slice::from_ref(state)),
-        expected.join("\n----\n"),
-        actual.join("\n----\n"),
-    );
-    true
+        .flat_map(|rendering| rendering.lines())
+        .filter_map(finding_range)
+        .any(|(_, _, rest)| {
+            rest.split(|character: char| !is_word(character))
+                .any(|part| part == word)
+        })
 }
 
 /// Whether every occurrence of `word` is an identifier token of the project's own: no string,
 /// comment or other token contains it, no identifier is a prefix R's partial matching could
-/// complete to it, and the shipped stubs do not declare it.
+/// complete to it, and no shipped stub or export manifest names it, whether or not the project
+/// attaches the package. A package the stubs know only by name leaves a read of its export
+/// quiet, and the checker models some exports by name (data.table's `setnames`), so a rename
+/// of such a read changes which function a call reaches.
 fn renameable(db: &RootDatabase, word: &str, tokens: &[&(SyntaxKind, String, bool)]) -> bool {
     let mut characters = word.chars();
     let snake = characters
@@ -1048,6 +1360,7 @@ fn renameable(db: &RootDatabase, word: &str, tokens: &[&(SyntaxKind, String, boo
         });
     snake
         && !declared_outside(db, word)
+        && !package_names().contains(word)
         && tokens.iter().all(|(kind, text, foreign)| {
             match *kind == SyntaxKind::IDENT && text == word {
                 true => !foreign,
@@ -1059,50 +1372,77 @@ fn renameable(db: &RootDatabase, word: &str, tokens: &[&(SyntaxKind, String, boo
         })
 }
 
-/// A name of `old`'s length and character classes that no token, stub or rendering contains,
-/// that no identifier of the project is a prefix of, and that sorts against every word of the
-/// project and its rendering as `old` does, or `None` when a few draws find none. Records
-/// list their fields by name and symbols order by spelling, so a name that moved past another
-/// would reorder what a rendering prints.
-fn fresh_name(
+/// A new name for `old` that no token, stub or rendering contains, that no identifier of the
+/// project is a prefix of, and that sorts as `old` does against every word of a rendered line
+/// that holds `old`, or `None` when a few draws find none. Records list their fields by name
+/// and symbols order by spelling, so a name that moved past another would reorder what a
+/// rendering prints. Unless `free`, the name keeps `old`'s length and character classes; a free name is
+/// any snake_case name of one to ten characters, some of them non-ASCII letters.
+fn fresh_name<'a>(
     db: &RootDatabase,
     old: &str,
     tokens: &[&(SyntaxKind, String, bool)],
-    original: &[String],
+    original: &'a [String],
+    free: bool,
     rng: &mut dyn Entropy,
 ) -> Option<String> {
+    const LETTERS: &[char] = &['\u{e9}', '\u{f8}', '\u{df}', '\u{3bb}'];
     let is_word =
         |character: char| character.is_ascii_alphanumeric() || character == '.' || character == '_';
-    let words: BTreeSet<&str> = tokens
+    let split_words = |text: &'a str| {
+        text.split(move |character: char| !is_word(character))
+            .filter(|word| !word.is_empty())
+    };
+    // Only a line that holds the name can list it among others, and a finding's prose never
+    // sorts, so the order that matters is among the words of the code a finding quotes and of
+    // a type line.
+    let words: BTreeSet<&str> = original
         .iter()
-        .map(|(_, text, _)| text.as_str())
-        .chain(original.iter().map(String::as_str))
-        .flat_map(|text| text.split(|character: char| !is_word(character)))
-        .filter(|word| !word.is_empty())
+        .flat_map(|rendering| rendering.lines())
+        .filter(|line| split_words(line).any(|word| word == old))
+        .flat_map(|line| match finding_range(line) {
+            Some((_, _, message)) => message.split('`').skip(1).step_by(2).collect(),
+            None => vec![line],
+        })
+        .flat_map(split_words)
         .collect();
     let below = words.range::<&str, _>(..old).next_back().copied();
     let above = words
         .range::<&str, _>((Bound::Excluded(old), Bound::Unbounded))
         .next()
         .copied();
-    for _ in 0..32 {
-        let kept = rng.below(old.len());
-        let new: String = old
-            .char_indices()
-            .map(|(index, character)| match (index < kept, character) {
-                (true, _) => character,
-                (false, 'a'..='z') => (b'a' + rng.below(26) as u8) as char,
-                (false, '0'..='9') => (b'0' + rng.below(10) as u8) as char,
-                (false, other) => other,
-            })
-            .collect();
+    let letter = |rng: &mut dyn Entropy, digits: bool| match rng.below(12) {
+        0 => LETTERS[rng.below(LETTERS.len())],
+        1 if digits => (b'0' + rng.below(10) as u8) as char,
+        2 if digits => '_',
+        _ => (b'a' + rng.below(26) as u8) as char,
+    };
+    for _ in 0..64 {
+        let new: String = match free {
+            true => (0..1 + rng.below(10))
+                .map(|index| letter(rng, index > 0))
+                .collect(),
+            false => {
+                let kept = rng.below(old.len());
+                old.char_indices()
+                    .map(|(index, character)| match (index < kept, character) {
+                        (true, _) => character,
+                        (false, 'a'..='z') => (b'a' + rng.below(26) as u8) as char,
+                        (false, '0'..='9') => (b'0' + rng.below(10) as u8) as char,
+                        (false, other) => other,
+                    })
+                    .collect()
+            }
+        };
         let in_place = below.is_none_or(|below| below < new.as_str())
             && above.is_none_or(|above| new.as_str() < above);
         let lexes_as_name = syntax::parse(&new)
             .syntax_node()
             .first_token()
             .is_some_and(|token| token.kind() == SyntaxKind::IDENT && token.text() == new);
+        let reshaped = !free || new.chars().next() != old.chars().next();
         let unused = new != old
+            && reshaped
             && in_place
             && lexes_as_name
             && !declared_outside(db, &new)

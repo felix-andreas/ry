@@ -322,21 +322,63 @@ fn edits_that_change_no_meaning_only_move_findings() {
     let mut workbench = Workbench::default();
     let mut leading_trivia = 0;
     let mut renames = 0;
+    let mut free_renames = 0;
+    let mut renames_in_findings = 0;
     let mut cases = 0;
     for_each_seed_on_named_threads(METAMORPHIC_CASES, |seed| {
         let mut rng = SplitMix64(0x3E7A_3021 ^ seed);
-        let states = generate_session(&mut rng, &POOL);
-        let coverage = check_metamorphic_relations(&mut workbench, &states[0], &mut rng);
+        let mut state = generate_session(&mut rng, &POOL).swap_remove(0);
+        if rng.below(2) == 0 {
+            add_unresolved_reads(&mut rng, &mut state);
+        }
+        let coverage = check_metamorphic_relations(&mut workbench, &state, &mut rng);
         cases += 1;
         leading_trivia += usize::from(coverage.leading_trivia);
         renames += usize::from(coverage.rename);
+        free_renames += usize::from(coverage.free_rename);
+        renames_in_findings += usize::from(coverage.rename_in_finding);
     });
-    eprintln!("{cases} cases: {leading_trivia} with a line inserted, {renames} renamed");
+    eprintln!(
+        "{cases} cases: {leading_trivia} with a line inserted, {renames} renamed, \
+         {free_renames} of them freely and {renames_in_findings} of a name in a finding"
+    );
     if cases >= METAMORPHIC_CASES {
         assert!(
-            leading_trivia * 2 > cases && renames * 4 > cases,
-            "{cases} cases: only {leading_trivia} with a line inserted and {renames} renamed"
+            leading_trivia * 2 > cases
+                && renames * 4 > cases
+                && free_renames * 8 > cases
+                && renames_in_findings * 8 > cases,
+            "{cases} cases: only {leading_trivia} with a line inserted, {renames} renamed, \
+             {free_renames} freely and {renames_in_findings} of a name in a finding"
         );
+    }
+}
+
+/// Appends reads of names nothing defines to a file of `state`, so a rename meets `unresolved`
+/// findings, which generated programs rarely have. The names vary in length and first letter,
+/// because a rename to a free name crosses both.
+fn add_unresolved_reads(rng: &mut SplitMix64, state: &mut ProjectState) {
+    let Some(file) = (!state.files.is_empty()).then(|| rng.below(state.files.len())) else {
+        return;
+    };
+    for index in 0..1 + rng.below(3) {
+        let name: String = (0..3 + rng.below(8))
+            .map(|position| match position > 0 && rng.below(5) == 0 {
+                true => '_',
+                false => (b'a' + rng.below(26) as u8) as char,
+            })
+            .collect();
+        let read = match rng.below(3) {
+            0 => format!("unresolved_{index} <- {name}"),
+            1 => format!("{name}(1L)"),
+            _ => format!("reader_{index} <- function(x) {name}(x)"),
+        };
+        let text = &mut state.files[file].1;
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&read);
+        text.push('\n');
     }
 }
 
