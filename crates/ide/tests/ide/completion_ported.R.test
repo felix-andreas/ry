@@ -405,3 +405,23 @@ action: Add inferred type annotations for the whole file
 completion (15): values, value, .valueClassTest, hatvalues, last_value, Dict.values, .Last.value, returnValue
 hint @6: double[]
 hint @31: double
+
+#---- a_global_written_by_superassignment_completes
+remember <- function(value) cache_value <<- value
+cache_v$0
+#++++
+hover 50..57: cache_v
+hover-definition: installed cache_v from base, stats, utils, methods, graphics, grDevices, datasets
+definition: installed cache_v from base, stats, utils, methods, graphics, grDevices, datasets
+references: none
+rename: none
+signature: none
+action: Add inferred type annotations for the whole file
+  edit 20..20 -> "<T>"
+  edit 26..26 -> ": T"
+  edit 27..27 -> " -> T"
+completion (1): cache_value
+hint @20<T>
+hint @26: T
+hint @27 -> T
+hint @39: T

@@ -1954,9 +1954,10 @@ Defaults are type-checked, and they interact with the parameter's type in four w
   omits `tol` sees `double`. A function written there, as in
   `if (missing(col.fun)) col.fun <- function(n) rep("a", n)`, is a default the same way. A value
   written on any other path is a rewrite, so later uses meet both values.
-- Inside `if (missing(x))`, reading `x` is an error unless `x` goes straight on to a parameter the
-  callee may leave unread, because R then forces nothing: `if (missing(x)) report(x)` checks when
-  `report` tests `missing()` on that parameter.
+- Inside `if (missing(x))`, reading `x` is an error unless `x` goes straight on to a parameter a
+  project function may leave unread, because R then forces nothing: `if (missing(x)) report(x)`
+  checks when `report` tests `missing()` on that parameter. A library function forces what it is
+  given, so `formatC(x, width = w)` there is still reported.
 
 An `if` without `else` that writes a formal under a test reading that same formal *normalizes* the
 input, as in `if (is.logical(type)) type <- if (type) "q" else "m"` or
@@ -2094,7 +2095,7 @@ where one function type is expected when each member is, with its own return, an
 those returns satisfies the expected return. Arguments a call forwards to the callback, as in
 `lapply(names, chosen, new = NULL)`, reach every member.
 
-A library function such as `apply` passes its `...` on to its callback, so an untyped parameter
+A declared function such as `apply` passes its `...` on to its callback, so an untyped parameter
 passed there takes `fn(Any, ...: Any) -> Any`, even from a call that forwards nothing. After
 `apply(m, 1, fun)`, the body may still call `fun(m, na.rm = TRUE)`.
 

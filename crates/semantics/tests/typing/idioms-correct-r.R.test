@@ -950,6 +950,16 @@ fifo_mode <- function(read = NULL, write = NULL) {
 #++++
 fifo_mode: fn([read]: logical | NULL, [write]: logical | NULL) -> logical
 
+#---- a_missing_formal_passed_to_a_library_function_is_read
+# `formatC` reads `width`, so R stops with "argument "w" is missing, with no default".
+pad <- function(x, w) {
+  if (missing(w)) return(formatC(x, width = w))
+  x
+}
+#++++
+pad: Unknown
+155..156 error[type-mismatch] reading `w` here would fail at run time: this branch runs only when `w` is missing, and it has no default
+
 #---- a_missing_formal_passed_to_a_parameter_that_tests_missing_is_not_read
 # `stop_type` hands `x` to `friendly`, which tests `missing(x)`, so passing the missing `x` on
 # never forces it. `strict` reads its `x`, so the same call there fails.
@@ -2980,12 +2990,12 @@ summarise: <T> fn(v: Unknown, [fun]: (fn(Any, ...: Any) -> Any) | NULL, [na.rm]:
 
 #---- a_callback_parameter_is_variadic_even_where_the_library_call_forwards_nothing
 # raster tries `apply(x, 1, fun)` first and `fun(x, na.rm = na.rm)` later: `apply` passes its
-# `...` on to `FUN`, so the first call fixes no arity. A plain one-argument lambda still fits.
+# `...` on to `FUN`, so the first call fixes no arity.
 calc <- function(x, fun, na.rm) {
   if (missing(na.rm)) apply(x, 1, fun) else apply(x, 1, fun, na.rm = na.rm)
   fun(x, na.rm = na.rm)
 }
-rows <- function(m) calc(m, function(row) row[1], TRUE)
+rows <- function(m) calc(m, function(row, ...) row[1], TRUE)
 #++++
 calc: <T, U> fn(x: T, fun: fn(Any, ...: Any) -> Any, [na.rm]: U) -> Any
 rows: <T> fn(m: T) -> Any

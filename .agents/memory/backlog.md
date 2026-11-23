@@ -788,7 +788,7 @@ constraint now fills a vector parameter. The forms once seen in ks `kfe.1d`, pra
 
 The top 100 CRAN packages by reverse dependencies that are not in the corpus (99 checked,
 1,210,157 lines, sources only) first gave 1,449 errors, of which 1,384 were false (114 per 100,000
-lines). They now give 112. VGAM, psych, raster and ggplot2 are classified in full, and every report
+lines). They give 112 with the fourth pass. VGAM, psych, raster and ggplot2 are classified in full, and every report
 left there is a true bug except these limitations:
 
 - VGAM's `eval(code)` in the running frame rewrites locals the checker still holds as `NULL`

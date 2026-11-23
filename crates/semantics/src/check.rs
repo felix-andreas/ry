@@ -8515,6 +8515,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             return;
         }
         let callee = self.table.resolve(self.db, callee);
+        // A library function forces what it is given (`formatC(x, width = w)` reads `width`);
+        // only a body the checker inferred records which parameters it may leave unread.
+        if !matches!(callee.kind(self.db), TyKind::Function(function) if function.inferred) {
+            return;
+        }
         let targets = self.arguments_left_unread(callee, arguments);
         for (index, argument) in arguments.iter().enumerate() {
             if let Some(value) = argument.value
@@ -18296,9 +18301,9 @@ impl<'db, 'a> Checker<'db, 'a> {
             arena,
         );
 
-        // A library function's `...` goes to its callback (`apply(m, 1, fun)` calls
+        // A declared function's `...` goes to its callback (`apply(m, 1, fun)` calls
         // `fun(row, ...)`), so an open callback is variadic even when this call forwards nothing.
-        let library_forwards = !forwarded_argument_indexes.is_empty()
+        let callback_forwarded = !forwarded_argument_indexes.is_empty()
             || variadic_element.is_some() && !function.inferred;
         let forwards_dots = arguments.iter().any(|argument| argument.forwards_dots);
         let mut findings = Vec::new();
@@ -18323,7 +18328,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         && let Some(ty) =
                             self.argument_type_for(expected, argument, function.inferred)
                         && let expected =
-                            self.forwarded_callback_shape(expected, ty, library_forwards)
+                            self.forwarded_callback_shape(expected, ty, callback_forwarded)
                         && let Err(error) = self.check_argument(
                             expected,
                             ty,
@@ -18392,7 +18397,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         && let Some(ty) =
                             self.argument_type_for(expected, argument, function.inferred)
                         && let expected =
-                            self.forwarded_callback_shape(expected, ty, library_forwards)
+                            self.forwarded_callback_shape(expected, ty, callback_forwarded)
                         && let Err(error) = self.check_argument(
                             expected,
                             ty,
