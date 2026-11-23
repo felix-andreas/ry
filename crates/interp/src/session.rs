@@ -352,22 +352,23 @@ unsafe fn remove_library_site() -> R<()> {
 }
 
 /// The site profile to source: `R_PROFILE`, else `R_HOME/etc/Rprofile.site`, if it exists.
+/// `R_PROFILE` set to the empty string means none, which is how `R --vanilla CMD` keeps the
+/// profile out of the R processes the command starts.
 fn site_profile_path() -> Option<String> {
-    let site = std::env::var("R_PROFILE")
-        .ok()
-        .filter(|path| !path.is_empty())
-        .unwrap_or_else(|| format!("{}/etc/Rprofile.site", crate::system::r_home()));
+    let site = match std::env::var("R_PROFILE") {
+        Ok(path) if path.is_empty() => return None,
+        Ok(path) => crate::connections::expand_path(&path),
+        Err(_) => format!("{}/etc/Rprofile.site", crate::system::r_home()),
+    };
     std::path::Path::new(&site).exists().then_some(site)
 }
 
 /// The user profile to source: `R_PROFILE_USER`, else `./.Rprofile`, else `~/.Rprofile`, if it
 /// exists. A set `R_PROFILE_USER` is the only candidate, even when the file is missing (callr
-/// points it at its own profile).
+/// points it at its own profile), and set to the empty string it means none.
 fn user_profile_path() -> Option<String> {
-    let user = match std::env::var("R_PROFILE_USER")
-        .ok()
-        .filter(|path| !path.is_empty())
-    {
+    let user = match std::env::var("R_PROFILE_USER").ok() {
+        Some(path) if path.is_empty() => None,
         Some(path) => Some(crate::connections::expand_path(&path)),
         None => [
             ".Rprofile".to_owned(),
@@ -1131,6 +1132,10 @@ pub unsafe fn run_console(
     loop {
         let prompt = if buffer.is_empty() { "> " } else { "+ " };
         let Some(chunk) = read(prompt) else {
+            if halt_on_error && !buffer.trim().is_empty() {
+                write_console(b"Error: unexpected end of input\nExecution halted\n", true);
+                return Outcome::Failed;
+            }
             break;
         };
         buffer.push_str(&chunk);

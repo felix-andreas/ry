@@ -1,6 +1,8 @@
 # Packages drive R as a subprocess and read what it prints (callr, renv, `R CMD BATCH`), so ry's
 # `bin/R` echoes input after its prompts, passes the command line through, reads the user's
-# Renviron, and finds `CMD` after leading options, as GNU R's front end does.
+# Renviron, and finds `CMD` after leading options, which reach the processes the command starts,
+# as GNU R's front end does. `R CMD INSTALL` ignores an empty argument, which devtools passes in
+# place of an option it leaves out.
 
 requires ry-runtime
 hide gnu-r
@@ -9,8 +11,31 @@ file input.R
 | x <- 1
 | x + 1
 
+file incomplete.R
+| x <- 1
+| f <- function() {
+
 file user.Renviron
 | GREETING=hello
+
+file profile.R
+| cat("PROFILE RAN\n")
+
+file batch.R
+| cat("batch ran\n")
+
+file emptyarg/DESCRIPTION
+| Package: emptyarg
+| Version: 0.1
+| Title: Empty Argument
+| Description: Installs with an empty argument.
+| License: MIT
+| Author: x
+| Maintainer: x <x@example.com>
+file emptyarg/NAMESPACE
+| export(f)
+file emptyarg/R/f.R
+| f <- function() 1
 
 file drive.R
 | R <- file.path(R.home("bin"), "R")
@@ -20,7 +45,7 @@ file drive.R
 | cat("quiet:", paste(quiet, collapse = "|"), "\n")
 | arguments <- system2(R, c("--no-echo", "-e", shQuote("cat(commandArgs(TRUE))"), "--args", "a", "b"), stdout = TRUE)
 | cat("arguments:", arguments, "\n")
-| stray <- system2(R, c("--no-echo", "stray", "-e", shQuote("cat(1)")), stdout = TRUE, stderr = TRUE)
+| stray <- system2(R, c("--no-echo", "stray", "-e", shQuote("cat(1)")), stdout = TRUE, stderr = FALSE)
 | cat("stray:", paste(stray, collapse = "|"), "\n")
 | environ <- system2(R, c("--no-echo", "-e", shQuote("cat(Sys.getenv('GREETING'))")), stdout = TRUE, env = "R_ENVIRON_USER=user.Renviron")
 | cat("environ:", environ, "\n")
@@ -30,7 +55,19 @@ file drive.R
 | cat("config:", nzchar(config), "\n")
 | unknown <- suppressWarnings(system2(R, c("CMD", "config", "NO_SUCH_VARIABLE"), stdout = TRUE, stderr = TRUE))
 | cat("unknown:", attr(unknown, "status"), unknown, "\n")
+| incomplete <- suppressWarnings(system2(R, c("-q", "-f", "incomplete.R"), stdout = TRUE, stderr = FALSE))
+| cat("incomplete:", attr(incomplete, "status"), paste(incomplete, collapse = "|"), "\n")
+| system2(R, c("CMD", "BATCH", "--no-timing", "batch.R", "plain.Rout"), env = "R_PROFILE_USER=profile.R")
+| system2(R, c("--vanilla", "CMD", "BATCH", "--no-timing", "batch.R", "vanilla.Rout"), env = "R_PROFILE_USER=profile.R")
+| profiled <- function(out) any(grepl("PROFILE RAN", readLines(out)))
+| cat("batch profile:", profiled("plain.Rout"), profiled("vanilla.Rout"), "\n")
+| tar("emptyarg_0.1.tar.gz", "emptyarg", compression = "gzip")
+| dir.create("library")
+| status <- system2(R, c("CMD", "INSTALL", "--library=library", "emptyarg_0.1.tar.gz", shQuote(""), "--install-tests"), stdout = FALSE, stderr = FALSE)
+| cat("empty argument:", status, list.files("library"), "\n")
 
+# On CI `R_HOME` names GNU R, whose `bin/R` this scenario must not test.
+unset R_HOME
 run ry run --runtime ry drive.R
 expect exit 0
 expect stdout "echoed: > x <- 1|> x + 1|[1] 2|> "
@@ -41,3 +78,6 @@ expect stdout "environ: hello"
 expect stdout "vanilla: FALSE"
 expect stdout "config: TRUE"
 expect stdout "unknown: 1 ERROR: no information for variable 'NO_SUCH_VARIABLE'"
+expect stdout "incomplete: 1 > x <- 1|> f <- function() {|+ "
+expect stdout "batch profile: TRUE FALSE"
+expect stdout "empty argument: 0 emptyarg"

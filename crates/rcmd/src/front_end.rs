@@ -70,15 +70,27 @@ pub fn main(arguments: Vec<String>) -> ExitCode {
         // SAFETY: no other thread exists yet.
         unsafe { std::env::set_var("R_HOME", home.display().to_string().replace('\\', "/")) };
     }
+    // Variables to export as empty, so every R process a `CMD` starts skips those start-up files.
+    let mut skipped_start_up: Vec<&str> = Vec::new();
     let arguments = match front_end.as_ref().map(|(name, _)| name.as_str()) {
         // GNU R's `bin/R` reads options up to `--args` and drops those before a `CMD` or
-        // `RHOME` (renv runs `R --vanilla CMD INSTALL`).
-        Some("R") => match arguments
-            .iter()
-            .take_while(|argument| *argument != "--args")
-            .position(|argument| argument == "CMD" || argument == "RHOME")
-        {
-            Some(start) => arguments[start..].to_vec(),
+        // `RHOME`, exporting the start-up files they turn off (renv runs
+        // `R --vanilla CMD INSTALL` so that a project's `.Rprofile` stays out of the install).
+        Some("R") => match command_start(&arguments) {
+            Some(start) => {
+                for option in &arguments[..start] {
+                    skipped_start_up.extend_from_slice(match option.as_str() {
+                        "--no-environ" => &["R_ENVIRON", "R_ENVIRON_USER"][..],
+                        "--no-site-file" => &["R_PROFILE"],
+                        "--no-init-file" => &["R_PROFILE_USER"],
+                        "--vanilla" => {
+                            &["R_ENVIRON", "R_ENVIRON_USER", "R_PROFILE", "R_PROFILE_USER"]
+                        }
+                        _ => &[],
+                    });
+                }
+                arguments[start..].to_vec()
+            }
             None if arguments
                 .first()
                 .is_some_and(|first| first == "write-start-image") =>
@@ -103,7 +115,10 @@ pub fn main(arguments: Vec<String>) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        for (name, value) in assignments {
+        let skipped = skipped_start_up
+            .iter()
+            .map(|name| ((*name).to_owned(), String::new()));
+        for (name, value) in assignments.into_iter().chain(skipped) {
             // SAFETY: no other thread exists yet.
             unsafe { std::env::set_var(name, value) };
         }
@@ -146,6 +161,22 @@ pub fn main(arguments: Vec<String>) -> ExitCode {
 /// the front end starts the session those scripts would. Each script passes its arguments as
 /// one string, every argument after the separator `nextArg`, because the R function splits
 /// `commandArgs(TRUE)` on it.
+/// Where `R`'s arguments name a `CMD` or `RHOME`, as GNU R's `bin/R` reads them: options up to
+/// `--args`, skipping the values of those that take one.
+fn command_start(arguments: &[String]) -> Option<usize> {
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        match argument.as_str() {
+            "--args" => return None,
+            "CMD" | "RHOME" => return Some(index),
+            "-e" | "-f" | "-g" | "--gui" | "-d" | "--debugger" | "--arch" => index += 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
 fn tools_command(arguments: &[String]) -> Option<crate::Session> {
     let (command, rest) = arguments.split_first()?;
     // The function, `R_DEFAULT_PACKAGES`, whether `--vanilla` skips the profiles, and whether
@@ -334,6 +365,16 @@ fn run_r(home: &Path, session: &crate::Session) -> crate::Result<i32> {
     if let Some(packages) = default_packages {
         // SAFETY: no other thread exists yet.
         unsafe { std::env::set_var("R_DEFAULT_PACKAGES", packages) };
+    }
+    // GNU R stops before its greeting when it cannot read the file, and says so on stdout.
+    if let Some(file) = file
+        && let Err(failure) = std::fs::File::open(file)
+    {
+        let reason = failure.to_string();
+        let reason = reason.split(" (os error").next().unwrap_or(&reason);
+        let message = format!("Fatal error: cannot open file '{file}': {reason}");
+        println!("{message}");
+        return Ok(2);
     }
     // With neither a file nor `-e`, `ry_run` reads stdin as a console, one expression at a time.
     let input = expressions.clone();

@@ -1538,10 +1538,17 @@ unsafe fn run_echoed(input: Option<&str>, path: Option<&str>) -> c_int {
                 Some(lines) => lines.next().map(str::to_owned),
                 None => read_stdin_line(&mut stdin),
             };
-            let echoed = line.as_deref().unwrap_or("");
-            crate::boundary::write_console(echoed.as_bytes(), false);
-            if !echoed.ends_with('\n') {
-                crate::boundary::write_console(b"\n", false);
+            match &line {
+                Some(echoed) => {
+                    crate::boundary::write_console(echoed.as_bytes(), false);
+                    if !echoed.ends_with('\n') {
+                        crate::boundary::write_console(b"\n", false);
+                    }
+                }
+                // GNU R ends the last `> ` prompt's line, but leaves a `+ ` prompt open before
+                // its "unexpected end of input" error.
+                None if prompt == "> " => crate::boundary::write_console(b"\n", false),
+                None => {}
             }
             line
         },

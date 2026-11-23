@@ -712,8 +712,8 @@ unsafe fn map_strings(call: &Call<'_>, function: impl Fn(&str) -> String) -> R<S
 /// answers "" for every path.
 unsafe fn do_sys_readlink(call: &Call<'_>) -> R<Sexp> {
     let paths = call.arg(0);
-    if paths.kind() != SexpType::String && paths != nil() {
-        return Err(call.error("a character vector argument expected"));
+    if paths.kind() != SexpType::String {
+        return Err(call.error("invalid 'paths' argument"));
     }
     let count = length(paths);
     let result = alloc(SexpType::String, count)?;
