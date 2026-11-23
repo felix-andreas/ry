@@ -9,7 +9,7 @@
 //! on a `LazyFrame` appends the step, and `LazyFrame.collect` optimizes and runs the whole plan.
 
 use {
-    crate::frame::{self, is_frame, literal, table_of, table_work},
+    crate::frame::{self, is_frame, table_of, table_work, vector_literal},
     heap::object::{Sexp, SexpType},
     interp::{
         builtins::{BuiltinDef, Call, builtin},
@@ -23,7 +23,7 @@ use {
         lazy::{self, How, Plan, Source, Step, Strategy},
         ops,
         polars::prelude::PlSmallStr,
-        query::{Aggregate, BinaryOp, Expr, Output, SortKey, UnaryOp, Warning},
+        query::{Aggregate, BinaryOp, Expr, Function, Output, SortKey, UnaryOp, Warning},
     },
 };
 
@@ -40,6 +40,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin(".expr_format", 1, table_work!(do_format)),
     builtin(".expr_over", 3, table_work!(do_over)),
     builtin(".expr_rank", 3, table_work!(do_rank)),
+    builtin(".expr_call", 2, table_work!(do_call)),
     builtin(".df_select", 3, table_work!(do_select)),
     builtin(".df_with_columns", 3, table_work!(do_with_columns)),
     builtin(".df_filter", 3, table_work!(do_filter)),
@@ -79,6 +80,7 @@ Expr.if_else <- function(test, yes, no) .expr_if_else(test, yes, no)
 Expr.cor <- function(first, second) .expr_cor(first, second)
 Expr.over <- function(expr, ...) .expr_over(expr, c(...), sys.call())
 Expr.rank <- function(expr, descending = FALSE) .expr_rank(expr, descending, sys.call())
+Expr.is_in <- function(expr, values) .expr_call("is_in", list(expr, values))
 DataFrame.height <- function(df) dim(df)[[1L]]
 DataFrame.width <- function(df) dim(df)[[2L]]
 DataFrame.columns <- function(df) names(df)
@@ -133,6 +135,9 @@ local({
     # expression instead of failing on conflicting `Ops.Expr` and `Ops.Date` methods.
     chooseOpsMethod.Expr = function(x, y, mx, my, cl, reverse) TRUE,
     format.Expr = function(x, ...) .expr_format(x),
+    # `%in%` is not generic, so an expression on its left stops in `match()` with a pointer to the
+    # expression's own test instead of an error about coercing a pointer.
+    mtfrm.Expr = function(x) stop("`%in%` does not build an expression; write `Expr.is_in(x, values)`", call. = FALSE),
     print.Expr = function(x, ...) {
       cat(.expr_format(x), "\n", sep = "")
       invisible(x)
@@ -252,20 +257,29 @@ unsafe fn describe(value: Sexp) -> String {
         Some(Object::Lazy(_)) => "a LazyFrame".to_string(),
         Some(Object::Group { .. }) => "a GroupBy".to_string(),
         None if is_nil(value) => "NULL".to_string(),
-        None => format!("a {} vector", value.kind().name()),
+        None => {
+            let kind = value.kind().name();
+            let article = if kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                "an"
+            } else {
+                "a"
+            };
+            format!("{article} {kind} vector")
+        }
     }
 }
 
-/// An operand: an expression, or a single R value as a literal.
+/// An operand: an expression, or an R vector as a literal. A single value broadcasts to every
+/// row, and a longer vector is a column of its own, one value per row.
 unsafe fn operand(value: Sexp, call: Sexp) -> R<Expr> {
     if let Some(Object::Expr(named)) = object_of(value) {
         return Ok(named.expr.clone());
     }
-    literal(value).ok_or_else(|| {
+    vector_literal(value)?.ok_or_else(|| {
         error_in(
             call,
             format!(
-                "an expression combines with expressions and single values, not {}",
+                "an expression combines with expressions and vectors, not {}",
                 describe(value)
             ),
         )
@@ -434,6 +448,21 @@ unsafe fn do_over(call: &Call<'_>) -> R<Sexp> {
     }))
 }
 
+/// `.expr_call(function, arguments)`: a row-wise [`Function`] of expressions and vectors.
+unsafe fn do_call(call: &Call<'_>) -> R<Sexp> {
+    let name = values::require_str(call.arg(0), "function")?;
+    let function = match name.as_ref() {
+        "is_in" => Function::IsIn,
+        other => return Err(error_in(call.call, format!("no expression function `{other}`"))),
+    };
+    let list = call.arg(1);
+    let mut arguments = Vec::with_capacity(length(list));
+    for index in 0..length(list) {
+        arguments.push(operand(list.element(index), call.call)?);
+    }
+    expr(Expr::Call(function, arguments))
+}
+
 unsafe fn do_rank(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(2);
     let named = expression(call.arg(0), caller)?;
@@ -521,7 +550,10 @@ unsafe fn table_error(
 }
 
 /// The named expressions of a verb's `...`: an expression keeps its alias, or takes the
-/// argument's name, and a string names a column.
+/// argument's name. Strings without an argument name name columns, and a single string with one
+/// names a column and renames it, as Polars reads a string. Any other vector, a named character
+/// vector of other than one string among them, is a literal under its argument name: one value
+/// for every row, or one value per row.
 unsafe fn named_expressions(list: Sexp, verb: &str, call: Sexp) -> R<Vec<(PlSmallStr, Expr)>> {
     let names = values::names(list);
     let mut columns = Vec::with_capacity(length(list));
@@ -540,19 +572,47 @@ unsafe fn named_expressions(list: Sexp, verb: &str, call: Sexp) -> R<Vec<(PlSmal
             columns.push(named.output());
             continue;
         }
-        if item.kind() == SexpType::String {
-            for name in values::strings(item).into_iter().flatten() {
-                columns.push((name.as_str().into(), Expr::Column(name.into())));
+        if item.kind() == SexpType::String && (argument_name.is_none() || length(item) == 1) {
+            match argument_name {
+                Some(name) => match values::string_at(item, 0) {
+                    Some(column) => {
+                        columns.push((name.as_ref().into(), Expr::Column(column.as_ref().into())))
+                    }
+                    None => {
+                        return Err(error_in(
+                            call,
+                            format!("`{name}` names no column, because it is `NA`"),
+                        ));
+                    }
+                },
+                None => {
+                    for name in values::strings(item).into_iter().flatten() {
+                        columns.push((name.as_str().into(), Expr::Column(name.into())));
+                    }
+                }
             }
             continue;
         }
-        return Err(error_in(
-            call,
-            format!(
-                "`{verb}` takes column names and expressions such as `Expr.col(\"x\")`, not {}",
-                describe(item)
-            ),
-        ));
+        match (argument_name, vector_literal(item)?) {
+            (Some(name), Some(literal)) => columns.push((name.as_ref().into(), literal)),
+            (None, Some(_)) => {
+                return Err(error_in(
+                    call,
+                    format!(
+                        "`{verb}` needs a name for a vector, such as `{verb}(x = ...)`, to make it a column"
+                    ),
+                ));
+            }
+            (_, None) => {
+                return Err(error_in(
+                    call,
+                    format!(
+                        "`{verb}` takes column names, expressions such as `Expr.col(\"x\")` and named vectors, not {}",
+                        describe(item)
+                    ),
+                ));
+            }
+        }
     }
     Ok(columns)
 }
@@ -571,14 +631,28 @@ unsafe fn do_with_columns(call: &Call<'_>) -> R<Sexp> {
     finish(plan.with(Step::WithColumns(columns)), lazy, caller)
 }
 
-/// Several predicates must all hold, as Polars' `filter(a, b)` is `filter(a & b)`.
+/// Several predicates must all hold, as Polars' `filter(a, b)` is `filter(a & b)`. A predicate
+/// is an expression or a logical vector with one value per row.
 unsafe fn do_filter(call: &Call<'_>) -> R<Sexp> {
     let caller = call.arg(2);
     let (plan, lazy) = plan_of(call.arg(0), caller)?;
     let list = call.arg(1);
     let mut predicate: Option<Expr> = None;
     for index in 0..length(list) {
-        let next = expression(list.element(index), caller)?.expr;
+        let item = list.element(index);
+        let next = match object_of(item) {
+            Some(Object::Expr(named)) => named.expr.clone(),
+            None if item.kind() == SexpType::Logical => operand(item, caller)?,
+            _ => {
+                return Err(error_in(
+                    caller,
+                    format!(
+                        "`filter` takes expressions such as `Expr.col(\"x\") > 0` and logical vectors, not {}",
+                        describe(item)
+                    ),
+                ));
+            }
+        };
         predicate = Some(match predicate {
             Some(earlier) => Expr::Binary(BinaryOp::And, Box::new(earlier), Box::new(next)),
             None => next,

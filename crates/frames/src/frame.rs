@@ -42,7 +42,7 @@ use {
         },
         query::{
             self, Aggregate, BinaryOp, Comparison, Expr, Join, Mult, On, Output, Query, Roll, Rows,
-            Select, SortKey, UnaryOp, Warning,
+            Select, SortKey, UnaryOp, Values, Warning,
         },
     },
 };
@@ -2356,6 +2356,21 @@ fn binary_op(name: &str) -> Option<BinaryOp> {
         "|" => BinaryOp::Or,
         _ => return None,
     })
+}
+
+/// An R vector as a literal of the IR: a single value as a scalar that broadcasts, and a longer
+/// or empty vector as a column of its values. `None` for a value no column can hold.
+pub(crate) unsafe fn vector_literal(value: Sexp) -> R<Option<Expr>> {
+    if length(value) == 1 {
+        return Ok(literal(value));
+    }
+    let value = values::materialize(value)?;
+    let Some(contents) = column_contents(value)? else {
+        return Ok(None);
+    };
+    let series = convert::to_series(PlSmallStr::EMPTY, contents)
+        .map_err(|failure| error(failure.to_string()))?;
+    Ok(Some(Expr::Values(Values(series))))
 }
 
 /// A single R value as a literal of the IR, or `None` for anything longer or of another type.
