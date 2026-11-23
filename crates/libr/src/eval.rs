@@ -1248,6 +1248,7 @@ pub unsafe extern "C" fn ry_start_session() -> c_int {
         },
         site_profile: false,
         user_profile: false,
+        environ: false,
         interactive: false,
         image: None,
         build: env!("RY_RUNTIME_ID"),
@@ -1421,9 +1422,10 @@ pub unsafe extern "C" fn ry_write_script_code(
 /// packages from the GNU R installation), attaches the package loader as `tools:ry`, evaluates
 /// `input` and then the file at `path` (either may be null, and with both null it reads R code
 /// from stdin, running each expression once it is complete), and returns the exit status: 0 on
-/// success, 1 after an error, 2 when the session could not start. `arguments` are what
-/// `commandArgs(trailingOnly = TRUE)` returns, and `flags` are the [`RUN_FLAGS`] bits. This is
-/// the entry point of `ry run --runtime ry` and `ry load`.
+/// success, 1 after an error, 2 when the session could not start. The `count` `arguments` are
+/// the whole command line `commandArgs()` returns, program first, and `flags` are the
+/// [`RUN_FLAGS`] bits. This is the entry point of `ry run --runtime ry`, `ry load` and the R
+/// front ends of ry's R home.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ry_run(
     path: *const c_char,
@@ -1437,14 +1439,13 @@ pub unsafe extern "C" fn ry_run(
         .then(|| String::from_utf8_lossy(crate::strings::c_bytes(path)).into_owned());
     let input = (!input.is_null())
         .then(|| String::from_utf8_lossy(crate::strings::c_bytes(input)).into_owned());
-    let mut command_args = vec!["ry".to_owned()];
-    if let Some(path) = &path {
-        command_args.push(format!("--file={path}"));
-    }
-    command_args.push("--args".to_owned());
+    let mut command_args = Vec::new();
     for index in 0..count.max(0) as usize {
         let argument = *arguments.add(index);
         command_args.push(String::from_utf8_lossy(crate::strings::c_bytes(argument)).into_owned());
+    }
+    if flags & RUN_FLAG_GREETING != 0 {
+        crate::boundary::write_console(interp::session::greeting().as_bytes(), false);
     }
     if !start_script_session(command_args, flags) {
         return 2;
@@ -1469,6 +1470,11 @@ pub unsafe extern "C" fn ry_run(
             });
         }
     }
+    if flags & RUN_FLAG_ECHO != 0 {
+        let status = run_echoed(input.as_deref(), path.as_deref());
+        finish_script_session();
+        return status;
+    }
     let mut outcome = interp::session::Outcome::Completed;
     if let Some(input) = &input {
         outcome = interp::session::run_text(input, "<input>");
@@ -1476,26 +1482,7 @@ pub unsafe extern "C" fn ry_run(
         // Each expression runs as soon as it is complete, not once stdin ends: callr drives `R`
         // this way, writing a command and waiting for its result before it writes the next.
         let mut stdin = std::io::stdin().lock();
-        outcome = interp::session::run_console(
-            |_prompt| {
-                use std::io::{BufRead, Write};
-                if let Err(error) = std::io::stdout().flush() {
-                    let message = format!("ry: cannot write output: {error}\n");
-                    crate::boundary::write_console(message.as_bytes(), true);
-                }
-                let mut line = Vec::new();
-                match stdin.read_until(b'\n', &mut line) {
-                    Ok(0) => None,
-                    Ok(_) => Some(String::from_utf8_lossy(&line).into_owned()),
-                    Err(error) => {
-                        let message = format!("ry: cannot read R input from stdin: {error}\n");
-                        crate::boundary::write_console(message.as_bytes(), true);
-                        None
-                    }
-                }
-            },
-            true,
-        );
+        outcome = interp::session::run_console(|_prompt| read_stdin_line(&mut stdin), true);
     }
     let source = SCRIPT_SOURCE
         .lock()
@@ -1522,6 +1509,67 @@ pub unsafe extern "C" fn ry_run(
     match outcome {
         interp::session::Outcome::Completed => 0,
         interp::session::Outcome::Failed => 1,
+    }
+}
+
+/// Runs `input`, else the file at `path`, else stdin as GNU R's `R` does without `--no-echo`:
+/// as console input, writing each prompt and the line read after it, so that the output
+/// interleaves the code with what it prints. The first error halts, as in any
+/// non-interactive console. Returns the exit status.
+unsafe fn run_echoed(input: Option<&str>, path: Option<&str>) -> c_int {
+    let text = match (input, path) {
+        (Some(input), _) => Some(input.to_owned()),
+        (None, Some(path)) => match std::fs::read(path) {
+            Ok(bytes) => Some(interp::values::escape_invalid_bytes(&bytes).into_owned()),
+            Err(failure) => {
+                let message = format!("Fatal error: cannot open file '{path}': {failure}\n");
+                crate::boundary::write_console(message.as_bytes(), true);
+                return 2;
+            }
+        },
+        (None, None) => None,
+    };
+    let mut lines = text.as_deref().map(|text| text.split_inclusive('\n'));
+    let mut stdin = std::io::stdin().lock();
+    let outcome = interp::session::run_console(
+        |prompt| {
+            crate::boundary::write_console(prompt.as_bytes(), false);
+            let line = match &mut lines {
+                Some(lines) => lines.next().map(str::to_owned),
+                None => read_stdin_line(&mut stdin),
+            };
+            let echoed = line.as_deref().unwrap_or("");
+            crate::boundary::write_console(echoed.as_bytes(), false);
+            if !echoed.ends_with('\n') {
+                crate::boundary::write_console(b"\n", false);
+            }
+            line
+        },
+        true,
+    );
+    match outcome {
+        interp::session::Outcome::Completed => 0,
+        interp::session::Outcome::Failed => 1,
+    }
+}
+
+/// The next line of stdin, after flushing stdout so that whoever drives the process sees the
+/// output of the previous line before it writes the next.
+fn read_stdin_line(stdin: &mut std::io::StdinLock<'_>) -> Option<String> {
+    use std::io::{BufRead, Write};
+    if let Err(error) = std::io::stdout().flush() {
+        let message = format!("ry: cannot write output: {error}\n");
+        crate::boundary::write_console(message.as_bytes(), true);
+    }
+    let mut line = Vec::new();
+    match stdin.read_until(b'\n', &mut line) {
+        Ok(0) => None,
+        Ok(_) => Some(String::from_utf8_lossy(&line).into_owned()),
+        Err(error) => {
+            let message = format!("ry: cannot read R input from stdin: {error}\n");
+            crate::boundary::write_console(message.as_bytes(), true);
+            None
+        }
     }
 }
 
@@ -1577,6 +1625,7 @@ unsafe fn start_script_session(command_args: Vec<String>, flags: c_int) -> bool 
         command_args,
         site_profile: flags & RUN_FLAG_SITE_PROFILE != 0,
         user_profile: flags & RUN_FLAG_USER_PROFILE != 0,
+        environ: flags & RUN_FLAG_ENVIRON != 0,
         interactive: false,
         image: Some(IMAGE_HOST),
         build: env!("RY_RUNTIME_ID"),
@@ -1764,6 +1813,19 @@ pub const RUN_FLAG_NO_PRELUDE: c_int = 1 << 5;
 /// (`ry run --aot`), instead of each at its first call.
 pub const RUN_FLAG_AHEAD: c_int = 1 << 6;
 
+/// `ry_run` flag: read the site and user `Renviron` files, as GNU R does without `--vanilla`
+/// or `--no-environ`. Like the profiles, `ry run` leaves it off and ry's R home's front ends
+/// set it.
+pub const RUN_FLAG_ENVIRON: c_int = 1 << 7;
+
+/// `ry_run` flag: run the input as GNU R's `R` does without `--no-echo`, echoing each line after
+/// its prompt.
+pub const RUN_FLAG_ECHO: c_int = 1 << 8;
+
+/// `ry_run` flag: print GNU R's start-up greeting first, as `R` does without `--quiet` or
+/// `--no-echo`.
+pub const RUN_FLAG_GREETING: c_int = 1 << 9;
+
 /// Every flag `ry_run` and `ry_repl` understand.
 pub const RUN_FLAGS: c_int = RUN_FLAG_ANNOTATION_CHECKS
     | RUN_FLAG_OBJECT_SYSTEMS
@@ -1771,7 +1833,10 @@ pub const RUN_FLAGS: c_int = RUN_FLAG_ANNOTATION_CHECKS
     | RUN_FLAG_SITE_PROFILE
     | RUN_FLAG_USER_PROFILE
     | RUN_FLAG_NO_PRELUDE
-    | RUN_FLAG_AHEAD;
+    | RUN_FLAG_AHEAD
+    | RUN_FLAG_ENVIRON
+    | RUN_FLAG_ECHO
+    | RUN_FLAG_GREETING;
 
 unsafe fn apply_flags(flags: c_int) {
     runtime();
@@ -1804,6 +1869,7 @@ pub unsafe extern "C" fn ry_repl(read: ReadConsole, startup: *const c_char, flag
         command_args: vec!["ry".to_owned()],
         site_profile: flags & RUN_FLAG_SITE_PROFILE != 0,
         user_profile: flags & RUN_FLAG_USER_PROFILE != 0,
+        environ: flags & RUN_FLAG_ENVIRON != 0,
         interactive: true,
         image: Some(IMAGE_HOST),
         build: env!("RY_RUNTIME_ID"),

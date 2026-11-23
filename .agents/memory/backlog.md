@@ -657,7 +657,6 @@ Rule and order: `development/design/memory-safety.md`, "Migration".
 The loader runs on ry's runtime (the `ry load` default) and on GNU R (`crates/loader`,
 `docs/.../guide.mdx`, step 3). Gaps, roughly in order of how often a real package hits them:
 
-- **The load-index cache never evicts.** `loader::index_cache` writes one `~/.cache/ry/load-index/<hash of root>.bin` per package root, and nothing removes an entry whose root is gone, so temporary roots (test and benchmark checkouts) pile up: one container held 782 entries, 1.9 GB. Store the root in the entry and drop entries whose root no longer exists, as the stale runtime directories are dropped.
 - **`ry test` workers under `--runtime gnu-r` still load with pkgload**, eagerly and without
   `ry.toml`'s switches, because a GNU R worker has no `.Internal(ryLoaderAttach())`. Attaching the
   GNU R loader in the worker hook (source `gnur.R` from the binary) would close it.

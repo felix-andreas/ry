@@ -154,7 +154,10 @@ fn tools_command(arguments: &[String]) -> Option<crate::Session> {
     Some(crate::Session::Run {
         file: None,
         expressions: Some(entry.to_owned()),
-        arguments: vec![
+        command_line: vec![
+            "--no-restore".to_owned(),
+            "--no-echo".to_owned(),
+            "--args".to_owned(),
             rest.iter()
                 .map(|argument| format!("nextArg{argument}"))
                 .collect(),
@@ -162,6 +165,9 @@ fn tools_command(arguments: &[String]) -> Option<crate::Session> {
         default_packages: default_packages.map(str::to_owned),
         site_profile: !vanilla,
         user_profile: !vanilla,
+        environ: !vanilla,
+        echo: false,
+        greeting: false,
     })
 }
 
@@ -292,31 +298,26 @@ const PROJECT_FLAGS: c_int = 0b10_0111;
 
 /// Runs a session on ry's runtime, the libR of the R home, which also holds the interpreter.
 fn run_r(home: &Path, session: &crate::Session) -> crate::Result<i32> {
-    let (file, expressions, arguments, default_packages, site_profile, user_profile) = match session
-    {
-        crate::Session::Print(text) => {
-            print!("{text}");
-            return Ok(0);
+    let crate::Session::Run {
+        file,
+        expressions,
+        command_line,
+        default_packages,
+        site_profile,
+        user_profile,
+        environ,
+        echo,
+        greeting,
+    } = session
+    else {
+        match session {
+            crate::Session::Print(text) => print!("{text}"),
+            crate::Session::Version { rscript } => {
+                print!("{}", crate::version_text(home, *rscript)?)
+            }
+            crate::Session::Run { .. } => {}
         }
-        crate::Session::Version { rscript } => {
-            print!("{}", crate::version_text(home, *rscript)?);
-            return Ok(0);
-        }
-        crate::Session::Run {
-            file,
-            expressions,
-            arguments,
-            default_packages,
-            site_profile,
-            user_profile,
-        } => (
-            file,
-            expressions,
-            arguments,
-            default_packages,
-            *site_profile,
-            *user_profile,
-        ),
+        return Ok(0);
     };
     if let Some(packages) = default_packages {
         // SAFETY: no other thread exists yet.
@@ -347,8 +348,12 @@ fn run_r(home: &Path, session: &crate::Session) -> crate::Result<i32> {
     };
     let file = file.as_deref().map(text).transpose()?;
     let input = input.as_deref().map(text).transpose()?;
-    let arguments = arguments
-        .iter()
+    // GNU R's `commandArgs()` starts with the path of the executable `bin/R` runs.
+    let program = std::env::current_exe()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "R".to_owned());
+    let arguments = std::iter::once(&program)
+        .chain(command_line)
         .map(|argument| text(argument))
         .collect::<crate::Result<Vec<_>>>()?;
     let pointers: Vec<*const c_char> = arguments.iter().map(|argument| argument.as_ptr()).collect();
@@ -365,8 +370,16 @@ fn run_r(home: &Path, session: &crate::Session) -> crate::Result<i32> {
         .ok()
         .and_then(|bits| bits.parse::<c_int>().ok())
         .map_or(0b11, |bits| bits & PROJECT_FLAGS);
-    let flags =
-        project | if site_profile { 1 << 3 } else { 0 } | if user_profile { 1 << 4 } else { 0 };
+    let flags = [
+        (*site_profile, 1 << 3),
+        (*user_profile, 1 << 4),
+        (*environ, 1 << 7),
+        (*echo, 1 << 8),
+        (*greeting, 1 << 9),
+    ]
+    .into_iter()
+    .filter(|(wanted, _)| *wanted)
+    .fold(project, |flags, (_, bit)| flags | bit);
     let status = unsafe {
         run(
             pointer(&file),

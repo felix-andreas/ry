@@ -205,13 +205,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     }),
     internal("setwd", 1, do_setwd).invisible(),
     internal("Sys.glob", 2, do_sys_glob),
-    internal("Sys.readlink", 1, |call| unsafe {
-        map_strings(call, |path| {
-            std::fs::read_link(path)
-                .map(|target| target.display().to_string())
-                .unwrap_or_default()
-        })
-    }),
+    internal("Sys.readlink", 1, do_sys_readlink),
     internal("Sys.which", 1, do_sys_which),
     internal("ryOsVersion", 0, do_os_version),
     internal("Sys.chmod", 3, do_sys_chmod).invisible(),
@@ -706,6 +700,34 @@ unsafe fn map_strings(call: &Call<'_>, function: impl Fn(&str) -> String) -> R<S
     for index in 0..count {
         let charsxp = match values::string_at(paths, index) {
             Some(path) => values::mkchar(&function(&path))?,
+            None => values::na_string(),
+        };
+        values::set_elt(result, index, charsxp);
+    }
+    Ok(result)
+}
+
+/// `Sys.readlink`: "" for a path that is not a symbolic link, and `NA` when it cannot be read
+/// at all (a missing path, or "" itself), as GNU R maps `readlink`'s errors. GNU R on Windows
+/// answers "" for every path.
+unsafe fn do_sys_readlink(call: &Call<'_>) -> R<Sexp> {
+    let paths = call.arg(0);
+    if paths.kind() != SexpType::String && paths != nil() {
+        return Err(call.error("a character vector argument expected"));
+    }
+    let count = length(paths);
+    let result = alloc(SexpType::String, count)?;
+    for index in 0..count {
+        let path = values::string_at(paths, index)
+            .map(|path| crate::connections::expand_path(&path));
+        let target = match path.as_deref().map(std::fs::read_link) {
+            Some(_) if cfg!(windows) => Some(String::new()),
+            Some(Ok(target)) => Some(target.display().to_string()),
+            Some(Err(error)) if error.raw_os_error() == Some(libc::EINVAL) => Some(String::new()),
+            Some(Err(_)) | None => None,
+        };
+        let charsxp = match target {
+            Some(target) => values::mkchar(&target)?,
             None => values::na_string(),
         };
         values::set_elt(result, index, charsxp);
@@ -3684,17 +3706,8 @@ unsafe fn do_l10n_info(_call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn do_version(_call: &Call<'_>) -> R<Sexp> {
-    // GNU R's own platform strings, which packages match on (`grepl("darwin", R.version$os)`).
-    // CRAN's macOS builds target Darwin 20, the first release with Apple silicon.
-    let (vendor, os) = if cfg!(target_os = "macos") {
-        ("apple", "darwin20")
-    } else if cfg!(windows) {
-        ("w64", "mingw32")
-    } else {
-        ("pc", "linux-gnu")
-    };
-    let arch = std::env::consts::ARCH;
-    let platform = format!("{arch}-{vendor}-{os}");
+    let (arch, _, os) = platform_parts();
+    let platform = platform_triple();
     let version = r_version();
     let (year, month, day) = (
         version.date.get(0..4).unwrap_or(""),
@@ -3757,6 +3770,26 @@ impl RVersion {
     pub fn number(&self) -> String {
         format!("{}.{}.{}", self.major, self.minor, self.patch)
     }
+}
+
+/// GNU R's platform triple, `R.version$platform`.
+pub fn platform_triple() -> String {
+    let (arch, vendor, os) = platform_parts();
+    format!("{arch}-{vendor}-{os}")
+}
+
+/// GNU R's own architecture, vendor and OS strings, which packages match on
+/// (`grepl("darwin", R.version$os)`). CRAN's macOS builds target Darwin 20, the first release
+/// with Apple silicon.
+fn platform_parts() -> (&'static str, &'static str, &'static str) {
+    let (vendor, os) = if cfg!(target_os = "macos") {
+        ("apple", "darwin20")
+    } else if cfg!(windows) {
+        ("w64", "mingw32")
+    } else {
+        ("pc", "linux-gnu")
+    };
+    (std::env::consts::ARCH, vendor, os)
 }
 
 /// ry implements `R_mapAttrib` and the resizable vectors whatever base it runs, and data.table's
