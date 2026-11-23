@@ -8900,18 +8900,27 @@ impl<'db, 'a> Checker<'db, 'a> {
             return None;
         };
         let members = guard_members(self.db, self.table.resolve(self.db, current));
+        // The condition an `error = function(e) e` handler returns is an error, so a value that
+        // is not one is the expression's own: `if (inherits(r, "error")) stop(...)` leaves `r`
+        // the expression's value. A handler for another class makes this an approximation.
+        let caught = matches!(&self.module[text], "error" | "condition");
         let decide = |db: &'db dyn Db, member: Ty<'db>| match member.kind(db) {
             TyKind::Scalar(_)
             | TyKind::Vector(_)
             | TyKind::NamedVector(_)
             | TyKind::Null
             | TyKind::Function(_) => Some(false),
+            TyKind::Named(name, _) if caught && name.text(db) == "condition" => Some(true),
             _ => None,
         };
         let refinement = self.filtered_edges(slot, &members, decide);
         Some(GuardRefinement {
             true_edge: refinement.true_edge,
-            false_edge: Vec::new(),
+            false_edge: if caught {
+                refinement.false_edge
+            } else {
+                Vec::new()
+            },
         })
     }
 
@@ -18306,16 +18315,27 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// therefore passes. So does a number where the body only claimed `logical`, because that
     /// claim comes from a condition or `!`, which coerce numbers as R does.
     fn fits_inferred_scalar(&self, expected: Ty<'db>, ty: Ty<'db>) -> bool {
-        // Only a scalar the signature names: a type variable an earlier argument bound to a
-        // scalar still widens through unification (`cost(TRUE, 0.5)` binds `T := double`).
-        let TyKind::Scalar(atomic) = *expected.kind(self.db) else {
-            return false;
+        // A type variable an earlier argument bound to a scalar still widens to another scalar
+        // through unification (`cost(TRUE, 0.5)` binds `T := double`), so it takes only a
+        // vector of that scalar here: Hmisc's `scontrol(times)` after `uniroot` called
+        // `scontrol(x)` with one number.
+        let (atomic, bound_variable) = match *expected.kind(self.db) {
+            TyKind::Scalar(atomic) => (atomic, false),
+            TyKind::Var(_) => match *self.table.resolve(self.db, expected).kind(self.db) {
+                TyKind::Scalar(atomic) => (atomic, true),
+                _ => return false,
+            },
+            _ => return false,
         };
         let fits = |member: Ty<'db>| {
             let element = match member.kind(self.db) {
                 TyKind::Vector(element) => *element,
+                _ if bound_variable => return false,
                 _ => member,
             };
+            if bound_variable {
+                return matches!(*element.kind(self.db), TyKind::Scalar(other) if other == atomic);
+            }
             match *element.kind(self.db) {
                 TyKind::Scalar(other) => {
                     other == atomic

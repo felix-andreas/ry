@@ -2804,3 +2804,28 @@ use_fwd <- function() fwd(obj = 1)
 gen: <T, U> fn([a]: T, obj: U) -> Any
 fwd: <T, U> fn([a]: T, obj: U) -> Any
 use_fwd: fn() -> Any
+
+#---- a_callback_bound_to_a_scalar_by_a_forwarded_call_takes_a_vector_later
+# Hmisc's `Quantile2` hands `scontrol` to `uniroot`, which calls it with one number, then calls
+# it on a grid of times.
+quant <- function(scontrol, m = 10, qt = 0.01) {
+  f <- function(x, scontrol, qt) scontrol(x) - qt
+  tmax <- uniroot(f, c(0, 1e9), scontrol = scontrol, qt = qt)$root
+  times <- seq(0, tmax, length.out = m)
+  scontrol(times)
+}
+#++++
+quant: <T: arithmetic, U> fn(scontrol: fn(double) -> T, [m]: U, [qt]: T) -> T
+
+#---- a_null_default_joined_with_a_number_passes_a_numeric_parameter
+# `ncases` is the caller's value or `NULL` replaced by a number, and both reach the arithmetic.
+solve_z <- function(nd, v0) sqrt(nd * v0)
+size <- function(ncontrols = NULL, ncases = NULL, kappa = 1) {
+  if (is.null(ncases) && !is.null(ncontrols)) {
+    ncases <- ncontrols / kappa
+  }
+  solve_z(nd = ncases, v0 = 2)
+}
+#++++
+solve_z: <T: numeric> fn(nd: T, v0: T) -> double
+size: <T: numeric, U: numeric> fn([ncontrols]: T | NULL, [ncases]: U | NULL, [kappa]: T) -> double

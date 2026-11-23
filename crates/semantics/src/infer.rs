@@ -384,6 +384,19 @@ impl<'db> InferenceTable<'db> {
         else {
             unreachable!("bind target is always unbound after find");
         };
+        // An open member of a union takes the bound, as it would bound alone: a `NULL`
+        // default joined with a number (`T | double`) passed to arithmetic makes `T` a number.
+        if constraint != Constraint::Unconstrained
+            && let TyKind::Union(members) = ty.kind(db)
+        {
+            for &member in members.iter() {
+                if let TyKind::Var(member) = self.shallow_resolve(db, member).kind(db)
+                    && matches!(self.entry(self.find(*member)), Entry::Unbound { .. })
+                {
+                    self.constrain(db, *member, constraint)?;
+                }
+            }
+        }
         if let Some(error) = constraint_rejects(db, self, constraint, ty) {
             return Err(error);
         }
@@ -2188,6 +2201,18 @@ pub(crate) fn constraint_rejects<'db>(
             .all(|&member| constraint_rejects(db, table, constraint, member).is_none());
         return (!every_member_admissible)
             .then_some(UnifyError::ConstraintRejected(constraint, ty));
+    }
+    // An open member counts when its own bound implies the required one, which `bind`
+    // arranges for the members of a union before it asks.
+    if let TyKind::Var(var) = ty.kind(db) {
+        let admissible = match table.entry(table.find(*var)) {
+            Entry::Unbound {
+                constraint: own, ..
+            } => own.join(constraint) == Some(*own),
+            Entry::Bound { ty, .. } => constraint_rejects(db, table, constraint, *ty).is_none(),
+            Entry::Redirect(_) => false,
+        };
+        return (!admissible).then_some(UnifyError::ConstraintRejected(constraint, ty));
     }
     let admissible = match constraint {
         Constraint::Unconstrained => true,

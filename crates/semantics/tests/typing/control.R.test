@@ -281,7 +281,7 @@ root <- function(f) {
   r
 }
 #++++
-root: fn(f: fn(double) -> double[]) -> double | condition
+root: fn(f: fn(double) -> double[]) -> double
 
 #---- a_class_dispatch_null_fallback_passes_an_object_that_may_carry_the_class
 is.chain <- function(x) inherits(x, "chain")
