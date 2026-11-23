@@ -757,6 +757,11 @@ enum Use {
     TableArgument,
 }
 
+/// Whether a value used as `usage` is an argument of an R call, which R evaluates itself.
+fn is_r_argument(usage: Use) -> bool {
+    matches!(usage, Use::Argument(_) | Use::TableArgument)
+}
+
 enum Callee {
     Return,
     Stop,
@@ -1041,11 +1046,14 @@ impl<'a, 'db> Judge<'a, 'db> {
         let db = self.judged.db;
         match *module.kind(id) {
             ExpressionKind::Missing | ExpressionKind::Break | ExpressionKind::Next => {}
+            // R evaluates such a literal itself where it stands among an R call's arguments.
             ExpressionKind::Literal(LiteralKind::Complex(_) | LiteralKind::Na(_)) => {
-                self.block(id, NativeBlockerKind::RLiteral);
+                if !is_r_argument(usage) {
+                    self.block(id, NativeBlockerKind::RLiteral);
+                }
             }
             ExpressionKind::Literal(_) => {}
-            ExpressionKind::NameRef(name) => self.read(id, name),
+            ExpressionKind::NameRef(name) => self.read(id, name, usage),
             ExpressionKind::Paren(inner) => self.walk(inner, Use::Value),
             ExpressionKind::Block { statements } => {
                 let statements = &module[statements];
@@ -1558,7 +1566,7 @@ impl<'a, 'db> Judge<'a, 'db> {
         }
     }
 
-    fn read(&mut self, id: ExprId, name: Symbol) {
+    fn read(&mut self, id: ExprId, name: Symbol, usage: Use) {
         let db = self.judged.db;
         match self.lookup(name) {
             Some(Slot::Function(_)) => {
@@ -1570,6 +1578,11 @@ impl<'a, 'db> Judge<'a, 'db> {
         }
         if self.locals.contains(&name) {
             self.uncompiled(id, Uncompiled::BranchOnlyName(name));
+            return;
+        }
+        // Among an R call's arguments, R reads a variable from outside the function itself, when
+        // the call runs, so its value needs no ry type.
+        if is_r_argument(usage) {
             return;
         }
         let ty = self.ty(id);
@@ -2036,7 +2049,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                 }
             }
             Callee::ToR(name) => {
-                if !matches!(usage, Use::Argument(_) | Use::TableArgument) {
+                if !is_r_argument(usage) {
                     self.block(id, NativeBlockerKind::ToROutsideCall(name));
                 }
                 for &(_, value) in arguments {

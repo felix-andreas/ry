@@ -5392,10 +5392,16 @@ an R function only in these positions:
 2. as a statement whose value nothing reads, which is not the last expression of the function;
 3. as `stop(...)`, whose arguments may hold anything.
 
-Each argument of such a call is a ry value that shares R's representation (an `F64`, `Bool` or
-`Str`, or a list of them), an R literal such as `42L`, or `Num.to_r(x)` or `List.to_r(x)` written
-directly as the argument. The arguments of a table function follow the same rule, and so do the
-operands of an operator that builds an `Expr`, as in `Expr.col("units") >= Num.to_r(least)`; they
+Each argument of such a call is one of these:
+
+- a ry value that shares R's representation: an `F64`, `Bool` or `Str`, or a list of them;
+- `Num.to_r(x)` or `List.to_r(x)` written directly as the argument;
+- an R literal, such as `42L`, `NA`, `NA_real_` or `2i`, which R evaluates itself;
+- a variable from outside the function that the function never assigns, such as a global. R reads
+  it when the call runs, so the call sees the binding as it is then.
+
+The arguments of a table function follow the same rule, and so do the operands of an operator that
+builds an `Expr`, as in `Expr.col("units") >= Num.to_r(least)` or `Expr.col("price") > limit`; they
 may also be table values and nested table calls
 ([Tables in typed code](#tables-in-typed-code)). This function is native:
 
@@ -5447,17 +5453,17 @@ native
     into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
 ```
 
-**A variable that holds an R value.** A native function reads its own parameters and variables. A
-global that holds an R value is converted once, outside, and passed in:
+**A variable that holds an R value, outside an R call's arguments.** A native function reads its
+own parameters and variables. A global that holds an R value may stand directly as an argument of
+an R call, which reads it, but anywhere else it is converted once, outside, and passed in:
 
 ```r
 #: character
 unit <- Sys.getenv("UNIT")
-report <- function(amount: F64) -> NULL {
-  cat(amount, unit, "\n")
-  NULL
+label <- function(amount: F64) -> Str {
+  Str.concat(Num.to_str(amount), Str.from_r(unit))
 }
-report(2.5)
+print(label(2.5))
 ```
 
 ```text ry check typing strict
@@ -5507,8 +5513,8 @@ native
 ```
 
 **An R value written as a literal or an operator.** `a:b` builds an R vector, and `NA` and complex
-literals have no ry type, so each is a `native` error. Write `List.range(a, b)`, and use a `Result`
-or a tag for a missing value. `Num.to_r` and `List.to_r` give an R value too, so they stand directly
+literals have no ry type, so each is a `native` error outside the arguments of an R call. Write
+`List.range(a, b)`, and use a `Result` or a tag for a missing value. `Num.to_r` and `List.to_r` give an R value too, so they stand directly
 inside the arguments of an R call.
 
 **A construct that is not compiled natively yet.** The program is legitimate ry and runs with the

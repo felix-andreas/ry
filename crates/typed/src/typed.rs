@@ -40,7 +40,7 @@ use {
     crate::{
         backend::{Callee, Code, Entry, Trampoline},
         ir::{Item, Type},
-        lower::{Callees, Lowered, RCall, RResult, Speculation},
+        lower::{Callees, Lowered, Passed, RCall, RResult, Speculation},
         shapes::Shapes,
         values::{Boxed, List, Str},
     },
@@ -584,7 +584,10 @@ unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<
         for conversion in site
             .arguments
             .iter()
-            .filter_map(|argument| argument.conversion)
+            .filter_map(|argument| match argument.passed {
+                Passed::Value(_, conversion) => conversion,
+                Passed::Code => None,
+            })
         {
             heap.add_global_root(conversion.function);
         }
@@ -1530,7 +1533,10 @@ unsafe fn call_r(
             let offset: usize = site
                 .arguments
                 .iter()
-                .map(|argument| backend::words(argument.ty).len())
+                .map(|argument| match argument.passed {
+                    Passed::Value(ty, _) => backend::words(ty).len(),
+                    Passed::Code => 0,
+                })
                 .sum();
             let mut native = [0u64; 2];
             for (position, word) in native.iter_mut().take(backend::words(ty).len()).enumerate() {
@@ -1553,24 +1559,33 @@ unsafe fn apply_r(site: &RCall, mut words: *const u64, env: Sexp) -> Result<Sexp
     let heap = interp::heap();
     let mut args: SmallVec<[Arg; 4]> = SmallVec::new();
     for argument in &site.arguments {
-        let mut native = [0u64; 2];
-        for word in native.iter_mut().take(backend::words(argument.ty).len()) {
-            *word = *words;
-            words = words.add(1);
-        }
-        let mut value = to_r(argument.ty, native)?;
-        heap.root(value);
-        if let Some(conversion) = argument.conversion {
-            value = convert(
-                conversion,
-                conversion.call.cdr().car(),
-                value,
-                None,
-                site.env,
-            )?;
-            heap.root(value);
-        }
-        let promise = interp::eval::forced_promise(argument.code, value)?;
+        let promise = match argument.passed {
+            // A literal is its own value, as the interpreter passes it.
+            Passed::Code if argument.code.kind() != SexpType::Symbol => {
+                interp::eval::forced_promise(argument.code, argument.code)?
+            }
+            Passed::Code => interp::eval::make_promise(argument.code, site.env)?,
+            Passed::Value(ty, conversion) => {
+                let mut native = [0u64; 2];
+                for word in native.iter_mut().take(backend::words(ty).len()) {
+                    *word = *words;
+                    words = words.add(1);
+                }
+                let mut value = to_r(ty, native)?;
+                heap.root(value);
+                if let Some(conversion) = conversion {
+                    value = convert(
+                        conversion,
+                        conversion.call.cdr().car(),
+                        value,
+                        None,
+                        site.env,
+                    )?;
+                    heap.root(value);
+                }
+                interp::eval::forced_promise(argument.code, value)?
+            }
+        };
         heap.root(promise);
         args.push(Arg {
             tag: argument.tag,

@@ -335,3 +335,51 @@ env RY_JIT off
 run ry run --runtime ry gaps.R
 expect exit 0
 expect stdout "[1] 10\n[1] 2\n[1] \"a,?,b\"\n[1] \"x\"\n103i64\n2i64"
+
+# R evaluates an argument of an R call itself: a literal with no ry type, such as `NA_real_` or
+# `2i`, and a variable from outside the function, which R reads when the call runs, so the call
+# after `threshold` is rebound keeps both rows. Every call runs natively, the first included, and
+# the code compiled ahead of time and the interpreter print the same.
+
+file arguments.R
+| alias Sales = DataFrame{region: character, units: double}
+| #: double
+| threshold <- 1.5
+| #: character[]
+| months <- c("jan", "feb")
+| large <- function(sales: Sales) -> Sales {
+|   sales |> DataFrame.filter(Expr.col("units") > threshold)
+| }
+| blanked <- function(sales: Sales) -> Sales {
+|   sales |> DataFrame.with_columns(
+|     units = Expr.if_else(Expr.col("region") == "north", Expr.col("units"), Expr.lit(NA_real_))
+|   )
+| }
+| labels <- function(label: Str) -> Str {
+|   Str.from_r(paste(label, months, NA, 2i, sep = "-", collapse = " "))
+| }
+| sales <- DataFrame(region = c("north", "south"), units = c(1, 2))
+| print(large(sales))
+| threshold <- 0.5
+| print(large(sales))
+| print(blanked(sales))
+| print(labels("q"))
+
+unset RY_JIT
+run ry run --runtime ry arguments.R
+expect exit 0
+expect stdout "   region units\n   <char> <num>\n1:  south     2\n   region units\n   <char> <num>\n1:  north     1\n2:  south     2\n   region units\n   <char> <num>\n1:  north     1\n2:  south    NA\n[1] \"q-jan-NA-0+2i q-feb-NA-0+2i\""
+expect stderr "typed: compiled for [Table] -> Table"
+expect stderr "typed: compiled for [Str] -> Str"
+expect stderr lacks "runs in the interpreter"
+
+run ry run --runtime ry --aot arguments.R
+expect exit 0
+expect stdout "   region units\n   <char> <num>\n1:  south     2\n   region units\n   <char> <num>\n1:  north     1\n2:  south     2\n   region units\n   <char> <num>\n1:  north     1\n2:  south    NA\n[1] \"q-jan-NA-0+2i q-feb-NA-0+2i\""
+expect stderr "typed: compiled 3 functions ahead of time in "
+expect stderr lacks "runs in the interpreter"
+
+env RY_JIT off
+run ry run --runtime ry arguments.R
+expect exit 0
+expect stdout "   region units\n   <char> <num>\n1:  south     2\n   region units\n   <char> <num>\n1:  north     1\n2:  south     2\n   region units\n   <char> <num>\n1:  north     1\n2:  south    NA\n[1] \"q-jan-NA-0+2i q-feb-NA-0+2i\""

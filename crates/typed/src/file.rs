@@ -24,7 +24,7 @@ use {
         },
         compiled_or_refusal, earliest,
         ir::{Item, Type},
-        lower::{self, Conversion, Lowered, RArgument, RCall, RResult, Speculation},
+        lower::{self, Conversion, Lowered, Passed, RArgument, RCall, RResult, Speculation},
         lower_settled, optimize, shapes, storage,
     },
     heap::{
@@ -49,7 +49,7 @@ use {
 };
 
 const MAGIC: &[u8; 8] = b"RYTYPED\0";
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 /// The bytes of the fixed header.
 const HEADER_SIZE: usize = 8 + 4 + 8 * 13;
 /// The alignment of the code in the file and of the offset table's reservation, which is the
@@ -330,7 +330,7 @@ unsafe fn collect(
             preserved.push(site.call);
             for argument in &site.arguments {
                 preserved.push(argument.code);
-                if let Some(conversion) = argument.conversion {
+                if let Passed::Value(_, Some(conversion)) = argument.passed {
                     preserved.push(conversion.call);
                 }
             }
@@ -780,8 +780,14 @@ pub struct Site {
 pub struct Argument {
     pub tag: Option<u32>,
     pub code: Expr,
-    pub ty: Type,
-    pub conversion: Option<FileConversion>,
+    pub passed: FilePassed,
+}
+
+/// What a site passes for an argument, as [`Passed`] says.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FilePassed {
+    Value(Type, Option<FileConversion>),
+    Code,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1274,15 +1280,20 @@ impl Encoder<'_> {
             } else {
                 Some(self.shapes.strings.id(&rvalues::symbol_name(argument.tag)))
             };
-            let conversion = match argument.conversion {
-                Some(conversion) => Some(self.conversion(conversion, identify, locate)?),
-                None => None,
+            let passed = match argument.passed {
+                Passed::Value(ty, conversion) => FilePassed::Value(
+                    self.shapes.ty(ty).map_err(|_| UNNAMED_SHAPE)?,
+                    match conversion {
+                        Some(conversion) => Some(self.conversion(conversion, identify, locate)?),
+                        None => None,
+                    },
+                ),
+                Passed::Code => FilePassed::Code,
             };
             arguments.push(Argument {
                 tag,
                 code: self.expr(argument.code).ok_or(UNNAMED_CODE)?,
-                ty: self.shapes.ty(argument.ty).map_err(|_| UNNAMED_SHAPE)?,
-                conversion,
+                passed,
             });
         }
         let result = match site.result {
@@ -1674,13 +1685,17 @@ fn encode_metadata(parsed: &Parsed) -> Vec<u8> {
         for argument in &site.arguments {
             out.option(argument.tag);
             out.expr(&argument.code);
-            out.ty(argument.ty);
-            match &argument.conversion {
-                Some(conversion) => {
+            match &argument.passed {
+                FilePassed::Value(ty, None) => {
+                    out.number(0);
+                    out.ty(*ty);
+                }
+                FilePassed::Value(ty, Some(conversion)) => {
                     out.number(1);
+                    out.ty(*ty);
                     out.conversion(conversion);
                 }
-                None => out.number(0),
+                FilePassed::Code => out.number(2),
             }
         }
         match &site.result {
@@ -2167,18 +2182,17 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
         for _ in 0..length {
             let tag = input.option(strings)?;
             let code = input.expr(strings, 0)?;
-            let ty = input.ty(&parsed.shapes)?;
-            let conversion = if input.flag()? {
-                Some(input.conversion(&parsed.shapes, lookups)?)
-            } else {
-                None
+            let passed = match input.number()? {
+                0 => FilePassed::Value(input.ty(&parsed.shapes)?, None),
+                1 => {
+                    let ty = input.ty(&parsed.shapes)?;
+                    let conversion = input.conversion(&parsed.shapes, lookups)?;
+                    FilePassed::Value(ty, Some(conversion))
+                }
+                2 => FilePassed::Code,
+                _ => return Err(MALFORMED),
             };
-            arguments.push(Argument {
-                tag,
-                code,
-                ty,
-                conversion,
-            });
+            arguments.push(Argument { tag, code, passed });
         }
         let result = match input.number()? {
             0 => SiteResult::Unused,
@@ -3149,15 +3163,20 @@ unsafe fn build_site_inner(
             Some(tag) => rvalues::install(&strings[tag as usize]).map_err(|_| UNBUILT)?,
             None => rvalues::nil(),
         };
-        let converted = match &argument.conversion {
-            Some(converted) => Some(conversion(converted, resolved)?),
-            None => None,
+        let passed = match &argument.passed {
+            FilePassed::Value(ty, converted) => Passed::Value(
+                live_type(*ty, &mapped.live),
+                match converted {
+                    Some(converted) => Some(conversion(converted, resolved)?),
+                    None => None,
+                },
+            ),
+            FilePassed::Code => Passed::Code,
         };
         arguments.push(RArgument {
             tag,
             code: keep(build_expr(strings, &argument.code).ok_or(UNBUILT)?),
-            ty: live_type(argument.ty, &mapped.live),
-            conversion: converted,
+            passed,
         });
     }
     let result = match &site.result {
@@ -3265,8 +3284,8 @@ pub mod testing {
     use {
         super::{
             ALIGN, Argument, Class, EnvRef, Expr, FieldNames, FileCallee, FileConversion,
-            HEADER_SIZE, Header, Item, LayoutKey, Lookup, Matches, Parsed, Place, ShapeEntry, Site,
-            SiteResult, Target, Version, encode_header, encode_metadata, parse,
+            FilePassed, HEADER_SIZE, Header, Item, LayoutKey, Lookup, Matches, Parsed, Place,
+            ShapeEntry, Site, SiteResult, Target, Version, encode_header, encode_metadata, parse,
         },
         crate::{
             backend::{Helper, Slot},
@@ -3433,8 +3452,13 @@ pub mod testing {
                     .map(|_| Argument {
                         tag: (below(2) == 0).then(|| below(strings) as u32),
                         code: Expr::Symbol(below(strings) as u32),
-                        ty: Type::Dbl,
-                        conversion: (below(2) == 0).then(|| conversion(&mut below)),
+                        passed: match below(3) {
+                            0 => FilePassed::Code,
+                            _ => FilePassed::Value(
+                                Type::Dbl,
+                                (below(2) == 0).then(|| conversion(&mut below)),
+                            ),
+                        },
                     })
                     .collect();
                 let result = match below(3) {

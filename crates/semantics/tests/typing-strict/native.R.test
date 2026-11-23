@@ -1001,6 +1001,32 @@ missing_amount: fn(amount: F64) -> F64
 51..59 warning[unused] `fallback` is assigned but never used
 63..71 error[native] this literal is an R value with no ry type, and a native function holds only ry values. Use a `Result` or a tag for a missing value
 
+#---- r_literals_and_outside_variables_as_r_arguments
+#~~~~ script.R
+# R evaluates an argument of an R call itself, so a literal with no ry type and a variable from
+# outside the function may stand there.
+alias Sales = DataFrame{region: character, units: double}
+#: double
+threshold <- 1.5
+large <- function(sales: Sales) -> Sales {
+  sales |> DataFrame.filter(Expr.col("units") > threshold)
+}
+blanked <- function(sales: Sales) -> Sales {
+  DataFrame.with_columns(sales, units = Expr.lit(NA_real_))
+}
+labels <- function(label: Str) -> Str {
+  Str.from_r(paste(label, threshold, NA, 2i, sep = "-"))
+}
+#++++
+== script.R
+threshold: double
+large: fn(sales: Sales) -> Sales
+blanked: fn(sales: Sales) -> Sales
+labels: fn(label: Str) -> Str
+221..226 warning[unused] `large` is assigned but never used
+325..332 warning[unused] `blanked` is assigned but never used
+432..438 warning[unused] `labels` is assigned but never used
+
 #---- each_function_is_reported_where_the_value_first_appears
 #~~~~ script.R
 label_width <- function(label: Str) -> F64 {

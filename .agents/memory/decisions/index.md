@@ -638,6 +638,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A loop that fills a list is fused with the loop that reads it
 - Whole-number ranges decide which checks typed code needs
 - An R vector with `NA` converts through `List.from_r_or` or `List.from_r_missing`
+- An R call's argument passes R literals and outside variables as code
 
 ## DataFrame and the table engine
 

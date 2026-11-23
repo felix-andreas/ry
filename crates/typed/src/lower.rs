@@ -20,7 +20,7 @@ use {
         shapes, values,
     },
     heap::{
-        object::{Sexp, SexpType},
+        object::{NA_INTEGER, Sexp, SexpType},
         records::{Fields, Layout},
     },
     interp::{numbers::Observed, values as rvalues},
@@ -111,13 +111,23 @@ pub enum RResult {
     Table,
 }
 
-/// An argument of an [`RCall`]: a native value of `ty`, passed through `conversion` when the
-/// code converts it with `Num.to_r` or `List.to_r`.
+/// An argument of an [`RCall`], written as `code`.
 pub struct RArgument {
     pub tag: Sexp,
     pub code: Sexp,
-    pub ty: Type,
-    pub conversion: Option<Conversion>,
+    pub passed: Passed,
+}
+
+/// What compiled code passes for an [`RArgument`].
+#[derive(Clone, Copy)]
+pub enum Passed {
+    /// A native value of this type, through the conversion when the code converts it with
+    /// `Num.to_r` or `List.to_r`.
+    Value(Type, Option<Conversion>),
+    /// The code itself, which R evaluates in the typed closure's environment when the function
+    /// asks for it: a literal, which may be one with no ry type such as `NA`, or a variable from
+    /// outside the function, whose binding R reads when the call runs.
+    Code,
 }
 
 /// A standard library conversion between ry and R values, applied as the interpreter applies it,
@@ -1167,6 +1177,14 @@ impl Lowering<'_> {
                     name()
                 ))));
             }
+            if self.passes_code(code) {
+                arguments.push(RArgument {
+                    tag,
+                    code,
+                    passed: Passed::Code,
+                });
+                continue;
+            }
             let (value, conversion) = match self.to_r_conversion(code) {
                 Some((inner, conversion)) => (self.value(inner)?, Some(conversion)),
                 None => (self.value(code)?, None),
@@ -1196,8 +1214,7 @@ impl Lowering<'_> {
             arguments.push(RArgument {
                 tag,
                 code,
-                ty,
-                conversion,
+                passed: Passed::Value(ty, conversion),
             });
             values.push(value);
         }
@@ -1212,6 +1229,44 @@ impl Lowering<'_> {
             ))));
         }
         Ok(self.r_site(call, function, (r_use, result), table, arguments, values))
+    }
+
+    /// Whether the argument `code` of an R call passes as code for R to evaluate: a literal, or
+    /// a variable that is not one of the function's own. R evaluates either as it would in the
+    /// interpreter, so neither needs a ry type. A variable the function assigns somewhere is
+    /// left to the lookup, which finds the local once its assignment is lowered, because a read
+    /// that a loop runs again after that assignment reads the local.
+    unsafe fn passes_code(&self, code: Sexp) -> bool {
+        match code.kind() {
+            SexpType::Integer
+            | SexpType::Real
+            | SexpType::Logical
+            | SexpType::String
+            | SexpType::Complex
+            | SexpType::Nil => true,
+            SexpType::Symbol => {
+                self.lookup(code).is_none()
+                    && !assigns(interp::bytecode::closure_body(self.closure), code)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether only R can evaluate the argument `code` of a base function: a literal with no ry
+    /// type, such as `NA` or `2i`, or a variable from outside the function.
+    unsafe fn only_r_evaluates(&self, code: Sexp) -> bool {
+        match code.kind() {
+            SexpType::Symbol => self.passes_code(code),
+            SexpType::Complex => true,
+            SexpType::Logical | SexpType::Integer => {
+                rvalues::ints(code).first() == Some(&NA_INTEGER)
+            }
+            SexpType::Real => rvalues::reals(code)
+                .first()
+                .is_some_and(|&number| rvalues::is_na(number)),
+            SexpType::String => rvalues::length(code) == 1 && rvalues::string_at(code, 0).is_none(),
+            _ => false,
+        }
     }
 
     /// Emits the call of the R function `function` with the arguments `arguments`, whose values
@@ -1296,8 +1351,7 @@ impl Lowering<'_> {
             .map(|&(code, value)| RArgument {
                 tag: rvalues::nil(),
                 code,
-                ty: self.builder.ty(value),
-                conversion: None,
+                passed: Passed::Value(self.builder.ty(value), None),
             })
             .collect();
         let values = SmallVec::from_slice(&[table.1, name.1]);
@@ -2272,6 +2326,16 @@ impl Lowering<'_> {
         // R's own operator does through the expression's method.
         if is_operator(name) && arguments.items.iter().any(|&(_, code)| self.is_table(code)) {
             return self.r_call(call, function, RUse::Table);
+        }
+        // Where the call may be one of R, an argument only R can evaluate makes it one.
+        if let Some(r_use) = r_use
+            && takes_r_arguments(name)
+            && arguments
+                .items
+                .iter()
+                .any(|&(_, code)| self.only_r_evaluates(code))
+        {
+            return self.r_call(call, function, r_use);
         }
         match name {
             "+" | "-" | "*" | "/" | "^" | "%%" | "%/%" => {
@@ -6856,6 +6920,21 @@ fn is_operator(name: &str) -> bool {
             | "&"
             | "|"
     )
+}
+
+/// Whether a base function's arguments are those of an R call, as the checker reads them: it is
+/// written as a call, `f(x)`, or as a `%op%` operator. An operand of another operator, of `$` or
+/// of `[[` is a ry value.
+fn takes_r_arguments(name: &str) -> bool {
+    let syntactic = name.starts_with(|first: char| first.is_alphabetic() || first == '.')
+        && name
+            .chars()
+            .all(|character| character.is_alphanumeric() || matches!(character, '.' | '_'));
+    let special = name.len() > 2
+        && name.starts_with('%')
+        && name.ends_with('%')
+        && !matches!(name, "%%" | "%/%");
+    syntactic || special
 }
 
 /// Whether a call resolved to one of the table API's functions that gives a table value: the

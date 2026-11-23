@@ -108,7 +108,7 @@ All integers in the header are little-endian `u64`s after the magic and a `u32` 
 
 | Part | Contents |
 |---|---|
-| Header | magic `RYTYPED\0`, format version 3, then the hash of the build identity, the `.rdb`'s length and modification time, the hash of the code target (triple and ISA flags), the metadata's length, the number of slots, the code's offset, the code's length, the data's length, where the shared code starts, the metadata's hash, the shared part's hash, and a reserved zero word |
+| Header | magic `RYTYPED\0`, format version 5, then the hash of the build identity, the `.rdb`'s length and modification time, the hash of the code target (triple and ISA flags), the metadata's length, the number of slots, the code's offset, the code's length, the data's length, where the shared code starts, the metadata's hash, the shared part's hash, and a reserved zero word |
 | Metadata | LEB128 varints, in this order: `strings`, `shapes`, `slots`, `lookups`, `sites`, `callees`, `functions` |
 | Padding | zeros up to the code's offset, a multiple of 64 KiB |
 | Code | the function bodies and their trampolines, then the code every function shares (the free entries) |
@@ -125,7 +125,8 @@ The metadata tables are:
   class of what it found (below).
 - **`sites`**: per R call site, every field of its `RCall`: the environment, where the call stands
   (the closure whose body holds it, which is the version's own or one a lookup finds, and the item
-  positions from the body to it), the called function's lookup, per argument its tag, code, type and conversion, how the result is used,
+  positions from the body to it), the called function's lookup, per argument its tag, its code and what compiled code passes for it (a native value
+  of a type, with its conversion, or the code itself, which R evaluates), how the result is used,
   and the flags `diverges` and `effect_free`.
 - **`callees`**: per typed function a version calls, its lookup, the signature the caller compiled
   against, and whether it is a version of this file (a direct call) or reached through a `Callee`
