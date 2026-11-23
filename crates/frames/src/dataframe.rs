@@ -463,7 +463,12 @@ unsafe fn do_call(call: &Call<'_>) -> R<Sexp> {
     let name = values::require_str(call.arg(0), "function")?;
     let function = match name.as_ref() {
         "is_in" => Function::IsIn,
-        other => return Err(error_in(call.call, format!("no expression function `{other}`"))),
+        other => {
+            return Err(error_in(
+                call.call,
+                format!("no expression function `{other}`"),
+            ));
+        }
     };
     let list = call.arg(1);
     let mut arguments = Vec::with_capacity(length(list));
@@ -574,16 +579,15 @@ unsafe fn do_concat(call: &Call<'_>) -> R<Sexp> {
             }
             let combined = table::polars::prelude::DataFrame::new(height, columns)
                 .map_err(|failure| error_in(caller, failure.to_string()))?;
-            return frame::wrap(table::Table::new(combined).map_err(|failure| {
-                table_error(caller, failure, None)
-            })?);
+            return frame::wrap(
+                table::Table::new(combined)
+                    .map_err(|failure| table_error(caller, failure, None))?,
+            );
         }
         other => {
             return Err(error_in(
                 caller,
-                format!(
-                    "`how` is \"vertical\", \"diagonal\" or \"horizontal\", not \"{other}\""
-                ),
+                format!("`how` is \"vertical\", \"diagonal\" or \"horizontal\", not \"{other}\""),
             ));
         }
     };

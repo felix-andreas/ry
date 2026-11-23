@@ -664,7 +664,11 @@ unsafe fn datetime_vector(series: &Series) -> ApiResult<Sexp> {
         };
         let vector = alloc_vector(SexpType::Real, seconds.len() as R_xlen_t)?;
         vector.slice_mut::<f64>().copy_from_slice(&seconds);
-        set_attrib(vector, R_ClassSymbol.get(), strings(&["POSIXct", "POSIXt"])?)?;
+        set_attrib(
+            vector,
+            R_ClassSymbol.get(),
+            strings(&["POSIXct", "POSIXt"])?,
+        )?;
         set_attrib(
             vector,
             runtime().heap.install(b"tzone")?,

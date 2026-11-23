@@ -519,7 +519,10 @@ fn every_kind_of_join_matches_a_missing_key_with_a_missing_key() {
         ("id", ints(&[1, i32::MIN, 2])),
         ("name", strings(&["a", "missing", "b"])),
     ]);
-    let right = frame(vec![("id", ints(&[1, i32::MIN])), ("score", ints(&[10, 20]))]);
+    let right = frame(vec![
+        ("id", ints(&[1, i32::MIN])),
+        ("score", ints(&[10, 20])),
+    ]);
     let join = |how| {
         collect(Plan::new(Source::Table(left.clone())).with(Step::Join {
             other: Box::new(Plan::new(Source::Table(right.clone()))),

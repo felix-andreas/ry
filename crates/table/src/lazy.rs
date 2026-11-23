@@ -78,7 +78,10 @@ pub enum Step {
     },
     /// The distinct rows by the `subset` columns (every column when empty), in their original
     /// order.
-    Unique { subset: Vec<PlSmallStr>, keep: Keep },
+    Unique {
+        subset: Vec<PlSmallStr>,
+        keep: Keep,
+    },
 }
 
 /// Which rows a join keeps.

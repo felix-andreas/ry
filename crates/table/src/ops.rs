@@ -228,9 +228,7 @@ pub fn unique_rows_keeping(table: &Table, by: &[&str], keep: Keep) -> Result<Tab
         Keep::None => UniqueKeepStrategy::None,
     };
     let subset = subset(table, by)?;
-    let unique = table
-        .frame()
-        .unique_stable(Some(&subset), strategy, None)?;
+    let unique = table.frame().unique_stable(Some(&subset), strategy, None)?;
     Ok(Table::from_normalized(unique))
 }
 
