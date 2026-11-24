@@ -976,7 +976,31 @@ set_a: <R> fn(x: Record{a: I64, ..R}) -> Record{a: I64, ..R}
 first <- function<R>(x: Record{a: I64, ..R}) x[[1]]
 #++++
 first: <R> fn(x: Record{a: I64, ..R}) -> Unknown
-65..66 error[type-mismatch] a position cannot pick a field of `Record{a: I64, ..R}`, because the fields of the row sort among the listed ones. Read the field by name
+65..66 error[type-mismatch] a position cannot pick from `Record{a: I64, ..R}`, because the fields or columns of its row may come before the listed ones. Read it by name
+
+#---- two_rows_that_meet_in_one_tail_do_not_recurse
+# typing: strict
+keep_a <- function<R>(p: Record{a: I64, ..R}) -> Record{a: I64, ..R} p
+keep_b <- function<R>(p: Record{b: I64, ..R}) -> Record{b: I64, ..R} p
+pick <- function(p, flag) if (flag) keep_a(p) else keep_b(p)
+#++++
+keep_a: <R> fn(p: Record{a: I64, ..R}) -> Record{a: I64, ..R}
+keep_b: <R> fn(p: Record{b: I64, ..R}) -> Record{b: I64, ..R}
+pick: <T> fn(p: Record{a: I64, b: I64, ..T}, flag: logical) -> Record{a: I64, b: I64, ..T}
+
+#---- a_row_parameter_is_only_a_row
+# typing: strict
+plain <- function<R>(x: Record{a: I64, ..R}, y: R) -> I64 x$a
+both <- function<R>(x: Record{a: I64, ..R}, d: DataFrame{k: integer[], ..R}) -> I64 x$a
+p <- plain((a = 1L, b = 2L), 3L)
+b <- both((a = 1L, b = 2L), DataFrame(k = 1L, b = 2L))
+#++++
+plain: <T, U> fn(x: T, [y]: U) -> Unknown
+both: <T, U> fn(x: T, [d]: U) -> Unknown
+p: Unknown
+b: Unknown
+65..66 error[annotation] `R` stands for a row in `..R`, so it cannot also be a type of its own
+150..153 error[annotation] `R` is the row of a record elsewhere in this type, so it cannot also be the row of a table: a row holds either columns or fields
 
 #---- a_closed_record_does_not_take_a_rigid_row
 # typing: strict

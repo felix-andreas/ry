@@ -1258,7 +1258,7 @@ their R meaning. A literal is all fields or all items, and a repeated field name
 
 ### Rows
 
-A `Record{...}`, `DataFrame{...}` or `LazyFrame{...}` type may end in a *row* `..R`, where `R` is a
+A `Record{...}`, `DataFrame{...}`, `LazyFrame{...}` or `GroupBy{...}` type may end in a *row* `..R`, where `R` is a
 type parameter of the function. The type lists some fields or columns, and `R` stands for all the
 others, so a function can take any table that has a `code` column and return it with one more
 column:
@@ -1296,8 +1296,11 @@ type-mismatch
   result carries them with their types. A listed field takes precedence over a field of the same
   name in the row.
 - Inside the function, `R` is unknown. Reading a field or column the type does not list is a
-  `type-mismatch`, and so is a positional `[[` on a record, because the row's fields sort among the
-  listed ones. A record pattern needs a trailing `..`, as in `(a = p, ..)`.
+  `type-mismatch`, and so is a positional `[[` such as `x[[1]]`, because the row's fields or
+  columns may come before the listed ones. Iterating a table with a row, as `lapply` does, gives
+  columns of unknown type. A record pattern needs a trailing `..`, as in `(a = p, ..)`.
+- `R` stands for a row wherever it appears: using it also as a type of its own, as in `y: R`, or as
+  the row of both a record and a table is an `annotation` error.
 - A value with a row fits a type with the same row, never a closed type: returning
   `Record{a: I64, ..R}` as `Record{a: I64}` is a `type-mismatch`, and so is building a closed
   `(a = 1L,)` where `Record{a: I64, ..R}` is expected.

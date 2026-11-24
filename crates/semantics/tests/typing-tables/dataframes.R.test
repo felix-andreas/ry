@@ -371,6 +371,26 @@ rows: Rows
 86..134 error[type-mismatch] expected `DataFrame{kind: :Bond | :Cash, v: double[]}`, found `DataFrame{kind: character[], v: double[]}`
 
 #==== open_tables
+
+#---- positions_and_iteration_on_an_open_table
+# typing: strict
+first <- function<R>(d: DataFrame{k: integer[], ..R}) d[[1]]
+named <- function<R>(d: DataFrame{k: integer[], ..R}) d[["k"]]
+columns <- function<R>(d: DataFrame{k: integer[], ..R}) lapply(d, length)
+#++++
+first: <R> fn(d: DataFrame{k: integer[], ..R}) -> Unknown
+named: <R> fn(d: DataFrame{k: integer[], ..R}) -> integer[]
+columns: <R> fn(d: DataFrame{k: integer[], ..R}) -> list[named: integer]
+17..22 warning[unused] `first` is assigned but never used
+74..75 error[type-mismatch] a position cannot pick from `DataFrame{k: integer[], ..R}`, because the fields or columns of its row may come before the listed ones. Read it by name
+78..83 warning[unused] `named` is assigned but never used
+141..148 warning[unused] `columns` is assigned but never used
+71..77 warning[interpreted] this function runs in the interpreter, because a column read by its position is not compiled natively yet. Read the column by its name, as in `table[["price"]]`
+71..77 error[native] reading a column gives an R vector, and a native function holds only ry values. Convert it where it is read: `List.from_r(d[[1]])`
+132..140 error[native] reading a column gives an R vector, and a native function holds only ry values. Convert it where it is read: `List.from_r(d[["k"]])`
+  safe fix 132..140 "List.from_r(d[[\"k\"]])"
+197..214 error[native] `lapply` is an R function, and a native function holds only ry values, so its result cannot be used here. If only its effect matters, call it in a statement of its own. Otherwise move the call into a function with an R type in its signature, which is where R values and ry values meet
+
 #---- a_function_adds_a_column_to_any_table_with_a_key
 # typing: strict
 add_id <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], id: double[], ..R} {

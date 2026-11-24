@@ -221,9 +221,9 @@ pub enum TypeErrorKind<'db> {
         position: usize,
         container: Ty<'db>,
     },
-    /// `x[[1]]` on a record that ends in a row: the row's fields sort among the listed ones, so
-    /// no position is known.
-    PositionInOpenRecord {
+    /// `x[[1]]` on a record or frame that ends in a row: the row's fields or columns may come
+    /// before the listed ones, so no position is known.
+    PositionInOpenType {
         container: Ty<'db>,
     },
     FieldDoesNotExist {
@@ -21752,7 +21752,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         let subset_data = self.column_scopes.last()?.subset_data;
         let columns = match subset_data.kind(db) {
-            TyKind::Frame(_, Some(columns), _) if !columns.is_empty() => *columns,
+            TyKind::Frame(_, Some(columns), None) if !columns.is_empty() => *columns,
             _ => {
                 self.infer(value);
                 return Some(None);
@@ -22728,7 +22728,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             // A position counts fields in their sorted order, as the runtime stores them.
             TyKind::NativeRecord(_, Some(_)) if literal_name.is_none() => Err(TypeError {
                 range: key_range,
-                kind: TypeErrorKind::PositionInOpenRecord { container: subject },
+                kind: TypeErrorKind::PositionInOpenType { container: subject },
             }),
             TyKind::NativeRecord(fields, _) => match literal_name {
                 Some(name) => match fields.iter().find(|field| field.name.text(self.db) == name) {
@@ -22779,6 +22779,15 @@ impl<'db, 'a> Checker<'db, 'a> {
                 None => Ok(union_of(self.db, items.iter().copied())),
             },
             TyKind::Frame(_, None, _) => Ok(unknown(self.db)),
+            TyKind::Frame(_, Some(_), Some(_)) if literal_name.is_none() => {
+                match literal_position {
+                    Some(_) => Err(TypeError {
+                        range: key_range,
+                        kind: TypeErrorKind::PositionInOpenType { container: subject },
+                    }),
+                    None => Ok(unknown(self.db)),
+                }
+            }
             TyKind::Frame(_, Some(columns), _) => match (literal_position, literal_name) {
                 (Some(position), _) => match columns.get(position) {
                     Some(column) => Ok(r_column_type(self.db, column.ty)),
@@ -24070,7 +24079,7 @@ fn widen_error_container<'db>(mut error: TypeError<'db>, union: Ty<'db>) -> Type
         | TypeErrorKind::UnsupportedSubset { found }
         | TypeErrorKind::DollarOnAtomicVector { found } => *found = union,
         TypeErrorKind::PositionDoesNotExist { container, .. }
-        | TypeErrorKind::PositionInOpenRecord { container }
+        | TypeErrorKind::PositionInOpenType { container }
         | TypeErrorKind::FieldDoesNotExist { container, .. } => *container = union,
         _ => {}
     }
@@ -24257,6 +24266,7 @@ fn element_types<'db>(db: &'db dyn Db, x: Ty<'db>) -> (Vec<Ty<'db>>, bool) {
         TyKind::NamedVector(element) | TyKind::NamedList(element) => (vec![*element], true),
         TyKind::Tuple(items) => (items.to_vec(), false),
         TyKind::Record(fields) => (fields.iter().map(|field| field.ty).collect(), true),
+        TyKind::Frame(_, Some(_), Some(_)) => (vec![unknown(db)], true),
         TyKind::Frame(_, Some(fields), _) => (
             fields
                 .iter()

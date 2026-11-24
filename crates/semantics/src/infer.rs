@@ -705,9 +705,12 @@ impl<'db> InferenceTable<'db> {
         b: Ty<'db>,
     ) -> Result<(), UnifyError<'db>> {
         let mismatch = || UnifyError::Mismatch(a, b);
-        let (shape, left, left_row) =
-            open_parts(db, self.settled_row(db, a)).ok_or_else(mismatch)?;
-        let (_, right, right_row) = open_parts(db, self.settled_row(db, b)).ok_or_else(mismatch)?;
+        let ((shape, left, left_row), (_, right, right_row)) =
+            match (self.settled(db, a), self.settled(db, b)) {
+                (Settled::Open(left), Settled::Open(right)) if left.0 == right.0 => (left, right),
+                (Settled::Unknown, _) | (_, Settled::Unknown) => return Ok(()),
+                _ => return Err(mismatch()),
+            };
         for (name, ty) in &left {
             if let Some((_, other)) = right.iter().find(|(other, _)| other == name) {
                 self.unify(db, *ty, *other)?;
@@ -744,6 +747,9 @@ impl<'db> InferenceTable<'db> {
                 let rest = row_type(db, shape, &right_only, right_row);
                 absorb(self, left_row, rest)
             }
+            // One row cannot hold names only the other side lists on both sides at once: binding
+            // it to the first rest would ask the same of its fresh tail, forever.
+            (false, false) if left_row.is_some() && left_row == right_row => Err(mismatch()),
             (false, false) => {
                 let tail = self.fresh_ty(db, Constraint::Unconstrained);
                 let rest = row_type(db, shape, &left_only, Some(tail));
@@ -764,31 +770,55 @@ impl<'db> InferenceTable<'db> {
         expected: Ty<'db>,
         depth: usize,
     ) -> bool {
-        let Some((shape, actual, actual_row)) = open_parts(db, self.settled_row(db, actual)) else {
-            return false;
-        };
-        let Some((_, expected, expected_row)) = open_parts(db, self.settled_row(db, expected))
-        else {
-            return false;
-        };
-        let listed = expected.iter().all(|(name, expected_ty)| {
-            actual
-                .iter()
-                .find(|(other, _)| other == name)
-                .is_some_and(|(_, actual_ty)| {
-                    self.compatible_probe(db, *actual_ty, *expected_ty, depth + 1)
-                })
-        });
-        if !listed {
-            return false;
+        let ((shape, actual, actual_row), (_, expected, expected_row)) =
+            match (self.settled(db, actual), self.settled(db, expected)) {
+                (Settled::Open(actual), Settled::Open(expected)) if actual.0 == expected.0 => {
+                    (actual, expected)
+                }
+                (Settled::Unknown, _) | (_, Settled::Unknown) => return true,
+                _ => return false,
+            };
+        let mut missing = OpenFields::new();
+        for (name, expected_ty) in &expected {
+            match actual.iter().find(|(other, _)| other == name) {
+                Some((_, actual_ty)) => {
+                    if !self.compatible_probe(db, *actual_ty, *expected_ty, depth + 1) {
+                        return false;
+                    }
+                }
+                None => missing.push((*name, *expected_ty)),
+            }
         }
         let rest: OpenFields<'db> = actual
             .iter()
             .filter(|(name, _)| !expected.iter().any(|(other, _)| other == name))
             .copied()
             .collect();
+        // An inferred value whose row is still a variable, such as a parameter two calls read
+        // different names of, takes the names `expected` lists and it lacks into that row.
+        let actual_row = match actual_row {
+            _ if missing.is_empty() => actual_row,
+            Some(row) if self.resolve(db, row).is_var() => {
+                if expected_row == Some(row) && !rest.is_empty() {
+                    return false;
+                }
+                let tail = expected_row.map(|_| self.fresh_ty(db, Constraint::Unconstrained));
+                if self
+                    .unify(db, row, row_type(db, shape, &missing, tail))
+                    .is_err()
+                {
+                    return false;
+                }
+                tail
+            }
+            _ => return false,
+        };
         match expected_row {
-            None => rest.is_empty() && actual_row.is_none(),
+            None => match actual_row {
+                _ if !rest.is_empty() => false,
+                None => true,
+                Some(row) => self.unify(db, row, row_type(db, shape, &[], None)).is_ok(),
+            },
             Some(expected_row) => {
                 let rest = row_type(db, shape, &rest, actual_row);
                 self.unify(db, expected_row, rest).is_ok()
@@ -796,29 +826,39 @@ impl<'db> InferenceTable<'db> {
         }
     }
 
-    /// `ty` with every row bound since it was built merged in, so that a table's or record's row
-    /// is an unbound variable, a type parameter, or none.
-    pub(crate) fn settled_row(&mut self, db: &'db dyn Db, ty: Ty<'db>) -> Ty<'db> {
-        let mut ty = ty;
-        loop {
-            let row = match *ty.kind(db) {
-                TyKind::Frame(_, Some(_), Some(row)) | TyKind::NativeRecord(_, Some(row)) => row,
-                _ => return ty,
+    /// A table's or record's names with every row bound since it was built merged in, so that
+    /// its row is an unbound variable, a type parameter, or none. A row bound to something other
+    /// than more names of the same kind, as when `R` in `..R` also types a parameter, is
+    /// `WrongShape`.
+    fn settled(&mut self, db: &'db dyn Db, ty: Ty<'db>) -> Settled<'db> {
+        let Some((shape, mut names, mut row)) = open_parts(db, ty) else {
+            return match ty.kind(db) {
+                TyKind::Unknown | TyKind::Any | TyKind::Frame(_, None, _) => Settled::Unknown,
+                _ => Settled::WrongShape,
             };
-            let resolved = self.shallow_resolve(db, row);
-            if resolved == row {
-                return ty;
+        };
+        while let Some(current) = row {
+            let resolved = self.shallow_resolve(db, current);
+            if let TyKind::Var(_) | TyKind::Rigid(_) = resolved.kind(db) {
+                row = Some(resolved);
+                break;
             }
-            ty = match *ty.kind(db) {
-                TyKind::Frame(kind, Some(columns), _) => {
-                    frame_with_row(db, kind, columns, Some(resolved))
+            if let TyKind::Unknown | TyKind::Any = resolved.kind(db) {
+                return Settled::Unknown;
+            }
+            match open_parts(db, resolved) {
+                Some((more_shape, more, rest)) if more_shape == shape => {
+                    for (name, more_ty) in more {
+                        if !names.iter().any(|(listed, _)| *listed == name) {
+                            names.push((name, more_ty));
+                        }
+                    }
+                    row = rest;
                 }
-                TyKind::NativeRecord(fields, _) => {
-                    native_record_with_row(db, fields.iter().copied(), Some(resolved))
-                }
-                _ => return ty,
-            };
+                _ => return Settled::WrongShape,
+            }
         }
+        Settled::Open((shape, names, row))
     }
 
     fn unify_unions(
@@ -1711,7 +1751,11 @@ impl<'db> InferenceTable<'db> {
                 TyKind::Frame(FrameKind::LazyFrame | FrameKind::GroupBy { .. }, _, _),
                 TyKind::List(_) | TyKind::NamedList(_),
             ) => false,
-            (TyKind::Frame(_, None, _), TyKind::List(_) | TyKind::NamedList(_)) => true,
+            // A row's columns are unknown, as are all the columns of a frame that lists none.
+            (
+                TyKind::Frame(_, None, _) | TyKind::Frame(_, Some(_), Some(_)),
+                TyKind::List(_) | TyKind::NamedList(_),
+            ) => true,
             (
                 TyKind::Frame(_, Some(columns), _),
                 TyKind::List(element) | TyKind::NamedList(element),
@@ -2455,10 +2499,18 @@ pub(crate) fn constraint_rejects<'db>(
 type OpenFields<'db> = SmallVec<[(Name<'db>, Ty<'db>); 8]>;
 
 /// Whether a row holds a table's columns or a record's fields.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum RowShape {
     Columns,
     Fields,
+}
+
+/// A table or record type as `Checker::unify_open` reads it.
+enum Settled<'db> {
+    Open((RowShape, OpenFields<'db>, Option<Ty<'db>>)),
+    /// The type, or its row, is `Unknown`, so anything fits it.
+    Unknown,
+    WrongShape,
 }
 
 fn open_parts<'db>(

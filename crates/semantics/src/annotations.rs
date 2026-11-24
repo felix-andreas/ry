@@ -859,11 +859,12 @@ pub fn statement_inline_site(statement: &SyntaxNode) -> Option<SyntaxNode> {
     is_inline_site(&function).then_some(function)
 }
 
-/// `Record{...}` and `Tuple{...}` share the brace grammar of `list{...}` too.
 fn has_row(node: &SyntaxNode) -> bool {
-    node.children().any(|c| c.kind() == SyntaxKind::TYPE_ROW)
+    node.children()
+        .any(|child| child.kind() == SyntaxKind::TYPE_ROW)
 }
 
+/// `Record{...}` and `Tuple{...}` share the brace grammar of `list{...}` too.
 fn native_head(node: &SyntaxNode) -> Option<NativeHead> {
     match name_text(node).as_deref() {
         Some("Record") => Some(NativeHead::Record),
@@ -908,6 +909,10 @@ struct Lowering<'db> {
     binders: Vec<Name<'db>>,
     /// Type parameters written as a `List`'s item (`List<T>`), which only a ry value can fill.
     list_item_binders: Vec<Name<'db>>,
+    /// Each `..R`: the binder, whether it closes a table rather than a record, and its range.
+    row_uses: Vec<(Name<'db>, bool, TextRange)>,
+    /// Each binder written as a type of its own, as in `y: R`.
+    plain_uses: Vec<(Name<'db>, TextRange)>,
     nominal_references: Vec<(String, TextRange)>,
     applied_references: Vec<(String, usize, TextRange)>,
     errors: Vec<(String, TextRange)>,
@@ -937,6 +942,8 @@ impl<'db> Lowering<'db> {
             db,
             binders: Vec::new(),
             list_item_binders: Vec::new(),
+            row_uses: Vec::new(),
+            plain_uses: Vec::new(),
             nominal_references: Vec::new(),
             applied_references: Vec::new(),
             errors: Vec::new(),
@@ -952,6 +959,34 @@ impl<'db> Lowering<'db> {
     /// annotation reports once and never cascades.
     fn finish(self, mut annotation: Annotation<'db>, range: TextRange) -> Annotation<'db> {
         let mut errors = self.errors;
+        // A row holds the names a value has beyond the listed ones, so a binder that is also a
+        // whole type, or the row of both a record and a table, has no type that fits every use.
+        for (index, &(binder, table, row_range)) in self.row_uses.iter().enumerate() {
+            let name = binder.text(self.db);
+            if let Some(&(_, other_table, _)) = self.row_uses[..index]
+                .iter()
+                .find(|(other, other_table, _)| *other == binder && *other_table != table)
+            {
+                let (here, there) = if other_table {
+                    ("record", "table")
+                } else {
+                    ("table", "record")
+                };
+                errors.push((
+                    format!("`{name}` is the row of a {there} elsewhere in this type, so it cannot also be the row of a {here}: a row holds either columns or fields"),
+                    row_range,
+                ));
+            }
+        }
+        for &(binder, plain_range) in &self.plain_uses {
+            if self.row_uses.iter().any(|(other, _, _)| *other == binder) {
+                let name = binder.text(self.db);
+                errors.push((
+                    format!("`{name}` stands for a row in `..{name}`, so it cannot also be a type of its own"),
+                    plain_range,
+                ));
+            }
+        }
         if self.beyond_parse_depth {
             errors.push((
                 "this type annotation is nested too deeply (more than 160 levels)".to_owned(),
@@ -1272,7 +1307,7 @@ impl<'db> Lowering<'db> {
                         unknown(self.db)
                     }
                     Some(NativeHead::Record) => {
-                        let Ok(row) = self.lower_row(node) else {
+                        let Ok(row) = self.lower_row(node, false) else {
                             return unknown(self.db);
                         };
                         let record = self.lower_native_fields(node, "this `Record{...}` type");
@@ -1360,7 +1395,7 @@ impl<'db> Lowering<'db> {
                     ));
                     return unknown(self.db);
                 }
-                let Ok(row) = self.lower_row(node) else {
+                let Ok(row) = self.lower_row(node, true) else {
                     return unknown(self.db);
                 };
                 Ty::new(self.db, TyKind::Frame(kind, Some(&[]), row))
@@ -1375,7 +1410,7 @@ impl<'db> Lowering<'db> {
             }
             SyntaxKind::TYPE_RECORD => {
                 let frame = frame_kind(node);
-                let Ok(row) = self.lower_row(node) else {
+                let Ok(row) = self.lower_row(node, frame.is_some()) else {
                     return unknown(self.db);
                 };
                 let fields: Vec<(String, SyntaxNode)> = node
@@ -1515,7 +1550,7 @@ impl<'db> Lowering<'db> {
 
     /// The type parameter a brace type's closing `..R` names, `None` without one, or `Err` after
     /// reporting a row that is not last or names no type parameter in scope.
-    fn lower_row(&mut self, node: &SyntaxNode) -> Result<Option<Ty<'db>>, ()> {
+    fn lower_row(&mut self, node: &SyntaxNode, table: bool) -> Result<Option<Ty<'db>>, ()> {
         let Some(row) = node.children().find(|c| c.kind() == SyntaxKind::TYPE_ROW) else {
             return Ok(None);
         };
@@ -1542,6 +1577,7 @@ impl<'db> Lowering<'db> {
             ));
             return Err(());
         }
+        self.row_uses.push((binder, table, row.text_range()));
         Ok(Some(Ty::new(self.db, TyKind::Rigid(binder))))
     }
 
@@ -1718,6 +1754,7 @@ impl<'db> Lowering<'db> {
         }
         let name = Name::new(self.db, text);
         if self.binders.contains(&name) {
+            self.plain_uses.push((name, token.text_range()));
             return Ty::new(self.db, TyKind::Rigid(name));
         }
         self.nominal_references

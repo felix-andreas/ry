@@ -3808,9 +3808,9 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "position {position} does not exist in `{}`",
             renderer.render(db, *container)
         ),
-        TypeErrorKind::PositionInOpenRecord { container } => format!(
-            "a position cannot pick a field of `{}`, because the fields of the row sort among \
-             the listed ones. Read the field by name",
+        TypeErrorKind::PositionInOpenType { container } => format!(
+            "a position cannot pick from `{}`, because the fields or columns of its row may come \
+             before the listed ones. Read it by name",
             renderer.render(db, *container)
         ),
         TypeErrorKind::OpaqueOutsideHome { name, creating, .. } => {
