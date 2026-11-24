@@ -1002,6 +1002,20 @@ b: Unknown
 65..66 error[annotation] `R` stands for a row in `..R`, so it cannot also be a type of its own
 150..153 error[annotation] `R` is the row of a record elsewhere in this type, so it cannot also be the row of a table: a row holds either columns or fields
 
+#---- a_row_parameter_passes_through_an_alias
+# typing: strict
+alias Rec<R> = Record{a: I64, ..R}
+to_alias <- function<S>(x: Record{a: I64, ..S}) -> Rec<S> x
+from_alias <- function<S>(x: Rec<S>) -> Record{a: I64, ..S} x
+wrong <- function(x: Rec<I64>) -> I64 x$a
+y <- from_alias((a = 1L, b = "x"))
+#++++
+to_alias: <S> fn(x: Record{a: I64, ..S}) -> Rec<S>
+from_alias: <S> fn(x: Rec<S>) -> Record{a: I64, ..S}
+wrong: fn(x: Rec<I64>) -> I64
+y: Record{a: I64, b: character}
+199..202 error[annotation] `R` is a row in `Rec`, so its argument must be a type parameter or a `Record{...}` type
+
 #---- a_closed_record_does_not_take_a_rigid_row
 # typing: strict
 close <- function<R>(x: Record{a: I64, ..R}) -> Record{a: I64} x

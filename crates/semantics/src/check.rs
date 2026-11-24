@@ -21059,9 +21059,14 @@ impl<'db, 'a> Checker<'db, 'a> {
     ) -> Ty<'db> {
         let module = self.module;
         let db = self.db;
-        let kind = match subject.kind(db) {
-            TyKind::Frame(kind, _, _) => *kind,
-            _ => FrameKind::DataFrame,
+        let (kind, row) = match subject.kind(db) {
+            TyKind::Frame(kind, _, row) => (*kind, *row),
+            _ => (FrameKind::DataFrame, None),
+        };
+        // A row selection or a `:=` update keeps every column, so it keeps the subject's row.
+        let keep_row = |columns: Option<&[RecordField<'db>]>| match columns {
+            Some(columns) => frame_with_row(db, kind, columns, row),
+            None => Ty::new(db, TyKind::Frame(kind, None, None)),
         };
         let named = |formal: &str| {
             arguments
@@ -21275,18 +21280,13 @@ impl<'db, 'a> Checker<'db, 'a> {
             _ => None,
         });
         let result = match j_value {
-            Some(_) if let Some(update) = update => Ty::new(
-                db,
-                TyKind::Frame(
-                    kind,
-                    self.column_update(
-                        &module[update],
-                        subject_columns,
-                        i_value.is_some() || by.is_some(),
-                    )
-                    .as_deref(),
-                    None,
-                ),
+            Some(_) if let Some(update) = update => keep_row(
+                self.column_update(
+                    &module[update],
+                    subject_columns,
+                    i_value.is_some() || by.is_some(),
+                )
+                .as_deref(),
             ),
             // `with = FALSE` and a `..name` `j` read `j` as column names or positions, which ry
             // does not model.
@@ -21308,7 +21308,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 groups,
                 by.is_some(),
             ),
-            None => Ty::new(db, TyKind::Frame(kind, source_columns.as_deref(), None)),
+            None => keep_row(source_columns.as_deref()),
         };
         for argument in arguments {
             let handled = [i, j, by, on, named(".SDcols")]

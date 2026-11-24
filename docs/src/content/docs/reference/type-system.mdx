@@ -1300,13 +1300,15 @@ type-mismatch
   columns may come before the listed ones. Iterating a table with a row, as `lapply` does, gives
   columns of unknown type. A record pattern needs a trailing `..`, as in `(a = p, ..)`.
 - `R` stands for a row wherever it appears: using it also as a type of its own, as in `y: R`, or as
-  the row of both a record and a table is an `annotation` error.
+  the row of both a record and a table is an `annotation` error. A generic alias passes a row on:
+  with `alias Rec<R> = Record{a: I64, ..R}`, `Rec<S>` is `Record{a: I64, ..S}`, and `Rec<I64>` is an
+  `annotation` error.
 - A value with a row fits a type with the same row, never a closed type: returning
   `Record{a: I64, ..R}` as `Record{a: I64}` is a `type-mismatch`, and so is building a closed
   `(a = 1L,)` where `Record{a: I64, ..R}` is expected.
 - A table verb that keeps every column keeps the row: `filter`, `sort`, `head`, `tail`, `unique`,
-  `with_columns`, `drop`, `rename`, `with_row_index`, `group_by`, `lazy` and `collect`, and a join
-  whose left table has the row. `select` and `GroupBy.agg` build their result from the columns they name, so it has no
+  `with_columns`, `drop`, `rename`, `with_row_index`, `group_by`, `lazy` and `collect`, a row
+  selection `d[i]`, a `:=` update, and a join whose left table has the row. `select` and `GroupBy.agg` build their result from the columns they name, so it has no
   row, and a join whose right table has a row, or `concat` of a table with a row, types as a plain
   `DataFrame`.
 

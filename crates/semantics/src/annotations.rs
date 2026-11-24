@@ -62,13 +62,16 @@ pub struct Annotation<'db> {
     /// needs the project vocabulary.
     #[salsa_value(unsafe(prove_safe_to_retain_manually))]
     pub vector_elements: Vec<(Ty<'db>, TextRange)>,
-    /// `(name, argument count, range)`; the arity check against the vocabulary lives with the
-    /// diagnostics.
-    pub applied_references: Vec<(String, usize, TextRange)>,
+    /// `(name, arguments with their ranges, range)`; the arity and row checks against the
+    /// vocabulary live with the diagnostics.
+    #[salsa_value(unsafe(prove_safe_to_retain_manually))]
+    pub applied_references: Vec<AppliedReference<'db>>,
     /// Excludes primitives and in-scope binders, so each entry must resolve through project
     /// declarations or the stubs.
     pub nominal_references: Vec<(String, TextRange)>,
 }
+
+pub type AppliedReference<'db> = (String, Vec<(Ty<'db>, TextRange)>, TextRange);
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct NamedDefinition<'db> {
@@ -914,7 +917,7 @@ struct Lowering<'db> {
     /// Each binder written as a type of its own, as in `y: R`.
     plain_uses: Vec<(Name<'db>, TextRange)>,
     nominal_references: Vec<(String, TextRange)>,
-    applied_references: Vec<(String, usize, TextRange)>,
+    applied_references: Vec<AppliedReference<'db>>,
     errors: Vec<(String, TextRange)>,
     vector_elements: Vec<(Ty<'db>, TextRange)>,
     depth: usize,
@@ -959,9 +962,16 @@ impl<'db> Lowering<'db> {
     /// annotation reports once and never cascades.
     fn finish(self, mut annotation: Annotation<'db>, range: TextRange) -> Annotation<'db> {
         let mut errors = self.errors;
+        // A binder error already explains a clash of uses, as with a shadowing `<R>`.
+        let checked_uses = if errors.is_empty() {
+            self.row_uses.len()
+        } else {
+            0
+        };
         // A row holds the names a value has beyond the listed ones, so a binder that is also a
         // whole type, or the row of both a record and a table, has no type that fits every use.
-        for (index, &(binder, table, row_range)) in self.row_uses.iter().enumerate() {
+        for (index, &(binder, table, row_range)) in self.row_uses[..checked_uses].iter().enumerate()
+        {
             let name = binder.text(self.db);
             if let Some(&(_, other_table, _)) = self.row_uses[..index]
                 .iter()
@@ -979,7 +989,10 @@ impl<'db> Lowering<'db> {
             }
         }
         for &(binder, plain_range) in &self.plain_uses {
-            if self.row_uses.iter().any(|(other, _, _)| *other == binder) {
+            if self.row_uses[..checked_uses]
+                .iter()
+                .any(|(other, _, _)| *other == binder)
+            {
                 let name = binder.text(self.db);
                 errors.push((
                     format!("`{name}` stands for a row in `..{name}`, so it cannot also be a type of its own"),
@@ -1504,16 +1517,26 @@ impl<'db> Lowering<'db> {
                 if let Some(range) = reference {
                     self.nominal_references.push((text.clone(), range));
                 }
-                let arguments: Vec<Ty<'db>> = node
+                // A bare binder passed to a generic may fill a row there, which the diagnostics
+                // check against the definition, so it is not a use of its own.
+                let applied: Vec<(Ty<'db>, TextRange)> = node
                     .children()
                     .find(|c| c.kind() == SyntaxKind::TYPE_ARG_LIST)
                     .map(|list| {
                         list.children()
                             .filter(|c| is_type_kind(c.kind()))
-                            .map(|argument| self.lower_type(&argument))
+                            .map(|argument| {
+                                let uses = self.plain_uses.len();
+                                let ty = self.lower_type(&argument);
+                                if matches!(ty.kind(self.db), TyKind::Rigid(_)) {
+                                    self.plain_uses.truncate(uses);
+                                }
+                                (ty, argument.text_range())
+                            })
                             .collect()
                     })
                     .unwrap_or_default();
+                let arguments: Vec<Ty<'db>> = applied.iter().map(|(ty, _)| *ty).collect();
                 // A `List` holds ry values only, so an R vector, R scalar, `NULL` or function item
                 // has no place in it.
                 if text == "List"
@@ -1539,7 +1562,7 @@ impl<'db> Lowering<'db> {
                     ));
                 }
                 if let Some(range) = reference {
-                    self.applied_references.push((text, arguments.len(), range));
+                    self.applied_references.push((text, applied, range));
                 }
                 Ty::new(self.db, TyKind::Named(name, &arguments))
             }
