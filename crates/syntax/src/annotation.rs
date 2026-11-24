@@ -646,6 +646,7 @@ pub fn is_type_kind(kind: SyntaxKind) -> bool {
             | SyntaxKind::TYPE_BINDER_LIST
             | SyntaxKind::TYPE_TAG
             | SyntaxKind::TYPE_OTHER_TAGS
+            | SyntaxKind::TYPE_ROW
     )
 }
 

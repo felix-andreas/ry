@@ -2,7 +2,7 @@ use {
     crate::{
         Db, DocumentKind, Item, ItemKind, ProjectFiles, SiteRole, SourceFile, TypeDefinitions,
         annotations::{
-            Annotation, Slot, comment_slots, definition_keyword, inline_slots,
+            Annotation, AppliedReference, Slot, comment_slots, definition_keyword, inline_slots,
             lower_inline_annotation, statement_inline_site,
         },
         check::{
@@ -1179,7 +1179,8 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                 .map(|definition| definition.parameters.len())
                 .or_else(|| stub_nominals.contains(name).then_some(0))
         };
-        for (name, count, range) in &annotation.applied_references {
+        for (name, arguments, range) in &annotation.applied_references {
+            let count = &arguments.len();
             let Some(arity) = declared_arity(name) else {
                 continue;
             };
@@ -1200,6 +1201,36 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                         plural(arity, "argument", "arguments"),
                     ),
                 ));
+            } else if let Some(definition) = definitions.get(db, Name::new(db, name)) {
+                for (parameter, (argument, argument_range)) in
+                    definition.parameters.iter().zip(arguments)
+                {
+                    let Some(table) = row_parameter_shape(db, definition.body, *parameter) else {
+                        continue;
+                    };
+                    let fits = match argument.kind(db) {
+                        TyKind::Rigid(_) | TyKind::Var(_) | TyKind::Unknown | TyKind::Any => true,
+                        TyKind::NativeRecord(..) => !table,
+                        TyKind::Frame(_, Some(_), _) => table,
+                        _ => false,
+                    };
+                    if !fits {
+                        let shape = if table {
+                            "DataFrame{...}"
+                        } else {
+                            "Record{...}"
+                        };
+                        diagnostics.push(Diagnostic::new(
+                            *argument_range,
+                            Severity::Error,
+                            "annotation",
+                            format!(
+                                "`{}` is a row in `{name}`, so its argument must be a type parameter or a `{shape}` type",
+                                parameter.text(db),
+                            ),
+                        ));
+                    }
+                }
             }
         }
         for (name, range) in &annotation.nominal_references {
@@ -1250,6 +1281,27 @@ fn annotation_rule_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
     diagnostics
 }
 
+/// Whether `parameter` closes a table (`true`) or a record (`false`) somewhere in `body`, or
+/// `None` when it is never a row there.
+fn row_parameter_shape<'db>(db: &'db dyn Db, body: Ty<'db>, parameter: Name<'db>) -> Option<bool> {
+    let is_parameter = |row: &Option<Ty<'db>>| {
+        row.is_some_and(|row| matches!(row.kind(db), TyKind::Rigid(name) if *name == parameter))
+    };
+    let mut seen = FxHashSet::default();
+    let mut pending = vec![body];
+    while let Some(ty) = pending.pop() {
+        if !seen.insert(ty) {
+            continue;
+        }
+        match ty.kind(db) {
+            TyKind::NativeRecord(_, row) if is_parameter(row) => return Some(false),
+            TyKind::Frame(_, _, row) if is_parameter(row) => return Some(true),
+            _ => for_each_child_type(db, ty, &mut |child| pending.push(child)),
+        }
+    }
+    None
+}
+
 /// What the vocabulary checks need from one annotation of the file.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 struct AnnotationReferences<'db> {
@@ -1257,7 +1309,8 @@ struct AnnotationReferences<'db> {
     // Sound: `TextRange` is plain offsets, so only the `'db` handles need retaining.
     #[salsa_value(unsafe(prove_safe_to_retain_manually))]
     vector_elements: Vec<(Ty<'db>, TextRange)>,
-    applied_references: Vec<(String, usize, TextRange)>,
+    #[salsa_value(unsafe(prove_safe_to_retain_manually))]
+    applied_references: Vec<AppliedReference<'db>>,
     nominal_references: Vec<(String, TextRange)>,
     #[salsa_value(unsafe(prove_safe_to_retain_manually))]
     new_nominal: Option<(Name<'db>, TextRange)>,
@@ -3808,6 +3861,11 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             "position {position} does not exist in `{}`",
             renderer.render(db, *container)
         ),
+        TypeErrorKind::PositionInOpenType { container } => format!(
+            "a position cannot pick from `{}`, because the fields or columns of its row may come \
+             before the listed ones. Read it by name",
+            renderer.render(db, *container)
+        ),
         TypeErrorKind::OpaqueOutsideHome { name, creating, .. } => {
             let name = name.text(db);
             if *creating {
@@ -4413,8 +4471,10 @@ impl<'db> TypeRenderer<'db> {
                 format!("list{{{}, ..}}", self.render_fields(db, fields))
             }
             TyKind::NativeTuple(items) => format!("Tuple{{{}}}", self.render_items(db, items)),
-            TyKind::NativeRecord(fields) => {
-                format!("Record{{{}}}", self.render_native_fields(db, fields))
+            TyKind::NativeRecord(fields, row) => {
+                let fields = self.render_native_fields(db, fields);
+                let fields = self.with_row(db, fields, *row);
+                format!("Record{{{fields}}}")
             }
             TyKind::Tag(name, payload) => {
                 let name = name.text(db);
@@ -4423,23 +4483,28 @@ impl<'db> TypeRenderer<'db> {
                     Some(TyKind::NativeTuple(items)) => {
                         format!(":{name}({})", self.render_items(db, items))
                     }
-                    Some(TyKind::NativeRecord(fields)) => {
+                    Some(TyKind::NativeRecord(fields, _)) => {
                         format!(":{name}({})", self.render_native_fields(db, fields))
                     }
                     Some(_) => format!(":{name}(Unknown)"),
                 }
             }
             TyKind::OtherTags => "..".to_owned(),
-            TyKind::Frame(kind @ FrameKind::GroupBy { keys, .. }, Some(columns)) if *keys > 0 => {
+            TyKind::Frame(kind @ FrameKind::GroupBy { keys, .. }, Some(columns), row)
+                if *keys > 0 =>
+            {
                 let (keys, rest) = columns.split_at((*keys as usize).min(columns.len()));
                 let keys = self.render_fields(db, keys);
                 let rest = self.render_fields(db, rest);
+                let rest = self.with_row(db, rest, *row);
                 format!("{}{{{keys}; {rest}}}", kind.head())
             }
-            TyKind::Frame(kind, Some(columns)) => {
-                format!("{}{{{}}}", kind.head(), self.render_fields(db, columns))
+            TyKind::Frame(kind, Some(columns), row) => {
+                let columns = self.render_fields(db, columns);
+                let columns = self.with_row(db, columns, *row);
+                format!("{}{{{columns}}}", kind.head())
             }
-            TyKind::Frame(kind, None) => kind.head().to_owned(),
+            TyKind::Frame(kind, None, _) => kind.head().to_owned(),
             TyKind::Function(function) => self.render_function(db, function),
             TyKind::Union(members) => {
                 let members: Vec<String> = members
@@ -4508,6 +4573,19 @@ impl<'db> TypeRenderer<'db> {
     fn render_items(&mut self, db: &'db dyn Db, items: &[Ty<'db>]) -> String {
         let items: Vec<String> = items.iter().map(|&item| self.render(db, item)).collect();
         items.join(", ")
+    }
+
+    /// `fields` followed by `..R` when a row stands for more of them.
+    fn with_row(&mut self, db: &'db dyn Db, fields: String, row: Option<Ty<'db>>) -> String {
+        let Some(row) = row else {
+            return fields;
+        };
+        let row = self.render(db, row);
+        if fields.is_empty() {
+            format!("..{row}")
+        } else {
+            format!("{fields}, ..{row}")
+        }
     }
 
     fn render_native_fields(&mut self, db: &'db dyn Db, fields: &[NativeField<'db>]) -> String {

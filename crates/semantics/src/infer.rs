@@ -9,10 +9,11 @@ use {
         diagnostics::nearest_name,
         stubs::stubs,
         types::{
-            Atomic, Binder, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeScalar,
-            Ty, TyKind, array_element, contains_inference_var, for_each_child_type,
-            is_ry_value_type, map_child_types, native_scalar, r_column_type, scalar,
-            substitute_rigid, union_of, unknown,
+            Atomic, Binder, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
+            NativeScalar, RecordField, Ty, TyKind, array_element, contains_inference_var,
+            for_each_child_type, frame_with_row, is_ry_value_type, map_child_types,
+            native_record_with_row, native_scalar, r_column_type, scalar, substitute_rigid,
+            union_of, unknown,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -626,26 +627,16 @@ impl<'db> InferenceTable<'db> {
                 }
                 Ok(())
             }
-            (TyKind::Frame(left_kind, _), TyKind::Frame(right_kind, _))
+            (TyKind::Frame(left_kind, _, _), TyKind::Frame(right_kind, _, _))
                 if !same_frame_kind(*left_kind, *right_kind) =>
             {
                 Err(UnifyError::Mismatch(a, b))
             }
             // A frame whose columns are unknown makes no claim to check.
-            (TyKind::Frame(_, None), TyKind::Frame(..))
-            | (TyKind::Frame(..), TyKind::Frame(_, None)) => Ok(()),
-            (TyKind::Frame(_, Some(left)), TyKind::Frame(_, Some(right))) => {
-                if left.len() != right.len() {
-                    return Err(UnifyError::Mismatch(a, b));
-                }
-                for column in left.iter() {
-                    let Some(other) = right.iter().find(|other| other.name == column.name) else {
-                        return Err(UnifyError::Mismatch(a, b));
-                    };
-                    self.unify(db, column.ty, other.ty)?;
-                }
-                Ok(())
-            }
+            (TyKind::Frame(_, None, _), TyKind::Frame(..))
+            | (TyKind::Frame(..), TyKind::Frame(_, None, _)) => Ok(()),
+            (TyKind::Frame(_, Some(_), _), TyKind::Frame(_, Some(_), _))
+            | (TyKind::NativeRecord(..), TyKind::NativeRecord(..)) => self.unify_open(db, a, b),
             (TyKind::Function(left), TyKind::Function(right)) => {
                 if left.positional.len() != right.positional.len()
                     || left.named.len() != right.named.len()
@@ -690,17 +681,6 @@ impl<'db> InferenceTable<'db> {
                 }
                 Ok(())
             }
-            (TyKind::NativeRecord(left), TyKind::NativeRecord(right)) => {
-                if left.len() != right.len()
-                    || left.iter().zip(right.iter()).any(|(l, r)| l.name != r.name)
-                {
-                    return Err(UnifyError::Mismatch(a, b));
-                }
-                for (left, right) in left.iter().zip(right.iter()) {
-                    self.unify(db, left.ty, right.ty)?;
-                }
-                Ok(())
-            }
             (TyKind::Tag(left_name, left_payload), TyKind::Tag(right_name, right_payload))
                 if left_name == right_name =>
             {
@@ -713,6 +693,172 @@ impl<'db> InferenceTable<'db> {
             (TyKind::Union(_), TyKind::Union(_)) => self.unify_unions(db, a, b),
             _ => Err(UnifyError::Mismatch(a, b)),
         }
+    }
+
+    /// Unifies two tables' columns or two records' fields. A side's row stands for the names it
+    /// does not list, so a name only one side lists goes into the other side's row, and when both
+    /// sides list names the other lacks, their rows share a fresh row for the rest.
+    fn unify_open(
+        &mut self,
+        db: &'db dyn Db,
+        a: Ty<'db>,
+        b: Ty<'db>,
+    ) -> Result<(), UnifyError<'db>> {
+        let mismatch = || UnifyError::Mismatch(a, b);
+        let ((shape, left, left_row), (_, right, right_row)) =
+            match (self.settled(db, a), self.settled(db, b)) {
+                (Settled::Open(left), Settled::Open(right)) if left.0 == right.0 => (left, right),
+                (Settled::Unknown, _) | (_, Settled::Unknown) => return Ok(()),
+                _ => return Err(mismatch()),
+            };
+        for (name, ty) in &left {
+            if let Some((_, other)) = right.iter().find(|(other, _)| other == name) {
+                self.unify(db, *ty, *other)?;
+            }
+        }
+        let only =
+            |these: &[(Name<'db>, Ty<'db>)], those: &[(Name<'db>, Ty<'db>)]| -> OpenFields<'db> {
+                these
+                    .iter()
+                    .filter(|(name, _)| !those.iter().any(|(other, _)| other == name))
+                    .copied()
+                    .collect()
+            };
+        let left_only = only(&left, &right);
+        let right_only = only(&right, &left);
+        let absorb = |table: &mut Self, row: Option<Ty<'db>>, rest: Ty<'db>| match row {
+            Some(row) => table.unify(db, row, rest),
+            None => Err(mismatch()),
+        };
+        match (left_only.is_empty(), right_only.is_empty()) {
+            (true, true) => {
+                let closed = row_type(db, shape, &[], None);
+                match (left_row, right_row) {
+                    (None, None) => Ok(()),
+                    (Some(left_row), Some(right_row)) => self.unify(db, left_row, right_row),
+                    (Some(row), None) | (None, Some(row)) => self.unify(db, row, closed),
+                }
+            }
+            (false, true) => {
+                let rest = row_type(db, shape, &left_only, left_row);
+                absorb(self, right_row, rest)
+            }
+            (true, false) => {
+                let rest = row_type(db, shape, &right_only, right_row);
+                absorb(self, left_row, rest)
+            }
+            // One row cannot hold names only the other side lists on both sides at once: binding
+            // it to the first rest would ask the same of its fresh tail, forever.
+            (false, false) if left_row.is_some() && left_row == right_row => Err(mismatch()),
+            (false, false) => {
+                let tail = self.fresh_ty(db, Constraint::Unconstrained);
+                let rest = row_type(db, shape, &left_only, Some(tail));
+                absorb(self, right_row, rest)?;
+                let rest = row_type(db, shape, &right_only, Some(tail));
+                absorb(self, left_row, rest)
+            }
+        }
+    }
+
+    /// Whether a table or record `actual` fits `expected`: every name `expected` lists must be
+    /// there and fit, and the names it does not list must fit its row. A closed `expected` takes
+    /// no more names, a type parameter only itself, and a type variable binds to the rest.
+    fn open_compatible(
+        &mut self,
+        db: &'db dyn Db,
+        actual: Ty<'db>,
+        expected: Ty<'db>,
+        depth: usize,
+    ) -> bool {
+        let ((shape, actual, actual_row), (_, expected, expected_row)) =
+            match (self.settled(db, actual), self.settled(db, expected)) {
+                (Settled::Open(actual), Settled::Open(expected)) if actual.0 == expected.0 => {
+                    (actual, expected)
+                }
+                (Settled::Unknown, _) | (_, Settled::Unknown) => return true,
+                _ => return false,
+            };
+        let mut missing = OpenFields::new();
+        for (name, expected_ty) in &expected {
+            match actual.iter().find(|(other, _)| other == name) {
+                Some((_, actual_ty)) => {
+                    if !self.compatible_probe(db, *actual_ty, *expected_ty, depth + 1) {
+                        return false;
+                    }
+                }
+                None => missing.push((*name, *expected_ty)),
+            }
+        }
+        let rest: OpenFields<'db> = actual
+            .iter()
+            .filter(|(name, _)| !expected.iter().any(|(other, _)| other == name))
+            .copied()
+            .collect();
+        // An inferred value whose row is still a variable, such as a parameter two calls read
+        // different names of, takes the names `expected` lists and it lacks into that row.
+        let actual_row = match actual_row {
+            _ if missing.is_empty() => actual_row,
+            Some(row) if self.resolve(db, row).is_var() => {
+                if expected_row == Some(row) && !rest.is_empty() {
+                    return false;
+                }
+                let tail = expected_row.map(|_| self.fresh_ty(db, Constraint::Unconstrained));
+                if self
+                    .unify(db, row, row_type(db, shape, &missing, tail))
+                    .is_err()
+                {
+                    return false;
+                }
+                tail
+            }
+            _ => return false,
+        };
+        match expected_row {
+            None => match actual_row {
+                _ if !rest.is_empty() => false,
+                None => true,
+                Some(row) => self.unify(db, row, row_type(db, shape, &[], None)).is_ok(),
+            },
+            Some(expected_row) => {
+                let rest = row_type(db, shape, &rest, actual_row);
+                self.unify(db, expected_row, rest).is_ok()
+            }
+        }
+    }
+
+    /// A table's or record's names with every row bound since it was built merged in, so that
+    /// its row is an unbound variable, a type parameter, or none. A row bound to something other
+    /// than more names of the same kind, as when `R` in `..R` also types a parameter, is
+    /// `WrongShape`.
+    fn settled(&mut self, db: &'db dyn Db, ty: Ty<'db>) -> Settled<'db> {
+        let Some((shape, mut names, mut row)) = open_parts(db, ty) else {
+            return match ty.kind(db) {
+                TyKind::Unknown | TyKind::Any | TyKind::Frame(_, None, _) => Settled::Unknown,
+                _ => Settled::WrongShape,
+            };
+        };
+        while let Some(current) = row {
+            let resolved = self.shallow_resolve(db, current);
+            if let TyKind::Var(_) | TyKind::Rigid(_) = resolved.kind(db) {
+                row = Some(resolved);
+                break;
+            }
+            if let TyKind::Unknown | TyKind::Any = resolved.kind(db) {
+                return Settled::Unknown;
+            }
+            match open_parts(db, resolved) {
+                Some((more_shape, more, rest)) if more_shape == shape => {
+                    for (name, more_ty) in more {
+                        if !names.iter().any(|(listed, _)| *listed == name) {
+                            names.push((name, more_ty));
+                        }
+                    }
+                    row = rest;
+                }
+                _ => return Settled::WrongShape,
+            }
+        }
+        Settled::Open((shape, names, row))
     }
 
     fn unify_unions(
@@ -1443,7 +1589,7 @@ impl<'db> InferenceTable<'db> {
             }
             // `data.table{...}` is the `data.table` class with its columns known, so the two fit
             // each other both ways, as `data.frame{...}` and `data.frame` do.
-            (TyKind::Named(name, arguments), TyKind::Frame(kind, _))
+            (TyKind::Named(name, arguments), TyKind::Frame(kind, _, _))
                 if arguments.is_empty() && kind.class() == Some(name.text(db)) =>
             {
                 true
@@ -1584,31 +1730,17 @@ impl<'db> InferenceTable<'db> {
                         })
                 })
             }
-            (TyKind::Frame(actual_kind, _), TyKind::Frame(expected_kind, _))
+            (TyKind::Frame(actual_kind, _, _), TyKind::Frame(expected_kind, _, _))
                 if !same_frame_kind(*actual_kind, *expected_kind) =>
             {
                 false
             }
-            (TyKind::Frame(_, None), TyKind::Frame(..))
-            | (TyKind::Frame(..), TyKind::Frame(_, None)) => true,
-            (TyKind::Frame(_, Some(actual_columns)), TyKind::Frame(_, Some(expected_columns)))
-                if actual_columns.len() == expected_columns.len() =>
-            {
-                expected_columns.iter().all(|expected_column| {
-                    actual_columns
-                        .iter()
-                        .find(|column| column.name == expected_column.name)
-                        .is_some_and(|actual_column| {
-                            self.compatible_probe(
-                                db,
-                                actual_column.ty,
-                                expected_column.ty,
-                                depth + 1,
-                            )
-                        })
-                })
+            (TyKind::Frame(_, None, _), TyKind::Frame(..))
+            | (TyKind::Frame(..), TyKind::Frame(_, None, _)) => true,
+            (TyKind::Frame(_, Some(_), _), TyKind::Frame(_, Some(_), _)) => {
+                self.open_compatible(db, actual, expected, depth)
             }
-            (TyKind::Frame(kind, _), TyKind::Named(name, arguments))
+            (TyKind::Frame(kind, _, _), TyKind::Named(name, arguments))
                 if arguments.is_empty() && kind.class() == Some(name.text(db)) =>
             {
                 true
@@ -1616,12 +1748,16 @@ impl<'db> InferenceTable<'db> {
             // `as.list` turns a frame into the list of its columns, which is how `lapply`,
             // `Map` and `Filter` iterate one. A plan or a grouping is not a list of columns.
             (
-                TyKind::Frame(FrameKind::LazyFrame | FrameKind::GroupBy { .. }, _),
+                TyKind::Frame(FrameKind::LazyFrame | FrameKind::GroupBy { .. }, _, _),
                 TyKind::List(_) | TyKind::NamedList(_),
             ) => false,
-            (TyKind::Frame(_, None), TyKind::List(_) | TyKind::NamedList(_)) => true,
+            // A row's columns are unknown, as are all the columns of a frame that lists none.
             (
-                TyKind::Frame(_, Some(columns)),
+                TyKind::Frame(_, None, _) | TyKind::Frame(_, Some(_), Some(_)),
+                TyKind::List(_) | TyKind::NamedList(_),
+            ) => true,
+            (
+                TyKind::Frame(_, Some(columns), _),
                 TyKind::List(element) | TyKind::NamedList(element),
             ) if self.resolve(db, *element).is_var() => {
                 let joined = union_of(
@@ -1631,7 +1767,7 @@ impl<'db> InferenceTable<'db> {
                 self.unify(db, *element, joined).is_ok()
             }
             (
-                TyKind::Frame(_, Some(columns)),
+                TyKind::Frame(_, Some(columns), _),
                 TyKind::List(element) | TyKind::NamedList(element),
             ) => columns.iter().all(|column| {
                 self.compatible_probe(db, r_column_type(db, column.ty), *element, depth + 1)
@@ -1692,21 +1828,8 @@ impl<'db> InferenceTable<'db> {
                     },
                 )
             }
-            // Both sides are sorted by name, so equal names pair up position by position.
-            (TyKind::NativeRecord(actual_fields), TyKind::NativeRecord(expected_fields))
-                if actual_fields.len() == expected_fields.len() =>
-            {
-                actual_fields.iter().zip(expected_fields.iter()).all(
-                    |(actual_field, expected_field)| {
-                        actual_field.name == expected_field.name
-                            && self.compatible_probe(
-                                db,
-                                actual_field.ty,
-                                expected_field.ty,
-                                depth + 1,
-                            )
-                    },
-                )
+            (TyKind::NativeRecord(..), TyKind::NativeRecord(..)) => {
+                self.open_compatible(db, actual, expected, depth)
             }
             (
                 TyKind::Tag(actual_name, actual_payload),
@@ -1720,7 +1843,7 @@ impl<'db> InferenceTable<'db> {
             },
             // Past the column-wise arms, an R frame passes wherever its class does:
             // `data.frame{...}` is a `data.frame` to `merge` and `sum`.
-            (TyKind::Frame(kind, _), _) if let Some(class) = kind.class() => {
+            (TyKind::Frame(kind, _, _), _) if let Some(class) = kind.class() => {
                 let nominal = Ty::new(db, TyKind::Named(Name::new(db, class), &[]));
                 self.compatible_probe(db, nominal, expected, depth + 1)
             }
@@ -2280,7 +2403,7 @@ pub(crate) fn constraint_rejects<'db>(
             TyKind::Named(name, _) => arithmetic_classes
                 .is_some_and(|classes| classes.closed_under_arithmetic(name.symbol())),
             // A frame with known columns carries its class like a nominal one does.
-            TyKind::Frame(kind, _) => kind.class().is_some_and(|class| {
+            TyKind::Frame(kind, _, _) => kind.class().is_some_and(|class| {
                 arithmetic_classes.is_some_and(|classes| match constraint {
                     Constraint::Arithmetic => classes.contains(class),
                     _ => classes.closed_under_arithmetic(class),
@@ -2370,6 +2493,79 @@ pub(crate) fn constraint_rejects<'db>(
         },
     };
     (!admissible).then_some(UnifyError::ConstraintRejected(constraint, ty))
+}
+
+/// The names and types a table or record lists, with its row.
+type OpenFields<'db> = SmallVec<[(Name<'db>, Ty<'db>); 8]>;
+
+/// Whether a row holds a table's columns or a record's fields.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowShape {
+    Columns,
+    Fields,
+}
+
+/// A table or record type as `Checker::unify_open` reads it.
+enum Settled<'db> {
+    Open((RowShape, OpenFields<'db>, Option<Ty<'db>>)),
+    /// The type, or its row, is `Unknown`, so anything fits it.
+    Unknown,
+    WrongShape,
+}
+
+fn open_parts<'db>(
+    db: &'db dyn Db,
+    ty: Ty<'db>,
+) -> Option<(RowShape, OpenFields<'db>, Option<Ty<'db>>)> {
+    match *ty.kind(db) {
+        TyKind::Frame(_, Some(columns), row) => Some((
+            RowShape::Columns,
+            columns
+                .iter()
+                .map(|column| (column.name, column.ty))
+                .collect(),
+            row,
+        )),
+        TyKind::NativeRecord(fields, row) => Some((
+            RowShape::Fields,
+            fields.iter().map(|field| (field.name, field.ty)).collect(),
+            row,
+        )),
+        _ => None,
+    }
+}
+
+/// The row that holds `fields` and then `tail`: `tail` itself without fields, and the empty
+/// closed row without either.
+fn row_type<'db>(
+    db: &'db dyn Db,
+    shape: RowShape,
+    fields: &[(Name<'db>, Ty<'db>)],
+    tail: Option<Ty<'db>>,
+) -> Ty<'db> {
+    if fields.is_empty()
+        && let Some(tail) = tail
+    {
+        return tail;
+    }
+    match shape {
+        RowShape::Columns => {
+            let columns: SmallVec<[RecordField<'db>; 8]> = fields
+                .iter()
+                .map(|&(name, ty)| RecordField {
+                    name,
+                    ty,
+                    optional: false,
+                })
+                .collect();
+            frame_with_row(db, FrameKind::DataFrame, &columns, tail)
+        }
+        RowShape::Fields => native_record_with_row(
+            db,
+            fields.iter().map(|&(name, ty)| NativeField { name, ty }),
+            tail,
+        ),
+    }
 }
 
 /// Two table kinds fit when they are the same kind. A grouping's key count is part of its kind

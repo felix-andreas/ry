@@ -369,3 +369,156 @@ rows: Rows <- DataFrame(kind = c("Bond", "Cash"), v = c(1, 2))
 rows: Rows
 72..76 warning[unused] `rows` is assigned but never used
 86..134 error[type-mismatch] expected `DataFrame{kind: :Bond | :Cash, v: double[]}`, found `DataFrame{kind: character[], v: double[]}`
+
+#==== open_tables
+
+#---- positions_and_iteration_on_an_open_table
+# typing: strict
+first <- function<R>(d: DataFrame{k: integer[], ..R}) d[[1]]
+named <- function<R>(d: DataFrame{k: integer[], ..R}) d[["k"]]
+columns <- function<R>(d: DataFrame{k: integer[], ..R}) lapply(d, length)
+#++++
+first: <R> fn(d: DataFrame{k: integer[], ..R}) -> Unknown
+named: <R> fn(d: DataFrame{k: integer[], ..R}) -> integer[]
+columns: <R> fn(d: DataFrame{k: integer[], ..R}) -> list[named: integer]
+17..22 warning[unused] `first` is assigned but never used
+74..75 error[type-mismatch] a position cannot pick from `DataFrame{k: integer[], ..R}`, because the fields or columns of its row may come before the listed ones. Read it by name
+78..83 warning[unused] `named` is assigned but never used
+141..148 warning[unused] `columns` is assigned but never used
+71..77 warning[interpreted] this function runs in the interpreter, because a column read by its position is not compiled natively yet. Read the column by its name, as in `table[["price"]]`
+71..77 error[native] reading a column gives an R vector, and a native function holds only ry values. Convert it where it is read: `List.from_r(d[[1]])`
+132..140 error[native] reading a column gives an R vector, and a native function holds only ry values. Convert it where it is read: `List.from_r(d[["k"]])`
+  safe fix 132..140 "List.from_r(d[[\"k\"]])"
+197..214 error[native] `lapply` is an R function, and a native function holds only ry values, so its result cannot be used here. If only its effect matters, call it in a statement of its own. Otherwise move the call into a function with an R type in its signature, which is where R values and ry values meet
+
+#---- a_row_selection_keeps_the_row
+# typing: strict
+keep <- function<R>(d: DataFrame{k: integer[], ..R}) -> DataFrame{k: integer[], ..R} d[k > 0L]
+close <- function<R>(d: DataFrame{k: integer[], ..R}) -> DataFrame{k: integer[]} d[k > 0L]
+out <- keep(DataFrame(k = 1L, extra = "x"))
+#++++
+keep: <R> fn(d: DataFrame{k: integer[], ..R}) -> DataFrame{k: integer[], ..R}
+close: <R> fn(d: DataFrame{k: integer[], ..R}) -> DataFrame{k: integer[]}
+out: DataFrame{k: integer[], extra: character[]}
+112..117 warning[unused] `close` is assigned but never used
+193..202 error[type-mismatch] expected `DataFrame{k: integer[]}`, found `DataFrame{k: integer[], ..R}`
+203..206 warning[unused] `out` is assigned but never used
+102..111 warning[interpreted] this function runs in the interpreter, because a column read by its position is not compiled natively yet. Read the column by its name, as in `table[["price"]]`
+102..111 error[native] reading a column gives an R vector, and a native function holds only ry values. Convert it where it is read: `List.from_r(d[k > 0L])`
+104..105 error[native] `k` comes from outside the function and holds an R value, and a native function holds only ry values. Convert it once where it is made, as in `List.from_r(...)`, and pass the ry value in as a parameter
+193..202 warning[interpreted] this function runs in the interpreter, because a column read by its position is not compiled natively yet. Read the column by its name, as in `table[["price"]]`
+193..202 error[native] reading a column gives an R vector, and a native function holds only ry values. Convert it where it is read: `List.from_r(d[k > 0L])`
+195..196 error[native] `k` comes from outside the function and holds an R value, and a native function holds only ry values. Convert it once where it is made, as in `List.from_r(...)`, and pass the ry value in as a parameter
+
+#---- a_function_adds_a_column_to_any_table_with_a_key
+# typing: strict
+add_id <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], id: double[], ..R} {
+  DataFrame.with_columns(data, id = Expr.rank(Expr.col("code")))
+}
+prices <- DataFrame(code = c("a", "bb"), price = c(1.5, 2.5))
+out <- add_id(prices)
+price <- out$price
+missing <- out$nothing
+#++++
+add_id: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], id: double[], ..R}
+prices: DataFrame{code: character[], price: double[]}
+out: DataFrame{code: character[], id: double[], price: double[]}
+price: double[]
+missing: Unknown
+284..289 warning[unused] `price` is assigned but never used
+303..310 warning[unused] `missing` is assigned but never used
+318..325 error[type-mismatch] the frame `out` has no column `nothing`. Its columns are `code`, `id`, `price`
+
+#---- a_table_without_the_listed_column_does_not_fit
+# typing: strict
+keep <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], ..R} data
+bad <- keep(DataFrame(name = c("a")))
+wrong <- keep(DataFrame(code = c(1, 2)))
+#++++
+keep: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], ..R}
+bad: Unknown
+wrong: Unknown
+120..123 warning[unused] `bad` is assigned but never used
+132..156 error[type-mismatch] expected `DataFrame{code: character[], ..T}`, found `DataFrame{name: character[]}`
+158..163 warning[unused] `wrong` is assigned but never used
+172..197 error[type-mismatch] expected `DataFrame{code: character[], ..T}`, found `DataFrame{code: double[]}`
+
+#---- the_body_reads_only_the_listed_columns
+# typing: strict
+first_price <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame {
+  DataFrame.select(data, Expr.col("price"))
+}
+#++++
+first_price: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame
+17..28 warning[unused] `first_price` is assigned but never used
+134..141 error[type-mismatch] the frame `data` has no column `price`. Its columns are `code`
+
+#---- the_body_keeps_the_other_columns
+# typing: strict
+closed <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[]} data
+filtered <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], ..R} {
+  DataFrame.filter(data, Expr.col("code") == "a")
+}
+sorted <- function<R>(data: DataFrame{code: character[], ..R}) -> LazyFrame{code: character[], ..R} {
+  DataFrame.lazy(DataFrame.sort(data, "code"))
+}
+dropped <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{..R} {
+  DataFrame.drop(data, "code")
+}
+selected <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[]} {
+  DataFrame.select(data, Expr.col("code"))
+}
+#++++
+closed: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[]}
+filtered: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], ..R}
+sorted: <R> fn(data: DataFrame{code: character[], ..R}) -> LazyFrame{code: character[], ..R}
+dropped: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{..R}
+selected: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[]}
+17..23 warning[unused] `closed` is assigned but never used
+112..116 error[type-mismatch] expected `DataFrame{code: character[]}`, found `DataFrame{code: character[], ..R}`
+117..125 warning[unused] `filtered` is assigned but never used
+273..279 warning[unused] `sorted` is assigned but never used
+424..431 warning[unused] `dropped` is assigned but never used
+541..549 warning[unused] `selected` is assigned but never used
+
+
+#---- an_open_table_passes_through_another_function
+# typing: strict
+add_id <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], id: double[], ..R} {
+  DataFrame.with_columns(data, id = Expr.rank(Expr.col("code")))
+}
+twice <- function<S>(data: DataFrame{code: character[], ..S}) -> DataFrame{code: character[], id: double[], ..S} {
+  add_id(data)
+}
+out <- twice(DataFrame(code = "a", flag = TRUE))
+#++++
+add_id: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], id: double[], ..R}
+twice: <S> fn(data: DataFrame{code: character[], ..S}) -> DataFrame{code: character[], id: double[], ..S}
+out: DataFrame{code: character[], id: double[], flag: logical[]}
+332..335 warning[unused] `out` is assigned but never used
+
+#---- joins_and_groups_on_an_open_table
+# typing: strict
+codes <- DataFrame(code = c("a", "b"), id = c(1, 2))
+joined <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], id: double[], ..R} {
+  DataFrame.join(data, codes, on = "code")
+}
+right_open <- function<R>(data: DataFrame{code: character[], ..R}) {
+  DataFrame.join(codes, data, on = "code")
+}
+kept <- function<R>(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], ..R} {
+  DataFrame.join(data, codes, on = "code", how = "semi")
+}
+counted <- function<R>(data: DataFrame{code: character[], ..R}) {
+  GroupBy.agg(DataFrame.group_by(data, "code"), n = Expr.len())
+}
+#++++
+codes: DataFrame{code: character[], id: double[]}
+joined: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], id: double[], ..R}
+right_open: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame
+kept: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], ..R}
+counted: <R> fn(data: DataFrame{code: character[], ..R}) -> DataFrame{code: character[], n: integer[]}
+70..76 warning[unused] `joined` is assigned but never used
+231..241 warning[unused] `right_open` is assigned but never used
+345..349 warning[unused] `kept` is assigned but never used
+504..511 warning[unused] `counted` is assigned but never used

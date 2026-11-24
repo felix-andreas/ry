@@ -583,11 +583,11 @@ fn member_at<'db>(
 
 fn field_type<'db>(db: &'db dyn Db, ty: Ty<'db>, name: &str) -> Option<Ty<'db>> {
     match ty.kind(db) {
-        TyKind::Record(fields) | TyKind::Frame(_, Some(fields)) => fields
+        TyKind::Record(fields) | TyKind::Frame(_, Some(fields), _) => fields
             .iter()
             .find(|field| field.name.text(db) == name)
             .map(|field| field.ty),
-        TyKind::NativeRecord(fields) => fields
+        TyKind::NativeRecord(fields, _) => fields
             .iter()
             .find(|field| field.name.text(db) == name)
             .map(|field| field.ty),
@@ -605,7 +605,7 @@ fn updated_column_at<'db>(
     arguments: &[Argument],
     relative: TextSize,
 ) -> Option<Member<'db>> {
-    let TyKind::Frame(_, Some(columns)) = check.editor().expression_types.get(&query)?.kind(db)
+    let TyKind::Frame(_, Some(columns), _) = check.editor().expression_types.get(&query)?.kind(db)
     else {
         return None;
     };
@@ -1665,7 +1665,7 @@ fn frame_column_reads(
             .get(&expression)
             .map(|ty| ty.kind(db))
         {
-            Some(TyKind::Frame(_, Some(columns))) => {
+            Some(TyKind::Frame(_, Some(columns), _)) => {
                 columns.iter().map(|column| column.name.text(db)).collect()
             }
             _ => Vec::new(),
@@ -3369,7 +3369,7 @@ pub fn type_definition(
     let name = match *ty.kind(db) {
         TyKind::Named(name, _) => name.text(db),
         // A `data.frame{...}` is its class with the columns known.
-        TyKind::Frame(kind, _) => kind.class()?,
+        TyKind::Frame(kind, _, _) => kind.class()?,
         _ => return None,
     };
     type_name_definition(db, files, name)
@@ -5033,7 +5033,7 @@ fn string_subscript_completion(
             .get(&target)
             .map(|ty| ty.kind(db))
     }) {
-        Some(Some(TyKind::Record(fields) | TyKind::Frame(_, Some(fields)))) => *fields,
+        Some(Some(TyKind::Record(fields) | TyKind::Frame(_, Some(fields), _))) => *fields,
         Some(_) => return None,
         None => dataframe_columns_for(db, file, hir, check, string_range)?,
     };
@@ -5108,7 +5108,7 @@ fn dataframe_columns_for<'db>(
     // A frame typed by a named definition, such as a parameter of type `Sales`, has the
     // columns of the definition's body.
     match representation(db, file, *check.editor().expression_types.get(&subject)?).kind(db) {
-        TyKind::Frame(_, Some(columns)) => Some(*columns),
+        TyKind::Frame(_, Some(columns), _) => Some(*columns),
         _ => None,
     }
 }
@@ -5632,11 +5632,11 @@ fn dollar_completions(
             .min_by_key(|(range, _)| range.len())?;
         let target_ty = representation(db, file, *check.editor().expression_types.get(&target)?);
         let fields: Vec<(&str, Ty<'_>)> = match target_ty.kind(db) {
-            TyKind::Record(fields) | TyKind::Frame(_, Some(fields)) => fields
+            TyKind::Record(fields) | TyKind::Frame(_, Some(fields), _) => fields
                 .iter()
                 .map(|field| (field.name.text(db), field.ty))
                 .collect(),
-            TyKind::NativeRecord(fields) => fields
+            TyKind::NativeRecord(fields, _) => fields
                 .iter()
                 .map(|field| (field.name.text(db), field.ty))
                 .collect(),
@@ -5869,7 +5869,7 @@ fn pattern_completions(
     let mut renderer = TypeRenderer::default();
     let mut items = Vec::new();
     for member in subject.types {
-        let TyKind::NativeRecord(fields) = member.kind(db) else {
+        let TyKind::NativeRecord(fields, _) = member.kind(db) else {
             continue;
         };
         for field in fields.iter() {
@@ -6040,7 +6040,7 @@ fn descend<'db>(db: &'db dyn Db, ty: Ty<'db>, steps: &[PatternStep]) -> Vec<Ty<'
                 (PatternStep::Item(index), TyKind::NativeTuple(items)) => {
                     items.get(*index).copied()
                 }
-                (PatternStep::Field(name), TyKind::NativeRecord(fields)) => fields
+                (PatternStep::Field(name), TyKind::NativeRecord(fields, _)) => fields
                     .iter()
                     .find(|field| field.name.text(db) == name)
                     .map(|field| field.ty),
@@ -6237,7 +6237,7 @@ fn literal_expected_fields(
     let mut renderer = TypeRenderer::default();
     let mut items = Vec::new();
     for member in members {
-        let TyKind::NativeRecord(fields) = member.kind(db) else {
+        let TyKind::NativeRecord(fields, _) = member.kind(db) else {
             continue;
         };
         for field in fields.iter() {
@@ -6286,7 +6286,7 @@ fn frame_query_completions(
             })
             .min_by_key(|(length, _)| *length)
             .map(|(_, target)| target)?;
-        let TyKind::Frame(_, Some(columns)) =
+        let TyKind::Frame(_, Some(columns), _) =
             check.editor().expression_types.get(&target)?.kind(db)
         else {
             return None;
@@ -6737,7 +6737,7 @@ fn value_shapes<'db>(db: &'db dyn Db, ty: Ty<'db>, shapes: &mut Vec<ValueShape<'
         | TyKind::Record(_)
         | TyKind::OpenRecord(_) => ValueShape::List,
         TyKind::NativeTuple(_)
-        | TyKind::NativeRecord(_)
+        | TyKind::NativeRecord(_, _)
         | TyKind::Tag(..)
         | TyKind::OtherTags
         | TyKind::Native(_) => ValueShape::Native,
@@ -7383,7 +7383,7 @@ fn is_impossible_vector(db: &dyn Db, ty: Ty<'_>) -> bool {
     let is_structured = |ty: Ty<'_>| {
         matches!(
             ty.kind(db),
-            TyKind::NativeRecord(_)
+            TyKind::NativeRecord(_, _)
                 | TyKind::NativeTuple(_)
                 | TyKind::Tag(..)
                 | TyKind::Record(_)
@@ -7415,7 +7415,7 @@ fn is_hintable(db: &dyn Db, ty: Ty<'_>, variables_allowed: bool) -> bool {
         TyKind::NativeTuple(items) => items
             .iter()
             .all(|&item| is_hintable(db, item, variables_allowed)),
-        TyKind::NativeRecord(fields) => fields
+        TyKind::NativeRecord(fields, _) => fields
             .iter()
             .all(|field| is_hintable(db, field.ty, variables_allowed)),
         TyKind::Tag(_, payload) => {
@@ -7431,10 +7431,10 @@ fn is_hintable(db: &dyn Db, ty: Ty<'_>, variables_allowed: bool) -> bool {
         TyKind::Record(fields)
         | TyKind::OpenRecord(fields)
         | TyKind::Environment(fields)
-        | TyKind::Frame(_, Some(fields)) => fields
+        | TyKind::Frame(_, Some(fields), _) => fields
             .iter()
             .all(|field| is_hintable(db, field.ty, variables_allowed)),
-        TyKind::Frame(_, None) => true,
+        TyKind::Frame(_, None, _) => true,
         TyKind::Union(members) => members
             .iter()
             .all(|&member| is_hintable(db, member, variables_allowed)),
