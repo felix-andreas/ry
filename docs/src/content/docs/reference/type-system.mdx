@@ -2233,8 +2233,10 @@ those returns satisfies the expected return. Arguments a call forwards to the ca
 `lapply(names, chosen, new = NULL)`, reach every member.
 
 A declared function such as `apply` passes its `...` on to its callback, so an untyped parameter
-passed there takes `fn(Any, ...: Any) -> Any`, even from a call that forwards nothing. After
-`apply(m, 1, fun)`, the body may still call `fun(m, na.rm = TRUE)`.
+that the body also calls takes `fn(Any, ...: Any) -> Any` when passed there, even from a call that
+forwards nothing. After `apply(m, 1, fun)`, the body may still call `fun(m, na.rm = TRUE)`. A
+parameter the body only passes on keeps the exact shape: `each <- function(f) lapply(list(1, 2), f)`
+is `fn(f: fn(double) -> T) -> list[T]`.
 
 A function whose parameter types are still being inferred is the one exception to exact parameter
 types: after `uniroot(f, interval, scontrol = scontrol)` binds `scontrol`'s parameter to `double`,

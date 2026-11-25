@@ -1004,6 +1004,7 @@ fn check_item_in<'db>(
         table,
         frame_level: 0,
         callback_frame_level: None,
+        called_formals: FxHashSet::default(),
         discarded_if: None,
         parameter_hints: Column::new_in(arena, expressions),
         hinted_parameters: HashSet::with_hasher_in(FxBuildHasher, Arena(arena)),
@@ -2042,6 +2043,8 @@ struct Checker<'db, 'a> {
     /// parameters are values the callee supplies, so the callee's signature, not the body,
     /// decides whether two of them are independent.
     callback_frame_level: Option<u32>,
+    /// The formals of the inferred function being walked that its body also calls by name.
+    called_formals: FxHashSet<Symbol>,
     /// The `if` statement about to infer whose value its block discards.
     discarded_if: Option<ExprId>,
     /// Parameter types an unannotated function literal takes from the function type its call
@@ -4714,7 +4717,9 @@ impl<'db, 'a> Checker<'db, 'a> {
                 let mark = self.environment.mark();
                 let uses = self.formal_uses(&module[parameters], *body);
                 let mut probed = FxHashSet::default();
-                self.collect_type_probed(*body, &mut probed);
+                let mut called = FxHashSet::default();
+                self.collect_body_names(*body, &mut probed, &mut called);
+                let enclosing_called_formals = mem::replace(&mut self.called_formals, called);
                 let mut named = Vec::new();
                 let mut formal_slots: SmallVec<[Option<BindingId>; 4]> = SmallVec::new();
                 let mut variadic = None;
@@ -4854,6 +4859,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 self.reapply_enclosing_writes(pending_mark);
                 self.frame_level = enclosing_frame_level;
                 self.callback_frame_level = enclosing_callback_frame_level;
+                self.called_formals = enclosing_called_formals;
                 self.table.level -= 1;
                 Ty::new(
                     self.db,
@@ -8158,10 +8164,20 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// `is.character(x)`, `inherits(x, ...)`, rlang's `is_string(x)`). Such a value is dynamically typed by
     /// design: each branch uses it as a different type, so no one type describes it.
     /// `is.null` and `is.na` test a value, not its type, and keep their narrowing.
-    fn collect_type_probed(&self, id: ExprId, probed: &mut FxHashSet<Symbol>) {
+    fn collect_body_names(
+        &self,
+        id: ExprId,
+        probed: &mut FxHashSet<Symbol>,
+        called: &mut FxHashSet<Symbol>,
+    ) {
         let kind = self.module.kind(id);
         if matches!(kind, ExpressionKind::Function { .. }) {
             return;
+        }
+        if let ExpressionKind::Call { callee, .. } = kind
+            && let ExpressionKind::NameRef(name) = self.module.kind(*callee)
+        {
+            called.insert(*name);
         }
         if let ExpressionKind::Call { callee, arguments } = kind
             && let ExpressionKind::NameRef(name) = self.module.kind(*callee)
@@ -8175,7 +8191,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             probed.insert(*probed_name);
         }
         let module = self.module;
-        module.for_each_child(id, |child| self.collect_type_probed(child, probed));
+        module.for_each_child(id, |child| self.collect_body_names(child, probed, called));
     }
 
     /// Walks in evaluation order, so a read counts as forcing a formal only before the body
@@ -19478,9 +19494,10 @@ impl<'db, 'a> Checker<'db, 'a> {
         );
 
         // A declared function's `...` goes to its callback (`apply(m, 1, fun)` calls
-        // `fun(row, ...)`), so an open callback is variadic even when this call forwards nothing.
-        let callback_forwarded = !forwarded_argument_indexes.is_empty()
-            || variadic_element.is_some() && !function.inferred;
+        // `fun(row, ...)`), so a formal the body also calls itself stays variadic even where
+        // this call forwards nothing: the arity of its own call is no mistake.
+        let declared_rest = variadic_element.is_some() && !function.inferred;
+        let callback_forwarded = !forwarded_argument_indexes.is_empty();
         let forwards_dots = arguments.iter().any(|argument| argument.forwards_dots);
         let mut findings = Vec::new();
         // An unknown name throws off positional accounting, so its arity verdict would be noise.
@@ -19505,8 +19522,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                     if let Some(&expected) = function.positional.get(*slot)
                         && let Some(ty) =
                             self.argument_type_for(expected, argument, function.inferred)
-                        && let expected =
-                            self.forwarded_callback_shape(expected, ty, callback_forwarded)
+                        && let expected = self.forwarded_callback_shape(
+                            expected,
+                            ty,
+                            callback_forwarded
+                                || declared_rest && self.calls_formal(argument.value),
+                        )
                         && let Err(error) = self.check_argument(
                             expected,
                             ty,
@@ -19574,8 +19595,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                     if let Some(expected) = function.named.get(*formal).map(|field| field.ty)
                         && let Some(ty) =
                             self.argument_type_for(expected, argument, function.inferred)
-                        && let expected =
-                            self.forwarded_callback_shape(expected, ty, callback_forwarded)
+                        && let expected = self.forwarded_callback_shape(
+                            expected,
+                            ty,
+                            callback_forwarded
+                                || declared_rest && self.calls_formal(argument.value),
+                        )
                         && let Err(error) = self.check_argument(
                             expected,
                             ty,
@@ -20217,6 +20242,12 @@ impl<'db, 'a> Checker<'db, 'a> {
             argument: argument.to_owned(),
             expected_parameters: parameters,
         }
+    }
+
+    fn calls_formal(&self, value: Option<ExprId>) -> bool {
+        value.is_some_and(|value| {
+            matches!(self.module.kind(value), ExpressionKind::NameRef(name) if self.called_formals.contains(name))
+        })
     }
 
     /// The function type an open callback (`apply(v, 2, FUN = fun, na.rm = na.rm)`) takes.
