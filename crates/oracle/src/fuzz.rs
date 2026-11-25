@@ -2174,7 +2174,8 @@ pub fn frame_program(seed: u64) -> String {
 
 /// Fixed frame programs for shapes a fix pinned, run with the generated ones: column arguments
 /// named like a verb's formals, whole or in part, and `%%` and `%/%` on infinite, zero, missing,
-/// negative, subnormal and huge operands and on an empty table against a single value.
+/// negative, subnormal and huge operands and on an empty table against a single value, and a
+/// minimum or maximum of an integer column, including a group left with no values.
 pub fn frame_regression_programs() -> Vec<String> {
     FRAME_REGRESSIONS
         .iter()
@@ -2261,6 +2262,21 @@ frame_check(TRUE, function() {
       qi = Expr.col("x") %/% Expr.col("i"),
       big = (Expr.col("x") * 3) %% 7
     )
+})
+"#,
+    r#"frame_check(FALSE, function() {
+  DataFrame(k = c(1L, 0L, 1L, 2L, 2L), v = c(4L, 3L, NA, NA, NA), w = c(1, NA, 2, NA, NA)) |>
+    DataFrame.group_by("k") |>
+    GroupBy.agg(hi = Expr.max(Expr.col("v")), lo = Expr.min(Expr.col("v")), wh = Expr.max(Expr.col("w")))
+})
+frame_check(FALSE, function() {
+  DataFrame(on = c(1L, 0L, -1L, 3L, 3L, 0L)) |>
+    DataFrame.lazy() |>
+    LazyFrame.group_by("on") |>
+    LazyGroupBy.agg(by = Expr.len()) |>
+    LazyFrame.group_by("by") |>
+    LazyGroupBy.agg(top = Expr.max(Expr.col("on"))) |>
+    LazyFrame.collect()
 })
 "#,
 ];

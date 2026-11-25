@@ -720,6 +720,8 @@ Rule and order: `development/design/memory-safety.md`, "Migration".
   - `crates/interp/src/testing.rs` 28 to 29: `check_saved_prologues_replaced`, `refusal`.
   - `crates/frames/src/dataframe.rs` 43 to 54: `do_call`, `do_concat`, `do_drop`, `do_duplicated`, `do_rename`, `do_unique`, `do_unpivot`, `do_with_row_index`, `materialized`, `verb_frame`, `whole`.
   - `crates/frames/src/frame.rs` 90 to 91: `vector_literal`.
+  - `crates/semantics/src/annotations.rs` 2 to 3: `Annotation` (its `applied_references` field, a salsa retention proof for `Ty<'db>` beside a `TextRange`, not heap access).
+  - `crates/semantics/src/diagnostics.rs` 2 to 3: `AnnotationReferences` (its `applied_references` field, the same retention proof).
 
 ## Open: the package loader
 

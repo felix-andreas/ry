@@ -132,8 +132,13 @@ Ops.Expr <- function(e1, e2) {
 Expr.sum <- .model_reduce_na(sum)
 Expr.mean <- .model_reduce_na(mean)
 Expr.median <- .model_reduce_na(median)
-Expr.min <- .model_reduce_na(min)
-Expr.max <- .model_reduce_na(max)
+# A group with no values left is `NA` of the column's type, as in Polars, not R's `Inf` or `-Inf`.
+.model_extreme <- function(extreme) {
+  force(extreme)
+  function(values) if (length(values)) extreme(values) else values[NA_integer_]
+}
+Expr.min <- .model_reduce_na(.model_extreme(min))
+Expr.max <- .model_reduce_na(.model_extreme(max))
 Expr.first <- .model_reduce(function(values) values[1L])
 Expr.last <- .model_reduce(function(values) values[length(values)])
 Expr.std <- .model_reduce_na(sd)

@@ -92,9 +92,9 @@
 9 crates/ry/src/debug_adapter.rs
 5 crates/ry/src/load.rs
 20 crates/ry/src/main.rs
-2 crates/semantics/src/annotations.rs
+3 crates/semantics/src/annotations.rs
 2 crates/semantics/src/check.rs
-2 crates/semantics/src/diagnostics.rs
+3 crates/semantics/src/diagnostics.rs
 11 crates/semantics/src/hir.rs
 7 crates/semantics/src/intern.rs
 7 crates/semantics/src/types.rs

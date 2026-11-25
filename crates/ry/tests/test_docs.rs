@@ -902,6 +902,11 @@ struct Plan {
     session: BTreeMap<usize, (usize, usize)>,
 }
 
+/// The `#>` examples that share a batch: the page, the command, the project's `ry.toml`, whether
+/// the batch prints with `dput`, and, for an example that defines a type, its index. A type
+/// definition must sit at the top level of a file, so that example runs unwrapped on its own.
+type BatchKey = (String, CommandKind, String, bool, Option<usize>);
+
 /// Gives each output block a process of its own, except where a runtime start, which costs
 /// seconds, can be shared. The `#>` blocks of one page and configuration share one process, and
 /// they cannot stop with an error, so a page like the standard library reference with a hundred
@@ -915,17 +920,24 @@ fn plan_jobs(examples: &[Example]) -> Plan {
         batched: BTreeMap::new(),
         session: BTreeMap::new(),
     };
-    let mut batches: BTreeMap<(String, CommandKind, String, bool), Vec<usize>> = BTreeMap::new();
+    let mut batches: BTreeMap<BatchKey, Vec<usize>> = BTreeMap::new();
     let mut sessions: BTreeMap<(String, CommandKind, String), Vec<usize>> = BTreeMap::new();
     for (example_index, example) in examples.iter().enumerate() {
         let toml = project_toml(&example.config);
-        if let Expected::Chunks(_) = example.expected {
+        if let Expected::Chunks(chunks) = &example.expected {
+            let defines_types = chunks.iter().any(|chunk| {
+                chunk
+                    .code
+                    .lines()
+                    .any(|line| line.starts_with("type ") || line.starts_with("alias "))
+            });
             batches
                 .entry((
                     example.page.clone(),
                     example.config.command,
                     toml,
                     example.config.dput,
+                    defines_types.then_some(example_index),
                 ))
                 .or_default()
                 .push(example_index);
@@ -989,7 +1001,7 @@ fn plan_jobs(examples: &[Example]) -> Plan {
             command,
         });
     }
-    for ((page, command, toml, dput), members) in batches {
+    for ((page, command, toml, dput, alone), members) in batches {
         let mut script = String::new();
         for &example_index in &members {
             let Expected::Chunks(chunks) = &examples[example_index].expected else {
@@ -998,6 +1010,16 @@ fn plan_jobs(examples: &[Example]) -> Plan {
             // `tryCatch` has no type, so strict mode would reject the wrapper itself. A strict
             // batch therefore stops at its first error, which the report names.
             let strict = toml.contains("strict = true");
+            if alone.is_some() {
+                for (chunk_index, chunk) in chunks.iter().enumerate() {
+                    script.push_str(&format!(
+                        "cat(\"\\n<<ry-docs {example_index} {chunk_index}>>\\n\")\n{}",
+                        chunk.code
+                    ));
+                }
+                plan.batched.insert(example_index, plan.jobs.len());
+                continue;
+            }
             script.push_str(if strict {
                 "local({\n"
             } else {
