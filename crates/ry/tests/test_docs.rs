@@ -902,6 +902,11 @@ struct Plan {
     session: BTreeMap<usize, (usize, usize)>,
 }
 
+/// The `#>` examples that share a batch: the page, the command, the project's `ry.toml`, whether
+/// the batch prints with `dput`, and, for an example that defines a type, its index. A type
+/// definition must sit at the top level of a file, so that example runs unwrapped on its own.
+type BatchKey = (String, CommandKind, String, bool, Option<usize>);
+
 /// Gives each output block a process of its own, except where a runtime start, which costs
 /// seconds, can be shared. The `#>` blocks of one page and configuration share one process, and
 /// they cannot stop with an error, so a page like the standard library reference with a hundred
@@ -915,10 +920,7 @@ fn plan_jobs(examples: &[Example]) -> Plan {
         batched: BTreeMap::new(),
         session: BTreeMap::new(),
     };
-    // The last key part sets apart an example that defines a type: a definition must sit at the
-    // top level of a file, so that example runs unwrapped in a batch of its own.
-    let mut batches: BTreeMap<(String, CommandKind, String, bool, Option<usize>), Vec<usize>> =
-        BTreeMap::new();
+    let mut batches: BTreeMap<BatchKey, Vec<usize>> = BTreeMap::new();
     let mut sessions: BTreeMap<(String, CommandKind, String), Vec<usize>> = BTreeMap::new();
     for (example_index, example) in examples.iter().enumerate() {
         let toml = project_toml(&example.config);
