@@ -1797,7 +1797,6 @@ enum FormalMatch {
     Local,
 }
 
-/// Replaces `arg`, matched to the formal `name`, by a promise of the formal in `method_env`,
 /// The name an argument is passed by, when it has one.
 #[inline]
 fn argument_name(arg: &Tagged<'_>) -> Option<Gc<'static, Symbol>> {
@@ -1807,6 +1806,7 @@ fn argument_name(arg: &Tagged<'_>) -> Option<Gc<'static, Symbol>> {
         .filter(|tag| !tag.name().bytes().is_empty())
 }
 
+/// Replaces `arg`, matched to the formal `name`, by a promise of the formal in `method_env`,
 /// unless it is empty and the formal is still missing there.
 fn patch_argument<'s>(
     context: &mut Cx<'s>,
