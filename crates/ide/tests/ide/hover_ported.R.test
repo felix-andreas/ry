@@ -850,3 +850,16 @@ completion (6): head, head.matrix, help, help.request, help.search, help.start
 hint @13<T>
 hint @17: T
 hint @18 -> T
+
+#---- the_name_string_of_delayed_assign_hovers_as_the_local_it_declares
+read_header <- function(read_bytes) {
+  delayedAssign($0"length", read_bytes(2))
+  length * 2
+}
+#++++
+hover 54..62: length: Unknown
+definition 54..62
+references: 81..87
+rename: 1 edit(s)
+signature: none
+completion (128+): read_bytes, length, read_header, delayedAssign, function, break, else, FALSE

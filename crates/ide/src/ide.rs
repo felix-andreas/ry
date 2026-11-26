@@ -27,7 +27,7 @@ use {
         },
         types::{
             Atomic, Binder, Constraint, FunctionType, Name, Parameter, RecordField, Ty, TyKind,
-            TypeScheme, contains_inference_var, contains_rigid, union_of,
+            TypeScheme, contains_inference_var, contains_rigid, union_of, unknown,
         },
     },
     std::{
@@ -322,9 +322,20 @@ fn typed_hover(
         .expressions_at()
         .into_iter()
         .find_map(|id| check.editor().expression_types.get(&id).map(|ty| (id, *ty)))?;
-    let ty = without_impossible_vectors(db, ty);
-
     let naming = item_naming(db, position.item).as_ref();
+    // The string of `assign("x", v)` declares `x`, whose value the checker does not track.
+    let writes_at_run_time = naming.is_some_and(|naming| {
+        naming.extras().run_time_writes.keys().any(|&call| {
+            matches!(hir.kind(call), ExpressionKind::Call { arguments, .. }
+                if hir[*arguments].first().and_then(|argument| argument.value) == Some(expression))
+        })
+    });
+    let ty = if writes_at_run_time {
+        unknown(db)
+    } else {
+        without_impossible_vectors(db, ty)
+    };
+
     // The string of `setGeneric("show", ...)` is the token that declares the item.
     let names_item = matches!(
         hir.kind(expression),
@@ -336,6 +347,7 @@ fn typed_hover(
         // `"x" <- 1` binds `x`, so the string is the variable's name there.
         ExpressionKind::Literal(LiteralKind::String(text))
             if names_item
+                || writes_at_run_time
                 || naming.is_some_and(|naming| {
                     naming.resolutions.contains_key(&expression)
                         || naming.non_locals.contains_key(&expression)
@@ -5357,9 +5369,9 @@ struct GlobalName<'db> {
 fn global_names<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<GlobalName<'db>> {
     let mut names = Vec::new();
     for &item in item_tree(db, file) {
-        // A function's body binds locals only; any other item's code runs at the top level, so
-        // an assignment nested in it (`total <- sum(parts <- c(1, 2))`) binds a global too.
-        let kind = *item.kind(db);
+        // An item's code outside function bodies runs at the top level, so an assignment
+        // nested in it (`total <- sum(parts <- c(1, 2))`) binds a global too, and so does the
+        // rest of a block whose `setGeneric` makes it a function item.
         let naming = item_naming(db, item);
         // So does a `<<-` with no enclosing binding, anywhere, and a top-level loop's variable.
         if let Some(naming) = &naming {
@@ -5368,10 +5380,6 @@ fn global_names<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<GlobalName<'db>> 
                 is_function: false,
                 item: None,
             }));
-        }
-        if kind != ItemKind::Function
-            && let Some(naming) = &naming
-        {
             names.extend(
                 naming
                     .bindings
@@ -5386,7 +5394,7 @@ fn global_names<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<GlobalName<'db>> 
                     }),
             );
         }
-        let is_function = match kind {
+        let is_function = match *item.kind(db) {
             ItemKind::Function => true,
             ItemKind::Value => false,
             ItemKind::Statement => continue,
@@ -6494,17 +6502,16 @@ fn finish_completions(
         items
             .iter()
             .enumerate()
+            // The word being typed is spelled once, at the cursor, and is no completion of
+            // itself. Dropped before deduplication, so a stub of the same name still completes.
+            .filter(|(_, item)| {
+                item.label.trim_matches('`') != query
+                    || usage.project_count(query) > 1
+                    || !item.source.is_spelled_in_project()
+            })
             .filter(|(_, item)| seen.insert(item.label.as_str()))
             .filter_map(|(index, item)| {
                 let name = item.label.trim_matches('`');
-                // The word being typed is spelled once, at the cursor, and is no completion of
-                // itself.
-                if name == query
-                    && usage.project_count(name) <= 1
-                    && item.source.is_spelled_in_project()
-                {
-                    return None;
-                }
                 let calls = if called { usage.call_count(name) } else { 0 };
                 // A project function named `generic.class` beside a `generic` is an S3 method,
                 // which code calls through its generic, not by name.
