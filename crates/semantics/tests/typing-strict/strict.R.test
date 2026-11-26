@@ -472,10 +472,16 @@ kept <- function() -> Result<I64, Str> {
   found <- :Ok(1)
   found
 }
+summed <- function(xs: List<F64>) -> F64 {
+  total <- 0
+  total <- List.walk(xs, total, function(s: F64, x: F64) -> F64 s + x)
+  total
+}
 #++++
 first_or_two: fn() -> I64
 named: fn(n: I64) -> Str
 kept: fn() -> Result<I64, Str>
+summed: fn(xs: List<F64>) -> F64
 
 #---- a_tag_payload_literal_takes_the_ry_number_beside_it
 alias Move = :Buy(quantity: F64, price: F64) | :Fee(amount: F64)

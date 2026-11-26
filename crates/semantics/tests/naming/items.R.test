@@ -99,7 +99,7 @@ after <- 1L
 # label
   b0 label top-level 0..5
   0..5 label <- b0
-  9..18 `unclosed -> non-local
+  9..18 unclosed -> non-local
 # after
   b0 after top-level 0..5
   0..5 after <- b0
