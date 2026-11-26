@@ -10474,13 +10474,21 @@ impl<'db, 'a> Checker<'db, 'a> {
                     && self.open_literal_var(left)
                     && self.open_literal_var(right)
                 {
-                    // A quotient is a fraction of its own: `n / 2` leaves `n` a whole number.
+                    // R's `/` gives `double` whatever its operands, so a quotient of `1L`-style
+                    // integers leaves them their own type.
+                    let integers = operator == Divide
+                        && self
+                            .open_literal_constraint(left)
+                            .is_some_and(|(_, default)| default == Atomic::Integer);
                     let result = if operator == Divide {
                         self.fresh_literal(Constraint::FracLiteral, false)
                     } else {
                         left
                     };
-                    if self.table.unify(self.db, left, right).is_ok() {
+                    if !integers
+                        && self.table.unify(self.db, left, right).is_ok()
+                        && self.table.unify(self.db, left, result).is_ok()
+                    {
                         return result;
                     }
                 }
@@ -13468,24 +13476,88 @@ impl<'db, 'a> Checker<'db, 'a> {
     fn elementwise_formals(&self, body: ExprId, parameters: &[Formal]) -> Vec<Name<'db>> {
         let mut tails = Vec::new();
         self.collect_tail_expressions(body, &mut tails);
-        parameters
+        let candidates: SmallVec<[Symbol; 2]> = parameters
             .iter()
             .filter(|parameter| {
                 parameter.name != "..."
-                    && !self.writes_name(body, parameter.name)
                     && tails.iter().all(|&tail| {
-                        self.elementwise_shape(tail, parameter.name)
+                        self.elementwise_shape(tail, parameter.name, parameters)
                             == Some(ElementwiseShape::Follows)
                     })
             })
-            .map(|parameter| Name::new(self.db, parameter.name))
+            .map(|parameter| parameter.name)
+            .collect();
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+        let mut written = SmallVec::<[Symbol; 4]>::new();
+        if !self.collect_written_names(body, &mut written) {
+            return Vec::new();
+        }
+        candidates
+            .into_iter()
+            .filter(|name| !written.contains(name))
+            .map(|name| Name::new(self.db, name))
             .collect()
+    }
+
+    /// Collects the names `id` rebinds: an assignment's target or the base of a replacement
+    /// (`dim(x) <- NULL`), and a `for` variable. `false` when a call may rebind any name
+    /// (`assign`, `rm`, `eval`).
+    fn collect_written_names(&self, id: ExprId, into: &mut SmallVec<[Symbol; 4]>) -> bool {
+        let module = self.module;
+        match module.kind(id) {
+            ExpressionKind::Assign { target, .. } => {
+                let mut base = *target;
+                loop {
+                    base = match module.kind(base) {
+                        ExpressionKind::Call { arguments, .. } => {
+                            match module[*arguments]
+                                .first()
+                                .and_then(|argument| argument.value)
+                            {
+                                Some(first) => first,
+                                None => break,
+                            }
+                        }
+                        ExpressionKind::Index { target, .. }
+                        | ExpressionKind::Field { target, .. } => *target,
+                        ExpressionKind::Paren(inner) => *inner,
+                        _ => break,
+                    };
+                }
+                if let ExpressionKind::NameRef(name) = module.kind(base) {
+                    into.push(*name);
+                }
+            }
+            ExpressionKind::For {
+                variable: Some(variable),
+                ..
+            } => into.push(module[*variable].name),
+            ExpressionKind::Call { callee, .. }
+                if matches!(module.kind(*callee), ExpressionKind::NameRef(name)
+                    if matches!(name.as_str(), "assign" | "rm" | "eval" | "evalq" | "list2env")) =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+        let mut complete = true;
+        module.for_each_child(id, |child| {
+            complete = complete && self.collect_written_names(child, into);
+        });
+        complete
     }
 
     /// How `id` relates to the shape of the formal `name`: vectorised math over it (an
     /// `@elementwise` base call or an elementwise project function taking it, or arithmetic
     /// with such a value), the formal's own shape, or a plain number.
-    fn elementwise_shape(&self, mut id: ExprId, name: Symbol) -> Option<ElementwiseShape> {
+    fn elementwise_shape(
+        &self,
+        mut id: ExprId,
+        name: Symbol,
+        formals: &[Formal],
+    ) -> Option<ElementwiseShape> {
         let module = self.module;
         while let ExpressionKind::Paren(inner) = module.kind(id) {
             id = *inner;
@@ -13508,13 +13580,13 @@ impl<'db, 'a> Checker<'db, 'a> {
                 ..
             } => {
                 let (lhs, rhs) = (*lhs, *rhs);
-                let left = self.elementwise_shape(lhs, name)?;
-                Some(left.max(self.elementwise_shape(rhs, name)?))
+                let left = self.elementwise_shape(lhs, name, formals)?;
+                Some(left.max(self.elementwise_shape(rhs, name, formals)?))
             }
             ExpressionKind::Unary {
                 operator: UnaryOperator::Minus | UnaryOperator::Plus,
                 operand,
-            } => self.elementwise_shape(*operand, name),
+            } => self.elementwise_shape(*operand, name, formals),
             ExpressionKind::Call { callee, arguments } => {
                 let arguments = &module[*arguments];
                 let positions = match module.kind(*callee) {
@@ -13525,6 +13597,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                             && self.calls_base(*callee) =>
                     {
                         self.library_parameter_arguments(called.as_str(), parameters, arguments)
+                    }
+                    // A formal callee is whatever function the caller passes, not its default.
+                    ExpressionKind::NameRef(called)
+                        if formals.iter().any(|formal| formal.name == *called) =>
+                    {
+                        return None;
                     }
                     _ => match self
                         .recorded
@@ -13545,7 +13623,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .iter()
                     .filter_map(|&index| arguments.get(index)?.value)
                     .any(|value| {
-                        self.elementwise_shape(value, name)
+                        self.elementwise_shape(value, name, formals)
                             .is_some_and(|shape| shape != ElementwiseShape::Number)
                     })
                     .then_some(ElementwiseShape::Follows)
@@ -23973,7 +24051,26 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         let snapshot = self.table.snapshot();
         match self.table.unify(self.db, left, right) {
-            Ok(()) => left,
+            // Unifying ignores the inferred `elementwise` formals, and a join of a wrapper of
+            // `sqrt` with one of `sum` is not elementwise.
+            Ok(()) => match (left_resolved.kind(self.db), right_resolved.kind(self.db)) {
+                (TyKind::Function(left_function), TyKind::Function(right_function))
+                    if left_function.elementwise != right_function.elementwise =>
+                {
+                    let ty = self.table.resolve(self.db, left);
+                    match ty.kind(self.db) {
+                        TyKind::Function(function) => Ty::new(
+                            self.db,
+                            TyKind::Function(&FunctionType {
+                                elementwise: &[],
+                                ..**function
+                            }),
+                        ),
+                        _ => ty,
+                    }
+                }
+                _ => left,
+            },
             Err(_) => {
                 self.table.rollback(snapshot);
                 self.wider_record(left_resolved, right_resolved)

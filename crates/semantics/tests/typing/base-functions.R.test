@@ -583,12 +583,26 @@ written <- function(x) {
   x <- 1
   sqrt(x)
 }
+looped <- function(x) {
+  for (x in 1:2) NULL
+  sqrt(x)
+}
+passed <- function(x, f = wrap) f(x)
+either <- function(k) if (k) function(x) sqrt(x) else function(x) mean(x)
+pick <- function(k) {
+  g <- function(x) sqrt(x)
+  if (k) g <- function(x) mean(x)
+  g(xs)
+}
 roots <- wrap(xs)
 one <- wrap(4)
 shifted <- scaled(xs)
 doubled <- twice(xs)
 other <- mixed(xs, 1)
 fixed <- written(xs)
+iterated <- looped(xs)
+forwarded <- passed(xs, mean)
+chosen <- either(TRUE)(xs)
 #++++
 xs: double[]
 wrap: <T> fn(x: T) -> double
@@ -596,12 +610,19 @@ scaled: <T> fn(r: T) -> double
 twice: <T> fn(x: T) -> double
 mixed: <T, U: arithmetic> fn(x: T, y: U) -> double
 written: <T> fn([x]: T) -> double
+looped: <T> fn([x]: T) -> double
+passed: <T, U, V> fn(x: T, [f]: fn(T) -> U) -> U
+either: <T, U> fn(k: logical) -> (fn(x: T) -> double) | (fn(x: U) -> double)
+pick: fn(k: logical) -> double
 roots: double[]
 one: double
 shifted: double[]
 doubled: double[]
 other: double
 fixed: double
+iterated: double
+forwarded: double
+chosen: double
 
 #---- a_logical_test_over_a_matrix_or_a_named_vector_is_a_condition
 # `is.finite(m)` keeps its logical claim, since `matrix` carries no element type, and a named
