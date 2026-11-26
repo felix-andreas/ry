@@ -368,6 +368,26 @@ pub enum Bits {
     ShiftRightZf,
 }
 
+/// Which bits of an `I64` `Num.count_one_bits` and its siblings count.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BitCount {
+    Ones,
+    LeadingZeros,
+    TrailingZeros,
+}
+
+/// What `I64` addition, subtraction or multiplication whose result leaves the range gives,
+/// where [`Op::Arith`] gives up.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Overflow {
+    /// `Num.add_wrap`: the low 64 bits of the exact result.
+    Wrap,
+    /// `Num.add_saturated`: the bound of the range nearest the exact result.
+    Saturate,
+    /// Whether the result leaves the range, as a `Bool`, which `Num.add_checked` tests.
+    Test,
+}
+
 /// A reduction of a vector to a scalar.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reduce {
@@ -393,6 +413,25 @@ pub enum Text {
     AsciiUpper,
     /// `Str.with_ascii_lowercased`.
     AsciiLower,
+    /// `Str.trim`: Unicode whitespace leaves both ends.
+    Trim,
+    /// `Str.trim_start`.
+    TrimStart,
+    /// `Str.trim_end`.
+    TrimEnd,
+}
+
+/// A test of a string scalar against another string.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StrTest {
+    /// `startsWith` and `Str.starts_with`.
+    StartsWith,
+    /// `endsWith` and `Str.ends_with`.
+    EndsWith,
+    /// `Str.contains`: the other string occurs anywhere.
+    Contains,
+    /// `Str.caseless_ascii_equals`: equal once ASCII letters are folded to one case.
+    CaselessAsciiEquals,
 }
 
 #[derive(Clone, Debug)]
@@ -410,6 +449,10 @@ pub enum Op {
     Math(Math, Item, Local),
     /// A bit operation on two `I64`s. A shift fails unless its count is from 0 to 63.
     Bits(Bits, Local, Local),
+    /// `I64` addition, subtraction or multiplication that does not give up on overflow.
+    Overflowing(Overflow, Arith, Local, Local),
+    /// A count of an `I64`'s 64 bits, as an `I64`.
+    CountBits(BitCount, Local),
     /// Whether a double is `NaN`, as a `Bool`. It fails on `NA`, which no library function takes.
     IsNan(Local),
     /// `round(x, digits)` of a scalar double.
@@ -491,9 +534,13 @@ pub enum Op {
     Text(Text, Local),
     /// A string function of every item of a vector.
     VectorText(Text, Local),
-    /// `startsWith` (`true`) or `endsWith` of a scalar and a prefix.
-    Affix(bool, Local, Local),
+    /// A test of a scalar against another string, as a logical.
+    StrTest(StrTest, Local, Local),
+    /// `startsWith` (`true`) or `endsWith` of every item of a vector and a prefix.
     VectorAffix(bool, Local, Local),
+    /// `Str.drop_prefix` (`true`) or `Str.drop_suffix`: the scalar without the other string at
+    /// that end, where it is there.
+    DropAffix(bool, Local, Local),
     /// A number as a string: `as.character` and `paste`.
     Format(Local),
     /// `sprintf("%.Nf", x)`.
@@ -613,6 +660,7 @@ impl Op {
             Const(_) | Poll | DictNew => SmallVec::new(),
             Copy(a)
             | Not(a)
+            | CountBits(_, a)
             | Math(_, _, a)
             | IsNan(a)
             | ToDbl(a)
@@ -649,6 +697,7 @@ impl Op {
             | Parse { string: a, .. } => SmallVec::from_slice(&[*a]),
             Arith(_, _, a, b)
             | Bits(_, a, b)
+            | Overflowing(_, _, a, b)
             | Compare(_, _, a, b)
             | And(a, b)
             | Or(a, b)
@@ -666,8 +715,9 @@ impl Op {
             | VectorLogic(_, a, b)
             | VectorRound(a, b)
             | Join(a, b)
-            | Affix(_, a, b)
+            | StrTest(_, a, b)
             | VectorAffix(_, a, b)
+            | DropAffix(_, a, b)
             | RepeatStr(a, b)
             | Split(a, b)
             | SplitBounds {
@@ -717,7 +767,7 @@ impl Op {
         use Op::*;
         match self {
             Copy(_) | Relabel(..) | Coerce(..) | VectorNot(_) | VectorMath(..) | Text(..)
-            | VectorText(..) | Unique(_) | Sort(..) => position == 0,
+            | VectorText(..) | Unique(_) | Sort(..) | DropAffix(..) => position == 0,
             VectorArith(..) | VectorCompare(..) | VectorLogic(..) => position < 2,
             VectorRound(..) => position == 0,
             // The list, and the new item, which the list then owns.
@@ -740,6 +790,7 @@ impl Op {
             | Copy(_)
             | Compare(..)
             | Not(_)
+            | CountBits(..)
             | And(..)
             | Or(..)
             | ToDbl(_)
@@ -751,9 +802,10 @@ impl Op {
             | Concat(..)
             | Join(..)
             | Text(..)
-            | Affix(..)
+            | StrTest(..)
             | VectorText(..)
             | VectorAffix(..)
+            | DropAffix(..)
             | RoundDigits(..)
             | Same(..)
             | Step(..)
@@ -775,7 +827,8 @@ impl Op {
             | ToUtf8(_)
             | DictLen(_)
             | DictKeys(_)
-            | DictValues(_) => false,
+            | DictValues(_)
+            | Overflowing(..) => false,
             // A split string has at least one piece, so only a later piece can be missing.
             Piece { index, .. } => *index != 1,
             // Integer arithmetic overflows, a double `%%` loses all accuracy, and a math function

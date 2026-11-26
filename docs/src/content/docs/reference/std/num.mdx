@@ -87,9 +87,9 @@ any other. The bit operations work on an `I64`'s 64-bit two's complement, and on
 | [`Num.shift_left_by`](#numshift_left_by) | Shifts the bits left by `bits`, from 0 to 63 for an `I64` and from 0 to 31 for an R number. |
 | [`Num.shift_right_by`](#numshift_right_by) | Shifts the bits right by `bits`, copying the sign bit in, so a negative number stays negative. |
 | [`Num.shift_right_zf_by`](#numshift_right_zf_by) | Shifts the bits right by `bits`, filling with zeros. |
-| [`Num.count_one_bits`](#numcount_one_bits) | The number of set bits. |
-| [`Num.count_leading_zero_bits`](#numcount_leading_zero_bits) | The number of zero bits above the highest set bit, 32 for zero. |
-| [`Num.count_trailing_zero_bits`](#numcount_trailing_zero_bits) | The number of zero bits below the lowest set bit, 32 for zero. |
+| [`Num.count_one_bits`](#numcount_one_bits) | The number of set bits of the 64. |
+| [`Num.count_leading_zero_bits`](#numcount_leading_zero_bits) | The number of zero bits above the highest set bit, 64 for zero. |
+| [`Num.count_trailing_zero_bits`](#numcount_trailing_zero_bits) | The number of zero bits below the lowest set bit, 64 for zero. |
 | [`Num.pi`](#numpi) | The ratio of a circle's circumference to its diameter. |
 | [`Num.tau`](#numtau) | The ratio of a circle's circumference to its radius, `2 * Num.pi`. |
 | [`Num.e`](#nume) | Euler's number, the base of the natural logarithm. |
@@ -2162,11 +2162,11 @@ Num.count_one_bits <- function(number)
 </TabItem>
 </Tabs>
 
-The number of set bits.
+The number of set bits of the 64.
 
 ```r ry run runtime=ry dput
 Num.count_one_bits(255)
-#> 8L
+#> 8i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1683)
@@ -2191,11 +2191,11 @@ Num.count_leading_zero_bits <- function(number)
 </TabItem>
 </Tabs>
 
-The number of zero bits above the highest set bit, 32 for zero.
+The number of zero bits above the highest set bit, 64 for zero.
 
 ```r ry run runtime=ry dput
 Num.count_leading_zero_bits(1)
-#> 31L
+#> 63i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1691)
@@ -2220,11 +2220,11 @@ Num.count_trailing_zero_bits <- function(number)
 </TabItem>
 </Tabs>
 
-The number of zero bits below the lowest set bit, 32 for zero.
+The number of zero bits below the lowest set bit, 64 for zero.
 
 ```r ry run runtime=ry dput
 Num.count_trailing_zero_bits(8)
-#> 3L
+#> 3i64
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L1699)

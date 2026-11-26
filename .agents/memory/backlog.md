@@ -263,7 +263,7 @@ A typed element loop over a `List<F64>` that tests each item and adds to an `F64
 
 - **Legitimate ry the typed core refuses, so the check warns `interpreted`:**
   - a `match` on a list (every list pattern), a nested pattern and an arm with an `if` guard;
-  - about 140 standard library functions with no code in `Lowerer::builtin`, among them `List.drop_at`, `List.set`, `Set.contains`, `Result.map`, `Result.and_then`, the `Num.*_checked` family and `Str.trim`. `native::COMPILED_STD` is the list of those that compile, and it grows to the whole library as the typed core gains them;
+  - about 80 standard library functions with no code in `Lowerer::builtin`, among them `List.split_at`, `List.walk_try`, `List.map_with_index`, `Dict.walk`, `Set.contains`, the checked divisions (`Num.div_checked` and its siblings) and `Str.split_first`. The `Set` family waits on a native set (`decisions/typed-native.md`, "Native code for callback, overflow and string library functions"). `native::COMPILED_STD` is the list of those that compile, and it grows to the whole library as the typed core gains them;
   - a variable that holds a tag and is assigned again, even one with a declared type, and a function-typed parameter;
   - a function with `-> NULL` that ends in a loop, `<<-`, `...`, named arguments or a left-out default in a call of a typed function, a `Dict` of anything but `I64`, `F64` and `Str`, and `List.map(xs, Num.to_f64)` by name;
   - a variable, parameter or loop variable assigned a value of another layout (`layout_differs` mirrors the lowerer's value classes), branches that set a name to different layouts, and the value of an `if` without `else`;

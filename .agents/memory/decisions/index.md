@@ -250,6 +250,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A cancellation flips the worker's token only inside an armed scope
 - A local typed by a signature's type parameter reads as that parameter
 - `# ry: expect(code)` reports when its finding is gone
+- A foreach iterator and a global-creating `<<-` are declarations
 
 ## Interpreter
 
@@ -660,6 +661,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A loop declares a name its body reads before a later statement sets it (settled)
 - Scalar library functions give up where the library raises an error (settled)
 - `try` and an early `return` compile in every function, inlined ones too (settled)
+- Native code for callback, overflow and string library functions (settled)
 
 ## DataFrame and the table engine
 

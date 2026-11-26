@@ -934,6 +934,9 @@ impl Lowering<'_, '_> {
                     Unary::Floor => ins.floor(value),
                     Unary::Ceil => ins.ceil(value),
                     Unary::Trunc => ins.trunc(value),
+                    Unary::Popcnt => ins.popcnt(value),
+                    Unary::Clz => ins.clz(value),
+                    Unary::Ctz => ins.ctz(value),
                 }
             }
             Op::Icmp(condition, left, right) => {

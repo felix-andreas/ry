@@ -3684,7 +3684,11 @@ unsafe fn num_shift_right_zf_by(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// Counts bits of an integer's two's-complement pattern with `count`.
+/// A count of an R integer's 32 bits; an `I64`'s 64 bits count in `numbers::library`.
 unsafe fn bit_count(call: &Call<'_>, count: fn(i32) -> u32) -> R<Sexp> {
+    if numbers::has_number_argument(call) {
+        return numbers::library(call);
+    }
     let [number] = arguments(call, ["number"])?;
     scalar_integer(count(integer_argument(call, "number", number)?) as i32)
 }

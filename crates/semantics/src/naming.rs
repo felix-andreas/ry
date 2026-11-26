@@ -2839,23 +2839,11 @@ pub(crate) fn foreach_loop(module: &Module, id: ExprId) -> Option<ForeachLoop> {
         }
     }
     stages.reverse();
-    let callee_is = |stage: ExprId, wanted: &str| match module.kind(stage) {
-        ExpressionKind::Call { callee, .. } => match module.kind(*callee) {
-            ExpressionKind::NameRef(name) => name.as_str() == wanted,
-            ExpressionKind::Namespace {
-                package: Some(package),
-                name: Some(name),
-                ..
-            } => package.as_str() == "foreach" && name.as_str() == wanted,
-            _ => false,
-        },
-        _ => false,
-    };
     let first = *stages.first()?;
-    let shaped = callee_is(first, "foreach")
-        && stages
-            .iter()
-            .all(|&stage| callee_is(stage, "foreach") || callee_is(stage, "when"));
+    let shaped = stage_calls(module, first, "foreach")
+        && stages.iter().all(|&stage| {
+            stage_calls(module, stage, "foreach") || stage_calls(module, stage, "when")
+        });
     shaped.then_some(ForeachLoop {
         stages,
         body: *rhs,
@@ -2864,13 +2852,16 @@ pub(crate) fn foreach_loop(module: &Module, id: ExprId) -> Option<ForeachLoop> {
 }
 
 /// The iterators of a `foreach()` stage: its named arguments other than the dotted options
-/// (`.combine`, `.packages`, ...), each with its value.
+/// (`.combine`, `.packages`, ...), each with its value. A `when()` stage binds nothing, since
+/// a name there names `when`'s own argument.
 pub(crate) fn foreach_iterators(
     module: &Module,
     stage: ExprId,
 ) -> impl Iterator<Item = (NameId, ExprId)> + '_ {
     let arguments = match module.kind(stage) {
-        ExpressionKind::Call { arguments, .. } => &module[*arguments],
+        ExpressionKind::Call { arguments, .. } if stage_calls(module, stage, "foreach") => {
+            &module[*arguments]
+        }
         _ => &[],
     };
     arguments.iter().filter_map(move |argument| {
@@ -2878,6 +2869,22 @@ pub(crate) fn foreach_iterators(
         let value = argument.value?;
         (!module[name].name.as_str().starts_with('.')).then_some((name, value))
     })
+}
+
+/// Whether a foreach stage calls `wanted`, written alone or as `foreach::wanted`.
+fn stage_calls(module: &Module, stage: ExprId, wanted: &str) -> bool {
+    let ExpressionKind::Call { callee, .. } = module.kind(stage) else {
+        return false;
+    };
+    match module.kind(*callee) {
+        ExpressionKind::NameRef(name) => name.as_str() == wanted,
+        ExpressionKind::Namespace {
+            package: Some(package),
+            name: Some(name),
+            ..
+        } => package.as_str() == "foreach" && name.as_str() == wanted,
+        _ => false,
+    }
 }
 
 /// The formals that hold the data; every other argument evaluates in the data's frame.

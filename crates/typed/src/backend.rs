@@ -16,8 +16,8 @@ use {
     crate::{
         Refusal,
         ir::{
-            Arith, Bits, Block as IrBlock, Compare, Constant, Function, Inst, Item, Local, Math,
-            Op, Reduce, Terminator, Text, Type,
+            Arith, BitCount, Bits, Block as IrBlock, Compare, Constant, Function, Inst, Item,
+            Local, Math, Op, Overflow, Reduce, StrTest, Terminator, Text, Type,
         },
         lower::SELF,
         ranges::{self, Range, Ranges, exact_bounds, ranges},
@@ -255,8 +255,11 @@ All => values::ry_all,
     ProdDbl => values::ry_prod_dbl,
     Round => values::ry_round,
     StrAsciiCase => values::ry_str_ascii_case,
+    StrCaselessAsciiEquals => values::ry_str_caseless_ascii_equals,
     StrCompare => values::ry_str_compare,
     StrConcat => values::ry_str_concat,
+    StrContains => values::ry_str_contains,
+    StrDropAffix => values::ry_str_drop_affix,
     StrEndsWith => values::ry_str_ends_with,
     StrEqual => values::ry_str_equal,
     StrFree => values::ry_str_free,
@@ -272,6 +275,7 @@ All => values::ry_all,
     StrToUtf8 => values::ry_str_to_utf8,
     StrTolower => values::ry_str_tolower,
     StrToupper => values::ry_str_toupper,
+    StrTrim => values::ry_str_trim,
     SumDbl => values::ry_sum_dbl,
     SumI64 => values::ry_sum_i64,
     SumInt => values::ry_sum_int,
@@ -1250,6 +1254,44 @@ impl Emitter<'_> {
                 };
                 SmallVec::from_slice(&[value])
             }
+            Op::CountBits(count, a) => {
+                let x = self.one(*a)?;
+                let counted = match count {
+                    BitCount::Ones => self.builder.ins().popcnt(x),
+                    BitCount::LeadingZeros => self.builder.ins().clz(x),
+                    BitCount::TrailingZeros => self.builder.ins().ctz(x),
+                };
+                SmallVec::from_slice(&[counted])
+            }
+            Op::Overflowing(overflow, op, a, b) => {
+                let (x, y) = (self.one(*a)?, self.one(*b)?);
+                let (value, overflowed) = match op {
+                    Arith::Add => self.builder.ins().sadd_overflow(x, y),
+                    Arith::Sub => self.builder.ins().ssub_overflow(x, y),
+                    Arith::Mul => self.builder.ins().smul_overflow(x, y),
+                    _ => return Err(Refusal::new("an overflowing operation other than + - *")),
+                };
+                let result = match overflow {
+                    Overflow::Wrap => value,
+                    Overflow::Test => self.builder.ins().uextend(I32, overflowed),
+                    Overflow::Saturate => {
+                        // An overflowing sum or difference has the first operand's sign, and an
+                        // overflowing product the sign the operands' signs give.
+                        let sign = match op {
+                            Arith::Mul => self.builder.ins().bxor(x, y),
+                            _ => x,
+                        };
+                        let negative =
+                            self.builder
+                                .ins()
+                                .icmp_imm_s(IntCC::SignedLessThan, sign, 0);
+                        let (lowest, highest) = (self.iconst(i64::MIN), self.iconst(i64::MAX));
+                        let bound = self.builder.ins().select(negative, lowest, highest);
+                        self.builder.ins().select(overflowed, bound, value)
+                    }
+                };
+                SmallVec::from_slice(&[result])
+            }
             Op::Bits(op, a, b) => {
                 let (x, y) = (self.one(*a)?, self.one(*b)?);
                 if matches!(op, Bits::ShiftLeft | Bits::ShiftRight | Bits::ShiftRightZf) {
@@ -1813,6 +1855,20 @@ impl Emitter<'_> {
                             &[x[0], x[1], owned, upper],
                         ))
                     }
+                    Text::Trim | Text::TrimStart | Text::TrimEnd => {
+                        let owned = self.owned(inst, 0);
+                        let ends = self.iconst(match text {
+                            Text::TrimStart => 1,
+                            Text::TrimEnd => 2,
+                            _ => 3,
+                        });
+                        SmallVec::from_slice(&self.call(
+                            Helper::StrTrim,
+                            &[I64; 4],
+                            &[I64, I64],
+                            &[x[0], x[1], owned, ends],
+                        ))
+                    }
                 }
             }
             Op::VectorText(text, a) => {
@@ -1828,24 +1884,40 @@ impl Emitter<'_> {
                         };
                         self.call_words(function, I64, &[x, owned])
                     }
-                    Text::AsciiUpper | Text::AsciiLower => {
-                        return Err(Refusal::new("an ASCII case change of a vector"));
+                    Text::AsciiUpper
+                    | Text::AsciiLower
+                    | Text::Trim
+                    | Text::TrimStart
+                    | Text::TrimEnd => {
+                        return Err(Refusal::new("a `Str` function of a vector"));
                     }
                 };
                 SmallVec::from_slice(&[list])
             }
-            Op::Affix(starts, a, affix) => {
-                let (x, affix) = (self.get(*a)?, self.get(*affix)?);
-                let function = if *starts {
-                    Helper::StrStartsWith
-                } else {
-                    Helper::StrEndsWith
+            Op::StrTest(test, a, other) => {
+                let (x, other) = (self.get(*a)?, self.get(*other)?);
+                let function = match test {
+                    StrTest::StartsWith => Helper::StrStartsWith,
+                    StrTest::EndsWith => Helper::StrEndsWith,
+                    StrTest::Contains => Helper::StrContains,
+                    StrTest::CaselessAsciiEquals => Helper::StrCaselessAsciiEquals,
                 };
                 SmallVec::from_slice(&self.call(
                     function,
                     &[I64; 4],
                     &[I32],
-                    &[x[0], x[1], affix[0], affix[1]],
+                    &[x[0], x[1], other[0], other[1]],
+                ))
+            }
+            Op::DropAffix(prefix, a, affix) => {
+                let (x, affix) = (self.get(*a)?, self.get(*affix)?);
+                let owned = self.owned(inst, 0);
+                let prefix = self.iconst(i64::from(*prefix));
+                SmallVec::from_slice(&self.call(
+                    Helper::StrDropAffix,
+                    &[I64; 6],
+                    &[I64, I64],
+                    &[x[0], x[1], owned, affix[0], affix[1], prefix],
                 ))
             }
             Op::VectorAffix(starts, a, affix) => {
