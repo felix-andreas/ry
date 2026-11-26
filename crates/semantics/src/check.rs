@@ -4522,7 +4522,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                                 {
                                     self.infer(value);
                                     let native = self.binds_ry_value();
-                                    // The guard computed the same leaves from the syntax alone.
+                                    // `infer` leaves these leaves as the guard saw them.
                                     let (constraint, leaves) =
                                         self.literal_leaves(value, native).unwrap_or_default();
                                     let ty = self.fresh_literal(constraint, native);
