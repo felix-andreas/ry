@@ -339,8 +339,8 @@ impl Uncompiled {
                  with `(..record, field = value)`"
             ),
             Uncompiled::LocalFunctionInBranch(name) => format!(
-                "`{name}` is a function defined inside a branch or a loop, which {YET}. Define it \
-                 once at the top of the function"
+                "`{name}` is a function defined inside a branch or a loop and used after it, or \
+                 defined again there, which {YET}. Define it once at the top of the function"
             ),
             Uncompiled::ReturnInLocalFunction => format!(
                 "`return` inside a local function {YET}: native code runs a local \
@@ -393,8 +393,9 @@ impl Uncompiled {
                  Assign the expression to a variable first, and apply the operator to the variable"
             ),
             Uncompiled::BranchOnlyName(name) => format!(
-                "`{name}` is first set inside a branch or a loop and read after it, which {YET}. \
-                 Give `{name}` a value before the branch"
+                "`{name}` is read before this function sets it, or after branches that set it to \
+                 values of different types, which {YET}. Give `{name}` one type, and a value \
+                 before the branch or loop"
             ),
             Uncompiled::TypeChange(name) => format!(
                 "`{name}` holds values of different types, which {YET}: a native variable keeps \
@@ -613,6 +614,7 @@ pub fn native_blockers(judged: Judged<'_, '_>) -> ThinVec<NativeBlocker> {
         blockers: Vec::new(),
         scope: Vec::new(),
         locals: FxHashSet::default(),
+        hidden: FxHashSet::default(),
         reported: FxHashSet::default(),
         reported_dict: false,
         control_depth: 0,
@@ -766,6 +768,10 @@ enum Slot<'db> {
     Value(Option<Ty<'db>>, Option<Symbol>),
     /// A local function, which native code runs in place where it is called.
     Function(ExprId),
+    /// A name set on some paths to this point only, with its type where known. A read compiles,
+    /// and where the name is unset the call gives up and the interpreter runs it; an assignment
+    /// gives the name a new variable.
+    Maybe(Option<Ty<'db>>),
 }
 
 /// How the value of an expression is used, which decides whether an R call may stand there.
@@ -815,6 +821,8 @@ struct Judge<'a, 'db> {
     /// Every name the function being judged binds anywhere, so a read of one that is out of
     /// scope is told apart from a read of a global.
     locals: FxHashSet<Symbol>,
+    /// The local functions a branch or a loop body defined, out of scope after it.
+    hidden: FxHashSet<Symbol>,
     /// Outside names already reported, so each is reported where it first appears.
     reported: FxHashSet<Symbol>,
     reported_dict: bool,
@@ -926,6 +934,7 @@ impl<'a, 'db> Judge<'a, 'db> {
         self.reported.clear();
         self.reported_dict = false;
         self.locals.clear();
+        self.hidden.clear();
         self.control_depth = 0;
         self.nested = 0;
         self.local_functions.clear();
@@ -1154,35 +1163,14 @@ impl<'a, 'db> Judge<'a, 'db> {
                 };
                 self.hoist = hoist;
                 self.control_depth -= 1;
-                // A name outlives the `if` when every branch that reaches its end set it.
-                let then_ends = !self.diverges(then_branch);
-                let else_ends = else_branch.is_none_or(|branch| !self.diverges(branch));
-                match (else_branch.is_some(), then_ends, else_ends) {
-                    // The typed core keeps a name both branches set only when they agree on its
-                    // type, so a read after the `if` finds no such name otherwise.
-                    (true, true, true) => {
-                        for (name, slot) in then_names {
-                            let Slot::Value(then_type, _) = slot else {
-                                continue;
-                            };
-                            let agree = else_names.iter().any(|&(other, other_slot)| {
-                                other == name
-                                    && match (then_type, other_slot) {
-                                        (Some(then_type), Slot::Value(Some(else_type), _)) => {
-                                            !self.layout_differs(then_type, else_type)
-                                        }
-                                        _ => true,
-                                    }
-                            });
-                            if agree {
-                                self.scope.push((name, slot));
-                            }
-                        }
-                    }
-                    (_, false, true) => self.scope.extend(else_names),
-                    (true, true, false) => self.scope.extend(then_names),
-                    _ => {}
+                let mut ends = Vec::new();
+                if !self.diverges(then_branch) {
+                    ends.push(then_names);
                 }
+                if else_branch.is_none_or(|branch| !self.diverges(branch)) {
+                    ends.push(else_names);
+                }
+                self.join(&ends);
                 if branch_use == Use::Value
                     && else_branch.is_some()
                     && self.ty(id).is_some_and(|ty| self.is_mixed_union(ty))
@@ -1204,8 +1192,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                     let item = self
                         .ty(sequence)
                         .and_then(|ty| array_element(db, self.peel(ty)));
-                    self.scope
-                        .push((module.name(variable), Slot::Parameter(item)));
+                    self.bind_assigned(module.name_range(variable), module.name(variable), item);
                 }
                 self.in_loop(body, mark);
             }
@@ -1426,6 +1413,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                 } else {
                     Use::Value
                 };
+                let mut ends = Vec::new();
                 for arm in &module[arms] {
                     if matches_shape && !self.pattern_compiles(arm.pattern, true) {
                         self.block_at(
@@ -1437,7 +1425,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                     self.control_depth += 1;
                     for &binding in &module[arm.bindings] {
                         if let ExpressionKind::NameRef(name) = *module.kind(binding) {
-                            self.scope.push((name, Slot::Parameter(self.ty(binding))));
+                            self.bind_assigned(module.range(binding), name, self.ty(binding));
                         }
                     }
                     if let Some(guard) = arm.guard {
@@ -1446,9 +1434,13 @@ impl<'a, 'db> Judge<'a, 'db> {
                     let hoist = self.hoist.take();
                     self.walk(arm.body, branch_use);
                     self.hoist = hoist;
-                    self.scope.truncate(mark);
+                    let names = self.scope.split_off(mark);
+                    if !self.diverges(arm.body) {
+                        ends.push(names);
+                    }
                     self.control_depth -= 1;
                 }
+                self.join(&ends);
                 if branch_use == Use::Value && self.ty(id).is_some_and(|ty| self.is_mixed_union(ty))
                 {
                     self.uncompiled(id, Uncompiled::BranchTypes);
@@ -1546,13 +1538,98 @@ impl<'a, 'db> Judge<'a, 'db> {
         }
     }
 
+    /// Walks a loop body. After the loop, each name the body created is set only if the body
+    /// ran far enough to set it.
     fn in_loop(&mut self, body: ExprId, mark: usize) {
         self.control_depth += 1;
         let hoist = self.hoist.take();
         self.walk(body, Use::Unused);
         self.hoist = hoist;
         self.control_depth -= 1;
-        self.scope.truncate(mark);
+        for (name, slot) in self.scope.split_off(mark) {
+            let ty = match slot {
+                Slot::Function(_) => {
+                    self.hidden.insert(name);
+                    continue;
+                }
+                Slot::Value(ty, _) | Slot::Parameter(ty) | Slot::Maybe(ty) => ty,
+                Slot::FunctionParameter => None,
+            };
+            self.scope.push((name, Slot::Maybe(ty)));
+        }
+    }
+
+    /// Binds a loop variable or a pattern's name, which the typed core assigns: a name the
+    /// function already holds keeps its variable, so a value of another type, or any tag, which
+    /// fixes the variables it is stored in, gives the function up.
+    fn bind_assigned(&mut self, at: TextRange, name: Symbol, ty: Option<Ty<'db>>) {
+        match self.lookup(name) {
+            Some(Slot::Value(held, _) | Slot::Parameter(held)) => {
+                if ty.is_some_and(|ty| self.holds_tag(ty)) {
+                    let kind = Uncompiled::TagReassigned(name);
+                    self.block_at(at, NativeBlockerKind::Uncompiled(kind));
+                } else if let (Some(held), Some(ty)) = (held, ty)
+                    && self.changes_type(held, ty)
+                {
+                    let kind = Uncompiled::TypeChange(name);
+                    self.block_at(at, NativeBlockerKind::Uncompiled(kind));
+                }
+            }
+            _ => self.scope.push((name, Slot::Parameter(ty))),
+        }
+    }
+
+    /// Brings the names that the paths reaching the end of a branch created into scope after
+    /// it, as the typed core joins them. A name every path set, to types stored alike, keeps its
+    /// slot; one some paths set, all to one type, is `Maybe`; any other leaves scope.
+    fn join(&mut self, ends: &[Vec<(Symbol, Slot<'db>)>]) {
+        let mut names: Vec<Symbol> = Vec::new();
+        for &(name, slot) in ends.iter().flatten() {
+            if matches!(slot, Slot::Function(_)) {
+                self.hidden.insert(name);
+            } else if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        for name in names {
+            let mut everywhere = true;
+            let mut agree = true;
+            let mut same = true;
+            let mut first: Option<(Slot<'db>, Option<Ty<'db>>)> = None;
+            for end in ends {
+                let slot = end
+                    .iter()
+                    .find(|(bound, _)| *bound == name)
+                    .map(|&(_, slot)| slot);
+                let ty = match slot {
+                    Some(Slot::Value(ty, _) | Slot::Parameter(ty)) => ty,
+                    Some(Slot::Maybe(ty)) => {
+                        everywhere = false;
+                        ty
+                    }
+                    Some(Slot::Function(_) | Slot::FunctionParameter) | None => {
+                        everywhere = false;
+                        continue;
+                    }
+                };
+                match (first, slot) {
+                    (None, Some(slot)) => first = Some((slot, ty)),
+                    (Some((_, held)), _) => {
+                        same &= held == ty;
+                        if let (Some(held), Some(ty)) = (held, ty) {
+                            agree &= !self.layout_differs(held, ty);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // The typed core joins types only where every path sets the name, so a name some
+            // paths leave unset keeps one variable, and its paths must agree on the exact type.
+            if let (true, Some((slot, ty))) = (agree && (everywhere || same), first) {
+                let slot = if everywhere { slot } else { Slot::Maybe(ty) };
+                self.scope.push((name, slot));
+            }
+        }
     }
 
     /// Whether `ty` is a union of anything but tags, which no single native value holds.
@@ -1658,6 +1735,10 @@ impl<'a, 'db> Judge<'a, 'db> {
             }
             None => {}
         }
+        if self.hidden.contains(&name) {
+            self.uncompiled(id, Uncompiled::LocalFunctionInBranch(name));
+            return;
+        }
         if self.locals.contains(&name) {
             self.uncompiled(id, Uncompiled::BranchOnlyName(name));
             return;
@@ -1755,8 +1836,16 @@ impl<'a, 'db> Judge<'a, 'db> {
         match *module.kind(target) {
             ExpressionKind::NameRef(name) => {
                 if matches!(*module.kind(value), ExpressionKind::Function { .. }) {
+                    // Native code inlines a local function where its definition stands, so one
+                    // name cannot stand for a second definition inside a branch or a loop.
+                    // A name another branch hid may be defined again, as in both branches of an
+                    // `if`, since it stays hidden after them.
                     if self.control_depth > 0 {
-                        self.uncompiled(id, Uncompiled::LocalFunctionInBranch(name));
+                        if self.lookup(name).is_some() {
+                            self.uncompiled(id, Uncompiled::LocalFunctionInBranch(name));
+                        }
+                    } else {
+                        self.hidden.remove(&name);
                     }
                     self.local_functions.push((value, false));
                     self.bind(name, Slot::Function(value));
@@ -1783,7 +1872,12 @@ impl<'a, 'db> Judge<'a, 'db> {
                     Some(Slot::Value(first, first_source)) => Some((first, first_source)),
                     Some(Slot::Parameter(first)) => Some((first, None)),
                     Some(Slot::FunctionParameter) => Some((None, None)),
-                    Some(Slot::Function(_)) | None => None,
+                    // A name set on some paths takes a new variable, so only a tag, which fixes
+                    // the variables it can be stored in where it is first set, is held.
+                    Some(Slot::Maybe(first)) if ty.is_some_and(|ty| self.holds_tag(ty)) => {
+                        Some((first, None))
+                    }
+                    Some(Slot::Function(_) | Slot::Maybe(_)) | None => None,
                 };
                 match held {
                     Some((first, first_source)) => {
@@ -2117,7 +2211,12 @@ impl<'a, 'db> Judge<'a, 'db> {
                 self.local_function(function);
             }
             Callee::Variable(name) => {
-                self.uncompiled(callee, Uncompiled::CallsVariable(name));
+                let gap = if self.lookup(name).is_none() && self.hidden.contains(&name) {
+                    Uncompiled::LocalFunctionInBranch(name)
+                } else {
+                    Uncompiled::CallsVariable(name)
+                };
+                self.uncompiled(callee, gap);
                 for &(_, value) in arguments {
                     self.walk(value, Use::Value);
                 }

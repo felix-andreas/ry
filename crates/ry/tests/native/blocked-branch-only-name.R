@@ -1,6 +1,12 @@
-# blocked: last_seen
-last_seen <- function(n: I64) -> F64 {
-  for (i in List.range(1, n)) last <- Num.to_f64(i)
-  last
+# blocked: deltas
+deltas <- function(n: I64) -> I64 {
+  total <- 0
+  for (i in List.range(1, n)) {
+    if (i > 1) {
+      total <- total + i - previous
+    }
+    previous <- i
+  }
+  total
 }
-cat(last_seen(3), "\n")
+print(deltas(3))

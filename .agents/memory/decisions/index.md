@@ -647,6 +647,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Native code reads a ry-typed global where it runs
 - `ry check --fix` applies the rewrites native findings name
 - `Num.sqrt(NaN)` is an error, as every library function's `NaN` is (settled)
+- A name set on some paths is one variable with a set flag
 
 ## DataFrame and the table engine
 

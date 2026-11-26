@@ -5697,8 +5697,8 @@ interpreted
 | a standard library function called with a `ry::` prefix | the name without the prefix |
 | an `I64`, a `List<I64>`, a `Dict` or a `Set` passed to an R function as it is | `Num.to_r(x)`, `List.to_r(xs)`, `Dict.keys` and `Dict.values`, or `Set.to_list` |
 | `<<-`, and an assignment to anything but a variable or `xs[[i]]` | return the new value; build a new record with `(..record, field = value)` |
-| a local function defined inside a branch or a loop, and `return` inside a local function | define it once at the top, and end it with its value |
-| a name first set inside a branch or a loop and read after it | set it before the branch |
+| a local function that a branch or a loop defines again after an earlier definition, or one called after the branch or loop that defines it, and `return` inside a local function | define it once at the top, and end it with its value |
+| a name read before the function sets it, as in a loop that reads a name a later statement of the body sets, or after branches that set it to values of different types | set it before the branch or loop, with one type |
 | a variable, a parameter or a loop variable that holds values of different types, branches that set a name to different types, and a variable that holds a tag and is assigned again | a new name for each value |
 | the value of an `if` without `else` | an `else` branch that gives a value of the same type |
 | `xs[i]` with a position, which takes a part of a list | `xs[[i]]` for one item, `List.sublist` for a part |
@@ -5729,7 +5729,13 @@ calls from the interpreter run in the interpreter with no finding:
   it runs, so every call of the function runs in the interpreter;
 - a call of a function that returns a `Dict` or a `Set`.
 
-A native function called from another native function has none of these limits.
+A name that a branch, a `match` arm or a loop body sets is read natively after it. A call that
+reaches the read on a path that left the name unset stops there, and the interpreter runs the call
+again from the start, replaying its R calls as above, where R reads the name from outside the
+function or fails with `object 'found' not found`. This holds for native functions called from
+native code too.
+
+A native function called from another native function has none of the other limits.
 `RY_TYPED_LOG=1` prints each such call with its reason.
 
 ### Diagnostics

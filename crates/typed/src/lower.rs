@@ -14,7 +14,7 @@ use {
     crate::{
         Refusal,
         ir::{
-            Arith, Bits, BlockId, Builder, Compare, Constant, Item, Local, Math, Op, Reduce,
+            Arith, Bits, BlockId, Builder, Compare, Constant, Inst, Item, Local, Math, Op, Reduce,
             Terminator, Text, Type,
         },
         shapes, values,
@@ -296,7 +296,13 @@ unsafe fn lower_calling(
         declared,
         tails: SmallVec::new(),
         callees,
-        scopes: vec![Scope::default()],
+        scopes: vec![Scope {
+            names: FxHashMap::default(),
+            id: 0,
+            entry: (BlockId(0), 0),
+        }],
+        scope_ids: 1,
+        variables: Vec::new(),
         loops: Vec::new(),
         inlined: Vec::new(),
         inlining: SmallVec::new(),
@@ -363,6 +369,7 @@ unsafe fn lower_calling(
     } else {
         lowering.builder.function.result = lowering.returned.unwrap_or(guess);
     }
+    lowering.maintain_flags();
     Ok(Lowered {
         function: lowering.builder.function,
         speculations: lowering.speculations,
@@ -384,14 +391,47 @@ enum Callable {
 #[derive(Clone, Copy, Debug)]
 enum Binding {
     Value(Local),
+    /// A name set on some paths to this point only, as after an `if` that sets it in one branch
+    /// or after a loop whose body sets it. The local is one of the name's [`Variable`]s, and a
+    /// read tests its flag first and gives the call up to the interpreter where the name is unset.
+    Maybe(Local),
     /// A local function: its formals, its body and the index of the scope that defines it, whose
     /// names are the only ones the body sees when it is inlined.
     Function(Sexp, Sexp, usize),
+    /// A local function that a branch or loop body defined, after it. The name may or may not be
+    /// that function there, so any use refuses rather than reach a global of the same name.
+    Hidden,
 }
 
-#[derive(Clone, Default)]
+/// The names a branch or loop body created, each with its local and whether it is set on some
+/// paths only ([`Binding::Maybe`]).
+type Created = SmallVec<[(Sexp, Local, bool); 4]>;
+
+#[derive(Clone)]
 struct Scope {
     names: FxHashMap<Sexp, Binding>,
+    /// Numbers the scopes of one lowering, so the variables of two inlined calls of one function
+    /// stay apart.
+    id: u32,
+    /// Where the scope's code starts, a block and an instruction position in it, which clears the
+    /// flags of its variables on every entry.
+    entry: (BlockId, usize),
+}
+
+/// A local that holds a name's value in one scope. A name has one per type it takes, and the
+/// lowering reuses it whenever the name is assigned a value of that type again, so every branch
+/// of an `if` that sets the name writes the same local and the join needs no copies.
+#[derive(Clone, Copy)]
+struct Variable {
+    scope: u32,
+    /// The entry of the scope ([`Scope::entry`]).
+    entry: (BlockId, usize),
+    symbol: Sexp,
+    local: Local,
+    /// Whether the local holds the name's current value: false where the scope starts, set by
+    /// every write of the local and cleared by a write of the name's other variables. Only a
+    /// variable that a [`Binding::Maybe`] reads has one ([`Lowering::flag`]).
+    flag: Option<Local>,
 }
 
 /// An inlined function's exit: the block a `return` jumps to and the local it writes.
@@ -404,6 +444,7 @@ struct Inlined {
 /// What [`Lowering::rewind`] restores.
 struct Checkpoint {
     scopes: Vec<Scope>,
+    variables: Vec<Variable>,
     loops: usize,
     inlined: Vec<Inlined>,
     speculations: usize,
@@ -430,6 +471,9 @@ struct Lowering<'c> {
     callees: &'c mut dyn Callees,
     /// The function's own names, then one scope per inlined function.
     scopes: Vec<Scope>,
+    /// The id the next scope takes.
+    scope_ids: u32,
+    variables: Vec<Variable>,
     /// The `next` and `break` targets of the loops around the current point.
     loops: Vec<(BlockId, BlockId)>,
     inlined: Vec<Inlined>,
@@ -547,6 +591,21 @@ impl Lowering<'_> {
         }
     }
 
+    /// A scope whose code starts here.
+    fn new_scope(&mut self) -> Scope {
+        let id = self.scope_ids;
+        self.scope_ids += 1;
+        let current = self.builder.current;
+        Scope {
+            names: FxHashMap::default(),
+            id,
+            entry: (
+                current,
+                self.builder.function.blocks[current.0 as usize].insts.len(),
+            ),
+        }
+    }
+
     fn lookup(&self, symbol: Sexp) -> Option<Binding> {
         self.scopes
             .iter()
@@ -594,26 +653,220 @@ impl Lowering<'_> {
             .unwrap_or_default()
     }
 
-    /// Leaves a branch or loop body: the names it created go out of scope, since they are unset
-    /// on a path that skips it, and come back as a list for an `if` to join.
-    fn leave_control(&mut self, saved: FxHashMap<Sexp, Binding>) -> SmallVec<[(Sexp, Local); 4]> {
+    /// Leaves a branch or loop body: the names it created go out of scope, and come back as a
+    /// list for the caller to bind as an `if` or a loop leaves them ([`Lowering::join_names`],
+    /// [`Lowering::leave_loop`]).
+    fn leave_control(&mut self, saved: FxHashMap<Sexp, Binding>) -> Created {
         self.control -= 1;
         let Some(scope) = self.scopes.last_mut() else {
             return SmallVec::new();
         };
-        let mut created: SmallVec<[(Sexp, Local); 4]> = scope
+        let mut created: Created = scope
             .names
             .iter()
             .filter(|(symbol, _)| !saved.contains_key(symbol))
             .filter_map(|(&symbol, &binding)| match binding {
-                Binding::Value(local) => Some((symbol, local)),
-                Binding::Function(..) => None,
+                Binding::Value(local) => Some((symbol, local, false)),
+                Binding::Maybe(local) => Some((symbol, local, true)),
+                Binding::Function(..) | Binding::Hidden => None,
             })
             .collect();
-        // The join emits copies in this order, which must not depend on hashing.
-        created.sort_by_key(|&(_, local)| local);
+        // A join emits copies in this order, which must not depend on hashing.
+        created.sort_by_key(|&(_, local, _)| local);
+        let hidden: SmallVec<[Sexp; 2]> = scope
+            .names
+            .iter()
+            .filter(|&(symbol, binding)| {
+                !saved.contains_key(symbol)
+                    && matches!(binding, Binding::Function(..) | Binding::Hidden)
+            })
+            .map(|(&symbol, _)| symbol)
+            .collect();
         scope.names = saved;
+        for symbol in hidden {
+            scope.names.insert(symbol, Binding::Hidden);
+        }
         created
+    }
+
+    /// Binds the names that the completing ends of an `if` or `match` created, each an end block
+    /// with its list. A name every end sets in one variable keeps it, and so does a name only some
+    /// ends set, as a [`Binding::Maybe`]. A name the ends set in variables of different types that
+    /// join gets a variable of the joined type, which each end copies into; any other name is out
+    /// of scope after the join.
+    fn join_names(&mut self, ends: &[(BlockId, Created)]) {
+        let mut symbols: SmallVec<[Sexp; 8]> = SmallVec::new();
+        for (_, created) in ends {
+            for &(symbol, _, _) in created {
+                if !symbols.contains(&symbol) {
+                    symbols.push(symbol);
+                }
+            }
+        }
+        for symbol in symbols {
+            let found: SmallVec<[Option<(Local, bool)>; 4]> = ends
+                .iter()
+                .map(|(_, created)| {
+                    created
+                        .iter()
+                        .find(|&&(other, _, _)| other == symbol)
+                        .map(|&(_, local, maybe)| (local, maybe))
+                })
+                .collect();
+            let Some(&Some((first, _))) = found.iter().find(|end| end.is_some()) else {
+                continue;
+            };
+            if found.iter().flatten().all(|&(local, _)| local == first) {
+                let everywhere = found.iter().all(|end| matches!(end, Some((_, false))));
+                let binding = if everywhere {
+                    Binding::Value(first)
+                } else {
+                    Binding::Maybe(first)
+                };
+                self.bind(symbol, binding);
+                continue;
+            }
+            // Variables of different types: the join copies them into one of the joined type,
+            // which needs the name set, as a value, on every end.
+            let mut ty = None;
+            for end in &found {
+                let Some((local, false)) = *end else {
+                    ty = None;
+                    break;
+                };
+                let found = self.builder.ty(local);
+                ty = match ty {
+                    None => Some(found),
+                    Some(held) => joined(held, found),
+                };
+                if ty.is_none() {
+                    break;
+                }
+            }
+            let Some(ty) = ty else {
+                continue;
+            };
+            let variable = self.variable(symbol, ty);
+            for (&(end, _), &local) in ends.iter().zip(&found) {
+                let Some((local, _)) = local else {
+                    continue;
+                };
+                self.builder.switch_to(end);
+                self.builder.push(Some(variable), Op::Copy(local));
+            }
+            self.bind(symbol, Binding::Value(variable));
+        }
+    }
+
+    /// Binds the names a loop body created: after the loop each is set only if the body ran far
+    /// enough to set it.
+    fn leave_loop(&mut self, created: Created) {
+        for (symbol, local, _) in created {
+            self.bind(symbol, Binding::Maybe(local));
+        }
+    }
+
+    /// The variable of `symbol` in the current scope that holds values of `ty`, made when the name
+    /// has none yet. A pending empty list never shares one, since its type is a placeholder.
+    fn variable(&mut self, symbol: Sexp, ty: Type) -> Local {
+        let (scope, entry) = self
+            .scopes
+            .last()
+            .map_or((0, (BlockId(0), 0)), |scope| (scope.id, scope.entry));
+        let existing = self.variables.iter().rev().find(|variable| {
+            variable.scope == scope
+                && variable.symbol == symbol
+                && self.builder.ty(variable.local) == ty
+                && self.pending_family(variable.local).is_none()
+        });
+        if let Some(existing) = existing {
+            return existing.local;
+        }
+        let local = self.builder.local(ty);
+        self.variables.push(Variable {
+            scope,
+            entry,
+            symbol,
+            local,
+            flag: None,
+        });
+        local
+    }
+
+    /// The flag of the variable `local`, made when it has none yet.
+    fn flag(&mut self, local: Local) -> Result<Local, Refusal> {
+        let index = self
+            .variables
+            .iter()
+            .rposition(|variable| variable.local == local)
+            .ok_or(Refusal::new(
+                "a name set on some paths only, outside its variable",
+            ))?;
+        if let Some(flag) = self.variables[index].flag {
+            return Ok(flag);
+        }
+        let flag = self.builder.local(Type::Bool);
+        self.variables[index].flag = Some(flag);
+        Ok(flag)
+    }
+
+    /// Gives every flag its value: false where its variable's scope starts, and after each write
+    /// of one of the name's variables, true for that variable and false for the others.
+    fn maintain_flags(&mut self) {
+        let variables = &self.variables;
+        let entries: SmallVec<[((BlockId, usize), Local); 4]> = variables
+            .iter()
+            .filter_map(|variable| Some((variable.entry, variable.flag?)))
+            .collect();
+        if entries.is_empty() {
+            return;
+        }
+        let same_name = |left: &Variable, right: &Variable| {
+            left.scope == right.scope && left.symbol == right.symbol
+        };
+        // The variable each local is, for the names one of whose variables has a flag.
+        let mut written: Vec<Option<u32>> = vec![None; self.builder.function.locals.len()];
+        for (index, variable) in variables.iter().enumerate() {
+            if variables
+                .iter()
+                .any(|other| other.flag.is_some() && same_name(other, variable))
+            {
+                written[variable.local.0 as usize] = Some(index as u32);
+            }
+        }
+        for (number, block) in self.builder.function.blocks.iter_mut().enumerate() {
+            let old = std::mem::take(&mut block.insts);
+            let mut insts = Vec::with_capacity(old.len());
+            let count = old.len();
+            let mut old = old.into_iter();
+            for position in 0..=count {
+                for &(_, flag) in entries
+                    .iter()
+                    .filter(|&&(entry, _)| entry == (BlockId(number as u32), position))
+                {
+                    insts.push(Inst::new(Some(flag), Op::Const(Constant::Lgl(0))));
+                }
+                let Some(inst) = old.next() else {
+                    break;
+                };
+                let writes: SmallVec<[u32; 2]> = inst
+                    .assigned()
+                    .iter()
+                    .filter_map(|local| written.get(local.0 as usize).copied().flatten())
+                    .collect();
+                insts.push(inst);
+                for index in writes {
+                    let variable = &variables[index as usize];
+                    for other in variables.iter().filter(|other| same_name(other, variable)) {
+                        if let Some(flag) = other.flag {
+                            let set = i32::from(other.local == variable.local);
+                            insts.push(Inst::new(Some(flag), Op::Const(Constant::Lgl(set))));
+                        }
+                    }
+                }
+            }
+            block.insts = insts;
+        }
     }
 
     unsafe fn expression_inner(&mut self, expression: Sexp) -> Result<Option<Local>, Refusal> {
@@ -666,7 +919,26 @@ impl Lowering<'_> {
     unsafe fn read(&mut self, symbol: Sexp) -> Result<Local, Refusal> {
         match self.lookup(symbol) {
             Some(Binding::Value(local)) => Ok(local),
+            Some(Binding::Maybe(local)) => {
+                // Where the name is unset, R reads it from the enclosing environment or fails,
+                // which the interpreter does when the call gives up.
+                let flag = self.flag(local)?;
+                let (set, unset) = (self.builder.block(), self.builder.block());
+                self.builder.terminate(Terminator::Branch {
+                    condition: flag,
+                    then: set,
+                    otherwise: unset,
+                });
+                self.builder.switch_to(set);
+                if let Some(scope) = self.scopes.last_mut()
+                    && let Some(binding) = scope.names.get_mut(&symbol)
+                {
+                    *binding = Binding::Value(local);
+                }
+                Ok(local)
+            }
             Some(Binding::Function(..)) => Err(Refusal::new("a local function used as a value")),
+            Some(Binding::Hidden) => Err(hidden_refusal()),
             None => self.library_constant(symbol),
         }
     }
@@ -752,7 +1024,18 @@ impl Lowering<'_> {
     }
 
     unsafe fn assign(&mut self, symbol: Sexp, value: Local) -> Result<Local, Refusal> {
-        match self.lookup_assignable(symbol) {
+        let ty = self.builder.ty(value);
+        let assignable = match self
+            .scopes
+            .last()
+            .and_then(|scope| scope.names.get(&symbol))
+        {
+            // A name that may be unset may also take a value of another type, in another
+            // variable, whose write clears this one's flag.
+            Some(&Binding::Maybe(local)) => (self.builder.ty(local) == ty).then_some(local),
+            _ => self.lookup_assignable(symbol),
+        };
+        match assignable {
             Some(variable) => {
                 self.unify_pending(variable, value)?;
                 let ty = self.builder.ty(value);
@@ -766,6 +1049,7 @@ impl Lowering<'_> {
                 if variable != value {
                     self.builder.push(Some(variable), Op::Copy(value));
                 }
+                self.bind(symbol, Binding::Value(variable));
                 Ok(variable)
             }
             None => {
@@ -779,8 +1063,29 @@ impl Lowering<'_> {
                 {
                     return Err(Refusal::new("a local function rebound in a branch or loop"));
                 }
-                let variable = self.builder.emit(self.builder.ty(value), Op::Copy(value));
-                if let Some(family) = self.pending_family(value) {
+                let family = self.pending_family(value);
+                // A pending empty list gets a variable of its own, never shared, since its type is a
+                // placeholder; it still counts as one of the name's variables for the set flags.
+                let variable = match family {
+                    Some(_) => {
+                        let local = self.builder.local(ty);
+                        let (scope, entry) = self
+                            .scopes
+                            .last()
+                            .map_or((0, (BlockId(0), 0)), |scope| (scope.id, scope.entry));
+                        self.variables.push(Variable {
+                            scope,
+                            entry,
+                            symbol,
+                            local,
+                            flag: None,
+                        });
+                        local
+                    }
+                    None => self.variable(symbol, ty),
+                };
+                self.builder.push(Some(variable), Op::Copy(value));
+                if let Some(family) = family {
                     self.pending[family].push(variable);
                 }
                 self.bind(symbol, Binding::Value(variable));
@@ -1185,8 +1490,10 @@ impl Lowering<'_> {
             let values = self.call_arguments(&arguments)?;
             return self.inline(formals, body, scope + 1, &values, inline_storage);
         }
-        if self.lookup(head).is_some() {
-            return Err(Refusal::new("a call of a local variable"));
+        match self.lookup(head) {
+            Some(Binding::Hidden) => return Err(hidden_refusal()),
+            Some(_) => return Err(Refusal::new("a call of a local variable")),
+            None => {}
         }
         let Some(speculation) = find_function(head, self.env) else {
             return Err(Refusal(Cow::Owned(format!(
@@ -1488,7 +1795,8 @@ impl Lowering<'_> {
         match code.kind() {
             SexpType::Symbol => matches!(
                 self.lookup(code),
-                Some(Binding::Value(local)) if self.builder.ty(local) == Type::Table
+                Some(Binding::Value(local) | Binding::Maybe(local))
+                    if self.builder.ty(local) == Type::Table
             ),
             SexpType::Language if code.car().kind() == SexpType::Symbol => {
                 let head = code.car();
@@ -1686,8 +1994,19 @@ impl Lowering<'_> {
                 let (Some(&(_, formals)), Some(&(_, body))) = (parts.first(), parts.get(1)) else {
                     return Err(Refusal::new("a malformed function literal"));
                 };
-                if self.control > 0 {
-                    return Err(Refusal::new("a local function defined in a branch or loop"));
+                // A branch that rebinds a name leaves the old binding on the paths that skip it,
+                // which a local function, inlined where it is called, cannot express. A name
+                // another branch hid is unusable after the branches either way, so it may be
+                // defined again, as when both branches of an `if` define it.
+                if self.control > 0
+                    && self.scopes.last().is_some_and(|scope| {
+                        scope
+                            .names
+                            .get(&target)
+                            .is_some_and(|binding| !matches!(binding, Binding::Hidden))
+                    })
+                {
+                    return Err(Refusal::new("a local function rebound in a branch or loop"));
                 }
                 let scope = self.scopes.len() - 1;
                 self.bind(target, Binding::Function(formals, body, scope));
@@ -1806,36 +2125,14 @@ impl Lowering<'_> {
         };
         let else_created = self.leave_control(saved);
         let else_end = self.builder.current;
-        // A name the `if` creates is set after it when every branch that completes sets it,
-        // with the same type.
-        match (then_value.is_some(), else_value.is_some()) {
-            (true, false) => then_created
-                .iter()
-                .for_each(|&(symbol, local)| self.bind(symbol, Binding::Value(local))),
-            (false, true) => else_created
-                .iter()
-                .for_each(|&(symbol, local)| self.bind(symbol, Binding::Value(local))),
-            (true, true) => {
-                for &(symbol, then_local) in &then_created {
-                    let Some(&(_, else_local)) =
-                        else_created.iter().find(|&&(other, _)| other == symbol)
-                    else {
-                        continue;
-                    };
-                    let Some(ty) = joined(self.builder.ty(then_local), self.builder.ty(else_local))
-                    else {
-                        continue;
-                    };
-                    let joined = self.builder.local(ty);
-                    self.builder.switch_to(then_end);
-                    self.builder.push(Some(joined), Op::Copy(then_local));
-                    self.builder.switch_to(else_end);
-                    self.builder.push(Some(joined), Op::Copy(else_local));
-                    self.bind(symbol, Binding::Value(joined));
-                }
-            }
-            (false, false) => {}
-        }
+        let ends: SmallVec<[(BlockId, Created); 2]> = [
+            then_value.map(|_| (then_end, then_created)),
+            else_value.map(|_| (else_end, else_created)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        self.join_names(&ends);
         let result = match (then_value, else_value) {
             (None, None) => None,
             (Some(value), None) | (None, Some(value)) => {
@@ -2067,7 +2364,8 @@ impl Lowering<'_> {
         self.loops.push((latch, exit));
         let completed = self.expression(body)?;
         self.loops.pop();
-        self.leave_control(saved);
+        let created = self.leave_control(saved);
+        self.leave_loop(created);
         if completed.is_some() {
             self.builder.terminate(Terminator::Jump(latch));
         }
@@ -2283,7 +2581,8 @@ impl Lowering<'_> {
         self.loops.push((header, exit));
         let saved = self.enter_control();
         let completed = self.expression(body)?;
-        self.leave_control(saved);
+        let created = self.leave_control(saved);
+        self.leave_loop(created);
         self.loops.pop();
         if completed.is_some() {
             self.builder.terminate(Terminator::Jump(header));
@@ -2303,7 +2602,8 @@ impl Lowering<'_> {
         self.loops.push((header, exit));
         let saved = self.enter_control();
         let completed = self.expression(body)?;
-        self.leave_control(saved);
+        let created = self.leave_control(saved);
+        self.leave_loop(created);
         self.loops.pop();
         if completed.is_some() {
             self.builder.terminate(Terminator::Jump(header));
@@ -2348,7 +2648,7 @@ impl Lowering<'_> {
             });
         }
         let arguments = &converted[..];
-        let mut scope = Scope::default();
+        let mut scope = self.new_scope();
         for (&(symbol, _), &argument) in formals.iter().zip(arguments) {
             if symbol == rvalues::symbols().dots {
                 return Err(Refusal::new("a local function with `...`"));
@@ -4111,7 +4411,7 @@ impl Lowering<'_> {
             )
             && let Some(list) = list
         {
-            let mut scope = Scope::default();
+            let mut scope = self.new_scope();
             scope.names.insert(name, Binding::Value(list));
             self.scopes.push(scope);
             let mask = self.expression(body);
@@ -4666,7 +4966,8 @@ impl Lowering<'_> {
                 operand != item
                     && matches!(
                         self.lookup(operand),
-                        Some(Binding::Value(local)) if self.builder.ty(local) == Type::Dbl
+                        Some(Binding::Value(local) | Binding::Maybe(local))
+                            if self.builder.ty(local) == Type::Dbl
                     )
             }
             _ => false,
@@ -4691,7 +4992,8 @@ impl Lowering<'_> {
                 Some(Binding::Function(formals, body, scope)) => {
                     return Ok(Callable::Inline(formals, body, scope));
                 }
-                Some(Binding::Value(_)) => {
+                Some(Binding::Hidden) => return Err(hidden_refusal()),
+                Some(Binding::Value(_) | Binding::Maybe(_)) => {
                     return Err(Refusal::new("a mapped function held in a variable"));
                 }
                 None => {}
@@ -4975,6 +5277,7 @@ impl Lowering<'_> {
         }
         let shape_of = self.builder.emit(Type::Int, Op::ShapeOf(value));
         let mut ends: SmallVec<[(BlockId, Local); 4]> = SmallVec::new();
+        let mut names: SmallVec<[(BlockId, Created); 4]> = SmallVec::new();
         let mut test = self.builder.current;
         for (position, &case) in cases.iter().enumerate() {
             self.builder.switch_to(test);
@@ -5021,15 +5324,17 @@ impl Lowering<'_> {
                 }
                 (completed, _) => completed,
             };
-            self.leave_control(saved);
+            let created = self.leave_control(saved);
             if let Some(completed) = completed? {
                 self.usable(completed)?;
                 ends.push((self.builder.current, completed));
+                names.push((self.builder.current, created));
             }
         }
         if cases.is_empty() {
             self.builder.terminate(Terminator::Fail);
         }
+        self.join_names(&names);
         let join = self.builder.block();
         let mut ty: Option<Option<Type>> = None;
         for &(_, completed) in &ends {
@@ -5080,6 +5385,7 @@ impl Lowering<'_> {
     fn checkpoint(&self) -> Checkpoint {
         Checkpoint {
             scopes: self.scopes.clone(),
+            variables: self.variables.clone(),
             loops: self.loops.len(),
             inlined: self.inlined.clone(),
             speculations: self.speculations.len(),
@@ -5117,6 +5423,7 @@ impl Lowering<'_> {
         entry.terminator = Terminator::Fail;
         self.builder.current = body;
         self.scopes = checkpoint.scopes;
+        self.variables = checkpoint.variables;
         self.loops.truncate(checkpoint.loops);
         self.inlined = checkpoint.inlined;
         self.speculations.truncate(checkpoint.speculations);
@@ -6691,6 +6998,10 @@ unsafe fn assigns(expression: Sexp, symbol: Sexp) -> bool {
         }
     }
     assigns(head, symbol) || items.iter().any(|&(_, item)| assigns(item, symbol))
+}
+
+fn hidden_refusal() -> Refusal {
+    Refusal::new("a local function defined in a branch or loop, used after it")
 }
 
 unsafe fn assigned_symbols(expression: Sexp, out: &mut Vec<Sexp>) {
