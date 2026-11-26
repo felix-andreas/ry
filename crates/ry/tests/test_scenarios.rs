@@ -1133,38 +1133,7 @@ fn typed_script(rng: &mut SplitMix64) -> (String, bool) {
 /// program, the top-level function, and a part of the typed core's reason. Each is a gap in the
 /// typed core, because the `native` rule accepts what the function does. An entry that stops
 /// falling back fails the test, so the list only shrinks.
-const NATIVE_CHECK_EXCEPTIONS: [(&str, &str, &str); 6] = [
-    (
-        "pinned-r-statement-tails",
-        "loop_tail",
-        "it uses the value of R's `cat` directly",
-    ),
-    (
-        "pinned-r-statement-tails",
-        "loop_statement",
-        "it uses the value of R's `cat` directly",
-    ),
-    (
-        "pinned-r-statement-tails",
-        "while_tail",
-        "it uses the value of R's `cat` directly",
-    ),
-    (
-        "pinned-r-statement-tails",
-        "branch_statement",
-        "it uses the value of R's `cat` directly",
-    ),
-    (
-        "pinned-r-statement-tails",
-        "both_branches",
-        "it uses the value of R's `cat` directly",
-    ),
-    (
-        "pinned-r-statement-tails",
-        "match_arms",
-        "it uses the value of R's `cat` directly",
-    ),
-];
+const NATIVE_CHECK_EXCEPTIONS: [(&str, &str, &str); 0] = [];
 
 /// How the typed core says that a function it calls is the one it could not compile.
 const CALLEE_REFUSED: &str = "a typed function it calls does not compile";

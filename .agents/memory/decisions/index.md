@@ -654,6 +654,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `ry check --fix` applies the rewrites native findings name
 - A name set on some paths is one variable with a set flag
 - A call of a function still being compiled goes through a code cell
+- A dropped value passes down to the parts that give it (settled)
 
 ## DataFrame and the table engine
 

@@ -435,3 +435,11 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 - `calls_r` includes cell callees, so the lazy-argument check sees R calls behind a cell.
 - Alternatives rejected: compiling a strongly connected group as one unit needs the call graph before lowering, which typed lowering only discovers as it links; a cell costs one load per call.
 - A code file's mutually recursive versions do not attach (a callee still attaching misses) and compile in the session (backlog, "Mutually recursive functions in the file").
+
+## A dropped value passes down to the parts that give it
+
+**Status:** settled.
+
+- An R call compiles natively where the program drops its value (`RUse::Unused`), because no conversion of the result is needed. The rule follows the value: a `{` block, a parenthesis, the branches of an `if` and the arms of a `match` drop their value when the construct's own value is dropped, and a loop body always drops its value (`Lowering::part`).
+- The checker's `native` rule accepts the same positions (the last statement of a loop body, a bare loop body, a branch in statement position): `tests/native/clean-r-statement-tails.R` pins them, and `blocked-r-call-read-branch.R` pins that a branch whose value is assigned refuses.
+- A dropped `match` also changes how its arms may disagree (`lower::Expected::Dropped`, `decisions/typed-stdlib.md`, "Stray shapes").

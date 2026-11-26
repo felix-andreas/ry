@@ -260,8 +260,6 @@ A typed element loop over a `List<F64>` that tests each item and adds to an `F64
 
 `ry check` reports what keeps a native function off native code, as `native` errors for R values and `interpreted` warnings for ry the typed core does not compile yet (`decisions/typed-native.md`, "Nativeness is a strict-mode diagnostic"). Each item here is a gap in the typed core that the check found; closing one means deleting its blocker in `semantics::native` (or its entry in `test_scenarios::NATIVE_CHECK_EXCEPTIONS`) and its row in `reference/type-system.mdx`, "Native functions".
 
-- **The checker passes it, the typed core refuses it** (pinned in `NATIVE_CHECK_EXCEPTIONS`):
-  - An R call whose value is unused compiles only as a statement of a `{` block that is not its last. As the last statement of a loop body, as a bare loop body, in an `if` branch or a `match` arm in statement position it refuses ("it uses the value of R's `cat` directly"), although nothing reads the value (`tests/native/pinned-r-statement-tails.R`).
 - **Legitimate ry the typed core refuses, so the check warns `interpreted`:**
   - `try`, which lowers to an R call of `.ry_try`;
   - a `match` on a list (every list pattern), a nested pattern and an arm with an `if` guard;

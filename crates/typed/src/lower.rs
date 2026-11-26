@@ -1440,17 +1440,18 @@ impl Lowering<'_> {
             return Err(Refusal::new("a call of a computed function"));
         }
         let name = rvalues::symbol_name(head).into_owned();
+        let dropped = matches!(r_use, Some(RUse::Unused));
         // The language's own forms, unless the program rebinds them.
         match name.as_str() {
-            "{" => return self.sequence(call),
+            "{" => return self.sequence(call, dropped),
             "(" => {
                 let [inner] = self.arguments(call, 1)?[..] else {
                     return Err(Refusal::new("a malformed parenthesis"));
                 };
-                return self.expression(inner);
+                return self.part(inner, dropped);
             }
             "<-" | "=" => return self.assignment(call).map(Some),
-            "if" => return self.conditional(call),
+            "if" => return self.conditional(call, dropped),
             "for" => return self.for_loop(call),
             "while" => return self.while_loop(call),
             "repeat" => return self.repeat_loop(call),
@@ -1528,7 +1529,7 @@ impl Lowering<'_> {
         if is_base_function(&speculation) {
             self.speculations.push(speculation);
             if name == ".ry_match" {
-                return self.match_expression(call, matches!(r_use, Some(RUse::Unused)));
+                return self.match_expression(call, dropped);
             }
             self.r_use = r_use;
             return self.builtin(&name, call, function).map(Some);
@@ -1980,7 +1981,20 @@ impl Lowering<'_> {
         Ok(())
     }
 
-    unsafe fn sequence(&mut self, call: Sexp) -> Result<Option<Local>, Refusal> {
+    /// Lowers `expression`, whose value the program drops when `dropped` is true, so that it may be
+    /// a call of an R function whose result nothing converts.
+    unsafe fn part(&mut self, expression: Sexp, dropped: bool) -> Result<Option<Local>, Refusal> {
+        if !dropped {
+            return self.expression(expression);
+        }
+        self.r_use = Some(RUse::Unused);
+        let value = self.expression(expression);
+        self.r_use = None;
+        value
+    }
+
+    /// `dropped` says the program drops the block's value, and with it the last statement's.
+    unsafe fn sequence(&mut self, call: Sexp, dropped: bool) -> Result<Option<Local>, Refusal> {
         let items = rvalues::pairlist_items(call.cdr());
         let mut last = None;
         if items.is_empty() {
@@ -1990,13 +2004,7 @@ impl Lowering<'_> {
         }
         let count = items.len();
         for (position, (_, item)) in items.into_iter().enumerate() {
-            // A statement's value is unused, so it may be a call of an R function.
-            if position + 1 < count {
-                self.r_use = Some(RUse::Unused);
-            }
-            let value = self.expression(item);
-            self.r_use = None;
-            last = value?;
+            last = self.part(item, dropped || position + 1 < count)?;
             if last.is_none() {
                 return Ok(None);
             }
@@ -2114,7 +2122,8 @@ impl Lowering<'_> {
         }
     }
 
-    unsafe fn conditional(&mut self, call: Sexp) -> Result<Option<Local>, Refusal> {
+    /// `dropped` says the program drops the `if`'s value, and with it its branches'.
+    unsafe fn conditional(&mut self, call: Sexp, dropped: bool) -> Result<Option<Local>, Refusal> {
         let items = rvalues::pairlist_items(call.cdr());
         let (condition, then, otherwise) = match items[..] {
             [(_, condition), (_, then)] => (condition, then, None),
@@ -2132,7 +2141,7 @@ impl Lowering<'_> {
         });
         self.builder.switch_to(then_block);
         let saved = self.enter_control();
-        let then_value = self.expression(then)?;
+        let then_value = self.part(then, dropped)?;
         if let Some(value) = then_value
             && self.inlined.is_empty()
             && self.tails.contains(&call)
@@ -2144,7 +2153,7 @@ impl Lowering<'_> {
         self.builder.switch_to(else_block);
         let saved = self.enter_control();
         let else_value = match otherwise {
-            Some(otherwise) => self.expression(otherwise)?,
+            Some(otherwise) => self.part(otherwise, dropped)?,
             None => Some(self.builder.emit(Type::Null, Op::Const(Constant::Null))),
         };
         let else_created = self.leave_control(saved);
@@ -2386,7 +2395,7 @@ impl Lowering<'_> {
         self.assign(variable, item)?;
         let latch = self.builder.block();
         self.loops.push((latch, exit));
-        let completed = self.expression(body)?;
+        let completed = self.part(body, true)?;
         self.loops.pop();
         let created = self.leave_control(saved);
         self.leave_loop(created);
@@ -2604,7 +2613,7 @@ impl Lowering<'_> {
         self.builder.switch_to(body_block);
         self.loops.push((header, exit));
         let saved = self.enter_control();
-        let completed = self.expression(body)?;
+        let completed = self.part(body, true)?;
         let created = self.leave_control(saved);
         self.leave_loop(created);
         self.loops.pop();
@@ -2625,7 +2634,7 @@ impl Lowering<'_> {
         let exit = self.builder.block();
         self.loops.push((header, exit));
         let saved = self.enter_control();
-        let completed = self.expression(body)?;
+        let completed = self.part(body, true)?;
         let created = self.leave_control(saved);
         self.leave_loop(created);
         self.loops.pop();
@@ -5592,7 +5601,7 @@ impl Lowering<'_> {
                         };
                         lowering.assign(symbol, bound)?;
                     }
-                    return lowering.expression(body);
+                    return lowering.part(body, dropped);
                 }
                 // The interpreter raises the error that no arm matches.
                 lowering.builder.terminate(Terminator::Fail);
