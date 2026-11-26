@@ -512,6 +512,23 @@ flip: fn(xs: List<I64>) -> Tuple{:Go(double) | :Stop(double), I64}
 bare: fn(xs: List<I64>) -> :Go(double) | :Stop(double)
 once: fn(c: Bool) -> Tuple{:Stop(double) | :Go(double), I64}
 
+#---- a_literal_a_loop_writes_takes_the_declared_return_type
+found <- function(xs: List<I64>) -> Result<I64, Str> {
+  r <- :Err("none")
+  for (x in xs) r <- :Ok(1)
+  r
+}
+stepped <- function(xs: List<I64>) -> (Result<I64, Str>, I64) {
+  state <- (:Err("none"), 0i64)
+  for (x in xs) state <- (:Ok(1), x)
+  state
+}
+#++++
+
+#---- an_integer_literal_beside_a_double_literal_argument_is_a_double
+widened <- function() Result.with_default(:Ok(1L), 2.5)
+#++++
+
 #---- a_report_shows_an_open_literal_as_its_default_type
 f <- function() { r <- :Some(0); match (r) { :Some(v) => 1, :None => 2 } }
 h <- function() { r <- :Ok(1); r + 1 }
