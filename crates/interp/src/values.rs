@@ -881,6 +881,7 @@ pub unsafe fn deferred_strings(object: Sexp) -> R<Option<Sexp>> {
 
 /// An ordinary vector with the contents of `object`, which is `object` itself unless it is
 /// ALTREP.
+#[inline]
 pub unsafe fn materialize(object: Sexp) -> R<Sexp> {
     if !object.is_altrep() {
         return Ok(object);
@@ -903,7 +904,10 @@ unsafe fn on_altrep<T>(
 }
 
 /// [`on_altrep`] for a hook that answers with an object, which is rooted in the caller's scope
-/// as a raw allocation's result is.
+/// as a raw allocation's result is. It stays out of line so that the non-ALTREP test of a
+/// caller such as [`materialize`] inlines alone.
+#[cold]
+#[inline(never)]
 unsafe fn altrep_result(
     object: Sexp,
     hook: impl for<'s> FnOnce(&mut Cx<'s>, Local<'s, Alt>) -> R<Local<'s>>,
