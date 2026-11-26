@@ -46,7 +46,7 @@ use {
     crate::{
         Frame, Interp, Signalling,
         arith::{MATHS, math_index},
-        builtins::{Arg, BuiltinDef, Call, Generic, Replacement, internal},
+        builtins::{Arg, BuiltinDef, Call, DirectNames, Generic, Replacement, internal},
         conditions, deparse,
         dispatch::{self, Caller},
         effects, element_access,
@@ -10627,7 +10627,7 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
     }
     if definition.direct.is_some()
         && definition.checks.replacement == Replacement::None
-        && direct_arguments(call.cdr(), definition.direct_by_position)
+        && direct_arguments(call.cdr(), definition.direct_names)
     {
         let values = std::slice::from_raw_parts(instruction.registers.add(first), count);
         if let Some(value) = eval::call_direct(definition, call, values)? {
@@ -10721,16 +10721,17 @@ unsafe fn op_call_builtin_positional(
     Ok(Flow::Next)
 }
 
-/// Whether a call's arguments suit the builtin's direct entry: none is empty, and none is named.
-/// An entry that passes its arguments on by position whatever they are called
-/// ([`BuiltinDef::direct_by_position`]) takes named ones too, except the name `PACKAGE`, which
-/// `.Call` reads.
+/// Whether a call's arguments suit the builtin's direct entry: none is empty, and none is named
+/// unless the entry takes names. An entry that passes its arguments on by position
+/// ([`DirectNames::Ignored`]) leaves the name `PACKAGE`, which `.Call` reads, to the full call.
 #[inline]
-unsafe fn direct_arguments(mut cell: Sexp, by_position: bool) -> bool {
+unsafe fn direct_arguments(mut cell: Sexp, names: DirectNames) -> bool {
     while cell != nil() {
         let tag = cell.tag();
         if cell.car() == missing_arg()
-            || (tag != nil() && (!by_position || tag == symbols().package_arg))
+            || (tag != nil()
+                && (names == DirectNames::Refused
+                    || (names == DirectNames::Ignored && tag == symbols().package_arg)))
         {
             return false;
         }

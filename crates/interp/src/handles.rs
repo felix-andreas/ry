@@ -1170,23 +1170,35 @@ pub(crate) use safe_unary;
 
 /// The raw direct entry (`builtins::DirectFn`) of `$function`, a safe fast path over the
 /// argument values in formal order that answers or declines with `None`, as a unary one does.
+/// `safe_direct!(call f)` also passes `f` the call, for an entry that reads the arguments'
+/// names from it.
 macro_rules! safe_direct {
-    ($function:path) => {{
+    (@entry |$context:ident, $call:ident, $values:ident| $result:expr) => {{
         unsafe fn entry(
-            _call: heap::object::Sexp,
-            values: &[heap::object::Sexp],
+            $call: heap::object::Sexp,
+            $values: &[heap::object::Sexp],
         ) -> $crate::unwind::R<Option<heap::object::Sexp>> {
             // SAFETY: as for `safe_unary`: the caller's registers, or its root for a
-            // replacement's target, hold every argument value.
+            // replacement's target, hold every argument value, and its code holds the call.
             unsafe {
-                $crate::handles::in_caller_scope(|context| {
-                    let values = $crate::handles::Local::adopt_slice(values);
-                    Ok($function(context, values)?.map($crate::handles::Gc::raw))
+                $crate::handles::in_caller_scope(|$context| {
+                    let $values = $crate::handles::Local::adopt_slice($values);
+                    Ok($result?.map($crate::handles::Gc::raw))
                 })
             }
         }
         entry
     }};
+    (call $function:path) => {
+        $crate::handles::safe_direct!(@entry |context, call, values| $function(
+            context,
+            $crate::handles::Local::adopt(call),
+            values
+        ))
+    };
+    ($function:path) => {
+        $crate::handles::safe_direct!(@entry |context, _call, values| $function(context, values))
+    };
 }
 pub(crate) use safe_direct;
 

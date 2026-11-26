@@ -239,6 +239,8 @@ OPERATIONS = [
     ("builtin: `c` of two scalars", "c(i, 1L)"),
     ("builtin: `c` of two named scalars", "c(a = i, b = 1L)"),
     ("builtin: `list` with a name", "list(a = i)"),
+    ("builtin: `list` of two values", "list(i, 1L)"),
+    ("builtin: `list` of three values, two named", 'list(a = i, "b", c = 1L)'),
     ("builtin: `paste0`", 'paste0("a", i)'),
     ("builtin: `sprintf`", 'sprintf("%d", i)'),
     ("builtin: `identical`", "identical(i, 1L)"),

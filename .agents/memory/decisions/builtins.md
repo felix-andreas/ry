@@ -273,6 +273,16 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 - **No per-call allocations.** `subset::resolve` returns a `SmallVec` with eight inline slots; negative subscripts build a `SmallVec<[u64; 4]>` bitset (inline up to 256 elements), so `x[-1L]` on a short vector makes no Rust allocation; `match_builtin_args` uses a bitset and borrowed names; the primitive formals `check_argument_names` reads are a `Vec` indexed by `builtin_index` (`subset__negative_index_bitset.R`).
 - **What is left.** At tier 0, `x[[i]]` and `x[[i]] <- v` cost about twice GNU R, all of it dispatch around the builtin: for a read, `GetFun`, the primitive and object branches, `CallBuiltin` and the `Jump` cost about 300 instructions around a 130-instruction read; for an assignment, two `Guard`s cost about 100. Under the JIT both run far below GNU R. Oracle cases `builtins__attribute_access.R`, `builtins__combine.R`, `builtins__element_access.R`, `builtins__assign_subset_vector.R` and `builtins__dot_call_native.R` pin the edges.
 
+## `list()` answers on its direct entry, which reads the call's tags
+
+**Status:** built.
+
+- **The cost without it.** Through the general builtin call, `list(a = i)` builds an argument list first, and an untagged `list(i, 1L)` takes the positional general call. Both cost several times the work of filling a list.
+- **`BuiltinDef::direct_names`** (`DirectNames`) says what an entry does with a call whose arguments are named: `Refused` (the default, the full call takes it), `Ignored` (`.Call`, which passes its arguments by position and leaves the name `PACKAGE` to the full call) or `Read` (`list`). `bytecode::direct_arguments` asks it per call site. One enum holds the choice, so an entry cannot both ignore and read names.
+- **`subset::direct_list`** is registered with `safe_direct!(call direct_list)`, the form of the macro that passes the call. It counts the call's argument cells against the values and declines when they differ, so a caller that hands it another call gets the full path. The list and the names vector are filled through `Unfilled::fill_elements`, which counts the stored references in one pass.
+- **Why the names come from the call.** The tags are in the call's cells, which tier 0 holds as a constant, so no argument list is built to carry them. An entry with a signature of its own for tags would be a second calling convention beside `DirectFn`.
+- Oracle case `builtins__list_of_arguments.R`.
+
 ## Builtin call machinery and subassignment toward 10x
 
 **Status:** built.

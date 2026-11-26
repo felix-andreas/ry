@@ -1153,6 +1153,11 @@ const NO_BLOCK: u32 = u32::MAX;
 
 pub struct Plan<'a> {
     pub insts: List<'a, Inst<'a>>,
+    /// The number of the closure's formals, which hold the first positions of its slot frame.
+    pub formals: usize,
+    /// The position of each of `slots` in the code's slot table, `None` for a variable the
+    /// table does not hold.
+    pub positions: List<'a, Option<usize>>,
     /// Registers past tier 0's that hold the unboxed values of inlined calls. They never live
     /// across an instruction and never reach tier 0.
     pub temporaries: usize,
@@ -1395,11 +1400,20 @@ pub struct Work {
     /// The variables compiled code writes back to the frame before those instructions: one
     /// for each variable that may differ from the frame before each step that can read it.
     pub writes: usize,
+    /// The write-backs compiled code stores itself, into the box the variable's slot holds
+    /// from the pass before ([`IN_PLACE_SLOTS`]). They are not among [`Work::writes`].
+    pub rewrites: usize,
     /// The variables compiled code reads from the frame outside the body's loops, where each
     /// call reads them once. A variable first read inside a loop is read from the frame on the
     /// first pass only, so it is not counted.
     pub loads: usize,
 }
+
+/// The most variables a write-back site inside a loop stores in place itself, where each is
+/// an unboxed scalar whose slot holds the box an earlier pass left. A site with more dirty
+/// variables calls the helper for all of them: code per variable at every site grew the
+/// compile time of large bodies with sites times variables.
+pub const IN_PLACE_SLOTS: usize = 6;
 
 /// What the instructions of a body allow compiled code to do, whatever its profile records.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1432,6 +1446,7 @@ impl Shape {
             frames: self.frames,
             steps: 0,
             writes: 0,
+            rewrites: 0,
             loads: 0,
         }
     }
@@ -1564,6 +1579,24 @@ impl Plan<'_> {
                 .any(|action| matches!(action, Action::NativeCall { .. }))
     }
 
+    /// Whether a write-back site inside a loop stores variable `slot`, of type `ty`, in place:
+    /// an unboxed scalar among the body's own locals. A formal is left to the helper, which
+    /// clears its missing bit.
+    pub fn in_place(&self, slot: usize, ty: Ty) -> bool {
+        matches!(ty, Ty::Int | Ty::Lgl | Ty::Dbl)
+            && self.positions[slot].is_some_and(|position| position >= self.formals)
+    }
+
+    /// The body's loops, each as the pc its backward jump targets and the jump's pc. A loop
+    /// with a `next` jumps back from more than one place, so it has an entry per jump.
+    pub fn loops(&self) -> SmallVec<[(usize, usize); 4]> {
+        self.insts
+            .iter()
+            .filter(|inst| inst.op == Op::Jump && inst.operand(0) <= inst.pc)
+            .map(|inst| (inst.operand(0), inst.pc))
+            .collect()
+    }
+
     /// The work of the whole body, split into the instructions outside its loops and those
     /// inside. An instruction is inside a loop when it lies between a backward jump and the
     /// jump's target, and it counts [`LOOP_WEIGHT`] times per loop around the innermost one,
@@ -1584,12 +1617,7 @@ impl Plan<'_> {
     pub unsafe fn work(&self, feedback: &[i32], hot: Option<usize>) -> BodyWork {
         let ran = self.ran(feedback);
         let backward = |inst: &Inst| inst.op == Op::Jump && inst.operand(0) <= inst.pc;
-        let loops: SmallVec<[(usize, usize); 4]> = self
-            .insts
-            .iter()
-            .filter(|inst| backward(inst))
-            .map(|inst| (inst.operand(0), inst.pc))
-            .collect();
+        let loops = self.loops();
         // A loop with a `next` jumps back to its target from more than one place.
         let hot = hot.and_then(|target| {
             let last = loops
@@ -1613,9 +1641,9 @@ impl Plan<'_> {
                 work.outside.loads += 1;
                 work.whole.loads += 1;
             }
-            let (native, calls, frames, steps, writes) = match action {
+            let (native, calls, frames, steps, writes, rewrites) = match action {
                 Action::Inline { .. } | Action::Traverse { .. } | Action::NativeCall { .. } => {
-                    (0, 1, 0, 0, 0)
+                    (0, 1, 0, 0, 0, 0)
                 }
                 Action::Frame {
                     callee, function, ..
@@ -1632,7 +1660,9 @@ impl Plan<'_> {
                         inner.calls,
                         inner.frames + 1,
                         inner.steps,
-                        inner.writes,
+                        // An inlined call's variables are written back by the helper alone.
+                        inner.writes + inner.rewrites,
+                        0,
                     )
                 }
                 Action::Step { .. }
@@ -1657,7 +1687,7 @@ impl Plan<'_> {
                 Action::Step {
                     fast: Fast::Inspect { .. },
                     ..
-                } => (1, 0, 0, 0, 0),
+                } => (1, 0, 0, 0, 0, 0),
                 // A step that runs tier 0's fast handler, or a builtin's direct entry, makes
                 // no round trip through the stepping helper, so it costs what tier 0 pays.
                 Action::Step { effect, fast, .. }
@@ -1672,17 +1702,22 @@ impl Plan<'_> {
                     effect: Effect::Opaque,
                     ..
                 } => {
-                    let dirty = self.before(position).map_or(0, |state| {
-                        state
-                            .slots
-                            .iter()
-                            .filter(|slot| slot.may_be(status::DIRTY))
-                            .count()
-                    });
-                    (0, 0, 0, 1, dirty)
+                    let (mut dirty, mut scalars) = (0, 0);
+                    if let Some(state) = self.before(position) {
+                        for (slot, held) in state.slots.iter().enumerate() {
+                            if held.may_be(status::DIRTY) {
+                                dirty += 1;
+                                scalars += usize::from(self.in_place(slot, held.ty));
+                            }
+                        }
+                    }
+                    if depth == 0 || dirty > IN_PLACE_SLOTS {
+                        scalars = 0;
+                    }
+                    (0, 0, 0, 1, dirty - scalars, scalars)
                 }
-                Action::Step { .. } => (0, 0, 0, 1, 0),
-                action if native(action) || backward(inst) => (1, 0, 0, 0, 0),
+                Action::Step { .. } => (0, 0, 0, 1, 0, 0),
+                action if native(action) || backward(inst) => (1, 0, 0, 0, 0, 0),
                 _ => continue,
             };
             let (part, weight) = match depth.checked_sub(1) {
@@ -1709,6 +1744,7 @@ impl Plan<'_> {
                 part.frames += weight * frames;
                 part.steps += weight * steps;
                 part.writes += weight * writes;
+                part.rewrites += weight * rewrites;
             }
         }
         work
@@ -1945,7 +1981,21 @@ unsafe fn plan_at<'a>(
     }
     edge_ranges.push(edges.len() as u32);
     boxing_ranges.push(boxings.len() as u32);
+    let table = constants.element(bytecode::SLOTS);
+    let names = if table == values::nil() {
+        values::nil()
+    } else {
+        table.element(1)
+    };
+    let mut positions = List::with_capacity_in(builder.slots.len(), arena);
+    positions.extend(
+        builder.slots.iter().map(|&symbol| {
+            (0..values::length(names)).find(|&index| names.element(index) == symbol)
+        }),
+    );
     Ok(Plan {
+        formals: values::length(formals),
+        positions,
         boxing_ranges,
         boxings,
         temporaries: TEMPORARIES,

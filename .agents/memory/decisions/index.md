@@ -336,6 +336,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Builtin fast paths take names as CHARSXPs and evaluate nothing twice (built, with exceptions)
 - One-argument builtins and small base closures skip dispatch when their arguments are values
 - Builtins with positional direct entries, one implementation per semantic (built, with exceptions)
+- `list()` answers on its direct entry, which reads the call's tags
 - Builtin call machinery and subassignment toward 10x
 - One kernel layer for R's vector builtins: slice kernels, a reuse rule, and a fused superinstruction (built, with exceptions)
 - Package code that dominates a workload runs natively: rlang's trace_back
@@ -465,6 +466,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A hot `for` loop whose runs are short is not entered
 - A `for` loop over a boxed sequence compiles, and a pairlist loop stays in tier 0
 - The cost model charges each variable written back before a step
+- A write-back stores into the box the slot holds, inline inside a loop
 
 ## Heap and collector
 

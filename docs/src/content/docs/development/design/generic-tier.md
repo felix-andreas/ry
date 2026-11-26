@@ -70,7 +70,7 @@ often costs more than the callee's body.
 
 Each number is a difference in callgrind instructions between the compiled path and tier 0's path
 for the same work. The cost model's constants (`crates/jit/src/jit.rs`) follow these numbers:
-`ENTRY_COST`, `LOAD_COST`, `STEP_COST`, `WRITE_BACK_COST` and `SAVING_PER_FRAME` are measured, and
+`ENTRY_COST`, `LOAD_COST`, `STEP_COST`, `WRITE_BACK_COST`, `REWRITE_COST` and `SAVING_PER_FRAME` are measured, and
 `SAVING_PER_NATIVE` and `SAVING_PER_CALL` are the model's estimates for work that varies with the
 instruction.
 
@@ -79,7 +79,8 @@ instruction.
 | Entering compiled code instead of starting the body in the dispatch loop | About 560 more: the tier's entry (246), the scheduled entry's dispatch and return path (107), the register window (36 to 53), the caller's feedback (55) and the code's prologue. End to end, two bodies that differ by four native instructions (`a + a + a + a + a` and the same with nine operands, each called through a closure made on every call) differ by 550, and the smaller one runs 132 more compiled than in tier 0 | `ENTRY_COST` |
 | A variable read from the frame, against one kept in a machine register | About 30 more when the inline probe answers, about 125 more when the runtime forces an argument's promise. A body that adds five arguments runs 130 more than one that adds one argument five times | `LOAD_COST` (60) |
 | An instruction handed to tier 0 (a step) | 60 to 70 more for the helper call alone; about 180 with the registers reloaded after it | `STEP_COST` |
-| A variable written back to the frame before a step that can run R code | About 170 to 210 more than tier 0's assignment, which stores into the frame as it goes. In a body of 20 lines whose plan has seven such write-backs, the write-back path (the flush, the boxed scalar, the assignment) runs 1,940 instructions a call against 435 for tier 0's assignments | `WRITE_BACK_COST` |
+| A variable written back to the frame before a step that can run R code | About 170 to 210 more than tier 0's assignment, which stores into the frame as it goes. In a body of 20 lines whose plan has seven such write-backs, the write-back path (the flush, the boxed scalar, the assignment) runs 1,940 instructions a call against 435 for tier 0's assignments. The first write of a variable in an activation allocates its box in both tiers, and the helper path around it costs about 280 a variable ("Measured", "Write-backs") | `WRITE_BACK_COST` |
+| A variable written back inside a loop, stored by compiled code into the box its slot holds from the pass before | About 33, which is less than tier 0's assignment (about 60). The model charges it in full, because `SAVING_PER_NATIVE` already credits the assignment | `REWRITE_COST` (30) |
 | A call inlined with a frame, no arguments | About 600 fewer. The functions involved account for 585: tier 0's call (368) and return (459), less the first start (152), the start (12), the register window (40) and the compiled code (38). The `f()` row of "Measured" with the entry added back gives about 640 | `SAVING_PER_FRAME` |
 | A call inlined with a frame, three arguments | 510 to 630 fewer | |
 | The first start of an inlined call in an entry | 152, once per entry of the compiled body for each call | |
@@ -225,6 +226,7 @@ the compile (`jit.rs`, `unpaid`). The saving is counted in tier-0 instructions t
 | A native instruction | `SAVING_PER_NATIVE` |
 | A step | Minus `STEP_COST` |
 | A variable that may differ from the frame before a step that can run R code | Minus `WRITE_BACK_COST` |
+| The same inside a loop, for an unboxed scalar at a site with at most six such variables | Minus `REWRITE_COST` |
 | The entry | Minus `ENTRY_COST` |
 | A variable read from the frame outside the loops | Minus `LOAD_COST` |
 
@@ -472,9 +474,38 @@ steady-state tests at its second entry.
 On the app-suite workload the default mode compiles nothing. Its hot bodies are steps around
 calls that keep their frame (they pass `...`, run an instruction only tier 0 has, or call a
 closure that needs its own frame), with a few native instructions between them, and the model
-prices their write-backs above what the native instructions save. Stretches (stage 3), the
-remaining native forms of stage 2 and direct calls into compiled code (stage 4) are what bring
-such bodies into compiled code.
+prices their write-backs above what the native instructions save. With the model's constants
+lowered by hand until three of the `bodies` section's bodies compile, the section runs level
+with tier 0: each entry of a compiled body costs about 1,000 instructions through the scheduled
+entry, its write-backs cost about 1,250 a round, of which 63% are the first write of a variable
+in a fresh frame, and the three compiles cost about 100M instructions, 80% of them in Cranelift.
+So the workload's ceiling for this tier is set by the entry and the compile, not by the calls
+between compiled bodies, and the order of the stages follows that: a lean entry and a cheaper
+compile before stretches and direct calls.
+
+### Write-backs
+
+A loop that assigns scalars and calls a closure writes the same variables back on every pass.
+The kernel is two such loops, with seven write-backs per pair of passes (callgrind instructions
+per pair, every body compiled, the callee too):
+
+| | Per pair of passes | Of which the write-back path |
+|---|---|---|
+| Tier 0 | 3,230 | |
+| Compiled, every write through the guarded helper | 4,511 | 1,277 |
+| Compiled, the helper stores into the box the slot holds | 3,896 | 663 |
+| Compiled, the store inline in the loop | 3,466 | 232 |
+
+The compiled rows include the entry of the compiled callee, which costs about 600 more per
+pair than tier 0 runs it for, so the default mode, which leaves the callee in tier 0, runs the
+loops below tier 0. The guarded helper pays a panic guard and a handle scope per variable, then
+tier 0's own in-place assignment. The helper's direct path tests the box and stores, at about
+93 a variable, and the inline store costs about 33.
+
+Outside a loop the frame is fresh and each write-back allocates the variable's box, as tier 0's
+first assignment does. A straight-line body that writes three variables back before a call
+spends 831 instructions on the path (870 through the guarded helper), so `WRITE_BACK_COST`
+holds there, and the inline store is emitted only at sites inside a loop.
 
 ## How it compares
 
@@ -497,8 +528,9 @@ the per-pattern instruction counts above, and the kernels, public and code-bases
 2. **Partly built.** Type predicates and `length` on the value's header, builtin calls with
    deferred signals, loops over boxed sequences, boxed arithmetic inside inlined frames, the exit
    profile that turns an instruction that keeps leaving into a step, a body with loops priced by
-   its measured passes per call, write-backs charged in the model, and forced compilation held
-   to tier 0's cost per body. Planned:
+   its measured passes per call, write-backs charged in the model, write-backs inside a loop
+   stored in place by compiled code, and forced compilation held to tier 0's cost per body.
+   Planned:
    the other native forms in the table.
 3. Planned. Stretches of tier-0 instructions.
 4. Planned. Calls with a frame made from an inlined frame, a direct call from compiled code
