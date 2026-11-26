@@ -1092,3 +1092,11 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - A `[[` position into a ry `List` decides the literal as `I64`, so `lookup[[j]]` before `lookup[[i]] <- j` keeps `j` an `I64`.
 - A nominal constructor's representation is an expected type for its literals (`check_new_nominal` adapts them), so `@Tree(:Leaf(1))` against `:Leaf(I64)` holds.
 - A recursive `alias` is refused, with a short message that names `type` as the recursive form: an alias is its expansion, so a recursive one has no finite type, while a nominal `type` gives the recursion a name to stop at.
+- An `if` with `else` or a `match` whose branches are all number literals of one R type is one open literal, bound to a variable or beside one (`literal_leaves`), so `m <- if (c) 1 else 2; m + n` with `n: I64` makes `m` an `I64`. A nominal constructor in a branch (`@UserId(5L)`) stops it, because the constructor gives its own type.
+
+## A record pattern's `..` takes no name
+
+**Status:** built (`Parser::pattern_list`; golden case `records_and_tags__named_rest_in_record_pattern`).
+
+- `(x = a, ..others)` is a syntax error. A list pattern's `..rest` binds a list of the remaining items, but a record's remaining fields would need a record type made by removing fields from the scrutinee's, which no other construct needs, and an empty rest has no value because a record has at least one field. Roc's and Elm's record patterns take no rest name either.
+- Reading the other fields from the matched value (`p as whole`, then `whole$y`) or building a changed copy with `(..p, x = 1)` covers what a named rest would.

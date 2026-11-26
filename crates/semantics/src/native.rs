@@ -377,8 +377,7 @@ impl Uncompiled {
             ),
             Uncompiled::MatchPattern => format!(
                 "this `match` pattern {YET}. Native code matches a literal other than `NA`, \
-                 `NaN` or a complex number, and a record pattern whose `..` binds no name. \
-                 Bind the value to a name and match it in the arm's body"
+                 `NaN` or a complex number. Bind the value to a name and match it in the arm's body"
             ),
             Uncompiled::MatchScrutinee => format!(
                 "a `match` on a value that is not a number, a string, a logical, a `List`, a \
@@ -1921,12 +1920,9 @@ impl<'a, 'db> Judge<'a, 'db> {
             PatternKind::Tuple(items) => module[items]
                 .iter()
                 .all(|&item| self.pattern_compiles(item)),
-            PatternKind::Record { fields, rest } => {
-                rest.is_none_or(|rest| rest.binding.is_none())
-                    && module[fields]
-                        .iter()
-                        .all(|field| self.pattern_compiles(field.pattern))
-            }
+            PatternKind::Record { fields, .. } => module[fields]
+                .iter()
+                .all(|field| self.pattern_compiles(field.pattern)),
             PatternKind::List { items, .. } => module[items]
                 .iter()
                 .all(|&item| self.pattern_compiles(item)),

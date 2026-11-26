@@ -263,8 +263,8 @@ place, and a closed record with a nominal type covers the programs ry targets. T
 - **Record update.** `(..point, x = 3)` is a copy of `point` with `x` replaced, and every replaced
   field must exist, as in Roc. `point$x <- 3` stays the statement form. `..point` is an ordinary R
   identifier, so `(..point, x = 3)` is today a record holding a variable named `..point`; a name
-  starting with `..` first in a parenthesized record literal becomes a spread. A `..rest` in a
-  record pattern binds the remaining fields as a record.
+  starting with `..` first in a parenthesized record literal becomes a spread. A record pattern's
+  `..` ignores the remaining fields and takes no name.
 - **Punning in patterns.** `(x =, y =)` binds the fields `x` and `y` to names of the same spelling,
   where `(x, y)` would be a tuple pattern. A record literal does not pun, because `(x, y)` is a tuple.
 
