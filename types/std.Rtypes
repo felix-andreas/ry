@@ -1674,27 +1674,27 @@ Num.shift_right_by : fn(number: I64, bits: I64) -> I64
 #' ```
 Num.shift_right_zf_by : fn(number: I64, bits: I64) -> I64
 
-#' The number of set bits.
+#' The number of set bits of the 64.
 #'
 #' ```r dput
 #' Num.count_one_bits(255)
-#' #> 8L
+#' #> 8i64
 #' ```
 Num.count_one_bits : fn(number: I64) -> I64
 
-#' The number of zero bits above the highest set bit, 32 for zero.
+#' The number of zero bits above the highest set bit, 64 for zero.
 #'
 #' ```r dput
 #' Num.count_leading_zero_bits(1)
-#' #> 31L
+#' #> 63i64
 #' ```
 Num.count_leading_zero_bits : fn(number: I64) -> I64
 
-#' The number of zero bits below the lowest set bit, 32 for zero.
+#' The number of zero bits below the lowest set bit, 64 for zero.
 #'
 #' ```r dput
 #' Num.count_trailing_zero_bits(8)
-#' #> 3L
+#' #> 3i64
 #' ```
 Num.count_trailing_zero_bits : fn(number: I64) -> I64
 
