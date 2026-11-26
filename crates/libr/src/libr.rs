@@ -243,6 +243,14 @@ pub fn runtime() -> &'static mut Runtime {
     }
 }
 
+/// The runtime once it has started. A C API function whose fast path must keep no frame asks
+/// here: the start in [`runtime`] is a call, and the arguments would be saved across it.
+#[inline(always)]
+pub fn started_runtime() -> Option<&'static mut Runtime> {
+    // SAFETY: single-threaded access, see `Global`.
+    unsafe { (*RUNTIME.as_ptr()).as_mut() }
+}
+
 /// Starts the runtime on the first API call. Every later call takes the inlined branch above,
 /// which is one load and a compare on the path of every C API function.
 #[cold]

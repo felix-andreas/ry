@@ -510,3 +510,26 @@ User page: `reference/package-loading.md`; design: `development/design/r-runtime
 - **The site and user `Renviron` files are read at start-up** (`read_site_and_user_renviron` in `crates/interp/src/session.rs`): `R_ENVIRON` or `etc/Renviron.site`, then `R_ENVIRON_USER`, `./.Renviron` or `~/.Renviron`. Their lines override set variables and an empty value sets nothing, as in GNU R; `--vanilla` and `--no-environ` skip both (`RUN_FLAG_ENVIRON`). Embedders (`ry_start_session`) and start-up image builds skip them, because the image must not capture one user's environment.
 - **`signalError` records the message for every handler it finds**, calling or exiting, before running it, because GNU R's `vsignalError` copies it into `errbuf` per handler: `geterrmessage()` after `tryCatch(stop("x"), error = ...)` is the handled message, and tryCatchLog's tests compare it.
 
+## `.Call` reads its routine list in one pass, and takes named arguments directly
+
+**Status:** settled.
+
+- **Context.** A native call of a registered routine (`.Call(C_routine, x)`) resolves a `NativeSymbolInfo` list on every call. The resolution searched the list's attributes three times (the class, then the names once for `address` and once for `numParameters`), each through a call, and cost more than the boundary crossing itself.
+- **Decision.** `dot_call::registered_routine` walks the attribute list once for the class and the names, checks the class by pointer, and reads `address` and `numParameters` at the positions R and ry build them at, when the names vector has those labels there. A list laid out another way is no routine for the direct entry, and the full `.Call` reads it by name (`slot`).
+- **Named arguments.** `.Call` passes its arguments by position whatever they are called and reads the one name `PACKAGE`. xts writes `.Call(C_routine, x = x, flag = flag)`, which took the full builtin call because a direct entry required untagged arguments. `BuiltinDef::direct_by_position` marks an entry that takes named arguments, and tier 0 sends it every call without an empty argument and without a `PACKAGE` name.
+- **A finalizer check without a call.** `call_native` asks `Heap::finalizers_ready` on its return and calls `run_pending_finalizers` only when one waits.
+- **Rejected: caching the resolved routine at the call site.** The list is a mutable R value, so a cache needs a guard on its identity and its elements, and after the one-pass read the resolution is a small part of the call (`tools/bench/tooling/mechanisms.py --profile`).
+- **Where GNU R differs.** GNU R reads the list by position alone (any list whose second element is an external pointer, classed or not) and takes the arity from the registered symbol the pointer names, so a bare address pointer is checked too. ry reads class and names and keeps the arity in the list ("Open: a cheaper `.Call`" in the backlog has the target shape).
+- Tests: oracle cases `builtins__dot_call_routine_lists` (a routine of a bundled library) and `builtins__dot_call_compiled_routines` (a compiled package routine).
+
+## `SET_STRING_ELT` stores a string without a call or a frame
+
+**Status:** settled.
+
+- **Context.** Native code that fills or recycles a character column calls `SET_STRING_ELT` once per cell (data.table's `memrecycle`), and in a test user's application workload it was the largest single C API function by instructions.
+- **Previous shape.** The fast path ran `Heap::set_element`, the store for any handle vector: it tests whether the value is inert, whether an escape of the list is pending, and whether the replaced value's last reference went away (`note_zero`, a call). The error path was a closure that captured the three arguments by address. The calls and the closure gave the function four saved registers and three spills on every store.
+- **Decision.** `Heap::set_string_element` is the store for a string into a character vector that is not ALTREP. With both kinds known, three of the general store's questions have fixed answers: a string is inert, only a list counts a store into a pending escape (`count_escaped_store`), and a string is never reclaimable by a reconcile, so losing its last counted reference needs no note. What is left is the two reference counts, the store, and the barrier's test after it. The checked path is a function of its own (`set_string_elt_checked`, cold), and the fast path asks `started_runtime` instead of `runtime`, whose start is a call.
+- **The barrier comes after the store.** `element_barrier_slow` reads the vector's and the value's generations and the card of the index, never the element, so the order does not matter to it, and placed last it is the function's only call.
+- **Check the shape, not only the count**: `objdump -d --disassemble=SET_STRING_ELT libR.so` shows no saved register.
+- **`SET_VECTOR_ELT` keeps the general store**: its value can be a list or a large vector, so every question stays open.
+- Tests: oracle case `datatable__string_column_stores` (fresh strings into a column that survived collections, a large column, replaced strings), also under GC stress.
