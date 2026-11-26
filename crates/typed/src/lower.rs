@@ -5883,7 +5883,22 @@ impl Lowering<'_> {
         let position = match index {
             Some(index) => {
                 let index = self.value(index)?;
+                let double = self.builder.ty(index) == Type::Dbl;
                 let index = self.to_i64(index)?;
+                if double {
+                    // The library reads a double index only up to the largest R integer.
+                    let size = self
+                        .builder
+                        .emit(Type::I64, Op::Math(Math::Abs, Item::I64, index));
+                    let largest = self
+                        .builder
+                        .emit(Type::I64, Op::Const(Constant::I64(i64::from(i32::MAX))));
+                    let outside = self.builder.emit(
+                        Type::Lgl,
+                        Op::Compare(Compare::Gt, Item::I64, size, largest),
+                    );
+                    self.fail_if(outside);
+                }
                 let below = self.test(Compare::Lt, Item::I64, index, one);
                 let inside = self.builder.block();
                 self.builder.terminate(Terminator::Branch {
@@ -5936,7 +5951,7 @@ impl Lowering<'_> {
     }
 
     /// A number argument of a library function as the library reads it: an `I64`, an R integer
-    /// or a double. The call fails on `NA` and `NaN`, where the interpreter raises the error.
+    /// or a double. The call fails on `NA` and `NaN`, and the interpreter answers for them.
     unsafe fn library_number(&mut self, value: Local) -> Result<Local, Refusal> {
         match self.builder.ty(value) {
             Type::I64 => {}
@@ -5967,9 +5982,7 @@ impl Lowering<'_> {
         let number = self.value(number)?;
         let number = self.library_number(number)?;
         let integer = self.builder.ty(number) == Type::I64;
-        // Of the rest, the library takes only an `I64` or an R number where its type says so.
-        let takes_r_numbers = !matches!(name, "Num.is_even" | "Num.is_odd");
-        if !integer && !takes_r_numbers {
+        if !integer && matches!(name, "Num.is_even" | "Num.is_odd") {
             return Err(Refusal(Cow::Owned(format!("a `{name}` of an R number"))));
         }
         match name {
@@ -6073,8 +6086,8 @@ impl Lowering<'_> {
 
     /// A `Num` function of two numbers, as the library computes it. With an `I64` the other
     /// number converts exactly and the operation is on `I64`s, which an overflow or a zero
-    /// divisor fails; two R integers stay integers, and otherwise both are doubles, whose
-    /// `NaN` results are errors.
+    /// divisor fails; the arithmetic and `abs_diff` of two R integers give an R integer, and
+    /// otherwise both are doubles, whose `NaN` results are errors.
     unsafe fn number_operation(
         &mut self,
         name: &str,
@@ -6100,8 +6113,8 @@ impl Lowering<'_> {
             "Num.mul" => Some(Arith::Mul),
             _ => None,
         };
-        let (ta, tb) = (self.builder.ty(a), self.builder.ty(b));
-        if ta == Type::I64 || tb == Type::I64 {
+        let (first_type, second_type) = (self.builder.ty(a), self.builder.ty(b));
+        if first_type == Type::I64 || second_type == Type::I64 {
             let a = self.to_i64(a)?;
             let b = self.to_i64(b)?;
             if let Some(op) = comparison {
@@ -6132,7 +6145,7 @@ impl Lowering<'_> {
                         .emit(Type::I64, Op::Arith(Arith::Sub, Item::I64, high, low)))
                 }
                 "Num.is_multiple_of" => {
-                    // Every number is a multiple of itself, and only zero is a multiple of zero.
+                    // Only zero is a multiple of zero, and a remainder by zero is not defined.
                     let result = self.builder.local(Type::Bool);
                     let by_zero = self.test(Compare::Eq, Item::I64, b, zero);
                     let (zero_divisor, divisor, join) = (
@@ -6164,12 +6177,20 @@ impl Lowering<'_> {
                 )))),
             };
         }
-        if ta == Type::Int
-            && tb == Type::Int
-            && let Some(op) = arithmetic
-        {
-            // R integer arithmetic gives up on a result outside the integers.
-            return Ok(self.builder.emit(Type::Int, Op::Arith(op, Item::Int, a, b)));
+        if first_type == Type::Int && second_type == Type::Int {
+            // R integer arithmetic gives up on a result outside the integers, which the
+            // library raises as an overflow.
+            if let Some(op) = arithmetic {
+                return Ok(self.builder.emit(Type::Int, Op::Arith(op, Item::Int, a, b)));
+            }
+            if name == "Num.abs_diff" {
+                let difference = self
+                    .builder
+                    .emit(Type::Int, Op::Arith(Arith::Sub, Item::Int, a, b));
+                return Ok(self
+                    .builder
+                    .emit(Type::Int, Op::Math(Math::Abs, Item::Int, difference)));
+            }
         }
         let a = self.as_double(a)?;
         let b = self.as_double(b)?;
@@ -6238,25 +6259,33 @@ impl Lowering<'_> {
         // fails on them, and the interpreter answers.
         let a = self.value(a)?;
         let b = self.value(b)?;
-        let (ta, tb) = (self.builder.ty(a), self.builder.ty(b));
+        let (first_type, second_type) = (self.builder.ty(a), self.builder.ty(b));
         let flag = |ty: Type| matches!(ty, Type::Lgl | Type::Bool);
-        if ta == Type::I64 || tb == Type::I64 {
-            // A number literal beside an `I64` is one, as the checker types it.
+        if first_type == Type::I64 || second_type == Type::I64 {
+            // The interpreter reads a number literal beside an `I64` as an `I64`, so the
+            // literal converts; any other R number is never `identical()` to an `I64`.
+            let literal = |lowerer: &Self, value: Local| {
+                lowerer.builder.ty(value) == Type::I64 || lowerer.constant_double(value).is_some()
+            };
+            if !literal(self, a) || !literal(self, b) {
+                return Err(Refusal::new("a `Bool.is_eq` of an I64 and an R number"));
+            }
             let a = self.to_i64(a)?;
             let b = self.to_i64(b)?;
             return Ok(self.test(op, Item::I64, a, b));
         }
-        if flag(ta) && flag(tb) {
+        if flag(first_type) && flag(second_type) {
             let a = self.truth(a);
             let b = self.truth(b);
             return Ok(self.test(op, Item::Lgl, a, b));
         }
-        let item = match (ta, tb) {
+        let item = match (first_type, second_type) {
             (Type::Str, Type::Str) => Item::Str,
             (Type::Int, Type::Int) | (Type::Dbl, Type::Dbl) => {
+                // The call fails on `NA` and `NaN`, which `identical()` tells from numbers.
                 self.library_number(a)?;
                 self.library_number(b)?;
-                if ta == Type::Int {
+                if first_type == Type::Int {
                     Item::Int
                 } else {
                     Item::Dbl
