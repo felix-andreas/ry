@@ -700,6 +700,11 @@ Rule and order: `development/design/memory-safety.md`, "Migration".
 - **Unexplained.** The hot set counts 1 to 2% more instructions per call on `base::matrix`,
   `foreach::%do%`, `stats::coef` and lubridate's arithmetic with the subset forms on handles; the
   per-operation table (`just bench-mechanisms`) shows no row for it.
+- **Measured, not closed.** With the replacement forms on handles, an S4 replacement generic
+  (`value(item) <- i`) counts 3.2% more instructions than the raw version: `replace_with_closure`
+  builds its call through `handles::language` and `handles::apply_closure`, which stay out of
+  line. `class<-`, `length<-`, `levels<-`, a string or matrix element and the `<<-` element rows
+  count 0.7 to 1.6% more, mostly `TmpValue`'s drop glue and the handlers' register setup.
 - **Raised `unsafe` counts** (`tools/unsafe.py check` reads them), until the helpers migrate:
   - `crates/interp/src/handles.rs` 107 to 176: `alloc_with_room`, `apply_closure`, `array_subassign`, `array_subset`, `array_subset2`, `assign_local`, `assign_outward`, `assignment_copy`, `builtin_definition`, `builtin_failure`, `call_builtin`, `call_direct`, `call_environment`, `call_value`, `claim_binding`, `classed_error`, `compact_sequence`, `copy_attributes_to`, `copy_elements`, `copy_most_attributes`, `count_tmp_binding`, `define`, `dispatch_builtin`, `element_text`, `enclosed_value`, `enclosing_binding`, `evaluate`, `force`, `force_holding`, `forced_promise`, `frame_binding`, `frame_value`, `generated_call`, `has_internal_method`, `holds_elements`, `in_caller_scope_with`, `install_bytes`, `int_element`, `is_altrep`, `is_missing_in`, `item`, `language`, `list_to_pairlist`, `mark_assigned`, `mark_shared`, `missing_argument`, `move_elements`, `owned_names`, `pairlist_to_list`, `permanent`, `primitive`, `reaching_environment`, `real_element`, `record_dollar`, `record_dollar_assign`, `record_subassign2`, `record_subset2`, `resize_in_place`, `reuse_permitted`, `scalar_subset`, `shallow_copy`, `store_item`, `stored`, `symbol_value`, `tag`, `type_name`, `unwrap_assigned`, `visible_binding`, `warning_in`, `with_result`.
   - `crates/interp/src/interp.rs` 47 to 49: `altrep_storage` (the hook's type), `resolve_samples_before_truncating`.
