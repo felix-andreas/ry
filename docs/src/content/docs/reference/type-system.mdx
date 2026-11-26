@@ -5697,7 +5697,7 @@ interpreted
 | a standard library function called with a `ry::` prefix | the name without the prefix |
 | an `I64`, a `List<I64>`, a `Dict` or a `Set` passed to an R function as it is | `Num.to_r(x)`, `List.to_r(xs)`, `Dict.keys` and `Dict.values`, or `Set.to_list` |
 | `<<-`, and an assignment to anything but a variable or `xs[[i]]` | return the new value; build a new record with `(..record, field = value)` |
-| a local function defined again inside a branch or a loop, or called after the branch or loop that defines it, and `return` inside a local function | define it once at the top, and end it with its value |
+| a local function that a branch or a loop defines again after an earlier definition, or one called after the branch or loop that defines it, and `return` inside a local function | define it once at the top, and end it with its value |
 | a name read before the function sets it, as in a loop that reads a name a later statement of the body sets, or after branches that set it to values of different types | set it before the branch or loop, with one type |
 | a variable, a parameter or a loop variable that holds values of different types, branches that set a name to different types, and a variable that holds a tag and is assigned again | a new name for each value |
 | the value of an `if` without `else` | an `else` branch that gives a value of the same type |

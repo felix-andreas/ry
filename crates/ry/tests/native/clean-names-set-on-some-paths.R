@@ -37,7 +37,18 @@ shifted <- function(xs: List<I64>) -> I64 {
   }
   total
 }
+both <- function(x: F64, up: Bool) -> F64 {
+  if (up) {
+    step <- function(v: F64) -> F64 v + 1
+    y <- step(x)
+  } else {
+    step <- function(v: F64) -> F64 v - 1
+    y <- step(x)
+  }
+  y
+}
 print(last_over([1, 5, 3], 4))
+print(both(1, TRUE))
 print(counted(3))
 print(payload(:Ok(9)))
 print(relabel(FALSE))

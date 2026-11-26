@@ -821,7 +821,9 @@ impl Lowering<'_> {
         if entries.is_empty() {
             return;
         }
-        let same_name = |a: &Variable, b: &Variable| a.scope == b.scope && a.symbol == b.symbol;
+        let same_name = |left: &Variable, right: &Variable| {
+            left.scope == right.scope && left.symbol == right.symbol
+        };
         // The variable each local is, for the names one of whose variables has a flag.
         let mut written: Vec<Option<u32>> = vec![None; self.builder.function.locals.len()];
         for (index, variable) in variables.iter().enumerate() {
@@ -1062,8 +1064,24 @@ impl Lowering<'_> {
                     return Err(Refusal::new("a local function rebound in a branch or loop"));
                 }
                 let family = self.pending_family(value);
+                // A pending empty list gets a variable of its own, never shared, since its type is a
+                // placeholder; it still counts as one of the name's variables for the set flags.
                 let variable = match family {
-                    Some(_) => self.builder.local(ty),
+                    Some(_) => {
+                        let local = self.builder.local(ty);
+                        let (scope, entry) = self
+                            .scopes
+                            .last()
+                            .map_or((0, (BlockId(0), 0)), |scope| (scope.id, scope.entry));
+                        self.variables.push(Variable {
+                            scope,
+                            entry,
+                            symbol,
+                            local,
+                            flag: None,
+                        });
+                        local
+                    }
                     None => self.variable(symbol, ty),
                 };
                 self.builder.push(Some(variable), Op::Copy(value));
@@ -1977,12 +1995,16 @@ impl Lowering<'_> {
                     return Err(Refusal::new("a malformed function literal"));
                 };
                 // A branch that rebinds a name leaves the old binding on the paths that skip it,
-                // which a local function, inlined where it is called, cannot express.
+                // which a local function, inlined where it is called, cannot express. A name
+                // another branch hid is unusable after the branches either way, so it may be
+                // defined again, as when both branches of an `if` define it.
                 if self.control > 0
-                    && self
-                        .scopes
-                        .last()
-                        .is_some_and(|scope| scope.names.contains_key(&target))
+                    && self.scopes.last().is_some_and(|scope| {
+                        scope
+                            .names
+                            .get(&target)
+                            .is_some_and(|binding| !matches!(binding, Binding::Hidden))
+                    })
                 {
                     return Err(Refusal::new("a local function rebound in a branch or loop"));
                 }

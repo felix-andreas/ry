@@ -108,3 +108,24 @@ run ry run --runtime ry after.R
 expect exit 0
 expect stdout "2i64\n1000i64"
 expect stderr "typed: `after` runs in the interpreter: no code for [Lgl]: a local function defined in a branch or loop, used after it"
+
+# A name set again to a value of another type, here an empty list whose item type is not known
+# yet, clears what it held, so the read after the branch gives up on the paths that wrote the
+# new value instead of returning the old one.
+file again.R
+| sized <- function(a: Bool, b: Bool) -> I64 {
+|   if (a) {
+|     xs <- [:Circle(1.0), :Circle(2.0)]
+|   }
+|   if (b) {
+|     xs <- []
+|   }
+|   List.len(xs)
+| }
+| print(sized(TRUE, FALSE))
+| print(sized(TRUE, TRUE))
+
+run ry run --runtime ry again.R
+expect exit 0
+expect stdout "2i64\n0i64"
+expect stderr lacks "refused"

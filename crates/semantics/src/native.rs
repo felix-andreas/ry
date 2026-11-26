@@ -1192,8 +1192,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                     let item = self
                         .ty(sequence)
                         .and_then(|ty| array_element(db, self.peel(ty)));
-                    self.scope
-                        .push((module.name(variable), Slot::Parameter(item)));
+                    self.bind_assigned(module.name_range(variable), module.name(variable), item);
                 }
                 self.in_loop(body, mark);
             }
@@ -1426,7 +1425,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                     self.control_depth += 1;
                     for &binding in &module[arm.bindings] {
                         if let ExpressionKind::NameRef(name) = *module.kind(binding) {
-                            self.scope.push((name, Slot::Parameter(self.ty(binding))));
+                            self.bind_assigned(module.range(binding), name, self.ty(binding));
                         }
                     }
                     if let Some(guard) = arm.guard {
@@ -1560,9 +1559,29 @@ impl<'a, 'db> Judge<'a, 'db> {
         }
     }
 
+    /// Binds a loop variable or a pattern's name, which the typed core assigns: a name the
+    /// function already holds keeps its variable, so a value of another type, or any tag, which
+    /// fixes the variables it is stored in, gives the function up.
+    fn bind_assigned(&mut self, at: TextRange, name: Symbol, ty: Option<Ty<'db>>) {
+        match self.lookup(name) {
+            Some(Slot::Value(held, _) | Slot::Parameter(held)) => {
+                if ty.is_some_and(|ty| self.holds_tag(ty)) {
+                    let kind = Uncompiled::TagReassigned(name);
+                    self.block_at(at, NativeBlockerKind::Uncompiled(kind));
+                } else if let (Some(held), Some(ty)) = (held, ty)
+                    && self.changes_type(held, ty)
+                {
+                    let kind = Uncompiled::TypeChange(name);
+                    self.block_at(at, NativeBlockerKind::Uncompiled(kind));
+                }
+            }
+            _ => self.scope.push((name, Slot::Parameter(ty))),
+        }
+    }
+
     /// Brings the names that the paths reaching the end of a branch created into scope after
     /// it, as the typed core joins them. A name every path set, to types stored alike, keeps its
-    /// slot; one some paths set is `Maybe`; one whose paths disagree on its type leaves scope.
+    /// slot; one some paths set, all to one type, is `Maybe`; any other leaves scope.
     fn join(&mut self, ends: &[Vec<(Symbol, Slot<'db>)>]) {
         let mut names: Vec<Symbol> = Vec::new();
         for &(name, slot) in ends.iter().flatten() {
@@ -1575,6 +1594,7 @@ impl<'a, 'db> Judge<'a, 'db> {
         for name in names {
             let mut everywhere = true;
             let mut agree = true;
+            let mut same = true;
             let mut first: Option<(Slot<'db>, Option<Ty<'db>>)> = None;
             for end in ends {
                 let slot = end
@@ -1594,15 +1614,18 @@ impl<'a, 'db> Judge<'a, 'db> {
                 };
                 match (first, slot) {
                     (None, Some(slot)) => first = Some((slot, ty)),
-                    (Some((_, Some(held))), _)
-                        if ty.is_some_and(|ty| self.layout_differs(held, ty)) =>
-                    {
-                        agree = false;
+                    (Some((_, held)), _) => {
+                        same &= held == ty;
+                        if let (Some(held), Some(ty)) = (held, ty) {
+                            agree &= !self.layout_differs(held, ty);
+                        }
                     }
                     _ => {}
                 }
             }
-            if let (true, Some((slot, ty))) = (agree, first) {
+            // The typed core joins types only where every path sets the name, so a name some
+            // paths leave unset keeps one variable, and its paths must agree on the exact type.
+            if let (true, Some((slot, ty))) = (agree && (everywhere || same), first) {
                 let slot = if everywhere { slot } else { Slot::Maybe(ty) };
                 self.scope.push((name, slot));
             }
@@ -1815,8 +1838,10 @@ impl<'a, 'db> Judge<'a, 'db> {
                 if matches!(*module.kind(value), ExpressionKind::Function { .. }) {
                     // Native code inlines a local function where its definition stands, so one
                     // name cannot stand for a second definition inside a branch or a loop.
+                    // A name another branch hid may be defined again, as in both branches of an
+                    // `if`, since it stays hidden after them.
                     if self.control_depth > 0 {
-                        if self.lookup(name).is_some() || self.hidden.contains(&name) {
+                        if self.lookup(name).is_some() {
                             self.uncompiled(id, Uncompiled::LocalFunctionInBranch(name));
                         }
                     } else {
