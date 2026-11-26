@@ -277,6 +277,9 @@ All => values::ry_all,
     SumInt => values::ry_sum_int,
     CallR => crate::ry_call_r,
     ModulusLosesAccuracy => modulus_loses_accuracy,
+    RealAcos => real_acos,
+    RealAsin => real_asin,
+    RealAtan => real_atan,
     RealCos => real_cos,
     RealExp => real_exp,
     RealIntegerDivide => real_integer_divide,
@@ -1134,7 +1137,7 @@ impl Emitter<'_> {
                             )[0];
                             self.fail_if(lost, &inst.fail_drops)?;
                         }
-                        self.real_arith(*op, x, y)
+                        self.real_arith(*op, x, y)?
                     }
                     Item::I64 => {
                         let ranges = (self.range(*a), self.range(*b));
@@ -2257,20 +2260,23 @@ impl Emitter<'_> {
         self.builder.ins().bor(a, b)
     }
 
-    fn real_arith(&mut self, op: Arith, x: Value, y: Value) -> Value {
+    fn real_arith(&mut self, op: Arith, x: Value, y: Value) -> Result<Value, Refusal> {
         let helper = match op {
-            Arith::Add => return self.builder.ins().fadd(x, y),
-            Arith::Sub => return self.builder.ins().fsub(x, y),
-            Arith::Mul => return self.builder.ins().fmul(x, y),
-            Arith::Div => return self.builder.ins().fdiv(x, y),
+            Arith::Add => return Ok(self.builder.ins().fadd(x, y)),
+            Arith::Sub => return Ok(self.builder.ins().fsub(x, y)),
+            Arith::Mul => return Ok(self.builder.ins().fmul(x, y)),
+            Arith::Div => return Ok(self.builder.ins().fdiv(x, y)),
             Arith::Pow => Helper::RealPower,
             Arith::NumPow => Helper::RealPlatformPower,
             Arith::Mod => Helper::RealModulo,
             Arith::IntDiv => Helper::RealIntegerDivide,
             Arith::Min => Helper::RealMin,
             Arith::Max => Helper::RealMax,
+            Arith::DivTrunc | Arith::RemTrunc => {
+                return Err(Refusal::new("a truncating division of doubles"));
+            }
         };
-        self.call(helper, &[F64, F64], &[F64], &[x, y])[0]
+        Ok(self.call(helper, &[F64, F64], &[F64], &[x, y])[0])
     }
 
     /// Integer arithmetic as R does it: `NA` in gives `NA` out, and a result outside the
@@ -2336,7 +2342,7 @@ impl Emitter<'_> {
             }
             Arith::Min => self.builder.ins().smin(x, y),
             Arith::Max => self.builder.ins().smax(x, y),
-            Arith::Div | Arith::Pow | Arith::NumPow => {
+            Arith::Div | Arith::Pow | Arith::NumPow | Arith::DivTrunc | Arith::RemTrunc => {
                 return Err(Refusal::new("an integer division or power"));
             }
         };
@@ -2453,6 +2459,31 @@ impl Emitter<'_> {
             }
             Arith::Min => self.builder.ins().smin(x, y),
             Arith::Max => self.builder.ins().smax(x, y),
+            Arith::DivTrunc | Arith::RemTrunc => {
+                if y_range.lo <= 0 && y_range.hi >= 0 {
+                    let zero = self.builder.ins().icmp_imm_s(IntCC::Equal, y, 0);
+                    self.fail_if(zero, &inst.fail_drops)?;
+                }
+                if y_range.lo <= -1 && y_range.hi >= -1 && x_range.lo == i64::MIN {
+                    let minus_one = self.builder.ins().icmp_imm_s(IntCC::Equal, y, -1);
+                    if op == Arith::DivTrunc {
+                        let lowest = self.builder.ins().icmp_imm_s(IntCC::Equal, x, i64::MIN);
+                        let overflow = self.builder.ins().band(lowest, minus_one);
+                        self.fail_if(overflow, &inst.fail_drops)?;
+                    } else {
+                        // Every remainder by -1 is 0, and the machine traps on the most
+                        // negative value by -1, so the remainder divides by 1 instead.
+                        let one = self.iconst(1);
+                        let safe_y = self.builder.ins().select(minus_one, one, y);
+                        return Ok(self.builder.ins().srem(x, safe_y));
+                    }
+                }
+                if op == Arith::DivTrunc {
+                    self.builder.ins().sdiv(x, y)
+                } else {
+                    self.builder.ins().srem(x, y)
+                }
+            }
             Arith::Div => return Err(Refusal::new("a `/` of I64s")),
             Arith::NumPow => return Err(Refusal::new("a `Num.pow` of I64s")),
         })
@@ -2478,6 +2509,9 @@ impl Emitter<'_> {
             Math::Round => Some(Helper::RealRound),
             Math::Sign => Some(Helper::RealSign),
             Math::RoundAway => Some(Helper::RealRoundAway),
+            Math::Atan => Some(Helper::RealAtan),
+            Math::Asin => Some(Helper::RealAsin),
+            Math::Acos => Some(Helper::RealAcos),
         };
         let value = match helper {
             None => self.builder.ins().sqrt(x),
@@ -2870,6 +2904,18 @@ extern "C" fn real_cos(x: f64) -> f64 {
 
 extern "C" fn real_tan(x: f64) -> f64 {
     x.tan()
+}
+
+extern "C" fn real_atan(x: f64) -> f64 {
+    x.atan()
+}
+
+extern "C" fn real_asin(x: f64) -> f64 {
+    x.asin()
+}
+
+extern "C" fn real_acos(x: f64) -> f64 {
+    x.acos()
 }
 
 extern "C" fn real_round_away(x: f64) -> f64 {

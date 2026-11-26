@@ -312,6 +312,11 @@ pub enum Arith {
     /// `Num.pow`: the platform's `pow`, without the multiplication R's `^` uses for small
     /// whole powers, so the last bit matches the interpreter's `Num.pow`.
     NumPow = 9,
+    /// `Num.div_trunc` of `I64`s: the quotient rounded toward zero.
+    DivTrunc = 10,
+    /// `Num.rem` of `I64`s: the remainder of the quotient rounded toward zero, with the
+    /// dividend's sign.
+    RemTrunc = 11,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -344,6 +349,10 @@ pub enum Math {
     Sign = 14,
     /// Rounding half away from zero, as `Num.round` does.
     RoundAway = 15,
+    Atan = 16,
+    /// The inverse sine and cosine, which give `NaN` outside `[-1, 1]`.
+    Asin = 17,
+    Acos = 18,
 }
 
 /// A bit operation on the 64-bit two's complement of two `I64`s.

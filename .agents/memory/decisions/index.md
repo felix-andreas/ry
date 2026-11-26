@@ -656,6 +656,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A call of a function still being compiled goes through a code cell
 - A dropped value passes down to the parts that give it (settled)
 - A loop declares a name its body reads before a later statement sets it (settled)
+- Scalar library functions give up where the library raises an error (settled)
 
 ## DataFrame and the table engine
 

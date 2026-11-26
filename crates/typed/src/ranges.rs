@@ -405,7 +405,12 @@ fn assigned_range(
                     lo: y.lo + 1,
                     hi: 0,
                 },
-                Arith::IntDiv if y.lo > 0 && x.lo >= 0 => Range {
+                // On numbers that are not negative, truncation and the floor agree.
+                Arith::RemTrunc if y.lo > 0 && x.lo >= 0 => Range {
+                    lo: 0,
+                    hi: x.hi.min(y.hi - 1),
+                },
+                Arith::IntDiv | Arith::DivTrunc if y.lo > 0 && x.lo >= 0 => Range {
                     lo: x.lo / y.hi,
                     hi: x.hi / y.lo,
                 },

@@ -3348,6 +3348,32 @@ impl Lowering<'_> {
                     _ => Err(Refusal::new("a `Num.round` of something other than an F64")),
                 }
             }
+            "Num.is_zero" | "Num.is_positive" | "Num.is_negative" | "Num.is_even"
+            | "Num.is_odd" | "Num.is_finite" | "Num.is_infinite" | "Num.neg" | "Num.floor"
+            | "Num.ceiling" | "Num.to_i64" | "Num.log" | "Num.sin" | "Num.cos" | "Num.tan"
+            | "Num.atan" | "Num.asin" | "Num.acos" => self.number_function(name, &arguments),
+            "Num.is_lt" | "Num.is_gt" | "Num.is_lte" | "Num.is_gte" | "Num.add" | "Num.sub"
+            | "Num.mul" | "Num.div" | "Num.div_trunc" | "Num.rem" | "Num.abs_diff"
+            | "Num.is_multiple_of" => self.number_operation(name, &arguments),
+            "Bool.and" | "Bool.or" | "Bool.not" | "Bool.is_eq" | "Bool.is_not_eq" => {
+                self.boolean(name, &arguments)
+            }
+            "List.first" | "List.last" | "List.get" => self.list_get(name, &arguments),
+            "Result.is_ok" | "Result.is_err" => self.result_is(name == "Result.is_ok", &arguments),
+            "Str.is_empty" => {
+                let [string] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal::new("a malformed `Str.is_empty`"));
+                };
+                let string = self.value(string)?;
+                if self.builder.ty(string) != Type::Str {
+                    return Err(Refusal::new(
+                        "a `Str.is_empty` of something other than a Str",
+                    ));
+                }
+                let bytes = self.builder.emit(Type::I64, Op::ByteCount(string));
+                let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+                Ok(self.test(Compare::Eq, Item::I64, bytes, zero))
+            }
             "List.count_if" | "List.walk" => self.walk(name, &arguments),
             "length" => {
                 let [a] = arguments.exactly(1)?[..] else {
@@ -5802,6 +5828,495 @@ impl Lowering<'_> {
         let value = value.ok_or(Refusal::new("a `Result.with_default` of no result"))?;
         self.usable(value)?;
         Ok(value)
+    }
+
+    /// `Result.is_ok(result)` or `Result.is_err(result)`.
+    unsafe fn result_is(
+        &mut self,
+        ok_wanted: bool,
+        arguments: &Arguments,
+    ) -> Result<Local, Refusal> {
+        let [result] = arguments.exactly(1)?[..] else {
+            return Err(Refusal::new("a malformed `Result.is_ok`"));
+        };
+        let result = self.value(result)?;
+        let (ok, err) = (tag_layout("Ok", 1)?, tag_layout("Err", 1)?);
+        let wanted = if ok_wanted { ok } else { err };
+        let (candidates, exhaustive) = self.shapes_of(self.builder.ty(result), &[ok, err], &[])?;
+        let answer = self.switch_shapes(
+            result,
+            &candidates,
+            exhaustive,
+            Expected::Free,
+            &mut |lowering, shape| match shape.map(|shape| shapes::shape(shape).layout) {
+                Some(layout) if layout == ok || layout == err => {
+                    let truth = Constant::Lgl(i32::from(layout == wanted));
+                    Ok(Some(lowering.builder.emit(Type::Lgl, Op::Const(truth))))
+                }
+                _ => {
+                    lowering.builder.terminate(Terminator::Fail);
+                    let unreachable = lowering.builder.block();
+                    lowering.builder.switch_to(unreachable);
+                    Ok(None)
+                }
+            },
+        )?;
+        let answer = answer.ok_or(Refusal::new("a `Result.is_ok` of no result"))?;
+        Ok(self.builder.emit(Type::Bool, Op::Truth(answer)))
+    }
+
+    /// `List.first(list)`, `List.last(list)` or `List.get(list, index)`: `:Ok` of the item at
+    /// a 1-based position, or an `:Err` when the list has none there.
+    unsafe fn list_get(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
+        let (list, index) = match arguments.exactly(if name == "List.get" { 2 } else { 1 })?[..] {
+            [list] => (list, None),
+            [list, index] => (list, Some(index)),
+            _ => return Err(Refusal(Cow::Owned(format!("a malformed `{name}`")))),
+        };
+        let (list, ty) = self.known_list(list, name)?;
+        let item = ty.items().ok_or(Refusal::new(
+            "a `List.get` of something other than a ry list",
+        ))?;
+        let count = self.builder.emit(Type::I64, Op::Length(list));
+        let one = self.builder.emit(Type::I64, Op::Const(Constant::I64(1)));
+        let (found, missing) = (self.builder.block(), self.builder.block());
+        let position = match index {
+            Some(index) => {
+                let index = self.value(index)?;
+                let double = self.builder.ty(index) == Type::Dbl;
+                let index = self.to_i64(index)?;
+                if double {
+                    // The library reads a double index only up to the largest R integer.
+                    let size = self
+                        .builder
+                        .emit(Type::I64, Op::Math(Math::Abs, Item::I64, index));
+                    let largest = self
+                        .builder
+                        .emit(Type::I64, Op::Const(Constant::I64(i64::from(i32::MAX))));
+                    let outside = self.builder.emit(
+                        Type::Lgl,
+                        Op::Compare(Compare::Gt, Item::I64, size, largest),
+                    );
+                    self.fail_if(outside);
+                }
+                let below = self.test(Compare::Lt, Item::I64, index, one);
+                let inside = self.builder.block();
+                self.builder.terminate(Terminator::Branch {
+                    condition: below,
+                    then: missing,
+                    otherwise: inside,
+                });
+                self.builder.switch_to(inside);
+                let above = self.test(Compare::Gt, Item::I64, index, count);
+                self.builder.terminate(Terminator::Branch {
+                    condition: above,
+                    then: missing,
+                    otherwise: found,
+                });
+                index
+            }
+            None => {
+                let empty = self.test(Compare::Lt, Item::I64, count, one);
+                self.builder.terminate(Terminator::Branch {
+                    condition: empty,
+                    then: missing,
+                    otherwise: found,
+                });
+                if name == "List.first" { one } else { count }
+            }
+        };
+        self.builder.switch_to(found);
+        let element = self
+            .builder
+            .emit(Type::of_item(item), Op::ItemAt(list, position));
+        let ok = self.tag("Ok", &[element])?;
+        let found = self.builder.current;
+        self.builder.switch_to(missing);
+        let reason = self.tag(
+            if name == "List.get" {
+                "OutOfBounds"
+            } else {
+                "ListWasEmpty"
+            },
+            &[],
+        )?;
+        let err = self.tag("Err", &[reason])?;
+        self.joined_result(found, ok, err)
+    }
+
+    /// A test of two scalars as a `Bool`.
+    fn test(&mut self, op: Compare, item: Item, a: Local, b: Local) -> Local {
+        let test = self.builder.emit(Type::Lgl, Op::Compare(op, item, a, b));
+        self.builder.emit(Type::Bool, Op::Truth(test))
+    }
+
+    /// A number argument of a library function as the library reads it: an `I64`, an R integer
+    /// or a double. The call fails on `NA` and `NaN`, and the interpreter answers for them.
+    unsafe fn library_number(&mut self, value: Local) -> Result<Local, Refusal> {
+        match self.builder.ty(value) {
+            Type::I64 => {}
+            // `ToI64` fails on `NA`.
+            Type::Int => {
+                self.builder.emit(Type::I64, Op::ToI64(value));
+            }
+            Type::Dbl => self.fail_if_nan(value),
+            _ => {
+                return Err(Refusal::new(
+                    "a library function of something other than a number",
+                ));
+            }
+        }
+        Ok(value)
+    }
+
+    /// A `Num` function of one number, as the library computes it: a double result that is
+    /// `NaN` and a logarithm of a number that is not positive are errors the interpreter raises.
+    unsafe fn number_function(
+        &mut self,
+        name: &str,
+        arguments: &Arguments,
+    ) -> Result<Local, Refusal> {
+        let [number] = arguments.exactly(1)?[..] else {
+            return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
+        };
+        let number = self.value(number)?;
+        let number = self.library_number(number)?;
+        let integer = self.builder.ty(number) == Type::I64;
+        if !integer && matches!(name, "Num.is_even" | "Num.is_odd") {
+            return Err(Refusal(Cow::Owned(format!("a `{name}` of an R number"))));
+        }
+        match name {
+            "Num.is_zero" | "Num.is_positive" | "Num.is_negative" => {
+                let op = match name {
+                    "Num.is_zero" => Compare::Eq,
+                    "Num.is_positive" => Compare::Gt,
+                    _ => Compare::Lt,
+                };
+                if integer {
+                    let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+                    return Ok(self.test(op, Item::I64, number, zero));
+                }
+                let number = self.as_double(number)?;
+                let zero = self.builder.emit(Type::Dbl, Op::Const(Constant::Dbl(0.0)));
+                Ok(self.test(op, Item::Dbl, number, zero))
+            }
+            "Num.is_even" | "Num.is_odd" => {
+                let two = self.builder.emit(Type::I64, Op::Const(Constant::I64(2)));
+                let remainder = self.builder.emit(
+                    Type::I64,
+                    Op::Arith(Arith::RemTrunc, Item::I64, number, two),
+                );
+                let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+                let op = if name == "Num.is_even" {
+                    Compare::Eq
+                } else {
+                    Compare::Ne
+                };
+                Ok(self.test(op, Item::I64, remainder, zero))
+            }
+            "Num.neg" => match self.builder.ty(number) {
+                Type::I64 => Ok(self
+                    .builder
+                    .emit(Type::I64, Op::Math(Math::Neg, Item::I64, number))),
+                Type::Int => Ok(self
+                    .builder
+                    .emit(Type::Int, Op::Math(Math::Neg, Item::Int, number))),
+                _ => Ok(self
+                    .builder
+                    .emit(Type::Dbl, Op::Math(Math::Neg, Item::Dbl, number))),
+            },
+            "Num.to_i64" => self.to_i64(number),
+            _ if integer => Err(Refusal(Cow::Owned(format!(
+                "a `{name}` of an I64, which is an error"
+            )))),
+            "Num.is_finite" | "Num.is_infinite" => {
+                let number = self.as_double(number)?;
+                let size = self
+                    .builder
+                    .emit(Type::Dbl, Op::Math(Math::Abs, Item::Dbl, number));
+                let infinity = self
+                    .builder
+                    .emit(Type::Dbl, Op::Const(Constant::Dbl(f64::INFINITY)));
+                let op = if name == "Num.is_finite" {
+                    Compare::Lt
+                } else {
+                    Compare::Eq
+                };
+                Ok(self.test(op, Item::Dbl, size, infinity))
+            }
+            "Num.floor" | "Num.ceiling" => {
+                if self.builder.ty(number) == Type::Int {
+                    return Ok(self.builder.emit(Type::I64, Op::ToI64(number)));
+                }
+                let op = if name == "Num.floor" {
+                    Math::Floor
+                } else {
+                    Math::Ceiling
+                };
+                let whole = self
+                    .builder
+                    .emit(Type::Dbl, Op::Math(op, Item::Dbl, number));
+                Ok(self.builder.emit(Type::I64, Op::ToI64(whole)))
+            }
+            _ => {
+                let number = self.as_double(number)?;
+                let op = match name {
+                    "Num.log" => {
+                        let zero = self.builder.emit(Type::Dbl, Op::Const(Constant::Dbl(0.0)));
+                        let not_positive = self
+                            .builder
+                            .emit(Type::Lgl, Op::Compare(Compare::Le, Item::Dbl, number, zero));
+                        self.fail_if(not_positive);
+                        Math::Log
+                    }
+                    "Num.sin" => Math::Sin,
+                    "Num.cos" => Math::Cos,
+                    "Num.tan" => Math::Tan,
+                    "Num.atan" => Math::Atan,
+                    "Num.asin" => Math::Asin,
+                    _ => Math::Acos,
+                };
+                // The math function gives up on a `NaN` result, which the library refuses.
+                Ok(self
+                    .builder
+                    .emit(Type::Dbl, Op::Math(op, Item::Dbl, number)))
+            }
+        }
+    }
+
+    /// A `Num` function of two numbers, as the library computes it. With an `I64` the other
+    /// number converts exactly and the operation is on `I64`s, which an overflow or a zero
+    /// divisor fails; the arithmetic and `abs_diff` of two R integers give an R integer, and
+    /// otherwise both are doubles, whose `NaN` results are errors.
+    unsafe fn number_operation(
+        &mut self,
+        name: &str,
+        arguments: &Arguments,
+    ) -> Result<Local, Refusal> {
+        let [a, b] = arguments.exactly(2)?[..] else {
+            return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
+        };
+        let a = self.value(a)?;
+        let a = self.library_number(a)?;
+        let b = self.value(b)?;
+        let b = self.library_number(b)?;
+        let comparison = match name {
+            "Num.is_lt" => Some(Compare::Lt),
+            "Num.is_gt" => Some(Compare::Gt),
+            "Num.is_lte" => Some(Compare::Le),
+            "Num.is_gte" => Some(Compare::Ge),
+            _ => None,
+        };
+        let arithmetic = match name {
+            "Num.add" => Some(Arith::Add),
+            "Num.sub" => Some(Arith::Sub),
+            "Num.mul" => Some(Arith::Mul),
+            _ => None,
+        };
+        let (first_type, second_type) = (self.builder.ty(a), self.builder.ty(b));
+        if first_type == Type::I64 || second_type == Type::I64 {
+            let a = self.to_i64(a)?;
+            let b = self.to_i64(b)?;
+            if let Some(op) = comparison {
+                return Ok(self.test(op, Item::I64, a, b));
+            }
+            if let Some(op) = arithmetic {
+                return Ok(self.builder.emit(Type::I64, Op::Arith(op, Item::I64, a, b)));
+            }
+            let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+            return match name {
+                "Num.div_trunc" | "Num.rem" => {
+                    let op = if name == "Num.rem" {
+                        Arith::RemTrunc
+                    } else {
+                        Arith::DivTrunc
+                    };
+                    Ok(self.builder.emit(Type::I64, Op::Arith(op, Item::I64, a, b)))
+                }
+                "Num.abs_diff" => {
+                    let high = self
+                        .builder
+                        .emit(Type::I64, Op::Arith(Arith::Max, Item::I64, a, b));
+                    let low = self
+                        .builder
+                        .emit(Type::I64, Op::Arith(Arith::Min, Item::I64, a, b));
+                    Ok(self
+                        .builder
+                        .emit(Type::I64, Op::Arith(Arith::Sub, Item::I64, high, low)))
+                }
+                "Num.is_multiple_of" => {
+                    // Only zero is a multiple of zero, and a remainder by zero is not defined.
+                    let result = self.builder.local(Type::Bool);
+                    let by_zero = self.test(Compare::Eq, Item::I64, b, zero);
+                    let (zero_divisor, divisor, join) = (
+                        self.builder.block(),
+                        self.builder.block(),
+                        self.builder.block(),
+                    );
+                    self.builder.terminate(Terminator::Branch {
+                        condition: by_zero,
+                        then: zero_divisor,
+                        otherwise: divisor,
+                    });
+                    self.builder.switch_to(zero_divisor);
+                    let zero_dividend = self.test(Compare::Eq, Item::I64, a, zero);
+                    self.builder.push(Some(result), Op::Copy(zero_dividend));
+                    self.builder.terminate(Terminator::Jump(join));
+                    self.builder.switch_to(divisor);
+                    let remainder = self
+                        .builder
+                        .emit(Type::I64, Op::Arith(Arith::RemTrunc, Item::I64, a, b));
+                    let whole = self.test(Compare::Eq, Item::I64, remainder, zero);
+                    self.builder.push(Some(result), Op::Copy(whole));
+                    self.builder.terminate(Terminator::Jump(join));
+                    self.builder.switch_to(join);
+                    Ok(result)
+                }
+                _ => Err(Refusal(Cow::Owned(format!(
+                    "a `{name}` of an I64, which is an error"
+                )))),
+            };
+        }
+        if first_type == Type::Int && second_type == Type::Int {
+            // R integer arithmetic gives up on a result outside the integers, which the
+            // library raises as an overflow.
+            if let Some(op) = arithmetic {
+                return Ok(self.builder.emit(Type::Int, Op::Arith(op, Item::Int, a, b)));
+            }
+            if name == "Num.abs_diff" {
+                let difference = self
+                    .builder
+                    .emit(Type::Int, Op::Arith(Arith::Sub, Item::Int, a, b));
+                return Ok(self
+                    .builder
+                    .emit(Type::Int, Op::Math(Math::Abs, Item::Int, difference)));
+            }
+        }
+        let a = self.as_double(a)?;
+        let b = self.as_double(b)?;
+        if let Some(op) = comparison {
+            return Ok(self.test(op, Item::Dbl, a, b));
+        }
+        let value = match name {
+            "Num.div" => {
+                let zero = self.builder.emit(Type::Dbl, Op::Const(Constant::Dbl(0.0)));
+                let by_zero = self
+                    .builder
+                    .emit(Type::Lgl, Op::Compare(Compare::Eq, Item::Dbl, b, zero));
+                self.fail_if(by_zero);
+                self.builder
+                    .emit(Type::Dbl, Op::Arith(Arith::Div, Item::Dbl, a, b))
+            }
+            "Num.abs_diff" => {
+                let difference = self
+                    .builder
+                    .emit(Type::Dbl, Op::Arith(Arith::Sub, Item::Dbl, a, b));
+                self.builder
+                    .emit(Type::Dbl, Op::Math(Math::Abs, Item::Dbl, difference))
+            }
+            _ => match arithmetic {
+                Some(op) => self.builder.emit(Type::Dbl, Op::Arith(op, Item::Dbl, a, b)),
+                None => {
+                    return Err(Refusal(Cow::Owned(format!("a `{name}` of R numbers"))));
+                }
+            },
+        };
+        self.fail_if_nan(value);
+        Ok(value)
+    }
+
+    /// A `Bool` function. The library refuses `NA`, so a logical that is `NA` fails the call.
+    unsafe fn boolean(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
+        if name == "Bool.not" {
+            let [value] = arguments.exactly(1)?[..] else {
+                return Err(Refusal::new("a malformed `Bool.not`"));
+            };
+            let value = self.bool_argument(value)?;
+            let flipped = self.builder.emit(Type::Lgl, Op::Not(value));
+            return Ok(self.builder.emit(Type::Bool, Op::Truth(flipped)));
+        }
+        let [a, b] = arguments.exactly(2)?[..] else {
+            return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
+        };
+        if matches!(name, "Bool.and" | "Bool.or") {
+            // Both arguments are evaluated, as in a call of the library function.
+            let a = self.bool_argument(a)?;
+            let b = self.bool_argument(b)?;
+            let op = if name == "Bool.and" {
+                Op::And(a, b)
+            } else {
+                Op::Or(a, b)
+            };
+            let value = self.builder.emit(Type::Lgl, op);
+            return Ok(self.builder.emit(Type::Bool, Op::Truth(value)));
+        }
+        let op = if name == "Bool.is_eq" {
+            Compare::Eq
+        } else {
+            Compare::Ne
+        };
+        // `identical()` decides, which tells `NaN` from `NA` and both from numbers; the call
+        // fails on them, and the interpreter answers.
+        let a = self.value(a)?;
+        let b = self.value(b)?;
+        let (first_type, second_type) = (self.builder.ty(a), self.builder.ty(b));
+        let flag = |ty: Type| matches!(ty, Type::Lgl | Type::Bool);
+        if first_type == Type::I64 || second_type == Type::I64 {
+            // The interpreter reads a number literal beside an `I64` as an `I64`, so the
+            // literal converts; any other R number is never `identical()` to an `I64`.
+            let literal = |lowerer: &Self, value: Local| {
+                lowerer.builder.ty(value) == Type::I64 || lowerer.constant_double(value).is_some()
+            };
+            if !literal(self, a) || !literal(self, b) {
+                return Err(Refusal::new("a `Bool.is_eq` of an I64 and an R number"));
+            }
+            let a = self.to_i64(a)?;
+            let b = self.to_i64(b)?;
+            return Ok(self.test(op, Item::I64, a, b));
+        }
+        if flag(first_type) && flag(second_type) {
+            let a = self.truth(a);
+            let b = self.truth(b);
+            return Ok(self.test(op, Item::Lgl, a, b));
+        }
+        let item = match (first_type, second_type) {
+            (Type::Str, Type::Str) => Item::Str,
+            (Type::Int, Type::Int) | (Type::Dbl, Type::Dbl) => {
+                // The call fails on `NA` and `NaN`, which `identical()` tells from numbers.
+                self.library_number(a)?;
+                self.library_number(b)?;
+                if first_type == Type::Int {
+                    Item::Int
+                } else {
+                    Item::Dbl
+                }
+            }
+            _ => {
+                return Err(Refusal::new(
+                    "a `Bool.is_eq` of values other than two numbers, strings or Bools",
+                ));
+            }
+        };
+        Ok(self.test(op, item, a, b))
+    }
+
+    /// A `Bool` argument, failing the call on `NA`.
+    unsafe fn bool_argument(&mut self, value: Sexp) -> Result<Local, Refusal> {
+        let value = self.value(value)?;
+        match self.builder.ty(value) {
+            Type::Lgl | Type::Bool => Ok(self.truth(value)),
+            _ => Err(Refusal::new(
+                "a `Bool` function of something other than a Bool",
+            )),
+        }
+    }
+
+    /// A logical as a `Bool`, failing the call on `NA`.
+    fn truth(&mut self, value: Local) -> Local {
+        match self.builder.ty(value) {
+            Type::Bool => value,
+            _ => self.builder.emit(Type::Bool, Op::Truth(value)),
+        }
     }
 
     /// `List.keep_oks(list, f)` or `List.keep_errs(list, f)`: the payloads of the results `f`
