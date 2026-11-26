@@ -6510,7 +6510,7 @@ fn finish_completions(
                     || !item.source.is_spelled_in_project()
             })
             .filter(|(_, item)| seen.insert(item.label.as_str()))
-            .filter_map(|(index, item)| {
+            .map(|(index, item)| {
                 let name = item.label.trim_matches('`');
                 let calls = if called { usage.call_count(name) } else { 0 };
                 // A project function named `generic.class` beside a `generic` is an S3 method,
@@ -6520,13 +6520,13 @@ fn finish_completions(
                     && name
                         .match_indices('.')
                         .any(|(dot, _)| labels.contains(&name[..dot]));
-                Some((
+                (
                     search_match(&item.label, query),
                     item.source.group(called),
                     false,
                     (method, Reverse(calls), Reverse(usage.count(name))),
                     index,
-                ))
+                )
             })
             .collect()
     };

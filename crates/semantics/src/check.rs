@@ -1707,8 +1707,7 @@ fn close_scheme<'db>(
     let mut abstracted = FxHashSet::default();
     collect_parameter_vars(db, table, scheme.body, &mut abstracted);
     let mut free_parameters = FxHashSet::default();
-    if declared
-        && let TyKind::Function(function) = table.shallow_resolve(db, scheme.body).kind(db)
+    if declared && let TyKind::Function(function) = table.shallow_resolve(db, scheme.body).kind(db)
     {
         let parameters = function
             .positional
