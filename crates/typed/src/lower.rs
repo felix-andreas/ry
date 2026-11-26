@@ -295,6 +295,7 @@ unsafe fn lower_calling(
         guess,
         declared,
         tails: SmallVec::new(),
+        body,
         callees,
         scopes: vec![Scope {
             names: FxHashMap::default(),
@@ -453,9 +454,9 @@ struct Inlined {
 /// whose types disagree.
 #[derive(Clone, Copy)]
 enum Expected {
-    /// The program drops the value, as a statement's, so its arms may disagree. A name they set
-    /// must still join after them.
-    Dropped,
+    /// The program drops the value of this `match` call, as a statement's, so its arms may
+    /// disagree. A name they set that code outside the call reads must still join after them.
+    Dropped(Sexp),
     /// Nothing says what type the value has.
     Free,
     /// The function's declared result: a number converts toward it as the function's exit does.
@@ -492,6 +493,8 @@ struct Lowering<'c> {
     declared: Option<Type>,
     /// The `if` and `match` calls whose value is the function's result.
     tails: SmallVec<[Sexp; 2]>,
+    /// The function's body.
+    body: Sexp,
     callees: &'c mut dyn Callees,
     /// The function's own names, then one scope per inlined function.
     scopes: Vec<Scope>,
@@ -739,12 +742,14 @@ impl Lowering<'_> {
         }
     }
 
-    /// Whether joining `ends` leaves a name some end created unbound, because its ends give it
-    /// types that do not join.
-    fn drops_a_name(&self, ends: &[(BlockId, Created)]) -> bool {
-        created_symbols(ends)
-            .into_iter()
-            .any(|symbol| self.name_join(&created_in(ends, symbol)).is_none())
+    /// Whether joining `ends`, the arms of the `match` call `call`, leaves a name some end
+    /// created unbound, because its ends give it types that do not join, where code outside the
+    /// call reads it. Inside an inlined function every such name counts.
+    unsafe fn drops_a_name(&self, ends: &[(BlockId, Created)], call: Sexp) -> bool {
+        created_symbols(ends).into_iter().any(|symbol| {
+            self.name_join(&created_in(ends, symbol)).is_none()
+                && (!self.inlined.is_empty() || mentions_outside(self.body, call, symbol))
+        })
     }
 
     /// How a name joins after branches, given the variable each end left it in and whether it
@@ -5303,7 +5308,7 @@ impl Lowering<'_> {
             .blocks
             .get(start.0 as usize)
             .map_or(0, |block| block.insts.len());
-        let before = (matches!(expected, Expected::Free | Expected::Dropped) && !exhaustive)
+        let before = (matches!(expected, Expected::Free | Expected::Dropped(_)) && !exhaustive)
             .then(|| self.checkpoint());
         let shape_of = self.builder.emit(Type::Int, Op::ShapeOf(value));
         let mut ends: SmallVec<[(BlockId, Local); 4]> = SmallVec::new();
@@ -5359,7 +5364,7 @@ impl Lowering<'_> {
             };
             let created = self.leave_control(saved);
             if let Some(completed) = completed? {
-                if !matches!(expected, Expected::Dropped) {
+                if !matches!(expected, Expected::Dropped(_)) {
                     self.usable(completed)?;
                 }
                 ends.push((self.builder.current, completed));
@@ -5376,7 +5381,10 @@ impl Lowering<'_> {
                 .map(|&(_, completed)| self.builder.ty(completed))
                 .collect();
             // A dropped value's arms may disagree, but a name they set must still join.
-            let restarts = !matches!(expected, Expected::Dropped) || self.drops_a_name(&names);
+            let restarts = match expected {
+                Expected::Dropped(call) => self.drops_a_name(&names, call),
+                _ => true,
+            };
             if restarts
                 && let Some(target) = stray_target(&completed_cases, &types)
                 && self.restart(before, start, start_insts)
@@ -5456,7 +5464,7 @@ impl Lowering<'_> {
             Expected::Stray(target) => {
                 return joined(target, self.builder.ty(value)).map(|_| value);
             }
-            Expected::Free | Expected::Dropped => return Some(value),
+            Expected::Free | Expected::Dropped(_) => return Some(value),
         };
         let value = match (target, self.builder.ty(value)) {
             (Type::I64, Type::Int | Type::Dbl) => self.to_i64(value).ok()?,
@@ -5563,7 +5571,7 @@ impl Lowering<'_> {
         let tail = self.inlined.is_empty() && self.tails.contains(&call);
         let expected = match self.declared {
             Some(declared) if tail => Expected::Declared(declared),
-            _ if dropped => Expected::Dropped,
+            _ if dropped => Expected::Dropped(call),
             _ => Expected::Free,
         };
         self.switch_shapes(
@@ -7200,6 +7208,23 @@ pub unsafe fn tail_invisible(expression: Sexp) -> bool {
                     .iter()
                     .skip(1)
                     .any(|&(_, branch)| tail_invisible(branch))
+        }
+        _ => false,
+    }
+}
+
+/// Whether `expression` mentions `symbol` anywhere but inside `skipped`.
+unsafe fn mentions_outside(expression: Sexp, skipped: Sexp, symbol: Sexp) -> bool {
+    if expression == skipped {
+        return false;
+    }
+    match expression.kind() {
+        SexpType::Symbol => expression == symbol,
+        SexpType::Language => {
+            mentions_outside(expression.car(), skipped, symbol)
+                || rvalues::pairlist_items(expression.cdr())
+                    .into_iter()
+                    .any(|(_, item)| mentions_outside(item, skipped, symbol))
         }
         _ => false,
     }
