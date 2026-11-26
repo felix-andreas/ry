@@ -1,6 +1,8 @@
-# blocked: parsed
-parsed <- function(first: Str) -> I64 {
-  numbers <- List.map_try([first, "2", "3"], Str.to_i64)
-  Result.with_default(Result.map(numbers, List.sum), 0)
+# blocked: checked
+checked <- function(first: F64) -> Bool {
+  positive <- List.for_each_try([first, 2, 3], function(x: F64) -> Result<NULL, :Negative> {
+    if (x < 0) :Err(:Negative) else :Ok(NULL)
+  })
+  Result.is_ok(positive)
 }
-print(parsed("1"))
+print(checked(1))

@@ -271,17 +271,19 @@ NULL
 
 #---- standard_library_function_without_native_code
 #~~~~ script.R
-# blocked: parsed
-parsed <- function(first: Str) -> I64 {
-  numbers <- List.map_try([first, "2", "3"], Str.to_i64)
-  Result.with_default(Result.map(numbers, List.sum), 0)
+# blocked: checked
+checked <- function(first: F64) -> Bool {
+  positive <- List.for_each_try([first, 2, 3], function(x: F64) -> Result<NULL, :Negative> {
+    if (x < 0) :Err(:Negative) else :Ok(NULL)
+  })
+  Result.is_ok(positive)
 }
-print(parsed("1"))
+print(checked(1))
 #++++
 == script.R
-parsed: fn(first: Str) -> I64
-I64
-71..83 warning[interpreted] this function runs in the interpreter, because `List.map_try` is not compiled natively yet. Write the step with a loop or another standard library function
+checked: fn(first: F64) -> Bool
+Bool
+75..92 warning[interpreted] this function runs in the interpreter, because `List.for_each_try` is not compiled natively yet. Write the step with a loop or another standard library function
 
 #---- standard_library_function_passed_by_name
 #~~~~ script.R

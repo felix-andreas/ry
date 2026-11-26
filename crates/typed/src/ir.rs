@@ -541,6 +541,12 @@ pub enum Op {
     /// `Str.drop_prefix` (`true`) or `Str.drop_suffix`: the scalar without the other string at
     /// that end, where it is there.
     DropAffix(bool, Local, Local),
+    /// The byte offset of the first (`false`) or the last (`true`) place the other string
+    /// occurs in the scalar, as an `I64`, or -1 where it does not occur.
+    Find(bool, Local, Local),
+    /// The bytes of a string from byte offset `start` to `end`, which lie on character
+    /// boundaries inside it, as a string of their own.
+    Substring(Local, Local, Local),
     /// A number as a string: `as.character` and `paste`.
     Format(Local),
     /// `sprintf("%.Nf", x)`.
@@ -718,6 +724,7 @@ impl Op {
             | StrTest(_, a, b)
             | VectorAffix(_, a, b)
             | DropAffix(_, a, b)
+            | Find(_, a, b)
             | RepeatStr(a, b)
             | Split(a, b)
             | SplitBounds {
@@ -735,6 +742,7 @@ impl Op {
             | DictInsert(a, b, c)
             | Swap(a, b, c)
             | Slice(a, b, c)
+            | Substring(a, b, c)
             | ReplaceEach(a, b, c) => SmallVec::from_slice(&[*a, *b, *c]),
             Piece {
                 string,
@@ -806,6 +814,8 @@ impl Op {
             | VectorText(..)
             | VectorAffix(..)
             | DropAffix(..)
+            | Find(..)
+            | Substring(..)
             | RoundDigits(..)
             | Same(..)
             | Step(..)

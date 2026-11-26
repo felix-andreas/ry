@@ -262,6 +262,7 @@ All => values::ry_all,
     StrDropAffix => values::ry_str_drop_affix,
     StrEndsWith => values::ry_str_ends_with,
     StrEqual => values::ry_str_equal,
+    StrFind => values::ry_str_find,
     StrFree => values::ry_str_free,
     StrNchar => values::ry_str_nchar,
     StrPiece => values::ry_str_piece,
@@ -1918,6 +1919,26 @@ impl Emitter<'_> {
                     &[I64; 6],
                     &[I64, I64],
                     &[x[0], x[1], owned, affix[0], affix[1], prefix],
+                ))
+            }
+            Op::Find(last, a, pattern) => {
+                let (x, pattern) = (self.get(*a)?, self.get(*pattern)?);
+                let last = self.iconst(i64::from(*last));
+                SmallVec::from_slice(&self.call(
+                    Helper::StrFind,
+                    &[I64; 5],
+                    &[I64],
+                    &[x[0], x[1], pattern[0], pattern[1], last],
+                ))
+            }
+            Op::Substring(a, start, end) => {
+                let x = self.get(*a)?;
+                let (start, end) = (self.one(*start)?, self.one(*end)?);
+                SmallVec::from_slice(&self.call(
+                    Helper::StrPiece,
+                    &[I64; 4],
+                    &[I64, I64],
+                    &[x[0], x[1], start, end],
                 ))
             }
             Op::VectorAffix(starts, a, affix) => {
