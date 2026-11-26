@@ -1571,6 +1571,10 @@ ends <- people |> DataFrame.select(
   empty = Expr.str_slice(Expr.col("city"), 1L, 0L)
 )
 #++++
+people: DataFrame{city: character[]}
+ends: Unknown
+171..174 error[type-mismatch] `Expr.str_slice` takes a `length` of 0 or more characters; count from the end with a negative `start` instead
+229..231 error[type-mismatch] `Expr.str_slice` takes a `length` of 0 or more characters; count from the end with a negative `start` instead
 
 #---- date_functions_give_parts_shifted_dates_and_text
 events <- DataFrame(day = as.Date(c("2024-01-31", NA)), at = as.POSIXct("2024-01-01 09:00:00", tz = "UTC") + c(0, 60))

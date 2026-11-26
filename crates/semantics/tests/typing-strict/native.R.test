@@ -1208,7 +1208,7 @@ trusted <- function(n: I64) n
 #++++
 == script.R
 untyped_rest: fn(xs: List<F64>, ...: Any) -> F64
-other_names: fn(x: I64, [y]: Unknown) -> I64
+other_names: <T> fn(x: I64, [y]: T) -> I64
 alias_with_types: Pick
 trusted: fn(n: I64) -> I64
 44..56 warning[unused] `untyped_rest` is assigned but never used
