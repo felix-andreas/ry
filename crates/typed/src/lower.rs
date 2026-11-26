@@ -14,8 +14,8 @@ use {
     crate::{
         Refusal,
         ir::{
-            Arith, Bits, BlockId, Builder, Compare, Constant, Function, Inst, Item, Local, Math,
-            Op, Reduce, Terminator, Text, Type,
+            Arith, BitCount, Bits, BlockId, Builder, Compare, Constant, Function, Inst, Item,
+            Local, Math, Op, Overflow, Reduce, StrTest, Terminator, Text, Type,
         },
         shapes, values,
     },
@@ -3262,6 +3262,24 @@ impl Lowering<'_> {
                 let ones = self.builder.emit(Type::I64, Op::Const(Constant::I64(-1)));
                 Ok(self.builder.emit(Type::I64, Op::Bits(Bits::Xor, a, ones)))
             }
+            "Num.count_one_bits"
+            | "Num.count_leading_zero_bits"
+            | "Num.count_trailing_zero_bits" => {
+                let [a] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal::new("a malformed bit count"));
+                };
+                let a = self.value(a)?;
+                // On R numbers the library counts 32 bits and gives an R integer.
+                if self.builder.ty(a) != Type::I64 {
+                    return Err(Refusal::new("a bit count of an R number"));
+                }
+                let count = match name {
+                    "Num.count_one_bits" => BitCount::Ones,
+                    "Num.count_leading_zero_bits" => BitCount::LeadingZeros,
+                    _ => BitCount::TrailingZeros,
+                };
+                Ok(self.builder.emit(Type::I64, Op::CountBits(count, a)))
+            }
             "Num.compare" => {
                 let [a, b] = arguments.exactly(2)?[..] else {
                     return Err(Refusal::new("a malformed `Num.compare`"));
@@ -3375,6 +3393,9 @@ impl Lowering<'_> {
             "Num.is_lt" | "Num.is_gt" | "Num.is_lte" | "Num.is_gte" | "Num.add" | "Num.sub"
             | "Num.mul" | "Num.div" | "Num.div_trunc" | "Num.rem" | "Num.abs_diff"
             | "Num.is_multiple_of" => self.number_operation(name, &arguments),
+            "Num.add_wrap" | "Num.sub_wrap" | "Num.mul_wrap" | "Num.add_saturated"
+            | "Num.sub_saturated" | "Num.mul_saturated" | "Num.add_checked" | "Num.sub_checked"
+            | "Num.mul_checked" | "Num.div_ceil" => self.overflowing(name, &arguments),
             "Bool.and" | "Bool.or" | "Bool.not" | "Bool.is_eq" | "Bool.is_not_eq" => {
                 self.boolean(name, &arguments)
             }
@@ -3394,7 +3415,18 @@ impl Lowering<'_> {
                 let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
                 Ok(self.test(Compare::Eq, Item::I64, bytes, zero))
             }
-            "List.count_if" | "List.walk" => self.walk(name, &arguments),
+            "List.count_if"
+            | "List.walk"
+            | "List.walk_backwards"
+            | "List.walk_until"
+            | "List.walk_backwards_until"
+            | "List.walk_with_index"
+            | "List.walk_with_index_until" => self.walk(name, &arguments),
+            "List.any" | "List.all" => self.any_all(name == "List.all", &arguments),
+            "List.product" => self.product(&arguments),
+            "List.single" | "List.prepend" => self.single_or_prepend(name, &arguments),
+            "List.set" => self.list_set(&arguments),
+            "List.drop_at" => self.drop_at(&arguments),
             "length" => {
                 let [a] = arguments.exactly(1)?[..] else {
                     return Err(Refusal::new("a malformed `length`"));
@@ -3785,7 +3817,14 @@ impl Lowering<'_> {
                 }
                 let starts = name == "startsWith";
                 match self.builder.ty(a) {
-                    Type::Str => Ok(self.builder.emit(Type::Lgl, Op::Affix(starts, a, affix))),
+                    Type::Str => {
+                        let test = if starts {
+                            StrTest::StartsWith
+                        } else {
+                            StrTest::EndsWith
+                        };
+                        Ok(self.builder.emit(Type::Lgl, Op::StrTest(test, a, affix)))
+                    }
                     Type::Vector {
                         item: Item::Str, ..
                     } => Ok(self
@@ -3918,8 +3957,11 @@ impl Lowering<'_> {
             }
             ".ry_array" => self.list_literal(&arguments, None, None),
             "List.append" => self.append(&arguments),
-            "List.keep_if" => self.keep_if(&arguments),
-            "List.find_first" | "List.find_first_index" => self.find_first(name, &arguments),
+            "List.keep_if" | "List.drop_if" => self.keep_if(name, &arguments),
+            "List.find_first"
+            | "List.find_first_index"
+            | "List.find_last"
+            | "List.find_last_index" => self.find_first(name, &arguments),
             "List.contains" => self.contains(&arguments),
             "List.reverse" => self.reverse(&arguments),
             "List.max" | "List.min" => self.list_extreme(name, &arguments),
@@ -4000,6 +4042,8 @@ impl Lowering<'_> {
                 self.field(object, shape, index)
             }
             "Result.with_default" => self.with_default(&arguments),
+            "Result.map" | "Result.map_err" | "Result.map_both" | "Result.and_then"
+            | "Result.on_err" => self.result_map(name, &arguments),
             "List.keep_oks" | "List.keep_errs" => {
                 self.keep_results(name == "List.keep_oks", &arguments)
             }
@@ -4049,6 +4093,46 @@ impl Lowering<'_> {
                 })
             }
             "Dict.update" => self.dict_update(&arguments),
+            "Dict.is_empty" => {
+                let [dict] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal::new("a malformed `Dict.is_empty`"));
+                };
+                let dict = self.value(dict)?;
+                if !matches!(self.builder.ty(dict), Type::Dict { .. }) {
+                    return Err(Refusal::new(
+                        "a `Dict.is_empty` of something other than a dictionary",
+                    ));
+                }
+                let count = self.builder.emit(Type::I64, Op::DictLen(dict));
+                let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+                Ok(self.test(Compare::Eq, Item::I64, count, zero))
+            }
+            "Dict.single" => {
+                let [key, value] = arguments.exactly(2)?[..] else {
+                    return Err(Refusal::new("a malformed `Dict.single`"));
+                };
+                let key = self.value(key)?;
+                let value = self.value(value)?;
+                let item = |ty: Type| match ty {
+                    Type::Str => Some(Item::Str),
+                    Type::I64 => Some(Item::I64),
+                    Type::Dbl => Some(Item::Dbl),
+                    _ => None,
+                };
+                let (Some(key_item @ (Item::Str | Item::I64)), Some(value_item)) =
+                    (item(self.builder.ty(key)), item(self.builder.ty(value)))
+                else {
+                    return Err(Refusal::new(
+                        "a `Dict.single` of keys or values that are not scalars",
+                    ));
+                };
+                let ty = Type::Dict {
+                    key: key_item,
+                    value: value_item,
+                };
+                let empty = self.builder.emit(ty, Op::DictNew);
+                Ok(self.builder.emit(ty, Op::DictInsert(empty, key, value)))
+            }
             "Str.to_i64" | "Str.to_f64" => self.parse_number(name == "Str.to_i64", &arguments),
             ".ry_text" | "Num.to_str" => {
                 let [a] = arguments.exactly(1)?[..] else {
@@ -4098,7 +4182,10 @@ impl Lowering<'_> {
             "Str.count_utf8_bytes"
             | "Str.to_utf8"
             | "Str.with_ascii_uppercased"
-            | "Str.with_ascii_lowercased" => {
+            | "Str.with_ascii_lowercased"
+            | "Str.trim"
+            | "Str.trim_start"
+            | "Str.trim_end" => {
                 let [a] = arguments.exactly(1)?[..] else {
                     return Err(Refusal::new("a malformed `Str` function"));
                 };
@@ -4120,7 +4207,12 @@ impl Lowering<'_> {
                     "Str.with_ascii_uppercased" => {
                         self.builder.emit(Type::Str, Op::Text(Text::AsciiUpper, a))
                     }
-                    _ => self.builder.emit(Type::Str, Op::Text(Text::AsciiLower, a)),
+                    "Str.with_ascii_lowercased" => {
+                        self.builder.emit(Type::Str, Op::Text(Text::AsciiLower, a))
+                    }
+                    "Str.trim" => self.builder.emit(Type::Str, Op::Text(Text::Trim, a)),
+                    "Str.trim_start" => self.builder.emit(Type::Str, Op::Text(Text::TrimStart, a)),
+                    _ => self.builder.emit(Type::Str, Op::Text(Text::TrimEnd, a)),
                 })
             }
             "Str.from_utf8_lossy" => {
@@ -4139,7 +4231,15 @@ impl Lowering<'_> {
                 }
                 Ok(self.builder.emit(Type::Str, Op::FromUtf8Lossy(bytes)))
             }
-            "Str.starts_with" | "Str.ends_with" | "Str.split_on" | "Str.join_with" => {
+            "Str.starts_with"
+            | "Str.ends_with"
+            | "Str.contains"
+            | "Str.caseless_ascii_equals"
+            | "Str.drop_prefix"
+            | "Str.drop_suffix"
+            | "Str.with_prefix"
+            | "Str.split_on"
+            | "Str.join_with" => {
                 let [a, b] = arguments.exactly(2)?[..] else {
                     return Err(Refusal::new("a malformed `Str` function"));
                 };
@@ -4155,9 +4255,30 @@ impl Lowering<'_> {
                     array: true,
                 };
                 match (name, self.builder.ty(a)) {
-                    ("Str.starts_with" | "Str.ends_with", Type::Str) => Ok(self
+                    (
+                        "Str.starts_with"
+                        | "Str.ends_with"
+                        | "Str.contains"
+                        | "Str.caseless_ascii_equals",
+                        Type::Str,
+                    ) => {
+                        let test = match name {
+                            "Str.starts_with" => StrTest::StartsWith,
+                            "Str.ends_with" => StrTest::EndsWith,
+                            "Str.contains" => StrTest::Contains,
+                            _ => StrTest::CaselessAsciiEquals,
+                        };
+                        Ok(self.builder.emit(Type::Lgl, Op::StrTest(test, a, b)))
+                    }
+                    ("Str.drop_prefix" | "Str.drop_suffix", Type::Str) => Ok(self
                         .builder
-                        .emit(Type::Lgl, Op::Affix(name == "Str.starts_with", a, b))),
+                        .emit(Type::Str, Op::DropAffix(name == "Str.drop_prefix", a, b))),
+                    ("Str.with_prefix", Type::Str) => {
+                        let empty = self.string("");
+                        Ok(self
+                            .builder
+                            .emit(Type::Str, Op::Concat(SmallVec::from_slice(&[b, a]), empty)))
+                    }
                     ("Str.split_on", Type::Str) => Ok(self.builder.emit(strings, Op::Split(a, b))),
                     ("Str.join_with", ty) if ty == strings => {
                         Ok(self.builder.emit(Type::Str, Op::Join(a, b)))
@@ -4570,6 +4691,9 @@ impl Lowering<'_> {
     /// state each item's step leaves, in a loop over the items with the function inlined.
     unsafe fn walk(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
         let counting = name == "List.count_if";
+        let backwards = name.starts_with("List.walk_backwards");
+        let with_index = name.starts_with("List.walk_with_index");
+        let until = name.ends_with("_until");
         let (list, state, function) =
             match (counting, &arguments.exactly(arguments.items.len())?[..]) {
                 (true, &[list, predicate]) => (list, None, predicate),
@@ -4577,7 +4701,7 @@ impl Lowering<'_> {
                 _ => return Err(Refusal::new("a walk of an unsupported form")),
             };
         // A walk over `List.range(from, to)` counts from `from` to `to` and builds no list.
-        let range = if self.is_library_call(list, "List.range", 2)? {
+        let range = if !backwards && !with_index && self.is_library_call(list, "List.range", 2)? {
             self.counted_range(list)?
         } else {
             None
@@ -4661,22 +4785,24 @@ impl Lowering<'_> {
         };
         let state_ty = self.builder.ty(state);
         let total = self.builder.emit(state_ty, Op::Copy(state));
-        let (positions, element) = match (range, list) {
+        let (positions, element, position) = match (range, list) {
             (Some((start, end, _)), _) => {
                 let positions = self.count_up(start, end);
                 let element = self.builder.emit(Type::I64, Op::Copy(positions.counter));
-                (positions, element)
+                (positions, element, positions.counter)
             }
             (None, Some(list)) => {
                 let item = ty
                     .items()
                     .ok_or(Refusal::new("a walk over something that is not a list"))?;
                 let held = self.builder.emit(ty, Op::Copy(list));
+                let past_end = backwards.then(|| self.past_end(held));
                 let positions = self.positions(held);
+                let position = self.position(past_end, positions.counter);
                 let element = self
                     .builder
-                    .emit(Type::of_item(item), Op::ItemAt(held, positions.counter));
-                (positions, element)
+                    .emit(Type::of_item(item), Op::ItemAt(held, position));
+                (positions, element, position)
             }
             (None, None) => return Err(Refusal::new("a walk over nothing")),
         };
@@ -4705,16 +4831,292 @@ impl Lowering<'_> {
             self.builder.terminate(Terminator::Jump(after));
             self.builder.switch_to(after);
         } else {
-            let step = self
-                .apply(callable, &[total, element])?
-                .ok_or(Refusal::new("a walk step that never completes"))?;
-            if self.builder.ty(step) != state_ty {
-                return Err(Refusal::new("a walk whose state changes type"));
+            let mut inputs: SmallVec<[Local; 3]> = SmallVec::from_slice(&[total, element]);
+            if with_index {
+                inputs.push(position);
             }
-            self.builder.push(Some(total), Op::Copy(step));
+            let step = self
+                .apply(callable, &inputs)?
+                .ok_or(Refusal::new("a walk step that never completes"))?;
+            if until {
+                self.walk_step(step, total, state_ty, positions.exit)?;
+            } else {
+                if self.builder.ty(step) != state_ty {
+                    return Err(Refusal::new("a walk whose state changes type"));
+                }
+                self.builder.push(Some(total), Op::Copy(step));
+            }
         }
         self.next_position(positions);
         Ok(total)
+    }
+
+    /// A `walk_until` step: `:Continue(state)` sets the walk's `total` and goes on, and
+    /// `:Break(state)` sets it and leaves the loop for `exit`.
+    unsafe fn walk_step(
+        &mut self,
+        step: Local,
+        total: Local,
+        state_ty: Type,
+        exit: BlockId,
+    ) -> Result<(), Refusal> {
+        let (go_on, stop) = (tag_layout("Continue", 1)?, tag_layout("Break", 1)?);
+        let (candidates, exhaustive) =
+            self.shapes_of(self.builder.ty(step), &[go_on, stop], &[])?;
+        // A step that never continues leaves the loop at the first item, and the block after
+        // the switch is then unreachable.
+        self.switch_shapes(
+            step,
+            &candidates,
+            exhaustive,
+            Expected::Free,
+            &mut |lowering, shape| {
+                let Some(shape) = shape.filter(|&shape| {
+                    let layout = shapes::shape(shape).layout;
+                    layout == go_on || layout == stop
+                }) else {
+                    lowering.builder.terminate(Terminator::Fail);
+                    let unreachable = lowering.builder.block();
+                    lowering.builder.switch_to(unreachable);
+                    return Ok(None);
+                };
+                let next = lowering.field(step, shape, 0)?;
+                if lowering.builder.ty(next) != state_ty {
+                    return Err(Refusal::new("a walk whose state changes type"));
+                }
+                lowering.builder.push(Some(total), Op::Copy(next));
+                if shapes::shape(shape).layout == stop {
+                    lowering.builder.terminate(Terminator::Jump(exit));
+                    let unreachable = lowering.builder.block();
+                    lowering.builder.switch_to(unreachable);
+                    return Ok(None);
+                }
+                Ok(Some(next))
+            },
+        )?;
+        Ok(())
+    }
+
+    /// One past the last position of `list`, from which a loop counting up from 1 counts the
+    /// positions down.
+    fn past_end(&mut self, list: Local) -> Local {
+        let count = self.builder.emit(Type::I64, Op::Length(list));
+        let one = self.builder.emit(Type::I64, Op::Const(Constant::I64(1)));
+        self.builder
+            .emit(Type::I64, Op::Arith(Arith::Add, Item::I64, count, one))
+    }
+
+    /// The position a loop's `counter` stands for: itself, or counted from the end when the
+    /// loop runs backwards from `past_end`.
+    fn position(&mut self, past_end: Option<Local>, counter: Local) -> Local {
+        match past_end {
+            Some(past_end) => self.builder.emit(
+                Type::I64,
+                Op::Arith(Arith::Sub, Item::I64, past_end, counter),
+            ),
+            None => counter,
+        }
+    }
+
+    /// `List.any(list, predicate)`, or `List.all`, in a loop that leaves at the first item that
+    /// decides the answer.
+    unsafe fn any_all(&mut self, all: bool, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [list, predicate] = arguments.exactly(2)?[..] else {
+            return Err(Refusal::new("a malformed `List.any`"));
+        };
+        let (list, ty) = self.known_list(list, if all { "List.all" } else { "List.any" })?;
+        let item = ty.items().ok_or(Refusal::new(
+            "a `List.any` of something other than a ry list",
+        ))?;
+        let callable = self.function_argument(predicate)?;
+        let result = self.builder.local(Type::Lgl);
+        let start = self
+            .builder
+            .emit(Type::Lgl, Op::Const(Constant::Lgl(i32::from(all))));
+        self.builder.push(Some(result), Op::Copy(start));
+        let held = self.builder.emit(ty, Op::Copy(list));
+        let positions = self.positions(held);
+        let element = self
+            .builder
+            .emit(Type::of_item(item), Op::ItemAt(held, positions.counter));
+        let answer = self.predicate(callable, element)?;
+        let (decided, next) = (self.builder.block(), self.builder.block());
+        let (then, otherwise) = if all {
+            (next, decided)
+        } else {
+            (decided, next)
+        };
+        self.builder.terminate(Terminator::Branch {
+            condition: answer,
+            then,
+            otherwise,
+        });
+        self.builder.switch_to(decided);
+        let flipped = self
+            .builder
+            .emit(Type::Lgl, Op::Const(Constant::Lgl(i32::from(!all))));
+        self.builder.push(Some(result), Op::Copy(flipped));
+        self.builder.terminate(Terminator::Jump(positions.exit));
+        self.builder.switch_to(next);
+        self.next_position(positions);
+        Ok(self.builder.emit(Type::Bool, Op::Truth(result)))
+    }
+
+    /// `List.product(list)` of `I64`s or `F64`s, multiplied in order from 1. An `I64` overflow
+    /// and a `NaN` product give up, and the interpreter raises the error.
+    unsafe fn product(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [list] = arguments.exactly(1)?[..] else {
+            return Err(Refusal::new("a malformed `List.product`"));
+        };
+        let (list, ty) = self.known_list(list, "List.product")?;
+        let (item, one) = match ty.items() {
+            Some(Item::I64) => (Item::I64, Constant::I64(1)),
+            Some(Item::Dbl) => (Item::Dbl, Constant::Dbl(1.0)),
+            _ => {
+                return Err(Refusal::new(
+                    "a `List.product` of something other than numbers",
+                ));
+            }
+        };
+        let item_ty = Type::of_item(item);
+        let start = self.builder.emit(item_ty, Op::Const(one));
+        let total = self.builder.emit(item_ty, Op::Copy(start));
+        let held = self.builder.emit(ty, Op::Copy(list));
+        let positions = self.positions(held);
+        let element = self
+            .builder
+            .emit(item_ty, Op::ItemAt(held, positions.counter));
+        let next = self
+            .builder
+            .emit(item_ty, Op::Arith(Arith::Mul, item, total, element));
+        self.builder.push(Some(total), Op::Copy(next));
+        self.next_position(positions);
+        if item == Item::Dbl {
+            self.fail_if_nan(total);
+        }
+        Ok(total)
+    }
+
+    /// `List.single(value)`, or `List.prepend(list, value)` as that list extended by the rest.
+    unsafe fn single_or_prepend(
+        &mut self,
+        name: &str,
+        arguments: &Arguments,
+    ) -> Result<Local, Refusal> {
+        let (list, value) = match arguments.exactly(if name == "List.single" { 1 } else { 2 })?[..]
+        {
+            [value] => (None, value),
+            [list, value] => (Some(list), value),
+            _ => return Err(Refusal(Cow::Owned(format!("a malformed `{name}`")))),
+        };
+        let list = list.map(|list| self.known_list(list, name)).transpose()?;
+        let value = self.value(value)?;
+        self.usable(value)?;
+        let item = self
+            .builder
+            .ty(value)
+            .held_item()
+            .ok_or(Refusal::new("a list of something a list cannot hold"))?;
+        if let Some((_, ty)) = list
+            && ty.items() != Some(item)
+        {
+            return Err(Refusal::new("a `List.prepend` of an item of another type"));
+        }
+        let empty = self.empty_list(item);
+        let single = self
+            .builder
+            .emit(Type::Vector { item, array: true }, Op::Push(empty, value));
+        Ok(match list {
+            Some((list, ty)) => self.builder.emit(ty, Op::Extend(single, list)),
+            None => single,
+        })
+    }
+
+    /// `List.set(list, index, value)`. An index outside the list leaves it unchanged.
+    unsafe fn list_set(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [list, index, value] = arguments.exactly(3)?[..] else {
+            return Err(Refusal::new("a malformed `List.set`"));
+        };
+        let (list, ty) = self.known_list(list, "List.set")?;
+        let index = self.value(index)?;
+        let index = self.to_i64(index)?;
+        let value = self.value(value)?;
+        self.usable(value)?;
+        let item = ty.items().ok_or(Refusal::new(
+            "a `List.set` of something other than a ry list",
+        ))?;
+        if self.builder.ty(value).held_item() != Some(item) {
+            return Err(Refusal::new("a `List.set` of an item of another type"));
+        }
+        let inside = self.within_list(list, index);
+        let result = self.builder.local(ty);
+        let (set, keep, join) = (
+            self.builder.block(),
+            self.builder.block(),
+            self.builder.block(),
+        );
+        self.builder.terminate(Terminator::Branch {
+            condition: inside,
+            then: set,
+            otherwise: keep,
+        });
+        self.builder.switch_to(set);
+        let updated = self.builder.emit(ty, Op::Set(list, index, value));
+        self.builder.push(Some(result), Op::Copy(updated));
+        self.builder.terminate(Terminator::Jump(join));
+        self.builder.switch_to(keep);
+        self.builder.push(Some(result), Op::Copy(list));
+        self.builder.terminate(Terminator::Jump(join));
+        self.builder.switch_to(join);
+        Ok(result)
+    }
+
+    /// Whether the 1-based `I64` `index` is a position of `list`.
+    fn within_list(&mut self, list: Local, index: Local) -> Local {
+        let one = self.builder.emit(Type::I64, Op::Const(Constant::I64(1)));
+        let count = self.builder.emit(Type::I64, Op::Length(list));
+        let above = self
+            .builder
+            .emit(Type::Lgl, Op::Compare(Compare::Ge, Item::I64, index, one));
+        let below = self
+            .builder
+            .emit(Type::Lgl, Op::Compare(Compare::Le, Item::I64, index, count));
+        let both = self.builder.emit(Type::Lgl, Op::And(above, below));
+        self.builder.emit(Type::Bool, Op::Truth(both))
+    }
+
+    /// `List.drop_at(list, index)`: the other items, pushed in order onto a fresh list. An index
+    /// outside the list keeps them all.
+    unsafe fn drop_at(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [list, index] = arguments.exactly(2)?[..] else {
+            return Err(Refusal::new("a malformed `List.drop_at`"));
+        };
+        let (list, ty) = self.known_list(list, "List.drop_at")?;
+        let index = self.value(index)?;
+        let index = self.to_i64(index)?;
+        let item = ty.items().ok_or(Refusal::new(
+            "a `List.drop_at` of something other than a ry list",
+        ))?;
+        let kept = self.empty_list(item);
+        let held = self.builder.emit(ty, Op::Copy(list));
+        let positions = self.positions(held);
+        let other = self.test(Compare::Ne, Item::I64, positions.counter, index);
+        let (keep, after) = (self.builder.block(), self.builder.block());
+        self.builder.terminate(Terminator::Branch {
+            condition: other,
+            then: keep,
+            otherwise: after,
+        });
+        self.builder.switch_to(keep);
+        let element = self
+            .builder
+            .emit(Type::of_item(item), Op::ItemAt(held, positions.counter));
+        let grown = self.builder.emit(ty, Op::Push(kept, element));
+        self.builder.push(Some(kept), Op::Copy(grown));
+        self.builder.terminate(Terminator::Jump(after));
+        self.builder.switch_to(after);
+        self.next_position(positions);
+        Ok(kept)
     }
 
     /// The `Bool` a predicate gives for `element`. The interpreter raises the error for an
@@ -4742,12 +5144,12 @@ impl Lowering<'_> {
     }
 
     /// `List.keep_if(list, predicate)`: the items the predicate is true for, pushed in order
-    /// onto a fresh list in a loop with the predicate inlined.
-    unsafe fn keep_if(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+    /// onto a fresh list in a loop with the predicate inlined. `List.drop_if` keeps the others.
+    unsafe fn keep_if(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
         let [list, predicate] = arguments.exactly(2)?[..] else {
-            return Err(Refusal::new("a malformed `List.keep_if`"));
+            return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
         };
-        let (list, ty) = self.known_list(list, "List.keep_if")?;
+        let (list, ty) = self.known_list(list, name)?;
         let item = ty.items().ok_or(Refusal::new(
             "a `List.keep_if` of something other than a ry list",
         ))?;
@@ -4760,10 +5162,15 @@ impl Lowering<'_> {
             .emit(Type::of_item(item), Op::ItemAt(held, positions.counter));
         let answer = self.predicate(callable, element)?;
         let (keep, after) = (self.builder.block(), self.builder.block());
+        let (then, otherwise) = if name == "List.keep_if" {
+            (keep, after)
+        } else {
+            (after, keep)
+        };
         self.builder.terminate(Terminator::Branch {
             condition: answer,
-            then: keep,
-            otherwise: after,
+            then,
+            otherwise,
         });
         self.builder.switch_to(keep);
         let grown = self.builder.emit(ty, Op::Push(kept, element));
@@ -4776,10 +5183,11 @@ impl Lowering<'_> {
 
     /// `List.find_first(list, predicate)` as `:Ok(item)`, or `List.find_first_index` as
     /// `:Ok(position)`, for the first item the predicate is true for, and `:Err(:NotFound)`
-    /// when there is none. The loop leaves at the first match.
+    /// when there is none. The loop leaves at the first match. `List.find_last` and
+    /// `List.find_last_index` search from the end.
     unsafe fn find_first(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
         let [list, predicate] = arguments.exactly(2)?[..] else {
-            return Err(Refusal::new("a malformed `List.find_first`"));
+            return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
         };
         let (list, ty) = self.known_list(list, name)?;
         let item = ty
@@ -4787,10 +5195,14 @@ impl Lowering<'_> {
             .ok_or(Refusal::new("a search of something other than a ry list"))?;
         let callable = self.function_argument(predicate)?;
         let held = self.builder.emit(ty, Op::Copy(list));
+        let past_end = name
+            .starts_with("List.find_last")
+            .then(|| self.past_end(held));
         let positions = self.positions(held);
+        let position = self.position(past_end, positions.counter);
         let element = self
             .builder
-            .emit(Type::of_item(item), Op::ItemAt(held, positions.counter));
+            .emit(Type::of_item(item), Op::ItemAt(held, position));
         let answer = self.predicate(callable, element)?;
         let (found, next) = (self.builder.block(), self.builder.block());
         self.builder.terminate(Terminator::Branch {
@@ -4799,8 +5211,8 @@ impl Lowering<'_> {
             otherwise: next,
         });
         self.builder.switch_to(found);
-        let value = if name == "List.find_first_index" {
-            self.builder.emit(Type::I64, Op::Copy(positions.counter))
+        let value = if name.ends_with("_index") {
+            self.builder.emit(Type::I64, Op::Copy(position))
         } else {
             element
         };
@@ -5850,6 +6262,78 @@ impl Lowering<'_> {
         Ok(value)
     }
 
+    /// `Result.map`, `Result.map_err`, `Result.map_both`, `Result.and_then` and
+    /// `Result.on_err`: a switch on the result's shape whose arm for each side inlines that
+    /// side's callback, and passes a side without one through unchanged. `map` and `map_err` wrap
+    /// the callback's value in the side's tag; `and_then` and `on_err` give it as it is, which
+    /// must itself be a result, as the interpreter requires.
+    unsafe fn result_map(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
+        let both = name == "Result.map_both";
+        let (result, on_ok, on_err) = match &arguments.exactly(if both { 3 } else { 2 })?[..] {
+            &[result, on_ok, on_err] => (result, Some(on_ok), Some(on_err)),
+            &[result, f] if matches!(name, "Result.map" | "Result.and_then") => {
+                (result, Some(f), None)
+            }
+            &[result, f] => (result, None, Some(f)),
+            _ => return Err(Refusal(Cow::Owned(format!("a malformed `{name}`")))),
+        };
+        let chained = matches!(name, "Result.and_then" | "Result.on_err");
+        let result = self.value(result)?;
+        let on_ok = on_ok.map(|f| self.function_argument(f)).transpose()?;
+        let on_err = on_err.map(|f| self.function_argument(f)).transpose()?;
+        let (ok, err) = (tag_layout("Ok", 1)?, tag_layout("Err", 1)?);
+        let (candidates, exhaustive) = self.shapes_of(self.builder.ty(result), &[ok, err], &[])?;
+        let value = self.switch_shapes(
+            result,
+            &candidates,
+            exhaustive,
+            Expected::Free,
+            &mut |lowering, shape| {
+                let (shape, callback, label) = match shape {
+                    Some(shape) if shapes::shape(shape).layout == ok => (shape, on_ok, "Ok"),
+                    Some(shape) if shapes::shape(shape).layout == err => (shape, on_err, "Err"),
+                    _ => {
+                        lowering.builder.terminate(Terminator::Fail);
+                        let unreachable = lowering.builder.block();
+                        lowering.builder.switch_to(unreachable);
+                        return Ok(None);
+                    }
+                };
+                let Some(callback) = callback else {
+                    // The side passes through as this shape alone, so the result's type gains
+                    // none of the operand's shapes for the other side.
+                    let ty = Type::Tag(shapes::union_of(&[shape]));
+                    return Ok(Some(lowering.builder.emit(ty, Op::Relabel(result, ty))));
+                };
+                let payload = lowering.field(result, shape, 0)?;
+                let value = lowering
+                    .apply(callback, &[payload])?
+                    .ok_or(Refusal::new("a result callback that never completes"))?;
+                if !chained {
+                    return lowering.tag(label, &[value]).map(Some);
+                }
+                let is_result = match lowering.builder.ty(value) {
+                    Type::Tag(union) => shapes::members(union).is_some_and(|members| {
+                        members.iter().all(|&member| {
+                            let layout = shapes::shape(member).layout;
+                            layout == ok || layout == err
+                        })
+                    }),
+                    _ => false,
+                };
+                if !is_result {
+                    return Err(Refusal(Cow::Owned(format!(
+                        "a `{name}` callback that may give something other than a result"
+                    ))));
+                }
+                Ok(Some(value))
+            },
+        )?;
+        let value = value.ok_or(Refusal(Cow::Owned(format!("a `{name}` of no result"))))?;
+        self.usable(value)?;
+        Ok(value)
+    }
+
     /// `Result.is_ok(result)` or `Result.is_err(result)`.
     unsafe fn result_is(
         &mut self,
@@ -6144,6 +6628,102 @@ impl Lowering<'_> {
     /// number converts exactly and the operation is on `I64`s, which an overflow or a zero
     /// divisor fails; the arithmetic and `abs_diff` of two R integers give an R integer, and
     /// otherwise both are doubles, whose `NaN` results are errors.
+    /// `Num.add_wrap` and its siblings, the checked and saturating forms, and `Num.div_ceil`,
+    /// on `I64`s. On R numbers the library works on 32 bits, which the typed core does not.
+    unsafe fn overflowing(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [a, b] = arguments.exactly(2)?[..] else {
+            return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
+        };
+        let a = self.value(a)?;
+        let a = self.library_number(a)?;
+        let b = self.value(b)?;
+        let b = self.library_number(b)?;
+        if self.builder.ty(a) != Type::I64 && self.builder.ty(b) != Type::I64 {
+            return Err(Refusal(Cow::Owned(format!("a `{name}` of R numbers"))));
+        }
+        let a = self.to_i64(a)?;
+        let b = self.to_i64(b)?;
+        if name == "Num.div_ceil" {
+            return Ok(self.ceiling_division(a, b));
+        }
+        let (operation, behavior) = name
+            .strip_prefix("Num.")
+            .and_then(|name| name.split_once('_'))
+            .ok_or(Refusal::new("a malformed overflowing operation"))?;
+        let op = match operation {
+            "add" => Arith::Add,
+            "sub" => Arith::Sub,
+            _ => Arith::Mul,
+        };
+        let overflow = match behavior {
+            "wrap" => Overflow::Wrap,
+            "saturated" => Overflow::Saturate,
+            _ => {
+                let overflowed = self
+                    .builder
+                    .emit(Type::Bool, Op::Overflowing(Overflow::Test, op, a, b));
+                let (fits, overflows) = (self.builder.block(), self.builder.block());
+                self.builder.terminate(Terminator::Branch {
+                    condition: overflowed,
+                    then: overflows,
+                    otherwise: fits,
+                });
+                self.builder.switch_to(fits);
+                let value = self
+                    .builder
+                    .emit(Type::I64, Op::Overflowing(Overflow::Wrap, op, a, b));
+                let ok = self.tag("Ok", &[value])?;
+                self.builder.switch_to(overflows);
+                let reason = self.tag("Overflow", &[])?;
+                let err = self.tag("Err", &[reason])?;
+                return self.joined_result(fits, ok, err);
+            }
+        };
+        Ok(self
+            .builder
+            .emit(Type::I64, Op::Overflowing(overflow, op, a, b)))
+    }
+
+    /// `Num.div_ceil(a, b)` on `I64`s: the truncated quotient, one more when a remainder is left
+    /// and the operands have one sign. The quotient gives up on a zero divisor, which the library
+    /// raises.
+    fn ceiling_division(&mut self, a: Local, b: Local) -> Local {
+        let quotient = self
+            .builder
+            .emit(Type::I64, Op::Arith(Arith::DivTrunc, Item::I64, a, b));
+        let remainder = self
+            .builder
+            .emit(Type::I64, Op::Arith(Arith::RemTrunc, Item::I64, a, b));
+        let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+        let signs = self.builder.emit(Type::I64, Op::Bits(Bits::Xor, a, b));
+        let left = self.builder.emit(
+            Type::Lgl,
+            Op::Compare(Compare::Ne, Item::I64, remainder, zero),
+        );
+        let alike = self
+            .builder
+            .emit(Type::Lgl, Op::Compare(Compare::Ge, Item::I64, signs, zero));
+        let both = self.builder.emit(Type::Lgl, Op::And(left, alike));
+        let rounds_up = self.builder.emit(Type::Bool, Op::Truth(both));
+        let result = self.builder.local(Type::I64);
+        self.builder.push(Some(result), Op::Copy(quotient));
+        let (up, join) = (self.builder.block(), self.builder.block());
+        self.builder.terminate(Terminator::Branch {
+            condition: rounds_up,
+            then: up,
+            otherwise: join,
+        });
+        self.builder.switch_to(up);
+        let one = self.builder.emit(Type::I64, Op::Const(Constant::I64(1)));
+        let next = self
+            .builder
+            .emit(Type::I64, Op::Arith(Arith::Add, Item::I64, quotient, one));
+        self.builder.push(Some(result), Op::Copy(next));
+        self.builder.terminate(Terminator::Jump(join));
+        self.builder.switch_to(join);
+        result
+    }
+
     unsafe fn number_operation(
         &mut self,
         name: &str,
