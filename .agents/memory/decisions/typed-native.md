@@ -464,3 +464,10 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 - `Num.div_trunc` and `Num.rem` are their own `I64` operations (`Arith::DivTrunc`, `RemTrunc`), because `%/%` and `%%` round toward the floor. A remainder by -1 divides by 1 instead, so `Num.rem(Num.min_i64, -1)` is 0 as in the library.
 - The arithmetic and `Num.abs_diff` of two R integers give an R integer, as the library does, so an overflow fails the call.
 - `Bool.is_eq` compiles for two numbers of one kind, strings or Bools, and for an `I64` beside a number literal, which the preflight writes as an `I64`; an `I64` beside any other R number is never `identical()` to it and refuses at compile time. Records, tags and lists stay in the interpreter, which compares with `identical()`.
+
+## `try` and an early `return` compile in every function, inlined ones too
+
+**Status:** settled.
+
+- `try result` lowers through `switch_shapes` on the `:Ok` and `:Err` layouts: an `:Ok` gives its payload, an `:Err` leaves the function with the result value itself, typed as that one `:Err` shape so the function's result type gains no `:Ok` shape of the operand's (`Lowering::try_result`), and any other value fails the call, so the interpreter raises R's error.
+- A local function is inlined, so its `return` (and a `try` in it) jumps to the inlined call's exit block. Each jump records its block and value in `Inlined::early`; once the body is lowered, those ends and the body's own value join into one local, typed by joining every end's type (tag unions widen, other types must match). The join is needed because the result type is not known when an early jump is lowered. A small typed function with a `return` inlines into its caller for the same reason.

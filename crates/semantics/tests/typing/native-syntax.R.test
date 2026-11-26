@@ -412,6 +412,10 @@ h <- Num.to_f64(6 + 7L)
 k: F64 <- 3 * 2.0
 m <- same_i64(if (FALSE) 7L else 0L)
 n <- if (TRUE) List.sum([0.1f64, 3.0]) else (if (FALSE) 1.25 else 0.1) * (0.5 / 2)
+t: :A | :B <- :A
+p: I64 <- match (t) { :A => 1, :B => 2 }
+q <- same_i64(1) + match (t) { :A => 1, :B => 2 }
+r <- 0.5f64 * match (t) { :A => 1, :B => 2.5 }
 #++++
 same_i64: fn(x: I64) -> I64
 v0: List<I64>
@@ -426,6 +430,10 @@ h: F64
 k: F64
 m: I64
 n: F64
+t: :A | :B
+p: I64
+q: I64
+r: F64
 
 #---- a_literal_beside_a_ry_value_takes_its_type
 b: Bool <- 3 > 2

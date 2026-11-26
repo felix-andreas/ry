@@ -125,7 +125,6 @@ pub enum Uncompiled {
     SuperAssignment,
     AssignmentTarget,
     LocalFunctionInBranch(Symbol),
-    ReturnInLocalFunction,
     FunctionValue,
     CallsVariable(Symbol),
     NamedArguments(Symbol),
@@ -144,7 +143,6 @@ pub enum Uncompiled {
     GlobalRead(Symbol),
     EnclosingRead(Symbol),
     ComputedCall,
-    Try,
     AliasedSignature,
     IfWithoutElse,
     RArgument(Symbol, Crossing),
@@ -343,10 +341,6 @@ impl Uncompiled {
                 "`{name}` is a function defined inside a branch or a loop and used after it, or \
                  defined again there, which {YET}. Define it once at the top of the function"
             ),
-            Uncompiled::ReturnInLocalFunction => format!(
-                "`return` inside a local function {YET}: native code runs a local \
-                 function in place. End the function with the value instead"
-            ),
             Uncompiled::FunctionValue => format!(
                 "a function used as a value {YET}. Native code runs a function literal only where \
                  it is called, or where a standard library function such as `List.map` takes it"
@@ -421,10 +415,6 @@ impl Uncompiled {
             Uncompiled::ComputedCall => {
                 format!("a call of a computed function {YET}. Call a function by its name")
             }
-            Uncompiled::Try => format!(
-                "`try` {YET}. Match the result instead, and return the error from its arm: \
-                 `match (result) {{ :Ok(value) => ..., :Err(error) => :Err(error) }}`"
-            ),
             Uncompiled::AliasedSignature => format!(
                 "a function whose signature is a type alias {YET}: the runtime reads the types \
                  where they are written, and an alias only names them. Write the function type \
@@ -1476,7 +1466,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                     self.walk(payload, Use::Value);
                 }
             }
-            ExpressionKind::Try(_) => self.uncompiled(id, Uncompiled::Try),
+            ExpressionKind::Try(operand) => self.walk(operand, Use::Value),
             ExpressionKind::Match { scrutinee, arms } => {
                 self.walk(scrutinee, Use::Value);
                 let matched = self.ty(scrutinee).map(|ty| self.peel(ty));
@@ -2351,9 +2341,6 @@ impl<'a, 'db> Judge<'a, 'db> {
         }
         match callee_kind {
             Callee::Return => {
-                if self.nested > 0 {
-                    self.uncompiled(id, Uncompiled::ReturnInLocalFunction);
-                }
                 if arguments.len() > 1 {
                     self.uncompiled(id, Uncompiled::Construct("`return` with several values"));
                 }
