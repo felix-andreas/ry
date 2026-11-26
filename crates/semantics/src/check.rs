@@ -4053,6 +4053,15 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
+    /// `ty` as a report names it: an open literal shows the type it defaults to and stays
+    /// open for later uses.
+    fn reported(&mut self, ty: Ty<'db>) -> Ty<'db> {
+        let probe = self.begin_probe();
+        let shown = self.settle_literals(ty);
+        self.end_probe(probe, false);
+        shown
+    }
+
     /// `ty` with every undecided literal in it given its default and every bounded variable
     /// settled to its bound, for a message that should name `I64` rather than a type variable,
     /// or a use that fixes the type, as a frame column does. It decides the variables, so only
@@ -4094,8 +4103,8 @@ impl<'db, 'a> Checker<'db, 'a> {
         found: Ty<'db>,
         value: Option<ExprId>,
     ) -> TypeError<'db> {
-        let expected = self.settle_literals(expected);
-        let found = self.settle_literals(found);
+        let expected = self.reported(expected);
+        let found = self.reported(found);
         if let Some(field) = value.and_then(|value| self.assignment_for_record(value, expected)) {
             return TypeError {
                 range,
@@ -4417,7 +4426,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             UnifyError::ConstraintRejected(constraint, found) => {
                 TypeErrorKind::ConstraintViolation {
                     constraint,
-                    found: self.table.resolve(self.db, found),
+                    found: self.reported(found),
                 }
             }
         };
@@ -5123,8 +5132,6 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             ExpressionKind::Tag { name, payload, .. } => {
                 let (name, payload) = (*name, *payload);
-                // A payload's literals are decided now: tags join by their payload types,
-                // which an open literal would leave undecided.
                 let payload = payload.map(|payload| self.infer_payload(payload));
                 Ty::new(
                     self.db,
@@ -7435,12 +7442,10 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             if members.is_empty() {
                 let (hint, blamed) = self.pattern_mismatch_hint(pattern, subject).unzip();
+                let found = self.reported(subject);
                 self.errors.push(TypeError {
                     range: blamed.flatten().unwrap_or(node.range),
-                    kind: TypeErrorKind::PatternNeverMatches {
-                        found: subject,
-                        hint,
-                    },
+                    kind: TypeErrorKind::PatternNeverMatches { found, hint },
                 });
                 self.bind_unknown(pattern, bindings);
                 return;
@@ -7455,12 +7460,10 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         if !self.pattern_admits(pattern, subject) {
             let (hint, blamed) = self.pattern_mismatch_hint(pattern, subject).unzip();
+            let found = self.reported(subject);
             self.errors.push(TypeError {
                 range: blamed.flatten().unwrap_or(node.range),
-                kind: TypeErrorKind::PatternNeverMatches {
-                    found: subject,
-                    hint,
-                },
+                kind: TypeErrorKind::PatternNeverMatches { found, hint },
             });
             self.bind_unknown(pattern, bindings);
             return;
@@ -7861,7 +7864,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             ExpressionKind::Tuple(items) => {
                 let items = module[*items]
                     .iter()
-                    .map(|&item| self.infer(item))
+                    .map(|&item| self.component(item))
                     .collect::<TypeList<'db>>();
                 Ty::new(self.db, TyKind::NativeTuple(&items))
             }
@@ -7870,12 +7873,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .iter()
                     .map(|field| NativeField {
                         name: Name::new(self.db, field.name),
-                        ty: self.infer(field.value),
+                        ty: self.component(field.value),
                     })
                     .collect::<Vec<_>>();
                 native_record(self.db, fields)
             }
-            _ => return self.infer(payload),
+            _ => return self.component(payload),
         };
         self.record(payload, ty)
     }
@@ -8019,6 +8022,12 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// take apart, so the join is reported and the value becomes `Unknown`.
     fn report_conflicting_tags(&mut self, range: TextRange, joined: Ty<'db>) -> Ty<'db> {
         let resolved = self.table.resolve(self.db, joined);
+        // The conflict names the payloads' types, so their literals take their own types.
+        let resolved = if conflicting_tags(self.db, resolved).is_some() {
+            self.settle_literals(resolved)
+        } else {
+            resolved
+        };
         match conflicting_tags(self.db, resolved) {
             Some((first, second)) => {
                 self.errors.push(TypeError {
@@ -10339,6 +10348,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 resolved
             }
             NumericOperand::Invalid => {
+                let resolved = self.reported(resolved);
                 self.errors.push(TypeError {
                     range: operand_range,
                     kind: TypeErrorKind::InvalidOperand {
@@ -10465,6 +10475,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
                 TyKind::Any | TyKind::Unknown => return unknown(self.db),
                 _ => {
+                    let resolved = self.reported(resolved);
                     self.errors.push(TypeError {
                         range: operand_range,
                         kind: TypeErrorKind::InvalidOperand {
@@ -10503,7 +10514,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             _ => false,
         };
         if !fits {
-            let array = self.settle_literals(array);
+            let array = self.reported(array);
             self.errors.push(TypeError {
                 range: operand_range,
                 kind: TypeErrorKind::InvalidOperand {
@@ -11107,20 +11118,49 @@ impl<'db, 'a> Checker<'db, 'a> {
         {
             return LiteralFit::Fits;
         }
+        // A literal for a ry function's free type parameter is open, so a later argument decides
+        // it: the `""` that `List.walk(xs, "", f)` starts from is the `Str` that `f` takes. The
+        // parameter may hold an earlier argument's open literal, as the `2` beside `:Ok(1)` in
+        // `Result.with_default(:Ok(1), 2)` does.
         if self.ry_callee
-            && open == Some(Constraint::Unconstrained)
-            && let Some(literal) = number_literal(module, value)
+            && matches!(
+                open,
+                Some(
+                    Constraint::Unconstrained
+                        | Constraint::WholeLiteral { .. }
+                        | Constraint::FracLiteral
+                        | Constraint::StrLiteral
+                        | Constraint::BoolLiteral
+                )
+            )
         {
-            let constraint = if literal.is_fraction() {
-                Constraint::FracLiteral
+            let ty = if let Some(literal) = number_literal(module, value) {
+                let constraint = if literal.is_fraction() {
+                    Constraint::FracLiteral
+                } else {
+                    Constraint::WholeLiteral {
+                        integer: literal.integer,
+                    }
+                };
+                let ty = self.fresh_literal(constraint, false);
+                self.record_literal(value, ty);
+                Some(ty)
             } else {
-                Constraint::WholeLiteral {
-                    integer: literal.integer,
-                }
+                let constraint = match module.kind(value) {
+                    ExpressionKind::Literal(LiteralKind::String(_)) => Some(Constraint::StrLiteral),
+                    ExpressionKind::Literal(LiteralKind::Logical(_)) => {
+                        Some(Constraint::BoolLiteral)
+                    }
+                    _ => None,
+                };
+                constraint.map(|constraint| {
+                    let ty = self.fresh_literal(constraint, false);
+                    self.record(value, ty)
+                })
             };
-            let ty = self.fresh_literal(constraint, false);
-            self.record_literal(value, ty);
-            if self.table.unify(self.db, ty, expected).is_ok() {
+            if let Some(ty) = ty
+                && self.table.unify(self.db, ty, expected).is_ok()
+            {
                 return LiteralFit::Fits;
             }
         }
@@ -12132,6 +12172,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             (&right, resolved_right, rhs_range),
         ] {
             if matches!(operand, NumericOperand::Invalid) {
+                let resolved = self.reported(resolved);
                 self.errors.push(TypeError {
                     range: operand_range,
                     kind: TypeErrorKind::InvalidOperand {
@@ -12426,6 +12467,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     result_atomic = Atomic::Double;
                 }
                 _ => {
+                    let resolved = self.reported(resolved);
                     self.errors.push(TypeError {
                         range: operand_range,
                         kind: TypeErrorKind::InvalidOperand {
@@ -12503,6 +12545,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         for (resolved, operand_range) in [(resolved_left, lhs_range), (resolved_right, rhs_range)] {
             let shapes = comparison_operand_shapes(self.db, resolved).filter(|_| !both_lists);
             let Some(shapes) = shapes else {
+                let resolved = self.reported(resolved);
                 self.errors.push(TypeError {
                     range: operand_range,
                     kind: TypeErrorKind::InvalidOperand {
@@ -20426,7 +20469,29 @@ impl<'db, 'a> Checker<'db, 'a> {
                 None => shared.push((var, vec![found])),
             }
         }
-        for (var, found_types) in shared {
+        for (var, mut found_types) in shared {
+            // Tags join part by part, so open payload literals stay open where their payloads
+            // unify. Payloads that do not unify join as decided types.
+            if found_types.len() >= 2
+                && found_types.iter().all(|&found| is_tag_type(self.db, found))
+            {
+                let snapshot = self.table.snapshot();
+                let first = self.table.resolve(self.db, found_types[0]);
+                let joined = found_types[1..].iter().try_fold(first, |joined, &found| {
+                    let found = self.table.resolve(self.db, found);
+                    self.join_ry_values(joined, found)
+                });
+                let variable = Ty::new(self.db, TyKind::Var(var));
+                if let Some(joined) = joined
+                    && self.table.unify(self.db, variable, joined).is_ok()
+                {
+                    continue;
+                }
+                self.table.rollback(snapshot);
+                for found in &mut found_types {
+                    *found = self.settle_literals(*found);
+                }
+            }
             if found_types.len() < 2
                 || found_types.iter().all(|&found| found == found_types[0])
                 || found_types
@@ -21246,17 +21311,22 @@ impl<'db, 'a> Checker<'db, 'a> {
                 range,
                 kind: TypeErrorKind::ConstraintViolation {
                     constraint,
-                    found: resolved_found,
+                    found: self.reported(resolved_found),
                 },
             });
         }
-        if let (TyKind::Function(found_function), TyKind::Function(expected_function)) = (
-            resolved_found.kind(self.db),
-            resolved_expected.kind(self.db),
-        ) && let Some(mismatch) =
-            self.table
-                .explain_function_mismatch(self.db, found_function, expected_function)
-        {
+        // The explanation compares against the expected type as a report names it, and its
+        // compatibility checks keep their bindings, so the probe rolls both back.
+        let probe = self.begin_probe();
+        let shown_expected = self.settle_literals(resolved_expected);
+        let mismatch = match (resolved_found.kind(self.db), shown_expected.kind(self.db)) {
+            (TyKind::Function(found_function), TyKind::Function(expected_function)) => self
+                .table
+                .explain_function_mismatch(self.db, found_function, expected_function),
+            _ => None,
+        };
+        self.end_probe(probe, false);
+        if let Some(mismatch) = mismatch {
             return Err(TypeError {
                 range,
                 kind: TypeErrorKind::CallbackShape {
@@ -23619,7 +23689,9 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             _ => Err(TypeError {
                 range,
-                kind: TypeErrorKind::NotAList { found: subject },
+                kind: TypeErrorKind::NotAList {
+                    found: self.reported(subject),
+                },
             }),
         }
     }
@@ -24058,7 +24130,9 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             _ => Err(TypeError {
                 range,
-                kind: TypeErrorKind::NotAList { found: subject },
+                kind: TypeErrorKind::NotAList {
+                    found: self.reported(subject),
+                },
             }),
         }
     }
@@ -24219,7 +24293,8 @@ impl<'db, 'a> Checker<'db, 'a> {
             // too: sessioninfo's `if (identical(dp, FALSE)) list(character(), character()) else
             // list(dp, dp)` leaves `dp` open. A bounded one is protected from types outside its
             // bound's atomic scalars and vectors: mgcv's `if (is.null(L)) rho + rho0 else L %*% rho
-            // + rho0` must not demand a matrix `rho`.
+            // + rho0` must not demand a matrix `rho`. A literal is not a value a caller chooses,
+            // so the other branch decides it, as `1.0` in `:Stop(1.0)` beside `:Go(v)`.
             let closed = if left_open {
                 right_resolved
             } else {
@@ -24234,8 +24309,14 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .open_constraint(self.db, Ty::new(self.db, TyKind::Var(var)))
                 {
                     Some(Constraint::Unconstrained) => true,
+                    Some(
+                        Constraint::WholeLiteral { .. }
+                        | Constraint::FracLiteral
+                        | Constraint::StrLiteral
+                        | Constraint::BoolLiteral,
+                    )
+                    | None => false,
                     Some(_) => !atomic,
-                    None => false,
                 }
             }) {
                 return union_of(self.db, [left_resolved, right_resolved]);

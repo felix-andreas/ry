@@ -26,9 +26,12 @@ impl Name {
 }
 
 /// The name a `NAME` token spells, as [`Name::text`] reads it. Only a backticked name with
-/// an escape allocates.
+/// an escape allocates. An unterminated backtick name, a syntax error, is the name it starts.
 pub fn name_text(token: &str) -> Cow<'_, str> {
-    match token.strip_prefix('`').and_then(|t| t.strip_suffix('`')) {
+    match token
+        .strip_prefix('`')
+        .map(|quoted| quoted.strip_suffix('`').unwrap_or(quoted))
+    {
         Some(quoted) if quoted.contains('\\') => Cow::Owned(unescape_name(quoted)),
         Some(quoted) => Cow::Borrowed(quoted),
         None => Cow::Borrowed(token),

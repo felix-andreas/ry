@@ -2310,8 +2310,17 @@ fn is_operator(kind: SyntaxKind) -> bool {
 /// layout choices must consult this or a second pass formats differently.
 fn forces_multiline(node: &SyntaxNode) -> bool {
     node.descendants()
-        .filter(|descendant| matches!(descendant.kind(), FOR_EXPR | WHILE_EXPR | REPEAT_EXPR))
+        .filter(|descendant| {
+            matches!(
+                descendant.kind(),
+                FOR_EXPR | WHILE_EXPR | REPEAT_EXPR | MATCH_EXPR
+            )
+        })
         .any(|descendant| {
+            // A `match` with arms always puts them on lines of their own.
+            if descendant.kind() == MATCH_EXPR {
+                return descendant.children().any(|child| child.kind() == MATCH_ARM);
+            }
             descendant.children().last().is_some_and(|body| {
                 body.kind() != BRACE_EXPR
                     || body.children_with_tokens().any(|child| {

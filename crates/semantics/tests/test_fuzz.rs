@@ -210,6 +210,8 @@ const REGRESSIONS: &[&str] = &[
     "frame <- data.frame(a = 1L)\n`setnames`(frame, \"a\", \"b\")\n",
     "setGeneric(\"area\", { y <- 1; function(obj) standardGeneric(\"area\") })\n",
     "x <- list(f = function() y <<- 1L)\n",
+    // An unterminated backtick name as a definition's target.
+    "a -> `b\n",
 ];
 
 /// The files a session starts from or takes a statement from, besides the programs the grammar

@@ -645,11 +645,34 @@ Each trades a narrow class of missed errors for a class of false reports seen on
   kind, such as `"a"` beside an `F64`, stays open for a use. A literal the number cannot hold is
   a `type-mismatch` at the literal. A loop pass writes fresh literal variables, so an open item
   would differ on each pass and the loop fixpoint would report that `step` does not stabilize.
-- A tag payload's literals are decided as the tag is inferred, because tags join by payload
-  type, so `:Step(0, a)` beside `:Step(q, p)` adapts through `adapt_literal`, as a payload
-  written only with literals does. A ry literal such as `7i64` does not adapt to `F64`.
-- `join_writes` treats two writes that resolve to the same type as equal, because each loop pass
-  writes fresh variables for its literals.
+- A tag payload's literals are open (`infer_payload` goes through `component`), so a later use
+  decides them as it decides a tuple item: `found <- :Ok(1)` returned from `-> Result<I64, Str>`
+  is `:Ok(1i64)`. `join_shared_parameters` joins tag arguments part by part (`join_ry_values`),
+  so `List.append([:Ok(1)], :Err("x"))` under `-> List<Result<I64, Str>>` keeps both payloads
+  open; only payloads that do not join are settled first, and `report_conflicting_tags` settles
+  them too, or a conflict would name a type variable. `:Step(0, a)` beside `:Step(q, p)` adapts
+  through `adapt_literal`. A ry literal such as `7i64` does not adapt to `F64`.
+- A number, string or logical literal passed for a ry function's type parameter (`ry_callee`,
+  an unconstrained or open-literal parameter) is a fresh open literal, so the next argument or
+  the call's use decides it: `List.walk(words, "", f)` with `f` taking `Str`, and
+  `Result.with_default(:Ok(1), 2)` under `-> I64`. Deciding it as R's type at the argument made
+  each of these a `type-mismatch` that only an annotated temporary avoided.
+- Each loop pass writes fresh variables for the literals inside a value, as in `:Stop(1)`, and
+  the loop-back join ties them to the previous pass's variables part by part, so they stay open
+  for a later use: `r <- :Err("none"); for (x in xs) r <- :Ok(1); r` under
+  `-> Result<I64, Str>` is `:Ok(1i64)` on every pass. `join_writes` treats two writes that
+  resolve to the same type as equal.
+- An open literal is not a value a caller chooses, so `join_branch_values`' differing-openness
+  rule (which unions rather than pins a parameter) ignores literal variables: `(:Stop(1.0), s)`
+  beside `(:Go(v), s)` joins to `Tuple{:Go(double) | :Stop(double), I64}`.
+- An R integer literal and an R double literal never become one literal (`Constraint::join`),
+  because `1L` beside `2.5` would make a `double` that holds `1L`: `:Ok(1L)` and `:Ok(2.5)` join
+  to `:Ok(integer | double)`. `Result.with_default(:Ok(1L), 2.5)` is `double`, because the
+  integer literal accepts R's widening to double.
+- A report names an open literal by the type it defaults to (`Checker::reported`, a probe that
+  settles and rolls back), so `r <- :Ok(1); r + 1` says `found `:Ok(double)``, never `:Ok(T)`.
+  `type_mismatch` and a callback's explanation report through the same probe, so a report never
+  decides a literal for later uses.
 - `c` is an R function, so `infer_combine` decides a variable written with a literal as R's type,
   as any other read does, and `bounds <- 1; bounds <- c(bounds, x)` is a `double[]` in strict
   mode.

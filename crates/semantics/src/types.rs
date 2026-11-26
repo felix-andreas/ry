@@ -781,9 +781,13 @@ impl Constraint {
             (Unconstrained, c) | (c, Unconstrained) => c,
             (a, b) if a == b => a,
             (Eq, c) | (c, Eq) => c,
-            (WholeLiteral { integer: left }, WholeLiteral { integer: right }) => WholeLiteral {
-                integer: left && right,
-            },
+            // An R integer literal and an R double literal have different R types, so they never
+            // become one literal: `1L` beside `2.5` would make a `double` that holds `1L`.
+            (WholeLiteral { integer: left }, WholeLiteral { integer: right }) if left != right => {
+                return None;
+            }
+            (WholeLiteral { integer: true }, FracLiteral)
+            | (FracLiteral, WholeLiteral { integer: true }) => return None,
             (WholeLiteral { .. }, FracLiteral) | (FracLiteral, WholeLiteral { .. }) => FracLiteral,
             (WholeLiteral { .. } | Number | ArrayItem | Key, Int)
             | (Int, WholeLiteral { .. } | Number | ArrayItem | Key) => Int,

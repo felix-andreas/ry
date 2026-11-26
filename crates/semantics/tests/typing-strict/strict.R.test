@@ -447,6 +447,121 @@ spend <- function(moves: List<Move>) -> F64 {
 #++++
 spend: fn(moves: List<Move>) -> F64
 
+#---- a_string_or_logical_argument_takes_the_type_a_later_argument_gives_it
+joined <- function(words: List<Str>) -> Str {
+  List.walk(words, "", function(text: Str, word: Str) -> Str Str.concat(text, word))
+}
+every <- function(flags: List<Bool>) -> Bool {
+  List.walk(flags, TRUE, function(all: Bool, flag: Bool) -> Bool all && flag)
+}
+fallback <- function(found: Result<Str, Str>) -> Str {
+  Result.with_default(found, "none")
+}
+#++++
+joined: fn(words: List<Str>) -> Str
+every: fn(flags: List<Bool>) -> Bool
+fallback: fn(found: Result<Str, Str>) -> Str
+
+#---- literals_a_call_leaves_open_take_the_declared_return_type
+first_or_two <- function() -> I64 Result.with_default(:Ok(1), 2)
+named <- function(n: I64) -> Str {
+  found <- if (n > 2) :Ok("big") else :Err("small")
+  Result.with_default(found, "none")
+}
+kept <- function() -> Result<I64, Str> {
+  found <- :Ok(1)
+  found
+}
+summed <- function(xs: List<F64>) -> F64 {
+  total <- 0
+  total <- List.walk(xs, total, function(s: F64, x: F64) -> F64 s + x)
+  total
+}
+#++++
+first_or_two: fn() -> I64
+named: fn(n: I64) -> Str
+kept: fn() -> Result<I64, Str>
+summed: fn(xs: List<F64>) -> F64
+
+#---- tags_inside_a_tuple_join_part_by_part_across_loop_passes_and_branches
+flip <- function(xs: List<I64>) {
+  state <- (:Go(0), 1i64)
+  for (x in xs) state <- match (state) {
+    (:Go(v), s) => (:Stop(1), s)
+    (:Stop(v), s) => (:Go(v), s)
+  }
+  state
+}
+bare <- function(xs: List<I64>) {
+  state <- :Go(0)
+  for (x in xs) state <- match (state) {
+    :Go(v) => :Stop(1)
+    :Stop(v) => :Go(v)
+  }
+  state
+}
+once <- function(c: Bool) {
+  state <- if (c) (:Go(0.0), 1i64) else (:Stop(1.0), 2i64)
+  match (state) {
+    (:Go(v), s) => (:Stop(1.0), s)
+    (:Stop(v), s) => (:Go(v), s)
+  }
+}
+#++++
+flip: fn(xs: List<I64>) -> Tuple{:Go(double) | :Stop(double), I64}
+bare: fn(xs: List<I64>) -> :Go(double) | :Stop(double)
+once: fn(c: Bool) -> Tuple{:Stop(double) | :Go(double), I64}
+
+#---- a_literal_a_loop_writes_takes_the_declared_return_type
+found <- function(xs: List<I64>) -> Result<I64, Str> {
+  r <- :Err("none")
+  for (x in xs) r <- :Ok(1)
+  r
+}
+stepped <- function(xs: List<I64>) -> Tuple{Result<I64, Str>, I64} {
+  state <- (:Err("none"), 0i64)
+  for (x in xs) state <- (:Ok(1), x)
+  state
+}
+#++++
+found: fn(xs: List<I64>) -> Result<I64, Str>
+stepped: fn(xs: List<I64>) -> Tuple{Result<I64, Str>, I64}
+
+#---- an_integer_literal_beside_a_double_literal_argument_is_a_double
+widened <- function() Result.with_default(:Ok(1L), 2.5)
+#++++
+widened: fn() -> double
+
+#---- a_report_shows_an_open_literal_as_its_default_type
+f <- function() { r <- :Some(0); match (r) { :Some(v) => 1, :None => 2 } }
+h <- function() { r <- :Ok(1); r + 1 }
+k <- function() { r <- :Ok(1); r$x }
+w <- function(xs: List<Str>) List.walk(xs, "", function(a: I64, b: Str) -> I64 a)
+#++++
+f: Unknown
+h: Unknown
+k: Unknown
+w: fn(xs: List<Str>) -> Unknown
+60..65 error[type-mismatch] this pattern can never match: the value is `:Some(double)`
+106..107 error[type-mismatch] expected a numeric value (`integer` or `double`), found `:Ok(double)`
+145..148 error[type-mismatch] expected a list, found `:Ok(double)`
+198..231 error[type-mismatch] this function is passed `character`, but its parameter `a` accepts `I64`
+
+#---- an_integer_literal_and_a_double_literal_stay_two_types
+pick <- function(c: Bool) {
+  t <- if (c) :Ok(1L) else :Ok(2.5)
+  t
+}
+#++++
+pick: fn(c: Bool) -> :Ok(integer | double)
+
+#---- tags_appended_to_a_list_take_the_declared_item_type
+same <- function() -> List<Result<I64, Str>> List.append([:Ok(1)], :Ok(2))
+other <- function() -> List<Result<I64, Str>> List.append([:Ok(1)], :Err("x"))
+#++++
+same: fn() -> List<Result<I64, Str>>
+other: fn() -> List<Result<I64, Str>>
+
 #---- a_tag_payload_literal_takes_the_ry_number_beside_it
 alias Move = :Buy(quantity: F64, price: F64) | :Fee(amount: F64)
 spend <- function(moves: List<Move>) -> F64 {

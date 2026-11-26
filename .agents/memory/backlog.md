@@ -291,7 +291,6 @@ Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomat
   - an empty list keeps its item type only in elaborated code (`development/design/language-climb.md`, "Open questions").
 - **A latin1 package's non-ASCII string literal installs as U+FFFD on ry's runtime.** A package with `Encoding: latin1` whose `R/` file binds `x <- "café"` (byte `0xE9`) installs with `ry install`, and `charToRaw(x)` gives `63 61 66 ef bf bd`, typed or not. The tarball keeps the latin1 byte, so the loss is in ry's `R CMD INSTALL` reading the code.
 - **Smaller typed-language gaps** (unverified): a string literal compared with `==` against a `Str` list gives an R logical; `[]` hovers as `List<T>`; f-strings build R `character`.
-- **A literal accumulator through a generic call stays `double` inside a function.** In `total <- 0; total <- List.walk(xs, total, f)` the accumulator needs `total: F64 <- 0`. At the top level of a typed file `total <- 0` is an `I64`, so a walk over `F64`s needs `0.0` there. This is an open target of the language climb (`just climb`).
 
 ## Open: ahead-of-time compilation
 
