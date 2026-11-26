@@ -5328,9 +5328,10 @@ impl Lowering<'_> {
             strings.push(value);
         }
         let (string, pattern) = (strings[0], strings[1]);
-        let at = self
-            .builder
-            .emit(Type::I64, Op::Find(name.ends_with("_last"), string, pattern));
+        let at = self.builder.emit(
+            Type::I64,
+            Op::Find(name.ends_with("_last"), string, pattern),
+        );
         let width = self.builder.emit(Type::I64, Op::ByteCount(pattern));
         let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
         let found = self
@@ -5863,9 +5864,10 @@ impl Lowering<'_> {
             .builder
             .emit(Type::Lgl, Op::Compare(Compare::Eq, Item::I64, run, zero));
         self.fail_if(no_run);
-        let pieces = self.empty_list(ty.held_item().ok_or(Refusal::new(
-            "a split of something a list cannot hold",
-        ))?);
+        let pieces = self.empty_list(
+            ty.held_item()
+                .ok_or(Refusal::new("a split of something a list cannot hold"))?,
+        );
         let pieces_ty = self.builder.ty(pieces);
         // `start` is where the current piece begins and `resume` the first position a run may
         // start at, both as 0-based offsets.
@@ -5882,9 +5884,10 @@ impl Lowering<'_> {
         let resumed = self
             .builder
             .emit(Type::Lgl, Op::Compare(Compare::Ge, Item::I64, at, resume));
-        let room = self
-            .builder
-            .emit(Type::Lgl, Op::Compare(Compare::Le, Item::I64, at, last_start));
+        let room = self.builder.emit(
+            Type::Lgl,
+            Op::Compare(Compare::Le, Item::I64, at, last_start),
+        );
         let candidate = self.builder.emit(Type::Lgl, Op::And(resumed, room));
         let candidate = self.builder.emit(Type::Bool, Op::Truth(candidate));
         let (compare, next) = (self.builder.block(), self.builder.block());
@@ -8409,8 +8412,11 @@ impl Lowering<'_> {
         }
         // A whole number from -2^63 up to but not including 2^63. `NaN` skips the tests, whose
         // comparisons would give `NA`.
-        let (exact, inexact, checking) =
-            (self.builder.block(), self.builder.block(), self.builder.block());
+        let (exact, inexact, checking) = (
+            self.builder.block(),
+            self.builder.block(),
+            self.builder.block(),
+        );
         let missing = self.builder.emit(Type::Bool, Op::IsNan(number));
         self.builder.terminate(Terminator::Branch {
             condition: missing,
@@ -8427,12 +8433,14 @@ impl Lowering<'_> {
                 .emit(Type::Lgl, Op::Compare(op, Item::Dbl, a, b))
         };
         let is_whole = compare(self, Compare::Eq, whole, number);
-        let low = self
-            .builder
-            .emit(Type::Dbl, Op::Const(Constant::Dbl(-9_223_372_036_854_775_808.0)));
-        let high = self
-            .builder
-            .emit(Type::Dbl, Op::Const(Constant::Dbl(9_223_372_036_854_775_808.0)));
+        let low = self.builder.emit(
+            Type::Dbl,
+            Op::Const(Constant::Dbl(-9_223_372_036_854_775_808.0)),
+        );
+        let high = self.builder.emit(
+            Type::Dbl,
+            Op::Const(Constant::Dbl(9_223_372_036_854_775_808.0)),
+        );
         let above = compare(self, Compare::Ge, number, low);
         let below = compare(self, Compare::Lt, number, high);
         let within = self.builder.emit(Type::Lgl, Op::And(above, below));
@@ -9181,7 +9189,9 @@ impl Lowering<'_> {
             .emit(Type::of_item(value), Op::ItemAt(values, positions.counter));
         let inner = self
             .apply(callable, &[entry_key, entry_value])?
-            .ok_or(Refusal::new("a `Dict.join_map` callback that never completes"))?;
+            .ok_or(Refusal::new(
+                "a `Dict.join_map` callback that never completes",
+            ))?;
         let output_ty = self.builder.ty(inner);
         let (inner_keys, inner_values, inner_key, inner_value) =
             self.entries(inner, "Dict.join_map")?;
@@ -9212,7 +9222,10 @@ impl Lowering<'_> {
     /// lists and dictionaries grow by doubling and keep no reserved room a program could read.
     fn capacity_operand(&mut self, name: &str, collection: Local) -> Result<Local, Refusal> {
         let fits = if name.starts_with("List.") {
-            matches!(self.builder.ty(collection), Type::Vector { array: true, .. })
+            matches!(
+                self.builder.ty(collection),
+                Type::Vector { array: true, .. }
+            )
         } else {
             matches!(self.builder.ty(collection), Type::Dict { .. })
         };
