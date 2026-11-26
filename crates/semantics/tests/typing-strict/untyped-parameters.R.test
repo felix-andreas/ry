@@ -31,7 +31,7 @@ increment: <T: arithmetic> fn(x: T) -> T
 #---- partial_annotation_reports_the_rest
 add <- function(x: integer, unused) x
 #++++
-add: fn(x: integer, [unused]: Unknown) -> integer
+add: <T> fn(x: integer, [unused]: T) -> integer
 28..34 error[strict] strict mode: parameter `unused` has no type. How the function uses it does not determine one, so any value is accepted unchecked. Annotate it, as in `unused: TYPE`
 
 #---- rest_parameters_are_not_reported

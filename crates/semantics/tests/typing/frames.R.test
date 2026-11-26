@@ -1562,6 +1562,20 @@ texts <- people |> DataFrame.select(
 people: DataFrame{city: character[], code: factor, n: integer[]}
 texts: DataFrame{has: logical[], starts: logical[], swapped: character[], part: character[], upper: character[], city: character[], parsed: Date}
 
+#---- a_negative_slice_length_is_refused
+people <- DataFrame(city = c("Oslo", NA))
+ends <- people |> DataFrame.select(
+  tail = Expr.str_slice(Expr.col("city"), -2L),
+  bad = Expr.str_slice(Expr.col("city"), 1L, -2L),
+  named = Expr.str_slice(Expr.col("city"), length = -1, start = 1L),
+  empty = Expr.str_slice(Expr.col("city"), 1L, 0L)
+)
+#++++
+people: DataFrame{city: character[]}
+ends: Unknown
+171..174 error[type-mismatch] `Expr.str_slice` takes a `length` of 0 or more characters; count from the end with a negative `start` instead
+229..231 error[type-mismatch] `Expr.str_slice` takes a `length` of 0 or more characters; count from the end with a negative `start` instead
+
 #---- date_functions_give_parts_shifted_dates_and_text
 events <- DataFrame(day = as.Date(c("2024-01-31", NA)), at = as.POSIXct("2024-01-01 09:00:00", tz = "UTC") + c(0, 60))
 parts <- events |> DataFrame.select(

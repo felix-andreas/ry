@@ -425,3 +425,36 @@ hint @20<T>
 hint @26: T
 hint @27 -> T
 hint @39: T
+
+#---- a_superassigned_base_name_completes_as_the_base_function
+repeat {
+  if (TRUE) break
+  scale$0 <<- 1L
+}
+#++++
+hover 29..34: scale: integer
+hover-definition: package base (1 declaration(s), declared in stub source base at `scale`)
+definition: stub source base at `scale`
+references: none
+rename: none
+signature: none
+completion (15): scale, scale.default, cmdscale, setGraphicsEventHandlers, Str.caseless_ascii_equals, Sys.getlocale, Sys.localeconv, Sys.setlocale
+hint @34: integer
+
+#---- a_block_with_a_set_generic_still_binds_its_other_globals
+if (TRUE) {
+  setGeneric("total", function(object, ...) standardGeneric("total"))
+  items <- 1
+  total(items$0)
+}
+#++++
+hover 103..108: items: double
+hover-definition: global 84..89
+definition 84..89
+references: 84..89*, 103..108
+rename: 2 edit(s)
+signature: none
+completion (8): items, winMenuItems, inheritedSlotNames, registerImplicitGenerics, registerS3methods, duplicated.numeric_version, testInheritedMethods, setPrimitiveMethods
+hint @25name =
+hint @34def =
+hint @89: double

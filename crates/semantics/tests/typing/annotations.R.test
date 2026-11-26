@@ -199,7 +199,7 @@ f: fn(x: integer) -> character
 #: fn(x: integer) -> integer
 f <- function(y) 1L
 #++++
-f: fn([y]: Unknown) -> integer
+f: <T> fn([y]: T) -> integer
 34..48 error[type-mismatch] this annotation names a parameter `x`, but the function does not define one. An annotation parameter name must match the function's parameter name
 
 #---- rigid_refuses_undeclared_bound

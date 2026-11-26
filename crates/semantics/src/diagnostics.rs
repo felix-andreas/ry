@@ -3946,6 +3946,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         TypeErrorKind::InvalidDuration { text, .. } => format!(
             "`Expr.dt_offset_by` takes a duration such as \"1mo\" or \"-2d\", not \"{text}\""
         ),
+        TypeErrorKind::NegativeSliceLength => "`Expr.str_slice` takes a `length` of 0 or more characters; count from the end with a negative `start` instead".to_owned(),
         TypeErrorKind::FilledTypesDiffer {
             function,
             first,

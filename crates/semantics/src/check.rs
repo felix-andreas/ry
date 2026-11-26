@@ -263,6 +263,8 @@ pub enum TypeErrorKind<'db> {
         text: String,
         part_of_day: bool,
     },
+    /// `Expr.str_slice` with a negative literal `length`, which the table engine refuses.
+    NegativeSliceLength,
     /// `Expr.coalesce` or `Expr.fill_null` filling dates or date-times from values of another
     /// type, whose common type would be text.
     FilledTypesDiffer {
@@ -1510,7 +1512,7 @@ fn check_item_in<'db>(
     let scheme = if trusted || scheme_is_declared {
         // Inference variables are table-scoped: a scheme crossing the item boundary must
         // never carry one.
-        scheme.map(|scheme| close_scheme(db, &mut context.table, scheme))
+        scheme.map(|scheme| close_scheme(db, &mut context.table, scheme, scheme_is_declared))
     } else {
         scheme.map(|_| TypeScheme::monomorphic(unknown(db)))
     };
@@ -1530,7 +1532,7 @@ fn check_item_in<'db>(
                 EnvEntry::Mono(ty) | EnvEntry::MissingFormal(ty) => TypeScheme::monomorphic(ty),
                 EnvEntry::Scheme(index) => context.scheme_arena[index as usize].clone(),
             };
-            close_scheme(db, &mut context.table, open)
+            close_scheme(db, &mut context.table, open, false)
         } else {
             TypeScheme::monomorphic(unknown(db))
         };
@@ -1693,17 +1695,44 @@ fn assert_type_resolves<'db>(
 /// Unbound constrained variables generalize into fresh binders; unconstrained ones
 /// erase to `Unknown`. The only exit edge for a scheme, so it asserts the invariant
 /// that no table-scoped variable leaks (a leaked id silently names a foreign variable).
+/// `declared` marks the signature of a partly annotated function, whose unannotated formals
+/// are still open variables: one a parameter holds unconstrained is the caller's choice, as for
+/// an unannotated function, so it becomes a type parameter rather than `Unknown`.
 fn close_scheme<'db>(
     db: &'db dyn Db,
     table: &mut InferenceTable<'db>,
     scheme: TypeScheme<'db>,
+    declared: bool,
 ) -> TypeScheme<'db> {
     let mut abstracted = FxHashSet::default();
     collect_parameter_vars(db, table, scheme.body, &mut abstracted);
+    let mut free_parameters = FxHashSet::default();
+    if declared && let TyKind::Function(function) = table.shallow_resolve(db, scheme.body).kind(db)
+    {
+        let parameters = function
+            .positional
+            .iter()
+            .copied()
+            .chain(
+                function
+                    .named
+                    .iter()
+                    .flat_map(|parameter| parameter.types()),
+            )
+            .chain(function.variadic.iter().map(|rest| rest.element));
+        for parameter in parameters {
+            table.collect_unbound_vars(db, parameter, &mut free_parameters);
+        }
+        free_parameters = free_parameters
+            .into_iter()
+            .map(|var| table.find(var))
+            .collect();
+    }
     let mut closer = ResidualCloser {
         binders: scheme.binders,
         generalized: FxHashMap::default(),
         abstracted,
+        free_parameters,
     };
     let body = erase_residual_vars_at(db, table, scheme.body, 0, Some(&mut closer));
     debug_assert!(
@@ -1722,6 +1751,9 @@ struct ResidualCloser<'db> {
     /// Only variables some parameter abstracts generalize; any other constrained
     /// variable is one fixed type nobody chooses, so it takes the constraint's default.
     abstracted: FxHashSet<InferenceVar>,
+    /// The variables a partly annotated function's own parameters hold, which generalize
+    /// even when unconstrained (see [`close_scheme`]).
+    free_parameters: FxHashSet<InferenceVar>,
 }
 
 fn collect_parameter_vars<'db>(
@@ -1784,10 +1816,13 @@ fn erase_residual_vars_at<'db>(
     };
     if constraint == Constraint::Unconstrained {
         // A residual bounded variable is one type nobody chooses, so it is its bound.
-        return match bound {
-            Some(bound) => erase_residual_vars_at(db, table, bound, depth + 1, Some(closer)),
-            None => unknown(db),
-        };
+        match bound {
+            Some(bound) => {
+                return erase_residual_vars_at(db, table, bound, depth + 1, Some(closer));
+            }
+            None if !closer.free_parameters.contains(&table.find(var)) => return unknown(db),
+            None => {}
+        }
     }
     // `Int` and `Frac` each admit one type, so a literal they describe is that type rather than
     // a type parameter.
@@ -15548,6 +15583,22 @@ impl<'db, 'a> Checker<'db, 'a> {
                                 operand,
                                 ExpressionNeeds::Text,
                             );
+                        }
+                        if name.as_str() == "Expr.str_slice"
+                            && let Some(Some(length)) = match_formals(
+                                module,
+                                &module[arguments],
+                                &["expr", "start", "length"],
+                            )
+                            .get(2)
+                            && let Some(literal) = number_literal(module, *length)
+                            && literal.negative
+                            && literal.value != 0.0
+                        {
+                            self.errors.push(TypeError {
+                                range: module.range(*length),
+                                kind: TypeErrorKind::NegativeSliceLength,
+                            });
                         }
                         let ty = match name.as_str() {
                             "Expr.str_contains" | "Expr.str_starts_with" | "Expr.str_ends_with" => {

@@ -185,7 +185,7 @@ The text functions take a character or factor column and give `NA` for a missing
 | `Expr.str_contains(expr, pattern, literal = FALSE)` | whether the text matches `pattern` |
 | `Expr.str_starts_with(expr, prefix)`, `Expr.str_ends_with(expr, suffix)` | whether the text starts or ends with the string |
 | `Expr.str_replace(expr, pattern, replacement, literal = FALSE)` | the text with the first match replaced; `Expr.str_replace_all` replaces every match |
-| `Expr.str_slice(expr, start, length = NULL)` | `length` characters from position `start`, counting from 1, or from the end when `start` is negative |
+| `Expr.str_slice(expr, start, length = NULL)` | `length` characters from position `start`, counting from 1, or from the end when `start` is negative; a negative literal `length` is an error |
 | `Expr.str_to_uppercase(expr)`, `Expr.str_to_lowercase(expr)` | the text in upper or lower case |
 | `Expr.str_to_date(expr, format = "%Y-%m-%d")` | a `Date`, or `NA` for text that does not match `format` |
 | `Expr.concat_str(..., separator = "")` | the values joined into one string per row |
