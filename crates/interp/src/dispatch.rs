@@ -181,6 +181,7 @@ fn class_attribute<'r, 's: 'r>(context: &'r Cx<'_>, object: Local<'s>) -> Option
 
 /// The first name of the implicit class [`class_of`] gives `object`, or `None` when the object
 /// has a class attribute.
+#[inline]
 pub fn implicit_class_name(context: &mut Cx<'_>, object: Local<'_>) -> Option<&'static str> {
     if class_attribute(context, object).is_some() {
         return None;
