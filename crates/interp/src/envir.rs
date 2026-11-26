@@ -2292,7 +2292,7 @@ unsafe fn rapply_leaf(
     let matches = if count > 0 && classes.element(0).bytes() == b"ANY" {
         true
     } else {
-        let class = crate::dispatch::class_of(object)?;
+        let class = crate::dispatch::class_of_raw(object)?;
         (0..count).any(|index| {
             let wanted = classes.element(index).bytes();
             (0..length(class)).any(|class_index| class.element(class_index).bytes() == wanted)

@@ -3212,7 +3212,7 @@ pub(crate) fn at<'s>(
         }
     }
     if !is_s4(object) && slot.raw() != symbol(|symbols| symbols.dot_data).raw() {
-        let class = handles::class_of(context, object)?;
+        let class = crate::dispatch::class_of(context, object)?;
         let class = handles::first_string(context, class).map(|class| class.into_owned());
         return Err(call_error(
             Some(call),
@@ -3279,7 +3279,7 @@ fn slot_value<'s>(
         return Ok(value);
     }
     if slot.raw() == symbol(|symbols| symbols.dot_s3_class).raw() {
-        return handles::class_of(context, object);
+        return crate::dispatch::class_of(context, object);
     }
     let name = handles::text(slot.read(context).name()).into_owned();
     if name == "names" && object.r_type() != SexpType::Object {
@@ -3423,8 +3423,8 @@ fn check_at_assignment<'s>(
     if answered && slot_accepts(context, object, slot, value)? {
         return Ok(());
     }
-    let class = handles::class_of(context, object)?;
-    let value_class = handles::class_of(context, value)?;
+    let class = crate::dispatch::class_of(context, object)?;
+    let value_class = crate::dispatch::class_of(context, value)?;
     let mut name_string = context.alloc::<Str>(1)?;
     name_string.set(context, 0, slot.name());
     let name_string = name_string.finish().value();
@@ -3496,24 +3496,29 @@ fn slot_accepts<'s>(
     if declared.read(context).bytes() == b"ANY" {
         return Ok(true);
     }
-    let value_class = get_attribute(context, value, class_symbol);
-    let same = match value_class.standard::<Str>() {
-        Some(value_class) if !value_class.is_empty() => {
-            value_class.get(0).bytes() == declared.read(context).bytes()
-        }
-        // A value with dimensions has the class `matrix` or `array`.
-        _ => {
-            value_class.r_type() == SexpType::Nil
-                && get_attribute(context, value, symbol(|symbols| symbols.dim)).r_type()
-                    == SexpType::Nil
-                && handles::basic_class(value).as_bytes() == declared.read(context).bytes()
-        }
+    let implicit = crate::dispatch::implicit_class_name(context, value);
+    let same = match implicit {
+        Some(name) => name.as_bytes() == declared.read(context).bytes(),
+        None => get_attribute(context, value, class_symbol)
+            .standard::<Str>()
+            .is_some_and(|class| class.get(0).bytes() == declared.read(context).bytes()),
     };
     if same {
         return Ok(true);
     }
-    let value_class = handles::class_of(context, value)?;
-    let Some(value_definition) = cached_definition(context, table, value_class)? else {
+    // An implicit class is one name with no package, so its definition is found by that name
+    // without building the class vector.
+    let value_definition = match implicit {
+        Some(name) => {
+            let name = handles::install_bytes(context, name.as_bytes())?;
+            definition_in(context, table, name, None)?
+        }
+        None => {
+            let value_class = context.root(get_attribute(context, value, class_symbol));
+            cached_definition(context, table, value_class)?
+        }
+    };
+    let Some(value_definition) = value_definition else {
         return Ok(false);
     };
     let contains = get_attribute(
@@ -3541,18 +3546,30 @@ fn cached_definition<'s>(
     if class.is_empty() {
         return Ok(None);
     }
-    let name = context.root(class.read(context).get(0));
-    if is_na(name.read(context)) {
+    if is_na(class.read(context).get(0)) {
         return Ok(None);
     }
-    let Some(definition) = handles::frame_value(context, table, name)? else {
+    let name = handles::install_element(context, class, 0)?;
+    definition_in(context, table, name, Some(class))
+}
+
+/// The definition the class cache `table` holds under `name`, when it is one class
+/// definition and, if `class` names a package, that package's.
+fn definition_in<'s>(
+    context: &mut Cx<'s>,
+    table: Local<'s>,
+    name: impl Pointer<Symbol>,
+    class: Option<Local<'s, Str>>,
+) -> R<Option<Local<'s>>> {
+    let Some(definition) = handles::frame_symbol_value(context, table, name)? else {
         return Ok(None);
     };
     if !is_s4(definition) {
         return Ok(None);
     }
     let package = symbol(|symbols| symbols.package);
-    if let Some(wanted) = get_attribute(context, class, package).standard::<Str>()
+    if let Some(class) = class
+        && let Some(wanted) = get_attribute(context, class, package).standard::<Str>()
         && let Some(defined) = get_attribute(context, definition, package).standard::<Str>()
         && !wanted.is_empty()
         && defined.len() == 1
@@ -7465,7 +7482,8 @@ fn bind_method<'s>(
         if !handles::is_object(item.value) {
             continue;
         }
-        let classes = handles::implicit_class(context, item.value)?;
+        let classes =
+            context.root_answer(|context| crate::dispatch::implicit_class(context, item.value))?;
         let Some(classes) = dense::<Str>(context, classes)? else {
             continue;
         };

@@ -13,21 +13,17 @@ use {
         approximate::{
             ApproximateMatch, ApproximateRegex, ApproximateSettings, SCOPE_GROUP, UNBOUNDED,
         },
-        builtins::{BuiltinDef, Call, builtin, internal},
-        coerce::{coerce_vector, integer_digits},
-        conditions::warning,
-        eval,
+        builtins::{BuiltinDef, builtin, internal},
+        coerce::integer_digits,
         format::{display_width, push_fixed, push_general, push_scientific},
         handles::{
-            self, Args, Chars, Cx, Fresh, Gc, Integer, List, Local, Logical, Raw, Str, StringFill,
-            safe,
+            self, Args, Chars, Cx, Environment, Fresh, Gc, Integer, List, Local, Logical, Raw,
+            Real, Str, StringFill, safe,
         },
         pcre::{CompileError, PerlRegex},
         tre::{self, Tnfa},
         unwind::{R, Unwind, error},
-        values::{
-            self, alloc, get_attr, length, na_string, nil, set_attr, set_elt, string_at, symbols,
-        },
+        values::{self, length, na_string, string_at},
     },
     fancy_regex::{Regex, RegexBuilder},
     heap::{
@@ -47,14 +43,14 @@ use {
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
-    internal("paste", 4, do_paste),
-    internal("paste0", 3, do_paste0),
+    internal("paste", 4, safe!(do_paste)),
+    internal("paste0", 3, safe!(do_paste0)),
     internal("nchar", 4, safe!(do_nchar)),
     builtin("nzchar", -1, safe!(do_nzchar)),
     internal("substr", 3, safe!(do_substr)),
     internal("substr<-", 4, safe!(do_set_substr)),
-    internal("strsplit", 5, do_strsplit),
-    internal("sprintf", -1, do_sprintf),
+    internal("strsplit", 5, safe!(do_strsplit)),
+    internal("sprintf", -1, safe!(do_sprintf)),
     internal("toupper", 1, safe!(do_toupper)),
     internal("tolower", 1, safe!(do_tolower)),
     internal("chartr", 3, safe!(do_chartr)),
@@ -64,7 +60,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("strrep", 2, safe!(do_strrep)),
     internal("strtoi", 2, safe!(do_strtoi)),
     internal("make.names", 2, safe!(do_make_names)),
-    internal("make.unique", 2, do_make_unique),
+    internal("make.unique", 2, safe!(do_make_unique)),
     internal("abbreviate", 3, safe!(do_abbreviate)),
     internal("utf8ToInt", 1, safe!(do_utf8_to_int)),
     internal("intToUtf8", 3, safe!(do_int_to_utf8)),
@@ -115,72 +111,76 @@ impl NamePattern {
     }
 }
 
-unsafe fn do_paste(call: &Call<'_>) -> R<Sexp> {
-    let separator = call.arg(1);
-    if separator.kind() != SexpType::String
-        || length(separator) == 0
-        || separator.element(0) == na_string()
-    {
-        return Err(error("invalid separator"));
-    }
-    paste(call, Some(separator.element(0)), call.arg(2), call.arg(3))
+fn do_paste<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let separator =
+        first_text(context, arguments.value(1))?.ok_or_else(|| error("invalid separator"))?;
+    paste(context, arguments, Some(separator), (2, 3))
 }
 
-unsafe fn do_paste0(call: &Call<'_>) -> R<Sexp> {
-    paste(call, None, call.arg(1), call.arg(2))
+fn do_paste0<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    paste(context, arguments, None, (1, 2))
+}
+
+/// The first element of `value` when it is a character vector whose first element is not `NA`,
+/// as `paste` requires of `sep` and `collapse`.
+fn first_text<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Option<Local<'s, Chars>>> {
+    let Some(strings) = handles::dense::<Str>(context, value)? else {
+        return Ok(None);
+    };
+    if strings.is_empty() {
+        return Ok(None);
+    }
+    let first = strings.get(context, 0);
+    Ok((!handles::is_na(first)).then(|| context.root(first)))
 }
 
 /// `paste` joins bytes, not text, because a native string may hold bytes that are not UTF-8.
 /// As in GNU R, the result is marked "bytes" when any piece is, UTF-8 when any piece is UTF-8
-/// or latin1 (which is translated), and native otherwise.
-unsafe fn paste(
-    call: &Call<'_>,
-    separator: Option<Sexp>,
-    collapse: Sexp,
-    recycle_zero: Sexp,
-) -> R<Sexp> {
-    let list = call.arg(0);
-    if list.kind() != SexpType::List {
+/// or latin1 (which is translated), and native otherwise. `collapse` and `recycle_zero` are
+/// the positions of those arguments.
+fn paste<'s>(
+    context: &mut Cx<'s>,
+    arguments: &Args<'_, 's>,
+    separator: Option<Local<'s, Chars>>,
+    (collapse, recycle_zero): (usize, usize),
+) -> R<Local<'s>> {
+    let Some(list) = handles::dense::<List>(context, arguments.value(0))? else {
         return Err(error("invalid first argument"));
-    }
-    let collapse = if collapse == nil() {
+    };
+    let collapse = arguments.value(collapse);
+    let collapse = if collapse.r_type() == SexpType::Nil {
         None
-    } else if collapse.kind() == SexpType::String
-        && length(collapse) > 0
-        && collapse.element(0) != na_string()
-    {
-        Some(collapse.element(0))
     } else {
-        return Err(error("invalid 'collapse' argument"));
+        Some(first_text(context, collapse)?.ok_or_else(|| error("invalid 'collapse' argument"))?)
     };
     // The converted columns go into a separate list rather than back into `list`, as GNU R's
     // `do_paste` does, because `list` can be the caller's own: `.Internal(paste(args, ...))`
     // would see its non-character elements replaced.
-    let mut columns: SmallVec<[(Sexp, usize); 8]> = SmallVec::with_capacity(length(list));
+    let mut columns: SmallVec<[Local<'s, Str>; 8]> = SmallVec::with_capacity(list.len());
     let mut count = 0;
     let mut any_empty = false;
-    for index in 0..length(list) {
+    for index in 0..list.len() {
+        let element = context.root(list.get(context, index));
         // Every element of a column is read, so a deferred column converts in one batch.
-        let column = values::materialize(as_character(list.element(index), || call.env())?)?;
-        let column_length = length(column);
-        count = count.max(column_length);
-        any_empty |= column_length == 0;
-        columns.push((column, column_length));
+        let column = as_character(context, element, |context| arguments.environment(context))?;
+        count = count.max(column.len());
+        any_empty |= column.is_empty();
+        columns.push(column);
     }
-    if any_empty && flag(recycle_zero) {
+    if any_empty && is_true(context, arguments.value(recycle_zero)) {
         count = 0;
     }
     let Some(collapse) = collapse else {
-        let result = alloc(SexpType::String, count)?;
+        let mut result = context.alloc::<Str>(count)?;
         with_byte_buffer(|bytes| {
             for row in 0..count {
                 bytes.clear();
-                let encoding = join_row(bytes, &columns, separator, row);
-                values::set_mkchar_bytes(result, row, bytes, encoding)?;
+                let encoding = join_row(context, bytes, &columns, separator, row);
+                handles::set_bytes(context, &mut result, row, bytes, encoding)?;
             }
             Ok(())
         })?;
-        return Ok(result);
+        return Ok(result.finish().value());
     };
     // With `collapse`, each row's bytes go straight into the one result instead of becoming a
     // string of their own, and the buffer is sized up front, so the peak is the joined text
@@ -189,21 +189,22 @@ unsafe fn paste(
     // marked ASCII whatever its pieces were.
     let mut estimate = 0;
     for row in 0..count {
-        row_pieces(&columns, separator, row, |charsxp| {
-            estimate += charsxp.bytes().len();
+        row_pieces(context, &columns, separator, row, |chars| {
+            estimate += chars.bytes().len();
         });
     }
-    let collapse_bytes = collapse.bytes();
-    estimate += count.saturating_sub(1) * collapse_bytes.len();
-    let collapsed = alloc(SexpType::String, 1)?;
+    let collapse_length = collapse.bytes(context).len();
+    estimate += count.saturating_sub(1) * collapse_length;
+    let mut collapsed = context.alloc::<Str>(1)?;
     with_byte_buffer(|bytes| {
         bytes.reserve(estimate);
+        let collapse_chars = collapse.read(context);
         let mut encoding = if count > 1 {
-            piece_encoding(Encoding::Native, collapse)
+            piece_encoding(Encoding::Native, collapse_chars)
         } else {
             Encoding::Native
         };
-        let collapse_latin1 = collapse.has_gp(gp::LATIN1);
+        let collapse_latin1 = handles::is_latin1(collapse_chars);
         let mut latin1_collapses = Vec::new();
         for row in 0..count {
             if row > 0 {
@@ -212,10 +213,10 @@ unsafe fn paste(
                     // known only at the end.
                     latin1_collapses.push(bytes.len());
                 }
-                bytes.extend_from_slice(collapse_bytes);
+                bytes.extend_from_slice(collapse.bytes(context));
             }
             let start = bytes.len();
-            match join_row(bytes, &columns, separator, row) {
+            match join_row(context, bytes, &columns, separator, row) {
                 Encoding::Bytes => encoding = Encoding::Bytes,
                 Encoding::Utf8 if encoding == Encoding::Native && !bytes[start..].is_ascii() => {
                     encoding = Encoding::Utf8;
@@ -224,73 +225,75 @@ unsafe fn paste(
             }
         }
         if !latin1_collapses.is_empty() && encoding != Encoding::Bytes {
-            let translated = values::char_str(collapse);
+            let translated = handles::text(collapse.read(context));
             let mut joined = Vec::with_capacity(bytes.len());
             let mut from = 0;
             for &at in &latin1_collapses {
                 joined.extend_from_slice(&bytes[from..at]);
                 joined.extend_from_slice(translated.as_bytes());
-                from = at + collapse_bytes.len();
+                from = at + collapse_length;
             }
             joined.extend_from_slice(&bytes[from..]);
             *bytes = joined;
         }
-        values::set_mkchar_bytes(collapsed, 0, bytes, encoding)
+        handles::set_bytes(context, &mut collapsed, 0, bytes, encoding)
     })?;
-    Ok(collapsed)
+    Ok(collapsed.finish().value())
 }
 
 /// Appends one row of `paste` and returns its encoding, decided from all pieces before any is
 /// joined, as in GNU R: a bytes piece keeps latin1 pieces untranslated. `NA` needs no case of its
 /// own, because `NA_STRING` holds the bytes "NA" and no encoding mark.
-unsafe fn join_row(
+fn join_row<'s>(
+    context: &Cx<'s>,
     bytes: &mut Vec<u8>,
-    columns: &[(Sexp, usize)],
-    separator: Option<Sexp>,
+    columns: &[Local<'s, Str>],
+    separator: Option<Local<'s, Chars>>,
     row: usize,
 ) -> Encoding {
     let mut encoding = Encoding::Native;
-    row_pieces(columns, separator, row, |charsxp| {
-        encoding = piece_encoding(encoding, charsxp)
+    row_pieces(context, columns, separator, row, |chars| {
+        encoding = piece_encoding(encoding, chars)
     });
-    row_pieces(columns, separator, row, |charsxp| {
-        if charsxp.has_gp(gp::LATIN1) && encoding != Encoding::Bytes {
-            bytes.extend_from_slice(values::char_str(charsxp).as_bytes());
+    row_pieces(context, columns, separator, row, |chars| {
+        if handles::is_latin1(chars) && encoding != Encoding::Bytes {
+            bytes.extend_from_slice(handles::text(chars).as_bytes());
         } else {
-            bytes.extend_from_slice(charsxp.bytes());
+            bytes.extend_from_slice(chars.bytes());
         }
     });
     encoding
 }
 
 /// Visits one row's pieces in order, with the separator between columns, without collecting them.
-unsafe fn row_pieces(
-    columns: &[(Sexp, usize)],
-    separator: Option<Sexp>,
+#[inline]
+fn row_pieces<'a, 's: 'a>(
+    context: &'a Cx<'s>,
+    columns: &[Local<'s, Str>],
+    separator: Option<Local<'s, Chars>>,
     row: usize,
-    mut visit: impl FnMut(Sexp),
+    mut visit: impl FnMut(Gc<'a, Chars>),
 ) {
-    for (position, &(column, column_length)) in columns.iter().enumerate() {
+    for (position, column) in columns.iter().enumerate() {
         if position > 0
             && let Some(separator) = separator
         {
-            visit(separator);
+            visit(separator.read(context));
         }
-        if row < column_length {
-            visit(column.element(row));
-        } else if column_length > 0 {
-            visit(column.element(row % column_length));
+        let column_length = column.len();
+        if column_length > 0 {
+            visit(column.get(context, row % column_length));
         }
     }
 }
 
 /// The encoding a `paste` result has so far, after one more piece: bytes wins over everything,
 /// and UTF-8 or latin1 makes the result UTF-8.
-unsafe fn piece_encoding(encoding: Encoding, charsxp: Sexp) -> Encoding {
+fn piece_encoding(encoding: Encoding, chars: Gc<'_, Chars>) -> Encoding {
     match encoding {
         Encoding::Bytes => encoding,
-        _ if charsxp.has_gp(gp::BYTES) => Encoding::Bytes,
-        _ if charsxp.has_gp(gp::LATIN1 | gp::UTF8) => Encoding::Utf8,
+        _ if handles::is_bytes(chars) => Encoding::Bytes,
+        _ if chars.has_mark(gp::LATIN1 | gp::UTF8) => Encoding::Utf8,
         _ => encoding,
     }
 }
@@ -565,40 +568,41 @@ fn char_span(text: &str, start: i32, stop: i32) -> (usize, usize) {
     if begin > end { (0, 0) } else { (begin, end) }
 }
 
-unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
-    let x = call.arg(0);
-    let split = call.arg(1);
-    if x.kind() != SexpType::String {
+fn do_strsplit<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let x = arguments.value(0);
+    let Some(text) = handles::dense::<Str>(context, x)? else {
         return Err(error("non-character argument"));
-    }
-    let (perl, fixed) = (flag(call.arg(3)), flag(call.arg(2)));
-    for message in overridden_flags(false, perl, fixed) {
-        warning(message)?;
-    }
-    let options = effective_options(false, perl, fixed);
-    let forced_bytes = [x, split].iter().any(|&vector| {
-        vector.kind() == SexpType::String
-            && (0..length(vector))
-                .any(|index| Encoding::of(vector.element(index)) == Encoding::Bytes)
-    });
-    let use_bytes = flag(call.arg(4)) || forced_bytes;
-    let splits: SmallVec<[Option<Cow<str>>; 1]> = if split.kind() == SexpType::String {
-        (0..length(split))
-            .map(|index| subject_at(split, index, use_bytes))
-            .collect()
-    } else {
-        SmallVec::new()
     };
+    let perl = is_true(context, arguments.value(3));
+    let fixed = is_true(context, arguments.value(2));
+    let options = pattern_options(context, false, perl, fixed)?;
+    let split = handles::dense::<Str>(context, arguments.value(1))?;
+    let forced_bytes = has_bytes(context, &[Some(text), split]);
+    let use_bytes = is_true(context, arguments.value(4)) || forced_bytes;
+    // The separators are read for every element, across the allocations that make the pieces,
+    // so their text is copied out of the heap once.
+    let splits: SmallVec<[Option<String>; 1]> = split.map_or_else(SmallVec::new, |split| {
+        split
+            .iter(context)
+            .map(|chars| subject(chars, use_bytes).map(Cow::into_owned))
+            .collect()
+    });
     let mut matchers: SmallVec<[Option<Matcher>; 1]> = (0..splits.len()).map(|_| None).collect();
-    let count = length(x);
-    let result = alloc(SexpType::List, count)?;
+    let count = text.len();
+    let mut lists = handles::StringLists::new(context, count)?;
     let mut pieces = Pieces::new();
-    // Pieces repeat (a code or a suffix of each id), so ASCII ones go through the call's memo.
-    let mut memo = values::StringMemo::default();
+    let mut subject_text = String::new();
     for index in 0..count {
-        let Some(text) = subject_at(x, index, use_bytes) else {
-            set_elt(result, index, values::scalar_string_charsxp(na_string())?);
-            continue;
+        let valid_utf8 = {
+            let chars = text.get(context, index);
+            let Some(element) = subject(chars, use_bytes) else {
+                lists.start(context, 1)?;
+                lists.push_na(context);
+                continue;
+            };
+            subject_text.clear();
+            subject_text.push_str(&element);
+            use_bytes || chars.is_valid_utf8()
         };
         let position = index % splits.len().max(1);
         // Splitting into characters reports an invalid string as the Perl matcher does.
@@ -608,68 +612,49 @@ unsafe fn do_strsplit(call: &Call<'_>) -> R<Sexp> {
             perl: options.perl || by_character,
             ..options
         };
-        let valid = use_bytes
-            || x.element(index).is_valid_utf8()
-            || handles::with(|context| {
-                let split = handles::dense::<Str>(context, handles::held(context, split))?;
-                match handles::dense::<Str>(context, handles::held(context, x))? {
-                    Some(x) => valid_subject(context, split, x, index, use_bytes, reported, false),
-                    None => Ok(true),
-                }
-            })?;
-        if !valid {
-            set_elt(result, index, values::scalar_string_charsxp(na_string())?);
+        if !valid_utf8 && !valid_subject(context, split, text, index, use_bytes, reported, false)? {
+            lists.start(context, 1)?;
+            lists.push_na(context);
             continue;
         }
         pieces.clear();
         match splits.get(position) {
-            None => split_chars(&text, &mut pieces),
-            Some(None) => pieces.push((0, text.len())),
-            Some(Some(separator)) if separator.is_empty() => split_chars(&text, &mut pieces),
+            None => split_chars(&subject_text, &mut pieces),
+            Some(None) => pieces.push((0, subject_text.len())),
+            Some(Some(separator)) if separator.is_empty() => {
+                split_chars(&subject_text, &mut pieces)
+            }
             Some(Some(separator)) if let Some(byte) = literal_byte(separator, options) => {
-                split_byte(byte, &text, &mut pieces)
+                split_byte(byte, &subject_text, &mut pieces)
             }
             Some(Some(separator)) => {
                 if matchers[position].is_none() {
                     let compiled = Matcher::compile(separator, options, CompileErrors::Quoted);
-                    matchers[position] = Some(compiled.or_else(|failure| {
-                        if let Some(message) = failure.warning {
-                            warning(message)?;
-                        }
-                        Err(failure.error)
-                    })?);
+                    matchers[position] =
+                        Some(compiled.map_err(|failure| compile_failure(context, failure))?);
                 }
                 match &matchers[position] {
-                    Some(matcher) => split_text(matcher, &text, &mut pieces)?,
-                    None => pieces.push((0, text.len())),
+                    Some(matcher) => split_text(matcher, &subject_text, &mut pieces)?,
+                    None => pieces.push((0, subject_text.len())),
                 }
             }
         }
-        // Each piece vector is stored in `result` before its strings are made, so neither needs
-        // a handle; rooting them would grow the handle stack with the input, and every
-        // collection scans that stack.
-        let heap = crate::heap();
-        let vector = heap.alloc_vector(SexpType::String, pieces.len() as isize)?;
-        heap.set_element(result, index, vector);
-        for (position, &(start, end)) in pieces.iter().enumerate() {
-            // With `useBytes`, the text carries a stand-in character for each byte past ASCII,
-            // which `regex_result` turns back into the byte.
-            let piece = &text.as_bytes()[start..end];
-            let charsxp = if use_bytes {
-                regex_result(&text[start..end], forced_bytes)?
+        lists.start(context, pieces.len())?;
+        for &(start, end) in &pieces {
+            let piece = &subject_text[start..end];
+            let (bytes, encoding) = if use_bytes {
+                regex_piece(piece, forced_bytes)
             } else if piece.is_ascii() {
-                memo.mk_char(piece)?
+                (Cow::Borrowed(piece.as_bytes()), Encoding::Native)
             } else {
-                heap.mk_char(piece, Encoding::Utf8)?
+                (Cow::Borrowed(piece.as_bytes()), Encoding::Utf8)
             };
-            heap.set_element(vector, position, charsxp);
+            lists.push_bytes(context, &bytes, encoding)?;
         }
     }
-    let names = get_attr(x, symbols().names);
-    if names != nil() {
-        set_attr(result, symbols().names, names)?;
-    }
-    Ok(result)
+    let mut result = lists.finish();
+    handles::copy_names(context, x, &mut result)?;
+    Ok(result.finish().value())
 }
 
 /// The byte ranges of the pieces `strsplit` cuts one string into.
@@ -735,18 +720,14 @@ fn split_text(matcher: &Matcher, text: &str, pieces: &mut Pieces) -> R<()> {
     Ok(())
 }
 
-/// Runs `body` with the interpreter's text buffer, empty. A nested call (a `%s` conversion that
-/// runs an `as.character` method that calls `sprintf`, say) finds the buffer taken and starts
-/// its own, and the larger of the two is kept.
+/// Runs `body` with one of the interpreter's text buffers, empty. A nested call (a `%s`
+/// conversion that runs an `as.character` method that calls `sprintf`, say) takes another.
 #[inline(always)]
 pub fn with_byte_buffer<T>(body: impl FnOnce(&mut Vec<u8>) -> R<T>) -> R<T> {
-    let mut buffer = std::mem::take(&mut crate::interp().text_buffer);
+    let mut buffer = crate::interp().text_buffers.pop().unwrap_or_default();
     buffer.clear();
     let result = body(&mut buffer);
-    let kept = &mut crate::interp().text_buffer;
-    if buffer.capacity() > kept.capacity() {
-        *kept = buffer;
-    }
+    crate::interp().text_buffers.push(buffer);
     result
 }
 
@@ -798,62 +779,97 @@ struct FormatPiece<'a> {
 type FormatPieces<'a> = SmallVec<[FormatPiece<'a>; 4]>;
 
 /// An argument of `sprintf` and the conversions it needs, computed once per call.
-struct FormatArgument {
-    value: Sexp,
+struct FormatArgument<'s> {
+    value: Local<'s>,
     kind: SexpType,
     length: usize,
     /// `as.character(value)`, for `%s`.
-    text: Option<Sexp>,
+    text: Option<Local<'s, Str>>,
     /// Whether a double vector holds only whole numbers, which `%d` requires.
     whole: Option<bool>,
 }
 
-unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
-    let formats = call.arg(0);
-    if formats.kind() != SexpType::String {
+fn do_sprintf<'s>(context: &mut Cx<'s>, call: &Args<'_, 's>) -> R<Local<'s>> {
+    let Some(formats) = handles::dense::<Str>(context, call.value(0))? else {
         return Err(error("'fmt' is not a character vector"));
-    }
+    };
     if call.len() > 100 {
         return Err(error("only 100 arguments are allowed"));
     }
-    values::refuse_bytes(formats)?;
-    for arg in call.args.iter().skip(1) {
-        values::refuse_bytes(arg.value)?;
-    }
-    let mut arguments: SmallVec<[FormatArgument; 8]> =
+    refuse_bytes(context, formats)?;
+    let mut arguments: SmallVec<[FormatArgument<'s>; 8]> =
         SmallVec::with_capacity(call.len().saturating_sub(1));
-    for (position, arg) in call.args.iter().enumerate().skip(1) {
-        let value = arg.value;
-        let kind = value.kind();
+    for position in 1..call.len() {
+        if let Some(text) = handles::dense::<Str>(context, call.value(position))? {
+            refuse_bytes(context, text)?;
+        }
+    }
+    for position in 1..call.len() {
+        let value = call.value(position);
+        let kind = value.r_type();
         if matches!(kind, SexpType::Symbol | SexpType::Language) {
             return Err(error(format!(
                 "invalid type of argument[{position}]: '{}'",
                 kind.name()
             )));
         }
+        // A number is read element by element, so a deferred vector expands once here.
+        let value = if matches!(kind, SexpType::Logical | SexpType::Integer | SexpType::Real) {
+            handles::materialize(context, value)?
+        } else {
+            value
+        };
         arguments.push(FormatArgument {
             value,
             kind,
-            length: length(value),
+            length: handles::length(context, value),
             text: None,
             whole: None,
         });
     }
-    let format_count = length(formats);
+    let format_count = formats.len();
     if format_count == 0 || arguments.iter().any(|argument| argument.length == 0) {
-        return alloc(SexpType::String, 0);
+        return Ok(context.alloc::<Str>(0)?.finish().value());
     }
+    with_text_buffer(|format_text| format_call(context, call, formats, &mut arguments, format_text))
+}
+
+/// [`do_sprintf`] once the arguments are checked, with `format_text` to copy the formats into.
+fn format_call<'s>(
+    context: &mut Cx<'s>,
+    call: &Args<'_, 's>,
+    formats: Local<'s, Str>,
+    arguments: &mut [FormatArgument<'s>],
+    format_text: &mut String,
+) -> R<Local<'s>> {
+    let format_count = formats.len();
     // One bit per argument, set once a conversion reads it.
     let mut used: SmallVec<[u64; 2]> = smallvec![0; arguments.len().div_ceil(64)];
-    // An `NA` format is the text "NA", as in GNU R.
-    let texts: SmallVec<[Cow<'_, str>; 1]> = (0..format_count)
-        .map(|index| string_at(formats, index).unwrap_or(Cow::Borrowed("NA")))
-        .collect();
+    // An `NA` format is the text "NA", as in GNU R. The texts are copied out of the vector, one
+    // after another, because the conversions below run R code, which a borrow of it could not
+    // outlive; format `i` is `format_text[text_ends[i - 1]..text_ends[i]]`.
+    let mut text_ends: SmallVec<[usize; 2]> = SmallVec::with_capacity(format_count);
+    for chars in formats.iter(context) {
+        if handles::is_na(chars) {
+            format_text.push_str("NA");
+        } else {
+            format_text.push_str(&handles::text(chars));
+        }
+        text_ends.push(format_text.len());
+    }
+    let format_text = &*format_text;
     // The pieces of format `i` are `pieces[ends[i - 1]..ends[i]]`.
     let mut pieces = FormatPieces::new();
     let mut ends: SmallVec<[usize; 2]> = SmallVec::with_capacity(format_count);
-    for text in &texts {
-        parse_format(text, &arguments, &mut used, &mut pieces)?;
+    let mut text_start = 0;
+    for &text_end in &text_ends {
+        parse_format(
+            &format_text[text_start..text_end],
+            arguments,
+            &mut used,
+            &mut pieces,
+        )?;
+        text_start = text_end;
         ends.push(pieces.len());
     }
     // `%s` converts a classed argument with its `as.character` method first, and the result's
@@ -863,17 +879,18 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
             && conversion.kind == 's'
         {
             let argument = &mut arguments[conversion.argument as usize];
-            if argument.text.is_none() && argument.value.is_object() {
-                let text = as_character(argument.value, || call.env())?;
+            if argument.text.is_none() && handles::is_object(argument.value) {
+                let text =
+                    as_character(context, argument.value, |context| call.environment(context))?;
                 argument.text = Some(text);
-                argument.length = length(text);
+                argument.length = text.len();
             }
         }
     }
     let mut count = format_count;
-    for argument in &arguments {
+    for argument in arguments.iter() {
         if argument.length == 0 {
-            return alloc(SexpType::String, 0);
+            return Ok(context.alloc::<Str>(0)?.finish().value());
         }
         count = count.max(argument.length);
     }
@@ -884,7 +901,7 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
     {
         return Err(error("arguments cannot be recycled to the same length"));
     }
-    let result = alloc(SexpType::String, count)?;
+    let mut result = context.alloc::<Str>(count)?;
     with_text_buffer(|text| {
         for row in 0..count {
             text.clear();
@@ -895,10 +912,10 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
                     text.push_str(piece.literal);
                 }
                 if let Some(conversion) = &piece.conversion {
-                    format_conversion(conversion, &mut arguments, row, call.env()?, text)?;
+                    format_conversion(context, conversion, arguments, (row, call), text)?;
                 }
             }
-            values::set_mkchar(result, row, text)?;
+            handles::set_text(context, &mut result, row, text)?;
         }
         Ok(())
     })?;
@@ -912,12 +929,18 @@ unsafe fn do_sprintf(call: &Call<'_>) -> R<Sexp> {
         };
         // GNU R names the format only when there is one.
         if format_count == 1 {
-            warning(format!("{what} not used by format '{}'", texts[0]))?;
+            handles::warning(
+                context,
+                format!(
+                    "{what} not used by format '{}'",
+                    &format_text[..text_ends[0]]
+                ),
+            )?;
         } else {
-            warning(format!("{what} not used by format"))?;
+            handles::warning(context, format!("{what} not used by format"))?;
         }
     }
-    Ok(result)
+    Ok(result.finish().value())
 }
 
 /// The conversion letters `sprintf` accepts.
@@ -927,7 +950,7 @@ const CONVERSIONS: &[u8] = b"dioxXfeEgGaAs";
 /// reads. `used` gets a bit set for each argument read.
 fn parse_format<'a>(
     format: &'a str,
-    arguments: &[FormatArgument],
+    arguments: &[FormatArgument<'_>],
     used: &mut [u64],
     pieces: &mut FormatPieces<'a>,
 ) -> R<()> {
@@ -1093,12 +1116,13 @@ fn read_number(bytes: &[u8], index: &mut usize) -> Option<u32> {
     (*index > start).then_some(value)
 }
 
-/// Appends one conversion of row `row` to `out`.
-unsafe fn format_conversion(
+/// Appends one conversion of row `row` to `out`. `call` is the `sprintf` call, whose
+/// environment a classed argument's `as.character` method runs in.
+fn format_conversion<'s>(
+    context: &mut Cx<'s>,
     conversion: &Conversion<'_>,
-    arguments: &mut [FormatArgument],
-    row: usize,
-    env: Sexp,
+    arguments: &mut [FormatArgument<'s>],
+    (row, call): (usize, &Args<'_, 's>),
     out: &mut String,
 ) -> R<()> {
     let mut left = conversion.left;
@@ -1108,7 +1132,7 @@ unsafe fn format_conversion(
         None => 0,
         Some(Amount::Fixed(width)) => width as usize,
         Some(Amount::Argument(position)) => {
-            let value = star_value(&arguments[position as usize], row)?;
+            let value = star_value(context, &arguments[position as usize], row)?;
             star = Some(value);
             if value < 0 {
                 left = true;
@@ -1123,7 +1147,7 @@ unsafe fn format_conversion(
         None => None,
         Some(Amount::Fixed(precision)) => Some(precision as usize),
         Some(Amount::Argument(position)) => {
-            let value = star_value(&arguments[position as usize], row)?;
+            let value = star_value(context, &arguments[position as usize], row)?;
             star = Some(value);
             if value < 0 {
                 negative_precision = Some(value);
@@ -1145,12 +1169,17 @@ unsafe fn format_conversion(
         let text = match argument.text {
             Some(text) => text,
             None => {
-                let text = as_character(value, || Ok(env))?;
+                let text = as_character(context, value, |context| call.environment(context))?;
                 argument.text = Some(text);
                 text
             }
         };
-        out.push_str(&string_at(text, index).unwrap_or(Cow::Borrowed("NA")));
+        let chars = text.get(context, index);
+        if handles::is_na(chars) {
+            out.push_str("NA");
+        } else {
+            out.push_str(&handles::text(chars));
+        }
         // The precision cuts the string to at most that many bytes, inside a character too, as
         // GNU R does. The bytes of a cut character travel as their stand-ins, which count one
         // byte each toward the width.
@@ -1176,7 +1205,7 @@ unsafe fn format_conversion(
         return Ok(());
     }
     let integer_conversion = matches!(conversion.kind, 'd' | 'i' | 'o' | 'x' | 'X');
-    match value.kind() {
+    match value.r_type() {
         SexpType::String => {
             return Err(error(format!(
                 "invalid format '{}'; use format %s for character objects",
@@ -1187,15 +1216,15 @@ unsafe fn format_conversion(
         _ => return Err(error("unsupported type")),
     }
     if integer_conversion {
-        let integer = match value.kind() {
-            SexpType::Real => {
+        let integer = match value.standard::<Real>() {
+            Some(numbers) => {
                 let whole = match argument.whole {
                     Some(whole) => whole,
                     None => {
                         // GNU R takes a double for `%d` when C's `(int) x == x` holds for every
                         // element or it is `NA`, so NaN, the infinities and 2^31 fail while -2^31
                         // passes and then becomes NA in the coercion, which warns once.
-                        let numbers = values::reals(value);
+                        let numbers = numbers.as_slice(context);
                         let whole = numbers.iter().all(|&number| {
                             is_na_real(number)
                                 || (number == number.trunc()
@@ -1203,7 +1232,10 @@ unsafe fn format_conversion(
                         });
                         argument.whole = Some(whole);
                         if whole && numbers.contains(&-2147483648.0) {
-                            warning("NAs introduced by coercion to integer range")?;
+                            handles::warning(
+                                context,
+                                "NAs introduced by coercion to integer range",
+                            )?;
                         }
                         whole
                     }
@@ -1214,14 +1246,14 @@ unsafe fn format_conversion(
                         spec_as_run(conversion.text, star)
                     )));
                 }
-                let number = values::reals(value)[index];
+                let number = numbers.as_slice(context)[index];
                 if is_na_real(number) || number == -2147483648.0 {
                     NA_INTEGER
                 } else {
                     number as i32
                 }
             }
-            _ => values::ints(value)[index],
+            None => integer_elements(context, value)[index],
         };
         if let Some(negative) = negative_precision {
             // An integer NA goes through `%s`, so the echo names that conversion.
@@ -1242,10 +1274,10 @@ unsafe fn format_conversion(
         }
         return push_integer(out, integer, conversion, width, left, precision);
     }
-    let number = match value.kind() {
-        SexpType::Real => values::reals(value)[index],
-        _ => {
-            let integer = values::ints(value)[index];
+    let number = match value.standard::<Real>() {
+        Some(numbers) => numbers.as_slice(context)[index],
+        None => {
+            let integer = integer_elements(context, value)[index];
             if integer == NA_INTEGER {
                 values::na_real()
             } else {
@@ -1333,19 +1365,22 @@ fn push_unparsed(
     out.push(kind);
 }
 
-unsafe fn star_value(argument: &FormatArgument, row: usize) -> R<i32> {
+fn star_value(context: &Cx<'_>, argument: &FormatArgument<'_>, row: usize) -> R<i32> {
     let value = argument.value;
     let index = row % argument.length;
-    let number = match value.kind() {
-        SexpType::Logical | SexpType::Integer => values::ints(value)[index],
-        SexpType::Real => {
-            let number = values::reals(value)[index];
-            if number.is_nan() {
-                NA_INTEGER
-            } else {
-                number as i32
+    let number = match value.r_type() {
+        SexpType::Logical | SexpType::Integer => integer_elements(context, value)[index],
+        SexpType::Real => match value.standard::<Real>() {
+            Some(numbers) => {
+                let number = numbers.as_slice(context)[index];
+                if number.is_nan() {
+                    NA_INTEGER
+                } else {
+                    number as i32
+                }
             }
-        }
+            None => NA_INTEGER,
+        },
         _ => NA_INTEGER,
     };
     if number == NA_INTEGER {
@@ -1354,6 +1389,18 @@ unsafe fn star_value(argument: &FormatArgument, row: usize) -> R<i32> {
         ));
     }
     Ok(number)
+}
+
+/// The elements of a `sprintf` argument that is a standard logical or integer vector, which
+/// both hold `i32`s.
+fn integer_elements<'a, 's: 'a>(context: &'a Cx<'_>, value: Local<'s>) -> &'a [i32] {
+    if let Some(logicals) = value.standard::<Logical>() {
+        logicals.as_slice(context)
+    } else if let Some(integers) = value.standard::<Integer>() {
+        integers.as_slice(context)
+    } else {
+        &[]
+    }
 }
 
 fn push_integer(
@@ -2013,19 +2060,19 @@ fn do_make_names<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<
     Ok(result.finish().value())
 }
 
-unsafe fn do_make_unique(call: &Call<'_>) -> R<Sexp> {
-    let names = call.arg(0);
-    if names.kind() != SexpType::String {
+fn do_make_unique<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let Some(names) = handles::dense::<Str>(context, arguments.value(0))? else {
         return Err(error("'names' must be a character vector"));
-    }
-    let separator = match values::first_string(call.arg(1)) {
-        Some(text) if call.arg(1).kind() == SexpType::String && length(call.arg(1)) == 1 => {
-            text.into_owned()
+    };
+    let separator = arguments.value(1);
+    let separator = match handles::dense::<Str>(context, separator)? {
+        Some(strings) if strings.len() == 1 && !handles::is_na(strings.get(context, 0)) => {
+            handles::text(strings.get(context, 0)).into_owned()
         }
         _ => return Err(error("'sep' must be a character string")),
     };
-    values::refuse_bytes(names)?;
-    make_unique_interned(names, separator.as_bytes())
+    refuse_bytes(context, names)?;
+    make_unique_interned(context, names, separator.as_bytes())
 }
 
 /// `make.unique(names, sep)`, which works on the strings themselves rather than copies of their
@@ -2040,38 +2087,12 @@ unsafe fn do_make_unique(call: &Call<'_>) -> R<Sexp> {
 /// input, the next suffix to try (0 until its first occurrence has been kept). Copying every
 /// name into owned text took about 150 MB for a million names, which `[.data.frame` builds row
 /// names from whenever its row index repeats.
-unsafe fn make_unique_interned(names: Sexp, separator: &[u8]) -> R<Sexp> {
-    struct Marked {
-        strings: Vec<Sexp>,
-        truelengths: Vec<i32>,
-        counters: Vec<u32>,
-    }
-    impl Marked {
-        /// The slot of `charsxp` if this call marked it; a negative truelength another
-        /// caller left behind names no slot of ours.
-        unsafe fn slot(&self, charsxp: Sexp) -> Option<usize> {
-            let mark = charsxp.char_truelength();
-            let slot = (mark < 0).then(|| mark.unsigned_abs() as usize - 1)?;
-            (self.strings.get(slot) == Some(&charsxp)).then_some(slot)
-        }
-
-        unsafe fn mark(&mut self, charsxp: Sexp) -> usize {
-            let slot = self.strings.len();
-            self.strings.push(charsxp);
-            self.truelengths.push(charsxp.char_truelength());
-            self.counters.push(0);
-            charsxp.set_char_truelength(-(slot as i32 + 1));
-            slot
-        }
-
-        unsafe fn restore(&self) {
-            for (&charsxp, &truelength) in self.strings.iter().zip(&self.truelengths) {
-                charsxp.set_char_truelength(truelength);
-            }
-        }
-    }
-    let na = na_string();
-    let count = length(names);
+fn make_unique_interned<'s>(
+    context: &mut Cx<'s>,
+    names: Local<'s, Str>,
+    separator: &[u8],
+) -> R<Local<'s>> {
+    let count = names.len();
     // Each name marks at most one string, its own or the one made for it, so the slots never
     // grow past the names and never reallocate.
     let mut marked = Marked {
@@ -2080,72 +2101,116 @@ unsafe fn make_unique_interned(names: Sexp, separator: &[u8]) -> R<Sexp> {
         counters: Vec::with_capacity(count),
     };
     for index in 0..count {
-        let charsxp = names.element(index);
-        if charsxp != na && marked.slot(charsxp).is_none() {
-            marked.mark(charsxp);
+        let chars = names.get(context, index);
+        if !handles::is_na(chars) && marked.slot(chars).is_none() {
+            marked.mark(context, chars);
         }
     }
-    let result = made_unique(names, separator, &mut marked);
-    marked.restore();
-    return result;
-
-    unsafe fn made_unique(names: Sexp, separator: &[u8], marked: &mut Marked) -> R<Sexp> {
-        let na = na_string();
-        let count = length(names);
-        let result = alloc(SexpType::String, count)?;
-        // NA is a name of its own, distinct from the text "NA": its first occurrence stays NA,
-        // and a repeat is made unique from the text "NA", as in GNU R.
-        let mut na_counter = 0;
-        let mut candidate = Vec::new();
-        for index in 0..count {
-            let charsxp = names.element(index);
-            let (counter, text): (&mut u32, Cow<'_, [u8]>) = if charsxp == na {
-                (&mut na_counter, Cow::Borrowed(b"NA"))
-            } else {
-                let slot = marked
-                    .slot(charsxp)
-                    .ok_or_else(|| error("a name lost its mark while 'make.unique' ran"))?;
-                // A made name is the name's text translated to UTF-8, ry's native encoding.
-                let text = if charsxp.has_gp(gp::LATIN1) {
-                    Cow::Owned(values::char_str(charsxp).into_owned().into_bytes())
-                } else {
-                    Cow::Borrowed(charsxp.bytes())
-                };
-                (&mut marked.counters[slot], text)
-            };
-            if *counter == 0 {
-                *counter = 1;
-                set_elt(result, index, charsxp);
-                continue;
+    let mut result = context.alloc::<Str>(count)?;
+    let made = made_unique(context, (names, &mut result), separator, &mut marked);
+    // Every marked string is a name or an element of the result, so a walk of both puts each
+    // truelength back, the first visit restoring it and later ones finding no mark.
+    for index in 0..count {
+        for chars in [names.get(context, index), result.get(context, index)] {
+            if let Some(slot) = marked.slot(chars) {
+                handles::set_char_truelength(context, chars, marked.truelengths[slot]);
             }
-            let mut next = *counter;
-            let made = loop {
-                candidate.clear();
-                candidate.extend_from_slice(&text);
-                candidate.extend_from_slice(separator);
-                // A suffix counts the names, which fit an `i32`.
-                candidate.extend_from_slice(integer_digits(next as i32, &mut [0; 11]));
-                next += 1;
-                let made = crate::heap().mk_char(&candidate, Encoding::Native)?;
-                if marked.slot(made).is_none() {
-                    break made;
-                }
-            };
-            set_elt(result, index, made);
-            marked.mark(made);
-            // `mark` may have grown the counters, so the slot is looked up again.
-            let counter = if charsxp == na {
-                &mut na_counter
-            } else {
-                let slot = marked
-                    .slot(charsxp)
-                    .ok_or_else(|| error("a name lost its mark while 'make.unique' ran"))?;
-                &mut marked.counters[slot]
-            };
-            *counter = next;
         }
-        Ok(result)
     }
+    made?;
+    Ok(result.finish().value())
+}
+
+/// The strings `make.unique` has marked, by slot: the string's identity, the truelength to put
+/// back, and the next suffix to try.
+struct Marked {
+    /// Only compared, never read through: every string here is a name or an element of the
+    /// result, which keep it alive.
+    strings: Vec<Sexp>,
+    truelengths: Vec<i32>,
+    counters: Vec<u32>,
+}
+
+impl Marked {
+    /// The slot of `chars` if this call marked it; a negative truelength another caller left
+    /// behind names no slot of ours.
+    fn slot(&self, chars: Gc<'_, Chars>) -> Option<usize> {
+        let mark = handles::char_truelength(chars);
+        let slot = (mark < 0).then(|| mark.unsigned_abs() as usize - 1)?;
+        (self.strings.get(slot) == Some(&chars.raw())).then_some(slot)
+    }
+
+    fn mark(&mut self, context: &Cx<'_>, chars: Gc<'_, Chars>) {
+        let slot = self.strings.len();
+        self.strings.push(chars.raw());
+        self.truelengths.push(handles::char_truelength(chars));
+        self.counters.push(0);
+        handles::set_char_truelength(context, chars, -(slot as i32 + 1));
+    }
+}
+
+/// Fills `result` with the unique names, each made name stored where it is made, which keeps it
+/// alive while the next is made.
+fn made_unique<'s>(
+    context: &mut Cx<'s>,
+    (names, result): (Local<'s, Str>, &mut Fresh<'s, Str>),
+    separator: &[u8],
+    marked: &mut Marked,
+) -> R<()> {
+    // NA is a name of its own, distinct from the text "NA": its first occurrence stays NA, and a
+    // repeat is made unique from the text "NA", as in GNU R.
+    let mut na_counter = 0;
+    let mut candidate = Vec::new();
+    let mut text = Vec::new();
+    for index in 0..names.len() {
+        let chars = names.get(context, index);
+        let slot = if handles::is_na(chars) {
+            None
+        } else {
+            Some(
+                marked
+                    .slot(chars)
+                    .ok_or_else(|| error("a name lost its mark while 'make.unique' ran"))?,
+            )
+        };
+        let counter = match slot {
+            None => &mut na_counter,
+            Some(slot) => &mut marked.counters[slot],
+        };
+        if *counter == 0 {
+            *counter = 1;
+            result.set(context, index, chars);
+            continue;
+        }
+        let mut next = *counter;
+        // A made name is the name's text translated to UTF-8, ry's native encoding.
+        text.clear();
+        match slot {
+            None => text.extend_from_slice(b"NA"),
+            Some(_) if handles::is_latin1(chars) => {
+                text.extend_from_slice(handles::text(chars).as_bytes());
+            }
+            Some(_) => text.extend_from_slice(chars.bytes()),
+        }
+        loop {
+            candidate.clear();
+            candidate.extend_from_slice(&text);
+            candidate.extend_from_slice(separator);
+            // A suffix counts the names, which fit an `i32`.
+            candidate.extend_from_slice(integer_digits(next as i32, &mut [0; 11]));
+            next += 1;
+            handles::set_bytes(context, result, index, &candidate, Encoding::Native)?;
+            if marked.slot(result.get(context, index)).is_none() {
+                break;
+            }
+        }
+        marked.mark(context, result.get(context, index));
+        match slot {
+            None => na_counter = next,
+            Some(slot) => marked.counters[slot] = next,
+        }
+    }
+    Ok(())
 }
 
 fn do_abbreviate<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
@@ -3476,11 +3541,15 @@ fn regex_bytes(text: &str, forced_bytes: bool) -> Option<Cow<'_, [u8]>> {
     }
 }
 
-/// [`regex_bytes`] as a new string.
-unsafe fn regex_result(text: &str, forced_bytes: bool) -> R<Sexp> {
-    match regex_bytes(text, forced_bytes) {
-        Some(bytes) => values::mkchar_bytes(&bytes, Encoding::Bytes),
-        None => values::mkchar(text),
+/// The bytes and encoding mark of the string [`regex_bytes`] makes of `text`: the bytes, or
+/// the text as `values::mkchar` reads it.
+fn regex_piece(text: &str, forced_bytes: bool) -> (Cow<'_, [u8]>, Encoding) {
+    if let Some(bytes) = regex_bytes(text, forced_bytes) {
+        return (bytes, Encoding::Bytes);
+    }
+    match values::unescape_invalid_bytes(text) {
+        Some(bytes) => (Cow::Owned(bytes), Encoding::Native),
+        None => (Cow::Borrowed(text.as_bytes()), Encoding::Utf8),
     }
 }
 
@@ -4990,23 +5059,20 @@ pub(crate) unsafe fn flag(value: Sexp) -> bool {
 /// `as.character(value)`, dispatching for objects, as `paste` and `sprintf` convert their
 /// arguments. A classed character vector is already text and is used as it is, which matters
 /// for vctrs, whose `as.character` method refuses a class with no cast to character. Only that
-/// dispatch needs the caller's environment, so `env` is asked for then, and a slot frame keeps
-/// its slots otherwise.
-unsafe fn as_character(value: Sexp, env: impl FnOnce() -> R<Sexp>) -> R<Sexp> {
-    if value.is_object() && value.kind() != SexpType::String {
-        let function = values::install("as.character")?;
-        let call = values::call(function, &[eval::quote_value(value)?])?;
-        let converted = eval::eval(call, env()?)?;
-        if converted.kind() != SexpType::String {
-            return coerce_vector(converted, SexpType::String);
-        }
-        return Ok(converted);
+/// dispatch needs the caller's environment, so `environment` is asked for then, and a slot frame
+/// keeps its slots otherwise.
+fn as_character<'s>(
+    context: &mut Cx<'s>,
+    value: Local<'s>,
+    environment: impl FnOnce(&mut Cx<'s>) -> R<Local<'s, Environment>>,
+) -> R<Local<'s, Str>> {
+    if handles::is_object(value) && value.r_type() != SexpType::String {
+        let environment = environment(context)?;
+        let argument = handles::quoted_value(context, value)?;
+        let converted = handles::call_function(context, "as.character", &[argument], environment)?;
+        return handles::character_vector(context, converted);
     }
-    match value.kind() {
-        SexpType::String => Ok(value),
-        SexpType::Symbol => values::scalar_string_charsxp(value.car()),
-        _ => coerce_vector(value, SexpType::String),
-    }
+    handles::character_vector(context, value)
 }
 
 /// Whether a flag argument is `TRUE`.

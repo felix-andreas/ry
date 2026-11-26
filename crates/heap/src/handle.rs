@@ -87,6 +87,25 @@ impl<'s> Cx<'s> {
         rest(unsafe { &mut *this })
     }
 
+    /// The answer of `read`, which may allocate and borrows the context, rooted in this scope
+    /// so that it outlives the next safepoint. One function then serves a caller that hands
+    /// the answer straight on and a caller that keeps it.
+    #[inline]
+    pub fn root_answer<T: Kind, E>(
+        &mut self,
+        read: impl for<'a> FnOnce(&'a mut Cx<'s>) -> Result<Gc<'a, T>, E>,
+    ) -> Result<Local<'s, T>, E> {
+        let raw = read(self)?.raw;
+        // SAFETY: the heap is live, and the answer was live when `read` returned; nothing has
+        // run since.
+        unsafe { (*self.heap.as_ptr()).root(raw) };
+        Ok(Local {
+            raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        })
+    }
+
     /// A new vector of `length` elements: zeros, `NULL`s or empty strings.
     #[inline]
     pub fn alloc<T: Vector>(&mut self, length: usize) -> HeapResult<Fresh<'s, T>> {
@@ -774,6 +793,15 @@ impl<T: Atomic> Fresh<'_, T> {
 }
 
 impl<T: Elements> Fresh<'_, T> {
+    /// One element: the one stored last at `index`, or the filler the allocation wrote there.
+    #[inline]
+    pub fn get<'a>(&self, _cx: &'a Cx<'_>, index: usize) -> Gc<'a, T::Element> {
+        assert!(index < self.len(), "element index out of bounds");
+        // SAFETY: the index is in bounds, and a new vector of pointers holds live objects of
+        // the element kind from its allocation on, which stay live until a safepoint.
+        unsafe { Gc::adopt(*(self.raw.data() as *const Sexp).add(index)) }
+    }
+
     /// Stores one element. A collection between two stores can promote the object, so each
     /// store runs the write barrier.
     #[inline]
