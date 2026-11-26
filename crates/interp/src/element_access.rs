@@ -8,7 +8,7 @@ use {
         attribute_access::same_text,
         builtins::is_native_value,
         eval::reuse_permitted,
-        interp, moves,
+        moves,
         subset::{int_to_real, vector_element},
         unwind::R,
         values::{self, length, na_string, nil, symbols},
@@ -144,7 +144,7 @@ pub(crate) unsafe fn altrep_element(object: Sexp, index: Sexp) -> R<Option<Sexp>
         SexpType::Integer => f64::from(index.slice::<i32>()[0]),
         _ => index.slice::<f64>()[0],
     };
-    let count = (interp().hooks.altrep_length)(object)?;
+    let count = values::class_length(object)?;
     // NA_integer_ and NaN fail the lower bound, and `x[2.7]` truncates to the second element.
     if !(position >= 1.0 && position < count as f64 + 1.0) {
         return Ok(None);

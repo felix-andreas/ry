@@ -6,7 +6,10 @@ use {
     crate::{
         builtins::{BuiltinDef, Call, builtin, internal, special},
         coerce::parse_real,
-        handles::{self, Args, Cx, Local, Str, safe},
+        handles::{
+            self, Args, Chars, Cx, Gc, Integer, List, Local, Logical, Owned, Real, Str, Vector,
+            safe,
+        },
         http::FetchError,
         interp,
         platform::{Iconv, IconvStop, convert_all},
@@ -292,11 +295,11 @@ pub const BUILTINS: &[BuiltinDef] = &[
         map_strings_bool(call, |_| true)
     }),
     internal("as.POSIXlt", 2, do_as_posixlt),
-    internal("as.POSIXct", 2, do_as_posixct),
-    internal("format.POSIXlt", -1, do_format_posixlt),
+    internal("as.POSIXct", 2, safe!(do_as_posixct)),
+    internal("format.POSIXlt", -1, safe!(do_format_posixlt)),
     internal("strptime", 3, do_strptime),
     internal("Date2POSIXlt", 2, do_date_to_posixlt),
-    internal("POSIXlt2Date", 1, do_posixlt_to_date),
+    internal("POSIXlt2Date", 1, safe!(do_posixlt_to_date)),
     internal("balancePOSIXlt", 3, |call| unsafe {
         balance_posixlt(
             call.arg(0),
@@ -1934,16 +1937,20 @@ unsafe fn posixlt_from_seconds(seconds: &[f64], tz: &str) -> R<Sexp> {
 
 /// The `tz` argument of the date-time internals: one string, where GNU R reads `NA` as the zone
 /// named "NA".
-unsafe fn zone_name(argument: Sexp) -> R<String> {
-    if argument.kind() != SexpType::String || length(argument) != 1 {
+fn zone_name(context: &mut Cx<'_>, argument: Local<'_>) -> R<String> {
+    if argument.r_type() != SexpType::String || handles::length(context, argument) != 1 {
         return Err(error("invalid 'tz' value"));
     }
-    Ok(values::first_string(argument).map_or_else(|| "NA".to_owned(), |text| text.into_owned()))
+    Ok(handles::first_string(context, argument)
+        .map_or_else(|| "NA".to_owned(), |text| text.into_owned()))
 }
 
 unsafe fn do_as_posixlt(call: &Call<'_>) -> R<Sexp> {
     let times = crate::coerce::coerce_vector(call.arg(0), SexpType::Real)?;
-    let tz = zone_name(call.arg(1))?;
+    let tz = handles::with(|context| {
+        let argument = handles::adopt(context, call.arg(1));
+        zone_name(context, argument)
+    })?;
     let seconds: Vec<f64> = values::reals(times).to_vec();
     let result = posixlt_from_seconds(&seconds, &tz)?;
     set_year_names(result, values::names(call.arg(0)))?;
@@ -1951,35 +1958,55 @@ unsafe fn do_as_posixlt(call: &Call<'_>) -> R<Sexp> {
 }
 
 /// GNU R rejects a POSIXlt in which some times exist but one of `components` is empty.
-unsafe fn require_nonempty_components(list: Sexp, components: &[usize]) -> R<()> {
-    let fields = length(list);
-    if (0..fields).all(|index| length(list.element(index)) == 0) {
+fn require_nonempty_components(
+    context: &mut Cx<'_>,
+    list: Local<'_, List>,
+    components: impl Iterator<Item = usize> + Clone,
+) -> R<()> {
+    let empty = |context: &mut Cx<'_>, index: usize| {
+        let component = context.root(list.get(context, index));
+        handles::length(context, component) == 0
+    };
+    let fields = list.len();
+    if (0..fields).all(|index| empty(context, index)) {
         return Ok(());
     }
-    if let Some(&empty) = components
-        .iter()
-        .find(|&&index| index < fields && length(list.element(index)) == 0)
-    {
-        return Err(error(format!(
-            "zero-length component [[{}]] in non-empty \"POSIXlt\" structure",
-            empty + 1
-        )));
+    for index in components.filter(|&index| index < fields) {
+        if empty(context, index) {
+            return Err(error(format!(
+                "zero-length component [[{}]] in non-empty \"POSIXlt\" structure",
+                index + 1
+            )));
+        }
     }
     Ok(())
 }
 
-unsafe fn require_posixlt(list: Sexp) -> R<()> {
-    if list.kind() != SexpType::List || length(list) < 9 {
-        return Err(error(
-            "a valid \"POSIXlt\" object is a list of at least 9 elements",
-        ));
+/// `value` as the list of a POSIXlt's components, of which GNU R requires at least 9.
+fn posixlt_list<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s, List>> {
+    handles::dense::<List>(context, value)?
+        .filter(|list| list.len() >= 9)
+        .ok_or_else(|| error("a valid \"POSIXlt\" object is a list of at least 9 elements"))
+}
+
+/// [`posixlt_list`] for a raw caller, which reads the list itself once it passes.
+///
+/// # Safety
+///
+/// `value` is a live object.
+unsafe fn require_posixlt(value: Sexp) -> R<()> {
+    // SAFETY: the caller's contract.
+    unsafe {
+        handles::with(|context| {
+            let value = handles::adopt(context, value);
+            posixlt_list(context, value).map(drop)
+        })
     }
-    Ok(())
 }
 
 /// The instants a POSIXlt's wall-clock fields name in the zone `tz`.
-unsafe fn posixlt_instants(list: Sexp, tz: &str) -> R<Vec<f64>> {
-    let mut seconds = posixlt_seconds(list)?;
+fn posixlt_instants<'s>(context: &mut Cx<'s>, list: Local<'s, List>, tz: &str) -> R<Vec<f64>> {
+    let mut seconds = posixlt_seconds(context, list)?;
     let zone = resolve_zone(tz);
     // GNU R converts UTC and GMT itself rather than through `mktime`, which ignores `isdst`.
     let name = if tz.is_empty() {
@@ -1988,16 +2015,12 @@ unsafe fn posixlt_instants(list: Sexp, tz: &str) -> R<Vec<f64>> {
         tz.to_owned()
     };
     let honors_isdst = name != "UTC" && name != "GMT";
-    let isdst = if length(list) > 8 {
-        list.element(8)
-    } else {
-        nil()
-    };
+    let isdst = Column::of(context, list, 8)?;
     for (position, value) in seconds.iter_mut().enumerate() {
-        let flag = if length(isdst) == 0 || !honors_isdst {
+        let flag = if !honors_isdst {
             -1
         } else {
-            let flag = crate::arith::real_at(isdst, position % length(isdst));
+            let flag = isdst.at(context, position);
             if flag.is_nan() { -1 } else { flag as i32 }
         };
         *value = zone.local_to_utc(*value, flag);
@@ -2016,42 +2039,47 @@ unsafe fn posixlt_zone(list: Sexp) -> R<String> {
 /// One numeric POSIXlt component, read as doubles with recycling; a missing or empty component
 /// reads as `NA`.
 #[derive(Clone, Copy)]
-enum Column<'a> {
-    Integers(&'a [i32]),
-    Reals(&'a [f64]),
+enum Column<'s> {
+    Integers(Local<'s, Integer>),
+    Logicals(Local<'s, Logical>),
+    Reals(Local<'s, Real>),
     Missing,
 }
 
-impl Column<'_> {
-    unsafe fn of(list: Sexp, index: usize) -> Self {
-        if index >= length(list) {
-            return Column::Missing;
+impl<'s> Column<'s> {
+    /// Component `index` of `list`. An ALTREP component is read from the vector its class keeps
+    /// its elements in.
+    fn of(context: &mut Cx<'s>, list: Local<'s, List>, index: usize) -> R<Self> {
+        if index >= list.len() {
+            return Ok(Column::Missing);
         }
-        let vector = list.element(index);
-        // An ALTREP component whose data pointer fails reads as empty and parks its error,
-        // which the builtin raises on return.
-        let column = match vector.kind() {
-            SexpType::Integer | SexpType::Logical => Column::Integers(values::ints(vector)),
-            SexpType::Real => Column::Reals(values::reals(vector)),
-            _ => Column::Missing,
+        let component = context.root(list.get(context, index));
+        let column = match component.r_type() {
+            SexpType::Integer => {
+                handles::elements_of::<Integer>(context, component)?.map(Column::Integers)
+            }
+            SexpType::Logical => {
+                handles::elements_of::<Logical>(context, component)?.map(Column::Logicals)
+            }
+            SexpType::Real => handles::elements_of::<Real>(context, component)?.map(Column::Reals),
+            _ => None,
         };
-        if column.length() == 0 {
-            Column::Missing
-        } else {
-            column
-        }
+        Ok(column
+            .filter(|column| column.length() > 0)
+            .unwrap_or(Column::Missing))
     }
 
-    fn length(&self) -> usize {
+    fn length(self) -> usize {
         match self {
             Column::Integers(values) => values.len(),
+            Column::Logicals(values) => values.len(),
             Column::Reals(values) => values.len(),
             Column::Missing => 0,
         }
     }
 
     #[inline]
-    fn at(&self, position: usize) -> f64 {
+    fn at(self, context: &Cx<'_>, position: usize) -> f64 {
         // Components of a balanced POSIXlt all have the same length, so the division of
         // recycling is rare.
         let recycle = |length: usize| {
@@ -2061,37 +2089,44 @@ impl Column<'_> {
                 position % length
             }
         };
+        let integer = |values: &[i32]| match values[recycle(values.len())] {
+            NA_INTEGER => NA_REAL,
+            value => f64::from(value),
+        };
         match self {
-            Column::Integers(values) => match values[recycle(values.len())] {
-                NA_INTEGER => NA_REAL,
-                value => f64::from(value),
-            },
-            Column::Reals(values) => values[recycle(values.len())],
+            Column::Integers(values) => integer(values.as_slice(context)),
+            Column::Logicals(values) => integer(values.as_slice(context)),
+            Column::Reals(values) => {
+                let values = values.as_slice(context);
+                values[recycle(values.len())]
+            }
             Column::Missing => NA_REAL,
         }
     }
 }
 
 /// A POSIXlt's wall-clock fields as seconds since the epoch read as UTC.
-unsafe fn posixlt_seconds(list: Sexp) -> R<Vec<f64>> {
-    require_posixlt(list)?;
+fn posixlt_seconds<'s>(context: &mut Cx<'s>, list: Local<'s, List>) -> R<Vec<f64>> {
     // `wday` and `yday` are derived, so only formatting needs them present.
-    require_nonempty_components(list, &[0, 1, 2, 3, 4, 5, 8])?;
-    let [second, minute, hour, day, month, year] =
-        std::array::from_fn(|index| Column::of(list, index));
-    let count = [second, minute, hour, day, month, year]
+    require_nonempty_components(context, list, [0, 1, 2, 3, 4, 5, 8].into_iter())?;
+    let mut columns = [Column::Missing; 6];
+    for (index, column) in columns.iter_mut().enumerate() {
+        *column = Column::of(context, list, index)?;
+    }
+    let count = columns
         .iter()
         .map(|column| column.length())
         .max()
         .unwrap_or(0);
+    let [second, minute, hour, day, month, year] = columns;
     let mut seconds = Vec::with_capacity(count);
     for position in 0..count {
-        let second = second.at(position);
-        let minute = minute.at(position);
-        let hour = hour.at(position);
-        let day = day.at(position);
-        let month = month.at(position);
-        let year = year.at(position);
+        let second = second.at(context, position);
+        let minute = minute.at(context, position);
+        let hour = hour.at(context, position);
+        let day = day.at(context, position);
+        let month = month.at(context, position);
+        let year = year.at(context, position);
         if !second.is_finite() {
             seconds.push(second);
             continue;
@@ -2157,10 +2192,18 @@ unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp>
         // calendar arithmetic and keeps its `isdst` and `tzone`.
         let tz = posixlt_zone(list)?;
         if length(list) >= 11 {
-            let seconds = posixlt_instants(list, &tz)?;
+            let seconds = handles::with(|context| {
+                let list = handles::adopt(context, list);
+                let list = posixlt_list(context, list)?;
+                posixlt_instants(context, list, &tz)
+            })?;
             posixlt_from_seconds(&seconds, &tz)?
         } else {
-            let wall = posixlt_seconds(list)?;
+            let wall = handles::with(|context| {
+                let list = handles::adopt(context, list);
+                let list = posixlt_list(context, list)?;
+                posixlt_seconds(context, list)
+            })?;
             let full = posixlt_from_seconds(&wall, "UTC")?;
             crate::heap().root(full);
             let fields = length(list);
@@ -2219,12 +2262,15 @@ unsafe fn balance_posixlt(list: Sexp, fill_only: bool, classed: bool) -> R<Sexp>
 }
 
 /// `as.POSIXct(x, tz)`: the instants a POSIXlt names in the zone `tz`.
-unsafe fn do_as_posixct(call: &Call<'_>) -> R<Sexp> {
-    let tz = zone_name(call.arg(1))?;
-    let seconds = posixlt_instants(call.arg(0), &tz)?;
-    let result = values::real_vector(&seconds)?;
-    set_names_from_year(call.arg(0), result)?;
-    Ok(result)
+fn do_as_posixct<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let tz = zone_name(context, arguments.value(1))?;
+    let list = posixlt_list(context, arguments.value(0))?;
+    let seconds = posixlt_instants(context, list, &tz)?;
+    let mut result = context.alloc::<Real>(seconds.len())?;
+    result.as_mut_slice().copy_from_slice(&seconds);
+    let mut result = result.owned();
+    set_names_from_year(context, list, &mut result)?;
+    Ok(result.finish().value())
 }
 
 /// A POSIXlt keeps its element names on the `year` field.
@@ -2237,27 +2283,35 @@ unsafe fn set_year_names(list: Sexp, names: Sexp) -> R<()> {
 
 /// Names `result` after the POSIXlt's year names. A ragged POSIXlt's year names can be shorter
 /// than the result, and GNU R pads them with NA.
-unsafe fn set_names_from_year(list: Sexp, result: Sexp) -> R<()> {
-    let names = values::names(list.element(5));
-    if names == nil() {
+fn set_names_from_year<'s, T: Vector>(
+    context: &mut Cx<'s>,
+    list: Local<'s, List>,
+    result: &mut Owned<'s, T>,
+) -> R<()> {
+    let year = context.root(list.get(context, 5));
+    let names = handles::names_of(context, year)?;
+    let Some(names) = handles::dense::<Str>(context, names)? else {
         return Ok(());
-    }
-    let count = length(result);
-    let padded = if length(names) == count {
+    };
+    let count = result.get().len();
+    let padded = if names.len() == count {
         names
     } else {
-        let padded = alloc(SexpType::String, count)?;
-        for position in 0..count {
-            let name = if position < length(names) {
-                names.element(position)
-            } else {
-                values::na_string()
-            };
-            values::set_elt(padded, position, name);
+        let mut padded = context.alloc::<Str>(count)?;
+        for position in 0..count.min(names.len()) {
+            padded.set(context, position, names.get(context, position));
         }
-        padded
+        for position in names.len()..count {
+            padded.set(context, position, handles::na());
+        }
+        padded.finish()
     };
-    values::set_attr(result, symbols().names, padded)
+    handles::set_attribute(
+        context,
+        result,
+        handles::symbol(|symbols| symbols.names),
+        padded.value(),
+    )
 }
 
 /// `Cstack_info()`: the size GNU R reports for an 8 MiB stack, the bytes in use (estimated from
@@ -2277,43 +2331,54 @@ unsafe fn cstack_info() -> R<Sexp> {
 
 /// `format.POSIXlt(x, format, usetz)`, plus R 4.4's `digits`. A bare `%OS` prints that many
 /// decimals; before R 4.4 the C code read them from `options("digits.secs")` itself.
-unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
-    let list = call.arg(0);
-    let formats = call.arg(1);
-    let use_tz = values::as_logical_scalar(call.arg(2)) == 1;
-    let digits = if call.len() > 3 {
-        call.arg(3)
+fn do_format_posixlt<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let formats = arguments.value(1);
+    let use_tz = handles::logical_scalar(context, arguments.value(2)) == 1;
+    let digits = if arguments.len() > 3 {
+        arguments.value(3)
     } else {
-        crate::envir::get_option("digits.secs")
+        handles::option(context, "digits.secs")
     };
-    let second_digits = if digits == nil() {
+    let second_digits = if digits.r_type() == SexpType::Nil {
         0
     } else {
-        values::as_integer_scalar(digits).clamp(0, 6)
+        handles::integer_scalar(context, digits).clamp(0, 6)
     };
-    require_posixlt(list)?;
-    let every: Vec<usize> = (0..length(list)).collect();
-    require_nonempty_components(list, &every)?;
-    let seconds = posixlt_seconds(list)?;
+    let list = posixlt_list(context, arguments.value(0))?;
+    require_nonempty_components(context, list, 0..list.len())?;
+    let seconds = posixlt_seconds(context, list)?;
+    let format_count = handles::length(context, formats);
+    let Some(formats) = handles::dense::<Str>(context, formats)?.filter(|_| format_count > 0)
+    else {
+        return Err(error("invalid 'format' argument"));
+    };
     // A longer `format` recycles the times, as in GNU R.
     let count = if seconds.is_empty() {
         0
     } else {
-        seconds.len().max(length(formats))
+        seconds.len().max(format_count)
     };
-    let result = alloc(SexpType::String, count)?;
-    let tzone = get_attr(list, values::install("tzone")?);
-    let field = |index: usize| {
-        if length(list) > index {
-            list.element(index)
-        } else {
-            nil()
-        }
+    let mut result = context.alloc::<Str>(count)?;
+    let tzone_symbol = handles::install_bytes(context, b"tzone")?;
+    let tzone = context.root(handles::get_attribute(context, list, tzone_symbol));
+    let tzone = handles::dense::<Str>(context, tzone)?;
+    let zones = if list.len() > 9 {
+        let zones = context.root(list.get(context, 9));
+        handles::dense::<Str>(context, zones)?
+    } else {
+        None
     };
-    let (isdst, zones, offsets) = (Column::of(list, 8), field(9), Column::of(list, 10));
-    let second_column = Column::of(list, 0);
-    let format_count = length(formats).max(1);
-    let single_format = (format_count == 1).then(|| values::string_at(formats, 0));
+    let (isdst, offsets) = (
+        Column::of(context, list, 8)?,
+        Column::of(context, list, 10)?,
+    );
+    let second_column = Column::of(context, list, 0)?;
+    // The format of element `index`, `None` for `NA`.
+    let format_at = |context: &Cx<'_>, index: usize| -> Option<String> {
+        let chars = formats.get(context, index % formats.len());
+        (!handles::is_na(chars)).then(|| handles::text(chars).into_owned())
+    };
+    let single_format = (format_count == 1).then(|| format_at(context, 0));
     // A single format without `%OS` is the same for every element, so it compiles once.
     let single_pieces = single_format.as_ref().and_then(|written| {
         let written = written.as_deref().unwrap_or("%Y-%m-%d %H:%M:%S");
@@ -2324,7 +2389,7 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
     for index in 0..count {
         let value = seconds[index % seconds.len()];
         if is_na_real(value) {
-            values::set_elt(result, index, values::na_string());
+            result.set(context, index, handles::na());
             continue;
         }
         if !value.is_finite() {
@@ -2335,14 +2400,14 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
             } else {
                 "-Inf"
             };
-            values::set_elt(result, index, values::mkchar(text)?);
+            handles::set_text(context, &mut result, index, text)?;
             continue;
         }
         let element_format;
         let written = match &single_format {
             Some(written) => written,
             None => {
-                element_format = values::string_at(formats, index % format_count);
+                element_format = format_at(context, index % format_count);
                 &element_format
             }
         };
@@ -2364,7 +2429,7 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
                 };
                 let digits = digits.min(6);
                 let replacement = if digits > 0 {
-                    let second = second_column.at(index);
+                    let second = second_column.at(context, index);
                     let scale = 10f64.powi(digits);
                     let truncated = (second * scale).trunc() / scale;
                     format!(
@@ -2405,24 +2470,30 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
             // The element's own zone fields win; a POSIXlt without them falls back to `tzone`.
             let dst = match isdst {
                 Column::Missing => 0.0,
-                column => column.at(index),
+                column => column.at(context, index),
             };
-            let zone = if zones.kind() == SexpType::String && length(zones) > 0 {
-                values::string_at(zones, index % length(zones))
-            } else {
-                let slot = if dst > 0.0 { 2 } else { 1 };
-                values::string_at(tzone, slot.min(length(tzone).saturating_sub(1)))
+            let zone = match (zones, tzone) {
+                (Some(zones), _) if !zones.is_empty() => {
+                    string_text(zones.get(context, index % zones.len()))
+                }
+                (_, Some(tzone)) if !tzone.is_empty() => {
+                    let slot = if dst > 0.0 { 2 } else { 1 };
+                    string_text(tzone.get(context, slot.min(tzone.len() - 1)))
+                }
+                _ => None,
             };
             let known = match offsets {
                 Column::Missing => Some(0.0),
-                column => Some(column.at(index)).filter(|offset| !offset.is_nan()),
+                column => Some(column.at(context, index)).filter(|offset| !offset.is_nan()),
             };
             // An unknown offset (strptime leaves it NA outside UTC) comes from the zone's rules
             // at that wall-clock time, as C's `mktime` fills it in for GNU R.
             let offset = match known {
                 Some(offset) => offset as i32,
                 None => {
-                    let name = values::string_at(tzone, 0)
+                    let name = tzone
+                        .filter(|tzone| !tzone.is_empty())
+                        .and_then(|tzone| string_text(tzone.get(context, 0)))
                         .map(|text| text.into_owned())
                         .unwrap_or_default();
                     let flag = if dst.is_nan() { -1 } else { dst as i32 };
@@ -2440,26 +2511,36 @@ unsafe fn do_format_posixlt(call: &Call<'_>) -> R<Sexp> {
             text.push(' ');
             text.push_str(zone);
         }
-        values::set_elt(result, index, values::mkchar(&text)?);
+        handles::set_text(context, &mut result, index, &text)?;
     }
-    let year_names = values::names(field(5));
-    if count > seconds.len() && year_names != nil() {
-        // The names are padded with NA to the number of times, then recycled with the times.
-        let recycled = alloc(SexpType::String, count)?;
-        for position in 0..count {
-            let time = position % seconds.len();
-            let name = if time < length(year_names) {
-                year_names.element(time)
-            } else {
-                values::na_string()
-            };
-            values::set_elt(recycled, position, name);
+    let mut result = result.owned();
+    let year = context.root(list.get(context, 5));
+    let year_names = handles::names_of(context, year)?;
+    let year_names = handles::dense::<Str>(context, year_names)?;
+    match year_names {
+        Some(year_names) if count > seconds.len() => {
+            // The names are padded with NA to the number of times, then recycled with the
+            // times.
+            let mut recycled = context.alloc::<Str>(count)?;
+            for position in 0..count {
+                let time = position % seconds.len();
+                if time < year_names.len() {
+                    recycled.set(context, position, year_names.get(context, time));
+                } else {
+                    recycled.set(context, position, handles::na());
+                }
+            }
+            let names = handles::symbol(|symbols| symbols.names);
+            handles::set_attribute(context, &mut result, names, recycled.finish().value())?;
         }
-        values::set_attr(result, symbols().names, recycled)?;
-    } else {
-        set_names_from_year(list, result)?;
+        _ => set_names_from_year(context, list, &mut result)?,
     }
-    Ok(result)
+    Ok(result.finish().value())
+}
+
+/// The text of `chars`, `None` for `NA`.
+fn string_text(chars: Gc<'_, Chars>) -> Option<Cow<'_, str>> {
+    (!handles::is_na(chars)).then(|| handles::text(chars))
 }
 
 /// A parsed time: whole wall-clock seconds since the epoch read as UTC, the fraction of a second
@@ -2851,7 +2932,10 @@ unsafe fn do_strptime(call: &Call<'_>) -> R<Sexp> {
     if formats.kind() != SexpType::String || length(formats) == 0 {
         return Err(error("invalid 'format' argument"));
     }
-    let tz = zone_name(call.arg(2))?;
+    let tz = handles::with(|context| {
+        let argument = handles::adopt(context, call.arg(2));
+        zone_name(context, argument)
+    })?;
     // GNU R recycles `x` and `format` to the longer of the two, unless `x` is empty.
     let count = match length(texts) {
         0 => 0,
@@ -2981,23 +3065,23 @@ unsafe fn do_date_to_posixlt(call: &Call<'_>) -> R<Sexp> {
     Ok(result)
 }
 
-unsafe fn do_posixlt_to_date(call: &Call<'_>) -> R<Sexp> {
-    let seconds = posixlt_seconds(call.arg(0))?;
-    let days: Vec<f64> = seconds
-        .iter()
-        .map(|&value| {
-            if value.is_finite() {
-                (value / 86400.0).floor()
-            } else {
-                value
-            }
-        })
-        .collect();
-    let result = values::real_vector(&days)?;
-    set_names_from_year(call.arg(0), result)?;
-    let class = scalar_string("Date")?;
-    values::set_attr(result, symbols().class, class)?;
-    Ok(result)
+fn do_posixlt_to_date<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let list = posixlt_list(context, arguments.value(0))?;
+    let seconds = posixlt_seconds(context, list)?;
+    let mut result = context.alloc::<Real>(seconds.len())?;
+    for (day, &value) in result.as_mut_slice().iter_mut().zip(&seconds) {
+        *day = if value.is_finite() {
+            (value / 86400.0).floor()
+        } else {
+            value
+        };
+    }
+    let mut result = result.owned();
+    set_names_from_year(context, list, &mut result)?;
+    let mut class = context.alloc::<Str>(1)?;
+    handles::set_text(context, &mut class, 0, "Date")?;
+    handles::set_class(context, &mut result, class.finish().value())?;
+    Ok(result.finish().value())
 }
 
 /// What `as.Date(strptime(text, format, tz))` makes of one string, worked out without the
@@ -4103,7 +4187,10 @@ unsafe fn do_gc(call: &Call<'_>) -> R<Sexp> {
     // and with them objects that are otherwise dead. Running the queue first lets this
     // collection free them, so `gc()` finalizes every object dead when it is called, however the
     // collections before it fell.
-    (interp().hooks.run_finalizers)();
+    crate::handles::with(|context| {
+        (interp().hooks.run_finalizers)(context);
+        Ok(())
+    })?;
     // As in GNU R, `verbose` alone decides whether this collection is reported, whatever
     // `gcinfo()` set for the collections that allocation triggers.
     let heap = crate::heap();
@@ -4114,7 +4201,10 @@ unsafe fn do_gc(call: &Call<'_>) -> R<Sexp> {
     if verbose {
         write_collection_report(&heap.report(kind));
     }
-    (interp().hooks.run_finalizers)();
+    crate::handles::with(|context| {
+        (interp().hooks.run_finalizers)(context);
+        Ok(())
+    })?;
     (interp().extensions.tables.release_worker_memory)();
     let heap = crate::heap();
     if reset {

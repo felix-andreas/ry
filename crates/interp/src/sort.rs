@@ -848,7 +848,10 @@ unsafe fn do_sorted_fpass(call: &Call<'_>) -> R<Sexp> {
         return values::scalar_bool(false);
     }
     if x.is_altrep() {
-        let (sorted, no_na) = (crate::interp().hooks.altrep_sortedness)(x)?;
+        let (sorted, no_na) = crate::handles::with(|context| {
+            let x = context.root(crate::handles::Gc::<crate::handles::Alt>::adopt(x));
+            (crate::interp().hooks.altrep_sortedness)(context, x)
+        })?;
         let known = matches!(sorted, -2 | -1 | 1 | 2);
         return values::scalar_bool(known && (sorted == wanted || (no_na && sorted * wanted > 0)));
     }
