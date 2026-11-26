@@ -4103,7 +4103,10 @@ unsafe fn do_gc(call: &Call<'_>) -> R<Sexp> {
     // and with them objects that are otherwise dead. Running the queue first lets this
     // collection free them, so `gc()` finalizes every object dead when it is called, however the
     // collections before it fell.
-    (interp().hooks.run_finalizers)();
+    crate::handles::with(|context| {
+        (interp().hooks.run_finalizers)(context);
+        Ok(())
+    })?;
     // As in GNU R, `verbose` alone decides whether this collection is reported, whatever
     // `gcinfo()` set for the collections that allocation triggers.
     let heap = crate::heap();
@@ -4114,7 +4117,10 @@ unsafe fn do_gc(call: &Call<'_>) -> R<Sexp> {
     if verbose {
         write_collection_report(&heap.report(kind));
     }
-    (interp().hooks.run_finalizers)();
+    crate::handles::with(|context| {
+        (interp().hooks.run_finalizers)(context);
+        Ok(())
+    })?;
     (interp().extensions.tables.release_worker_memory)();
     let heap = crate::heap();
     if reset {

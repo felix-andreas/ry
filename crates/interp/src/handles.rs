@@ -263,23 +263,17 @@ pub fn elements_of<'s, T: Vector>(
 #[cold]
 #[inline(never)]
 fn stored<'s, T: Vector>(context: &mut Cx<'s>, value: Local<'s>) -> R<Option<Local<'s, T>>> {
-    // SAFETY: the object is rooted, and its class's methods may allocate, which `&mut Cx`
-    // permits. The result is a live object, and nothing has allocated since.
-    let vector = unsafe {
-        rooted(
-            context,
-            (crate::interp().hooks.altrep_storage)(value.raw())?,
-        )
+    let Some(object) = value.downcast::<Alt>() else {
+        return Ok(None);
     };
+    let vector = (crate::interp().hooks.altrep_storage)(context, object)?;
     Ok(vector.standard::<T>())
 }
 
 /// Whether the class of an ALTREP vector holds its elements in memory already, as a wrapper
 /// does, so reading them expands and copies nothing.
-pub fn holds_elements(_context: &mut Cx<'_>, vector: Local<'_, Alt>) -> R<bool> {
-    // SAFETY: the object is rooted and ALTREP, and its class's method may allocate, which
-    // `&mut Cx` permits.
-    Ok(unsafe { (crate::interp().hooks.altrep_dataptr_or_null)(vector.raw())? }.is_some())
+pub fn holds_elements(context: &mut Cx<'_>, vector: Local<'_, Alt>) -> R<bool> {
+    Ok((crate::interp().hooks.altrep_dataptr_or_null)(context, vector)?.is_some())
 }
 
 /// `value` as a standard character vector, coerced as `as.character` coerces when it is of
@@ -1670,13 +1664,7 @@ pub fn environment_names<'s>(
 /// `1:count` as a compact sequence, when the host provides one.
 #[inline]
 pub fn integer_sequence<'s>(context: &mut Cx<'s>, count: usize) -> R<Option<Local<'s>>> {
-    // SAFETY: making the sequence allocates, which `&mut Cx` permits, and the result is live
-    // until the next allocation.
-    unsafe {
-        let sequence =
-            (crate::interp().hooks.compact_sequence)(SexpType::Integer, count, 1.0, 1.0)?;
-        Ok(sequence.map(|sequence| rooted(context, sequence)))
-    }
+    (crate::interp().hooks.compact_sequence)(context, SexpType::Integer, count, 1.0, 1.0)
 }
 
 /// The first `count` cells of the pairlist `list` as a new pairlist with their tags, padded
@@ -2666,14 +2654,21 @@ pub fn assignment_copy<'s>(
 /// ([`values::unwrap_assigned`]). `bound` says whether the variable already holds `result`.
 #[inline(always)]
 pub fn unwrap_assigned<'s>(context: &mut Cx<'s>, result: Local<'s>, bound: bool) -> Local<'s> {
-    // SAFETY: the result is rooted, and unwrapping may allocate, which `&mut Cx` permits.
-    unsafe {
-        let unwrapped = values::unwrap_assigned(result.raw(), bound);
-        if unwrapped == result.raw() {
-            result
-        } else {
-            rooted(context, unwrapped)
-        }
+    // SAFETY: the result is rooted.
+    if unsafe { values::unwraps(result.raw(), bound) } {
+        unwrap_wrapper(context, result)
+    } else {
+        result
+    }
+}
+
+/// The ALTREP branch of [`unwrap_assigned`].
+#[cold]
+#[inline(never)]
+fn unwrap_wrapper<'s>(context: &mut Cx<'s>, result: Local<'s>) -> Local<'s> {
+    match result.downcast::<Alt>() {
+        Some(wrapper) => (crate::interp().hooks.altrep_unwrap)(context, wrapper),
+        None => result,
     }
 }
 

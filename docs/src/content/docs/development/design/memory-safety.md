@@ -587,8 +587,10 @@ attribute readers and setters with their fast-path entries (`attr`, `attributes`
 `dimnames`, `class`, `oldClass`, `levels<-`, `comment`, `length<-`, `inherits`, `unclass` and the
 replacement forms); the class readers `class_of`, `implicit_class`, `.class2` and `.cache_class`
 (`dispatch.rs`); `strings.rs` but for `subject_at` and `flag`, which `agrep` calls raw; the bit
-conversions in `arith.rs`; and the `arima0` and `ppr` routines of the
-stats crate. Two pieces of the API are not built: the
+conversions in `arith.rs`; the host hooks (`interp::Hooks`) that `libr` fills, which take and
+return handles, so `libr` roots what an ALTREP class method returns before the interpreter sees
+it (only `connection_method`, `enter_from_native` and `guard_native` stay `unsafe`, because they
+run native code); and the `arima0` and `ppr` routines of the stats crate. Two pieces of the API are not built: the
 bytecode loop's register accessor and `Held<T>` fields in traced structures. The replacement
 forms reach a frame through `RunningFrame` and `Slot` in `bytecode.rs`, a narrow form of that
 accessor: a slot read is a `Gc` that borrows the context, a store takes a rooted value, and an

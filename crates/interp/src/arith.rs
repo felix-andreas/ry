@@ -27,7 +27,7 @@ use {
         coerce::{self, coerce_vector},
         conditions,
         eval::lexical_call,
-        handles::{self, Args, Cx, Integer, Local, Logical, Raw, Real, dense, safe},
+        handles::{self, Alt, Args, Cx, Gc, Integer, Local, Logical, Raw, Real, dense, safe},
         interp,
         kernels::{self, Comparison, Extremes, Integers, Reals},
         long_double::{self, LongDouble, modulus_loses_accuracy, real_integer_divide, real_modulo},
@@ -3400,7 +3400,11 @@ unsafe fn altrep_summary(call: &Call<'_>, function: Summary) -> R<Option<Sexp>> 
         .args
         .iter()
         .any(|arg| arg.tag == na_rm && values::as_logical_scalar(arg.value) == 1);
-    (interp().hooks.altrep_summary)(x, which, remove_na)
+    handles::with_result(|context| {
+        let x = context.root(Gc::<Alt>::adopt(x));
+        let answer = (interp().hooks.altrep_summary)(context, x, which, remove_na)?;
+        Ok(answer.map(|answer| answer.raw()))
+    })
 }
 
 /// How a summary reads a compact sequence. GNU R's `sum`, `min`, `max` and `prod` read one by
@@ -4373,7 +4377,7 @@ unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
 /// `.Internal(inspect())` reports what GNU R reports.
 unsafe fn sequence(kind: SexpType, count: usize, first: f64, increment: f64) -> R<Sexp> {
     if count >= 2
-        && let Some(sequence) = (interp().hooks.compact_sequence)(kind, count, first, increment)?
+        && let Some(sequence) = values::compact_sequence_of(kind, count, first, increment)?
     {
         return Ok(sequence);
     }

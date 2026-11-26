@@ -12,11 +12,14 @@ use {
     crate::{
         TaskCallbackRoutine, builtin_libraries,
         builtins::{Arg, BuiltinDef, Call, builtin, internal},
-        conditions, interp, linalg,
+        conditions,
+        handles::{self, Local},
+        interp, linalg,
         unwind::{R, Unwind, error},
         values::{self, nil, scalar_bool, string_vector, symbols},
     },
     heap::object::{Sexp, SexpType},
+    smallvec::SmallVec,
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -97,13 +100,13 @@ impl BaseRoutine {
 /// LINPACK QR and condition routines behind `qr()` and `kappa()`.
 pub const BASE_ROUTINES: &[BaseRoutine] = &[
     call_routine("R_addTaskCallback", 4, |args| unsafe {
-        (interp().hooks.task_callback_routine)(TaskCallbackRoutine::Add, args)
+        task_callback(TaskCallbackRoutine::Add, args)
     }),
     call_routine("R_getTaskCallbackNames", 0, |args| unsafe {
-        (interp().hooks.task_callback_routine)(TaskCallbackRoutine::Names, args)
+        task_callback(TaskCallbackRoutine::Names, args)
     }),
     call_routine("R_removeTaskCallback", 1, |args| unsafe {
-        (interp().hooks.task_callback_routine)(TaskCallbackRoutine::Remove, args)
+        task_callback(TaskCallbackRoutine::Remove, args)
     }),
     fortran_routine("dqrcf", 8, linalg::dqrcf),
     fortran_routine("dqrdc2", 9, linalg::dqrdc2),
@@ -113,6 +116,17 @@ pub const BASE_ROUTINES: &[BaseRoutine] = &[
     fortran_routine("dqrxb", 7, linalg::dqrxb),
     fortran_routine("dtrco", 6, linalg::dtrco),
 ];
+
+/// The host's task-callback `routine` called with the `.Call` arguments `args`.
+unsafe fn task_callback(routine: TaskCallbackRoutine, args: &[Sexp]) -> R<Sexp> {
+    handles::with_result(|context| {
+        let args: SmallVec<[Local<'_>; 4]> = args
+            .iter()
+            .map(|&arg| handles::adopt(context, arg))
+            .collect();
+        Ok((interp().hooks.task_callback_routine)(context, routine, &args)?.raw())
+    })
+}
 
 const fn call_routine(
     name: &'static str,

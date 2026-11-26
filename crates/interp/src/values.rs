@@ -3,6 +3,7 @@
 
 use {
     crate::{
+        handles::{self, Alt, Cx, Gc, Local},
         interp, records, standard_library,
         unwind::{R, error},
     },
@@ -838,7 +839,7 @@ unsafe fn altrep_length(object: Sexp) -> usize {
     if let Some((count, _, _)) = compact_sequence(object) {
         return count;
     }
-    match (interp().hooks.altrep_length)(object) {
+    match class_length(object) {
         Ok(count) => count,
         Err(unwind) => {
             crate::unwind::park(unwind);
@@ -847,16 +848,71 @@ unsafe fn altrep_length(object: Sexp) -> usize {
     }
 }
 
+/// The length an ALTREP vector's class's `Length` method answers.
+pub unsafe fn class_length(object: Sexp) -> R<usize> {
+    on_altrep(object, |context, object| {
+        (interp().hooks.altrep_length)(context, object)
+    })
+}
+
+/// A compact sequence of an integer or double `kind`, as the hook makes it, rooted in the
+/// caller's scope, or `None` when the host has no compact sequences.
+pub unsafe fn compact_sequence_of(
+    kind: SexpType,
+    count: usize,
+    first: f64,
+    increment: f64,
+) -> R<Option<Sexp>> {
+    handles::with_result(|context| {
+        let sequence = (interp().hooks.compact_sequence)(context, kind, count, first, increment)?;
+        Ok(sequence.map(|sequence| sequence.raw()))
+    })
+}
+
+/// `as.character` of the integer or double vector `object` as deferred strings, rooted in the
+/// caller's scope, or `None` when the host has no such class.
+pub unsafe fn deferred_strings(object: Sexp) -> R<Option<Sexp>> {
+    handles::with_result(|context| {
+        let object = handles::adopt(context, object);
+        let deferred = (interp().hooks.defer_strings)(context, object)?;
+        Ok(deferred.map(|deferred| deferred.raw()))
+    })
+}
+
 /// An ordinary vector with the contents of `object`, which is `object` itself unless it is
 /// ALTREP.
 pub unsafe fn materialize(object: Sexp) -> R<Sexp> {
     if object.is_altrep() {
-        let vector = (interp().hooks.materialize_altrep)(object)?;
-        crate::heap().root(vector);
-        Ok(vector)
+        altrep_result(object, |context, object| {
+            (interp().hooks.materialize_altrep)(context, object)
+        })
     } else {
         Ok(object)
     }
+}
+
+/// Runs `hook` on the ALTREP object `object` in a scope of its own, which roots the object,
+/// because a class's method is native code that may allocate.
+unsafe fn on_altrep<T>(
+    object: Sexp,
+    hook: impl for<'s> FnOnce(&mut Cx<'s>, Local<'s, Alt>) -> R<T>,
+) -> R<T> {
+    handles::with(|context| {
+        let object = context.root(Gc::<Alt>::adopt(object));
+        hook(context, object)
+    })
+}
+
+/// [`on_altrep`] for a hook that answers with an object, which is rooted in the caller's scope
+/// as a raw allocation's result is.
+unsafe fn altrep_result(
+    object: Sexp,
+    hook: impl for<'s> FnOnce(&mut Cx<'s>, Local<'s, Alt>) -> R<Local<'s>>,
+) -> R<Sexp> {
+    handles::with_result(|context| {
+        let object = context.root(Gc::<Alt>::adopt(object));
+        Ok(hook(context, object)?.raw())
+    })
 }
 
 /// An ordinary vector with the contents of `object` to read, leaving `object` as it is: a compact
@@ -908,7 +964,9 @@ macro_rules! typed_slice {
             // The accessor cannot fail, so a method's error is parked, as for elements. The
             // class's own data pointer comes first, since materializing copies the whole vector
             // on every read.
-            let data = match (interp().hooks.altrep_dataptr)(object) {
+            let data = match on_altrep(object, |context, object| {
+                (interp().hooks.altrep_dataptr)(context, object)
+            }) {
                 Ok(Some(pointer)) if pointer.is_null() => Ok(&[][..]),
                 Ok(Some(pointer)) => Ok(std::slice::from_raw_parts(
                     pointer.cast::<$type>(),
@@ -968,7 +1026,9 @@ pub unsafe fn real_elt(object: Sexp, index: usize) -> R<f64> {
 unsafe fn altrep_int_elt(object: Sexp, index: usize) -> R<i32> {
     match compact_sequence(object) {
         Some((_, first, increment)) => Ok((first + increment * index as f64) as i32),
-        None => (interp().hooks.altrep_int_elt)(object, index),
+        None => on_altrep(object, |context, object| {
+            (interp().hooks.altrep_int_elt)(context, object, index)
+        }),
     }
 }
 
@@ -978,7 +1038,9 @@ unsafe fn altrep_int_elt(object: Sexp, index: usize) -> R<i32> {
 unsafe fn altrep_real_elt(object: Sexp, index: usize) -> R<f64> {
     match compact_sequence(object) {
         Some((_, first, increment)) => Ok(first + increment * index as f64),
-        None => (interp().hooks.altrep_real_elt)(object, index),
+        None => on_altrep(object, |context, object| {
+            (interp().hooks.altrep_real_elt)(context, object, index)
+        }),
     }
 }
 
@@ -988,7 +1050,9 @@ unsafe fn altrep_real_elt(object: Sexp, index: usize) -> R<f64> {
 #[cold]
 #[inline(never)]
 pub unsafe fn altrep_string_elt(object: Sexp, index: usize) -> R<Sexp> {
-    (interp().hooks.altrep_string_elt)(object, index)
+    altrep_result(object, |context, object| {
+        Ok((interp().hooks.altrep_string_elt)(context, object, index)?.value())
+    })
 }
 
 #[inline]
@@ -1600,7 +1664,10 @@ pub unsafe fn shallow_duplicate_attr(object: Sexp) -> R<Sexp> {
     if !wrappable || object.is_array() || length(object) < WRAP_THRESHOLD {
         return shallow_duplicate(object);
     }
-    let copy = (interp().hooks.altrep_wrap)(object)?;
+    let copy = handles::with_result(|context| {
+        let object = handles::adopt(context, object);
+        Ok((interp().hooks.altrep_wrap)(context, object)?.raw())
+    })?;
     if copy.is_array() {
         copy.set_array(false);
     }
@@ -1652,17 +1719,13 @@ pub unsafe fn compact_sequence(object: Sexp) -> Option<(usize, f64, f64)> {
     Some((count as usize, first, increment))
 }
 
-/// The value a complex assignment binds: a wrapper [`shallow_duplicate_attr`] introduced is
-/// dropped for its data once the replacement has copied that data, as GNU R's
-/// `try_assign_unwrap` does. `bound` says whether the variable's binding is the one reference
-/// the value has.
+/// Whether a complex assignment binds the data under `value` instead of `value`: a wrapper
+/// [`shallow_duplicate_attr`] introduced is dropped for its data once the replacement has copied
+/// that data, as GNU R's `try_assign_unwrap` does. `bound` says whether the variable's binding
+/// is the one reference the value has.
 #[inline]
-pub unsafe fn unwrap_assigned(value: Sexp, bound: bool) -> Sexp {
-    if value.is_altrep() && (value.refcount() == 0 || (value.refcount() == 1 && bound)) {
-        (interp().hooks.altrep_unwrap)(value)
-    } else {
-        value
-    }
+pub unsafe fn unwraps(value: Sexp, bound: bool) -> bool {
+    value.is_altrep() && (value.refcount() == 0 || (value.refcount() == 1 && bound))
 }
 
 /// GNU R's `WRAP_THRESHOLD`: a shorter vector is cheaper to copy than to wrap.

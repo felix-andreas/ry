@@ -7826,7 +7826,10 @@ pub unsafe fn complex_assign(
         let bound = heap
             .frame_cell(env, inner)
             .is_some_and(|cell| cell.cdr() == replaced && !cell.has_gp(gp::ACTIVE_BINDING));
-        replaced = values::unwrap_assigned(replaced, bound);
+        replaced = handles::with_result(|context| {
+            let replaced = handles::adopt(context, replaced);
+            Ok(handles::unwrap_assigned(context, replaced, bound).raw())
+        })?;
     }
     assign_symbol(inner, replaced, env, superassign)
 }

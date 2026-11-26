@@ -1233,7 +1233,7 @@ thread_local! {
     static OUTPUT: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
-unsafe fn capture(text: &[u8], _is_error: bool) {
+fn capture(text: &[u8], _is_error: bool) {
     OUTPUT.with(|output| output.borrow_mut().push_str(&String::from_utf8_lossy(text)));
 }
 
