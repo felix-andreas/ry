@@ -4967,8 +4967,8 @@ impl<'p> Translator<'p> {
         // what they left.
         let done = in_place.then(|| {
             let mut pending = self.builder.ins().iconst(I32, 0);
-            for slot in 0..state.slots.len() {
-                if state.slots[slot].may_be(status::DIRTY) {
+            for (slot, held) in state.slots.iter().enumerate() {
+                if held.may_be(status::DIRTY) {
                     let status = self.status(slot);
                     let dirty =
                         self.builder
