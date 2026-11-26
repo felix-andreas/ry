@@ -41,7 +41,7 @@
 15 crates/interp/src/file_removal.rs
 41 crates/interp/src/fork.rs
 16 crates/interp/src/format.rs
-191 crates/interp/src/handles.rs
+194 crates/interp/src/handles.rs
 13 crates/interp/src/help_server.rs
 17 crates/interp/src/image.rs
 24 crates/interp/src/interp.rs
@@ -71,7 +71,7 @@
 385 crates/interp/src/standard_library.rs
 4 crates/interp/src/strings.rs
 44 crates/interp/src/subset.rs
-156 crates/interp/src/system.rs
+148 crates/interp/src/system.rs
 29 crates/interp/src/testing.rs
 19 crates/interp/src/tools.rs
 9 crates/interp/src/unwind.rs

@@ -10,7 +10,8 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, Kind, Visibility, builtin, internal, special},
         eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
         handles::{
-            self, Cx, Gc, Integer, Language, Local, Str, StringFill, Symbol, Value, attribute_copy,
+            self, Cx, Environment, Gc, Integer, Language, Local, Pairlist, Promise, Str,
+            StringFill, Symbol, Tagged, Value, attribute_copy,
             attributes_unshared, dense, get_attribute, is_s4, null, safe, set_class, symbol,
             unreferenced,
         },
@@ -1610,7 +1611,20 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     let mut args = promargs;
     let mut made = MadePromises(SmallVec::new());
     if function.kind() == SexpType::Closure {
-        patch_args_by_actuals(function.car(), &mut args, method_env, &mut made)?;
+        // SAFETY: the method's frame holds its function, its arguments and its environment,
+        // and the promises the patch makes stay rooted in this builtin's scope, past the call
+        // they are passed to. `Tagged` has `Arg`'s layout.
+        handles::in_caller_scope(|context| {
+            let formals = handles::held(context, function.car());
+            let environment = handles::held(context, method_env)
+                .downcast::<Environment>()
+                .ok_or_else(|| error("internal error: a method's frame has no environment"))?;
+            let args = std::slice::from_raw_parts_mut(
+                args.as_mut_ptr().cast::<Tagged<'_>>(),
+                args.len(),
+            );
+            patch_args_by_actuals(context, formals, args, environment, &mut made)
+        })?;
     }
     // Named arguments passed to NextMethod replace or extend the method's arguments.
     for extra in call.args.iter().skip(2) {
@@ -1686,6 +1700,95 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     result
 }
 
+/// GNU R's `patchArgsByActuals`: matches the method's arguments `args` to its `formals` again,
+/// as the call did, and replaces each matched argument by a promise of its formal in
+/// `method_env`, so the next method sees what the method changed. An empty argument matched by
+/// name stays empty while its formal is missing, and otherwise reads the formal, which leaves
+/// the positional argument that filled the formal empty.
+fn patch_args_by_actuals<'s>(
+    context: &mut Cx<'s>,
+    formals: Local<'s>,
+    args: &mut [Tagged<'s>],
+    method_env: Local<'s, Environment>,
+    made: &mut MadePromises,
+) -> R<()> {
+    let dots = symbol(|symbols| symbols.dots);
+    let mut names: SmallVec<[Gc<'static, Symbol>; 8]> = SmallVec::new();
+    let mut formal = formals.read(context);
+    while let Some(cell) = formal.downcast::<Pairlist>() {
+        if let Some(name) = cell.tag().downcast::<Symbol>() {
+            names.push(handles::permanent(name));
+        }
+        formal = cell.rest();
+    }
+    // Only the values change, so each argument's tag is read once: its symbol when it has a
+    // name.
+    let tags: SmallVec<[Option<Gc<'static, Symbol>>; 10]> = args
+        .iter()
+        .map(|arg| {
+            arg.tag
+                .downcast::<Symbol>()
+                .map(handles::permanent)
+                .filter(|tag| !tag.name().bytes().is_empty())
+        })
+        .collect();
+    let mut found: SmallVec<[FormalMatch; 8]> =
+        SmallVec::from_elem(FormalMatch::Unmatched, names.len());
+    // 0 unused, 1 matched by a partial name or position, 2 matched by its exact name.
+    let mut used: SmallVec<[u8; 8]> = SmallVec::from_elem(0, args.len());
+    for (index, &name) in names.iter().enumerate() {
+        if name.is(dots) {
+            continue;
+        }
+        if let Some(position) = tags.iter().position(|tag| tag.is_some_and(|tag| tag.is(name))) {
+            found[index] = patch_argument(context, &mut args[position], name, method_env, made)?;
+            used[position] = 2;
+        }
+    }
+    let mut seen_dots = false;
+    for (index, &name) in names.iter().enumerate() {
+        if found[index] != FormalMatch::Unmatched {
+            continue;
+        }
+        if name.is(dots) && !seen_dots {
+            seen_dots = true;
+            continue;
+        }
+        let formal = name.name().bytes();
+        let position = tags.iter().enumerate().position(|(position, tag)| {
+            used[position] == 0
+                && tag.is_some_and(|tag| {
+                    tag.is(name) || !seen_dots && formal.starts_with(tag.name().bytes())
+                })
+        });
+        if let Some(position) = position {
+            found[index] = patch_argument(context, &mut args[position], name, method_env, made)?;
+            used[position] = 1;
+        }
+    }
+    let (mut formal, mut position) = (0, 0);
+    while formal < names.len() && position < args.len() {
+        if names[formal].is(dots) {
+            break;
+        }
+        if found[formal] == FormalMatch::Present {
+            formal += 1;
+        } else if used[position] != 0 || tags[position].is_some() {
+            position += 1;
+        } else {
+            if found[formal] == FormalMatch::Local {
+                args[position].value = handles::missing_argument();
+            } else {
+                patch_argument(context, &mut args[position], names[formal], method_env, made)?;
+            }
+            used[position] = 1;
+            position += 1;
+            formal += 1;
+        }
+    }
+    Ok(())
+}
+
 /// How [`patch_args_by_actuals`] found a formal matched.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FormalMatch {
@@ -1699,102 +1802,27 @@ enum FormalMatch {
     Local,
 }
 
-/// GNU R's `patchArgsByActuals`: matches the method's arguments `args` to its `formals` again,
-/// as the call did, and replaces each matched argument by a promise of its formal in
-/// `method_env`, so the next method sees what the method changed. An empty argument matched by
-/// name stays empty while its formal is missing, and otherwise reads the formal, which leaves
-/// the positional argument that filled the formal empty.
-unsafe fn patch_args_by_actuals(
-    formals: Sexp,
-    args: &mut [Arg],
-    method_env: Sexp,
+/// Replaces `arg`, matched to the formal `name`, by a promise of the formal in `method_env`,
+/// unless it is empty and the formal is still missing there.
+fn patch_argument<'s>(
+    context: &mut Cx<'s>,
+    arg: &mut Tagged<'s>,
+    name: Gc<'static, Symbol>,
+    method_env: Local<'s, Environment>,
     made: &mut MadePromises,
-) -> R<()> {
-    let dots = symbols().dots;
-    let mut names: SmallVec<[Sexp; 8]> = SmallVec::new();
-    let mut formal = formals;
-    while formal.kind() == SexpType::Pairlist {
-        names.push(formal.tag());
-        formal = formal.cdr();
-    }
-    let mut found: SmallVec<[FormalMatch; 8]> =
-        SmallVec::from_elem(FormalMatch::Unmatched, names.len());
-    // 0 unused, 1 matched by a partial name or position, 2 matched by its exact name.
-    let mut used: SmallVec<[u8; 8]> = SmallVec::from_elem(0, args.len());
-    let tagged = |arg: &Arg| arg.tag != nil() && arg.tag.car().length() > 0;
-    let mut patch = |arg: &mut Arg, name: Sexp| -> R<FormalMatch> {
-        let found = if arg.value == missing_arg() {
-            let value = if method_env.has_gp(gp::SLOT_FRAME)
-                && let Some(value) = eval::slot_binding(method_env, name, false)
-            {
-                value
-            } else {
-                eval::find_var_in_frame(name, method_env)?
-            };
-            if value == missing_arg() {
-                return Ok(FormalMatch::Missing);
-            }
-            FormalMatch::Local
-        } else {
-            FormalMatch::Present
-        };
-        arg.value = eval::make_promise(name, method_env)?;
-        if method_env.has_gp(gp::SLOT_FRAME) {
-            arg.value.increment_refcount();
-            made.0.push(arg.value);
+) -> R<FormalMatch> {
+    let found = if handles::is_missing_argument(arg.value) {
+        if handles::binds_empty_argument(context, method_env, name)? {
+            return Ok(FormalMatch::Missing);
         }
-        Ok(found)
+        FormalMatch::Local
+    } else {
+        FormalMatch::Present
     };
-    for (index, &name) in names.iter().enumerate() {
-        if name == dots {
-            continue;
-        }
-        if let Some(position) = args.iter().position(|arg| arg.tag == name) {
-            found[index] = patch(&mut args[position], name)?;
-            used[position] = 2;
-        }
-    }
-    let mut seen_dots = false;
-    for (index, &name) in names.iter().enumerate() {
-        if found[index] != FormalMatch::Unmatched {
-            continue;
-        }
-        if name == dots && !seen_dots {
-            seen_dots = true;
-            continue;
-        }
-        let formal = name.car().bytes();
-        let position = args.iter().enumerate().position(|(position, arg)| {
-            used[position] == 0
-                && tagged(arg)
-                && (arg.tag == name || !seen_dots && formal.starts_with(arg.tag.car().bytes()))
-        });
-        if let Some(position) = position {
-            found[index] = patch(&mut args[position], name)?;
-            used[position] = 1;
-        }
-    }
-    let (mut formal, mut position) = (0, 0);
-    while formal < names.len() && position < args.len() {
-        if names[formal] == dots {
-            break;
-        }
-        if found[formal] == FormalMatch::Present {
-            formal += 1;
-        } else if used[position] != 0 || tagged(&args[position]) {
-            position += 1;
-        } else {
-            if found[formal] == FormalMatch::Local {
-                args[position].value = missing_arg();
-            } else {
-                patch(&mut args[position], names[formal])?;
-            }
-            used[position] = 1;
-            position += 1;
-            formal += 1;
-        }
-    }
-    Ok(())
+    let promise = handles::variable_promise(context, name, method_env)?;
+    made.hold(promise, method_env);
+    arg.value = promise.value();
+    Ok(found)
 }
 
 /// The promises NextMethod made over the environment of a method that runs in slots, each held
@@ -1804,6 +1832,21 @@ unsafe fn patch_args_by_actuals(
 /// remains. A next method that binds the promise nowhere (a primitive) would leave it
 /// unreleased, so this list releases the ones nothing else holds when the call is over.
 struct MadePromises(SmallVec<[Sexp; 4]>);
+
+impl MadePromises {
+    /// Counts a reference of the list's own on `promise`, made over `environment`, when the
+    /// environment stands for a frame that runs in slots.
+    fn hold(&mut self, promise: Local<'_, Promise>, environment: Local<'_, Environment>) {
+        // SAFETY: both are rooted, and the count keeps the promise alive until the list
+        // releases it.
+        unsafe {
+            if environment.raw().has_gp(gp::SLOT_FRAME) {
+                promise.raw().increment_refcount();
+                self.0.push(promise.raw());
+            }
+        }
+    }
+}
 
 impl Drop for MadePromises {
     fn drop(&mut self) {
