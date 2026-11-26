@@ -1986,9 +1986,7 @@ fn require_nonempty_components(
 fn posixlt_list<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s, List>> {
     handles::dense::<List>(context, value)?
         .filter(|list| list.len() >= 9)
-        .ok_or_else(|| {
-            error("a valid \"POSIXlt\" object is a list of at least 9 elements")
-        })
+        .ok_or_else(|| error("a valid \"POSIXlt\" object is a list of at least 9 elements"))
 }
 
 /// [`posixlt_list`] for a raw caller, which reads the list itself once it passes.
@@ -2366,7 +2364,10 @@ fn do_format_posixlt<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Lo
     } else {
         None
     };
-    let (isdst, offsets) = (Column::of(context, list, 8)?, Column::of(context, list, 10)?);
+    let (isdst, offsets) = (
+        Column::of(context, list, 8)?,
+        Column::of(context, list, 10)?,
+    );
     let second_column = Column::of(context, list, 0)?;
     let format_count = format_count.max(1);
     // The format of element `index`, `None` for `NA`.
