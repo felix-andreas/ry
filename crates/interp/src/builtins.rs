@@ -139,8 +139,10 @@ pub type UnaryFn = unsafe fn(Sexp) -> R<Option<Sexp>>;
 /// A builtin's result for the call and its argument values in formal order when that takes no
 /// dispatch, no checks and no handle scope of its own, or `None` for the full call (see
 /// [`BuiltinDef::direct`]). Most entries ignore the call, which only names the builtin's
-/// context, as `.Call` needs for its traceback. The caller holds every argument value, in a
-/// register or under a root, until the entry returns.
+/// context, as `.Call` needs for its traceback. An entry registered to read names
+/// ([`DirectNames::Read`]) takes them from the tags of the call's argument cells, which list the
+/// values one for one. The caller holds every argument value, in a register or under a root,
+/// until the entry returns.
 pub type DirectFn = unsafe fn(Sexp, &[Sexp]) -> R<Option<Sexp>>;
 
 pub struct BuiltinDef {
@@ -173,22 +175,34 @@ pub struct BuiltinDef {
     /// full call would treat differently (an object that dispatches, a ry value the builtin
     /// refuses, an ALTREP vector), and its result is visible.
     pub unary: Option<UnaryFn>,
-    /// The result for untagged, non-empty arguments in the common case, which a compiled call
-    /// tries before the full call, and a complex assignment tries for a replacement whose only
-    /// tag is the trailing `value`: set by [`BuiltinDef::direct`]. Like `unary`, it must decline
+    /// The result for non-empty arguments in the common case, which a compiled call tries before
+    /// the full call, and a complex assignment tries for a replacement whose only tag is the
+    /// trailing `value`: set by [`BuiltinDef::direct`]. `direct_names` decides which calls with
+    /// named arguments the entry takes. Like `unary`, it must decline
     /// every value the full call treats differently (an object that dispatches, ALTREP, a ry
     /// value, an argument the full call reports an error for), and its result is visible unless
     /// the builtin is invisible. The caller releases the handles it roots.
     pub direct: Option<DirectFn>,
-    /// Whether [`BuiltinDef::direct`] also takes a call whose arguments are named, because the
-    /// builtin passes them on by position whatever they are called: set by
-    /// [`BuiltinDef::direct_by_position`] on `.Call`. The one name such a builtin reads,
-    /// `PACKAGE`, takes the full call.
-    pub direct_by_position: bool,
+    /// What [`BuiltinDef::direct`] does with a call whose arguments are named.
+    pub direct_names: DirectNames,
     pub object: Option<Sexp>,
     /// The symbol of `name`, set at registration so that dispatch looks methods up without
     /// hashing the name on every call.
     pub symbol: Option<Sexp>,
+}
+
+/// What a builtin's direct entry does with a call whose arguments are named.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DirectNames {
+    /// The entry takes untagged arguments only, and a named one takes the full call.
+    Refused,
+    /// The builtin passes its arguments on by position whatever they are called, as `.Call`
+    /// does ([`BuiltinDef::direct_by_position`]). The one name it reads, `PACKAGE`, takes the
+    /// full call.
+    Ignored,
+    /// The entry reads each argument's name from the call it is given, as `list` does
+    /// ([`BuiltinDef::direct_named`]).
+    Read,
 }
 
 /// What a call checks before its builtin runs. The checks follow from the rest of the
@@ -286,7 +300,7 @@ pub const fn builtin(name: &'static str, arity: i32, function: BuiltinFn) -> Bui
         function,
         unary: None,
         direct: None,
-        direct_by_position: false,
+        direct_names: DirectNames::Refused,
         object: None,
         symbol: None,
     }
@@ -357,7 +371,14 @@ impl BuiltinDef {
 
     pub const fn direct_by_position(self) -> BuiltinDef {
         BuiltinDef {
-            direct_by_position: true,
+            direct_names: DirectNames::Ignored,
+            ..self
+        }
+    }
+
+    pub const fn direct_named(self) -> BuiltinDef {
+        BuiltinDef {
+            direct_names: DirectNames::Read,
             ..self
         }
     }
@@ -423,7 +444,7 @@ impl BuiltinDef {
             function: self.function,
             unary: self.unary,
             direct: self.direct,
-            direct_by_position: self.direct_by_position,
+            direct_names: self.direct_names,
             object: self.object,
             symbol: self.symbol,
         }
