@@ -483,6 +483,7 @@ fn copy_of<'s>(
 
 /// Gives the new `copy` the attributes of `value`, copied as deep as the copy is, and its
 /// object and S4 bits, with its Array bit under `keep_array`.
+#[inline]
 fn finish_copy(
     context: &mut Cx<'_>,
     value: Local<'_>,
@@ -513,6 +514,7 @@ fn finish_copy(
 
 /// A new vector of `value`'s type with its elements, which for a list under `deep` are copies
 /// of its elements. An ALTREP vector's elements are those of its expanded form.
+#[inline]
 fn copy_storage<'s>(context: &mut Cx<'s>, value: Local<'_>, deep: bool) -> R<Local<'s>> {
     let value = inner(context, value);
     let source = materialize(context, value)?;
@@ -736,6 +738,7 @@ impl<'s> Cells<'s> {
     }
 
     /// Appends a cell that holds `value` with the tag `tag`.
+    #[inline]
     pub fn push(&mut self, context: &mut Cx<'s>, tag: Local<'_>, value: Local<'_>) -> R<()> {
         let heap = crate::heap();
         let nil = values::nil();
