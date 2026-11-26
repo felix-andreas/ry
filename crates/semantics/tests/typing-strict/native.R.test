@@ -145,7 +145,7 @@ NULL
 
 #---- invisible_result
 #~~~~ script.R
-# blocked: remember, show_all
+# blocked: remember, show_all, bump_all
 remember <- function(x: F64) -> F64 {
   doubled <- x * 2
 }
@@ -155,16 +155,21 @@ show_all <- function(n: I64) -> NULL {
     NULL
   }
 }
+bump_all <- function(xs: List<I64>) List.for_each(xs, function(x: I64) x + 1)
 show_all(2)
 cat(remember(2), "\n")
+bump_all([1, 2])
 #++++
 == script.R
 remember: fn(x: F64) -> F64
 show_all: fn(n: I64) -> NULL
+bump_all: fn(xs: List<I64>) -> NULL
 NULL
 NULL
-70..86 warning[interpreted] this function runs in the interpreter, because the function ends in an expression whose value R returns invisibly, which is not compiled natively yet. End the function with the value itself, or with `NULL`
-130..206 warning[interpreted] this function runs in the interpreter, because the function ends in an expression whose value R returns invisibly, which is not compiled natively yet. End the function with the value itself, or with `NULL`
+NULL
+80..96 warning[interpreted] this function runs in the interpreter, because the function ends in an expression whose value R returns invisibly, which is not compiled natively yet. End the function with the value itself, or with `NULL`
+140..216 warning[interpreted] this function runs in the interpreter, because the function ends in an expression whose value R returns invisibly, which is not compiled natively yet. End the function with the value itself, or with `NULL`
+255..296 warning[interpreted] this function runs in the interpreter, because the function ends in an expression whose value R returns invisibly, which is not compiled natively yet. End the function with the value itself, or with `NULL`
 
 #---- super_assignment
 #~~~~ script.R

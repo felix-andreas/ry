@@ -5512,13 +5512,20 @@ impl Lowering<'_> {
             return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
         };
         let (list, ty) = self.known_list(list, name)?;
-        if !matches!(ty.items(), Some(Item::I64 | Item::Str | Item::Lgl)) {
+        let Some(item @ (Item::I64 | Item::Str | Item::Lgl)) = ty.items() else {
             return Err(Refusal(Cow::Owned(format!(
                 "a `{name}` of items other than whole numbers, strings and Bools"
             ))));
-        }
-        let item = ty.items().ok_or(Refusal::new("a split of no list"))?;
+        };
         let delimiter = self.value(delimiter)?;
+        self.usable(delimiter)?;
+        // `identical` holds an `I64` item and an `F64` delimiter apart, which a comparison
+        // that converts one side would not.
+        if self.builder.ty(delimiter).held_item() != Some(item) {
+            return Err(Refusal(Cow::Owned(format!(
+                "a `{name}` with a delimiter of another type"
+            ))));
+        }
         let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
         let found = self.builder.local(Type::I64);
         self.builder.push(Some(found), Op::Copy(zero));
@@ -10325,7 +10332,7 @@ pub unsafe fn tail_invisible(expression: Sexp) -> bool {
     }
     let args = rvalues::pairlist_items(expression.cdr());
     match &*rvalues::symbol_name(expression.car()) {
-        "<-" | "=" | "invisible" | "for" | "while" | "repeat" => true,
+        "<-" | "=" | "invisible" | "for" | "while" | "repeat" | "List.for_each" => true,
         "{" => args.last().is_some_and(|&(_, last)| tail_invisible(last)),
         // An `if` without `else` whose condition is false gives an invisible `NULL`.
         "if" => {

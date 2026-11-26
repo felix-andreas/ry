@@ -1193,7 +1193,8 @@ impl<'a, 'db> Judge<'a, 'db> {
     }
 
     /// The expression that makes the function's result invisible, which the typed core cannot
-    /// return: an assignment, a loop or an `if` without `else` in the last position.
+    /// return: an assignment, a loop, an `if` without `else`, `invisible` or `List.for_each` in the
+    /// last position.
     fn invisible_tail(&self, id: ExprId) -> Option<ExprId> {
         let module = self.judged.module;
         match *module.kind(id) {
@@ -1214,10 +1215,11 @@ impl<'a, 'db> Judge<'a, 'db> {
             ExpressionKind::Block { statements } => module[statements]
                 .last()
                 .and_then(|&last| self.invisible_tail(last)),
-            ExpressionKind::Call { callee, .. } => {
-                matches!(*module.kind(callee), ExpressionKind::NameRef(name) if name == "invisible")
-                    .then_some(id)
-            }
+            ExpressionKind::Call { callee, .. } => matches!(
+                *module.kind(callee),
+                ExpressionKind::NameRef(name) if name == "invisible" || name == "List.for_each"
+            )
+            .then_some(id),
             _ => None,
         }
     }
