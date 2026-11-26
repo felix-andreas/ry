@@ -2041,6 +2041,9 @@ impl<'db> Environment<'db, '_> {
 /// the item's dense ids. The arena frees every superseded table in one step when the check ends.
 type ArenaMap<'a, K, V> = HashMap<K, V, FxBuildHasher, Arena<'a>>;
 type ArenaSet<'a, T> = HashSet<T, FxBuildHasher, Arena<'a>>;
+/// The number literals of one open literal and the expressions around them, each with whether
+/// it is a literal (`Checker::literal_leaves`).
+type LiteralLeaves = SmallVec<[(ExprId, bool); 8]>;
 
 /// The check's bump arena as a std allocator, whose frees are no-ops because the arena is reset
 /// when the check ends. It implements std's trait rather than relying on bumpalo's
@@ -3466,6 +3469,15 @@ fn is_character(db: &dyn Db, ty: Ty<'_>) -> bool {
     }
 }
 
+/// How often a step function is inferred again under a wider accumulator: a state widens by
+/// whole tags, so the bound is reached only by a step function that adds a new tag each pass.
+const ACCUMULATOR_PASS_CAP: usize = 3;
+
+/// The accumulators of one callback (`Checker::accumulator_states`): each formal's index, the
+/// argument that passes its initial state, and whether the callback returns the state as its
+/// tags' payload.
+type AccumulatorStates = SmallVec<[(usize, usize, bool); 1]>;
+
 /// The single source for both `operator_group`'s `Arith` and the method prefixes
 /// the numeric constraint admits; restating it lets the two drift apart.
 const ARITHMETIC_OPERATORS: [BinaryOperator; 7] = [
@@ -4507,6 +4519,25 @@ impl<'db, 'a> Checker<'db, 'a> {
                                 ty
                             }
                             None => match self.module.kind(value) {
+                                // An `if` or `match` of number literals binds one open literal,
+                                // as a lone literal does, once its conditions are inferred.
+                                ExpressionKind::If { .. } | ExpressionKind::Match { .. }
+                                    if binds_name
+                                        && !value_annotated
+                                        && !self.expression_annotations.contains_key(id)
+                                        && self
+                                            .literal_leaves(value, self.binds_ry_value())
+                                            .is_some() =>
+                                {
+                                    self.infer(value);
+                                    let native = self.binds_ry_value();
+                                    // `infer` leaves these leaves as the guard saw them.
+                                    let (constraint, leaves) =
+                                        self.literal_leaves(value, native).unwrap_or_default();
+                                    let ty = self.fresh_literal(constraint, native);
+                                    self.record_leaves(&leaves, ty);
+                                    ty
+                                }
                                 ExpressionKind::Literal(
                                     kind @ (LiteralKind::String(_) | LiteralKind::Logical(_)),
                                 ) if binds_name
@@ -7849,30 +7880,94 @@ impl<'db, 'a> Checker<'db, 'a> {
         self.record(payload, ty)
     }
 
-    /// An open literal variable for the unsuffixed number literal `id`, recorded as its type.
+    /// An open literal variable for the unsuffixed number literal `id`, or an `if` or `match`
+    /// whose every branch is one, recorded as its type.
     fn open_number_literal(&mut self, id: ExprId, default: Atomic) -> Option<Ty<'db>> {
-        let module = self.module;
-        let mut inner = id;
-        while let ExpressionKind::Paren(paren) = module.kind(inner) {
-            inner = *paren;
-        }
-        let literal = number_literal(module, inner)?;
-        let constraint = if literal.is_fraction() {
-            Constraint::FracLiteral
-        } else {
-            Constraint::WholeLiteral {
-                integer: literal.integer,
-            }
-        };
+        let (constraint, leaves) = self.literal_leaves(id, false)?;
         if constraint.literal_default() != Some(default) {
             return None;
         }
         let ty = self.fresh_literal(constraint, false);
-        self.record_literal(inner, ty);
-        if inner != id {
-            self.record(id, ty);
-        }
+        self.record_leaves(&leaves, ty);
         Some(ty)
+    }
+
+    /// The literal constraint of `id` when it is a number literal or an `if` with `else` or a
+    /// `match` whose every branch is a number literal of one R type, with the literals and the
+    /// expressions around them, which take the literal's type together. A `native` literal, a ry
+    /// value from the start, is fractional when it is past the `I64` range.
+    fn literal_leaves(&self, id: ExprId, native: bool) -> Option<(Constraint, LiteralLeaves)> {
+        let mut leaves = SmallVec::new();
+        let mut constraint = None;
+        if !self.collect_literal_leaves(id, native, &mut constraint, &mut leaves) {
+            return None;
+        }
+        Some((constraint?, leaves))
+    }
+
+    fn collect_literal_leaves(
+        &self,
+        id: ExprId,
+        native: bool,
+        constraint: &mut Option<Constraint>,
+        leaves: &mut LiteralLeaves,
+    ) -> bool {
+        let module = self.module;
+        // A nominal constructor (`@UserId(5L)`) gives its own type, not a literal's.
+        if self.expression_annotations.contains_key(id) {
+            return false;
+        }
+        if let Some(literal) = number_literal(module, id) {
+            let found = if literal.is_fraction()
+                || (native && literal.default_native() == NativeScalar::F64)
+            {
+                Constraint::FracLiteral
+            } else {
+                Constraint::WholeLiteral {
+                    integer: literal.integer,
+                }
+            };
+            *constraint = match *constraint {
+                None => Some(found),
+                Some(held) if held.literal_default() != found.literal_default() => return false,
+                Some(Constraint::FracLiteral) => Some(Constraint::FracLiteral),
+                Some(_) => Some(found),
+            };
+            leaves.push((id, true));
+            return true;
+        }
+        let branches = match *module.kind(id) {
+            ExpressionKind::Paren(inner) => {
+                leaves.push((id, false));
+                return self.collect_literal_leaves(inner, native, constraint, leaves);
+            }
+            ExpressionKind::If {
+                then_branch,
+                else_branch: Some(else_branch),
+                ..
+            } => SmallVec::<[ExprId; 4]>::from_slice(&[then_branch, else_branch]),
+            ExpressionKind::Match { arms, .. } => module[arms].iter().map(|arm| arm.body).collect(),
+            ExpressionKind::Block { statements } if module[statements].len() == 1 => {
+                SmallVec::from_slice(&module[statements])
+            }
+            _ => return false,
+        };
+        leaves.push((id, false));
+        branches
+            .into_iter()
+            .all(|branch| self.collect_literal_leaves(branch, native, constraint, leaves))
+    }
+
+    /// Records `ty` on every literal and every expression around them that `literal_leaves`
+    /// collected.
+    fn record_leaves(&mut self, leaves: &[(ExprId, bool)], ty: Ty<'db>) {
+        for &(leaf, literal) in leaves {
+            if literal {
+                self.record_literal(leaf, ty);
+            } else {
+                self.record(leaf, ty);
+            }
+        }
     }
 
     /// A tuple item or a record field. A literal there is open, as a literal bound
@@ -18607,19 +18702,190 @@ impl<'db, 'a> Checker<'db, 'a> {
         if deferred.is_empty() {
             return call_arguments;
         }
-        let hints = self.parameter_hints_for(callees, &call_arguments, &deferred);
+        // Only a single candidate widens, because the hints of several candidates must agree.
+        let widening: Vec<AccumulatorStates> = match callees {
+            [callee] => (0..call_arguments.len())
+                .map(|index| {
+                    if deferred.contains(index) {
+                        self.accumulator_states(*callee, &call_arguments, &deferred, index)
+                    } else {
+                        SmallVec::new()
+                    }
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let hints = self.parameter_hints_for(callees, &call_arguments, &deferred, &widening);
         for (index, argument) in arguments.iter().enumerate() {
             let Some(value) = argument.value.filter(|_| deferred.contains(index)) else {
                 continue;
             };
-            if let Some(hint) = hints.get(index).cloned().flatten() {
-                self.parameter_hints.insert(value, hint);
-            }
+            let mut hint = hints.get(index).cloned().flatten();
+            let states = match (&hint, widening.get(index)) {
+                (Some(_), Some(states)) => states.clone(),
+                _ => SmallVec::new(),
+            };
             let errors_before = self.errors.len();
-            call_arguments[index].ty = Some(self.infer(value));
+            let origins_before = self.strict_origins.len();
+            let environment_mark = self.environment.mark();
+            let pending_mark = self.pending_enclosing_writes.len();
+            let snapshot = (!states.is_empty()).then(|| self.table.snapshot());
+            let mut passes = 0;
+            loop {
+                passes += 1;
+                if let Some(hint) = &hint {
+                    self.parameter_hints.insert(value, hint.clone());
+                }
+                let ty = self.infer(value);
+                call_arguments[index].ty = Some(ty);
+                if passes >= ACCUMULATOR_PASS_CAP {
+                    break;
+                }
+                let (Some(snapshot), Some(hint)) = (&snapshot, hint.as_mut()) else {
+                    break;
+                };
+                if !self.widen_accumulators(ty, &states, hint, &mut call_arguments) {
+                    break;
+                }
+                // This pass read the accumulator as the narrower state, so what it inferred is
+                // stale, as in `infer_body_with_capture_discovery`.
+                self.environment.rollback(environment_mark);
+                self.table.rollback(*snapshot);
+                self.truncate_errors(errors_before);
+                self.strict_origins.truncate(origins_before);
+                self.pending_enclosing_writes.truncate(pending_mark);
+            }
             self.name_contextual_parameters(value, errors_before, LambdaContext::Call);
         }
         call_arguments
+    }
+
+    /// The accumulators of the callback at `callback`: each formal typed as the bare variable
+    /// the callback returns, as `S` is in `walk(list, state: S, f: fn(S, T) -> S)`, or as every
+    /// payload of the tags it returns, as in `walk_until`'s `fn(S, T) -> :Continue(S) |
+    /// :Break(S)`, with the argument that passes the initial state and whether the tags wrap it.
+    fn accumulator_states(
+        &mut self,
+        callee: Ty<'db>,
+        arguments: &[CallArgument<'db>],
+        deferred: &Bitset<'a, usize>,
+        callback: usize,
+    ) -> AccumulatorStates {
+        let mut states = SmallVec::new();
+        let callee = self.structural(self.table.shallow_resolve(self.db, callee));
+        let TyKind::Function(function) = callee.kind(self.db) else {
+            return states;
+        };
+        let arena = self.arena;
+        let targets = argument_targets(self.db, arena, function, argument_shapes(arena, arguments));
+        let target_var = |target: Option<&Option<ArgumentTarget>>| {
+            let ty = match target? {
+                Some(ArgumentTarget::Positional(index)) => function.positional.get(*index).copied(),
+                Some(ArgumentTarget::Named(index)) => {
+                    function.named.get(*index).map(|parameter| parameter.ty)
+                }
+                _ => None,
+            }?;
+            Some(self.table.shallow_resolve(self.db, ty))
+        };
+        let Some(expected) = target_var(targets.get(callback)) else {
+            return states;
+        };
+        let TyKind::Function(expected) = expected.kind(self.db) else {
+            return states;
+        };
+        let ret = self.table.shallow_resolve(self.db, expected.ret);
+        let (result, wrapped) = match tag_payloads(self.db, ret) {
+            Some(payloads) => {
+                let mut payloads = payloads
+                    .into_iter()
+                    .map(|payload| self.table.shallow_resolve(self.db, payload));
+                let Some(first) = payloads.next() else {
+                    return states;
+                };
+                if !payloads.all(|payload| payload == first) {
+                    return states;
+                }
+                (first, true)
+            }
+            None => (ret, false),
+        };
+        if !matches!(result.kind(self.db), TyKind::Var(_)) {
+            return states;
+        }
+        let formals = expected
+            .positional
+            .iter()
+            .copied()
+            .chain(expected.named.iter().map(|parameter| parameter.ty));
+        for (formal_index, formal) in formals.enumerate() {
+            if self.table.shallow_resolve(self.db, formal) != result {
+                continue;
+            }
+            let state = (0..arguments.len()).find(|&index| {
+                !deferred.contains(index)
+                    && arguments[index].ty.is_some()
+                    && target_var(targets.get(index)) == Some(result)
+            });
+            if let Some(state) = state {
+                states.push((formal_index, state, wrapped));
+            }
+        }
+        states
+    }
+
+    /// A step function that returns more tags than its state holds widens the state, so
+    /// `List.walk(xs, :None, \(acc, x) :Some(x))` keeps `:None | :Some(I64)`. Passing the
+    /// initial state as the wider type is an upcast. Returns whether a hint widened.
+    fn widen_accumulators(
+        &mut self,
+        callback: Ty<'db>,
+        states: &[(usize, usize, bool)],
+        hint: &mut [Option<Ty<'db>>],
+        arguments: &mut [CallArgument<'db>],
+    ) -> bool {
+        let TyKind::Function(function) = self.table.resolve(self.db, callback).kind(self.db) else {
+            return false;
+        };
+        let mut widened = false;
+        for &(formal, state, wrapped) in states {
+            let Some(current) = hint.get(formal).copied().flatten() else {
+                continue;
+            };
+            // A join that does not widen the state leaves no bindings behind.
+            let snapshot = self.table.snapshot();
+            match self.widened_state(function.ret, wrapped, current) {
+                Some(joined) => {
+                    hint[formal] = Some(joined);
+                    arguments[state].ty = Some(joined);
+                    widened = true;
+                }
+                None => self.table.rollback(snapshot),
+            }
+        }
+        widened
+    }
+
+    /// The join of `current` and the state a callback returning `ret` gives back, bare or as the
+    /// payload of each tag when `wrapped`, or `None` when the state fits `current` already. The
+    /// caller rolls the pass's bindings back, so the join must be closed.
+    fn widened_state(&mut self, ret: Ty<'db>, wrapped: bool, current: Ty<'db>) -> Option<Ty<'db>> {
+        let result = if wrapped {
+            let mut payloads = tag_payloads(self.db, ret)?.into_iter();
+            let first = payloads.next()?;
+            payloads.try_fold(first, |held, payload| self.join_ry_values(held, payload))?
+        } else {
+            ret
+        };
+        let snapshot = self.table.snapshot();
+        let fits = self.table.compatible(self.db, result, current);
+        self.table.rollback(snapshot);
+        if fits {
+            return None;
+        }
+        self.join_ry_values(current, self.table.resolve(self.db, result))
+            .map(|joined| self.table.resolve(self.db, joined))
+            .filter(|joined| !self.table.contains_unbound_var(self.db, *joined))
     }
 
     /// Whether `expression` reads a local whose value is a string of its own name.
@@ -18933,6 +19199,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         callees: &[Ty<'db>],
         arguments: &[CallArgument<'db>],
         deferred: &Bitset<'a, usize>,
+        widening: &[AccumulatorStates],
     ) -> Vec<Option<Vec<Option<Ty<'db>>>>> {
         let mut agreed: Vec<Option<Vec<Option<Ty<'db>>>>> = vec![None; arguments.len()];
         let mut first_candidate = true;
@@ -19082,13 +19349,17 @@ impl<'db, 'a> Checker<'db, 'a> {
                             .map(|(index, formal)| {
                                 let formal = self.table.resolve(self.db, formal);
                                 // An accumulator whose initial state is a settled ry value keeps
-                                // that type, because only a tag union widens among ry types. In
-                                // `List.walk(xs, List.repeat(0f64, n), \(sums, x) sums + x)` the
-                                // state is `List<F64>` before the body reads `sums + x`. A state
-                                // with a tag anywhere in it, such as `[:A]`, stays open.
+                                // that type. In `List.walk(xs, List.repeat(0f64, n), \(sums, x)
+                                // sums + x)` the state is `List<F64>` before the body reads
+                                // `sums + x`. A state with a tag in it, such as `[:A]`, keeps
+                                // its type only where `widen_accumulators` widens it.
+                                let tag_state_widens =
+                                    widening.get(argument_index).is_some_and(|states| {
+                                        states.iter().any(|&(widened, ..)| widened == index)
+                                    });
                                 let widening_accumulator = accumulators.contains(index)
                                     && !(is_ry_value_type(self.db, formal)
-                                        && !mentions_tag(self.db, formal)
+                                        && (tag_state_widens || !mentions_tag(self.db, formal))
                                         && !self.table.contains_unbound_var(self.db, formal));
                                 if widening_accumulator
                                     || (index < declared_count
@@ -24096,8 +24367,126 @@ impl<'db, 'a> Checker<'db, 'a> {
             },
             Err(_) => {
                 self.table.rollback(snapshot);
-                self.wider_record(left_resolved, right_resolved)
+                self.join_ry_values(left_resolved, right_resolved)
+                    .or_else(|| self.wider_record(left_resolved, right_resolved))
                     .unwrap_or_else(|| union_of(self.db, [left_resolved, right_resolved]))
+            }
+        }
+    }
+
+    /// ry's values are immutable, so they join covariantly, part by part: `[:A]` and `[:B]`
+    /// join to `List<:A | :B>` rather than a union of two lists that no `List<T>` parameter
+    /// accepts, and `(t = :A, n = 1i64)` and `(t = :B, n = 2i64)` to one record. A part that
+    /// neither unifies nor joins (`I64` beside `F64`, since numbers never widen) leaves the
+    /// join to the caller's union.
+    fn join_ry_values(&mut self, left: Ty<'db>, right: Ty<'db>) -> Option<Ty<'db>> {
+        if !is_ry_value_type(self.db, left) || !is_ry_value_type(self.db, right) {
+            return None;
+        }
+        let snapshot = self.table.snapshot();
+        let joined = self.join_ry_shapes(left, right);
+        if joined.is_none() {
+            self.table.rollback(snapshot);
+        }
+        joined
+    }
+
+    fn join_ry_part(&mut self, left: Ty<'db>, right: Ty<'db>) -> Option<Ty<'db>> {
+        let left = self.table.resolve(self.db, left);
+        let right = self.table.resolve(self.db, right);
+        if left == right {
+            return Some(left);
+        }
+        let snapshot = self.table.snapshot();
+        if self.table.unify(self.db, left, right).is_ok() {
+            return Some(self.table.resolve(self.db, left));
+        }
+        self.table.rollback(snapshot);
+        self.join_ry_shapes(left, right)
+    }
+
+    fn join_ry_shapes(&mut self, left: Ty<'db>, right: Ty<'db>) -> Option<Ty<'db>> {
+        let db = self.db;
+        match (left.kind(db), right.kind(db)) {
+            (
+                TyKind::Named(left_name, left_arguments),
+                TyKind::Named(right_name, right_arguments),
+            ) if left_name == right_name
+                && left_arguments.len() == right_arguments.len()
+                && is_ry_value_type(db, left) =>
+            {
+                let mut arguments: SmallVec<[Ty<'db>; 2]> = SmallVec::new();
+                for (&left_argument, &right_argument) in left_arguments.iter().zip(*right_arguments)
+                {
+                    arguments.push(self.join_ry_part(left_argument, right_argument)?);
+                }
+                Some(Ty::new(db, TyKind::Named(*left_name, &arguments)))
+            }
+            (TyKind::NativeTuple(left_items), TyKind::NativeTuple(right_items))
+                if left_items.len() == right_items.len() =>
+            {
+                let mut items: SmallVec<[Ty<'db>; 4]> = SmallVec::new();
+                for (&left_item, &right_item) in left_items.iter().zip(*right_items) {
+                    items.push(self.join_ry_part(left_item, right_item)?);
+                }
+                Some(Ty::new(db, TyKind::NativeTuple(&items)))
+            }
+            (TyKind::NativeRecord(left_fields, None), TyKind::NativeRecord(right_fields, None))
+                if left_fields.len() == right_fields.len()
+                    && left_fields
+                        .iter()
+                        .zip(*right_fields)
+                        .all(|(left_field, right_field)| left_field.name == right_field.name) =>
+            {
+                let mut fields: SmallVec<[NativeField<'db>; 8]> = SmallVec::new();
+                for (left_field, right_field) in left_fields.iter().zip(*right_fields) {
+                    fields.push(NativeField {
+                        name: left_field.name,
+                        ty: self.join_ry_part(left_field.ty, right_field.ty)?,
+                    });
+                }
+                Some(native_record(db, fields))
+            }
+            _ => {
+                // Tags join by union, and a tag both sides hold joins its payloads.
+                let tags = |ty: Ty<'db>| -> Option<SmallVec<[Ty<'db>; 4]>> {
+                    let members: &[Ty<'db>] = match ty.kind(db) {
+                        TyKind::Union(members) => members,
+                        _ => std::slice::from_ref(&ty),
+                    };
+                    members
+                        .iter()
+                        .all(|member| {
+                            matches!(member.kind(db), TyKind::Tag(..) | TyKind::OtherTags)
+                        })
+                        .then(|| members.iter().copied().collect())
+                };
+                let (mut members, right_members) = (tags(left)?, tags(right)?);
+                for right_member in right_members {
+                    let TyKind::Tag(name, right_payload) = right_member.kind(db) else {
+                        members.push(right_member);
+                        continue;
+                    };
+                    let same = members.iter().position(
+                        |member| matches!(member.kind(db), TyKind::Tag(other, _) if other == name),
+                    );
+                    let Some(position) = same else {
+                        members.push(right_member);
+                        continue;
+                    };
+                    let TyKind::Tag(_, left_payload) = members[position].kind(db) else {
+                        continue;
+                    };
+                    members[position] = match (*left_payload, *right_payload) {
+                        (None, None) => continue,
+                        (Some(left_payload), Some(right_payload)) => {
+                            let payload = self.join_ry_part(left_payload, right_payload)?;
+                            Ty::new(db, TyKind::Tag(*name, Some(payload)))
+                        }
+                        _ => return None,
+                    };
+                }
+                Some(union_of(db, members))
             }
         }
     }
@@ -25673,6 +26062,25 @@ fn ok_payload<'db>(db: &'db dyn Db, result: Ty<'db>) -> Option<Ty<'db>> {
         TyKind::NativeTuple(items) if items.len() == 1 => items[0],
         _ => payload,
     })
+}
+
+/// The payloads of `ty`'s tags when it is one tag or a union of tags that each carry one value,
+/// as `:Continue(S) | :Break(S)` does.
+fn tag_payloads<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<SmallVec<[Ty<'db>; 2]>> {
+    let members: &[Ty<'db>] = match ty.kind(db) {
+        TyKind::Union(members) => members,
+        _ => std::slice::from_ref(&ty),
+    };
+    members
+        .iter()
+        .map(|member| match member.kind(db) {
+            TyKind::Tag(_, Some(payload)) => match payload.kind(db) {
+                TyKind::NativeTuple([value]) => Some(*value),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
 }
 
 /// Whether a tag or a tag union appears anywhere in `ty`, the part of a ry type that widens.

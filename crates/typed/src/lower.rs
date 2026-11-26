@@ -26,7 +26,10 @@ use {
     interp::{numbers::Observed, records::rest_name, values as rvalues},
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
-    std::{borrow::Cow, cell::Cell},
+    std::{
+        borrow::Cow,
+        cell::{Cell, RefCell},
+    },
     syntax::native_values::reads_its_frame,
 };
 
@@ -214,6 +217,9 @@ pub const SELF: usize = usize::MAX;
 
 /// How deeply local functions inline into each other.
 const MAX_INLINE_DEPTH: usize = 8;
+
+/// How many variables and walks a function's lowering widens to more tags before it gives up.
+const MAX_WIDENINGS: usize = 8;
 /// How deep in inlined functions a call of a typed function may still inline, which leaves
 /// the levels below `MAX_INLINE_DEPTH` to the local functions of the inlined bodies.
 const MAX_TYPED_INLINE_DEPTH: usize = 4;
@@ -244,21 +250,36 @@ pub unsafe fn lower(
     // function the typed core cannot compile does not keep its callers off native code. The
     // builder already holds part of the refused body by then, so the caller is lowered again.
     let mut called: SmallVec<[Sexp; 2]> = SmallVec::new();
+    // A variable takes the type of the first value assigned to it. A later tag of another shape,
+    // or a list of such tags, widens the variable's tags to the union of both, and the function
+    // is lowered again with every variable of that name holding the union from its first
+    // assignment. A walk's state widens the same way, keyed by its step function.
+    let mut widened: SmallVec<[(Sexp, u32); 2]> = SmallVec::new();
     loop {
         let mut refused = None;
+        let mut widen = None;
         let result = lower_calling(
             closure,
             params,
             guess,
             declared,
             &mut *callees,
-            &called,
-            &mut refused,
+            (&called, &widened),
+            (&mut refused, &mut widen),
             returned,
         );
-        match (result, refused) {
-            (Err(_), Some(function)) => called.push(function),
-            (result, _) => return result,
+        match (result, refused, widen) {
+            (Err(_), Some(function), _) => called.push(function),
+            (Err(refusal), None, Some((key, union))) => {
+                let count = widened.len();
+                match widened.iter_mut().find(|(held, _)| *held == key) {
+                    Some((_, held)) if shapes::within(union, *held) => return Err(refusal),
+                    Some((_, held)) => *held = shapes::join(*held, union),
+                    None if count < MAX_WIDENINGS => widened.push((key, union)),
+                    None => return Err(refusal),
+                }
+            }
+            (result, ..) => return result,
         }
     }
 }
@@ -272,8 +293,8 @@ unsafe fn lower_calling(
     guess: Type,
     declared: Option<Type>,
     callees: &mut dyn Callees,
-    called: &[Sexp],
-    refused: &mut Option<Sexp>,
+    (called, widened): (&[Sexp], &[(Sexp, u32)]),
+    (refused, widen): (&mut Option<Sexp>, &mut Option<(Sexp, u32)>),
     returned: &mut Option<Type>,
 ) -> Result<Lowered, Refusal> {
     let formals = rvalues::pairlist_items(closure.car());
@@ -310,6 +331,8 @@ unsafe fn lower_calling(
         self_inlines: 0,
         called,
         refused,
+        widened,
+        widen,
         speculations: Vec::new(),
         nesting: 0,
         control: 0,
@@ -326,6 +349,7 @@ unsafe fn lower_calling(
         forward: None,
         declared_loops: Vec::new(),
         probing: 0,
+        captures: Vec::new(),
     };
     tail_matches(body, &mut lowering.tails);
     let mut assigned = Vec::new();
@@ -383,12 +407,26 @@ unsafe fn lower_calling(
     })
 }
 
-/// A function passed to another: a local function or a literal, inlined where it is called, or
-/// a typed closure and the name that names it.
+/// A function passed to another: a local function or a literal, inlined where it is called, a
+/// typed closure and the name that names it, or a function of base R or the standard library.
 #[derive(Clone, Copy, Debug)]
 enum Callable {
+    /// Its formals, its body and the index of the scope that defines it, whose names are the
+    /// only ones the body sees when it is inlined.
     Inline(Sexp, Sexp, usize),
+    /// A local function or a literal passed to an inlined function, with the index of the
+    /// capture of the names it sees ([`Lowering::capture`]).
+    Captured(Sexp, Sexp, u32),
     Typed(Sexp, Sexp),
+    /// The symbol that names it, which lowers as a call of that name ([`eta`]).
+    Library(Sexp),
+}
+
+/// A value a call passes, or a function it passes to a parameter that takes one.
+#[derive(Clone, Copy, Debug)]
+enum Argument {
+    Value(Local),
+    Function(Callable),
 }
 
 /// What a name in scope stands for.
@@ -399,9 +437,8 @@ enum Binding {
     /// or after a loop whose body sets it. The local is one of the name's [`Variable`]s, and a
     /// read tests its flag first and gives the call up to the interpreter where the name is unset.
     Maybe(Local),
-    /// A local function: its formals, its body and the index of the scope that defines it, whose
-    /// names are the only ones the body sees when it is inlined.
-    Function(Sexp, Sexp, usize),
+    /// A local function, or a function a call passed to an inlined function's parameter.
+    Function(Callable),
     /// A local function that a branch or loop body defined, after it. The name may or may not be
     /// that function there, so any use refuses rather than reach a global of the same name.
     Hidden,
@@ -521,6 +558,12 @@ struct Lowering<'c> {
     called: &'c [Sexp],
     /// The innermost typed function whose body was refused where it inlined.
     refused: &'c mut Option<Sexp>,
+    /// Names whose variables, and step functions whose walk states, hold at least these tags
+    /// ([`lower`]).
+    widened: &'c [(Sexp, u32)],
+    /// The name or step function and the union of tags the lowering needs a variable or a walk's
+    /// state to hold, when it refused for it.
+    widen: &'c mut Option<(Sexp, u32)>,
     speculations: Vec<Speculation>,
     nesting: usize,
     /// How many branches and loop bodies enclose the current point in the current scope.
@@ -562,6 +605,8 @@ struct Lowering<'c> {
     /// How many loop trials enclose the current point: a trial lowers a loop only to learn the
     /// types of the names it sets, and leaves out each statement that reads one too early.
     probing: usize,
+    /// The names each captured function sees ([`Callable::Captured`]).
+    captures: Vec<FxHashMap<Sexp, Binding>>,
 }
 
 /// A name a loop declares before it ([`Lowering::looped`]): its symbol, its type, and whether
@@ -812,9 +857,35 @@ impl Lowering<'_> {
         }
     }
 
+    /// `ty` holding the tags an earlier lowering found `key` needs ([`lower`]).
+    fn widened_type(&self, key: Sexp, ty: Type) -> Type {
+        match self.widened.iter().find(|&&(held, _)| held == key) {
+            Some(&(_, wider)) => with_tags(ty, wider),
+            None => ty,
+        }
+    }
+
+    /// Whether a value of `found` may be stored where `held` is, which holds for the same type
+    /// and for fewer tags. A value with more tags asks [`lower`] to widen `key`.
+    fn fits_widening(&mut self, key: Sexp, held: Type, found: Type) -> bool {
+        match (held_tags(held), held_tags(found)) {
+            (Some(held_union), Some(found_union))
+                if with_tags(held, found_union) == with_tags(found, held_union) =>
+            {
+                let fits = shapes::within(found_union, held_union);
+                if !fits {
+                    *self.widen = Some((key, shapes::join(held_union, found_union)));
+                }
+                fits
+            }
+            _ => held == found,
+        }
+    }
+
     /// The variable of `symbol` in the current scope that holds values of `ty`, made when the name
     /// has none yet. A pending empty list never shares one, since its type is a placeholder.
     fn variable(&mut self, symbol: Sexp, ty: Type) -> Local {
+        let ty = self.widened_type(symbol, ty);
         let (scope, entry) = self
             .scopes
             .last()
@@ -1098,10 +1169,7 @@ impl Lowering<'_> {
             Some(variable) => {
                 self.unify_pending(variable, value)?;
                 let ty = self.builder.ty(value);
-                let fits = match (self.builder.ty(variable), ty) {
-                    (Type::Tag(held), Type::Tag(found)) => shapes::within(found, held),
-                    (held, found) => held == found,
-                };
+                let fits = self.fits_widening(symbol, self.builder.ty(variable), ty);
                 if !fits {
                     return Err(Refusal::new("a variable that changes type"));
                 }
@@ -1298,26 +1366,27 @@ impl Lowering<'_> {
             .ok_or(Refusal::new("an append of something a list cannot hold"))?;
         self.settle(list, item)?;
         let ty = self.builder.ty(list);
-        let fits = match (ty, item) {
+        // A tag of another shape widens the list's item union: its items are boxes either way.
+        let ty = match (ty, item) {
             (
                 Type::Vector {
                     item: Item::Tag(held),
                     array: true,
                 },
                 Item::Tag(found),
-            ) => shapes::within(found, held),
+            ) => with_tags(ty, shapes::join(held, found)),
             (
                 Type::Vector {
                     item: held,
                     array: true,
                 },
                 found,
-            ) => held == found,
+            ) if held == found => ty,
+            (Type::Vector { array: true, .. }, _) => {
+                return Err(Refusal::new("an append of an item of another type"));
+            }
             _ => return Err(Refusal::new("an append to something other than a ry list")),
         };
-        if !fits {
-            return Err(Refusal::new("an append of an item of another type"));
-        }
         Ok(self.builder.emit(ty, Op::Push(list, value)))
     }
 
@@ -1533,10 +1602,10 @@ impl Lowering<'_> {
             }
             _ => {}
         }
-        if let Some(Binding::Function(formals, body, scope)) = self.lookup(head) {
+        if let Some(Binding::Function(callable)) = self.lookup(head) {
             let arguments = Arguments::of(call);
-            let values = self.call_arguments(&arguments)?;
-            return self.inline(formals, body, scope + 1, &values, inline_storage);
+            let values = self.passed_arguments(&arguments)?;
+            return self.apply_arguments(callable, &values);
         }
         match self.lookup(head) {
             Some(Binding::Hidden) => return Err(hidden_refusal()),
@@ -1567,7 +1636,7 @@ impl Lowering<'_> {
             if arguments.items.iter().any(|(tag, _)| tag.is_some()) {
                 return Err(Refusal::new("a typed call with named arguments"));
             }
-            let values = self.call_arguments(&arguments)?;
+            let values = self.passed_arguments(&arguments)?;
             return self.typed_function(head, function, &values);
         }
         if let Some(r_use) = r_use {
@@ -1907,9 +1976,32 @@ impl Lowering<'_> {
         &mut self,
         name: Sexp,
         function: Sexp,
-        values: &[Local],
+        arguments: &[Argument],
     ) -> Result<Option<Local>, Refusal> {
         let body = interp::bytecode::closure_body(function);
+        let Some(values) = plain_values(arguments) else {
+            // Compiled code holds no function values, so a function passed to a parameter is
+            // known where the call is lowered, and the callee lowers into the caller with that
+            // function in place of the parameter, once per call.
+            if function.tag() != self.env
+                || function == self.closure
+                || self.inlining.contains(&function)
+                || self.called.contains(&function)
+            {
+                return Err(Refusal::new(
+                    "a function passed to a typed function that does not lower into its caller, \
+                     such as a recursive one",
+                ));
+            }
+            if tail_invisible(body) {
+                return Err(Refusal::new("the body's value may be invisible"));
+            }
+            self.inlining.push(function);
+            let value = self.inline(function.car(), body, 0, arguments, crate::storage);
+            self.inlining.pop();
+            return value;
+        };
+        let values = &values[..];
         let own = function == self.closure;
         let mut own_calls = if own { MAX_SELF_CALLS } else { 0 };
         if function.tag() == self.env
@@ -1923,7 +2015,7 @@ impl Lowering<'_> {
         {
             self.self_inlines += own as usize;
             self.inlining.push(function);
-            let value = self.inline(function.car(), body, 0, values, crate::storage);
+            let value = self.inline(function.car(), body, 0, arguments, crate::storage);
             self.inlining.pop();
             if value.is_err() {
                 self.refused.get_or_insert(function);
@@ -1947,15 +2039,79 @@ impl Lowering<'_> {
             .emit(result, Op::CallTyped(index, SmallVec::from_slice(values))))
     }
 
-    unsafe fn call_arguments(
+    /// The arguments of a call of a local or typed function. A function literal, a local
+    /// function and a name that holds a function pass that function, and any other argument
+    /// passes its value.
+    unsafe fn passed_arguments(
         &mut self,
         arguments: &Arguments,
-    ) -> Result<SmallVec<[Local; 4]>, Refusal> {
-        let mut values = SmallVec::new();
+    ) -> Result<SmallVec<[Argument; 4]>, Refusal> {
+        let mut passed = SmallVec::new();
         for &(_, argument) in &arguments.items {
-            values.push(self.value(argument)?);
+            passed.push(if self.passes_function(argument) {
+                Argument::Function(self.function_argument(argument)?)
+            } else {
+                Argument::Value(self.value(argument)?)
+            });
         }
-        Ok(values)
+        Ok(passed)
+    }
+
+    /// Whether the argument `code` is a function: a function literal, a local function, or a
+    /// name whose value lookup finds a function.
+    unsafe fn passes_function(&self, code: Sexp) -> bool {
+        match code.kind() {
+            SexpType::Symbol => match self.lookup(code) {
+                Some(binding) => matches!(binding, Binding::Function(_)),
+                None => find_function(code, self.env).is_some(),
+            },
+            SexpType::Language => {
+                code.car().kind() == SexpType::Symbol
+                    && rvalues::symbol_name(code.car()) == "function"
+                    && self.lookup(code.car()).is_none()
+            }
+            _ => false,
+        }
+    }
+
+    /// `callable` as a function that sees the names it sees here wherever it is called: a local
+    /// function or a literal takes the bindings of the scopes it sees along, since the function
+    /// it is passed to lowers with other scopes in view.
+    fn captured(&mut self, callable: Callable) -> Callable {
+        match callable {
+            Callable::Inline(formals, body, scope) => {
+                Callable::Captured(formals, body, self.capture(scope, &mut SmallVec::new()))
+            }
+            other => other,
+        }
+    }
+
+    /// The bindings of the first `scope + 1` scopes as one capture, an inner scope's binding of
+    /// a name hiding an outer one's. The local functions among them are captured in turn, each
+    /// with the scopes it sees, which a function defined in this scope shares.
+    fn capture(&mut self, scope: usize, shared: &mut SmallVec<[(usize, u32); 4]>) -> u32 {
+        if let Some(&(_, id)) = shared.iter().find(|&&(held, _)| held == scope) {
+            return id;
+        }
+        let id = self.captures.len() as u32;
+        self.captures.push(FxHashMap::default());
+        shared.push((scope, id));
+        let mut names: FxHashMap<Sexp, Binding> = FxHashMap::default();
+        for held in self.scopes.iter().take(scope + 1) {
+            names.extend(
+                held.names
+                    .iter()
+                    .map(|(&symbol, &binding)| (symbol, binding)),
+            );
+        }
+        for binding in names.values_mut() {
+            if let Binding::Function(Callable::Inline(formals, body, defined)) = *binding {
+                let capture = self.capture(defined, shared);
+                *binding = Binding::Function(Callable::Captured(formals, body, capture));
+            }
+        }
+        self.captures[id as usize] = names;
+        id
     }
 
     unsafe fn arguments(&self, call: Sexp, count: usize) -> Result<SmallVec<[Sexp; 4]>, Refusal> {
@@ -2069,7 +2225,10 @@ impl Lowering<'_> {
                     return Err(Refusal::new("a local function rebound in a branch or loop"));
                 }
                 let scope = self.scopes.len() - 1;
-                self.bind(target, Binding::Function(formals, body, scope));
+                self.bind(
+                    target,
+                    Binding::Function(Callable::Inline(formals, body, scope)),
+                );
                 return Ok(self.builder.emit(Type::Null, Op::Const(Constant::Null)));
             }
             let value = self.value(value)?;
@@ -2803,7 +2962,7 @@ impl Lowering<'_> {
         formals: Sexp,
         body: Sexp,
         visible: usize,
-        arguments: &[Local],
+        arguments: &[Argument],
         storage: fn(Type) -> Option<(SexpType, bool)>,
     ) -> Result<Option<Local>, Refusal> {
         if self.inlined.len() >= MAX_INLINE_DEPTH {
@@ -2819,12 +2978,16 @@ impl Lowering<'_> {
         // The arguments meet the function's annotations as a call's would: an `I64` formal
         // converts a whole R number, and every other check must pass for the types at hand.
         let (i64_formals, returns_i64) = interp::annotations::declared_i64(definition, body);
-        let mut converted: SmallVec<[Local; 4]> = SmallVec::new();
+        let mut converted: SmallVec<[Argument; 4]> = SmallVec::new();
         for (index, &argument) in arguments.iter().enumerate() {
-            converted.push(if i64_formals.get(index).copied().unwrap_or(false) {
-                self.to_i64(argument)?
-            } else {
-                argument
+            converted.push(match argument {
+                Argument::Value(value) if i64_formals.get(index).copied().unwrap_or(false) => {
+                    Argument::Value(self.to_i64(value)?)
+                }
+                // The body runs with other scopes in view, so a passed function brings the names
+                // it sees with it.
+                Argument::Function(callable) => Argument::Function(self.captured(callable)),
+                argument => argument,
             });
         }
         let arguments = &converted[..];
@@ -2833,8 +2996,16 @@ impl Lowering<'_> {
             if symbol == rvalues::symbols().dots {
                 return Err(Refusal::new("a local function with `...`"));
             }
-            // A parameter is a fresh variable, so assigning it never touches the caller's.
-            let ty = self.builder.ty(argument);
+            let argument = match argument {
+                Argument::Value(value) => value,
+                Argument::Function(callable) => {
+                    scope.names.insert(symbol, Binding::Function(callable));
+                    continue;
+                }
+            };
+            // A parameter is a fresh variable, so assigning it never touches the caller's, and
+            // one holding a tag widens as any variable does.
+            let ty = self.widened_type(symbol, self.builder.ty(argument));
             let variable = self.builder.local(ty);
             self.builder.push(Some(variable), Op::Copy(argument));
             scope.names.insert(symbol, Binding::Value(variable));
@@ -2894,7 +3065,10 @@ impl Lowering<'_> {
         };
         let kinds: SmallVec<[Option<(SexpType, bool)>; 4]> = arguments
             .iter()
-            .map(|&argument| storage(self.builder.ty(argument)))
+            .map(|&argument| match argument {
+                Argument::Value(value) => storage(self.builder.ty(value)),
+                Argument::Function(_) => Some((SexpType::Closure, false)),
+            })
             .collect();
         if !interp::annotations::admits_inline(definition, body, &kinds, storage(ty)) {
             return Err(Refusal::new(
@@ -4769,7 +4943,9 @@ impl Lowering<'_> {
         let state = match state {
             Some(state) if self.is_library_call(state, "Dict.empty", 0)? => {
                 // An empty dictionary's type is the one the step function declares for its state.
-                let Callable::Inline(formals, body, _) = callable else {
+                let (Callable::Inline(formals, body, _) | Callable::Captured(formals, body, _)) =
+                    callable
+                else {
                     return Err(Refusal::new("a walk from `Dict.empty()` with a named step"));
                 };
                 let ty = interp::annotations::formal_annotation(formals, body, 0)
@@ -4783,7 +4959,9 @@ impl Lowering<'_> {
             Some(state) => self.value(state)?,
             None => self.builder.emit(Type::I64, Op::Const(Constant::I64(0))),
         };
-        let state_ty = self.builder.ty(state);
+        // A step that returns more tags than the state holds widens the state, as a variable
+        // widens, keyed by the step function.
+        let state_ty = self.widened_type(function, self.builder.ty(state));
         let total = self.builder.emit(state_ty, Op::Copy(state));
         let (positions, element, position) = match (range, list) {
             (Some((start, end, _)), _) => {
@@ -4839,9 +5017,9 @@ impl Lowering<'_> {
                 .apply(callable, &inputs)?
                 .ok_or(Refusal::new("a walk step that never completes"))?;
             if until {
-                self.walk_step(step, total, state_ty, positions.exit)?;
+                self.walk_step(step, total, (function, state_ty), positions.exit)?;
             } else {
-                if self.builder.ty(step) != state_ty {
+                if !self.fits_widening(function, state_ty, self.builder.ty(step)) {
                     return Err(Refusal::new("a walk whose state changes type"));
                 }
                 self.builder.push(Some(total), Op::Copy(step));
@@ -4857,7 +5035,7 @@ impl Lowering<'_> {
         &mut self,
         step: Local,
         total: Local,
-        state_ty: Type,
+        (function, state_ty): (Sexp, Type),
         exit: BlockId,
     ) -> Result<(), Refusal> {
         let (go_on, stop) = (tag_layout("Continue", 1)?, tag_layout("Break", 1)?);
@@ -4881,7 +5059,7 @@ impl Lowering<'_> {
                     return Ok(None);
                 };
                 let next = lowering.field(step, shape, 0)?;
-                if lowering.builder.ty(next) != state_ty {
+                if !lowering.fits_widening(function, state_ty, lowering.builder.ty(next)) {
                     return Err(Refusal::new("a walk whose state changes type"));
                 }
                 lowering.builder.push(Some(total), Op::Copy(next));
@@ -5018,15 +5196,18 @@ impl Lowering<'_> {
             .ty(value)
             .held_item()
             .ok_or(Refusal::new("a list of something a list cannot hold"))?;
-        if let Some((_, ty)) = list
-            && ty.items() != Some(item)
-        {
-            return Err(Refusal::new("a `List.prepend` of an item of another type"));
-        }
+        let single_ty = Type::Vector { item, array: true };
+        // A tag of another shape widens the item union, as an append does.
+        let list = match list {
+            Some((list, ty)) => Some((
+                list,
+                joined(ty, single_ty)
+                    .ok_or(Refusal::new("a `List.prepend` of an item of another type"))?,
+            )),
+            None => None,
+        };
         let empty = self.empty_list(item);
-        let single = self
-            .builder
-            .emit(Type::Vector { item, array: true }, Op::Push(empty, value));
+        let single = self.builder.emit(single_ty, Op::Push(empty, value));
         Ok(match list {
             Some((list, ty)) => self.builder.emit(ty, Op::Extend(single, list)),
             None => single,
@@ -5043,12 +5224,21 @@ impl Lowering<'_> {
         let index = self.to_i64(index)?;
         let value = self.value(value)?;
         self.usable(value)?;
-        let item = ty.items().ok_or(Refusal::new(
-            "a `List.set` of something other than a ry list",
-        ))?;
-        if self.builder.ty(value).held_item() != Some(item) {
-            return Err(Refusal::new("a `List.set` of an item of another type"));
-        }
+        // A tag of another shape widens the item union, as an append does.
+        let ty = self
+            .builder
+            .ty(value)
+            .held_item()
+            .and_then(|found| {
+                joined(
+                    ty,
+                    Type::Vector {
+                        item: found,
+                        array: true,
+                    },
+                )
+            })
+            .ok_or(Refusal::new("a `List.set` of an item of another type"))?;
         let inside = self.within_list(list, index);
         let result = self.builder.local(ty);
         let (set, keep, join) = (
@@ -5625,9 +5815,7 @@ impl Lowering<'_> {
     unsafe fn function_argument(&mut self, function: Sexp) -> Result<Callable, Refusal> {
         if function.kind() == SexpType::Symbol {
             match self.lookup(function) {
-                Some(Binding::Function(formals, body, scope)) => {
-                    return Ok(Callable::Inline(formals, body, scope));
-                }
+                Some(Binding::Function(callable)) => return Ok(callable),
                 Some(Binding::Hidden) => return Err(hidden_refusal()),
                 Some(Binding::Value(_) | Binding::Maybe(_)) => {
                     return Err(Refusal::new("a mapped function held in a variable"));
@@ -5637,6 +5825,10 @@ impl Lowering<'_> {
             let speculation = find_function(function, self.env)
                 .ok_or(Refusal::new("a mapped function that does not resolve"))?;
             let found = speculation.function;
+            if is_base_function(&speculation) {
+                self.speculations.push(speculation);
+                return Ok(Callable::Library(function));
+            }
             if found.kind() != SexpType::Closure || !interp::annotations::is_typed(found) {
                 return Err(Refusal::new(
                     "a mapped function that is not a typed closure",
@@ -5663,13 +5855,38 @@ impl Lowering<'_> {
     unsafe fn apply(
         &mut self,
         callable: Callable,
-        arguments: &[Local],
+        values: &[Local],
+    ) -> Result<Option<Local>, Refusal> {
+        let arguments: SmallVec<[Argument; 4]> =
+            values.iter().map(|&value| Argument::Value(value)).collect();
+        self.apply_arguments(callable, &arguments)
+    }
+
+    /// Calls a function argument with these arguments, which may pass functions in turn.
+    unsafe fn apply_arguments(
+        &mut self,
+        callable: Callable,
+        arguments: &[Argument],
     ) -> Result<Option<Local>, Refusal> {
         match callable {
             Callable::Inline(formals, body, scope) => {
                 self.inline(formals, body, scope + 1, arguments, inline_storage)
             }
+            Callable::Captured(formals, body, capture) => {
+                // The function sees its captured names and its own, so it lowers with the scopes
+                // in view swapped for one scope of those names.
+                let mut scope = self.new_scope();
+                scope.names = self.captures[capture as usize].clone();
+                let held = std::mem::replace(&mut self.scopes, vec![scope]);
+                let value = self.inline(formals, body, 1, arguments, inline_storage);
+                self.scopes = held;
+                value
+            }
             Callable::Typed(name, function) => self.typed_function(name, function, arguments),
+            Callable::Library(name) => {
+                let (formals, body) = eta(name, arguments.len())?;
+                self.inline(formals, body, 0, arguments, inline_storage)
+            }
         }
     }
 
@@ -8821,10 +9038,83 @@ unsafe fn writes(expression: Sexp) -> bool {
             .any(|(_, item)| writes(item))
 }
 
-/// The type both of two values' types fit: that type, or the union of two tags.
+/// The values of `arguments`, or `None` when one is a function.
+fn plain_values(arguments: &[Argument]) -> Option<SmallVec<[Local; 4]>> {
+    arguments
+        .iter()
+        .map(|&argument| match argument {
+            Argument::Value(value) => Some(value),
+            Argument::Function(_) => None,
+        })
+        .collect()
+}
+
+thread_local! {
+    /// The function of each library function and arity that [`eta`] made, kept for the session.
+    static ETA: RefCell<Vec<(Sexp, usize, Sexp, Sexp)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The formals and body of `function(a1, ..., an) name(a1, ..., an)` for the library function
+/// `name` passed by name, which lowers as a call of it with the values passed. The language
+/// objects are preserved, so each is made once per session.
+unsafe fn eta(name: Sexp, arity: usize) -> Result<(Sexp, Sexp), Refusal> {
+    if let Some(found) = ETA.with_borrow(|made| {
+        made.iter()
+            .find(|&&(held, count, ..)| held == name && count == arity)
+            .map(|&(.., formals, body)| (formals, body))
+    }) {
+        return Ok(found);
+    }
+    let failed = |_| Refusal::new("a library function passed by name");
+    let mut formals = rvalues::nil();
+    let mut arguments = rvalues::nil();
+    for position in (1..=arity).rev() {
+        let symbol = rvalues::install(&format!(".ry_passed{position}")).map_err(failed)?;
+        formals = rvalues::cons_tagged(rvalues::missing_arg(), formals, symbol).map_err(failed)?;
+        arguments = rvalues::cons(symbol, arguments).map_err(failed)?;
+    }
+    let body = rvalues::lcons(name, arguments).map_err(failed)?;
+    let heap = interp::heap();
+    heap.preserve(formals);
+    heap.preserve(body);
+    ETA.with_borrow_mut(|made| made.push((name, arity, formals, body)));
+    Ok((formals, body))
+}
+
+/// The tags a value of `ty` holds: a tag's union, or the item union of a ry list of tags.
+fn held_tags(ty: Type) -> Option<u32> {
+    match ty {
+        Type::Tag(union)
+        | Type::Vector {
+            item: Item::Tag(union),
+            array: true,
+        } => Some(union),
+        _ => None,
+    }
+}
+
+/// `ty` holding the tags of `union` as well, for a type [`held_tags`] reads.
+fn with_tags(ty: Type, union: u32) -> Type {
+    match ty {
+        Type::Tag(held) => Type::Tag(shapes::join(held, union)),
+        Type::Vector {
+            item: Item::Tag(held),
+            array: true,
+        } => Type::Vector {
+            item: Item::Tag(shapes::join(held, union)),
+            array: true,
+        },
+        ty => ty,
+    }
+}
+
+/// The type both of two values' types fit: that type, or the union of two tags or two ry lists
+/// of tags.
 fn joined(a: Type, b: Type) -> Option<Type> {
+    if let (Some(left), Some(right)) = (held_tags(a), held_tags(b)) {
+        return (with_tags(a, right) == with_tags(b, left)).then(|| with_tags(a, right));
+    }
     match (a, b) {
-        (Type::Tag(a), Type::Tag(b)) => Some(Type::Tag(shapes::join(a, b))),
         // A `Bool` is a logical that is never `NA`, held in the same word.
         (Type::Bool, Type::Lgl) | (Type::Lgl, Type::Bool) => Some(Type::Lgl),
         (a, b) => (a == b).then_some(a),

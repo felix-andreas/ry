@@ -1438,7 +1438,7 @@ so every R use of `base::match` keeps its meaning. An arm is `PATTERN => EXPR` o
 | `1L`, `"a"`, `TRUE`, `NA`, `NULL`, `-1` | a length-one value equal to the literal |
 | `:Tag`, `:Tag(p1, p2)`, `:Tag(field = p)` | a tag with that name whose payload matches |
 | `(p1, p2)`, `(p,)` | a tuple of that length whose items match |
-| `(name = p, ..)`, `(name = p,)` | a record with those fields; without `..`, exactly those fields |
+| `(name = p, ..)`, `(name = p,)` | a record with those fields; without `..`, exactly those fields. The `..` takes no name: `(x = a, ..others)` is a syntax error |
 | `p1 \| p2` | either pattern; both sides must bind the same names |
 
 The type of a `match` is the join of its arm types, as for `if`. A pattern that cannot match the
@@ -1603,7 +1603,10 @@ A ry type asks in three places:
   and number literals of its R type (`x + 1.5` with `x <- 0`) is open too, and so is a variable that branches write with
   literals R gives one type: in a function declared `-> F64`, `x <- 0`, then
   `if (n > 1i64) x <- x + 1.5`, then `x` makes every `x` an `F64`. Branches that write literals of
-  different R types (`1L` and `2.5`) keep R's types. Any other read gives the variable R's type,
+  different R types (`1L` and `2.5`) keep R's types. An `if` with `else` or a `match` whose
+  branches are all number literals of one R type is one such literal, both bound to a variable
+  (`m <- if (c) 1 else 2`, then `m + n` with `n: I64`, makes `m` an `I64`) and beside one
+  (`score + match (k) { :A => 1, :B => 2 }` with `score <- 0`). Any other read gives the variable R's type,
   as does a function that never decides it. A literal written as a tuple item
   or a record field is decided the same way: in `pair <- ("a", 1)`, the read
   `Str.concat(s, pair[[1]])` makes `"a"` a `Str`, and with no such use `pair` is a
@@ -2152,6 +2155,18 @@ type, `x` would be an open variable and `c(x, x)` could not be typed. The rule h
   the initial state gives it (such as an empty `list()`) is no context, and by the rule above the
   literal takes no types. A variable fixed by a collection is not widened, so in
   `List.update(xs, i, f: fn(T) -> T)` the literal's formal still takes the item type.
+- An accumulator whose initial state is a settled ry value takes that value's type, so in
+  `List.walk(rows, List.repeat(0f64, 2), \(sums, row) sums + row)` the formal `sums` is a
+  `List<F64>`. When the step function returns more tags than the state holds, the state widens to
+  the join of both and the step function is checked again under it, so
+  `List.walk(xs, :None, \(acc, x) :Some(x))` is `:None | :Some(I64)` and
+  `List.walk(xs, (best = :None, n = 0i64), \(acc, x) (best = :Some(x), n = acc$n + 1i64))` is
+  `Record{best: :None | :Some(I64), n: I64}`. The initial state is passed as the wider type, and
+  the step function is checked at most three times. A step function may also return the state as
+  the payload of every tag it returns, so `List.walk_until(xs, :None, \(acc, x) if (x > 2i64)
+  :Break(:Some(x)) else :Continue(acc))` is `:None | :Some(I64)`. A state with a tag in it widens
+  only with a single candidate callee whose step function returns the state in one of these two
+  ways; anywhere else it gives the formal no context.
 - A literal with a formal after `...` takes no types, because R binds positional arguments to
   `...` before any later formal.
 - A parameter type that is `Any`, `Unknown` or still contains an open type variable gives no
@@ -3390,6 +3405,13 @@ join does not merge or coerce branch types beyond unification; it records the al
   is `integer | NULL`.
 - Branches with genuinely different types give their union: `if (flag) 1L else "foo"` is
   `integer | character`, not a type error.
+- Two ry values of the same shape join part by part, because ry's values are immutable and so
+  covariant: `if (c) [:A] else [:B]` is `List<:A | :B>`, `if (c) (t = :A, n = 1i64) else (t = :B,
+  n = 2i64)` is `Record{n: I64, t: :A | :B}`, and `if (c) :Some([:A]) else :Some([:B])` is
+  `:Some(List<:A | :B>)`. A loop's accumulator joins the same way, so `acc <- [:A]` followed by
+  `for (x in xs) acc <- List.append(acc, :B)` leaves `acc` a `List<:A | :B>`. Only tags widen: a
+  part that differs in anything else, such as `[1i64]` beside `[1.5f64]`, leaves the union of
+  both values (`List<I64> | List<F64>`).
 - A branch whose type is still undetermined is never pinned by the other branch.
   `function(flag, x) if (flag) x else "s"` is `<T> fn(flag: logical, [x]: T) -> T | character`, not
   `fn(flag: logical, x: character)`, because unifying would make a caller wrong because of a line
@@ -5690,8 +5712,9 @@ interpreted
 | Construct | What to write instead |
 | --- | --- |
 | a function with `...` | name each parameter, or take one `List` |
-| a parameter that takes a function, a function literal used as a value, a call of a variable that holds a function | define the function inside the native function, or pass the literal straight to a standard library function such as `List.map` |
-| a standard library function passed by name, as in `List.map(xs, Num.to_f64)` | wrap it: `function(x: I64) -> F64 Num.to_f64(x)` |
+| a function literal used as a value other than an argument, a function that a function returns, a call of a variable that holds a function | define the function inside the native function, or pass it straight to the function that calls it |
+| a recursive call that passes a function, as in `count_down(n - 1, f)` | a loop, or a local function defined inside the recursive one |
+| an R function passed by name, as in `List.map(xs, sqrt)` | the standard library function (`Num.sqrt`), or a function literal |
 | a standard library function without native code, such as `List.intersperse` | a loop or another standard library function |
 | parameter types in a `#:` comment or on the assigned name, as in `f: fn(x: I64) -> I64 <- function(x) x` | write the types on the parameters |
 | a call of a typed or standard library function with named arguments, or one that leaves a default out | pass every argument by position |
@@ -5700,14 +5723,14 @@ interpreted
 | `<<-`, and an assignment to anything but a variable or `xs[[i]]` | return the new value; build a new record with `(..record, field = value)` |
 | a local function that a branch or a loop defines again after an earlier definition, or one called after the branch or loop that defines it | define it once at the top |
 | a name read before the function sets it, as in `acc <- acc + i` in a loop that sets `acc` nowhere else, or after branches that set it to values of different types | set it before the branch or loop, with one type |
-| a variable, a parameter or a loop variable that holds values of different types, branches that set a name to different types, and a variable that holds a tag and is assigned again | a new name for each value |
+| a variable, a parameter or a loop variable that holds values of different types, and branches that set a name to different types | a new name for each value |
 | the value of an `if` without `else` | an `else` branch that gives a value of the same type |
 | `xs[i]` with a position, which takes a part of a list | `xs[[i]]` for one item, `List.sublist` for a part |
 | a column read by its position, as in `table[[2]]` | the column's name: `table[["price"]]` |
 | a table value inside a record, a tuple, a tag or a list | a variable of its own for the table value |
 | an operator applied directly to a table expression that a local function, a function whose result type is an alias, an `if` or a `match` gives | assign the expression to a variable, and apply the operator to the variable |
 | a `Dict` whose keys or values are not `I64`, `F64` or `Str` | keep the values in a `List` and store their positions |
-| a `match` guard that assigns a variable, a pattern with `NA`, `NaN` or a complex number, a record pattern whose `..` names the rest, and a pattern other than a name or `_` on a value that is not a number, a string, a logical, a `List`, a tag, a record or a tuple | compute the value before the `match`, and bind the value to a name |
+| a `match` guard that assigns a variable, a pattern with `NA`, `NaN` or a complex number, and a pattern other than a name or `_` on a value that is not a number, a string, a logical, a `List`, a tag, a record or a tuple | compute the value before the `match`, and bind the value to a name |
 | a read of a global that holds a record, a tuple, a tag, a `Dict` or a `Set`, or of a variable of an enclosing boundary function | pass the value in as a parameter |
 | a function that ends in a loop or another expression whose value R returns invisibly | end with the value, or with `NULL` |
 

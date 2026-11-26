@@ -1441,8 +1441,14 @@ elsewhere.
 - **`.Call` by address.** A routine is native code exactly when its `NativeSymbolInfo`'s
   `address` pointer has no tag and a non-null address, so the call reads two slots by position
   and passes its arguments from the stack, with no name search or allocation before native code
-  runs. A `PACKAGE` argument or an arity mismatch goes to the general path, which reports the
-  errors.
+  runs. One walk of the list's attributes checks the class and that the names label those two
+  positions. Named arguments (`.Call(routine, x = x)`) take the same path, because `.Call`
+  passes its arguments by position whatever they are called. A `PACKAGE` argument, a list laid
+  out another way or an arity mismatch goes to the general path, which reports the errors.
+- **Per-cell C API stores.** `SET_STRING_ELT` is called once per cell by native code that fills
+  a character column, so its usual path makes no call and saves no register
+  (`Heap::set_string_element`): for a string stored into a character vector, the store is two
+  reference counts, the write and the barrier's test.
 
 A third round kept element assignments in slot frames: a `for` variable the body never reads
 gets a slot, `ForStep` and `SubAssign` find their slot through a constant-to-slot map built with

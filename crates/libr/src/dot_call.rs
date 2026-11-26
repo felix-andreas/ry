@@ -84,19 +84,59 @@ pub unsafe fn direct_call(call: Sexp, args: &[Sexp]) -> ApiResult<Option<Sexp>> 
 /// pointer whose address is a native entry point.
 pub unsafe fn native_routine(name: Sexp) -> Option<NativeRoutine> {
     match name.kind() {
-        SexpType::List => {
-            let function = native_address(symbol_address(name)?)?;
-            Some(NativeRoutine {
-                function,
-                arity: symbol_arity(name),
-            })
-        }
+        SexpType::List => registered_routine(name),
         SexpType::ExternalPtr => Some(NativeRoutine {
             function: native_address(name)?,
             arity: None,
         }),
         _ => None,
     }
+}
+
+/// [`native_routine`] of a list. Every `.Call` of a registered routine passes here, so the
+/// list's attributes are walked once for both its class and its names, and the `address` and
+/// `numParameters` elements are read at the positions R and ry build them at. A list laid out
+/// some other way is no routine here, and the full `.Call` reads it by name.
+unsafe fn registered_routine(info: Sexp) -> Option<NativeRoutine> {
+    if !info.is_object() || (info.length() as usize) <= ARITY_SLOT {
+        return None;
+    }
+    let symbols = symbols();
+    let (class_symbol, names_symbol) = (R_ClassSymbol.get(), R_NamesSymbol.get());
+    let (mut classes, mut names) = (None, None);
+    let mut cell = info.attrib();
+    while cell.kind() == SexpType::Pairlist {
+        let tag = cell.tag();
+        if tag == class_symbol {
+            classes = Some(cell.car());
+        } else if tag == names_symbol {
+            names = Some(cell.car());
+        }
+        cell = cell.cdr();
+    }
+    let (classes, names) = (classes?, names?);
+    if classes.kind() != SexpType::String
+        || names.kind() != SexpType::String
+        || classes.is_altrep()
+        || names.is_altrep()
+    {
+        return None;
+    }
+    let labels = names.slice::<Sexp>();
+    if !classes
+        .slice::<Sexp>()
+        .contains(&symbols.native_symbol_info.car())
+        || labels.get(ADDRESS_SLOT) != Some(&symbols.address.car())
+        || labels.get(ARITY_SLOT) != Some(&symbols.num_parameters.car())
+    {
+        return None;
+    }
+    let arity = info.element(ARITY_SLOT);
+    Some(NativeRoutine {
+        function: native_address(info.element(ADDRESS_SLOT))?,
+        arity: (arity.kind() == SexpType::Integer && arity.length() == 1)
+            .then(|| arity.slice::<i32>()[0]),
+    })
 }
 
 /// The `address` pointer of a `NativeSymbolInfo` list, whatever routine it points to.
@@ -124,7 +164,7 @@ pub unsafe fn slot(list: Sexp, position: usize, label: Sexp) -> Option<Sexp> {
     if names.kind() != SexpType::String {
         return None;
     }
-    let count = names.length() as usize;
+    let count = (names.length() as usize).min(list.length() as usize);
     if position < count && names.element(position) == label {
         return Some(list.element(position));
     }

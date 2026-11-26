@@ -98,6 +98,18 @@ knested <- function(l, v) { l$inner$low <- v; l }
 kswitch <- function(kind) switch(kind, a = 1L, b = 2L, c = 3L, 4L)
 kchain <- function(kind) if (kind == "a") 1L else if (kind == "b") 2L else if (kind == "c") 3L else 4L
 kcopy <- function(l) { out <- list(); for (name in c("a", "b")) out[[name]] <- l[[name]]; out }
+kobject <- (function() {
+  values <- list(1L)
+  list(get = function(key) values[[key]])
+})()
+kobject_wide <- (function() {
+  a1 <- 1; a2 <- 1; a3 <- 1; a4 <- 1; a5 <- 1; a6 <- 1; a7 <- 1; a8 <- 1; a9 <- 1; a10 <- 1
+  b1 <- 1; b2 <- 1; b3 <- 1; b4 <- 1; b5 <- 1; b6 <- 1; b7 <- 1; b8 <- 1; b9 <- 1; b10 <- 1
+  values <- list(1L)
+  get <- function(key) values[[key]]
+  checked <- function(key) if (is.null(key)) 0L else get(key)
+  list(get = get, checked = checked)
+})()
 """
 
 # Bindings of the `s4:` operations, which only their scripts define, so the other operations'
@@ -177,6 +189,9 @@ OPERATIONS = [
     ("call: its value replaces its argument", "kidentity(result)"),
     ("call: base closure with a native entry", "isTRUE(result)"),
     ("call: native entry declines a call argument", "isTRUE(kidentity(i))"),
+    ("call: method of a closure object", "kobject$get(1L)"),
+    ("call: method of a closure object with 23 variables", "kobject_wide$get(1L)"),
+    ("call: method of a closure object calls another", "kobject_wide$checked(1L)"),
     ("apply: `lapply` over 4 elements", "lapply(numbers, k1)"),
     ("apply: `vapply` over 4 elements", "vapply(numbers, k1, 0)"),
     ("apply: `sapply` over 4 elements", "sapply(numbers, k1)"),
@@ -224,6 +239,8 @@ OPERATIONS = [
     ("builtin: `c` of two scalars", "c(i, 1L)"),
     ("builtin: `c` of two named scalars", "c(a = i, b = 1L)"),
     ("builtin: `list` with a name", "list(a = i)"),
+    ("builtin: `list` of two values", "list(i, 1L)"),
+    ("builtin: `list` of three values, two named", 'list(a = i, "b", c = 1L)'),
     ("builtin: `paste0`", 'paste0("a", i)'),
     ("builtin: `sprintf`", 'sprintf("%d", i)'),
     ("builtin: `identical`", "identical(i, 1L)"),

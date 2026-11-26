@@ -109,6 +109,8 @@ const COMPILE_PER_WORD: u64 = 50_000;
 /// same instruction in the dispatch loop: the helper call with its panic guard and the
 /// registers read again after it. Each variable written back before it costs about
 /// [`WRITE_BACK_COST`] more than tier 0's assignment, which stores into the frame as it goes.
+/// A write-back inside a loop that compiled code stores itself into the box the pass before
+/// left ([`analysis::IN_PLACE_SLOTS`]) costs about [`REWRITE_COST`].
 ///
 /// `development/design/generic-tier.md` holds the measurements behind these numbers.
 const ENTRY_COST: u64 = 560;
@@ -118,6 +120,7 @@ const SAVING_PER_CALL: u64 = 1000;
 const SAVING_PER_FRAME: u64 = 600;
 const STEP_COST: u64 = 180;
 const WRITE_BACK_COST: u64 = 170;
+const REWRITE_COST: u64 = 30;
 /// A body's expected calls are its share of the closure calls the session made over its
 /// recording window, times this many calls. The session's call count measures how much
 /// interpreted work ran between two calls of the body: it is deterministic and does not move
@@ -328,7 +331,9 @@ fn saved(work: Work) -> u64 {
 }
 
 fn handed_back(work: Work) -> u64 {
-    STEP_COST * work.steps as u64 + WRITE_BACK_COST * work.writes as u64
+    STEP_COST * work.steps as u64
+        + WRITE_BACK_COST * work.writes as u64
+        + REWRITE_COST * work.rewrites as u64
 }
 
 /// What one call of a body with loops is expected to save when tier 0 enters its compiled code
@@ -883,6 +888,7 @@ unsafe fn compile_in<'a>(
                     frames: work.whole.frames.saturating_sub(work.outside.frames),
                     steps: work.whole.steps.saturating_sub(work.outside.steps),
                     writes: work.whole.writes.saturating_sub(work.outside.writes),
+                    rewrites: work.whole.rewrites,
                     loads: 0,
                 };
                 unpaid(

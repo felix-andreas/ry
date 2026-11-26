@@ -1,0 +1,37 @@
+[stdout]
+| [1] "name"          "address"       "dll"           "numParameters"
+| [1] "2a2f0e859495caed"
+| [1] "6d85746c3f7235d9"
+| [1] "deab38d23cd56ab6"
+| [1] "2a2f0e859495caed"
+| [1] "6d85746c3f7235d9"
+| [1] "deab38d23cd56ab6"
+| [1] "9b1edae5dbb937b1"
+| [1] "9b1edae5dbb937b1"
+| [1] "9b1edae5dbb937b1"
+| [1] "9b1edae5dbb937b1"
+| [1] "9b1edae5dbb937b1"
+| [1] "9b1edae5dbb937b1"
+| [1] "9b1edae5dbb937b1"
+| [1] "9b1edae5dbb937b1"
+| [1] "9b1edae5dbb937b1"
+| -- a list that is no routine
+| [1] "9b1edae5dbb937b1"
+| [1] "an error"
+| [1] "an error"
+| -- named arguments are passed by position
+| [1] "9b1edae5dbb937b1"
+| [1] "9b1edae5dbb937b1"
+| [1] "9b1edae5dbb937b1"
+| [1] "2a2f0e859495caed"
+| [1] "6d85746c3f7235d9"
+| [1] "deab38d23cd56ab6"
+| [1] "9b1edae5dbb937b1"
+| [1] "9b1edae5dbb937b1"
+| [1] "9b1edae5dbb937b1"
+[messages]
+[warnings]
+[errors]
+[value]
+NULL
+| NULL

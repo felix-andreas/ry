@@ -1092,3 +1092,20 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - A `[[` position into a ry `List` decides the literal as `I64`, so `lookup[[j]]` before `lookup[[i]] <- j` keeps `j` an `I64`.
 - A nominal constructor's representation is an expected type for its literals (`check_new_nominal` adapts them), so `@Tree(:Leaf(1))` against `:Leaf(I64)` holds.
 - A recursive `alias` is refused, with a short message that names `type` as the recursive form: an alias is its expansion, so a recursive one has no finite type, while a nominal `type` gives the recursion a name to stop at.
+- An `if` with `else` or a `match` whose branches are all number literals of one R type is one open literal, bound to a variable or beside one (`literal_leaves`), so `m <- if (c) 1 else 2; m + n` with `n: I64` makes `m` an `I64`. A nominal constructor in a branch (`@UserId(5L)`) stops it, because the constructor gives its own type.
+
+## A record pattern's `..` takes no name
+
+**Status:** built (`Parser::pattern_list`; golden case `records_and_tags__named_rest_in_record_pattern`).
+
+- `(x = a, ..others)` is a syntax error. A list pattern's `..rest` binds a list of the remaining items, but a record's remaining fields would need a record type made by removing fields from the scrutinee's, which no other construct needs, and an empty rest has no value because a record has at least one field. Roc's and Elm's record patterns take no rest name either.
+- Reading the other fields from the matched value (`p as whole`, then `whole$y`) or building a changed copy with `(..p, x = 1)` covers what a named rest would.
+
+## ry values join covariantly, and a walk's tag state widens
+
+**Status:** built (`join_ry_values` and `widen_accumulators` in `crates/semantics/src/check.rs`; `with_tags`, `fits_widening` and `joined` in `crates/typed/src/lower.rs`; `native-syntax.R.test` case `tags_widen_through_walk_states_loops_and_branches`; `crates/ry/tests/native/clean-widening-tags.R`).
+
+- A join that fails to unify does not take the union of the two values: the union would make `if (c) [:A] else [:B]` a `List<:A> | List<:B>`, and a loop's `acc <- List.append(acc, :B)` over `acc <- [:A]` would fail at the next `List.append`. ry's values are immutable, so `List`, `Dict`, `Set`, native records, native tuples and tag payloads join part by part (`join_ry_values`, before `wider_record` and the union). A part that neither unifies nor joins (numbers never widen) falls back to the union of the whole values.
+- A `List.walk` step function may return more tags than its initial state. The accumulator formal takes the settled initial state as its hint, and after inferring the step function `widen_accumulators` joins its result into the state, rolls back that pass (environment, unification table, findings, pending enclosing writes, as the capture repass does) and infers the step again under the join, at most `ACCUMULATOR_PASS_CAP` times. The join must be closed, because the rollback drops the pass's bindings. The state argument's type becomes the join, an upcast. A callback that returns the state as every tag's payload (`List.walk_until`'s `:Continue(S) | :Break(S)`) widens by the join of the payloads.
+- Only a single candidate callee widens, because the hints of several candidates must agree. With several candidates, or a callback that returns the state any other way, a tag-bearing state gives the formal no hint, so the formal stays open. The hint side asks `accumulator_states` itself, so a kept hint always widens.
+- The typed core derives types from values, so it widens by relowering, as for a variable: `List.append`, `List.prepend` and `List.set` of a tag outside the list's item union return the wider list (its items are boxes either way), the branches of an `if` and a function's returns join tag lists (`joined`), an assignment of a list of more tags widens the variable, and a walk's state widens keyed by its step function's `Sexp`. `Dict.insert` does not widen, because the interpreter checks the value against the dictionary's value type.
