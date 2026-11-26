@@ -12328,6 +12328,31 @@ impl<'f> RunningFrame<'f, '_, '_> {
         unsafe { (*self.state.heap).store_slot(&mut *slot.register, value.raw()) }
     }
 
+    /// Binds the frame's variable `variable`, whose slot is `slot`, to `value`: in the slot, or
+    /// in the frame's environment when code that ran since the slot was read gave the frame one
+    /// (a calling handler of a warning, a forced promise, a dispatch), which then holds the
+    /// variable instead of the slot.
+    fn bind<'s>(
+        self,
+        context: &mut Cx<'s>,
+        (slot, variable): (Slot<'f>, Local<'_, Symbol>),
+        value: Local<'s>,
+    ) -> R<()> {
+        match self.environment(context) {
+            Some(environment) => {
+                let binding = handles::frame_binding(context, environment, variable)
+                    .map(|binding| context.root(binding));
+                handles::assign_local(context, variable, value, environment, binding)
+            }
+            None => {
+                if !self.read(context, slot).is(value) {
+                    self.store(context, slot, value);
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// `target` as the value `slot` alone holds, for an update in place.
     fn claim<'s>(self, context: &Cx<'s>, slot: Slot<'f>, target: Local<'s>) -> Option<Owned<'s>> {
         if !self.read(context, slot).is(target) {
@@ -12380,7 +12405,7 @@ fn assign_slot_element<'f, 's>(
     (index, value, kind): (Local<'s>, Local<'s>, ElementKind),
     (whole, setter_call): (Local<'s>, Local<'s>),
 ) -> R<bool> {
-    if assign_slot_element_in_place(context, frame, slot, index, value, kind)? {
+    if assign_slot_element_in_place(context, frame, (slot, variable), index, value, kind)? {
         return Ok(true);
     }
     // Forcing a formal's promise ran code that may have given the frame its environment.
@@ -12418,20 +12443,11 @@ fn assign_slot_element<'f, 's>(
     let object = if environment || (direct && frame.claim(context, slot, target).is_some()) {
         target
     } else {
-        handles::assignment_copy(context, target, AssignmentCopy::Wrapper)?.get()
+        handles::assignment_copy(context, target, AssignmentCopy::Wrapper)?
     };
     let result = replace_element(context, kind, object, (index, value), (whole, setter_call))?;
     let result = handles::unwrap_assigned(context, result, direct && target.is(result));
-    // A warning's calling handler may have looked at the frame, which then holds the variable
-    // in its environment instead of the slot.
-    match frame.environment(context) {
-        Some(environment) => {
-            let binding = handles::frame_binding(context, environment, variable)
-                .map(|binding| context.root(binding));
-            handles::assign_local(context, variable, result, environment, binding)?;
-        }
-        None => frame.store(context, slot, result),
-    }
+    frame.bind(context, (slot, variable), result)?;
     Ok(true)
 }
 
@@ -12510,7 +12526,7 @@ fn may_dispatch_replacement(
 fn assign_slot_element_in_place<'f, 's>(
     context: &mut Cx<'s>,
     frame: RunningFrame<'f, '_, '_>,
-    slot: Slot<'f>,
+    (slot, variable): (Slot<'f>, Local<'s, Symbol>),
     index: Local<'s>,
     value: Local<'s>,
     kind: ElementKind,
@@ -12522,9 +12538,7 @@ fn assign_slot_element_in_place<'f, 's>(
     let Some(result) = store_element(context, target, index, value, kind, claim)? else {
         return Ok(false);
     };
-    if !frame.read(context, slot).is(result) {
-        frame.store(context, slot, result);
-    }
+    frame.bind(context, (slot, variable), result)?;
     Ok(true)
 }
 
@@ -14273,7 +14287,7 @@ fn assign_enclosed_element<'s>(
     let object = if owned {
         target
     } else {
-        handles::assignment_copy(context, target, AssignmentCopy::Storage)?.get()
+        handles::assignment_copy(context, target, AssignmentCopy::Storage)?
     };
     let result = replace_element(context, kind, object, (index, value), (whole, setter_call))?;
     // A warning's calling handler may have rebound the variable, so `<<-` finds it again.
@@ -14322,7 +14336,7 @@ unsafe fn op_sub_assign_matrix(
             assign_slot_matrix_element(
                 context,
                 frame,
-                slot,
+                (slot, Local::adopt(variable)),
                 (row, column),
                 handles::held(context, value),
             )
@@ -15036,7 +15050,7 @@ fn replace_variable<'f, 's>(
     if (shared || args[1..].iter().any(|argument| argument.is(target)))
         && target.r_type() != SexpType::Environment
     {
-        target = handles::assignment_copy(context, target, AssignmentCopy::Replacement)?.get();
+        target = handles::assignment_copy(context, target, AssignmentCopy::Replacement)?;
     }
     args[0] = target;
     let args: &[Local<'s>] = args;
@@ -15094,16 +15108,7 @@ fn replace_variable<'f, 's>(
         Home::Binding(environment, binding) => {
             handles::assign_local(context, variable, result, environment, Some(binding))?;
         }
-        // A warning's calling handler may have looked at the frame, which then holds the
-        // variable in its environment instead of the slot.
-        Home::Slot(slot) => match frame.environment(context) {
-            Some(environment) => {
-                let binding = handles::frame_binding(context, environment, variable)
-                    .map(|binding| context.root(binding));
-                handles::assign_local(context, variable, result, environment, binding)?;
-            }
-            None => frame.store(context, slot, result),
-        },
+        Home::Slot(slot) => frame.bind(context, (slot, variable), result)?,
     }
     Ok(true)
 }
@@ -15253,7 +15258,7 @@ fn assign_matrix_element_in_place<'s>(
 fn assign_slot_matrix_element<'f, 's>(
     context: &mut Cx<'s>,
     frame: RunningFrame<'f, '_, '_>,
-    slot: Slot<'f>,
+    (slot, variable): (Slot<'f>, Local<'s, Symbol>),
     subscripts: (Local<'s>, Local<'s>),
     value: Local<'s>,
 ) -> R<bool> {
@@ -15265,9 +15270,7 @@ fn assign_slot_matrix_element<'f, 's>(
     let Some(object) = stored else {
         return Ok(false);
     };
-    if !frame.read(context, slot).is(object) {
-        frame.store(context, slot, object);
-    }
+    frame.bind(context, (slot, variable), object)?;
     Ok(true)
 }
 

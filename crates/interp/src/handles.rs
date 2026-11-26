@@ -2248,7 +2248,9 @@ pub fn frame_binding<'a>(
     environment: impl Pointer<Environment>,
     symbol: impl Pointer<Symbol>,
 ) -> Option<Gc<'a, Binding>> {
-    // SAFETY: both are live, and a frame lookup reads the frame without allocating.
+    // SAFETY: both are live. A lookup in a slot frame's environment may move the variable from
+    // its slot into a new binding cell, and collection is inhibited while it does
+    // (`eval::resolve_pending_access`), so no handle the context lends out goes stale.
     unsafe {
         let cell = crate::heap().frame_cell(environment.raw(), symbol.raw())?;
         Some(Gc::adopt(cell))
@@ -2262,7 +2264,8 @@ pub fn visible_binding<'a>(
     symbol: impl Pointer<Symbol>,
     environment: impl Pointer<Environment>,
 ) -> Option<Gc<'a, Binding>> {
-    // SAFETY: both are live, and the walk reads frames without allocating.
+    // SAFETY: both are live, and a binding cell the walk makes for a slot frame's variable is
+    // made with collection inhibited, as in `frame_binding`.
     unsafe { crate::eval::find_cell(symbol.raw(), environment.raw()).map(|cell| Gc::adopt(cell)) }
 }
 
@@ -2278,7 +2281,7 @@ pub fn enclosing_binding<'a>(
     let mut environment = enclosure.raw();
     while environment != empty {
         // SAFETY: the environment is live, reached from a live one through its enclosure, and
-        // nothing here allocates.
+        // nothing here collects (`frame_binding`).
         let environment_handle = unsafe { Gc::<Environment>::adopt(environment) };
         if let Some(cell) = frame_binding(context, environment_handle, symbol) {
             return Some((environment_handle, cell));
@@ -2429,6 +2432,26 @@ pub fn has_internal_method(
     }
 }
 
+/// `value` as the value `binding` in the frame of `environment` alone holds, for an assignment
+/// that changes it where it is: the binding holds it directly, nothing else counts a reference
+/// to it, and no suspended compiled body holds it uncounted ([`reuse_permitted`]).
+pub fn claim_binding<'s>(
+    context: &Cx<'s>,
+    environment: Local<'_, Environment>,
+    binding: Local<'_, Binding>,
+    value: Local<'s>,
+) -> Option<Owned<'s>> {
+    if !binding.read(context).content().is(value)
+        || value.is_shared()
+        || !reuse_permitted(context, environment, value)
+    {
+        return None;
+    }
+    // SAFETY: the binding holds the value and counts its one reference, and `reuse_permitted`
+    // rules out a holder that counts none.
+    Some(unsafe { Owned::assume(value) })
+}
+
 /// Whether the value bound in `environment` may change in place without a suspended compiled
 /// body noticing ([`crate::eval::reuse_permitted`]).
 #[inline]
@@ -2455,14 +2478,15 @@ pub enum AssignmentCopy {
     Replacement,
 }
 
-/// A copy of `value` for a replacement to change, as `how` makes it.
+/// A copy of `value` for a replacement to change, as `how` makes it. It is not an [`Owned`],
+/// because a wrapper shares the original's storage and only a replacement builtin, which copies
+/// that storage on its first write, may change it.
 pub fn assignment_copy<'s>(
     context: &mut Cx<'s>,
     value: Local<'_>,
     how: AssignmentCopy,
-) -> R<Owned<'s>> {
-    // SAFETY: the value is rooted, and copying allocates, which `&mut Cx` permits. The copy is
-    // new, so only this handle reaches it.
+) -> R<Local<'s>> {
+    // SAFETY: the value is rooted, and copying allocates, which `&mut Cx` permits.
     unsafe {
         let copy = match how {
             AssignmentCopy::Storage => values::shallow_duplicate(value.raw())?,
@@ -2470,7 +2494,7 @@ pub fn assignment_copy<'s>(
             AssignmentCopy::Replacement => values::replacement_copy(value.raw())?,
         };
         copy.set_array(value.raw().is_array());
-        Ok(Owned::assume(rooted(context, copy)))
+        Ok(rooted(context, copy))
     }
 }
 
@@ -2653,24 +2677,4 @@ pub fn apply_closure<'s>(
         )?;
         Ok(rooted(context, result))
     }
-}
-
-/// `value` as the value `binding` in the frame of `environment` alone holds, for an assignment
-/// that changes it where it is: the binding holds it directly, nothing else counts a reference
-/// to it, and no suspended compiled body holds it uncounted ([`reuse_permitted`]).
-pub fn claim_binding<'s>(
-    context: &Cx<'s>,
-    environment: Local<'_, Environment>,
-    binding: Local<'_, Binding>,
-    value: Local<'s>,
-) -> Option<Owned<'s>> {
-    if !binding.read(context).content().is(value)
-        || value.is_shared()
-        || !reuse_permitted(context, environment, value)
-    {
-        return None;
-    }
-    // SAFETY: the binding holds the value and counts its one reference, and `reuse_permitted`
-    // rules out a holder that counts none.
-    Some(unsafe { Owned::assume(value) })
 }
