@@ -69,6 +69,65 @@ fn returned_from_its_scope<'s>(cx: &mut Cx<'s>) -> Result<Local<'s, Real>, HeapE
 }
 ```
 
+A handle of the enclosing scope is not one of the nested scope's, so code written for one
+scope's handles refuses it:
+
+```compile_fail
+use heap::handle::{Cx, Local, Real};
+use heap::HeapError;
+fn copy<'s>(cx: &mut Cx<'s>, vector: Local<'s, Real>) -> Result<Local<'s, Real>, HeapError> {
+    let copy = cx.alloc_unfilled::<Real>(vector.len())?;
+    Ok(copy.fill(vector.as_slice(cx).iter().copied()).finish())
+}
+fn copied_in_a_nested_scope<'s>(cx: &mut Cx<'s>, outer: Local<'s, Real>) {
+    let _ = cx.scope(|cx| copy(cx, outer));
+}
+```
+
+`scope_reading` hands the body the proof that the enclosing scope outlives it, which passes
+such a handle in, and carries plain data out:
+
+```no_run
+use heap::handle::{Cx, Local, Real};
+use heap::HeapError;
+fn copy<'s>(cx: &mut Cx<'s>, vector: Local<'s, Real>) -> Result<Local<'s, Real>, HeapError> {
+    let copy = cx.alloc_unfilled::<Real>(vector.len())?;
+    Ok(copy.fill(vector.as_slice(cx).iter().copied()).finish())
+}
+fn passed_into_the_scope<'s>(cx: &mut Cx<'s>, outer: Local<'s, Real>) -> Result<(), HeapError> {
+    cx.scope_reading(|cx, enclosing| {
+        let outer = enclosing.pass(outer);
+        Ok(copy(cx, outer)?.len())
+    })?;
+    Ok(())
+}
+```
+
+A handle of the nested scope is not plain data, so it cannot be the result:
+
+```compile_fail
+use heap::handle::{Cx, Real};
+fn passed_out_of_the_scope<'s>(cx: &mut Cx<'s>) {
+    let _ = cx.scope_reading(|cx, _enclosing| cx.alloc::<Real>(1).map(|fresh| fresh.finish()));
+}
+```
+
+An element moved by `Unfilled::fill_from` belongs to that one call, so it cannot be kept and
+written into another vector later:
+
+```compile_fail
+use heap::HeapError;
+use heap::handle::{Cx, Item, Local, Str};
+fn kept_past_the_call<'s>(cx: &mut Cx<'s>, source: Local<'s, Str>) -> Result<(), HeapError> {
+    let mut kept: Vec<Item<'_>> = Vec::new();
+    let first = cx.alloc_unfilled::<Str>(source.len())?;
+    let _ = first.fill_from(cx, source, |_, items| kept.extend_from_slice(items));
+    let second = cx.alloc_unfilled::<Str>(kept.len())?;
+    let _ = second.fill_from(cx, source, |slots, _| slots.copy_from_slice(&kept));
+    Ok(())
+}
+```
+
 While an object is written in place, the context is borrowed mutably, so nothing allocates
 and no slice taken earlier is alive:
 

@@ -8,7 +8,7 @@
 use {
     crate::{
         Heap, HeapResult, flag_bits,
-        object::{Rcomplex, Sexp, SexpType},
+        object::{Rcomplex, Sexp, SexpType, gp},
     },
     std::{marker::PhantomData, mem::MaybeUninit, ptr::NonNull},
 };
@@ -196,6 +196,62 @@ impl<'s> Cx<'s> {
                 error.reroot(heap);
                 Err(error)
             }
+        }
+    }
+}
+
+impl<'s> Cx<'s> {
+    /// A nested handle scope for a body that reads handles of this scope and hands out plain
+    /// data: it receives an [`Enclosing`], which passes those handles in, and whatever it roots
+    /// is released on return. A loop that runs R code for each element uses it, so that the
+    /// roots of one element are released before the next and nothing is allocated to carry
+    /// the element's result out. `V` cannot name the nested scope, which is higher-ranked, so
+    /// no handle of it leaves the body.
+    #[inline]
+    pub fn scope_reading<V, E: Reroot>(
+        &mut self,
+        body: impl for<'inner> FnOnce(&mut Cx<'inner>, Enclosing<'s, 'inner>) -> Result<V, E>,
+    ) -> Result<V, E> {
+        // SAFETY: the heap is live.
+        let mark = unsafe { (*self.heap.as_ptr()).handle_mark() };
+        let mut inner = Cx {
+            heap: self.heap,
+            scope: PhantomData,
+        };
+        let result = body(
+            &mut inner,
+            Enclosing {
+                enclosing: PhantomData,
+                inner: PhantomData,
+            },
+        );
+        // SAFETY: the heap is live, and no handle of the inner scope outlives `body`, as in
+        // [`Cx::scope`]; an error is rooted again before anything can collect.
+        let heap = unsafe { &mut *self.heap.as_ptr() };
+        heap.release_handles(mark);
+        if let Err(error) = &result {
+            error.reroot(heap);
+        }
+        result
+    }
+}
+
+/// Proof that the scope `'s` encloses the scope `'inner`, which [`Cx::scope_reading`] hands
+/// its body: a handle of `'s` stays rooted for all of `'inner`, so it is a handle of `'inner`
+/// too.
+#[derive(Clone, Copy)]
+pub struct Enclosing<'s, 'inner> {
+    enclosing: Brand<'s>,
+    inner: Brand<'inner>,
+}
+
+impl<'s, 'inner> Enclosing<'s, 'inner> {
+    #[inline(always)]
+    pub fn pass<T: Kind>(self, value: Local<'s, T>) -> Local<'inner, T> {
+        Local {
+            raw: value.raw,
+            scope: PhantomData,
+            kind: PhantomData,
         }
     }
 }
@@ -406,6 +462,36 @@ impl<'a> Gc<'a, Promise> {
     pub fn code(self) -> Gc<'a> {
         // SAFETY: the promise is live for `'a` and keeps its expression alive.
         unsafe { Gc::adopt(self.raw.cdr()) }
+    }
+
+    /// The promise's value, or the unbound marker until it is forced.
+    #[inline]
+    pub fn result(self) -> Gc<'a> {
+        // SAFETY: the promise is live for `'a` and keeps its value alive.
+        unsafe { Gc::adopt(self.raw.car()) }
+    }
+}
+
+impl<'a> Gc<'a, Binding> {
+    /// The bound value: a variable's value, a promise, or an active binding's function.
+    #[inline]
+    pub fn content(self) -> Gc<'a> {
+        // SAFETY: the cell is live for `'a` and keeps its value alive.
+        unsafe { Gc::adopt(self.raw.cdr()) }
+    }
+
+    /// Whether reading the binding calls a function instead.
+    #[inline]
+    pub fn is_active(self) -> bool {
+        // SAFETY: the cell is live, and the test reads its header.
+        unsafe { self.raw.has_gp(gp::ACTIVE_BINDING) }
+    }
+
+    /// Whether an assignment to the binding is an error.
+    #[inline]
+    pub fn is_locked(self) -> bool {
+        // SAFETY: the cell is live, and the test reads its header.
+        unsafe { self.raw.has_gp(gp::BINDING_LOCKED) }
     }
 }
 
@@ -735,6 +821,33 @@ impl<'s, T: Atomic> Unfilled<'s, T> {
     }
 }
 
+impl<'s, T: Atomic> Unfilled<'s, T> {
+    /// The vector after `write` has written its slots, which are not zeroed first.
+    ///
+    /// # Safety
+    ///
+    /// `write` initializes every slot of the slice it receives.
+    #[inline(always)]
+    pub unsafe fn fill_slots(
+        self,
+        write: impl FnOnce(&mut [MaybeUninit<T::Element>]),
+    ) -> Fresh<'s, T> {
+        // SAFETY: as in `fill`, and the caller initializes every slot.
+        let slots = unsafe {
+            std::slice::from_raw_parts_mut(
+                self.raw.data() as *mut MaybeUninit<T::Element>,
+                self.raw.length() as usize,
+            )
+        };
+        write(slots);
+        Fresh {
+            raw: self.raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        }
+    }
+}
+
 impl<'s, T: Elements> Unfilled<'s, T> {
     /// The vector with `elements` in order, and the type's fill (`NULL` or the empty string)
     /// after them. The slots are written directly and counted as references once afterwards,
@@ -760,7 +873,50 @@ impl<'s, T: Elements> Unfilled<'s, T> {
             kind: PhantomData,
         }
     }
+
+    /// The vector after `write` has moved elements of `source` into its slots, which hold the
+    /// type's fill until written. `write` sees both vectors as slices of [`Item`]s it can copy
+    /// but not read, so a kernel that only moves elements (a permutation, a recycling
+    /// placement) runs on them as on numbers, and the slots are counted as references once.
+    #[inline(always)]
+    pub fn fill_from(
+        self,
+        cx: &Cx<'_>,
+        source: Local<'_, T>,
+        write: impl for<'call> FnOnce(&mut [Item<'call>], &[Item<'call>]),
+    ) -> Fresh<'s, T> {
+        // SAFETY: the vector is a standard one of `T` that only `self` reaches, so it is not
+        // `source` and no slice of it is alive. `source` is a rooted standard vector of `T`,
+        // whose slots hold live elements of the element kind, and `Item` is a transparent
+        // `Sexp` branded with this call alone. The context is borrowed, so nothing collects while `write` runs, and every
+        // slot afterwards holds such an element or the uncounted fill `alloc_vector` wrote,
+        // which `count_written_elements` requires.
+        unsafe {
+            let target = self.raw.slice_mut::<Sexp>();
+            let source = source.raw.slice::<Sexp>();
+            write(
+                std::slice::from_raw_parts_mut(
+                    target.as_mut_ptr().cast::<Item<'_>>(),
+                    target.len(),
+                ),
+                std::slice::from_raw_parts(source.as_ptr().cast::<Item<'_>>(), source.len()),
+            );
+            (*cx.heap.as_ptr()).count_written_elements(self.raw);
+        }
+        Fresh {
+            raw: self.raw,
+            scope: PhantomData,
+            kind: PhantomData,
+        }
+    }
 }
+
+/// An element of a list or character vector on its way from one vector's slot to another's,
+/// in [`Unfilled::fill_from`]. It can be copied but not read, and its invariant lifetime is the
+/// one call that hands it out, so an item cannot be kept past it or written by a later call.
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+pub struct Item<'call>(Sexp, Brand<'call>);
 
 /// Exclusive access to an existing object. It holds the context, so no R code runs, nothing
 /// allocates and no slice taken earlier is alive while the object is written.
@@ -1082,6 +1238,7 @@ impl Exact for Language {}
 impl Exact for Closure {}
 impl Exact for Environment {}
 impl Exact for Promise {}
+impl Exact for Binding {}
 
 // Only a vector can be an ALTREP object (`Heap::alloc_altrep`), so the other kinds are told by
 // their type alone, which a walk over an attribute list tests for every cell and tag.
@@ -1103,6 +1260,8 @@ kinds! {
     Closure = Closure, |_altrep| true;
     Environment = Environment, |_altrep| true;
     Promise = Promise, |_altrep| true;
+    /// A variable's binding cell in an environment's frame.
+    Binding = Binding, |_altrep| true;
 }
 
 /// One string, as a character vector's element. It is not an [`Identity`] kind.
