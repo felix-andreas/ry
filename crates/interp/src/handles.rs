@@ -8,9 +8,9 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub use heap::handle::{
-    Alt, Atomic, Chars, Complex, Cx, Elements, Environment, Exact, Expression, Fresh, Gc, I64,
-    Identity, Integer, Kind, Language, List, Local, Logical, Owned, Pairlist, Pointer, Promise,
-    Raw, Real, Str, Symbol, Unfilled, Value, Vector,
+    Alt, Atomic, Binding, Chars, Complex, Cx, Elements, Environment, Exact, Expression, Fresh, Gc,
+    I64, Identity, Integer, Kind, Language, List, Local, Logical, Owned, Pairlist, Pointer,
+    Promise, Raw, Real, Str, Symbol, Unfilled, Value, Vector,
 };
 use {
     crate::{
@@ -984,6 +984,25 @@ pub unsafe fn in_caller_scope<T>(body: impl for<'s> FnOnce(&mut Cx<'s>) -> R<T>)
     // cannot outlive, because it must accept every `'s`.
     let mut context = unsafe { Cx::enter(NonNull::from(&mut *crate::heap())) };
     body(&mut context)
+}
+
+/// [`in_caller_scope`] for a function `body` that takes its operands as `data`. Tier 0
+/// compiles each handler twice, for running and for stepping, so a closure or a generic shim
+/// a handler calls has two callers and LLVM keeps a large one out of line; a call through a
+/// constant function pointer to an `#[inline(always)]` function inlines into both.
+///
+/// # Safety
+///
+/// As for [`in_caller_scope`].
+#[inline(always)]
+pub unsafe fn in_caller_scope_with<D, T>(
+    data: D,
+    body: for<'s> fn(&mut Cx<'s>, D) -> R<T>,
+) -> R<T> {
+    // SAFETY: as in `with`. The scope `body` sees ends no later than the caller's, which it
+    // cannot outlive, because it must accept every `'s` and `data` was made before it began.
+    let mut context = unsafe { Cx::enter(NonNull::from(&mut *crate::heap())) };
+    body(&mut context, data)
 }
 
 /// Roots `raw` in the context's scope.
@@ -2238,5 +2257,501 @@ pub fn call_value<'s>(
             context,
             crate::eval::eval(call.raw(), values::base_env())?,
         ))
+    }
+}
+
+/// The binding of `symbol` in the frame of `environment` itself.
+#[inline]
+pub fn frame_binding<'a>(
+    _context: &'a Cx<'_>,
+    environment: impl Pointer<Environment>,
+    symbol: impl Pointer<Symbol>,
+) -> Option<Gc<'a, Binding>> {
+    // SAFETY: both are live. A lookup in a slot frame's environment may move the variable from
+    // its slot into a new binding cell, and collection is inhibited while it does
+    // (`eval::resolve_pending_access`), so no handle the context lends out goes stale.
+    unsafe {
+        let cell = crate::heap().frame_cell(environment.raw(), symbol.raw())?;
+        Some(Gc::adopt(cell))
+    }
+}
+
+/// The binding `symbol` reads from `environment` outward.
+#[inline]
+pub fn visible_binding<'a>(
+    _context: &'a Cx<'_>,
+    symbol: impl Pointer<Symbol>,
+    environment: impl Pointer<Environment>,
+) -> Option<Gc<'a, Binding>> {
+    // SAFETY: both are live, and a binding cell the walk makes for a slot frame's variable is
+    // made with collection inhibited, as in `frame_binding`.
+    unsafe { crate::eval::find_cell(symbol.raw(), environment.raw()).map(|cell| Gc::adopt(cell)) }
+}
+
+/// The binding `<<-` assigns `symbol` through, searching from `enclosure`, and the environment
+/// whose frame holds it.
+pub fn enclosing_binding<'a>(
+    context: &'a Cx<'_>,
+    symbol: impl Pointer<Symbol>,
+    enclosure: impl Pointer<Environment>,
+) -> Option<(Gc<'a, Environment>, Gc<'a, Binding>)> {
+    let heap = crate::heap();
+    let empty = heap.known().empty_env;
+    let mut environment = enclosure.raw();
+    while environment != empty {
+        // SAFETY: the environment is live, reached from a live one through its enclosure, and
+        // nothing here collects (`frame_binding`).
+        let environment_handle = unsafe { Gc::<Environment>::adopt(environment) };
+        if let Some(cell) = frame_binding(context, environment_handle, symbol) {
+            return Some((environment_handle, cell));
+        }
+        // SAFETY: as above.
+        environment = unsafe { environment.enclosure() };
+    }
+    None
+}
+
+/// Clears the marks that call a binding's variable a missing argument, which an assignment to
+/// it ends.
+#[inline]
+pub fn mark_assigned(_context: &Cx<'_>, binding: impl Pointer<Binding>) {
+    // SAFETY: the cell is live, and the write changes two flags of its header.
+    unsafe {
+        binding
+            .raw()
+            .set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false)
+    }
+}
+
+/// `symbol <- value` in `environment`, whose own frame binds `symbol` to `binding`, or not at
+/// all.
+pub fn assign_local(
+    _context: &mut Cx<'_>,
+    symbol: Local<'_, Symbol>,
+    value: Local<'_>,
+    environment: Local<'_, Environment>,
+    binding: Option<Local<'_, Binding>>,
+) -> R<()> {
+    // SAFETY: every handle is rooted, and a new binding allocates and an active binding runs
+    // its function, which `&mut Cx` permits.
+    unsafe {
+        crate::eval::assign_local(
+            symbol.raw(),
+            value.raw(),
+            environment.raw(),
+            binding.map(Local::raw),
+        )
+    }
+}
+
+/// `symbol <<- value` from `environment`: the nearest binding outward changes, or the global
+/// environment gains one.
+pub fn assign_outward(
+    _context: &mut Cx<'_>,
+    symbol: Local<'_, Symbol>,
+    value: Local<'_>,
+    environment: Local<'_, Environment>,
+) -> R<()> {
+    // SAFETY: every handle is rooted, and a binding allocates and may run an active binding's
+    // function, which `&mut Cx` permits.
+    unsafe { crate::eval::set_var(symbol.raw(), value.raw(), environment.raw()) }
+}
+
+/// The variable `symbol` a replacement in a slot frame changes, read from the frame's
+/// `enclosure` because its slots do not bind it.
+pub fn enclosed_value<'s>(
+    context: &mut Cx<'s>,
+    symbol: Local<'_, Symbol>,
+    enclosure: Local<'_, Environment>,
+) -> R<Local<'s>> {
+    // SAFETY: both are rooted, and the lookup forces promises and may signal, which `&mut Cx`
+    // permits.
+    unsafe {
+        let value = crate::eval::enclosed_value(symbol.raw(), enclosure.raw())?;
+        Ok(rooted(context, value))
+    }
+}
+
+/// The value of `symbol` in `environment`, as evaluating the name gives it.
+pub fn symbol_value<'s>(
+    context: &mut Cx<'s>,
+    symbol: Local<'_, Symbol>,
+    environment: Local<'_, Environment>,
+) -> R<Local<'s>> {
+    // SAFETY: both are rooted, and the lookup forces promises, which `&mut Cx` permits.
+    unsafe {
+        let value = crate::eval::eval_symbol(symbol.raw(), environment.raw())?;
+        Ok(rooted(context, value))
+    }
+}
+
+/// Whether `symbol` is a missing argument of the frame of `environment`, as `missing()` asks.
+pub fn is_missing_in(
+    _context: &mut Cx<'_>,
+    symbol: Local<'_, Symbol>,
+    environment: Local<'_, Environment>,
+) -> R<bool> {
+    // SAFETY: both are rooted, and the test may force a promise, which `&mut Cx` permits.
+    unsafe { crate::eval::argument_is_missing(symbol.raw(), environment.raw()) }
+}
+
+/// The value of `promise`, forced while a reference to `held` is counted, so that code the
+/// promise runs copies `held` before it changes it, as GNU R's `*tmp*` keeps it.
+pub fn force_holding<'s>(
+    context: &mut Cx<'s>,
+    promise: Local<'s, Promise>,
+    held: Local<'_>,
+) -> R<Local<'s>> {
+    // SAFETY: both are rooted, the count is given back whatever the forcing does, and forcing
+    // runs R code, which `&mut Cx` permits.
+    unsafe {
+        held.raw().increment_refcount();
+        let value = crate::eval::force_promise(promise.raw());
+        held.raw().decrement_refcount();
+        Ok(rooted(context, value?))
+    }
+}
+
+/// The definition of the builtin or special `function`.
+#[inline]
+pub fn builtin_definition(
+    function: impl Pointer<Value>,
+) -> R<&'static crate::builtins::BuiltinDef> {
+    // SAFETY: the function is live, and the definition table is static.
+    unsafe { crate::eval::builtin_def(function.raw()) }
+}
+
+/// The base primitive called `name`, for any scope: the interpreter keeps its primitives for
+/// its whole life.
+#[inline]
+pub fn primitive(name: &str) -> Option<Gc<'static>> {
+    // SAFETY: the builtin table holds each primitive object for as long as the interpreter
+    // lives.
+    unsafe { crate::builtins::primitive(name).map(|object| Gc::adopt(object)) }
+}
+
+/// Whether a call of the internal generic `definition`, the primitive `function`, on `object`
+/// could run a method in place of the primitive's own code ([`crate::dispatch::has_internal_method`]).
+/// `caller` is the environment of the calling frame, or `None` for a slot frame that has none.
+pub fn has_internal_method(
+    _context: &mut Cx<'_>,
+    definition: &crate::builtins::BuiltinDef,
+    function: impl Pointer<Value>,
+    object: Local<'_>,
+    caller: Option<Local<'_, Environment>>,
+) -> R<bool> {
+    let caller = match caller {
+        Some(environment) => crate::dispatch::Caller::Env(environment.raw()),
+        None => crate::dispatch::Caller::SlotFrame,
+    };
+    // SAFETY: the function is a permanent primitive and the object is rooted, and looking a
+    // method up may force promises, which `&mut Cx` permits.
+    unsafe {
+        crate::dispatch::has_internal_method(definition, function.raw(), object.raw(), caller)
+    }
+}
+
+/// `value` as the value `binding` in the frame of `environment` alone holds, for an assignment
+/// that changes it where it is: the binding holds it directly, nothing else counts a reference
+/// to it, and no suspended compiled body holds it uncounted ([`reuse_permitted`]).
+#[inline]
+pub fn claim_binding<'s>(
+    context: &Cx<'s>,
+    environment: Local<'_, Environment>,
+    binding: Local<'_, Binding>,
+    value: Local<'s>,
+) -> Option<Owned<'s>> {
+    if !binding.read(context).content().is(value)
+        || value.is_shared()
+        || !reuse_permitted(context, environment, value)
+    {
+        return None;
+    }
+    // SAFETY: the binding holds the value and counts its one reference, and `reuse_permitted`
+    // rules out a holder that counts none.
+    Some(unsafe { Owned::assume(value) })
+}
+
+/// Whether the value bound in `environment` may change in place without a suspended compiled
+/// body noticing ([`crate::eval::reuse_permitted`]).
+#[inline]
+pub fn reuse_permitted(
+    _context: &Cx<'_>,
+    environment: impl Pointer<Environment>,
+    value: impl Pointer<Value>,
+) -> bool {
+    // SAFETY: both are live, and the test reads the frame stack and the registers.
+    unsafe { crate::eval::reuse_permitted(environment.raw(), value.raw()) }
+}
+
+/// The copy a replacement makes of a value its variable does not own. Each keeps ry's Array
+/// flag, which an element replacement keeps.
+#[derive(Clone, Copy)]
+pub enum AssignmentCopy {
+    /// A copy with its own storage, which a direct element write may change.
+    Storage,
+    /// GNU R's `shallow_duplicate_attr`: a long vector becomes an ALTREP wrapper of the
+    /// original's storage, which only a replacement builtin writes through.
+    Wrapper,
+    /// As [`AssignmentCopy::Wrapper`], and an ALTREP vector keeps its class
+    /// ([`values::replacement_copy`]).
+    Replacement,
+}
+
+/// A copy of `value` for a replacement to change, as `how` makes it. It is not an [`Owned`],
+/// because a wrapper shares the original's storage and only a replacement builtin, which copies
+/// that storage on its first write, may change it.
+pub fn assignment_copy<'s>(
+    context: &mut Cx<'s>,
+    value: Local<'_>,
+    how: AssignmentCopy,
+) -> R<Local<'s>> {
+    // SAFETY: the value is rooted, and copying allocates, which `&mut Cx` permits.
+    unsafe {
+        let copy = match how {
+            AssignmentCopy::Storage => values::shallow_duplicate(value.raw())?,
+            AssignmentCopy::Wrapper => values::shallow_duplicate_attr(value.raw())?,
+            AssignmentCopy::Replacement => values::replacement_copy(value.raw())?,
+        };
+        copy.set_array(value.raw().is_array());
+        Ok(rooted(context, copy))
+    }
+}
+
+/// The value an assignment binds for a replacement's `result`: an ALTREP wrapper the
+/// replacement's copy introduced is dropped for its data once nothing else holds it
+/// ([`values::unwrap_assigned`]). `bound` says whether the variable already holds `result`.
+#[inline(always)]
+pub fn unwrap_assigned<'s>(context: &mut Cx<'s>, result: Local<'s>, bound: bool) -> Local<'s> {
+    // SAFETY: the result is rooted, and unwrapping may allocate, which `&mut Cx` permits.
+    unsafe {
+        let unwrapped = values::unwrap_assigned(result.raw(), bound);
+        if unwrapped == result.raw() {
+            result
+        } else {
+            rooted(context, unwrapped)
+        }
+    }
+}
+
+/// While it lives, the replacement call running is `setter_call` of the assignment `whole`,
+/// the call the replacement primitives report and may modify their target for.
+pub struct AssignmentCall<'s> {
+    outer: Option<(Sexp, Sexp, usize)>,
+    scope: PhantomData<fn(&'s ()) -> &'s ()>,
+}
+
+impl<'s> AssignmentCall<'s> {
+    #[inline(always)]
+    pub fn enter(
+        _context: &Cx<'s>,
+        setter_call: Local<'s>,
+        whole: Local<'s>,
+    ) -> AssignmentCall<'s> {
+        let interpreter = crate::interp();
+        let outer = interpreter.assignment_call.replace((
+            setter_call.raw(),
+            whole.raw(),
+            interpreter.frames.len(),
+        ));
+        AssignmentCall {
+            outer,
+            scope: PhantomData,
+        }
+    }
+}
+
+impl Drop for AssignmentCall<'_> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        crate::interp().assignment_call = self.outer;
+    }
+}
+
+/// The unwind a failing replacement primitive raises: an error it returned is signalled,
+/// naming the assignment's call.
+pub fn builtin_failure(_context: &mut Cx<'_>, unwind: Unwind) -> Unwind {
+    // SAFETY: signalling runs calling handlers, which are R code, as `&mut Cx` permits.
+    unsafe { crate::eval::builtin_failure(values::unbound(), unwind) }
+}
+
+/// While it lives, `target` is the value of `*tmp*` in `environment`, where a replacement call
+/// finds it. A slot frame without an environment (`None`) binds no `*tmp*`.
+pub struct TmpValue<'s> {
+    bound: bool,
+    #[cfg(debug_assertions)]
+    entry: Option<(Sexp, Sexp)>,
+    scope: PhantomData<fn(&'s ()) -> &'s ()>,
+}
+
+impl<'s> TmpValue<'s> {
+    #[inline(always)]
+    pub fn bind(
+        _context: &Cx<'s>,
+        environment: Option<Local<'s, Environment>>,
+        target: Local<'s>,
+    ) -> TmpValue<'s> {
+        if let Some(environment) = environment {
+            crate::interp()
+                .tmp_values
+                .push((environment.raw(), target.raw()));
+        }
+        TmpValue {
+            bound: environment.is_some(),
+            #[cfg(debug_assertions)]
+            entry: environment.map(|environment| (environment.raw(), target.raw())),
+            scope: PhantomData,
+        }
+    }
+}
+
+impl Drop for TmpValue<'_> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        if self.bound {
+            // `eval::complex_assign` pushes and pops its own entries, which must balance.
+            #[cfg(debug_assertions)]
+            assert_eq!(crate::interp().tmp_values.pop(), self.entry);
+            #[cfg(not(debug_assertions))]
+            crate::interp().tmp_values.pop();
+        }
+    }
+}
+
+/// Counts a `*tmp*` binding that the frame of `environment` holds while a replacement call
+/// runs, so lookups cached for that frame see it.
+#[inline]
+pub fn count_tmp_binding(_context: &Cx<'_>, environment: Local<'_, Environment>) {
+    // SAFETY: the environment is rooted, and counting writes the frame's own bookkeeping.
+    unsafe {
+        crate::heap().count_transient_binding(environment.raw(), values::symbols().tmp);
+    }
+}
+
+/// The direct entry of the builtin `definition` on `arguments`, in formal order, or `None` when
+/// it has none or declines.
+#[inline(always)]
+pub fn call_direct<'s>(
+    context: &mut Cx<'s>,
+    definition: &crate::builtins::BuiltinDef,
+    call: Local<'s>,
+    arguments: &[Local<'s>],
+) -> R<Option<Local<'s>>> {
+    // SAFETY: the call and the arguments are rooted, and the entry runs any builtin code,
+    // which `&mut Cx` permits. `Local` is `repr(transparent)` over `Sexp`.
+    unsafe {
+        let arguments =
+            std::slice::from_raw_parts(arguments.as_ptr().cast::<Sexp>(), arguments.len());
+        let result = crate::eval::call_direct(definition, call.raw(), arguments)?;
+        Ok(result.map(|result| rooted(context, result)))
+    }
+}
+
+/// The builtin `function` called on `arguments`, tagged as the arguments of `call` are, from
+/// the frame of `environment`, or from a slot frame that has none.
+#[inline(always)]
+pub fn call_builtin<'s>(
+    context: &mut Cx<'s>,
+    definition: &crate::builtins::BuiltinDef,
+    (call, function): (Local<'s>, Local<'s>),
+    arguments: &[Local<'s>],
+    environment: Option<Local<'s, Environment>>,
+) -> R<Local<'s>> {
+    let environment = environment.map_or_else(values::nil, Local::raw);
+    // SAFETY: the call, the function, the arguments and the environment are rooted, and the
+    // builtin runs any code, which `&mut Cx` permits.
+    unsafe {
+        let mut tagged = crate::eval::Args::new();
+        let mut item = call.raw().cdr();
+        for argument in arguments {
+            tagged.push(Arg {
+                tag: item.tag(),
+                value: argument.raw(),
+            });
+            item = item.cdr();
+        }
+        let result = crate::eval::call_builtin(
+            definition,
+            call.raw(),
+            function.raw(),
+            &tagged,
+            environment,
+        )?;
+        Ok(rooted(context, result))
+    }
+}
+
+/// A promise of `code` already forced to `value`.
+#[inline(always)]
+pub fn forced_promise<'s>(
+    context: &mut Cx<'s>,
+    code: Local<'_>,
+    value: Local<'_>,
+) -> R<Local<'s, Promise>> {
+    // SAFETY: both are rooted, the promise allocates, which `&mut Cx` permits, and a promise
+    // is what the allocation makes.
+    unsafe {
+        let promise = crate::eval::forced_promise(code.raw(), value.raw())?;
+        Ok(Local::adopt(rooted(context, promise).raw()))
+    }
+}
+
+/// An argument with its tag ([`Arg`] on handles): `NULL` when it has none.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct Tagged<'s> {
+    pub tag: Local<'s>,
+    pub value: Local<'s>,
+}
+
+// Argument lists are reinterpreted between `Arg` and `Tagged` without copying.
+const _: () = {
+    use std::mem::{offset_of, size_of};
+    assert!(size_of::<Tagged<'static>>() == size_of::<Arg>());
+    assert!(offset_of!(Tagged<'static>, tag) == offset_of!(Arg, tag));
+    assert!(offset_of!(Tagged<'static>, value) == offset_of!(Arg, value));
+};
+
+/// The call whose function and arguments are `items`, each with its tag.
+#[inline]
+pub fn language<'s>(context: &mut Cx<'s>, items: &[Tagged<'_>]) -> R<Local<'s, Language>> {
+    // SAFETY: the items are rooted, and each cell allocates, which `&mut Cx` permits, with the
+    // cells made so far rooted. A call is what the first item's cell is.
+    unsafe {
+        let mut call = values::nil();
+        for (position, item) in items.iter().enumerate().rev() {
+            let kind = if position == 0 {
+                SexpType::Language
+            } else {
+                SexpType::Pairlist
+            };
+            call = values::triple(kind, item.value.raw(), call, item.tag.raw())?;
+        }
+        rooted(context, call)
+            .downcast::<Language>()
+            .ok_or_else(|| error("internal error: a call without a function"))
+    }
+}
+
+/// The closure `function` applied by `call` to `arguments` from the frame of `caller`, or from
+/// a slot frame that has none. The closure's frame keeps the arguments
+/// (`eval::apply_closure_owning`).
+#[inline]
+pub fn apply_closure<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'s, Language>,
+    function: Local<'s>,
+    arguments: &[Tagged<'s>],
+    caller: Option<Local<'s, Environment>>,
+) -> R<Local<'s>> {
+    let caller = caller.map_or_else(values::nil, Local::raw);
+    // SAFETY: the call, the function, the arguments and the caller's environment are rooted,
+    // and the closure runs any R code, which `&mut Cx` permits. `Tagged` has `Arg`'s layout.
+    unsafe {
+        let arguments =
+            std::slice::from_raw_parts(arguments.as_ptr().cast::<Arg>(), arguments.len());
+        let result =
+            crate::eval::apply_closure_owning(call.raw(), function.raw(), arguments, caller, None)?;
+        Ok(rooted(context, result))
     }
 }

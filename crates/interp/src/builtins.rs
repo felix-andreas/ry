@@ -60,6 +60,7 @@ pub enum Generic {
 /// One argument: its tag (`R_NilValue` when unnamed) and its value, or for a special its
 /// unevaluated expression.
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct Arg {
     pub tag: Sexp,
     pub value: Sexp,

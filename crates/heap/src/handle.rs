@@ -8,7 +8,7 @@
 use {
     crate::{
         Heap, HeapResult, flag_bits,
-        object::{Rcomplex, Sexp, SexpType},
+        object::{Rcomplex, Sexp, SexpType, gp},
     },
     std::{marker::PhantomData, mem::MaybeUninit, ptr::NonNull},
 };
@@ -406,6 +406,36 @@ impl<'a> Gc<'a, Promise> {
     pub fn code(self) -> Gc<'a> {
         // SAFETY: the promise is live for `'a` and keeps its expression alive.
         unsafe { Gc::adopt(self.raw.cdr()) }
+    }
+
+    /// The promise's value, or the unbound marker until it is forced.
+    #[inline]
+    pub fn result(self) -> Gc<'a> {
+        // SAFETY: the promise is live for `'a` and keeps its value alive.
+        unsafe { Gc::adopt(self.raw.car()) }
+    }
+}
+
+impl<'a> Gc<'a, Binding> {
+    /// The bound value: a variable's value, a promise, or an active binding's function.
+    #[inline]
+    pub fn content(self) -> Gc<'a> {
+        // SAFETY: the cell is live for `'a` and keeps its value alive.
+        unsafe { Gc::adopt(self.raw.cdr()) }
+    }
+
+    /// Whether reading the binding calls a function instead.
+    #[inline]
+    pub fn is_active(self) -> bool {
+        // SAFETY: the cell is live, and the test reads its header.
+        unsafe { self.raw.has_gp(gp::ACTIVE_BINDING) }
+    }
+
+    /// Whether an assignment to the binding is an error.
+    #[inline]
+    pub fn is_locked(self) -> bool {
+        // SAFETY: the cell is live, and the test reads its header.
+        unsafe { self.raw.has_gp(gp::BINDING_LOCKED) }
     }
 }
 
@@ -1082,6 +1112,7 @@ impl Exact for Language {}
 impl Exact for Closure {}
 impl Exact for Environment {}
 impl Exact for Promise {}
+impl Exact for Binding {}
 
 // Only a vector can be an ALTREP object (`Heap::alloc_altrep`), so the other kinds are told by
 // their type alone, which a walk over an attribute list tests for every cell and tag.
@@ -1103,6 +1134,8 @@ kinds! {
     Closure = Closure, |_altrep| true;
     Environment = Environment, |_altrep| true;
     Promise = Promise, |_altrep| true;
+    /// A variable's binding cell in an environment's frame.
+    Binding = Binding, |_altrep| true;
 }
 
 /// One string, as a character vector's element. It is not an [`Identity`] kind.
