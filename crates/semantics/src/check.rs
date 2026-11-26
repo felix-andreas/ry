@@ -2041,6 +2041,9 @@ impl<'db> Environment<'db, '_> {
 /// the item's dense ids. The arena frees every superseded table in one step when the check ends.
 type ArenaMap<'a, K, V> = HashMap<K, V, FxBuildHasher, Arena<'a>>;
 type ArenaSet<'a, T> = HashSet<T, FxBuildHasher, Arena<'a>>;
+/// The number literals of one open literal and the expressions around them, each with whether
+/// it is a literal (`Checker::literal_leaves`).
+type LiteralLeaves = SmallVec<[(ExprId, bool); 8]>;
 
 /// The check's bump arena as a std allocator, whose frees are no-ops because the arena is reset
 /// when the check ends. It implements std's trait rather than relying on bumpalo's
@@ -4507,6 +4510,22 @@ impl<'db, 'a> Checker<'db, 'a> {
                                 ty
                             }
                             None => match self.module.kind(value) {
+                                // An `if` or `match` of number literals binds one open literal,
+                                // as a lone literal does, once its conditions are inferred.
+                                ExpressionKind::If { .. } | ExpressionKind::Match { .. }
+                                    if binds_name
+                                        && !value_annotated
+                                        && !self.expression_annotations.contains_key(id)
+                                        && self.literal_leaves(value, false).is_some() =>
+                                {
+                                    self.infer(value);
+                                    let native = self.binds_ry_value();
+                                    let (constraint, leaves) =
+                                        self.literal_leaves(value, native).unwrap_or_default();
+                                    let ty = self.fresh_literal(constraint, native);
+                                    self.record_leaves(&leaves, ty);
+                                    ty
+                                }
                                 ExpressionKind::Literal(
                                     kind @ (LiteralKind::String(_) | LiteralKind::Logical(_)),
                                 ) if binds_name
@@ -7849,30 +7868,90 @@ impl<'db, 'a> Checker<'db, 'a> {
         self.record(payload, ty)
     }
 
-    /// An open literal variable for the unsuffixed number literal `id`, recorded as its type.
+    /// An open literal variable for the unsuffixed number literal `id`, or an `if` or `match`
+    /// whose every branch is one, recorded as its type.
     fn open_number_literal(&mut self, id: ExprId, default: Atomic) -> Option<Ty<'db>> {
-        let module = self.module;
-        let mut inner = id;
-        while let ExpressionKind::Paren(paren) = module.kind(inner) {
-            inner = *paren;
-        }
-        let literal = number_literal(module, inner)?;
-        let constraint = if literal.is_fraction() {
-            Constraint::FracLiteral
-        } else {
-            Constraint::WholeLiteral {
-                integer: literal.integer,
-            }
-        };
+        let (constraint, leaves) = self.literal_leaves(id, false)?;
         if constraint.literal_default() != Some(default) {
             return None;
         }
         let ty = self.fresh_literal(constraint, false);
-        self.record_literal(inner, ty);
-        if inner != id {
-            self.record(id, ty);
-        }
+        self.record_leaves(&leaves, ty);
         Some(ty)
+    }
+
+    /// The literal constraint of `id` when it is a number literal or an `if` with `else` or a
+    /// `match` whose every branch is a number literal of one R type, with the literals and the
+    /// expressions around them, which take the literal's type together. A `native` literal, a ry
+    /// value from the start, is fractional when it is past the `I64` range.
+    fn literal_leaves(&self, id: ExprId, native: bool) -> Option<(Constraint, LiteralLeaves)> {
+        let mut leaves = SmallVec::new();
+        let mut constraint = None;
+        if !self.collect_literal_leaves(id, native, &mut constraint, &mut leaves) {
+            return None;
+        }
+        Some((constraint?, leaves))
+    }
+
+    fn collect_literal_leaves(
+        &self,
+        id: ExprId,
+        native: bool,
+        constraint: &mut Option<Constraint>,
+        leaves: &mut LiteralLeaves,
+    ) -> bool {
+        let module = self.module;
+        if let Some(literal) = number_literal(module, id) {
+            let found = if literal.is_fraction()
+                || (native && literal.default_native() == NativeScalar::F64)
+            {
+                Constraint::FracLiteral
+            } else {
+                Constraint::WholeLiteral {
+                    integer: literal.integer,
+                }
+            };
+            *constraint = match *constraint {
+                None => Some(found),
+                Some(held) if held.literal_default() != found.literal_default() => return false,
+                Some(Constraint::FracLiteral) => Some(Constraint::FracLiteral),
+                Some(_) => Some(found),
+            };
+            leaves.push((id, true));
+            return true;
+        }
+        let branches = match *module.kind(id) {
+            ExpressionKind::Paren(inner) => {
+                leaves.push((id, false));
+                return self.collect_literal_leaves(inner, native, constraint, leaves);
+            }
+            ExpressionKind::If {
+                then_branch,
+                else_branch: Some(else_branch),
+                ..
+            } => SmallVec::<[ExprId; 4]>::from_slice(&[then_branch, else_branch]),
+            ExpressionKind::Match { arms, .. } => module[arms].iter().map(|arm| arm.body).collect(),
+            ExpressionKind::Block { statements } if module[statements].len() == 1 => {
+                SmallVec::from_slice(&module[statements])
+            }
+            _ => return false,
+        };
+        leaves.push((id, false));
+        branches
+            .into_iter()
+            .all(|branch| self.collect_literal_leaves(branch, native, constraint, leaves))
+    }
+
+    /// Records `ty` on every literal and every expression around them that `literal_leaves`
+    /// collected.
+    fn record_leaves(&mut self, leaves: &[(ExprId, bool)], ty: Ty<'db>) {
+        for &(leaf, literal) in leaves {
+            if literal {
+                self.record_literal(leaf, ty);
+            } else {
+                self.record(leaf, ty);
+            }
+        }
     }
 
     /// A tuple item or a record field. A literal there is open, as a literal bound
