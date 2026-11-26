@@ -39,10 +39,7 @@ use {
         },
         vector_math,
     },
-    heap::{
-        handle::Gc,
-        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
-    },
+    heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
     smallvec::SmallVec,
 };
 
