@@ -2012,11 +2012,8 @@ impl Context<'_> {
             return;
         }
         let module = self.module;
-        // `<<-` in the top-level frame finds no binding above it and assigns in that frame,
-        // as `<-` does, and so does one at the top of an example.
         let spelling = if spelling == AssignSpelling::Super
-            && (self.current_scope().kind == ScopeKind::TopLevel
-                || self.example_scope == Some(self.scopes.len() - 1))
+            && self.example_scope == Some(self.scopes.len() - 1)
         {
             AssignSpelling::Local
         } else {

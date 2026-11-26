@@ -8166,6 +8166,19 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                             .filter(|callee| reads.binary_search(callee).is_ok())
                             .collect();
                         callees.sort_unstable();
+                        // A `<<-` that finds no binding above it creates the global, so goto
+                        // definition lands on it and it declares the name.
+                        let super_targets: Vec<ExprId> = hir
+                            .expressions()
+                            .filter_map(|expression| match &expression.kind {
+                                ExpressionKind::Assign {
+                                    spelling: AssignSpelling::Super,
+                                    target,
+                                    ..
+                                } => Some(*target),
+                                _ => None,
+                            })
+                            .collect();
                         for expression in reads {
                             if columns.contains(&hir.range(expression)) {
                                 continue;
@@ -8173,7 +8186,7 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                             let occurrence = Occurrence {
                                 file,
                                 range: name_range(hir, expression, name) + item_offset,
-                                is_declaration: false,
+                                is_declaration: super_targets.contains(&expression),
                             };
                             match callees.binary_search(&expression) {
                                 Ok(_) => calls.push((item, expression, occurrence)),
