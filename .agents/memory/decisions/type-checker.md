@@ -1100,3 +1100,12 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 
 - `(x = a, ..others)` is a syntax error. A list pattern's `..rest` binds a list of the remaining items, but a record's remaining fields would need a record type made by removing fields from the scrutinee's, which no other construct needs, and an empty rest has no value because a record has at least one field. Roc's and Elm's record patterns take no rest name either.
 - Reading the other fields from the matched value (`p as whole`, then `whole$y`) or building a changed copy with `(..p, x = 1)` covers what a named rest would.
+
+## ry values join covariantly, and a walk's tag state widens
+
+**Status:** built (`join_ry_values` and `widen_accumulators` in `crates/semantics/src/check.rs`; `with_tags` and `fits_widening` in `crates/typed/src/lower.rs`; `native-syntax.R.test` case `tags_widen_through_walk_states_loops_and_branches`; `crates/ry/tests/native/clean-widening-tags.R`).
+
+- A join that fails to unify used to take the union of the two values, so `if (c) [:A] else [:B]` was `List<:A> | List<:B>` and a loop's `acc <- List.append(acc, :B)` over `acc <- [:A]` failed at the next `List.append` ("expected `List<T>`"). ry's values are immutable, so `List`, `Dict`, `Set`, native records, native tuples and tag payloads join part by part (`join_ry_values`, before `wider_record` and the union). A part that neither unifies nor joins (numbers never widen) falls back to the union of the whole values.
+- A `List.walk` step function that returns more tags than its initial state used to fail ("must return `:None`, but it returns `:Some(I64)`"). The accumulator formal takes the settled initial state as its hint, and after inferring the step function `widen_accumulators` joins its result into the state, truncates that pass's findings, and infers the step again under the join (`ACCUMULATOR_PASS_CAP`, as the loop re-walk does). The state argument's type becomes the join, an upcast. Only a single candidate callee widens, because the hints of several candidates must agree.
+- The typed core derives types from values, so it widens by relowering, as for a variable: `List.append` of a tag outside the list's item union returns the wider list (its items are boxes either way), an assignment of a list of more tags widens the variable, and a walk's state widens keyed by its step function's `Sexp`.
+

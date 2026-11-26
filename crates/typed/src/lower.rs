@@ -250,9 +250,10 @@ pub unsafe fn lower(
     // function the typed core cannot compile does not keep its callers off native code. The
     // builder already holds part of the refused body by then, so the caller is lowered again.
     let mut called: SmallVec<[Sexp; 2]> = SmallVec::new();
-    // A variable takes the type of the first value assigned to it. A later tag of another shape
-    // widens the variable's tags to the union of both, and the function is lowered again with
-    // every variable of that name holding the union from its first assignment.
+    // A variable takes the type of the first value assigned to it. A later tag of another shape,
+    // or a list of such tags, widens the variable's tags to the union of both, and the function
+    // is lowered again with every variable of that name holding the union from its first
+    // assignment. A walk's state widens the same way, keyed by its step function.
     let mut widened: SmallVec<[(Sexp, u32); 2]> = SmallVec::new();
     loop {
         let mut refused = None;
@@ -557,9 +558,11 @@ struct Lowering<'c> {
     called: &'c [Sexp],
     /// The innermost typed function whose body was refused where it inlined.
     refused: &'c mut Option<Sexp>,
-    /// Names whose variables hold at least these tags ([`lower`]).
+    /// Names whose variables, and step functions whose walk states, hold at least these tags
+    /// ([`lower`]).
     widened: &'c [(Sexp, u32)],
-    /// The name and union of tags the lowering needs a variable to hold, when it refused for it.
+    /// The name or step function and the union of tags the lowering needs a variable or a walk's
+    /// state to hold, when it refused for it.
     widen: &'c mut Option<(Sexp, u32)>,
     speculations: Vec<Speculation>,
     nesting: usize,
@@ -854,16 +857,35 @@ impl Lowering<'_> {
         }
     }
 
+    /// `ty` holding the tags an earlier lowering found `key` needs ([`lower`]).
+    fn widened_type(&self, key: Sexp, ty: Type) -> Type {
+        match self.widened.iter().find(|&&(held, _)| held == key) {
+            Some(&(_, wider)) => with_tags(ty, wider),
+            None => ty,
+        }
+    }
+
+    /// Whether a value of `found` may be stored where `held` is, which holds for the same type
+    /// and for fewer tags. A value with more tags asks [`lower`] to widen `key`.
+    fn fits_widening(&mut self, key: Sexp, held: Type, found: Type) -> bool {
+        match (held_tags(held), held_tags(found)) {
+            (Some(held_union), Some(found_union))
+                if with_tags(held, found_union) == with_tags(found, held_union) =>
+            {
+                let fits = shapes::within(found_union, held_union);
+                if !fits {
+                    *self.widen = Some((key, shapes::join(held_union, found_union)));
+                }
+                fits
+            }
+            _ => held == found,
+        }
+    }
+
     /// The variable of `symbol` in the current scope that holds values of `ty`, made when the name
     /// has none yet. A pending empty list never shares one, since its type is a placeholder.
     fn variable(&mut self, symbol: Sexp, ty: Type) -> Local {
-        let ty = match ty {
-            Type::Tag(union) => match self.widened.iter().find(|&&(held, _)| held == symbol) {
-                Some(&(_, wider)) => Type::Tag(shapes::join(union, wider)),
-                None => ty,
-            },
-            ty => ty,
-        };
+        let ty = self.widened_type(symbol, ty);
         let (scope, entry) = self
             .scopes
             .last()
@@ -1147,16 +1169,7 @@ impl Lowering<'_> {
             Some(variable) => {
                 self.unify_pending(variable, value)?;
                 let ty = self.builder.ty(value);
-                let fits = match (self.builder.ty(variable), ty) {
-                    (Type::Tag(held), Type::Tag(found)) => {
-                        let fits = shapes::within(found, held);
-                        if !fits {
-                            *self.widen = Some((symbol, shapes::join(held, found)));
-                        }
-                        fits
-                    }
-                    (held, found) => held == found,
-                };
+                let fits = self.fits_widening(symbol, self.builder.ty(variable), ty);
                 if !fits {
                     return Err(Refusal::new("a variable that changes type"));
                 }
@@ -1353,26 +1366,27 @@ impl Lowering<'_> {
             .ok_or(Refusal::new("an append of something a list cannot hold"))?;
         self.settle(list, item)?;
         let ty = self.builder.ty(list);
-        let fits = match (ty, item) {
+        // A tag of another shape widens the list's item union: its items are boxes either way.
+        let ty = match (ty, item) {
             (
                 Type::Vector {
                     item: Item::Tag(held),
                     array: true,
                 },
                 Item::Tag(found),
-            ) => shapes::within(found, held),
+            ) => with_tags(ty, shapes::join(held, found)),
             (
                 Type::Vector {
                     item: held,
                     array: true,
                 },
                 found,
-            ) => held == found,
+            ) if held == found => ty,
+            (Type::Vector { array: true, .. }, _) => {
+                return Err(Refusal::new("an append of an item of another type"));
+            }
             _ => return Err(Refusal::new("an append to something other than a ry list")),
         };
-        if !fits {
-            return Err(Refusal::new("an append of an item of another type"));
-        }
         Ok(self.builder.emit(ty, Op::Push(list, value)))
     }
 
@@ -2991,13 +3005,7 @@ impl Lowering<'_> {
             };
             // A parameter is a fresh variable, so assigning it never touches the caller's, and
             // one holding a tag widens as any variable does.
-            let ty = match self.builder.ty(argument) {
-                Type::Tag(union) => match self.widened.iter().find(|&&(held, _)| held == symbol) {
-                    Some(&(_, wider)) => Type::Tag(shapes::join(union, wider)),
-                    None => Type::Tag(union),
-                },
-                ty => ty,
-            };
+            let ty = self.widened_type(symbol, self.builder.ty(argument));
             let variable = self.builder.local(ty);
             self.builder.push(Some(variable), Op::Copy(argument));
             scope.names.insert(symbol, Binding::Value(variable));
@@ -4951,7 +4959,9 @@ impl Lowering<'_> {
             Some(state) => self.value(state)?,
             None => self.builder.emit(Type::I64, Op::Const(Constant::I64(0))),
         };
-        let state_ty = self.builder.ty(state);
+        // A step that returns more tags than the state holds widens the state, as a variable
+        // widens, keyed by the step function.
+        let state_ty = self.widened_type(function, self.builder.ty(state));
         let total = self.builder.emit(state_ty, Op::Copy(state));
         let (positions, element, position) = match (range, list) {
             (Some((start, end, _)), _) => {
@@ -5007,9 +5017,9 @@ impl Lowering<'_> {
                 .apply(callable, &inputs)?
                 .ok_or(Refusal::new("a walk step that never completes"))?;
             if until {
-                self.walk_step(step, total, state_ty, positions.exit)?;
+                self.walk_step(step, total, (function, state_ty), positions.exit)?;
             } else {
-                if self.builder.ty(step) != state_ty {
+                if !self.fits_widening(function, state_ty, self.builder.ty(step)) {
                     return Err(Refusal::new("a walk whose state changes type"));
                 }
                 self.builder.push(Some(total), Op::Copy(step));
@@ -5025,7 +5035,7 @@ impl Lowering<'_> {
         &mut self,
         step: Local,
         total: Local,
-        state_ty: Type,
+        (function, state_ty): (Sexp, Type),
         exit: BlockId,
     ) -> Result<(), Refusal> {
         let (go_on, stop) = (tag_layout("Continue", 1)?, tag_layout("Break", 1)?);
@@ -5049,7 +5059,7 @@ impl Lowering<'_> {
                     return Ok(None);
                 };
                 let next = lowering.field(step, shape, 0)?;
-                if lowering.builder.ty(next) != state_ty {
+                if !lowering.fits_widening(function, state_ty, lowering.builder.ty(next)) {
                     return Err(Refusal::new("a walk whose state changes type"));
                 }
                 lowering.builder.push(Some(total), Op::Copy(next));
@@ -9057,6 +9067,33 @@ unsafe fn eta(name: Sexp, arity: usize) -> Result<(Sexp, Sexp), Refusal> {
     heap.preserve(body);
     ETA.with_borrow_mut(|made| made.push((name, arity, formals, body)));
     Ok((formals, body))
+}
+
+/// The tags a value of `ty` holds: a tag's union, or the item union of a ry list of tags.
+fn held_tags(ty: Type) -> Option<u32> {
+    match ty {
+        Type::Tag(union)
+        | Type::Vector {
+            item: Item::Tag(union),
+            array: true,
+        } => Some(union),
+        _ => None,
+    }
+}
+
+/// `ty` holding the tags of `union` as well, for a type [`held_tags`] reads.
+fn with_tags(ty: Type, union: u32) -> Type {
+    match ty {
+        Type::Tag(held) => Type::Tag(shapes::join(held, union)),
+        Type::Vector {
+            item: Item::Tag(held),
+            array: true,
+        } => Type::Vector {
+            item: Item::Tag(shapes::join(held, union)),
+            array: true,
+        },
+        ty => ty,
+    }
 }
 
 /// The type both of two values' types fit: that type, or the union of two tags.

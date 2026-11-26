@@ -524,6 +524,39 @@ column_sums <- function(rows: List<List<F64>>) -> List<F64>
 #++++
 column_sums: fn(rows: List<List<F64>>) -> List<F64>
 
+#---- tags_widen_through_walk_states_loops_and_branches
+first_some <- function(xs: List<I64>) List.walk(xs, :None, \(acc, x) :Some(x))
+keep_big <- function(xs: List<I64>) List.walk(xs, :None, \(acc, x) if (x > 3i64) :Some(x) else acc)
+grow <- function(xs: List<I64>) List.walk(xs, [:A], \(acc, x) List.append(acc, :B))
+best <- function(xs: List<I64>) {
+  List.walk(xs, (best = :None, n = 0i64), \(acc, x) (best = :Some(x), n = acc$n + 1i64))
+}
+cycle <- function(xs: List<I64>) {
+  List.walk(xs, :A, \(acc, x) match (acc) { :A => :B; :B => :C; :C => :A })
+}
+loop_grow <- function(xs: List<I64>) {
+  acc <- [:A]
+  for (x in xs) acc <- List.append(acc, :B)
+  acc
+}
+branch <- function(c: Bool) if (c) [:A] else [:B]
+record_branch <- function(c: Bool) if (c) (t = :A, n = 1i64) else (t = :B, n = 2i64)
+tuple_branch <- function(c: Bool) if (c) (:A, 1i64) else (:B, 2i64)
+payload_branch <- function(c: Bool) if (c) :Some([:A]) else :Some([:B])
+numbers_never_widen <- function(c: Bool) if (c) [1i64] else [1.5f64]
+#++++
+first_some: fn(xs: List<I64>) -> :None | :Some(I64)
+keep_big: fn(xs: List<I64>) -> :None | :Some(I64)
+grow: fn(xs: List<I64>) -> List<:A | :B>
+best: fn(xs: List<I64>) -> Record{best: :None | :Some(I64), n: I64}
+cycle: fn(xs: List<I64>) -> :A | :B | :C
+loop_grow: fn(xs: List<I64>) -> List<:A | :B>
+branch: fn(c: Bool) -> List<:A | :B>
+record_branch: fn(c: Bool) -> Record{n: I64, t: :A | :B}
+tuple_branch: fn(c: Bool) -> Tuple{:A | :B, I64}
+payload_branch: fn(c: Bool) -> :Some(List<:A | :B>)
+numbers_never_widen: fn(c: Bool) -> List<I64> | List<F64>
+
 #---- an_empty_list_grows_into_a_list_of_a_nominal_type
 type Tree = :Leaf(I64) | :Node(List<Tree>)
 grow <- function(leaf: Tree) -> Tree {
