@@ -53,6 +53,7 @@ const REGRESSIONS: &[&str] = &[
     "f <- function(x: integer) -> NULL invisible(x)\n",
     "count <- 1L\nf <- function(count) count + 1L\ng <- function() count\n",
     "Kind <- setRefClass(\"Kind\", fields = list(amount = \"numeric\"))\nitem <- Kind$new(amount = 1)\nitem $ amount\n",
+    "f <- function(xs) {\n  foreach(g = xs) %do% sum(g)\n}\nh <- function(n) {\n  foreach::foreach(i = seq_len(n)) %:% foreach::foreach(j = seq_len(i)) %dopar% (i + j)\n}\n",
 ];
 
 fn package(source: &str) -> Vec<Project> {

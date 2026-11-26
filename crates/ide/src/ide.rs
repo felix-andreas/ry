@@ -7571,7 +7571,22 @@ fn written_target_at<'db>(
     if let Some(hir) = item_hir(db, position.item)
         && let Some(argument) = named_argument_at(hir, position.relative)
     {
-        return parameter_target(db, files, position.item, &argument);
+        // An argument name that binds a variable, such as the iterator `g` in
+        // `foreach(g = groups)`, declares that variable rather than naming a parameter.
+        let declared = naming
+            .bindings
+            .iter()
+            .find(|(_, info)| info.range == argument.range && info.name == argument.name);
+        return match declared {
+            Some((binding, info)) if binds_global(naming, *binding, info) => {
+                Some(Target::Global(info.name.to_string()))
+            }
+            Some((binding, _)) => Some(Target::Slot {
+                item: position.item,
+                binding: *binding,
+            }),
+            None => parameter_target(db, files, position.item, &argument),
+        };
     }
     if let Some(expression) = position.expression_at()
         && let Some(target) = expression_target(db, files, position.item, naming, expression)
