@@ -2289,8 +2289,8 @@ fn set_names_from_year<'s, T: Vector>(
     result: &mut Owned<'s, T>,
 ) -> R<()> {
     let year = context.root(list.get(context, 5));
-    let names = handles::names_attribute(context, year);
-    let Some(names) = names.standard::<Str>() else {
+    let names = handles::names_of(context, year)?;
+    let Some(names) = handles::dense::<Str>(context, names)? else {
         return Ok(());
     };
     let count = result.get().len();
@@ -2348,7 +2348,10 @@ fn do_format_posixlt<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Lo
     require_nonempty_components(context, list, 0..list.len())?;
     let seconds = posixlt_seconds(context, list)?;
     let format_count = handles::length(context, formats);
-    let formats = handles::dense::<Str>(context, formats)?;
+    let Some(formats) = handles::dense::<Str>(context, formats)?.filter(|_| format_count > 0)
+    else {
+        return Err(error("invalid 'format' argument"));
+    };
     // A longer `format` recycles the times, as in GNU R.
     let count = if seconds.is_empty() {
         0
@@ -2358,9 +2361,10 @@ fn do_format_posixlt<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Lo
     let mut result = context.alloc::<Str>(count)?;
     let tzone_symbol = handles::install_bytes(context, b"tzone")?;
     let tzone = context.root(handles::get_attribute(context, list, tzone_symbol));
-    let tzone = tzone.standard::<Str>();
+    let tzone = handles::dense::<Str>(context, tzone)?;
     let zones = if list.len() > 9 {
-        context.root(list.get(context, 9)).standard::<Str>()
+        let zones = context.root(list.get(context, 9));
+        handles::dense::<Str>(context, zones)?
     } else {
         None
     };
@@ -2369,10 +2373,8 @@ fn do_format_posixlt<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Lo
         Column::of(context, list, 10)?,
     );
     let second_column = Column::of(context, list, 0)?;
-    let format_count = format_count.max(1);
     // The format of element `index`, `None` for `NA`.
     let format_at = |context: &Cx<'_>, index: usize| -> Option<String> {
-        let formats = formats?;
         let chars = formats.get(context, index % formats.len());
         (!handles::is_na(chars)).then(|| handles::text(chars).into_owned())
     };
@@ -2513,7 +2515,8 @@ fn do_format_posixlt<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Lo
     }
     let mut result = result.owned();
     let year = context.root(list.get(context, 5));
-    let year_names = handles::names_attribute(context, year).standard::<Str>();
+    let year_names = handles::names_of(context, year)?;
+    let year_names = handles::dense::<Str>(context, year_names)?;
     match year_names {
         Some(year_names) if count > seconds.len() => {
             // The names are padded with NA to the number of times, then recycled with the

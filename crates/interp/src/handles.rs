@@ -14,6 +14,7 @@ pub use heap::handle::{
 };
 use {
     crate::{
+        TaskCallbackRoutine,
         builtin_libraries::NativeCall,
         builtins::{Arg, Call},
         coerce::coerce_vector,
@@ -1432,6 +1433,23 @@ pub unsafe fn with<T>(body: impl for<'s> FnOnce(&mut Cx<'s>) -> R<T>) -> R<T> {
     }
 }
 
+/// The host's task-callback `routine` called with the `.Call` arguments `args`.
+///
+/// # Safety
+///
+/// The caller keeps `args` alive until this returns.
+pub unsafe fn task_callback(routine: TaskCallbackRoutine, args: &[Sexp]) -> R<Sexp> {
+    // SAFETY: the caller keeps the arguments alive, and the hook's result is read before
+    // anything else allocates.
+    unsafe {
+        with_result(|context| {
+            let args: SmallVec<[Local<'_>; 4]> =
+                args.iter().map(|&arg| adopt(context, arg)).collect();
+            Ok((crate::interp().hooks.task_callback_routine)(context, routine, &args)?.raw())
+        })
+    }
+}
+
 /// Runs `body` as a builtin's fast-path entry in the handle scope of its caller, which releases
 /// the handle stack once the entry returns: tier 0 after the instruction, compiled code and the
 /// evaluator's direct call around the entry. A scope of the entry's own would mark and release
@@ -1830,10 +1848,10 @@ pub fn set_attribute<'s, T: Kind>(
 }
 
 /// [`set_attribute`] on an object the caller may change, which is rooted.
-fn store_attribute<'s>(
+fn store_attribute<'s, N: Kind>(
     context: &mut Cx<'s>,
     object: Local<'_>,
-    name: Gc<'_, Symbol>,
+    name: impl Pointer<N>,
     value: Local<'_>,
 ) -> R<()> {
     if value.r_type() == SexpType::Nil {
@@ -1900,7 +1918,7 @@ pub fn remove_attribute<'s, T: Kind>(
 
 /// Removes the attribute `name` of `object`, which the caller may change, if it has one.
 #[inline]
-fn unlink_attribute(object: Local<'_>, name: Gc<'_, Symbol>) {
+fn unlink_attribute<N: Kind>(object: Local<'_>, name: impl Pointer<N>) {
     // SAFETY: the caller may change the object, and unlinking a cell allocates nothing.
     unsafe { values::remove_attr(object.raw(), name.raw()) }
 }
@@ -2460,10 +2478,15 @@ fn copy_attribute_cells(
             || tag.is(symbol(|symbols| symbols.dim))
             || tag.is(symbol(|symbols| symbols.dimnames));
         if keep_names_dims || !structural {
-            let tag = permanent(tag.downcast::<Symbol>().ok_or_else(|| {
-                error("internal error: an attribute without a symbol for its name")
-            })?);
-            store_attribute(context, to, tag, value)?;
+            match tag.downcast::<Symbol>() {
+                Some(tag) => store_attribute(context, to, permanent(tag), value)?,
+                // C code can give an attribute any tag with `SET_ATTRIB`, and GNU R's
+                // `copyMostAttrib` copies it as it is.
+                None => {
+                    let tag = context.root(tag);
+                    store_attribute(context, to, tag, value)?
+                }
+            }
         }
         cell = rest;
     }

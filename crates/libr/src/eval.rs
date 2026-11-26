@@ -34,8 +34,6 @@ use {
     },
 };
 
-/// Runs a graphics callback inside a C context, so that an R error raised from C code in it
-/// unwinds to here instead of past Rust frames.
 /// Roots `raw`, which a hook's native code made, in the hook's scope.
 ///
 /// # Safety
@@ -46,6 +44,8 @@ unsafe fn rooted<'s>(context: &Cx<'s>, raw: Sexp) -> Local<'s> {
     context.root(unsafe { Gc::<Value>::adopt(raw) })
 }
 
+/// Runs a graphics callback inside a C context, so that an R error raised from C code in it
+/// unwinds to here instead of past Rust frames.
 unsafe fn guard_native(body: &mut dyn FnMut()) -> ApiResult<()> {
     unsafe extern "C" fn trampoline(data: *mut c_void) {
         // SAFETY: `data` is the `&mut &mut dyn FnMut()` passed below, alive for the call.

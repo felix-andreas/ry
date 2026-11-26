@@ -41,7 +41,7 @@
 15 crates/interp/src/file_removal.rs
 41 crates/interp/src/fork.rs
 16 crates/interp/src/format.rs
-194 crates/interp/src/handles.rs
+196 crates/interp/src/handles.rs
 13 crates/interp/src/help_server.rs
 17 crates/interp/src/image.rs
 24 crates/interp/src/interp.rs
@@ -52,7 +52,7 @@
 60 crates/interp/src/methods.rs
 137 crates/interp/src/methods_core.rs
 30 crates/interp/src/moves.rs
-28 crates/interp/src/native.rs
+27 crates/interp/src/native.rs
 46 crates/interp/src/numbers.rs
 30 crates/interp/src/package_fast_paths.rs
 3 crates/interp/src/parallel.rs
