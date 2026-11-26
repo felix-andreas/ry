@@ -283,7 +283,7 @@ into the host through the C ABI.
   the boundary to untyped code boxes them. Records, tuples and tags travel as pointers whose field
   types come from an allocation-site profile, and `match` compiles to a branch on the layout id. This
   is Roc's specialization applied at runtime, where R loads code: the cache key is the closure and
-  the argument types seen, not a whole-program instantiation (`decisions/typed-stdlib.md`, "Typed closures run as
+  the argument types seen, not a whole-program instantiation (`decisions/typed-native.md`, "Typed closures run as
   native functions over records, tags and match").
 - **Precise counts in compiled code.** The interpreter keeps R's count updates at every binding,
   which is what native code observes. The JIT tracks counts precisely inside a compiled function and

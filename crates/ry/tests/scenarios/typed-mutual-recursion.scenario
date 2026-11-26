@@ -1,0 +1,56 @@
+# Typed functions too large to inline that call each other compile natively: the one compiled
+# first calls the other while that one is still being compiled, assuming the result type the
+# other's own recursion assumes. A result type the guesses miss, as a record, is revised and both
+# compile again, and rebinding one of them makes the other call the new definition.
+
+requires ry-runtime
+
+file ry.toml
+| [check]
+| typing = true
+
+file mutual.R
+| alias Pair = Record{left: I64, right: I64}
+| down_a <- function(n: I64, p: Pair) -> Pair {
+|   if (n <= 0) return(p)
+|   x <- n * 3
+|   y <- x %% 7
+|   z <- if (y > 3) x + y else x - y
+|   w <- z * 2 + p$left
+|   down_b(n - 1, (left = w %% 1000, right = p$right + 1))
+| }
+| down_b <- function(n: I64, p: Pair) -> Pair {
+|   if (n <= 0) return(p)
+|   x <- n * 5
+|   y <- x %% 11
+|   z <- if (y > 5) x + y else x - y
+|   w <- z * 3 + p$right
+|   down_a(n - 1, (left = p$left + 1, right = w %% 1000))
+| }
+| start_a <- function(n: I64) -> I64 {
+|   r <- down_a(n, (left = 0, right = 0))
+|   r$left * 1000 + r$right
+| }
+| start_b <- function(n: I64) -> I64 {
+|   r <- down_b(n, (left = 1, right = 2))
+|   r$left * 1000 + r$right
+| }
+| print(start_a(10))
+| print(start_b(7))
+| down_a <- function(n: I64, p: Pair) -> Pair {
+|   if (n <= 0) return(p)
+|   x <- n * 100
+|   y <- x %% 7
+|   z <- if (y > 3) x + y else x - y
+|   w <- z + 1
+|   down_b(n - 1, (left = w, right = p$right))
+| }
+| print(start_b(4))
+| print(start_a(5))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry mutual.R
+expect exit 0
+expect stdout "205335i64\n107203i64\n99149i64\n99147i64"
+expect stderr lacks "being compiled"
+expect stderr lacks "runs in the interpreter"

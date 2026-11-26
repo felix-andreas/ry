@@ -2985,6 +2985,7 @@ unsafe fn attach_inner(
         epoch,
         calls_r,
         guessed,
+        cells: SmallVec::new(),
     })))
 }
 

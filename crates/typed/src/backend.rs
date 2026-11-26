@@ -53,6 +53,9 @@ pub enum Entry {
     /// A typed function of another namespace, by its index in the code file's callees, whose
     /// address the loader writes into the offset table when the caller attaches.
     Callee(u32),
+    /// The address of a word in this process that holds the function's address, for a function
+    /// still being compiled when its caller is, as in mutual recursion.
+    Cell(usize),
 }
 
 /// The addresses of a compiled function and of its trampoline.
@@ -905,6 +908,17 @@ impl Emitter<'_> {
             Entry::Callee(index) => {
                 let signature = self.builder.import_signature(signature);
                 let callee = self.word(Slot::Callee(index), || 0);
+                self.builder
+                    .ins()
+                    .call_indirect(signature, callee, arguments)
+            }
+            Entry::Cell(address) => {
+                let signature = self.builder.import_signature(signature);
+                let cell = self.iconst(address as i64);
+                let callee = self
+                    .builder
+                    .ins()
+                    .load(I64, MemFlagsData::trusted(), cell, 0);
                 self.builder
                     .ins()
                     .call_indirect(signature, callee, arguments)

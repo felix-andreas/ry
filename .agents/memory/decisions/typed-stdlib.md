@@ -1,6 +1,6 @@
 # Decisions: Typed ry and the standard library
 
-Typed closures and their native compilation, records, tuples and tags, and `std`.
+Typed ry's values, records, tuples and tags, and `std`.
 
 ## Beta semantics: Signature matching is name-aware
 
@@ -195,19 +195,6 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **Docs are generated.** `crates/semantics/tests/test_std_docs.rs` renders `reference/std/` from `types/std.Rtypes` and fails when committed pages are stale (`just docs-std` rewrites them), so the declarations are the single source for checker, hover and docs; a hand-written copy drifted.
 - **Gap.** Compiled code fast-paths only bare library calls, so `std::List.map` is neither fast-pathed nor JIT-looped (`backlog.md`).
 
-## Typed closures run as native functions over records, tags and match
-
-**Status:** built.
-
-- **Call-time entry.** `jit_call` in `runtime.rs` (from `apply_closure`) runs a typed closure (`annotations::is_typed`) as a native at its first call. Arguments must be positional or name-exact, and each is read without forcing (a constant, a forced promise, a promise of a constant, or of a symbol bound to a plain value). Its `Ty` comes from the value; the native is cached per closure and `Ty` list, and a trampoline per machine signature passes words and boxes the result. Debug, step, trace and move tracking skip the path.
-- **Records as pointers.** `Ty::Rec(layout)` holds a record pointer; distinct layouts join to `Ty::Obj`. Field reads speculate from per-layout slot-kind profiles the heap records at allocation (`heap::records::slot_kind`); an empty profile fails the read and a mixed one refuses the native.
-- **Construction and match.** `jit_native_record` builds from a stack array; zero-slot tags are shared singletons. `match` with exact-layout patterns, `_` and binds resolves statically on `Rec(L)` and branches on the layout id for `Obj`; a non-exhaustive match fails to tier 0. Guards, `|`, `..`, literals and nested patterns refuse the native.
-- **Rooting.** `jit_native_mark`/`jit_native_release` bracket entry, return, failure and loop back edges, except where a loop carries a record into a pre-loop local.
-- **Why no deoptimization.** A native fails and tier 0 reruns the call, rather than deoptimizing mid-body, which keeps every native side-effect-free until it returns. Annotation checks stay storage-only.
-- **Not built here** (`backlog.md`): uniqueness in-place update, strings and the standard library inside these natives, vector builtins, recompiling when a profile widens.
-- **Measured.** `orders` 0.50 s (GNU R) / 0.44 s (untyped ry) / 0.034 s (typed); `expr_tree` 0.33 / 0.34 / 0.008 s, checksums equal. Before, typed programs ran no faster than untyped ones.
-- **Test.** `fuzz_typed_record_natives_agree_with_tier_zero` in `crates/jit/tests/test_tiers.rs`.
-
 ## Typed ry has its own numbers, `Bool`, `Str` and `List`
 
 **Status:** built, except the closing note that typed `I64` code runs in the interpreter, which "Typed `I64` runs in registers, and list arithmetic fuses into one loop" supersedes.
@@ -224,113 +211,6 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **Smaller rules.** `/` decides `F64` and is a `type-mismatch` on `I64`, as in Roc. Lengths, counts and positions are `I64` (`standard_library::whole_number`). List operators work item by item and never recycle (over the buffers for `List<I64>`, `arith::item_by_item` for nested lists). `try f(x)` is the `Ok` value or an early return of the `Err`; `try (expr)` keeps R's `try()`. No row variables: an open tag union cannot pass unlisted tags through with their types (user direction).
 - **Typed programs are written in ry types only**: `tools/bench/kernels/*.typed.R`, `tools/bench/applications/*.typed.R`.
 
-## Typed values are native, immutable, acyclic and freed by reference counts
-
-**Status:** built, except the per-type struct-of-arrays pools with 32-bit references, which "Typed boxes have shapes, and a tag type is a union of them" supersedes.
-
-- **Shape.** Typed ry's own values (numbers, `Str`, `List`, `Dict`, `Set`, records, tuples, tags, closures) live outside the R heap. They are immutable and acyclic (a closure never captures itself; recursion goes through a lifted definition), so compiler-inserted Perceus reference counts free them deterministically, with Lean 4-style borrow inference, field moves, drop specialization and reuse of a uniquely held block. No tracing collector sees them, so compiled frames need no stack maps.
-- **R boundary.** R values stay under the collector and meet typed code only at the boundary: an entry stub checks a guess and runs a second compiled copy that reads the R value in place, or the program converts explicitly (`List.from_r`). References go one way: a native block may preserve an R value, but every native value crossing to R is converted (a typed closure becomes an R closure over converted captures), so no cycle spans both heaps. R values in compiled locals sit on the handle stack.
-- **Why.** Exact counts make in-place update a count-of-one test, freeing deterministic and leaks checkable at the end of every test. Native layouts are the Rust-shaped data the 1.5 to 2 times Rust bar needs; R vector headers, intern tables and collector tracing would cost on every operation.
-- **Cost.** A `List<F64>` reaches C only through a copy; an ALTREP wrapper is the deferred fix. Design and test matrix: `development/design/typed-runtime.md`.
-
-## Typed code compiles ahead of time, and `ry build --aot --exe` writes an executable
-
-**Status:** built. `ry run --aot` compiles a script's typed functions before it starts (the entry "`ry run --aot` compiles a script's typed code before it starts"), `ry install` writes an installed package's typed code file (the entry "The typed code file is position-independent code whose offset table is the per-process table"), `ry build --aot --exe` writes an executable (the entry "`ry build --aot --exe` appends the script and its code file to a copy of `ry`"), and plain `ry build` writes a source tarball.
-
-- **Command line (user directive).** `--aot` asks for ahead-of-time compilation: `ry run --aot main.R` compiles before the program starts; `ry build --aot` and `ry install` compile into the installed package; `ry build --aot --exe main.R` writes one executable. Without `--aot` typed code compiles at its first call. Plain `ry build` writes a source tarball, as `devtools::build()` does, because existing workflows rely on it.
-- **No code cache** (`AGENTS.md`, "Performance principles"). An installed package's code file is build output: one position-independent file per namespace, mapped read-only and shared between processes, stamped with the ry build and the package database, with every resolved name checked again when a function attaches. Code for a script or a package under development compiles in memory.
-- **Tests.** Every typed program runs interpreted, compiled, and compiled with annotations erased, with identical output, plus an empty-pool leak check (from Bun's compiler, `prior-art.md`).
-
-## `ry run --aot` compiles a script's typed code before it starts
-
-**Status:** built for a script's top-level definitions and for files it sources into the global environment. The package code file is its own entry ("The typed code file is position-independent code whose offset table is the per-process table"). Not built: the executable. Decided against: packages under `ry load` (below).
-
-- **Shape.** `ry run --aot` sets `RUN_FLAG_AHEAD`; `run_script` lowers every top-level expression before the first runs, creates the closure of each top-level `name <- function` (`crates/interp/src/ahead.rs`) and hands them to `Tier.ahead`. The typed core (`crates/typed/src/ahead.rs`) compiles each definition whose declared parameter types R can pass (numbers, `Bool`, `Str`, lists of those, tag unions, tables) plus its typed callees. Parameter types are read from the annotation text (`annotated_type`), which the preflight writes in canonical spelling, so the text is the checker's type.
-- **Sibling calls.** A name not bound yet resolves to the closure created up front (`DEFINED_LATER`); the compiled call carries the usual function-identity speculation (`still_resolves`), and the assignment hands out that same closure (`ahead::take`), so the check holds once the definition runs. A different later binding fails the check and the caller recompiles.
-- **Conversions have the checker's type.** The preflight wraps a `List.from_r(x)` whose item type the checker knows as `.ry_items(List.from_r(x), "F64")`, and the lowering takes that as the conversion's type (`Conversion.checked`) instead of an interpreter observation, which was a second source of truth and cost one interpreted call. The wrapper's kinds are `"I64"`, `"F64"`, `"Str"` and `"list"`. One function (`arrays::checked_conversion`, `crates/interp/src/arrays.rs`) converts in both tiers (`do_items` in the interpreter, `write_converted` in compiled code). It widens as R coerces (`Bool`/`I64` items to `F64`, `Bool` to `I64`, an empty vector to an empty checked list), because the checker's R types are coarser than the vectors R computes (`abs(-3:3)`, `sample(5)` and a `double[]` parameter passed `1:3` are typed `double` but hold integers). Any other difference (`F64` items where the checker said `I64`, strings for numbers) is one error in both tiers: R code gave a value its types do not describe, for example after `assign()` rebound the function behind `x`, or an R type rule of the checker is wrong. Rejected: erroring on every storage difference (it stopped correct programs), and recompiling for the arriving type (a second path used only by mistyped programs).
-- **Lazy bindings** of a loaded namespace are forced when typed code compiles, in every mode: forcing reads the package database and runs no user code. An unloaded namespace waits for the first call, because loading it runs `.onLoad` before the script's first statement and changes output, options and error order.
-- **Refusals are retried**: a refusal met before the script ran may only mean the script had not run yet, so refusals are dropped after the pass.
-- **What still compiles at a first call**: a `Num.from_r`/`List.from_r` the checker cannot type, a call into a namespace not loaded yet (loading it early would run `.onLoad` first; waiting costs one interpreted call per caller, and no typed benchmark calls a package namespace, so compiling the caller when the namespace loads waits for a measured program that shows the call), a function defined in a block or in a file sourced into another environment, a definition in a statement whose lowering warns, and a top-level function with a record, tuple, `Dict`, `Set` or function parameter that no compiled-ahead function calls.
-- **Sourced files.** `parse()` of a whole file under `--aot` (`lower::do_parse` calling `ahead::parsed_file`) compiles the file's typed top-level definitions only when the frame calling `parse()` binds `envir` itself to the global environment, read without forcing (`eval::peek_frame_variable`, which does not look in enclosing environments): `source()` at top level. `sys.source()` calls R-level `parse()` and compiles at first calls. Rejected: compiling every parsed file (it compiled `sys.source(file, envir = e)` and `source(local = TRUE)` inside a function, for closures nobody binds) and scanning the script for `source("...")` (misses computed paths, reads files before the script creates them).
-- **`ry load` is not compiled ahead**: it defines functions lazily on first use, which is its point, and the compile already follows the definition immediately. Install the package to get its code file.
-- **The pass must not change behaviour.** An expression whose lowering warns (`1.5L`) is left to the run (`ahead::holds_back_warning`), because the warning would precede a handler or `options(warn = 2)` the script sets earlier. Functions compiled ahead do not count against `MAX_COMPILED` (`ahead::compiled_ahead`), since a script's definitions are bounded by its text. The run roots each pre-lowered expression in its own handle scope, because nothing else holds a statement while it runs: without the root, a collection between two arguments of a statement frees the later ones (`ahead::lowered`, pinned by `run-aot.scenario`). Closures of definitions that never ran are released when the script ends.
-- **Measured.** All 70 typed benchmark programs (11 kernels, 6 applications, 53 public) print what the first-call run prints and compile nothing after the script starts. The up-front compile takes 1.1 to 5.9 ms per kernel or application; a first measured run drops by the compile it no longer holds (`pidigits` 51 to 2 ms, `log_rank` 34.56 to 22.02 ms); warm and whole-process times are unchanged. The checked conversion type and forced lazy bindings apply without the flag too (`vasicek`'s first run about 140 to 74 ms). No new code store: code compiled ahead lives in the table first-call code lives in.
-- **Tests.** `typed_scripts_agree_however_they_compile` (interpreted, first call, ahead, ahead with every sibling guess failing under `RY_AHEAD_MISS=1`, tier 1 forced, annotations erased), `typed_benchmarks_run_natively` and `a_script_with_more_definitions_than_the_closure_limit_compiles_them_all_ahead` in `crates/ry/tests/test_scenarios.rs`; `run-aot.scenario`, `typed-code-calls-r.scenario`, `typed-table-values.scenario`.
-
-## An installed typed package holds elaborated sources with canonical annotations
-
-**Status:** built.
-
-- **Elaborated install.** `preflight::elaborate_package` checks a typed package (strict in `ry.toml`, or a file with ry syntax or `# typing: strict`), refuses the build on a strict error, and returns each file's elaborated text in the package's declared encoding. A rewrite that changes the line count or the parse errors fails the build. `build_tarball` (`crates/ry/src/main.rs`) builds a copy in a temporary directory (skipping `.git` and `.Rbuildignore` matches, which `R CMD build` applies again, and entering each directory once so a link cannot loop), so the package directory is never touched. Without this, installed code had no checked conversion types and ran literals as R doubles where the checker said `I64`.
-- **Canonical annotations.** Every file the preflight elaborates (a `ry run` script, a console command, a typed package's files; `ry load` and `source()` run unelaborated text) gets each one-line parameter and return annotation rewritten to the checker's type (`semantics::canonical_annotation`): aliases expanded, project nominal types unfolded except a recursive one inside itself, printed by `TypeRenderer`. A spelling is used only when reading it back gives the same type, so a rewrite never changes what was declared; unfolding stops at `UNFOLD_BUDGET`, because definitions naming another twice double the spelling each step. Open records, type parameters, unknown names and non-ASCII field names stay as written. `annotated_type` reads this closed grammar, so the lowering no longer needs its own reader of type definitions (one source of truth for named types). Elaboration keeps line counts, so srcrefs hold. Of the 514 one-line types the 70 typed benchmark programs' signatures write, 95 are rewritten and none is left as written (`benchmark_signatures_all_have_canonical_spellings` in `crates/typed/tests/test_typed/annotations.rs`, which also pins printer against reader over aliases, generics, tuples, records, functions, tag unions, nominal, recursive and table types).
-- **Serialization.** `I64` and `List<I64>` serialize as ry's type code 28 (array flag, length, each item's high and low halves; `crates/libr/src/serialize.rs`, `crates/interp/src/serialize.rs`), so a package's `I64` constants reach the lazy-load database through `lazyLoadDBinsertValue`; `saveRDS` and other builtins still refuse a top-level one. Records, tuples, tags, dicts and sets have no stream form and are refused.
-- **Behaviour.** A parameter typed by a record alias is checked at run time as the record, where an alias reads as unchecked otherwise.
-- **Measured** (debug build, `RY_TYPED_LOG=1`, `RY_BENCH_REPEAT=0`). All 70 packages generated from the typed benchmark programs (`tools/bench/typed_package.py`) install, print what the script prints, and run no function in the interpreter apart from the harness's R-boundary `measure`; each compiles at first calls exactly what the script does (103 compilations in total). `ry run --aot` compiles 156 for the same programs, because it compiles every definition as its own root, including small functions a first-call compile only inlines. The tier matrix (`typed_scripts_agree_however_they_compile`) also runs each script's definitions as an installed package. `ry install` of a typed package adds one check of the package.
-
-## The typed code file is position-independent code whose offset table is the per-process table
-
-**Status:** built for installed packages and for executables. `development/typed-code-file.md` is the contract.
-
-- **Why.** Session-compiled typed code embeds process addresses as immediates, so every process (each CI test process, per dependency) compiles and holds the same code privately, at about 0.8 ms per typed closure's first call.
-- **Shape.** One file per namespace, `R/<package>.<build>.ryt`, written by `ry install` and `ry build --aot` in the session that writes the bytecode image (before `ryCodeImageWrite` in `code-image.R`, because writing the image ends the recording of the closures the file names). Every process value (helpers, libcalls, the interrupt flag, shape ids, static boxes, the file's own read-only data, R call sites, cross-namespace callees) is a word in a table at a fixed distance before the code, reached through the GOT load Cranelift emits for an external name on a PIC ISA; calls inside the file are direct. The writer resolves every relocation, so code pages are never written and are shared; only the table is private. Slots are numbered downward from the code, so the table needs no size before layout. Shape ids, which lowering writes as plain integers in a `match` and the sort comparator, get a shape constant in the IR.
-- **Attach.** A closure is named by its lazy-load record offset and position, and attaches at its first call: names resolved at install are resolved again and must be of the class lowering specialized on, R call sites are built, callees attached, constructed shapes confirmed, and the session's `Compiled` entry inserted. A version that does not attach compiles in the session. A version whose direct callee is still attaching misses, so mutual recursion compiles in the session (self-recursion attaches); an SCC-at-once attach would fix it, not worth it until a real package shows it.
-- **A version belongs to one closure.** The loader notes (record, position, database stamp) per closure when the database yields it; a run-time copy (R6 method, `environment<-`, per-class S4 method) has another environment, which a version's R call sites hold, so it compiles in the session. The note's stamp, not the disk database, is checked against the header, so a reinstall in a running session cannot attach new code to old closures.
-- **Rejected.** Patching addresses into code pages at load (a patched page is private). A table pointer in a pinned register (costs every function a register and every entry a write). One emission mode for session and file code (session code memory is not at a fixed distance from a table); the targets differ in one `Slot` seam of the backend, and the tier matrix compares them.
-- **Training.** With `--train`, every successful `COMPILED` entry of a database closure is also a root, except one whose guess a later conversion contradicted. A guessed conversion is stored with empty `checked`; at attach, `numbers::assume_conversion` records it as the session's observation, so a session that saw another type refuses the version and `conversion_epoch` makes it stale later. Pinned by `install-typed-package.scenario`. A version for a record or function parameter travels inside its typed caller's code, so training adds nothing there. Untyped R is never in the file ("Untyped R code is not compiled to machine code ahead of time"); the stored versions follow Leyden's stored profiles (`prior-art.md`).
-- **No cache.** The file is build output, replaced only by reinstalling; a stamp mismatch sends the namespace to session compiles with a line saying to reinstall. The file is trusted like a package's shared objects; hashes and stamps catch truncation, another build and a changed database.
-- **Format choices.** Metadata is LEB128 varints in one hashed stream, because the loader parses it once into vectors, so a fixed-width on-disk layout buys nothing. Slots are numbered `base - 8 * (n + 1)`. Static strings live after the code and the IR's string constant carries the string; free stubs and data form one region hashed at map time, and each version's bytes are hashed at attach.
-- **Platforms.** Linux maps the file; other Unix, and Linux where mapping is refused, copies into the same reserved range and flushes the instruction cache (`RY_TYPED_FILE_COPY=1` forces it). Windows does not use the file. The copy path compiles for `aarch64-apple-darwin` but has not run on macOS.
-- **`ry run --aot` and packages.** A package is compiled at load only when its `R/` holds a `.ryt` of another build, because a package with no file cannot be told from one installed with `--ry-no-typed-code` without reading every function (`interp::ahead::namespace_loaded`).
-- **Bench engine.** `ry_typed_file` drives the installed package from a plain R script, because the checker does not resolve names `library()` attaches, so each measured call converts its arguments at the boundary.
-- **Measured** (iterate build, 50 typed functions of one package): first calls 1.43 ms from the file against 18.5 ms compiled in the session, about 21 µs per attach including the lazy-load fetch; peak memory over `library()` +2.2 MiB against +5.0 MiB; `library()` 7.13 to 7.27 ms with a file against 7.51 ms without; code pages `Shared_Clean` across two processes. Warm time of file code over session code is 0.975 to 1.014 across five programs, so the table loads cost nothing measurable and a `Data`-slot relaxation is not needed. 9 of 170 typed benchmark functions (5.3%) are left out for a `match` over any tag.
-
-## `ry build --aot --exe` appends the script and its code file to a copy of `ry`
-
-**Status:** built. `reference/cli.md` ("Executables") documents the command and `development/typed-code-file.md` ("Executables") the layout.
-
-- **Shape.** `[ry][zero padding to 64 KiB][typed code file][metadata][48-byte trailer]` (`crates/ry/src/executable.rs`). The trailer holds the code file's offset and length, the metadata's offset, length and FNV-1a hash, and an 8-byte magic; the metadata holds the run flags, the script's name, its elaborated text, and a development build's runtime paths. `main` reads its own trailer before parsing arguments (and before the R front ends, since an executable may be named `Rscript`), so every argument belongs to the script. A damaged payload is an error; an unreadable executable (execute-only, no `/proc`) is plain `ry`. The run skips the checker and takes `ry run --aot`'s path with `interp().ahead.code` set, so `prepare` notes each closure instead of compiling it and the first call attaches through `typed::file::open` from the file mapped at its offset.
-- **Script identity.** A script closure's note is `(SCRIPT_DATABASE = u32::MAX, top-level expression index, 0)`, stamped with the elaborated text's length and hash, so a closure whose index or text differs compiles as under `ry run --aot`. In the code file the script is the package `""`.
-- **Sourced files are read from disk**, because embedding them needs a virtual file system under `source()`, and no real program asks for it yet.
-- **A development build records its runtime paths** (runtime library and base R), because a copy moved out of `target/` cannot find them; they go to `repl::use_runtime_files`, not `RY_LIBR`/`RY_BASE_R`, so child processes (maybe another ry build) do not inherit them, and those variables still win.
-- **The build protects its inputs**: it refuses an output that is the script itself (an extensionless `main`) or a directory, makes the copy owner-writable (an installed `ry` is often 0555), and removes a partial file on failure. `RY_AHEAD_MISS=1` forces first-call compiles, which the scenario uses to check the fallback.
-- **Measured** (iterate build). The executable starts about 1.6 ms sooner than `ry run` on an empty script (no checker), first calls attach in 0.29 ms against 6.6 ms compiled for 20 functions, and peak resident memory is about 6 MiB lower.
-
-## The typed core lowers R syntax at the first call and runs on 16-byte strings and view lists
-
-**Status:** built.
-
-- **Shape.** `crates/typed` lowers a strict typed closure to a typed SSA IR at its first call for the argument types it sees, inserts Perceus reference counts (`ownership.rs`) and compiles with Cranelift (`backend.rs`). `jit::native::call` is the one seam; `typed::call` returns `None` to fall back. A run-time failure (an `NA` an integer cannot hold, overflow, index out of range, interrupt) returns status 1 and the interpreter reruns the call, so the typed core never reports an error itself.
-- **Lowering from R syntax, not salsa**, because the runtime cannot link the analysis and the closure body is the source of truth the interpreter also runs. `Speculation` guards on resolved functions, rechecked every call, make it sound against rebinding.
-- **`Str` is 16 bytes, not 24**: two words fit Cranelift's tail-convention two-register return and halve list storage; up to 15 bytes are inline, flagged by bit 63 of the second word.
-- **A `List` header points at its items**, so an R vector argument is a view (flag `VIEW`) over R's data with no copy, and one compiled body serves owned and borrowed lists. Writing to a view copies first. A view has an ordinary count of one, held by the boundary, so code that keeps it (a record field, a list item) counts it like any list; `ry_view_release` then gives a kept view its own copy of the items in place, since every holder reads the one header. A static count would leave a kept view dangling once the boundary frees the header.
-- **Base closures behind lazy-load promises.** A function is base's own when its binding cell is base's, and `resolve_function` forces the promise (it only reads the package database) instead of refusing.
-- **Counted loops check their ends once.** `for` over `seq_len`, `seq_along`, `a:b` or a vector tests `counter == end` at the latch and steps with `Op::Step`, which cannot overflow because the counter never passes the end.
-- **Measured** (why-bench, typed and strict, against the scalar natives that took R values in and out of every operation): `closures` 0.348 to 0.006 s, `report` 0.640 to 0.009 s, `bond_book` 0.739 to 0.049 s, `array_map` 0.048 to 0.017 s.
-
-## Typed `I64` runs in registers, and list arithmetic fuses into one loop
-
-**Status:** built.
-
-- **`I64` is a register value** with checked `+ - *` (overflow fails) and R's floored `%%`/`%/%`; a failure reruns in the interpreter, which reports the error.
-- **An `I64` parameter or result converts an exactly whole R number** (`annotations::check_value`, `check_return`, `check_forced`), mirrored in `typed::call`, inlined calls and returns; otherwise `f(3)` failed and every caller wrote `3i64`. A `List<I64>` boundary converts whole double or integer lists item by item (`annotations::as_i64`), because an unsuffixed `[1, 2]` is a double list at run time, and an empty `logical` list becomes an empty `I64` list (`annotations::lacks_item_type`), covering unelaborated `ry load`/`source()` code.
-- **`List<T>` annotations are checked at run time**: the Array bit plus the item's storage (an R list for records, tags, functions and nested lists); any empty list passes, because an empty list is stored as `logical`.
-- **Fused elementwise kernels** (`Op::Elementwise`, `values::ry_elementwise`). A tree of base arithmetic over same-length lists and scalars, with at least two list operations or one under `List.sum`, lowers to one program of up to 16 steps over up to 16 inputs, run in 128-item chunks so intermediates stay in L1 and only the final list is allocated. Each intermediate is checked for NaN, so a fused tree fails exactly where the unfused one would.
-- **Large blocks get power-of-two pools.** Blocks over 64 KiB round up to a power of two, and up to four freed blocks per class (each at most 64 MiB) are kept per thread (`values::block_alloc`), because the system allocator mapped fresh pages each call and paid page faults: a benchmark allocating an 8 MB list per iteration went from 407k page faults to 18k.
-- **Library constants are speculated by identity.** `Num.pi` is a constant when the name resolves to the very object `standard_library::builtins_env()` holds (`lower::resolve_value`, `typed::still_resolves`), so a user binding of the same name or a rebinding fails the guard; a function that assigns the name anywhere refuses (`lower::assigns`), since a read before a later assignment in a loop would keep the constant.
-- **`Num.pow` is `powf`, not R's `^`**: R's `r_pow` multiplies out small whole powers, which changes the last bit (`Arith::NumPow`).
-- **A counted `List.range` loop keeps the list length limit** (`i32::MAX` items), though it allocates no list.
-- **A constant scalar default is passed as the argument** (`jit::native::call`), so a missing argument with a default such as `k: F64 = 3` does not refuse the call.
-- **Measured** (why-bench, typed and strict, against interpreted `I64` and unfused list arithmetic): `array_dot` 3.171 s to 0.004 s, `loop_sum` 2.341 to 0.007, `bond_book` 4.075 to 0.075, `drawdown` 1.663 to 0.007, `vector_arith` 0.266 to 0.062.
-
-## Array subscripts walk offsets instead of listing them
-
-**Status:** built.
-
-- **Shape.** `ArrayOffsets` in `crates/interp/src/subset.rs` yields `x[i, j, k]` offsets one at a time to `select_positions`, `scatter` and `recycle_into`, instead of materializing a column-major offset list (an 8 MB list per `X[, , k]` read of a 1000 x 1000 x 20 array). The innermost run walks the first selection longer than one position, so `X[5, , k]` strides through a row with no per-element odometer step; an odometer step updates the base by each changed dimension and counts `NA` positions, amortized constant time.
-- **Trap.** `next` is inlined and the odometer step is out of line, which keeps the iterator in registers in the gather loop; without those attributes the row read ran about 50% slower than with listed offsets.
-- **Measured.** The slab read is 1.7x to 2.5x faster and the row read is unchanged; no allocation proportional to the result beyond the result itself. The numeric write `X[, , k] <- W` already took the slab path.
-- **Tests.** `NA`, empty and zero-length shapes: `crates/oracle/cases/assignment__array_slab_shapes.R`.
-
 ## Typed boxes have shapes, and a tag type is a union of them
 
 **Status:** built, except the deep conversion of a box result, which "A typed record or tag that R holds stays a box until R reads into it" supersedes.
@@ -345,66 +225,12 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **Typed calls are never read ahead.** `native::pure_value` does not evaluate a typed call inside an unforced argument promise: the call may not finish, and R never runs an argument its callee does not force (`ignore(1, spin())` must return). So `evaluate(build(14, 8))` runs `evaluate` in the interpreter, and `expr_tree.typed.R` binds the tree first.
 - **Test.** `typed_core_keeps_tier_zero_semantics_for_records_tags_and_text` in `crates/jit/tests/test_tiers.rs`, including the ill-typed payload case; `orders`, `expr_tree`, `report` and `team_scores` run natively with checksums equal to tier 0's.
 
-## Typed-to-typed calls are eager on every tier
-
-**Status:** built.
-
-- **Rule.** Typed ry is strict: a call from one typed function to another computes every argument the caller wrote, left to right, before the callee runs, on every tier. Otherwise compiled code (`Op::CallTyped`, eager) and tier 0 (lazy promises) disagreed on an argument that never finishes or has an effect. A typed call with an argument `pure_value` cannot read (`count(risk & data$treated)`) also ran its callee interpreted, with `List.count_if` calling an R closure per item: `log_rank` typed took 6.4 s against 0.21 s as plain R, and takes 0.25 s with eager forcing.
-- **Mechanism.** `interp::eval::force_typed_arguments` forces, before a typed callee is entered, each argument promise whose environment is the frame of a live typed closure; a typed closure never runs on slots, so the environment test is exact. A promise written in R code, including one forwarded through `...`, stays lazy, so calls from R keep R's semantics and `native::pure_value` never reads a typed call ahead.
-- **Defaults.** `native::gather` also passes a default that names no formal and that `pure_value` reads in the closure's environment (`dt = 1f64 / 12f64`).
-- This argument order is the one documented difference from GNU R running the erasure (`type-system.mdx`, "Annotations at run time"). Pinned by `test_tiers::typed_to_typed_calls_evaluate_their_arguments_first`, JIT off and on.
-
 ## R lists do not convert to records at a typed boundary
 
 **Status:** built, except the "Gap" bullet, which "A ry list is one item word" supersedes.
 
 - **Decision.** R values enter typed code only through the per-parameter boundary, as plain vectors and scalars checked at entry; records, tuples and tags are built inside typed code. A plain R list where a record is expected is a `type-mismatch` (`reference/type-system.mdx`, "Records from R"); a record from `as.record()` passes the check but runs in the interpreter, which `RY_TYPED_LOG` names. The typed log-rank benchmark (`tools/bench/kernels/log_rank.typed.R`) takes its columns as `List` parameters.
 - **Rejected (by the owner): record parameters filled from R**, with fields spread into separate compiled parameters. An R list is untyped and mutable, so the boundary would be implicit (field types, lengths and `NA`s checked deep inside a call instead of where the caller converted), it adds a second conversion route beside `List.from_r()` and `Num.from_r()`, and spreading fields gives the typed core a second kind of binding with its own refusals.
-
-## A typed call that runs in the interpreter always says why
-
-**Status:** built.
-
-- **Decision.** Every point where the native path declines calls `annotations::decline(|| reason)`, and the fallback prints ``typed: `name` runs in the interpreter: <reason>`` once per name and reason under `RY_TYPED_LOG`, the typed core's explain path. The closure runs only under the log, so a decline costs one flag test. The compile table keeps each refusal's text, so a cached refusal still gives its reason. Dispatched methods and sessions without a native tier log from `eval::try_native_typed`. ``the native path recorded no reason, which is a bug`` marks a missed decline point.
-- **Unforced promises are reported, not forced.** Forcing an R-written argument at the boundary would run its code before the body, changing the order of effects, and run arguments the function never uses (`reference/type-system.mdx`, "Parameters are checked when their value is computed"), so it is not done even where the parameter type needs a value. The native tier reads ahead only what cannot run R code (constants, variables, forced promises and base arithmetic over them, `native::pure_value`); anything else declines with a reason that quotes the argument and says to compute it into a variable first.
-- **Pinned by** `typed-fallbacks-give-a-reason.scenario` and `test_scenarios::typed_benchmarks_run_natively`, whose failure message is the fallback lines.
-
-## Typed code calls R natively
-
-**Status:** built.
-
-- **Decision.** A call of an untyped R function (base, an R closure, or `pkg::name` of a loaded namespace) compiles to `Op::CallR`, calling `typed::ry_call_r` with a leaked, globally rooted `lower::RCall` site, in exactly two positions: a statement whose value is unused, and the direct argument of `Num.from_r`, `Str.from_r`, `Bool.from_r` or `List.from_r`. Anywhere else the value would be an untyped R value, which typed code cannot hold, so the refusal says to convert it. Before, one `set.seed` or `stats::rnorm` sent a whole typed closure (`vasicek`) to the interpreter.
-- **Interpreter semantics.** Each argument reaches the function as a forced promise of the code written, so `substitute()`, `sys.call()` and error calls match. `Num.to_r`/`List.to_r` arguments and the result conversion run the real standard library functions through `eval::apply`, so errors are the interpreter's. An `I64` crosses only through `Num.to_r` or `List.to_r`; a set or dict never crosses. An R call inside another R call's arguments is refused, because R's lazy arguments decide that order and compiled code computes arguments first.
-- **Result types come from feedback.** `Num.from_r` and `List.from_r` give a type that depends on the R value, so the interpreter records it per call (`numbers::observed_conversion`). Without a record, lowering refuses with `lower::AWAITING` and `typed::AWAITING` remembers what it waits on, so the first call runs interpreted and later ones natively. An unloaded `pkg::name` waits the same way, because resolving it at compile time would load the namespace. A conversion the checker typed (`Conversion::checked`) gives its type or an error; others are guesses.
-- **A failed guess reruns the call in the interpreter.** `numbers::Observed` is `Steady(type)` or `Changed(first, second)` per call; a change bumps `numbers::conversion_epoch`. Native code sets `typed::FAILED_GUESS` and gives up; code that guessed holds the epoch (`Compiled::guessed`) and goes stale; lowering refuses a `Changed` conversion. So every tier prints what the interpreter prints, at the cost of one more compile per change. Rejected: an R error for the changed type, which the interpreter never raises.
-- **Giving up after an R call replays it** (`interp::replay`). Rerunning from the start would repeat the R call's effects. Each `typed::call` opens a segment; `ry_call_r` records `(call node, value)` for every R call that is not `effect_free` or that warned (`NULL` for an unused value), and `replay::trace` marks the values, so a native loop roots nothing per call. On a give-up, `replay::replay` runs the call in the interpreter (`eval::run_interpreted`) with the records pending; `run_frame_general` then evaluates a typed closure's body through `replay::body`, wrapping each pending node as `.ry_replay(rewritten, original)`, which returns the first unused record for the node (marking nested calls' records used) or evaluates live. Native `ry_call_r` consumes records the same way, so nested give-ups replay too. Typed code computes only from its arguments and R calls, so the interpreter reaches the recorded calls in the same order.
-  - Rejected: rerunning the call whole (repeats effects), hooking every interpreter call path (too many), running a copied closure (loses the signature, keyed by formals and body).
-  - Limits: `replay::MAX_RECORDED` (4096) calls and `replay::MAX_RECORDED_MIB` (64) MiB of values (each value's own bytes and its list elements') per segment, because records keep values alive; past them a give-up is an error that says so.
-  - File-attached code must hold the body's own call nodes (`file::Place`: the holder closure and the item positions to the call), because replay and `numbers::assume_conversion` key on the node; a rebuilt copy made attached code repeat its R calls on a give-up and never refuse a guessed conversion.
-  - An error an R function raised (parked in `PARKED`) is raised as is; `stop(...)` is a site marked `diverges` followed by a give-up, so R raises the user's message. A diverging site does not set `calls_r`, since it cannot change a variable a lazy argument reads.
-  - Cost: a call that does not give up pays one thread-local push per effectful R call; while records are pending, every typed closure the interpreter calls builds a rewritten body copy (a hash set of pending nodes and a walk), which only a give-up pays.
-- **R calls run in a frame for the typed call.** `ry_call_r` pushes one (`eval::run_in_frame`) from the `TypedCall` in `typed::RUNNING`, with a fresh environment enclosed by the closure's, so `stop()`, `sys.call()` and `parent.frame()` see the typed call. Only R calls pay the environment. A typed callee that compiled code calls directly reports its caller's call.
-- **Lazy arguments.** If a read-ahead argument (`native::pure_value`) depends on a variable, an R call in the body could change it before R would have forced it, so code that calls R (`Compiled::calls_r`, including callees) declines those calls with a reason.
-- **Pinned by** `typed-code-calls-r.scenario` and `test_scenarios::typed_benchmarks_run_natively`, which accepts the one feedback fallback line per conversion.
-
-## Typed list literals compile natively, and an empty list of boxes settles its item type at first use
-
-**Status:** built.
-
-- **Shape.** `[a, b, ...]` lowers to an empty vector of the items' common type plus one `Op::Push` per item (`list_literal` in `crates/typed/src/lower.rs`); mixed item types refuse. `List.append` is `Op::Push`. `.ry_items([], "I64" | "F64" | "Str")` gives the named type, and a bare `[]` is a `Bool` list, because the preflight wraps every other empty list.
-- **Empty lists of records or tags** are named only by storage (`"list"`), so such a `[]` starts as a *pending* list of any tag; the first `List.append` or assignment meeting a concrete list settles it, retyping every holder and the allocation (`Lowering::settle`). Settling refuses when anything but a copy or a length read used the placeholder (that operation chose code by the placeholder type), and reading a pending list's items refuses. Never settled, it stays an empty list of any tag, which is sound.
-- **Rejected: carrying the checker's type** through the preflight: it needs a type printer and parser for records, tuples and tag unions in the runtime, a second description of the same type. Every case in the benchmark ports appends before reading, so flow typing settles them all.
-- **Pinned by** `typed-list-literals.scenario`.
-
-## A count of a logical list fuses with the comparisons that built it, after lowering
-
-**Status:** built.
-
-- **Shape.** `count_if` with the identity predicate over a `List<Bool>` lowers to `Op::CountTrue`. `crates/typed/src/fusion.rs`, before ownership insertion, follows the list back through `VectorCompare` (`I64`/`F64`), `VectorLogic`, `VectorNot` and same-typed `Copy` and makes one program over the comparisons' inputs. `values::ry_count_true` runs it in 128-item chunks with lanes 0, 1, 2 for `FALSE`, `NA`, `TRUE` (`&` is `min`, `|` is `max`, `!` is `2 - x`), and fails on `NA` in the result, a length mismatch or an invalid program, as the unfused code would. Absorbed instructions whose results nothing else reads are removed, and several counts over the same lists share one pass ("Counts that share a list share one kernel pass").
-- **Why after lowering.** At lowering an operand is a local that may be reassigned, read in a branch or returned. The IR pass fuses only within a straight-line run ending at the count (its block and the chain of single-predecessor blocks into it) and checks no input is reassigned between comparison and count.
-- **Comparisons and `!` on ry lists give `List<Bool>`**, not R logicals, so `&` and `|` with another ry list accept them (`compare` and the `!` case in `lower.rs`).
-- **Measured.** `List.count_if(time >= t & event, \(b) b)` built a list per comparison and per `&`; typed `log_rank` (four 16,000-item lists per each of 1,000 event times) dropped from 0.213 s to 0.112 s median on a release build (untyped ry 0.227 s).
-- **Pinned by** `typed-mask-counts.scenario` and `fused_counts_follow_three_valued_logic` in `crates/typed/tests/test_typed/values.rs`, a seeded model of R's three-valued logic.
 
 ## A uniquely owned Array grows in place
 
@@ -416,17 +242,6 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **Reserved room.** `List.with_capacity`/`List.reserve` of an empty Array give an empty resizable `logical` Array whose capacity is the room; the first append keeps it, and `.ry_items` keeps it when retyping. Typed code lowers `.ry_items(List.with_capacity(n), "I64")` (written by the preflight, since only the checker knows the item type) to `Op::EmptyList`.
 - **Pinned by** the Array growth and `move_undo` cases in `crates/frames/tests/test_standard_library.rs`.
 
-## A ry list is one item word
-
-**Status:** built.
-
-- **Shape.** `Item::Array(id)` is a ry list held as one counted pointer word; `id` interns the item type in `crates/typed/src/shapes.rs` (`array_of`, `array_item`), so `Item` stays `Copy` and one word at any nesting. Stores use `Type::held_item`; `Type::item` is unchanged because comparison, `rep` and vector conversion must keep refusing a list of lists. `ry_list_drop` dispatches on the header's kind, so a box releases a list field like any object word. In R, a list of ry lists is an R list of Arrays.
-- **`Bool` joins logical.** A `Bool` is a never-`NA` logical in the same word, so a branch or `return` mixing them joins as logical (`joined`, `exit` in `lower.rs`); pidigits' comparison helpers return a comparison in one branch and `Bool.false` in another.
-- **An empty `I64` sum is 0** in `ry_sum_i64` and `ry_elementwise`, as in the standard library.
-- **A copying push grows from the length** (`ry_list_push`), not the shared list's capacity, which otherwise doubled on every copy in a loop of field updates and asked for gigabytes after about 30 steps.
-- **Measured.** Typed pidigits (a big integer is a record of limbs) runs natively in about 0.03 s against about 0.45 s untyped, same checksum.
-- **Pinned by** `typed-record-list-fields.scenario` and the list-field cases of `typed_core_keeps_tier_zero_semantics_for_records_tags_and_text` (`crates/jit/tests/test_tiers.rs`), which also check for leaks.
-
 ## Typed `List.sort_with` is a merge sort with its comparator inlined, and strings order by the interpreter's collation
 
 **Status:** built.
@@ -436,27 +251,6 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **String order.** `values::str_order` calls `interp::sort::collate`, the function behind R's `<`, for `ry_str_compare` and list comparisons. The interpreter reruns failed native calls, so the tiers must agree in every locale; one function is the only way, and `collate` reads the locale per call, so `Sys.setlocale` is honored.
 - **Measured.** Typed knucleotide runs natively in about 0.04 s against about 0.5 s untyped, same checksum.
 - **Pinned by** `typed-sort-with.scenario`, `test_tiers` sort and string cases, and `comparisons_and_logic_follow_r` in `crates/typed/tests/test_typed/values.rs`.
-
-## Converting a record tree at the typed boundary takes one shape-table borrow and no per-node allocation
-
-**Status:** built.
-
-- **Shape.** `to_box` finds shapes through `by_layout`, a dense vector indexed by layout id (ids come from an append-only interner), scanning that layout's few shapes with no hashing or allocation. `shapes::with` lends the whole table to one conversion, and `Shapes::converted` interns, confirms and returns words, masks and static box in one call. Fields convert into stack buffers laid out as the box (offsets are prefix sums of `item_words`), so the box fills with one copy.
-- **`from_box` borrows briefly**: it copies out the layout and items, because allocating an R record may collect and so run R code that reaches the table.
-- **Stack** is checked every `STACK_CHECK_LEVELS` levels, so deep chains (200,000 levels) convert both ways without querying the stack per node.
-- **Measured.** Warm Ir per `expr_tree` typed iteration (a 570,000-node tree held by R, converted every iteration) fell from about 429M to about 226M; the rest was per-node work the R representation forces, which lazy records remove (next entry).
-
-## A typed record or tag that R holds stays a box until R reads into it
-
-**Status:** built.
-
-- **Shape.** `from_box` returns a lazy record: an R record of the right layout whose layout word carries `heap::object::LAZY_RECORD`, slot 0 holds the box, all slots marked raw (the collector traces nothing), refcount `REFCOUNT_MAX` (no in-place update writes to it). `interp::records::slot_value` and `with_slots` fill it one level on first read (children become lazy records), and every other slot reader goes through them; `identical()` fills through `settle_uncollected`, which holds off collection, and compares two lazy records over one box without filling. `to_box` of a lazy record takes another reference to its box. `Interp::lazy_records` owns one reference per lazy record and releases it at the collection that finds it dead or filled, safe because the heap never moves objects.
-- **Compiled code** never reads into one: it fails the JIT's exact layout compare for `$` and the native field load (`jit::native::field` checks the layout word's sign), so the interpreter path fills it; the layout branch masks the bit off; `argument_word` does not pass one natively.
-- **Native memory.** Boxes are malloc'd and invisible to the collector, so `from_box` runs a minor collection once the typed core's live object count passes a threshold (at least 2^20), then doubles the threshold past what survived.
-- **Filling roots the record first**, because the reader may hold it only in a register and a collection mid-fill would release the box being read.
-- **Measured.** The convert-down-and-back round trip was about 227M of 230M warm instructions per `expr_tree` typed iteration; with lazy records it is about 24M, same checksum.
-- **Not done:** a record R built itself still converts deeply per call, and a filled record keeps no link to its box.
-- **Pinned by** `typed-lazy-records.scenario`, also under collection stress with the JIT forced on.
 
 ## The typed suite scores typed ry against Rust
 
@@ -471,85 +265,6 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **`--any-build`** lifts the release-build refusal for a local look; `--write` still requires `--release`.
 - The bar for the suite's geometric mean is 2x Rust's time or better (user direction); `just bench typed --ry PATH --any-build` scores a local build against it.
 - **Pinned by** `TypedSuite` and `BuildProfile` in `tools/bench/test_bench.py`.
-
-## Nativeness is a strict-mode diagnostic
-
-**Status:** built.
-
-- **Decision.** `semantics::native::native_blockers` judges each native function after its item is checked, from HIR and recorded types, into `ItemCheck.native_blockers`; `strict_diagnostics` renders them, and the errors reach the `preflight` gate. It is a pass over one item, not a query, so the per-item firewall holds; it reads other definitions only through declared signatures. Contract: `reference/type-system.mdx`, "Native functions".
-- **Which functions are judged.** A function literal whose declared signature (inline or `#:`) is written entirely in ry types (every parameter one, result one, `NULL` or absent, at least one ry type). A signature with an R type is the opt-out boundary function, because it is what the author wrote and every caller sees, and such a function cannot avoid holding an R value. An unannotated literal is judged only inside a native function. A signature in a `#:` comment or on the assigned name is judged by the same rule and compiles like the inline form ("A function has one signature, resolved in `syntax::annotation`"); only a signature that is a type alias name gets an extra `interpreted` warning (`Uncompiled::AliasedSignature`). A type parameter bounded by an R type (`<T: numeric>`, `native::has_r_bound`) makes a boundary function, so `ry check --annotate` output on plain R is not judged as ry.
-- **Two codes.** An R value in a native function (`NativeBlockerKind` other than `Uncompiled`: an R call's value, a nested R call, an outside variable, a column read, `a:b`, an R literal, a stray `*.to_r`) is a `native` error (the author broke the rule and can fix it). Legitimate ry the typed core does not compile yet (`Uncompiled`: `try`, list patterns, a std function without native code) is an `interpreted` warning saying how to write the step so it compiles, because the gap is the compiler's: as an error, strict mode refused about 195 std functions and `try`, and their docs examples had to leave strict mode.
-- **The rule.** Every value is a ry value. An R function may be called as the direct argument of a `*.from_r`, as an unused statement, and as `stop(...)`. Table values (`DataFrame`, `LazyFrame`, `GroupBy`, `LazyGroupBy`, `Expr`) are ry values, and a table function giving one is a native call (`native::gives_table_value`, which must agree with `gives_table_value` in `crates/typed/src/lower.rs`).
-- **Sound in one direction**: a native function with no finding compiles. The checker over-reports where it cannot decide: base functions the core computes itself (`sqrt`, `nchar`, `paste0`) are still R functions to the rule, and `a:b` is reported although `for (i in a:b)` compiles. `native::COMPILED_STD` mirrors `Lowerer::builtin` because `semantics` cannot depend on `typed`; the agreement test fails for a listed name no natively running function of its corpus calls, so a name the core lacks cannot stay listed. `Expr`-building operators are told from arithmetic by operand form on both sides (`Lowerer::is_table`, `Judge::table_operand`: a variable, an operator, or a call of a table function or of a top-level function declaring a table result).
-- **Each function is judged alone**: callers of a blocked function get no finding, and an R value is reported once, where it first appears, as `strict_origins` does for an undetermined value.
-- **Not covered**: the rule judges a body, not its calls. Calls the native entry declines (record, tuple, list literal or function arguments, non-constant non-variable arguments, a variable argument to a function that calls R, `Dict`/`Set` results) run interpreted without a finding, as does a first call that waits to load an R function or learn a conversion's type.
-- **A variable keeps one layout**, because the typed core gives it one machine type: `Judge::layout_differs` mirrors the lowerer's value classes (scalar kinds, list, record and tuple shape, tag set, table) and applies to parameters, loop variables and match bindings too; an `if` keeps a name only when both branches agree, so the value of an `if` without `else` is a finding. A local function is walked where it is first called, since it reads the caller's variables as they are at the call.
-- **Pinned by** `crates/semantics/tests/typing-strict/native.R.test` and `test_scenarios::native_diagnostics_agree_with_the_typed_core`, which checks a corpus in strict mode, runs it under `RY_TYPED_LOG`, and fails when a function without a finding falls back or a `COMPILED_STD` name goes unexercised; its `NATIVE_CHECK_EXCEPTIONS` (functions the checker passes and the core still refuses) fail when an entry starts compiling, so the list only shrinks. So a typed program clean in strict mode runs natively, apart from those exceptions and declined calls. Programs under `crates/ry/tests/native/` state their blocked and boundary functions in a header.
-
-## Typed code holds table values natively
-
-**Status:** built.
-
-- **Shape.** `ir::Type::Table` is one opaque word, the pointer of a DataFrame, LazyFrame, GroupBy, LazyGroupBy or Expr (`frames::dataframe::is_table_value`). Typed code only passes it to the table API (`gives_table_value` in `lower.rs`: every `DataFrame.*`, `LazyFrame.*`, `GroupBy.*`, `LazyGroupBy.*` and `Expr.*` function giving a table value, plus `DataFrame()` and `as.DataFrame()`), compiled as `Op::CallR` with `RResult::Table`. The table engine runs the same closures as from R, so results are the interpreter's. It is not counted: the collector owns it.
-- **A table call is not an R call for the R-call rules**, because the table API changes nothing a second run would see: it may nest in arguments (no order is observable), does not set `Compiled::calls_r` and does not count in `R_CALLS`, so a give-up after it is a plain re-run. Its one visible effect is a warning, so `ry_call_r` compares `interp::conditions::warnings_raised()` around it and counts the call when the number moved.
-- **Operators** with a table operand (`Expr.col("units") > 3`) are table calls of the base operator, which dispatches to the `Expr` method, decided from syntax (`Lowerer::is_table`: a variable holding a table, a table function call, a parenthesis or operator over one, a typed function whose written result type starts with a table type's name, `lower::returns_table`). The runtime keeps no alias definitions, so a result type that aliases a table type is not seen; the checker warns and asks for a variable. Arguments cross as for any R call: an `I64` reaches a table function through `Num.to_r`, as the checker requires (`Expr.col("units") >= least` with an `I64` is a `type-mismatch`), so the lowerer has no table-only argument rule.
-- **Columns are R vectors**: `table$name` and `table[["name"]]` compile to base `[[` and are legal only where an R call's value is; `table[...]` is refused with a message naming the verbs.
-- **Rooting.** A table result sits in a word the collector does not scan, so `ry_call_r` roots it on the handle stack until the outermost `typed::call` returns; a loop making a table per iteration holds them all until then.
-- **Pinned by** `typed-table-values.scenario`.
-
-## A serialized typed closure carries its signature
-
-**Status:** built.
-
-- **Decision.** The registry (`interp::annotations`, keyed by formals carrying `TYPED_DEFINITION`) stays the one in-memory source of truth. The stream carries a copy: `libr::serialize` writes `annotations::STREAM_ATTRIBUTE` as the first attribute, and `interp::serialize` removes it and registers it (`annotations::restore_signature`), so a closure in memory never has it. Without it a typed function read back (lazy-load database, `readRDS`, saved workspace) kept the typed bit but had no signature: no argument check, a whole number for an `I64` parameter stayed a double, and the typed core compiled for whatever arrived. Install-time compilation reads these declared types. Another R reads such a stream as a closure with one unknown attribute.
-- **Unloaded siblings.** `typed::lower::resolve_function` forces a lazy-load promise of any package (`serialize::lazy_record_header`), because such a promise only reads the package database; otherwise a typed function whose first call found a sibling unloaded was refused for good.
-- **Pinned by** `install-typed-package.scenario`.
-
-## A record or tag that stays in its function has no box
-
-**Status:** built.
-
-- **Shape.** `typed::unbox` (`crates/typed/src/unbox.rs`) runs after lowering and before fusion and ownership. A local holding a record or tag becomes one `Int` local for the shape plus one local per field some instruction reads. Constructions assign the shape constant and copy read fields, a payload-less tag (`shapes::constant_shape`) assigns its shape, `Op::ShapeOf` and `Op::Field` read the variables. Every assignment of the old local assigns the new ones at the same place, so a read sees the same value on every path. Running before ownership means no count operation ever exists for a removed box.
-- **Rejected: a dominance rule** (a single dominating construction). It treated locals as SSA values and missed boxes built on both arms of an `if` or rebuilt per loop iteration. Locals are variables, and a variable holding a box can simply become several variables. So `match (Str.to_i64(text)) { :Ok(n) => ...; :Err(_) => ... }` no longer builds `:Ok(n)` on one branch only to take it apart after the join, and no dominator tree is needed.
-- **Groups.** Locals copied into each other form a group (union-find over `Op::Copy`), replaced whole or not at all. A group keeps its boxes when a member is a parameter's box, is assigned by anything but a construction, in-group copy or static tag, or is used other than as a shape read, field read or in-group copy (an argument, a list item, a field of a kept box, the result); or when reads of one field differ in type, or constructions store types the field type does not cover (`fits` allows equal types, a `Bool` stored as its logical, and a tag of a known union stored as a tag of any union).
-- **Payload-less tag variables** are replaced too when some instruction builds for the group, so a `match` compares a register instead of loading from the static box, which `orders` pays per item for its region tag. A group nothing builds for (a box a call returned, or an earlier round's variables) is left alone.
-- **A field only one shape has** may be dead-but-live after a join (liveness is not path-sensitive). Sound because locals start at zero, a zero string, list or box counts as nothing (`backend::dup`/`drop` test it), and a live local holds zero or a value it owns.
-- **Nested boxes** go in later rounds (`MAX_ROUNDS` is 4): once the outer box is gone, the inner one's only uses are copies and reads. A field nobody reads gets no variable, so a box only stored in such a field goes too.
-- **Measured.** With this and inlining, `orders` went from about 19 to about 2.3 times its Rust twin's time (iterate build), and the group rule halved `team_scores` (two of its four boxes per row are parse results matched at once). Compile cost is three linear walks and one rewrite per round.
-- **Pinned by** `crates/typed/tests/test_typed/unbox.rs` (hand-built IR per rule), `typed-records-unboxed.scenario`, and the loop case of `typed_core_keeps_tier_zero_semantics_for_records_tags_and_text` in `crates/jit/tests/test_tiers.rs` (tags with string payloads built on different branches, read after the join).
-
-## A small typed function is lowered into its caller
-
-**Status:** built.
-
-- **Shape.** `Lowering::inline` takes the callee's storage rule (`crate::storage`, so arguments meet the callee's annotation exactly) and serves top-level typed functions as well as local ones. A call inlines when the callee is in the same environment, is not already being inlined (`inlining`), is within `MAX_TYPED_INLINE_DEPTH` (4) levels, takes exactly the arguments passed, cannot end invisibly (`tail_invisible`), and is small (`small_body`: at most `MAX_INLINE_CALLS` (48) calls and operators, no `return`, no self call). Inlining lets the callee's constructions land where `typed::unbox` removes them.
-- **Self-recursion inlines one level**, for a function with at most `MAX_SELF_CALLS` (2) self calls. Calls inside the inlined copy are real calls, so a recursion makes about half its calls and each pays the frame, depth guard and status test once for up to three bodies: `fib` went from about 2.3 to about 2 times its Rust twin. More is not taken because each further level or call multiplies the body, and compile time is part of the score (`expr_tree`'s five-way recursion compiled five times slower for no gain). `self_inlines` counts copies as made, because a local function holding the self call is lowered at each of its calls. A recursive function never inlines into another, so a caller's size does not depend on its callees' recursion.
-- **Why at lowering, not on the IR.** The lowerer types by flow, so an inlined body is specialized to the site's argument types for free; an IR inliner would need the callee's IR for those types plus renaming.
-- **Fallback.** An inlined body is lowered under the caller's rules, which can refuse something a separate function may do (a body whose result is a call of R); `lower::lower` then runs once more (`lower_calling`) with that callee as `Op::CallTyped`.
-- `RY_TYPED_LOG` prints no "compiled for" line for a function that was only inlined.
-- **Pinned by** `typed-record-list-fields.scenario`, `typed-calls-stay-native.scenario` and the self-calling cases of `typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic` in `crates/jit/tests/test_tiers.rs`.
-
-## A typed loop over a held list counts a position and reads without a range check
-
-**Status:** built.
-
-- `positions` and `count_up` in `lower.rs` run an `I64` counter from 1 to a length read once; `next_position` leaves when the counter equals the end before stepping, so the step cannot overflow. The body reads with `Op::ItemAt`, an unchecked load, which is sound because the loop reads a lowerer-made local holding its own reference for the whole loop, so the length cannot change. `List.walk` over `List.range` builds no list. The array kernels' loops are a compare, a load and an add per item.
-
-## A typed free calls a register-preserving entry
-
-**Status:** built.
-
-- The backend compiles one thunk per free routine in Cranelift's preserve-all convention (`CallConv::Preserving` in `crates/ssa`) and calls that, so values live across a drop stay in registers. The spills came from the host call's convention (the allocator assumes it clobbers every caller-saved register), not from its frequency, so inlining only the count test did not help.
-
-## Fused list kernels are compiled per CPU feature level and clear no buffers
-
-**Status:** built.
-
-- **Feature levels at run time.** A released binary must run on any x86-64, so not `-C target-cpu`. `count_true` is `#[inline(always)]` and compiled twice (`count_true_avx2` with `#[target_feature(enable = "avx2")]`, picked by `is_x86_feature_detected!`). Trap: its helpers (`operand`, `compare_lanes`) must be `#[inline(always)]` too, because a function without the attribute is not compiled with the caller's features. `crates/numeric/src/vector_math.rs` does the same. Baseline x86-64 (SSE2) has no 64-bit integer compare and works on two doubles at a time.
-- **The arithmetic kernel** calls one step function per step and chunk through a pointer chosen once (`Step<T>`: `step_dbl_avx2`/`step_dbl_baseline`, same for `I64`). The slices are step parameters, so the compiler knows they do not overlap and vectorizes every operator with its `NaN` or overflow test; the last step writes into the result list. A call per 128-item chunk costs nothing beside the chunk and keeps one copy of the control code; the count kernel's whole-body copy could move to step functions as a cleanup, not a speed-up.
-- **No clearing.** `Rows` holds chunk buffers uninitialized; a kernel fills its scalar rows, clears only rows its steps write, and reads no other row. Zeroed arrays cleared up to 36 KB per call, a sixth of the kernel's instructions in `log_rank`.
-- **Measured** (iterate build): `log_rank` runs at about 3.5 times its Rust twin's time (from about 8) and `vector_arith` at about 1.9 (from about 2.6). The remaining cost is in `backlog.md` ("Typed ry against Rust").
-- **Pinned by** `fused_counts_follow_three_valued_logic` and `fused_arithmetic_agrees_with_one_item_at_a_time` in `crates/typed/tests/test_typed/values.rs`, and `typed-mask-counts.scenario`.
 
 ## `Dict.update` probes once and builds no `Result`
 
@@ -567,27 +282,6 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - A typed benchmark and its Rust twin do the same work in the same data model (the mandate's "written entirely in ry's own types"), so `sales.typed.R` totals revenue per region in a `Dict<Str, F64>` via `Dict.update` and `tools/bench/typed/sales.rs` uses a `HashMap<&str, f64>`; a DataFrame pipeline measured the table engine and the R call protocol instead. Both weight regions alphabetically, so the checksum is the plain R program's.
 - The column lists are held by untyped code, so each call converts the `List<Str>` and scans the numeric ones (`typed::type_of`); that boundary cost is in the ratio on purpose (`backlog.md`).
 
-## Short strings are built and hashed as two words
-
-**Status:** built.
-
-- A string of at most 15 bytes is two words with inline bytes. `values::str_from_bytes` builds them from overlapping fixed-size reads (two 8-byte reads for 8 to 15 bytes, two 4-byte reads for 4 to 7, byte reads below) with no `memcpy`, and `values::key_hash` mixes the two words. Equal inline strings have equal words because bytes past the length are zero. The crate is little-endian only (`compile_error!`), which the layout relies on.
-- `typed::usable_string` skips UTF-8 validation for a CHARSXP with `VALID_UTF8` set (interning sets it).
-- **Pinned by** `test_values::strings_switch_to_heap_past_fifteen_bytes`, which checks the exact words for every length from 0 to 15.
-
-## The typed log reports each compilation's own time
-
-**Status:** built.
-
-- **Why.** Compile time is part of typed ry's performance bar (single-pass, far below `rustc`), so it must be visible to weigh optimizations.
-- With `RY_TYPED_LOG=1`, `typed: compiled for [...] -> ... in N us` excludes nested callee compiles (`typed::NESTED_COMPILE`), and refusals log `typed: refused [...] after N us`, so a run's lines sum to its total. No clock is read without the log. The typed suite sums them into `compile_seconds` beside `rustc`'s time (`tools/bench/bench.py`, `typed_log`, `RustRunner.compile_seconds`), and the benchmarks page shows them as the suite's "Compile time" table.
-
-## One thread-local holds every typed allocation pool
-
-**Status:** built.
-
-- `values::Pools` holds the free stacks, large classes and `live` counter in one thread-local, resolved once per `object_alloc`/`object_free` and passed down (`block_alloc_in`, `block_free_in`), because in `libR.so` each thread-local read is a `__tls_get_addr` call. Its cost still shows in `team_scores` (`ry_box_new` is about 84 instructions). Next step: backlog, "Typed ry against Rust".
-
 ## `Str.split_on` with a one-byte separator scans a word at a time
 
 **Status:** built.
@@ -596,13 +290,6 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **Rejected: `memchr`**, because delimited fields are short and a call per separator costs more than the scan.
 - `box_free` visits only the set bits of the `objects` and `strings` masks (`trailing_zeros`, clear the lowest bit), not every word of the box.
 - **Pinned by** the sweep in `test_values::string_functions_follow_r_and_the_standard_library` (every length from 0 to 40 with separators at eight strides, against Rust's `split`).
-
-## A branch on a comparison of two doubles compares once
-
-**Status:** built.
-
-- `backend::emit_block` recognizes a block ending in `Compare(op, Dbl, a, b)`, `Truth` and `Branch`, and emits the ordered comparison as the branch. A holding ordered comparison proves neither operand is NaN, so the unordered test runs only on the other path; `!=` holds for unordered operands, so there the unordered test comes first. The compare's and truth's locals are still set, because later blocks may read them. Compile cost is a slice pattern on the block's last two instructions, no extra pass.
-- **Pinned by** `test_tiers::typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic` (all six operators on both sides, and `0 / 0` with `!=` and `<`, where the interpreter answers).
 
 ## `List.count_if` with a comparison predicate counts over the whole list
 
@@ -618,14 +305,6 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 **Status:** built.
 
 - A typed benchmark and its Rust twin are both written as users would write them. The twin counts with `filter` and `count`, which `rustc` vectorizes, so `array_filter.typed.R` counts with `List.count_if` and a comparison predicate. Typed ry has no autovectorizer and gets none (compile time is single-pass), so whole-list operations are the fast spelling: an element loop adding to an `F64` total is bound by the add chain and the per-item poll, about three times the vectorized count.
-
-## Shapes are confirmed after lowering, and machine code is generated once
-
-**Status:** built.
-
-- `compile` lowers (`lower_settled`), confirms `Lowered::constructed`, and lowers again only if a `match` over any tag saw an older epoch; `generate` then runs unboxing, fusion, ownership and Cranelift once. Confirming after code generation made functions that construct shapes and match over any tag compile twice. Lowering is cheap to repeat.
-- **Confirming before the code exists is safe**: a confirmed shape only adds a case to matches over any tag; if the backend then refuses, later matches test for a shape nothing constructs, which costs a comparison and changes no answer.
-- **Measured.** `orders` compiles in about 1.5 ms instead of 2.4 ms; `RY_SSA_DUMP=1` prints one `function Tail` per `typed: compiled` line.
 
 ## `List.sum` adds doubles in order in double precision
 
@@ -648,61 +327,6 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **Not done: range facts for `I64` subtraction.** Dropping the overflow check from `fib`'s `n - 1` and `n - 2` changed its time by less than the noise.
 - **Pinned by** `crates/typed/tests/test_typed/fusion.rs` (which counts share a pass, and each rule that keeps two apart), `fused_counts_follow_three_valued_logic` in `crates/typed/tests/test_typed/values.rs`, and the log-rank cases of `typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic` in `crates/jit/tests/test_tiers.rs`.
 
-## Parsing a number is one instruction with two results
-
-**Status:** built.
-
-- `Op::Parse { string, parsed }` assigns the number to `dest` and whether it parsed to `parsed`, from one call of `values::ry_str_to_i64` or `ry_str_to_dbl`; the number is zero when parsing fails, and the instruction cannot fail. It replaced a test-then-parse pair that parsed every string twice. `Inst::assigned` reports the extra local. With the `:Ok(number)` box removed by unboxing, `match (Str.to_i64(text))` costs the parser call and a branch.
-
-## An `I64` remainder or quotient by a positive constant needs no checks
-
-**Status:** built.
-
-- **Shape.** When the divisor is a positive constant (`ssa::Builder::constant` reads its defining `iconst`), zero and -1 cannot happen, and a truncated remainder is negative exactly when the floored one differs: `%%` adds the divisor masked by the remainder's sign, `%/%` adds that sign. A power of two needs no division (low bits, arithmetic shift). The general path in `backend::i64_arith` keeps a floor fix of about ten instructions per operator even after Cranelift folds a constant divisor.
-- **Measured.** `orders` (four such operators per item) went from about 114 to about 89 instructions per item (callgrind, release build), and from about 2.4 to about 1.8 times its Rust twin; less code is emitted, so compile time falls.
-- **Why in the backend**: typed IR locals are variables and cannot say an operand is constant, while the SSA builder knows each value's definition. A constant assigned in another block is a block parameter until sealing and takes the general path.
-- **Pinned by** the constant-divisor cases of `typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic` (negative dividends, `Num.min_i64`, zero and negative constants) in `crates/jit/tests/test_tiers.rs`.
-
-## A split list that is only read at constant positions is never built
-
-**Status:** built.
-
-- **Shape.** `unbox::replace_split_lists` runs before `unbox::unbox` and replaces a group of list variables with variables for the string, the piece count, and the bounds of each piece some read names. `Op::SplitBounds` assigns them from one scan (`values::ry_str_split_bounds`) that stops after the last named piece; a read becomes `Op::Piece` (`values::ry_str_piece`), which fails exactly where the list read failed.
-- **Which lists.** A group of `List<Str>` variables joined by copies, assigned only by splits or in-group copies, used only by such copies or by `Op::Get` with an index one `I64` constant assigns, from 1 to 32. A list returned, measured, passed on or read at a computed position is kept.
-- **Why the variables hold the string**: locals are variables, so the split's string may be reassigned before a read; copying it at the split makes every read see its split's string on every path, as for a box's fields.
-- **Why cut at the read**: a row rejected early never pays for later pieces (Rust's `split` yields slices too). A read run many times cuts each time where a list read would copy a reference; the common shape (split inside the loop, read each piece once) takes that trade.
-- **Measured.** The list and its strings were about 690 of about 1,750 instructions per `team_scores` row; it went to about 1,420, and from about 2.9 to about 2.2 times its Rust twin (release build, shared machine).
-- **Pinned by** `crates/typed/tests/test_typed/unbox.rs` (which lists are replaced and which uses keep one), `check_split_bounds` in `crates/typed/tests/test_typed/values.rs` (offsets against Rust's `split` for every limit, with one-byte, wide and empty separators), and the split cases of `typed_core_keeps_tier_zero_semantics_for_records_tags_and_text` in `crates/jit/tests/test_tiers.rs` (a read past the last piece, a reassigned string, a list reassigned on a branch and in a loop).
-
-## A loop that fills a list is fused with the loop that reads it
-
-**Status:** built.
-
-- **Shape.** `loops::fuse_loops` (`crates/typed/src/loops.rs`) runs on the typed IR, because `fusion::fuse` only fuses element-wise arithmetic and does not see loops. It moves the consumer loop's body into the producer at its `Push` or `Set`, which it deletes. The item passes in a variable, a counter stands in for the length (`List.len` still answers), and a three-stage pipeline fuses in two rounds. With no list holding them, the items' boxes are removable by `unbox::unbox`.
-- **Which lists**: the module documentation lists the conditions (one counted producer filling once per iteration, a consumer reading first to last, nothing else reading but the length, a straight path between whose only branches give up, no calls or returns, no shared variables).
-- **Why reordering is sound.** Without calls a body's only effects are on locals and the heap values they own, and the interference test (`Bits::intersects`) excludes shared variables. Every failure (`Terminator::Fail`, no payload) gives the call to the interpreter, which reruns it from the start. The one accepted difference: a consumer body that never ends, where unfused a later producer failure would have given up first.
-- **Making the list must not fail**, because its creation is deleted: the capacity must be `never_negative` (a non-negative constant, a length or a count), since `Op::EmptyList` fails on a negative one. The instruction computing the capacity stays, with its own failure.
-- **The store's own failure stays.** `Op::Set` into a double list gives up on `NaN`/`NA` (the backend's `Set` arm, giving the interpreter's "a list cannot hold NA"), so the fused loop keeps an `Op::IsNan` branch there. A `Set`-filled list of R integers or logicals has that failure with no IR test, so it is not fused (`List.map` refuses to build one anyway). `Op::Push` has no such test.
-- **Where the list may be made**: a `for` over `List.range(1, n)` puts its range check before the guard, so a list made before the `for` sits a block ahead; it is accepted on the single-predecessor path into the producer's guard, up to `MAX_BETWEEN` blocks (`runs_into`); a `Set`-filled list must be made in the guard, since its length is the loop's.
-- **Why before `unbox` and ownership**: no `Dup`/`Drop` exists yet to move, and the boxes become removable only after their lists are gone.
-- **Supporting changes**: `List.map` with a named typed function inlines it at `apply` (`lower::typed_function`), because a loop with a call never fuses; `unbox::remove_unread` removes unread instructions that cannot fail (unread fields of a record that became its fields, which for a string was an allocation per row); `Op::Piece` at index 1 cannot fail (`ir::Op::can_fail`), because a string always has a first piece.
-- **Known limits** (in `backlog.md`): a third stage after two `Set`-filled lists fuses only the first two, loops sharing an assigned variable stay apart, and a loop with a call of R or of a non-inlined typed function never fuses.
-- **Measured.** `team_scores` went from about 1,420 to about 890 instructions per row (callgrind), and from about 2.2 to about 1.2 times its Rust twin (release build, shared machine), allocating no list and no box. What remains: the separator scan (about 180), generated code (about 165), cutting parsed pieces (about 150), the two number parsers (about 165) and the dictionary update (about 135). Suite compile time stayed within run-to-run spread (about 37 to 39 ms for seventeen programs), because the pass only looks at functions with two counted loops.
-- **Pinned by** `crates/typed/tests/test_typed/loops.rs` (each condition, plus a fuzz against an IR evaluator; `FUZZ_SEED=<n> cargo test -p typed --test test_typed loops::` replays), `an_unread_value_goes_with_what_only_it_read_unless_computing_it_can_fail` in `test_typed/unbox.rs`, and the pipeline cases of `typed_core_keeps_tier_zero_semantics_for_records_tags_and_text` in `crates/jit/tests/test_tiers.rs` (rows dropped, none kept, a row missing a piece, an empty list, a `for` that appends and breaks, an overflowing item).
-
-## Whole-number ranges decide which checks typed code needs
-
-**Status:** built.
-
-- **Shape.** `ranges::ranges` (`crates/typed/src/ranges.rs`) computes one interval per whole-number local, read by `backend::compile` through `Ranges::of(block, local)`. An `I64` `+ - *` whose exact result fits drops its overflow test; `%%`/`%/%` with a known-positive divisor drops the zero and -1 tests, and the floor correction when the dividend is known non-negative; `Op::Truth` and `Op::ToDbl` skip the `NA` test for an operand whose range starts above `NA`.
-- **Finding a range.** A range covers every assignment of the local. Ranges grow from empty to a fixed point, a bound still growing after three rounds jumps to its type's limit, and up to three descending rounds recompute from that (`i %% 7` is at most 6 whatever the counter's end). A local some path reads before assigning includes 0, because machine code starts non-parameter locals at zero.
-- **Branch narrowing.** A branch on a comparison of two `I64` locals narrows both in every block the target dominates, only when the branch is the target's only entry and the condition and operands are assigned at most once, before the comparison on every path. Then every way back into a dominated block leads through the comparison, so the test holds wherever the narrowed range is read.
-- **A wrong range is a miscompile**, so each transfer function follows what the backend emits: a length written to an integer keeps the type's whole range, extra assigned locals get their type's range, an operator that gives up on overflow is clamped to its type, and a logical or `Bool` is not assumed to be 0 or 1, because package C code can store another true value and `Op::Truth` passes it on. It relies on two IR contracts: `Op::Step` never overflows, and a `Bool` is never `NA`.
-- **Rejected: SSA value ranges in `crates/ssa`**, which would have to recover the types and the checked operators from emitted code.
-- **Known cost**: Cranelift places a pure value at its first use per dominator branch, so with the overflow test gone `i %% 7 + 1` can be computed twice; the removed checks outweigh it.
-- **Measured** (callgrind, iterate build): `orders` runs about 76 instructions per order line, from about 88, and `fib` about 7% fewer. Release times moved less than run-to-run spread (`orders` near 1.8 times its Rust twin, `fib` near 1.7), likely (unmeasured) because the removed tests were well-predicted branches. Compile time stayed within spread (a few linear walks). The facts serve later steps: a counter known non-negative, a value known not `NA`.
-- **Pinned by** `crates/typed/tests/test_typed/ranges.rs` (each rule, plus a fuzz checking every read value lies in its range; `FUZZ_SEED=<n> cargo test -p typed --test test_typed ranges::` replays) and the range cases of `typed_core_keeps_tier_zero_semantics_for_i64_and_list_arithmetic` in `crates/jit/tests/test_tiers.rs` (negative dividends, `Num.min_i64` and `Num.max_i64` behind a test, a variable reassigned after a test, a test in a loop).
-
 ## An R vector with `NA` converts through `List.from_r_or` or `List.from_r_missing`
 
 **Status:** built.
@@ -714,53 +338,8 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **The typed code file format recorded a conversion's default type from version 4** (version 5 is current: "An R call's argument passes R literals and outside variables as code").
 - **Pinned by** the `conversions__missing_values_convert_with_a_default_or_as_results` typing fixture, the `List.from_r_or`/`List.from_r_missing` cases of `crates/interp/tests/test_arrays.rs` and `crates/frames/tests/test_standard_library.rs`, and the `gaps.R` section of `crates/ry/tests/scenarios/typed-code-calls-r.scenario` (native at the first call, `--aot`, and `RY_JIT=off`).
 
-## An R call's argument passes R literals and outside variables as code
-
-**Status:** built.
-
-- **Rule.** Directly among an R call's arguments (an R function, a table function, an operand of an operator that builds an `Expr`), a native function may write any R literal (`NA`, `NA_real_`, `2i`) and read any variable from outside the function that it never assigns. R evaluates such an argument itself, so it needs no ry type. Anywhere else, the literal and the variable stay `native` errors (`native.rs`, `is_r_argument`).
-- **Lowering.** `lower::RArgument::passed` is `Passed::Value(type, conversion)` or `Passed::Code`. `typed::apply_r` hands a code literal over as a forced promise of itself, as the interpreter does, and a code variable as a lazy promise in the typed closure's environment, so the R call reads the binding when it runs and a rebinding between calls is seen. The closure's environment is the lexically right one; the frame `run_in_frame` lends belongs to the outermost running function.
-- **A base function that lowers natively becomes an R call when an argument only R can evaluate** (an `NA` or complex literal, an outside variable), but only when it is written as a call or a `%op%` operator (`takes_r_arguments`), the positions the checker reads as an R call's arguments. An operand of `$`, `[[` or another operator stays a ry value, or a column name like `kept$price` would turn the read into an R call that has effects.
-- **R code nests.** A call of a base R function (or base `%op%`, or `base::f`) on R code (literals, outside variables, such calls) is R code, and `apply_r` passes it as a lazy promise in the closure's environment, so `Expr.col("day") >= as.Date(start)` is native and R decides when `as.Date` runs. From a promise, a function that looks at its caller's frame would see that environment instead of the function's frame, so only base R qualifies (the checker asks `declaring_namespace`, the lowering `binds_in_base`) minus the base functions that look (`syntax::native_values::reads_its_frame`, which also lists `stop`/`warning`, whose condition records the call). Other packages are out because any may look (`glue::glue` interpolates from `parent.frame()`). A package that imports a base name from elsewhere makes the lowering refuse a call the checker accepted, which only costs the interpreter. A table site with such a call among its arguments still counts as effect-free where it nests in another call's arguments (only R code of base R runs there), but `call_r` records it for replay, so a fallback does not run the call twice. Chosen over a ry date type for the reported need (a date bound in a table filter): a ry `Date` would clash with R's `Date` in annotations (`DataFrame{day: Date}`), and building a date from ry values still goes through a boundary function.
-- **Rejected:** converting the global once at compile time (a rebinding would be missed), and giving `NA` a ry type (no ry value holds it; a `Result` or a tag models a missing value).
-- **The typed code file format is version 5**, since an argument records whether it passes a value or its code, and a site may read a global ("Native code reads a ry-typed global where it runs").
-- **Pinned by** the `native__r_literals_and_outside_variables_as_r_arguments` and `native__r_calls_on_r_code_as_r_arguments` strict fixtures, `crates/ry/tests/native/clean-r-arguments.R` and `clean-r-code-calls.R` in the agreement corpus, and the `arguments.R` section of `crates/ry/tests/scenarios/typed-code-calls-r.scenario` (native at the first call, `--aot`, `RY_JIT=off`, and a rebinding between calls).
-
-## Native code reads a ry-typed global where it runs
-
-**Status:** built.
-
-- **Rule.** A native function reads a global that holds an `F64`, `I64`, `Bool`, `Str`, a `List` of a scalar, or a table value (`semantics::native` `reads_globally`, `typed::lower::reads_globally`). A global holding a record, tuple, tag, `Dict` or `Set` stays an `interpreted` warning (GlobalRead), because R code may rebind it to anything and those values have no checked conversion from R.
-- **Lowering.** The read is an R call site whose `RResult::Global(type)` reads the binding at each run (`typed::read_global`), so a rebinding is seen with no recompilation. A value of another type is an error naming the global and both types, as other typed boundaries fail. A promise (a package variable's lazy-load promise) is forced there, as R forces it on a read. An unbound, active or enclosing binding makes the call give up, and the interpreter runs it (a namespace's imports environment counts as global). Each read converts the value, so a global `List` read in a loop copies it per iteration and a global table is rooted per read until the entering call returns: bind it to a local first in a hot loop. Reading it once per call would need the global's rebinding visible to compiled code, which the per-read site is for.
-- **Compile time.** Lowering resolves the binding to learn its type: an unbound global waits (`Awaited::Binding`) for the assignment to run, an unforced promise waits for it to be forced, an enclosing variable is refused. So a script's `--aot` compiles such a function at its first call, while a package's functions compile at install and at namespace load, where the values exist. A function that also assigns the name is refused, since the local would shadow the global partway through.
-- **Rejected:** a speculation on the value (a rebinding would recompile, and `still_resolves` compares identity), and converting once at compile time (a rebinding would be missed).
-- **File format.** A site's function lookup is an `Option`, absent for a global read, whose call is the global's symbol (version 5); attaching checks that the place holds that symbol.
-- **Open.** `--aot` could take the checker's declared types of top-level globals and compile these functions ahead. The interpreter tier does not check the global's type, so `RY_JIT=off` follows R where native code raises the error.
-- **Pinned by** the `native__global_that_holds_a_ry_value` and `native__global_that_holds_a_record` strict fixtures, `crates/ry/tests/native/clean-ry-globals.R` and `blocked-global-read.R` in the agreement corpus, the `globals.R` and `loose/retyped.R` sections of `crates/ry/tests/scenarios/typed-code-calls-r.scenario`, and `capped`/`step_total` in `install-typed-package.scenario` (attached from the file).
-
-## `ry check --fix` applies the rewrites native findings name
-
-**Status:** built.
-
-- **Shape.** `NativeBlocker.fix` holds a `NativeFix`, decided by the judge where it sees the context; `diagnostics::native_fix` turns it into the one-edit `Fix` every host shares (CLI, quick fix, check cache). `Convert` wraps the construct in the `from_r` the message names (an R call's value, a column read). `Hoist` computes a nested R call into a new variable before the statement and uses the variable: one contiguous edit from the statement (or the first of its `#:` lines, which must stay on the statement) to the occurrence, so `Fix` needs no multi-edit form. The name is `value`, `value2`, ... skipping every variable the item reads or binds (`variable_names`, from HIR, not text) and earlier fixes of the same pass. Both are `Safe`: strict mode refuses to run the function as written, and the rewrite is the one order native code runs.
-- **When `Hoist` is offered.** `Judge::hoist` is the enclosing `{` statement, cleared in branches, loops, a `while` condition, the right of `&&`/`||`, a function literal's body (a braced body sets its own), match arms, and the arguments of an R function that evaluates them late, repeatedly, never or under a handler (`defers_arguments`: `tryCatch`, `switch`, `ifelse`, `quote`, `with*`, `suppress*`, `expect_*` and so on). An `if` condition runs first and once, so it hoists. Ordinary R functions are trusted to force their arguments, as the message already asks the user to assume.
-- **When `Convert` is withdrawn.** For `x <- r_call()` where a later read of `x` converts it (it would become `Num.from_r(I64)`, a type error) or passes it to R under a `Num` or `List` conversion (an `I64` needs `Num.to_r`). The right rewrite there moves the conversion, two edits; left to the user.
-- **No fix**: a nested call without a conversion type, `RVariable` (the conversion belongs at the variable's origin, outside the function), `Range` (`a:b` to `List.range(a, b)` changes the type from an R vector and is inclusive differently for `b < a`), `ToROutsideCall` and `RLiteral` (no single rewrite), and every `interpreted` warning (most name a restructuring; none is one exact edit).
-- **The lazy-argument rule stays.** `Str.from_r(toupper(key))` inside `DataFrame.filter` is reported although `toupper` has no effect, because the checker cannot know an R function is effect-free in general; `typed`'s `RCall::effect_free` covers only table functions and column reads, which the judge already exempts. The fix makes the rewrite cheap instead.
-- **Pinned by** the `native__a_nested_r_call_*`, `native__a_moved_call_*`, `native__a_column_read_*` and `native__a_local_converted_*` strict fixtures (which render fixes) and `crates/ry/tests/scenarios/native-fix.scenario` (fix, idempotent second pass, clean check, run).
-
 ## `Num.sqrt(NaN)` is an error, as every library function's `NaN` is
 
 **Status:** settled (`reference/standard-library.mdx`, "No function returns `NaN`").
 
 - A typed port found that `Num.sqrt` stops on `NaN` rather than returning it. That is the library's contract: no function takes or returns `NaN` except `Num.is_nan`, so a `NaN` never travels silently through typed code, and `Num.sqrt_checked` returns the failure as a tag. A port that may meet `NaN` tests with `Num.is_nan` first.
-
-## A name set on some paths is one variable with a set flag
-
-**Status:** built (`crates/typed/src/lower.rs`, `Binding::Maybe`, `Lowering::variable`, `maintain_flags`; mirrored by `Judge::join` in `crates/semantics/src/native.rs`).
-
-- **Shape.** A name gets one IR variable per type per inline scope (`Variable`), reused by every assignment of that name and type, so every branch writes the same local and a join needs no copy. After a branch, a `match` or a loop, a name set on every reaching path is `Value`; one set on some paths is `Maybe(local)`. A read of a `Maybe` branches on a `Bool` flag local and gives up where it is clear, so the interpreter reruns the call with R's lookup (the enclosing frame, or `object 'x' not found`). Where every end sets the name, in variables of joinable types, each end copies into a joined variable; anything else drops the name, and a later read refuses.
-- **Flags are maintained after lowering.** `maintain_flags` clears each flag at its variable's scope entry and, after every write of a variable whose name has a flagged variable, sets that flag and clears the name's other variables' flags. A pending empty list's local is a variable of its own for this, never shared, or its write would leave an older value's flag set. One pass over the finished IR keeps checkpoint and rewind (match shapes) free of flag bookkeeping, and costs nothing for functions with no `Maybe` read.
-- **Why not a zero constant.** Locals start zeroed and the unbox pass keeps boxes for a group assigned by anything but `Construct`, `Copy` or a constant object, so initializing value locals explicitly would pessimize unboxing.
-- **Local functions.** One defined in a branch or loop body is inlined there; after it the name is `Hidden`, so a use refuses rather than reach a global of the same name. Defining a name again inside a branch or loop refuses, because inlining fixes one body per name, except a name a branch already hid, so both branches of an `if` may define one.
-- **The checker mirrors it.** `Judge::join` keeps a name every ending path set to types stored alike, makes one some paths set, all to one type, `Slot::Maybe` (an assignment gives it a new variable, so no `TypeChange`), and drops the others (`BranchOnlyName` on read). A loop variable or pattern name is an assignment in the core, so `Judge::bind_assigned` checks a name the function already holds for `TypeChange`. `native_diagnostics_agree_with_the_typed_core` pins the agreement through `crates/ry/tests/native/clean-names-set-on-some-paths.R`; runtime behavior is pinned by `typed-names-set-on-some-paths.scenario`.

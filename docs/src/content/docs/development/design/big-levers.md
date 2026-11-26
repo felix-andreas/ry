@@ -331,7 +331,7 @@ ry's own types and scalars. If that is right, the feature the mandate is built a
 on the mandate's benchmark, and closing the gap means building and tightening what is already
 decided:
 
-- **Build the ahead-of-time compiler.** `decisions/typed-stdlib.md` records the shape as chosen ("Typed code
+- **Build the ahead-of-time compiler.** `decisions/typed-native.md` records the shape as chosen ("Typed code
   compiles ahead of time, and `ry build --aot --exe` writes an executable"), and `backlog.md` files the
   work as "mid priority" while the typed core compiles a closure at its first call. This is the
   top runtime item, not a middle one.
