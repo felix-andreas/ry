@@ -4053,6 +4053,38 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
+    /// Whether `ty` holds a literal variable that a use may still decide.
+    fn holds_open_literal(&mut self, ty: Ty<'db>) -> bool {
+        let mut open = FxHashSet::default();
+        self.table.collect_unbound_vars(self.db, ty, &mut open);
+        open.into_iter().any(|var| {
+            let representative = self.table.find(var);
+            self.table.literal_of(representative).is_some()
+        })
+    }
+
+    /// `ty` with its undecided literals given their defaults, and nothing else decided.
+    fn settle_open_literals(&mut self, ty: Ty<'db>) -> Ty<'db> {
+        let mut open = FxHashSet::default();
+        self.table.collect_unbound_vars(self.db, ty, &mut open);
+        for var in open {
+            let representative = self.table.find(var);
+            if let Some((literal, native)) = self.table.literal_of(representative) {
+                self.default_literal_var(Ty::new(self.db, TyKind::Var(literal)), native);
+            }
+        }
+        self.table.resolve(self.db, ty)
+    }
+
+    /// `ty` as a report names it: an open literal shows the type it defaults to and stays
+    /// open for later uses.
+    fn reported(&mut self, ty: Ty<'db>) -> Ty<'db> {
+        let probe = self.begin_probe();
+        let shown = self.settle_literals(ty);
+        self.end_probe(probe, false);
+        shown
+    }
+
     /// `ty` with every undecided literal in it given its default and every bounded variable
     /// settled to its bound, for a message that should name `I64` rather than a type variable,
     /// or a use that fixes the type, as a frame column does. It decides the variables, so only
@@ -4417,7 +4449,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             UnifyError::ConstraintRejected(constraint, found) => {
                 TypeErrorKind::ConstraintViolation {
                     constraint,
-                    found: self.table.resolve(self.db, found),
+                    found: self.reported(found),
                 }
             }
         };
@@ -7433,12 +7465,10 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             if members.is_empty() {
                 let (hint, blamed) = self.pattern_mismatch_hint(pattern, subject).unzip();
+                let found = self.reported(subject);
                 self.errors.push(TypeError {
                     range: blamed.flatten().unwrap_or(node.range),
-                    kind: TypeErrorKind::PatternNeverMatches {
-                        found: subject,
-                        hint,
-                    },
+                    kind: TypeErrorKind::PatternNeverMatches { found, hint },
                 });
                 self.bind_unknown(pattern, bindings);
                 return;
@@ -7453,12 +7483,10 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         if !self.pattern_admits(pattern, subject) {
             let (hint, blamed) = self.pattern_mismatch_hint(pattern, subject).unzip();
+            let found = self.reported(subject);
             self.errors.push(TypeError {
                 range: blamed.flatten().unwrap_or(node.range),
-                kind: TypeErrorKind::PatternNeverMatches {
-                    found: subject,
-                    hint,
-                },
+                kind: TypeErrorKind::PatternNeverMatches { found, hint },
             });
             self.bind_unknown(pattern, bindings);
             return;
@@ -10343,6 +10371,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 resolved
             }
             NumericOperand::Invalid => {
+                let resolved = self.reported(resolved);
                 self.errors.push(TypeError {
                     range: operand_range,
                     kind: TypeErrorKind::InvalidOperand {
@@ -10469,6 +10498,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
                 TyKind::Any | TyKind::Unknown => return unknown(self.db),
                 _ => {
+                    let resolved = self.reported(resolved);
                     self.errors.push(TypeError {
                         range: operand_range,
                         kind: TypeErrorKind::InvalidOperand {
@@ -10508,6 +10538,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         };
         if !fits {
             let array = self.settle_literals(array);
+            let array = self.reported(array);
             self.errors.push(TypeError {
                 range: operand_range,
                 kind: TypeErrorKind::InvalidOperand {
@@ -12165,6 +12196,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             (&right, resolved_right, rhs_range),
         ] {
             if matches!(operand, NumericOperand::Invalid) {
+                let resolved = self.reported(resolved);
                 self.errors.push(TypeError {
                     range: operand_range,
                     kind: TypeErrorKind::InvalidOperand {
@@ -12459,6 +12491,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     result_atomic = Atomic::Double;
                 }
                 _ => {
+                    let resolved = self.reported(resolved);
                     self.errors.push(TypeError {
                         range: operand_range,
                         kind: TypeErrorKind::InvalidOperand {
@@ -12536,6 +12569,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         for (resolved, operand_range) in [(resolved_left, lhs_range), (resolved_right, rhs_range)] {
             let shapes = comparison_operand_shapes(self.db, resolved).filter(|_| !both_lists);
             let Some(shapes) = shapes else {
+                let resolved = self.reported(resolved);
                 self.errors.push(TypeError {
                     range: operand_range,
                     kind: TypeErrorKind::InvalidOperand {
@@ -20460,11 +20494,24 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
         }
         for (var, mut found_types) in shared {
-            // A payload's literal is open, but tags of one name join only once their payloads
-            // are decided, so the literals take their own types first.
+            // Tags join part by part, so open payload literals stay open where their payloads
+            // unify. Payloads that do not unify join as decided types.
             if found_types.len() >= 2
                 && found_types.iter().all(|&found| is_tag_type(self.db, found))
             {
+                let snapshot = self.table.snapshot();
+                let first = self.table.resolve(self.db, found_types[0]);
+                let joined = found_types[1..].iter().try_fold(first, |joined, &found| {
+                    let found = self.table.resolve(self.db, found);
+                    self.join_ry_values(joined, found)
+                });
+                let variable = Ty::new(self.db, TyKind::Var(var));
+                if let Some(joined) = joined
+                    && self.table.unify(self.db, variable, joined).is_ok()
+                {
+                    continue;
+                }
+                self.table.rollback(snapshot);
                 for found in &mut found_types {
                     *found = self.settle_literals(*found);
                 }
@@ -21288,13 +21335,14 @@ impl<'db, 'a> Checker<'db, 'a> {
                 range,
                 kind: TypeErrorKind::ConstraintViolation {
                     constraint,
-                    found: resolved_found,
+                    found: self.reported(resolved_found),
                 },
             });
         }
+        let shown_expected = self.reported(resolved_expected);
         if let (TyKind::Function(found_function), TyKind::Function(expected_function)) = (
             resolved_found.kind(self.db),
-            resolved_expected.kind(self.db),
+            shown_expected.kind(self.db),
         ) && let Some(mismatch) =
             self.table
                 .explain_function_mismatch(self.db, found_function, expected_function)
@@ -23661,7 +23709,9 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             _ => Err(TypeError {
                 range,
-                kind: TypeErrorKind::NotAList { found: subject },
+                kind: TypeErrorKind::NotAList {
+                    found: self.reported(subject),
+                },
             }),
         }
     }
@@ -24100,7 +24150,9 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             _ => Err(TypeError {
                 range,
-                kind: TypeErrorKind::NotAList { found: subject },
+                kind: TypeErrorKind::NotAList {
+                    found: self.reported(subject),
+                },
             }),
         }
     }
@@ -24261,7 +24313,8 @@ impl<'db, 'a> Checker<'db, 'a> {
             // too: sessioninfo's `if (identical(dp, FALSE)) list(character(), character()) else
             // list(dp, dp)` leaves `dp` open. A bounded one is protected from types outside its
             // bound's atomic scalars and vectors: mgcv's `if (is.null(L)) rho + rho0 else L %*% rho
-            // + rho0` must not demand a matrix `rho`.
+            // + rho0` must not demand a matrix `rho`. A literal is not a value a caller chooses,
+            // so the other branch decides it, as `1.0` in `:Stop(1.0)` beside `:Go(v)`.
             let closed = if left_open {
                 right_resolved
             } else {
@@ -24276,8 +24329,14 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .open_constraint(self.db, Ty::new(self.db, TyKind::Var(var)))
                 {
                     Some(Constraint::Unconstrained) => true,
+                    Some(
+                        Constraint::WholeLiteral { .. }
+                        | Constraint::FracLiteral
+                        | Constraint::StrLiteral
+                        | Constraint::BoolLiteral,
+                    )
+                    | None => false,
                     Some(_) => !atomic,
-                    None => false,
                 }
             }) {
                 return union_of(self.db, [left_resolved, right_resolved]);
@@ -24602,6 +24661,24 @@ impl<'db, 'a> Checker<'db, 'a> {
             if current.is_none() && branch_entry.is_some() {
                 current = self.materialize_pre_state(slot, true).map(EnvEntry::Mono);
             }
+            // Each loop pass writes fresh variables for the literals inside a value, as in
+            // `:Stop(1)`, so a pass that changes the slot decides them, or every pass would.
+            let branch_entry = match (edge, current, branch_entry) {
+                (JoinEdge::LoopBack, Some(EnvEntry::Mono(a)), Some(EnvEntry::Mono(b)))
+                    if a != b && !self.open_literal_var(b) && self.holds_open_literal(b) =>
+                {
+                    let probe = self.begin_probe();
+                    let trial = self.join_written_values(a, b);
+                    let alike = self.table.resolve(self.db, trial) == self.table.resolve(self.db, a);
+                    self.end_probe(probe, false);
+                    if alike {
+                        branch_entry
+                    } else {
+                        Some(EnvEntry::Mono(self.settle_open_literals(b)))
+                    }
+                }
+                _ => branch_entry,
+            };
             // Each loop pass writes fresh variables for its literals, so two writes that
             // decided them alike differ only before resolution.
             let same_resolved = match (current, branch_entry) {
@@ -24667,8 +24744,17 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
                 (_, None) => None,
             };
+            // A join that unified fresh literal variables, as a tag payload a loop pass writes,
+            // builds a new type that resolves as the current one does.
+            let resolves_alike = match (joined, current) {
+                (Some(EnvEntry::Mono(a)), Some(EnvEntry::Mono(b))) if a != b => {
+                    self.table.resolve(self.db, a) == self.table.resolve(self.db, b)
+                }
+                _ => false,
+            };
             if let Some(entry) = joined
                 && Some(entry) != current
+                && !resolves_alike
             {
                 self.environment.set(slot, entry);
                 changed.push(slot);

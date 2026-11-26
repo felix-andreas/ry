@@ -1603,7 +1603,8 @@ A ry type asks in three places:
   and number literals of its R type (`x + 1.5` with `x <- 0`) is open too, and so is a variable that branches write with
   literals R gives one type: in a function declared `-> F64`, `x <- 0`, then
   `if (n > 1i64) x <- x + 1.5`, then `x` makes every `x` an `F64`. Branches that write literals of
-  different R types (`1L` and `2.5`) keep R's types. An `if` with `else` or a `match` whose
+  different R types (`1L` and `2.5`) keep R's types, inside a value as well: `if (c) :Ok(1L) else
+  :Ok(2.5)` is an `:Ok(integer | double)`. An `if` with `else` or a `match` whose
   branches are all number literals of one R type is one such literal, both bound to a variable
   (`m <- if (c) 1 else 2`, then `m + n` with `n: I64`, makes `m` an `I64`) and beside one
   (`score + match (k) { :A => 1, :B => 2 }` with `score <- 0`). Any other read gives the variable R's type,
