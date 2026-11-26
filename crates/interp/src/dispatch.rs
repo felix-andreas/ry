@@ -171,7 +171,7 @@ fn class_attribute<'r, 's: 'r>(context: &'r Cx<'_>, object: Local<'s>) -> Option
 
 /// The first name of the implicit class [`class_of`] gives `object`, or `None` when the object
 /// has a class attribute.
-pub fn implicit_class_name(context: &Cx<'_>, object: Local<'_>) -> Option<&'static str> {
+pub fn implicit_class_name(context: &mut Cx<'_>, object: Local<'_>) -> Option<&'static str> {
     if class_attribute(context, object).is_some() {
         return None;
     }
@@ -183,13 +183,19 @@ pub fn implicit_class_name(context: &Cx<'_>, object: Local<'_>) -> Option<&'stat
 }
 
 /// 2 for a matrix, 1 for another array and 0 for an object without dims.
-fn shape(context: &Cx<'_>, object: Local<'_>) -> u8 {
+fn shape(context: &mut Cx<'_>, object: Local<'_>) -> u8 {
     let dim = get_attribute(context, object, symbol(|symbols| symbols.dim));
-    match dim.standard::<Integer>() {
-        _ if dim.r_type() == SexpType::Nil => 0,
-        Some(dim) if dim.len() == 2 => 2,
-        _ => 1,
-    }
+    let matrix = match dim.standard::<Integer>() {
+        _ if dim.r_type() == SexpType::Nil => return 0,
+        Some(dim) => dim.len() == 2,
+        // An ALTREP `dim`, such as the compact sequence `dim(x) <- 2:3` stores, answers its
+        // length through its class.
+        None => {
+            let dim = context.root(dim);
+            handles::length(context, dim) == 2
+        }
+    };
+    if matrix { 2 } else { 1 }
 }
 
 /// A new character vector of `texts`.

@@ -865,7 +865,7 @@ fn format_call<'s>(
     for &text_end in &text_ends {
         parse_format(
             &format_text[text_start..text_end],
-            &arguments,
+            arguments,
             &mut used,
             &mut pieces,
         )?;
