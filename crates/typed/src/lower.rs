@@ -1981,8 +1981,8 @@ impl Lowering<'_> {
         Ok(())
     }
 
-    /// Lowers `expression`, a part of a construct whose value the program drops when `dropped`
-    /// says so, as a statement's. Only then may it be a call of an R function.
+    /// Lowers `expression`, whose value the program drops when `dropped` is true, so that it may be
+    /// a call of an R function whose result nothing converts.
     unsafe fn part(&mut self, expression: Sexp, dropped: bool) -> Result<Option<Local>, Refusal> {
         if !dropped {
             return self.expression(expression);

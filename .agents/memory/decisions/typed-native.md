@@ -441,5 +441,5 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 **Status:** settled.
 
 - An R call compiles natively where the program drops its value (`RUse::Unused`), because no conversion of the result is needed. The rule follows the value: a `{` block, a parenthesis, the branches of an `if` and the arms of a `match` drop their value when the construct's own value is dropped, and a loop body always drops its value (`Lowering::part`).
-- The checker's `native` rule already accepted these positions (the last statement of a loop body, a bare loop body, a branch in statement position), so they no longer need `NATIVE_CHECK_EXCEPTIONS` entries (`tests/native/r-statement-tails.R`).
+- The checker's `native` rule accepts the same positions (the last statement of a loop body, a bare loop body, a branch in statement position): `tests/native/clean-r-statement-tails.R` pins them, and `blocked-r-call-read-branch.R` pins that a branch whose value is assigned refuses.
 - A dropped `match` also changes how its arms may disagree (`lower::Expected::Dropped`, `decisions/typed-stdlib.md`, "Stray shapes").
