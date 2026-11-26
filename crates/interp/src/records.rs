@@ -1072,7 +1072,7 @@ unsafe fn array_matches(
 }
 
 /// For a rest pattern `..` or `..name`, the name it binds, if any.
-unsafe fn rest_name(pattern: Sexp) -> Option<Option<String>> {
+pub unsafe fn rest_name(pattern: Sexp) -> Option<Option<String>> {
     if pattern.kind() != SexpType::Symbol {
         return None;
     }

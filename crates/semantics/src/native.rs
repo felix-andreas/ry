@@ -377,9 +377,8 @@ impl Uncompiled {
             ),
             Uncompiled::MatchPattern => format!(
                 "this `match` pattern {YET}. Native code matches a literal other than `NA`, \
-                 `NaN` or a complex number, and a record pattern that ends in `..` only as the \
-                 whole pattern or a tag's payload, without a name after the `..`. List the \
-                 fields, or bind the value to a name and match it in the arm's body"
+                 `NaN` or a complex number, and a record pattern whose `..` binds no name. \
+                 Bind the value to a name and match it in the arm's body"
             ),
             Uncompiled::MatchScrutinee => format!(
                 "a `match` on a value that is not a number, a string, a logical, a `List`, a \
@@ -1535,15 +1534,6 @@ impl<'a, 'db> Judge<'a, 'db> {
                 if !matches_shape && tests {
                     self.uncompiled(scrutinee, Uncompiled::MatchScrutinee);
                 }
-                // A pattern that names only some fields stands for no layout, so a value of any
-                // tag cannot list the shapes it matches.
-                let open = matched.is_some_and(|ty| match ty.kind(db) {
-                    TyKind::OtherTags => true,
-                    TyKind::Union(members) => members
-                        .iter()
-                        .any(|member| matches!(member.kind(db), TyKind::OtherTags)),
-                    _ => false,
-                });
                 let branch_use = if usage == Use::Unused {
                     Use::Unused
                 } else {
@@ -1551,7 +1541,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                 };
                 let mut ends = Vec::new();
                 for arm in &module[arms] {
-                    if matches_shape && !self.pattern_compiles(arm.pattern, !open) {
+                    if matches_shape && !self.pattern_compiles(arm.pattern) {
                         self.block_at(
                             module.pattern(arm.pattern).range,
                             NativeBlockerKind::Uncompiled(Uncompiled::MatchPattern),
@@ -1914,7 +1904,7 @@ impl<'a, 'db> Judge<'a, 'db> {
     /// Whether the typed core compiles `pattern`. `top` says it stands at the top of an arm, or
     /// inside an alternative or an `as` there, over a value whose shapes are listed, where a record
     /// pattern may end in `..`.
-    fn pattern_compiles(&self, pattern: PatId, top: bool) -> bool {
+    fn pattern_compiles(&self, pattern: PatId) -> bool {
         let module = self.judged.module;
         match module.pattern(pattern).kind {
             PatternKind::Missing | PatternKind::Wildcard | PatternKind::Bind(_) => true,
@@ -1928,24 +1918,24 @@ impl<'a, 'db> Judge<'a, 'db> {
                     | LiteralKind::Inf
             ),
             PatternKind::Tag { payload, .. } => {
-                payload.is_none_or(|payload| self.pattern_compiles(payload, top))
+                payload.is_none_or(|payload| self.pattern_compiles(payload))
             }
             PatternKind::Tuple(items) => module[items]
                 .iter()
-                .all(|&item| self.pattern_compiles(item, false)),
+                .all(|&item| self.pattern_compiles(item)),
             PatternKind::Record { fields, rest } => {
-                rest.is_none_or(|rest| top && rest.binding.is_none())
+                rest.is_none_or(|rest| rest.binding.is_none())
                     && module[fields]
                         .iter()
-                        .all(|field| self.pattern_compiles(field.pattern, false))
+                        .all(|field| self.pattern_compiles(field.pattern))
             }
             PatternKind::List { items, .. } => module[items]
                 .iter()
-                .all(|&item| self.pattern_compiles(item, false)),
-            PatternKind::As { pattern, .. } => self.pattern_compiles(pattern, top),
+                .all(|&item| self.pattern_compiles(item)),
+            PatternKind::As { pattern, .. } => self.pattern_compiles(pattern),
             PatternKind::Or(alternatives) => module[alternatives]
                 .iter()
-                .all(|&alternative| self.pattern_compiles(alternative, top)),
+                .all(|&alternative| self.pattern_compiles(alternative)),
         }
     }
 

@@ -23,7 +23,7 @@ use {
         object::{NA_INTEGER, Sexp, SexpType},
         records::{Fields, Layout},
     },
-    interp::{numbers::Observed, values as rvalues},
+    interp::{numbers::Observed, records::rest_name, values as rvalues},
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
     std::{borrow::Cow, cell::Cell},
@@ -6227,16 +6227,10 @@ impl Lowering<'_> {
             return self.match_arms(value, Known::Typed, &parsed, dropped, expected);
         }
         let (mut layouts, mut tags): (SmallVec<[u32; 4]>, SmallVec<[u32; 4]>) = Default::default();
-        let mut open = false;
         for arm in &parsed {
-            open |= pattern_layouts(arm.pattern, &mut layouts, &mut tags)?;
+            pattern_layouts(arm.pattern, &mut layouts, &mut tags)?;
         }
         let (candidates, exhaustive) = self.shapes_of(ty, &layouts, &tags)?;
-        if open && !exhaustive {
-            return Err(Refusal::new(
-                "a pattern with `..` after its fields over a value of any tag",
-            ));
-        }
         self.switch_shapes(
             value,
             &candidates,
@@ -6468,14 +6462,11 @@ impl Lowering<'_> {
                 Some(number)
             }
             SexpType::I64 => {
+                // The interpreter converts a double to an `I64` exactly, so a pattern no double
+                // holds exactly (past 2^53, or `i64::MAX`, which rounds to 2^63) matches none.
                 let number = pattern.slice::<i64>()[0];
-                // Past 2^53 a double would round, and the interpreter compares exactly.
-                if number.unsigned_abs() > 1 << 53 && self.builder.ty(value) != Type::I64 {
-                    return Err(Refusal::new(
-                        "an `I64` pattern too large to compare with a double exactly",
-                    ));
-                }
-                Some(number as f64)
+                let double = number as f64;
+                (double < 9_223_372_036_854_775_808.0 && double as i64 == number).then_some(double)
             }
             _ => None,
         };
@@ -6686,14 +6677,12 @@ impl Lowering<'_> {
                     PatternLayout::Exact(layout, _) => {
                         (smallvec::smallvec![layout], SmallVec::new())
                     }
-                    PatternLayout::Tag(tag) => (SmallVec::new(), smallvec::smallvec![tag]),
-                    PatternLayout::Open { .. } => (SmallVec::new(), SmallVec::new()),
+                    PatternLayout::Tag(tag) | PatternLayout::Open { tag: Some(tag), .. } => {
+                        (SmallVec::new(), smallvec::smallvec![tag])
+                    }
+                    // A record value has its one shape, and a tag never matches a record.
+                    PatternLayout::Open { tag: None, .. } => (SmallVec::new(), SmallVec::new()),
                 };
-                if matches!(constructor, PatternLayout::Open { .. }) {
-                    return Err(Refusal::new(
-                        "a pattern with `..` after its fields inside another pattern",
-                    ));
-                }
                 let (candidates, exhaustive) = self.shapes_of(ty, &layouts, &tags)?;
                 let fitting: SmallVec<[u32; 4]> = candidates
                     .iter()
@@ -6707,7 +6696,8 @@ impl Lowering<'_> {
         if shapes.is_empty() {
             return Ok(self.never(fail));
         }
-        let reads_fields = !payload.is_empty() && !matches!(constructor, PatternLayout::Tag(_));
+        let reads_fields = !matches!(constructor, PatternLayout::Tag(_))
+            && payload.iter().any(|&(_, item)| !is_wildcard(item));
         if shapes.len() > 1 && reads_fields {
             return Err(Refusal::new(
                 "a pattern inside another over shapes that hold different fields",
@@ -8772,56 +8762,43 @@ unsafe fn pattern_layouts(
     pattern: Sexp,
     layouts: &mut SmallVec<[u32; 4]>,
     tags: &mut SmallVec<[u32; 4]>,
-) -> Result<bool, Refusal> {
+) -> Result<(), Refusal> {
     if pattern.kind() != SexpType::Language || pattern.car().kind() != SexpType::Symbol {
-        return Ok(false);
+        return Ok(());
     }
     let items = rvalues::pairlist_items(pattern.cdr());
     match &*rvalues::symbol_name(pattern.car()) {
         "(" | "|" => {
-            let mut open = false;
             for (_, inner) in items {
-                open |= pattern_layouts(inner, layouts, tags)?;
+                pattern_layouts(inner, layouts, tags)?;
             }
-            Ok(open)
         }
-        ".ry_as" => match items.first() {
-            Some(&(_, inner)) => pattern_layouts(inner, layouts, tags),
-            None => Ok(false),
-        },
+        ".ry_as" => {
+            if let Some(&(_, inner)) = items.first() {
+                pattern_layouts(inner, layouts, tags)?;
+            }
+        }
         ".ry_tag" | ".ry_record" | ".ry_tuple" => match pattern_layout(pattern)?.0 {
             PatternLayout::Exact(layout, _) => {
                 if !layouts.contains(&layout) {
                     layouts.push(layout);
                 }
-                Ok(false)
             }
-            PatternLayout::Tag(tag) => {
+            PatternLayout::Tag(tag) | PatternLayout::Open { tag: Some(tag), .. } => {
                 if !tags.contains(&tag) {
                     tags.push(tag);
                 }
-                Ok(false)
             }
-            PatternLayout::Open { .. } => Ok(true),
+            PatternLayout::Open { tag: None, .. } => {}
         },
-        _ => Ok(false),
+        _ => {}
     }
+    Ok(())
 }
 
-/// For a rest item `..` or `..name` of a list pattern, the name it binds, if any.
-unsafe fn rest_name(pattern: Sexp) -> Option<Option<String>> {
-    if pattern.kind() != SexpType::Symbol {
-        return None;
-    }
-    let name = rvalues::symbol_name(pattern);
-    let rest = name.strip_prefix("..")?;
-    if rest.is_empty() {
-        Some(None)
-    } else if rest.starts_with(char::is_alphabetic) {
-        Some(Some(rest.to_owned()))
-    } else {
-        None
-    }
+/// Whether `pattern` is `_`, which reads nothing.
+unsafe fn is_wildcard(pattern: Sexp) -> bool {
+    pattern.kind() == SexpType::Symbol && &*rvalues::symbol_name(pattern) == "_"
 }
 
 /// Whether `expression` assigns a name, has a `for` loop or a `match`, local functions included.
