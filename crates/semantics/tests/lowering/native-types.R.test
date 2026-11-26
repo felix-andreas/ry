@@ -90,7 +90,7 @@ match (xs) {
 #---- as_pattern_and_record_rest
 match (s) {
   :Circle(radius = r) as circle => circle
-  (x = a, ..rest) => rest
+  (x = a, ..) => a
   (x =, y =) => x
   5i64 => 0
 }
@@ -107,10 +107,10 @@ match (s) {
               pattern bind r
       NameRef circle
     arm
-      pattern Record ..rest
+      pattern Record ..
         field x =
           pattern bind a
-      NameRef rest
+      NameRef a
     arm
       pattern Record
         field x =

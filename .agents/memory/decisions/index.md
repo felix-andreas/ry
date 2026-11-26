@@ -181,6 +181,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A `Record{...}` or `DataFrame{...}` type may end in a row variable
 - Tag unions take no row, and a record update adds no field (settled)
 - Literal variables stay open through joins, tail reads and `List` positions
+- A record pattern's `..` takes no name
 
 ## Analysis core
 

@@ -1438,7 +1438,7 @@ so every R use of `base::match` keeps its meaning. An arm is `PATTERN => EXPR` o
 | `1L`, `"a"`, `TRUE`, `NA`, `NULL`, `-1` | a length-one value equal to the literal |
 | `:Tag`, `:Tag(p1, p2)`, `:Tag(field = p)` | a tag with that name whose payload matches |
 | `(p1, p2)`, `(p,)` | a tuple of that length whose items match |
-| `(name = p, ..)`, `(name = p,)` | a record with those fields; without `..`, exactly those fields |
+| `(name = p, ..)`, `(name = p,)` | a record with those fields; without `..`, exactly those fields. The `..` takes no name: `(x = a, ..others)` is a syntax error |
 | `p1 \| p2` | either pattern; both sides must bind the same names |
 
 The type of a `match` is the join of its arm types, as for `if`. A pattern that cannot match the
@@ -5711,7 +5711,7 @@ interpreted
 | a table value inside a record, a tuple, a tag or a list | a variable of its own for the table value |
 | an operator applied directly to a table expression that a local function, a function whose result type is an alias, an `if` or a `match` gives | assign the expression to a variable, and apply the operator to the variable |
 | a `Dict` whose keys or values are not `I64`, `F64` or `Str` | keep the values in a `List` and store their positions |
-| a `match` guard that assigns a variable, a pattern with `NA`, `NaN` or a complex number, a record pattern whose `..` names the rest, and a pattern other than a name or `_` on a value that is not a number, a string, a logical, a `List`, a tag, a record or a tuple | compute the value before the `match`, and bind the value to a name |
+| a `match` guard that assigns a variable, a pattern with `NA`, `NaN` or a complex number, and a pattern other than a name or `_` on a value that is not a number, a string, a logical, a `List`, a tag, a record or a tuple | compute the value before the `match`, and bind the value to a name |
 | a read of a global that holds a record, a tuple, a tag, a `Dict` or a `Set`, or of a variable of an enclosing boundary function | pass the value in as a parameter |
 | a function that ends in a loop or another expression whose value R returns invisibly | end with the value, or with `NULL` |
 

@@ -291,12 +291,20 @@ mixed <- function(c: Bool) {
   m <- if (c) 1L else 2
   m
 }
+type UserId = integer
+takes <- function(id: UserId) -> UserId id
+nominal <- function(c: Bool) {
+  id <- if (c) @UserId(5L) else @UserId(6L)
+  takes(id)
+}
 #++++
 scored: fn(k: K, n: I64) -> I64
 picked: fn(c: Bool, n: I64) -> I64
 fraction: fn(c: Bool) -> F64
 plain: fn(c: Bool) -> double
 mixed: fn(c: Bool) -> integer | double
+takes: fn(id: UserId) -> UserId
+nominal: fn(c: Bool) -> UserId
 
 #---- a_call_decides_a_literal_variable
 half <- function(x: F64) -> F64 x / 2

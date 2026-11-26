@@ -4516,10 +4516,13 @@ impl<'db, 'a> Checker<'db, 'a> {
                                     if binds_name
                                         && !value_annotated
                                         && !self.expression_annotations.contains_key(id)
-                                        && self.literal_leaves(value, false).is_some() =>
+                                        && self
+                                            .literal_leaves(value, self.binds_ry_value())
+                                            .is_some() =>
                                 {
                                     self.infer(value);
                                     let native = self.binds_ry_value();
+                                    // The guard computed the same leaves from the syntax alone.
                                     let (constraint, leaves) =
                                         self.literal_leaves(value, native).unwrap_or_default();
                                     let ty = self.fresh_literal(constraint, native);
@@ -7901,6 +7904,10 @@ impl<'db, 'a> Checker<'db, 'a> {
         leaves: &mut LiteralLeaves,
     ) -> bool {
         let module = self.module;
+        // A nominal constructor (`@UserId(5L)`) gives its own type, not a literal's.
+        if self.expression_annotations.contains_key(id) {
+            return false;
+        }
         if let Some(literal) = number_literal(module, id) {
             let found = if literal.is_fraction()
                 || (native && literal.default_native() == NativeScalar::F64)
