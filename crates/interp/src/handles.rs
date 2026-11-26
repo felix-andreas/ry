@@ -2435,6 +2435,7 @@ pub fn has_internal_method(
 /// `value` as the value `binding` in the frame of `environment` alone holds, for an assignment
 /// that changes it where it is: the binding holds it directly, nothing else counts a reference
 /// to it, and no suspended compiled body holds it uncounted ([`reuse_permitted`]).
+#[inline]
 pub fn claim_binding<'s>(
     context: &Cx<'s>,
     environment: Local<'_, Environment>,
@@ -2501,6 +2502,7 @@ pub fn assignment_copy<'s>(
 /// The value an assignment binds for a replacement's `result`: an ALTREP wrapper the
 /// replacement's copy introduced is dropped for its data once nothing else holds it
 /// ([`values::unwrap_assigned`]). `bound` says whether the variable already holds `result`.
+#[inline]
 pub fn unwrap_assigned<'s>(context: &mut Cx<'s>, result: Local<'s>, bound: bool) -> Local<'s> {
     // SAFETY: the result is rooted, and unwrapping may allocate, which `&mut Cx` permits.
     unsafe {
@@ -2515,6 +2517,7 @@ pub fn unwrap_assigned<'s>(context: &mut Cx<'s>, result: Local<'s>, bound: bool)
 
 /// Runs `body`, a replacement call of the assignment `whole`, as the call `setter_call` that
 /// the replacement primitives report and may modify their target for.
+#[inline]
 pub fn as_assignment<'s, T>(
     context: &mut Cx<'s>,
     setter_call: Local<'s>,
@@ -2540,13 +2543,17 @@ pub fn builtin_failure(_context: &mut Cx<'_>, unwind: Unwind) -> Unwind {
 }
 
 /// Runs `body` while `target` is the value of `*tmp*` in `environment`, where the replacement
-/// call `body` makes finds it.
+/// call `body` makes finds it. A slot frame without an environment (`None`) binds no `*tmp*`.
+#[inline]
 pub fn with_tmp_value<'s, T>(
     context: &mut Cx<'s>,
-    environment: Local<'s, Environment>,
+    environment: Option<Local<'s, Environment>>,
     target: Local<'s>,
     body: impl FnOnce(&mut Cx<'s>) -> R<T>,
 ) -> R<T> {
+    let Some(environment) = environment else {
+        return body(context);
+    };
     crate::interp()
         .tmp_values
         .push((environment.raw(), target.raw()));
@@ -2557,6 +2564,7 @@ pub fn with_tmp_value<'s, T>(
 
 /// Counts a `*tmp*` binding that the frame of `environment` holds while a replacement call
 /// runs, so lookups cached for that frame see it.
+#[inline]
 pub fn count_tmp_binding(_context: &Cx<'_>, environment: Local<'_, Environment>) {
     // SAFETY: the environment is rooted, and counting writes the frame's own bookkeeping.
     unsafe {
@@ -2566,6 +2574,7 @@ pub fn count_tmp_binding(_context: &Cx<'_>, environment: Local<'_, Environment>)
 
 /// The direct entry of the builtin `definition` on `arguments`, in formal order, or `None` when
 /// it has none or declines.
+#[inline]
 pub fn call_direct<'s>(
     context: &mut Cx<'s>,
     definition: &crate::builtins::BuiltinDef,
@@ -2583,6 +2592,7 @@ pub fn call_direct<'s>(
 
 /// The builtin `function` called on `arguments`, tagged as the arguments of `call` are, from
 /// the frame of `environment`, or from a slot frame that has none.
+#[inline]
 pub fn call_builtin<'s>(
     context: &mut Cx<'s>,
     definition: &crate::builtins::BuiltinDef,

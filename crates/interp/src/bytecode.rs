@@ -12332,25 +12332,20 @@ impl<'f> RunningFrame<'f, '_, '_> {
     /// in the frame's environment when code that ran since the slot was read gave the frame one
     /// (a calling handler of a warning, a forced promise, a dispatch), which then holds the
     /// variable instead of the slot.
+    #[inline(always)]
     fn bind<'s>(
         self,
         context: &mut Cx<'s>,
         (slot, variable): (Slot<'f>, Local<'_, Symbol>),
         value: Local<'s>,
     ) -> R<()> {
-        match self.environment(context) {
-            Some(environment) => {
-                let binding = handles::frame_binding(context, environment, variable)
-                    .map(|binding| context.root(binding));
-                handles::assign_local(context, variable, value, environment, binding)
-            }
-            None => {
-                if !self.read(context, slot).is(value) {
-                    self.store(context, slot, value);
-                }
-                Ok(())
-            }
+        if self.has_environment() {
+            return bind_in_environment(context, self, variable, value);
         }
+        if !self.read(context, slot).is(value) {
+            self.store(context, slot, value);
+        }
+        Ok(())
     }
 
     /// `target` as the value `slot` alone holds, for an update in place.
@@ -12388,6 +12383,23 @@ impl<'f> RunningFrame<'f, '_, '_> {
             Ok(handles::adopt(context, function))
         }
     }
+}
+
+/// [`RunningFrame::bind`] once the frame has an environment, which holds its variables.
+#[cold]
+#[inline(never)]
+fn bind_in_environment<'s>(
+    context: &mut Cx<'s>,
+    frame: RunningFrame<'_, '_, '_>,
+    variable: Local<'_, Symbol>,
+    value: Local<'s>,
+) -> R<()> {
+    let Some(environment) = frame.environment(context) else {
+        return Err(error("internal error: a slot frame lost its environment"));
+    };
+    let binding =
+        handles::frame_binding(context, environment, variable).map(|binding| context.root(binding));
+    handles::assign_local(context, variable, value, environment, binding)
 }
 
 /// `x[i] <- value`, `x[[i]] <- value` or `x$name <- value` on a slot frame's slot, without
@@ -12545,6 +12557,7 @@ fn assign_slot_element_in_place<'f, 's>(
 /// The value of the slot frame's variable in `slot`, its promise forced. `None` when the
 /// variable is unbound or a missing argument, or when forcing gave the frame its environment,
 /// which then holds the variable instead of the slot.
+#[inline(always)]
 fn slot_value<'f, 's>(
     context: &mut Cx<'s>,
     frame: RunningFrame<'f, '_, '_>,
@@ -15090,12 +15103,11 @@ fn replace_variable<'f, 's>(
             }
         }
     };
-    let result = match home {
-        Home::Binding(environment, _) => {
-            handles::with_tmp_value(context, environment, target, replace)?
-        }
-        Home::Slot(_) => replace(context)?,
+    let tmp_home = match home {
+        Home::Binding(environment, _) => Some(environment),
+        Home::Slot(_) => None,
     };
+    let result = handles::with_tmp_value(context, tmp_home, target, replace)?;
     let Some(result) = result else {
         return Ok(false);
     };
