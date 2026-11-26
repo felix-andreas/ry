@@ -14,7 +14,7 @@ A check must never read a project-wide map directly, because then every edit any
 
 - **A per-item query never scans a per-file or per-project list**: compute once per file in a memoized query and probe per item (`item_spans` is the one source of item identity). Vary both items and names when measuring.
 - **A per-item read that joins over a project-wide list needs a cap, not just memoization** (`CONDITIONAL_SLOT_JOIN_CAP`, widening to `Unknown`).
-- **Never call `Checker::infer` twice on one expression.** It has no memo, so a double walk costs 2^depth on operator chains and repeats findings, which the deduplicating fixtures hide.
+- **Never call `Checker::infer` twice on one expression**, except in a capped re-walk that rolls back the earlier pass (the loop re-walk, the capture repass, `widen_accumulators`). It has no memo, so a double walk costs 2^depth on operator chains and repeats findings, which the deduplicating fixtures hide.
 - **Hot tracked queries returning maps or vectors use `returns(ref)`**, and `GlobalEnv` facts are borrowed `&'db` values; `returns(clone)` deep-clones per call.
 - **A type is a hash-consed DAG: walk it with a memo, never as a tree** (`substitute_rigid`).
 - **A `Ty` and a `Symbol` are ids in interning order, which differs between runs of a parallel check.** Nothing that reaches output may walk or sort by `Symbol::index()` or a type's id; `Symbol` orders by spelling for that reason. Ask a type's id bits (`may_resolve`, `contains_inference_var`) before walking it, and add no cache in front of the interners: a lookup takes no lock (`.agents/memory/decisions/analysis-core.md`, "Types and symbols are four-byte ids into append-only columns").

@@ -544,6 +544,10 @@ record_branch <- function(c: Bool) if (c) (t = :A, n = 1i64) else (t = :B, n = 2
 tuple_branch <- function(c: Bool) if (c) (:A, 1i64) else (:B, 2i64)
 payload_branch <- function(c: Bool) if (c) :Some([:A]) else :Some([:B])
 numbers_never_widen <- function(c: Bool) if (c) [1i64] else [1.5f64]
+stop_at <- function(xs: List<I64>) {
+  List.walk_until(xs, :None, \(acc, x) if (x > 2i64) :Break(:Some(x)) else :Continue(acc))
+}
+front <- function(xs: List<:A>) List.prepend(xs, :B)
 #++++
 first_some: fn(xs: List<I64>) -> :None | :Some(I64)
 keep_big: fn(xs: List<I64>) -> :None | :Some(I64)
@@ -556,6 +560,8 @@ record_branch: fn(c: Bool) -> Record{n: I64, t: :A | :B}
 tuple_branch: fn(c: Bool) -> Tuple{:A | :B, I64}
 payload_branch: fn(c: Bool) -> :Some(List<:A | :B>)
 numbers_never_widen: fn(c: Bool) -> List<I64> | List<F64>
+stop_at: fn(xs: List<I64>) -> :None | :Some(I64)
+front: fn(xs: List<:A>) -> List<:A | :B>
 
 #---- an_empty_list_grows_into_a_list_of_a_nominal_type
 type Tree = :Leaf(I64) | :Node(List<Tree>)

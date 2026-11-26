@@ -1,4 +1,5 @@
-# Tag unions that widen through a walk's state, a loop's accumulator and the branches of an `if`.
+# Tag unions that widen through a walk's state, a loop's accumulator, the branches of an `if` and
+# the list functions that store an item.
 first_some <- function(xs: List<I64>) -> :None | :Some(I64) {
   List.walk(xs, :None, \(acc, x) :Some(x))
 }
@@ -16,12 +17,36 @@ loop_grow <- function(xs: List<I64>) -> I64 {
   for (x in xs) acc <- List.append(acc, :B)
   List.len(acc)
 }
-record_branch <- function(c: Bool) -> I64 {
+record_stop_at <- function(xs: List<I64>) -> :None | :Some(I64) {
+  List.walk_until(xs, :None, \(acc, x) if (x > 2i64) :Break(:Some(x)) else :Continue(acc))
+}
+branch <- function(c: Bool) -> I64 {
   r <- if (c) (t = :A, n = 1i64) else (t = :B, n = 2i64)
   match (r$t) { :A => r$n; :B => r$n * 10i64 }
 }
-tuple_branch <- function(c: Bool) -> Tuple{:A | :B, I64} {
+tuple_stop_at <- function(xs: List<I64>) -> :None | :Some(I64) {
+  List.walk_until(xs, :None, \(acc, x) if (x > 2i64) :Break(:Some(x)) else :Continue(acc))
+}
+branch <- function(c: Bool) -> Tuple{:A | :B, I64} {
   if (c) (:A, 1i64) else (:B, 2i64)
+}
+stop_at <- function(xs: List<I64>) -> :None | :Some(I64) {
+  List.walk_until(xs, :None, \(acc, x) if (x > 2i64) :Break(:Some(x)) else :Continue(acc))
+}
+branch <- function(c: Bool) -> List<:A | :B> {
+  if (c) [:A] else [:B]
+}
+payload_stop_at <- function(xs: List<I64>) -> :None | :Some(I64) {
+  List.walk_until(xs, :None, \(acc, x) if (x > 2i64) :Break(:Some(x)) else :Continue(acc))
+}
+branch <- function(c: Bool) -> :Some(List<:A | :B>) {
+  if (c) :Some([:A]) else :Some([:B])
+}
+front <- function(xs: List<:A>) -> List<:A | :B> {
+  List.prepend(xs, :B)
+}
+replace_first <- function(xs: List<:A>) -> List<:A | :B> {
+  List.set(xs, 1i64, :B)
 }
 print(first_some([1i64, 2i64]))
 print(grow([1i64, 2i64]))
@@ -30,3 +55,8 @@ print(cycle([1i64, 2i64, 3i64, 4i64]))
 print(loop_grow([1i64, 2i64, 3i64]))
 print(record_branch(FALSE))
 print(tuple_branch(TRUE))
+print(branch(FALSE))
+print(payload_branch(TRUE))
+print(front([:A]))
+print(replace_first([:A, :A]))
+print(stop_at([1i64, 3i64]))

@@ -218,7 +218,7 @@ pub const SELF: usize = usize::MAX;
 /// How deeply local functions inline into each other.
 const MAX_INLINE_DEPTH: usize = 8;
 
-/// How many names a function's lowering widens to more tags before it gives up.
+/// How many variables and walks a function's lowering widens to more tags before it gives up.
 const MAX_WIDENINGS: usize = 8;
 /// How deep in inlined functions a call of a typed function may still inline, which leaves
 /// the levels below `MAX_INLINE_DEPTH` to the local functions of the inlined bodies.
@@ -270,12 +270,12 @@ pub unsafe fn lower(
         );
         match (result, refused, widen) {
             (Err(_), Some(function), _) => called.push(function),
-            (Err(refusal), None, Some((symbol, union))) => {
+            (Err(refusal), None, Some((key, union))) => {
                 let count = widened.len();
-                match widened.iter_mut().find(|(held, _)| *held == symbol) {
+                match widened.iter_mut().find(|(held, _)| *held == key) {
                     Some((_, held)) if shapes::within(union, *held) => return Err(refusal),
                     Some((_, held)) => *held = shapes::join(*held, union),
-                    None if count < MAX_WIDENINGS => widened.push((symbol, union)),
+                    None if count < MAX_WIDENINGS => widened.push((key, union)),
                     None => return Err(refusal),
                 }
             }
@@ -5196,15 +5196,18 @@ impl Lowering<'_> {
             .ty(value)
             .held_item()
             .ok_or(Refusal::new("a list of something a list cannot hold"))?;
-        if let Some((_, ty)) = list
-            && ty.items() != Some(item)
-        {
-            return Err(Refusal::new("a `List.prepend` of an item of another type"));
-        }
+        let single_ty = Type::Vector { item, array: true };
+        // A tag of another shape widens the item union, as an append does.
+        let list = match list {
+            Some((list, ty)) => Some((
+                list,
+                joined(ty, single_ty)
+                    .ok_or(Refusal::new("a `List.prepend` of an item of another type"))?,
+            )),
+            None => None,
+        };
         let empty = self.empty_list(item);
-        let single = self
-            .builder
-            .emit(Type::Vector { item, array: true }, Op::Push(empty, value));
+        let single = self.builder.emit(single_ty, Op::Push(empty, value));
         Ok(match list {
             Some((list, ty)) => self.builder.emit(ty, Op::Extend(single, list)),
             None => single,
@@ -5221,12 +5224,24 @@ impl Lowering<'_> {
         let index = self.to_i64(index)?;
         let value = self.value(value)?;
         self.usable(value)?;
-        let item = ty.items().ok_or(Refusal::new(
+        ty.items().ok_or(Refusal::new(
             "a `List.set` of something other than a ry list",
         ))?;
-        if self.builder.ty(value).held_item() != Some(item) {
-            return Err(Refusal::new("a `List.set` of an item of another type"));
-        }
+        // A tag of another shape widens the item union, as an append does.
+        let ty = self
+            .builder
+            .ty(value)
+            .held_item()
+            .and_then(|found| {
+                joined(
+                    ty,
+                    Type::Vector {
+                        item: found,
+                        array: true,
+                    },
+                )
+            })
+            .ok_or(Refusal::new("a `List.set` of an item of another type"))?;
         let inside = self.within_list(list, index);
         let result = self.builder.local(ty);
         let (set, keep, join) = (
@@ -9096,10 +9111,13 @@ fn with_tags(ty: Type, union: u32) -> Type {
     }
 }
 
-/// The type both of two values' types fit: that type, or the union of two tags.
+/// The type both of two values' types fit: that type, or the union of two tags or two ry lists
+/// of tags.
 fn joined(a: Type, b: Type) -> Option<Type> {
+    if let (Some(left), Some(right)) = (held_tags(a), held_tags(b)) {
+        return (with_tags(a, right) == with_tags(b, left)).then(|| with_tags(a, right));
+    }
     match (a, b) {
-        (Type::Tag(a), Type::Tag(b)) => Some(Type::Tag(shapes::join(a, b))),
         // A `Bool` is a logical that is never `NA`, held in the same word.
         (Type::Bool, Type::Lgl) | (Type::Lgl, Type::Bool) => Some(Type::Lgl),
         (a, b) => (a == b).then_some(a),

@@ -18711,6 +18711,9 @@ impl<'db, 'a> Checker<'db, 'a> {
             };
             let errors_before = self.errors.len();
             let origins_before = self.strict_origins.len();
+            let environment_mark = self.environment.mark();
+            let pending_mark = self.pending_enclosing_writes.len();
+            let snapshot = (!states.is_empty()).then(|| self.table.snapshot());
             let mut passes = 0;
             loop {
                 passes += 1;
@@ -18719,16 +18722,22 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
                 let ty = self.infer(value);
                 call_arguments[index].ty = Some(ty);
-                if states.is_empty() || passes >= ACCUMULATOR_PASS_CAP {
+                if passes >= ACCUMULATOR_PASS_CAP {
                     break;
                 }
-                let Some(hint) = hint.as_mut() else { break };
+                let (Some(snapshot), Some(hint)) = (&snapshot, hint.as_mut()) else {
+                    break;
+                };
                 if !self.widen_accumulators(ty, &states, hint, &mut call_arguments) {
                     break;
                 }
-                // This pass read the accumulator as the narrower state, so its findings are stale.
+                // This pass read the accumulator as the narrower state, so what it inferred is
+                // stale, as in `infer_body_with_capture_discovery`.
+                self.environment.rollback(environment_mark);
+                self.table.rollback(*snapshot);
                 self.truncate_errors(errors_before);
                 self.strict_origins.truncate(origins_before);
+                self.pending_enclosing_writes.truncate(pending_mark);
             }
             self.name_contextual_parameters(value, errors_before, LambdaContext::Call);
         }
@@ -18736,18 +18745,19 @@ impl<'db, 'a> Checker<'db, 'a> {
     }
 
     /// The accumulators of the callback at `callback`: each formal typed as the bare variable
-    /// the callback returns, as `S` is in `walk(list, state: S, f: fn(S, T) -> S)`, with the
-    /// argument that passes the initial state.
+    /// the callback returns, as `S` is in `walk(list, state: S, f: fn(S, T) -> S)`, or as every
+    /// payload of the tags it returns, as in `walk_until`'s `fn(S, T) -> :Continue(S) |
+    /// :Break(S)`, with the argument that passes the initial state and whether the tags wrap it.
     fn accumulator_states(
-        &self,
+        &mut self,
         callee: Ty<'db>,
         arguments: &[CallArgument<'db>],
         deferred: &Bitset<'a, usize>,
         callback: usize,
-    ) -> SmallVec<[(usize, usize); 1]> {
+    ) -> SmallVec<[(usize, usize, bool); 1]> {
         let mut states = SmallVec::new();
-        let TyKind::Function(function) = self.table.shallow_resolve(self.db, callee).kind(self.db)
-        else {
+        let callee = self.structural(self.table.shallow_resolve(self.db, callee));
+        let TyKind::Function(function) = callee.kind(self.db) else {
             return states;
         };
         let arena = self.arena;
@@ -18768,7 +18778,22 @@ impl<'db, 'a> Checker<'db, 'a> {
         let TyKind::Function(expected) = expected.kind(self.db) else {
             return states;
         };
-        let result = self.table.shallow_resolve(self.db, expected.ret);
+        let ret = self.table.shallow_resolve(self.db, expected.ret);
+        let (result, wrapped) = match tag_payloads(self.db, ret) {
+            Some(payloads) => {
+                let mut payloads = payloads
+                    .into_iter()
+                    .map(|payload| self.table.shallow_resolve(self.db, payload));
+                let Some(first) = payloads.next() else {
+                    return states;
+                };
+                if !payloads.all(|payload| payload == first) {
+                    return states;
+                }
+                (first, true)
+            }
+            None => (ret, false),
+        };
         if !matches!(result.kind(self.db), TyKind::Var(_)) {
             return states;
         }
@@ -18787,7 +18812,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     && target_var(targets.get(index)) == Some(result)
             });
             if let Some(state) = state {
-                states.push((formal_index, state));
+                states.push((formal_index, state, wrapped));
             }
         }
         states
@@ -18799,18 +18824,34 @@ impl<'db, 'a> Checker<'db, 'a> {
     fn widen_accumulators(
         &mut self,
         callback: Ty<'db>,
-        states: &[(usize, usize)],
+        states: &[(usize, usize, bool)],
         hint: &mut [Option<Ty<'db>>],
         arguments: &mut [CallArgument<'db>],
     ) -> bool {
         let TyKind::Function(function) = self.table.resolve(self.db, callback).kind(self.db) else {
             return false;
         };
-        let result = function.ret;
         let mut widened = false;
-        for &(formal, state) in states {
+        for &(formal, state, wrapped) in states {
             let Some(current) = hint.get(formal).copied().flatten() else {
                 continue;
+            };
+            let result = match wrapped {
+                false => function.ret,
+                true => {
+                    let Some(mut payloads) =
+                        tag_payloads(self.db, function.ret).map(|payloads| payloads.into_iter())
+                    else {
+                        continue;
+                    };
+                    let Some(first) = payloads.next() else {
+                        continue;
+                    };
+                    let joined = payloads
+                        .try_fold(first, |held, payload| self.join_ry_values(held, payload));
+                    let Some(joined) = joined else { continue };
+                    joined
+                }
             };
             let snapshot = self.table.snapshot();
             let fits = self.table.compatible(self.db, result, current);
@@ -18818,7 +18859,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             if fits {
                 continue;
             }
-            let Some(joined) = self.join_ry_values(current, self.table.resolve(self.db, result))
+            // The caller rolls this pass's bindings back, so the joined state must be closed.
+            let Some(joined) = self
+                .join_ry_values(current, self.table.resolve(self.db, result))
+                .map(|joined| self.table.resolve(self.db, joined))
+                .filter(|joined| !self.table.contains_unbound_var(self.db, *joined))
             else {
                 continue;
             };
@@ -19253,6 +19298,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     let TyKind::Function(expected) = expected.kind(self.db) else {
                         return None;
                     };
+                    let ret = self.table.resolve(self.db, expected.ret);
                     let formals = expected
                         .positional
                         .iter()
@@ -19291,11 +19337,18 @@ impl<'db, 'a> Checker<'db, 'a> {
                                 // An accumulator whose initial state is a settled ry value keeps
                                 // that type. In `List.walk(xs, List.repeat(0f64, n), \(sums, x)
                                 // sums + x)` the state is `List<F64>` before the body reads
-                                // `sums + x`. A state with a tag in it, such as `[:A]`, widens
-                                // (`widen_accumulators`), which needs the one callee.
+                                // `sums + x`. A state with a tag in it, such as `[:A]`, keeps
+                                // its type only where `widen_accumulators` widens it: for one
+                                // callee whose callback returns the state, bare or as the payload
+                                // of every tag it returns.
+                                let tag_state_widens = callees.len() == 1
+                                    && (ret == formal
+                                        || tag_payloads(self.db, ret).is_some_and(|payloads| {
+                                            payloads.iter().all(|&payload| payload == formal)
+                                        }));
                                 let widening_accumulator = accumulators.contains(index)
                                     && !(is_ry_value_type(self.db, formal)
-                                        && !(callees.len() > 1 && mentions_tag(self.db, formal))
+                                        && (tag_state_widens || !mentions_tag(self.db, formal))
                                         && !self.table.contains_unbound_var(self.db, formal));
                                 if widening_accumulator
                                     || (index < declared_count
@@ -26001,6 +26054,25 @@ fn ok_payload<'db>(db: &'db dyn Db, result: Ty<'db>) -> Option<Ty<'db>> {
 }
 
 /// Whether a tag or a tag union appears anywhere in `ty`, the part of a ry type that widens.
+/// The payloads of `ty`'s tags when it is one tag or a union of tags that each carry one value,
+/// as `:Continue(S) | :Break(S)` does.
+fn tag_payloads<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<SmallVec<[Ty<'db>; 2]>> {
+    let members: &[Ty<'db>] = match ty.kind(db) {
+        TyKind::Union(members) => members,
+        _ => std::slice::from_ref(&ty),
+    };
+    members
+        .iter()
+        .map(|member| match member.kind(db) {
+            TyKind::Tag(_, Some(payload)) => match payload.kind(db) {
+                TyKind::NativeTuple([value]) => Some(*value),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
 fn mentions_tag<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
     if matches!(
         ty.kind(db),
