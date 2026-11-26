@@ -1015,8 +1015,9 @@ fn finding_range(line: &str) -> Option<(usize, usize, &str)> {
 /// Whether an identifier names something outside the project, which a rename of the
 /// project's own names must leave alone: a package's export, a word of the annotation language
 /// (`fn`, `trust`, a type), a name R6 binds by its spelling, or a member or argument name a
-/// stub declares (`add` in `on.exit(add = TRUE)`, a field of a stub's record). The parameters
-/// and fields of a type the project writes are its own.
+/// stub declares (`add` in `on.exit(add = TRUE)`, a field of a stub's record), or an argument
+/// name of a subscript, which the subscript's method reads by spelling (a table's `roll`). The
+/// parameters and fields of a type the project writes are its own.
 fn names_foreign(token: &SyntaxToken) -> bool {
     const SPELLING_BOUND: [&str; 6] =
         ["self", "private", "super", "public", "active", "initialize"];
@@ -1046,11 +1047,24 @@ fn names_foreign(token: &SyntaxToken) -> bool {
     while let Some(candidate) = next.as_ref().filter(|candidate| trivia(candidate.kind())) {
         next = candidate.next_token();
     }
-    let member = previous
-        .is_some_and(|previous| matches!(previous.kind(), SyntaxKind::DOLLAR | SyntaxKind::AT))
-        || next.is_some_and(|next| next.kind() == SyntaxKind::EQ);
+    let argument_name = next.is_some_and(|next| next.kind() == SyntaxKind::EQ);
+    let member = argument_name
+        || previous
+            .is_some_and(|previous| matches!(previous.kind(), SyntaxKind::DOLLAR | SyntaxKind::AT));
+    let subscript_argument = argument_name
+        && token
+            .parent_ancestors()
+            .find(|ancestor| ancestor.kind() == SyntaxKind::ARGUMENT_LIST)
+            .and_then(|list| list.parent())
+            .is_some_and(|subscript| {
+                matches!(
+                    subscript.kind(),
+                    SyntaxKind::SUBSET_EXPR | SyntaxKind::SUBSET2_EXPR
+                )
+            });
     foreign_syntax
         || SPELLING_BOUND.contains(&token.text())
+        || subscript_argument
         || (member && stub_words().contains(token.text()))
 }
 
