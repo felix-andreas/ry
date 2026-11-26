@@ -4921,13 +4921,14 @@ impl Lowering<'_> {
     /// `List.any(list, predicate)`, or `List.all`, in a loop that leaves at the first item that
     /// decides the answer.
     unsafe fn any_all(&mut self, all: bool, arguments: &Arguments) -> Result<Local, Refusal> {
+        let name = if all { "List.all" } else { "List.any" };
         let [list, predicate] = arguments.exactly(2)?[..] else {
-            return Err(Refusal::new("a malformed `List.any`"));
+            return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
         };
-        let (list, ty) = self.known_list(list, if all { "List.all" } else { "List.any" })?;
-        let item = ty.items().ok_or(Refusal::new(
-            "a `List.any` of something other than a ry list",
-        ))?;
+        let (list, ty) = self.known_list(list, name)?;
+        let item = ty.items().ok_or(Refusal(Cow::Owned(format!(
+            "a `{name}` of something other than a ry list"
+        ))))?;
         let callable = self.function_argument(predicate)?;
         let result = self.builder.local(Type::Lgl);
         let start = self
@@ -5150,9 +5151,9 @@ impl Lowering<'_> {
             return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
         };
         let (list, ty) = self.known_list(list, name)?;
-        let item = ty.items().ok_or(Refusal::new(
-            "a `List.keep_if` of something other than a ry list",
-        ))?;
+        let item = ty.items().ok_or(Refusal(Cow::Owned(format!(
+            "a `{name}` of something other than a ry list"
+        ))))?;
         let callable = self.function_argument(predicate)?;
         let kept = self.empty_list(item);
         let held = self.builder.emit(ty, Op::Copy(list));
@@ -5190,9 +5191,9 @@ impl Lowering<'_> {
             return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
         };
         let (list, ty) = self.known_list(list, name)?;
-        let item = ty
-            .items()
-            .ok_or(Refusal::new("a search of something other than a ry list"))?;
+        let item = ty.items().ok_or(Refusal(Cow::Owned(format!(
+            "a `{name}` of something other than a ry list"
+        ))))?;
         let callable = self.function_argument(predicate)?;
         let held = self.builder.emit(ty, Op::Copy(list));
         let past_end = name
@@ -6269,12 +6270,12 @@ impl Lowering<'_> {
     /// must itself be a result, as the interpreter requires.
     unsafe fn result_map(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
         let both = name == "Result.map_both";
-        let (result, on_ok, on_err) = match &arguments.exactly(if both { 3 } else { 2 })?[..] {
-            &[result, on_ok, on_err] => (result, Some(on_ok), Some(on_err)),
-            &[result, f] if matches!(name, "Result.map" | "Result.and_then") => {
+        let (result, on_ok, on_err) = match arguments.exactly(if both { 3 } else { 2 })?[..] {
+            [result, on_ok, on_err] => (result, Some(on_ok), Some(on_err)),
+            [result, f] if matches!(name, "Result.map" | "Result.and_then") => {
                 (result, Some(f), None)
             }
-            &[result, f] => (result, None, Some(f)),
+            [result, f] => (result, None, Some(f)),
             _ => return Err(Refusal(Cow::Owned(format!("a malformed `{name}`")))),
         };
         let chained = matches!(name, "Result.and_then" | "Result.on_err");
@@ -6624,10 +6625,6 @@ impl Lowering<'_> {
         }
     }
 
-    /// A `Num` function of two numbers, as the library computes it. With an `I64` the other
-    /// number converts exactly and the operation is on `I64`s, which an overflow or a zero
-    /// divisor fails; the arithmetic and `abs_diff` of two R integers give an R integer, and
-    /// otherwise both are doubles, whose `NaN` results are errors.
     /// `Num.add_wrap` and its siblings, the checked and saturating forms, and `Num.div_ceil`,
     /// on `I64`s. On R numbers the library works on 32 bits, which the typed core does not.
     unsafe fn overflowing(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
@@ -6724,6 +6721,10 @@ impl Lowering<'_> {
         result
     }
 
+    /// A `Num` function of two numbers, as the library computes it. With an `I64` the other
+    /// number converts exactly and the operation is on `I64`s, which an overflow or a zero
+    /// divisor fails; the arithmetic and `abs_diff` of two R integers give an R integer, and
+    /// otherwise both are doubles, whose `NaN` results are errors.
     unsafe fn number_operation(
         &mut self,
         name: &str,

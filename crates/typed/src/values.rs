@@ -2017,8 +2017,7 @@ pub unsafe extern "C" fn ry_str_contains(lo: u64, hi: u64, part_lo: u64, part_hi
             hi: part_hi,
         },
     );
-    let (bytes, part) = (string.bytes(), part.bytes());
-    (part.is_empty() || bytes.windows(part.len()).any(|window| window == part)) as i32
+    string.as_str().contains(part.as_str()) as i32
 }
 
 pub unsafe extern "C" fn ry_str_caseless_ascii_equals(
@@ -2035,36 +2034,19 @@ pub unsafe extern "C" fn ry_str_caseless_ascii_equals(
 }
 
 /// `Str.trim` (`ends` 3), `Str.trim_start` (1) or `Str.trim_end` (2): the string without the
-/// Unicode whitespace at those ends, in a new string. Native strings hold UTF-8, which the
-/// interpreter's `str::trim` reads.
+/// Unicode whitespace at those ends, in a new string, as the interpreter's `str::trim` gives.
 pub unsafe extern "C" fn ry_str_trim(lo: u64, hi: u64, owned: u32, ends: u32) -> Str {
     let string = Str { lo, hi };
-    let bytes = string.bytes();
-    let kept = match std::str::from_utf8(bytes) {
-        Ok(text) => {
-            let text = if ends & 1 != 0 {
-                text.trim_start()
-            } else {
-                text
-            };
-            let text = if ends & 2 != 0 { text.trim_end() } else { text };
-            text.as_bytes()
-        }
-        Err(_) => {
-            let bytes = if ends & 1 != 0 {
-                bytes.trim_ascii_start()
-            } else {
-                bytes
-            };
-            if ends & 2 != 0 {
-                bytes.trim_ascii_end()
-            } else {
-                bytes
-            }
-        }
+    let text = string.as_str();
+    let kept = if ends & 1 != 0 {
+        text.trim_start()
+    } else {
+        text
     };
+    let kept = if ends & 2 != 0 { kept.trim_end() } else { kept };
+    let kept = kept.as_bytes();
     // An owned string with nothing to trim is its own result.
-    if owned != 0 && kept.len() == bytes.len() {
+    if owned != 0 && kept.len() == text.len() {
         return string;
     }
     let result = str_from_bytes(kept);
