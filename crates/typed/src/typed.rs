@@ -118,13 +118,17 @@ thread_local! {
     /// The closures being compiled, each with the result type its recursive calls assume while
     /// it is lowered, which a call from a function compiled meanwhile assumes too.
     static COMPILING: RefCell<FxHashMap<Key, Option<Type>>> = RefCell::new(FxHashMap::default());
-    /// A word per closure and argument types that some code calls through ([`Entry::Cell`]),
-    /// holding the address of the current code, or 0 while there is none.
-    static CELLS: RefCell<FxHashMap<Key, &'static Cell<usize>>> =
+    /// A word per closure, argument types and result type that some code calls through
+    /// ([`Entry::Cell`]), holding the address of the latest code with that result, or 0 while
+    /// there is none. A cell never holds code of another result, so code that called through it
+    /// while the closure recompiled to another result still gets the type it was compiled for.
+    static CELLS: RefCell<FxHashMap<(Key, Type), &'static Cell<usize>>> =
         RefCell::new(FxHashMap::default());
     /// How many calls through a cell lowerings have linked, which tells a compilation that
     /// refused whether its refusal rests on a guess that the function being compiled may revise.
     static CELL_CALLS: Cell<u64> = const { Cell::new(0) };
+    /// Refusals that rest on such a guess, remembered once the outermost compilation finishes.
+    static PROVISIONAL: RefCell<Vec<(Key, Refusal)>> = const { RefCell::new(Vec::new()) };
     /// The refusals that wait on the interpreter, with what each waits for: the closure compiles
     /// again once the interpreter has done it.
     static AWAITING: RefCell<FxHashMap<Key, lower::Awaited>> = RefCell::new(FxHashMap::default());
@@ -342,7 +346,7 @@ pub unsafe fn compiled_for(function: Sexp, params: &[Type]) -> Option<&'static C
     let cells_filled = compiled
         .cells
         .iter()
-        .all(|(callee, _)| cell(callee).get() != 0);
+        .all(|(callee, assumed)| cell(callee, *assumed).get() != 0);
     if !cells_filled {
         decline(|| String::from("it calls a function whose code is still being compiled"));
         return None;
@@ -381,9 +385,7 @@ unsafe fn compiled_or_refusal(
     }
     // An installed package's typed code file may hold the code already.
     if let Some(compiled) = file::attach(function, params) {
-        if let Some(cell) = CELLS.with_borrow(|cells| cells.get(&key).copied()) {
-            cell.set(compiled.code.address);
-        }
+        fill_cell(key, compiled);
         return Ok(compiled);
     }
     if !ahead::compiling_ahead()
@@ -422,9 +424,7 @@ unsafe fn compiled_or_refusal(
                 );
             }
             let compiled: &'static Compiled = Box::leak(Box::new(compiled));
-            if let Some(cell) = CELLS.with_borrow(|cells| cells.get(&key).copied()) {
-                cell.set(compiled.code.address);
-            }
+            fill_cell(key.clone(), compiled);
             Ok(compiled)
         }
         Err(refusal) => {
@@ -436,21 +436,44 @@ unsafe fn compiled_or_refusal(
         }
     };
     let found = compiled.clone();
-    // A refusal under a guess of a function still being compiled is not this function's for
-    // good: the guess may be revised, and the next call compiles it again.
-    if compiled.is_err() && CELL_CALLS.get() != cell_calls {
-        return found;
-    }
-    if let Err(refusal) = &compiled
-        && lower::awaits_interpreter(refusal)
-        && let Some(awaited) = lower::awaited()
-    {
-        // The table reads the promise later, which the namespace may have dropped by then.
-        if let lower::Awaited::Promise(promise) = awaited {
-            interp::heap().add_global_root(promise);
+    match compiled {
+        // A refusal under a guess of a function still being compiled is not this function's for
+        // good while that function may revise the guess, so a call made meanwhile compiles it
+        // again; once the outermost compilation is done, it stands.
+        Err(refusal) if CELL_CALLS.get() != cell_calls => {
+            PROVISIONAL.with_borrow_mut(|provisional| provisional.push((key, refusal)));
         }
-        AWAITING.with_borrow_mut(|awaiting| awaiting.insert(key.clone(), awaited));
+        compiled => {
+            if let Err(refusal) = &compiled
+                && lower::awaits_interpreter(refusal)
+                && let Some(awaited) = lower::awaited()
+            {
+                // The table reads the promise later, which the namespace may have dropped by
+                // then.
+                if let lower::Awaited::Promise(promise) = awaited {
+                    interp::heap().add_global_root(promise);
+                }
+                AWAITING.with_borrow_mut(|awaiting| awaiting.insert(key.clone(), awaited));
+            }
+            remember(key, compiled);
+        }
     }
+    if COMPILING.with_borrow(|compiling| compiling.is_empty()) {
+        let provisional = PROVISIONAL.take();
+        for (key, refusal) in provisional {
+            let compiled = COMPILED.with_borrow(|table| match table.get(&key) {
+                Some(Ok(found)) => Some(*found),
+                _ => None,
+            });
+            if !compiled.is_some_and(|found| current(found) && cells_hold(&key, found)) {
+                remember(key, Err(refusal));
+            }
+        }
+    }
+    found
+}
+
+fn remember(key: Key, compiled: Result<&'static Compiled, Refusal>) {
     COMPILED.with_borrow_mut(|table| {
         if compiled.is_err() && table.len() >= MAX_REFUSALS {
             table.retain(|_, entry| entry.is_ok());
@@ -458,7 +481,14 @@ unsafe fn compiled_or_refusal(
         }
         table.insert(key, compiled);
     });
-    found
+}
+
+/// Points the cell that calls `key` assuming `compiled`'s result, if code calls through one, at
+/// `compiled`.
+fn fill_cell(key: Key, compiled: &Compiled) {
+    if let Some(cell) = CELLS.with_borrow(|cells| cells.get(&(key, compiled.result)).copied()) {
+        cell.set(compiled.code.address);
+    }
 }
 
 /// How many calls on this thread stopped in native code and ran again in the interpreter.
@@ -529,12 +559,13 @@ fn calls_r(compiled: &Compiled) -> bool {
         })
 }
 
-/// The cell that holds the address of the current code for `key`, made on first use.
-fn cell(key: &Key) -> &'static Cell<usize> {
+/// The cell that holds the address of the latest code for `key` with result `result`, made on
+/// first use.
+fn cell(key: &Key, result: Type) -> &'static Cell<usize> {
     CELLS.with_borrow_mut(|cells| {
-        *cells.entry(key.clone()).or_insert_with(|| {
+        *cells.entry((key.clone(), result)).or_insert_with(|| {
             let address = COMPILED.with_borrow(|table| match table.get(key) {
-                Some(Ok(found)) => found.code.address,
+                Some(Ok(found)) if found.result == result => found.code.address,
                 _ => 0,
             });
             Box::leak(Box::new(Cell::new(address)))
@@ -592,11 +623,28 @@ unsafe fn compile(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> 
 /// How many times [`compile`] lowers before the shapes settle.
 const MAX_SHAPE_ROUNDS: usize = 4;
 
-/// Lowers `function` with a result type that its recursive calls agree with.
+/// Lowers `function` with a result type that its recursive calls agree with. While it lowers,
+/// the function is in `COMPILING` with its guess, which a call from a function compiled
+/// meanwhile assumes ([`Linker::callee`]); afterwards its entry is as it was, so a lowering
+/// for a code file leaves no guess behind.
 unsafe fn lower_settled(function: Sexp, params: &[Type]) -> Result<(Lowered, Linker), Refusal> {
+    let key: Key = (function, SmallVec::from_slice(params));
+    let before = COMPILING.with_borrow(|compiling| compiling.get(&key).copied());
+    let lowered = lower_guessing(function, params, &key);
+    COMPILING.with_borrow_mut(|compiling| match before {
+        Some(before) => compiling.insert(key, before),
+        None => compiling.remove(&key),
+    });
+    lowered
+}
+
+unsafe fn lower_guessing(
+    function: Sexp,
+    params: &[Type],
+    key: &Key,
+) -> Result<(Lowered, Linker), Refusal> {
     let declared = declared_result(function);
     let guesses: SmallVec<[Type; 5]> = declared.into_iter().chain(GUESSES).collect();
-    let key: Key = (function, SmallVec::from_slice(params));
     let mut refusal = Refusal::new("the result type depends on the recursion");
     for &first in &guesses {
         let mut guess = first;
@@ -631,7 +679,7 @@ unsafe fn lower_settled(function: Sexp, params: &[Type]) -> Result<(Lowered, Lin
             let result = lowered.function.result;
             // A function compiled meanwhile that calls this one back through a cell assumed the
             // guess too.
-            let called_back = linker.cells.iter().any(|(callee, _)| *callee == key);
+            let called_back = linker.cells.iter().any(|(callee, _)| callee == key);
             if result == guess || !(calls_itself(&lowered.function) || called_back) {
                 return Ok((lowered, linker));
             }
@@ -748,7 +796,7 @@ impl Callees for Linker {
         // A function being compiled, which calls this one, has no code yet: the call goes through
         // its cell and assumes the result its own recursive calls assume.
         if let Some(Some(guess)) = COMPILING.with_borrow(|compiling| compiling.get(&key).copied()) {
-            let cell = cell(&key);
+            let cell = cell(&key, guess);
             CELL_CALLS.set(CELL_CALLS.get() + 1);
             add_cell(&mut self.cells, &key, guess);
             self.called.push(key);
