@@ -379,6 +379,36 @@ fn trivia_oracle_catches_unmoved_findings() {
     );
 }
 
+/// A subscript's argument names belong to its method, which reads them by spelling: renaming a
+/// table's `roll` changes a rolling join into an equi-join and drops its finding (`FUZZ_SEED=177`
+/// before the renamer knew).
+#[test]
+fn renames_leave_subscript_argument_names_alone() {
+    let db = command_database();
+    let state = fixture_state(
+        "joined <- events[windows, on = .(id, t >= lo), roll = TRUE]\n\
+         roll <- joined\n",
+        DocumentKind::Test,
+    );
+    let original = vec![String::new()];
+    let mut renamed = 0;
+    for seed in 0..64 {
+        let Some(rename) = plan_rename(&db, &state, &original, &mut SplitMix64(seed)) else {
+            continue;
+        };
+        let (_, text, _) = &rename.edited.files[0];
+        assert!(
+            text.contains("roll = TRUE"),
+            "seed {seed} renamed a subscript's argument name:\n{text}"
+        );
+        renamed += 1;
+    }
+    assert!(
+        renamed > 0,
+        "no seed renamed anything, so the test checks nothing"
+    );
+}
+
 /// The rename relation reports a renamed project that lost a finding: the real rendering of the
 /// renamed project, less one finding line.
 #[test]
