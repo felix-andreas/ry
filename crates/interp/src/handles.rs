@@ -2622,7 +2622,7 @@ pub fn count_tmp_binding(_context: &Cx<'_>, environment: Local<'_, Environment>)
 
 /// The direct entry of the builtin `definition` on `arguments`, in formal order, or `None` when
 /// it has none or declines.
-#[inline]
+#[inline(always)]
 pub fn call_direct<'s>(
     context: &mut Cx<'s>,
     definition: &crate::builtins::BuiltinDef,
@@ -2674,6 +2674,7 @@ pub fn call_builtin<'s>(
 }
 
 /// A promise of `code` already forced to `value`.
+#[inline(always)]
 pub fn forced_promise<'s>(
     context: &mut Cx<'s>,
     code: Local<'_>,
@@ -2687,53 +2688,54 @@ pub fn forced_promise<'s>(
     }
 }
 
+/// An argument with its tag ([`Arg`] on handles): `NULL` when it has none.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct Tagged<'s> {
+    pub tag: Local<'s>,
+    pub value: Local<'s>,
+}
+
 /// The call whose function and arguments are `items`, each with its tag.
-pub fn language<'s>(
-    context: &mut Cx<'s>,
-    items: &[(Local<'_>, Local<'_>)],
-) -> R<Local<'s, Language>> {
-    let items: SmallVec<[(Sexp, Sexp); 6]> = items
-        .iter()
-        .map(|(tag, value)| (tag.raw(), value.raw()))
-        .collect();
-    // SAFETY: the items are rooted, the call allocates, which `&mut Cx` permits, and a call is
-    // what the allocation makes for at least one item.
+#[inline]
+pub fn language<'s>(context: &mut Cx<'s>, items: &[Tagged<'_>]) -> R<Local<'s, Language>> {
+    // SAFETY: the items are rooted, and each cell allocates, which `&mut Cx` permits, with the
+    // cells made so far rooted. A call is what the first item's cell is.
     unsafe {
-        let call = values::pairlist(&items, SexpType::Language)?;
+        let mut call = values::nil();
+        for (position, item) in items.iter().enumerate().rev() {
+            let kind = if position == 0 {
+                SexpType::Language
+            } else {
+                SexpType::Pairlist
+            };
+            call = values::triple(kind, item.value.raw(), call, item.tag.raw())?;
+        }
         rooted(context, call)
             .downcast::<Language>()
             .ok_or_else(|| error("internal error: a call without a function"))
     }
 }
 
-/// The closure `function` applied by `call` to `arguments`, each with its tag, from the frame of
-/// `caller`, or from a slot frame that has none. The closure's frame keeps the arguments
+/// The closure `function` applied by `call` to `arguments` from the frame of `caller`, or from
+/// a slot frame that has none. The closure's frame keeps the arguments
 /// (`eval::apply_closure_owning`).
+#[inline]
 pub fn apply_closure<'s>(
     context: &mut Cx<'s>,
     call: Local<'s, Language>,
     function: Local<'s>,
-    arguments: &[(Local<'s>, Local<'s>)],
+    arguments: &[Tagged<'s>],
     caller: Option<Local<'s, Environment>>,
 ) -> R<Local<'s>> {
     let caller = caller.map_or_else(values::nil, Local::raw);
-    let arguments: SmallVec<[Arg; 6]> = arguments
-        .iter()
-        .map(|(tag, value)| Arg {
-            tag: tag.raw(),
-            value: value.raw(),
-        })
-        .collect();
     // SAFETY: the call, the function, the arguments and the caller's environment are rooted,
-    // and the closure runs any R code, which `&mut Cx` permits.
+    // and the closure runs any R code, which `&mut Cx` permits. `Tagged` has `Arg`'s layout.
     unsafe {
-        let result = crate::eval::apply_closure_owning(
-            call.raw(),
-            function.raw(),
-            &arguments,
-            caller,
-            None,
-        )?;
+        let arguments =
+            std::slice::from_raw_parts(arguments.as_ptr().cast::<Arg>(), arguments.len());
+        let result =
+            crate::eval::apply_closure_owning(call.raw(), function.raw(), arguments, caller, None)?;
         Ok(rooted(context, result))
     }
 }

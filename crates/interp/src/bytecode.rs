@@ -54,7 +54,8 @@ use {
         eval::{self, Reify, Site, SwitchSelector, as_condition},
         handles::{
             self, AssignmentCopy, Atomic, Binding, Chars, Cx, Environment, Gc, Integer, Language,
-            List, Local, Logical, Names, Owned, Pairlist, Promise, Real, Str, Symbol, Vector, safe,
+            List, Local, Logical, Names, Owned, Pairlist, Promise, Real, Str, Symbol, Tagged,
+            Vector, safe,
         },
         interp,
         kernels::{self, Element, MAX_NODES, Node, Reduction},
@@ -12322,6 +12323,7 @@ impl<'f> RunningFrame<'f, '_, '_> {
     }
 
     /// Stores `value` in `slot`, which counts the reference.
+    #[inline]
     fn store(self, _context: &Cx<'_>, slot: Slot<'f>, value: Local<'_>) {
         // SAFETY: the register belongs to the running frame, and a store that drops the old
         // value's count to zero frees nothing.
@@ -15240,6 +15242,7 @@ fn replacement_arguments(context: &Cx<'_>, setter_call: Local<'_>, empty_allowed
 /// Whether a replacement call's arguments between the target and the value are constants,
 /// which a replacement closure can take as values: it cannot tell a constant from a promise of
 /// one.
+#[inline]
 fn replacement_constants(context: &Cx<'_>, setter_call: Local<'_>) -> bool {
     let Some(call) = setter_call.read(context).downcast::<Language>() else {
         return false;
@@ -15296,30 +15299,32 @@ fn replace_with_closure<'s>(
         .map(|value| value.head())
         .ok_or_else(malformed)?;
     let value_code = context.root(value_code);
+    let object = handles::forced_promise(context, tmp, target)?.value();
+    let value = handles::forced_promise(context, value_code, assigned)?.value();
     let call = setter_call
         .read(context)
         .downcast::<Language>()
         .ok_or_else(malformed)?;
-    let head = context.root(call.head());
-    let mut tags: SmallVec<[Local<'s>; 6]> = SmallVec::new();
+    let mut items: SmallVec<[Tagged<'s>; 6]> = smallvec![Tagged {
+        tag: handles::null(),
+        value: context.root(call.head()),
+    }];
+    let mut arguments: SmallVec<[Tagged<'s>; 6]> = SmallVec::new();
     let mut cell = call.rest();
-    for _ in args {
+    for (position, &constant) in args.iter().enumerate() {
         let item = cell.downcast::<Pairlist>().ok_or_else(malformed)?;
-        tags.push(context.root(item.tag()));
+        let tag = context.root(item.tag());
         cell = item.rest();
-    }
-    let object = handles::forced_promise(context, tmp, target)?.value();
-    let value = handles::forced_promise(context, value_code, assigned)?.value();
-    let mut items: SmallVec<[(Local<'s>, Local<'s>); 6]> = smallvec![(handles::null(), head)];
-    let mut arguments: SmallVec<[(Local<'s>, Local<'s>); 6]> = SmallVec::new();
-    for (position, (&tag, &constant)) in tags.iter().zip(args).enumerate() {
         let (in_call, passed) = match position {
             0 => (tmp, object),
             position if position == last => (value_code, value),
             _ => (constant, constant),
         };
-        items.push((tag, in_call));
-        arguments.push((tag, passed));
+        items.push(Tagged {
+            tag,
+            value: in_call,
+        });
+        arguments.push(Tagged { tag, value: passed });
     }
     let call = handles::language(context, &items)?;
     handles::apply_closure(context, call, function, &arguments, environment)
