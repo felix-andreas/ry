@@ -166,6 +166,8 @@ const REGRESSIONS: &[&str] = &[
     "1L --- fn(ier\n#:dL\n----a, bar)\n\n!\n L\n",
     // A `[[` opening two nested array literals, which the formatter breaks onto two lines.
     "n <- [[1L], \n[2L, 3L]]\n",
+    // A one-line block whose `match` breaks onto lines of its own.
+    "f <- function() { r <- 1; match (r) { 1 => 1, 2 => 2 } }\n",
 ];
 
 /// Whole-file and range formatting share every generated input: a range
