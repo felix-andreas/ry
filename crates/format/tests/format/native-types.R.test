@@ -42,7 +42,7 @@ r <- match(xs){
 [_ ,..rest]=>rest
 :Some(v)as whole=>whole
 (x=,y=)=>x
-(x=a,..rest)=>rest
+(x=a,..)=>a
 }
 #++++
 r <- match (xs) {
@@ -52,5 +52,5 @@ r <- match (xs) {
   [_, ..rest] => rest
   :Some(v) as whole => whole
   (x =, y =) => x
-  (x = a, ..rest) => rest
+  (x = a, ..) => a
 }

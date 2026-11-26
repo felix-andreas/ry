@@ -79,3 +79,13 @@ error: `..` ignores the remaining fields of a record pattern, so it needs named 
  --> 2:3
   |   (a, ..) => a
   |   ^^^^^^^
+
+#---- named_rest_in_record_pattern
+match (x) {
+  (a = p, ..others) => p
+}
+#++++
+error: a record pattern's `..` ignores the remaining fields, so it takes no name; only a list pattern binds its rest. Write `..` and read other fields from the matched value
+ --> 2:11
+  |   (a = p, ..others) => p
+  |           ^^^^^^^^

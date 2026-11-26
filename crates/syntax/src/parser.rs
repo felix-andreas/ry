@@ -3096,7 +3096,9 @@ impl Parser<'_> {
                 self.error_here("`..` must be the last item of a pattern");
             }
             if self.rest_ahead() {
-                shape.rest_binds = self.token_str(self.pos) != "..";
+                if self.token_str(self.pos) != ".." {
+                    shape.named_rest = Some(self.token_range(self.pos));
+                }
                 self.wrap(PATTERN_REST);
                 shape.rest = true;
             } else if self.at(IDENT)
@@ -3165,10 +3167,18 @@ impl Parser<'_> {
             );
         }
         shape.range = self.range_from(open);
-        if shape.rest && !shape.named && (shape.rest_binds || !(payload && shape.items == 0)) {
+        if shape.rest
+            && !shape.named
+            && (shape.named_rest.is_some() || !(payload && shape.items == 0))
+        {
             self.error_rule(
                 shape.range,
                 "`..` ignores the remaining fields of a record pattern, so it needs named fields before it",
+            );
+        } else if let Some(range) = shape.named_rest {
+            self.error_rule(
+                range,
+                "a record pattern's `..` ignores the remaining fields, so it takes no name; only a list pattern binds its rest. Write `..` and read other fields from the matched value",
             );
         }
         shape
@@ -3283,8 +3293,8 @@ struct PatternListShape {
     items: usize,
     named: bool,
     rest: bool,
-    /// The rest is `..name`, which binds the remaining fields.
-    rest_binds: bool,
+    /// Where a rest written `..name` is: a record or payload rest binds nothing.
+    named_rest: Option<TextRange>,
     trailing_comma: bool,
     range: TextRange,
 }
