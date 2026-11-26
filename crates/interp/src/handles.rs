@@ -8,9 +8,9 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub use heap::handle::{
-    Alt, Atomic, Binding, Chars, Complex, Cx, Elements, Environment, Exact, Expression, Fresh, Gc,
-    I64, Identity, Integer, Kind, Language, List, Local, Logical, Owned, Pairlist, Pointer,
-    Promise, Raw, Real, Str, Symbol, Unfilled, Value, Vector,
+    Alt, Atomic, Binding, Chars, Complex, Cx, Elements, Enclosing, Environment, Exact, Expression,
+    Fresh, Gc, I64, Identity, Integer, Item, Kind, Language, List, Local, Logical, Owned, Pairlist,
+    Pointer, Promise, Raw, Real, Str, Symbol, Unfilled, Value, Vector,
 };
 use {
     crate::{
@@ -1133,6 +1133,19 @@ impl<'s> Args<'_, 's> {
         // SAFETY: a warning may run a calling handler, which is R code and so needs `&mut Cx`.
         unsafe { conditions::warning_call(self.call.call, message) }
     }
+
+    /// The call of the closure the call was made from, or the call itself outside a closure:
+    /// the call GNU R names in a warning from an internal.
+    pub fn closure_call(&self, _context: &Cx<'s>) -> Local<'s> {
+        // SAFETY: the frame stack holds each running closure's call, and the evaluator the call
+        // it is evaluating, until the builtin returns.
+        unsafe {
+            let raw = self.call.frame_index().map_or(self.call.call, |position| {
+                crate::interp().frames[position].call
+            });
+            Local::adopt(raw)
+        }
+    }
 }
 
 /// An error that names the call `call`.
@@ -1589,8 +1602,8 @@ pub fn pairlist_prefix<'s>(context: &mut Cx<'s>, list: Local<'s>, count: usize) 
     Ok(unsafe { rooted(context, values::pairlist(&items, SexpType::Pairlist)?) })
 }
 
-/// Copies the first `count` elements of `from` into the new vector `to`, a list's or
-/// character vector's in one bulk copy that counts its references once.
+/// Copies the first `count` elements of `from` into the new vector `to` in one bulk copy, which
+/// for a list or a character vector counts its references once.
 pub fn copy_prefix<T: Vector>(
     _context: &mut Cx<'_>,
     from: Local<'_, T>,
@@ -1609,13 +1622,17 @@ pub fn copy_prefix<T: Vector>(
                 crate::heap().copy_elements(to.raw(), 0, from.raw(), 0, count);
                 Ok(())
             }
-            _ => crate::subset::copy_mapped(
-                from.raw(),
-                to.raw(),
-                count,
-                |index| index,
-                |index| index,
-            ),
+            kind => {
+                let size = kind
+                    .element_size()
+                    .ok_or_else(|| error("internal error: a copy of a vector without elements"))?;
+                std::ptr::copy_nonoverlapping(
+                    from.raw().data().cast_const(),
+                    to.raw().data(),
+                    count * size,
+                );
+                Ok(())
+            }
         }
     }
 }
@@ -1877,8 +1894,17 @@ pub fn frame_value<'s>(
     name: Local<'_, Chars>,
 ) -> R<Option<Local<'s>>> {
     let symbol = install(context, name)?;
-    // SAFETY: the environment and the symbol are rooted, and a lookup and the promise it
-    // forces run R code, which `&mut Cx` permits.
+    frame_symbol_value(context, environment, symbol)
+}
+
+/// [`frame_value`] for the variable `symbol`.
+pub fn frame_symbol_value<'s>(
+    context: &mut Cx<'s>,
+    environment: Local<'s>,
+    symbol: impl Pointer<Symbol>,
+) -> R<Option<Local<'s>>> {
+    // SAFETY: the environment is rooted and symbols are permanent, and a lookup and the
+    // promise it forces run R code, which `&mut Cx` permits.
     unsafe {
         crate::moves::reaching_environment()?;
         let value = crate::eval::find_var_in_frame(symbol.raw(), environment.raw())?;
@@ -2395,6 +2421,26 @@ pub fn is_missing_in(
     unsafe { crate::eval::argument_is_missing(symbol.raw(), environment.raw()) }
 }
 
+/// Whether `symbol` is a missing argument in `environment`, counting a defaulted formal as
+/// missing in its own function, as `missing()` does.
+pub fn is_missing(
+    _context: &mut Cx<'_>,
+    symbol: Local<'_, Symbol>,
+    environment: Local<'_, Environment>,
+) -> R<bool> {
+    // SAFETY: both are rooted, and the test may force a promise, which `&mut Cx` permits.
+    unsafe { crate::eval::is_missing(symbol.raw(), environment.raw()) }
+}
+
+/// The namespace registered as `name`, if it is loaded.
+pub fn registered_namespace<'s>(context: &mut Cx<'s>, name: &str) -> R<Option<Local<'s>>> {
+    let symbol = install_bytes(context, name.as_bytes())?;
+    // SAFETY: the registry is a permanent root of the heap.
+    let registry = unsafe { Local::adopt(crate::heap().known().namespace_registry) };
+    let namespace = frame_symbol_value(context, registry, symbol)?;
+    Ok(namespace.filter(|namespace| namespace.r_type() == SexpType::Environment))
+}
+
 /// The value of `promise`, forced while a reference to `held` is counted, so that code the
 /// promise runs copies `held` before it changes it, as GNU R's `*tmp*` keeps it.
 pub fn force_holding<'s>(
@@ -2754,4 +2800,112 @@ pub fn apply_closure<'s>(
             crate::eval::apply_closure_owning(call.raw(), function.raw(), arguments, caller, None)?;
         Ok(rooted(context, result))
     }
+}
+
+/// An argument that `...` holds: its tag, its value, forced, and the expression that produced
+/// it, which is the promise's code.
+#[derive(Clone, Copy)]
+pub struct DotsArgument<'s> {
+    pub tag: Local<'s>,
+    pub value: Local<'s>,
+    pub expression: Local<'s>,
+}
+
+/// The arguments `...` holds in `environment`, each forced in order; none when it is unbound.
+pub fn dots_arguments<'s>(
+    context: &mut Cx<'s>,
+    environment: Local<'s, Environment>,
+) -> R<Vec<DotsArgument<'s>>> {
+    // SAFETY: the lookup and each force run R code, which `&mut Cx` permits. The rooted list
+    // keeps every cell alive, and each part is rooted before the next force.
+    unsafe {
+        let dots = rooted(
+            context,
+            crate::eval::find_var(values::symbols().dots, environment.raw())?,
+        );
+        let mut arguments = Vec::new();
+        let mut cell = dots.raw();
+        while matches!(cell.kind(), SexpType::Dots | SexpType::Pairlist) {
+            let item = cell.car();
+            let mut expression = item;
+            while expression.kind() == SexpType::Promise {
+                expression = expression.cdr();
+            }
+            let tag = rooted(context, cell.tag());
+            let expression = rooted(context, expression);
+            let value = rooted(context, crate::eval::value_of(item)?);
+            arguments.push(DotsArgument {
+                tag,
+                value,
+                expression,
+            });
+            cell = cell.cdr();
+        }
+        Ok(arguments)
+    }
+}
+
+/// The S3 method `name` that a call from `environment` finds, looking in `definitions` after
+/// the calling scope.
+pub fn lookup_method<'s>(
+    context: &mut Cx<'s>,
+    name: Gc<'_, Symbol>,
+    environment: Local<'s, Environment>,
+    definitions: Local<'s, Environment>,
+) -> R<Option<Local<'s>>> {
+    // SAFETY: the environments are rooted and the symbol is permanent. The lookup may force a
+    // promise or run an active binding, which `&mut Cx` permits.
+    unsafe {
+        let method =
+            crate::dispatch::lookup_method(name.raw(), environment.raw(), definitions.raw())?;
+        Ok(method.map(|method| rooted(context, method)))
+    }
+}
+
+/// The class vector S3 dispatch uses for `object`, its implicit class when it has no `class`
+/// attribute.
+pub fn implicit_class<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
+    // SAFETY: the object is rooted, and building an implicit class allocates, which `&mut Cx`
+    // permits.
+    unsafe {
+        let class = crate::dispatch::implicit_class(object.raw())?;
+        Ok(rooted(context, class))
+    }
+}
+
+/// `expression` deparsed onto one line.
+pub fn deparse_one_line(_context: &mut Cx<'_>, expression: Local<'_>) -> String {
+    // SAFETY: the expression is rooted, and deparsing allocates, which `&mut Cx` permits.
+    unsafe { crate::deparse::deparse_one_line(expression.raw()) }
+}
+
+/// The function `function`, a closure or a primitive, applied to `arguments` from
+/// `environment`. A `NULL` call is built from the function and the arguments.
+pub fn apply<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'s>,
+    function: Local<'s>,
+    arguments: &[Tagged<'s>],
+    environment: Local<'s, Environment>,
+) -> R<Local<'s>> {
+    // SAFETY: everything is rooted, and the function runs any R code, which `&mut Cx` permits.
+    // `Tagged` has `Arg`'s layout.
+    unsafe {
+        let arguments =
+            std::slice::from_raw_parts(arguments.as_ptr().cast::<Arg>(), arguments.len());
+        let result = crate::eval::apply(call.raw(), function.raw(), arguments, environment.raw())?;
+        Ok(rooted(context, result))
+    }
+}
+
+/// Runs `body` between reading the random number generator's state from `.Random.seed` and
+/// writing it back.
+pub fn with_rng_state<'s, T>(context: &mut Cx<'s>, body: impl FnOnce(&mut Cx<'s>) -> R<T>) -> R<T> {
+    // SAFETY: reading `.Random.seed` may force a promise and writing it allocates, which
+    // `&mut Cx` permits.
+    unsafe { crate::random::get_rng_state()? };
+    let answer = body(context)?;
+    // SAFETY: as above.
+    unsafe { crate::random::put_rng_state()? };
+    Ok(answer)
 }

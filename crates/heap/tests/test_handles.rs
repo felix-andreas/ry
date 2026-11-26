@@ -87,6 +87,32 @@ fn a_scope_releases_what_it_rooted_and_keeps_its_result() {
 }
 
 #[test]
+fn a_scope_reading_its_enclosing_scope_keeps_both() {
+    with_context(GcStress::EveryAllocation, |cx| -> Result<(), HeapError> {
+        let outer = integers(cx, &[1, 2, 3])?;
+        let mut sums = Vec::new();
+        for round in 0..8 {
+            let sum = cx.scope_reading(|cx, enclosing| {
+                let outer = enclosing.pass(outer);
+                let shifted: Vec<i32> = outer
+                    .as_slice(cx)
+                    .iter()
+                    .map(|value| value + round)
+                    .collect();
+                let inner = integers(cx, &shifted)?;
+                cx.alloc::<Real>(64)?;
+                Ok(outer.as_slice(cx).iter().sum::<i32>() + inner.as_slice(cx).iter().sum::<i32>())
+            })?;
+            sums.push(sum);
+        }
+        assert_eq!(outer.as_slice(cx), [1, 2, 3]);
+        assert_eq!(sums, (0..8).map(|round| 12 + 3 * round).collect::<Vec<_>>());
+        Ok(())
+    })
+    .expect("allocation");
+}
+
+#[test]
 fn a_write_reads_other_vectors_and_refuses_its_own_storage() {
     with_context(GcStress::EveryAllocation, |cx| -> Result<(), HeapError> {
         let target = integers(cx, &[1, 2, 3, 4])?;
