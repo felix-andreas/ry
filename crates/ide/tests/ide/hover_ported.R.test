@@ -851,6 +851,21 @@ hint @13<T>
 hint @17: T
 hint @18 -> T
 
+#---- the_name_string_of_assign_hovers_as_the_local_it_declares
+read_header <- function(read_bytes) {
+  assign($0"width", read_bytes(2))
+  width * 2
+}
+#++++
+hover 47..54: width: Unknown
+definition 47..54
+references: 73..78
+rename: 1 edit(s)
+signature: fn(x: character, value: Any, [pos]: Any, [envir]: Any, [inherits]: logical, [immediate]: logical) -> Any
+parameters: [x: character] | value: Any | [pos]: Any | [envir]: Any | [inherits]: logical | [immediate]: logical
+completion (128+): read_bytes, width, read_header, assign, function, break, else, FALSE
+hint @56value =
+
 #---- the_name_string_of_delayed_assign_hovers_as_the_local_it_declares
 read_header <- function(read_bytes) {
   delayedAssign($0"length", read_bytes(2))
