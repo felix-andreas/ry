@@ -364,6 +364,7 @@ impl Globals {
     }
 }
 
+#[inline]
 pub fn symbols() -> &'static Symbols {
     &interp().symbols
 }
