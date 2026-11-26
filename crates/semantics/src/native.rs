@@ -840,7 +840,7 @@ struct Judge<'a, 'db> {
     /// The names each loop body at the judged function's own level declares before the loop,
     /// from its first walk outside a trial, as the typed core remembers them
     /// (`lower::Lowering::looped`).
-    declared_loops: Vec<(ExprId, SmallVec<[(Symbol, Option<Ty<'db>>); 2]>)>,
+    declared_loops: Vec<(ExprId, Declared<'db>)>,
     /// The local functions defined so far and whether each body was walked. Native code runs a
     /// local function in place where it is called, so its body is judged with the names in scope
     /// at its first call.
@@ -859,6 +859,9 @@ struct Judge<'a, 'db> {
     /// because converting at the assignment would break that read.
     converted_locals: Vec<(Symbol, usize)>,
 }
+
+/// The names a loop declares before it, with their types ([`Judge::in_loop`]).
+type Declared<'db> = SmallVec<[(Symbol, Option<Ty<'db>>); 2]>;
 
 /// What a walk changes, which a loop trial puts back ([`Judge::in_loop`]).
 #[derive(Clone)]
@@ -1619,7 +1622,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             self.probing += 1;
             self.loop_body(body, mark);
             self.probing -= 1;
-            let learned: SmallVec<[(Symbol, Option<Ty<'db>>); 2]> = forward
+            let learned: Declared<'db> = forward
                 .into_iter()
                 .filter_map(|name| match self.lookup(name) {
                     Some(Slot::Maybe(ty) | Slot::Value(ty, _)) => Some((name, ty)),
