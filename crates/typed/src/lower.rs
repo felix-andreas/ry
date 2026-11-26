@@ -14,8 +14,8 @@ use {
     crate::{
         Refusal,
         ir::{
-            Arith, Bits, BlockId, Builder, Compare, Constant, Inst, Item, Local, Math, Op, Reduce,
-            Terminator, Text, Type,
+            Arith, Bits, BlockId, Builder, Compare, Constant, Function, Inst, Item, Local, Math,
+            Op, Reduce, Terminator, Text, Type,
         },
         shapes, values,
     },
@@ -50,7 +50,7 @@ pub trait Callees {
 
 /// The lowered function and the lookups it assumes.
 pub struct Lowered {
-    pub function: crate::ir::Function,
+    pub function: Function,
     pub speculations: Vec<Speculation>,
     /// The R calls the code makes, as [`Op::CallR`] indexes them.
     pub r_calls: Vec<RCall>,
@@ -323,6 +323,9 @@ unsafe fn lower_calling(
         converted: None,
         checked_items: None,
         pending: Vec::new(),
+        forward: None,
+        declared_loops: Vec::new(),
+        probing: 0,
     };
     tail_matches(body, &mut lowering.tails);
     let mut assigned = Vec::new();
@@ -467,6 +470,7 @@ enum Expected {
 }
 
 /// What [`Lowering::rewind`] restores.
+#[derive(Clone)]
 struct Checkpoint {
     scopes: Vec<Scope>,
     variables: Vec<Variable>,
@@ -480,6 +484,8 @@ struct Checkpoint {
     constructed: usize,
     r_calls: usize,
     blocks: usize,
+    self_inlines: usize,
+    pending: Vec<SmallVec<[Local; 4]>>,
 }
 
 struct Lowering<'c> {
@@ -544,7 +550,21 @@ struct Lowering<'c> {
     /// starts as a list of any tag and takes the item type of the first item appended to it or
     /// list assigned over it ([`Lowering::settle`]).
     pending: Vec<SmallVec<[Local; 4]>>,
+    /// The name the last read refused for because the function sets it only later, with the
+    /// number of scopes at the read, for the loop around the read to declare
+    /// ([`Lowering::looped`]).
+    forward: Option<(Sexp, usize)>,
+    /// The names each loop at the function's own level declares before it, from the first time
+    /// it lowered outside a trial, so lowering an enclosing loop again repeats no trials.
+    declared_loops: Vec<(Sexp, SmallVec<[Declared; 2]>)>,
+    /// How many loop trials enclose the current point: a trial lowers a loop only to learn the
+    /// types of the names it sets, and leaves out each statement that reads one too early.
+    probing: usize,
 }
+
+/// A name a loop declares before it ([`Lowering::looped`]): its symbol, its type, and whether
+/// it is a pending empty list.
+type Declared = (Sexp, Type, bool);
 
 /// Where typed code may call an R function: where the value is unused, where a conversion
 /// gives it a ry type, as `stop()`, which never returns, or anywhere when the function is one of
@@ -979,6 +999,7 @@ impl Lowering<'_> {
                 .iter()
                 .any(|&function| assigns(interp::bytecode::closure_body(function), symbol))
         {
+            self.forward = Some((symbol, self.scopes.len()));
             return Err(Refusal(Cow::Owned(format!(
                 "it reads `{}` from outside the function before it assigns it: give the local \
                  another name",
@@ -1055,8 +1076,20 @@ impl Lowering<'_> {
             .and_then(|scope| scope.names.get(&symbol))
         {
             // A name that may be unset may also take a value of another type, in another
-            // variable, whose write clears this one's flag.
-            Some(&Binding::Maybe(local)) => (self.builder.ty(local) == ty).then_some(local),
+            // variable, whose write clears this one's flag. A pending empty list takes the
+            // variable's item type, or gives it its own.
+            Some(&Binding::Maybe(local)) => {
+                let pending =
+                    self.pending_family(local).is_some() || self.pending_family(value).is_some();
+                let lists = matches!(
+                    (self.builder.ty(local), ty),
+                    (
+                        Type::Vector { array: true, .. },
+                        Type::Vector { array: true, .. }
+                    )
+                );
+                (self.builder.ty(local) == ty || (pending && lists)).then_some(local)
+            }
             _ => self.lookup_assignable(symbol),
         };
         match assignable {
@@ -1165,36 +1198,23 @@ impl Lowering<'_> {
         };
         let members = self.pending.swap_remove(family);
         let function = &mut self.builder.function;
-        for inst in function
+        let read = function
             .blocks
-            .iter_mut()
-            .flat_map(|block| &mut block.insts)
-        {
-            let reads = inst
-                .op
-                .operands()
-                .iter()
-                .any(|operand| members.contains(operand));
-            if reads && !matches!(inst.op, Op::Copy(_) | Op::Length(_) | Op::Relabel(..)) {
-                return Err(Refusal::new(
-                    "an empty list read before anything shows its item type",
-                ));
-            }
-            if inst.dest.is_some_and(|dest| members.contains(&dest)) {
-                match &mut inst.op {
-                    Op::NewVector(held, _) | Op::EmptyList(held, _) => *held = item,
-                    Op::Relabel(_, Type::Vector { item: held, .. }) => *held = item,
-                    _ => {}
-                }
-            }
+            .iter()
+            .flat_map(|block| &block.insts)
+            .any(|inst| {
+                inst.op
+                    .operands()
+                    .iter()
+                    .any(|operand| members.contains(operand))
+                    && !matches!(inst.op, Op::Copy(_) | Op::Length(_) | Op::Relabel(..))
+            });
+        if read {
+            return Err(Refusal::new(
+                "an empty list read before anything shows its item type",
+            ));
         }
-        for member in members {
-            if let Some(Type::Vector { item: held, .. }) =
-                function.locals.get_mut(member.0 as usize)
-            {
-                *held = item;
-            }
-        }
+        retype_family(function, &members, item);
         Ok(())
     }
 
@@ -1452,9 +1472,9 @@ impl Lowering<'_> {
             }
             "<-" | "=" => return self.assignment(call).map(Some),
             "if" => return self.conditional(call, dropped),
-            "for" => return self.for_loop(call),
-            "while" => return self.while_loop(call),
-            "repeat" => return self.repeat_loop(call),
+            "for" => return self.looped(call, Self::for_loop),
+            "while" => return self.looped(call, Self::while_loop),
+            "repeat" => return self.looped(call, Self::repeat_loop),
             "break" | "next" => {
                 let &(continue_to, break_to) = self
                     .loops
@@ -2004,7 +2024,12 @@ impl Lowering<'_> {
         }
         let count = items.len();
         for (position, (_, item)) in items.into_iter().enumerate() {
-            last = self.part(item, dropped || position + 1 < count)?;
+            let dropped = dropped || position + 1 < count;
+            last = if self.probing > 0 {
+                self.trial_part(item, dropped)?
+            } else {
+                self.part(item, dropped)?
+            };
             if last.is_none() {
                 return Ok(None);
             }
@@ -2287,6 +2312,125 @@ impl Lowering<'_> {
         self.builder.switch_to(header);
         self.builder.push(None, Op::Poll);
         header
+    }
+
+    /// Lowers the loop `call` with `lower`. A read in the loop of a name that only a later
+    /// statement of its body sets refuses at first, because the name has no variable yet. The
+    /// loop is then lowered as a trial that leaves out the statements reading such a name, which
+    /// gives the name's type, and lowered again with the name declared before it as a name not
+    /// set yet: the read gives up where the name is unset, and the interpreter reads it as R does.
+    unsafe fn looped(
+        &mut self,
+        call: Sexp,
+        lower: unsafe fn(&mut Self, Sexp) -> Result<Option<Local>, Refusal>,
+    ) -> Result<Option<Local>, Refusal> {
+        let checkpoint = self.checkpoint();
+        let start = self.builder.current;
+        let start_insts = self
+            .builder
+            .function
+            .blocks
+            .get(start.0 as usize)
+            .map_or(0, |block| block.insts.len());
+        let scopes = self.scopes.len();
+        // Only a loop at the function's own level lowers in one context: an inlined function's
+        // loop takes other types where it inlines again.
+        let remembers = scopes == 1;
+        let mut declared: SmallVec<[Declared; 2]> = self
+            .declared_loops
+            .iter()
+            .find(|&&(loop_call, _)| remembers && loop_call == call)
+            .map(|(_, names)| names.clone())
+            .unwrap_or_default();
+        self.declare(&declared);
+        loop {
+            self.forward = None;
+            let refusal = match lower(self, call) {
+                Ok(value) => {
+                    if remembers && self.probing == 0 && !declared.is_empty() {
+                        self.declared_loops
+                            .retain(|&(loop_call, _)| loop_call != call);
+                        self.declared_loops.push((call, declared));
+                    }
+                    return Ok(value);
+                }
+                Err(refusal) => refusal,
+            };
+            let Some((symbol, at)) = self.forward else {
+                return Err(refusal);
+            };
+            // A name only an enclosing loop's body sets is that loop's to declare.
+            if !assigns(call, symbol) {
+                return Err(refusal);
+            }
+            self.forward = None;
+            if at != scopes
+                || declared.iter().any(|&(name, ..)| name == symbol)
+                || !self.restart(checkpoint.clone(), start, start_insts)
+            {
+                return Err(refusal);
+            }
+            self.declare(&declared);
+            let refused = *self.refused;
+            self.probing += 1;
+            let trial = lower(self, call);
+            self.probing -= 1;
+            *self.refused = refused;
+            let learned = match (trial, self.lookup(symbol)) {
+                (Ok(_), Some(Binding::Maybe(local) | Binding::Value(local))) => (
+                    symbol,
+                    self.builder.ty(local),
+                    self.pending_family(local).is_some(),
+                ),
+                _ => return Err(refusal),
+            };
+            if !self.restart(checkpoint.clone(), start, start_insts) {
+                return Err(refusal);
+            }
+            declared.push(learned);
+            self.declare(&declared);
+        }
+    }
+
+    /// Binds each name of `declared` to a variable of its type that is not set yet. An empty
+    /// list of records or tags the trial left pending is pending in its variable too.
+    fn declare(&mut self, declared: &[Declared]) {
+        for &(symbol, ty, pending) in declared {
+            let local = self.variable(symbol, ty);
+            if pending {
+                self.pending.push(SmallVec::from_slice(&[local]));
+            }
+            self.bind(symbol, Binding::Maybe(local));
+        }
+    }
+
+    /// Lowers `expression`, a statement of a loop trial ([`Lowering::looped`]), leaving it out
+    /// when it reads a name that only a later statement sets.
+    unsafe fn trial_part(
+        &mut self,
+        expression: Sexp,
+        dropped: bool,
+    ) -> Result<Option<Local>, Refusal> {
+        let checkpoint = self.checkpoint();
+        let start = self.builder.current;
+        let start_insts = self
+            .builder
+            .function
+            .blocks
+            .get(start.0 as usize)
+            .map_or(0, |block| block.insts.len());
+        self.forward = None;
+        match self.part(expression, dropped) {
+            Err(refusal) if self.forward.is_some() => {
+                if !self.restart(checkpoint, start, start_insts) {
+                    return Err(refusal);
+                }
+                Ok(Some(
+                    self.builder.emit(Type::Null, Op::Const(Constant::Null)),
+                ))
+            }
+            value => value,
+        }
     }
 
     unsafe fn for_loop(&mut self, call: Sexp) -> Result<Option<Local>, Refusal> {
@@ -5496,6 +5640,8 @@ impl Lowering<'_> {
             constructed: self.constructed.len(),
             r_calls: self.r_calls.len(),
             blocks: self.builder.function.blocks.len(),
+            self_inlines: self.self_inlines,
+            pending: self.pending.clone(),
         }
     }
 
@@ -5538,6 +5684,17 @@ impl Lowering<'_> {
         self.returned = checkpoint.returned;
         self.constructed.truncate(checkpoint.constructed);
         self.r_calls.truncate(checkpoint.r_calls);
+        self.self_inlines = checkpoint.self_inlines;
+        // A list the forgotten code settled is pending again, with its placeholder item type.
+        for family in &checkpoint.pending {
+            let settled = family
+                .first()
+                .is_some_and(|first| !self.pending.iter().any(|current| current.contains(first)));
+            if settled {
+                retype_family(&mut self.builder.function, family, Item::Tag(shapes::ANY));
+            }
+        }
+        self.pending = checkpoint.pending;
     }
 
     /// `match (value) { pattern => body ... }` over a record or tag, decided for each shape the
@@ -7110,6 +7267,29 @@ unsafe fn assigns(expression: Sexp, symbol: Sexp) -> bool {
         }
     }
     assigns(head, symbol) || items.iter().any(|&(_, item)| assigns(item, symbol))
+}
+
+/// Gives the lists `members` hold, and the instructions that allocated them, the item type
+/// `item` ([`Lowering::settle`]).
+fn retype_family(function: &mut Function, members: &[Local], item: Item) {
+    for inst in function
+        .blocks
+        .iter_mut()
+        .flat_map(|block| &mut block.insts)
+    {
+        if inst.dest.is_some_and(|dest| members.contains(&dest)) {
+            match &mut inst.op {
+                Op::NewVector(held, _) | Op::EmptyList(held, _) => *held = item,
+                Op::Relabel(_, Type::Vector { item: held, .. }) => *held = item,
+                _ => {}
+            }
+        }
+    }
+    for member in members {
+        if let Some(Type::Vector { item: held, .. }) = function.locals.get_mut(member.0 as usize) {
+            *held = item;
+        }
+    }
 }
 
 fn hidden_refusal() -> Refusal {
