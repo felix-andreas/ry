@@ -23786,6 +23786,14 @@ impl<'db, 'a> Checker<'db, 'a> {
         branch_ty: Ty<'db>,
         other: Ty<'db>,
     ) -> Ty<'db> {
+        // A number literal beside a variable written with a literal of its R type stays as open
+        // as the variable, so `y <- 5; if (flag) y else 0` in a function declared `-> I64` leaves
+        // both to the tail, as `y + 0` would.
+        if let Some((_, default)) = self.open_literal_constraint(other)
+            && let Some(open) = self.open_number_literal(branch, default)
+        {
+            return open;
+        }
         let other = self.table.resolve(self.db, other);
         let resolved = self.table.resolve(self.db, branch_ty);
         self.decide_item_literals(Some(branch), resolved, other);

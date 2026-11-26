@@ -561,6 +561,14 @@ start <- function(n: I64) -> F64 {
 #++++
 start: fn(n: I64) -> F64
 
+#---- a_tail_if_beside_a_literal_variable_takes_the_declared_number
+pick <- function(flag: Bool) -> I64 {
+  y <- 5
+  if (flag) y else 0
+}
+#++++
+pick: fn(flag: Bool) -> I64
+
 #---- a_literal_variable_rebound_in_a_branch_stays_open_for_its_use
 grow <- function(n: I64) -> F64 {
   x <- 0

@@ -1,0 +1,57 @@
+# A tag value from R whose payload has another type than the union declares (`:One(2.5)` against
+# `:One(I64)`) runs that one call in the interpreter. The function keeps its native code for every
+# other call, also when the `match` is not its result and has no declared type to judge arms by.
+
+requires ry-runtime
+
+file ry.toml
+| [check]
+| typing = true
+
+file stray.R
+| alias T =
+|   | :One(I64)
+|   | :Two
+| f <- function(t: T) -> I64 {
+|   y <- match (t) {
+|     :One(v) => v
+|     :Two => 0i64
+|   }
+|   y + 1i64
+| }
+| print(f(:One(2i64)))
+| print(f(:Two))
+| bad <- eval(parse(text = ":One(2.5)"))
+| print(tryCatch(f(bad), error = function(e) conditionMessage(e)))
+| print(f(:One(3i64)))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry stray.R
+expect exit 0
+expect stdout "3i64\n1i64\n[1] \"2.5 does not fit I64\"\n4i64"
+expect stderr "`f` runs in the interpreter: its native code stopped"
+expect stderr lacks "refused"
+
+# A `match` run for its effect, whose arms give different types, does the same.
+file statement.R
+| alias T =
+|   | :One(I64)
+|   | :Two
+| f <- function(t: T) -> I64 {
+|   y <- 0i64
+|   match (t) {
+|     :One(v) => { y <- v }
+|     :Two => "s"
+|   }
+|   y + 1i64
+| }
+| print(f(:One(2i64)))
+| print(f(:Two))
+| bad <- eval(parse(text = ":One(2.5)"))
+| print(tryCatch(f(bad), error = function(e) conditionMessage(e)))
+| print(f(:One(3i64)))
+
+run ry run --runtime ry statement.R
+expect exit 0
+expect stdout "3i64\n1i64\n[1] \"2.5 does not fit I64\"\n4i64"
+expect stderr lacks "refused"

@@ -637,7 +637,7 @@ impl Lowering<'_> {
     fn usable(&self, value: Local) -> Result<(), Refusal> {
         if self.unusable.contains(&value) {
             return Err(Refusal::new(
-                "a value whose type depends on the branch an `if` takes",
+                "a value whose type depends on the branch an `if` or `match` takes",
             ));
         }
         Ok(())
@@ -5275,8 +5275,17 @@ impl Lowering<'_> {
         if !exhaustive {
             cases.push(None);
         }
+        let start = self.builder.current;
+        let start_insts = self
+            .builder
+            .function
+            .blocks
+            .get(start.0 as usize)
+            .map_or(0, |block| block.insts.len());
+        let before = (target.is_none() && !exhaustive).then(|| self.checkpoint());
         let shape_of = self.builder.emit(Type::Int, Op::ShapeOf(value));
         let mut ends: SmallVec<[(BlockId, Local); 4]> = SmallVec::new();
+        let mut completed_cases: SmallVec<[Option<u32>; 4]> = SmallVec::new();
         let mut names: SmallVec<[(BlockId, Created); 4]> = SmallVec::new();
         let mut test = self.builder.current;
         for (position, &case) in cases.iter().enumerate() {
@@ -5329,10 +5338,22 @@ impl Lowering<'_> {
                 self.usable(completed)?;
                 ends.push((self.builder.current, completed));
                 names.push((self.builder.current, created));
+                completed_cases.push(case);
             }
         }
         if cases.is_empty() {
             self.builder.terminate(Terminator::Fail);
+        }
+        if let Some(before) = before {
+            let types: SmallVec<[Type; 4]> = ends
+                .iter()
+                .map(|&(_, completed)| self.builder.ty(completed))
+                .collect();
+            if let Some(target) = stray_target(&completed_cases, &types)
+                && self.restart(before, start, start_insts)
+            {
+                return self.switch_shapes(value, shapes, exhaustive, Some(target), arm);
+            }
         }
         self.join_names(&names);
         let join = self.builder.block();
@@ -5369,6 +5390,33 @@ impl Lowering<'_> {
             self.builder.terminate(Terminator::Fail);
         }
         Ok(result)
+    }
+
+    /// Forgets everything lowered since `checkpoint`, taken when block `start` held
+    /// `start_insts` instructions, to lower the same code again from there. `false` when a block
+    /// that existed before points into the code lowered since, so it cannot be forgotten.
+    fn restart(&mut self, checkpoint: Checkpoint, start: BlockId, start_insts: usize) -> bool {
+        let blocks = &mut self.builder.function.blocks;
+        let kept = checkpoint.blocks;
+        if blocks.iter().take(kept).enumerate().any(|(index, block)| {
+            index != start.0 as usize
+                && block
+                    .terminator
+                    .successors()
+                    .iter()
+                    .any(|target| target.0 as usize >= kept)
+        }) {
+            return false;
+        }
+        blocks.truncate(kept);
+        let Some(entry) = blocks.get_mut(start.0 as usize) else {
+            return false;
+        };
+        entry.insts.truncate(start_insts);
+        entry.terminator = Terminator::Fail;
+        self.builder.current = start;
+        self.restore(checkpoint);
+        true
     }
 
     /// `value` as a value of `target`, converting a number to the `I64` a function declares as
@@ -5422,6 +5470,11 @@ impl Lowering<'_> {
         entry.insts.clear();
         entry.terminator = Terminator::Fail;
         self.builder.current = body;
+        self.restore(checkpoint);
+        true
+    }
+
+    fn restore(&mut self, checkpoint: Checkpoint) {
         self.scopes = checkpoint.scopes;
         self.variables = checkpoint.variables;
         self.loops.truncate(checkpoint.loops);
@@ -5433,7 +5486,6 @@ impl Lowering<'_> {
         self.returned = checkpoint.returned;
         self.constructed.truncate(checkpoint.constructed);
         self.r_calls.truncate(checkpoint.r_calls);
-        true
     }
 
     /// `match (value) { pattern => body ... }` over a record or tag, decided for each shape the
@@ -7142,6 +7194,64 @@ unsafe fn tail_matches(expression: Sexp, tails: &mut SmallVec<[Sexp; 2]>) {
         }
         _ => {}
     }
+}
+
+/// The type a `match` over any tag lowers its arms against when the arms disagree only because
+/// R confirmed a stray shape: one with the layout of another candidate (`:One(F64)` beside the
+/// `:One(I64)` a function declares). The arms of shapes whose layout no other candidate has
+/// must all join, and decide the target; with none, the type most arms give does. `None` when
+/// the arms agree or no stray shape explains why they do not, as when a tag has no arm that
+/// gives the target.
+fn stray_target(cases: &[Option<u32>], types: &[Type]) -> Option<Type> {
+    let layouts: SmallVec<[Option<u32>; 4]> = cases
+        .iter()
+        .map(|case| case.map(|shape| shapes::shape(shape).layout))
+        .collect();
+    let shared = |position: usize| {
+        layouts[position].is_some_and(|layout| {
+            layouts
+                .iter()
+                .enumerate()
+                .any(|(other, &found)| other != position && found == Some(layout))
+        })
+    };
+    if !(0..cases.len()).any(shared) {
+        return None;
+    }
+    let mut all = types.iter().copied();
+    let first = all.next()?;
+    if all.try_fold(first, joined).is_some() {
+        return None;
+    }
+    let mut unique = (0..cases.len()).filter(|&position| !shared(position));
+    let reaches = |target: Type| {
+        types
+            .iter()
+            .filter(|&&ty| joined(target, ty).is_some())
+            .count()
+    };
+    let target = match unique.next() {
+        Some(position) => unique.try_fold(types[position], |held, position| {
+            joined(held, types[position])
+        })?,
+        None => types
+            .iter()
+            .copied()
+            .fold(None, |best: Option<Type>, ty| match best {
+                Some(best) if reaches(best) >= reaches(ty) => Some(best),
+                _ => Some(ty),
+            })?,
+    };
+    // Each tag keeps a shape whose arm gives the target, or the arms disagree for a reason no
+    // stray shape explains (a statement whose arms give different types).
+    let kept = (0..cases.len())
+        .filter(|&position| shared(position))
+        .all(|position| {
+            (0..cases.len()).any(|other| {
+                layouts[other] == layouts[position] && joined(target, types[other]).is_some()
+            })
+        });
+    kept.then_some(target)
 }
 
 /// The refusal of a call of the R function `head` whose value typed code uses directly.

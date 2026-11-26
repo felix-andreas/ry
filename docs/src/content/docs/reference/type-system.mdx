@@ -1596,7 +1596,8 @@ A ry type asks in three places:
   function decides: an operand beside a ry number, an argument to a typed parameter, an annotated
   binding, a value written into a `List`'s item (`lookup[[i]] <- j` with `lookup: List<I64>`)
   or a record's field (`r$x <- j` with `x: I64`), a position into a `List` (`lookup[[j]]`, which
-  makes `j` an `I64`), or the value a function declared with a ry number result ends with. In
+  makes `j` an `I64`), or the value a function declared with a ry number result ends with, which
+  may be one branch of an `if` whose other branch is a literal (`if (flag) y else 0`). In
   `for (x in xs) total <- total + x` with `xs: List<F64>`, `total` is an `F64`, and
   `rate <- 2.0; half(rate)` with `half(x: F64)` makes `rate` an `F64`. Arithmetic on the variable
   and number literals of its R type (`x + 1.5` with `x <- 0`) is open too, and so is a variable that branches write with
