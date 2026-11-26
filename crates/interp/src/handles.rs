@@ -491,15 +491,19 @@ fn finish_copy(
     keep_array: bool,
 ) -> R<()> {
     let attributes = value.attributes(context);
-    if attributes.r_type() != SexpType::Nil {
+    let copied = if attributes.r_type() == SexpType::Nil {
+        None
+    } else {
         let attributes = context.root(attributes);
-        let copied = copy_of(context, attributes, deep, true)?.unwrap_or(attributes);
-        // SAFETY: the copy is new, so only its handle reaches it, and the list is rooted.
-        unsafe { crate::heap().set_attrib(copy.raw(), copied.raw()) };
-    }
-    // SAFETY: as above, and setting header bits allocates nothing.
+        Some(copy_of(context, attributes, deep, true)?.unwrap_or(attributes))
+    };
+    // SAFETY: the copy is new, so only its handle reaches it, the list is rooted, and setting
+    // the attributes and header bits allocates nothing.
     unsafe {
         let (from, to) = (value.raw(), copy.raw());
+        if let Some(copied) = copied {
+            crate::heap().set_attrib(to, copied.raw());
+        }
         to.set_object(from.is_object());
         to.set_array(keep_array && from.is_array());
         to.set_gp(from.gp() & gp::S4_OBJECT);
@@ -579,13 +583,14 @@ fn copy_cells<'s>(context: &mut Cx<'s>, list: Local<'_>, deep: bool) -> R<Local<
     let mut cell = inner(context, list);
     let mut first = true;
     while let Some((head, tag, rest)) = cell_fields(cell.read(context)) {
-        let (head, tag, rest) = (context.root(head), context.root(tag), context.root(rest));
-        let value = if deep {
-            copy_of(context, head, true, true)?.unwrap_or(head)
+        let rest = context.root(rest);
+        if deep {
+            let (head, tag) = (context.root(head), context.root(tag));
+            let value = copy_of(context, head, true, true)?.unwrap_or(head);
+            cells.push(context, tag, value)?;
         } else {
-            head
-        };
-        cells.push(context, tag, value)?;
+            cells.push_cell(context, cell)?;
+        }
         let attributes = cell.attributes(context);
         if !first && attributes.r_type() != SexpType::Nil {
             let attributes = context.root(attributes);
@@ -750,6 +755,20 @@ impl<'s> Cells<'s> {
             }
         }
         Ok(())
+    }
+
+    /// Appends a cell that holds the value of the cell `source` with its tag. The rooted cell
+    /// keeps both alive, so they need no roots of their own.
+    pub fn push_cell(&mut self, context: &mut Cx<'s>, source: Local<'_>) -> R<()> {
+        let Some((value, tag, _)) = cell_fields(source.read(context)) else {
+            return Err(error(
+                "internal error: a cell to copy that is not a pairlist cell",
+            ));
+        };
+        // SAFETY: the source cell holds the value and the tag through the allocation, and the
+        // new cell is linked as in `push`.
+        let (value, tag) = unsafe { (Local::adopt(value.raw()), Local::adopt(tag.raw())) };
+        self.push(context, tag, value)
     }
 
     /// Gives the cell pushed last the attribute list `attributes`.

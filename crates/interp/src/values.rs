@@ -863,7 +863,7 @@ pub unsafe fn compact_sequence_of(
     first: f64,
     increment: f64,
 ) -> R<Option<Sexp>> {
-    handles::with_result(|context| {
+    handles::in_caller_scope(|context| {
         let sequence = (interp().hooks.compact_sequence)(context, kind, count, first, increment)?;
         Ok(sequence.map(|sequence| sequence.raw()))
     })
@@ -872,8 +872,8 @@ pub unsafe fn compact_sequence_of(
 /// `as.character` of the integer or double vector `object` as deferred strings, rooted in the
 /// caller's scope, or `None` when the host has no such class.
 pub unsafe fn deferred_strings(object: Sexp) -> R<Option<Sexp>> {
-    handles::with_result(|context| {
-        let object = handles::adopt(context, object);
+    handles::in_caller_scope(|context| {
+        let object = handles::held(context, object);
         let deferred = (interp().hooks.defer_strings)(context, object)?;
         Ok(deferred.map(|deferred| deferred.raw()))
     })
