@@ -1236,10 +1236,18 @@ pub fn plan_rename(
         .collect();
     let free = rng.below(2) == 0;
     // A typo check reports a name, or suggests one, by its spelling's distance from the others,
-    // so a rename into or out of a near miss changes findings for a reason.
+    // so a rename into or out of a near miss changes findings for a reason. A string is also
+    // one whole word, because a column check compares `Expr.col("amo$unt")` against `amount`.
     let project_words: BTreeSet<&str> = tokens
         .iter()
-        .flat_map(|(_, text, _)| text.split(|character: char| !is_name_character(character)))
+        .flat_map(|(kind, text, _)| {
+            let whole = match kind {
+                SyntaxKind::STRING => Some(text.trim_matches(['"', '\''])),
+                _ => None,
+            };
+            text.split(|character: char| !is_name_character(character))
+                .chain(whole)
+        })
         .filter(|word| !word.is_empty())
         .collect();
     let library = stubs(db);
