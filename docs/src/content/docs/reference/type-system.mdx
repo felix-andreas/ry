@@ -2155,6 +2155,18 @@ type, `x` would be an open variable and `c(x, x)` could not be typed. The rule h
   the initial state gives it (such as an empty `list()`) is no context, and by the rule above the
   literal takes no types. A variable fixed by a collection is not widened, so in
   `List.update(xs, i, f: fn(T) -> T)` the literal's formal still takes the item type.
+- An accumulator whose initial state is a settled ry value takes that value's type, so in
+  `List.walk(rows, List.repeat(0f64, 2), \(sums, row) sums + row)` the formal `sums` is a
+  `List<F64>`. When the step function returns more tags than the state holds, the state widens to
+  the join of both and the step function is checked again under it, so
+  `List.walk(xs, :None, \(acc, x) :Some(x))` is `:None | :Some(I64)` and
+  `List.walk(xs, (best = :None, n = 0i64), \(acc, x) (best = :Some(x), n = acc$n + 1i64))` is
+  `Record{best: :None | :Some(I64), n: I64}`. The initial state is passed as the wider type, and
+  the step function is checked at most three times. A step function may also return the state as
+  the payload of every tag it returns, so `List.walk_until(xs, :None, \(acc, x) if (x > 2i64)
+  :Break(:Some(x)) else :Continue(acc))` is `:None | :Some(I64)`. A state with a tag in it widens
+  only with a single candidate callee whose step function returns the state in one of these two
+  ways; anywhere else it gives the formal no context.
 - A literal with a formal after `...` takes no types, because R binds positional arguments to
   `...` before any later formal.
 - A parameter type that is `Any`, `Unknown` or still contains an open type variable gives no
@@ -3393,6 +3405,13 @@ join does not merge or coerce branch types beyond unification; it records the al
   is `integer | NULL`.
 - Branches with genuinely different types give their union: `if (flag) 1L else "foo"` is
   `integer | character`, not a type error.
+- Two ry values of the same shape join part by part, because ry's values are immutable and so
+  covariant: `if (c) [:A] else [:B]` is `List<:A | :B>`, `if (c) (t = :A, n = 1i64) else (t = :B,
+  n = 2i64)` is `Record{n: I64, t: :A | :B}`, and `if (c) :Some([:A]) else :Some([:B])` is
+  `:Some(List<:A | :B>)`. A loop's accumulator joins the same way, so `acc <- [:A]` followed by
+  `for (x in xs) acc <- List.append(acc, :B)` leaves `acc` a `List<:A | :B>`. Only tags widen: a
+  part that differs in anything else, such as `[1i64]` beside `[1.5f64]`, leaves the union of
+  both values (`List<I64> | List<F64>`).
 - A branch whose type is still undetermined is never pinned by the other branch.
   `function(flag, x) if (flag) x else "s"` is `<T> fn(flag: logical, [x]: T) -> T | character`, not
   `fn(flag: logical, x: character)`, because unifying would make a caller wrong because of a line

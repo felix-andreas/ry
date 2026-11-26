@@ -182,6 +182,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Tag unions take no row, and a record update adds no field (settled)
 - Literal variables stay open through joins, tail reads and `List` positions
 - A record pattern's `..` takes no name
+- ry values join covariantly, and a walk's tag state widens
 
 ## Analysis core
 
