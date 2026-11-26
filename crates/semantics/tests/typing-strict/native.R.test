@@ -324,7 +324,6 @@ cat(graded(12), "\n")
 grade: fn(reading: Reading) -> Str
 graded: fn(amount: F64) -> Str
 NULL
-156..162 warning[interpreted] this function runs in the interpreter, because a `match` arm with an `if` guard is not compiled natively yet. Test the condition inside the arm's body
 
 #---- nested_match_pattern
 #~~~~ script.R
@@ -345,8 +344,6 @@ cat(main(2), "\n")
 describe: fn(slot: Slot) -> Str
 main: fn(amount: F64) -> Str
 NULL
-176..211 warning[interpreted] this function runs in the interpreter, because this `match` pattern is not compiled natively yet. Native code matches a tag, a record or a tuple whose fields are names or `_`. Bind the field to a name and match it in the arm's body
-227..252 warning[interpreted] this function runs in the interpreter, because this `match` pattern is not compiled natively yet. Native code matches a tag, a record or a tuple whose fields are names or `_`. Bind the field to a name and match it in the arm's body
 
 #---- match_on_a_list
 #~~~~ script.R
@@ -362,7 +359,6 @@ cat(first_or_zero(4), "\n")
 == script.R
 first_or_zero: fn(first: F64) -> F64
 NULL
-80..92 warning[interpreted] this function runs in the interpreter, because a `match` on a value that is not a tag, a record or a tuple is not compiled natively yet. Compare the value with `if` and `==`
 
 #---- name_set_only_in_a_loop
 #~~~~ script.R
