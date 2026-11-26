@@ -20,7 +20,7 @@ classify_all <- function(xs: List<I64>) -> I64 {
     if (x == 5) return(inner(-x))
     inner(x) + 1
   }
-  score <- 0
+  score: I64 <- 0
   for (x in xs) {
     score <- score + match (kind(x)) {
       :Zero => 1,

@@ -3757,14 +3757,26 @@ fn literal_value_scalar(module: &Module, id: ExprId) -> Option<NativeScalar> {
         } => {
             let then_scalar = literal_value_scalar(module, *then_branch)?;
             let else_scalar = literal_value_scalar(module, *else_branch)?;
-            match (then_scalar, else_scalar) {
-                (then_scalar, else_scalar) if then_scalar == else_scalar => Some(then_scalar),
-                // `if (c) 1 else 2.5` holds a fraction, and `1` is an `F64` too.
-                (NativeScalar::I64, NativeScalar::F64) | (NativeScalar::F64, NativeScalar::I64) => {
-                    Some(NativeScalar::F64)
-                }
-                _ => None,
-            }
+            branch_scalar(then_scalar, else_scalar)
+        }
+        ExpressionKind::Match { arms, .. } => {
+            let mut bodies = module[*arms].iter().map(|arm| arm.body);
+            let first = literal_value_scalar(module, bodies.next()?)?;
+            bodies.try_fold(first, |scalar, body| {
+                branch_scalar(scalar, literal_value_scalar(module, body)?)
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The scalar of a value whose branches give literals of these two scalars.
+fn branch_scalar(first: NativeScalar, second: NativeScalar) -> Option<NativeScalar> {
+    match (first, second) {
+        (first, second) if first == second => Some(first),
+        // `if (c) 1 else 2.5` holds a fraction, and `1` is an `F64` too.
+        (NativeScalar::I64, NativeScalar::F64) | (NativeScalar::F64, NativeScalar::I64) => {
+            Some(NativeScalar::F64)
         }
         _ => None,
     }
@@ -3827,6 +3839,9 @@ fn literal_leaves_fit(module: &Module, id: ExprId, target: NativeScalar) -> bool
             literal_leaves_fit(module, *then_branch, target)
                 && literal_leaves_fit(module, *else_branch, target)
         }
+        ExpressionKind::Match { arms, .. } => module[*arms]
+            .iter()
+            .all(|arm| literal_leaves_fit(module, arm.body, target)),
         _ => false,
     }
 }
@@ -10927,24 +10942,30 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             return fit;
         }
-        // `if (c) 0.1 else 3.0` and `{ 3L }` take the value of a branch or of the statement, so
-        // each literal there adapts as it would written alone. The `if` was inferred already,
-        // condition included, so only its literal leaves remain to adapt.
+        // `if (c) 0.1 else 3.0`, a `match` of literals and `{ 3L }` take the value of a branch,
+        // an arm or the statement, so each literal there adapts as it would written alone. The
+        // `if` or `match` was inferred already, condition included, so only its literal leaves
+        // remain to adapt.
         if let Some(native) = target
             && literal_value_scalar(module, value).is_some()
             && literal_leaves_fit(module, value, native)
         {
-            let leaves = match *module.kind(value) {
+            let leaves: SmallVec<[ExprId; 4]> = match *module.kind(value) {
                 ExpressionKind::If {
                     then_branch,
                     else_branch: Some(else_branch),
                     ..
-                } => [Some(then_branch), Some(else_branch)],
-                ExpressionKind::Block { statements } => [module[statements].first().copied(), None],
-                _ => [None, None],
+                } => SmallVec::from_slice(&[then_branch, else_branch]),
+                ExpressionKind::Match { arms, .. } => {
+                    module[arms].iter().map(|arm| arm.body).collect()
+                }
+                ExpressionKind::Block { statements } => {
+                    module[statements].first().copied().into_iter().collect()
+                }
+                _ => SmallVec::new(),
             };
-            if leaves[0].is_some() {
-                for leaf in leaves.into_iter().flatten() {
+            if !leaves.is_empty() {
+                for leaf in leaves {
                     match self.adapt_literal(leaf, expected) {
                         LiteralFit::Fits => {}
                         fit => return fit,

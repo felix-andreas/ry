@@ -221,23 +221,6 @@ pick: fn(x: F64, up: Bool) -> F64
 NULL
 116..153 warning[interpreted] this function runs in the interpreter, because `step` is a function defined inside a branch or a loop and used after it, or defined again there, which is not compiled natively yet. Define it once at the top of the function
 
-#---- return_in_a_local_function
-#~~~~ script.R
-# blocked: clamp_all
-clamp_all <- function(low: F64, high: F64) -> F64 {
-  clamp <- function(v: F64) -> F64 {
-    if (v > 1) return(1)
-    v
-  }
-  List.sum(List.map([low, high], clamp))
-}
-cat(clamp_all(0.5, 3), "\n")
-#++++
-== script.R
-clamp_all: fn(low: F64, high: F64) -> F64
-NULL
-125..134 warning[interpreted] this function runs in the interpreter, because `return` inside a local function is not compiled natively yet: native code runs a local function in place. End the function with the value instead
-
 #---- function_used_as_a_value
 #~~~~ script.R
 # blocked: adder, add_three
@@ -557,42 +540,6 @@ cat(counted(2), "\n")
 counted: fn(n: I64) -> F64
 NULL
 81..84 error[native] `:` builds an R vector, and a native function holds only ry values. Write `List.range(from, to)`
-
-#---- try_expression
-#~~~~ script.R
-# blocked: add_strings
-# `try` returns an error from the enclosing function. `add_matched` is the same function written
-# with `match`, which compiles.
-add_strings <- function(a: Str, b: Str) -> Result<I64, :InvalidNumStr> {
-  x <- try Str.to_i64(a)
-  y <- try Str.to_i64(b)
-  :Ok(x + y)
-}
-add_matched <- function(a: Str, b: Str) -> Result<I64, :InvalidNumStr> {
-  match (Str.to_i64(a)) {
-    :Err(error) => :Err(error),
-    :Ok(x) => match (Str.to_i64(b)) {
-      :Err(error) => :Err(error),
-      :Ok(y) => :Ok(x + y)
-    }
-  }
-}
-total <- function(a: Str, b: Str) -> I64 {
-  tried <- Result.with_default(add_strings(a, b), 0)
-  matched <- Result.with_default(add_matched(a, b), 0)
-  tried + matched
-}
-print(total("4", "5"))
-print(total("4", "five"))
-#++++
-== script.R
-add_strings: fn(a: Str, b: Str) -> Result<I64, :InvalidNumStr>
-add_matched: fn(a: Str, b: Str) -> Result<I64, :InvalidNumStr>
-total: fn(a: Str, b: Str) -> I64
-I64
-I64
-232..249 warning[interpreted] this function runs in the interpreter, because `try` is not compiled natively yet. Match the result instead, and return the error from its arm: `match (result) { :Ok(value) => ..., :Err(error) => :Err(error) }`
-257..274 warning[interpreted] this function runs in the interpreter, because `try` is not compiled natively yet. Match the result instead, and return the error from its arm: `match (result) { :Ok(value) => ..., :Err(error) => :Err(error) }`
 
 #---- boundary_function_is_not_judged
 #~~~~ script.R

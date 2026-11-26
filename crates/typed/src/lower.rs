@@ -5904,7 +5904,11 @@ impl Lowering<'_> {
                     lowering.field(result, shape, 0).map(Some)
                 }
                 Some(shape) if shapes::shape(shape).layout == err => {
-                    lowering.exit(result)?;
+                    // The returned type is this `:Err` shape alone, so the function's result type
+                    // gains no `:Ok` shape of the operand's.
+                    let ty = Type::Tag(shapes::union_of(&[shape]));
+                    let error = lowering.builder.emit(ty, Op::Relabel(result, ty));
+                    lowering.exit(error)?;
                     Ok(None)
                 }
                 _ => {
@@ -7899,8 +7903,8 @@ unsafe fn assigned_symbols(expression: Sexp, out: &mut Vec<Sexp>) {
 }
 
 /// Whether `expression`, the body of a typed function, is small enough to lower into a caller:
-/// at most `MAX_INLINE_CALLS` calls, counted in `calls`, none of them a `return`, which would
-/// leave the caller, and at most `own_calls` calls of `own`, the function's own name.
+/// at most `MAX_INLINE_CALLS` calls, counted in `calls`, and at most `own_calls` calls of `own`,
+/// the function's own name.
 unsafe fn small_body(
     expression: Sexp,
     own: Sexp,
@@ -7912,9 +7916,7 @@ unsafe fn small_body(
     }
     *calls += 1;
     let head = expression.car();
-    if *calls > MAX_INLINE_CALLS
-        || head.kind() == SexpType::Symbol && rvalues::symbol_name(head) == "return"
-    {
+    if *calls > MAX_INLINE_CALLS {
         return false;
     }
     if head == own {

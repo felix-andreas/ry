@@ -24,6 +24,13 @@ countdown <- function(n: I64) -> Result<I64, Str> {
   step <- try halve(n * 2)
   :Ok(rest + step)
 }
+scaled <- function(n: I64) -> F64 {
+  Result.with_default(ratio(n), 0.0) * 2.0
+}
+again <- function(n: I64) -> Result<F64, Str> {
+  r <- try ratio(n)
+  :Ok(r + 1.0)
+}
 report <- function(a: I64, b: I64) -> Str {
   quarter <- match (ratio(a)) {
     :Ok(x) => f"{x}",
@@ -31,7 +38,8 @@ report <- function(a: I64, b: I64) -> Str {
   }
   sum <- Result.with_default(both(a, b), -1)
   steps <- Result.with_default(countdown(b), -1)
-  f"{quarter} {sum} {steps}"
+  twice <- scaled(a) + Result.with_default(again(a), 0.0)
+  f"{quarter} {sum} {steps} {twice}"
 }
 words <- ["1", "2", "30"]
 bad <- ["1", "x", "30"]
