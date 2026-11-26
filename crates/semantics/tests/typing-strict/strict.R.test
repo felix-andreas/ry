@@ -447,6 +447,36 @@ spend <- function(moves: List<Move>) -> F64 {
 #++++
 spend: fn(moves: List<Move>) -> F64
 
+#---- a_string_or_logical_argument_takes_the_type_a_later_argument_gives_it
+joined <- function(words: List<Str>) -> Str {
+  List.walk(words, "", function(text: Str, word: Str) -> Str Str.concat(text, word))
+}
+every <- function(flags: List<Bool>) -> Bool {
+  List.walk(flags, TRUE, function(all: Bool, flag: Bool) -> Bool all && flag)
+}
+fallback <- function(found: Result<Str, Str>) -> Str {
+  Result.with_default(found, "none")
+}
+#++++
+joined: fn(words: List<Str>) -> Str
+every: fn(flags: List<Bool>) -> Bool
+fallback: fn(found: Result<Str, Str>) -> Str
+
+#---- literals_a_call_leaves_open_take_the_declared_return_type
+first_or_two <- function() -> I64 Result.with_default(:Ok(1), 2)
+named <- function(n: I64) -> Str {
+  found <- if (n > 2) :Ok("big") else :Err("small")
+  Result.with_default(found, "none")
+}
+kept <- function() -> Result<I64, Str> {
+  found <- :Ok(1)
+  found
+}
+#++++
+first_or_two: fn() -> I64
+named: fn(n: I64) -> Str
+kept: fn() -> Result<I64, Str>
+
 #---- a_tag_payload_literal_takes_the_ry_number_beside_it
 alias Move = :Buy(quantity: F64, price: F64) | :Fee(amount: F64)
 spend <- function(moves: List<Move>) -> F64 {

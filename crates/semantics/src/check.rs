@@ -5123,8 +5123,6 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             ExpressionKind::Tag { name, payload, .. } => {
                 let (name, payload) = (*name, *payload);
-                // A payload's literals are decided now: tags join by their payload types,
-                // which an open literal would leave undecided.
                 let payload = payload.map(|payload| self.infer_payload(payload));
                 Ty::new(
                     self.db,
@@ -7861,7 +7859,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             ExpressionKind::Tuple(items) => {
                 let items = module[*items]
                     .iter()
-                    .map(|&item| self.infer(item))
+                    .map(|&item| self.component(item))
                     .collect::<TypeList<'db>>();
                 Ty::new(self.db, TyKind::NativeTuple(&items))
             }
@@ -7870,12 +7868,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .iter()
                     .map(|field| NativeField {
                         name: Name::new(self.db, field.name),
-                        ty: self.infer(field.value),
+                        ty: self.component(field.value),
                     })
                     .collect::<Vec<_>>();
                 native_record(self.db, fields)
             }
-            _ => return self.infer(payload),
+            _ => return self.component(payload),
         };
         self.record(payload, ty)
     }
@@ -8019,6 +8017,12 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// take apart, so the join is reported and the value becomes `Unknown`.
     fn report_conflicting_tags(&mut self, range: TextRange, joined: Ty<'db>) -> Ty<'db> {
         let resolved = self.table.resolve(self.db, joined);
+        // The conflict names the payloads' types, so their literals take their own types.
+        let resolved = if conflicting_tags(self.db, resolved).is_some() {
+            self.settle_literals(resolved)
+        } else {
+            resolved
+        };
         match conflicting_tags(self.db, resolved) {
             Some((first, second)) => {
                 self.errors.push(TypeError {
@@ -11107,20 +11111,49 @@ impl<'db, 'a> Checker<'db, 'a> {
         {
             return LiteralFit::Fits;
         }
+        // A literal for a ry function's free type parameter is open, so a later argument decides
+        // it: the `""` that `List.walk(xs, "", f)` starts from is the `Str` that `f` takes. The
+        // parameter may hold an earlier argument's open literal, as the `2` beside `:Ok(1)` in
+        // `Result.with_default(:Ok(1), 2)` does.
         if self.ry_callee
-            && open == Some(Constraint::Unconstrained)
-            && let Some(literal) = number_literal(module, value)
+            && matches!(
+                open,
+                Some(
+                    Constraint::Unconstrained
+                        | Constraint::WholeLiteral { .. }
+                        | Constraint::FracLiteral
+                        | Constraint::StrLiteral
+                        | Constraint::BoolLiteral
+                )
+            )
         {
-            let constraint = if literal.is_fraction() {
-                Constraint::FracLiteral
+            let ty = if let Some(literal) = number_literal(module, value) {
+                let constraint = if literal.is_fraction() {
+                    Constraint::FracLiteral
+                } else {
+                    Constraint::WholeLiteral {
+                        integer: literal.integer,
+                    }
+                };
+                let ty = self.fresh_literal(constraint, false);
+                self.record_literal(value, ty);
+                Some(ty)
             } else {
-                Constraint::WholeLiteral {
-                    integer: literal.integer,
-                }
+                let constraint = match module.kind(value) {
+                    ExpressionKind::Literal(LiteralKind::String(_)) => Some(Constraint::StrLiteral),
+                    ExpressionKind::Literal(LiteralKind::Logical(_)) => {
+                        Some(Constraint::BoolLiteral)
+                    }
+                    _ => None,
+                };
+                constraint.map(|constraint| {
+                    let ty = self.fresh_literal(constraint, false);
+                    self.record(value, ty)
+                })
             };
-            let ty = self.fresh_literal(constraint, false);
-            self.record_literal(value, ty);
-            if self.table.unify(self.db, ty, expected).is_ok() {
+            if let Some(ty) = ty
+                && self.table.unify(self.db, ty, expected).is_ok()
+            {
                 return LiteralFit::Fits;
             }
         }
@@ -20426,7 +20459,16 @@ impl<'db, 'a> Checker<'db, 'a> {
                 None => shared.push((var, vec![found])),
             }
         }
-        for (var, found_types) in shared {
+        for (var, mut found_types) in shared {
+            // A payload's literal is open, but tags of one name join only once their payloads
+            // are decided, so the literals take their own types first.
+            if found_types.len() >= 2
+                && found_types.iter().all(|&found| is_tag_type(self.db, found))
+            {
+                for found in &mut found_types {
+                    *found = self.settle_literals(*found);
+                }
+            }
             if found_types.len() < 2
                 || found_types.iter().all(|&found| found == found_types[0])
                 || found_types
