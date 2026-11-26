@@ -283,6 +283,14 @@ The routines live in `crates/interp/src/utils.rs`, `tools.rs` and `crates/graphi
 - **Why the names come from the call.** The tags are in the call's cells, which tier 0 holds as a constant, so no argument list is built to carry them. An entry with a signature of its own for tags would be a second calling convention beside `DirectFn`.
 - Oracle case `builtins__list_of_arguments.R`.
 
+## `seq_len` answers a plain count on its unary entry
+
+**Status:** built.
+
+- **The cost without it.** `seq_len(n)` runs the full builtin call for every count, and the scalar coercion with its warning check, although nearly every call passes one plain integer or double.
+- **`arith::unary_seq_len`** (`safe_unary!`) answers one attribute-free integer or double count from 0 to the integer range: `integer(0)`, `1L`, or the compact sequence from `handles::integer_sequence`. It declines every other value (attributes, an array, another type or length, a negative, `NA` or larger count), which the full call coerces, warns about or refuses.
+- Oracle case `builtins__seq_len_counts.R`.
+
 ## Builtin call machinery and subassignment toward 10x
 
 **Status:** built.

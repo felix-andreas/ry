@@ -336,6 +336,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - One-argument builtins and small base closures skip dispatch when their arguments are values
 - Builtins with positional direct entries, one implementation per semantic (built, with exceptions)
 - `list()` answers on its direct entry, which reads the call's tags
+- `seq_len` answers a plain count on its unary entry
 - Builtin call machinery and subassignment toward 10x
 - One kernel layer for R's vector builtins: slice kernels, a reuse rule, and a fused superinstruction (built, with exceptions)
 - Package code that dominates a workload runs natively: rlang's trace_back

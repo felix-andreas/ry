@@ -39,7 +39,10 @@ use {
         },
         vector_math,
     },
-    heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
+    heap::{
+        handle::Gc,
+        object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType, gp, is_na_real},
+    },
     smallvec::SmallVec,
 };
 
@@ -370,7 +373,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     .generic(Generic::Internal),
     builtin("anyNA", -1, do_any_na).generic(Generic::Internal),
     builtin(":", 2, do_colon),
-    builtin("seq_len", 1, do_seq_len),
+    builtin("seq_len", 1, do_seq_len).unary(handles::safe_unary!(unary_seq_len)),
     builtin("seq_along", 1, do_seq_along),
     builtin("seq.int", -1, do_seq_int).generic(Generic::Internal),
     builtin("rep", -1, do_rep)
@@ -4364,6 +4367,40 @@ unsafe fn do_seq_len(call: &Call<'_>) -> R<Sexp> {
         SexpType::Integer
     };
     sequence(kind, count as usize, 1.0, 1.0)
+}
+
+/// `seq_len(n)` for one plain integer or double count in the integer range. `None` for any
+/// other value, which the full call coerces, warns about or refuses.
+fn unary_seq_len<'a, 's>(context: &'a mut Cx<'s>, value: Local<'s>) -> R<Option<Gc<'a>>> {
+    if handles::is_array(value) || value.attributes(context).r_type() != SexpType::Nil {
+        return Ok(None);
+    }
+    let count = if let Some(integer) = value.standard::<Integer>() {
+        match integer.as_slice(context) {
+            &[count] if count >= 0 => count as usize,
+            _ => return Ok(None),
+        }
+    } else if let Some(real) = value.standard::<Real>() {
+        match real.as_slice(context) {
+            &[count] if (0.0..=f64::from(i32::MAX)).contains(&count) => count as usize,
+            _ => return Ok(None),
+        }
+    } else {
+        return Ok(None);
+    };
+    let sequence = match count {
+        0 => context
+            .alloc_unfilled::<Integer>(0)?
+            .fill(std::iter::empty())
+            .finish()
+            .value(),
+        1 => context.scalar::<Integer>(1)?.finish().value(),
+        _ => match handles::integer_sequence(context, count)? {
+            Some(sequence) => sequence,
+            None => return Ok(None),
+        },
+    };
+    Ok(Some(sequence.read(context)))
 }
 
 /// The integers or doubles `first`, `first + increment`, ... of length `count`, for an
