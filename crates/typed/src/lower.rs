@@ -407,6 +407,14 @@ enum Binding {
 /// paths only ([`Binding::Maybe`]).
 type Created = SmallVec<[(Sexp, Local, bool); 4]>;
 
+/// How a name that branches set joins after them ([`Lowering::name_join`]).
+enum NameJoin {
+    /// Every end left it in one variable.
+    Shared(Binding),
+    /// The ends left it in variables of types that join into this one.
+    Copied(Type),
+}
+
 #[derive(Clone)]
 struct Scope {
     names: FxHashMap<Sexp, Binding>,
@@ -439,6 +447,22 @@ struct Variable {
 struct Inlined {
     exit: BlockId,
     result: Option<Local>,
+}
+
+/// What a `match`'s value must be, which decides how [`Lowering::switch_shapes`] treats arms
+/// whose types disagree.
+#[derive(Clone, Copy)]
+enum Expected {
+    /// The program drops the value, as a statement's, so its arms may disagree. A name they set
+    /// must still join after them.
+    Dropped,
+    /// Nothing says what type the value has.
+    Free,
+    /// The function's declared result: a number converts toward it as the function's exit does.
+    Declared(Type),
+    /// The type the arms of every shape but a stray one give: the arm of a confirmed shape that
+    /// gives another type leaves that shape to the interpreter.
+    Stray(Type),
 }
 
 /// What [`Lowering::rewind`] restores.
@@ -695,67 +719,62 @@ impl Lowering<'_> {
     /// join gets a variable of the joined type, which each end copies into; any other name is out
     /// of scope after the join.
     fn join_names(&mut self, ends: &[(BlockId, Created)]) {
-        let mut symbols: SmallVec<[Sexp; 8]> = SmallVec::new();
-        for (_, created) in ends {
-            for &(symbol, _, _) in created {
-                if !symbols.contains(&symbol) {
-                    symbols.push(symbol);
+        for symbol in created_symbols(ends) {
+            let found = created_in(ends, symbol);
+            match self.name_join(&found) {
+                None => {}
+                Some(NameJoin::Shared(binding)) => self.bind(symbol, binding),
+                Some(NameJoin::Copied(ty)) => {
+                    let variable = self.variable(symbol, ty);
+                    for (&(end, _), &local) in ends.iter().zip(&found) {
+                        let Some((local, _)) = local else {
+                            continue;
+                        };
+                        self.builder.switch_to(end);
+                        self.builder.push(Some(variable), Op::Copy(local));
+                    }
+                    self.bind(symbol, Binding::Value(variable));
                 }
             }
         }
-        for symbol in symbols {
-            let found: SmallVec<[Option<(Local, bool)>; 4]> = ends
-                .iter()
-                .map(|(_, created)| {
-                    created
-                        .iter()
-                        .find(|&&(other, _, _)| other == symbol)
-                        .map(|&(_, local, maybe)| (local, maybe))
-                })
-                .collect();
-            let Some(&Some((first, _))) = found.iter().find(|end| end.is_some()) else {
-                continue;
-            };
-            if found.iter().flatten().all(|&(local, _)| local == first) {
-                let everywhere = found.iter().all(|end| matches!(end, Some((_, false))));
-                let binding = if everywhere {
-                    Binding::Value(first)
-                } else {
-                    Binding::Maybe(first)
-                };
-                self.bind(symbol, binding);
-                continue;
-            }
-            // Variables of different types: the join copies them into one of the joined type,
-            // which needs the name set, as a value, on every end.
-            let mut ty = None;
-            for end in &found {
-                let Some((local, false)) = *end else {
-                    ty = None;
-                    break;
-                };
-                let found = self.builder.ty(local);
-                ty = match ty {
-                    None => Some(found),
-                    Some(held) => joined(held, found),
-                };
-                if ty.is_none() {
-                    break;
-                }
-            }
-            let Some(ty) = ty else {
-                continue;
-            };
-            let variable = self.variable(symbol, ty);
-            for (&(end, _), &local) in ends.iter().zip(&found) {
-                let Some((local, _)) = local else {
-                    continue;
-                };
-                self.builder.switch_to(end);
-                self.builder.push(Some(variable), Op::Copy(local));
-            }
-            self.bind(symbol, Binding::Value(variable));
+    }
+
+    /// Whether joining `ends` leaves a name some end created unbound, because its ends give it
+    /// types that do not join.
+    fn drops_a_name(&self, ends: &[(BlockId, Created)]) -> bool {
+        created_symbols(ends)
+            .into_iter()
+            .any(|symbol| self.name_join(&created_in(ends, symbol)).is_none())
+    }
+
+    /// How a name joins after branches, given the variable each end left it in and whether it
+    /// may be unset there: `None` when it cannot be read after them.
+    fn name_join(&self, found: &[Option<(Local, bool)>]) -> Option<NameJoin> {
+        let &Some((first, _)) = found.iter().find(|end| end.is_some())? else {
+            return None;
+        };
+        if found.iter().flatten().all(|&(local, _)| local == first) {
+            let everywhere = found.iter().all(|end| matches!(end, Some((_, false))));
+            return Some(NameJoin::Shared(if everywhere {
+                Binding::Value(first)
+            } else {
+                Binding::Maybe(first)
+            }));
         }
+        // Variables of different types: the join copies them into one of the joined type,
+        // which needs the name set, as a value, on every end.
+        let mut ty: Option<Type> = None;
+        for end in found {
+            let Some((local, false)) = *end else {
+                return None;
+            };
+            let found = self.builder.ty(local);
+            ty = Some(match ty {
+                None => found,
+                Some(held) => joined(held, found)?,
+            });
+        }
+        ty.map(NameJoin::Copied)
     }
 
     /// Binds the names a loop body created: after the loop each is set only if the body ran far
@@ -1504,7 +1523,7 @@ impl Lowering<'_> {
         if is_base_function(&speculation) {
             self.speculations.push(speculation);
             if name == ".ry_match" {
-                return self.match_expression(call);
+                return self.match_expression(call, matches!(r_use, Some(RUse::Unused)));
             }
             self.r_use = r_use;
             return self.builtin(&name, call, function).map(Some);
@@ -5256,18 +5275,20 @@ impl Lowering<'_> {
     /// unless they are all the box may have, once with `None` for any other, and joins the
     /// values the arms complete with.
     ///
-    /// `target` is the type the switch's value must have, the function's declared result when
-    /// that value is the function's result. An arm for a shape only confirmed somewhere whose
-    /// value cannot have it gives up for that shape alone, as an arm that does not lower does.
-    /// A tag from R is any tag, whatever the annotation says, so ill-typed R code can confirm
-    /// `:One(F64)` beside the `:One(I64)` a function declares, and without a target the arms
-    /// would disagree and the whole function would refuse for the rest of the session.
+    /// `expected` says what the switch's value must be. An arm for a shape only confirmed
+    /// somewhere whose value cannot be that gives up for that shape alone, as an arm that does
+    /// not lower does. A tag from R is any tag, whatever the annotation says, so ill-typed R code
+    /// can confirm `:One(F64)` beside the `:One(I64)` a function declares, and without a target
+    /// the arms would disagree and the whole function would refuse for the rest of the session.
+    /// When the box may have other shapes, a value nothing types is lowered again against the type
+    /// a stray shape explains ([`stray_target`]); a dropped one only when a name its arms set
+    /// would not join otherwise.
     unsafe fn switch_shapes(
         &mut self,
         value: Local,
         shapes: &[u32],
         exhaustive: bool,
-        target: Option<Type>,
+        expected: Expected,
         arm: &mut dyn FnMut(&mut Self, Option<u32>) -> Result<Option<Local>, Refusal>,
     ) -> Result<Option<Local>, Refusal> {
         let mut cases: SmallVec<[Option<u32>; 4]> =
@@ -5282,7 +5303,8 @@ impl Lowering<'_> {
             .blocks
             .get(start.0 as usize)
             .map_or(0, |block| block.insts.len());
-        let before = (target.is_none() && !exhaustive).then(|| self.checkpoint());
+        let before = (matches!(expected, Expected::Free | Expected::Dropped) && !exhaustive)
+            .then(|| self.checkpoint());
         let shape_of = self.builder.emit(Type::Int, Op::ShapeOf(value));
         let mut ends: SmallVec<[(BlockId, Local); 4]> = SmallVec::new();
         let mut completed_cases: SmallVec<[Option<u32>; 4]> = SmallVec::new();
@@ -5318,8 +5340,10 @@ impl Lowering<'_> {
                     }
                     Ok(None)
                 }
-                (Ok(Some(completed)), checkpoint) if target.is_some() => {
-                    match (self.toward(completed, target), checkpoint) {
+                (Ok(Some(completed)), checkpoint)
+                    if matches!(expected, Expected::Declared(_) | Expected::Stray(_)) =>
+                {
+                    match (self.toward(completed, expected), checkpoint) {
                         (Some(completed), _) => Ok(Some(completed)),
                         (None, Some(checkpoint)) => {
                             if self.rewind(checkpoint, body) {
@@ -5335,7 +5359,9 @@ impl Lowering<'_> {
             };
             let created = self.leave_control(saved);
             if let Some(completed) = completed? {
-                self.usable(completed)?;
+                if !matches!(expected, Expected::Dropped) {
+                    self.usable(completed)?;
+                }
                 ends.push((self.builder.current, completed));
                 names.push((self.builder.current, created));
                 completed_cases.push(case);
@@ -5349,10 +5375,13 @@ impl Lowering<'_> {
                 .iter()
                 .map(|&(_, completed)| self.builder.ty(completed))
                 .collect();
-            if let Some(target) = stray_target(&completed_cases, &types)
+            // A dropped value's arms may disagree, but a name they set must still join.
+            let restarts = !matches!(expected, Expected::Dropped) || self.drops_a_name(&names);
+            if restarts
+                && let Some(target) = stray_target(&completed_cases, &types)
                 && self.restart(before, start, start_insts)
             {
-                return self.switch_shapes(value, shapes, exhaustive, Some(target), arm);
+                return self.switch_shapes(value, shapes, exhaustive, Expected::Stray(target), arm);
             }
         }
         self.join_names(&names);
@@ -5419,10 +5448,16 @@ impl Lowering<'_> {
         true
     }
 
-    /// `value` as a value of `target`, converting a number to the `I64` a function declares as
-    /// its exit does, or `None` when it cannot be one.
-    unsafe fn toward(&mut self, value: Local, target: Option<Type>) -> Option<Local> {
-        let target = target?;
+    /// `value` as a value of the type `expected` names, converting a number to the `I64` a
+    /// function declares as its exit does, or `None` when it cannot be one.
+    unsafe fn toward(&mut self, value: Local, expected: Expected) -> Option<Local> {
+        let target = match expected {
+            Expected::Declared(target) => target,
+            Expected::Stray(target) => {
+                return joined(target, self.builder.ty(value)).map(|_| value);
+            }
+            Expected::Free | Expected::Dropped => return Some(value),
+        };
         let value = match (target, self.builder.ty(value)) {
             (Type::I64, Type::Int | Type::Dbl) => self.to_i64(value).ok()?,
             _ => value,
@@ -5490,7 +5525,12 @@ impl Lowering<'_> {
 
     /// `match (value) { pattern => body ... }` over a record or tag, decided for each shape the
     /// value may have as the interpreter would decide it for a value of that shape.
-    unsafe fn match_expression(&mut self, call: Sexp) -> Result<Option<Local>, Refusal> {
+    /// `dropped` says the program drops the `match`'s value, as a statement's.
+    unsafe fn match_expression(
+        &mut self,
+        call: Sexp,
+        dropped: bool,
+    ) -> Result<Option<Local>, Refusal> {
         let items = rvalues::pairlist_items(call.cdr());
         let Some((&(scrutinee_tag, scrutinee), arms)) = items.split_first() else {
             return Err(Refusal::new("a malformed `match`"));
@@ -5520,14 +5560,17 @@ impl Lowering<'_> {
             pattern_layouts(pattern, &mut layouts, &mut tags)?;
         }
         let (candidates, exhaustive) = self.shapes_of(self.builder.ty(value), &layouts, &tags)?;
-        let target = (self.inlined.is_empty() && self.tails.contains(&call))
-            .then_some(self.declared)
-            .flatten();
+        let tail = self.inlined.is_empty() && self.tails.contains(&call);
+        let expected = match self.declared {
+            Some(declared) if tail => Expected::Declared(declared),
+            _ if dropped => Expected::Dropped,
+            _ => Expected::Free,
+        };
         self.switch_shapes(
             value,
             &candidates,
             exhaustive,
-            target,
+            expected,
             &mut |lowering, shape| {
                 for &(pattern, body) in &parsed {
                     let mut bindings: SmallVec<[(Sexp, Option<usize>); 4]> = SmallVec::new();
@@ -5565,7 +5608,7 @@ impl Lowering<'_> {
             result,
             &candidates,
             exhaustive,
-            None,
+            Expected::Free,
             &mut |lowering, shape| {
                 let layout = shape.map(|shape| shapes::shape(shape).layout);
                 match (shape, layout) {
@@ -5639,7 +5682,7 @@ impl Lowering<'_> {
             result,
             &candidates,
             exhaustive,
-            None,
+            Expected::Free,
             &mut |lowering, shape| {
                 let layout = shape.map(|shape| shapes::shape(shape).layout);
                 match (shape, layout) {
@@ -5930,7 +5973,7 @@ impl Lowering<'_> {
             answer,
             &candidates,
             exhaustive,
-            None,
+            Expected::Free,
             &mut |lowering, shape| {
                 let layout = shape.map(|shape| shapes::shape(shape).layout);
                 let op = match (shape, layout) {
@@ -7160,6 +7203,31 @@ pub unsafe fn tail_invisible(expression: Sexp) -> bool {
         }
         _ => false,
     }
+}
+
+/// The names any of `ends` created, in the order they first appear.
+fn created_symbols(ends: &[(BlockId, Created)]) -> SmallVec<[Sexp; 8]> {
+    let mut symbols: SmallVec<[Sexp; 8]> = SmallVec::new();
+    for (_, created) in ends {
+        for &(symbol, _, _) in created {
+            if !symbols.contains(&symbol) {
+                symbols.push(symbol);
+            }
+        }
+    }
+    symbols
+}
+
+/// The variable each of `ends` left `symbol` in, and whether it may be unset there.
+fn created_in(ends: &[(BlockId, Created)], symbol: Sexp) -> SmallVec<[Option<(Local, bool)>; 4]> {
+    ends.iter()
+        .map(|(_, created)| {
+            created
+                .iter()
+                .find(|&&(other, _, _)| other == symbol)
+                .map(|&(_, local, maybe)| (local, maybe))
+        })
+        .collect()
 }
 
 /// Collects the `if` and `match` calls whose value is the value of `expression`: `expression`

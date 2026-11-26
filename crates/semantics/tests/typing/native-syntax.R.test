@@ -566,8 +566,24 @@ pick <- function(flag: Bool) -> I64 {
   y <- 5
   if (flag) y else 0
 }
+reversed <- function(flag: Bool) -> I64 {
+  y <- 5
+  if (flag) 0 else y
+}
+negative <- function(flag: Bool) -> I64 {
+  y <- 5
+  if (flag) y else -1
+}
+inner <- function(flag: Bool) {
+  y <- 5
+  z <- if (flag) y else 0
+  z
+}
 #++++
 pick: fn(flag: Bool) -> I64
+reversed: fn(flag: Bool) -> I64
+negative: fn(flag: Bool) -> I64
+inner: fn(flag: Bool) -> double
 
 #---- a_literal_variable_rebound_in_a_branch_stays_open_for_its_use
 grow <- function(n: I64) -> F64 {

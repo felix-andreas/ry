@@ -7841,12 +7841,6 @@ impl<'db, 'a> Checker<'db, 'a> {
         while let ExpressionKind::Paren(paren) = module.kind(inner) {
             inner = *paren;
         }
-        if !matches!(
-            module.kind(inner),
-            ExpressionKind::Literal(LiteralKind::Integer(_) | LiteralKind::Double(_))
-        ) {
-            return None;
-        }
         let literal = number_literal(module, inner)?;
         let constraint = if literal.is_fraction() {
             Constraint::FracLiteral
