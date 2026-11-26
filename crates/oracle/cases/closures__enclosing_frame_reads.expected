@@ -1,0 +1,158 @@
+[stdout]
+| -- closures over one shared frame
+| [1] 1
+| [1] 2
+| [1] 3
+| [1] 4
+| [1] 14 14
+| [1] 24 24
+| [1] 34 34
+| [1]  1 34
+| [1]  2 34
+| [1]  3 34
+| -- a variable removed from the enclosing frame and bound again
+| [1] "local"
+| [1] "local"
+| [1] "local"
+| [1] "global"
+| [1] "global"
+| [1] "global"
+| [1] "bound again"
+| [1] "bound again"
+| [1] "bound again"
+| [1] "global again"
+| [1] "global again"
+| [1] "global again"
+| -- a nearer frame binds the name after the farther one was read
+| [1] "outer"
+| [1] "outer"
+| [1] "outer"
+| [1] "middle"
+| [1] "middle"
+| [1] "middle"
+| [1] "outer"
+| [1] "outer"
+| [1] "outer"
+| [1] "outer, replaced"
+| [1] "outer, replaced"
+| [1] "outer, replaced"
+| -- a frame of many variables
+| [1] 40
+| [1] 40
+| [1] "from the global environment"
+| [1] 26
+| [1] 82
+| [1] 40
+| [1] 40
+| [1] "from the global environment"
+| [1] 26
+| [1] 82
+| [1] 40
+| [1] 40
+| [1] "from the global environment"
+| [1] 26
+| [1] 82
+| [1] "from the frame"
+| [1] "from the frame"
+| [1] 2
+| [1] 2
+| -- one function body over frames laid out differently
+| [1] "bound first" "bound last" 
+| [1] "bound first" "bound last" 
+| [1] "bound first" "bound last" 
+| [1] "bound last"  "bound first"
+| [1] "bound last"  "bound first"
+| [1] "bound last"  "bound first"
+| -- a promise and an active binding in the enclosing frame
+| forced
+| [1] 5
+| [1] 5
+| [1] 5
+| [1] 1
+| [1] 2
+| [1] 3
+| [1] "no value"
+| [1] "no value"
+| [1] "no value"
+| [1] "argument \"x\" is missing, with no default"
+| [1] "argument \"x\" is missing, with no default"
+| [1] "argument \"x\" is missing, with no default"
+| -- a function lookup passes a variable that is no function
+| [1] "1234"
+| [1] "1234"
+| [1] "1234"
+| [1] "one"
+| [1] "one"
+| [1] "one"
+| [1] "two"
+| [1] "two"
+| [1] "two"
+| [1] "the global helper"
+| [1] "the global helper"
+| [1] "the global helper"
+| -- a callback reads the variables of a frame that is running
+| [1] 2 3
+| [1] 4 5
+| [1] 7 8
+| [1] 108 109
+| [1] 2 3
+| [1] 4 5
+| [1] 7 8
+| [1] 108 109
+| [1] 2 3
+| [1] 4 5
+| [1] 7 8
+| [1] 108 109
+| [1] "depth 2" "depth 1" "depth 0"
+| [1] "depth 2" "depth 1" "depth 0"
+| [1] "depth 2" "depth 1" "depth 0"
+| -- a closure made in a `local` block inside a function
+| [1] "the function's"
+| [1] "the function's"
+| [1] "the function's"
+| [1] "the block's"
+| [1] "the block's"
+| [1] "the block's"
+| -- two dozen variables read beside globals and base functions
+| List of 3
+|  $ : int [1:13] 25 10 26 3 5 1 1 11 1 4 ...
+|  $ : logi [1:8] FALSE TRUE TRUE FALSE TRUE TRUE ...
+|  $ : int 3
+| List of 3
+|  $ : int [1:13] 25 10 26 3 5 2 2 11 2 4 ...
+|  $ : logi [1:8] FALSE TRUE TRUE FALSE TRUE TRUE ...
+|  $ : int 3
+| List of 3
+|  $ : int [1:13] 25 10 26 3 5 3 3 11 3 4 ...
+|  $ : logi [1:8] FALSE TRUE TRUE FALSE TRUE TRUE ...
+|  $ : int 3
+| List of 3
+|  $ : int [1:13] 25 37 -1 3 5 1 1 11 1 4 ...
+|  $ : logi [1:8] FALSE TRUE TRUE FALSE TRUE TRUE ...
+|  $ : int 3
+| List of 3
+|  $ : int [1:13] 25 37 -1 3 5 2 2 11 2 4 ...
+|  $ : logi [1:8] FALSE TRUE TRUE FALSE TRUE TRUE ...
+|  $ : int 3
+| List of 3
+|  $ : int [1:13] 25 10 26 3 5 1 1 11 1 4 ...
+|  $ : logi [1:8] FALSE TRUE TRUE FALSE TRUE TRUE ...
+|  $ : chr "the global m3"
+| List of 3
+|  $ : int [1:13] 25 10 26 3 5 2 2 11 2 4 ...
+|  $ : logi [1:8] FALSE TRUE TRUE FALSE TRUE TRUE ...
+|  $ : chr "the global m3"
+| List of 2
+|  $ : int [1:13] 25 10 26 3 5 1 1 11 1 4 ...
+|  $ : int [1:13] 25 10 26 3 5 1 0 11 1 4 ...
+| List of 2
+|  $ : int [1:13] 25 10 26 3 5 2 2 11 2 4 ...
+|  $ : int [1:13] 25 10 26 3 5 2 0 11 2 4 ...
+[messages]
+[warnings]
+- restarting interrupted promise evaluation (in never())
+- restarting interrupted promise evaluation (in never())
+[errors]
+[value]
+NULL
+| NULL

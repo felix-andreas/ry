@@ -646,6 +646,88 @@ impl<'s> StringFill<'s> {
     }
 }
 
+/// A new list of new character vectors, each started and filled in order, as `strsplit` makes
+/// its pieces. A vector is stored in the list as it starts, and neither a vector nor a string is
+/// overwritten, so the list holds every one of them: no element needs a handle of its own, which
+/// would grow the handle stack with the input, and a string stored earlier is handed out again
+/// for the same bytes ([`values::StringMemo`]).
+pub struct StringLists<'s> {
+    list: Fresh<'s, List>,
+    /// The next element of `list` to start.
+    next_vector: usize,
+    /// The vector being filled, which `list` holds, or nil before the first starts.
+    vector: Sexp,
+    length: usize,
+    next: usize,
+    memo: values::StringMemo<'s>,
+}
+
+impl<'s> StringLists<'s> {
+    pub fn new(context: &mut Cx<'s>, length: usize) -> R<StringLists<'s>> {
+        Ok(StringLists {
+            list: context.alloc::<List>(length)?,
+            next_vector: 0,
+            vector: values::nil(),
+            length: 0,
+            next: 0,
+            memo: values::StringMemo::default(),
+        })
+    }
+
+    /// Starts the next element as a new character vector of `length` empty strings.
+    pub fn start(&mut self, _context: &mut Cx<'_>, length: usize) -> R<()> {
+        assert!(
+            self.next_vector < self.list.len(),
+            "element index out of bounds"
+        );
+        // SAFETY: the list is rooted and a standard list, and the index is in bounds; the new
+        // vector is stored before anything else allocates, which `&mut Cx` permits.
+        unsafe {
+            let heap = crate::heap();
+            let vector = heap.alloc_vector(SexpType::String, length as isize)?;
+            heap.set_element(self.list.raw(), self.next_vector, vector);
+            self.vector = vector;
+        }
+        self.next_vector += 1;
+        self.length = length;
+        self.next = 0;
+        Ok(())
+    }
+
+    /// Pushes a string of `bytes` marked `encoding` onto the vector last started. A native
+    /// string goes through the memo.
+    pub fn push_bytes(&mut self, _context: &mut Cx<'_>, bytes: &[u8], encoding: Encoding) -> R<()> {
+        assert!(self.next < self.length, "element index out of bounds");
+        // SAFETY: `start` ran, since `length` is not zero, so the list holds `self.vector`, a
+        // character vector of `length` elements. The new string is stored before anything else
+        // allocates, and a string the memo hands out is stored earlier in a vector the list
+        // holds, which is rooted for `'s` and never overwritten.
+        unsafe {
+            let made = if encoding == Encoding::Native {
+                self.memo.mk_char(bytes)?
+            } else {
+                crate::heap().mk_char(bytes, encoding)?
+            };
+            crate::heap().set_element(self.vector, self.next, made);
+        }
+        self.next += 1;
+        Ok(())
+    }
+
+    /// Pushes `NA` onto the vector last started.
+    pub fn push_na(&mut self, _context: &Cx<'_>) {
+        assert!(self.next < self.length, "element index out of bounds");
+        // SAFETY: as in `push_bytes`; `NA` is permanent.
+        unsafe { crate::heap().set_element(self.vector, self.next, values::na_string()) };
+        self.next += 1;
+    }
+
+    #[inline]
+    pub fn finish(self) -> Fresh<'s, List> {
+        self.list
+    }
+}
+
 /// The encoding `chars` is marked with, as `Rf_getCharCE` reports it.
 #[inline]
 pub fn encoding(chars: Gc<'_, Chars>) -> Encoding {
@@ -670,6 +752,21 @@ pub fn is_na(chars: Gc<'_, Chars>) -> bool {
 #[inline]
 pub fn is_bytes(chars: Gc<'_, Chars>) -> bool {
     chars.has_mark(gp::BYTES)
+}
+
+/// The truelength of `chars`, which code such as data.table's C uses to mark the strings it has
+/// seen, and `make.unique` too.
+#[inline]
+pub fn char_truelength(chars: Gc<'_, Chars>) -> i32 {
+    // SAFETY: the string is live, and the read is of its header.
+    unsafe { chars.raw().char_truelength() }
+}
+
+/// Sets the truelength of `chars` ([`char_truelength`]).
+#[inline]
+pub fn set_char_truelength(_context: &Cx<'_>, chars: Gc<'_, Chars>, truelength: i32) {
+    // SAFETY: the string is live, and the write changes a header field no collection reads.
+    unsafe { chars.raw().set_char_truelength(truelength) }
 }
 
 /// Whether `chars` is marked latin1.
@@ -1005,6 +1102,23 @@ pub unsafe fn in_caller_scope_with<D, T>(
     body(&mut context, data)
 }
 
+/// [`in_caller_scope_with`] for a raw entry that reads one object its caller holds, which
+/// `body` receives as a value of the scope ([`held`]).
+///
+/// # Safety
+///
+/// As for [`in_caller_scope`], and the caller keeps `object` alive until this returns.
+#[inline(always)]
+pub unsafe fn held_in_caller_scope<T>(
+    object: Sexp,
+    body: for<'s> fn(&mut Cx<'s>, Local<'s>) -> R<T>,
+) -> R<T> {
+    // SAFETY: as in `in_caller_scope_with`, and the caller's contract keeps `object` alive.
+    let mut context = unsafe { Cx::enter(NonNull::from(&mut *crate::heap())) };
+    let object = unsafe { Local::adopt(object) };
+    body(&mut context, object)
+}
+
 /// Roots `raw` in the context's scope.
 ///
 /// # Safety
@@ -1056,23 +1170,35 @@ pub(crate) use safe_unary;
 
 /// The raw direct entry (`builtins::DirectFn`) of `$function`, a safe fast path over the
 /// argument values in formal order that answers or declines with `None`, as a unary one does.
+/// `safe_direct!(call f)` also passes `f` the call, for an entry that reads the arguments'
+/// names from it.
 macro_rules! safe_direct {
-    ($function:path) => {{
+    (@entry |$context:ident, $call:ident, $values:ident| $result:expr) => {{
         unsafe fn entry(
-            _call: heap::object::Sexp,
-            values: &[heap::object::Sexp],
+            $call: heap::object::Sexp,
+            $values: &[heap::object::Sexp],
         ) -> $crate::unwind::R<Option<heap::object::Sexp>> {
             // SAFETY: as for `safe_unary`: the caller's registers, or its root for a
-            // replacement's target, hold every argument value.
+            // replacement's target, hold every argument value, and its code holds the call.
             unsafe {
-                $crate::handles::in_caller_scope(|context| {
-                    let values = $crate::handles::Local::adopt_slice(values);
-                    Ok($function(context, values)?.map($crate::handles::Gc::raw))
+                $crate::handles::in_caller_scope(|$context| {
+                    let $values = $crate::handles::Local::adopt_slice($values);
+                    Ok($result?.map($crate::handles::Gc::raw))
                 })
             }
         }
         entry
     }};
+    (call $function:path) => {
+        $crate::handles::safe_direct!(@entry |context, call, values| $function(
+            context,
+            $crate::handles::Local::adopt(call),
+            values
+        ))
+    };
+    ($function:path) => {
+        $crate::handles::safe_direct!(@entry |context, _call, values| $function(context, values))
+    };
 }
 pub(crate) use safe_direct;
 
@@ -1173,6 +1299,14 @@ pub fn symbol(pick: impl FnOnce(&values::Symbols) -> Sexp) -> Gc<'static, Symbol
     // SAFETY: the symbols of `values::symbols` are installed at start-up, and the heap's symbol
     // table keeps every symbol alive for as long as it lives.
     unsafe { Gc::adopt(pick(values::symbols())) }
+}
+
+/// [`symbol`] as a handle of any scope, which needs no root of its own: the heap's symbol
+/// table keeps the symbol.
+#[inline(always)]
+pub fn permanent_symbol<'s>(pick: impl FnOnce(&values::Symbols) -> Sexp) -> Local<'s, Symbol> {
+    // SAFETY: as in `symbol`.
+    unsafe { Local::adopt(pick(values::symbols())) }
 }
 
 /// The attribute `name` of `object`, or `NULL`.
@@ -1519,41 +1653,15 @@ pub fn quoted<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s>> {
     })
 }
 
-/// The class vector `class()` reports.
-#[inline]
-pub fn class_of<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
-    // SAFETY: the object is rooted, and an implicit class allocates, which `&mut Cx` permits.
-    Ok(unsafe { rooted(context, crate::dispatch::class_of(object.raw())?) })
-}
-
-/// [`class_of`] without a root, for a caller that hands the class on before the next
-/// safepoint.
-#[inline]
-pub fn class_read<'a>(_context: &'a mut Cx<'_>, object: Local<'_>) -> R<Gc<'a>> {
-    // SAFETY: the object is rooted, and an implicit class allocates, which `&mut Cx` permits.
-    // The class is the stored attribute or a new vector, live until the next allocation, which
-    // the borrow of the context rules out.
-    Ok(unsafe { Gc::adopt(crate::dispatch::class_of(object.raw())?) })
-}
-
-/// An S4 object's class and every class it extends, as `is()` lists them.
-#[inline]
-pub fn s4_classes<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
-    // SAFETY: the object is rooted, and the methods package's R code may run, which `&mut Cx`
-    // permits.
-    Ok(unsafe {
-        rooted(
-            context,
-            crate::dispatch::s4_class_with_superclasses(object.raw())?,
-        )
-    })
-}
-
-/// The class of an object with no class attribute and no dims, such as `"numeric"`.
-#[inline]
-pub fn basic_class(object: impl Pointer<Value>) -> &'static str {
-    // SAFETY: the handle is a live object, whose type this reads.
-    unsafe { crate::dispatch::basic_class(object.raw(), false) }
+/// `value` as an argument of a call that evaluates to it: quoted when it is a symbol, a call, a
+/// promise or `...`, which evaluating would change, and as it is otherwise.
+pub fn quoted_value<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s>> {
+    match value.r_type() {
+        SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Dots => {
+            quoted(context, value)
+        }
+        _ => Ok(value),
+    }
 }
 
 /// `ls(environment, all.names = TRUE, sorted = FALSE)`.
@@ -2547,6 +2655,7 @@ pub enum AssignmentCopy {
 /// A copy of `value` for a replacement to change, as `how` makes it. It is not an [`Owned`],
 /// because a wrapper shares the original's storage and only a replacement builtin, which copies
 /// that storage on its first write, may change it.
+#[inline]
 pub fn assignment_copy<'s>(
     context: &mut Cx<'s>,
     value: Local<'_>,
@@ -2621,47 +2730,42 @@ pub fn builtin_failure(_context: &mut Cx<'_>, unwind: Unwind) -> Unwind {
     unsafe { crate::eval::builtin_failure(values::unbound(), unwind) }
 }
 
-/// While it lives, `target` is the value of `*tmp*` in `environment`, where a replacement call
-/// finds it. A slot frame without an environment (`None`) binds no `*tmp*`.
+/// Makes `target` the value of `*tmp*` in `environment`, where a replacement call finds it,
+/// until [`unbind_tmp_value`] takes the entry back. A slot frame without an environment
+/// (`None`) binds no `*tmp*`. A pair of calls rather than a guard or a closure: either costs the
+/// replacement path drop glue or an outlined body on every run.
+#[inline(always)]
+pub fn bind_tmp_value<'s>(
+    _context: &Cx<'s>,
+    environment: Option<Local<'s, Environment>>,
+    target: Local<'s>,
+) -> TmpValue<'s> {
+    let entry = environment.map(|environment| (environment.raw(), target.raw()));
+    if let Some(entry) = entry {
+        crate::interp().tmp_values.push(entry);
+    }
+    TmpValue {
+        entry,
+        scope: PhantomData,
+    }
+}
+
+/// Ends the `*tmp*` binding [`bind_tmp_value`] made.
+#[inline(always)]
+pub fn unbind_tmp_value(tmp_value: TmpValue<'_>) {
+    if let Some(entry) = tmp_value.entry {
+        // `eval::complex_assign` pushes and pops its own entries, which must balance.
+        let popped = crate::interp().tmp_values.pop();
+        debug_assert_eq!(popped, Some(entry));
+    }
+}
+
+/// A `*tmp*` binding [`bind_tmp_value`] made, which [`unbind_tmp_value`] must end on every
+/// path, an error's included.
+#[must_use]
 pub struct TmpValue<'s> {
-    bound: bool,
-    #[cfg(debug_assertions)]
     entry: Option<(Sexp, Sexp)>,
     scope: PhantomData<fn(&'s ()) -> &'s ()>,
-}
-
-impl<'s> TmpValue<'s> {
-    #[inline(always)]
-    pub fn bind(
-        _context: &Cx<'s>,
-        environment: Option<Local<'s, Environment>>,
-        target: Local<'s>,
-    ) -> TmpValue<'s> {
-        if let Some(environment) = environment {
-            crate::interp()
-                .tmp_values
-                .push((environment.raw(), target.raw()));
-        }
-        TmpValue {
-            bound: environment.is_some(),
-            #[cfg(debug_assertions)]
-            entry: environment.map(|environment| (environment.raw(), target.raw())),
-            scope: PhantomData,
-        }
-    }
-}
-
-impl Drop for TmpValue<'_> {
-    #[inline(always)]
-    fn drop(&mut self) {
-        if self.bound {
-            // `eval::complex_assign` pushes and pops its own entries, which must balance.
-            #[cfg(debug_assertions)]
-            assert_eq!(crate::interp().tmp_values.pop(), self.entry);
-            #[cfg(not(debug_assertions))]
-            crate::interp().tmp_values.pop();
-        }
-    }
 }
 
 /// Counts a `*tmp*` binding that the frame of `environment` holds while a replacement call
@@ -2707,22 +2811,9 @@ pub fn call_builtin<'s>(
     // SAFETY: the call, the function, the arguments and the environment are rooted, and the
     // builtin runs any code, which `&mut Cx` permits.
     unsafe {
-        let mut tagged = crate::eval::Args::new();
-        let mut item = call.raw().cdr();
-        for argument in arguments {
-            tagged.push(Arg {
-                tag: item.tag(),
-                value: argument.raw(),
-            });
-            item = item.cdr();
-        }
-        let result = crate::eval::call_builtin(
-            definition,
-            call.raw(),
-            function.raw(),
-            &tagged,
-            environment,
-        )?;
+        let result = tagged_as_in(call.raw(), arguments.iter().copied(), |tagged| {
+            crate::eval::call_builtin(definition, call.raw(), function.raw(), tagged, environment)
+        })?;
         Ok(rooted(context, result))
     }
 }
@@ -2758,47 +2849,142 @@ const _: () = {
     assert!(offset_of!(Tagged<'static>, value) == offset_of!(Arg, value));
 };
 
-/// The call whose function and arguments are `items`, each with its tag.
-#[inline]
-pub fn language<'s>(context: &mut Cx<'s>, items: &[Tagged<'_>]) -> R<Local<'s, Language>> {
-    // SAFETY: the items are rooted, and each cell allocates, which `&mut Cx` permits, with the
-    // cells made so far rooted. A call is what the first item's cell is.
+/// `setter_call` as the call a replacement closure is applied by: `*tmp*` in place of its
+/// target and `value_code` in place of its value, with its other arguments and every tag as
+/// they are.
+#[inline(always)]
+pub fn replacement_call<'s>(
+    context: &mut Cx<'s>,
+    setter_call: Local<'_, Language>,
+    value_code: Local<'_>,
+) -> R<Local<'s, Language>> {
+    // SAFETY: the setter call is rooted and holds its cells, their tags and their code, and
+    // `value_code` is rooted. Each new cell holds the cells made before it and is rooted, so
+    // nothing built is lost when the next one allocates. A call is what the first cell is.
     unsafe {
-        let mut call = values::nil();
-        for (position, item) in items.iter().enumerate().rev() {
-            let kind = if position == 0 {
-                SexpType::Language
-            } else {
-                SexpType::Pairlist
+        let call = setter_call.raw();
+        let tmp = values::symbols().tmp;
+        let mut items = [const { std::mem::MaybeUninit::<(Sexp, Sexp)>::uninit() }; SHORT_CALL];
+        let mut count = 0;
+        let mut cell = call.cdr();
+        while cell.kind() == SexpType::Pairlist {
+            if count == items.len() {
+                return long_replacement_call(context, call, value_code.raw());
+            }
+            let code = match count {
+                0 => tmp,
+                _ if cell.cdr().kind() != SexpType::Pairlist => value_code.raw(),
+                _ => cell.car(),
             };
-            call = values::triple(kind, item.value.raw(), call, item.tag.raw())?;
+            items[count].write((cell.tag(), code));
+            count += 1;
+            cell = cell.cdr();
         }
-        rooted(context, call)
-            .downcast::<Language>()
-            .ok_or_else(|| error("internal error: a call without a function"))
+        let mut built = values::nil();
+        for item in items[..count].iter().rev() {
+            let (tag, code) = item.assume_init();
+            built = values::triple(SexpType::Pairlist, code, built, tag)?;
+        }
+        let built = values::triple(SexpType::Language, call.car(), built, values::nil())?;
+        Ok(Local::adopt(built))
     }
 }
 
-/// The closure `function` applied by `call` to `arguments` from the frame of `caller`, or from
-/// a slot frame that has none. The closure's frame keeps the arguments
-/// (`eval::apply_closure_owning`).
-#[inline]
+/// [`replacement_call`] for a call of more than [`SHORT_CALL`] arguments.
+///
+/// # Safety
+///
+/// As in [`replacement_call`], whose operands these are.
+#[cold]
+#[inline(never)]
+unsafe fn long_replacement_call<'s>(
+    _context: &mut Cx<'s>,
+    call: Sexp,
+    value_code: Sexp,
+) -> R<Local<'s, Language>> {
+    // SAFETY: as in `replacement_call`.
+    unsafe {
+        let mut items: Vec<(Sexp, Sexp)> = vec![(values::nil(), call.car())];
+        let mut cell = call.cdr();
+        while cell.kind() == SexpType::Pairlist {
+            let code = match items.len() {
+                1 => values::symbols().tmp,
+                _ if cell.cdr().kind() != SexpType::Pairlist => value_code,
+                _ => cell.car(),
+            };
+            items.push((cell.tag(), code));
+            cell = cell.cdr();
+        }
+        Ok(Local::adopt(values::pairlist(&items, SexpType::Language)?))
+    }
+}
+
+/// The closure `function` applied by `call` to `arguments`, each tagged as the argument of
+/// `call` in its position is, from the frame of `caller`, or from a slot frame that has none.
+/// The closure's frame keeps the arguments (`eval::apply_closure_owning`).
+#[inline(always)]
 pub fn apply_closure<'s>(
     context: &mut Cx<'s>,
     call: Local<'s, Language>,
     function: Local<'s>,
-    arguments: &[Tagged<'s>],
+    arguments: impl ExactSizeIterator<Item = Local<'s>>,
     caller: Option<Local<'s, Environment>>,
 ) -> R<Local<'s>> {
     let caller = caller.map_or_else(values::nil, Local::raw);
     // SAFETY: the call, the function, the arguments and the caller's environment are rooted,
-    // and the closure runs any R code, which `&mut Cx` permits. `Tagged` has `Arg`'s layout.
+    // and the closure runs any R code, which `&mut Cx` permits.
     unsafe {
-        let arguments =
-            std::slice::from_raw_parts(arguments.as_ptr().cast::<Arg>(), arguments.len());
-        let result =
-            crate::eval::apply_closure_owning(call.raw(), function.raw(), arguments, caller, None)?;
+        let result = tagged_as_in(call.raw(), arguments, |tagged| {
+            crate::eval::apply_closure_owning(call.raw(), function.raw(), tagged, caller, None)
+        })?;
         Ok(rooted(context, result))
+    }
+}
+
+/// How many arguments a call's tagged argument list holds on the stack.
+const SHORT_CALL: usize = 8;
+
+/// `body` on `values`, each tagged as the argument of `call` in its position is. A short list
+/// is built on the stack.
+///
+/// # Safety
+///
+/// `call` is a live call with at least as many arguments as `values` yields.
+#[inline(always)]
+unsafe fn tagged_as_in<'s, T>(
+    call: Sexp,
+    values: impl ExactSizeIterator<Item = Local<'s>>,
+    body: impl FnOnce(&[Arg]) -> T,
+) -> T {
+    // SAFETY: the caller's contract, and the first `count` items of the buffer are written.
+    unsafe {
+        let mut cell = call.cdr();
+        if values.len() <= SHORT_CALL {
+            let mut buffer = [const { std::mem::MaybeUninit::<Arg>::uninit() }; SHORT_CALL];
+            let mut count = 0;
+            for (slot, value) in buffer.iter_mut().zip(values) {
+                slot.write(Arg {
+                    tag: cell.tag(),
+                    value: value.raw(),
+                });
+                cell = cell.cdr();
+                count += 1;
+            }
+            body(std::slice::from_raw_parts(
+                buffer.as_ptr().cast::<Arg>(),
+                count,
+            ))
+        } else {
+            let mut tagged = crate::eval::Args::new();
+            for value in values {
+                tagged.push(Arg {
+                    tag: cell.tag(),
+                    value: value.raw(),
+                });
+                cell = cell.cdr();
+            }
+            body(&tagged)
+        }
     }
 }
 
@@ -2859,17 +3045,6 @@ pub fn lookup_method<'s>(
         let method =
             crate::dispatch::lookup_method(name.raw(), environment.raw(), definitions.raw())?;
         Ok(method.map(|method| rooted(context, method)))
-    }
-}
-
-/// The class vector S3 dispatch uses for `object`, its implicit class when it has no `class`
-/// attribute.
-pub fn implicit_class<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
-    // SAFETY: the object is rooted, and building an implicit class allocates, which `&mut Cx`
-    // permits.
-    unsafe {
-        let class = crate::dispatch::implicit_class(object.raw())?;
-        Ok(rooted(context, class))
     }
 }
 

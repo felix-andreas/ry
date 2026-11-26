@@ -133,7 +133,7 @@ pub unsafe fn dispatch_generic(name: Sexp, env: Sexp, generic: Sexp) -> R<Sexp> 
     let selecting = activity::enter(Activity::S4Dispatch, 0);
     let generic_name = || values::first_string(name).unwrap_or_default().into_owned();
     if generic.kind() != SexpType::Closure {
-        let class = dispatch::class_of(generic)?;
+        let class = dispatch::class_of_raw(generic)?;
         return Err(error(format!(
             "expected a generic function or a primitive for dispatch, got an object of class \"{}\"",
             values::first_string(class).unwrap_or_default()
@@ -428,7 +428,7 @@ unsafe fn class_keys(signature: &[Sexp], argument_values: &[Sexp]) -> R<SmallVec
             }
             values::string_elt(value, 0)
         } else {
-            values::string_elt(dispatch::class_of(value)?, 0)
+            values::string_elt(dispatch::class_of_raw(value)?, 0)
         };
         classes.push(class);
     }
@@ -898,7 +898,7 @@ pub unsafe fn slot_symbol(name: Sexp) -> R<Sexp> {
 /// `R_data_class(object, TRUE)`: the one class S4 dispatch uses for `object`. A class attribute
 /// of length one is kept as it is, with its `package` attribute.
 pub unsafe fn dispatch_class(object: Sexp) -> R<Sexp> {
-    first_class(dispatch::class_of(object)?)
+    first_class(dispatch::class_of_raw(object)?)
 }
 
 // Selection.
@@ -1554,7 +1554,7 @@ unsafe fn missing_arg_routine(call: &NativeCall<'_>) -> R<Sexp> {
         SexpType::Symbol => symbol,
         SexpType::String if length(symbol) >= 1 => values::install_charsxp(symbol.element(0))?,
         _ => {
-            let class = dispatch::class_of(symbol)?;
+            let class = dispatch::class_of_raw(symbol)?;
             return Err(call.error(format!(
                 "invalid symbol in checking for missing argument in method dispatch: expected a name, got an object of class \"{}\"",
                 values::first_string(class).unwrap_or_default()
@@ -1567,7 +1567,7 @@ unsafe fn missing_arg_routine(call: &NativeCall<'_>) -> R<Sexp> {
         env
     };
     if env.kind() != SexpType::Environment {
-        let class = dispatch::class_of(env)?;
+        let class = dispatch::class_of_raw(env)?;
         return Err(call.error(format!(
             "invalid environment in checking for missing argument, '{}', in methods dispatch: supplied an object of class \"{}\"",
             symbol_name(symbol),

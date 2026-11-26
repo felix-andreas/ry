@@ -23,10 +23,13 @@ use {
         object::{NA_INTEGER, Sexp, SexpType},
         records::{Fields, Layout},
     },
-    interp::{numbers::Observed, values as rvalues},
+    interp::{numbers::Observed, records::rest_name, values as rvalues},
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
-    std::{borrow::Cow, cell::Cell},
+    std::{
+        borrow::Cow,
+        cell::{Cell, RefCell},
+    },
     syntax::native_values::reads_its_frame,
 };
 
@@ -214,6 +217,9 @@ pub const SELF: usize = usize::MAX;
 
 /// How deeply local functions inline into each other.
 const MAX_INLINE_DEPTH: usize = 8;
+
+/// How many names a function's lowering widens to more tags before it gives up.
+const MAX_WIDENINGS: usize = 8;
 /// How deep in inlined functions a call of a typed function may still inline, which leaves
 /// the levels below `MAX_INLINE_DEPTH` to the local functions of the inlined bodies.
 const MAX_TYPED_INLINE_DEPTH: usize = 4;
@@ -244,21 +250,35 @@ pub unsafe fn lower(
     // function the typed core cannot compile does not keep its callers off native code. The
     // builder already holds part of the refused body by then, so the caller is lowered again.
     let mut called: SmallVec<[Sexp; 2]> = SmallVec::new();
+    // A variable takes the type of the first value assigned to it. A later tag of another shape
+    // widens the variable's tags to the union of both, and the function is lowered again with
+    // every variable of that name holding the union from its first assignment.
+    let mut widened: SmallVec<[(Sexp, u32); 2]> = SmallVec::new();
     loop {
         let mut refused = None;
+        let mut widen = None;
         let result = lower_calling(
             closure,
             params,
             guess,
             declared,
             &mut *callees,
-            &called,
-            &mut refused,
+            (&called, &widened),
+            (&mut refused, &mut widen),
             returned,
         );
-        match (result, refused) {
-            (Err(_), Some(function)) => called.push(function),
-            (result, _) => return result,
+        match (result, refused, widen) {
+            (Err(_), Some(function), _) => called.push(function),
+            (Err(refusal), None, Some((symbol, union))) => {
+                let count = widened.len();
+                match widened.iter_mut().find(|(held, _)| *held == symbol) {
+                    Some((_, held)) if shapes::within(union, *held) => return Err(refusal),
+                    Some((_, held)) => *held = shapes::join(*held, union),
+                    None if count < MAX_WIDENINGS => widened.push((symbol, union)),
+                    None => return Err(refusal),
+                }
+            }
+            (result, ..) => return result,
         }
     }
 }
@@ -272,8 +292,8 @@ unsafe fn lower_calling(
     guess: Type,
     declared: Option<Type>,
     callees: &mut dyn Callees,
-    called: &[Sexp],
-    refused: &mut Option<Sexp>,
+    (called, widened): (&[Sexp], &[(Sexp, u32)]),
+    (refused, widen): (&mut Option<Sexp>, &mut Option<(Sexp, u32)>),
     returned: &mut Option<Type>,
 ) -> Result<Lowered, Refusal> {
     let formals = rvalues::pairlist_items(closure.car());
@@ -310,6 +330,8 @@ unsafe fn lower_calling(
         self_inlines: 0,
         called,
         refused,
+        widened,
+        widen,
         speculations: Vec::new(),
         nesting: 0,
         control: 0,
@@ -326,6 +348,7 @@ unsafe fn lower_calling(
         forward: None,
         declared_loops: Vec::new(),
         probing: 0,
+        captures: Vec::new(),
     };
     tail_matches(body, &mut lowering.tails);
     let mut assigned = Vec::new();
@@ -383,12 +406,26 @@ unsafe fn lower_calling(
     })
 }
 
-/// A function passed to another: a local function or a literal, inlined where it is called, or
-/// a typed closure and the name that names it.
+/// A function passed to another: a local function or a literal, inlined where it is called, a
+/// typed closure and the name that names it, or a function of base R or the standard library.
 #[derive(Clone, Copy, Debug)]
 enum Callable {
+    /// Its formals, its body and the index of the scope that defines it, whose names are the
+    /// only ones the body sees when it is inlined.
     Inline(Sexp, Sexp, usize),
+    /// A local function or a literal passed to an inlined function, with the index of the
+    /// capture of the names it sees ([`Lowering::capture`]).
+    Captured(Sexp, Sexp, u32),
     Typed(Sexp, Sexp),
+    /// The symbol that names it, which lowers as a call of that name ([`eta`]).
+    Library(Sexp),
+}
+
+/// A value a call passes, or a function it passes to a parameter that takes one.
+#[derive(Clone, Copy, Debug)]
+enum Argument {
+    Value(Local),
+    Function(Callable),
 }
 
 /// What a name in scope stands for.
@@ -399,9 +436,8 @@ enum Binding {
     /// or after a loop whose body sets it. The local is one of the name's [`Variable`]s, and a
     /// read tests its flag first and gives the call up to the interpreter where the name is unset.
     Maybe(Local),
-    /// A local function: its formals, its body and the index of the scope that defines it, whose
-    /// names are the only ones the body sees when it is inlined.
-    Function(Sexp, Sexp, usize),
+    /// A local function, or a function a call passed to an inlined function's parameter.
+    Function(Callable),
     /// A local function that a branch or loop body defined, after it. The name may or may not be
     /// that function there, so any use refuses rather than reach a global of the same name.
     Hidden,
@@ -521,6 +557,10 @@ struct Lowering<'c> {
     called: &'c [Sexp],
     /// The innermost typed function whose body was refused where it inlined.
     refused: &'c mut Option<Sexp>,
+    /// Names whose variables hold at least these tags ([`lower`]).
+    widened: &'c [(Sexp, u32)],
+    /// The name and union of tags the lowering needs a variable to hold, when it refused for it.
+    widen: &'c mut Option<(Sexp, u32)>,
     speculations: Vec<Speculation>,
     nesting: usize,
     /// How many branches and loop bodies enclose the current point in the current scope.
@@ -562,6 +602,8 @@ struct Lowering<'c> {
     /// How many loop trials enclose the current point: a trial lowers a loop only to learn the
     /// types of the names it sets, and leaves out each statement that reads one too early.
     probing: usize,
+    /// The names each captured function sees ([`Callable::Captured`]).
+    captures: Vec<FxHashMap<Sexp, Binding>>,
 }
 
 /// A name a loop declares before it ([`Lowering::looped`]): its symbol, its type, and whether
@@ -815,6 +857,13 @@ impl Lowering<'_> {
     /// The variable of `symbol` in the current scope that holds values of `ty`, made when the name
     /// has none yet. A pending empty list never shares one, since its type is a placeholder.
     fn variable(&mut self, symbol: Sexp, ty: Type) -> Local {
+        let ty = match ty {
+            Type::Tag(union) => match self.widened.iter().find(|&&(held, _)| held == symbol) {
+                Some(&(_, wider)) => Type::Tag(shapes::join(union, wider)),
+                None => ty,
+            },
+            ty => ty,
+        };
         let (scope, entry) = self
             .scopes
             .last()
@@ -1099,7 +1148,13 @@ impl Lowering<'_> {
                 self.unify_pending(variable, value)?;
                 let ty = self.builder.ty(value);
                 let fits = match (self.builder.ty(variable), ty) {
-                    (Type::Tag(held), Type::Tag(found)) => shapes::within(found, held),
+                    (Type::Tag(held), Type::Tag(found)) => {
+                        let fits = shapes::within(found, held);
+                        if !fits {
+                            *self.widen = Some((symbol, shapes::join(held, found)));
+                        }
+                        fits
+                    }
                     (held, found) => held == found,
                 };
                 if !fits {
@@ -1533,10 +1588,10 @@ impl Lowering<'_> {
             }
             _ => {}
         }
-        if let Some(Binding::Function(formals, body, scope)) = self.lookup(head) {
+        if let Some(Binding::Function(callable)) = self.lookup(head) {
             let arguments = Arguments::of(call);
-            let values = self.call_arguments(&arguments)?;
-            return self.inline(formals, body, scope + 1, &values, inline_storage);
+            let values = self.passed_arguments(&arguments)?;
+            return self.apply_arguments(callable, &values);
         }
         match self.lookup(head) {
             Some(Binding::Hidden) => return Err(hidden_refusal()),
@@ -1567,7 +1622,7 @@ impl Lowering<'_> {
             if arguments.items.iter().any(|(tag, _)| tag.is_some()) {
                 return Err(Refusal::new("a typed call with named arguments"));
             }
-            let values = self.call_arguments(&arguments)?;
+            let values = self.passed_arguments(&arguments)?;
             return self.typed_function(head, function, &values);
         }
         if let Some(r_use) = r_use {
@@ -1907,9 +1962,32 @@ impl Lowering<'_> {
         &mut self,
         name: Sexp,
         function: Sexp,
-        values: &[Local],
+        arguments: &[Argument],
     ) -> Result<Option<Local>, Refusal> {
         let body = interp::bytecode::closure_body(function);
+        let Some(values) = plain_values(arguments) else {
+            // Compiled code holds no function values, so a function passed to a parameter is
+            // known where the call is lowered, and the callee lowers into the caller with that
+            // function in place of the parameter, once per call.
+            if function.tag() != self.env
+                || function == self.closure
+                || self.inlining.contains(&function)
+                || self.called.contains(&function)
+            {
+                return Err(Refusal::new(
+                    "a function passed to a typed function that does not lower into its caller, \
+                     such as a recursive one",
+                ));
+            }
+            if tail_invisible(body) {
+                return Err(Refusal::new("the body's value may be invisible"));
+            }
+            self.inlining.push(function);
+            let value = self.inline(function.car(), body, 0, arguments, crate::storage);
+            self.inlining.pop();
+            return value;
+        };
+        let values = &values[..];
         let own = function == self.closure;
         let mut own_calls = if own { MAX_SELF_CALLS } else { 0 };
         if function.tag() == self.env
@@ -1923,7 +2001,7 @@ impl Lowering<'_> {
         {
             self.self_inlines += own as usize;
             self.inlining.push(function);
-            let value = self.inline(function.car(), body, 0, values, crate::storage);
+            let value = self.inline(function.car(), body, 0, arguments, crate::storage);
             self.inlining.pop();
             if value.is_err() {
                 self.refused.get_or_insert(function);
@@ -1947,15 +2025,79 @@ impl Lowering<'_> {
             .emit(result, Op::CallTyped(index, SmallVec::from_slice(values))))
     }
 
-    unsafe fn call_arguments(
+    /// The arguments of a call of a local or typed function. A function literal, a local
+    /// function and a name that holds a function pass that function, and any other argument
+    /// passes its value.
+    unsafe fn passed_arguments(
         &mut self,
         arguments: &Arguments,
-    ) -> Result<SmallVec<[Local; 4]>, Refusal> {
-        let mut values = SmallVec::new();
+    ) -> Result<SmallVec<[Argument; 4]>, Refusal> {
+        let mut passed = SmallVec::new();
         for &(_, argument) in &arguments.items {
-            values.push(self.value(argument)?);
+            passed.push(if self.passes_function(argument) {
+                Argument::Function(self.function_argument(argument)?)
+            } else {
+                Argument::Value(self.value(argument)?)
+            });
         }
-        Ok(values)
+        Ok(passed)
+    }
+
+    /// Whether the argument `code` is a function: a function literal, a local function, or a
+    /// name whose value lookup finds a function.
+    unsafe fn passes_function(&self, code: Sexp) -> bool {
+        match code.kind() {
+            SexpType::Symbol => match self.lookup(code) {
+                Some(binding) => matches!(binding, Binding::Function(_)),
+                None => find_function(code, self.env).is_some(),
+            },
+            SexpType::Language => {
+                code.car().kind() == SexpType::Symbol
+                    && rvalues::symbol_name(code.car()) == "function"
+                    && self.lookup(code.car()).is_none()
+            }
+            _ => false,
+        }
+    }
+
+    /// `callable` as a function that sees the names it sees here wherever it is called: a local
+    /// function or a literal takes the bindings of the scopes it sees along, since the function
+    /// it is passed to lowers with other scopes in view.
+    fn captured(&mut self, callable: Callable) -> Callable {
+        match callable {
+            Callable::Inline(formals, body, scope) => {
+                Callable::Captured(formals, body, self.capture(scope, &mut SmallVec::new()))
+            }
+            other => other,
+        }
+    }
+
+    /// The bindings of the first `scope + 1` scopes as one capture, an inner scope's binding of
+    /// a name hiding an outer one's. The local functions among them are captured in turn, each
+    /// with the scopes it sees, which a function defined in this scope shares.
+    fn capture(&mut self, scope: usize, shared: &mut SmallVec<[(usize, u32); 4]>) -> u32 {
+        if let Some(&(_, id)) = shared.iter().find(|&&(held, _)| held == scope) {
+            return id;
+        }
+        let id = self.captures.len() as u32;
+        self.captures.push(FxHashMap::default());
+        shared.push((scope, id));
+        let mut names: FxHashMap<Sexp, Binding> = FxHashMap::default();
+        for held in self.scopes.iter().take(scope + 1) {
+            names.extend(
+                held.names
+                    .iter()
+                    .map(|(&symbol, &binding)| (symbol, binding)),
+            );
+        }
+        for binding in names.values_mut() {
+            if let Binding::Function(Callable::Inline(formals, body, defined)) = *binding {
+                let capture = self.capture(defined, shared);
+                *binding = Binding::Function(Callable::Captured(formals, body, capture));
+            }
+        }
+        self.captures[id as usize] = names;
+        id
     }
 
     unsafe fn arguments(&self, call: Sexp, count: usize) -> Result<SmallVec<[Sexp; 4]>, Refusal> {
@@ -2069,7 +2211,10 @@ impl Lowering<'_> {
                     return Err(Refusal::new("a local function rebound in a branch or loop"));
                 }
                 let scope = self.scopes.len() - 1;
-                self.bind(target, Binding::Function(formals, body, scope));
+                self.bind(
+                    target,
+                    Binding::Function(Callable::Inline(formals, body, scope)),
+                );
                 return Ok(self.builder.emit(Type::Null, Op::Const(Constant::Null)));
             }
             let value = self.value(value)?;
@@ -2803,7 +2948,7 @@ impl Lowering<'_> {
         formals: Sexp,
         body: Sexp,
         visible: usize,
-        arguments: &[Local],
+        arguments: &[Argument],
         storage: fn(Type) -> Option<(SexpType, bool)>,
     ) -> Result<Option<Local>, Refusal> {
         if self.inlined.len() >= MAX_INLINE_DEPTH {
@@ -2819,12 +2964,16 @@ impl Lowering<'_> {
         // The arguments meet the function's annotations as a call's would: an `I64` formal
         // converts a whole R number, and every other check must pass for the types at hand.
         let (i64_formals, returns_i64) = interp::annotations::declared_i64(definition, body);
-        let mut converted: SmallVec<[Local; 4]> = SmallVec::new();
+        let mut converted: SmallVec<[Argument; 4]> = SmallVec::new();
         for (index, &argument) in arguments.iter().enumerate() {
-            converted.push(if i64_formals.get(index).copied().unwrap_or(false) {
-                self.to_i64(argument)?
-            } else {
-                argument
+            converted.push(match argument {
+                Argument::Value(value) if i64_formals.get(index).copied().unwrap_or(false) => {
+                    Argument::Value(self.to_i64(value)?)
+                }
+                // The body runs with other scopes in view, so a passed function brings the names
+                // it sees with it.
+                Argument::Function(callable) => Argument::Function(self.captured(callable)),
+                argument => argument,
             });
         }
         let arguments = &converted[..];
@@ -2833,8 +2982,22 @@ impl Lowering<'_> {
             if symbol == rvalues::symbols().dots {
                 return Err(Refusal::new("a local function with `...`"));
             }
-            // A parameter is a fresh variable, so assigning it never touches the caller's.
-            let ty = self.builder.ty(argument);
+            let argument = match argument {
+                Argument::Value(value) => value,
+                Argument::Function(callable) => {
+                    scope.names.insert(symbol, Binding::Function(callable));
+                    continue;
+                }
+            };
+            // A parameter is a fresh variable, so assigning it never touches the caller's, and
+            // one holding a tag widens as any variable does.
+            let ty = match self.builder.ty(argument) {
+                Type::Tag(union) => match self.widened.iter().find(|&&(held, _)| held == symbol) {
+                    Some(&(_, wider)) => Type::Tag(shapes::join(union, wider)),
+                    None => Type::Tag(union),
+                },
+                ty => ty,
+            };
             let variable = self.builder.local(ty);
             self.builder.push(Some(variable), Op::Copy(argument));
             scope.names.insert(symbol, Binding::Value(variable));
@@ -2894,7 +3057,10 @@ impl Lowering<'_> {
         };
         let kinds: SmallVec<[Option<(SexpType, bool)>; 4]> = arguments
             .iter()
-            .map(|&argument| storage(self.builder.ty(argument)))
+            .map(|&argument| match argument {
+                Argument::Value(value) => storage(self.builder.ty(value)),
+                Argument::Function(_) => Some((SexpType::Closure, false)),
+            })
             .collect();
         if !interp::annotations::admits_inline(definition, body, &kinds, storage(ty)) {
             return Err(Refusal::new(
@@ -4769,7 +4935,9 @@ impl Lowering<'_> {
         let state = match state {
             Some(state) if self.is_library_call(state, "Dict.empty", 0)? => {
                 // An empty dictionary's type is the one the step function declares for its state.
-                let Callable::Inline(formals, body, _) = callable else {
+                let (Callable::Inline(formals, body, _) | Callable::Captured(formals, body, _)) =
+                    callable
+                else {
                     return Err(Refusal::new("a walk from `Dict.empty()` with a named step"));
                 };
                 let ty = interp::annotations::formal_annotation(formals, body, 0)
@@ -5625,9 +5793,7 @@ impl Lowering<'_> {
     unsafe fn function_argument(&mut self, function: Sexp) -> Result<Callable, Refusal> {
         if function.kind() == SexpType::Symbol {
             match self.lookup(function) {
-                Some(Binding::Function(formals, body, scope)) => {
-                    return Ok(Callable::Inline(formals, body, scope));
-                }
+                Some(Binding::Function(callable)) => return Ok(callable),
                 Some(Binding::Hidden) => return Err(hidden_refusal()),
                 Some(Binding::Value(_) | Binding::Maybe(_)) => {
                     return Err(Refusal::new("a mapped function held in a variable"));
@@ -5637,6 +5803,10 @@ impl Lowering<'_> {
             let speculation = find_function(function, self.env)
                 .ok_or(Refusal::new("a mapped function that does not resolve"))?;
             let found = speculation.function;
+            if is_base_function(&speculation) {
+                self.speculations.push(speculation);
+                return Ok(Callable::Library(function));
+            }
             if found.kind() != SexpType::Closure || !interp::annotations::is_typed(found) {
                 return Err(Refusal::new(
                     "a mapped function that is not a typed closure",
@@ -5663,13 +5833,38 @@ impl Lowering<'_> {
     unsafe fn apply(
         &mut self,
         callable: Callable,
-        arguments: &[Local],
+        values: &[Local],
+    ) -> Result<Option<Local>, Refusal> {
+        let arguments: SmallVec<[Argument; 4]> =
+            values.iter().map(|&value| Argument::Value(value)).collect();
+        self.apply_arguments(callable, &arguments)
+    }
+
+    /// Calls a function argument with these arguments, which may pass functions in turn.
+    unsafe fn apply_arguments(
+        &mut self,
+        callable: Callable,
+        arguments: &[Argument],
     ) -> Result<Option<Local>, Refusal> {
         match callable {
             Callable::Inline(formals, body, scope) => {
                 self.inline(formals, body, scope + 1, arguments, inline_storage)
             }
+            Callable::Captured(formals, body, capture) => {
+                // The function sees its captured names and its own, so it lowers with the scopes
+                // in view swapped for one scope of those names.
+                let mut scope = self.new_scope();
+                scope.names = self.captures[capture as usize].clone();
+                let held = std::mem::replace(&mut self.scopes, vec![scope]);
+                let value = self.inline(formals, body, 1, arguments, inline_storage);
+                self.scopes = held;
+                value
+            }
             Callable::Typed(name, function) => self.typed_function(name, function, arguments),
+            Callable::Library(name) => {
+                let (formals, body) = eta(name, arguments.len())?;
+                self.inline(formals, body, 0, arguments, inline_storage)
+            }
         }
     }
 
@@ -6004,10 +6199,21 @@ impl Lowering<'_> {
                 return self.switch_shapes(value, shapes, exhaustive, Expected::Stray(target), arm);
             }
         }
-        self.join_names(&names);
+        Ok(self.join_arms(&ends, &names))
+    }
+
+    /// Joins the values the arms of a switch or `match` complete with, each with the end block
+    /// it completes in, and the names each set, leaving the builder after them. `None` when no
+    /// arm completes.
+    fn join_arms(
+        &mut self,
+        ends: &[(BlockId, Local)],
+        names: &[(BlockId, Created)],
+    ) -> Option<Local> {
+        self.join_names(names);
         let join = self.builder.block();
         let mut ty: Option<Option<Type>> = None;
-        for &(_, completed) in &ends {
+        for &(_, completed) in ends {
             let found = self.builder.ty(completed);
             ty = Some(match ty {
                 None => Some(found),
@@ -6018,7 +6224,7 @@ impl Lowering<'_> {
             None => None,
             Some(ty) => {
                 let result = self.builder.local(ty.unwrap_or(Type::Null));
-                for &(end, completed) in &ends {
+                for &(end, completed) in ends {
                     self.builder.switch_to(end);
                     let op = match ty {
                         Some(_) => Op::Copy(completed),
@@ -6038,7 +6244,7 @@ impl Lowering<'_> {
         if result.is_none() {
             self.builder.terminate(Terminator::Fail);
         }
-        Ok(result)
+        result
     }
 
     /// Forgets everything lowered since `checkpoint`, taken when block `start` held
@@ -6156,9 +6362,10 @@ impl Lowering<'_> {
         self.pending = checkpoint.pending;
     }
 
-    /// `match (value) { pattern => body ... }` over a record or tag, decided for each shape the
-    /// value may have as the interpreter would decide it for a value of that shape.
-    /// `dropped` says the program drops the `match`'s value, as a statement's.
+    /// `match (value) { pattern => body ... }`. Over a record or tag the arms are decided for each
+    /// shape the value may have, as the interpreter would decide them for a value of that shape;
+    /// over any other value they are tested in order. `dropped` says the program drops the
+    /// `match`'s value, as a statement's.
     unsafe fn match_expression(
         &mut self,
         call: Sexp,
@@ -6172,60 +6379,573 @@ impl Lowering<'_> {
             return Err(Refusal::new("a `match` with named arguments"));
         }
         let arrow = rvalues::install("=>").map_err(|_| Refusal::new("a malformed `match`"))?;
-        let mut parsed: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
+        let mut parsed: SmallVec<[MatchArm; 4]> = SmallVec::new();
         for &(tag, arm) in arms {
             if tag != rvalues::nil() || arm.kind() != SexpType::Language || arm.car() != arrow {
                 return Err(Refusal::new("a malformed `match` arm"));
             }
-            match rvalues::pairlist_items(arm.cdr())[..] {
-                [(pattern_tag, pattern), (body_tag, body)]
-                    if pattern_tag == rvalues::nil() && body_tag == rvalues::nil() =>
-                {
-                    parsed.push((pattern, body));
-                }
-                [_, _, _] => return Err(Refusal::new("a `match` arm with a guard")),
-                _ => return Err(Refusal::new("a malformed `match` arm")),
+            let parts = rvalues::pairlist_items(arm.cdr());
+            if parts.iter().any(|&(tag, _)| tag != rvalues::nil()) {
+                return Err(Refusal::new("a malformed `match` arm"));
             }
+            let arm = match parts[..] {
+                [(_, pattern), (_, body)] => MatchArm {
+                    pattern,
+                    guard: None,
+                    body,
+                },
+                [(_, pattern), (_, guard), (_, body)] => {
+                    // The interpreter evaluates a guard in a scratch environment, so what it
+                    // assigns is gone afterwards, which the lowering does not model.
+                    if writes(guard) {
+                        return Err(Refusal::new("a `match` guard that assigns a name"));
+                    }
+                    MatchArm {
+                        pattern,
+                        guard: Some(guard),
+                        body,
+                    }
+                }
+                _ => return Err(Refusal::new("a malformed `match` arm")),
+            };
+            parsed.push(arm);
         }
         let value = self.value(scrutinee)?;
-        let (mut layouts, mut tags): (SmallVec<[u32; 4]>, SmallVec<[u32; 4]>) = Default::default();
-        for &(pattern, _) in &parsed {
-            pattern_layouts(pattern, &mut layouts, &mut tags)?;
-        }
-        let (candidates, exhaustive) = self.shapes_of(self.builder.ty(value), &layouts, &tags)?;
         let tail = self.inlined.is_empty() && self.tails.contains(&call);
         let expected = match self.declared {
             Some(declared) if tail => Expected::Declared(declared),
             _ if dropped => Expected::Dropped(call),
             _ => Expected::Free,
         };
+        let ty = self.builder.ty(value);
+        if !matches!(ty, Type::Record(_) | Type::Tag(_)) {
+            return self.match_arms(value, Known::Typed, &parsed, dropped, expected);
+        }
+        let (mut layouts, mut tags): (SmallVec<[u32; 4]>, SmallVec<[u32; 4]>) = Default::default();
+        for arm in &parsed {
+            pattern_layouts(arm.pattern, &mut layouts, &mut tags)?;
+        }
+        let (candidates, exhaustive) = self.shapes_of(ty, &layouts, &tags)?;
         self.switch_shapes(
             value,
             &candidates,
             exhaustive,
             expected,
             &mut |lowering, shape| {
-                for &(pattern, body) in &parsed {
-                    let mut bindings: SmallVec<[(Sexp, Option<usize>); 4]> = SmallVec::new();
-                    if !pattern_matches(pattern, shape, &mut bindings)? {
-                        continue;
-                    }
-                    for (symbol, field) in bindings {
-                        let bound = match (field, shape) {
-                            (Some(index), Some(shape)) => lowering.field(value, shape, index)?,
-                            _ => value,
-                        };
-                        lowering.assign(symbol, bound)?;
-                    }
-                    return lowering.part(body, dropped);
-                }
-                // The interpreter raises the error that no arm matches.
-                lowering.builder.terminate(Terminator::Fail);
-                let unreachable = lowering.builder.block();
-                lowering.builder.switch_to(unreachable);
-                Ok(None)
+                let known = shape.map_or(Known::Other, Known::Shape);
+                lowering.match_arms(value, known, &parsed, dropped, expected)
             },
         )
+    }
+
+    /// Lowers `arms` in order against `value`: each arm's tests and guard jump to the next arm
+    /// when they fail, and the call fails when no arm matches, where the interpreter raises its
+    /// error. Joins the values of the arms that complete.
+    unsafe fn match_arms(
+        &mut self,
+        value: Local,
+        known: Known,
+        arms: &[MatchArm],
+        dropped: bool,
+        expected: Expected,
+    ) -> Result<Option<Local>, Refusal> {
+        let mut ends: SmallVec<[(BlockId, Local); 4]> = SmallVec::new();
+        let mut names: SmallVec<[(BlockId, Created); 4]> = SmallVec::new();
+        for arm in arms {
+            let next = self.builder.block();
+            let mut bindings: SmallVec<[(Sexp, Local); 4]> = SmallVec::new();
+            let mut test = self.test_pattern(arm.pattern, value, known, next, &mut bindings)?;
+            if test == Test::Never {
+                self.builder.switch_to(next);
+                continue;
+            }
+            if let Some(guard) = arm.guard {
+                let saved = self.enter_control();
+                for &(symbol, bound) in &bindings {
+                    self.bind(symbol, Binding::Value(bound));
+                }
+                let holds = self.condition(guard);
+                self.leave_control(saved);
+                self.pass_if(holds?, next);
+                test = Test::Maybe;
+            }
+            let saved = self.enter_control();
+            for &(symbol, bound) in &bindings {
+                self.assign(symbol, bound)?;
+            }
+            let completed = self
+                .part(arm.body, dropped)?
+                .map(|completed| self.toward(completed, expected).unwrap_or(completed));
+            let created = self.leave_control(saved);
+            if let Some(completed) = completed {
+                if !matches!(expected, Expected::Dropped(_)) {
+                    self.usable(completed)?;
+                }
+                ends.push((self.builder.current, completed));
+                names.push((self.builder.current, created));
+            }
+            self.builder.switch_to(next);
+            if test == Test::Always {
+                break;
+            }
+        }
+        self.builder.terminate(Terminator::Fail);
+        Ok(self.join_arms(&ends, &names))
+    }
+
+    /// Lowers the tests of `pattern` against `value`, which jump to `fail` where it does not
+    /// match, and adds the names it binds with their values.
+    unsafe fn test_pattern(
+        &mut self,
+        pattern: Sexp,
+        value: Local,
+        known: Known,
+        fail: BlockId,
+        bindings: &mut SmallVec<[(Sexp, Local); 4]>,
+    ) -> Result<Test, Refusal> {
+        let unknown = || Refusal::new("a `match` pattern the typed core does not know");
+        match pattern.kind() {
+            SexpType::Symbol => {
+                let name = rvalues::symbol_name(pattern);
+                match &*name {
+                    "_" => Ok(Test::Always),
+                    "T" | "F" | "" => Err(unknown()),
+                    _ if name.starts_with("..") => Err(unknown()),
+                    _ => {
+                        bindings.push((pattern, value));
+                        Ok(Test::Always)
+                    }
+                }
+            }
+            SexpType::Logical
+            | SexpType::Integer
+            | SexpType::Real
+            | SexpType::String
+            | SexpType::I64 => self.test_literal(pattern, value, fail),
+            SexpType::Language if pattern.car().kind() == SexpType::Symbol => {
+                let head = rvalues::symbol_name(pattern.car());
+                let items = rvalues::pairlist_items(pattern.cdr());
+                match (&*head, &items[..]) {
+                    ("(", &[(_, inner)]) => self.test_pattern(inner, value, known, fail, bindings),
+                    ("|", &[(_, left), (_, right)]) => {
+                        self.test_alternatives(left, right, value, known, fail, bindings)
+                    }
+                    (".ry_as", &[(_, inner), (_, name)]) if name.kind() == SexpType::Symbol => {
+                        let test = self.test_pattern(inner, value, known, fail, bindings)?;
+                        if test != Test::Never {
+                            bindings.push((name, value));
+                        }
+                        Ok(test)
+                    }
+                    (".ry_array", _) => self.test_list(&items, value, fail, bindings),
+                    (".ry_tag" | ".ry_record" | ".ry_tuple", _) => {
+                        self.test_constructor(pattern, value, known, fail, bindings)
+                    }
+                    _ => Err(unknown()),
+                }
+            }
+            _ => Err(unknown()),
+        }
+    }
+
+    /// `left | right`: `right` is tested where `left` fails, and a name both bind joins.
+    unsafe fn test_alternatives(
+        &mut self,
+        left: Sexp,
+        right: Sexp,
+        value: Local,
+        known: Known,
+        fail: BlockId,
+        bindings: &mut SmallVec<[(Sexp, Local); 4]>,
+    ) -> Result<Test, Refusal> {
+        let right_start = self.builder.block();
+        let mut left_bound: SmallVec<[(Sexp, Local); 4]> = SmallVec::new();
+        let left_test = self.test_pattern(left, value, known, right_start, &mut left_bound)?;
+        if left_test == Test::Always {
+            bindings.extend(left_bound);
+            return Ok(Test::Always);
+        }
+        let left_end = (left_test != Test::Never).then_some(self.builder.current);
+        self.builder.switch_to(right_start);
+        let mut right_bound: SmallVec<[(Sexp, Local); 4]> = SmallVec::new();
+        let right_test = self.test_pattern(right, value, known, fail, &mut right_bound)?;
+        let right_end = (right_test != Test::Never).then_some(self.builder.current);
+        let (left_end, right_end) = match (left_end, right_end) {
+            (None, None) => return Ok(Test::Never),
+            (Some(left_end), None) => {
+                self.builder.switch_to(left_end);
+                bindings.extend(left_bound);
+                return Ok(Test::Maybe);
+            }
+            (None, Some(_)) => {
+                bindings.extend(right_bound);
+                return Ok(right_test);
+            }
+            (Some(left_end), Some(right_end)) => (left_end, right_end),
+        };
+        let last = |bound: &[(Sexp, Local)], symbol: Sexp| {
+            bound
+                .iter()
+                .rev()
+                .find(|&&(name, _)| name == symbol)
+                .map(|&(_, local)| local)
+        };
+        let differ = || Refusal::new("an alternative pattern whose sides bind different names");
+        if right_bound
+            .iter()
+            .any(|&(symbol, _)| last(&left_bound, symbol).is_none())
+        {
+            return Err(differ());
+        }
+        let mut joined_bound: SmallVec<[(Sexp, Local); 4]> = SmallVec::new();
+        for &(symbol, _) in &left_bound {
+            if joined_bound.iter().any(|&(name, _)| name == symbol) {
+                continue;
+            }
+            let (Some(from_left), Some(from_right)) =
+                (last(&left_bound, symbol), last(&right_bound, symbol))
+            else {
+                return Err(differ());
+            };
+            if from_left == from_right {
+                joined_bound.push((symbol, from_left));
+                continue;
+            }
+            let ty = joined(self.builder.ty(from_left), self.builder.ty(from_right)).ok_or(
+                Refusal::new("an alternative pattern binding a name to two types"),
+            )?;
+            let variable = self.builder.local(ty);
+            for (end, local) in [(left_end, from_left), (right_end, from_right)] {
+                self.builder.switch_to(end);
+                self.builder.push(Some(variable), Op::Copy(local));
+            }
+            joined_bound.push((symbol, variable));
+        }
+        let matched = self.builder.block();
+        for end in [left_end, right_end] {
+            self.builder.switch_to(end);
+            self.builder.terminate(Terminator::Jump(matched));
+        }
+        self.builder.switch_to(matched);
+        bindings.extend(joined_bound);
+        Ok(Test::Maybe)
+    }
+
+    /// A literal pattern, which matches a value of its kind that equals it, as
+    /// `interp::records::literal_matches` decides: numbers match numbers whatever their storage,
+    /// and a logical, a number and a string never match each other.
+    unsafe fn test_literal(
+        &mut self,
+        pattern: Sexp,
+        value: Local,
+        fail: BlockId,
+    ) -> Result<Test, Refusal> {
+        if pattern.attrib() != rvalues::nil() || rvalues::length(pattern) != 1 {
+            return Err(Refusal::new("a literal pattern that is not one value"));
+        }
+        let missing = || Refusal::new("a missing value as a pattern");
+        let number = match pattern.kind() {
+            SexpType::Integer => match rvalues::ints(pattern)[0] {
+                i32::MIN => return Err(missing()),
+                number => Some(f64::from(number)),
+            },
+            SexpType::Real => {
+                let number = rvalues::reals(pattern)[0];
+                if number.is_nan() {
+                    return Err(missing());
+                }
+                Some(number)
+            }
+            SexpType::I64 => {
+                // The interpreter converts a double to an `I64` exactly, so a pattern no double
+                // holds exactly (past 2^53, or `i64::MAX`, which rounds to 2^63) matches none.
+                let number = pattern.slice::<i64>()[0];
+                let double = number as f64;
+                (double < 9_223_372_036_854_775_808.0 && double as i64 == number).then_some(double)
+            }
+            _ => None,
+        };
+        let logical = match pattern.kind() {
+            SexpType::Logical => match rvalues::ints(pattern)[0] {
+                i32::MIN => return Err(missing()),
+                flag => Some(i32::from(flag != 0)),
+            },
+            _ => None,
+        };
+        if pattern.kind() == SexpType::String && constant_string(pattern).is_none() {
+            return Err(missing());
+        }
+        let condition = match self.builder.ty(value) {
+            Type::I64 => {
+                let converted = interp::numbers::read(pattern).or_else(|| {
+                    interp::numbers::r_source(pattern)
+                        .ok()
+                        .and_then(interp::numbers::convert)
+                });
+                let Some(number) = converted else {
+                    return Ok(self.never(fail));
+                };
+                let number = self
+                    .builder
+                    .emit(Type::I64, Op::Const(Constant::I64(number)));
+                self.builder.emit(
+                    Type::Bool,
+                    Op::Compare(Compare::Eq, Item::I64, value, number),
+                )
+            }
+            Type::Int => match number {
+                Some(number)
+                    if number.fract() == 0.0
+                        && number > f64::from(i32::MIN)
+                        && number <= f64::from(i32::MAX) =>
+                {
+                    let number = self.int(number as i32);
+                    self.builder.emit(Type::Bool, Op::Same(value, number))
+                }
+                _ => return Ok(self.never(fail)),
+            },
+            Type::Dbl => {
+                let Some(number) = number else {
+                    return Ok(self.never(fail));
+                };
+                let number = self
+                    .builder
+                    .emit(Type::Dbl, Op::Const(Constant::Dbl(number)));
+                // An `NA` or `NaN` compares as `NA`, which is not true.
+                let equal = self.builder.emit(
+                    Type::Lgl,
+                    Op::Compare(Compare::Eq, Item::Dbl, value, number),
+                );
+                let true_ = self.builder.emit(Type::Lgl, Op::Const(Constant::Lgl(1)));
+                self.builder.emit(Type::Bool, Op::Same(equal, true_))
+            }
+            Type::Lgl | Type::Bool => {
+                let Some(flag) = logical else {
+                    return Ok(self.never(fail));
+                };
+                let flag = self.builder.emit(Type::Lgl, Op::Const(Constant::Lgl(flag)));
+                self.builder.emit(Type::Bool, Op::Same(value, flag))
+            }
+            Type::Str => {
+                if pattern.kind() != SexpType::String {
+                    return Ok(self.never(fail));
+                }
+                let text = self.value(pattern)?;
+                self.builder
+                    .emit(Type::Bool, Op::Compare(Compare::Eq, Item::Str, value, text))
+            }
+            Type::Record(_) | Type::Tag(_) => return Ok(self.never(fail)),
+            _ => {
+                return Err(Refusal::new(
+                    "a literal pattern against a value that is not a scalar",
+                ));
+            }
+        };
+        self.pass_if(condition, fail);
+        Ok(Test::Maybe)
+    }
+
+    /// A list pattern `[a, b, ..rest, z]`, which matches a ry list of exactly its items, or with a
+    /// `..` at least the items before and after it, the items between binding to `..name`.
+    unsafe fn test_list(
+        &mut self,
+        items: &[(Sexp, Sexp)],
+        value: Local,
+        fail: BlockId,
+        bindings: &mut SmallVec<[(Sexp, Local); 4]>,
+    ) -> Result<Test, Refusal> {
+        let ty = self.builder.ty(value);
+        let item = match ty {
+            Type::Vector { item, array: true } => item,
+            Type::Record(_)
+            | Type::Tag(_)
+            | Type::Int
+            | Type::Dbl
+            | Type::Lgl
+            | Type::Bool
+            | Type::Str
+            | Type::I64 => return Ok(self.never(fail)),
+            _ => {
+                return Err(Refusal::new(
+                    "a list pattern against a value that is not a ry list",
+                ));
+            }
+        };
+        let rests: SmallVec<[usize; 2]> = items
+            .iter()
+            .enumerate()
+            .filter(|&(_, &(_, item))| rest_name(item).is_some())
+            .map(|(position, _)| position)
+            .collect();
+        let (before, after, rest) = match rests[..] {
+            [] => (items, &items[items.len()..], None),
+            [position] => (
+                &items[..position],
+                &items[position + 1..],
+                rest_name(items[position].1).flatten(),
+            ),
+            _ => return Err(Refusal::new("a list pattern with two `..`")),
+        };
+        let fixed = (before.len() + after.len()) as i64;
+        let count = self.builder.emit(Type::I64, Op::Length(value));
+        let fixed = self
+            .builder
+            .emit(Type::I64, Op::Const(Constant::I64(fixed)));
+        let compare = if rests.is_empty() {
+            Compare::Eq
+        } else {
+            Compare::Ge
+        };
+        let long_enough = self
+            .builder
+            .emit(Type::Bool, Op::Compare(compare, Item::I64, count, fixed));
+        self.pass_if(long_enough, fail);
+        if !before.is_empty() || !after.is_empty() || rest.is_some() {
+            self.known_items(value)?;
+        }
+        for (offset, &(_, pattern)) in before.iter().enumerate() {
+            let position = self
+                .builder
+                .emit(Type::I64, Op::Const(Constant::I64(offset as i64 + 1)));
+            let item = self
+                .builder
+                .emit(Type::of_item(item), Op::Get(value, position));
+            if self.test_pattern(pattern, item, Known::Typed, fail, bindings)? == Test::Never {
+                return Ok(Test::Never);
+            }
+        }
+        for (offset, &(_, pattern)) in after.iter().enumerate() {
+            let from_end = (after.len() - offset - 1) as i64;
+            let from_end = self
+                .builder
+                .emit(Type::I64, Op::Const(Constant::I64(from_end)));
+            let position = self
+                .builder
+                .emit(Type::I64, Op::Arith(Arith::Sub, Item::I64, count, from_end));
+            let item = self
+                .builder
+                .emit(Type::of_item(item), Op::Get(value, position));
+            if self.test_pattern(pattern, item, Known::Typed, fail, bindings)? == Test::Never {
+                return Ok(Test::Never);
+            }
+        }
+        if let Some(name) = rest {
+            let start = self
+                .builder
+                .emit(Type::I64, Op::Const(Constant::I64(before.len() as i64)));
+            let between = self
+                .builder
+                .emit(Type::I64, Op::Arith(Arith::Sub, Item::I64, count, fixed));
+            let slice = self.builder.emit(ty, Op::Slice(value, start, between));
+            let symbol = rvalues::install(&name).map_err(|_| Refusal::new("a rest name"))?;
+            bindings.push((symbol, slice));
+        }
+        Ok(Test::Maybe)
+    }
+
+    /// A tuple, record or tag pattern: a test of the value's shape unless `known` or the value's
+    /// type settles it, then a test of each field.
+    unsafe fn test_constructor(
+        &mut self,
+        pattern: Sexp,
+        value: Local,
+        known: Known,
+        fail: BlockId,
+        bindings: &mut SmallVec<[(Sexp, Local); 4]>,
+    ) -> Result<Test, Refusal> {
+        let (constructor, payload) = pattern_layout(pattern)?;
+        let ty = self.builder.ty(value);
+        if !matches!(ty, Type::Record(_) | Type::Tag(_)) {
+            return Ok(self.never(fail));
+        }
+        let (shapes, tested) = match known {
+            Known::Shape(shape) => {
+                let fitting: SmallVec<[u32; 4]> = constructor_fits(&constructor, shape)
+                    .map(|_| shape)
+                    .into_iter()
+                    .collect();
+                (fitting, false)
+            }
+            Known::Other => return Ok(self.never(fail)),
+            Known::Typed => {
+                let (layouts, tags): (SmallVec<[u32; 1]>, SmallVec<[u32; 1]>) = match constructor {
+                    PatternLayout::Exact(layout, _) => {
+                        (smallvec::smallvec![layout], SmallVec::new())
+                    }
+                    PatternLayout::Tag(tag) | PatternLayout::Open { tag: Some(tag), .. } => {
+                        (SmallVec::new(), smallvec::smallvec![tag])
+                    }
+                    // A record value has its one shape, and a tag never matches a record.
+                    PatternLayout::Open { tag: None, .. } => (SmallVec::new(), SmallVec::new()),
+                };
+                let (candidates, exhaustive) = self.shapes_of(ty, &layouts, &tags)?;
+                let fitting: SmallVec<[u32; 4]> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|&shape| constructor_fits(&constructor, shape).is_some())
+                    .collect();
+                let settled = exhaustive && fitting.len() == candidates.len();
+                (fitting, !settled)
+            }
+        };
+        if shapes.is_empty() {
+            return Ok(self.never(fail));
+        }
+        let reads_fields = !matches!(constructor, PatternLayout::Tag(_))
+            && payload.iter().any(|&(_, item)| !is_wildcard(item));
+        if shapes.len() > 1 && reads_fields {
+            return Err(Refusal::new(
+                "a pattern inside another over shapes that hold different fields",
+            ));
+        }
+        if tested {
+            let shape_of = self.builder.emit(Type::Int, Op::ShapeOf(value));
+            let pass = self.builder.block();
+            for &shape in &shapes {
+                let id = self.shape_id(shape);
+                let same = self.builder.emit(Type::Bool, Op::Same(shape_of, id));
+                let next = self.builder.block();
+                self.builder.terminate(Terminator::Branch {
+                    condition: same,
+                    then: pass,
+                    otherwise: next,
+                });
+                self.builder.switch_to(next);
+            }
+            self.builder.terminate(Terminator::Jump(fail));
+            self.builder.switch_to(pass);
+        }
+        let mut test = if tested { Test::Maybe } else { Test::Always };
+        if let ([shape], true) = (&shapes[..], reads_fields) {
+            let slots = constructor_fits(&constructor, *shape)
+                .ok_or(Refusal::new("a pattern that does not fit its shape"))?;
+            for (&(_, item), slot) in payload.iter().zip(slots) {
+                let field = self.field(value, *shape, slot)?;
+                match self.test_pattern(item, field, Known::Typed, fail, bindings)? {
+                    Test::Never => return Ok(Test::Never),
+                    Test::Maybe => test = Test::Maybe,
+                    Test::Always => {}
+                }
+            }
+        }
+        Ok(test)
+    }
+
+    /// Continues where `condition`, a `Bool`, holds, and jumps to `fail` where it does not.
+    fn pass_if(&mut self, condition: Local, fail: BlockId) {
+        let pass = self.builder.block();
+        self.builder.terminate(Terminator::Branch {
+            condition,
+            then: pass,
+            otherwise: fail,
+        });
+        self.builder.switch_to(pass);
+    }
+
+    /// A pattern that cannot match here: the code jumps to `fail`.
+    fn never(&mut self, fail: BlockId) -> Test {
+        self.builder.terminate(Terminator::Jump(fail));
+        Test::Never
     }
 
     /// `Result.with_default(result, default)`.
@@ -8118,19 +8838,51 @@ fn dict_type(annotation: &str) -> Option<Type> {
     })
 }
 
-/// What a `match` pattern of a tuple, record or tag names: a layout and each item's slot, or
-/// for `:Name(..)` only the tag.
+/// A `match` arm: its pattern, its `if` guard and its value.
+#[derive(Clone, Copy)]
+struct MatchArm {
+    pattern: Sexp,
+    guard: Option<Sexp>,
+    body: Sexp,
+}
+
+/// What the lowering knows of the shape of a value a pattern tests.
+#[derive(Clone, Copy)]
+enum Known {
+    /// A box of this shape.
+    Shape(u32),
+    /// A box of a shape that no constructor pattern at the top of an arm names.
+    Other,
+    /// Only its type.
+    Typed,
+}
+
+/// Whether a pattern matches, given the tests lowered for it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Test {
+    /// Whatever the value: nothing is tested.
+    Always,
+    /// Where its tests pass, which is where the builder is.
+    Maybe,
+    /// Never: the code jumps to where it fails.
+    Never,
+}
+
+/// What a `match` pattern of a tuple, record or tag names: a layout and each item's slot, for
+/// `:Name(..)` only the tag, and for a record or a tag's named payload with a trailing `..` the
+/// tag and the field names it needs among others.
 enum PatternLayout {
     Exact(u32, Vec<usize>),
     Tag(u32),
+    Open { tag: Option<u32>, names: Vec<Sexp> },
 }
 
 /// The layout a constructor pattern `.ry_tag(...)`, `.ry_record(...)` or `.ry_tuple(...)`
-/// tests, with its items.
+/// tests, with its items, a trailing `..` left out.
 unsafe fn pattern_layout(pattern: Sexp) -> Result<(PatternLayout, Vec<(Sexp, Sexp)>), Refusal> {
     let head = rvalues::symbol_name(pattern.car());
     let items = rvalues::pairlist_items(pattern.cdr());
-    let (tag, payload) = if head == ".ry_tag" {
+    let (name, payload) = if head == ".ry_tag" {
         let Some((&(name_tag, name), payload)) = items.split_first() else {
             return Err(Refusal::new("a tag pattern without a name"));
         };
@@ -8142,26 +8894,65 @@ unsafe fn pattern_layout(pattern: Sexp) -> Result<(PatternLayout, Vec<(Sexp, Sex
         (None, items)
     };
     let rest = |item: Sexp| item.kind() == SexpType::Symbol && rvalues::symbol_name(item) == "..";
-    if let (Some(name), [(item_tag, item)]) = (tag, &payload[..])
-        && *item_tag == rvalues::nil()
-        && rest(*item)
-    {
-        let text = rvalues::string_at(name, 0).ok_or(Refusal::new("a tag pattern's name"))?;
-        let symbol = rvalues::install(&text).map_err(|_| Refusal::new("a tag name"))?;
-        let tag = interp::heap().layouts.intern_tag(symbol);
-        return Ok((PatternLayout::Tag(tag), payload));
-    }
-    if payload.iter().any(|&(_, item)| rest(item)) {
+    let tag = match name {
+        Some(name) => {
+            let text = rvalues::string_at(name, 0).ok_or(Refusal::new("a tag pattern's name"))?;
+            let symbol = rvalues::install(&text).map_err(|_| Refusal::new("a tag name"))?;
+            Some(interp::heap().layouts.intern_tag(symbol))
+        }
+        None => None,
+    };
+    let open = payload
+        .last()
+        .is_some_and(|&(item_tag, item)| item_tag == rvalues::nil() && rest(item));
+    let fields = &payload[..payload.len() - usize::from(open)];
+    if fields.iter().any(|&(_, item)| rest(item)) {
         return Err(Refusal::new("a pattern with `..` among its fields"));
     }
+    if open {
+        if let (Some(tag), []) = (tag, fields) {
+            return Ok((PatternLayout::Tag(tag), Vec::new()));
+        }
+        if head == ".ry_tuple" || fields.iter().any(|&(tag, _)| tag == rvalues::nil()) {
+            return Err(Refusal::new("a positional pattern with `..`"));
+        }
+        let names = fields.iter().map(|&(tag, _)| tag).collect();
+        return Ok((PatternLayout::Open { tag, names }, fields.to_vec()));
+    }
     let names: Vec<Sexp> = payload.iter().map(|&(tag, _)| tag).collect();
-    let (layout, slots) = interp::records::constructor_layout(tag, &names, head == ".ry_record")
+    let (layout, slots) = interp::records::constructor_layout(name, &names, head == ".ry_record")
         .ok_or(Refusal::new("a pattern the interpreter rejects"))?;
     Ok((PatternLayout::Exact(layout, slots), payload))
 }
 
-/// Adds the layouts `pattern` names, and the tags it names with any payload, which a `match` over
-/// any tag tests for.
+/// The slot of each field `constructor` reads when it matches a box of `shape`, or `None` when it
+/// does not match one.
+unsafe fn constructor_fits(constructor: &PatternLayout, shape: u32) -> Option<Vec<usize>> {
+    let found = shapes::shape(shape).layout;
+    match constructor {
+        PatternLayout::Exact(layout, slots) => (*layout == found).then(|| slots.clone()),
+        PatternLayout::Tag(tag) => {
+            (interp::heap().layouts.get(found)?.tag == Some(*tag)).then(Vec::new)
+        }
+        PatternLayout::Open { tag, names } => {
+            let layout = interp::heap().layouts.get(found)?;
+            let Fields::Named(fields) = &layout.fields else {
+                return None;
+            };
+            if layout.tag != *tag {
+                return None;
+            }
+            names
+                .iter()
+                .map(|name| fields.iter().position(|field| field == name))
+                .collect()
+        }
+    }
+}
+
+/// Adds the layouts the constructor patterns at the top of `pattern` name, and the tags they
+/// name with any payload, which a `match` over any tag tests for. `true` when one of them names
+/// only some of its fields, which no layout stands for.
 unsafe fn pattern_layouts(
     pattern: Sexp,
     layouts: &mut SmallVec<[u32; 4]>,
@@ -8170,124 +8961,102 @@ unsafe fn pattern_layouts(
     if pattern.kind() != SexpType::Language || pattern.car().kind() != SexpType::Symbol {
         return Ok(());
     }
+    let items = rvalues::pairlist_items(pattern.cdr());
     match &*rvalues::symbol_name(pattern.car()) {
         "(" | "|" => {
-            for (_, inner) in rvalues::pairlist_items(pattern.cdr()) {
+            for (_, inner) in items {
                 pattern_layouts(inner, layouts, tags)?;
             }
-            Ok(())
+        }
+        ".ry_as" => {
+            if let Some(&(_, inner)) = items.first() {
+                pattern_layouts(inner, layouts, tags)?;
+            }
         }
         ".ry_tag" | ".ry_record" | ".ry_tuple" => match pattern_layout(pattern)?.0 {
             PatternLayout::Exact(layout, _) => {
                 if !layouts.contains(&layout) {
                     layouts.push(layout);
                 }
-                Ok(())
             }
-            PatternLayout::Tag(tag) => {
+            PatternLayout::Tag(tag) | PatternLayout::Open { tag: Some(tag), .. } => {
                 if !tags.contains(&tag) {
                     tags.push(tag);
                 }
-                Ok(())
             }
+            PatternLayout::Open { tag: None, .. } => {}
         },
-        _ => Ok(()),
+        _ => {}
     }
+    Ok(())
 }
 
-/// Whether `pattern` matches a box of `shape`, or with `None` a box of a shape no pattern
-/// names, adding the names it binds: to the whole value, or to a field by index.
-unsafe fn pattern_matches(
-    pattern: Sexp,
-    shape: Option<u32>,
-    bindings: &mut SmallVec<[(Sexp, Option<usize>); 4]>,
-) -> Result<bool, Refusal> {
-    match pattern.kind() {
-        SexpType::Symbol => match &*rvalues::symbol_name(pattern) {
-            "_" => Ok(true),
-            "T" | "F" | ".." | "..." | "" => Err(Refusal::new(
-                "a `match` pattern the typed core does not know",
-            )),
-            _ => {
-                bindings.push((pattern, None));
-                Ok(true)
-            }
-        },
-        SexpType::Language if pattern.car().kind() == SexpType::Symbol => {
-            let head = rvalues::symbol_name(pattern.car());
-            let items = rvalues::pairlist_items(pattern.cdr());
-            match (&*head, &items[..]) {
-                ("(", &[(_, inner)]) => pattern_matches(inner, shape, bindings),
-                ("|", &[(_, left), (_, right)]) => {
-                    let before = bindings.len();
-                    let found = pattern_matches(left, shape, bindings)?
-                        || pattern_matches(right, shape, bindings)?;
-                    if bindings.len() != before {
-                        return Err(Refusal::new("an alternative pattern that binds names"));
-                    }
-                    Ok(found)
-                }
-                (".ry_tag" | ".ry_record" | ".ry_tuple", _) => {
-                    let (layout, payload) = pattern_layout(pattern)?;
-                    let Some(shape) = shape else {
-                        return Ok(false);
-                    };
-                    let found = shapes::shape(shape).layout;
-                    match layout {
-                        PatternLayout::Tag(tag) => Ok(interp::heap()
-                            .layouts
-                            .get(found)
-                            .is_some_and(|layout| layout.tag == Some(tag))),
-                        PatternLayout::Exact(layout, slots) => {
-                            if layout != found {
-                                return Ok(false);
-                            }
-                            for (&(_, item), &slot) in payload.iter().zip(&slots) {
-                                field_pattern(item, slot, bindings)?;
-                            }
-                            Ok(true)
-                        }
-                    }
-                }
-                _ => Err(Refusal::new(
-                    "a `match` pattern the typed core does not know",
-                )),
-            }
-        }
-        _ => Err(Refusal::new(
-            "a `match` pattern the typed core does not know",
-        )),
-    }
+/// Whether `pattern` is `_`, which reads nothing.
+unsafe fn is_wildcard(pattern: Sexp) -> bool {
+    pattern.kind() == SexpType::Symbol && &*rvalues::symbol_name(pattern) == "_"
 }
 
-/// A field's pattern, which matches any value: `_`, or a name it binds.
-unsafe fn field_pattern(
-    pattern: Sexp,
-    slot: usize,
-    bindings: &mut SmallVec<[(Sexp, Option<usize>); 4]>,
-) -> Result<(), Refusal> {
-    match pattern.kind() {
-        SexpType::Symbol => match &*rvalues::symbol_name(pattern) {
-            "_" => Ok(()),
-            "T" | "F" | ".." | "..." | "" => {
-                Err(Refusal::new("a field pattern the typed core does not know"))
-            }
-            _ => {
-                bindings.push((pattern, Some(slot)));
-                Ok(())
-            }
-        },
-        SexpType::Language
-            if pattern.car().kind() == SexpType::Symbol
-                && rvalues::symbol_name(pattern.car()) == "(" =>
-        {
-            match rvalues::pairlist_items(pattern.cdr())[..] {
-                [(_, inner)] => field_pattern(inner, slot, bindings),
-                _ => Err(Refusal::new("a malformed pattern")),
-            }
-        }
-        _ => Err(Refusal::new("a nested `match` pattern")),
+/// Whether `expression` assigns a name, has a `for` loop or a `match`, local functions included.
+unsafe fn writes(expression: Sexp) -> bool {
+    if expression.kind() != SexpType::Language {
+        return false;
     }
+    let head = expression.car();
+    if head.kind() == SexpType::Symbol
+        && matches!(
+            &*rvalues::symbol_name(head),
+            "<-" | "=" | "<<-" | "->" | "->>" | "for" | "assign" | ".ry_match"
+        )
+    {
+        return true;
+    }
+    writes(head)
+        || rvalues::pairlist_items(expression.cdr())
+            .into_iter()
+            .any(|(_, item)| writes(item))
+}
+
+/// The values of `arguments`, or `None` when one is a function.
+fn plain_values(arguments: &[Argument]) -> Option<SmallVec<[Local; 4]>> {
+    arguments
+        .iter()
+        .map(|&argument| match argument {
+            Argument::Value(value) => Some(value),
+            Argument::Function(_) => None,
+        })
+        .collect()
+}
+
+thread_local! {
+    /// The function of each library function and arity that [`eta`] made, kept for the session.
+    static ETA: RefCell<Vec<(Sexp, usize, Sexp, Sexp)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The formals and body of `function(a1, ..., an) name(a1, ..., an)` for the library function
+/// `name` passed by name, which lowers as a call of it with the values passed. The language
+/// objects are preserved, so each is made once per session.
+unsafe fn eta(name: Sexp, arity: usize) -> Result<(Sexp, Sexp), Refusal> {
+    if let Some(found) = ETA.with_borrow(|made| {
+        made.iter()
+            .find(|&&(held, count, ..)| held == name && count == arity)
+            .map(|&(.., formals, body)| (formals, body))
+    }) {
+        return Ok(found);
+    }
+    let failed = |_| Refusal::new("a library function passed by name");
+    let mut formals = rvalues::nil();
+    let mut arguments = rvalues::nil();
+    for position in (1..=arity).rev() {
+        let symbol = rvalues::install(&format!(".ry_passed{position}")).map_err(failed)?;
+        formals = rvalues::cons_tagged(rvalues::missing_arg(), formals, symbol).map_err(failed)?;
+        arguments = rvalues::cons(symbol, arguments).map_err(failed)?;
+    }
+    let body = rvalues::lcons(name, arguments).map_err(failed)?;
+    let heap = interp::heap();
+    heap.preserve(formals);
+    heap.preserve(body);
+    ETA.with_borrow_mut(|made| made.push((name, arity, formals, body)));
+    Ok((formals, body))
 }
 
 /// The type both of two values' types fit: that type, or the union of two tags.

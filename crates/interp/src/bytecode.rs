@@ -46,7 +46,7 @@ use {
     crate::{
         Frame, Interp, Signalling,
         arith::{MATHS, math_index},
-        builtins::{Arg, BuiltinDef, Call, Generic, Replacement, internal},
+        builtins::{Arg, BuiltinDef, Call, DirectNames, Generic, Replacement, internal},
         conditions, deparse,
         dispatch::{self, Caller},
         effects, element_access,
@@ -54,8 +54,7 @@ use {
         eval::{self, Reify, Site, SwitchSelector, as_condition},
         handles::{
             self, AssignmentCopy, Atomic, Binding, Chars, Cx, Environment, Gc, Integer, Language,
-            List, Local, Logical, Names, Owned, Pairlist, Promise, Real, Str, Symbol, Tagged,
-            Vector, safe,
+            List, Local, Logical, Names, Owned, Pairlist, Promise, Real, Str, Symbol, Vector, safe,
         },
         interp,
         kernels::{self, Element, MAX_NODES, Node, Reduction},
@@ -10628,7 +10627,7 @@ unsafe fn op_call_builtin(state: &mut Activation<'_, '_>, instruction: Instructi
     }
     if definition.direct.is_some()
         && definition.checks.replacement == Replacement::None
-        && positional_arguments(call.cdr())
+        && direct_arguments(call.cdr(), definition.direct_names)
     {
         let values = std::slice::from_raw_parts(instruction.registers.add(first), count);
         if let Some(value) = eval::call_direct(definition, call, values)? {
@@ -10722,12 +10721,18 @@ unsafe fn op_call_builtin_positional(
     Ok(Flow::Next)
 }
 
-/// Whether every argument cell of a call is untagged and not empty, as a
-/// [`BuiltinDef::direct`] entry requires.
+/// Whether a call's arguments suit the builtin's direct entry: none is empty, and none is named
+/// unless the entry takes names. An entry that passes its arguments on by position
+/// ([`DirectNames::Ignored`]) leaves the name `PACKAGE`, which `.Call` reads, to the full call.
 #[inline]
-unsafe fn positional_arguments(mut cell: Sexp) -> bool {
+unsafe fn direct_arguments(mut cell: Sexp, names: DirectNames) -> bool {
     while cell != nil() {
-        if cell.tag() != nil() || cell.car() == missing_arg() {
+        let tag = cell.tag();
+        if cell.car() == missing_arg()
+            || (tag != nil()
+                && (names == DirectNames::Refused
+                    || (names == DirectNames::Ignored && tag == symbols().package_arg)))
+        {
             return false;
         }
         cell = cell.cdr();
@@ -12323,7 +12328,7 @@ impl<'f> RunningFrame<'f, '_, '_> {
     }
 
     /// Stores `value` in `slot`, which counts the reference.
-    #[inline]
+    #[inline(always)]
     fn store(self, _context: &Cx<'_>, slot: Slot<'f>, value: Local<'_>) {
         // SAFETY: the register belongs to the running frame, and a store that drops the old
         // value's count to zero frees nothing.
@@ -15160,47 +15165,46 @@ fn replace_variable<'f, 's>(
     }
     args[0] = target;
     let args: &[Local<'s>] = args;
-    let result = {
-        let _tmp = handles::TmpValue::bind(
-            context,
-            match home {
-                Home::Binding(environment, _) => Some(environment),
-                Home::Slot(_) => None,
-            },
-            target,
-        );
-        let direct = match builtin {
-            Some(definition)
-                if definition.direct.is_some()
-                    && replacement_arguments(context, setter_call, special) =>
-            {
-                handles::call_direct(context, definition, setter_call, args)
-            }
-            _ => Ok(None),
-        };
-        if special && matches!(direct, Ok(None)) {
-            return Ok(false);
+    let tmp_environment = match home {
+        Home::Binding(environment, _) => Some(environment),
+        Home::Slot(_) => None,
+    };
+    let tmp_value = handles::bind_tmp_value(context, tmp_environment, target);
+    let direct = match builtin {
+        Some(definition)
+            if definition.direct.is_some()
+                && replacement_arguments(context, setter_call, special) =>
+        {
+            handles::call_direct(context, definition, setter_call, args)
         }
-        if let Some(environment) = environment {
-            handles::count_tmp_binding(context, environment);
+        _ => Ok(None),
+    };
+    if special && matches!(direct, Ok(None)) {
+        handles::unbind_tmp_value(tmp_value);
+        return Ok(false);
+    }
+    if let Some(environment) = environment {
+        handles::count_tmp_binding(context, environment);
+    }
+    let result = match (direct, builtin) {
+        (Ok(Some(value)), _) => Ok(value),
+        (Err(unwind), _) => Err(unwind),
+        (Ok(None), Some(definition)) => {
+            let _call = handles::AssignmentCall::enter(context, setter_call, whole);
+            handles::call_builtin(
+                context,
+                definition,
+                (setter_call, function),
+                args,
+                environment,
+            )
         }
-        match (direct?, builtin) {
-            (Some(value), _) => value,
-            (None, Some(definition)) => {
-                let _call = handles::AssignmentCall::enter(context, setter_call, whole);
-                handles::call_builtin(
-                    context,
-                    definition,
-                    (setter_call, function),
-                    args,
-                    environment,
-                )?
-            }
-            (None, None) => {
-                replace_with_closure(context, function, (setter_call, whole), args, environment)?
-            }
+        (Ok(None), None) => {
+            replace_with_closure(context, function, (setter_call, whole), args, environment)
         }
     };
+    handles::unbind_tmp_value(tmp_value);
+    let result = result?;
     let bound = match home {
         Home::Binding(_, binding) => binding.read(context).content().is(result),
         Home::Slot(slot) => frame.read(context, slot).is(result),
@@ -15289,7 +15293,7 @@ fn replace_with_closure<'s>(
         return Err(malformed());
     };
     let last = args.len() - 1;
-    let tmp = context.root(handles::symbol(|symbols| symbols.tmp)).value();
+    let tmp = handles::permanent_symbol(|symbols| symbols.tmp).value();
     // `whole` is `` `<-`(f(x), value) ``.
     let value_code = whole
         .read(context)
@@ -15301,33 +15305,17 @@ fn replace_with_closure<'s>(
     let value_code = context.root(value_code);
     let object = handles::forced_promise(context, tmp, target)?.value();
     let value = handles::forced_promise(context, value_code, assigned)?.value();
-    let call = setter_call
-        .read(context)
-        .downcast::<Language>()
-        .ok_or_else(malformed)?;
-    let mut items: SmallVec<[Tagged<'s>; 6]> = smallvec![Tagged {
-        tag: handles::null(),
-        value: context.root(call.head()),
-    }];
-    let mut arguments: SmallVec<[Tagged<'s>; 6]> = SmallVec::new();
-    let mut cell = call.rest();
-    for (position, &constant) in args.iter().enumerate() {
-        let item = cell.downcast::<Pairlist>().ok_or_else(malformed)?;
-        let tag = context.root(item.tag());
-        cell = item.rest();
-        let (in_call, passed) = match position {
-            0 => (tmp, object),
-            position if position == last => (value_code, value),
-            _ => (constant, constant),
-        };
-        items.push(Tagged {
-            tag,
-            value: in_call,
+    let setter_call = setter_call.downcast::<Language>().ok_or_else(malformed)?;
+    let call = handles::replacement_call(context, setter_call, value_code)?;
+    let arguments = args
+        .iter()
+        .enumerate()
+        .map(|(position, &constant)| match position {
+            0 => object,
+            position if position == last => value,
+            _ => constant,
         });
-        arguments.push(Tagged { tag, value: passed });
-    }
-    let call = handles::language(context, &items)?;
-    handles::apply_closure(context, call, function, &arguments, environment)
+    handles::apply_closure(context, call, function, arguments, environment)
 }
 
 /// `variable[row, column] <- value` on an atomic matrix, done in place when the matrix is the

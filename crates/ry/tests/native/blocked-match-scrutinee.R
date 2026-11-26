@@ -1,8 +1,12 @@
-# blocked: first_or_zero
-first_or_zero <- function(first: F64) -> F64 {
-  match ([first, 5]) {
-    [] => 0
-    [head, ..] => head
+# blocked: size
+size <- function(counts: Dict<Str, I64>) -> I64 {
+  match (counts) {
+    [] => 0i64
+    other => Dict.len(other)
   }
 }
-cat(first_or_zero(4), "\n")
+main <- function(key: Str) -> I64 {
+  empty: Dict<Str, I64> <- Dict.empty()
+  size(Dict.insert(empty, key, 1i64))
+}
+cat(Num.to_r(main("a")), "\n")

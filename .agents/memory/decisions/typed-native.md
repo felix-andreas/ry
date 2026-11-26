@@ -482,3 +482,23 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 - `Num.count_one_bits`, `count_leading_zero_bits` and `count_trailing_zero_bits` of an `I64` count its 64 bits and give an `I64`, in the library and in native code (`Op::CountBits`, the SSA IR's `popcnt`, `clz` and `ctz`), because the checker types them `I64 -> I64`; an R integer, which only untyped code passes, counts its 32 bits.
 - `Str.trim` reads the string as UTF-8 and trims Unicode whitespace as Rust's `str::trim` does, like the interpreter. `Str.contains` with an empty part is true. An owned string with nothing to trim or drop is its own result.
 - Left out on purpose: the `Set` family, because the native set is a deduplicated list (`Op::Unique`) and a native `Set.contains` or `Set.insert` would be a linear scan, slower than the interpreter's hash set; it waits on a hashed native set.
+
+## A `match` lowers as a chain of tests, one arm falling through to the next
+
+**Status:** settled.
+
+- Each arm's pattern lowers to tests that branch to the next arm on failure (`Lowering::match_arms`, `test_pattern`); a guard is one more test, with the pattern's names bound only for it, and the first arm whose test cannot fail ends the chain. Arms that complete join as `switch_shapes` arms do (`join_arms`).
+- A tag or record scrutinee is first split by shape, so a constructor pattern on a known shape needs no test (`Known::Shape`); a nested constructor tests the field's shape id against each shape the pattern fits.
+- Literal tests mirror the interpreter's `literal_matches`: numbers match across `I64`, integer and double storage exactly, logicals, numbers and strings never match each other, and an `NA`, `NaN` or complex pattern is refused. A suffixed literal (`0i64`) is a pattern in the interpreter too (`records::matches`).
+- A record `..` pattern lists the shapes of its tag (`pattern_layouts`), so over a value of any tag it tests the confirmed shapes of that tag, as a tag-only pattern does.
+- The lowerer refuses a nested constructor that fits more than one shape and reads a field (a `_` field reads nothing), an or-pattern whose sides bind different names or types, and a guard that assigns (the interpreter runs a guard in a scratch environment). `semantics::native::pattern_compiles` and `writes` mirror what the checker can see, and a pattern that only binds compiles on a value of any type.
+
+## A function passed to a typed function lowers into its caller
+
+**Status:** settled.
+
+- Compiled code holds no function values, as in Roc. A typed function that takes a function is not compiled on its own for that parameter: each native call that passes a function inlines the callee with the parameter bound to the passed function (`Lowering::typed_function`, `Argument::Function`), so the call of the parameter is a direct call or an inlined body. A recursive callee refuses ("a function passed to a typed function that does not lower into its caller"), because the inlining cannot end; compiling one copy per passed function (lambda-set specialization) is the backlog's fix.
+- A local function or lambda passed into an inlined function sees the caller's variables, so it becomes `Callable::Captured`: a snapshot of the bindings of the scopes it sees, taken where it is passed, which the callee's body applies in place of its own scopes. A callee cannot assign its caller's variables (native code has no `<<-`), so the snapshot cannot go stale.
+- A standard library or base function passed by name is eta-expanded once per session into `function(.ry_passed1, ...) name(.ry_passed1, ...)` (`eta`), so a name lowers through the same path as a literal. The expansions are preserved R objects, kept per name and arity for the session like the compiled closures they lower into, because each lowering would otherwise allocate and pin a new one. `semantics::native` accepts a standard library function with native code (`COMPILED_STD`) and still reports an R function passed by name, the same over-report as other base functions the typed core computes itself.
+- A variable holding a tag widens to every tag assigned to it: when an assignment's tag does not fit the variable's layout, the lowering starts again with that variable holding the union (`widened`, at most `MAX_WIDENINGS` variables). The check reports only a change of layout (`layout_differs`), so reassigning a tag is not a finding.
+- From R, a call that passes a function runs in the interpreter ("typed code takes functions only from typed code"), because an R closure has no lowering.

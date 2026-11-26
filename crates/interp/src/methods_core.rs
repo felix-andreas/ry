@@ -351,7 +351,7 @@ unsafe fn do_initialize(call: &Call<'_>) -> R<Sexp> {
     if length(args) == 0 {
         return Ok(done);
     }
-    let class = dispatch::class_of(object)?;
+    let class = dispatch::class_of_raw(object)?;
     if length(class) != 1 || basic_classes()?.contains(&class.element(0).bytes()) {
         bail!(skip);
     }
@@ -381,7 +381,7 @@ unsafe fn do_initialize(call: &Call<'_>) -> R<Sexp> {
             continue;
         }
         let value = args.element(index);
-        let value_class = dispatch::class_of(value)?;
+        let value_class = dispatch::class_of_raw(value)?;
         if value_class.element(0).bytes() == class_name {
             supers.push((value, false));
             continue;
@@ -409,7 +409,7 @@ unsafe fn do_initialize(call: &Call<'_>) -> R<Sexp> {
             bail!(skip);
         }
         let value = args.element(index);
-        let value_class = dispatch::class_of(value)?;
+        let value_class = dispatch::class_of_raw(value)?;
         let same = length(value_class) == 1
             && value_class.element(0).bytes() == slot_class.element(0).bytes();
         // The R code replaces `.Object` with what the first slot assignment returns and drops
@@ -735,7 +735,7 @@ struct LastSlot {
 /// its declared class accepts and every class involved is cached; `None` when the loop would
 /// record an error or look past the cache.
 unsafe fn check_slots(object: Sexp) -> R<Option<SlotCheck>> {
-    let class = dispatch::class_of(object)?;
+    let class = dispatch::class_of_raw(object)?;
     let Some(definition) = cached_class(class)? else {
         return Ok(None);
     };
@@ -774,7 +774,7 @@ unsafe fn check_slots(object: Sexp) -> R<Option<SlotCheck>> {
             }
             let value = crate::subset::get_slot(object, symbol, nil())?;
             crate::heap().root(value);
-            (value, dispatch::class_of(value)?)
+            (value, dispatch::class_of_raw(value)?)
         };
         let class2 = slot_class.element(0).bytes();
         // What `possibleExtends()` returns, which the loop binds as `ok`: `TRUE`, or the
@@ -877,7 +877,7 @@ unsafe fn do_is(call: &Call<'_>) -> R<Sexp> {
 }
 
 unsafe fn is_instance(object: Sexp, class2: Sexp) -> R<Option<bool>> {
-    let class1 = dispatch::class_of(object)?;
+    let class1 = dispatch::class_of_raw(object)?;
     let mut s3_case = length(class1) > 1;
     let class1 = if s3_case {
         values::scalar_string_charsxp(class1.element(0))?
@@ -917,7 +917,7 @@ unsafe fn is_instance(object: Sexp, class2: Sexp) -> R<Option<bool>> {
             if object.has_gp(gp::S4_OBJECT) {
                 return Ok(None);
             }
-            let classes = dispatch::class_of(object)?;
+            let classes = dispatch::class_of_raw(object)?;
             return Ok(Some(
                 (0..length(classes)).any(|index| classes.element(index).bytes() == name2),
             ));
@@ -3120,7 +3120,7 @@ unsafe fn set_class(call: &Call<'_>) -> R<Sexp> {
         if is_true(slot(class_definition, symbols().virtual_)?) {
             continue;
         }
-        let value_class = dispatch::class_of(value)?;
+        let value_class = dispatch::class_of_raw(value)?;
         let first = values::scalar_string_charsxp(value_class.element(0))?;
         if name_extends(first, cached_class(first)?, slot_class.element(0).bytes())? != Some(true) {
             bail!(

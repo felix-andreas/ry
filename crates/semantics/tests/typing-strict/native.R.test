@@ -142,8 +142,6 @@ apply_twice: fn(step: fn(F64) -> F64, x: F64) -> F64
 bump: fn(x: F64) -> F64
 main: fn(x: F64) -> F64
 NULL
-53..57 warning[interpreted] this function runs in the interpreter, because `step` takes a function, and a function passed as a value is not compiled natively yet. Define the function inside this one, or give a parameter an R type so this function is a boundary function that the interpreter runs
-186..190 warning[interpreted] this function runs in the interpreter, because a function used as a value is not compiled natively yet. Native code runs a function literal only where it is called, or where a standard library function such as `List.map` takes it
 
 #---- invisible_result
 #~~~~ script.R
@@ -237,7 +235,7 @@ cat(add_three(1), "\n")
 adder: fn(by: F64) -> fn(F64) -> F64
 add_three: fn(x: F64) -> F64
 NULL
-77..107 warning[interpreted] this function runs in the interpreter, because a function used as a value is not compiled natively yet. Native code runs a function literal only where it is called, or where a standard library function such as `List.map` takes it
+77..107 warning[interpreted] this function runs in the interpreter, because a function used as a value is not compiled natively yet. Native code runs a function only where it is called, or where it is passed straight to a function that calls it
 170..174 warning[interpreted] this function runs in the interpreter, because `step` is a variable that holds a function, and calling one is not compiled natively yet. Define the function with `step <- function(...)` in this function, or call a top-level function
 
 #---- typed_call_with_named_arguments
@@ -289,7 +287,6 @@ cat(as_floats(4), "\n")
 == script.R
 as_floats: fn(n: I64) -> F64
 NULL
-94..104 warning[interpreted] this function runs in the interpreter, because a function passed by name is not compiled natively yet unless it is a typed function of the project or a local function. Wrap it in a function literal, as in `function(x: I64) -> F64 Num.to_f64(x)`
 
 #---- dict_of_bool
 #~~~~ script.R
@@ -324,7 +321,6 @@ cat(graded(12), "\n")
 grade: fn(reading: Reading) -> Str
 graded: fn(amount: F64) -> Str
 NULL
-156..162 warning[interpreted] this function runs in the interpreter, because a `match` arm with an `if` guard is not compiled natively yet. Test the condition inside the arm's body
 
 #---- nested_match_pattern
 #~~~~ script.R
@@ -345,8 +341,6 @@ cat(main(2), "\n")
 describe: fn(slot: Slot) -> Str
 main: fn(amount: F64) -> Str
 NULL
-176..211 warning[interpreted] this function runs in the interpreter, because this `match` pattern is not compiled natively yet. Native code matches a tag, a record or a tuple whose fields are names or `_`. Bind the field to a name and match it in the arm's body
-227..252 warning[interpreted] this function runs in the interpreter, because this `match` pattern is not compiled natively yet. Native code matches a tag, a record or a tuple whose fields are names or `_`. Bind the field to a name and match it in the arm's body
 
 #---- match_on_a_list
 #~~~~ script.R
@@ -362,7 +356,6 @@ cat(first_or_zero(4), "\n")
 == script.R
 first_or_zero: fn(first: F64) -> F64
 NULL
-80..92 warning[interpreted] this function runs in the interpreter, because a `match` on a value that is not a tag, a record or a tuple is not compiled natively yet. Compare the value with `if` and `==`
 
 #---- name_set_only_in_a_loop
 #~~~~ script.R
@@ -472,7 +465,6 @@ cat(cycled(3), "\n")
 next_light: fn(light: Light) -> Light
 cycled: fn(n: I64) -> F64
 NULL
-282..308 warning[interpreted] this function runs in the interpreter, because `light` holds a tag and is assigned again, which is not compiled natively yet: native code fixes the tags a variable can hold where it is first set. Use a new name for each value, or compute the final value in one expression
 
 #---- global_that_holds_a_ry_value
 #~~~~ script.R
@@ -1615,7 +1607,7 @@ guarded: fn(amount: F64, flag: Bool) -> F64
 492..501 error[native] this calls R's `format` inside the arguments of R's `paste0`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
 516..553 error[native] this calls R's `cat` inside the arguments of R's `tryCatch`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Call `cat` in a statement of its own if only its effect matters, or make both calls in a function with an R type in its signature
 520..546 error[native] this calls R's `format` inside the arguments of R's `cat`. R evaluates an argument only when the function reads it, so native code cannot run the two in a fixed order. Compute the inner call into a variable first, as in `value <- Str.from_r(format(...))`, and pass the variable
-563..579 warning[interpreted] this function runs in the interpreter, because a function used as a value is not compiled natively yet. Native code runs a function literal only where it is called, or where a standard library function such as `List.map` takes it
+563..579 warning[interpreted] this function runs in the interpreter, because a function used as a value is not compiled natively yet. Native code runs a function only where it is called, or where it is passed straight to a function that calls it
 
 #---- a_local_converted_where_it_is_read_gets_no_conversion_fix
 #~~~~ script.R

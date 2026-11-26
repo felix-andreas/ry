@@ -949,49 +949,6 @@ SOURCE_FILE@0..25
     R_BRACE@24..25 "}"
 err: 19..21: expected a name after `as`, found `=>`
 
-#---- record_rest_binds
-match (p) {
-  (x = x, ..rest) => rest
-}
-#++++
-SOURCE_FILE@0..39
-  MATCH_EXPR@0..39
-    IDENT@0..5 "match"
-    WHITESPACE@5..6 " "
-    PAREN_EXPR@6..9
-      L_PAREN@6..7 "("
-      NAME@7..8
-        IDENT@7..8 "p"
-      R_PAREN@8..9 ")"
-    WHITESPACE@9..10 " "
-    L_BRACE@10..11 "{"
-    NEWLINE@11..12 "\n"
-    WHITESPACE@12..14 "  "
-    MATCH_ARM@14..37
-      PATTERN_LIST@14..29
-        L_PAREN@14..15 "("
-        PATTERN_FIELD@15..20
-          NAME@15..16
-            IDENT@15..16 "x"
-          WHITESPACE@16..17 " "
-          EQ@17..18 "="
-          WHITESPACE@18..19 " "
-          PATTERN_BIND@19..20
-            NAME@19..20
-              IDENT@19..20 "x"
-        COMMA@20..21 ","
-        WHITESPACE@21..22 " "
-        PATTERN_REST@22..28
-          IDENT@22..28 "..rest"
-        R_PAREN@28..29 ")"
-      WHITESPACE@29..30 " "
-      FAT_ARROW@30..32 "=>"
-      WHITESPACE@32..33 " "
-      NAME@33..37
-        IDENT@33..37 "rest"
-    NEWLINE@37..38 "\n"
-    R_BRACE@38..39 "}"
-
 #---- punned_fields
 match (p) {
   (x =, y =) => x + y

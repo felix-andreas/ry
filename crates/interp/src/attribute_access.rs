@@ -8,12 +8,13 @@
 use {
     crate::{
         builtins::{BuiltinDef, Generic, builtin, internal},
+        dispatch::{basic_class, class_of, class_read, s4_classes},
         handles::{
             self, Args, Chars, Cx, Gc, Integer, Local, Logical, Str, Symbol, attribute_cells,
-            attributes_unshared, base_namespace, basic_class, call_function, class_of, class_read,
-            dense, environment_names, get_attribute, install_name_at, integer_sequence, is_na,
-            is_object, is_s4, length, logical_scalar, names_of, null, quoted, s4_classes, safe,
-            safe_direct, safe_unary, set_attribute, set_class, stored_names, symbol, text,
+            attributes_unshared, base_namespace, call_function, dense, environment_names,
+            get_attribute, install_name_at, integer_sequence, is_na, is_object, is_s4, length,
+            logical_scalar, names_of, null, quoted, safe, safe_direct, safe_unary, set_attribute,
+            set_class, stored_names, symbol, text,
         },
         subset::{assign_attribute, assign_names, assign_row_names},
         unwind::{R, error},
@@ -637,7 +638,7 @@ impl<'a> Classes<'a> {
         }
         let dim = get_attribute(context, object, symbol(|symbols| symbols.dim));
         if dim.r_type() == SexpType::Nil {
-            return Some(Classes::Basic(basic_class(object)));
+            return Some(Classes::Basic(basic_class(object.read(context), false)));
         }
         let dim = dim.standard::<Integer>()?;
         Some(Classes::Fixed(if dim.len() == 2 {

@@ -72,7 +72,7 @@ const SEEDS: &[&str] = &[
     "n <- 5i64 + 0xFFi64 * 1.5f64 - 1e3f64 / 2i64",
     "g <- f\"Hello {name}, {{n}} {f'{n + 1}'}\"",
     "p <- (x = try Str.to_i64(a)$v, y = try b); q <- (..p, x = 3)",
-    "match (xs) {\n  [first, .., last] as all => all\n  [] => 0i64\n  (x =, ..rest) => rest\n}",
+    "match (xs) {\n  [first, .., last] as all => all\n  [] => 0i64\n  (x =, ..) => x\n}",
 ];
 
 const ALPHABET: &[&str] = &[

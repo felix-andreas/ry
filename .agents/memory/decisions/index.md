@@ -181,6 +181,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A `Record{...}` or `DataFrame{...}` type may end in a row variable
 - Tag unions take no row, and a record update adds no field (settled)
 - Literal variables stay open through joins, tail reads and `List` positions
+- A record pattern's `..` takes no name
 
 ## Analysis core
 
@@ -304,6 +305,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `object@name` is an instruction, and a slot write is checked without a call (settled)
 - String equality is a kernel, and the fast return asks what outlives the frame (settled)
 - Small combines skip the naming walk, and a lookup forces the promise it found (settled)
+- A closure's free variable in an enclosing function frame is read by the generic lookup (settled)
 
 ## Builtins and base R
 
@@ -333,6 +335,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Builtin fast paths take names as CHARSXPs and evaluate nothing twice (built, with exceptions)
 - One-argument builtins and small base closures skip dispatch when their arguments are values
 - Builtins with positional direct entries, one implementation per semantic (built, with exceptions)
+- `list()` answers on its direct entry, which reads the call's tags
 - Builtin call machinery and subassignment toward 10x
 - One kernel layer for R's vector builtins: slice kernels, a reuse rule, and a fused superinstruction (built, with exceptions)
 - Package code that dominates a workload runs natively: rlang's trace_back
@@ -573,6 +576,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Measured and not taken: libdeflate for lazy-load records
 - Extracted runtimes and base trees are pruned by a ledger and held by locks
 - `bin/R` and `Rscript` behave as GNU R's front ends
+- `.Call` reads its routine list in one pass, and takes named arguments directly (settled)
+- `SET_STRING_ELT` stores a string without a call or a frame (settled)
 
 ## Typed ry and the standard library
 
@@ -662,6 +667,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Scalar library functions give up where the library raises an error (settled)
 - `try` and an early `return` compile in every function, inlined ones too (settled)
 - Native code for callback, overflow and string library functions (settled)
+- A `match` lowers as a chain of tests, one arm falling through to the next (settled)
+- A function passed to a typed function lowers into its caller (settled)
 
 ## DataFrame and the table engine
 

@@ -10,7 +10,7 @@ use {
         Db, TypeDefinitions,
         hir::{ExprId, ExpressionKind, LiteralKind, Module, PatId, PatternKind},
         infer::apply_definition,
-        types::{Atomic, Ty, TyKind, union_of, unknown},
+        types::{Atomic, NativeScalar, Ty, TyKind, union_of, unknown},
     },
     syntax::TextRange,
 };
@@ -435,6 +435,7 @@ fn type_constructors(db: &dyn Db, ty: Ty<'_>) -> (Vec<Constructor>, bool) {
             vec![Constructor::True, Constructor::False, Constructor::Na],
             true,
         ),
+        TyKind::Native(NativeScalar::Bool) => (vec![Constructor::True, Constructor::False], true),
         TyKind::Null => (vec![Constructor::Null], true),
         _ => (Vec::new(), false),
     }

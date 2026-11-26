@@ -7,7 +7,7 @@ use {
         boundary::{ApiResult, direct, enter, error, warn},
         globals::{R_ClassSymbol, R_DimSymbol, R_LevelsSymbol, R_NamesSymbol, R_TspSymbol},
         memory::{alloc_vector, scalar_string},
-        runtime,
+        runtime, started_runtime,
         strings::{c_bytes, utf8_text},
     },
     heap::{
@@ -1244,10 +1244,21 @@ pub unsafe extern "C" fn SET_STRING_ELT(object: Sexp, index: R_xlen_t, value: Se
         && value.kind() == SexpType::Char
         && !object.is_altrep()
         && (0..object.length()).contains(&index)
+        && let Some(runtime) = started_runtime()
     {
-        runtime().heap.set_element(object, index as usize, value);
-        return;
+        return runtime
+            .heap
+            .set_string_element(object, index as usize, value);
     }
+    set_string_elt_checked(object, index, value)
+}
+
+/// [`SET_STRING_ELT`] for a store its fast path declines. It is a function of its own because
+/// the closure below captures the arguments by address, which would make the fast path spill
+/// all three on every call.
+#[cold]
+#[inline(never)]
+unsafe extern "C" fn set_string_elt_checked(object: Sexp, index: R_xlen_t, value: Sexp) {
     enter(|| {
         refuse_native(object)?;
         if object.kind() != SexpType::String {
@@ -1281,6 +1292,13 @@ pub unsafe extern "C" fn SET_VECTOR_ELT(object: Sexp, index: R_xlen_t, value: Se
         runtime().heap.set_element(object, index as usize, value);
         return value;
     }
+    set_vector_elt_checked(object, index, value)
+}
+
+/// [`SET_VECTOR_ELT`] for a store its fast path declines ([`set_string_elt_checked`]).
+#[cold]
+#[inline(never)]
+unsafe extern "C" fn set_vector_elt_checked(object: Sexp, index: R_xlen_t, value: Sexp) -> Sexp {
     enter(|| {
         refuse_native(object)?;
         if !matches!(object.kind(), SexpType::List | SexpType::Expression) {

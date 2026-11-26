@@ -1,0 +1,111 @@
+[stdout]
+|  list()
+| List of 4
+|  $ : int 1
+|  $ : chr "a"
+|  $ : NULL
+|  $ : logi TRUE
+| List of 1
+|  $ a: int 1
+| List of 3
+|  $ a: int 1
+|  $  : num 2
+|  $ b: chr "x"
+| List of 3
+|  $ a b   : num 1
+|  $ quoted: num 2
+|  $       : num 3
+| List of 2
+|  $  : NULL
+|  $ a: NULL
+| List of 4
+|  $ f:function (..., na.rm = FALSE)  
+|  $ e:<environment: R_GlobalEnv> 
+|  $ s: symbol x
+|  $ l: language f(x)
+| List of 2
+|  $  :List of 1
+|   ..$ a: num 1
+|  $ b:List of 2
+|   ..$  : num 2
+|   ..$ c: num 3
+| List of 3
+|  $ first: int 1
+|  $      : chr "b"
+|  $ third: int 2
+| List of 3
+|  $ first: int 2
+|  $      : NULL
+|  $ third: int 3
+| $values
+| [1] 1 2 3
+| 
+| [[2]]
+| [1] 1 2 3
+| 
+| [1] 9 2 3
+| [1] 1 2 3
+| [1] "changed" "right"  
+| [1] "left"  "right"
+| [1] "left"  "right"
+| [1] 13500
+| List of 3
+|  $ :List of 1
+|   ..$ value: int 1
+|  $ :List of 1
+|   ..$ value: NULL
+|  $ :List of 1
+|   ..$ value: Named num 1
+|   .. ..- attr(*, "names")= chr "a"
+| List of 2
+|  $ a: num 1
+|  $  : num 2
+|  list()
+| List of 2
+|  $ a: num 1
+|  $  : num 2
+| List of 2
+|  $  : num 1
+|  $ b: num 2
+| List of 1
+|  $ a: num 1
+| List of 2
+|  $ a: num 1
+|  $  : num 2
+| List of 2
+|  $ :List of 2
+|   ..$ left: int 1
+|   ..$     : chr "a"
+|  $ :List of 2
+|   ..$ left: int 2
+|   ..$     : chr "b"
+| $class
+| [1] "tag"
+| 
+| $note
+| [1] "n"
+| 
+| [1] TRUE
+| [1] "error"
+| [1] "error"
+|  [1] "a" "b" "c" "d" "e" "f" "g" "h" "i" "j" ""  "" 
+| [1] 78
+| List of 2
+|  $ a: num 1
+|  $ a: num 2
+| List of 2
+|  $ a: num 1
+|  $  : chr "b"
+| List of 2
+|  $ a: num 1
+|  $  : num 2
+| List of 2
+|  $ : num 1
+|  $ : num 2
+| [1] "x y"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "x y"
