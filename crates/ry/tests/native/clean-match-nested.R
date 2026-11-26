@@ -1,4 +1,4 @@
-# blocked: describe
+# A `match` pattern nested inside a tag payload.
 alias Reading = :Value(amount: F64) | :Missing
 alias Slot = :Full(reading: Reading) | :Empty
 describe <- function(slot: Slot) -> Str {

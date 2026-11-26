@@ -559,6 +559,28 @@ f <- function(r) {
 #++++
 f: fn(r: :Ok(integer) | ..) -> integer
 
+#---- literal_patterns_on_ry_scalars
+#: fn(n: I64, name: Str, flag: Bool) -> I64
+f <- function(n, name, flag) {
+  a <- match (n) {
+    0i64 | 1 => 1i64
+    _ => 2i64
+  }
+  b <- match (name) {
+    "one" => 1i64
+    1 => 2i64
+    _ => 3i64
+  }
+  c <- match (flag) {
+    TRUE => 1i64
+    FALSE => 0i64
+  }
+  a + b + c
+}
+#++++
+f: fn(n: I64, name: Str, flag: Bool) -> I64
+177..178 error[type-mismatch] this pattern can never match: the value is `Str`
+
 #==== guards
 #---- guard_sees_the_bindings
 #: fn(o: :Some(integer) | :None) -> integer

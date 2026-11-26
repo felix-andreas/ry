@@ -372,15 +372,17 @@ impl Uncompiled {
                  values in a `List` and store their positions in the dictionary"
             ),
             Uncompiled::MatchGuard => format!(
-                "a `match` arm with an `if` guard {YET}. Test the condition inside the arm's body"
+                "a `match` guard that assigns a variable {YET}. Compute the value before the \
+                 `match` and test it in the guard"
             ),
             Uncompiled::MatchPattern => format!(
-                "this `match` pattern {YET}. Native code matches a tag, a record or a tuple whose \
-                 fields are names or `_`. Bind the field to a name and match it in the arm's body"
+                "this `match` pattern {YET}. Native code matches a literal other than `NA`, \
+                 `NaN` or a complex number, and a record pattern whose `..` binds no name. \
+                 Bind the value to a name and match it in the arm's body"
             ),
             Uncompiled::MatchScrutinee => format!(
-                "a `match` on a value that is not a tag, a record or a tuple {YET}. Compare the \
-                 value with `if` and `==`"
+                "a `match` on a value that is not a number, a string, a logical, a `List`, a \
+                 tag, a record or a tuple {YET}. Compare the value with `if` and `==`"
             ),
             Uncompiled::TableOperand => format!(
                 "an operator applied directly to a table expression that a local function, a \
@@ -465,21 +467,29 @@ pub const COMPILED_STD: &[&str] = &[
     "Dict.empty",
     "Dict.get",
     "Dict.insert",
+    "Dict.is_empty",
     "Dict.keys",
     "Dict.len",
     "Dict.remove",
+    "Dict.single",
     "Dict.to_list",
     "Dict.update",
     "Dict.values",
+    "List.all",
+    "List.any",
     "List.append",
     "List.chunks_of",
     "List.concat",
     "List.contains",
     "List.count_if",
+    "List.drop_at",
     "List.drop_first",
+    "List.drop_if",
     "List.drop_last",
     "List.find_first",
     "List.find_first_index",
+    "List.find_last",
+    "List.find_last_index",
     "List.first",
     "List.get",
     "List.is_empty",
@@ -494,9 +504,13 @@ pub const COMPILED_STD: &[&str] = &[
     "List.map3",
     "List.max",
     "List.min",
+    "List.prepend",
+    "List.product",
     "List.range",
     "List.repeat",
     "List.reverse",
+    "List.set",
+    "List.single",
     "List.sort_asc",
     "List.sort_desc",
     "List.sort_with",
@@ -506,11 +520,19 @@ pub const COMPILED_STD: &[&str] = &[
     "List.take_first",
     "List.take_last",
     "List.walk",
+    "List.walk_backwards",
+    "List.walk_backwards_until",
+    "List.walk_until",
+    "List.walk_with_index",
+    "List.walk_with_index_until",
     "List.with_capacity",
     "Num.abs",
     "Num.abs_diff",
     "Num.acos",
     "Num.add",
+    "Num.add_checked",
+    "Num.add_saturated",
+    "Num.add_wrap",
     "Num.asin",
     "Num.atan",
     "Num.bitwise_and",
@@ -520,7 +542,11 @@ pub const COMPILED_STD: &[&str] = &[
     "Num.ceiling",
     "Num.compare",
     "Num.cos",
+    "Num.count_leading_zero_bits",
+    "Num.count_one_bits",
+    "Num.count_trailing_zero_bits",
     "Num.div",
+    "Num.div_ceil",
     "Num.div_trunc",
     "Num.exp",
     "Num.floor",
@@ -541,6 +567,9 @@ pub const COMPILED_STD: &[&str] = &[
     "Num.max",
     "Num.min",
     "Num.mul",
+    "Num.mul_checked",
+    "Num.mul_saturated",
+    "Num.mul_wrap",
     "Num.neg",
     "Num.pow",
     "Num.pow_int",
@@ -552,19 +581,31 @@ pub const COMPILED_STD: &[&str] = &[
     "Num.sin",
     "Num.sqrt",
     "Num.sub",
+    "Num.sub_checked",
+    "Num.sub_saturated",
+    "Num.sub_wrap",
     "Num.tan",
     "Num.to_f64",
     "Num.to_i64",
     "Num.to_str",
     "Num.truncate",
+    "Result.and_then",
     "Result.is_err",
     "Result.is_ok",
+    "Result.map",
+    "Result.map_both",
+    "Result.map_err",
+    "Result.on_err",
     "Result.with_default",
     "Set.from_list",
     "Set.len",
     "Set.to_list",
+    "Str.caseless_ascii_equals",
     "Str.concat",
+    "Str.contains",
     "Str.count_utf8_bytes",
+    "Str.drop_prefix",
+    "Str.drop_suffix",
     "Str.ends_with",
     "Str.from_utf8_lossy",
     "Str.is_empty",
@@ -576,8 +617,12 @@ pub const COMPILED_STD: &[&str] = &[
     "Str.to_f64",
     "Str.to_i64",
     "Str.to_utf8",
+    "Str.trim",
+    "Str.trim_end",
+    "Str.trim_start",
     "Str.with_ascii_lowercased",
     "Str.with_ascii_uppercased",
+    "Str.with_prefix",
 ];
 
 const FROM_R: [&str; 6] = [
@@ -1474,11 +1519,19 @@ impl<'a, 'db> Judge<'a, 'db> {
                     TyKind::NativeRecord(_, _)
                     | TyKind::NativeTuple(_)
                     | TyKind::Tag(..)
-                    | TyKind::OtherTags => true,
+                    | TyKind::OtherTags
+                    | TyKind::Native(_)
+                    | TyKind::Scalar(
+                        Atomic::Double | Atomic::Integer | Atomic::Logical | Atomic::Character,
+                    ) => true,
                     TyKind::Union(_) => !self.is_mixed_union(ty),
-                    _ => false,
+                    _ => array_element(db, ty).is_some(),
                 });
-                if !matches_shape {
+                // A pattern that tests nothing compiles on a value of any type.
+                let tests = module[arms]
+                    .iter()
+                    .any(|arm| !irrefutable(module, arm.pattern));
+                if !matches_shape && tests {
                     self.uncompiled(scrutinee, Uncompiled::MatchScrutinee);
                 }
                 let branch_use = if usage == Use::Unused {
@@ -1488,7 +1541,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                 };
                 let mut ends = Vec::new();
                 for arm in &module[arms] {
-                    if matches_shape && !self.pattern_compiles(arm.pattern, true) {
+                    if matches_shape && !self.pattern_compiles(arm.pattern) {
                         self.block_at(
                             module.pattern(arm.pattern).range,
                             NativeBlockerKind::Uncompiled(Uncompiled::MatchPattern),
@@ -1502,7 +1555,11 @@ impl<'a, 'db> Judge<'a, 'db> {
                         }
                     }
                     if let Some(guard) = arm.guard {
-                        self.uncompiled(guard, Uncompiled::MatchGuard);
+                        if writes(module, guard) {
+                            self.uncompiled(guard, Uncompiled::MatchGuard);
+                        } else {
+                            self.walk(guard, Use::Value);
+                        }
                     }
                     let hoist = self.hoist.take();
                     self.walk(arm.body, branch_use);
@@ -1844,31 +1901,41 @@ impl<'a, 'db> Judge<'a, 'db> {
         })
     }
 
-    fn pattern_compiles(&self, pattern: PatId, top: bool) -> bool {
+    /// Whether the typed core compiles `pattern`. `top` says it stands at the top of an arm, or
+    /// inside an alternative or an `as` there, over a value whose shapes are listed, where a record
+    /// pattern may end in `..`.
+    fn pattern_compiles(&self, pattern: PatId) -> bool {
         let module = self.judged.module;
-        let leaf = |pattern: PatId| {
-            matches!(
-                module.pattern(pattern).kind,
-                PatternKind::Wildcard | PatternKind::Bind(_) | PatternKind::Missing
-            )
-        };
         match module.pattern(pattern).kind {
             PatternKind::Missing | PatternKind::Wildcard | PatternKind::Bind(_) => true,
+            PatternKind::Literal { literal, .. } => matches!(
+                literal,
+                LiteralKind::Integer(_)
+                    | LiteralKind::Double(_)
+                    | LiteralKind::Suffixed { .. }
+                    | LiteralKind::String(_)
+                    | LiteralKind::Logical(_)
+                    | LiteralKind::Inf
+            ),
             PatternKind::Tag { payload, .. } => {
-                top && payload.is_none_or(|payload| self.pattern_compiles(payload, true))
+                payload.is_none_or(|payload| self.pattern_compiles(payload))
             }
-            PatternKind::Tuple(items) => top && module[items].iter().all(|&item| leaf(item)),
+            PatternKind::Tuple(items) => module[items]
+                .iter()
+                .all(|&item| self.pattern_compiles(item)),
             PatternKind::Record { fields, rest } => {
-                top && rest.is_none() && module[fields].iter().all(|field| leaf(field.pattern))
+                rest.is_none_or(|rest| rest.binding.is_none())
+                    && module[fields]
+                        .iter()
+                        .all(|field| self.pattern_compiles(field.pattern))
             }
-            PatternKind::Or(alternatives) => {
-                top && module[alternatives].iter().all(|&alternative| {
-                    !binds(module, alternative) && self.pattern_compiles(alternative, true)
-                })
-            }
-            PatternKind::Literal { .. } | PatternKind::List { .. } | PatternKind::As { .. } => {
-                false
-            }
+            PatternKind::List { items, .. } => module[items]
+                .iter()
+                .all(|&item| self.pattern_compiles(item)),
+            PatternKind::As { pattern, .. } => self.pattern_compiles(pattern),
+            PatternKind::Or(alternatives) => module[alternatives]
+                .iter()
+                .all(|&alternative| self.pattern_compiles(alternative)),
         }
     }
 
@@ -2773,6 +2840,31 @@ fn library_callee(name: Symbol) -> Callee {
     }
 }
 
+/// Whether `pattern` matches every value, so it tests nothing.
+fn irrefutable(module: &Module, pattern: PatId) -> bool {
+    match module.pattern(pattern).kind {
+        PatternKind::Missing | PatternKind::Wildcard | PatternKind::Bind(_) => true,
+        PatternKind::As { pattern, .. } => irrefutable(module, pattern),
+        _ => false,
+    }
+}
+
+/// Whether `id` assigns a name, has a `for` loop or a `match`, which a `match` guard may not
+/// for the typed core, because the interpreter runs a guard in a scratch environment.
+fn writes(module: &Module, id: ExprId) -> bool {
+    if matches!(
+        *module.kind(id),
+        ExpressionKind::Assign { .. } | ExpressionKind::For { .. } | ExpressionKind::Match { .. }
+    ) {
+        return true;
+    }
+    let mut found = false;
+    module.for_each_child(id, |child| {
+        found = found || writes(module, child);
+    });
+    found
+}
+
 /// Whether `id` sets the local `name`, by an assignment or as a `for` loop's variable.
 fn assigns_name(module: &Module, id: ExprId, name: Symbol) -> bool {
     let sets = match *module.kind(id) {
@@ -2790,25 +2882,4 @@ fn assigns_name(module: &Module, id: ExprId, name: Symbol) -> bool {
         found = found || assigns_name(module, child, name);
     });
     found
-}
-
-fn binds(module: &Module, pattern: PatId) -> bool {
-    match module.pattern(pattern).kind {
-        PatternKind::Bind(_) | PatternKind::As { .. } => true,
-        PatternKind::Missing | PatternKind::Wildcard | PatternKind::Literal { .. } => false,
-        PatternKind::Tag { payload, .. } => payload.is_some_and(|payload| binds(module, payload)),
-        PatternKind::Tuple(items) | PatternKind::Or(items) => {
-            module[items].iter().any(|&item| binds(module, item))
-        }
-        PatternKind::Record { fields, rest } => {
-            rest.is_some_and(|rest| rest.binding.is_some())
-                || module[fields]
-                    .iter()
-                    .any(|field| binds(module, field.pattern))
-        }
-        PatternKind::List { items, rest } => {
-            rest.is_some_and(|rest| rest.rest.binding.is_some())
-                || module[items].iter().any(|&item| binds(module, item))
-        }
-    }
 }

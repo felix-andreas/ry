@@ -25508,8 +25508,26 @@ fn literal_overlaps<'db>(
             _ => return true,
         },
         TyKind::Null => return matches!(literal, LiteralKind::Null),
+        // A ry scalar holds no `NA`, and numbers match across storage as in R.
+        TyKind::Native(scalar) => {
+            return match scalar {
+                NativeScalar::I64 | NativeScalar::F64 => matches!(
+                    literal,
+                    LiteralKind::Integer(_)
+                        | LiteralKind::Double(_)
+                        | LiteralKind::Suffixed { .. }
+                        | LiteralKind::Inf
+                        | LiteralKind::NaN
+                ),
+                NativeScalar::Bool => matches!(literal, LiteralKind::Logical(_)),
+                NativeScalar::Str => matches!(literal, LiteralKind::String(_)),
+            };
+        }
         _ => return false,
     };
+    if matches!(literal, LiteralKind::Suffixed { .. }) {
+        return matches!(atomic, Atomic::Integer | Atomic::Double);
+    }
     if matches!(literal, LiteralKind::Na(_)) {
         return true;
     }

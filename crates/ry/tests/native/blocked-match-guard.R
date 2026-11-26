@@ -2,7 +2,7 @@
 alias Reading = :Value(amount: F64) | :Missing
 grade <- function(reading: Reading) -> Str {
   match (reading) {
-    :Value(amount = a) if (a > 10) => "high"
+    :Value(amount = a) if ((limit <- 10) < a) => "high"
     :Value(amount = _) => "low"
     :Missing => "none"
   }

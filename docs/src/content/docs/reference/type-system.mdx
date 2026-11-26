@@ -5692,7 +5692,7 @@ interpreted
 | a function with `...` | name each parameter, or take one `List` |
 | a parameter that takes a function, a function literal used as a value, a call of a variable that holds a function | define the function inside the native function, or pass the literal straight to a standard library function such as `List.map` |
 | a standard library function passed by name, as in `List.map(xs, Num.to_f64)` | wrap it: `function(x: I64) -> F64 Num.to_f64(x)` |
-| a standard library function without native code, such as `List.drop_at` | a loop or another standard library function |
+| a standard library function without native code, such as `List.intersperse` | a loop or another standard library function |
 | parameter types in a `#:` comment or on the assigned name, as in `f: fn(x: I64) -> I64 <- function(x) x` | write the types on the parameters |
 | a call of a typed or standard library function with named arguments, or one that leaves a default out | pass every argument by position |
 | a standard library function called with a `ry::` prefix | the name without the prefix |
@@ -5707,7 +5707,7 @@ interpreted
 | a table value inside a record, a tuple, a tag or a list | a variable of its own for the table value |
 | an operator applied directly to a table expression that a local function, a function whose result type is an alias, an `if` or a `match` gives | assign the expression to a variable, and apply the operator to the variable |
 | a `Dict` whose keys or values are not `I64`, `F64` or `Str` | keep the values in a `List` and store their positions |
-| a `match` on a list or a scalar (so every list pattern), a nested pattern, and an arm with an `if` guard | match a tag, a record or a tuple, and test inside the arm |
+| a `match` guard that assigns a variable, a pattern with `NA`, `NaN` or a complex number, a record pattern whose `..` names the rest, and a pattern other than a name or `_` on a value that is not a number, a string, a logical, a `List`, a tag, a record or a tuple | compute the value before the `match`, and bind the value to a name |
 | a read of a global that holds a record, a tuple, a tag, a `Dict` or a `Set`, or of a variable of an enclosing boundary function | pass the value in as a parameter |
 | a function that ends in a loop or another expression whose value R returns invisibly | end with the value, or with `NULL` |
 

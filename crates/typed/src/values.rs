@@ -2009,6 +2009,88 @@ pub unsafe extern "C" fn ry_str_ends_with(lo: u64, hi: u64, suffix_lo: u64, suff
     Str { lo, hi }.bytes().ends_with(suffix.bytes()) as i32
 }
 
+pub unsafe extern "C" fn ry_str_contains(lo: u64, hi: u64, part_lo: u64, part_hi: u64) -> i32 {
+    let (string, part) = (
+        Str { lo, hi },
+        Str {
+            lo: part_lo,
+            hi: part_hi,
+        },
+    );
+    string.as_str().contains(part.as_str()) as i32
+}
+
+pub unsafe extern "C" fn ry_str_caseless_ascii_equals(
+    lo: u64,
+    hi: u64,
+    other_lo: u64,
+    other_hi: u64,
+) -> i32 {
+    let other = Str {
+        lo: other_lo,
+        hi: other_hi,
+    };
+    Str { lo, hi }.bytes().eq_ignore_ascii_case(other.bytes()) as i32
+}
+
+/// `Str.trim` (`ends` 3), `Str.trim_start` (1) or `Str.trim_end` (2): the string without the
+/// Unicode whitespace at those ends, in a new string, as the interpreter's `str::trim` gives.
+pub unsafe extern "C" fn ry_str_trim(lo: u64, hi: u64, owned: u32, ends: u32) -> Str {
+    let string = Str { lo, hi };
+    let text = string.as_str();
+    let kept = if ends & 1 != 0 {
+        text.trim_start()
+    } else {
+        text
+    };
+    let kept = if ends & 2 != 0 { kept.trim_end() } else { kept };
+    let kept = kept.as_bytes();
+    // An owned string with nothing to trim is its own result.
+    if owned != 0 && kept.len() == text.len() {
+        return string;
+    }
+    let result = str_from_bytes(kept);
+    if owned != 0 {
+        str_drop(string);
+    }
+    result
+}
+
+/// `Str.drop_prefix` (`prefix` 1) or `Str.drop_suffix`: the string without `affix` at that end
+/// where it is there, in a new string.
+pub unsafe extern "C" fn ry_str_drop_affix(
+    lo: u64,
+    hi: u64,
+    owned: u32,
+    affix_lo: u64,
+    affix_hi: u64,
+    prefix: u32,
+) -> Str {
+    let string = Str { lo, hi };
+    let bytes = string.bytes();
+    let affix = Str {
+        lo: affix_lo,
+        hi: affix_hi,
+    };
+    let affix = affix.bytes();
+    let kept = if prefix != 0 {
+        bytes.strip_prefix(affix)
+    } else {
+        bytes.strip_suffix(affix)
+    };
+    let Some(kept) = kept else {
+        if owned != 0 {
+            return string;
+        }
+        return str_from_bytes(bytes);
+    };
+    let result = str_from_bytes(kept);
+    if owned != 0 {
+        str_drop(string);
+    }
+    result
+}
+
 /// `startsWith(x, prefix)` of each item of a string list, as a logical list.
 pub unsafe extern "C" fn ry_list_starts_with(
     list: *mut List,

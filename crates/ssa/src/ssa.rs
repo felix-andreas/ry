@@ -391,6 +391,9 @@ enum Unary {
     Floor,
     Ceil,
     Trunc,
+    Popcnt,
+    Clz,
+    Ctz,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1242,7 +1245,7 @@ impl Ins<'_> {
 
     unaries! {
         ineg => Ineg, iabs => Iabs, fneg => Fneg, fabs => Fabs, sqrt => Sqrt, floor => Floor,
-        ceil => Ceil, trunc => Trunc,
+        ceil => Ceil, trunc => Trunc, popcnt => Popcnt, clz => Clz, ctz => Ctz,
     }
 
     conversions! {

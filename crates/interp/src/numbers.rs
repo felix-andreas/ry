@@ -1259,6 +1259,9 @@ pub unsafe fn library(call: &Call<'_>) -> R<Sexp> {
             })
         }
         "Num.bitwise_not" => alloc(!one_number(call)?),
+        "Num.count_one_bits" => alloc(i64::from(one_number(call)?.count_ones())),
+        "Num.count_leading_zero_bits" => alloc(i64::from(one_number(call)?.leading_zeros())),
+        "Num.count_trailing_zero_bits" => alloc(i64::from(one_number(call)?.trailing_zeros())),
         "Num.shift_left_by" | "Num.shift_right_by" | "Num.shift_right_zf_by" => {
             let (number, bits) = named_numbers(call, ["number", "bits"])?;
             let Some(bits) = u32::try_from(bits).ok().filter(|bits| *bits < 64) else {
