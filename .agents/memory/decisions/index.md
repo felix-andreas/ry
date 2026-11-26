@@ -250,6 +250,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A cancellation flips the worker's token only inside an armed scope
 - A local typed by a signature's type parameter reads as that parameter
 - `# ry: expect(code)` reports when its finding is gone
+- A foreach iterator and a global-creating `<<-` are declarations
 
 ## Interpreter
 

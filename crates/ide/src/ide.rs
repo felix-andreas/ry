@@ -7571,7 +7571,22 @@ fn written_target_at<'db>(
     if let Some(hir) = item_hir(db, position.item)
         && let Some(argument) = named_argument_at(hir, position.relative)
     {
-        return parameter_target(db, files, position.item, &argument);
+        // An argument name that binds a variable, such as the iterator `g` in
+        // `foreach(g = groups)`, declares that variable rather than naming a parameter.
+        let declared = naming
+            .bindings
+            .iter()
+            .find(|(_, info)| info.range == argument.range && info.name == argument.name);
+        return match declared {
+            Some((binding, info)) if binds_global(naming, *binding, info) => {
+                Some(Target::Global(info.name.to_string()))
+            }
+            Some((binding, _)) => Some(Target::Slot {
+                item: position.item,
+                binding: *binding,
+            }),
+            None => parameter_target(db, files, position.item, &argument),
+        };
     }
     if let Some(expression) = position.expression_at()
         && let Some(target) = expression_target(db, files, position.item, naming, expression)
@@ -8151,6 +8166,19 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                             .filter(|callee| reads.binary_search(callee).is_ok())
                             .collect();
                         callees.sort_unstable();
+                        // A `<<-` that finds no binding above it creates the global, so goto
+                        // definition lands on it and it declares the name.
+                        let super_targets: Vec<ExprId> = hir
+                            .expressions()
+                            .filter_map(|expression| match &expression.kind {
+                                ExpressionKind::Assign {
+                                    spelling: AssignSpelling::Super,
+                                    target,
+                                    ..
+                                } => Some(*target),
+                                _ => None,
+                            })
+                            .collect();
                         for expression in reads {
                             if columns.contains(&hir.range(expression)) {
                                 continue;
@@ -8158,7 +8186,7 @@ fn occurrences(db: &dyn Db, files: ProjectFiles, target: &Target<'_>) -> Vec<Occ
                             let occurrence = Occurrence {
                                 file,
                                 range: name_range(hir, expression, name) + item_offset,
-                                is_declaration: false,
+                                is_declaration: super_targets.contains(&expression),
                             };
                             match callees.binary_search(&expression) {
                                 Ok(_) => calls.push((item, expression, occurrence)),
