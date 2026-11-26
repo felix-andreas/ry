@@ -552,3 +552,58 @@ passed: <T> fn(p: T, flag: Bool) -> T
 returned: <T> fn(p: T, flag: Bool) -> T
 held: <T> fn(p: T, flag: Bool) -> T
 used: integer
+
+#---- a_literal_variable_the_function_ends_with_takes_the_declared_number
+start <- function(n: I64) -> F64 {
+  x <- 0
+  x
+}
+#++++
+start: fn(n: I64) -> F64
+
+#---- a_literal_variable_rebound_in_a_branch_stays_open_for_its_use
+grow <- function(n: I64) -> F64 {
+  x <- 0
+  if (n > 1i64) x <- x + 1.5
+  x
+}
+replace <- function(n: I64) -> F64 {
+  x <- 0
+  if (n > 1i64) x <- 2.5
+  x
+}
+plain <- function(n) {
+  x <- 0
+  if (n > 1) x <- x + 1.5
+  x
+}
+mixed <- function(n) {
+  x <- 0
+  if (n > 1) x <- "a"
+  x
+}
+#++++
+grow: fn(n: I64) -> F64
+replace: fn(n: I64) -> F64
+plain: <T> fn(n: T) -> double
+mixed: <T> fn(n: T) -> double | character
+
+#---- a_literal_variable_read_as_a_list_position_is_an_i64
+leaf <- function() -> List<I64> {
+  lookup <- [1i64, 2i64]
+  j <- 1
+  first <- lookup[[j]]
+  lookup[[2i64]] <- j
+  lookup
+}
+#++++
+leaf: fn() -> List<I64>
+70..75 warning[unused] `first` is assigned but never used
+
+#---- literals_in_a_nominal_constructor_take_the_representation_numbers
+type Tree = :Leaf(I64) | :Node(Tree, Tree)
+leaf <- function() -> Tree @Tree(:Leaf(1))
+pair <- function() -> Tree @Tree(:Node(@Tree(:Leaf(1)), @Tree(:Leaf(2))))
+#++++
+leaf: fn() -> Tree
+pair: fn() -> Tree

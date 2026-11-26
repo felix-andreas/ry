@@ -1059,7 +1059,7 @@ fn alias_cycle_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     )
                 } else {
                     format!(
-                        "the alias `{name}` refers to itself, so its expansion never ends. A recursive type needs a name of its own: declare it as `@type {name} {{...}}` instead of `@alias`"
+                        "the alias `{name}` refers to itself, so its expansion never ends. A recursive type needs a name of its own: declare `{name}` as a `type` instead of an `alias`"
                     )
                 },
             ));

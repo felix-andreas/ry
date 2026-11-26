@@ -1594,11 +1594,16 @@ A ry type asks in three places:
   literal takes that type, so `n + 1` with `n: I64` is an `I64`.
 - **A later use.** `total <- 0` gives `total` a literal type that its first use in the same
   function decides: an operand beside a ry number, an argument to a typed parameter, an annotated
-  binding, or a value written into a `List`'s item (`lookup[[i]] <- j` with `lookup: List<I64>`)
-  or a record's field (`r$x <- j` with `x: I64`). In `for (x in xs) total <- total + x` with
-  `xs: List<F64>`, `total` is an `F64`, and
-  `rate <- 2.0; half(rate)` with `half(x: F64)` makes `rate` an `F64`. Any other read gives the
-  variable R's type, as does a function that never decides it. A literal written as a tuple item
+  binding, a value written into a `List`'s item (`lookup[[i]] <- j` with `lookup: List<I64>`)
+  or a record's field (`r$x <- j` with `x: I64`), a position into a `List` (`lookup[[j]]`, which
+  makes `j` an `I64`), or the value a function declared with a ry number result ends with. In
+  `for (x in xs) total <- total + x` with `xs: List<F64>`, `total` is an `F64`, and
+  `rate <- 2.0; half(rate)` with `half(x: F64)` makes `rate` an `F64`. Arithmetic on the variable
+  and number literals (`x + 1.5`) is still open, and so is a variable that branches write with
+  literals R gives one type: in a function declared `-> F64`, `x <- 0`, then
+  `if (n > 1i64) x <- x + 1.5`, then `x` makes every `x` an `F64`. Branches that write literals of
+  different R types (`1L` and `2.5`) keep R's types. Any other read gives the variable R's type,
+  as does a function that never decides it. A literal written as a tuple item
   or a record field is decided the same way: in `pair <- ("a", 1)`, the read
   `Str.concat(s, pair[[1]])` makes `"a"` a `Str`, and with no such use `pair` is a
   `Tuple{character, double}`.
@@ -2465,6 +2470,8 @@ expression has the nominal type from then on.
   arguments from the representation check, so a value `list(value = 1L)` becomes a
   `Person<integer>`.
 - When the value already has the nominal type, `@new` is allowed and does nothing further.
+- The representation is an expected type for the value's literals, so `@Tree(:Leaf(1))` with
+  `type Tree = :Leaf(I64) | :Node(Tree, Tree)` makes the `1` an `I64`.
 - The parentheses of `@Name(...)` are the value's own, so they follow the record and tuple literal
   rules: `@Point(x = 1, y = 2)` is a record, `@Pair(1L, "a")` a tuple, and `@UserId(id = 1L,)` a
   one-field record. `@UserId(id = 1L)` is an R assignment wrapped in the constructor, and when the

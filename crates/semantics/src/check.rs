@@ -3939,8 +3939,31 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// A join is not a use that decides a literal variable, so both sides take R's type.
+    /// A join is not a use that decides a literal variable, but it ties two paths' literals
+    /// that R gives one type: `x <- 0` and a branch's `x <- x + 1.5` stay one open literal that
+    /// a later use decides, and beside a ry number the literal is that number. Beside anything
+    /// else, or beside a literal of another R type (`1L` beside `2.5`, which R keeps apart as
+    /// `integer | double`), each side takes R's type.
     fn default_join_literals(&mut self, left: Ty<'db>, right: Ty<'db>) {
+        let left_literal = self.open_literal_constraint(left);
+        let right_literal = self.open_literal_constraint(right);
+        if left_literal.is_some() || right_literal.is_some() {
+            let other = if left_literal.is_some() { right } else { left };
+            let other_resolved = self.table.shallow_resolve(self.db, other);
+            let ties = match (left_literal, right_literal) {
+                (Some((_, left_default)), Some((_, right_default))) => {
+                    left_default == right_default
+                }
+                _ => matches!(other_resolved.kind(self.db), TyKind::Native(_)),
+            };
+            if ties {
+                let snapshot = self.table.snapshot();
+                if self.table.unify(self.db, left, right).is_ok() {
+                    return;
+                }
+                self.table.rollback(snapshot);
+            }
+        }
         for ty in [left, right] {
             if self.open_literal_var(ty) {
                 self.default_literal_var(ty, false);
@@ -7776,6 +7799,35 @@ impl<'db, 'a> Checker<'db, 'a> {
         self.record(payload, ty)
     }
 
+    /// An open literal variable for the unsuffixed number literal `id`, recorded as its type.
+    fn open_number_literal(&mut self, id: ExprId) -> Option<Ty<'db>> {
+        let module = self.module;
+        let mut inner = id;
+        while let ExpressionKind::Paren(paren) = module.kind(inner) {
+            inner = *paren;
+        }
+        if !matches!(
+            module.kind(inner),
+            ExpressionKind::Literal(LiteralKind::Integer(_) | LiteralKind::Double(_))
+        ) {
+            return None;
+        }
+        let literal = number_literal(module, inner)?;
+        let constraint = if literal.is_fraction() {
+            Constraint::FracLiteral
+        } else {
+            Constraint::WholeLiteral {
+                integer: literal.integer,
+            }
+        };
+        let ty = self.fresh_literal(constraint, false);
+        self.record_literal(inner, ty);
+        if inner != id {
+            self.record(id, ty);
+        }
+        Some(ty)
+    }
+
     /// A tuple item or a record field. A literal there is open, as a literal bound
     /// to a variable is: a later use decides it (`Str.concat(s, pair[[1]])` makes `"a"` in
     /// `pair <- ("a", 1)` a `Str`), and otherwise it has R's type.
@@ -10350,10 +10402,19 @@ impl<'db, 'a> Checker<'db, 'a> {
                 // exponential.
                 self.literal_reads.insert(lhs);
                 self.literal_reads.insert(rhs);
-                let left = self.infer(lhs);
-                let right = self.infer(rhs);
+                let mut left = self.infer(lhs);
+                let mut right = self.infer(rhs);
                 self.literal_reads.remove(lhs);
                 self.literal_reads.remove(rhs);
+                // Beside a variable written with a literal, a number literal is as undecided as
+                // the variable, so `x + 1.5` stays open for a use to decide.
+                if matches!(operator, Add | Subtract | Multiply | Modulo | Divide) {
+                    if self.open_literal_var(left) {
+                        right = self.open_number_literal(rhs).unwrap_or(right);
+                    } else if self.open_literal_var(right) {
+                        left = self.open_number_literal(lhs).unwrap_or(left);
+                    }
+                }
                 // `f + 1` on a `data.frame{...}` dispatches to `Arith.data.frame`.
                 let left = self.frame_as_class(left);
                 let right = self.frame_as_class(right);
@@ -12758,8 +12819,32 @@ impl<'db, 'a> Checker<'db, 'a> {
         let mut signature = FunctionType::declared(&[], &named, variadic, declared.ret);
         signature.quoted = &quoted;
 
+        // A variable the body ends with is read as the declared ry number, so `x <- 0` then `x`
+        // in a function declared `-> F64` is `0f64`, as a tail `0` is.
+        let mut tail_reads = Vec::new();
+        if matches!(
+            self.structural(declared.ret).kind(self.db),
+            TyKind::Native(_)
+        ) {
+            self.collect_tail_expressions(*body, &mut tail_reads);
+            tail_reads.retain(|&leaf| {
+                matches!(module.kind(leaf), ExpressionKind::NameRef(_))
+                    && self.literal_reads.insert(leaf)
+            });
+        }
         self.return_frames.push(Vec::new());
         let trailing_ty = self.infer_body_with_capture_discovery(*body, pending_mark);
+        for leaf in tail_reads {
+            self.literal_reads.remove(leaf);
+            let found = self.recorded_type(leaf);
+            if self.open_literal_var(found) {
+                let snapshot = self.table.snapshot();
+                if self.table.unify(self.db, found, declared.ret).is_err() {
+                    self.table.rollback(snapshot);
+                    self.default_literal_var(found, false);
+                }
+            }
+        }
         let early_returns = self
             .return_frames
             .pop()
@@ -20701,10 +20786,14 @@ impl<'db, 'a> Checker<'db, 'a> {
         if !matches!(definition.body.kind(self.db), TyKind::Unknown) {
             let representation = apply_definition(self.db, &definition, &arguments);
             self.record_expectation(value, representation);
+            // `@Tree(:Leaf(1))` against `:Leaf(I64)`: the literals take the representation's
+            // ry numbers, as they do against an annotation.
+            let adapted = self.adapt_literal(value, representation) != LiteralFit::NotLiteral;
             let resolved_value = self.table.resolve(self.db, value_ty);
-            if !self
-                .table
-                .compatible(self.db, resolved_value, representation)
+            if !adapted
+                && !self
+                    .table
+                    .compatible(self.db, resolved_value, representation)
             {
                 let error = self.type_mismatch(range, representation, resolved_value, Some(value));
                 self.errors.push(error);
@@ -20966,10 +21055,26 @@ impl<'db, 'a> Checker<'db, 'a> {
         if unseen_frame {
             self.unseen_frames += 1;
         }
+        // A position into a ry `List` is an `I64`, so `lookup[[j]]` decides a `j` written with
+        // a literal as one, as a later `lookup[[i]] <- j` would.
+        let ry_list = double && array_element(self.db, subject).is_some();
         let mut index_types = Vec::with_capacity(arguments.len());
         for argument in arguments {
             if let Some(value) = argument.value {
-                index_types.push(self.infer(value));
+                let fresh = ry_list && self.literal_reads.insert(value);
+                let ty = self.infer(value);
+                if fresh {
+                    self.literal_reads.remove(value);
+                    if self.open_literal_var(ty) {
+                        let snapshot = self.table.snapshot();
+                        let position = native_scalar(self.db, NativeScalar::I64);
+                        if self.table.unify(self.db, ty, position).is_err() {
+                            self.table.rollback(snapshot);
+                            self.default_literal_var(ty, false);
+                        }
+                    }
+                }
+                index_types.push(ty);
             }
         }
         if unseen_frame {

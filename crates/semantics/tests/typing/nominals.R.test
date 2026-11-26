@@ -45,7 +45,7 @@ value: integer
 f <- function() 1L
 #++++
 f: fn() -> integer
-3..27 error[annotation] the alias `A` refers to itself, so its expansion never ends. A recursive type needs a name of its own: declare it as `@type A {...}` instead of `@alias`
+3..27 error[annotation] the alias `A` refers to itself, so its expansion never ends. A recursive type needs a name of its own: declare `A` as a `type` instead of an `alias`
 31..43 error[annotation] the alias `B` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle
 
 #---- a_recursive_record_is_a_nominal_type
@@ -63,7 +63,7 @@ use <- function(log) {
 }
 #++++
 use: fn(log: Logger) -> NULL
-161..206 error[annotation] the alias `Chain` refers to itself, so its expansion never ends. A recursive type needs a name of its own: declare it as `@type Chain {...}` instead of `@alias`
+161..206 error[annotation] the alias `Chain` refers to itself, so its expansion never ends. A recursive type needs a name of its own: declare `Chain` as a `type` instead of an `alias`
 422..423 error[type-mismatch] expected `character`, found `double`
 
 #---- new_introduces_and_projects
