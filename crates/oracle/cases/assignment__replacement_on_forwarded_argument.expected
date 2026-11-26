@@ -1,0 +1,13 @@
+[stdout]
+| p q TRUE 
+| p q 
+| p q a b 
+| 99 0 99 0 
+| p q TRUE 
+| p q 
+| p q a b 
+| 99 0 99 0 
+| p q TRUE 
+| p q 
+| p q a b 
+| 99 0 99 0 

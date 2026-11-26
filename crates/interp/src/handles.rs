@@ -2579,6 +2579,8 @@ pub fn builtin_failure(_context: &mut Cx<'_>, unwind: Unwind) -> Unwind {
 /// finds it. A slot frame without an environment (`None`) binds no `*tmp*`.
 pub struct TmpValue<'s> {
     bound: bool,
+    #[cfg(debug_assertions)]
+    entry: Option<(Sexp, Sexp)>,
     scope: PhantomData<fn(&'s ()) -> &'s ()>,
 }
 
@@ -2596,6 +2598,8 @@ impl<'s> TmpValue<'s> {
         }
         TmpValue {
             bound: environment.is_some(),
+            #[cfg(debug_assertions)]
+            entry: environment.map(|environment| (environment.raw(), target.raw())),
             scope: PhantomData,
         }
     }
@@ -2605,6 +2609,10 @@ impl Drop for TmpValue<'_> {
     #[inline(always)]
     fn drop(&mut self) {
         if self.bound {
+            // `eval::complex_assign` pushes and pops its own entries, which must balance.
+            #[cfg(debug_assertions)]
+            assert_eq!(crate::interp().tmp_values.pop(), self.entry);
+            #[cfg(not(debug_assertions))]
             crate::interp().tmp_values.pop();
         }
     }
@@ -2695,6 +2703,14 @@ pub struct Tagged<'s> {
     pub tag: Local<'s>,
     pub value: Local<'s>,
 }
+
+// Argument lists are reinterpreted between `Arg` and `Tagged` without copying.
+const _: () = {
+    use std::mem::{offset_of, size_of};
+    assert!(size_of::<Tagged<'static>>() == size_of::<Arg>());
+    assert!(offset_of!(Tagged<'static>, tag) == offset_of!(Arg, tag));
+    assert!(offset_of!(Tagged<'static>, value) == offset_of!(Arg, value));
+};
 
 /// The call whose function and arguments are `items`, each with its tag.
 #[inline]

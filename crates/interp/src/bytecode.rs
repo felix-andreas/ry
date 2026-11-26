@@ -12317,8 +12317,8 @@ impl<'f> RunningFrame<'f, '_, '_> {
 
     /// What `slot` holds: a value, a promise of an argument, or nothing (`unbound`).
     fn read<'c>(self, _context: &'c Cx<'_>, slot: Slot<'f>) -> Gc<'c> {
-        // SAFETY: the frame roots its registers, and the borrow of the context lets nothing run
-        // that could overwrite this one.
+        // SAFETY: the frame roots its registers, and the borrow of the context allows no
+        // safepoint, so the value stays alive even if a lookup moves the variable to a cell.
         unsafe { Gc::adopt(*slot.register) }
     }
 
@@ -14165,7 +14165,7 @@ fn sub_assign_in_place<'s>(
 }
 
 /// `op_sub_assign` on the variable in a slot frame's slot `constant`, with the raw operands
-/// `(variable, [index, value, call, whole])`.
+/// `(variable, [index, value, whole, setter_call])`.
 #[inline(always)]
 fn sub_assign_in_slots<'s>(
     context: &mut Cx<'s>,
@@ -14181,7 +14181,7 @@ fn sub_assign_in_slots<'s>(
     };
     // SAFETY: the constants, the registers and the frame's environment hold every operand
     // until the instruction ends.
-    let (variable, [index, value, call, whole]) = unsafe {
+    let (variable, [index, value, whole, setter_call]) = unsafe {
         (
             Local::adopt(variable),
             operands.map(|operand| handles::held(context, operand)),
@@ -14195,11 +14195,11 @@ fn sub_assign_in_slots<'s>(
         frame,
         (slot, variable),
         (index, value, kind),
-        (call, whole),
+        (whole, setter_call),
     )
 }
 
-/// `op_super_sub_assign` with the raw operands `(variable, [index, value, call, whole])`: the
+/// `op_super_sub_assign` with the raw operands `(variable, [index, value, whole, setter_call])`: the
 /// subscript's value when the general assignment must take over.
 #[inline(always)]
 fn super_sub_assign<'s>(
@@ -14208,7 +14208,7 @@ fn super_sub_assign<'s>(
 ) -> R<Option<Sexp>> {
     // SAFETY: the constants, the registers and the frame's environment hold every operand
     // until the instruction ends.
-    let (variable, [mut index, value, call, whole]) = unsafe {
+    let (variable, [mut index, value, whole, setter_call]) = unsafe {
         (
             Local::adopt(variable),
             operands.map(|operand| handles::held(context, operand)),
@@ -14219,7 +14219,7 @@ fn super_sub_assign<'s>(
         frame,
         variable,
         (&mut index, value, kind),
-        (call, whole),
+        (whole, setter_call),
     )?;
     Ok((!done).then(|| index.raw()))
 }
