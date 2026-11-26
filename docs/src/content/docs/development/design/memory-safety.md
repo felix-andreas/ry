@@ -585,8 +585,9 @@ element reads and stores, `[`, `[[`, `$`, `@` with their replacement forms, the 
 (`subset.rs`); the
 attribute readers and setters with their fast-path entries (`attr`, `attributes`, `names`, `dim`,
 `dimnames`, `class`, `oldClass`, `levels<-`, `comment`, `length<-`, `inherits`, `unclass` and the
-replacement forms); `strings.rs` except `paste`, `paste0`, `sprintf`, `strsplit` and
-`make.unique`; the bit conversions in `arith.rs`; and the `arima0` and `ppr` routines of the
+replacement forms); the class readers `class_of`, `implicit_class`, `.class2` and `.cache_class`
+(`dispatch.rs`); `strings.rs` but for `subject_at` and `flag`, which `agrep` calls raw; the bit
+conversions in `arith.rs`; and the `arima0` and `ppr` routines of the
 stats crate. Two pieces of the API are not built: the
 bytecode loop's register accessor and `Held<T>` fields in traced structures. The replacement
 forms reach a frame through `RunningFrame` and `Slot` in `bytecode.rs`, a narrow form of that
@@ -604,6 +605,7 @@ that states what the caller must hold. Which helper the entry uses decides its c
 | Returns no object | `handles::with` | a scope of its own, released on return |
 | Returns an object to a caller that treats it as rooted | `handles::with_result` | a scope of its own, and the result rooted again in the caller's |
 | Runs once per instruction or per loop iteration, and its caller releases the handle stack | `handles::in_caller_scope` with `handles::held` operands | none of its own: the caller's roots hold the operands, and what the entry roots stays until the caller's release |
+| Reads one object its caller holds, on every dispatch (`class_of_raw`, `implicit_class_raw`) | `handles::held_in_caller_scope` | none of its own: the object is held by the caller, and a new answer stays rooted until the caller's release |
 
 The third form is what `subset::vector_element` (the element read of `for` and the apply
 functions) and tier 0's `$` entries use, because a scope and a second root per call measured 15

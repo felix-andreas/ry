@@ -10,14 +10,14 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, Kind, Visibility, builtin, internal, special},
         eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
         handles::{
-            self, Cx, Local, Str, attribute_copy, attributes_unshared, dense, get_attribute, is_s4,
-            null, safe, set_class, symbol, unreferenced,
+            self, Cx, Gc, Integer, Language, Local, Str, StringFill, Symbol, attribute_copy,
+            attributes_unshared, dense, get_attribute, is_s4, null, safe, set_class, symbol,
+            unreferenced,
         },
         interp,
-        unwind::{R, error, error_in},
+        unwind::{R, Unwind, error, error_in},
         values::{
-            self, char_str, get_attr, length, missing_arg, nil, scalar_string, string_vector,
-            symbol_name, symbols, unbound,
+            self, char_str, get_attr, length, missing_arg, nil, symbol_name, symbols, unbound,
         },
     },
     heap::{
@@ -35,8 +35,8 @@ pub const BUILTINS: &[BuiltinDef] = &[
     builtin("oldClass<-", 2, safe!(do_set_old_class)),
     builtin("class<-", 2, safe!(do_set_class)),
     builtin("unclass", 1, safe!(do_unclass)),
-    builtin(".class2", 1, |call| unsafe { implicit_class(call.arg(0)) }),
-    builtin(".cache_class", 2, |call| unsafe { do_cache_class(call) }),
+    builtin(".class2", 1, safe!(do_class2)),
+    builtin(".cache_class", 2, safe!(do_cache_class)),
     builtin(".isMethodsDispatchOn", -1, safe!(do_is_methods_dispatch_on)),
     builtin("isS4", 1, safe!(do_is_s4)),
     internal("setS4Object", 3, do_set_s4_object),
@@ -44,143 +44,257 @@ pub const BUILTINS: &[BuiltinDef] = &[
 ];
 
 /// The class vector `class()` reports.
-pub unsafe fn class_of(object: Sexp) -> R<Sexp> {
-    let class = values::class_attr(object);
-    if class != nil() && length(class) > 0 {
-        return Ok(class);
+pub fn class_of<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
+    context.root_answer(|context| class_read(context, object))
+}
+
+/// [`class_of`] as a value that borrows the context, for a caller that hands it on before the
+/// next safepoint: the class attribute, which the object holds, or a new vector rooted in the
+/// context's scope.
+pub fn class_read<'a, 's>(context: &'a mut Cx<'s>, object: Local<'s>) -> R<Gc<'a>> {
+    let answer = context.read_or(
+        |context| class_attribute(context, object),
+        |context| {
+            let classes: &[&str] = match shape(context, object) {
+                2 => &["matrix", "array"],
+                1 => &["array"],
+                _ => &[basic_class(object.read(context), false)],
+            };
+            let classes = text_vector(context, classes)?;
+            Ok::<_, Unwind>(Some(classes.value().read(context)))
+        },
+    )?;
+    answer.ok_or_else(|| error("internal error: an object has no class"))
+}
+
+/// [`class_of`] for a raw caller.
+///
+/// # Safety
+///
+/// The caller is on the interpreter's thread, holds no reference into the heap and keeps
+/// `object` alive until this returns. The result is rooted in the caller's scope.
+pub unsafe fn class_of_raw(object: Sexp) -> R<Sexp> {
+    // SAFETY: the caller's contract. A scope of its own would mark, release and root the
+    // answer again on every dispatch; the answer is the object's attribute or a vector rooted
+    // in the caller's scope.
+    unsafe {
+        handles::held_in_caller_scope(object, |context, object| {
+            Ok(class_read(context, object)?.raw())
+        })
     }
-    let dim = get_attr(object, symbols().dim);
-    if dim != nil() {
-        return if length(dim) == 2 {
-            string_vector(&["matrix", "array"])
-        } else {
-            scalar_string("array")
-        };
-    }
-    scalar_string(basic_class(object, false))
 }
 
 /// The class `UseMethod` dispatches on: for an S4 object, its class and every class it
 /// extends; otherwise the class attribute, or the implicit class, which adds `matrix`/`array`,
-/// and for numbers both the type and `numeric`.
-pub unsafe fn implicit_class(object: Sexp) -> R<Sexp> {
-    let class = values::class_attr(object);
-    if class != nil() && length(class) > 0 {
-        if object.has_gp(gp::S4_OBJECT) {
-            return s4_extends(class);
-        }
-        return Ok(class);
+/// and for numbers both the type and `numeric`. The answer is the object's attribute or a
+/// vector the interpreter's caches hold, except for the implicit class of a call, a record or
+/// an `I64` vector, which is new and rooted in the context's scope.
+pub fn implicit_class<'a, 's>(context: &'a mut Cx<'s>, object: Local<'s>) -> R<Gc<'a>> {
+    let answer = context.read_or(
+        |context| class_attribute(context, object).filter(|_| !is_s4(object)),
+        |context| {
+            if let Some(class) = class_attribute(context, object) {
+                let class = context.root(class);
+                return s4_extends(context, class).map(Some);
+            }
+            let shape = shape(context, object);
+            let kind = object.r_type();
+            // A call's class depends on its head (`if`, `for`, `=`, ...), a record's on its
+            // kind and an `I64` vector's on whether it is a list, so only their type does not
+            // determine it.
+            let cacheable = !matches!(kind, SexpType::Language | SexpType::Record | SexpType::I64);
+            if cacheable
+                && let Some(&classes) = interp().globals.implicit_classes.get(&(shape, kind))
+            {
+                // SAFETY: the interpreter's globals keep the vector, and only a safepoint can
+                // remove it, which the borrow of the context rules out.
+                return Ok(Some(unsafe { Gc::adopt(classes) }));
+            }
+            let mut classes: SmallVec<[&str; 4]> = SmallVec::new();
+            if shape == 2 {
+                classes.push("matrix");
+            }
+            if shape > 0 {
+                classes.push("array");
+            }
+            match kind {
+                SexpType::Integer => classes.extend(["integer", "numeric"]),
+                SexpType::Real => classes.extend(["double", "numeric"]),
+                _ => classes.push(basic_class(object.read(context), true)),
+            }
+            let classes = text_vector(context, &classes)?;
+            if cacheable {
+                // Shared by every dispatch from now on, so a caller that modifies it must copy
+                // it.
+                handles::mark_shared(classes.value());
+                interp()
+                    .globals
+                    .implicit_classes
+                    .insert((shape, kind), classes.raw());
+            }
+            Ok(Some(classes.value().read(context)))
+        },
+    )?;
+    answer.ok_or_else(|| error("internal error: an object has no class"))
+}
+
+/// [`implicit_class`] for a raw caller.
+///
+/// # Safety
+///
+/// As for [`class_of_raw`].
+pub unsafe fn implicit_class_raw(object: Sexp) -> R<Sexp> {
+    // SAFETY: the caller's contract, as in `class_of_raw`; the answer may also be a vector the
+    // caches hold.
+    unsafe {
+        handles::held_in_caller_scope(object, |context, object| {
+            Ok(implicit_class(context, object)?.raw())
+        })
     }
-    let dim = get_attr(object, symbols().dim);
-    let shape = match dim {
-        dim if dim == nil() => 0,
-        dim if length(dim) == 2 => 2,
-        _ => 1,
+}
+
+/// `.class2(x)`.
+fn do_class2<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    context.root_answer(|context| implicit_class(context, object))
+}
+
+/// The class attribute of `object`, unless it is absent or empty.
+fn class_attribute<'r, 's: 'r>(context: &'r Cx<'_>, object: Local<'s>) -> Option<Gc<'r>> {
+    let class = get_attribute(context, object, symbol(|symbols| symbols.class));
+    let empty = match class.standard::<Str>() {
+        Some(class) => class.is_empty(),
+        None => class.r_type() == SexpType::Nil,
     };
-    let kind = object.kind();
-    // A call's class depends on its head (`if`, `for`, `=`, ...), a record's on its kind and an
-    // `I64` vector's on whether it is a list, so only their type does not determine it.
-    let cacheable = !matches!(kind, SexpType::Language | SexpType::Record | SexpType::I64);
-    if cacheable && let Some(&classes) = interp().globals.implicit_classes.get(&(shape, kind)) {
-        return Ok(classes);
+    (!empty).then_some(class)
+}
+
+/// The first name of the implicit class [`class_of`] gives `object`, or `None` when the object
+/// has a class attribute.
+pub fn implicit_class_name(context: &Cx<'_>, object: Local<'_>) -> Option<&'static str> {
+    if class_attribute(context, object).is_some() {
+        return None;
     }
-    let mut classes: Vec<&str> = Vec::new();
-    if shape == 2 {
-        classes.push("matrix");
+    Some(match shape(context, object) {
+        2 => "matrix",
+        1 => "array",
+        _ => basic_class(object.read(context), false),
+    })
+}
+
+/// 2 for a matrix, 1 for another array and 0 for an object without dims.
+fn shape(context: &Cx<'_>, object: Local<'_>) -> u8 {
+    let dim = get_attribute(context, object, symbol(|symbols| symbols.dim));
+    match dim.standard::<Integer>() {
+        _ if dim.r_type() == SexpType::Nil => 0,
+        Some(dim) if dim.len() == 2 => 2,
+        _ => 1,
     }
-    if shape > 0 {
-        classes.push("array");
+}
+
+/// A new character vector of `texts`.
+fn text_vector<'s>(context: &mut Cx<'s>, texts: &[&str]) -> R<Local<'s, Str>> {
+    let mut fill = StringFill::new(context, texts.len())?;
+    for text in texts {
+        fill.push_text(context, text)?;
     }
-    match kind {
-        SexpType::Integer => classes.extend(["integer", "numeric"]),
-        SexpType::Real => classes.extend(["double", "numeric"]),
-        _ => classes.push(basic_class(object, true)),
-    }
-    let classes = string_vector(&classes)?;
-    if cacheable {
-        // Shared by every dispatch from now on, so a caller that modifies it must copy it.
-        classes.mark_not_mutable();
-        interp()
-            .globals
-            .implicit_classes
-            .insert((shape, kind), classes);
-    }
-    Ok(classes)
+    Ok(fill.finish().finish())
 }
 
 /// An S4 class's S3 class vector, from the methods package's `.extendsForS3`, cached by class
 /// name as GNU R does. Without the methods package the class attribute stands alone.
-unsafe fn s4_extends(class: Sexp) -> R<Sexp> {
-    let name = class.element(0).bytes();
-    if let Some(&extends) = interp().globals.s4_extends.get(name) {
-        return Ok(extends);
+fn s4_extends<'a, 's>(context: &'a mut Cx<'s>, class: Local<'s>) -> R<Gc<'a>> {
+    let name: Box<[u8]> = match class.standard::<Str>() {
+        Some(names) if !names.is_empty() => names.get(context, 0).bytes().into(),
+        _ => return Ok(class.read(context)),
+    };
+    if let Some(&extends) = interp().globals.s4_extends.get(&name) {
+        // SAFETY: the interpreter's globals keep the vector, and only a safepoint can remove
+        // it, which the borrow of the context rules out.
+        return Ok(unsafe { Gc::adopt(extends) });
     }
+    let Some(function) = extends_for_s3(context)? else {
+        return Ok(class.read(context));
+    };
+    let extends = handles::call_value(context, function, &[class])?;
+    interp().globals.s4_extends.insert(name, extends.raw());
+    Ok(extends.read(context))
+}
+
+/// For an S4 object, its class and every class it extends, as `is()` lists them.
+pub fn s4_classes<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
+    let class = get_attribute(context, object, symbol(|symbols| symbols.class));
+    if class.r_type() != SexpType::Nil {
+        let class = context.root(class);
+        if let Some(function) = extends_for_s3(context)? {
+            return handles::call_value(context, function, &[class]);
+        }
+    }
+    context.root_answer(|context| implicit_class(context, object))
+}
+
+/// The methods package's `.extendsForS3`, when the package is loaded and defines it.
+fn extends_for_s3<'s>(context: &mut Cx<'s>) -> R<Option<Local<'s>>> {
     let namespace = interp().globals.methods_namespace;
     if namespace == nil() {
-        return Ok(class);
+        return Ok(None);
     }
-    let function = eval::value_of(eval::find_var_in_frame(
-        values::install(".extendsForS3")?,
-        namespace,
-    )?)?;
-    if !values::is_function(function) {
-        return Ok(class);
-    }
-    let call = values::call(function, &[class])?;
-    let extends = eval::eval(call, values::base_env())?;
-    interp().globals.s4_extends.insert(name.into(), extends);
-    Ok(extends)
+    // SAFETY: the interpreter's globals keep the methods namespace.
+    let namespace = unsafe { Local::adopt(namespace) };
+    let name = handles::install_bytes(context, b".extendsForS3")?;
+    let function = handles::frame_symbol_value(context, namespace, name)?;
+    Ok(function.filter(|function| {
+        matches!(
+            function.r_type(),
+            SexpType::Closure | SexpType::Builtin | SexpType::Special
+        )
+    }))
 }
 
 /// `.cache_class(class, extends)`: records the S3 class vector of an S4 class, or with
 /// `extends = NULL` forgets it.
-unsafe fn do_cache_class(call: &Call<'_>) -> R<Sexp> {
-    let class = call.arg(0);
-    let extends = call.arg(1);
-    if class.kind() != SexpType::String || length(class) < 1 {
-        return Err(call.error("invalid class argument to internal .class_cache"));
-    }
-    let name: Box<[u8]> = class.element(0).bytes().into();
-    if extends == nil() {
+fn do_cache_class<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let extends = arguments.value(1);
+    let name: Box<[u8]> = match arguments.value(0).standard::<Str>() {
+        Some(class) if !class.is_empty() => class.get(context, 0).bytes().into(),
+        _ => return Err(arguments.error("invalid class argument to internal .class_cache")),
+    };
+    if extends.r_type() == SexpType::Nil {
         interp().globals.s4_extends.remove(&name);
     } else {
-        interp().globals.s4_extends.insert(name, extends);
+        interp().globals.s4_extends.insert(name, extends.raw());
     }
     Ok(extends)
 }
 
-pub(crate) unsafe fn basic_class(object: Sexp, for_dispatch: bool) -> &'static str {
-    match object.kind() {
+/// The class of an object with no class attribute and no dims: its type's, with `"double"`
+/// for a double vector when `for_dispatch` and `"numeric"` otherwise.
+pub(crate) fn basic_class(object: Gc<'_>, for_dispatch: bool) -> &'static str {
+    match object.r_type() {
         SexpType::Closure | SexpType::Special | SexpType::Builtin => "function",
         SexpType::Integer => "integer",
-        SexpType::Real => {
-            if for_dispatch {
-                "double"
-            } else {
-                "numeric"
-            }
-        }
+        SexpType::Real if for_dispatch => "double",
+        SexpType::Real => "numeric",
         SexpType::Symbol => "name",
         SexpType::Language => {
-            let head = object.car();
-            if head.kind() == SexpType::Symbol {
-                match head.car().bytes() {
-                    b"if" => "if",
-                    b"while" => "while",
-                    b"for" => "for",
-                    b"=" => "=",
-                    b"<-" => "<-",
-                    b"(" => "(",
-                    b"{" => "{",
-                    _ => "call",
-                }
-            } else {
-                "call"
+            let head = object
+                .downcast::<Language>()
+                .and_then(|call| call.head().downcast::<Symbol>());
+            match head.map(|head| head.name().bytes()) {
+                Some(b"if") => "if",
+                Some(b"while") => "while",
+                Some(b"for") => "for",
+                Some(b"=") => "=",
+                Some(b"<-") => "<-",
+                Some(b"(") => "(",
+                Some(b"{") => "{",
+                _ => "call",
             }
         }
-        SexpType::Record => crate::records::native_kind(object).class_name(),
+        // SAFETY: the object is a live record.
+        SexpType::Record => unsafe { crate::records::native_kind(object.raw()) }.class_name(),
         // A `List<I64>` keeps the class an R list of boxed numbers had.
-        SexpType::I64 if object.is_array() => "list",
+        SexpType::I64 if handles::is_array(object) => "list",
         SexpType::I64 => "ry_number",
         kind => kind.name(),
     }
@@ -857,7 +971,7 @@ unsafe fn find_s3_method(
     def_env: Sexp,
 ) -> R<Option<Found>> {
     let _activity = activity::enter(Activity::S3Dispatch, 0);
-    let classes = implicit_class(object)?;
+    let classes = implicit_class_raw(object)?;
     let method = resolve_s3(generic, nil(), true, classes, call_env, def_env)?;
     Ok(method.map(|method| Found::of(method, call_env, def_env)))
 }
@@ -1134,7 +1248,7 @@ unsafe fn generic_method(
         return Ok(found);
     }
     let generic_name = char_str(generic.element(0));
-    let class = implicit_class(object)?;
+    let class = implicit_class_raw(object)?;
     let classes: Vec<String> = (0..length(class))
         .map(|index| char_str(class.element(index)).into_owned())
         .collect();
@@ -1941,7 +2055,7 @@ pub unsafe fn has_internal_method(
             function.tag()
         }
     };
-    let classes = implicit_class(object)?;
+    let classes = implicit_class_raw(object)?;
     let mut scope = method_scope(call_env, values::base_namespace())?;
     for index in 0..length(classes) {
         let name = method_name(generic, classes.element(index))?;
@@ -2108,7 +2222,7 @@ pub(crate) unsafe fn subject_method(
     call_env: Sexp,
 ) -> R<Option<SubjectMethod>> {
     let _activity = activity::enter(Activity::S3Dispatch, 0);
-    let classes = implicit_class(object)?;
+    let classes = implicit_class_raw(object)?;
     let generic = match definition.symbol {
         Some(symbol) => symbol,
         None => values::install(definition.name)?,
@@ -2361,7 +2475,7 @@ unsafe fn group_dispatch(
             let named = index == position
                 || (operands == 2
                     && args[index].value.is_object()
-                    && implicit_class(args[index].value).is_ok_and(|classes| {
+                    && implicit_class_raw(args[index].value).is_ok_and(|classes| {
                         names_class(generic, classes) || names_class(group, classes)
                     }));
             let element = if named {
@@ -2429,7 +2543,7 @@ unsafe fn find_group_method(
     env: Sexp,
 ) -> R<Option<Found>> {
     let _activity = activity::enter(Activity::S3Dispatch, 0);
-    let classes = implicit_class(object)?;
+    let classes = implicit_class_raw(object)?;
     let def_env = values::base_namespace();
     let generic = values::install(generic)?;
     let group = values::install(group)?;
@@ -2865,21 +2979,4 @@ fn do_unclass<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<
     };
     set_class(context, &mut copy, null())?;
     Ok(copy.finish())
-}
-
-/// For an S4 object, its class and every class it extends, as `is()` would list them.
-pub(crate) unsafe fn s4_class_with_superclasses(object: Sexp) -> R<Sexp> {
-    let class = values::class_attr(object);
-    let methods = interp().globals.methods_namespace;
-    if methods == nil() || class == nil() {
-        return implicit_class(object);
-    }
-    let extends = values::install(".extendsForS3")?;
-    let function = eval::find_var(extends, methods)?;
-    if function == unbound() {
-        return implicit_class(object);
-    }
-    let function = value_of(function)?;
-    let call = values::call(function, &[class])?;
-    eval::eval(call, values::base_env())
 }

@@ -722,10 +722,10 @@ pub struct Interp {
     pub signalling: Signalling,
     /// The text `geterrmessage()` returns.
     pub error_message: String,
-    /// A buffer builtins reuse to assemble each element of a character result
-    /// ([`crate::strings::with_byte_buffer`]), so building a string allocates only when it is
-    /// longer than any built before.
-    pub text_buffer: Vec<u8>,
+    /// Buffers builtins reuse to assemble each element of a character result
+    /// ([`crate::strings::with_byte_buffer`]), one for each call that holds one at a time, so
+    /// building a string allocates only when it is longer than any built before.
+    pub text_buffers: Vec<Vec<u8>>,
     /// Whether the default error handler prints (`R_ShowErrorMessages`).
     pub show_error_messages: bool,
     /// The attached Debug Adapter Protocol server, which the evaluator consults before each
@@ -964,7 +964,7 @@ pub unsafe fn install(heap_pointer: *mut Heap, hooks: Hooks) {
         immediate_warning: false,
         signalling: Signalling::Immediate,
         error_message: String::new(),
-        text_buffer: Vec::new(),
+        text_buffers: Vec::new(),
         show_error_messages: true,
         debugger: DebuggerSlot(None),
         in_error: 0,
