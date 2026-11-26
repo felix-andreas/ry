@@ -180,6 +180,11 @@ pub struct BuiltinDef {
     /// value, an argument the full call reports an error for), and its result is visible unless
     /// the builtin is invisible. The caller releases the handles it roots.
     pub direct: Option<DirectFn>,
+    /// Whether [`BuiltinDef::direct`] also takes a call whose arguments are named, because the
+    /// builtin passes them on by position whatever they are called: set by
+    /// [`BuiltinDef::direct_by_position`] on `.Call`. The one name such a builtin reads,
+    /// `PACKAGE`, takes the full call.
+    pub direct_by_position: bool,
     pub object: Option<Sexp>,
     /// The symbol of `name`, set at registration so that dispatch looks methods up without
     /// hashing the name on every call.
@@ -281,6 +286,7 @@ pub const fn builtin(name: &'static str, arity: i32, function: BuiltinFn) -> Bui
         function,
         unary: None,
         direct: None,
+        direct_by_position: false,
         object: None,
         symbol: None,
     }
@@ -349,6 +355,13 @@ impl BuiltinDef {
         }
     }
 
+    pub const fn direct_by_position(self) -> BuiltinDef {
+        BuiltinDef {
+            direct_by_position: true,
+            ..self
+        }
+    }
+
     /// GNU R's `DispatchOrEval`, for the specials `[`, `[[`, `[<-` and `[[<-`: the evaluator
     /// evaluates only the first argument before S3 dispatch, so a method receives the others as
     /// unevaluated promises, and the function itself runs on evaluated arguments as a builtin's
@@ -410,6 +423,7 @@ impl BuiltinDef {
             function: self.function,
             unary: self.unary,
             direct: self.direct,
+            direct_by_position: self.direct_by_position,
             object: self.object,
             symbol: self.symbol,
         }

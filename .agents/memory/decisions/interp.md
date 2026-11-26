@@ -1289,3 +1289,14 @@ without cells, promise forcing in the loop, and one observer word on the general
 - **A frame that something outlives**: previously the fast return asked `outliving_cause`, declined, and `eval::finish_frame` asked it again on the general return. The fast return lifts the frame with the cause it found (`eval::lift_frame`, with collection inhibited as in a lookup's move) and finishes the return itself: it pops the frame and hands the environment and the closures the frame made to `Heap::release_frame`, which is what `pop_frame` does on the general return. Only a failed lift goes to the general return, where `finish_frame` finds the frame on its slots, lifts again and raises the error.
 - **Not changed, with the reason in the backlog:** closure creation on a slot frame, `list(...)` through `...`, `list(a = i)`, `sprintf`, and `do.call(f, list(...))` whose list is a call.
 - Tests: oracle cases `builtins__combine_small_values`, `closures__maker_variables`, `datatable__unlist_names_after_setnames`.
+
+## A closure's free variable in an enclosing function frame is read by the generic lookup
+
+**Status:** settled.
+
+- **Context.** A closure object (fastmap, a function factory, an R6-style object built by hand) keeps its state in the frame of the function that made it, so every method reads and calls free variables through that function frame. Tier 0's fast `GetVar` and `GetFun` take a remembered cell only when the site's key is the closure's own enclosure, and a key is never a function frame, so each such read runs the generic handler and `walk_function_frames`.
+- **Tried.** The walk written in line in `get_var_fast` and `get_fun_fast` (the frame's filter, the site's hint, a scan of a frame without an index, then the remembered cell at the key). A method of a closure object got 13% cheaper in instructions.
+- **Why it is not the shape.** The walk's loop and scan need registers the fast handlers do not have, so the compiler gave `fast_get_var` and `fast_get_fun` a frame: three to six pushes and pops on entry, 8 to 12 instructions on every variable read and function lookup of every program. The hot suite rose 0.3% to 1.5% and the workload's `bodies` section 1.9%. A per-operation table of closure-object rows does not show this: only an A/B over whole programs does.
+- **Decision.** The fast handlers decline such a read, and the generic lookup answers it. `Heap::frame_cell_hinted` is inlined into `walk_function_frames`, so a frame's filter and the site's hint answer there without a call into the frame search.
+- **If it is tried again**, the walk is a handler of its own that the fast handler reaches with `become` (`crates/interp/AGENTS.md`, "a tier-0 fast path makes no calls"), so the fast handler keeps no frame. Check `objdump -d --disassemble=fast_get_var libR.so` for pushes before measuring anything else.
+- Tests: oracle case `closures__enclosing_frame_reads`; `just bench-mechanisms` rows "method of a closure object".

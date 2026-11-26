@@ -305,6 +305,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `object@name` is an instruction, and a slot write is checked without a call (settled)
 - String equality is a kernel, and the fast return asks what outlives the frame (settled)
 - Small combines skip the naming walk, and a lookup forces the promise it found (settled)
+- A closure's free variable in an enclosing function frame is read by the generic lookup (settled)
 
 ## Builtins and base R
 
@@ -573,6 +574,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Measured and not taken: libdeflate for lazy-load records
 - Extracted runtimes and base trees are pruned by a ledger and held by locks
 - `bin/R` and `Rscript` behave as GNU R's front ends
+- `.Call` reads its routine list in one pass, and takes named arguments directly (settled)
+- `SET_STRING_ELT` stores a string without a call or a frame (settled)
 
 ## Typed ry and the standard library
 
