@@ -49,7 +49,9 @@ pub const BUILTINS: &[BuiltinDef] = &[
     special("@<-", 3, do_at_assign).direct(handles::safe_direct!(at_assign_values)),
     builtin(".subset", -1, do_subset),
     builtin(".subset2", -1, do_subset2).direct(direct_subset2),
-    builtin("list", -1, safe!(list_of)),
+    builtin("list", -1, safe!(list_of))
+        .direct(handles::safe_direct!(call direct_list))
+        .direct_named(),
     builtin("length", 1, safe!(do_length))
         .generic(Generic::Internal)
         .unary(|value| unsafe {
@@ -5569,6 +5571,58 @@ fn list_of<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
         return Ok(result.finish().value());
     }
     Ok(result.finish().value())
+}
+
+/// `list(...)` of evaluated values, named by the tags of `call`'s arguments when any has one.
+/// `None` when the call does not list `values` one for one.
+fn direct_list<'a, 's>(
+    context: &'a mut Cx<'s>,
+    call: Local<'s>,
+    values: &[Local<'s>],
+) -> R<Option<Gc<'a>>> {
+    let Some(call) = call.downcast::<Language>() else {
+        return Ok(None);
+    };
+    let mut count = 0;
+    let mut named = false;
+    for tag in argument_tags(context, call) {
+        count += 1;
+        named |= tag.r_type() != SexpType::Nil;
+    }
+    if count != values.len() {
+        return Ok(None);
+    }
+    let result = context.alloc_unfilled::<List>(count)?;
+    let result = result.fill_elements(context, values.iter().map(|value| value.read(context)));
+    if !named {
+        return Ok(Some(result.finish().read(context).value()));
+    }
+    let names = context.alloc_unfilled::<Str>(count)?;
+    let names = names.fill_elements(
+        context,
+        argument_tags(context, call).map(|tag| match tag.downcast::<Symbol>() {
+            Some(tag) => tag.name(),
+            None => handles::blank(),
+        }),
+    );
+    let names = names.finish().value();
+    let mut result = result.owned();
+    set_attribute(context, &mut result, symbol(|symbols| symbols.names), names)?;
+    Ok(Some(result.finish().read(context).value()))
+}
+
+/// The tag of each argument of `call`, in order: a symbol, or `NULL`.
+#[inline]
+fn argument_tags<'a, 's: 'a>(
+    context: &'a Cx<'_>,
+    call: Local<'s, Language>,
+) -> impl Iterator<Item = Gc<'a>> {
+    let mut cell = call.read(context).rest();
+    std::iter::from_fn(move || {
+        let pair = cell.downcast::<Pairlist>()?;
+        cell = pair.rest();
+        Some(pair.tag())
+    })
 }
 
 // Lengths and names.
