@@ -4053,29 +4053,6 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// Whether `ty` holds a literal variable that a use may still decide.
-    fn holds_open_literal(&mut self, ty: Ty<'db>) -> bool {
-        let mut open = FxHashSet::default();
-        self.table.collect_unbound_vars(self.db, ty, &mut open);
-        open.into_iter().any(|var| {
-            let representative = self.table.find(var);
-            self.table.literal_of(representative).is_some()
-        })
-    }
-
-    /// `ty` with its undecided literals given their defaults, and nothing else decided.
-    fn settle_open_literals(&mut self, ty: Ty<'db>) -> Ty<'db> {
-        let mut open = FxHashSet::default();
-        self.table.collect_unbound_vars(self.db, ty, &mut open);
-        for var in open {
-            let representative = self.table.find(var);
-            if let Some((literal, native)) = self.table.literal_of(representative) {
-                self.default_literal_var(Ty::new(self.db, TyKind::Var(literal)), native);
-            }
-        }
-        self.table.resolve(self.db, ty)
-    }
-
     /// `ty` as a report names it: an open literal shows the type it defaults to and stays
     /// open for later uses.
     fn reported(&mut self, ty: Ty<'db>) -> Ty<'db> {
@@ -4126,8 +4103,8 @@ impl<'db, 'a> Checker<'db, 'a> {
         found: Ty<'db>,
         value: Option<ExprId>,
     ) -> TypeError<'db> {
-        let expected = self.settle_literals(expected);
-        let found = self.settle_literals(found);
+        let expected = self.reported(expected);
+        let found = self.reported(found);
         if let Some(field) = value.and_then(|value| self.assignment_for_record(value, expected)) {
             return TypeError {
                 range,
@@ -10537,7 +10514,6 @@ impl<'db, 'a> Checker<'db, 'a> {
             _ => false,
         };
         if !fits {
-            let array = self.settle_literals(array);
             let array = self.reported(array);
             self.errors.push(TypeError {
                 range: operand_range,
@@ -21339,14 +21315,18 @@ impl<'db, 'a> Checker<'db, 'a> {
                 },
             });
         }
-        let shown_expected = self.reported(resolved_expected);
-        if let (TyKind::Function(found_function), TyKind::Function(expected_function)) = (
-            resolved_found.kind(self.db),
-            shown_expected.kind(self.db),
-        ) && let Some(mismatch) =
-            self.table
-                .explain_function_mismatch(self.db, found_function, expected_function)
-        {
+        // The explanation compares against the expected type as a report names it, and its
+        // compatibility checks keep their bindings, so the probe rolls both back.
+        let probe = self.begin_probe();
+        let shown_expected = self.settle_literals(resolved_expected);
+        let mismatch = match (resolved_found.kind(self.db), shown_expected.kind(self.db)) {
+            (TyKind::Function(found_function), TyKind::Function(expected_function)) => self
+                .table
+                .explain_function_mismatch(self.db, found_function, expected_function),
+            _ => None,
+        };
+        self.end_probe(probe, false);
+        if let Some(mismatch) = mismatch {
             return Err(TypeError {
                 range,
                 kind: TypeErrorKind::CallbackShape {
@@ -24661,24 +24641,6 @@ impl<'db, 'a> Checker<'db, 'a> {
             if current.is_none() && branch_entry.is_some() {
                 current = self.materialize_pre_state(slot, true).map(EnvEntry::Mono);
             }
-            // Each loop pass writes fresh variables for the literals inside a value, as in
-            // `:Stop(1)`, so a pass that changes the slot decides them, or every pass would.
-            let branch_entry = match (edge, current, branch_entry) {
-                (JoinEdge::LoopBack, Some(EnvEntry::Mono(a)), Some(EnvEntry::Mono(b)))
-                    if a != b && !self.open_literal_var(b) && self.holds_open_literal(b) =>
-                {
-                    let probe = self.begin_probe();
-                    let trial = self.join_written_values(a, b);
-                    let alike = self.table.resolve(self.db, trial) == self.table.resolve(self.db, a);
-                    self.end_probe(probe, false);
-                    if alike {
-                        branch_entry
-                    } else {
-                        Some(EnvEntry::Mono(self.settle_open_literals(b)))
-                    }
-                }
-                _ => branch_entry,
-            };
             // Each loop pass writes fresh variables for its literals, so two writes that
             // decided them alike differ only before resolution.
             let same_resolved = match (current, branch_entry) {
@@ -24744,17 +24706,8 @@ impl<'db, 'a> Checker<'db, 'a> {
                 }
                 (_, None) => None,
             };
-            // A join that unified fresh literal variables, as a tag payload a loop pass writes,
-            // builds a new type that resolves as the current one does.
-            let resolves_alike = match (joined, current) {
-                (Some(EnvEntry::Mono(a)), Some(EnvEntry::Mono(b))) if a != b => {
-                    self.table.resolve(self.db, a) == self.table.resolve(self.db, b)
-                }
-                _ => false,
-            };
             if let Some(entry) = joined
                 && Some(entry) != current
-                && !resolves_alike
             {
                 self.environment.set(slot, entry);
                 changed.push(slot);
