@@ -2088,7 +2088,7 @@ pub fn call_environment<'s>(context: &mut Cx<'s>, call: &Call<'_>) -> R<Local<'s
 
 /// A symbol's handle for any scope: the heap roots every symbol for its whole life.
 #[inline]
-pub fn permanent(symbol: Local<'_, Symbol>) -> Gc<'static, Symbol> {
+pub fn permanent(symbol: impl Pointer<Symbol>) -> Gc<'static, Symbol> {
     // SAFETY: the symbol is live, and the symbol table keeps it so.
     unsafe { Gc::adopt(symbol.raw()) }
 }
@@ -2342,6 +2342,12 @@ pub fn type_name(value: impl Pointer<Value>) -> &'static str {
 pub fn warning_in(_context: &mut Cx<'_>, call: Local<'_>, message: impl Into<String>) -> R<()> {
     // SAFETY: a warning may run a calling handler, which is R code and so needs `&mut Cx`.
     unsafe { conditions::warning_call(call.raw(), message) }
+}
+
+/// The value of the option `name`, or `NULL` when it is unset.
+pub fn option<'s>(context: &Cx<'s>, name: &str) -> Local<'s> {
+    // SAFETY: the options list holds the value, and the lookup allocates nothing.
+    unsafe { rooted(context, crate::envir::get_option(name)) }
 }
 
 /// The symbol spelled by `name`.
@@ -2813,6 +2819,42 @@ pub fn forced_promise<'s>(
     unsafe {
         let promise = crate::eval::forced_promise(code.raw(), value.raw())?;
         Ok(Local::adopt(rooted(context, promise).raw()))
+    }
+}
+
+/// A promise of the variable `symbol` in `environment`.
+pub fn variable_promise<'s>(
+    _context: &mut Cx<'s>,
+    symbol: impl Pointer<Symbol>,
+    environment: Local<'_, Environment>,
+) -> R<Local<'s, Promise>> {
+    // SAFETY: symbols are permanent and the environment is rooted. The promise allocates, which
+    // `&mut Cx` permits, and the allocation roots it in the context's scope.
+    unsafe {
+        let promise = crate::eval::make_promise(symbol.raw(), environment.raw())?;
+        Ok(Local::adopt(promise))
+    }
+}
+
+/// Whether the frame of `environment` itself binds `symbol` to the empty argument: a formal
+/// its call left out and its function has not assigned since.
+pub fn binds_empty_argument(
+    _context: &mut Cx<'_>,
+    environment: Local<'_, Environment>,
+    symbol: impl Pointer<Symbol>,
+) -> R<bool> {
+    // SAFETY: the environment is rooted and symbols are permanent, and an active binding the
+    // lookup reaches runs R code, which `&mut Cx` permits.
+    unsafe {
+        let (environment, symbol) = (environment.raw(), symbol.raw());
+        let value = if environment.has_gp(gp::SLOT_FRAME)
+            && let Some(value) = crate::eval::slot_binding(environment, symbol, false)
+        {
+            value
+        } else {
+            crate::eval::find_var_in_frame(symbol, environment)?
+        };
+        Ok(value == values::missing_arg())
     }
 }
 
