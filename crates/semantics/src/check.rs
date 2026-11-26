@@ -3473,6 +3473,11 @@ fn is_character(db: &dyn Db, ty: Ty<'_>) -> bool {
 /// whole tags, so the bound is reached only by a step function that adds a new tag each pass.
 const ACCUMULATOR_PASS_CAP: usize = 3;
 
+/// The accumulators of one callback (`Checker::accumulator_states`): each formal's index, the
+/// argument that passes its initial state, and whether the callback returns the state as its
+/// tags' payload.
+type AccumulatorStates = SmallVec<[(usize, usize, bool); 1]>;
+
 /// The single source for both `operator_group`'s `Arith` and the method prefixes
 /// the numeric constraint admits; restating it lets the two drift apart.
 const ARITHMETIC_OPERATORS: [BinaryOperator; 7] = [
@@ -18698,7 +18703,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             return call_arguments;
         }
         // Only a single candidate widens, because the hints of several candidates must agree.
-        let widening: Vec<SmallVec<[(usize, usize, bool); 1]>> = match callees {
+        let widening: Vec<AccumulatorStates> = match callees {
             [callee] => (0..call_arguments.len())
                 .map(|index| {
                     if deferred.contains(index) {
@@ -18765,7 +18770,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         arguments: &[CallArgument<'db>],
         deferred: &Bitset<'a, usize>,
         callback: usize,
-    ) -> SmallVec<[(usize, usize, bool); 1]> {
+    ) -> AccumulatorStates {
         let mut states = SmallVec::new();
         let callee = self.structural(self.table.shallow_resolve(self.db, callee));
         let TyKind::Function(function) = callee.kind(self.db) else {
@@ -19194,7 +19199,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         callees: &[Ty<'db>],
         arguments: &[CallArgument<'db>],
         deferred: &Bitset<'a, usize>,
-        widening: &[SmallVec<[(usize, usize, bool); 1]>],
+        widening: &[AccumulatorStates],
     ) -> Vec<Option<Vec<Option<Ty<'db>>>>> {
         let mut agreed: Vec<Option<Vec<Option<Ty<'db>>>>> = vec![None; arguments.len()];
         let mut first_candidate = true;
