@@ -1047,21 +1047,25 @@ fn names_foreign(token: &SyntaxToken) -> bool {
     while let Some(candidate) = next.as_ref().filter(|candidate| trivia(candidate.kind())) {
         next = candidate.next_token();
     }
-    let argument_name = next.is_some_and(|next| next.kind() == SyntaxKind::EQ);
+    let argument_name = next
+        .as_ref()
+        .is_some_and(|next| next.kind() == SyntaxKind::EQ);
     let member = argument_name
         || previous
             .is_some_and(|previous| matches!(previous.kind(), SyntaxKind::DOLLAR | SyntaxKind::AT));
-    let subscript_argument = argument_name
-        && token
-            .parent_ancestors()
-            .find(|ancestor| ancestor.kind() == SyntaxKind::ARGUMENT_LIST)
-            .and_then(|list| list.parent())
-            .is_some_and(|subscript| {
-                matches!(
-                    subscript.kind(),
-                    SyntaxKind::SUBSET_EXPR | SyntaxKind::SUBSET2_EXPR
-                )
-            });
+    let subscript_argument = next
+        .filter(|next| next.kind() == SyntaxKind::EQ)
+        .and_then(|equals| equals.parent())
+        .filter(|argument| argument.kind() == SyntaxKind::ARGUMENT)
+        .and_then(|argument| argument.parent())
+        .filter(|list| list.kind() == SyntaxKind::ARGUMENT_LIST)
+        .and_then(|list| list.parent())
+        .is_some_and(|subscript| {
+            matches!(
+                subscript.kind(),
+                SyntaxKind::SUBSET_EXPR | SyntaxKind::SUBSET2_EXPR
+            )
+        });
     foreign_syntax
         || SPELLING_BOUND.contains(&token.text())
         || subscript_argument

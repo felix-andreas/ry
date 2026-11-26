@@ -391,6 +391,7 @@ fn renames_leave_subscript_argument_names_alone() {
         DocumentKind::Test,
     );
     let original = vec![String::new()];
+    let mut renamed = 0;
     for seed in 0..64 {
         let Some(rename) = plan_rename(&db, &state, &original, &mut SplitMix64(seed)) else {
             continue;
@@ -400,7 +401,12 @@ fn renames_leave_subscript_argument_names_alone() {
             text.contains("roll = TRUE"),
             "seed {seed} renamed a subscript's argument name:\n{text}"
         );
+        renamed += 1;
     }
+    assert!(
+        renamed > 0,
+        "no seed renamed anything, so the test checks nothing"
+    );
 }
 
 /// The rename relation reports a renamed project that lost a finding: the real rendering of the
