@@ -620,7 +620,8 @@ const NATIVE_BUILTINS: &[BuiltinDef] = &[
     builtin(".Call", -1, |call| unsafe {
         foreign_context(call.call, || dot_call(call, RoutineKind::Call))
     })
-    .direct(crate::dot_call::direct_call),
+    .direct(crate::dot_call::direct_call)
+    .direct_by_position(),
     builtin(".External", -1, |call| unsafe {
         foreign_context(call.call, || dot_call(call, RoutineKind::External))
     }),

@@ -2466,6 +2466,25 @@ impl Heap {
         vector.set_element_unbarriered(index, value);
     }
 
+    /// [`Heap::set_element`] for a string stored into a character vector that is not ALTREP,
+    /// which is what native code does once per cell when it fills or recycles a column. Knowing
+    /// both kinds leaves three loads and the barrier's test: a string is inert, only a list
+    /// counts a store into a pending escape, and the string it replaces is never reclaimable, so
+    /// losing its last counted reference needs no note. The barrier comes after the store, in
+    /// tail position, so a caller that inlines this keeps no frame.
+    #[inline(always)]
+    pub unsafe fn set_string_element(&mut self, vector: Sexp, index: usize, value: Sexp) {
+        debug_assert!(vector.kind() == SexpType::String && !vector.is_altrep());
+        debug_assert!(value.kind() == SexpType::Char);
+        self.verify_store(vector, value);
+        if vector.flags() & flag_bits::UNTRACKED == 0 {
+            value.increment_refcount();
+            vector.stored_element(index).decrement_refcount();
+        }
+        vector.set_element_unbarriered(index, value);
+        self.element_barrier(vector, index, value);
+    }
+
     /// Giving an Array any attribute turns it back into a plain R vector, because an Array is
     /// attribute-free by definition.
     pub unsafe fn set_attrib(&mut self, object: Sexp, value: Sexp) {
@@ -3563,6 +3582,13 @@ impl Heap {
 
     pub fn remove_root_source(&mut self, id: u64) {
         self.sources.retain(|(source_id, _)| *source_id != id);
+    }
+
+    /// Whether a finalizer waits to run. A native call asks on its return, so the answer is one
+    /// load there and the common call runs none.
+    #[inline(always)]
+    pub fn finalizers_ready(&self) -> bool {
+        !self.ready_to_finalize.is_empty()
     }
 
     /// Weak references whose keys have died and whose finalizers should now run. The caller

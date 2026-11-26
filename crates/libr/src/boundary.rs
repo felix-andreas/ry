@@ -380,7 +380,9 @@ pub unsafe fn call_native(function: DlFunc, args: &[Sexp], what: &str) -> ApiRes
             runtime.nil()
         }
     };
-    run_pending_finalizers();
+    if runtime.heap.finalizers_ready() {
+        run_pending_finalizers();
+    }
     Ok(result)
 }
 
