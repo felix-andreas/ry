@@ -266,17 +266,17 @@ NULL
 
 #---- standard_library_function_without_native_code
 #~~~~ script.R
-# blocked: interspersed
-interspersed <- function(first: F64) -> F64 {
-  spaced <- List.intersperse([first, 2, 3], 0)
-  spaced[[1]]
+# blocked: parsed
+parsed <- function(first: Str) -> I64 {
+  numbers <- List.map_try([first, "2", "3"], Str.to_i64)
+  Result.with_default(Result.map(numbers, List.sum), 0)
 }
-cat(interspersed(1), "\n")
+print(parsed("1"))
 #++++
 == script.R
-interspersed: fn(first: F64) -> F64
-NULL
-82..98 warning[interpreted] this function runs in the interpreter, because `List.intersperse` is not compiled natively yet. Write the step with a loop or another standard library function
+parsed: fn(first: Str) -> I64
+I64
+71..83 warning[interpreted] this function runs in the interpreter, because `List.map_try` is not compiled natively yet. Write the step with a loop or another standard library function
 
 #---- standard_library_function_passed_by_name
 #~~~~ script.R
