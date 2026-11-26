@@ -11,9 +11,8 @@ use {
         eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
         handles::{
             self, Cx, Environment, Gc, Integer, Language, Local, Pairlist, Promise, Str,
-            StringFill, Symbol, Tagged, Value, attribute_copy,
-            attributes_unshared, dense, get_attribute, is_s4, null, safe, set_class, symbol,
-            unreferenced,
+            StringFill, Symbol, Tagged, Value, attribute_copy, attributes_unshared, dense,
+            get_attribute, is_s4, null, safe, set_class, symbol, unreferenced,
         },
         interp,
         unwind::{R, Unwind, error, error_in},
@@ -1619,10 +1618,8 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
             let environment = handles::held(context, method_env)
                 .downcast::<Environment>()
                 .ok_or_else(|| error("internal error: a method's frame has no environment"))?;
-            let args = std::slice::from_raw_parts_mut(
-                args.as_mut_ptr().cast::<Tagged<'_>>(),
-                args.len(),
-            );
+            let args =
+                std::slice::from_raw_parts_mut(args.as_mut_ptr().cast::<Tagged<'_>>(), args.len());
             patch_args_by_actuals(context, formals, args, environment, &mut made)
         })?;
     }
@@ -1740,7 +1737,10 @@ fn patch_args_by_actuals<'s>(
         if name.is(dots) {
             continue;
         }
-        if let Some(position) = tags.iter().position(|tag| tag.is_some_and(|tag| tag.is(name))) {
+        if let Some(position) = tags
+            .iter()
+            .position(|tag| tag.is_some_and(|tag| tag.is(name)))
+        {
             found[index] = patch_argument(context, &mut args[position], name, method_env, made)?;
             used[position] = 2;
         }
@@ -1779,7 +1779,13 @@ fn patch_args_by_actuals<'s>(
             if found[formal] == FormalMatch::Local {
                 args[position].value = handles::missing_argument();
             } else {
-                patch_argument(context, &mut args[position], names[formal], method_env, made)?;
+                patch_argument(
+                    context,
+                    &mut args[position],
+                    names[formal],
+                    method_env,
+                    made,
+                )?;
             }
             used[position] = 1;
             position += 1;
