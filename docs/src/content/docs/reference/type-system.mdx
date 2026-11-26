@@ -5715,9 +5715,9 @@ interpreted
 | a function literal used as a value other than an argument, a function that a function returns, a call of a variable that holds a function | define the function inside the native function, or pass it straight to the function that calls it |
 | a recursive call that passes a function, as in `count_down(n - 1, f)` | a loop, or a local function defined inside the recursive one |
 | an R function passed by name, as in `List.map(xs, sqrt)` | the standard library function (`Num.sqrt`), or a function literal |
-| a standard library function without native code, such as `List.intersperse` | a loop or another standard library function |
+| a standard library function without native code, such as `List.map_try` | a loop or another standard library function |
 | parameter types in a `#:` comment or on the assigned name, as in `f: fn(x: I64) -> I64 <- function(x) x` | write the types on the parameters |
-| a call of a typed or standard library function with named arguments, or one that leaves a default out | pass every argument by position |
+| a call of a typed or standard library function with named arguments (`Num.is_approx_eq` takes them), or one that leaves a default out | pass every argument by position |
 | a standard library function called with a `ry::` prefix | the name without the prefix |
 | an `I64`, a `List<I64>`, a `Dict` or a `Set` passed to an R function as it is | `Num.to_r(x)`, `List.to_r(xs)`, `Dict.keys` and `Dict.values`, or `Set.to_list` |
 | `<<-`, and an assignment to anything but a variable or `xs[[i]]` | return the new value; build a new record with `(..record, field = value)` |

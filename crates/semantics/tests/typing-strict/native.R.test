@@ -145,7 +145,7 @@ NULL
 
 #---- invisible_result
 #~~~~ script.R
-# blocked: remember, show_all
+# blocked: remember, show_all, bump_all
 remember <- function(x: F64) -> F64 {
   doubled <- x * 2
 }
@@ -155,16 +155,21 @@ show_all <- function(n: I64) -> NULL {
     NULL
   }
 }
+bump_all <- function(xs: List<I64>) List.for_each(xs, function(x: I64) x + 1)
 show_all(2)
 cat(remember(2), "\n")
+bump_all([1, 2])
 #++++
 == script.R
 remember: fn(x: F64) -> F64
 show_all: fn(n: I64) -> NULL
+bump_all: fn(xs: List<I64>) -> NULL
 NULL
 NULL
-70..86 warning[interpreted] this function runs in the interpreter, because the function ends in an expression whose value R returns invisibly, which is not compiled natively yet. End the function with the value itself, or with `NULL`
-130..206 warning[interpreted] this function runs in the interpreter, because the function ends in an expression whose value R returns invisibly, which is not compiled natively yet. End the function with the value itself, or with `NULL`
+NULL
+80..96 warning[interpreted] this function runs in the interpreter, because the function ends in an expression whose value R returns invisibly, which is not compiled natively yet. End the function with the value itself, or with `NULL`
+140..216 warning[interpreted] this function runs in the interpreter, because the function ends in an expression whose value R returns invisibly, which is not compiled natively yet. End the function with the value itself, or with `NULL`
+255..296 warning[interpreted] this function runs in the interpreter, because the function ends in an expression whose value R returns invisibly, which is not compiled natively yet. End the function with the value itself, or with `NULL`
 
 #---- super_assignment
 #~~~~ script.R
@@ -266,17 +271,17 @@ NULL
 
 #---- standard_library_function_without_native_code
 #~~~~ script.R
-# blocked: interspersed
-interspersed <- function(first: F64) -> F64 {
-  spaced <- List.intersperse([first, 2, 3], 0)
-  spaced[[1]]
+# blocked: parsed
+parsed <- function(first: Str) -> I64 {
+  numbers <- List.map_try([first, "2", "3"], Str.to_i64)
+  Result.with_default(Result.map(numbers, List.sum), 0)
 }
-cat(interspersed(1), "\n")
+print(parsed("1"))
 #++++
 == script.R
-interspersed: fn(first: F64) -> F64
-NULL
-82..98 warning[interpreted] this function runs in the interpreter, because `List.intersperse` is not compiled natively yet. Write the step with a loop or another standard library function
+parsed: fn(first: Str) -> I64
+I64
+71..83 warning[interpreted] this function runs in the interpreter, because `List.map_try` is not compiled natively yet. Write the step with a loop or another standard library function
 
 #---- standard_library_function_passed_by_name
 #~~~~ script.R

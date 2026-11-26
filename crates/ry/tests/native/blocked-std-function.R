@@ -1,6 +1,6 @@
-# blocked: interspersed
-interspersed <- function(first: F64) -> F64 {
-  spaced <- List.intersperse([first, 2, 3], 0)
-  spaced[[1]]
+# blocked: parsed
+parsed <- function(first: Str) -> I64 {
+  numbers <- List.map_try([first, "2", "3"], Str.to_i64)
+  Result.with_default(Result.map(numbers, List.sum), 0)
 }
-cat(interspersed(1), "\n")
+print(parsed("1"))

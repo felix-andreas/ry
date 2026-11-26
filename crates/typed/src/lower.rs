@@ -3595,12 +3595,35 @@ impl Lowering<'_> {
             | "List.walk_until"
             | "List.walk_backwards_until"
             | "List.walk_with_index"
-            | "List.walk_with_index_until" => self.walk(name, &arguments),
+            | "List.walk_with_index_until"
+            | "List.walk_from"
+            | "List.walk_from_until"
+            | "Dict.walk"
+            | "Dict.walk_until" => self.walk(name, &arguments),
             "List.any" | "List.all" => self.any_all(name == "List.all", &arguments),
             "List.product" => self.product(&arguments),
             "List.single" | "List.prepend" => self.single_or_prepend(name, &arguments),
             "List.set" => self.list_set(&arguments),
             "List.drop_at" => self.drop_at(&arguments),
+            "List.replace" => self.replace(&arguments),
+            "List.update" => self.list_update(&arguments),
+            "List.split_at" => self.split_at(&arguments),
+            "List.split_first" | "List.split_last" => {
+                self.split_around(name == "List.split_last", &arguments)
+            }
+            "List.starts_with" | "List.ends_with" => {
+                self.affix(name == "List.starts_with", &arguments)
+            }
+            "List.intersperse" => self.intersperse(&arguments),
+            "List.join" => self.join(&arguments),
+            "List.for_each" => self.for_each(&arguments),
+            "Num.div_checked"
+            | "Num.div_trunc_checked"
+            | "Num.div_ceil_checked"
+            | "Num.rem_checked"
+            | "Num.sqrt_checked"
+            | "Num.log_checked" => self.checked_number(name, &arguments),
+            "Num.is_approx_eq" => self.is_approx_eq(&arguments),
             "length" => {
                 let [a] = arguments.exactly(1)?[..] else {
                     return Err(Refusal::new("a malformed `length`"));
@@ -4182,7 +4205,7 @@ impl Lowering<'_> {
             }
             "List.sublist" | "List.take_first" | "List.take_last" | "List.drop_first"
             | "List.drop_last" => self.slice(name, &arguments),
-            "lapply" | "vapply" | "List.map" => self.map(name, &arguments),
+            "lapply" | "vapply" | "List.map" | "List.map_with_index" => self.map(name, &arguments),
             "List.sort_with" => self.sort_with(&arguments),
             ".ry_record" | ".ry_tuple" | ".ry_tag" => self.construct(name, &arguments),
             ".ry_update" => self.update(&arguments),
@@ -4224,6 +4247,13 @@ impl Lowering<'_> {
             "Dict.get" => self.dict_get(&arguments),
             "Dict.insert" => self.dict_insert(&arguments),
             "Dict.to_list" => self.dict_to_list(&arguments),
+            "Dict.from_list" => self.dict_from_list(&arguments),
+            "Dict.map" => self.dict_map(&arguments),
+            "Dict.keep_if" | "Dict.drop_if" | "Dict.keep_shared" | "Dict.remove_all" => {
+                self.dict_filter(name, &arguments)
+            }
+            "Dict.insert_all" => self.dict_insert_all(&arguments),
+            "Result.map2" => self.result_map2(&arguments),
             "Dict.len" | "Dict.keys" | "Dict.values" => {
                 let [dict] = arguments.exactly(1)?[..] else {
                     return Err(Refusal::new("a malformed `Dict` function"));
@@ -4576,9 +4606,12 @@ impl Lowering<'_> {
         let (vector, function, template) =
             match (name, &arguments.exactly(arguments.items.len())?[..]) {
                 ("vapply", &[vector, function, template]) => (vector, function, Some(template)),
-                ("lapply" | "List.map", &[vector, function]) => (vector, function, None),
+                ("lapply" | "List.map" | "List.map_with_index", &[vector, function]) => {
+                    (vector, function, None)
+                }
                 _ => return Err(Refusal::new("a map of an unsupported form")),
             };
+        let with_index = name == "List.map_with_index";
         let callable = self.function_argument(function)?;
         let vector = self.value(vector)?;
         let ty = self.builder.ty(vector);
@@ -4597,7 +4630,12 @@ impl Lowering<'_> {
         };
         // `List.map` over a ry list builds a ry list of the results, which the interpreter
         // cannot do from no items at all.
-        let to_array = name == "List.map" && matches!(ty, Type::Vector { array: true, .. });
+        let to_array = name.starts_with("List.") && matches!(ty, Type::Vector { array: true, .. });
+        if with_index && !to_array {
+            return Err(Refusal::new(
+                "a `List.map_with_index` of something other than a ry list",
+            ));
+        }
         let held = self.builder.emit(ty, Op::Copy(vector));
         let count = self.builder.emit(Type::Int, Op::Length(held));
         if to_array {
@@ -4613,8 +4651,12 @@ impl Lowering<'_> {
         let element = self
             .builder
             .emit(Type::of_item(item), Op::ItemAt(held, positions.counter));
+        let mut inputs: SmallVec<[Local; 2]> = SmallVec::from_slice(&[element]);
+        if with_index {
+            inputs.push(positions.counter);
+        }
         let value = self
-            .apply(callable, &[element])?
+            .apply(callable, &inputs)?
             .ok_or(Refusal::new("a mapped function that never completes"))?;
         // A ry list holds no `NA`, so a logical a mapped function returns into one must be
         // settled, and an `NA` stops the native code as a missing item does in the interpreter.
@@ -4863,19 +4905,31 @@ impl Lowering<'_> {
 
     /// `List.count_if(list, predicate)` as an `I64` count, or `List.walk(list, state, f)` as the
     /// state each item's step leaves, in a loop over the items with the function inlined.
+    /// `List.walk_from` starts at a position, and `Dict.walk` steps with each key and value.
     unsafe fn walk(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
         let counting = name == "List.count_if";
         let backwards = name.starts_with("List.walk_backwards");
         let with_index = name.starts_with("List.walk_with_index");
+        let from = name.starts_with("List.walk_from");
+        let over_dict = name.starts_with("Dict.");
         let until = name.ends_with("_until");
-        let (list, state, function) =
-            match (counting, &arguments.exactly(arguments.items.len())?[..]) {
-                (true, &[list, predicate]) => (list, None, predicate),
-                (false, &[list, state, f]) => (list, Some(state), f),
-                _ => return Err(Refusal::new("a walk of an unsupported form")),
-            };
+        let (list, start, state, function) = match (
+            counting,
+            from,
+            &arguments.exactly(arguments.items.len())?[..],
+        ) {
+            (true, _, &[list, predicate]) => (list, None, None, predicate),
+            (false, false, &[list, state, f]) => (list, None, Some(state), f),
+            (false, true, &[list, index, state, f]) => (list, Some(index), Some(state), f),
+            _ => return Err(Refusal::new("a walk of an unsupported form")),
+        };
         // A walk over `List.range(from, to)` counts from `from` to `to` and builds no list.
-        let range = if !backwards && !with_index && self.is_library_call(list, "List.range", 2)? {
+        let range = if !backwards
+            && !with_index
+            && !from
+            && !over_dict
+            && self.is_library_call(list, "List.range", 2)?
+        {
             self.counted_range(list)?
         } else {
             None
@@ -4885,11 +4939,30 @@ impl Lowering<'_> {
             None => {
                 let list = self.value(list)?;
                 let ty = self.builder.ty(list);
-                if !matches!(ty, Type::Vector { array: true, .. } | Type::List(_)) {
+                let walkable = if over_dict {
+                    matches!(ty, Type::Dict { .. })
+                } else {
+                    matches!(ty, Type::Vector { array: true, .. } | Type::List(_))
+                };
+                if !walkable {
                     return Err(Refusal::new("a walk over something that is not a list"));
                 }
                 (Some(list), ty)
             }
+        };
+        // A start before position 1 is an error, which the interpreter raises.
+        let start = match start {
+            Some(index) => {
+                let index = self.value(index)?;
+                let index = self.to_i64(index)?;
+                let one = self.builder.emit(Type::I64, Op::Const(Constant::I64(1)));
+                let before = self
+                    .builder
+                    .emit(Type::Lgl, Op::Compare(Compare::Lt, Item::I64, index, one));
+                self.fail_if(before);
+                Some(index)
+            }
+            None => None,
         };
         let callable = self.function_argument(function)?;
         // Counting a list of logicals with the identity counts its true items, which the fusion
@@ -4963,10 +5036,41 @@ impl Lowering<'_> {
         // widens, keyed by the step function.
         let state_ty = self.widened_type(function, self.builder.ty(state));
         let total = self.builder.emit(state_ty, Op::Copy(state));
+        let mut entry_value = None;
         let (positions, element, position) = match (range, list) {
             (Some((start, end, _)), _) => {
                 let positions = self.count_up(start, end);
                 let element = self.builder.emit(Type::I64, Op::Copy(positions.counter));
+                (positions, element, positions.counter)
+            }
+            (None, Some(dict)) if over_dict => {
+                let Type::Dict { key, value } = ty else {
+                    return Err(Refusal::new(
+                        "a walk over something that is not a dictionary",
+                    ));
+                };
+                let keys = self.builder.emit(
+                    Type::Vector {
+                        item: key,
+                        array: true,
+                    },
+                    Op::DictKeys(dict),
+                );
+                let values = self.builder.emit(
+                    Type::Vector {
+                        item: value,
+                        array: true,
+                    },
+                    Op::DictValues(dict),
+                );
+                let positions = self.positions(keys);
+                let element = self
+                    .builder
+                    .emit(Type::of_item(key), Op::ItemAt(keys, positions.counter));
+                entry_value = Some(
+                    self.builder
+                        .emit(Type::of_item(value), Op::ItemAt(values, positions.counter)),
+                );
                 (positions, element, positions.counter)
             }
             (None, Some(list)) => {
@@ -4975,7 +5079,13 @@ impl Lowering<'_> {
                     .ok_or(Refusal::new("a walk over something that is not a list"))?;
                 let held = self.builder.emit(ty, Op::Copy(list));
                 let past_end = backwards.then(|| self.past_end(held));
-                let positions = self.positions(held);
+                let positions = match start {
+                    Some(start) => {
+                        let count = self.builder.emit(Type::I64, Op::Length(held));
+                        self.count_up(start, count)
+                    }
+                    None => self.positions(held),
+                };
                 let position = self.position(past_end, positions.counter);
                 let element = self
                     .builder
@@ -5010,6 +5120,7 @@ impl Lowering<'_> {
             self.builder.switch_to(after);
         } else {
             let mut inputs: SmallVec<[Local; 3]> = SmallVec::from_slice(&[total, element]);
+            inputs.extend(entry_value);
             if with_index {
                 inputs.push(position);
             }
@@ -5274,6 +5385,390 @@ impl Lowering<'_> {
             .emit(Type::Lgl, Op::Compare(Compare::Le, Item::I64, index, count));
         let both = self.builder.emit(Type::Lgl, Op::And(above, below));
         self.builder.emit(Type::Bool, Op::Truth(both))
+    }
+
+    /// `List.replace(list, index, value)` as `(list = ..., value = ...)`: the list with `value`
+    /// at `index` and the item it replaced, or the list unchanged and `value` itself when
+    /// `index` is not a position of the list.
+    unsafe fn replace(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [list, index, value] = arguments.exactly(3)?[..] else {
+            return Err(Refusal::new("a malformed `List.replace`"));
+        };
+        let (list, ty) = self.known_list(list, "List.replace")?;
+        let item = ty.items().ok_or(Refusal::new(
+            "a `List.replace` of something other than a ry list",
+        ))?;
+        let index = self.value(index)?;
+        let index = self.to_i64(index)?;
+        let value = self.value(value)?;
+        self.usable(value)?;
+        if self.builder.ty(value).held_item() != Some(item) {
+            return Err(Refusal::new(
+                "a `List.replace` with an item of another type",
+            ));
+        }
+        let inside = self.within_list(list, index);
+        let output = self.builder.local(ty);
+        self.builder.push(Some(output), Op::Copy(list));
+        let previous = self.builder.local(Type::of_item(item));
+        self.builder.push(Some(previous), Op::Copy(value));
+        let (set, join) = (self.builder.block(), self.builder.block());
+        self.builder.terminate(Terminator::Branch {
+            condition: inside,
+            then: set,
+            otherwise: join,
+        });
+        self.builder.switch_to(set);
+        let old = self
+            .builder
+            .emit(Type::of_item(item), Op::ItemAt(list, index));
+        self.builder.push(Some(previous), Op::Copy(old));
+        let updated = self.builder.emit(ty, Op::Set(list, index, value));
+        self.builder.push(Some(output), Op::Copy(updated));
+        self.builder.terminate(Terminator::Jump(join));
+        self.builder.switch_to(join);
+        self.record_of(&[("list", output), ("value", previous)])
+    }
+
+    /// `List.update(list, index, f)`: the list with `f` of the item at `index` in its place, or
+    /// the list unchanged when `index` is not a position of the list.
+    unsafe fn list_update(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [list, index, function] = arguments.exactly(3)?[..] else {
+            return Err(Refusal::new("a malformed `List.update`"));
+        };
+        let (list, ty) = self.known_list(list, "List.update")?;
+        let item = ty.items().ok_or(Refusal::new(
+            "a `List.update` of something other than a ry list",
+        ))?;
+        let index = self.value(index)?;
+        let index = self.to_i64(index)?;
+        let callable = self.function_argument(function)?;
+        let inside = self.within_list(list, index);
+        let output = self.builder.local(ty);
+        self.builder.push(Some(output), Op::Copy(list));
+        let (set, join) = (self.builder.block(), self.builder.block());
+        self.builder.terminate(Terminator::Branch {
+            condition: inside,
+            then: set,
+            otherwise: join,
+        });
+        self.builder.switch_to(set);
+        let old = self
+            .builder
+            .emit(Type::of_item(item), Op::ItemAt(list, index));
+        let value = self.apply(callable, &[old])?.ok_or(Refusal::new(
+            "a `List.update` callback that never completes",
+        ))?;
+        self.usable(value)?;
+        if self.builder.ty(value).held_item() != Some(item) {
+            return Err(Refusal::new(
+                "a `List.update` callback that gives an item of another type",
+            ));
+        }
+        let updated = self.builder.emit(ty, Op::Set(list, index, value));
+        self.builder.push(Some(output), Op::Copy(updated));
+        self.builder.terminate(Terminator::Jump(join));
+        self.builder.switch_to(join);
+        Ok(output)
+    }
+
+    /// `List.split_at(list, count)` as `(before = ..., others = ...)`, the count clamped to the
+    /// list. A negative count is an error, which the interpreter raises.
+    unsafe fn split_at(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [list, count] = arguments.exactly(2)?[..] else {
+            return Err(Refusal::new("a malformed `List.split_at`"));
+        };
+        let (list, ty) = self.known_list(list, "List.split_at")?;
+        let count = self.value(count)?;
+        let count = self.to_i64(count)?;
+        let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+        let negative = self
+            .builder
+            .emit(Type::Lgl, Op::Compare(Compare::Lt, Item::I64, count, zero));
+        self.fail_if(negative);
+        let total = self.builder.emit(Type::I64, Op::Length(list));
+        let taken = self
+            .builder
+            .emit(Type::I64, Op::Arith(Arith::Min, Item::I64, count, total));
+        let rest = self
+            .builder
+            .emit(Type::I64, Op::Arith(Arith::Sub, Item::I64, total, taken));
+        let before = self.builder.emit(ty, Op::Slice(list, zero, taken));
+        let others = self.builder.emit(ty, Op::Slice(list, taken, rest));
+        self.record_of(&[("before", before), ("others", others)])
+    }
+
+    /// `List.split_first(list, delimiter)`, or `List.split_last`, as
+    /// `:Ok((before = ..., after = ...))` around the first (or last) item equal to `delimiter`,
+    /// or `:Err(:NotFound)`. Items compare as the interpreter's `identical` does, which for
+    /// whole numbers, strings and Bools is equality.
+    unsafe fn split_around(&mut self, last: bool, arguments: &Arguments) -> Result<Local, Refusal> {
+        let name = if last {
+            "List.split_last"
+        } else {
+            "List.split_first"
+        };
+        let [list, delimiter] = arguments.exactly(2)?[..] else {
+            return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
+        };
+        let (list, ty) = self.known_list(list, name)?;
+        let Some(item @ (Item::I64 | Item::Str | Item::Lgl)) = ty.items() else {
+            return Err(Refusal(Cow::Owned(format!(
+                "a `{name}` of items other than whole numbers, strings and Bools"
+            ))));
+        };
+        let delimiter = self.value(delimiter)?;
+        self.usable(delimiter)?;
+        // `identical` holds an `I64` item and an `F64` delimiter apart, which a comparison
+        // that converts one side would not.
+        if self.builder.ty(delimiter).held_item() != Some(item) {
+            return Err(Refusal(Cow::Owned(format!(
+                "a `{name}` with a delimiter of another type"
+            ))));
+        }
+        let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+        let found = self.builder.local(Type::I64);
+        self.builder.push(Some(found), Op::Copy(zero));
+        let held = self.builder.emit(ty, Op::Copy(list));
+        let past_end = last.then(|| self.past_end(held));
+        let positions = self.positions(held);
+        let position = self.position(past_end, positions.counter);
+        let element = self
+            .builder
+            .emit(Type::of_item(item), Op::ItemAt(held, position));
+        let equal = self.identical_items(element, delimiter, name)?;
+        let (hit, next) = (self.builder.block(), self.builder.block());
+        self.builder.terminate(Terminator::Branch {
+            condition: equal,
+            then: hit,
+            otherwise: next,
+        });
+        self.builder.switch_to(hit);
+        self.builder.push(Some(found), Op::Copy(position));
+        self.builder.terminate(Terminator::Jump(positions.exit));
+        self.builder.switch_to(next);
+        self.next_position(positions);
+        let present = self.test(Compare::Gt, Item::I64, found, zero);
+        let (split, missing) = (self.builder.block(), self.builder.block());
+        self.builder.terminate(Terminator::Branch {
+            condition: present,
+            then: split,
+            otherwise: missing,
+        });
+        self.builder.switch_to(split);
+        let one = self.builder.emit(Type::I64, Op::Const(Constant::I64(1)));
+        let taken = self
+            .builder
+            .emit(Type::I64, Op::Arith(Arith::Sub, Item::I64, found, one));
+        let total = self.builder.emit(Type::I64, Op::Length(held));
+        let rest = self
+            .builder
+            .emit(Type::I64, Op::Arith(Arith::Sub, Item::I64, total, found));
+        let before = self.builder.emit(ty, Op::Slice(held, zero, taken));
+        let after = self.builder.emit(ty, Op::Slice(held, found, rest));
+        let parts = self.record_of(&[("before", before), ("after", after)])?;
+        let ok = self.tag("Ok", &[parts])?;
+        let split_end = self.builder.current;
+        self.builder.switch_to(missing);
+        let reason = self.tag("NotFound", &[])?;
+        let err = self.tag("Err", &[reason])?;
+        self.joined_result(split_end, ok, err)
+    }
+
+    /// `List.starts_with(list, prefix)`, or `List.ends_with(list, suffix)`, in a loop over the
+    /// part that leaves at the first item that differs.
+    unsafe fn affix(&mut self, at_start: bool, arguments: &Arguments) -> Result<Local, Refusal> {
+        let name = if at_start {
+            "List.starts_with"
+        } else {
+            "List.ends_with"
+        };
+        let [list, part] = arguments.exactly(2)?[..] else {
+            return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
+        };
+        let (list, ty) = self.known_list(list, name)?;
+        let (part, part_ty) = self.known_list(part, name)?;
+        if ty != part_ty {
+            return Err(Refusal(Cow::Owned(format!(
+                "a `{name}` of lists of different item types"
+            ))));
+        }
+        let item = match ty.items() {
+            Some(item @ (Item::I64 | Item::Str | Item::Lgl)) => item,
+            _ => {
+                return Err(Refusal(Cow::Owned(format!(
+                    "a `{name}` of items other than whole numbers, strings and Bools"
+                ))));
+            }
+        };
+        let result = self.builder.local(Type::Lgl);
+        let yes = self.builder.emit(Type::Lgl, Op::Const(Constant::Lgl(1)));
+        self.builder.push(Some(result), Op::Copy(yes));
+        let total = self.builder.emit(Type::I64, Op::Length(list));
+        let length = self.builder.emit(Type::I64, Op::Length(part));
+        let longer = self.test(Compare::Gt, Item::I64, length, total);
+        let (short, check, done) = (
+            self.builder.block(),
+            self.builder.block(),
+            self.builder.block(),
+        );
+        self.builder.terminate(Terminator::Branch {
+            condition: longer,
+            then: short,
+            otherwise: check,
+        });
+        self.builder.switch_to(short);
+        let no = self.builder.emit(Type::Lgl, Op::Const(Constant::Lgl(0)));
+        self.builder.push(Some(result), Op::Copy(no));
+        self.builder.terminate(Terminator::Jump(done));
+        self.builder.switch_to(check);
+        let offset = if at_start {
+            self.builder.emit(Type::I64, Op::Const(Constant::I64(0)))
+        } else {
+            self.builder
+                .emit(Type::I64, Op::Arith(Arith::Sub, Item::I64, total, length))
+        };
+        let held = self.builder.emit(ty, Op::Copy(part));
+        let positions = self.positions(held);
+        let mine = self
+            .builder
+            .emit(Type::of_item(item), Op::ItemAt(held, positions.counter));
+        let at = self.builder.emit(
+            Type::I64,
+            Op::Arith(Arith::Add, Item::I64, offset, positions.counter),
+        );
+        let theirs = self.builder.emit(Type::of_item(item), Op::ItemAt(list, at));
+        let equal = self.identical_items(theirs, mine, name)?;
+        let (differ, next) = (self.builder.block(), self.builder.block());
+        self.builder.terminate(Terminator::Branch {
+            condition: equal,
+            then: next,
+            otherwise: differ,
+        });
+        self.builder.switch_to(differ);
+        let no = self.builder.emit(Type::Lgl, Op::Const(Constant::Lgl(0)));
+        self.builder.push(Some(result), Op::Copy(no));
+        self.builder.terminate(Terminator::Jump(positions.exit));
+        self.builder.switch_to(next);
+        self.next_position(positions);
+        self.builder.terminate(Terminator::Jump(done));
+        self.builder.switch_to(done);
+        Ok(self.builder.emit(Type::Bool, Op::Truth(result)))
+    }
+
+    /// Whether `a` equals `b`, as a `Bool` to branch on, for the list function `name`.
+    unsafe fn identical_items(&mut self, a: Local, b: Local, name: &str) -> Result<Local, Refusal> {
+        let equal = self.compare(Compare::Eq, a, b)?;
+        match self.builder.ty(equal) {
+            Type::Bool => Ok(equal),
+            Type::Lgl => Ok(self.builder.emit(Type::Bool, Op::Truth(equal))),
+            _ => Err(Refusal(Cow::Owned(format!("a `{name}` of another type")))),
+        }
+    }
+
+    /// `List.intersperse(list, separator)`: the items with `separator` pushed between each two.
+    unsafe fn intersperse(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [list, separator] = arguments.exactly(2)?[..] else {
+            return Err(Refusal::new("a malformed `List.intersperse`"));
+        };
+        let (list, ty) = self.known_list(list, "List.intersperse")?;
+        let item = ty.items().ok_or(Refusal::new(
+            "a `List.intersperse` of something other than a ry list",
+        ))?;
+        let separator = self.value(separator)?;
+        self.usable(separator)?;
+        if self.builder.ty(separator).held_item() != Some(item) {
+            return Err(Refusal::new(
+                "a `List.intersperse` with a separator of another type",
+            ));
+        }
+        let output = self.empty_list(item);
+        let held = self.builder.emit(ty, Op::Copy(list));
+        let positions = self.positions(held);
+        let element = self
+            .builder
+            .emit(Type::of_item(item), Op::ItemAt(held, positions.counter));
+        let one = self.builder.emit(Type::I64, Op::Const(Constant::I64(1)));
+        let later = self.test(Compare::Gt, Item::I64, positions.counter, one);
+        let (spaced, join) = (self.builder.block(), self.builder.block());
+        self.builder.terminate(Terminator::Branch {
+            condition: later,
+            then: spaced,
+            otherwise: join,
+        });
+        self.builder.switch_to(spaced);
+        let grown = self.builder.emit(ty, Op::Push(output, separator));
+        self.builder.push(Some(output), Op::Copy(grown));
+        self.builder.terminate(Terminator::Jump(join));
+        self.builder.switch_to(join);
+        let grown = self.builder.emit(ty, Op::Push(output, element));
+        self.builder.push(Some(output), Op::Copy(grown));
+        self.next_position(positions);
+        Ok(output)
+    }
+
+    /// `List.join(lists)`: the items of each list in turn, extended onto a fresh list.
+    unsafe fn join(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [lists] = arguments.exactly(1)?[..] else {
+            return Err(Refusal::new("a malformed `List.join`"));
+        };
+        let (lists, ty) = self.known_list(lists, "List.join")?;
+        let inner = ty.items().map(Type::of_item).ok_or(Refusal::new(
+            "a `List.join` of something other than a ry list",
+        ))?;
+        let Type::Vector { item, array: true } = inner else {
+            return Err(Refusal::new("a `List.join` of something other than lists"));
+        };
+        let output = self.empty_list(item);
+        let held = self.builder.emit(ty, Op::Copy(lists));
+        let positions = self.positions(held);
+        let piece = self
+            .builder
+            .emit(inner, Op::ItemAt(held, positions.counter));
+        let grown = self.builder.emit(inner, Op::Extend(output, piece));
+        self.builder.push(Some(output), Op::Copy(grown));
+        self.next_position(positions);
+        Ok(output)
+    }
+
+    /// `List.for_each(list, f)`: `f` of each item for its effects, in a loop with `f` inlined.
+    unsafe fn for_each(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [list, function] = arguments.exactly(2)?[..] else {
+            return Err(Refusal::new("a malformed `List.for_each`"));
+        };
+        let (list, ty) = self.known_list(list, "List.for_each")?;
+        let item = ty.items().ok_or(Refusal::new(
+            "a `List.for_each` of something other than a ry list",
+        ))?;
+        let callable = self.function_argument(function)?;
+        let held = self.builder.emit(ty, Op::Copy(list));
+        let positions = self.positions(held);
+        let element = self
+            .builder
+            .emit(Type::of_item(item), Op::ItemAt(held, positions.counter));
+        self.apply(callable, &[element])?.ok_or(Refusal::new(
+            "a `List.for_each` callback that never completes",
+        ))?;
+        self.next_position(positions);
+        Ok(self.builder.emit(Type::Null, Op::Const(Constant::Null)))
+    }
+
+    /// A record of `fields`, each named, as `(name = value, ...)` builds it.
+    unsafe fn record_of(&mut self, fields: &[(&str, Local)]) -> Result<Local, Refusal> {
+        let names: SmallVec<[Sexp; 4]> = fields
+            .iter()
+            .map(|&(name, _)| rvalues::install(name).map_err(|_| Refusal::new("a field name")))
+            .collect::<Result<_, _>>()?;
+        let (layout, slots) = interp::records::constructor_layout(None, &names, true)
+            .ok_or(Refusal::new("a record the interpreter rejects"))?;
+        let mut placed: SmallVec<[(usize, Local); 4]> = slots
+            .iter()
+            .copied()
+            .zip(fields.iter().map(|&(_, value)| value))
+            .collect();
+        placed.sort_by_key(|&(slot, _)| slot);
+        let values: SmallVec<[Local; 4]> = placed.iter().map(|&(_, value)| value).collect();
+        self.boxed(layout, false, &values)
     }
 
     /// `List.drop_at(list, index)`: the other items, pushed in order onto a fresh list. An index
@@ -7077,6 +7572,79 @@ impl Lowering<'_> {
         Ok(value)
     }
 
+    /// `Result.map2(first, second, f)`: `:Ok(f(a, b))` of two `:Ok`s, else the first `:Err`, in
+    /// a switch on each result's shape with `f` inlined where both are `:Ok`.
+    unsafe fn result_map2(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [first, second, function] = arguments.exactly(3)?[..] else {
+            return Err(Refusal::new("a malformed `Result.map2`"));
+        };
+        let first = self.value(first)?;
+        let second = self.value(second)?;
+        let callable = self.function_argument(function)?;
+        let (ok, err) = (tag_layout("Ok", 1)?, tag_layout("Err", 1)?);
+        let (first_shapes, first_exhaustive) =
+            self.shapes_of(self.builder.ty(first), &[ok, err], &[])?;
+        let (second_shapes, second_exhaustive) =
+            self.shapes_of(self.builder.ty(second), &[ok, err], &[])?;
+        let value = self.switch_shapes(
+            first,
+            &first_shapes,
+            first_exhaustive,
+            Expected::Free,
+            &mut |lowering, shape| {
+                let Some(left_shape) = shape else {
+                    return Ok(lowering.unreachable());
+                };
+                if shapes::shape(left_shape).layout == err {
+                    let ty = Type::Tag(shapes::union_of(&[left_shape]));
+                    return Ok(Some(lowering.builder.emit(ty, Op::Relabel(first, ty))));
+                }
+                if shapes::shape(left_shape).layout != ok {
+                    return Ok(lowering.unreachable());
+                }
+                let left = lowering.field(first, left_shape, 0)?;
+                lowering.switch_shapes(
+                    second,
+                    &second_shapes,
+                    second_exhaustive,
+                    Expected::Free,
+                    &mut |lowering, shape| {
+                        let Some(right_shape) = shape else {
+                            return Ok(lowering.unreachable());
+                        };
+                        let layout = shapes::shape(right_shape).layout;
+                        if layout == err {
+                            let ty = Type::Tag(shapes::union_of(&[right_shape]));
+                            return Ok(Some(lowering.builder.emit(ty, Op::Relabel(second, ty))));
+                        }
+                        if layout != ok {
+                            return Ok(lowering.unreachable());
+                        }
+                        let right = lowering.field(second, right_shape, 0)?;
+                        let value =
+                            lowering
+                                .apply(callable, &[left, right])?
+                                .ok_or(Refusal::new(
+                                    "a `Result.map2` callback that never completes",
+                                ))?;
+                        lowering.tag("Ok", &[value]).map(Some)
+                    },
+                )
+            },
+        )?;
+        let value = value.ok_or(Refusal::new("a `Result.map2` of no result"))?;
+        self.usable(value)?;
+        Ok(value)
+    }
+
+    /// Ends the current block as one no value reaches, and continues in a fresh block after it.
+    fn unreachable(&mut self) -> Option<Local> {
+        self.builder.terminate(Terminator::Fail);
+        let unreachable = self.builder.block();
+        self.builder.switch_to(unreachable);
+        None
+    }
+
     /// `Result.is_ok(result)` or `Result.is_err(result)`.
     unsafe fn result_is(
         &mut self,
@@ -7421,6 +7989,178 @@ impl Lowering<'_> {
         Ok(self
             .builder
             .emit(Type::I64, Op::Overflowing(overflow, op, a, b)))
+    }
+
+    /// `Num.div_checked`, `Num.sqrt_checked` and `Num.log_checked` on doubles, and
+    /// `Num.div_trunc_checked`, `Num.div_ceil_checked` and `Num.rem_checked` on `I64`s: `:Ok` of
+    /// the operation, or the `:Err` the library gives for the operands it rejects.
+    unsafe fn checked_number(
+        &mut self,
+        name: &str,
+        arguments: &Arguments,
+    ) -> Result<Local, Refusal> {
+        let unary = matches!(name, "Num.sqrt_checked" | "Num.log_checked");
+        let parameters = arguments.exactly(if unary { 1 } else { 2 })?;
+        let mut numbers: SmallVec<[Local; 2]> = SmallVec::new();
+        for &parameter in &parameters {
+            let value = self.value(parameter)?;
+            numbers.push(self.library_number(value)?);
+        }
+        let integral = matches!(
+            name,
+            "Num.div_trunc_checked" | "Num.div_ceil_checked" | "Num.rem_checked"
+        );
+        // The interpreter reads `I64`s apart from R's numbers, so only these operand types give
+        // the result it gives.
+        let operand = if integral { Type::I64 } else { Type::Dbl };
+        if numbers
+            .iter()
+            .any(|&number| self.builder.ty(number) != operand)
+        {
+            return Err(Refusal(Cow::Owned(format!(
+                "a `{name}` of numbers it does not compute natively"
+            ))));
+        }
+        let (rejected, reason) = if integral {
+            let b = numbers[1];
+            let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+            (self.test(Compare::Eq, Item::I64, b, zero), "DivByZero")
+        } else {
+            let zero = self.builder.emit(Type::Dbl, Op::Const(Constant::Dbl(0.0)));
+            match name {
+                "Num.div_checked" => (
+                    self.test(Compare::Eq, Item::Dbl, numbers[1], zero),
+                    "DivByZero",
+                ),
+                "Num.sqrt_checked" => (
+                    self.test(Compare::Lt, Item::Dbl, numbers[0], zero),
+                    "SqrtOfNegative",
+                ),
+                _ => (
+                    self.test(Compare::Le, Item::Dbl, numbers[0], zero),
+                    "LogNeedsPositive",
+                ),
+            }
+        };
+        let (computed, refused) = (self.builder.block(), self.builder.block());
+        self.builder.terminate(Terminator::Branch {
+            condition: rejected,
+            then: refused,
+            otherwise: computed,
+        });
+        self.builder.switch_to(computed);
+        let value = match name {
+            "Num.div_ceil_checked" => self.ceiling_division(numbers[0], numbers[1]),
+            "Num.div_trunc_checked" | "Num.rem_checked" => {
+                let op = if name == "Num.rem_checked" {
+                    Arith::RemTrunc
+                } else {
+                    Arith::DivTrunc
+                };
+                self.builder
+                    .emit(Type::I64, Op::Arith(op, Item::I64, numbers[0], numbers[1]))
+            }
+            "Num.sqrt_checked" => self
+                .builder
+                .emit(Type::Dbl, Op::Math(Math::Sqrt, Item::Dbl, numbers[0])),
+            "Num.log_checked" => self
+                .builder
+                .emit(Type::Dbl, Op::Math(Math::Log, Item::Dbl, numbers[0])),
+            _ => {
+                // A quotient that is `NaN` (`Inf / Inf`) is `:Err(:Undefined)`, which the
+                // interpreter gives.
+                let quotient = self.builder.emit(
+                    Type::Dbl,
+                    Op::Arith(Arith::Div, Item::Dbl, numbers[0], numbers[1]),
+                );
+                self.fail_if_nan(quotient);
+                quotient
+            }
+        };
+        let ok = self.tag("Ok", &[value])?;
+        let computed_end = self.builder.current;
+        self.builder.switch_to(refused);
+        let reason = self.tag(reason, &[])?;
+        let err = self.tag("Err", &[reason])?;
+        self.joined_result(computed_end, ok, err)
+    }
+
+    /// `Num.is_approx_eq(first, second, rtol, atol)`: whether the numbers are equal or differ by
+    /// at most the larger of `atol` and `rtol` times the larger magnitude.
+    unsafe fn is_approx_eq(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        // Named arguments take their formals and the others fill the rest in order, as R
+        // matches them.
+        let formals = ["first", "second", "rtol", "atol"];
+        let mut matched: [Option<Sexp>; 4] = [None; 4];
+        for (tag, value) in &arguments.items {
+            let Some(tag) = tag else { continue };
+            let slot = formals
+                .iter()
+                .position(|formal| formal == tag)
+                .and_then(|at| matched.get_mut(at))
+                .filter(|slot| slot.is_none())
+                .ok_or(Refusal::new(
+                    "a `Num.is_approx_eq` with unexpected arguments",
+                ))?;
+            *slot = Some(*value);
+        }
+        let mut open = matched.iter_mut().filter(|slot| slot.is_none());
+        for (tag, value) in &arguments.items {
+            if tag.is_none() {
+                let slot = open.next().ok_or(Refusal::new(
+                    "a `Num.is_approx_eq` with unexpected arguments",
+                ))?;
+                *slot = Some(*value);
+            }
+        }
+        let defaults = [None, None, Some(0.00001), Some(0.00000001)];
+        let mut numbers: SmallVec<[Local; 4]> = SmallVec::new();
+        for (argument, default) in matched.into_iter().zip(defaults) {
+            let number = match (argument, default) {
+                (Some(argument), _) => {
+                    let value = self.value(argument)?;
+                    let value = self.library_number(value)?;
+                    self.as_double(value)?
+                }
+                (None, Some(default)) => self
+                    .builder
+                    .emit(Type::Dbl, Op::Const(Constant::Dbl(default))),
+                (None, None) => {
+                    return Err(Refusal::new("a `Num.is_approx_eq` without both numbers"));
+                }
+            };
+            numbers.push(number);
+        }
+        let [first, second, rtol, atol] = numbers[..] else {
+            return Err(Refusal::new("a malformed `Num.is_approx_eq`"));
+        };
+        let arith = |lowering: &mut Self, op: Arith, a: Local, b: Local| {
+            lowering
+                .builder
+                .emit(Type::Dbl, Op::Arith(op, Item::Dbl, a, b))
+        };
+        let magnitude = |lowering: &mut Self, a: Local| {
+            lowering
+                .builder
+                .emit(Type::Dbl, Op::Math(Math::Abs, Item::Dbl, a))
+        };
+        let first_magnitude = magnitude(self, first);
+        let second_magnitude = magnitude(self, second);
+        let larger = arith(self, Arith::Max, first_magnitude, second_magnitude);
+        let relative = arith(self, Arith::Mul, rtol, larger);
+        let tolerance = arith(self, Arith::Max, atol, relative);
+        let difference = arith(self, Arith::Sub, first, second);
+        let difference = magnitude(self, difference);
+        let equal = self.builder.emit(
+            Type::Lgl,
+            Op::Compare(Compare::Eq, Item::Dbl, first, second),
+        );
+        let close = self.builder.emit(
+            Type::Lgl,
+            Op::Compare(Compare::Le, Item::Dbl, difference, tolerance),
+        );
+        let either = self.builder.emit(Type::Lgl, Op::Or(equal, close));
+        Ok(self.builder.emit(Type::Bool, Op::Truth(either)))
     }
 
     /// `Num.div_ceil(a, b)` on `I64`s: the truncated quotient, one more when a remainder is left
@@ -7886,6 +8626,257 @@ impl Lowering<'_> {
             ));
         };
         self.convert_scalar(key, item)
+    }
+
+    /// `Dict.from_list(pairs)`: each `(key, value)` pair inserted in turn into an empty
+    /// dictionary, so a later pair's value replaces an earlier one's.
+    unsafe fn dict_from_list(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [pairs] = arguments.exactly(1)?[..] else {
+            return Err(Refusal::new("a malformed `Dict.from_list`"));
+        };
+        let (pairs, ty) = self.known_list(pairs, "Dict.from_list")?;
+        let (layout, _) =
+            interp::records::constructor_layout(None, &[rvalues::nil(), rvalues::nil()], false)
+                .ok_or(Refusal::new("a pair the interpreter rejects"))?;
+        let Some(Item::Record(shape)) = ty.items() else {
+            return Err(Refusal::new(
+                "a `Dict.from_list` of something other than pairs",
+            ));
+        };
+        let held_shape = shapes::shape(shape);
+        let (
+            &[
+                key @ (Item::Str | Item::I64),
+                value @ (Item::Str | Item::I64 | Item::Dbl),
+            ],
+            true,
+        ) = (&held_shape.fields[..], held_shape.layout == layout)
+        else {
+            return Err(Refusal::new(
+                "a `Dict.from_list` of something other than pairs of scalars",
+            ));
+        };
+        let dict_ty = Type::Dict { key, value };
+        let dict = self.builder.local(dict_ty);
+        self.builder.push(Some(dict), Op::DictNew);
+        let held = self.builder.emit(ty, Op::Copy(pairs));
+        let positions = self.positions(held);
+        let pair = self
+            .builder
+            .emit(Type::Record(shape), Op::ItemAt(held, positions.counter));
+        let entry_key = self.field(pair, shape, 0)?;
+        let entry_value = self.field(pair, shape, 1)?;
+        let grown = self
+            .builder
+            .emit(dict_ty, Op::DictInsert(dict, entry_key, entry_value));
+        self.builder.push(Some(dict), Op::Copy(grown));
+        self.next_position(positions);
+        Ok(dict)
+    }
+
+    /// The keys and values of `dict` as two ry lists in the dictionary's order, and the
+    /// dictionary's type.
+    fn entries(&mut self, dict: Local, name: &str) -> Result<(Local, Local, Item, Item), Refusal> {
+        let Type::Dict { key, value } = self.builder.ty(dict) else {
+            return Err(Refusal(Cow::Owned(format!(
+                "a `{name}` of something other than a dictionary"
+            ))));
+        };
+        let keys = self.builder.emit(
+            Type::Vector {
+                item: key,
+                array: true,
+            },
+            Op::DictKeys(dict),
+        );
+        let values = self.builder.emit(
+            Type::Vector {
+                item: value,
+                array: true,
+            },
+            Op::DictValues(dict),
+        );
+        Ok((keys, values, key, value))
+    }
+
+    /// `Dict.map(dict, f)`: each key with `f` of its key and value, inserted in order into a
+    /// fresh dictionary, in a loop with `f` inlined.
+    unsafe fn dict_map(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [dict, function] = arguments.exactly(2)?[..] else {
+            return Err(Refusal::new("a malformed `Dict.map`"));
+        };
+        let dict = self.value(dict)?;
+        let callable = self.function_argument(function)?;
+        let (keys, values, key, value) = self.entries(dict, "Dict.map")?;
+        // The result's value type is known only once the body is lowered, so the output is made
+        // in the preheader afterwards, as `List.map` makes its output.
+        let preheader = self.builder.current;
+        let output = self.builder.local(Type::Null);
+        let positions = self.positions(keys);
+        let entry_key = self
+            .builder
+            .emit(Type::of_item(key), Op::ItemAt(keys, positions.counter));
+        let entry_value = self
+            .builder
+            .emit(Type::of_item(value), Op::ItemAt(values, positions.counter));
+        let mapped = self
+            .apply(callable, &[entry_key, entry_value])?
+            .ok_or(Refusal::new("a `Dict.map` callback that never completes"))?;
+        let mapped_item = match self.builder.ty(mapped) {
+            Type::Str => Item::Str,
+            Type::I64 => Item::I64,
+            Type::Dbl => Item::Dbl,
+            _ => {
+                return Err(Refusal::new(
+                    "a `Dict.map` callback whose value is not a whole number, a double or a string",
+                ));
+            }
+        };
+        let output_ty = Type::Dict {
+            key,
+            value: mapped_item,
+        };
+        self.builder.function.locals[output.0 as usize] = output_ty;
+        let grown = self
+            .builder
+            .emit(output_ty, Op::DictInsert(output, entry_key, mapped));
+        self.builder.push(Some(output), Op::Copy(grown));
+        self.next_position(positions);
+        self.builder.switch_to(preheader);
+        let fresh = self.builder.emit(output_ty, Op::DictNew);
+        self.builder.push(Some(output), Op::Copy(fresh));
+        self.builder.switch_to(positions.exit);
+        Ok(output)
+    }
+
+    /// `Dict.keep_if(dict, predicate)`, `Dict.drop_if`, `Dict.keep_shared(first, second)` and
+    /// `Dict.remove_all(first, second)`: the entries that pass, inserted in order into a fresh
+    /// dictionary, so the kept entries keep their order. A shared entry needs an equal value too,
+    /// as the interpreter's `identical` compares it.
+    unsafe fn dict_filter(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [dict, other] = arguments.exactly(2)?[..] else {
+            return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
+        };
+        let dict = self.value(dict)?;
+        let ty = self.builder.ty(dict);
+        let by_predicate = matches!(name, "Dict.keep_if" | "Dict.drop_if");
+        let (callable, second) = if by_predicate {
+            (Some(self.function_argument(other)?), None)
+        } else {
+            let second = self.value(other)?;
+            if self.builder.ty(second) != ty {
+                return Err(Refusal(Cow::Owned(format!(
+                    "a `{name}` of dictionaries of different types"
+                ))));
+            }
+            (None, Some(second))
+        };
+        let (keys, values, key, value) = self.entries(dict, name)?;
+        let output = self.builder.local(ty);
+        self.builder.push(Some(output), Op::DictNew);
+        let positions = self.positions(keys);
+        let entry_key = self
+            .builder
+            .emit(Type::of_item(key), Op::ItemAt(keys, positions.counter));
+        let entry_value = self
+            .builder
+            .emit(Type::of_item(value), Op::ItemAt(values, positions.counter));
+        let (keep, next) = (self.builder.block(), self.builder.block());
+        match (callable, second) {
+            (Some(callable), _) => {
+                let answer = self
+                    .apply(callable, &[entry_key, entry_value])?
+                    .ok_or(Refusal::new("a predicate that never completes"))?;
+                let answer = match self.builder.ty(answer) {
+                    Type::Bool => answer,
+                    Type::Lgl => self.builder.emit(Type::Bool, Op::Truth(answer)),
+                    _ => return Err(Refusal::new("a predicate whose answer is not a logical")),
+                };
+                let (then, otherwise) = if name == "Dict.keep_if" {
+                    (keep, next)
+                } else {
+                    (next, keep)
+                };
+                self.builder.terminate(Terminator::Branch {
+                    condition: answer,
+                    then,
+                    otherwise,
+                });
+            }
+            (None, Some(second)) => {
+                let position = self
+                    .builder
+                    .emit(Type::I64, Op::DictFind(second, entry_key));
+                let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+                let present = self.test(Compare::Ge, Item::I64, position, zero);
+                if name == "Dict.remove_all" {
+                    self.builder.terminate(Terminator::Branch {
+                        condition: present,
+                        then: next,
+                        otherwise: keep,
+                    });
+                } else {
+                    let compare = self.builder.block();
+                    self.builder.terminate(Terminator::Branch {
+                        condition: present,
+                        then: compare,
+                        otherwise: next,
+                    });
+                    self.builder.switch_to(compare);
+                    let theirs = self
+                        .builder
+                        .emit(Type::of_item(value), Op::DictAt(second, position));
+                    let equal = self.identical_items(entry_value, theirs, name)?;
+                    self.builder.terminate(Terminator::Branch {
+                        condition: equal,
+                        then: keep,
+                        otherwise: next,
+                    });
+                }
+            }
+            (None, None) => return Err(Refusal(Cow::Owned(format!("a malformed `{name}`")))),
+        }
+        self.builder.switch_to(keep);
+        let grown = self
+            .builder
+            .emit(ty, Op::DictInsert(output, entry_key, entry_value));
+        self.builder.push(Some(output), Op::Copy(grown));
+        self.builder.terminate(Terminator::Jump(next));
+        self.builder.switch_to(next);
+        self.next_position(positions);
+        Ok(output)
+    }
+
+    /// `Dict.insert_all(first, second)`: each entry of `second` inserted in order into `first`,
+    /// whose values for the same keys it replaces.
+    unsafe fn dict_insert_all(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [first, second] = arguments.exactly(2)?[..] else {
+            return Err(Refusal::new("a malformed `Dict.insert_all`"));
+        };
+        let first = self.value(first)?;
+        let second = self.value(second)?;
+        let ty = self.builder.ty(first);
+        if self.builder.ty(second) != ty {
+            return Err(Refusal::new(
+                "a `Dict.insert_all` of dictionaries of different types",
+            ));
+        }
+        let (keys, values, key, value) = self.entries(second, "Dict.insert_all")?;
+        let output = self.builder.local(ty);
+        self.builder.push(Some(output), Op::Copy(first));
+        let positions = self.positions(keys);
+        let entry_key = self
+            .builder
+            .emit(Type::of_item(key), Op::ItemAt(keys, positions.counter));
+        let entry_value = self
+            .builder
+            .emit(Type::of_item(value), Op::ItemAt(values, positions.counter));
+        let grown = self
+            .builder
+            .emit(ty, Op::DictInsert(output, entry_key, entry_value));
+        self.builder.push(Some(output), Op::Copy(grown));
+        self.next_position(positions);
+        Ok(output)
     }
 
     /// `:Ok(value)` when `dict` holds `key`, else `:Err(:missing)`, and the position
@@ -9341,7 +10332,7 @@ pub unsafe fn tail_invisible(expression: Sexp) -> bool {
     }
     let args = rvalues::pairlist_items(expression.cdr());
     match &*rvalues::symbol_name(expression.car()) {
-        "<-" | "=" | "invisible" | "for" | "while" | "repeat" => true,
+        "<-" | "=" | "invisible" | "for" | "while" | "repeat" | "List.for_each" => true,
         "{" => args.last().is_some_and(|&(_, last)| tail_invisible(last)),
         // An `if` without `else` whose condition is false gives an invisible `NULL`.
         "if" => {
