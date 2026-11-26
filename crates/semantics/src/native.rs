@@ -120,7 +120,7 @@ pub enum Conversion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::SalsaValue)]
 pub enum Uncompiled {
     Dots,
-    FunctionParameter(Symbol),
+    RecursiveFunctionArgument(Symbol),
     InvisibleResult,
     SuperAssignment,
     AssignmentTarget,
@@ -138,7 +138,6 @@ pub enum Uncompiled {
     TableOperand,
     BranchOnlyName(Symbol),
     TypeChange(Symbol),
-    TagReassigned(Symbol),
     BranchTypes,
     GlobalRead(Symbol),
     EnclosingRead(Symbol),
@@ -319,10 +318,10 @@ impl Uncompiled {
                 "a function with `...` {YET}. Name each parameter, or take the values as one \
                  `List`"
             ),
-            Uncompiled::FunctionParameter(name) => format!(
-                "`{name}` takes a function, and a function passed as a value {YET}. Define the \
-                 function inside this one, or give a parameter an R type so this function is a \
-                 boundary function that the interpreter runs"
+            Uncompiled::RecursiveFunctionArgument(name) => format!(
+                "a function passed to a recursive call of `{name}` {YET}: native code lowers a \
+                 function that takes a function into each of its callers, which a recursion \
+                 cannot end. Loop instead, or define the function inside `{name}`"
             ),
             Uncompiled::InvisibleResult => format!(
                 "the function ends in an expression whose value R returns invisibly, which {YET}. \
@@ -342,8 +341,8 @@ impl Uncompiled {
                  defined again there, which {YET}. Define it once at the top of the function"
             ),
             Uncompiled::FunctionValue => format!(
-                "a function used as a value {YET}. Native code runs a function literal only where \
-                 it is called, or where a standard library function such as `List.map` takes it"
+                "a function used as a value {YET}. Native code runs a function only where it is \
+                 called, or where it is passed straight to a function that calls it"
             ),
             Uncompiled::CallsVariable(name) => format!(
                 "`{name}` is a variable that holds a function, and calling one {YET}. Define the \
@@ -363,9 +362,10 @@ impl Uncompiled {
                  function"
             ),
             Uncompiled::MappedFunction => format!(
-                "a function passed by name {YET} unless it is a typed function of the project or \
-                 a local function. Wrap it in a function literal, as in \
-                 `function(x: I64) -> F64 Num.to_f64(x)`"
+                "a function passed by name {YET} unless it is a typed function of the project, a \
+                 local function, a parameter or a standard library function with native code. \
+                 Pass the standard library function, such as `Num.sqrt` for `sqrt`, or a \
+                 function literal"
             ),
             Uncompiled::DictEntries => format!(
                 "a `Dict` whose keys or values are not `I64`, `F64` or `Str` {YET}. Keep the \
@@ -397,11 +397,6 @@ impl Uncompiled {
             Uncompiled::TypeChange(name) => format!(
                 "`{name}` holds values of different types, which {YET}: a native variable keeps \
                  one type. Use a new name for the second value"
-            ),
-            Uncompiled::TagReassigned(name) => format!(
-                "`{name}` holds a tag and is assigned again, which {YET}: native code fixes the \
-                 tags a variable can hold where it is first set. Use a new name for each value, \
-                 or compute the final value in one expression"
             ),
             Uncompiled::BranchTypes => format!(
                 "the branches give values of different types, which {YET}: a native value has one \
@@ -704,8 +699,9 @@ pub fn native_blockers(judged: Judged<'_, '_>) -> ThinVec<NativeBlocker> {
         invisible: None,
         hoist: None,
         converted_locals: Vec::new(),
+        own: None,
     };
-    judge.find(root);
+    judge.find(root, None);
     let mut blockers = judge.blockers;
     blockers.sort_by_key(|blocker| (blocker.range.start(), blocker.range.end()));
     blockers.dedup();
@@ -840,12 +836,10 @@ fn is_native_signature<'db>(
 enum Slot<'db> {
     /// A parameter, a loop variable or a name a `match` arm binds, with its type where known.
     Parameter(Option<Ty<'db>>),
-    /// A parameter that takes a function. It is reported once, where it is declared, so its uses
-    /// are not reported again.
+    /// A parameter that takes a function, which a native caller passes as a function it knows.
     FunctionParameter,
-    /// A variable, with the type of the first value it was given and the standard library
-    /// function that value came from.
-    Value(Option<Ty<'db>>, Option<Symbol>),
+    /// A variable, with the type of the first value it was given.
+    Value(Option<Ty<'db>>),
     /// A local function, which native code runs in place where it is called.
     Function(ExprId),
     /// A name set on some paths to this point only, with its type where known. A read compiles,
@@ -934,6 +928,8 @@ struct Judge<'a, 'db> {
     /// index. A later read of the local that converts it or passes it to R withdraws the fix,
     /// because converting at the assignment would break that read.
     converted_locals: Vec<(Symbol, usize)>,
+    /// The name the judged function is assigned to, which a recursive call calls.
+    own: Option<Symbol>,
 }
 
 /// The names a loop declares before it, with their types ([`Judge::in_loop`]).
@@ -1011,9 +1007,17 @@ impl<'a, 'db> Judge<'a, 'db> {
     }
 
     /// Looks for native functions outside any native function: a function literal with a
-    /// native signature is judged, and any other is searched for ones nested in it.
-    fn find(&mut self, id: ExprId) {
+    /// native signature is judged, and any other is searched for ones nested in it. `own` is the
+    /// name a function literal is assigned to.
+    fn find(&mut self, id: ExprId, own: Option<Symbol>) {
         let module = self.judged.module;
+        if let ExpressionKind::Assign { target, value, .. } = *module.kind(id)
+            && let ExpressionKind::NameRef(name) = *module.kind(target)
+            && matches!(module.kind(value), ExpressionKind::Function { .. })
+        {
+            self.find(value, Some(name));
+            return;
+        }
         if let ExpressionKind::Function { parameters, .. } = *module.kind(id)
             && let Some(signature) = self.judged.signatures.get(id)
         {
@@ -1022,11 +1026,12 @@ impl<'a, 'db> Judge<'a, 'db> {
                 .filter(|parameter| parameter.name != "...")
                 .count();
             if is_native_signature(self.judged.db, self.judged.definitions, signature, formals) {
+                self.own = own;
                 self.judge(id, signature);
                 return;
             }
         }
-        module.for_each_child(id, |child| self.find(child));
+        module.for_each_child(id, |child| self.find(child, None));
     }
 
     fn judge(&mut self, function: ExprId, signature: &FunctionType<'db>) {
@@ -1086,13 +1091,9 @@ impl<'a, 'db> Judge<'a, 'db> {
             };
             let mut slot = Slot::Parameter(declared);
             if let Some(declared) = declared {
+                // Native code holds no function values: a function a native caller passes here
+                // is lowered in place of the parameter.
                 if matches!(self.peel(declared).kind(db), TyKind::Function(_)) {
-                    self.block_at(
-                        parameter.range,
-                        NativeBlockerKind::Uncompiled(Uncompiled::FunctionParameter(
-                            parameter.name,
-                        )),
-                    );
                     slot = Slot::FunctionParameter;
                 } else if !self.dict_compiles(declared) {
                     self.dict_entries(parameter.range);
@@ -1713,7 +1714,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             let learned: Declared<'db> = forward
                 .into_iter()
                 .filter_map(|name| match self.lookup(name) {
-                    Some(Slot::Maybe(ty) | Slot::Value(ty, _)) => Some((name, ty)),
+                    Some(Slot::Maybe(ty) | Slot::Value(ty)) => Some((name, ty)),
                     _ => None,
                 })
                 .collect();
@@ -1771,7 +1772,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                     self.hidden.insert(name);
                     continue;
                 }
-                Slot::Value(ty, _) | Slot::Parameter(ty) | Slot::Maybe(ty) => ty,
+                Slot::Value(ty) | Slot::Parameter(ty) | Slot::Maybe(ty) => ty,
                 Slot::FunctionParameter => None,
             };
             self.scope.push((name, Slot::Maybe(ty)));
@@ -1779,16 +1780,13 @@ impl<'a, 'db> Judge<'a, 'db> {
     }
 
     /// Binds a loop variable or a pattern's name, which the typed core assigns: a name the
-    /// function already holds keeps its variable, so a value of another type, or any tag, which
-    /// fixes the variables it is stored in, gives the function up.
+    /// function already holds keeps its variable, so a value stored another way gives the
+    /// function up.
     fn bind_assigned(&mut self, at: TextRange, name: Symbol, ty: Option<Ty<'db>>) {
         match self.lookup(name) {
-            Some(Slot::Value(held, _) | Slot::Parameter(held)) => {
-                if ty.is_some_and(|ty| self.holds_tag(ty)) {
-                    let kind = Uncompiled::TagReassigned(name);
-                    self.block_at(at, NativeBlockerKind::Uncompiled(kind));
-                } else if let (Some(held), Some(ty)) = (held, ty)
-                    && self.changes_type(held, ty)
+            Some(Slot::Value(held) | Slot::Parameter(held)) => {
+                if let (Some(held), Some(ty)) = (held, ty)
+                    && self.layout_differs(held, ty)
                 {
                     let kind = Uncompiled::TypeChange(name);
                     self.block_at(at, NativeBlockerKind::Uncompiled(kind));
@@ -1821,7 +1819,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                     .find(|(bound, _)| *bound == name)
                     .map(|&(_, slot)| slot);
                 let ty = match slot {
-                    Some(Slot::Value(ty, _) | Slot::Parameter(ty)) => ty,
+                    Some(Slot::Value(ty) | Slot::Parameter(ty)) => ty,
                     Some(Slot::Maybe(ty)) => {
                         everywhere = false;
                         ty
@@ -2091,36 +2089,22 @@ impl<'a, 'db> Judge<'a, 'db> {
                     self.converted_locals.push((name, index));
                 }
                 let ty = self.ty(value);
-                let source = match *module.kind(value) {
-                    ExpressionKind::Call { callee, .. } => match self.callee(callee) {
-                        Callee::Std(function) => Some(function),
-                        _ => None,
-                    },
-                    _ => None,
-                };
+                // A name set on some paths takes a new variable. A variable holding tags widens
+                // to every tag assigned to it, so only another kind of value changes its type.
                 let held = match self.lookup(name) {
-                    Some(Slot::Value(first, first_source)) => Some((first, first_source)),
-                    Some(Slot::Parameter(first)) => Some((first, None)),
-                    Some(Slot::FunctionParameter) => Some((None, None)),
-                    // A name set on some paths takes a new variable, so only a tag, which fixes
-                    // the variables it can be stored in where it is first set, is held.
-                    Some(Slot::Maybe(first)) if ty.is_some_and(|ty| self.holds_tag(ty)) => {
-                        Some((first, None))
-                    }
+                    Some(Slot::Value(first) | Slot::Parameter(first)) => Some(first),
+                    Some(Slot::FunctionParameter) => Some(None),
                     Some(Slot::Function(_) | Slot::Maybe(_)) | None => None,
                 };
                 match held {
-                    Some((first, first_source)) => {
-                        let same_source = source.is_some() && source == first_source;
-                        if !same_source && ty.is_some_and(|later| self.holds_tag(later)) {
-                            self.uncompiled(id, Uncompiled::TagReassigned(name));
-                        } else if let (Some(first), Some(later)) = (first, ty)
-                            && self.changes_type(first, later)
+                    Some(first) => {
+                        if let (Some(first), Some(later)) = (first, ty)
+                            && self.layout_differs(first, later)
                         {
                             self.uncompiled(id, Uncompiled::TypeChange(name));
                         }
                     }
-                    None => self.bind(name, Slot::Value(ty, source)),
+                    None => self.bind(name, Slot::Value(ty)),
                 }
             }
             ExpressionKind::Index {
@@ -2164,32 +2148,6 @@ impl<'a, 'db> Judge<'a, 'db> {
         {
             Some(entry) => entry.1 = slot,
             None => self.scope.push((name, slot)),
-        }
-    }
-
-    /// Whether a variable first given a value of type `first` cannot take one of type `later`:
-    /// the typed core stores the two differently, or `later` holds a tag `first` does not.
-    fn changes_type(&self, first: Ty<'db>, later: Ty<'db>) -> bool {
-        let db = self.judged.db;
-        if self.layout_differs(first, later) {
-            return true;
-        }
-        let tags = |ty: Ty<'db>| -> Option<Vec<Name<'db>>> {
-            match self.peel(ty).kind(db) {
-                TyKind::Tag(name, _) => Some(vec![*name]),
-                TyKind::Union(members) => members
-                    .iter()
-                    .map(|member| match member.kind(db) {
-                        TyKind::Tag(name, _) => Some(*name),
-                        _ => None,
-                    })
-                    .collect(),
-                _ => None,
-            }
-        };
-        match (tags(first), tags(later)) {
-            (Some(first), Some(later)) => later.iter().any(|tag| !first.contains(tag)),
-            _ => false,
         }
     }
 
@@ -2257,18 +2215,6 @@ impl<'a, 'db> Judge<'a, 'db> {
             },
             _ => return None,
         })
-    }
-
-    /// Whether `ty` is a tag or a union of tags.
-    fn holds_tag(&self, ty: Ty<'db>) -> bool {
-        let db = self.judged.db;
-        match self.peel(ty).kind(db) {
-            TyKind::Tag(..) => true,
-            TyKind::Union(members) => members
-                .iter()
-                .any(|member| matches!(self.peel(*member).kind(db), TyKind::Tag(..))),
-            _ => false,
-        }
     }
 
     /// How the typed core stores a scalar or a list of scalars. `F64` and `double` share a
@@ -2433,7 +2379,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                     self.uncompiled(id, Uncompiled::ArgumentCount(name));
                 }
                 for &(_, value) in arguments {
-                    self.walk(value, Use::Value);
+                    self.function_argument(value);
                 }
                 self.local_function(function);
             }
@@ -2450,7 +2396,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             }
             Callee::FunctionParameter => {
                 for &(_, value) in arguments {
-                    self.walk(value, Use::Value);
+                    self.function_argument(value);
                 }
             }
             Callee::Conversion => {
@@ -2500,7 +2446,7 @@ impl<'a, 'db> Judge<'a, 'db> {
                     self.uncompiled(id, Uncompiled::NamedArguments(name));
                 }
                 for &(_, value) in arguments {
-                    self.std_argument(value);
+                    self.function_argument(value);
                 }
                 if self.ty(id).is_some_and(|ty| !self.dict_compiles(ty)) {
                     self.dict_entries(module.range(id));
@@ -2527,8 +2473,12 @@ impl<'a, 'db> Judge<'a, 'db> {
                 } else if formals.is_some_and(|formals| formals != arguments.len()) {
                     self.uncompiled(id, Uncompiled::ArgumentCount(name));
                 }
+                let mut passes_function = false;
                 for &(_, value) in arguments {
-                    self.walk(value, Use::Value);
+                    passes_function |= self.function_argument(value);
+                }
+                if passes_function && self.own == Some(name) {
+                    self.uncompiled(id, Uncompiled::RecursiveFunctionArgument(name));
                 }
             }
             Callee::R(name, origin) => self.r_call(id, name, origin, arguments, usage),
@@ -2541,17 +2491,22 @@ impl<'a, 'db> Judge<'a, 'db> {
         }
     }
 
-    /// An argument of a standard library function: a function it takes is run in place, so a
-    /// function literal, a local function or a native project function may stand there.
-    fn std_argument(&mut self, value: ExprId) {
+    /// An argument of a function native code calls. A function passed there is lowered into
+    /// the call, so a function literal, a local function, a parameter, a native project function
+    /// or a compiled standard library function may stand there. Returns whether the argument is
+    /// a function.
+    fn function_argument(&mut self, value: ExprId) -> bool {
         let module = self.judged.module;
         let db = self.judged.db;
         match *module.kind(value) {
-            ExpressionKind::Function { .. } => self.function_body(value),
+            ExpressionKind::Function { .. } => {
+                self.function_body(value);
+                true
+            }
             ExpressionKind::NameRef(name)
                 if self
                     .ty(value)
-                    .is_some_and(|ty| matches!(ty.kind(db), TyKind::Function(_))) =>
+                    .is_some_and(|ty| matches!(self.peel(ty).kind(db), TyKind::Function(_))) =>
             {
                 let compiles = match self.lookup(name) {
                     Some(Slot::Function(function)) => {
@@ -2560,13 +2515,21 @@ impl<'a, 'db> Judge<'a, 'db> {
                     }
                     Some(Slot::FunctionParameter) => true,
                     Some(_) => false,
-                    None => matches!(self.global_callee(value, name), Callee::Native(..)),
+                    None => match self.global_callee(value, name) {
+                        Callee::Native(..) => true,
+                        Callee::Std(name) => COMPILED_STD.contains(&name.as_str()),
+                        _ => false,
+                    },
                 };
                 if !compiles {
                     self.uncompiled(value, Uncompiled::MappedFunction);
                 }
+                true
             }
-            _ => self.walk(value, Use::Value),
+            _ => {
+                self.walk(value, Use::Value);
+                false
+            }
         }
     }
 
