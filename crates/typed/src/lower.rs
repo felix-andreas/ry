@@ -2066,7 +2066,7 @@ impl Lowering<'_> {
     fn captured(&mut self, callable: Callable) -> Callable {
         match callable {
             Callable::Inline(formals, body, scope) => {
-                Callable::Captured(formals, body, self.capture(scope))
+                Callable::Captured(formals, body, self.capture(scope, &mut SmallVec::new()))
             }
             other => other,
         }
@@ -2075,9 +2075,13 @@ impl Lowering<'_> {
     /// The bindings of the first `scope + 1` scopes as one capture, an inner scope's binding of
     /// a name hiding an outer one's. The local functions among them are captured in turn, each
     /// with the scopes it sees, which a function defined in this scope shares.
-    fn capture(&mut self, scope: usize) -> u32 {
+    fn capture(&mut self, scope: usize, shared: &mut SmallVec<[(usize, u32); 4]>) -> u32 {
+        if let Some(&(_, id)) = shared.iter().find(|&&(held, _)| held == scope) {
+            return id;
+        }
         let id = self.captures.len() as u32;
         self.captures.push(FxHashMap::default());
+        shared.push((scope, id));
         let mut names: FxHashMap<Sexp, Binding> = FxHashMap::default();
         for held in self.scopes.iter().take(scope + 1) {
             names.extend(
@@ -2086,17 +2090,9 @@ impl Lowering<'_> {
                     .map(|(&symbol, &binding)| (symbol, binding)),
             );
         }
-        let mut shared: SmallVec<[(usize, u32); 2]> = SmallVec::from_slice(&[(scope, id)]);
         for binding in names.values_mut() {
             if let Binding::Function(Callable::Inline(formals, body, defined)) = *binding {
-                let capture = match shared.iter().find(|&&(held, _)| held == defined) {
-                    Some(&(_, capture)) => capture,
-                    None => {
-                        let capture = self.capture(defined);
-                        shared.push((defined, capture));
-                        capture
-                    }
-                };
+                let capture = self.capture(defined, shared);
                 *binding = Binding::Function(Callable::Captured(formals, body, capture));
             }
         }
@@ -2993,8 +2989,15 @@ impl Lowering<'_> {
                     continue;
                 }
             };
-            // A parameter is a fresh variable, so assigning it never touches the caller's.
-            let ty = self.builder.ty(argument);
+            // A parameter is a fresh variable, so assigning it never touches the caller's, and
+            // one holding a tag widens as any variable does.
+            let ty = match self.builder.ty(argument) {
+                Type::Tag(union) => match self.widened.iter().find(|&&(held, _)| held == symbol) {
+                    Some(&(_, wider)) => Type::Tag(shapes::join(union, wider)),
+                    None => Type::Tag(union),
+                },
+                ty => ty,
+            };
             let variable = self.builder.local(ty);
             self.builder.push(Some(variable), Op::Copy(argument));
             scope.names.insert(symbol, Binding::Value(variable));
@@ -9013,7 +9016,6 @@ unsafe fn writes(expression: Sexp) -> bool {
             .any(|(_, item)| writes(item))
 }
 
-/// The type both of two values' types fit: that type, or the union of two tags.
 /// The values of `arguments`, or `None` when one is a function.
 fn plain_values(arguments: &[Argument]) -> Option<SmallVec<[Local; 4]>> {
     arguments
@@ -9057,6 +9059,7 @@ unsafe fn eta(name: Sexp, arity: usize) -> Result<(Sexp, Sexp), Refusal> {
     Ok((formals, body))
 }
 
+/// The type both of two values' types fit: that type, or the union of two tags.
 fn joined(a: Type, b: Type) -> Option<Type> {
     match (a, b) {
         (Type::Tag(a), Type::Tag(b)) => Some(Type::Tag(shapes::join(a, b))),

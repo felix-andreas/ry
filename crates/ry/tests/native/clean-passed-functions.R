@@ -1,5 +1,5 @@
 # Functions passed to typed functions: a project function, a local function that captures a
-# variable, a lambda, standard library functions by name, and a tag variable reassigned in a loop.
+# variable, a lambda, standard library functions by name, and a tag variable or parameter reassigned.
 alias Light = :Red | :Amber | :Green
 apply_twice <- function(step: fn(F64) -> F64, x: F64) -> F64 step(step(x))
 compose <- function(f: fn(F64) -> F64, g: fn(F64) -> F64, x: F64) -> F64 apply_twice(f, g(x))
@@ -26,12 +26,24 @@ cycled <- function(n: I64) -> F64 {
     :Green => 3f64
   }
 }
+step_twice <- function(light: Light, f: fn(Light) -> Light) -> Light {
+  light <- f(light)
+  light <- f(light)
+  light
+}
+stepped <- function(n: I64) -> F64 {
+  match (step_twice(:Green, next_light)) {
+    :Red => 1f64
+    :Amber => 2f64
+    :Green => 3f64
+  }
+}
 by_name <- function(n: I64, xs: List<F64>) -> F64 {
   floats <- List.map(List.range(1, n), Num.to_f64)
   List.sum(floats) + List.sum(List.map(xs, Num.sqrt)) + fold(xs, Num.max, 0)
 }
 main <- function(x: F64) -> F64 {
-  apply_twice(bump, x) + scaled(3, x) + apply_twice(\(v) v * 2, x) + cycled(3) +
+  apply_twice(bump, x) + scaled(3, x) + apply_twice(\(v) v * 2, x) + cycled(3) + stepped(1) +
     by_name(4, [1, 4, 9.5])
 }
 cat(main(1), "\n")

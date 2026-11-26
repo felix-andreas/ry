@@ -701,7 +701,7 @@ pub fn native_blockers(judged: Judged<'_, '_>) -> ThinVec<NativeBlocker> {
         converted_locals: Vec::new(),
         own: None,
     };
-    judge.find(root);
+    judge.find(root, None);
     let mut blockers = judge.blockers;
     blockers.sort_by_key(|blocker| (blocker.range.start(), blocker.range.end()));
     blockers.dedup();
@@ -1007,14 +1007,16 @@ impl<'a, 'db> Judge<'a, 'db> {
     }
 
     /// Looks for native functions outside any native function: a function literal with a
-    /// native signature is judged, and any other is searched for ones nested in it.
-    fn find(&mut self, id: ExprId) {
+    /// native signature is judged, and any other is searched for ones nested in it. `own` is the
+    /// name a function literal is assigned to.
+    fn find(&mut self, id: ExprId, own: Option<Symbol>) {
         let module = self.judged.module;
         if let ExpressionKind::Assign { target, value, .. } = *module.kind(id)
             && let ExpressionKind::NameRef(name) = *module.kind(target)
             && matches!(module.kind(value), ExpressionKind::Function { .. })
         {
-            self.own = Some(name);
+            self.find(value, Some(name));
+            return;
         }
         if let ExpressionKind::Function { parameters, .. } = *module.kind(id)
             && let Some(signature) = self.judged.signatures.get(id)
@@ -1024,11 +1026,12 @@ impl<'a, 'db> Judge<'a, 'db> {
                 .filter(|parameter| parameter.name != "...")
                 .count();
             if is_native_signature(self.judged.db, self.judged.definitions, signature, formals) {
+                self.own = own;
                 self.judge(id, signature);
                 return;
             }
         }
-        module.for_each_child(id, |child| self.find(child));
+        module.for_each_child(id, |child| self.find(child, None));
     }
 
     fn judge(&mut self, function: ExprId, signature: &FunctionType<'db>) {
@@ -2503,7 +2506,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             ExpressionKind::NameRef(name)
                 if self
                     .ty(value)
-                    .is_some_and(|ty| matches!(ty.kind(db), TyKind::Function(_))) =>
+                    .is_some_and(|ty| matches!(self.peel(ty).kind(db), TyKind::Function(_))) =>
             {
                 let compiles = match self.lookup(name) {
                     Some(Slot::Function(function)) => {
