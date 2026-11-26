@@ -591,6 +591,9 @@ pub struct FunctionType<'db> {
     /// Formals the body reads only as the whole condition of an `if` or `while`, which takes a
     /// string through `as.logical`. Inferred only.
     pub condition_only: &'db [Name<'db>],
+    /// Formals whose argument's shape the scalar result takes, because every value the body
+    /// returns is vectorised math over that formal (`function(x) sqrt(x) * 2`). Inferred only.
+    pub elementwise: &'db [Name<'db>],
     /// The formal an S3 generic's `UseMethod` dispatches on. Dispatch forces a supplied
     /// argument, so forwarding a missing formal there fails even though a call may leave the
     /// formal out. Inferred only.
@@ -629,6 +632,7 @@ impl<'db> FunctionType<'db> {
             default_reads: &[],
             missing_tested: &[],
             condition_only: &[],
+            elementwise: &[],
             dispatch: None,
             null_unless: None,
             reduces: None,
@@ -1678,6 +1682,7 @@ fn stored_kind<'a>(arena: &'a Bump, kind: TyKind<'a>) -> TyKind<'a> {
             default_reads: arena.alloc_slice_copy(function.default_reads),
             missing_tested: arena.alloc_slice_copy(function.missing_tested),
             condition_only: arena.alloc_slice_copy(function.condition_only),
+            elementwise: arena.alloc_slice_copy(function.elementwise),
             ..*function
         })),
         TyKind::Union(members) => TyKind::Union(arena.alloc_slice_copy(members)),

@@ -991,10 +991,6 @@ The rule ships (`decisions/syntax-semantics.md`, "A strict library file's top le
 
 - **Evaluate pure constants once and cache them** with the bytecode, as Roc evaluates top-level constants at compile time.
 
-## Open: strict-mode friction from typing finbench
-
-- **An unannotated wrapper of vectorised math returns a scalar.** `@elementwise(x)` gives `sqrt(x)` the shape of a known `x` (`decisions/type-checker.md`, "`@elementwise(x)` gives a scalar result the shape of its argument"), but `function(x) sqrt(x)` infers `<T> fn(x: T) -> double`, so `wrap(xs)` over a `double[]` is still `double`. A shape variable (the shape of `T` with a `double` element) would fix it; no `array` type exists either.
-
 ## Open: the JIT
 
 `crates/jit` compiles hot bodies and loops (`decisions/jit-ssa.md`, "The JIT tier"). In priority order:

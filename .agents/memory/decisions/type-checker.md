@@ -931,13 +931,13 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 
 ## `@elementwise(x)` gives a scalar result the shape of its argument
 
-**Status:** built (`Library::elementwise` in `crates/semantics/src/stubs.rs`, `elementwise_result` in `crates/semantics/src/check.rs`; `base-functions.R.test`, `vectorised_math_keeps_the_shape_of_its_argument`).
+**Status:** built (`Library::elementwise` in `crates/semantics/src/stubs.rs`, `elementwise_result`, `elementwise_formals` and `elementwise_return` in `crates/semantics/src/check.rs`; `base-functions.R.test`, `vectorised_math_keeps_the_shape_of_its_argument`).
 
 - `sqrt`, `exp`, `log`, the trigonometric and rounding functions, `nchar`, `toupper`, `tolower`, `trimws`, `chartr`, `is.na` and its siblings declared one scalar result for any input, so `#: fn(x: double[]) -> double` over `sqrt(x)` checked clean and `#: fn(rates: matrix) -> matrix` over `exp(-rates)` failed.
 - An overload set per shape was tried and dropped: an unannotated `function(x) sqrt(x)` then matches candidates that disagree, and the overload rules give it `Unknown` or a `numeric` bound across the typing fixtures.
 - Target shape: one declaration, `sqrt : @pure @elementwise(x) fn(x: Any) -> double`. After the call types, its scalar result takes the shape of the first marked argument that is a vector (`double[]`), a named vector (`double[named]`, since these functions keep names) or a `matrix` (which records no element type). A union lifts member by member. Any other argument, a scalar, `Any` or an open variable among them, keeps the declared scalar.
 - No `array` type: `array()` stays `Any`, which keeps the scalar claim, as before. A base `array` type would need `dim` tracking that no fixture asks for yet.
-- Limit: an unannotated wrapper `function(x) sqrt(x)` infers `<T> fn(x: T) -> double`, because no type form says "the shape of `T` with a `double` element". A shape variable would fix it; it waits for a case that needs it.
+- An unannotated wrapper takes the shape too. Its signature reads `<T> fn(x: T) -> double`, and the inferred `FunctionType` lists the formals every returned value follows elementwise (`elementwise`, inferred only): a marked call over the formal, an elementwise project function over it, or `+ - * / ^ %%` joining such a value with the formal or a number. A call lifts the scalar result to the argument's shape as a direct call does (`base-functions.R.test`, `an_unannotated_wrapper_of_vectorised_math_takes_its_arguments_shape`). A shape variable was the alternative; it would add a type form every renderer, parser and unifier must carry, for one fact that only calls read. A formal the body writes, an early `return`, or another formal in the arithmetic (`sqrt(x) + y`) keeps the scalar claim.
 - `as.integer` and the other `as.*` drop names and `dim`, so they are not marked; they keep the scalar claim.
 
 ## The fresh sample's false-report classes, second pass
@@ -1086,10 +1086,9 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 
 **Status:** built (`default_join_literals`, `open_number_literal`, the tail reads in `check_declared_function` and the `List` position in `infer_plain_index`, all in `check.rs`; `native-syntax.R.test` group `conversions`).
 
-- A join of two paths ties their open literals when R gives them the same type, so `x <- 0` and a branch's `x <- x + 1.5` stay one literal that a later use decides. Literals of different R types (`1L` and `2.5`) still take R's types at the join, because plain R code keeps them apart as `integer | double`. Beside a ry number on the other path, the literal is that number.
-- A number literal beside an open literal variable in arithmetic is open too, so `x + 1.5` is undecided, as arithmetic on two literals already was.
+- A join of two paths ties their open literals when R gives them the same type, so `x <- 0` and a branch's `x <- x + 1.5` stay one literal that a later use decides. Literals of different R types (`1L` and `2.5`) take R's types at the join, because plain R code keeps them apart as `integer | double`. Beside a ry number on the other path, the literal is that number.
+- A number literal beside an open literal variable of the same R type is open too, so `x <- 0; x + 1.5` is undecided, as arithmetic on two literals is. A literal of another R type (`i <- 1L; i + 1.5`) stays closed, or the joined constraint would turn `i` into a `double`. A quotient is a fraction variable of its own, so `n / 2` leaves `n` whole.
 - A variable that a function declared with a ry number result ends with is read as that number, as a tail literal is. Only declared ry number results do this, because against an R type the default already is that type.
-- A `[[` position into a ry `List` decides the literal as `I64`, so `lookup[[j]]` before `lookup[[i]] <- j` no longer makes `j` a `double`.
+- A `[[` position into a ry `List` decides the literal as `I64`, so `lookup[[j]]` before `lookup[[i]] <- j` keeps `j` an `I64`.
 - A nominal constructor's representation is an expected type for its literals (`check_new_nominal` adapts them), so `@Tree(:Leaf(1))` against `:Leaf(I64)` holds.
-- A recursive `alias` stays refused, with a short message that names `type` as the recursive form: an alias is its expansion, so a recursive one has no finite type, while a nominal `type` gives the recursion a name to stop at.
-
+- A recursive `alias` is refused, with a short message that names `type` as the recursive form: an alias is its expansion, so a recursive one has no finite type, while a nominal `type` gives the recursion a name to stop at.

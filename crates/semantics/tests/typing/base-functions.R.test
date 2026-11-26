@@ -572,6 +572,37 @@ wrap: <T> fn(x: T) -> double
 discount: fn(rates: matrix) -> matrix
 scaled: fn(x: double[]) -> double[]
 
+#---- an_unannotated_wrapper_of_vectorised_math_takes_its_arguments_shape
+# A body that returns vectorised math over a formal makes the wrapper elementwise in it.
+xs <- c(1.5, 2, 3)
+wrap <- function(x) sqrt(x)
+scaled <- function(r) exp(r) - 1
+twice <- function(x) 2 * wrap(x)
+mixed <- function(x, y) sqrt(x) + y
+written <- function(x) {
+  x <- 1
+  sqrt(x)
+}
+roots <- wrap(xs)
+one <- wrap(4)
+shifted <- scaled(xs)
+doubled <- twice(xs)
+other <- mixed(xs, 1)
+fixed <- written(xs)
+#++++
+xs: double[]
+wrap: <T> fn(x: T) -> double
+scaled: <T> fn(r: T) -> double
+twice: <T> fn(x: T) -> double
+mixed: <T, U: arithmetic> fn(x: T, y: U) -> double
+written: <T> fn([x]: T) -> double
+roots: double[]
+one: double
+shifted: double[]
+doubled: double[]
+other: double
+fixed: double
+
 #---- a_logical_test_over_a_matrix_or_a_named_vector_is_a_condition
 # `is.finite(m)` keeps its logical claim, since `matrix` carries no element type, and a named
 # vector tests like an unnamed one.

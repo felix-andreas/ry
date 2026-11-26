@@ -1243,6 +1243,10 @@ pub fn plan_rename(
         .flat_map(|(kind, text, _)| {
             let whole = match kind {
                 SyntaxKind::STRING => Some(text.trim_matches(['"', '\''])),
+                SyntaxKind::RAW_STRING => Some(
+                    text.trim_start_matches(['r', 'R'])
+                        .trim_matches(['"', '\'', '-', '(', ')', '[', ']', '{', '}']),
+                ),
                 _ => None,
             };
             text.split(|character: char| !is_name_character(character))

@@ -385,8 +385,8 @@ functions declare generic `T[]` signatures. A function serves a callback interfa
 accepts every call shape the interface promises, so a callback-style stub can declare its real
 signature, spare optional formals included. A function whose result's atomic type differs from its
 input's while its shape follows the input, such as `nchar` or `toupper`, declares
-[`@elementwise`](#results-that-keep-the-arguments-shape); through an unannotated wrapper its result
-is still the scalar claim.
+[`@elementwise`](#results-that-keep-the-arguments-shape); an unannotated wrapper that returns such a
+call over its formal (`function(x) sqrt(x) * 2`) takes the argument's shape too.
 
 ## Loading and namespacing
 

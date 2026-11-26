@@ -600,10 +600,48 @@ leaf <- function() -> List<I64> {
 leaf: fn() -> List<I64>
 70..75 warning[unused] `first` is assigned but never used
 
+#---- a_number_beside_a_literal_variable_of_another_r_type_keeps_r_types
+counted <- function() {
+  i <- 1L
+  j <- i + 1.5
+  i
+}
+halves <- function() {
+  n <- 10L
+  h <- n / 2L
+  n
+}
+joined <- function(flag) {
+  x <- 1L
+  if (flag) x <- x + 2.5
+  x
+}
+#++++
+counted: fn() -> integer
+halves: fn() -> integer
+joined: fn(flag: logical) -> integer | double
+36..37 warning[unused] `j` is assigned but never used
+91..92 warning[unused] `h` is assigned but never used
+
+#---- a_literal_variable_that_cannot_take_the_declared_number_is_reported
+fraction <- function() -> I64 {
+  x <- 1.5
+  x
+}
+#++++
+fraction: fn() -> I64
+45..46 error[type-mismatch] expected `I64`, found `double`
+
 #---- literals_in_a_nominal_constructor_take_the_representation_numbers
 type Tree = :Leaf(I64) | :Node(Tree, Tree)
 leaf <- function() -> Tree @Tree(:Leaf(1))
 pair <- function() -> Tree @Tree(:Node(@Tree(:Leaf(1)), @Tree(:Leaf(2))))
+fraction <- function() -> Tree @Tree(:Leaf(1.5))
+text <- function(s: Str) -> Tree @Tree(:Leaf(s))
 #++++
 leaf: fn() -> Tree
 pair: fn() -> Tree
+fraction: fn() -> Tree
+text: fn(s: Str) -> Tree
+203..206 error[type-mismatch] this literal does not fit `I64`, which cannot hold its value exactly
+254..255 error[type-mismatch] expected `I64`, found `Str`
