@@ -5224,9 +5224,6 @@ impl Lowering<'_> {
         let index = self.to_i64(index)?;
         let value = self.value(value)?;
         self.usable(value)?;
-        ty.items().ok_or(Refusal::new(
-            "a `List.set` of something other than a ry list",
-        ))?;
         // A tag of another shape widens the item union, as an append does.
         let ty = self
             .builder

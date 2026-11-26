@@ -18697,16 +18697,27 @@ impl<'db, 'a> Checker<'db, 'a> {
         if deferred.is_empty() {
             return call_arguments;
         }
-        let hints = self.parameter_hints_for(callees, &call_arguments, &deferred);
+        // Only a single candidate widens, because the hints of several candidates must agree.
+        let widening: Vec<SmallVec<[(usize, usize, bool); 1]>> = match callees {
+            [callee] => (0..call_arguments.len())
+                .map(|index| {
+                    if deferred.contains(index) {
+                        self.accumulator_states(*callee, &call_arguments, &deferred, index)
+                    } else {
+                        SmallVec::new()
+                    }
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let hints = self.parameter_hints_for(callees, &call_arguments, &deferred, &widening);
         for (index, argument) in arguments.iter().enumerate() {
             let Some(value) = argument.value.filter(|_| deferred.contains(index)) else {
                 continue;
             };
             let mut hint = hints.get(index).cloned().flatten();
-            let states = match callees {
-                [callee] if hint.is_some() => {
-                    self.accumulator_states(*callee, &call_arguments, &deferred, index)
-                }
+            let states = match (&hint, widening.get(index)) {
+                (Some(_), Some(states)) => states.clone(),
                 _ => SmallVec::new(),
             };
             let errors_before = self.errors.len();
@@ -18836,42 +18847,40 @@ impl<'db, 'a> Checker<'db, 'a> {
             let Some(current) = hint.get(formal).copied().flatten() else {
                 continue;
             };
-            let result = match wrapped {
-                false => function.ret,
-                true => {
-                    let Some(mut payloads) =
-                        tag_payloads(self.db, function.ret).map(|payloads| payloads.into_iter())
-                    else {
-                        continue;
-                    };
-                    let Some(first) = payloads.next() else {
-                        continue;
-                    };
-                    let joined = payloads
-                        .try_fold(first, |held, payload| self.join_ry_values(held, payload));
-                    let Some(joined) = joined else { continue };
-                    joined
-                }
-            };
+            // A join that does not widen the state leaves no bindings behind.
             let snapshot = self.table.snapshot();
-            let fits = self.table.compatible(self.db, result, current);
-            self.table.rollback(snapshot);
-            if fits {
-                continue;
+            match self.widened_state(function.ret, wrapped, current) {
+                Some(joined) => {
+                    hint[formal] = Some(joined);
+                    arguments[state].ty = Some(joined);
+                    widened = true;
+                }
+                None => self.table.rollback(snapshot),
             }
-            // The caller rolls this pass's bindings back, so the joined state must be closed.
-            let Some(joined) = self
-                .join_ry_values(current, self.table.resolve(self.db, result))
-                .map(|joined| self.table.resolve(self.db, joined))
-                .filter(|joined| !self.table.contains_unbound_var(self.db, *joined))
-            else {
-                continue;
-            };
-            hint[formal] = Some(joined);
-            arguments[state].ty = Some(joined);
-            widened = true;
         }
         widened
+    }
+
+    /// The join of `current` and the state a callback returning `ret` gives back, bare or as the
+    /// payload of each tag when `wrapped`, or `None` when the state fits `current` already. The
+    /// caller rolls the pass's bindings back, so the join must be closed.
+    fn widened_state(&mut self, ret: Ty<'db>, wrapped: bool, current: Ty<'db>) -> Option<Ty<'db>> {
+        let result = if wrapped {
+            let mut payloads = tag_payloads(self.db, ret)?.into_iter();
+            let first = payloads.next()?;
+            payloads.try_fold(first, |held, payload| self.join_ry_values(held, payload))?
+        } else {
+            ret
+        };
+        let snapshot = self.table.snapshot();
+        let fits = self.table.compatible(self.db, result, current);
+        self.table.rollback(snapshot);
+        if fits {
+            return None;
+        }
+        self.join_ry_values(current, self.table.resolve(self.db, result))
+            .map(|joined| self.table.resolve(self.db, joined))
+            .filter(|joined| !self.table.contains_unbound_var(self.db, *joined))
     }
 
     /// Whether `expression` reads a local whose value is a string of its own name.
@@ -19185,6 +19194,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         callees: &[Ty<'db>],
         arguments: &[CallArgument<'db>],
         deferred: &Bitset<'a, usize>,
+        widening: &[SmallVec<[(usize, usize, bool); 1]>],
     ) -> Vec<Option<Vec<Option<Ty<'db>>>>> {
         let mut agreed: Vec<Option<Vec<Option<Ty<'db>>>>> = vec![None; arguments.len()];
         let mut first_candidate = true;
@@ -19298,7 +19308,6 @@ impl<'db, 'a> Checker<'db, 'a> {
                     let TyKind::Function(expected) = expected.kind(self.db) else {
                         return None;
                     };
-                    let ret = self.table.resolve(self.db, expected.ret);
                     let formals = expected
                         .positional
                         .iter()
@@ -19338,14 +19347,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                                 // that type. In `List.walk(xs, List.repeat(0f64, n), \(sums, x)
                                 // sums + x)` the state is `List<F64>` before the body reads
                                 // `sums + x`. A state with a tag in it, such as `[:A]`, keeps
-                                // its type only where `widen_accumulators` widens it: for one
-                                // callee whose callback returns the state, bare or as the payload
-                                // of every tag it returns.
-                                let tag_state_widens = callees.len() == 1
-                                    && (ret == formal
-                                        || tag_payloads(self.db, ret).is_some_and(|payloads| {
-                                            payloads.iter().all(|&payload| payload == formal)
-                                        }));
+                                // its type only where `widen_accumulators` widens it.
+                                let tag_state_widens =
+                                    widening.get(argument_index).is_some_and(|states| {
+                                        states.iter().any(|&(widened, ..)| widened == index)
+                                    });
                                 let widening_accumulator = accumulators.contains(index)
                                     && !(is_ry_value_type(self.db, formal)
                                         && (tag_state_widens || !mentions_tag(self.db, formal))
@@ -26053,7 +26059,6 @@ fn ok_payload<'db>(db: &'db dyn Db, result: Ty<'db>) -> Option<Ty<'db>> {
     })
 }
 
-/// Whether a tag or a tag union appears anywhere in `ty`, the part of a ry type that widens.
 /// The payloads of `ty`'s tags when it is one tag or a union of tags that each carry one value,
 /// as `:Continue(S) | :Break(S)` does.
 fn tag_payloads<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<SmallVec<[Ty<'db>; 2]>> {
@@ -26073,6 +26078,7 @@ fn tag_payloads<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<SmallVec<[Ty<'db>; 
         .collect()
 }
 
+/// Whether a tag or a tag union appears anywhere in `ty`, the part of a ry type that widens.
 fn mentions_tag<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
     if matches!(
         ty.kind(db),

@@ -17,17 +17,11 @@ loop_grow <- function(xs: List<I64>) -> I64 {
   for (x in xs) acc <- List.append(acc, :B)
   List.len(acc)
 }
-record_stop_at <- function(xs: List<I64>) -> :None | :Some(I64) {
-  List.walk_until(xs, :None, \(acc, x) if (x > 2i64) :Break(:Some(x)) else :Continue(acc))
-}
-branch <- function(c: Bool) -> I64 {
+record_branch <- function(c: Bool) -> I64 {
   r <- if (c) (t = :A, n = 1i64) else (t = :B, n = 2i64)
   match (r$t) { :A => r$n; :B => r$n * 10i64 }
 }
-tuple_stop_at <- function(xs: List<I64>) -> :None | :Some(I64) {
-  List.walk_until(xs, :None, \(acc, x) if (x > 2i64) :Break(:Some(x)) else :Continue(acc))
-}
-branch <- function(c: Bool) -> Tuple{:A | :B, I64} {
+tuple_branch <- function(c: Bool) -> Tuple{:A | :B, I64} {
   if (c) (:A, 1i64) else (:B, 2i64)
 }
 stop_at <- function(xs: List<I64>) -> :None | :Some(I64) {
@@ -36,10 +30,7 @@ stop_at <- function(xs: List<I64>) -> :None | :Some(I64) {
 branch <- function(c: Bool) -> List<:A | :B> {
   if (c) [:A] else [:B]
 }
-payload_stop_at <- function(xs: List<I64>) -> :None | :Some(I64) {
-  List.walk_until(xs, :None, \(acc, x) if (x > 2i64) :Break(:Some(x)) else :Continue(acc))
-}
-branch <- function(c: Bool) -> :Some(List<:A | :B>) {
+payload_branch <- function(c: Bool) -> :Some(List<:A | :B>) {
   if (c) :Some([:A]) else :Some([:B])
 }
 front <- function(xs: List<:A>) -> List<:A | :B> {

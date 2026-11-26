@@ -548,6 +548,13 @@ stop_at <- function(xs: List<I64>) {
   List.walk_until(xs, :None, \(acc, x) if (x > 2i64) :Break(:Some(x)) else :Continue(acc))
 }
 front <- function(xs: List<:A>) List.prepend(xs, :B)
+replace_first <- function(xs: List<:A>) List.set(xs, 1i64, :B)
+latest <- function(xs: List<I64>) {
+  List.walk(xs, :None, \(acc, x) {
+    seen <- acc
+    :Some(x)
+  })
+}
 #++++
 first_some: fn(xs: List<I64>) -> :None | :Some(I64)
 keep_big: fn(xs: List<I64>) -> :None | :Some(I64)
@@ -562,6 +569,9 @@ payload_branch: fn(c: Bool) -> :Some(List<:A | :B>)
 numbers_never_widen: fn(c: Bool) -> List<I64> | List<F64>
 stop_at: fn(xs: List<I64>) -> :None | :Some(I64)
 front: fn(xs: List<:A>) -> List<:A | :B>
+replace_first: fn(xs: List<:A>) -> List<:A | :B>
+latest: fn(xs: List<I64>) -> :None | :Some(I64)
+1271..1275 warning[unused] `seen` is assigned but never used
 
 #---- an_empty_list_grows_into_a_list_of_a_nominal_type
 type Tree = :Leaf(I64) | :Node(List<Tree>)
