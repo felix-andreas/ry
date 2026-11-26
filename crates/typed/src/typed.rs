@@ -127,8 +127,6 @@ thread_local! {
     /// How many calls through a cell lowerings have linked, which tells a compilation that
     /// refused whether its refusal rests on a guess that the function being compiled may revise.
     static CELL_CALLS: Cell<u64> = const { Cell::new(0) };
-    /// Refusals that rest on such a guess, remembered once the outermost compilation finishes.
-    static PROVISIONAL: RefCell<Vec<(Key, Refusal)>> = const { RefCell::new(Vec::new()) };
     /// The refusals that wait on the interpreter, with what each waits for: the closure compiles
     /// again once the interpreter has done it.
     static AWAITING: RefCell<FxHashMap<Key, lower::Awaited>> = RefCell::new(FxHashMap::default());
@@ -435,42 +433,25 @@ unsafe fn compiled_or_refusal(
             Err(refusal)
         }
     };
-    let found = compiled.clone();
-    match compiled {
-        // A refusal under a guess of a function still being compiled is not this function's for
-        // good while that function may revise the guess, so a call made meanwhile compiles it
-        // again; once the outermost compilation is done, it stands.
-        Err(refusal) if CELL_CALLS.get() != cell_calls => {
-            PROVISIONAL.with_borrow_mut(|provisional| provisional.push((key, refusal)));
+    if let Err(refusal) = &compiled
+        && lower::awaits_interpreter(refusal)
+        && let Some(awaited) = lower::awaited()
+    {
+        // The table reads the promise later, which the namespace may have dropped by then.
+        if let lower::Awaited::Promise(promise) = awaited {
+            interp::heap().add_global_root(promise);
         }
-        compiled => {
-            if let Err(refusal) = &compiled
-                && lower::awaits_interpreter(refusal)
-                && let Some(awaited) = lower::awaited()
-            {
-                // The table reads the promise later, which the namespace may have dropped by
-                // then.
-                if let lower::Awaited::Promise(promise) = awaited {
-                    interp::heap().add_global_root(promise);
-                }
-                AWAITING.with_borrow_mut(|awaiting| awaiting.insert(key.clone(), awaited));
-            }
-            remember(key, compiled);
-        }
+        AWAITING.with_borrow_mut(|awaiting| awaiting.insert(key.clone(), awaited));
     }
-    if COMPILING.with_borrow(|compiling| compiling.is_empty()) {
-        let provisional = PROVISIONAL.take();
-        for (key, refusal) in provisional {
-            let compiled = COMPILED.with_borrow(|table| match table.get(&key) {
-                Some(Ok(found)) => Some(*found),
-                _ => None,
-            });
-            if !compiled.is_some_and(|found| current(found) && cells_hold(&key, found)) {
-                remember(key, Err(refusal));
-            }
-        }
+    // A refusal under the guess of a function still being compiled is not this function's for
+    // good, since that function may revise the guess, so it is not remembered and a later call
+    // compiles it again. The outermost compilation's refusal rests on no one else's guess.
+    let provisional =
+        CELL_CALLS.get() != cell_calls && !COMPILING.with_borrow(|compiling| compiling.is_empty());
+    if !provisional {
+        remember(key, compiled.clone());
     }
-    found
+    compiled
 }
 
 fn remember(key: Key, compiled: Result<&'static Compiled, Refusal>) {
@@ -825,6 +806,10 @@ impl Callees for Linker {
         self.epoch = earliest(self.epoch, compiled.epoch);
         self.guessed = earliest(self.guessed, compiled.guessed);
         for (callee, assumed) in &compiled.cells {
+            // Code linked here rests on that guess as much as a call through the cell would.
+            if COMPILING.with_borrow(|compiling| compiling.contains_key(callee)) {
+                CELL_CALLS.set(CELL_CALLS.get() + 1);
+            }
             add_cell(&mut self.cells, callee, *assumed);
         }
         self.called.push(key);

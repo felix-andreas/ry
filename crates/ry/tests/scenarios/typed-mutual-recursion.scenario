@@ -118,3 +118,54 @@ unset RY_TYPED_LOG
 run ry build --aot --exe calls.R -o calls
 expect exit 0
 expect stdout "typed code: closures=2 written=2"
+
+# A group that waits on the interpreter to run a conversion compiles once it has run.
+file await.R
+| options(k = 2)
+| f <- function(n: I64) -> I64 {
+|   if (n <= 0) return(0)
+|   ax <- n
+|   a0 <- (n * 3 + ax) %% 7
+|   a1 <- (n * 4 + a0) %% 8
+|   a2 <- (n * 5 + a1) %% 9
+|   a3 <- (n * 6 + a2) %% 10
+|   a4 <- (n * 7 + a3) %% 11
+|   a5 <- (n * 8 + a4) %% 12
+|   a6 <- (n * 9 + a5) %% 13
+|   a7 <- (n * 10 + a6) %% 14
+|   a8 <- (n * 11 + a7) %% 15
+|   a9 <- (n * 12 + a8) %% 16
+|   a10 <- (n * 13 + a9) %% 17
+|   a11 <- (n * 14 + a10) %% 18
+|   a12 <- (n * 15 + a11) %% 19
+|   a13 <- (n * 16 + a12) %% 20
+|   g(n - 1) + a13 %% 2
+| }
+| g <- function(n: I64) -> I64 {
+|   if (n <= 0) return(1)
+|   k <- Num.from_r(getOption("k"))
+|   ax <- n
+|   a0 <- (n * 3 + ax) %% 7
+|   a1 <- (n * 4 + a0) %% 8
+|   a2 <- (n * 5 + a1) %% 9
+|   a3 <- (n * 6 + a2) %% 10
+|   a4 <- (n * 7 + a3) %% 11
+|   a5 <- (n * 8 + a4) %% 12
+|   a6 <- (n * 9 + a5) %% 13
+|   a7 <- (n * 10 + a6) %% 14
+|   a8 <- (n * 11 + a7) %% 15
+|   a9 <- (n * 12 + a8) %% 16
+|   a10 <- (n * 13 + a9) %% 17
+|   a11 <- (n * 14 + a10) %% 18
+|   a12 <- (n * 15 + a11) %% 19
+|   a13 <- (n * 16 + a12) %% 20
+|   f(n - 1) + k + a13 %% 2
+| }
+| for (i in 1:3) print(f(10))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry await.R
+expect exit 0
+expect stdout "17i64\n17i64\n17i64"
+expect stderr "waits on the interpreter"
+expect stderr "typed: compiled for [I64] -> I64"
