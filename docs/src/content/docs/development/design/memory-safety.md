@@ -564,14 +564,22 @@ without `unsafe`. The wrappers are where a migrated
 function meets an unmigrated one, so that boundary is visible and counted, and a wrapper
 disappears when the helper under it is migrated.
 
-Written against the handle types: tier 0's element and matrix stores; subscript resolution,
+Written against the handle types: tier 0's element and matrix stores and its replacement forms
+(`x[i] <- v`, `x[[i]] <- v`, `x$name <- v`, `x[i, j] <- v` and `f(x) <- v`, on a frame slot or a
+binding); subscript resolution,
 element reads and stores, and `[`, `[[`, `$`, `@` with their replacement forms (`subset.rs`); the
 attribute readers and setters with their fast-path entries (`attr`, `attributes`, `names`, `dim`,
 `dimnames`, `class`, `oldClass`, `levels<-`, `comment`, `length<-`, `inherits`, `unclass` and the
 replacement forms); `strings.rs` except `paste`, `paste0`, `sprintf`, `strsplit` and
 `make.unique`; the bit conversions in `arith.rs`; and the `arima0` and `ppr` routines of the
 stats crate. Two pieces of the API are not built: the
-bytecode loop's register accessor and `Held<T>` fields in traced structures.
+bytecode loop's register accessor and `Held<T>` fields in traced structures. The replacement
+forms reach a frame through `RunningFrame` and `Slot` in `bytecode.rs`, a narrow form of that
+accessor: a slot read is a `Gc` that borrows the context, a store takes a rooted value, and an
+in-place write needs the `Owned` that `claim` returns only when the slot holds the value itself
+and the value is unshared. A binding is claimed the same way (`handles::claim_binding`), so a
+variable bound to a promise is copied before its first write instead of written through the
+promise.
 
 An unmigrated caller reaches a migrated function through a raw entry, an `unsafe fn` over `Sexp`
 that states what the caller must hold. Which helper the entry uses decides its cost:

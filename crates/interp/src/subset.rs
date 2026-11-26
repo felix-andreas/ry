@@ -3813,7 +3813,7 @@ fn selects_nothing<'s>(
         && index.attributes(context).r_type() == SexpType::Nil)
 }
 
-fn assign_subset<'s>(
+pub(crate) fn assign_subset<'s>(
     context: &mut Cx<'s>,
     object: Local<'s>,
     indices: &[Local<'s>],
@@ -4972,7 +4972,7 @@ pub unsafe fn subassign2(object: Sexp, indices: &[Sexp], value: Sexp, call: Sexp
 }
 
 /// [`subassign2`] on handles.
-fn assign_subset2<'s>(
+pub(crate) fn assign_subset2<'s>(
     context: &mut Cx<'s>,
     object: Local<'s>,
     indices: &[Local<'s>],
@@ -5521,7 +5521,7 @@ pub unsafe fn dollar_assign(object: Sexp, name: Sexp, value: Sexp, call: Sexp) -
 }
 
 /// [`dollar_assign`] on handles.
-fn assign_dollar<'s>(
+pub(crate) fn assign_dollar<'s>(
     context: &mut Cx<'s>,
     object: Local<'s>,
     name: Local<'s, handles::Chars>,
