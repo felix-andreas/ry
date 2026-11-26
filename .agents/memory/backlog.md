@@ -680,8 +680,7 @@ A test user's application workload (`tools/bench/appsuite`) spends its time flat
 
 Rule and order: `development/design/memory-safety.md`, "Migration".
 
-- **Raw, in order.** `.class2`, `.cache_class`; `paste`, `sprintf`, `make.unique`, `strsplit`;
-  the ALTREP hook table (`interp.rs`), `patch_args_by_actuals` (`dispatch.rs`), the POSIXlt
+- **Raw, in order.** The ALTREP hook table (`interp.rs`), `patch_args_by_actuals` (`dispatch.rs`), the POSIXlt
   `Column::of` (`system.rs`); `values.rs`, the evaluator, the bytecode loop.
 - **Not built**: the register accessor beyond the replacement forms' `RunningFrame`, `Held<T>`.
 - **Unaudited.** `jit::runtime` helpers outside `scoped` must leave no handle.
@@ -695,13 +694,15 @@ Rule and order: `development/design/memory-safety.md`, "Migration".
   copies dimnames only with names and errors on `NA`). `aperm(resize = TRUE)` keeps the names
   of `dim` and `resize = NA` acts as `TRUE`. `t()` of a 1-D array drops `names(dimnames)`
   where GNU R gives `c("", name)`. Each needs an oracle case recorded with GNU R.
-- **Measured, not closed.** With the replacement forms on handles, an S4 replacement generic
-  (`value(item) <- i`) counts 3.2% more instructions than the raw version: `replace_with_closure`
-  builds its call through `handles::language` and `handles::apply_closure`, which stay out of
-  line. `class<-`, `length<-`, `levels<-`, a string or matrix element and the `<<-` element rows
-  count 0.7 to 1.6% more, mostly `TmpValue`'s drop glue and the handlers' register setup.
+- **Measured, not closed.** Against the raw interpreter, the S4 replacement generic and `class<-`,
+  `oldClass<-`, `dim<-`, `length<-` and `levels<-` count 2.5 to 4.8% fewer instructions. Seven
+  rows count 1.0 to 1.8% more (4 to 32 instructions each): `isTRUE` on a native entry, an S4 slot
+  write, `class`, a string or matrix element store, `kgrid` and the `<<-` element rows. Each
+  difference is the root pushes and pops of the handles a handler takes for values the frame
+  already holds, so closing them needs `Held<T>` for frame operands (the bytecode-loop step)
+  rather than more local tuning.
 - **Raised `unsafe` counts** (`tools/unsafe.py check` reads them), until the helpers migrate:
-  - `crates/interp/src/handles.rs` 107 to 186: `alloc_with_room`, `apply`, `apply_closure`, `array_subassign`, `array_subset`, `array_subset2`, `assign_local`, `assign_outward`, `assignment_copy`, `builtin_definition`, `builtin_failure`, `call_builtin`, `call_direct`, `call_environment`, `call_value`, `claim_binding`, `classed_error`, `closure_call`, `compact_sequence`, `copy_attributes_to`, `copy_elements`, `copy_most_attributes`, `count_tmp_binding`, `define`, `deparse_one_line`, `dispatch_builtin`, `dots_arguments`, `element_text`, `enclosed_value`, `enclosing_binding`, `evaluate`, `force`, `force_holding`, `forced_promise`, `frame_binding`, `frame_value`, `generated_call`, `has_internal_method`, `holds_elements`, `implicit_class`, `in_caller_scope_with`, `install_bytes`, `int_element`, `is_altrep`, `is_missing`, `is_missing_in`, `item`, `language`, `list_to_pairlist`, `lookup_method`, `mark_assigned`, `mark_shared`, `missing_argument`, `move_elements`, `owned_names`, `pairlist_to_list`, `permanent`, `primitive`, `reaching_environment`, `real_element`, `record_dollar`, `record_dollar_assign`, `record_subassign2`, `record_subset2`, `registered_namespace`, `resize_in_place`, `reuse_permitted`, `scalar_subset`, `shallow_copy`, `store_item`, `stored`, `symbol_value`, `tag`, `type_name`, `unwrap_assigned`, `visible_binding`, `warning_in`, `with_result`, `with_rng_state`.
+  - `crates/interp/src/handles.rs` 107 to 194: `alloc_with_room`, `apply`, `apply_closure`, `array_subassign`, `array_subset`, `array_subset2`, `assign_local`, `assign_outward`, `assignment_copy`, `builtin_definition`, `builtin_failure`, `call_builtin`, `call_direct`, `call_environment`, `call_value`, `claim_binding`, `classed_error`, `closure_call`, `compact_sequence`, `copy_attributes_to`, `copy_elements`, `copy_most_attributes`, `count_tmp_binding`, `define`, `deparse_one_line`, `dispatch_builtin`, `dots_arguments`, `element_text`, `enclosed_value`, `enclosing_binding`, `evaluate`, `force`, `force_holding`, `forced_promise`, `frame_binding`, `frame_value`, `generated_call`, `has_internal_method`, `holds_elements`, `in_caller_scope_with`, `install_bytes`, `int_element`, `is_altrep`, `is_missing`, `is_missing_in`, `item`, `list_to_pairlist`, `lookup_method`, `mark_assigned`, `mark_shared`, `missing_argument`, `move_elements`, `owned_names`, `pairlist_to_list`, `permanent`, `primitive`, `reaching_environment`, `real_element`, `record_dollar`, `record_dollar_assign`, `record_subassign2`, `record_subset2`, `registered_namespace`, `resize_in_place`, `reuse_permitted`, `scalar_subset`, `shallow_copy`, `store_item`, `stored`, `symbol_value`, `tag`, `type_name`, `unwrap_assigned`, `visible_binding`, `warning_in`, `with_result`, `with_rng_state`, `StringLists::start`, `StringLists::push_bytes`, `StringLists::push_na`, `char_truelength`, `set_char_truelength`, `held_in_caller_scope`, `long_replacement_call`, `replacement_call`, `tagged_as_in`, `permanent_symbol`.
   - `crates/interp/src/interp.rs` 47 to 49: `altrep_storage` (the hook's type), `resolve_samples_before_truncating`.
   - `crates/interp/src/bytecode.rs` 409 to 428: `load_declines`, `op_subscript`, `subscript_unbound`, `call_declined`, `call_generic_hooked`, `call_summarized`, `clear_dead`, `count_body_entry`, `count_code_entry`, `enclosed_element_assignment`, `fast_call_rebinding`, `generic_call_handler`, `has_slot_table`, `leave_summarized`, `op_super_sub_assign`, `return_hooked`, `setter_call`, `shared_body`, `shared_slot_code`, `sub_assign_in_place`, `sub_assign_in_slots`, `sub_assign_matrix_in_place`, `sub_assign_matrix_in_slots`, `super_sub_assign`, `take_body_entries`, `track_body_entries`.
   - `crates/interp/src/conditions.rs` 50 to 51: `c_error`.
