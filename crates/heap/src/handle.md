@@ -112,6 +112,22 @@ fn passed_out_of_the_scope<'s>(cx: &mut Cx<'s>) {
 }
 ```
 
+An element moved by `Unfilled::fill_from` belongs to that one call, so it cannot be kept and
+written into another vector later:
+
+```compile_fail
+use heap::HeapError;
+use heap::handle::{Cx, Item, Local, Str};
+fn kept_past_the_call<'s>(cx: &mut Cx<'s>, source: Local<'s, Str>) -> Result<(), HeapError> {
+    let mut kept: Vec<Item<'_>> = Vec::new();
+    let first = cx.alloc_unfilled::<Str>(source.len())?;
+    let _ = first.fill_from(cx, source, |_, items| kept.extend_from_slice(items));
+    let second = cx.alloc_unfilled::<Str>(kept.len())?;
+    let _ = second.fill_from(cx, source, |slots, _| slots.copy_from_slice(&kept));
+    Ok(())
+}
+```
+
 While an object is written in place, the context is borrowed mutably, so nothing allocates
 and no slice taken earlier is alive:
 

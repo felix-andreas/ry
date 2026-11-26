@@ -883,20 +883,23 @@ impl<'s, T: Elements> Unfilled<'s, T> {
         self,
         cx: &Cx<'_>,
         source: Local<'_, T>,
-        write: impl FnOnce(&mut [Item], &[Item]),
+        write: impl for<'call> FnOnce(&mut [Item<'call>], &[Item<'call>]),
     ) -> Fresh<'s, T> {
         // SAFETY: the vector is a standard one of `T` that only `self` reaches, so it is not
         // `source` and no slice of it is alive. `source` is a rooted standard vector of `T`,
         // whose slots hold live elements of the element kind, and `Item` is a transparent
-        // `Sexp`. The context is borrowed, so nothing collects while `write` runs, and every
+        // `Sexp` branded with this call alone. The context is borrowed, so nothing collects while `write` runs, and every
         // slot afterwards holds such an element or the uncounted fill `alloc_vector` wrote,
         // which `count_written_elements` requires.
         unsafe {
             let target = self.raw.slice_mut::<Sexp>();
             let source = source.raw.slice::<Sexp>();
             write(
-                std::slice::from_raw_parts_mut(target.as_mut_ptr().cast::<Item>(), target.len()),
-                std::slice::from_raw_parts(source.as_ptr().cast::<Item>(), source.len()),
+                std::slice::from_raw_parts_mut(
+                    target.as_mut_ptr().cast::<Item<'_>>(),
+                    target.len(),
+                ),
+                std::slice::from_raw_parts(source.as_ptr().cast::<Item<'_>>(), source.len()),
             );
             (*cx.heap.as_ptr()).count_written_elements(self.raw);
         }
@@ -909,11 +912,11 @@ impl<'s, T: Elements> Unfilled<'s, T> {
 }
 
 /// An element of a list or character vector on its way from one vector's slot to another's,
-/// in [`Unfilled::fill_from`]. It can be copied but not read, so it never outlives the call
-/// that hands it out.
+/// in [`Unfilled::fill_from`]. It can be copied but not read, and its invariant lifetime is the
+/// one call that hands it out, so an item cannot be kept past it or written by a later call.
 #[derive(Clone, Copy)]
 #[repr(transparent)]
-pub struct Item(Sexp);
+pub struct Item<'call>(Sexp, Brand<'call>);
 
 /// Exclusive access to an existing object. It holds the context, so no R code runs, nothing
 /// allocates and no slice taken earlier is alive while the object is written.
