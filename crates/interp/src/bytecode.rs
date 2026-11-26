@@ -14122,20 +14122,8 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
         return Ok(Flow::Next);
     }
     let env = state.env(Reify::Site(Site::Subassignment))?;
-    let done = handles::in_caller_scope(|context| {
-        let environment = Local::adopt(env);
-        let Some(index) = subscript_value(context, environment, handles::held(context, index))?
-        else {
-            return Ok(false);
-        };
-        Ok(assign_element_in_place(
-            context,
-            environment,
-            Local::adopt(variable),
-            (index, handles::held(context, value), kind),
-        )? || (kind == ElementKind::Single
-            && element_access::assign_subset_in_place(env, variable, index.raw(), value)?))
-    })?;
+    let done =
+        handles::in_caller_scope_with((env, variable, [index, value], kind), sub_assign_in_place)?;
     if !done {
         let evaluated = evaluated_arguments(target, &[index])?;
         eval::complex_assign(call, target, value, env, false, &evaluated)?;
@@ -14143,6 +14131,35 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
     instruction.output(0, value);
     (*state.interp).visible = false;
     Ok(Flow::Next)
+}
+
+/// `op_sub_assign` on the variable of the frame `env`, in place, with the raw operands
+/// `(env, variable, [index, value], kind)`.
+#[inline(always)]
+fn sub_assign_in_place<'s>(
+    context: &mut Cx<'s>,
+    (env, variable, operands, kind): (Sexp, Sexp, [Sexp; 2], ElementKind),
+) -> R<bool> {
+    // SAFETY: the frame's environment, the constants and the registers hold every operand
+    // until the instruction ends.
+    let (environment, variable, [index, value]) = unsafe {
+        (
+            Local::adopt(env),
+            Local::adopt(variable),
+            operands.map(|operand| handles::held(context, operand)),
+        )
+    };
+    let Some(index) = subscript_value(context, environment, index)? else {
+        return Ok(false);
+    };
+    if assign_element_in_place(context, environment, variable, (index, value, kind))? {
+        return Ok(true);
+    }
+    // SAFETY: every operand is rooted, and the store writes elements without a safepoint.
+    Ok(kind == ElementKind::Single
+        && unsafe {
+            element_access::assign_subset_in_place(env, variable.raw(), index.raw(), value.raw())?
+        })
 }
 
 /// `op_sub_assign` on the variable in a slot frame's slot `constant`, with the raw operands
@@ -14180,6 +14197,31 @@ fn sub_assign_in_slots<'s>(
     )
 }
 
+/// `op_super_sub_assign` with the raw operands `(variable, [index, value, call, whole])`: the
+/// subscript's value when the general assignment must take over.
+#[inline(always)]
+fn super_sub_assign<'s>(
+    context: &mut Cx<'s>,
+    (frame, variable, operands, kind): (RunningFrame<'_, '_, '_>, Sexp, [Sexp; 4], ElementKind),
+) -> R<Option<Sexp>> {
+    // SAFETY: the constants, the registers and the frame's environment hold every operand
+    // until the instruction ends.
+    let (variable, [mut index, value, call, whole]) = unsafe {
+        (
+            Local::adopt(variable),
+            operands.map(|operand| handles::held(context, operand)),
+        )
+    };
+    let done = assign_enclosed_element(
+        context,
+        frame,
+        variable,
+        (&mut index, value, kind),
+        (call, whole),
+    )?;
+    Ok((!done).then(|| index.raw()))
+}
+
 #[inline(always)]
 unsafe fn op_super_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction) -> R<Flow> {
     let call = state.constant(instruction, 4);
@@ -14192,20 +14234,20 @@ unsafe fn op_super_sub_assign(state: &mut Activation<'_, '_>, instruction: Instr
     // The subscript's value once the assignment read it, which the general assignment then
     // takes instead of evaluating the subscript again. The handle stack roots it until the
     // instruction ends.
-    let declined = handles::in_caller_scope(|context| {
-        let mut index = handles::held(context, state.constant(instruction, 2));
-        let done = assign_enclosed_element(
-            context,
+    let declined = handles::in_caller_scope_with(
+        (
             RunningFrame { state: &*state },
-            Local::adopt(state.constant(instruction, 1)),
-            (&mut index, handles::held(context, value), kind),
-            (
-                handles::held(context, call),
-                handles::held(context, state.constant(instruction, 6)),
-            ),
-        )?;
-        Ok((!done).then(|| index.raw()))
-    })?;
+            state.constant(instruction, 1),
+            [
+                state.constant(instruction, 2),
+                value,
+                call,
+                state.constant(instruction, 6),
+            ],
+            kind,
+        ),
+        super_sub_assign,
+    )?;
     if let Some(index) = declined {
         let target = call.cdr().car();
         let evaluated = evaluated_arguments(target, &[index])?;
@@ -14331,6 +14373,31 @@ fn assign_enclosed_element<'s>(
     Ok(true)
 }
 
+/// `op_sub_assign_matrix` on the variable of the frame `env`, in place, with the raw operands
+/// `(env, variable, [row, column, value])`.
+#[inline(always)]
+fn sub_assign_matrix_in_place<'s>(
+    context: &mut Cx<'s>,
+    (env, variable, operands): (Sexp, Sexp, [Sexp; 3]),
+) -> R<bool> {
+    // SAFETY: the frame's environment, the constants and the registers hold every operand
+    // until the instruction ends.
+    let (environment, variable, [row, column, value]) = unsafe {
+        (
+            Local::adopt(env),
+            Local::adopt(variable),
+            operands.map(|operand| handles::held(context, operand)),
+        )
+    };
+    let Some(row) = subscript_value(context, environment, row)? else {
+        return Ok(false);
+    };
+    let Some(column) = subscript_value(context, environment, column)? else {
+        return Ok(false);
+    };
+    assign_matrix_element_in_place(context, environment, variable, (row, column), value)
+}
+
 /// `op_sub_assign_matrix` on the variable in a slot frame's slot `constant`, with the raw
 /// operands `(variable, [row, column, value])`.
 #[inline(always)]
@@ -14398,23 +14465,10 @@ unsafe fn op_sub_assign_matrix(
     }
     let env = state.env(Reify::Site(Site::MatrixSubassignment))?;
     let done = lookups
-        && handles::in_caller_scope(|context| {
-            let environment = Local::adopt(env);
-            let [row, column] = subscripts.map(|subscript| handles::held(context, subscript));
-            let Some(row) = subscript_value(context, environment, row)? else {
-                return Ok(false);
-            };
-            let Some(column) = subscript_value(context, environment, column)? else {
-                return Ok(false);
-            };
-            assign_matrix_element_in_place(
-                context,
-                environment,
-                Local::adopt(variable),
-                (row, column),
-                handles::held(context, value),
-            )
-        })?;
+        && handles::in_caller_scope_with(
+            (env, variable, [subscripts[0], subscripts[1], value]),
+            sub_assign_matrix_in_place,
+        )?;
     if !done {
         let evaluated = evaluated_arguments(target, &subscripts)?;
         eval::complex_assign(call, target, value, env, false, &evaluated)?;

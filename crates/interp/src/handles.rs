@@ -2629,11 +2629,12 @@ pub fn call_direct<'s>(
     call: Local<'s>,
     arguments: &[Local<'s>],
 ) -> R<Option<Local<'s>>> {
-    let arguments: SmallVec<[Sexp; 6]> = arguments.iter().map(|argument| argument.raw()).collect();
     // SAFETY: the call and the arguments are rooted, and the entry runs any builtin code,
-    // which `&mut Cx` permits.
+    // which `&mut Cx` permits. `Local` is `repr(transparent)` over `Sexp`.
     unsafe {
-        let result = crate::eval::call_direct(definition, call.raw(), &arguments)?;
+        let arguments =
+            std::slice::from_raw_parts(arguments.as_ptr().cast::<Sexp>(), arguments.len());
+        let result = crate::eval::call_direct(definition, call.raw(), arguments)?;
         Ok(result.map(|result| rooted(context, result)))
     }
 }

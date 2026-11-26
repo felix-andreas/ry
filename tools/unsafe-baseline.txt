@@ -19,7 +19,7 @@
 144 crates/interp/src/base_fast_paths.rs
 17 crates/interp/src/builtin_libraries.rs
 20 crates/interp/src/builtins.rs
-424 crates/interp/src/bytecode.rs
+428 crates/interp/src/bytecode.rs
 2 crates/interp/src/callgrind.rs
 25 crates/interp/src/capture.rs
 22 crates/interp/src/code_image.rs
