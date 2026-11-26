@@ -665,6 +665,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `try` and an early `return` compile in every function, inlined ones too (settled)
 - Native code for callback, overflow and string library functions (settled)
 - A `match` lowers as a chain of tests, one arm falling through to the next (settled)
+- A function passed to a typed function lowers into its caller (settled)
 
 ## DataFrame and the table engine
 

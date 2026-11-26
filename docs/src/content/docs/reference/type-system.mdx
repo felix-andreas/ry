@@ -5690,8 +5690,9 @@ interpreted
 | Construct | What to write instead |
 | --- | --- |
 | a function with `...` | name each parameter, or take one `List` |
-| a parameter that takes a function, a function literal used as a value, a call of a variable that holds a function | define the function inside the native function, or pass the literal straight to a standard library function such as `List.map` |
-| a standard library function passed by name, as in `List.map(xs, Num.to_f64)` | wrap it: `function(x: I64) -> F64 Num.to_f64(x)` |
+| a function literal used as a value other than an argument, a function that a function returns, a call of a variable that holds a function | define the function inside the native function, or pass it straight to the function that calls it |
+| a recursive call that passes a function, as in `count_down(n - 1, f)` | a loop, or a local function defined inside the recursive one |
+| an R function passed by name, as in `List.map(xs, sqrt)` | the standard library function (`Num.sqrt`), or a function literal |
 | a standard library function without native code, such as `List.intersperse` | a loop or another standard library function |
 | parameter types in a `#:` comment or on the assigned name, as in `f: fn(x: I64) -> I64 <- function(x) x` | write the types on the parameters |
 | a call of a typed or standard library function with named arguments, or one that leaves a default out | pass every argument by position |
@@ -5700,7 +5701,7 @@ interpreted
 | `<<-`, and an assignment to anything but a variable or `xs[[i]]` | return the new value; build a new record with `(..record, field = value)` |
 | a local function that a branch or a loop defines again after an earlier definition, or one called after the branch or loop that defines it | define it once at the top |
 | a name read before the function sets it, as in `acc <- acc + i` in a loop that sets `acc` nowhere else, or after branches that set it to values of different types | set it before the branch or loop, with one type |
-| a variable, a parameter or a loop variable that holds values of different types, branches that set a name to different types, and a variable that holds a tag and is assigned again | a new name for each value |
+| a variable, a parameter or a loop variable that holds values of different types, and branches that set a name to different types | a new name for each value |
 | the value of an `if` without `else` | an `else` branch that gives a value of the same type |
 | `xs[i]` with a position, which takes a part of a list | `xs[[i]]` for one item, `List.sublist` for a part |
 | a column read by its position, as in `table[[2]]` | the column's name: `table[["price"]]` |
