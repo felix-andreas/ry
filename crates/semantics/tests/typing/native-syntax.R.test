@@ -536,3 +536,19 @@ z <- List.to_r(counts)
 y: integer[] | double[]
 counts: List<I64>
 z: integer[] | double[]
+
+#---- an_unannotated_parameter_beside_an_annotated_one_stays_generic
+id <- function<T>(p: T) -> T p
+passed <- function(p, flag: Bool) id(p)
+returned <- function(p, flag: Bool) p
+held <- function(p, flag: Bool) {
+  q <- id(p)
+  q
+}
+used <- passed(2L, TRUE) + 1L
+#++++
+id: <T> fn(p: T) -> T
+passed: <T> fn(p: T, flag: Bool) -> T
+returned: <T> fn(p: T, flag: Bool) -> T
+held: <T> fn(p: T, flag: Bool) -> T
+used: integer

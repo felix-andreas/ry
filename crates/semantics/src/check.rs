@@ -263,6 +263,8 @@ pub enum TypeErrorKind<'db> {
         text: String,
         part_of_day: bool,
     },
+    /// `Expr.str_slice` with a negative literal `length`, which the table engine refuses.
+    NegativeSliceLength,
     /// `Expr.coalesce` or `Expr.fill_null` filling dates or date-times from values of another
     /// type, whose common type would be text.
     FilledTypesDiffer {
@@ -1783,11 +1785,16 @@ fn erase_residual_vars_at<'db>(
         return unknown(db);
     };
     if constraint == Constraint::Unconstrained {
-        // A residual bounded variable is one type nobody chooses, so it is its bound.
-        return match bound {
-            Some(bound) => erase_residual_vars_at(db, table, bound, depth + 1, Some(closer)),
-            None => unknown(db),
-        };
+        // A residual bounded variable is one type nobody chooses, so it is its bound. A free
+        // one a parameter abstracts is the caller's choice, as in an unannotated parameter of
+        // a partly annotated function (`function(p, flag: Bool) p`).
+        match bound {
+            Some(bound) => {
+                return erase_residual_vars_at(db, table, bound, depth + 1, Some(closer));
+            }
+            None if !closer.abstracted.contains(&table.find(var)) => return unknown(db),
+            None => {}
+        }
     }
     // `Int` and `Frac` each admit one type, so a literal they describe is that type rather than
     // a type parameter.
@@ -15548,6 +15555,22 @@ impl<'db, 'a> Checker<'db, 'a> {
                                 operand,
                                 ExpressionNeeds::Text,
                             );
+                        }
+                        if name.as_str() == "Expr.str_slice"
+                            && let Some(Some(length)) = match_formals(
+                                module,
+                                &module[arguments],
+                                &["expr", "start", "length"],
+                            )
+                            .get(2)
+                            && let Some(literal) = number_literal(module, *length)
+                            && literal.negative
+                            && literal.value != 0.0
+                        {
+                            self.errors.push(TypeError {
+                                range: module.range(*length),
+                                kind: TypeErrorKind::NegativeSliceLength,
+                            });
                         }
                         let ty = match name.as_str() {
                             "Expr.str_contains" | "Expr.str_starts_with" | "Expr.str_ends_with" => {
