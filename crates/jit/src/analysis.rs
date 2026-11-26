@@ -1155,6 +1155,9 @@ pub struct Plan<'a> {
     pub insts: List<'a, Inst<'a>>,
     /// The number of the closure's formals, which hold the first positions of its slot frame.
     pub formals: usize,
+    /// The position of each of `slots` in the code's slot table, `None` for a variable the
+    /// table does not hold.
+    pub positions: List<'a, Option<usize>>,
     /// Registers past tier 0's that hold the unboxed values of inlined calls. They never live
     /// across an instruction and never reach tier 0.
     pub temporaries: usize,
@@ -1412,11 +1415,6 @@ pub struct Work {
 /// compile time of large bodies with sites times variables.
 pub const IN_PLACE_SLOTS: usize = 6;
 
-/// Whether a variable of type `ty` is one a write-back site stores in place.
-pub fn in_place(ty: Ty) -> bool {
-    matches!(ty, Ty::Int | Ty::Lgl | Ty::Dbl)
-}
-
 /// What the instructions of a body allow compiled code to do, whatever its profile records.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Shape {
@@ -1581,6 +1579,14 @@ impl Plan<'_> {
                 .any(|action| matches!(action, Action::NativeCall { .. }))
     }
 
+    /// Whether a write-back site inside a loop stores variable `slot`, of type `ty`, in place:
+    /// an unboxed scalar among the body's own locals. A formal is left to the helper, which
+    /// clears its missing bit.
+    pub fn in_place(&self, slot: usize, ty: Ty) -> bool {
+        matches!(ty, Ty::Int | Ty::Lgl | Ty::Dbl)
+            && self.positions[slot].is_some_and(|position| position >= self.formals)
+    }
+
     /// The body's loops, each as the pc its backward jump targets and the jump's pc. A loop
     /// with a `next` jumps back from more than one place, so it has an entry per jump.
     pub fn loops(&self) -> SmallVec<[(usize, usize); 4]> {
@@ -1698,9 +1704,11 @@ impl Plan<'_> {
                 } => {
                     let (mut dirty, mut scalars) = (0, 0);
                     if let Some(state) = self.before(position) {
-                        for slot in state.slots.iter().filter(|slot| slot.may_be(status::DIRTY)) {
-                            dirty += 1;
-                            scalars += usize::from(in_place(slot.ty));
+                        for (slot, held) in state.slots.iter().enumerate() {
+                            if held.may_be(status::DIRTY) {
+                                dirty += 1;
+                                scalars += usize::from(self.in_place(slot, held.ty));
+                            }
                         }
                     }
                     if depth == 0 || dirty > IN_PLACE_SLOTS {
@@ -1973,8 +1981,21 @@ unsafe fn plan_at<'a>(
     }
     edge_ranges.push(edges.len() as u32);
     boxing_ranges.push(boxings.len() as u32);
+    let table = constants.element(bytecode::SLOTS);
+    let names = if table == values::nil() {
+        values::nil()
+    } else {
+        table.element(1)
+    };
+    let mut positions = List::with_capacity_in(builder.slots.len(), arena);
+    positions.extend(
+        builder.slots.iter().map(|&symbol| {
+            (0..values::length(names)).find(|&index| names.element(index) == symbol)
+        }),
+    );
     Ok(Plan {
         formals: values::length(formals),
+        positions,
         boxing_ranges,
         boxings,
         temporaries: TEMPORARIES,

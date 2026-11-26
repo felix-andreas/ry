@@ -222,9 +222,6 @@ struct Frame<'p> {
     /// writes many slots back stores the values held in variables for the helper to read
     /// ([`Translator::save_dirty`]).
     statuses: StackSlot,
-    /// Each slot's position in the slot frame of the frame's code, or `None` for a variable
-    /// the frame does not number.
-    positions: Box<[Option<usize>]>,
     labels: Vec<Option<Label>>,
     edges: Vec<PendingEdge>,
     /// The position of the first instruction of the block being translated.
@@ -321,17 +318,6 @@ impl<'p> Frame<'p> {
                 .map(|_| builder.declare_var(ty))
                 .collect::<Vec<_>>()
         };
-        let table = code.cdr().element(bytecode::SLOTS);
-        let names = if table == values::nil() {
-            values::nil()
-        } else {
-            table.element(1)
-        };
-        let positions = plan
-            .slots
-            .iter()
-            .map(|&symbol| (0..values::length(names)).find(|&index| names.element(index) == symbol))
-            .collect();
         Frame {
             plan,
             code,
@@ -343,7 +329,6 @@ impl<'p> Frame<'p> {
             slot_integers: declare(plan.slots.len(), I32),
             slot_doubles: declare(plan.slots.len(), F64),
             statuses: StackSlot::from_u32(0),
-            positions,
             labels: Vec::new(),
             edges: Vec::new(),
             block_start: 0,
@@ -517,7 +502,7 @@ impl<'p> Translator<'p> {
         Layout {
             registers: plan.registers,
             slots: plan.slots.iter().copied().collect(),
-            frame: self.frame.positions.clone(),
+            frame: self.frame.plan.positions.as_slice().into(),
             volatile: plan.volatile.iter().copied().collect(),
             hints: plan.slots.iter().map(|_| Cell::new(0)).collect(),
             inlined,
@@ -5022,8 +5007,9 @@ impl<'p> Translator<'p> {
     /// box its frame slot holds, when that box is a plain scalar of the type that only the
     /// binding references, as [`runtime::jit_flush`] does. A loop that writes the same
     /// variables back on every pass finds the boxes of the pass before, so the pass calls no
-    /// helper. The code has no branch: a slot that fails a test stays dirty for the helper,
-    /// and its store goes to the slot's home. Returns whether any slot was a candidate.
+    /// helper. The stores sit behind one branch on the frame having slots, and none follows
+    /// per slot: a slot that fails a test stays dirty for the helper, and its store goes to
+    /// the slot's home. Returns whether any slot was a candidate.
     ///
     /// A formal is left to the helper, which clears its missing bit, and so is the variable
     /// of an inlined call, whose window is no slot frame. A site outside the loops writes
@@ -5037,23 +5023,28 @@ impl<'p> Translator<'p> {
         if (0..state.slots.len()).filter(|&slot| dirty(slot)).count() > IN_PLACE_SLOTS {
             return false;
         }
-        let formals = self.frame.plan.formals;
+        let plan = self.frame.plan;
         let candidates: SmallVec<[(usize, usize); IN_PLACE_SLOTS]> = (0..state.slots.len())
-            .filter(|&slot| dirty(slot) && analysis::in_place(state.slots[slot].ty))
-            .filter_map(|slot| Some((slot, self.frame.positions[slot]?)))
-            .filter(|&(_, position)| position >= formals)
+            .filter(|&slot| dirty(slot) && plan.in_place(slot, state.slots[slot].ty))
+            .filter_map(|slot| Some((slot, plan.positions[slot]?)))
             .collect();
         if candidates.is_empty() {
             return false;
         }
         // A callee can give the slot frame its environment while the activation runs, and the
-        // variables then live in the environment's bindings.
+        // variables then live in the environment's bindings. An activation that was entered
+        // with an environment has no slots at all, so the slot words are read only behind
+        // this test.
         let header = self
             .builder
             .ins()
             .load(I64, flags(), self.frame.activation, offset::HEADER);
         let env = self.builder.ins().load(I64, flags(), header, 0);
         let framed = self.builder.ins().icmp_imm_u(IntCC::Equal, env, self.nil);
+        let stores = self.builder.create_block();
+        let after = self.builder.create_block();
+        self.builder.ins().brif(framed, stores, &[], after, &[]);
+        self.builder.switch_to_block(stores);
         let homes = homes_offset(state.slots.len());
         for (slot, position) in candidates {
             let ty = state.slots[slot].ty;
@@ -5062,8 +5053,8 @@ impl<'p> Translator<'p> {
                 .builder
                 .ins()
                 .icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
-            // Every value a slot holds is an object, a marker for an unbound variable too, so
-            // its header can be read before the tests say what it is.
+            // Every value a slot frame's slot holds is an object, a marker for an unbound
+            // variable too, so its header can be read before the tests say what it is.
             let current =
                 self.builder
                     .ins()
@@ -5089,7 +5080,7 @@ impl<'p> Translator<'p> {
                 .builder
                 .ins()
                 .icmp_imm_u(IntCC::Equal, attributes, self.nil);
-            let mut ok = self.builder.ins().band(framed, dirty);
+            let mut ok = dirty;
             for test in [plain, scalar, bare] {
                 ok = self.builder.ins().band(ok, test);
             }
@@ -5112,6 +5103,8 @@ impl<'p> Translator<'p> {
             let status = self.builder.ins().select(ok, local, status);
             self.set_status(slot, status);
         }
+        self.builder.ins().jump(after, &[]);
+        self.builder.switch_to_block(after);
         true
     }
 
