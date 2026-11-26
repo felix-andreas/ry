@@ -1,5 +1,5 @@
-# An R call whose value is unused, as the last statement of a loop body or of a branch. The
-# checker accepts each, and the typed core does not compile them yet.
+# An R call whose value is unused, as the last statement of a loop body, as a bare loop body, or
+# in a branch or a `match` arm whose value is dropped. Each compiles natively.
 loop_tail <- function(n: I64) -> F64 {
   total <- 0f64
   for (i in List.range(1, n)) {
