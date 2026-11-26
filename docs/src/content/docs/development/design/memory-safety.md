@@ -328,6 +328,19 @@ This is `interp::scope` with the lifetime that proves what its comment asks for.
 again in the enclosing one, as it does a result: the error type implements `Reroot`, whose one
 `unsafe impl` for `Unwind` says that every object it gives access to is rooted afterwards.
 
+A body that reads handles of the enclosing scope runs in `cx.scope_reading`, which also hands it
+an `Enclosing<'s, 'inner>`. Its `pass` turns a `Local<'s, _>` into a `Local<'inner, _>`, which is
+sound because the enclosing scope's roots stay on the handle stack for all of the nested one, and
+only `scope_reading` makes the token. Its result is plain data rather than a handle: the nested
+lifetime is higher-ranked, so the result type cannot name it, and nothing is allocated to carry an
+element's answer out. A loop that runs R code for each element (`lengths`, which may call a
+class's `[[` and `length` methods) uses it to release one element's roots before the next.
+
+A kernel that only moves the elements of a list or character vector (a permutation, a recycling
+placement) fills a new vector through `Unfilled::fill_from`. It sees the source's and the
+target's slots as `Item`s, which it can copy but not read, so `t`, `aperm`, `matrix` and `array`
+run the same slice code on pointers as on numbers and count the references once.
+
 The bytecode loop does not pay that second root. Its registers are traced, so an instruction that
 can root runs in `cx.scope_to(register, ..)`, which writes the result into the destination
 register and releases the handles, as the loop's `release` does by hand.
@@ -567,7 +580,9 @@ disappears when the helper under it is migrated.
 Written against the handle types: tier 0's element and matrix stores and its replacement forms
 (`x[i] <- v`, `x[[i]] <- v`, `x$name <- v`, `x[i, j] <- v` and `f(x) <- v`, on a frame slot or a
 binding); subscript resolution,
-element reads and stores, and `[`, `[[`, `$`, `@` with their replacement forms (`subset.rs`); the
+element reads and stores, `[`, `[[`, `$`, `@` with their replacement forms, the array builders
+(`matrix`, `array`, `t`, `aperm`, `asplit`, `max.col`), `cbind`, `rbind` and `lengths`
+(`subset.rs`); the
 attribute readers and setters with their fast-path entries (`attr`, `attributes`, `names`, `dim`,
 `dimnames`, `class`, `oldClass`, `levels<-`, `comment`, `length<-`, `inherits`, `unclass` and the
 replacement forms); `strings.rs` except `paste`, `paste0`, `sprintf`, `strsplit` and

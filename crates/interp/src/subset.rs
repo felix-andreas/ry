@@ -9,29 +9,27 @@ use {
             Arg, BuiltinDef, Call, Generic, builtin, internal, internal_special, is_native_value,
             special,
         },
-        coerce::{self, coerce_vector},
-        conditions,
+        coerce,
         distributions::SessionDeviates,
         element_access::direct_subset2,
         eval::{self, value_of},
         handles::{
-            self, Alt, Args, Atomic, Chars, Complex, Cx, Elements, Environment, Exact, Expression,
-            Fresh, Gc, I64, Integer, Kind, Language, List, Local, Logical, Owned, Pairlist,
-            Pointer, Promise, Raw, Real, Str, Symbol, Unfilled, Vector, attribute_cells,
-            attributes_unshared, clear_attributes, coerce, compact_sequence, dense, element_text,
-            get_attribute, int_element, is_missing_argument, is_na, is_s4, item, materialize, na,
-            names_of, null, pairlist_to_list, real_element, remove_attribute, safe, same_text,
-            set_attribute, set_class, store_item, symbol, unshared,
+            self, Alt, Args, Atomic, Chars, Complex, Cx, DotsArgument, Elements, Environment,
+            Exact, Expression, Fresh, Gc, I64, Integer, Kind, Language, List, Local, Logical,
+            Owned, Pairlist, Pointer, Promise, Raw, Real, Str, Symbol, Tagged, Unfilled, Vector,
+            attribute_cells, attributes_unshared, clear_attributes, coerce, compact_sequence,
+            dense, element_text, get_attribute, int_element, is_missing_argument, is_na, is_s4,
+            item, materialize, na, names_of, null, pairlist_to_list, real_element,
+            remove_attribute, safe, same_text, set_attribute, set_class, store_item, symbol,
+            unshared,
         },
         random::Deviates,
         unwind::{R, Unwind, error},
-        values::{
-            self, Dims, alloc, char_str, get_attr, length, na_string, nil, scalar_integer,
-            symbol_name, symbols, unbound,
-        },
+        values::{self, Dims, get_attr, nil, scalar_integer, symbols, unbound},
     },
     heap::object::{NA_INTEGER, NA_LOGICAL, NA_REAL, Rcomplex, Sexp, SexpType},
     smallvec::{SmallVec, smallvec},
+    std::mem::MaybeUninit,
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -76,21 +74,21 @@ pub const BUILTINS: &[BuiltinDef] = &[
             scalar_integer(count).map(Some)
         }),
     builtin("length<-", 2, safe!(do_set_length)).generic(Generic::Internal),
-    internal("lengths", 2, do_lengths).generic(Generic::Internal),
+    internal("lengths", 2, safe!(do_lengths)).generic(Generic::Internal),
     builtin("dim<-", 2, safe!(do_set_dim)).generic(Generic::Internal),
     builtin("dimnames", 1, safe!(do_dimnames)).generic(Generic::Internal),
     builtin("dimnames<-", 2, safe!(do_set_dimnames)).generic(Generic::Internal),
     builtin("levels<-", 2, safe!(do_set_levels)).generic(Generic::Internal),
     builtin("attributes<-", 2, safe!(do_set_attributes)),
-    internal("matrix", 7, do_matrix),
-    internal("array", 3, do_array),
-    internal("t.default", 1, do_transpose),
-    internal("max.col", 2, do_max_col),
-    internal("aperm", 3, do_aperm),
-    internal("asplit", 8, do_asplit),
+    internal("matrix", 7, safe!(do_matrix)),
+    internal("array", 3, safe!(do_array)),
+    internal("t.default", 1, safe!(do_transpose)),
+    internal("max.col", 2, safe!(do_max_col)),
+    internal("aperm", 3, safe!(do_aperm)),
+    internal("asplit", 8, safe!(do_asplit)),
     internal("drop", 1, safe!(do_drop)),
-    internal_special("cbind", -1, |call| unsafe { bind(call, false) }),
-    internal_special("rbind", -1, |call| unsafe { bind(call, true) }),
+    internal_special("cbind", -1, safe!(do_cbind)),
+    internal_special("rbind", -1, safe!(do_rbind)),
     internal("rev", 1, safe!(do_rev)),
     internal("islistfactor", 2, safe!(do_is_list_factor)),
     internal("comment", 1, safe!(do_comment)),
@@ -386,115 +384,12 @@ fn put_pointer<'s, T: Elements>(
     Ok(())
 }
 
-/// `to[target(i)] <- from[source(i)]` for `i` in `0..count`, converting to `to`'s type, with a
-/// typed loop for the same type and for the widening to double. `from` is not ALTREP.
-pub(crate) unsafe fn copy_mapped(
-    from: Sexp,
-    to: Sexp,
-    count: usize,
-    source: impl Fn(usize) -> usize,
-    target: impl Fn(usize) -> usize,
-) -> R<()> {
-    match (from.kind(), to.kind()) {
-        (SexpType::Logical | SexpType::Integer, SexpType::Logical | SexpType::Integer)
-            if from.kind() == to.kind() =>
-        {
-            let (from, to) = (values::ints(from), values::ints_mut(to));
-            for index in 0..count {
-                to[target(index)] = from[source(index)];
-            }
-        }
-        (SexpType::Real, SexpType::Real) => {
-            let (from, to) = (values::reals(from), values::reals_mut(to));
-            for index in 0..count {
-                to[target(index)] = from[source(index)];
-            }
-        }
-        (SexpType::Logical | SexpType::Integer, SexpType::Real) => {
-            let (from, to) = (values::ints(from), values::reals_mut(to));
-            for index in 0..count {
-                to[target(index)] = int_to_real(from[source(index)]);
-            }
-        }
-        (SexpType::Complex, SexpType::Complex) => {
-            let (from, to) = (values::complexes(from), values::complexes_mut(to));
-            for index in 0..count {
-                to[target(index)] = from[source(index)];
-            }
-        }
-        _ => {
-            for index in 0..count {
-                copy_element(from, source(index), to, target(index))?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Fills `to[start..start + count]` with `from` recycled, a run of `from` at a time.
-unsafe fn copy_recycled(from: Sexp, to: Sexp, start: usize, count: usize) -> R<()> {
-    let length = length(from);
-    if length == 0 || count == 0 {
-        return Ok(());
-    }
-    match (from.kind(), to.kind()) {
-        (SexpType::Logical | SexpType::Integer, SexpType::Logical | SexpType::Integer)
-            if from.kind() == to.kind() =>
-        {
-            let from = values::ints(from);
-            for chunk in values::ints_mut(to)[start..start + count].chunks_mut(length) {
-                chunk.copy_from_slice(&from[..chunk.len()]);
-            }
-        }
-        (SexpType::Real, SexpType::Real) => {
-            let from = values::reals(from);
-            for chunk in values::reals_mut(to)[start..start + count].chunks_mut(length) {
-                chunk.copy_from_slice(&from[..chunk.len()]);
-            }
-        }
-        (SexpType::Logical | SexpType::Integer, SexpType::Real) => {
-            let from = values::ints(from);
-            for chunk in values::reals_mut(to)[start..start + count].chunks_mut(length) {
-                for (slot, &value) in chunk.iter_mut().zip(from) {
-                    *slot = int_to_real(value);
-                }
-            }
-        }
-        _ => copy_mapped(
-            from,
-            to,
-            count,
-            |position| position % length,
-            |position| start + position,
-        )?,
-    }
-    Ok(())
-}
-
 /// An integer or logical element as a double, NA staying NA.
 pub(crate) fn int_to_real(value: i32) -> f64 {
     if value == NA_INTEGER {
         NA_REAL
     } else {
         f64::from(value)
-    }
-}
-
-/// Sets `to[to_index]` to the type's NA (or `NULL` for lists).
-unsafe fn set_na(to: Sexp, to_index: usize) {
-    match to.kind() {
-        SexpType::Logical | SexpType::Integer => values::ints_mut(to)[to_index] = NA_INTEGER,
-        SexpType::Real => values::reals_mut(to)[to_index] = NA_REAL,
-        SexpType::Complex => {
-            values::complexes_mut(to)[to_index] = Rcomplex {
-                r: NA_REAL,
-                i: NA_REAL,
-            }
-        }
-        SexpType::String => values::set_elt(to, to_index, na_string()),
-        SexpType::List | SexpType::Expression => values::set_elt(to, to_index, nil()),
-        SexpType::Raw => values::raws_mut(to)[to_index] = 0,
-        _ => {}
     }
 }
 
@@ -977,15 +872,40 @@ fn kept_positions(keep: &[u64]) -> impl Iterator<Item = usize> + '_ {
     })
 }
 
-/// `length()` with S3 dispatch, for builtins that need an object's length.
+/// [`length_dispatched`] for raw callers.
+///
+/// # Safety
+///
+/// The caller is on the interpreter's thread, holds no reference into the heap, and keeps
+/// `object` and `env` alive until this returns.
 pub unsafe fn dispatch_length(object: Sexp, env: Sexp) -> R<usize> {
-    if !object.is_object() {
-        return Ok(length(object));
+    handles::with(|context| {
+        let object = handles::held(context, object);
+        let environment = handles::held(context, env)
+            .downcast::<Environment>()
+            .ok_or_else(|| error("internal error: `length` dispatched from no environment"))?;
+        length_dispatched(context, object, environment)
+    })
+}
+
+/// `length()` with S3 dispatch, for builtins that need an object's length.
+pub fn length_dispatched<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    environment: Local<'s, Environment>,
+) -> R<usize> {
+    if !handles::is_object(object) {
+        return Ok(handles::length(context, object));
     }
-    let function = crate::builtins::primitive("length").ok_or_else(|| error("no length"))?;
-    let value = eval::apply(nil(), function, &eval::value_args(&[object]), env)?;
-    let value = crate::coerce::coerce_vector(value, SexpType::Integer)?;
-    Ok(values::as_integer_scalar(value).max(0) as usize)
+    let function = handles::primitive("length").ok_or_else(|| error("no length"))?;
+    let function = context.root(function);
+    let argument = Tagged {
+        tag: null(),
+        value: object,
+    };
+    let value = handles::apply(context, null(), function, &[argument], environment)?;
+    let value = coerce(context, value, SexpType::Integer)?;
+    Ok(handles::integer_scalar(context, value).max(0) as usize)
 }
 
 // Index resolution.
@@ -5778,14 +5698,14 @@ fn pad<T: Copy>(elements: &mut [T], from: usize, value: T) {
     }
 }
 
-unsafe fn do_lengths(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let use_names = values::as_logical_scalar(call.arg(1)) != 0;
-    let listlike = matches!(object.kind(), SexpType::List | SexpType::Expression)
-        || crate::coerce::is_s4(object);
+fn do_lengths<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    let use_names = handles::logical_scalar(context, arguments.value(1)) != 0;
+    let listlike =
+        matches!(object.r_type(), SexpType::List | SexpType::Expression) || is_s4(object);
     if !listlike
         && !matches!(
-            object.kind(),
+            object.r_type(),
             SexpType::Nil
                 | SexpType::Logical
                 | SexpType::Integer
@@ -5797,51 +5717,81 @@ unsafe fn do_lengths(call: &Call<'_>) -> R<Sexp> {
     {
         return Err(error("'x' must be a list or atomic vector"));
     }
-    let count = dispatch_length(object, call.env()?)?;
-    let result = alloc(SexpType::Integer, count)?;
-    crate::heap().root(result);
-    // As in GNU R, a classed object's elements come from its `[[` method, because its `length`
-    // method may count elements its storage does not hold (posterior's `rvar` is an empty list
-    // of some length).
-    let subset2 = if listlike && object.is_object() {
-        Some(crate::builtins::primitive("[[").ok_or_else(|| error("no [[ primitive"))?)
-    } else {
-        None
-    };
-    for index in 0..count {
-        let element = match subset2 {
-            Some(subset2) => crate::scope(|| {
-                let position = values::scalar_integer(index as i32 + 1)?;
-                let element = eval::apply(
-                    nil(),
-                    subset2,
-                    &eval::value_args(&[object, position]),
-                    call.env()?,
-                )?;
-                dispatch_length(element, call.env()?)
-            })?,
-            // A classed element answers with its own `length` method, S4 ones included
-            // (Matrix's sparse vectors).
-            None if listlike => dispatch_length(object.element(index), call.env()?)?,
-            None => 1,
+    let environment = arguments.environment(context)?;
+    let count = length_dispatched(context, object, environment)?;
+    let mut lengths = context.alloc::<Integer>(count)?;
+    if listlike {
+        // As in GNU R, a classed object's elements come from its `[[` method, because its
+        // `length` method may count elements its storage does not hold (posterior's `rvar` is
+        // an empty list of some length).
+        let subset2 = match handles::is_object(object) {
+            true => {
+                let subset2 = handles::primitive("[[").ok_or_else(|| error("no [[ primitive"))?;
+                Some(context.root(subset2))
+            }
+            false => None,
         };
-        values::ints_mut(result)[index] = element as i32;
+        for index in 0..count {
+            // Each element's length is found in a scope of its own, so that a long list does
+            // not grow the handle stack.
+            let length = context.scope_reading(|context, outer| {
+                let (object, environment) = (outer.pass(object), outer.pass(environment));
+                let element = match subset2 {
+                    Some(subset2) => {
+                        let position = handles::integer(context, index as i32 + 1)?;
+                        let arguments = [
+                            Tagged {
+                                tag: null(),
+                                value: object,
+                            },
+                            Tagged {
+                                tag: null(),
+                                value: position,
+                            },
+                        ];
+                        let subset2 = outer.pass(subset2);
+                        handles::apply(context, null(), subset2, &arguments, environment)?
+                    }
+                    None => handles::item(context, object, index)?,
+                };
+                // A classed element answers with its own `length` method, S4 ones included
+                // (Matrix's sparse vectors).
+                length_dispatched(context, element, environment)
+            })?;
+            lengths.as_mut_slice()[index] = length as i32;
+        }
+    } else {
+        lengths.as_mut_slice().fill(1);
     }
+    let mut result = lengths.owned().value();
     if use_names {
-        let names = values::names(object);
-        if names != nil() {
-            values::set_attr(result, symbols().names, names)?;
+        let names = names_of(context, object)?;
+        if names.r_type() != SexpType::Nil {
+            set_attribute(context, &mut result, symbol(|symbols| symbols.names), names)?;
         }
     }
-    let dim = get_attr(object, symbols().dim);
-    if dim != nil() {
-        values::set_attr(result, symbols().dim, dim)?;
-        let dimnames = get_attr(object, symbols().dimnames);
-        if dimnames != nil() {
-            values::set_attr(result, symbols().dimnames, dimnames)?;
+    let dim = context.root(get_attribute(
+        context,
+        object,
+        symbol(|symbols| symbols.dim),
+    ));
+    if dim.r_type() != SexpType::Nil {
+        set_attribute(context, &mut result, symbol(|symbols| symbols.dim), dim)?;
+        let dimnames = context.root(get_attribute(
+            context,
+            object,
+            symbol(|symbols| symbols.dimnames),
+        ));
+        if dimnames.r_type() != SexpType::Nil {
+            set_attribute(
+                context,
+                &mut result,
+                symbol(|symbols| symbols.dimnames),
+                dimnames,
+            )?;
         }
     }
-    Ok(result)
+    Ok(result.finish())
 }
 
 /// GNU R's `namesgets`, behind `attr<-`, `attributes<-` and the C API: names are converted to
@@ -6380,23 +6330,23 @@ pub(crate) fn do_set_attributes<'s>(
 
 // Matrices and arrays.
 
-unsafe fn do_matrix(call: &Call<'_>) -> R<Sexp> {
-    let data = values::materialize(call.arg(0))?;
-    if !(data.kind().is_atomic() || matches!(data.kind(), SexpType::List | SexpType::Expression)) {
+fn do_matrix<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let data = materialize(context, arguments.value(0))?;
+    if !(data.r_type().is_atomic()
+        || matches!(data.r_type(), SexpType::List | SexpType::Expression))
+    {
         return Err(error(format!(
             "'data' must be of a vector type, was '{}'",
-            crate::coerce::type_name(data)
+            handles::type_name(data)
         )));
     }
-    let by_row = values::as_logical_scalar(call.arg(3));
-    if by_row == NA_LOGICAL {
-        return Err(error("invalid 'byrow' argument"));
-    }
-    let by_row = by_row == 1;
-    let dimnames = call.arg(4);
-    let count = length(data);
-    let nrow = matrix_extent(call, 1, 5, "nrow")?;
-    let ncol = matrix_extent(call, 2, 6, "ncol")?;
+    let by_row = match handles::logical_scalar(context, arguments.value(3)) {
+        NA_LOGICAL => return Err(error("invalid 'byrow' argument")),
+        by_row => by_row == 1,
+    };
+    let count = handles::length(context, data);
+    let nrow = matrix_extent(context, arguments, 1, 5, "nrow")?;
+    let ncol = matrix_extent(context, arguments, 2, 6, "ncol")?;
     // GNU R compares the length with `extent * INT_MAX` before it looks for a zero extent, so
     // non-empty data with one zero extent given is "too long".
     let (rows, cols) = match (nrow, ncol) {
@@ -6416,165 +6366,191 @@ unsafe fn do_matrix(call: &Call<'_>) -> R<Sexp> {
     };
     if count > 1 && !total.is_multiple_of(count) {
         if unrelated(rows) {
-            conditions::warning(format!(
-                "data length [{count}] is not a sub-multiple or multiple of the number of rows [{rows}]"
-            ))?;
+            handles::warning(
+                context,
+                format!(
+                    "data length [{count}] is not a sub-multiple or multiple of the number of rows [{rows}]"
+                ),
+            )?;
         } else if unrelated(cols) {
-            conditions::warning(format!(
-                "data length [{count}] is not a sub-multiple or multiple of the number of columns [{cols}]"
-            ))?;
+            handles::warning(
+                context,
+                format!(
+                    "data length [{count}] is not a sub-multiple or multiple of the number of columns [{cols}]"
+                ),
+            )?;
         } else if total != count {
-            conditions::warning(format!(
-                "data length differs from size of matrix: [{count} != {rows} x {cols}]"
-            ))?;
+            handles::warning(
+                context,
+                format!("data length differs from size of matrix: [{count} != {rows} x {cols}]"),
+            )?;
         }
     } else if count > 1 && total == 0 {
-        conditions::warning("non-empty data for zero-extent matrix")?;
+        handles::warning(context, "non-empty data for zero-extent matrix")?;
     }
-    let result = alloc(data.kind(), total)?;
-    if count == 0 {
-        for position in 0..total {
-            set_na(result, position);
-        }
-    } else if !place_elements(result, data, rows, by_row) {
-        for row in 0..rows {
-            for col in 0..cols {
-                let target = row + col * rows;
-                let source = if by_row { row * cols + col } else { target };
-                copy_element(data, source % count, result, target)?;
-            }
-        }
-    }
-    let dim = values::integer_vector(&[rows as i32, cols as i32])?;
-    values::set_attr(result, symbols().dim, dim)?;
-    // GNU R reports a bad `dimnames` against the closure that called the internal.
-    if dimnames != nil() && length(dimnames) > 0 {
-        set_dimnames(result, dimnames, crate::heap().known().unbound)?;
-    }
-    Ok(result)
+    let mut result = recycled(context, data, total, rows, by_row)?;
+    let mut dim = context.alloc::<Integer>(2)?;
+    dim.as_mut_slice()
+        .copy_from_slice(&[rows as i32, cols as i32]);
+    set_attribute(
+        context,
+        &mut result,
+        symbol(|symbols| symbols.dim),
+        dim.finish().value(),
+    )?;
+    with_dimnames(context, result, arguments.value(4))
 }
 
 /// The `nrow` or `ncol` of a `matrix()` call, argument `index`, or `None` when the caller left
 /// it out, which the flag at `missing_index` says.
-unsafe fn matrix_extent(
-    call: &Call<'_>,
+fn matrix_extent<'s>(
+    context: &mut Cx<'s>,
+    arguments: &Args<'_, 's>,
     index: usize,
     missing_index: usize,
     name: &str,
 ) -> R<Option<usize>> {
-    if values::as_logical_scalar(call.arg(missing_index)) == 1 {
+    if handles::logical_scalar(context, arguments.value(missing_index)) == 1 {
         return Ok(None);
     }
-    let extent = call.arg(index);
-    if !values::is_numeric_type(extent.kind()) || values::inherits(extent, "factor") {
+    let extent = arguments.value(index);
+    if !matches!(
+        extent.r_type(),
+        SexpType::Logical | SexpType::Integer | SexpType::Real
+    ) || handles::inherits(context, extent, "factor")
+    {
         return Err(error("non-numeric matrix extent"));
     }
-    if extent.kind() == SexpType::Real && length(extent) > 0 {
-        let (_, out_of_range) = crate::coerce::real_to_int(values::reals(extent)[0]);
+    if extent.r_type() == SexpType::Real && handles::length(context, extent) > 0 {
+        let (_, out_of_range) = coerce::real_to_int(real_element(context, extent, 0)?);
         if out_of_range {
-            conditions::warning("NAs introduced by coercion to integer range")?;
+            handles::warning(context, "NAs introduced by coercion to integer range")?;
         }
     }
-    match values::as_integer_scalar(extent) {
+    match handles::integer_scalar(context, extent) {
         NA_INTEGER => Err(error(format!("invalid '{name}' value (too large or NA)"))),
         extent if extent < 0 => Err(error(format!("invalid '{name}' value (< 0)"))),
         extent => Ok(Some(extent as usize)),
     }
 }
 
-/// Fills `result`, a matrix of `rows` rows and of `data`'s type, with `data` recycled in column
-/// order, or in row order when `by_row`. Returns whether it did, which it does for every vector
-/// type when `data` is not empty.
-unsafe fn place_elements(result: Sexp, data: Sexp, rows: usize, by_row: bool) -> bool {
-    fn place<T: Copy>(target: &mut [T], source: &[T], rows: usize, by_row: bool) {
-        let cols = target.len().checked_div(rows).unwrap_or(0);
-        // One row or one column is the same order either way.
-        if !by_row || rows <= 1 || cols <= 1 {
-            if let [single] = source {
-                target.fill(*single);
-            } else {
-                for (slot, &item) in target.iter_mut().zip(source.iter().cycle()) {
-                    *slot = item;
+/// A new vector of `data`'s type with `total` elements: `data` recycled in the column order of
+/// a matrix of `rows` rows, or in its row order when `by_row`, and `NA` throughout when `data`
+/// is empty. `NULL` gives logical `NA`s.
+fn recycled<'s>(
+    context: &mut Cx<'s>,
+    data: Local<'s>,
+    total: usize,
+    rows: usize,
+    by_row: bool,
+) -> R<Owned<'s>> {
+    let count = handles::length(context, data);
+    if count > 0 {
+        macro_rules! place_as {
+            ($($kind:ty),*) => {$(
+                if let Some(source) = data.standard::<$kind>() {
+                    let mut result = context.alloc::<$kind>(total)?;
+                    place(result.as_mut_slice(), source.as_slice(context), rows, by_row);
+                    return Ok(result.owned().value());
                 }
-            }
-            return;
+            )*};
         }
-        let count = source.len();
-        for (col, column) in target.chunks_exact_mut(rows).enumerate() {
-            if count == rows * cols {
-                for (row, slot) in column.iter_mut().enumerate() {
-                    *slot = source[row * cols + col];
+        place_as!(Real, Integer, Logical, Complex, Raw);
+        macro_rules! place_items_as {
+            ($($kind:ty),*) => {$(
+                if let Some(source) = data.standard::<$kind>() {
+                    let result = context
+                        .alloc_unfilled::<$kind>(total)?
+                        .fill_from(context, source, |target, source| {
+                            place(target, source, rows, by_row)
+                        });
+                    return Ok(result.owned().value());
                 }
-            } else {
-                for (row, slot) in column.iter_mut().enumerate() {
-                    *slot = source[(row * cols + col) % count];
-                }
-            }
+            )*};
         }
+        place_items_as!(Str, List, Expression);
     }
-    if data.kind() != result.kind() || length(data) == 0 || data.is_altrep() {
-        return false;
+    if data.r_type() == SexpType::Nil {
+        let result = context
+            .alloc_unfilled::<Logical>(total)?
+            .fill(std::iter::repeat(NA_LOGICAL));
+        return Ok(result.owned().value());
     }
-    match data.kind() {
-        SexpType::Real => place(values::reals_mut(result), values::reals(data), rows, by_row),
-        SexpType::Integer | SexpType::Logical => {
-            place(values::ints_mut(result), values::ints(data), rows, by_row)
-        }
-        SexpType::Complex => place(
-            values::complexes_mut(result),
-            values::complexes(data),
-            rows,
-            by_row,
-        ),
-        SexpType::Raw => place(values::raws_mut(result), values::raws(data), rows, by_row),
-        SexpType::String | SexpType::List | SexpType::Expression => {
-            place(
-                result.slice_mut::<Sexp>(),
-                data.slice::<Sexp>(),
-                rows,
-                by_row,
-            );
-            crate::heap().count_written_elements(result);
-        }
-        _ => return false,
-    }
-    true
+    let cols = total.checked_div(rows).unwrap_or(0);
+    // One row or one column is the same order either way.
+    let by_row = by_row && rows > 1 && cols > 1;
+    let positions = (0..total).map(move |target| match count {
+        // A position past the end selects `NA`.
+        0 => usize::MAX,
+        _ if by_row => ((target % rows) * cols + target / rows) % count,
+        _ => target % count,
+    });
+    let result = select_iter(context, data, positions, total)?;
+    owned(context, result)
 }
 
-unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
-    let data = values::materialize(call.arg(0))?;
-    let dims = coerce_vector(call.arg(1), SexpType::Integer)?;
-    let dimnames = call.arg(2);
-    let total: usize = if crate::system::r_at_least_release(4, 6, 2) {
-        dims_total(values::ints(dims)).map_err(|message| call.error(message))? as usize
-    } else {
-        values::ints(dims)
-            .iter()
-            .map(|&value| value.max(0) as usize)
-            .product()
-    };
-    let count = length(data);
-    let kind = if data == nil() {
-        SexpType::Logical
-    } else {
-        data.kind()
-    };
-    let result = alloc(kind, total)?;
-    if count == 0 || !place_elements(result, data, 1, false) {
-        for position in 0..total {
-            if count == 0 {
-                set_na(result, position);
-            } else {
-                copy_element(data, position % count, result, position)?;
+/// Fills `target`, a matrix of `rows` rows, with `source` recycled in column order, or in row
+/// order when `by_row`.
+fn place<T: Copy>(target: &mut [T], source: &[T], rows: usize, by_row: bool) {
+    let cols = target.len().checked_div(rows).unwrap_or(0);
+    // One row or one column is the same order either way.
+    if !by_row || rows <= 1 || cols <= 1 {
+        if let [single] = source {
+            target.fill(*single);
+        } else {
+            for (slot, &item) in target.iter_mut().zip(source.iter().cycle()) {
+                *slot = item;
+            }
+        }
+        return;
+    }
+    let count = source.len();
+    for (col, column) in target.chunks_exact_mut(rows).enumerate() {
+        if count == rows * cols {
+            for (row, slot) in column.iter_mut().enumerate() {
+                *slot = source[row * cols + col];
+            }
+        } else {
+            for (row, slot) in column.iter_mut().enumerate() {
+                *slot = source[(row * cols + col) % count];
             }
         }
     }
-    values::set_attr(result, symbols().dim, dims)?;
-    // GNU R reports a bad `dimnames` against the closure that called the internal.
-    if dimnames != nil() && length(dimnames) > 0 {
-        set_dimnames(result, dimnames, crate::heap().known().unbound)?;
+}
+
+/// `result` with `dimnames` unless they are empty. GNU R reports bad ones against the closure
+/// that called the internal.
+fn with_dimnames<'s>(
+    context: &mut Cx<'s>,
+    mut result: Owned<'s>,
+    dimnames: Local<'s>,
+) -> R<Local<'s>> {
+    if dimnames.r_type() != SexpType::Nil && handles::length(context, dimnames) > 0 {
+        assign_dimnames(context, &mut result, dimnames, None)?;
     }
-    Ok(result)
+    Ok(result.finish())
+}
+
+fn do_array<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let data = materialize(context, arguments.value(0))?;
+    let dims = handles::integer_vector(context, arguments.value(1))?;
+    let extents = dims.as_slice(context);
+    let total = if crate::system::r_at_least_release(4, 6, 2) {
+        dims_total(extents).map_err(|message| arguments.error(message))? as usize
+    } else {
+        extents
+            .iter()
+            .map(|&extent| extent.max(0) as usize)
+            .product()
+    };
+    let mut result = recycled(context, data, total, 1, false)?;
+    set_attribute(
+        context,
+        &mut result,
+        symbol(|symbols| symbols.dim),
+        dims.value(),
+    )?;
+    with_dimnames(context, result, arguments.value(2))
 }
 
 /// The number of elements an integer `dim` vector describes, checked in the order GNU R's
@@ -6606,62 +6582,83 @@ fn dims_total(extents: &[i32]) -> Result<i64, &'static str> {
     Ok(product as i64)
 }
 
-unsafe fn do_transpose(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let (rows, cols, dimnames) = match values::dims(object) {
-        Some(dims) if dims.len() == 2 => (dims[0], dims[1], get_attr(object, symbols().dimnames)),
-        Some(dims) if dims.len() == 1 => (dims[0], 1, get_attr(object, symbols().dimnames)),
+fn do_transpose<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    let dimnames_symbol = symbol(|symbols| symbols.dimnames);
+    let (rows, cols, dimnames) = match handles::dims(context, object) {
+        Some(dims) if matches!(dims.len(), 1 | 2) => {
+            let dimnames = context.root(get_attribute(context, object, dimnames_symbol));
+            (dims[0], dims.get(1).copied().unwrap_or(1), dimnames)
+        }
         None => {
-            let names = values::names(object);
-            let dimnames = if names != nil() {
-                values::list_vector(&[names, nil()])?
+            let names = names_of(context, object)?;
+            let dimnames = if names.r_type() == SexpType::Nil {
+                null()
             } else {
-                nil()
+                let mut dimnames = context.alloc::<List>(2)?;
+                dimnames.set(context, 0, names);
+                dimnames.finish().value()
             };
-            (length(object), 1, dimnames)
+            (handles::length(context, object), 1, dimnames)
         }
-        _ => return Err(call.error("argument is not a matrix")),
+        _ => return Err(arguments.error("argument is not a matrix")),
     };
-    let Some(result) = permuted_copy(object, &[rows, cols], &[1, 0])? else {
-        return Err(call.error("argument is not a matrix"));
+    let Some(mut result) = permuted_copy(context, object, &[rows, cols], &[1, 0])? else {
+        return Err(arguments.error("argument is not a matrix"));
     };
-    let dim = values::integer_vector(&[cols as i32, rows as i32])?;
-    values::set_attr(result, symbols().dim, dim)?;
-    if dimnames != nil() {
-        let first = if length(dimnames) > 1 {
-            dimnames.element(1)
-        } else {
-            nil()
-        };
-        let second = dimnames.element(0);
-        let swapped = values::list_vector(&[first, second])?;
-        let names = values::names(dimnames);
-        if names != nil() && length(names) == 2 {
-            let new_names = alloc(SexpType::String, 2)?;
-            values::set_elt(new_names, 0, names.element(1));
-            values::set_elt(new_names, 1, names.element(0));
-            values::set_attr(swapped, symbols().names, new_names)?;
+    let mut dim = context.alloc::<Integer>(2)?;
+    dim.as_mut_slice()
+        .copy_from_slice(&[cols as i32, rows as i32]);
+    set_attribute(
+        context,
+        &mut result,
+        symbol(|symbols| symbols.dim),
+        dim.finish().value(),
+    )?;
+    if let Some(dimnames) = dense::<List>(context, dimnames)? {
+        let mut swapped = context.alloc::<List>(2)?;
+        if dimnames.len() > 1 {
+            swapped.set(context, 0, dimnames.get(context, 1));
         }
-        values::set_attr(result, symbols().dimnames, swapped)?;
+        if !dimnames.is_empty() {
+            swapped.set(context, 1, dimnames.get(context, 0));
+        }
+        let mut swapped = swapped.owned().value();
+        let names = names_of(context, dimnames.value())?;
+        if let Some(names) = dense::<Str>(context, names)?
+            && names.len() == 2
+        {
+            let reversed = context.alloc_unfilled::<Str>(2)?.fill_elements(
+                context,
+                [names.get(context, 1), names.get(context, 0)].into_iter(),
+            );
+            set_attribute(
+                context,
+                &mut swapped,
+                symbol(|symbols| symbols.names),
+                reversed.finish().value(),
+            )?;
+        }
+        set_attribute(context, &mut result, dimnames_symbol, swapped.finish())?;
     }
     // GNU R keeps the other attributes after `dim` and `dimnames`, and `getParseData` relies on
     // that to read the parse data's `text` after transposing it.
-    values::copy_most_attributes(object, result, false)?;
-    Ok(result)
+    handles::copy_most_attributes(context, object, &mut result, false)?;
+    Ok(result.finish())
 }
 
 /// R 4.6's `asplit(x, d.ans, d.call, dn.ans, dn.call, n.call, n.ans, drop)`, where `x` is
 /// already permuted so that each piece is a contiguous run of `n.call` elements. The pieces
 /// keep the remaining dimensions unless `drop`, and the list takes the split ones.
-unsafe fn do_asplit(call: &Call<'_>) -> R<Sexp> {
-    let x = call.arg(0);
-    let (answer_dims, piece_dims) = (call.arg(1), call.arg(2));
-    let (answer_names, piece_names) = (call.arg(3), call.arg(4));
-    let piece_length = values::as_real_scalar(call.arg(5)).max(0.0) as usize;
-    let pieces = values::as_real_scalar(call.arg(6)).max(0.0) as usize;
-    let drop = values::as_logical_scalar(call.arg(7)) == 1;
+fn do_asplit<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let x = arguments.value(0);
+    let (answer_dims, piece_dims) = (arguments.value(1), arguments.value(2));
+    let (answer_names, piece_names) = (arguments.value(3), arguments.value(4));
+    let piece_length = handles::real_scalar(context, arguments.value(5)).max(0.0) as usize;
+    let pieces = handles::real_scalar(context, arguments.value(6)).max(0.0) as usize;
+    let drop = handles::logical_scalar(context, arguments.value(7)) == 1;
     let vector = matches!(
-        x.kind(),
+        x.r_type(),
         SexpType::Logical
             | SexpType::Integer
             | SexpType::Real
@@ -6671,90 +6668,112 @@ unsafe fn do_asplit(call: &Call<'_>) -> R<Sexp> {
             | SexpType::List
             | SexpType::Expression
     );
-    if !vector || pieces.saturating_mul(piece_length) > length(x) {
+    if !vector || pieces.saturating_mul(piece_length) > handles::length(context, x) {
         return Err(error("invalid 'x' argument"));
     }
-    if !drop && length(piece_dims) == 0 {
+    if !drop && handles::length(context, piece_dims) == 0 {
         return Err(error("length-0 dimension vector is invalid"));
     }
-    let named = |names: Sexp| names.kind() == SexpType::List && length(names) > 0;
-    let result = alloc(SexpType::List, pieces)?;
+    let named = |context: &mut Cx<'s>, names: Local<'s>| {
+        names.r_type() == SexpType::List && handles::length(context, names) > 0
+    };
+    let piece_dims = if drop {
+        null()
+    } else {
+        coerce(context, piece_dims, SexpType::Integer)?
+    };
+    let piece_names = named(context, piece_names).then_some(piece_names);
+    let mut result = context.alloc::<List>(pieces)?;
     for piece in 0..pieces {
-        let element = alloc(x.kind(), piece_length)?;
-        for offset in 0..piece_length {
-            copy_element(x, piece * piece_length + offset, element, offset)?;
-        }
-        values::set_elt(result, piece, element);
+        let start = piece * piece_length;
+        let mut element = select_iter(context, x, start..start + piece_length, piece_length)?;
         if !drop {
-            values::set_attr(
-                element,
-                symbols().dim,
-                coerce_vector(piece_dims, SexpType::Integer)?,
+            let mut shaped = owned(context, element)?;
+            set_attribute(
+                context,
+                &mut shaped,
+                symbol(|symbols| symbols.dim),
+                piece_dims,
             )?;
-            if named(piece_names) {
-                values::set_attr(element, symbols().dimnames, piece_names)?;
+            if let Some(piece_names) = piece_names {
+                set_attribute(
+                    context,
+                    &mut shaped,
+                    symbol(|symbols| symbols.dimnames),
+                    piece_names,
+                )?;
             }
+            element = shaped.finish();
         }
+        result.set(context, piece, element);
     }
-    values::set_attr(
-        result,
-        symbols().dim,
-        coerce_vector(answer_dims, SexpType::Integer)?,
+    let mut result = result.owned().value();
+    let answer_dims = coerce(context, answer_dims, SexpType::Integer)?;
+    set_attribute(
+        context,
+        &mut result,
+        symbol(|symbols| symbols.dim),
+        answer_dims,
     )?;
-    if named(answer_names) {
-        values::set_attr(result, symbols().dimnames, answer_names)?;
+    if named(context, answer_names) {
+        set_attribute(
+            context,
+            &mut result,
+            symbol(|symbols| symbols.dimnames),
+            answer_names,
+        )?;
     }
-    Ok(result)
+    Ok(result.finish())
 }
 
-/// A fresh vector of `object`'s elements with the dimensions `dims` permuted into the order
+/// A new vector of `object`'s elements with the dimensions `dims` permuted into the order
 /// `order` (result dimension `k` is source dimension `order[k]`), without attributes, or `None`
 /// for a type that has no array layout to permute (GNU R permutes only atomic vectors and lists).
-unsafe fn permuted_copy(object: Sexp, dims: &[usize], order: &[usize]) -> R<Option<Sexp>> {
+fn permuted_copy<'s>(
+    context: &mut Cx<'s>,
+    object: Local<'s>,
+    dims: &[usize],
+    order: &[usize],
+) -> R<Option<Owned<'s>>> {
     // C code can set a `dim` that disagrees with the length, which would index out of bounds.
     // Within the length, no stride or offset can overflow.
+    let length = handles::length(context, object);
     let total = dims
         .iter()
         .try_fold(1usize, |product, &extent| product.checked_mul(extent))
-        .filter(|&total| total <= length(object))
+        .filter(|&total| total <= length)
         .ok_or_else(|| error("dims do not match the length of object"))?;
-    match object.kind() {
-        SexpType::Real => {
-            let result = values::alloc_uninit(SexpType::Real, total)?;
-            let source = &values::reals(object)[..total];
-            permute(source, values::reals_mut(result), dims, order);
-            Ok(Some(result))
-        }
-        SexpType::Integer | SexpType::Logical => {
-            let result = values::alloc_uninit(object.kind(), total)?;
-            let source = &values::ints(object)[..total];
-            permute(source, values::ints_mut(result), dims, order);
-            Ok(Some(result))
-        }
-        SexpType::Complex => {
-            let result = alloc(SexpType::Complex, total)?;
-            let source = &values::complexes(object)[..total];
-            permute(source, values::complexes_mut(result), dims, order);
-            Ok(Some(result))
-        }
-        SexpType::Raw => {
-            let result = alloc(SexpType::Raw, total)?;
-            let source = &values::raws(object)[..total];
-            permute(source, values::raws_mut(result), dims, order);
-            Ok(Some(result))
-        }
-        SexpType::String | SexpType::List => {
-            let source = values::materialize(object)?;
-            let result = alloc(object.kind(), total)?;
-            permute(
-                &source.slice::<Sexp>()[..total],
-                result.slice_mut::<Sexp>(),
-                dims,
-                order,
+    macro_rules! permuted {
+        ($kind:ty) => {{
+            let source = dense::<$kind>(context, object)?
+                .ok_or_else(|| error("internal error: a vector has no standard form"))?;
+            let result = context.alloc_unfilled::<$kind>(total)?;
+            let source = &source.as_slice(context)[..total];
+            // SAFETY: a permutation writes each of the `total` slots once.
+            let result = unsafe { result.fill_slots(|slots| permute(source, slots, dims, order)) };
+            Ok(Some(result.owned().value()))
+        }};
+    }
+    macro_rules! permuted_items {
+        ($kind:ty) => {{
+            let source = dense::<$kind>(context, object)?
+                .ok_or_else(|| error("internal error: a vector has no standard form"))?;
+            let result = context.alloc_unfilled::<$kind>(total)?.fill_from(
+                context,
+                source,
+                |slots, source| permute(&source[..total], slots, dims, order),
             );
-            crate::heap().count_written_elements(result);
-            Ok(Some(result))
-        }
+            Ok(Some(result.owned().value()))
+        }};
+    }
+    match object.r_type() {
+        SexpType::Real => permuted!(Real),
+        SexpType::Integer => permuted!(Integer),
+        SexpType::Logical => permuted!(Logical),
+        SexpType::Complex => permuted!(Complex),
+        SexpType::Raw => permuted!(Raw),
+        SexpType::String => permuted_items!(Str),
+        SexpType::List => permuted_items!(List),
         _ => Ok(None),
     }
 }
@@ -6766,14 +6785,38 @@ unsafe fn permuted_copy(object: Sexp, dims: &[usize], order: &[usize]) -> R<Opti
 const ROW_TILE: usize = 32;
 const COLUMN_TILE: usize = 256;
 
-/// Writes `source`, a column-major array with extents `dims`, into `target` with the dimensions
-/// permuted by `order`. The source's first dimension is contiguous in `source` and the result's
-/// first dimension, `order[0]`, is contiguous in `target`, so those two are walked as blocked
-/// tiles to keep both streams in cache; the other dimensions step an offset pair. When the two
-/// are the same dimension, each step copies one contiguous run.
-fn permute<T: Copy>(source: &[T], target: &mut [T], dims: &[usize], order: &[usize]) {
+/// A slot [`permute`] writes: an element, or one not yet initialized.
+trait Writable<T: Copy> {
+    fn put(&mut self, value: T);
+}
+
+impl<T: Copy> Writable<T> for T {
+    #[inline(always)]
+    fn put(&mut self, value: T) {
+        *self = value;
+    }
+}
+
+impl<T: Copy> Writable<T> for MaybeUninit<T> {
+    #[inline(always)]
+    fn put(&mut self, value: T) {
+        self.write(value);
+    }
+}
+
+/// Writes `source`, a column-major array with extents `dims`, into every slot of `target` with
+/// the dimensions permuted by `order`. The source's first dimension is contiguous in `source`
+/// and the result's first dimension, `order[0]`, is contiguous in `target`, so those two are
+/// walked as blocked tiles to keep both streams in cache; the other dimensions step an offset
+/// pair. When the two are the same dimension, each step copies one contiguous run.
+fn permute<T: Copy>(
+    source: &[T],
+    target: &mut [impl Writable<T>],
+    dims: &[usize],
+    order: &[usize],
+) {
     let total: usize = dims.iter().product();
-    assert!(source.len() >= total && target.len() >= total);
+    assert!(source.len() >= total && target.len() == total);
     if total == 0 {
         return;
     }
@@ -6806,7 +6849,12 @@ fn permute<T: Copy>(source: &[T], target: &mut [T], dims: &[usize], order: &[usi
     let (mut from, mut to) = (0usize, 0usize);
     for _ in 0..total / (rows * columns) {
         if fast == 0 {
-            target[to..to + rows].copy_from_slice(&source[from..from + rows]);
+            for (slot, &value) in target[to..to + rows]
+                .iter_mut()
+                .zip(&source[from..from + rows])
+            {
+                slot.put(value);
+            }
         } else {
             // Plain loops rather than `step_by`, whose setup costs more than copying a small
             // array.
@@ -6821,7 +6869,7 @@ fn permute<T: Copy>(source: &[T], target: &mut [T], dims: &[usize], order: &[usi
                         let destination =
                             &mut target[to + row * row_stride + column_block..][..width];
                         for (step, slot) in destination.iter_mut().enumerate() {
-                            *slot = strided[step * column_stride];
+                            slot.put(strided[step * column_stride]);
                         }
                     }
                     column_block += COLUMN_TILE;
@@ -6852,34 +6900,39 @@ struct OuterDimension {
     counter: usize,
 }
 
-unsafe fn do_aperm(call: &Call<'_>) -> R<Sexp> {
-    let object = call.arg(0);
-    let permutation = call.arg(1);
-    let resize = values::as_logical_scalar(call.arg(2)) != 0;
+fn do_aperm<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let object = arguments.value(0);
+    let permutation = arguments.value(1);
+    let resize = handles::logical_scalar(context, arguments.value(2)) != 0;
+    let dim_symbol = symbol(|symbols| symbols.dim);
+    let dimnames_symbol = symbol(|symbols| symbols.dimnames);
     // C code can set an empty `dim`, which leaves nothing to permute.
-    let Some(dims) = values::dims(object).filter(|dims| !dims.is_empty()) else {
-        return Err(call.error("invalid first argument, must be an array"));
+    let Some(dims) = handles::dims(context, object).filter(|dims| !dims.is_empty()) else {
+        return Err(arguments.error("invalid first argument, must be an array"));
     };
     let rank = dims.len();
-    let order: Vec<usize> = if permutation == nil() {
+    let order: SmallVec<[usize; 6]> = if permutation.r_type() == SexpType::Nil {
         (0..rank).rev().collect()
     } else {
-        let length = values::length(permutation);
+        let length = handles::length(context, permutation);
         if length != rank {
-            return Err(call.error(format!("'perm' is of wrong length {length} (!= {rank})")));
+            return Err(arguments.error(format!("'perm' is of wrong length {length} (!= {rank})")));
         }
-        let mut order = Vec::with_capacity(rank);
-        if permutation.kind() == SexpType::String {
-            let dimnames_names = values::names(get_attr(object, symbols().dimnames));
-            if dimnames_names == nil() {
-                return Err(call.error("'a' does not have named dimnames"));
-            }
+        let mut order = SmallVec::with_capacity(rank);
+        if permutation.r_type() == SexpType::String {
+            let dimnames = context.root(get_attribute(context, object, dimnames_symbol));
+            let dimension_names = names_of(context, dimnames)?;
+            let Some(dimension_names) = dense::<Str>(context, dimension_names)? else {
+                return Err(arguments.error("'a' does not have named dimnames"));
+            };
+            let wanted = dense::<Str>(context, permutation)?
+                .ok_or_else(|| error("internal error: a vector has no standard form"))?;
             for index in 0..rank {
-                let wanted = permutation.element(index);
-                let Some(found) = (0..rank).find(|&candidate| {
-                    values::same_string(dimnames_names.element(candidate), wanted)
-                }) else {
-                    return Err(call.error(format!(
+                let name = wanted.get(context, index);
+                let Some(found) = (0..rank.min(dimension_names.len()))
+                    .find(|&candidate| same_text(dimension_names.get(context, candidate), name))
+                else {
+                    return Err(arguments.error(format!(
                         "'perm[{}]' does not match a dimension name",
                         index + 1
                     )));
@@ -6887,56 +6940,70 @@ unsafe fn do_aperm(call: &Call<'_>) -> R<Sexp> {
                 order.push(found);
             }
         } else {
+            // Only a number names a dimension; any other type reads as `NA`.
+            let numbers = match permutation.r_type() {
+                SexpType::Real | SexpType::Integer | SexpType::Logical | SexpType::Raw => {
+                    let numbers = coerce(context, permutation, SexpType::Real)?;
+                    dense::<Real>(context, numbers)?
+                }
+                _ => None,
+            };
             for index in 0..rank {
-                let value = crate::arith::real_at(permutation, index);
+                let value = numbers.map_or(NA_REAL, |numbers| numbers.as_slice(context)[index]);
                 if !(value >= 1.0 && value < rank as f64 + 1.0) {
-                    return Err(call.error("value out of range in 'perm'"));
+                    return Err(arguments.error("value out of range in 'perm'"));
                 }
                 order.push(value as usize - 1);
             }
         }
-        let mut seen = vec![false; rank];
+        let mut seen: SmallVec<[bool; 6]> = smallvec![false; rank];
         for &dimension in &order {
             if std::mem::replace(&mut seen[dimension], true) {
-                return Err(call.error("invalid 'perm' argument"));
+                return Err(arguments.error("invalid 'perm' argument"));
             }
         }
         order
     };
-    let new_dims: Vec<usize> = order.iter().map(|&dimension| dims[dimension]).collect();
-    let result = permuted_copy(object, &dims, &order)?.ok_or_else(|| {
-        call.error(format!(
+    let mut result = permuted_copy(context, object, &dims, &order)?.ok_or_else(|| {
+        arguments.error(format!(
             "unimplemented type '{}' in 'aperm'\n",
-            object.kind().name()
+            object.r_type().name()
         ))
     })?;
     if resize {
-        let dim_values: Vec<i32> = new_dims.iter().map(|&extent| extent as i32).collect();
-        let dim = values::integer_vector(&dim_values)?;
-        let dim_names = values::names(get_attr(object, symbols().dim));
-        if dim_names != nil() {
-            values::set_attr(dim, symbols().names, select_elements(dim_names, &order)?)?;
+        let mut dim = context.alloc::<Integer>(rank)?;
+        for (slot, &dimension) in dim.as_mut_slice().iter_mut().zip(&order) {
+            *slot = dims[dimension] as i32;
         }
-        values::set_attr(result, symbols().dim, dim)?;
-        let dimnames = get_attr(object, symbols().dimnames);
-        if dimnames != nil() {
-            let permuted: Vec<Sexp> = order
-                .iter()
-                .map(|&dimension| dimnames.element(dimension))
-                .collect();
-            let list = values::list_vector(&permuted)?;
-            let names = values::names(dimnames);
-            if names != nil() {
-                let new_names = select_elements(names, &order)?;
-                values::set_attr(list, symbols().names, new_names)?;
+        let mut dim = dim.owned().value();
+        let old_dim = context.root(get_attribute(context, object, dim_symbol));
+        let dim_names = names_of(context, old_dim)?;
+        if dim_names.r_type() != SexpType::Nil {
+            let permuted = select_iter(context, dim_names, order.iter().copied(), rank)?;
+            set_attribute(context, &mut dim, symbol(|symbols| symbols.names), permuted)?;
+        }
+        set_attribute(context, &mut result, dim_symbol, dim.finish())?;
+        let dimnames = context.root(get_attribute(context, object, dimnames_symbol));
+        if dimnames.r_type() != SexpType::Nil {
+            let permuted = select_iter(context, dimnames, order.iter().copied(), rank)?;
+            let mut permuted = owned(context, permuted)?;
+            let names = names_of(context, dimnames)?;
+            if names.r_type() != SexpType::Nil {
+                let names = select_iter(context, names, order.iter().copied(), rank)?;
+                set_attribute(
+                    context,
+                    &mut permuted,
+                    symbol(|symbols| symbols.names),
+                    names,
+                )?;
             }
-            values::set_attr(result, symbols().dimnames, list)?;
+            set_attribute(context, &mut result, dimnames_symbol, permuted.finish())?;
         }
     } else {
-        let dim = get_attr(object, symbols().dim);
-        values::set_attr(result, symbols().dim, dim)?;
+        let dim = context.root(get_attribute(context, object, dim_symbol));
+        set_attribute(context, &mut result, dim_symbol, dim)?;
     }
-    Ok(result)
+    Ok(result.finish())
 }
 
 fn do_drop<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
@@ -7037,115 +7104,90 @@ fn named<'a, 's>(
     (names.r_type() != SexpType::Nil).then_some(names)
 }
 
+fn do_cbind<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    bind(context, arguments, false)
+}
+
+fn do_rbind<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    bind(context, arguments, true)
+}
+
 /// `cbind` and `rbind` for vectors and matrices; data frames dispatch to their R methods.
-unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
+fn bind<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, by_row: bool) -> R<Local<'s>> {
     // The arguments arrive unevaluated, because `deparse.level` names a vector argument after
     // the expression that produced it, which only the promise still knows.
-    let Some((level, rest)) = call.args.split_first() else {
-        return Err(call.error("argument \"deparse.level\" is missing"));
+    if arguments.is_empty() {
+        return Err(arguments.error("argument \"deparse.level\" is missing"));
+    }
+    let environment = arguments.environment(context)?;
+    let level = arguments.value(0);
+    let level_missing = match level.downcast::<Symbol>() {
+        Some(level) => handles::is_missing(context, level, environment)?,
+        None => false,
     };
-    let level_missing =
-        level.value.kind() == SexpType::Symbol && eval::is_missing(level.value, call.env()?)?;
-    let level_value = eval::eval(level.value, call.env()?)?;
-    let deparse_level = values::as_integer_scalar(level_value);
-    let mut items: Vec<Arg> = Vec::with_capacity(rest.len());
-    let mut expressions: Vec<Sexp> = Vec::with_capacity(rest.len());
-    for arg in rest {
-        if arg.value == symbols().dots {
-            let dots = eval::find_var(symbols().dots, call.env()?)?;
-            let mut cell = dots;
-            while matches!(cell.kind(), SexpType::Dots | SexpType::Pairlist) {
-                let item = cell.car();
-                let mut expression = item;
-                while expression.kind() == SexpType::Promise {
-                    expression = expression.cdr();
-                }
-                items.push(Arg {
-                    tag: cell.tag(),
-                    value: value_of(item)?,
-                });
-                expressions.push(expression);
-                cell = cell.cdr();
-            }
+    let level_value = handles::evaluate(context, level, environment)?;
+    let deparse_level = handles::integer_scalar(context, level_value);
+    let dots = context.root(symbol(|symbols| symbols.dots));
+    let mut items: Vec<DotsArgument<'s>> = Vec::with_capacity(arguments.len() - 1);
+    for index in 1..arguments.len() {
+        let expression = arguments.value(index);
+        if expression.raw() == dots.raw() {
+            items.extend(handles::dots_arguments(context, environment)?);
         } else {
-            items.push(Arg {
-                tag: arg.tag,
-                value: eval::eval(arg.value, call.env()?)?,
+            let value = handles::evaluate(context, expression, environment)?;
+            items.push(DotsArgument {
+                tag: arguments.tag(index),
+                value,
+                expression,
             });
-            expressions.push(arg.value);
         }
     }
-    // S3 dispatch, as GNU R's `do_bind` does it: the first classed argument with a method
-    // picks it. Through R 4.3 the method gets the `...` arguments alone; from R 4.4 on, a
-    // supplied `deparse.level` comes first, tagged, and only a missing one is dropped.
     let generic = if by_row { "rbind" } else { "cbind" };
-    for arg in &items {
-        if !arg.value.is_object() {
-            continue;
-        }
-        let classes = crate::dispatch::implicit_class(arg.value)?;
-        for index in 0..length(classes) {
-            let symbol =
-                values::install(&format!("{generic}.{}", char_str(classes.element(index))))?;
-            if let Some(method) =
-                crate::dispatch::lookup_method(symbol, call.env()?, values::base_namespace())?
-            {
-                // The method sees promises, so `data.frame` inside `cbind.data.frame` names a
-                // column after its argument expression.
-                let mut arguments = Vec::with_capacity(items.len() + 1);
-                if !level_missing && crate::system::r_at_least(4, 4) {
-                    arguments.push(Arg {
-                        tag: values::install("deparse.level")?,
-                        value: level_value,
-                    });
-                }
-                for (item, &expression) in items.iter().zip(&expressions) {
-                    arguments.push(Arg {
-                        tag: item.tag,
-                        value: eval::forced_promise(expression, item.value)?,
-                    });
-                }
-                return eval::apply(call.call, method, &arguments, call.env()?);
-            }
-        }
+    if let Some(result) = bind_method(
+        context,
+        arguments,
+        environment,
+        generic,
+        &items,
+        (!level_missing).then_some(level_value),
+    )? {
+        return Ok(result);
     }
     // An S4 argument hands the call to the methods package's hidden `cbind` or `rbind`, which
     // dispatch on `cbind2` and `rbind2`. Their default methods bind with a deparse level of
     // -1, which marks the call as already coming from there.
-    if deparse_level != -1 && items.iter().any(|arg| coerce::is_s4(arg.value)) {
-        let registry = crate::heap().known().namespace_registry;
-        let methods = value_of(eval::find_var_in_frame(
-            values::install("methods")?,
-            registry,
-        )?)?;
-        if methods.kind() == SexpType::Environment {
-            let function = value_of(eval::find_var_in_frame(values::install(generic)?, methods)?)?;
-            if function.kind() == SexpType::Closure {
-                let mut arguments = Vec::with_capacity(items.len() + 1);
-                arguments.push(Arg {
-                    tag: values::install("deparse.level")?,
-                    value: level_value,
-                });
-                for (item, &expression) in items.iter().zip(&expressions) {
-                    arguments.push(Arg {
-                        tag: item.tag,
-                        value: eval::forced_promise(expression, item.value)?,
-                    });
-                }
-                return eval::apply(call.call, function, &arguments, call.env()?);
-            }
+    if deparse_level != -1
+        && items.iter().any(|item| is_s4(item.value))
+        && let Some(methods) = handles::registered_namespace(context, "methods")?
+        && let Some(methods) = methods.downcast::<Environment>()
+    {
+        let name = handles::install_bytes(context, generic.as_bytes())?;
+        if let Some(function) = handles::frame_symbol_value(context, methods.value(), name)?
+            && function.r_type() == SexpType::Closure
+        {
+            let forwarded = forwarded_items(context, &items, Some(level_value))?;
+            return handles::apply(
+                context,
+                arguments.expression(),
+                function,
+                &forwarded,
+                environment,
+            );
         }
     }
     // GNU R's `cbind` and `rbind` from its `bind.c`, written once for both directions: the
     // extent is the length along the bound vectors (rows for `cbind`), and each argument adds
     // lines across it (columns for `cbind`). Only a call of NULLs alone gives NULL.
-    if items.iter().all(|arg| arg.value == nil()) {
-        return Ok(nil());
+    if items
+        .iter()
+        .all(|item| item.value.r_type() == SexpType::Nil)
+    {
+        return Ok(null());
     }
     // An argument that is no vector makes the result a list, as in GNU R: a call or pairlist
     // binds its elements, and anything else (a symbol, a function) is one element.
-    for arg in &mut items {
-        match arg.value.kind() {
+    for item in &mut items {
+        match item.value.r_type() {
             SexpType::Nil
             | SexpType::Raw
             | SexpType::Logical
@@ -7156,102 +7198,122 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
             | SexpType::List
             | SexpType::Expression => {}
             SexpType::Language | SexpType::Pairlist => {
-                arg.value = coerce::coerce_vector(arg.value, SexpType::List)?;
-                crate::heap().root(arg.value);
+                item.value = coerce(context, item.value, SexpType::List)?;
             }
             _ => {
-                let wrapped = alloc(SexpType::List, 1)?;
-                values::set_elt(wrapped, 0, arg.value);
-                crate::heap().root(wrapped);
-                arg.value = wrapped;
+                let mut wrapped = context.alloc::<List>(1)?;
+                wrapped.set(context, 0, item.value);
+                item.value = wrapped.finish().value();
             }
         }
     }
     // Starting below raw, so that binding only raw vectors gives a raw matrix.
-    let mut kind = SexpType::Nil;
-    for arg in &items {
-        kind = coerce::higher_type(kind, arg.value.kind());
-    }
-    if kind == SexpType::Nil {
-        kind = SexpType::Logical;
-    }
-    if kind == SexpType::Expression {
-        return Err(crate::unwind::error(
-            "cannot create a matrix from type 'expression'",
-        ));
-    }
+    let kind = match items.iter().fold(SexpType::Nil, |kind, item| {
+        coerce::higher_type(kind, item.value.r_type())
+    }) {
+        SexpType::Nil => SexpType::Logical,
+        SexpType::Expression => {
+            return Err(error("cannot create a matrix from type 'expression'"));
+        }
+        kind => kind,
+    };
     let (along, across) = if by_row { (1, 0) } else { (0, 1) };
-    let matrix_dims = |value: Sexp| values::dims(value).filter(|dims| dims.len() == 2);
+    let mut shapes: Vec<Shape> = Vec::with_capacity(items.len());
+    for item in &items {
+        let length = handles::length(context, item.value);
+        shapes.push(match handles::dims(context, item.value) {
+            Some(dims) if dims.len() == 2 => {
+                // C code can set a `dim` that disagrees with the length, which would copy past
+                // the end of the matrix.
+                if dims[0]
+                    .checked_mul(dims[1])
+                    .is_none_or(|total| total > length)
+                {
+                    return Err(error("dims do not match the length of object"));
+                }
+                Shape::Matrix {
+                    rows: dims[0],
+                    extent: dims[along],
+                    lines: dims[across],
+                }
+            }
+            _ => Shape::Vector { length },
+        });
+    }
     // A zero-length vector, NULL included, adds a line only when no argument has a nonzero
     // extent, so that `cbind(matrix(0, 0, 2), NULL)` has three columns.
-    let min_length = usize::from(items.iter().any(|arg| match matrix_dims(arg.value) {
-        Some(dims) => dims[along] > 0,
-        None => length(arg.value) > 0,
+    let min_length = usize::from(shapes.iter().any(|shape| match *shape {
+        Shape::Matrix { extent, .. } => extent > 0,
+        Shape::Vector { length } => length > 0,
     }));
+    let direction = if by_row { "columns" } else { "rows" };
     let mut matrix_extent: Option<usize> = None;
     let mut vector_extent = 0usize;
     let mut total = 0usize;
-    for (index, arg) in items.iter().enumerate() {
-        match matrix_dims(arg.value) {
-            Some(dims) => {
-                if matrix_extent.is_some_and(|extent| extent != dims[along]) {
-                    let direction = if by_row { "columns" } else { "rows" };
-                    // Reported against the `rbind` or `cbind` closure call, as GNU R does.
-                    return Err(crate::unwind::error(format!(
+    for (index, shape) in shapes.iter().enumerate() {
+        match *shape {
+            Shape::Matrix { extent, lines, .. } => {
+                if matrix_extent.is_some_and(|known| known != extent) {
+                    return Err(error(format!(
                         "number of {direction} of matrices must match (see arg {})",
                         index + 1
                     )));
                 }
-                matrix_extent = Some(dims[along]);
-                total += dims[across];
+                matrix_extent = Some(extent);
+                total += lines;
             }
-            None if length(arg.value) >= min_length => {
-                vector_extent = vector_extent.max(length(arg.value));
+            Shape::Vector { length } if length >= min_length => {
+                vector_extent = vector_extent.max(length);
                 total += 1;
             }
-            None => {}
+            Shape::Vector { .. } => {}
         }
     }
     let extent = matrix_extent.unwrap_or(vector_extent);
-    // The warning names the `rbind` or `cbind` closure call, not the internal.
-    let frames = &crate::interp().frames;
-    let closure_call = call
-        .frame_index()
-        .map_or(call.call, |position| frames[position].call);
-    let names_vector = |index: usize| {
-        let expression = expressions[index];
-        items[index].tag != nil()
+    let names_vector = |item: &DotsArgument<'_>| {
+        item.tag.r_type() != SexpType::Nil
             || deparse_level == 2
-            || (deparse_level == 1 && expression.kind() == SexpType::Symbol)
+            || (deparse_level == 1 && item.expression.r_type() == SexpType::Symbol)
     };
     let mut has_bound_names = false;
     let mut matrix_has_other_names = false;
     let mut longest_names = 0usize;
     let mut warned = false;
-    for (index, arg) in items.iter().enumerate() {
-        if matrix_dims(arg.value).is_some() {
-            let dimnames = get_attr(arg.value, symbols().dimnames);
-            if length(dimnames) == 2 {
-                has_bound_names |= dimnames.element(across) != nil();
-                // GNU R records the first matrix's extent here, so a zero extent counts as none.
-                matrix_has_other_names |= dimnames.element(along) != nil() && extent > 0;
+    for (index, (item, shape)) in items.iter().zip(&shapes).enumerate() {
+        match *shape {
+            Shape::Matrix { .. } => {
+                let dimnames =
+                    get_attribute(context, item.value, symbol(|symbols| symbols.dimnames));
+                if let Some(dimnames) = dimnames.standard::<List>()
+                    && dimnames.len() == 2
+                {
+                    has_bound_names |= dimnames.get(across).r_type() != SexpType::Nil;
+                    // GNU R records the first matrix's extent here, so a zero extent counts
+                    // as none.
+                    matrix_has_other_names |=
+                        dimnames.get(along).r_type() != SexpType::Nil && extent > 0;
+                }
             }
-            continue;
+            Shape::Vector { length } => {
+                if !warned && length > 0 && (length > extent || !extent.is_multiple_of(length)) {
+                    warned = true;
+                    // The warning names the `rbind` or `cbind` closure call, not the internal.
+                    let call = arguments.closure_call(context);
+                    handles::warning_in(
+                        context,
+                        call,
+                        format!(
+                            "number of {direction} of result is not a multiple of vector \
+                             length (arg {})",
+                            index + 1
+                        ),
+                    )?;
+                }
+                has_bound_names |= length >= min_length && names_vector(item);
+                let names = names_of(context, item.value)?;
+                longest_names = longest_names.max(handles::length(context, names));
+            }
         }
-        let count = length(arg.value);
-        if !warned && count > 0 && (count > extent || !extent.is_multiple_of(count)) {
-            warned = true;
-            let direction = if by_row { "columns" } else { "rows" };
-            crate::conditions::warning_call(
-                closure_call,
-                format!(
-                    "number of {direction} of result is not a multiple of vector length (arg {})",
-                    index + 1
-                ),
-            )?;
-        }
-        has_bound_names |= count >= min_length && names_vector(index);
-        longest_names = longest_names.max(length(values::names(arg.value)));
     }
     let has_other_names = matrix_has_other_names || longest_names == extent;
     let (rows, cols) = if by_row {
@@ -7259,105 +7321,335 @@ unsafe fn bind(call: &Call<'_>, by_row: bool) -> R<Sexp> {
     } else {
         (extent, total)
     };
-    let result = alloc(kind, rows * cols)?;
-    let bound_names = if has_bound_names {
-        alloc(SexpType::String, total)?
-    } else {
-        nil()
+    let mut sources: Vec<Option<Local<'s>>> = Vec::with_capacity(items.len());
+    for (item, shape) in items.iter().zip(&shapes) {
+        let used = match *shape {
+            Shape::Matrix { .. } => true,
+            Shape::Vector { length } => length >= min_length && length > 0,
+        };
+        sources.push(match used {
+            true => Some(coerce(context, item.value, kind)?),
+            false => None,
+        });
+    }
+    let layout = Layout {
+        by_row,
+        rows,
+        cols,
+        extent,
+        min_length,
     };
-    let mut other_names = nil();
+    let mut result = match kind {
+        SexpType::Raw => bound_numbers::<Raw>(context, &layout, &shapes, &sources)?,
+        SexpType::Logical => bound_numbers::<Logical>(context, &layout, &shapes, &sources)?,
+        SexpType::Integer => bound_numbers::<Integer>(context, &layout, &shapes, &sources)?,
+        SexpType::Real => bound_numbers::<Real>(context, &layout, &shapes, &sources)?,
+        SexpType::Complex => bound_numbers::<Complex>(context, &layout, &shapes, &sources)?,
+        SexpType::String => bound_pointers::<Str>(context, &layout, &shapes, &sources)?,
+        _ => bound_pointers::<List>(context, &layout, &shapes, &sources)?,
+    };
+    let mut bound_names = match has_bound_names {
+        true => Some(context.alloc::<Str>(total)?),
+        false => None,
+    };
+    let mut other_names = null();
     let mut offset = 0usize;
-    for (index, arg) in items.iter().enumerate() {
-        let value = arg.value;
-        if let Some(dims) = matrix_dims(value) {
-            let count = dims[across];
-            let source = values::materialize(value)?;
-            let source_rows = dims[0];
-            if by_row {
-                for line in 0..count {
-                    let line_offset = offset + line;
-                    copy_mapped(
-                        source,
-                        result,
-                        extent,
-                        |position| line + position * source_rows,
-                        |position| line_offset + position * rows,
-                    )?;
-                }
-            } else {
-                // Every matrix has `extent` rows, so its columns are one run of the result's.
-                copy_recycled(source, result, offset * rows, extent * count)?;
+    for (item, shape) in items.iter().zip(&shapes) {
+        if let Shape::Matrix { lines, .. } = *shape {
+            let dimnames = context.root(get_attribute(
+                context,
+                item.value,
+                symbol(|symbols| symbols.dimnames),
+            ));
+            // Only C code can set dimnames that are not one entry per dimension.
+            let dimnames = dense::<List>(context, dimnames)?.filter(|dimnames| dimnames.len() == 2);
+            if has_other_names
+                && other_names.r_type() == SexpType::Nil
+                && let Some(dimnames) = dimnames
+            {
+                other_names = context.root(dimnames.get(context, along));
             }
-            let dimnames = get_attr(value, symbols().dimnames);
-            let names = if dimnames != nil() {
-                dimnames.element(across)
-            } else {
-                nil()
-            };
-            if has_other_names && other_names == nil() && dimnames != nil() {
-                other_names = dimnames.element(along);
-            }
-            if has_bound_names {
-                for line in 0..count {
-                    let name = if names != nil() {
-                        names.element(line)
-                    } else {
-                        values::blank_string()
-                    };
-                    crate::heap().set_element(bound_names, offset + line, name);
+            if let Some(bound_names) = &mut bound_names {
+                let names = dimnames.map(|dimnames| context.root(dimnames.get(context, across)));
+                let names = match names {
+                    Some(names) => {
+                        dense::<Str>(context, names)?.filter(|names| names.len() >= lines)
+                    }
+                    None => None,
+                };
+                for line in 0..lines {
+                    match names {
+                        Some(names) => {
+                            bound_names.set(context, offset + line, names.get(context, line))
+                        }
+                        None => bound_names.set(context, offset + line, handles::blank()),
+                    }
                 }
             }
-            offset += count;
+            offset += lines;
             continue;
         }
-        let source_length = length(value);
-        if source_length < min_length {
+        let Shape::Vector { length } = *shape else {
+            continue;
+        };
+        if length < min_length {
             continue;
         }
-        if source_length > 0 {
-            let source = values::materialize(value)?;
-            if by_row {
-                copy_mapped(
-                    source,
-                    result,
-                    extent,
-                    |position| position % source_length,
-                    |position| offset + position * rows,
-                )?;
-            } else {
-                copy_recycled(source, result, offset * rows, extent)?;
-            }
-        }
-        let names = values::names(value);
-        if has_other_names && other_names == nil() && names != nil() && length(names) == extent {
+        let names = names_of(context, item.value)?;
+        if has_other_names
+            && other_names.r_type() == SexpType::Nil
+            && names.r_type() != SexpType::Nil
+            && handles::length(context, names) == extent
+        {
             other_names = names;
         }
-        if has_bound_names {
-            let expression = expressions[index];
-            let name = if arg.tag != nil() {
-                values::mkchar(&symbol_name(arg.tag))?
-            } else if deparse_level == 1 && expression.kind() == SexpType::Symbol {
-                values::mkchar(&symbol_name(expression))?
+        if let Some(bound_names) = &mut bound_names {
+            if let Some(tag) = item.tag.downcast::<Symbol>() {
+                let name = tag.read(context).name();
+                bound_names.set(context, offset, name);
+            } else if deparse_level == 1
+                && let Some(expression) = item.expression.downcast::<Symbol>()
+            {
+                let name = expression.read(context).name();
+                bound_names.set(context, offset, name);
             } else if deparse_level == 2 {
-                values::mkchar(&crate::deparse::deparse_one_line(expression))?
+                let text = handles::deparse_one_line(context, item.expression);
+                handles::set_text(context, bound_names, offset, &text)?;
             } else {
-                values::blank_string()
-            };
-            crate::heap().set_element(bound_names, offset, name);
+                bound_names.set(context, offset, handles::blank());
+            }
         }
         offset += 1;
     }
-    let dim = values::integer_vector(&[rows as i32, cols as i32])?;
-    values::set_attr(result, symbols().dim, dim)?;
+    let mut dim = context.alloc::<Integer>(2)?;
+    dim.as_mut_slice()
+        .copy_from_slice(&[rows as i32, cols as i32]);
+    set_attribute(
+        context,
+        &mut result,
+        symbol(|symbols| symbols.dim),
+        dim.finish().value(),
+    )?;
     if has_bound_names || has_other_names {
-        let dimnames = if by_row {
-            values::list_vector(&[bound_names, other_names])?
+        let bound_names = bound_names.map_or_else(null, |names| names.finish().value());
+        let (first, second) = if by_row {
+            (bound_names, other_names)
         } else {
-            values::list_vector(&[other_names, bound_names])?
+            (other_names, bound_names)
         };
-        values::set_attr(result, symbols().dimnames, dimnames)?;
+        let mut dimnames = context.alloc::<List>(2)?;
+        dimnames.set(context, 0, first);
+        dimnames.set(context, 1, second);
+        set_attribute(
+            context,
+            &mut result,
+            symbol(|symbols| symbols.dimnames),
+            dimnames.finish().value(),
+        )?;
     }
-    Ok(result)
+    Ok(result.finish())
+}
+
+/// The S3 method `bind` dispatches to, applied, as GNU R's `do_bind` finds it: the first
+/// classed argument with a method picks it. Through R 4.3 the method gets the `...` arguments
+/// alone; from R 4.4 on, a supplied `deparse.level` comes first, tagged.
+fn bind_method<'s>(
+    context: &mut Cx<'s>,
+    arguments: &Args<'_, 's>,
+    environment: Local<'s, Environment>,
+    generic: &str,
+    items: &[DotsArgument<'s>],
+    level: Option<Local<'s>>,
+) -> R<Option<Local<'s>>> {
+    for item in items {
+        if !handles::is_object(item.value) {
+            continue;
+        }
+        let classes = handles::implicit_class(context, item.value)?;
+        let Some(classes) = dense::<Str>(context, classes)? else {
+            continue;
+        };
+        for index in 0..classes.len() {
+            let mut name = format!("{generic}.").into_bytes();
+            name.extend_from_slice(classes.get(context, index).bytes());
+            let name = handles::install_bytes(context, &name)?;
+            let base = handles::base_namespace();
+            let Some(method) = handles::lookup_method(context, name, environment, base)? else {
+                continue;
+            };
+            let level = level.filter(|_| crate::system::r_at_least(4, 4));
+            let forwarded = forwarded_items(context, items, level)?;
+            return handles::apply(
+                context,
+                arguments.expression(),
+                method,
+                &forwarded,
+                environment,
+            )
+            .map(Some);
+        }
+    }
+    Ok(None)
+}
+
+/// `items` as the arguments of a method `bind` forwards to: each a promise of its expression
+/// already forced to its value, so that `data.frame` inside `cbind.data.frame` names a column
+/// after its argument expression, after `deparse.level` when it is given.
+fn forwarded_items<'s>(
+    context: &mut Cx<'s>,
+    items: &[DotsArgument<'s>],
+    level: Option<Local<'s>>,
+) -> R<Vec<Tagged<'s>>> {
+    let mut forwarded = Vec::with_capacity(items.len() + 1);
+    if let Some(level) = level {
+        let tag = handles::install_bytes(context, b"deparse.level")?;
+        forwarded.push(Tagged {
+            tag: context.root(tag).value(),
+            value: level,
+        });
+    }
+    for item in items {
+        let value = handles::forced_promise(context, item.expression, item.value)?;
+        forwarded.push(Tagged {
+            tag: item.tag,
+            value: value.value(),
+        });
+    }
+    Ok(forwarded)
+}
+
+/// How an argument of `cbind` or `rbind` lays out: a matrix adds `lines` lines of `extent`
+/// elements and has `rows` rows; a vector adds at most one line.
+#[derive(Clone, Copy)]
+enum Shape {
+    Matrix {
+        rows: usize,
+        extent: usize,
+        lines: usize,
+    },
+    Vector {
+        length: usize,
+    },
+}
+
+/// The result `bind` fills: its extents, the extent of each line, whether lines are rows, and
+/// the length a vector needs to add a line.
+struct Layout {
+    by_row: bool,
+    rows: usize,
+    cols: usize,
+    extent: usize,
+    min_length: usize,
+}
+
+/// Calls `copy(target, source, count)` for each run of elements an argument of `shape` puts
+/// into the result, its first line at line `offset`, and returns the number of lines it adds.
+/// A run is contiguous in both vectors: a whole matrix or a vector's recycled stretch for
+/// `cbind`, one element for `rbind`.
+#[inline(always)]
+fn place_lines(
+    layout: &Layout,
+    shape: Shape,
+    offset: usize,
+    mut copy: impl FnMut(usize, usize, usize),
+) -> usize {
+    let Layout {
+        by_row,
+        rows,
+        extent,
+        min_length,
+        ..
+    } = *layout;
+    match shape {
+        Shape::Matrix {
+            rows: source_rows,
+            lines,
+            ..
+        } => {
+            if by_row {
+                for line in 0..lines {
+                    for position in 0..extent {
+                        copy(
+                            offset + line + position * rows,
+                            line + position * source_rows,
+                            1,
+                        );
+                    }
+                }
+            } else {
+                copy(offset * rows, 0, extent * lines);
+            }
+            lines
+        }
+        Shape::Vector { length } if length < min_length => 0,
+        Shape::Vector { length: 0 } => 1,
+        Shape::Vector { length } => {
+            if by_row {
+                for position in 0..extent {
+                    copy(offset + position * rows, position % length, 1);
+                }
+            } else {
+                for start in (0..extent).step_by(length) {
+                    copy(offset * rows + start, 0, length.min(extent - start));
+                }
+            }
+            1
+        }
+    }
+}
+
+/// The elements of a `bind` result of an atomic type, with each source already of that type.
+fn bound_numbers<'s, T: Atomic>(
+    context: &mut Cx<'s>,
+    layout: &Layout,
+    shapes: &[Shape],
+    sources: &[Option<Local<'s>>],
+) -> R<Owned<'s>> {
+    let mut result = context.alloc::<T>(layout.rows * layout.cols)?;
+    let mut offset = 0;
+    for (&shape, &source) in shapes.iter().zip(sources) {
+        let source = match source {
+            Some(source) => dense::<T>(context, source)?,
+            None => None,
+        };
+        let target = result.as_mut_slice();
+        offset += match source {
+            Some(source) => {
+                let source = source.as_slice(context);
+                place_lines(layout, shape, offset, |to, from, count| {
+                    target[to..to + count].copy_from_slice(&source[from..from + count]);
+                })
+            }
+            None => place_lines(layout, shape, offset, |_, _, _| {}),
+        };
+    }
+    Ok(result.owned().value())
+}
+
+/// [`bound_numbers`] for a character vector or a list.
+fn bound_pointers<'s, T: Elements>(
+    context: &mut Cx<'s>,
+    layout: &Layout,
+    shapes: &[Shape],
+    sources: &[Option<Local<'s>>],
+) -> R<Owned<'s>> {
+    let mut result = context.alloc::<T>(layout.rows * layout.cols)?;
+    let mut offset = 0;
+    for (&shape, &source) in shapes.iter().zip(sources) {
+        let source = match source {
+            Some(source) => dense::<T>(context, source)?,
+            None => None,
+        };
+        offset += match source {
+            Some(source) => place_lines(layout, shape, offset, |to, from, count| {
+                for index in 0..count {
+                    result.set(context, to + index, source.get(context, from + index));
+                }
+            }),
+            None => place_lines(layout, shape, offset, |_, _, _| {}),
+        };
+    }
+    Ok(result.owned().value())
 }
 
 fn do_rev<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
@@ -7463,25 +7755,45 @@ fn row_col<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, rows: bool) -> R<
 
 /// `.Internal(max.col(m, ties.method))`, with the method as GNU R's code: 1 random, 2 first,
 /// 3 last.
-unsafe fn do_max_col(call: &Call<'_>) -> R<Sexp> {
-    let matrix = call.arg(0);
-    let dims = get_attr(matrix, symbols().dim);
-    let dims = coerce_vector(dims, SexpType::Integer)?;
-    let (rows, columns) = match values::ints(dims) {
-        &[rows, columns] => (rows.max(0) as usize, columns.max(0) as usize),
-        _ => (length(matrix), 1),
+fn do_max_col<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>) -> R<Local<'s>> {
+    let matrix = arguments.value(0);
+    let dims = context.root(get_attribute(
+        context,
+        matrix,
+        symbol(|symbols| symbols.dim),
+    ));
+    let dims = handles::integer_vector(context, dims)?;
+    let (rows, columns) = match *dims.as_slice(context) {
+        [rows, columns] => (rows.max(0) as usize, columns.max(0) as usize),
+        _ => (handles::length(context, matrix), 1),
     };
-    let method = values::as_integer_scalar(call.arg(1));
-    let matrix = coerce_vector(matrix, SexpType::Real)?;
-    let result = alloc(SexpType::Integer, rows)?;
-    max_col(
-        values::reals(matrix),
+    let method = handles::integer_scalar(context, arguments.value(1));
+    let matrix = coerce(context, matrix, SexpType::Real)?;
+    let matrix = dense::<Real>(context, matrix)?
+        .ok_or_else(|| error("internal error: a coercion to double gave another type"))?;
+    let mut result = context.alloc::<Integer>(rows)?;
+    let drawing = column_maxima(
+        matrix.as_slice(context),
         rows,
         columns,
         method,
-        values::ints_mut(result),
-    )?;
-    Ok(result)
+        result.as_mut_slice(),
+    );
+    // GNU R reads the generator's state at the first tie, so a call without one leaves
+    // `.Random.seed` as it was, even unset.
+    if !drawing.is_empty() {
+        handles::with_rng_state(context, |context| {
+            draw_ties(
+                matrix.as_slice(context),
+                rows,
+                columns,
+                &drawing,
+                result.as_mut_slice(),
+                &mut SessionDeviates,
+            )
+        })?;
+    }
+    Ok(result.finish().value())
 }
 
 /// `R_max_col`: the column of each row's maximum of the column-major `matrix`, or `NA` for a
