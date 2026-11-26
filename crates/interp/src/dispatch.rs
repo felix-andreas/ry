@@ -10,7 +10,7 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, Kind, Visibility, builtin, internal, special},
         eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
         handles::{
-            self, Cx, Gc, Integer, Language, Local, Str, StringFill, Symbol, attribute_copy,
+            self, Cx, Gc, Integer, Language, Local, Str, StringFill, Symbol, Value, attribute_copy,
             attributes_unshared, dense, get_attribute, is_s4, null, safe, set_class, symbol,
             unreferenced,
         },
@@ -72,7 +72,8 @@ pub fn class_read<'a, 's>(context: &'a mut Cx<'s>, object: Local<'s>) -> R<Gc<'a
 /// # Safety
 ///
 /// The caller is on the interpreter's thread, holds no reference into the heap and keeps
-/// `object` alive until this returns. The result is rooted in the caller's scope.
+/// `object` alive until this returns. The result is the object's class attribute, which the
+/// object holds, or a new vector rooted in the caller's scope.
 pub unsafe fn class_of_raw(object: Sexp) -> R<Sexp> {
     // SAFETY: the caller's contract. A scope of its own would mark, release and root the
     // answer again on every dispatch; the answer is the object's attribute or a vector rooted
@@ -93,7 +94,10 @@ pub fn implicit_class<'a, 's>(context: &'a mut Cx<'s>, object: Local<'s>) -> R<G
     let answer = context.read_or(
         |context| class_attribute(context, object).filter(|_| !is_s4(object)),
         |context| {
-            if let Some(class) = class_attribute(context, object) {
+            // The read above answers for any class attribute but an S4 object's.
+            if is_s4(object)
+                && let Some(class) = class_attribute(context, object)
+            {
                 let class = context.root(class);
                 return s4_extends(context, class).map(Some);
             }
@@ -142,10 +146,11 @@ pub fn implicit_class<'a, 's>(context: &'a mut Cx<'s>, object: Local<'s>) -> R<G
 ///
 /// # Safety
 ///
-/// As for [`class_of_raw`].
+/// As for [`class_of_raw`], and the result may also be a vector the implicit-class cache holds,
+/// whose entries nothing replaces.
 pub unsafe fn implicit_class_raw(object: Sexp) -> R<Sexp> {
-    // SAFETY: the caller's contract, as in `class_of_raw`; the answer may also be a vector the
-    // caches hold.
+    // SAFETY: the caller's contract, as in `class_of_raw`. An S4 class vector comes rooted from
+    // `s4_extends`, because `.cache_class` can replace the cache's entry.
     unsafe {
         handles::held_in_caller_scope(object, |context, object| {
             Ok(implicit_class(context, object)?.raw())
@@ -161,6 +166,11 @@ fn do_class2<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<L
 
 /// The class attribute of `object`, unless it is absent or empty.
 fn class_attribute<'r, 's: 'r>(context: &'r Cx<'_>, object: Local<'s>) -> Option<Gc<'r>> {
+    // A class attribute counts only with the object bit, as `inherits` reads it, so the two
+    // agree on a value native code gave a class without setting the bit.
+    if !handles::is_object(object) {
+        return None;
+    }
     let class = get_attribute(context, object, symbol(|symbols| symbols.class));
     let empty = match class.standard::<Str>() {
         Some(class) => class.is_empty(),
@@ -210,15 +220,21 @@ fn text_vector<'s>(context: &mut Cx<'s>, texts: &[&str]) -> R<Local<'s, Str>> {
 /// An S4 class's S3 class vector, from the methods package's `.extendsForS3`, cached by class
 /// name as GNU R does. Without the methods package the class attribute stands alone.
 fn s4_extends<'a, 's>(context: &'a mut Cx<'s>, class: Local<'s>) -> R<Gc<'a>> {
-    let name: Box<[u8]> = match class.standard::<Str>() {
-        Some(names) if !names.is_empty() => names.get(context, 0).bytes().into(),
-        _ => return Ok(class.read(context)),
+    let Some(names) = class.standard::<Str>().filter(|names| !names.is_empty()) else {
+        return Ok(class.read(context));
     };
-    if let Some(&extends) = interp().globals.s4_extends.get(&name) {
-        // SAFETY: the interpreter's globals keep the vector, and only a safepoint can remove
-        // it, which the borrow of the context rules out.
-        return Ok(unsafe { Gc::adopt(extends) });
+    if let Some(&extends) = interp()
+        .globals
+        .s4_extends
+        .get(names.get(context, 0).bytes())
+    {
+        // SAFETY: the interpreter's globals keep the vector, and nothing replaces it before
+        // the root. A `.cache_class` call can replace it once R code runs, so a caller that
+        // holds the answer across a lookup needs the root.
+        let extends = context.root(unsafe { Gc::<Value>::adopt(extends) });
+        return Ok(extends.read(context));
     }
+    let name: Box<[u8]> = names.get(context, 0).bytes().into();
     let Some(function) = extends_for_s3(context)? else {
         return Ok(class.read(context));
     };
