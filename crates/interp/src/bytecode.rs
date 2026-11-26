@@ -14106,28 +14106,19 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
         (*state.interp).visible = false;
         return Ok(Flow::Next);
     }
-    // The constants, the registers and the frame's environment hold every operand until the
-    // instruction ends.
     let done = state.in_slots()
-        && handles::in_caller_scope(|context| {
-            let frame = RunningFrame { state: &*state };
-            let Some(slot) = frame.slot_at(instruction.operand(1)) else {
-                return Ok(false);
-            };
-            let Some(index) = slot_subscript(context, frame, handles::held(context, index))? else {
-                return Ok(false);
-            };
-            assign_slot_element(
-                context,
-                frame,
-                (slot, Local::adopt(variable)),
-                (index, handles::held(context, value), kind),
+        && handles::in_caller_scope_with(
+            (
+                RunningFrame { state: &*state },
+                instruction.operand(1),
                 (
-                    handles::held(context, call),
-                    handles::held(context, state.constant(instruction, 6)),
+                    variable,
+                    [index, value, call, state.constant(instruction, 6)],
                 ),
-            )
-        })?;
+                kind,
+            ),
+            sub_assign_in_slots,
+        )?;
     if done {
         instruction.output(0, value);
         (*state.interp).visible = false;
@@ -14155,6 +14146,41 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
     instruction.output(0, value);
     (*state.interp).visible = false;
     Ok(Flow::Next)
+}
+
+/// `op_sub_assign` on the variable in a slot frame's slot `constant`, with the raw operands
+/// `(variable, [index, value, call, whole])`.
+#[inline(always)]
+fn sub_assign_in_slots<'s>(
+    context: &mut Cx<'s>,
+    (frame, constant, (variable, operands), kind): (
+        RunningFrame<'_, '_, '_>,
+        usize,
+        (Sexp, [Sexp; 4]),
+        ElementKind,
+    ),
+) -> R<bool> {
+    let Some(slot) = frame.slot_at(constant) else {
+        return Ok(false);
+    };
+    // SAFETY: the constants, the registers and the frame's environment hold every operand
+    // until the instruction ends.
+    let (variable, [index, value, call, whole]) = unsafe {
+        (
+            Local::adopt(variable),
+            operands.map(|operand| handles::held(context, operand)),
+        )
+    };
+    let Some(index) = slot_subscript(context, frame, index)? else {
+        return Ok(false);
+    };
+    assign_slot_element(
+        context,
+        frame,
+        (slot, variable),
+        (index, value, kind),
+        (call, whole),
+    )
 }
 
 #[inline(always)]
@@ -14308,6 +14334,33 @@ fn assign_enclosed_element<'s>(
     Ok(true)
 }
 
+/// `op_sub_assign_matrix` on the variable in a slot frame's slot `constant`, with the raw
+/// operands `(variable, [row, column, value])`.
+#[inline(always)]
+fn sub_assign_matrix_in_slots<'s>(
+    context: &mut Cx<'s>,
+    (frame, constant, (variable, operands)): (RunningFrame<'_, '_, '_>, usize, (Sexp, [Sexp; 3])),
+) -> R<bool> {
+    let Some(slot) = frame.slot_at(constant) else {
+        return Ok(false);
+    };
+    // SAFETY: the registers and the frame's environment hold every operand until the
+    // instruction ends.
+    let (variable, [row, column, value]) = unsafe {
+        (
+            Local::adopt(variable),
+            operands.map(|operand| handles::held(context, operand)),
+        )
+    };
+    let Some(row) = slot_subscript(context, frame, row)? else {
+        return Ok(false);
+    };
+    let Some(column) = slot_subscript(context, frame, column)? else {
+        return Ok(false);
+    };
+    assign_slot_matrix_element(context, frame, (slot, variable), (row, column), value)
+}
+
 #[inline(always)]
 unsafe fn op_sub_assign_matrix(
     state: &mut Activation<'_, '_>,
@@ -14331,29 +14384,16 @@ unsafe fn op_sub_assign_matrix(
         .iter()
         .zip(codes)
         .all(|(subscript, code)| subscript.kind() != SexpType::Symbol || *subscript == code);
-    // The registers and the frame's environment hold every operand until the instruction ends.
     let done = lookups
         && state.in_slots()
-        && handles::in_caller_scope(|context| {
-            let frame = RunningFrame { state: &*state };
-            let Some(slot) = frame.slot_at(instruction.operand(1)) else {
-                return Ok(false);
-            };
-            let [row, column] = subscripts.map(|subscript| handles::held(context, subscript));
-            let Some(row) = slot_subscript(context, frame, row)? else {
-                return Ok(false);
-            };
-            let Some(column) = slot_subscript(context, frame, column)? else {
-                return Ok(false);
-            };
-            assign_slot_matrix_element(
-                context,
-                frame,
-                (slot, Local::adopt(variable)),
-                (row, column),
-                handles::held(context, value),
-            )
-        })?;
+        && handles::in_caller_scope_with(
+            (
+                RunningFrame { state: &*state },
+                instruction.operand(1),
+                (variable, [subscripts[0], subscripts[1], value]),
+            ),
+            sub_assign_matrix_in_slots,
+        )?;
     if done {
         instruction.output(0, value);
         (*state.interp).visible = false;

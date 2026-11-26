@@ -980,10 +980,27 @@ pub unsafe fn with<T>(body: impl for<'s> FnOnce(&mut Cx<'s>) -> R<T>) -> R<T> {
 /// As for [`with`], and the caller releases what `body` roots.
 #[inline(always)]
 pub unsafe fn in_caller_scope<T>(body: impl for<'s> FnOnce(&mut Cx<'s>) -> R<T>) -> R<T> {
+    // SAFETY: the caller's contract.
+    unsafe { in_caller_scope_with(body, |context, body| body(context)) }
+}
+
+/// [`in_caller_scope`] for a `body` that takes its operands as `data`. Tier 0 compiles each
+/// handler twice, for running and for stepping, so a closure a handler passes has two callers
+/// and LLVM keeps a large one out of line; an `#[inline(always)]` function item inlines into
+/// both.
+///
+/// # Safety
+///
+/// As for [`in_caller_scope`].
+#[inline(always)]
+pub unsafe fn in_caller_scope_with<D, T>(
+    data: D,
+    body: impl for<'s> FnOnce(&mut Cx<'s>, D) -> R<T>,
+) -> R<T> {
     // SAFETY: as in `with`. The scope `body` sees ends no later than the caller's, which it
-    // cannot outlive, because it must accept every `'s`.
+    // cannot outlive, because it must accept every `'s` and `data` was made before it began.
     let mut context = unsafe { Cx::enter(NonNull::from(&mut *crate::heap())) };
-    body(&mut context)
+    body(&mut context, data)
 }
 
 /// Roots `raw` in the context's scope.
@@ -2502,7 +2519,7 @@ pub fn assignment_copy<'s>(
 /// The value an assignment binds for a replacement's `result`: an ALTREP wrapper the
 /// replacement's copy introduced is dropped for its data once nothing else holds it
 /// ([`values::unwrap_assigned`]). `bound` says whether the variable already holds `result`.
-#[inline]
+#[inline(always)]
 pub fn unwrap_assigned<'s>(context: &mut Cx<'s>, result: Local<'s>, bound: bool) -> Local<'s> {
     // SAFETY: the result is rooted, and unwrapping may allocate, which `&mut Cx` permits.
     unsafe {
@@ -2517,7 +2534,7 @@ pub fn unwrap_assigned<'s>(context: &mut Cx<'s>, result: Local<'s>, bound: bool)
 
 /// Runs `body`, a replacement call of the assignment `whole`, as the call `setter_call` that
 /// the replacement primitives report and may modify their target for.
-#[inline]
+#[inline(always)]
 pub fn as_assignment<'s, T>(
     context: &mut Cx<'s>,
     setter_call: Local<'s>,
@@ -2544,21 +2561,23 @@ pub fn builtin_failure(_context: &mut Cx<'_>, unwind: Unwind) -> Unwind {
 
 /// Runs `body` while `target` is the value of `*tmp*` in `environment`, where the replacement
 /// call `body` makes finds it. A slot frame without an environment (`None`) binds no `*tmp*`.
-#[inline]
+#[inline(always)]
 pub fn with_tmp_value<'s, T>(
     context: &mut Cx<'s>,
     environment: Option<Local<'s, Environment>>,
     target: Local<'s>,
     body: impl FnOnce(&mut Cx<'s>) -> R<T>,
 ) -> R<T> {
-    let Some(environment) = environment else {
-        return body(context);
-    };
-    crate::interp()
-        .tmp_values
-        .push((environment.raw(), target.raw()));
+    // One call of `body`, which then inlines here.
+    if let Some(environment) = environment {
+        crate::interp()
+            .tmp_values
+            .push((environment.raw(), target.raw()));
+    }
     let result = body(context);
-    crate::interp().tmp_values.pop();
+    if environment.is_some() {
+        crate::interp().tmp_values.pop();
+    }
     result
 }
 
@@ -2592,7 +2611,7 @@ pub fn call_direct<'s>(
 
 /// The builtin `function` called on `arguments`, tagged as the arguments of `call` are, from
 /// the frame of `environment`, or from a slot frame that has none.
-#[inline]
+#[inline(always)]
 pub fn call_builtin<'s>(
     context: &mut Cx<'s>,
     definition: &crate::builtins::BuiltinDef,
