@@ -465,6 +465,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A hot `for` loop whose runs are short is not entered
 - A `for` loop over a boxed sequence compiles, and a pairlist loop stays in tier 0
 - The cost model charges each variable written back before a step
+- A write-back stores into the box the slot holds, inline inside a loop
 
 ## Heap and collector
 

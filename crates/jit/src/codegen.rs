@@ -17,8 +17,8 @@
 use {
     crate::{
         analysis::{
-            self, Action, Argument, Effect, Fast, Fold, Inspection, Intrinsic, Numeric, Passing,
-            Plan, Refusal, StateId, StateRef, Store, Ty, jump_target, status,
+            self, Action, Argument, Effect, Fast, Fold, IN_PLACE_SLOTS, Inspection, Intrinsic,
+            Numeric, Passing, Plan, Refusal, StateId, StateRef, Store, Ty, jump_target, status,
         },
         native,
         runtime::{
@@ -226,6 +226,10 @@ struct Frame<'p> {
     edges: Vec<PendingEdge>,
     /// The position of the first instruction of the block being translated.
     block_start: usize,
+    /// The frame's loops ([`Plan::loops`]), and whether the block being translated is inside
+    /// one.
+    loops: SmallVec<[(usize, usize); 4]>,
+    in_loop: bool,
     /// For an inlined call, a bitset by position of the formals whose promises the call has
     /// forced so far, had it bound promises. A slot's status cannot say this: an argument
     /// read ahead of the callee loads the slot without forcing anything, and a callee further
@@ -308,7 +312,7 @@ fn flags() -> MemFlagsData {
 impl<'p> Frame<'p> {
     /// A frame for `plan` with variables of its own. Its activation, window and statuses are
     /// set where the frame starts.
-    fn new(builder: &mut Builder, plan: &'p Plan<'p>, code: Sexp, index: u32) -> Frame<'p> {
+    unsafe fn new(builder: &mut Builder, plan: &'p Plan<'p>, code: Sexp, index: u32) -> Frame<'p> {
         let mut declare = |count: usize, ty: Type| {
             (0..count)
                 .map(|_| builder.declare_var(ty))
@@ -328,6 +332,8 @@ impl<'p> Frame<'p> {
             labels: Vec::new(),
             edges: Vec::new(),
             block_start: 0,
+            loops: plan.loops(),
+            in_loop: false,
             forced: builder.declare_var(I64),
             call: None,
         }
@@ -341,7 +347,7 @@ impl<'p> Frame<'p> {
 }
 
 impl<'p> Translator<'p> {
-    fn new(
+    unsafe fn new(
         plan: &'p Plan<'p>,
         code: Sexp,
         mut builder: Builder,
@@ -493,22 +499,10 @@ impl<'p> Translator<'p> {
     /// The current frame as the helpers see it, for the call `inlined` or the body itself.
     unsafe fn layout(&self, inlined: Option<Inlined>) -> Layout {
         let plan = self.frame.plan;
-        let table = self.frame.code.cdr().element(bytecode::SLOTS);
-        let names = if table == values::nil() {
-            values::nil()
-        } else {
-            table.element(1)
-        };
         Layout {
             registers: plan.registers,
             slots: plan.slots.iter().copied().collect(),
-            frame: plan
-                .slots
-                .iter()
-                .map(|&symbol| {
-                    (0..values::length(names)).find(|&index| names.element(index) == symbol)
-                })
-                .collect(),
+            frame: self.frame.plan.positions.as_slice().into(),
             volatile: plan.volatile.iter().copied().collect(),
             hints: plan.slots.iter().map(|_| Cell::new(0)).collect(),
             inlined,
@@ -527,6 +521,12 @@ impl<'p> Translator<'p> {
                 self.frame.plan.blocks[index].end,
             );
             self.frame.block_start = start;
+            let pc = self.frame.plan.insts[start].pc;
+            self.frame.in_loop = self
+                .frame
+                .loops
+                .iter()
+                .any(|&(first, last)| first <= pc && pc <= last);
             for position in start..end {
                 // An instruction that always leaves, as a return does, ends its block there.
                 if self.instruction(position)? {
@@ -4959,9 +4959,32 @@ impl<'p> Translator<'p> {
         let Some(first) = first else {
             return;
         };
+        let in_place = self.overwrite_in_place(state);
         if second.is_none() {
             return self.flush_slot(state, first, failed);
         }
+        // Where the stores above can leave every slot clean, the helper is called only for
+        // what they left.
+        let done = in_place.then(|| {
+            let mut pending = self.builder.ins().iconst(I32, 0);
+            for (slot, held) in state.slots.iter().enumerate() {
+                if held.may_be(status::DIRTY) {
+                    let status = self.status(slot);
+                    let dirty =
+                        self.builder
+                            .ins()
+                            .icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
+                    let dirty = self.builder.ins().uextend(I32, dirty);
+                    pending = self.builder.ins().bor(pending, dirty);
+                }
+            }
+            let call = self.builder.create_block();
+            let done = self.builder.create_block();
+            self.builder.ins().brif(pending, call, &[], done, &[]);
+            self.builder.switch_to_block(call);
+            self.builder.set_cold_block(call);
+            done
+        });
         let record = self.save_dirty(state);
         let statuses = self.builder.ins().stack_addr(I64, self.frame.statuses, 0);
         let Some(result) = self.call(
@@ -4974,6 +4997,115 @@ impl<'p> Translator<'p> {
         };
         let ok = self.builder.ins().icmp_imm_s(IntCC::NotEqual, result, 0);
         self.guard(ok, failed);
+        if let Some(done) = done {
+            self.builder.ins().jump(done, &[]);
+            self.builder.switch_to_block(done);
+        }
+    }
+
+    /// Writes the dirty unboxed scalars of the body's own locals back by storing each into the
+    /// box its frame slot holds, when that box is a plain scalar of the type that only the
+    /// binding references, as [`runtime::jit_flush`] does. A loop that writes the same
+    /// variables back on every pass finds the boxes of the pass before, so the pass calls no
+    /// helper. The stores sit behind one branch on the frame having slots, and none follows
+    /// per slot: a slot that fails a test stays dirty for the helper, and its store goes to
+    /// the slot's home. Returns whether any slot was a candidate.
+    ///
+    /// A formal is left to the helper, which clears its missing bit, and so is the variable
+    /// of an inlined call, whose window is no slot frame. A site outside the loops writes
+    /// into a fresh frame, whose slots hold no box, and a site with more than
+    /// [`IN_PLACE_SLOTS`] dirty slots keeps the one helper call too.
+    unsafe fn overwrite_in_place(&mut self, state: &StateRef<'p>) -> bool {
+        if self.frame.call.is_some() || !self.frame.in_loop {
+            return false;
+        }
+        let dirty = |slot: usize| state.slots[slot].may_be(status::DIRTY);
+        if (0..state.slots.len()).filter(|&slot| dirty(slot)).count() > IN_PLACE_SLOTS {
+            return false;
+        }
+        let plan = self.frame.plan;
+        let candidates: SmallVec<[(usize, usize); IN_PLACE_SLOTS]> = (0..state.slots.len())
+            .filter(|&slot| dirty(slot) && plan.in_place(slot, state.slots[slot].ty))
+            .filter_map(|slot| Some((slot, plan.positions[slot]?)))
+            .collect();
+        if candidates.is_empty() {
+            return false;
+        }
+        // A callee can give the slot frame its environment while the activation runs, and the
+        // variables then live in the environment's bindings. An activation that was entered
+        // with an environment has no slots at all, so the slot words are read only behind
+        // this test.
+        let header = self
+            .builder
+            .ins()
+            .load(I64, flags(), self.frame.activation, offset::HEADER);
+        let env = self.builder.ins().load(I64, flags(), header, 0);
+        let framed = self.builder.ins().icmp_imm_u(IntCC::Equal, env, self.nil);
+        let stores = self.builder.create_block();
+        let after = self.builder.create_block();
+        self.builder.ins().brif(framed, stores, &[], after, &[]);
+        self.builder.switch_to_block(stores);
+        let homes = homes_offset(state.slots.len());
+        for (slot, position) in candidates {
+            let ty = state.slots[slot].ty;
+            let status = self.status(slot);
+            let dirty = self
+                .builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, status, status::RUNTIME_DIRTY);
+            // Every value a slot frame's slot holds is an object, a marker for an unbound
+            // variable too, so its header can be read before the tests say what it is.
+            let current =
+                self.builder
+                    .ins()
+                    .load(I64, flags(), header, (8 * (1 + position)) as i32);
+            // The header's first word holds the kind, the flags and the reference count.
+            let kind = match ty {
+                Ty::Int => SexpType::Integer,
+                Ty::Lgl => SexpType::Logical,
+                _ => SexpType::Real,
+            };
+            let word = self.builder.ins().load(I64, flags(), current, KIND);
+            let mask = 0xff | (ALTREP_FLAG | ARRAY_FLAG) << (8 * FLAGS) | 0xffff << (8 * REFCOUNT);
+            let masked = self.builder.ins().band_imm_u(word, mask);
+            let plain = self.builder.ins().icmp_imm_u(
+                IntCC::Equal,
+                masked,
+                kind as i64 | 1 << (8 * REFCOUNT),
+            );
+            let length = self.builder.ins().load(I64, flags(), current, LENGTH);
+            let scalar = self.builder.ins().icmp_imm_u(IntCC::Equal, length, 1);
+            let attributes = self.builder.ins().load(I64, flags(), current, ATTRIB);
+            let bare = self
+                .builder
+                .ins()
+                .icmp_imm_u(IntCC::Equal, attributes, self.nil);
+            let mut ok = dirty;
+            for test in [plain, scalar, bare] {
+                ok = self.builder.ins().band(ok, test);
+            }
+            let data = self.builder.ins().iadd_imm_s(current, i64::from(DATA));
+            let home =
+                self.builder
+                    .ins()
+                    .stack_addr(I64, self.frame.statuses, (homes + 16 * slot) as i32);
+            let target = self.builder.ins().select(ok, data, home);
+            let value = if ty == Ty::Dbl {
+                self.builder.use_var(self.frame.slot_doubles[slot])
+            } else {
+                self.builder.use_var(self.frame.slot_integers[slot])
+            };
+            self.builder.ins().store(flags(), value, target, 0);
+            let cell = self.load_slot_cell(slot);
+            let cell = self.builder.ins().select(ok, current, cell);
+            self.store_slot_cell(slot, cell);
+            let local = self.builder.ins().iconst(I32, status::RUNTIME_LOCAL);
+            let status = self.builder.ins().select(ok, local, status);
+            self.set_status(slot, status);
+        }
+        self.builder.ins().jump(after, &[]);
+        self.builder.switch_to_block(after);
+        true
     }
 
     /// Calls the load helper `plain` with `arguments`, or `exposed` when a slot may be dirty:
