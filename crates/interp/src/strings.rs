@@ -3616,8 +3616,9 @@ fn pattern_text<'a, 's: 'a>(
     subject(pattern.get(context, 0), use_bytes).unwrap_or_default()
 }
 
-/// A string as the regular expression engine sees it, as [`subject_at`] reads it.
-#[inline]
+/// A string as the regular expression engine sees it, as [`subject_at`] reads it. It is
+/// inlined into the per-element loops of `sub` and `gsub`.
+#[inline(always)]
 fn subject(chars: Gc<'_, Chars>, use_bytes: bool) -> Option<Cow<'_, str>> {
     if handles::is_na(chars) {
         None

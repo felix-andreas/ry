@@ -1718,17 +1718,6 @@ fn patch_args_by_actuals<'s>(
         }
         formal = cell.rest();
     }
-    // Only the values change, so each argument's tag is read once: its symbol when it has a
-    // name.
-    let tags: SmallVec<[Option<Gc<'static, Symbol>>; 10]> = args
-        .iter()
-        .map(|arg| {
-            arg.tag
-                .downcast::<Symbol>()
-                .map(handles::permanent)
-                .filter(|tag| !tag.name().bytes().is_empty())
-        })
-        .collect();
     let mut found: SmallVec<[FormalMatch; 8]> =
         SmallVec::from_elem(FormalMatch::Unmatched, names.len());
     // 0 unused, 1 matched by a partial name or position, 2 matched by its exact name.
@@ -1737,9 +1726,9 @@ fn patch_args_by_actuals<'s>(
         if name.is(dots) {
             continue;
         }
-        if let Some(position) = tags
+        if let Some(position) = args
             .iter()
-            .position(|tag| tag.is_some_and(|tag| tag.is(name)))
+            .position(|arg| argument_name(arg).is_some_and(|tag| tag.is(name)))
         {
             found[index] = patch_argument(context, &mut args[position], name, method_env, made)?;
             used[position] = 2;
@@ -1755,9 +1744,9 @@ fn patch_args_by_actuals<'s>(
             continue;
         }
         let formal = name.name().bytes();
-        let position = tags.iter().enumerate().position(|(position, tag)| {
+        let position = args.iter().enumerate().position(|(position, arg)| {
             used[position] == 0
-                && tag.is_some_and(|tag| {
+                && argument_name(arg).is_some_and(|tag| {
                     tag.is(name) || !seen_dots && formal.starts_with(tag.name().bytes())
                 })
         });
@@ -1773,7 +1762,7 @@ fn patch_args_by_actuals<'s>(
         }
         if found[formal] == FormalMatch::Present {
             formal += 1;
-        } else if used[position] != 0 || tags[position].is_some() {
+        } else if used[position] != 0 || argument_name(&args[position]).is_some() {
             position += 1;
         } else {
             if found[formal] == FormalMatch::Local {
@@ -1809,6 +1798,15 @@ enum FormalMatch {
 }
 
 /// Replaces `arg`, matched to the formal `name`, by a promise of the formal in `method_env`,
+/// The name an argument is passed by, when it has one.
+#[inline]
+fn argument_name(arg: &Tagged<'_>) -> Option<Gc<'static, Symbol>> {
+    arg.tag
+        .downcast::<Symbol>()
+        .map(handles::permanent)
+        .filter(|tag| !tag.name().bytes().is_empty())
+}
+
 /// unless it is empty and the formal is still missing there.
 fn patch_argument<'s>(
     context: &mut Cx<'s>,

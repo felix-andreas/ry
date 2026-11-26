@@ -2482,7 +2482,33 @@ pub fn copy_attributes_to<'s, T: Kind>(
 
 /// Copies the attributes of `from` onto `to`, which the caller may change, with its object and
 /// S4 bits, leaving out the names, dim and dimnames unless `keep_names_dims` asks for them.
+#[inline]
 fn copy_attribute_cells(
+    context: &mut Cx<'_>,
+    from: Local<'_>,
+    to: Local<'_>,
+    keep_names_dims: bool,
+) -> R<()> {
+    if from.attributes(context).downcast::<Pairlist>().is_some() {
+        copy_attribute_list(context, from, to, keep_names_dims)?;
+    }
+    // SAFETY: the caller may change `to`, and setting header bits allocates nothing.
+    unsafe {
+        let (from, to) = (from.raw(), to.raw());
+        if from.is_object() {
+            to.set_object(true);
+        }
+        if from.has_gp(gp::S4_OBJECT) {
+            to.set_gp_bits(gp::S4_OBJECT, true);
+        }
+    }
+    Ok(())
+}
+
+/// The attribute list half of [`copy_attribute_cells`], outlined so a value without
+/// attributes, the common case, pays only for the check.
+#[inline(never)]
+fn copy_attribute_list(
     context: &mut Cx<'_>,
     from: Local<'_>,
     to: Local<'_>,
@@ -2511,16 +2537,6 @@ fn copy_attribute_cells(
             }
         }
         cell = rest;
-    }
-    // SAFETY: the caller may change `to`, and setting header bits allocates nothing.
-    unsafe {
-        let (from, to) = (from.raw(), to.raw());
-        if from.is_object() {
-            to.set_object(true);
-        }
-        if from.has_gp(gp::S4_OBJECT) {
-            to.set_gp_bits(gp::S4_OBJECT, true);
-        }
     }
     Ok(())
 }
