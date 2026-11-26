@@ -1,0 +1,171 @@
+# Typed functions too large to inline that call each other compile natively: the one compiled
+# first calls the other while that one is still being compiled, assuming the result type the
+# other's own recursion assumes. A result type the guesses miss, as a record, is revised and both
+# compile again, and rebinding one of them makes the other call the new definition.
+
+requires ry-runtime
+
+file ry.toml
+| [check]
+| typing = true
+
+file mutual.R
+| alias Pair = Record{left: I64, right: I64}
+| down_a <- function(n: I64, p: Pair) -> Pair {
+|   if (n <= 0) return(p)
+|   x <- n * 3
+|   y <- x %% 7
+|   z <- if (y > 3) x + y else x - y
+|   w <- z * 2 + p$left
+|   down_b(n - 1, (left = w %% 1000, right = p$right + 1))
+| }
+| down_b <- function(n: I64, p: Pair) -> Pair {
+|   if (n <= 0) return(p)
+|   x <- n * 5
+|   y <- x %% 11
+|   z <- if (y > 5) x + y else x - y
+|   w <- z * 3 + p$right
+|   down_a(n - 1, (left = p$left + 1, right = w %% 1000))
+| }
+| start_a <- function(n: I64) -> I64 {
+|   r <- down_a(n, (left = 0, right = 0))
+|   r$left * 1000 + r$right
+| }
+| start_b <- function(n: I64) -> I64 {
+|   r <- down_b(n, (left = 1, right = 2))
+|   r$left * 1000 + r$right
+| }
+| print(start_a(10))
+| print(start_b(7))
+| down_a <- function(n: I64, p: Pair) -> Pair {
+|   if (n <= 0) return(p)
+|   x <- n * 100
+|   y <- x %% 7
+|   z <- if (y > 3) x + y else x - y
+|   w <- z + 1
+|   down_b(n - 1, (left = w, right = p$right))
+| }
+| print(start_b(4))
+| print(start_a(5))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry mutual.R
+expect exit 0
+expect stdout "205335i64\n107203i64\n99149i64\n99147i64"
+expect stderr lacks "being compiled"
+expect stderr lacks "runs in the interpreter"
+
+# Two functions that call each other and never compile refuse once, not at every call.
+file never.R
+| f <- function(n: I64) {
+|   if (n <= 0) return("a")
+|   x <- n * 3
+|   y <- x %% 7
+|   z <- if (y > 3) x + y else x - y
+|   g(n - 1 + z - z)
+| }
+| g <- function(n: I64) {
+|   if (n <= 0) return(1)
+|   x <- n * 5
+|   y <- x %% 11
+|   z <- if (y > 5) x + y else x - y
+|   f(n - 1 + z - z)
+| }
+| f(3)
+| cat("again\n", file = stderr())
+| for (i in 1:20) f(3)
+| print(f(3))
+
+run ry run --runtime ry never.R
+expect exit 0
+expect stdout "[1] 1"
+expect stderr "again\n"
+expect stderr lacks "again\ntyped: refused"
+expect stderr lacks "again\ntyped: compiled"
+
+# A function that R rebinds while code compiled against its old result runs keeps the result
+# type that code was compiled for.
+file rebind.R
+| k <- function(n: I64) return(Str.concat("s", "t"))
+| cb <- function(n) {
+|   if (n == 2) {
+|     k <<- function(n: I64) return(2.5)
+|     print(f(0))
+|   }
+|   NULL
+| }
+| f <- function(n: I64) if (n <= 0) k(n) else g(n - 1)
+| g <- function(n: I64) {
+|   cb(Num.to_r(n))
+|   f(n)
+| }
+| print(f(0))
+| print(f(4))
+| print(f(0))
+
+run ry run --runtime ry rebind.R
+expect exit 0
+expect stdout "[1] \"st\"\n[1] 2.5"
+expect stdout "[1] 2.5\n"
+
+# A code file holds a function that calls an earlier one with another result than a guess.
+file calls.R
+| f <- function(x: I64) return(x + 1)
+| g <- function(x: I64) -> F64 Num.to_f64(f(x)) + 0.5
+| print(g(3))
+
+unset RY_TYPED_LOG
+run ry build --aot --exe calls.R -o calls
+expect exit 0
+expect stdout "typed code: closures=2 written=2"
+
+# A group that waits on the interpreter to run a conversion compiles once it has run.
+file await.R
+| options(k = 2)
+| f <- function(n: I64) -> I64 {
+|   if (n <= 0) return(0)
+|   ax <- n
+|   a0 <- (n * 3 + ax) %% 7
+|   a1 <- (n * 4 + a0) %% 8
+|   a2 <- (n * 5 + a1) %% 9
+|   a3 <- (n * 6 + a2) %% 10
+|   a4 <- (n * 7 + a3) %% 11
+|   a5 <- (n * 8 + a4) %% 12
+|   a6 <- (n * 9 + a5) %% 13
+|   a7 <- (n * 10 + a6) %% 14
+|   a8 <- (n * 11 + a7) %% 15
+|   a9 <- (n * 12 + a8) %% 16
+|   a10 <- (n * 13 + a9) %% 17
+|   a11 <- (n * 14 + a10) %% 18
+|   a12 <- (n * 15 + a11) %% 19
+|   a13 <- (n * 16 + a12) %% 20
+|   g(n - 1) + a13 %% 2
+| }
+| g <- function(n: I64) -> I64 {
+|   if (n <= 0) return(1)
+|   k <- Num.from_r(getOption("k"))
+|   ax <- n
+|   a0 <- (n * 3 + ax) %% 7
+|   a1 <- (n * 4 + a0) %% 8
+|   a2 <- (n * 5 + a1) %% 9
+|   a3 <- (n * 6 + a2) %% 10
+|   a4 <- (n * 7 + a3) %% 11
+|   a5 <- (n * 8 + a4) %% 12
+|   a6 <- (n * 9 + a5) %% 13
+|   a7 <- (n * 10 + a6) %% 14
+|   a8 <- (n * 11 + a7) %% 15
+|   a9 <- (n * 12 + a8) %% 16
+|   a10 <- (n * 13 + a9) %% 17
+|   a11 <- (n * 14 + a10) %% 18
+|   a12 <- (n * 15 + a11) %% 19
+|   a13 <- (n * 16 + a12) %% 20
+|   f(n - 1) + k + a13 %% 2
+| }
+| for (i in 1:3) print(f(10))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry await.R
+expect exit 0
+expect stdout "17i64\n17i64\n17i64"
+expect stderr "waits on the interpreter"
+expect stderr "typed: compiled for [I64] -> I64"

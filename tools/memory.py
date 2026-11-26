@@ -74,7 +74,10 @@ AREAS = [
      "The `libR` C API, `R CMD`, package installation, the bundled base R, and the loader behind "
      "`ry load`, `ry test` and `ry document`."),
     ("typed-stdlib", "Typed ry and the standard library",
-     "Typed closures and their native compilation, records, tuples and tags, and `std`."),
+     "Typed ry's values, records, tuples and tags, and `std`."),
+    ("typed-native", "Typed native compilation",
+     "How the typed core lowers, compiles, links and attaches typed code: registers, loops and "
+     "fusion, ahead-of-time code files, nativeness findings and the boundary with R."),
     ("frames-table", "DataFrame and the table engine",
      "The built-in DataFrame, its kernels, CSV reading, and the data.table boundary."),
     ("tooling-bench-ci", "Build, benchmarks and CI",
@@ -96,6 +99,88 @@ RECORD_PREFIX = "Decision record: "
 # Classification overrides by heading (after folding), for entries the keyword scores misplace or
 # score with low confidence. Pinned by reading each entry.
 OVERRIDES = {
+    'Typed closures run as native functions over records, tags and match':
+        "typed-native",
+    'Typed values are native, immutable, acyclic and freed by reference counts':
+        "typed-native",
+    'Typed code compiles ahead of time, and `ry build --aot --exe` writes an executable':
+        "typed-native",
+    "`ry run --aot` compiles a script's typed code before it starts":
+        "typed-native",
+    'An installed typed package holds elaborated sources with canonical annotations':
+        "typed-native",
+    'The typed code file is position-independent code whose offset table is the per-process table':
+        "typed-native",
+    '`ry build --aot --exe` appends the script and its code file to a copy of `ry`':
+        "typed-native",
+    'The typed core lowers R syntax at the first call and runs on 16-byte strings and view lists':
+        "typed-native",
+    'Typed `I64` runs in registers, and list arithmetic fuses into one loop':
+        "typed-native",
+    'Array subscripts walk offsets instead of listing them':
+        "typed-native",
+    'Typed-to-typed calls are eager on every tier':
+        "typed-native",
+    'A typed call that runs in the interpreter always says why':
+        "typed-native",
+    'Typed code calls R natively':
+        "typed-native",
+    'Typed list literals compile natively, and an empty list of boxes settles its item type at first use':
+        "typed-native",
+    'A count of a logical list fuses with the comparisons that built it, after lowering':
+        "typed-native",
+    'A ry list is one item word':
+        "typed-native",
+    'Converting a record tree at the typed boundary takes one shape-table borrow and no per-node allocation':
+        "typed-native",
+    'A typed record or tag that R holds stays a box until R reads into it':
+        "typed-native",
+    'Nativeness is a strict-mode diagnostic':
+        "typed-native",
+    'Typed code holds table values natively':
+        "typed-native",
+    'A serialized typed closure carries its signature':
+        "typed-native",
+    'A record or tag that stays in its function has no box':
+        "typed-native",
+    'A small typed function is lowered into its caller':
+        "typed-native",
+    'A typed loop over a held list counts a position and reads without a range check':
+        "typed-native",
+    'A typed free calls a register-preserving entry':
+        "typed-native",
+    'Fused list kernels are compiled per CPU feature level and clear no buffers':
+        "typed-native",
+    'Short strings are built and hashed as two words':
+        "typed-native",
+    "The typed log reports each compilation's own time":
+        "typed-native",
+    'One thread-local holds every typed allocation pool':
+        "typed-native",
+    'A branch on a comparison of two doubles compares once':
+        "typed-native",
+    'Shapes are confirmed after lowering, and machine code is generated once':
+        "typed-native",
+    'Parsing a number is one instruction with two results':
+        "typed-native",
+    'An `I64` remainder or quotient by a positive constant needs no checks':
+        "typed-native",
+    'A split list that is only read at constant positions is never built':
+        "typed-native",
+    'A loop that fills a list is fused with the loop that reads it':
+        "typed-native",
+    'Whole-number ranges decide which checks typed code needs':
+        "typed-native",
+    "An R call's argument passes R literals and outside variables as code":
+        "typed-native",
+    'Native code reads a ry-typed global where it runs':
+        "typed-native",
+    '`ry check --fix` applies the rewrites native findings name':
+        "typed-native",
+    'A name set on some paths is one variable with a set flag':
+        "typed-native",
+    'A call of a function still being compiled goes through a code cell':
+        "typed-native",
     '`is.null` shapes an unconstrained inference variable':
         "type-checker",
     'Recursion in a function-valued assignment is monomorphic':
@@ -462,8 +547,6 @@ OVERRIDES = {
         "syntax-semantics",
     "An item's syntax has a stamp, so an edit lowers only the items it changed":
         "syntax-semantics",
-    "The typed code file is position-independent code whose offset table is the per-process table":
-        "typed-stdlib",
     "The methods package's core runs natively behind hash-guarded prologues":
         "builtins",
     "Bytecode is build output, not a cache":
@@ -538,8 +621,6 @@ OVERRIDES = {
         "builtins",
     "sprintf formats numbers with the native kernels":
         "builtins",
-    "A typed call that runs in the interpreter always says why":
-        "typed-stdlib",
     "Top-level loops compile per evaluation, without a call frame or a tier":
         "jit-ssa",
     "Hash tables for `unique()` and `match()` stop growing with the elements at 256 KB":
@@ -548,18 +629,6 @@ OVERRIDES = {
         "jit-ssa",
     "Positional builtin calls read their arguments from the registers":
         "builtins",
-    "A small typed function is lowered into its caller":
-        "typed-stdlib",
-    "A typed free calls a register-preserving entry":
-        "typed-stdlib",
-    "Fused list kernels are compiled per CPU feature level and clear no buffers":
-        "typed-stdlib",
-    "Short strings are built and hashed as two words":
-        "typed-stdlib",
-    "One thread-local holds every typed allocation pool":
-        "typed-stdlib",
-    "An `I64` remainder or quotient by a positive constant needs no checks":
-        "typed-stdlib",
     "A warning reaches `suppressWarnings` and `tryCatch` without running R":
         "builtins",
     "A compiled return writes locals back only when something can still read the frame":
@@ -644,10 +713,6 @@ OVERRIDES = {
         "syntax-semantics",
     "The analysis core's per-item and per-file tables after the type store":
         "syntax-semantics",
-    "An installed typed package holds elaborated sources with canonical annotations":
-        "typed-stdlib",
-    "The typed core lowers R syntax at the first call and runs on 16-byte strings and view lists":
-        "typed-stdlib",
     "Installed packages load through native fast paths, not an image":
         "libr-rcmd",
     "Code images: compiled code beside the lazy-load database":
@@ -665,8 +730,6 @@ OVERRIDES = {
     "Typed `List.sort_with` is a merge sort with its comparator inlined, and strings order by the interpreter's collation":
         "typed-stdlib",
     "The typed suite scores typed ry against Rust":
-        "typed-stdlib",
-    "Shapes are confirmed after lowering, and machine code is generated once":
         "typed-stdlib",
     "Tier 1 leaves compiled code through frame states":
         "jit-ssa",
@@ -740,6 +803,10 @@ KEYWORDS = {
         "typed", "standard library", "std", "record", "tuple", "tag", "list.", "str.", "dict",
         "result", "crates/typed", "aot", "ahead of time", "i64", "native value", "box",
         "roc", "match", "typed boundary",
+    ],
+    "typed-native": [
+        "lower", "cranelift", "native", "fuse", "fusion", "register", "code file", "attach",
+        "compile", "linker", "aot", "ahead of time",
     ],
     "frames-table": [
         "dataframe", "data frame", "table engine", "polars", "group-by", "group by", "join",

@@ -11,7 +11,7 @@ checks, no tracing collector, and no allocation the program did not ask for.
 
 The contract gives `List<F64>`, `List<Bool>` and `List<Str>` R's vector layouts, so that they
 pass to C without a copy, and makes a `Str` a `CHARSXP`. That assumes typed values live on the R
-heap. This draft makes them native values freed by reference counts (`decisions/typed-stdlib.md`, "Typed values
+heap. This draft makes them native values freed by reference counts (`decisions/typed-native.md`, "Typed values
 are native, immutable, acyclic and freed by reference counts"), so every list crosses to R by a
 copy, and the contract is amended to match.
 
@@ -39,7 +39,7 @@ entry stub handles the R value it is given (see "Facts and guesses") and calls a
 
 ## Why the native path is not the end shape
 
-Typed closures run as native functions from their first call (`decisions/typed-stdlib.md`, "Typed closures run
+Typed closures run as native functions from their first call (`decisions/typed-native.md`, "Typed closures run
 as native functions over records, tags and match"), and typed `orders` and `expr_tree` run 13 and
 80 times faster than GNU R. That path compiles R syntax with types it infers from the first call's
 argument values, and it treats those types as speculation:
@@ -539,7 +539,7 @@ code compiled before the script ran valid once it runs:
   conversion has a type before any call has run. On every call the conversion turns what R gives
   into a list of that type: it widens `Bool` and `I64` items as R coerces, because a vector R
   types as `double` may hold integers, and it stops with an error on any other type. The
-  interpreter and compiled code convert through one function (`decisions/typed-stdlib.md`, "`ry run --aot`
+  interpreter and compiled code convert through one function (`decisions/typed-native.md`, "`ry run --aot`
   compiles a script's typed code before it starts").
 - A function a loaded namespace binds lazily is read from the package database when the code
   compiles.

@@ -573,7 +573,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 
 ## Typed ry and the standard library
 
-[`typed-stdlib.md`](typed-stdlib.md): Typed closures and their native compilation, records, tuples and tags, and `std`.
+[`typed-stdlib.md`](typed-stdlib.md): Typed ry's values, records, tuples and tags, and `std`.
 
 - Beta semantics: Signature matching is name-aware
 - Records, tuples and tags are ry values, not R lists (built, with exceptions)
@@ -593,8 +593,27 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A key of the wrong type is an error, not a missing key
 - Records, tuples and tags compile natively
 - The standard library is the `std` namespace, with an optional prelude
-- Typed closures run as native functions over records, tags and match
 - Typed ry has its own numbers, `Bool`, `Str` and `List` (built, with exceptions)
+- Typed boxes have shapes, and a tag type is a union of them (built, with exceptions)
+- R lists do not convert to records at a typed boundary (built, with exceptions)
+- A uniquely owned Array grows in place
+- Typed `List.sort_with` is a merge sort with its comparator inlined, and strings order by the interpreter's collation
+- The typed suite scores typed ry against Rust
+- `Dict.update` probes once and builds no `Result`
+- The typed `sales` benchmark is written over `Dict`
+- `Str.split_on` with a one-byte separator scans a word at a time
+- `List.count_if` with a comparison predicate counts over the whole list
+- The typed `array_filter` benchmark counts with `List.count_if`
+- `List.sum` adds doubles in order in double precision
+- Counts that share a list share one kernel pass (built, with exceptions)
+- An R vector with `NA` converts through `List.from_r_or` or `List.from_r_missing`
+- `Num.sqrt(NaN)` is an error, as every library function's `NaN` is (settled)
+
+## Typed native compilation
+
+[`typed-native.md`](typed-native.md): How the typed core lowers, compiles, links and attaches typed code: registers, loops and fusion, ahead-of-time code files, nativeness findings and the boundary with R.
+
+- Typed closures run as native functions over records, tags and match
 - Typed values are native, immutable, acyclic and freed by reference counts (built, with exceptions)
 - Typed code compiles ahead of time, and `ry build --aot --exe` writes an executable
 - `ry run --aot` compiles a script's typed code before it starts
@@ -604,19 +623,14 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The typed core lowers R syntax at the first call and runs on 16-byte strings and view lists
 - Typed `I64` runs in registers, and list arithmetic fuses into one loop
 - Array subscripts walk offsets instead of listing them
-- Typed boxes have shapes, and a tag type is a union of them (built, with exceptions)
 - Typed-to-typed calls are eager on every tier
-- R lists do not convert to records at a typed boundary (built, with exceptions)
 - A typed call that runs in the interpreter always says why
 - Typed code calls R natively
 - Typed list literals compile natively, and an empty list of boxes settles its item type at first use
 - A count of a logical list fuses with the comparisons that built it, after lowering
-- A uniquely owned Array grows in place
 - A ry list is one item word
-- Typed `List.sort_with` is a merge sort with its comparator inlined, and strings order by the interpreter's collation
 - Converting a record tree at the typed boundary takes one shape-table borrow and no per-node allocation
 - A typed record or tag that R holds stays a box until R reads into it
-- The typed suite scores typed ry against Rust
 - Nativeness is a strict-mode diagnostic
 - Typed code holds table values natively
 - A serialized typed closure carries its signature
@@ -625,29 +639,21 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A typed loop over a held list counts a position and reads without a range check
 - A typed free calls a register-preserving entry
 - Fused list kernels are compiled per CPU feature level and clear no buffers
-- `Dict.update` probes once and builds no `Result`
-- The typed `sales` benchmark is written over `Dict`
 - Short strings are built and hashed as two words
 - The typed log reports each compilation's own time
 - One thread-local holds every typed allocation pool
-- `Str.split_on` with a one-byte separator scans a word at a time
 - A branch on a comparison of two doubles compares once
-- `List.count_if` with a comparison predicate counts over the whole list
-- The typed `array_filter` benchmark counts with `List.count_if`
 - Shapes are confirmed after lowering, and machine code is generated once
-- `List.sum` adds doubles in order in double precision
-- Counts that share a list share one kernel pass (built, with exceptions)
 - Parsing a number is one instruction with two results
 - An `I64` remainder or quotient by a positive constant needs no checks
 - A split list that is only read at constant positions is never built
 - A loop that fills a list is fused with the loop that reads it
 - Whole-number ranges decide which checks typed code needs
-- An R vector with `NA` converts through `List.from_r_or` or `List.from_r_missing`
 - An R call's argument passes R literals and outside variables as code
 - Native code reads a ry-typed global where it runs
 - `ry check --fix` applies the rewrites native findings name
-- `Num.sqrt(NaN)` is an error, as every library function's `NaN` is (settled)
 - A name set on some paths is one variable with a set flag
+- A call of a function still being compiled goes through a code cell
 
 ## DataFrame and the table engine
 

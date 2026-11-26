@@ -877,7 +877,7 @@ fn typed_script(rng: &mut SplitMix64) -> (String, bool) {
     let mut erasable = true;
     for index in 0..rng.below(4) + 2 {
         let n = rng.below(9) + 2;
-        let mut lines = match rng.below(16) {
+        let mut lines = match rng.below(17) {
             0 => {
                 let operator = ["+", "*", "-"][rng.below(3)];
                 let mut definitions = vec![
@@ -1057,6 +1057,27 @@ fn typed_script(rng: &mut SplitMix64) -> (String, bool) {
                     format!("assign(\"rate_{index}\", {n}.25)"),
                     format!("print(scaled_{index}({n}))"),
                 ]
+            }
+            15 => {
+                // Two functions too large to inline call each other, so whichever compiles first
+                // calls the other while that one is still being compiled.
+                let mut definitions: Vec<String> = [("a", "b", 3, 7), ("b", "a", 5, 11)]
+                    .iter()
+                    .map(|(own, other, factor, modulus)| {
+                        format!(
+                            "walk_{own}_{index} <- function(n: I64, acc: I64) -> I64 {{\n  if (n \
+                             <= 0) return(acc)\n  x <- n * {factor}\n  y <- x %% {modulus}\n  \
+                             z <- if (y > 3) x + y else x - y\n  w <- z * 2 + acc\n  \
+                             walk_{other}_{index}(n - 1, w %% 1000)\n}}"
+                        )
+                    })
+                    .collect();
+                if rng.chance(1, 2) {
+                    definitions.reverse();
+                }
+                definitions.push(format!("print(Num.to_f64(walk_a_{index}({n}, 0)))"));
+                definitions.push(format!("print(Num.to_f64(walk_b_{index}({n}, 1)))"));
+                definitions
             }
             _ => vec![
                 format!("plain_{index} <- function(x) x + 1"),
