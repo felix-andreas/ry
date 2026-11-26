@@ -179,6 +179,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - `==` on ry's records, tuples and tags is structural, and a crossing names the R side's conversion
 - ry's immutable containers are covariant
 - A `Record{...}` or `DataFrame{...}` type may end in a row variable
+- Tag unions take no row, and a record update adds no field (settled)
+- Literal variables stay open through joins, tail reads and `List` positions
 
 ## Analysis core
 
@@ -644,6 +646,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - An R call's argument passes R literals and outside variables as code
 - Native code reads a ry-typed global where it runs
 - `ry check --fix` applies the rewrites native findings name
+- `Num.sqrt(NaN)` is an error, as every library function's `NaN` is (settled)
 
 ## DataFrame and the table engine
 

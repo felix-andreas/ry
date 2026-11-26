@@ -58,7 +58,7 @@ Most important first. Each line names the open item, and the detail is at its po
 - Typed code that builds vectors runs at untyped speed ("Typed natives, the rest of the end shape", under "Open: the JIT").
 - `DataFrame` beats data.table on every db-benchmark question at 1e7 rows; what is open is the 1e8 memory margin, the reference counts some calls leave on a frame, and API gaps ("Open: DataFrame").
 - Records, tuples, tags and the standard library: "Open: findings from the records, library and frame round" and "Open: ry's standard library".
-- Strict mode: friction from typing the benchmark code bases, the cost of a first strict `ry load`, and the top-level rule's follow-ups ("Open: strict-mode friction from typing finbench", "A first strict `ry load` costs the strict check's wall time", "Open: strict mode's top-level rule"). The typed benchmark code bases check clean in strict mode, so a template change that makes one report is a regression or a new friction item.
+- Strict mode: friction from typing the benchmark code bases, the cost of a first strict `ry load`, and the top-level rule's follow-ups ("A first strict `ry load` costs the strict check's wall time", "Open: strict mode's top-level rule"). The typed benchmark code bases check clean in strict mode, so a template change that makes one report is a regression or a new friction item.
 
 **Analysis and editor** (ranks behind the reimplementation, and matters as the semantics contract)
 

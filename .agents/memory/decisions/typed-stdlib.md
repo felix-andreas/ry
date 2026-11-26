@@ -748,3 +748,10 @@ A dictionary or set holds keys of one kind. A lookup with another kind stops wit
 - **No fix**: a nested call without a conversion type, `RVariable` (the conversion belongs at the variable's origin, outside the function), `Range` (`a:b` to `List.range(a, b)` changes the type from an R vector and is inclusive differently for `b < a`), `ToROutsideCall` and `RLiteral` (no single rewrite), and every `interpreted` warning (most name a restructuring; none is one exact edit).
 - **The lazy-argument rule stays.** `Str.from_r(toupper(key))` inside `DataFrame.filter` is reported although `toupper` has no effect, because the checker cannot know an R function is effect-free in general; `typed`'s `RCall::effect_free` covers only table functions and column reads, which the judge already exempts. The fix makes the rewrite cheap instead.
 - **Pinned by** the `native__a_nested_r_call_*`, `native__a_moved_call_*`, `native__a_column_read_*` and `native__a_local_converted_*` strict fixtures (which render fixes) and `crates/ry/tests/scenarios/native-fix.scenario` (fix, idempotent second pass, clean check, run).
+
+## `Num.sqrt(NaN)` is an error, as every library function's `NaN` is
+
+**Status:** settled (`reference/standard-library.mdx`, "No function returns `NaN`").
+
+- A typed port found that `Num.sqrt` stops on `NaN` rather than returning it. That is the library's contract: no function takes or returns `NaN` except `Num.is_nan`, so a `NaN` never travels silently through typed code, and `Num.sqrt_checked` returns the failure as a tag. A port that may meet `NaN` tests with `Num.is_nan` first.
+

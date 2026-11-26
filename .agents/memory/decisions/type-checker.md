@@ -931,13 +931,13 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 
 ## `@elementwise(x)` gives a scalar result the shape of its argument
 
-**Status:** built (`Library::elementwise` in `crates/semantics/src/stubs.rs`, `elementwise_result` in `crates/semantics/src/check.rs`; `base-functions.R.test`, `vectorised_math_keeps_the_shape_of_its_argument`).
+**Status:** built (`Library::elementwise` in `crates/semantics/src/stubs.rs`, `elementwise_result`, `elementwise_formals` and `elementwise_return` in `crates/semantics/src/check.rs`; `base-functions.R.test`, `vectorised_math_keeps_the_shape_of_its_argument`).
 
 - `sqrt`, `exp`, `log`, the trigonometric and rounding functions, `nchar`, `toupper`, `tolower`, `trimws`, `chartr`, `is.na` and its siblings declared one scalar result for any input, so `#: fn(x: double[]) -> double` over `sqrt(x)` checked clean and `#: fn(rates: matrix) -> matrix` over `exp(-rates)` failed.
 - An overload set per shape was tried and dropped: an unannotated `function(x) sqrt(x)` then matches candidates that disagree, and the overload rules give it `Unknown` or a `numeric` bound across the typing fixtures.
 - Target shape: one declaration, `sqrt : @pure @elementwise(x) fn(x: Any) -> double`. After the call types, its scalar result takes the shape of the first marked argument that is a vector (`double[]`), a named vector (`double[named]`, since these functions keep names) or a `matrix` (which records no element type). A union lifts member by member. Any other argument, a scalar, `Any` or an open variable among them, keeps the declared scalar.
 - No `array` type: `array()` stays `Any`, which keeps the scalar claim, as before. A base `array` type would need `dim` tracking that no fixture asks for yet.
-- Limit: an unannotated wrapper `function(x) sqrt(x)` infers `<T> fn(x: T) -> double`, because no type form says "the shape of `T` with a `double` element". A shape variable would fix it; it waits for a case that needs it.
+- An unannotated wrapper takes the shape too. Its signature reads `<T> fn(x: T) -> double`, and the inferred `FunctionType` lists the formals every returned value follows elementwise (`elementwise`, inferred only): a marked call over the formal, an elementwise project function over it, or `+ - * / ^ %%` joining such a value with the formal or a number. A call lifts the scalar result to the argument's shape as a direct call does (`base-functions.R.test`, `an_unannotated_wrapper_of_vectorised_math_takes_its_arguments_shape`). A shape variable was the alternative; it would add a type form every renderer, parser and unifier must carry, for one fact that only calls read. A formal the body rebinds (an assignment, a replacement such as `dim(x) <- NULL`, a `for` variable, or any `assign`, `rm` or `eval` call), an early `return`, a formal callee (`function(x, f = wrap) f(x)`), or another formal in the arithmetic (`sqrt(x) + y`) keeps the scalar claim. Unification ignores the list, so a join of two functions whose lists differ drops it. Limit: a wrapper reached through an elided return (`#: fn(double[])` on `g <- wrap`) keeps the scalar result.
 - `as.integer` and the other `as.*` drop names and `dim`, so they are not marked; they keep the scalar claim.
 
 ## The fresh sample's false-report classes, second pass
@@ -1072,4 +1072,23 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - Rows are refused on `list{...}` (which has its bare `..`), `Tuple{...}`, tag payloads and the R classes `data.frame{...}`/`data.table{...}`, whose verbs build closed results. Polars verbs that keep every column keep the row, and so do `d[i]` and a `:=` update; `select` and `GroupBy.agg` drop it; a join with an open right side and `concat` with an open table give a plain `DataFrame`.
 - A record literal against an open expected type adapts its listed fields' literals and then must still fit, so `(a = 1,)` passed to `Record{a: I64, ..R}` is `Record{a: I64}` while returning `(a = 1L,)` as `Record{a: I64, ..R}` is an error.
 - `GroupBy{...}` takes a row too, because `group_by` keeps it and every printed type must parse back.
-- Not done: tag unions have no row; the "no column" message on an open frame lists only the listed columns, without naming the row; a record update cannot add a field (Roc's rule), so a function cannot return "an open record plus one field" the way a table verb adds a column.
+- Not done: the "no column" message on an open frame lists only the listed columns, without naming the row. Tag unions take no row and a record update adds no field, by decision ("Tag unions take no row, and a record update adds no field").
+
+## Tag unions take no row, and a record update adds no field
+
+**Status:** settled.
+
+- A record update `(..r, b = 1)` changes listed fields only (Roc's rule), so a function cannot return "an open record plus one field". Adding one needs a shadowing rule for a row that already holds `b` and a native copy of fields the compiled code cannot name. A table verb covers the common case (a column added to any table with a `code` column), and no typed port or test user has needed it on records.
+- Tag unions are structural and join by union, so `:A` already fits `:A | :B`, and an `:A | :B` value fits a parameter typed `:A | :B | :C`. A row (`[A, ..R]`) would only add pass-through of unknown tags, which Roc uses to accumulate error tags across calls; ry's `Result` errors are closed unions and none of the typed ports needs more.
+- Either becomes worth building when a real program needs it, as typed ry adds features only when they earn their place.
+
+## Literal variables stay open through joins, tail reads and `List` positions
+
+**Status:** built (`default_join_literals`, `open_number_literal`, the tail reads in `check_declared_function` and the `List` position in `infer_plain_index`, all in `check.rs`; `native-syntax.R.test` group `conversions`).
+
+- A join of two paths ties their open literals when R gives them the same type, so `x <- 0` and a branch's `x <- x + 1.5` stay one literal that a later use decides. Literals of different R types (`1L` and `2.5`) take R's types at the join, because plain R code keeps them apart as `integer | double`. Beside a ry number on the other path, the literal is that number.
+- A number literal beside an open literal variable of the same R type is open too, so `x <- 0; x + 1.5` is undecided, as arithmetic on two literals is. A literal of another R type (`i <- 1L; i + 1.5`) stays closed, or the joined constraint would turn `i` into a `double`. A quotient of open `1L`-style integers leaves them integers (`n <- 10L; n / 2L`), because R's `/` gives `double` whatever its operands; other quotients tie their operands to the fraction, so `/` still asks for `F64`.
+- A variable that a function declared with a ry number result ends with is read as that number, as a tail literal is. Only declared ry number results do this, because against an R type the default already is that type.
+- A `[[` position into a ry `List` decides the literal as `I64`, so `lookup[[j]]` before `lookup[[i]] <- j` keeps `j` an `I64`.
+- A nominal constructor's representation is an expected type for its literals (`check_new_nominal` adapts them), so `@Tree(:Leaf(1))` against `:Leaf(I64)` holds.
+- A recursive `alias` is refused, with a short message that names `type` as the recursive form: an alias is its expansion, so a recursive one has no finite type, while a nominal `type` gives the recursion a name to stop at.
