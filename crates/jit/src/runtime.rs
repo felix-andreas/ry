@@ -2245,18 +2245,130 @@ pub unsafe extern "C" fn jit_flush(
     bits: i64,
 ) -> i32 {
     unsafe {
-        // A boxed value into a slot frame is a store that allocates nothing and cannot fail, so
-        // it needs neither the panic guard nor a handle scope, which cost more than the store.
-        if kind == representation::BOXED && (*(*activation).parked).panic.is_none() {
-            let activation = &*activation;
-            let machine = machine(activation);
-            if let Some(frame) = frame_slot(activation, machine, slot) {
-                let value = *slot_cell(activation, slot);
-                machine.hand_over_slot(frame, value);
+        // A write into a slot frame that collects nothing cannot fail, so it needs neither the
+        // panic guard nor a handle scope, which cost more than the store.
+        if (*(*activation).parked).panic.is_none() {
+            if let Some(position) = overwrite_slot(&*activation, slot as usize, kind, bits) {
+                if position < 64
+                    && let Some(frame) = interp::interp().frames.last_mut()
+                {
+                    frame.missing &= !(1 << position);
+                }
                 return 1;
+            }
+            let machine = machine(&*activation);
+            if let Some(frame) = frame_slot(&*activation, machine, slot) {
+                if kind == representation::BOXED {
+                    let value = *slot_cell(&*activation, slot);
+                    machine.hand_over_slot(frame, value);
+                    return 1;
+                }
+                if let Some(result) = flush_scalar(activation, frame, slot, kind, bits) {
+                    return result;
+                }
             }
         }
         flush_guarded(activation, slot, kind, bits)
+    }
+}
+
+/// Writes the unboxed scalar `bits` of the [`representation`] `kind` back to `slot` of a
+/// compiled body's own slot frame by storing it into the box the variable holds, which a loop
+/// that writes the same variables back on every iteration finds there. The box takes the
+/// element when it is a plain scalar of the kind that only the binding references, which is
+/// what `bytecode::Machine::overwrite` tests. Returns the slot's position in the frame, whose
+/// missing bit the caller clears as an assignment does, or `None` when the write needs
+/// [`jit_flush`]'s other paths.
+///
+/// An inlined call's variables take those paths: its window is no frame of the interpreter's.
+#[inline(always)]
+unsafe fn overwrite_slot(
+    activation: &Activation,
+    slot: usize,
+    kind: i32,
+    bits: i64,
+) -> Option<usize> {
+    unsafe {
+        let kind = match kind {
+            representation::INTEGER => SexpType::Integer,
+            representation::LOGICAL => SexpType::Logical,
+            representation::DOUBLE => SexpType::Real,
+            _ => return None,
+        };
+        let layout = layout(activation);
+        if layout.inlined.is_some() {
+            return None;
+        }
+        let position = (*layout.frame.get(slot)?)?;
+        let nil = values::nil();
+        if *activation.header != nil {
+            return None;
+        }
+        let current = *activation.header.add(1 + position);
+        if current.kind() != kind
+            || current.is_altrep()
+            || current.is_array()
+            || current.refcount() != 1
+            || current.length() != 1
+            || current.attrib() != nil
+        {
+            return None;
+        }
+        if kind == SexpType::Real {
+            current
+                .data()
+                .cast::<f64>()
+                .write(f64::from_bits(bits as u64));
+        } else {
+            current.data().cast::<i32>().write(bits as i32);
+        }
+        *slot_cell(activation, slot as i64) = current;
+        Some(position)
+    }
+}
+
+/// [`jit_flush`] of an unboxed scalar into the slot `frame` of a slot frame: into the box the
+/// variable holds when nothing else references it, and otherwise into a new box when the heap
+/// has one to give without collecting. `None` leaves the write to the guarded path.
+#[inline]
+unsafe fn flush_scalar(
+    activation: *mut Activation,
+    frame: *mut Sexp,
+    slot: i64,
+    kind: i32,
+    bits: i64,
+) -> Option<i32> {
+    unsafe {
+        let (kind, element, payload) = match kind {
+            representation::INTEGER => (
+                SexpType::Integer,
+                f64::from(bits as i32),
+                u64::from(bits as u32),
+            ),
+            representation::LOGICAL => (
+                SexpType::Logical,
+                f64::from(bits as i32),
+                u64::from(bits as u32),
+            ),
+            representation::DOUBLE => (SexpType::Real, f64::from_bits(bits as u64), bits as u64),
+            _ => return None,
+        };
+        let machine = machine(&*activation);
+        let symbol = layout(&*activation).slots[slot as usize];
+        let cell = slot_cell(&*activation, slot);
+        if let Some(value) = machine.overwrite(Some(frame), symbol, kind, element) {
+            *cell = value;
+            return Some(1);
+        }
+        let value = heap().try_alloc_scalar(kind, [payload, 0])?;
+        *cell = value;
+        match machine.assign(Some(frame), symbol, value) {
+            Ok(()) => Some(1),
+            Err(unwind) => {
+                park(&mut *activation, unwind);
+                Some(0)
+            }
+        }
     }
 }
 
@@ -2330,6 +2442,11 @@ unsafe fn write_record(
 ) -> bool {
     unsafe {
         let homes = statuses.cast::<u8>().add(*record.add(1) as usize);
+        let unguarded = (*(*activation).parked).panic.is_none();
+        // The positions of the slots written in place, whose missing bits one store clears
+        // after the last of them.
+        let mut written = 0u64;
+        let mut complete = true;
         for index in 0..*record as usize {
             let entry = *record.add(RECORD_HEADER + index);
             let slot = (entry >> 3) as usize;
@@ -2353,14 +2470,24 @@ unsafe fn write_record(
                 }
                 kind => (kind, i64::from(home.cast::<i32>().read())),
             };
-            if jit_flush(activation, slot as i64, kind, bits) == 0 {
-                return false;
+            if unguarded && let Some(position) = overwrite_slot(&*activation, slot, kind, bits) {
+                if position < 64 {
+                    written |= 1 << position;
+                }
+            } else if jit_flush(activation, slot as i64, kind, bits) == 0 {
+                complete = false;
+                break;
             }
             if kind == representation::BOXED || !exposing {
                 *status = status::RUNTIME_LOCAL as i32;
             }
         }
-        true
+        if written != 0
+            && let Some(frame) = interp::interp().frames.last_mut()
+        {
+            frame.missing &= !written;
+        }
+        complete
     }
 }
 
