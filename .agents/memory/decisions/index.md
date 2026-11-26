@@ -661,6 +661,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Scalar library functions give up where the library raises an error (settled)
 - `try` and an early `return` compile in every function, inlined ones too (settled)
 - Native code for callback, overflow and string library functions (settled)
+- A `match` lowers as a chain of tests, one arm falling through to the next (settled)
 
 ## DataFrame and the table engine
 

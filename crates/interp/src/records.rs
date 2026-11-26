@@ -1022,7 +1022,8 @@ unsafe fn matches(
         | SexpType::Integer
         | SexpType::Real
         | SexpType::Complex
-        | SexpType::String => Ok(literal_matches(pattern, value)),
+        | SexpType::String
+        | SexpType::I64 => Ok(literal_matches(pattern, value)),
         _ => Err(error_in(call, "invalid pattern in `match`")),
     }
 }
@@ -1152,6 +1153,9 @@ pub unsafe fn literal_matches(pattern: Sexp, value: Sexp) -> bool {
     }
     if let Some(number) = numbers::read(value) {
         return numbers::literal_matches(pattern, number);
+    }
+    if let Some(number) = numbers::read(pattern) {
+        return numbers::literal_matches(value, number);
     }
     if length(value) != 1 || value.is_object() || length(pattern) != 1 {
         return false;

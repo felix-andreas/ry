@@ -482,3 +482,12 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 - `Num.count_one_bits`, `count_leading_zero_bits` and `count_trailing_zero_bits` of an `I64` count its 64 bits and give an `I64`, in the library and in native code (`Op::CountBits`, the SSA IR's `popcnt`, `clz` and `ctz`), because the checker types them `I64 -> I64`; an R integer, which only untyped code passes, counts its 32 bits.
 - `Str.trim` reads the string as UTF-8 and trims Unicode whitespace as Rust's `str::trim` does, like the interpreter. `Str.contains` with an empty part is true. An owned string with nothing to trim or drop is its own result.
 - Left out on purpose: the `Set` family, because the native set is a deduplicated list (`Op::Unique`) and a native `Set.contains` or `Set.insert` would be a linear scan, slower than the interpreter's hash set; it waits on a hashed native set.
+
+## A `match` lowers as a chain of tests, one arm falling through to the next
+
+**Status:** settled.
+
+- Each arm's pattern lowers to tests that branch to the next arm on failure (`Lowering::match_arms`, `test_pattern`); a guard is one more test, with the pattern's names bound only for it, and the first arm whose test cannot fail ends the chain. Arms that complete join as `switch_shapes` arms do (`join_arms`).
+- A tag or record scrutinee is first split by shape, so a constructor pattern on a known shape needs no test (`Known::Shape`); a nested constructor tests the field's shape id against each shape the pattern fits.
+- Literal tests mirror the interpreter's `literal_matches`: numbers match across `I64`, integer and double storage exactly, logicals, numbers and strings never match each other, and an `NA`, `NaN` or complex pattern is refused. A suffixed literal (`0i64`) is a pattern in the interpreter too (`records::matches`).
+- The lowerer refuses what it cannot test from a layout: a record `..` pattern over a value of any tag or inside another pattern, a constructor that fits more than one shape whose fields it reads, an or-pattern whose sides bind different names, and a guard that assigns (the interpreter runs a guard in a scratch environment). `semantics::native::pattern_compiles` and `writes` mirror these, and a pattern that only binds compiles on a value of any type.

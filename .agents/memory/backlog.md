@@ -261,7 +261,7 @@ A typed element loop over a `List<F64>` that tests each item and adds to an `F64
 `ry check` reports what keeps a native function off native code, as `native` errors for R values and `interpreted` warnings for ry the typed core does not compile yet (`decisions/typed-native.md`, "Nativeness is a strict-mode diagnostic"). Each item here is a gap in the typed core that the check found; closing one means deleting its blocker in `semantics::native` (or its entry in `test_scenarios::NATIVE_CHECK_EXCEPTIONS`) and its row in `reference/type-system.mdx`, "Native functions".
 
 - **Legitimate ry the typed core refuses, so the check warns `interpreted`:**
-  - a `match` on a list (every list pattern), a nested pattern and an arm with an `if` guard;
+  - a `match` guard that assigns, an `NA`, `NaN` or complex literal pattern, a record `..` pattern inside another pattern or over a value of any tag;
   - about 80 standard library functions with no code in `Lowerer::builtin`, among them `List.split_at`, `List.walk_try`, `List.map_with_index`, `Dict.walk`, `Set.contains`, the checked divisions (`Num.div_checked` and its siblings) and `Str.split_first`. The `Set` family waits on a native set (`decisions/typed-native.md`, "Native code for callback, overflow and string library functions"). `native::COMPILED_STD` is the list of those that compile, and it grows to the whole library as the typed core gains them;
   - a variable that holds a tag and is assigned again, even one with a declared type, and a function-typed parameter;
   - a function with `-> NULL` that ends in a loop, `<<-`, `...`, named arguments or a left-out default in a call of a typed function, a `Dict` of anything but `I64`, `F64` and `Str`, and `List.map(xs, Num.to_f64)` by name;
