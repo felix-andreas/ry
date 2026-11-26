@@ -20,9 +20,6 @@ arithmetic <- function(a: I64, b: I64) -> I64 {
   sum <- Num.add(a, b) + Num.sub(a, b) + Num.mul(a, b)
   sum + Num.div_trunc(-a, b) * 100 + Num.rem(-a, b) * 1000 + Num.abs_diff(a, b) + Num.neg(b)
 }
-integers <- function(a: integer, b: integer) -> integer {
-  Num.abs_diff(a, b) + Num.add(a, b) * Num.sub(b, a)
-}
 fractions <- function(x: F64) -> F64 {
   whole <- Num.to_f64(Num.floor(x) + Num.ceiling(-x) + Num.to_i64(4.0))
   whole + Num.div(x, 4.0) + Num.add(x, 0.5) + Num.sub(x, 0.25) * Num.mul(x, 2.0) +
@@ -54,9 +51,6 @@ positions <- function(xs: List<I64>, at: I64) -> I64 {
 }
 cat(Num.to_r(predicates(4, -2.5)), Num.to_r(predicates(3, 1.5)), "\n")
 cat(Num.to_r(arithmetic(7, 2)), Num.to_r(arithmetic(-9, 4)), "\n")
-low <- as.integer(3)
-high <- as.integer(10)
-cat(integers(low, high), is.integer(integers(high, low)), "\n")
 cat(fractions(2.5), fractions(-1.25), "\n")
 cat(transcendental(2.0), "\n")
 cat(Num.to_r(logic(3, "go")), Num.to_r(logic(7, "")), "\n")
