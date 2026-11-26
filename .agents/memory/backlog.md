@@ -697,6 +697,10 @@ Rule and order: `development/design/memory-safety.md`, "Migration".
   copies dimnames only with names and errors on `NA`). `aperm(resize = TRUE)` keeps the names
   of `dim` and `resize = NA` acts as `TRUE`. `t()` of a 1-D array drops `names(dimnames)`
   where GNU R gives `c("", name)`. Each needs an oracle case recorded with GNU R.
+- **POSIXlt behaviour read from GNU R's C source and not yet run against it.**
+  `format.POSIXlt` with a zero-length `format` errors with "invalid 'format' argument", and a
+  POSIXlt whose year names are deferred strings (`names(x) <- 1:3`) keeps them through `format`
+  and `as.POSIXct`. Each needs an oracle case recorded with GNU R.
 - **Measured, not closed.** Against the raw interpreter, the S4 replacement generic and `class<-`,
   `oldClass<-`, `dim<-`, `length<-` and `levels<-` count 2.5 to 4.8% fewer instructions. Seven
   rows count 1.0 to 1.8% more (4 to 32 instructions each): `isTRUE` on a native entry, an S4 slot
