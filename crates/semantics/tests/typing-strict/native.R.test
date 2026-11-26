@@ -208,18 +208,18 @@ NULL
 #~~~~ script.R
 # blocked: pick
 pick <- function(x: F64, up: Bool) -> F64 {
+  step <- function(v: F64) -> F64 v - 1
   if (up) {
     step <- function(v: F64) -> F64 v + 1
-    return(step(x))
   }
-  x - 1
+  step(x)
 }
 cat(pick(1, TRUE), "\n")
 #++++
 == script.R
 pick: fn(x: F64, up: Bool) -> F64
 NULL
-76..113 warning[interpreted] this function runs in the interpreter, because `step` is a function defined inside a branch or a loop, which is not compiled natively yet. Define it once at the top of the function
+116..153 warning[interpreted] this function runs in the interpreter, because `step` is a function defined inside a branch or a loop and used after it, or defined again there, which is not compiled natively yet. Define it once at the top of the function
 
 #---- return_in_a_local_function
 #~~~~ script.R
@@ -394,7 +394,59 @@ cat(last_seen(3), "\n")
 last_seen: fn(n: I64) -> F64
 NULL
 114..118 warning[maybe-undefined] `last` is only assigned on some paths here, so this read can find nothing
-114..118 warning[interpreted] this function runs in the interpreter, because `last` is first set inside a branch or a loop and read after it, which is not compiled natively yet. Give `last` a value before the branch
+
+#---- names_set_on_some_paths
+#~~~~ script.R
+# A name a branch, a loop body or a `match` arm sets is read natively after it, and a local
+# function defined inside a loop body runs there.
+alias Outcome = :Ok(I64) | :Err(Str)
+last_over <- function(xs: List<I64>, limit: I64) -> I64 {
+  for (x in xs) {
+    if (x > limit) {
+      found <- x
+    }
+  }
+  found
+}
+payload <- function(r: Outcome) -> I64 {
+  match (r) {
+    :Ok(n) => 0
+    :Err(_) => 1
+  }
+  n
+}
+relabel <- function(flag: Bool) -> Str {
+  if (flag) {
+    label <- 1
+  }
+  label <- "text"
+  Str.concat(label, "!")
+}
+shifted <- function(xs: List<I64>) -> I64 {
+  total <- 0
+  for (x in xs) {
+    add <- function(v: I64) -> I64 v + x
+    total <- total + add(1)
+  }
+  total
+}
+print(last_over([1, 5], 4))
+print(payload(:Ok(9)))
+print(relabel(TRUE))
+print(shifted([1, 2]))
+#++++
+== script.R
+last_over: fn(xs: List<I64>, limit: I64) -> I64
+payload: fn(r: Outcome) -> I64
+relabel: fn(flag: Bool) -> Str
+shifted: fn(xs: List<I64>) -> I64
+I64
+I64
+Str
+I64
+305..310 warning[maybe-undefined] `found` is only assigned on some paths here, so this read can find nothing
+407..408 warning[maybe-undefined] `n` is only assigned on some paths here, so this read can find nothing
+470..475 warning[unused] `label` is assigned but never used
 
 #---- variable_that_changes_type
 #~~~~ script.R
@@ -1328,7 +1380,7 @@ agreeing: fn(n: I64) -> I64
 0..8 warning[unused] `branches` is assigned but never used
 100..101 warning[unused] `y` is assigned but never used
 113..121 warning[unused] `agreeing` is assigned but never used
-105..106 warning[interpreted] this function runs in the interpreter, because `x` is first set inside a branch or a loop and read after it, which is not compiled natively yet. Give `x` a value before the branch
+105..106 warning[interpreted] this function runs in the interpreter, because `x` is read before this function sets it, or after branches that set it to values of different types, which is not compiled natively yet. Give `x` one type, and a value before the branch or loop
 
 #---- value_of_an_if_without_else
 #~~~~ script.R

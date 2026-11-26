@@ -1,0 +1,110 @@
+# A typed function that sets a name on some paths only, in one branch of an `if`, in some arms of
+# a `match` or inside a loop body, runs natively and reads the name afterwards. Where the name is
+# unset on the path a call takes, the call gives up and the interpreter runs it, so the read fails
+# with R's own error, or finds the value the name held before. A local function defined inside a
+# branch or loop body is inlined there, and a use after it runs in the interpreter.
+
+requires ry-runtime
+
+file ry.toml
+| [check]
+| typing = true
+
+file paths.R
+| alias Outcome = :Ok(I64) | :Err(Str)
+| last_over <- function(xs: List<I64>, limit: I64) -> I64 {
+|   for (x in xs) {
+|     if (x > limit) {
+|       found <- x
+|     }
+|   }
+|   found
+| }
+| final_double <- function(n: I64) -> I64 {
+|   for (i in List.range(1, n)) {
+|     doubled <- i * 2
+|   }
+|   doubled
+| }
+| counted <- function(n: I64) -> I64 {
+|   k <- 0
+|   while (k < n) {
+|     k <- k + 1
+|     seen <- k * 10
+|   }
+|   seen
+| }
+| payload <- function(r: Outcome) -> I64 {
+|   match (r) {
+|     :Ok(n) => 0
+|     :Err(_) => 1
+|   }
+|   n
+| }
+| shifted <- function(xs: List<I64>) -> I64 {
+|   total <- 0
+|   for (x in xs) {
+|     add <- function(v: I64) -> I64 v + x
+|     total <- total + add(1)
+|   }
+|   total
+| }
+| print(last_over([1, 5, 3, 7, 2], 4))
+| print(final_double(4))
+| print(counted(3))
+| print(payload(:Ok(9)))
+| print(shifted([1, 2, 3]))
+| print(tryCatch(last_over([1, 2], 4), error = conditionMessage))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry paths.R
+expect exit 0
+expect stdout "7i64\n8i64\n30i64\n9i64\n9i64"
+expect stdout "object 'found' not found"
+expect stderr lacks "refused"
+expect stderr "typed: `last_over` runs in the interpreter: its native code stopped"
+
+# Where the branches give the name values of different types, the name lives in one local per
+# type, and the read gives up on a path whose last write went to the other one.
+file mixed.R
+| mixed <- function(n: I64) -> I64 {
+|   total <- 0
+|   for (k in List.range(1, n)) {
+|     if (k == 2) {
+|       y <- "s"
+|     } else {
+|       y <- k
+|     }
+|     if (k == 1) {
+|       y <- 100
+|     }
+|     total <- total + y
+|   }
+|   total
+| }
+| print(mixed(1))
+| print(mixed(3))
+
+run ry run --runtime ry mixed.R
+expect exit 1
+expect stdout "100i64"
+expect stderr "non-numeric argument to binary operator"
+expect stderr lacks "refused"
+
+# A local function a branch defines may or may not be the name's value after the branch, so a
+# call there runs in the interpreter, which calls the global function on the path that skips it.
+file after.R
+| g <- function(v: I64) -> I64 v * 1000
+| after <- function(flag: Bool) -> I64 {
+|   if (flag) {
+|     g <- function(v: I64) -> I64 v + 1
+|   }
+|   g(1)
+| }
+| print(after(TRUE))
+| print(after(FALSE))
+
+run ry run --runtime ry after.R
+expect exit 0
+expect stdout "2i64\n1000i64"
+expect stderr "typed: `after` runs in the interpreter: no code for [Lgl]: a local function defined in a branch or loop, used after it"
