@@ -5732,7 +5732,8 @@ calls from the interpreter run in the interpreter with no finding:
 
 A name that a branch, a `match` arm or a loop body sets is read natively after it, and so is a
 name a loop body reads before a later statement of the body sets it, as `last` in
-`for (x in xs) { if (x > 1) gap <- x - last; last <- x }`. A call that reaches the read on a path
+`for (x in xs) { if (x > 1) gap <- x - last; last <- x }`, unless the read is inside a local
+function or a function literal, which runs in the interpreter. A call that reaches the read on a path
 that left the name unset stops there, and the interpreter runs the call
 again from the start, replaying its R calls as above, where R reads the name from outside the
 function or fails with `object 'found' not found`. This holds for native functions called from

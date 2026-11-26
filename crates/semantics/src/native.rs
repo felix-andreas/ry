@@ -621,6 +621,8 @@ pub fn native_blockers(judged: Judged<'_, '_>) -> ThinVec<NativeBlocker> {
         control_depth: 0,
         probing: 0,
         nested: 0,
+        early_reads: Vec::new(),
+        declared_loops: Vec::new(),
         local_functions: Vec::new(),
         r_arguments: None,
         invisible: None,
@@ -833,6 +835,12 @@ struct Judge<'a, 'db> {
     probing: u32,
     /// How many local functions or function literals enclose the walk inside the judged function.
     nested: u32,
+    /// Each read of a name the function sets only later, with the `nested` depth of the read.
+    early_reads: Vec<(Symbol, u32)>,
+    /// The names each loop body at the judged function's own level declares before the loop,
+    /// from its first walk outside a trial, as the typed core remembers them
+    /// (`lower::Lowering::looped`).
+    declared_loops: Vec<(ExprId, SmallVec<[(Symbol, Option<Ty<'db>>); 2]>)>,
     /// The local functions defined so far and whether each body was walked. Native code runs a
     /// local function in place where it is called, so its body is judged with the names in scope
     /// at its first call.
@@ -857,6 +865,7 @@ struct Judge<'a, 'db> {
 struct WalkState<'db> {
     scope: Vec<(Symbol, Slot<'db>)>,
     blockers: usize,
+    early_reads: usize,
     hidden: FxHashSet<Symbol>,
     reported: FxHashSet<Symbol>,
     reported_dict: bool,
@@ -1568,49 +1577,76 @@ impl<'a, 'db> Judge<'a, 'db> {
         }
     }
 
-    /// Walks a loop body. After the loop, each name the body created is set only if the body
-    /// ran far enough to set it.
-    /// Walks the loop body `body`. A name the body reads before a later statement of it sets
-    /// it is declared before the loop, with the type a trial walk that leaves out the early
-    /// reads gives it, as the typed core declares it (`lower::Lowering::looped`).
+    /// Walks the loop body `body`, after which each name the body created is set only if the
+    /// body ran far enough to set it. A name the body reads before a later statement of it sets
+    /// it is declared before the loop with the type a trial walk that leaves out the early reads
+    /// gives it, round by round as earlier names' types show more, as the typed core declares
+    /// it (`lower::Lowering::looped`). A read inside a local function or a function literal is
+    /// not declared, because the core inlines that body in a scope of its own.
     fn in_loop(&mut self, body: ExprId, mark: usize) {
         let entry = self.walk_state();
-        self.loop_body(body, mark);
+        let remembers = self.nested == 0;
         let module = self.judged.module;
-        let mut forward: SmallVec<[Symbol; 2]> = SmallVec::new();
-        for blocker in &self.blockers[entry.blockers..] {
-            if let NativeBlockerKind::Uncompiled(Uncompiled::BranchOnlyName(name)) = blocker.kind
-                && !forward.contains(&name)
-                && assigns_name(module, body, name)
-            {
-                forward.push(name);
+        let mut declared = self
+            .declared_loops
+            .iter()
+            .find(|&&(loop_body, _)| remembers && loop_body == body)
+            .map(|(_, names)| names.clone())
+            .unwrap_or_default();
+        loop {
+            self.declare(&declared);
+            self.loop_body(body, mark);
+            let mut forward: SmallVec<[Symbol; 2]> = SmallVec::new();
+            for &(name, nested) in &self.early_reads[entry.early_reads..] {
+                if nested == self.nested
+                    && !forward.contains(&name)
+                    && !declared.iter().any(|&(declared, _)| declared == name)
+                    && assigns_name(module, body, name)
+                {
+                    forward.push(name);
+                }
             }
+            if forward.is_empty() {
+                if remembers && self.probing == 0 && !declared.is_empty() {
+                    self.declared_loops
+                        .retain(|&(loop_body, _)| loop_body != body);
+                    self.declared_loops.push((body, declared));
+                }
+                return;
+            }
+            self.restore(entry.clone());
+            self.declare(&declared);
+            self.probing += 1;
+            self.loop_body(body, mark);
+            self.probing -= 1;
+            let learned: SmallVec<[(Symbol, Option<Ty<'db>>); 2]> = forward
+                .into_iter()
+                .filter_map(|name| match self.lookup(name) {
+                    Some(Slot::Maybe(ty) | Slot::Value(ty, _)) => Some((name, ty)),
+                    _ => None,
+                })
+                .collect();
+            self.restore(entry.clone());
+            if learned.is_empty() {
+                self.declare(&declared);
+                self.loop_body(body, mark);
+                return;
+            }
+            declared.extend(learned);
         }
-        if forward.is_empty() {
-            return;
-        }
-        self.restore(entry.clone());
-        self.probing += 1;
-        self.loop_body(body, mark);
-        self.probing -= 1;
-        let declared: SmallVec<[(Symbol, Option<Ty<'db>>); 2]> = forward
-            .into_iter()
-            .filter_map(|name| match self.lookup(name) {
-                Some(Slot::Maybe(ty) | Slot::Value(ty, _)) => Some((name, ty)),
-                _ => None,
-            })
-            .collect();
-        self.restore(entry);
-        for (name, ty) in declared {
+    }
+
+    fn declare(&mut self, declared: &[(Symbol, Option<Ty<'db>>)]) {
+        for &(name, ty) in declared {
             self.scope.push((name, Slot::Maybe(ty)));
         }
-        self.loop_body(body, mark);
     }
 
     fn walk_state(&self) -> WalkState<'db> {
         WalkState {
             scope: self.scope.clone(),
             blockers: self.blockers.len(),
+            early_reads: self.early_reads.len(),
             hidden: self.hidden.clone(),
             reported: self.reported.clone(),
             reported_dict: self.reported_dict,
@@ -1623,6 +1659,7 @@ impl<'a, 'db> Judge<'a, 'db> {
     fn restore(&mut self, state: WalkState<'db>) {
         self.scope = state.scope;
         self.blockers.truncate(state.blockers);
+        self.early_reads.truncate(state.early_reads);
         self.hidden = state.hidden;
         self.reported = state.reported;
         self.reported_dict = state.reported_dict;
@@ -1831,6 +1868,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             return;
         }
         if self.locals.contains(&name) {
+            self.early_reads.push((name, self.nested));
             self.uncompiled(id, Uncompiled::BranchOnlyName(name));
             return;
         }
