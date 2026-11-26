@@ -261,7 +261,6 @@ A typed element loop over a `List<F64>` that tests each item and adds to an `F64
 `ry check` reports what keeps a native function off native code, as `native` errors for R values and `interpreted` warnings for ry the typed core does not compile yet (`decisions/typed-native.md`, "Nativeness is a strict-mode diagnostic"). Each item here is a gap in the typed core that the check found; closing one means deleting its blocker in `semantics::native` (or its entry in `test_scenarios::NATIVE_CHECK_EXCEPTIONS`) and its row in `reference/type-system.mdx`, "Native functions".
 
 - **Legitimate ry the typed core refuses, so the check warns `interpreted`:**
-  - `try`, which lowers to an R call of `.ry_try`;
   - a `match` on a list (every list pattern), a nested pattern and an arm with an `if` guard;
   - about 140 standard library functions with no code in `Lowerer::builtin`, among them `List.drop_at`, `List.set`, `Set.contains`, `Result.map`, `Result.and_then`, the `Num.*_checked` family and `Str.trim`. `native::COMPILED_STD` is the list of those that compile, and it grows to the whole library as the typed core gains them;
   - a variable that holds a tag and is assigned again, even one with a declared type, and a function-typed parameter;

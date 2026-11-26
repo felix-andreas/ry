@@ -290,7 +290,7 @@ native
 
 A function with an R type in its signature, such as `function(path: character) -> F64`, is a
 boundary function: it may mix R values and ry values freely, and the interpreter runs it when it
-has to. Legitimate ry that the native compiler does not compile yet, such as `try`, gets a warning
+has to. Legitimate ry that the native compiler does not compile yet, such as a list pattern, gets a warning
 with the code `interpreted` that names the construct. [Native functions](/reference/type-system#native-functions) has the full rule.
 
 ## Where to go next

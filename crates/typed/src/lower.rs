@@ -446,11 +446,13 @@ struct Variable {
     flag: Option<Local>,
 }
 
-/// An inlined function's exit: the block a `return` jumps to and the local it writes.
-#[derive(Clone, Copy)]
+/// An inlined function's exit: the block a `return` jumps to, and the blocks that jumped there
+/// early with their values, which join with the body's value once it is lowered.
+#[derive(Clone)]
 struct Inlined {
     exit: BlockId,
-    result: Option<Local>,
+    returns_i64: bool,
+    early: SmallVec<[(BlockId, Local); 2]>,
 }
 
 /// What a `match`'s value must be, which decides how [`Lowering::switch_shapes`] treats arms
@@ -1475,6 +1477,7 @@ impl Lowering<'_> {
             "for" => return self.looped(call, Self::for_loop),
             "while" => return self.looped(call, Self::while_loop),
             "repeat" => return self.looped(call, Self::repeat_loop),
+            ".ry_try" => return self.try_result(call),
             "break" | "next" => {
                 let &(continue_to, break_to) = self
                     .loops
@@ -1963,16 +1966,16 @@ impl Lowering<'_> {
     unsafe fn exit(&mut self, value: Local) -> Result<(), Refusal> {
         match self.inlined.last() {
             Some(inlined) => {
-                let exit = inlined.exit;
-                match inlined.result {
-                    Some(result) => {
-                        let (expected, found) = (self.builder.ty(result), self.builder.ty(value));
-                        if expected != found && (expected, found) != (Type::Lgl, Type::Bool) {
-                            return Err(Refusal::new("a `return` of another type"));
-                        }
-                        self.builder.push(Some(result), Op::Copy(value));
-                    }
-                    None => return Err(Refusal::new("a `return` before the result type is known")),
+                let (exit, returns_i64) = (inlined.exit, inlined.returns_i64);
+                self.usable(value)?;
+                let value = if returns_i64 {
+                    self.to_i64(value)?
+                } else {
+                    value
+                };
+                let block = self.builder.current;
+                if let Some(inlined) = self.inlined.last_mut() {
+                    inlined.early.push((block, value));
                 }
                 self.builder.terminate(Terminator::Jump(exit));
             }
@@ -2845,51 +2848,68 @@ impl Lowering<'_> {
         let control = std::mem::replace(&mut self.control, 0);
         self.scopes.push(scope);
         let exit = self.builder.block();
-        // The result's type is the body's, which a `return` before the end must match: the
-        // body is lowered first into its own blocks with the result local still open.
-        self.inlined.push(Inlined { exit, result: None });
-        let has_return = contains_return(body);
-        let value = if has_return {
-            Err(Refusal::new("a `return` inside a local function"))
-        } else {
-            self.expression(body)
+        // A `return` or `try` before the end jumps to `exit` with its value, and the result's
+        // type is the join of those values and the body's.
+        self.inlined.push(Inlined {
+            exit,
+            returns_i64,
+            early: SmallVec::new(),
+        });
+        let value = match self.expression(body) {
+            Ok(Some(value)) => self.usable(value).and_then(|()| {
+                if returns_i64 {
+                    self.to_i64(value).map(Some)
+                } else {
+                    Ok(Some(value))
+                }
+            }),
+            other => other,
         };
-        self.inlined.pop();
+        let mut ends = self
+            .inlined
+            .pop()
+            .map(|inlined| inlined.early)
+            .unwrap_or_default();
         self.scopes.pop();
         self.scopes.extend(hidden);
         self.loops = loops;
         self.control = control;
-        let value = value?;
-        match value {
-            Some(value) => {
-                self.usable(value)?;
-                let value = if returns_i64 {
-                    self.to_i64(value)?
-                } else {
-                    value
-                };
-                let kinds: SmallVec<[Option<(SexpType, bool)>; 4]> = arguments
-                    .iter()
-                    .map(|&argument| storage(self.builder.ty(argument)))
-                    .collect();
-                let result_kind = storage(self.builder.ty(value));
-                if !interp::annotations::admits_inline(definition, body, &kinds, result_kind) {
-                    return Err(Refusal::new(
-                        "a local function whose annotations reject its types",
-                    ));
-                }
-                let result = self.builder.local(self.builder.ty(value));
-                self.builder.push(Some(result), Op::Copy(value));
-                self.builder.terminate(Terminator::Jump(exit));
-                self.builder.switch_to(exit);
-                Ok(Some(result))
-            }
-            None => {
-                self.builder.switch_to(exit);
-                self.builder.terminate(Terminator::Fail);
-                Ok(None)
-            }
+        if let Some(value) = value? {
+            ends.push((self.builder.current, value));
         }
+        let mut ty: Option<Type> = None;
+        for &(_, value) in &ends {
+            let found = self.builder.ty(value);
+            ty = Some(match ty {
+                None => found,
+                Some(held) => {
+                    joined(held, found).ok_or(Refusal::new("a `return` of another type"))?
+                }
+            });
+        }
+        let Some(ty) = ty else {
+            self.builder.switch_to(exit);
+            self.builder.terminate(Terminator::Fail);
+            return Ok(None);
+        };
+        let kinds: SmallVec<[Option<(SexpType, bool)>; 4]> = arguments
+            .iter()
+            .map(|&argument| storage(self.builder.ty(argument)))
+            .collect();
+        if !interp::annotations::admits_inline(definition, body, &kinds, storage(ty)) {
+            return Err(Refusal::new(
+                "a local function whose annotations reject its types",
+            ));
+        }
+        let result = self.builder.local(ty);
+        for &(end, value) in &ends {
+            // An early exit's block already jumps to `exit`; the copy goes before the jump.
+            self.builder.switch_to(end);
+            self.builder.push(Some(result), Op::Copy(value));
+            self.builder.terminate(Terminator::Jump(exit));
+        }
+        self.builder.switch_to(exit);
+        Ok(Some(result))
     }
 
     fn int(&mut self, value: i32) -> Local {
@@ -5865,6 +5885,38 @@ impl Lowering<'_> {
         Ok(self.builder.emit(Type::Bool, Op::Truth(answer)))
     }
 
+    /// `try result`: the payload of an `:Ok`, or a return of the `:Err` itself from the function.
+    /// Any other value gives up, and the interpreter raises the error.
+    unsafe fn try_result(&mut self, call: Sexp) -> Result<Option<Local>, Refusal> {
+        let [result] = self.arguments(call, 1)?[..] else {
+            return Err(Refusal::new("a malformed `try`"));
+        };
+        let result = self.value(result)?;
+        let (ok, err) = (tag_layout("Ok", 1)?, tag_layout("Err", 1)?);
+        let (candidates, exhaustive) = self.shapes_of(self.builder.ty(result), &[ok, err], &[])?;
+        self.switch_shapes(
+            result,
+            &candidates,
+            exhaustive,
+            Expected::Free,
+            &mut |lowering, shape| match shape {
+                Some(shape) if shapes::shape(shape).layout == ok => {
+                    lowering.field(result, shape, 0).map(Some)
+                }
+                Some(shape) if shapes::shape(shape).layout == err => {
+                    lowering.exit(result)?;
+                    Ok(None)
+                }
+                _ => {
+                    lowering.builder.terminate(Terminator::Fail);
+                    let unreachable = lowering.builder.block();
+                    lowering.builder.switch_to(unreachable);
+                    Ok(None)
+                }
+            },
+        )
+    }
+
     /// `List.first(list)`, `List.last(list)` or `List.get(list, index)`: `:Ok` of the item at
     /// a 1-based position, or an `:Err` when the list has none there.
     unsafe fn list_get(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
@@ -7875,24 +7927,6 @@ unsafe fn small_body(
         && rvalues::pairlist_items(expression.cdr())
             .into_iter()
             .all(|(_, item)| small_body(item, own, own_calls, calls))
-}
-
-/// Whether `expression` calls `return` outside nested function literals.
-unsafe fn contains_return(expression: Sexp) -> bool {
-    if expression.kind() != SexpType::Language {
-        return false;
-    }
-    let head = expression.car();
-    if head.kind() == SexpType::Symbol {
-        match &*rvalues::symbol_name(head) {
-            "return" => return true,
-            "function" => return false,
-            _ => {}
-        }
-    }
-    rvalues::pairlist_items(expression.cdr())
-        .into_iter()
-        .any(|(_, item)| contains_return(item))
 }
 
 /// Whether the value of `expression` may be invisible, as an assignment's is, which a compiled

@@ -280,7 +280,7 @@ starts. Typed ry is strict: a typed function's call of another typed function co
 argument before the call, while an argument written in R code stays lazy. A function whose signature
 is written entirely in ry types runs natively, and strict mode says where one would not: an R value
 used outside a conversion such as `Num.from_r` is an error with the code `native`, and a construct
-the native compiler does not compile yet, such as `try` or a list pattern, is a warning with the
+the native compiler does not compile yet, such as a list pattern, is a warning with the
 code `interpreted`. A function with an R type in its signature is where R values and ry values
 meet, and it is not judged.
 [Strict mode](/reference/type-system#strict-mode) lists what it reports.
