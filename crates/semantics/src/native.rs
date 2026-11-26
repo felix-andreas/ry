@@ -28,6 +28,7 @@ use {
         },
     },
     rustc_hash::FxHashSet,
+    smallvec::SmallVec,
     syntax::{
         TextRange, TextSize,
         annotation::{Paired, pair_formals},
@@ -618,6 +619,7 @@ pub fn native_blockers(judged: Judged<'_, '_>) -> ThinVec<NativeBlocker> {
         reported: FxHashSet::default(),
         reported_dict: false,
         control_depth: 0,
+        probing: 0,
         nested: 0,
         local_functions: Vec::new(),
         r_arguments: None,
@@ -827,6 +829,8 @@ struct Judge<'a, 'db> {
     reported: FxHashSet<Symbol>,
     reported_dict: bool,
     control_depth: u32,
+    /// How many loop trials enclose the walk ([`Judge::in_loop`]).
+    probing: u32,
     /// How many local functions or function literals enclose the walk inside the judged function.
     nested: u32,
     /// The local functions defined so far and whether each body was walked. Native code runs a
@@ -845,6 +849,19 @@ struct Judge<'a, 'db> {
     /// Each local assigned an R value whose blocker offers to convert it, with that blocker's
     /// index. A later read of the local that converts it or passes it to R withdraws the fix,
     /// because converting at the assignment would break that read.
+    converted_locals: Vec<(Symbol, usize)>,
+}
+
+/// What a walk changes, which a loop trial puts back ([`Judge::in_loop`]).
+#[derive(Clone)]
+struct WalkState<'db> {
+    scope: Vec<(Symbol, Slot<'db>)>,
+    blockers: usize,
+    hidden: FxHashSet<Symbol>,
+    reported: FxHashSet<Symbol>,
+    reported_dict: bool,
+    local_functions: Vec<(ExprId, bool)>,
+    invisible: Option<ExprId>,
     converted_locals: Vec<(Symbol, usize)>,
 }
 
@@ -1128,9 +1145,22 @@ impl<'a, 'db> Judge<'a, 'db> {
                     } else {
                         Use::Value
                     };
+                    let trial = (self.probing > 0).then(|| self.walk_state());
                     let hoist = self.hoist.replace(statement);
                     self.walk(statement, statement_use);
                     self.hoist = hoist;
+                    // A loop trial leaves out a statement that reads a name too early, as the
+                    // typed core's does (`lower::Lowering::trial_part`).
+                    if let Some(state) = trial
+                        && self.blockers[state.blockers..].iter().any(|blocker| {
+                            matches!(
+                                blocker.kind,
+                                NativeBlockerKind::Uncompiled(Uncompiled::BranchOnlyName(_))
+                            )
+                        })
+                    {
+                        self.restore(state);
+                    }
                 }
             }
             ExpressionKind::Assign {
@@ -1540,7 +1570,68 @@ impl<'a, 'db> Judge<'a, 'db> {
 
     /// Walks a loop body. After the loop, each name the body created is set only if the body
     /// ran far enough to set it.
+    /// Walks the loop body `body`. A name the body reads before a later statement of it sets
+    /// it is declared before the loop, with the type a trial walk that leaves out the early
+    /// reads gives it, as the typed core declares it (`lower::Lowering::looped`).
     fn in_loop(&mut self, body: ExprId, mark: usize) {
+        let entry = self.walk_state();
+        self.loop_body(body, mark);
+        let module = self.judged.module;
+        let mut forward: SmallVec<[Symbol; 2]> = SmallVec::new();
+        for blocker in &self.blockers[entry.blockers..] {
+            if let NativeBlockerKind::Uncompiled(Uncompiled::BranchOnlyName(name)) = blocker.kind
+                && !forward.contains(&name)
+                && assigns_name(module, body, name)
+            {
+                forward.push(name);
+            }
+        }
+        if forward.is_empty() {
+            return;
+        }
+        self.restore(entry.clone());
+        self.probing += 1;
+        self.loop_body(body, mark);
+        self.probing -= 1;
+        let declared: SmallVec<[(Symbol, Option<Ty<'db>>); 2]> = forward
+            .into_iter()
+            .filter_map(|name| match self.lookup(name) {
+                Some(Slot::Maybe(ty) | Slot::Value(ty, _)) => Some((name, ty)),
+                _ => None,
+            })
+            .collect();
+        self.restore(entry);
+        for (name, ty) in declared {
+            self.scope.push((name, Slot::Maybe(ty)));
+        }
+        self.loop_body(body, mark);
+    }
+
+    fn walk_state(&self) -> WalkState<'db> {
+        WalkState {
+            scope: self.scope.clone(),
+            blockers: self.blockers.len(),
+            hidden: self.hidden.clone(),
+            reported: self.reported.clone(),
+            reported_dict: self.reported_dict,
+            local_functions: self.local_functions.clone(),
+            invisible: self.invisible,
+            converted_locals: self.converted_locals.clone(),
+        }
+    }
+
+    fn restore(&mut self, state: WalkState<'db>) {
+        self.scope = state.scope;
+        self.blockers.truncate(state.blockers);
+        self.hidden = state.hidden;
+        self.reported = state.reported;
+        self.reported_dict = state.reported_dict;
+        self.local_functions = state.local_functions;
+        self.invisible = state.invisible;
+        self.converted_locals = state.converted_locals;
+    }
+
+    fn loop_body(&mut self, body: ExprId, mark: usize) {
         self.control_depth += 1;
         let hoist = self.hoist.take();
         self.walk(body, Use::Unused);
@@ -2611,6 +2702,25 @@ fn library_callee(name: Symbol) -> Callee {
     } else {
         Callee::R(name, ROrigin::Library)
     }
+}
+
+/// Whether `id` sets the local `name`, by an assignment or as a `for` loop's variable.
+fn assigns_name(module: &Module, id: ExprId, name: Symbol) -> bool {
+    let sets = match *module.kind(id) {
+        ExpressionKind::Assign { target, .. } => {
+            matches!(*module.kind(target), ExpressionKind::NameRef(target) if target == name)
+        }
+        ExpressionKind::For {
+            variable: Some(variable),
+            ..
+        } => module.name(variable) == name,
+        _ => false,
+    };
+    let mut found = sets;
+    module.for_each_child(id, |child| {
+        found = found || assigns_name(module, child, name);
+    });
+    found
 }
 
 fn binds(module: &Module, pattern: PatId) -> bool {

@@ -443,3 +443,11 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 - An R call compiles natively where the program drops its value (`RUse::Unused`), because no conversion of the result is needed. The rule follows the value: a `{` block, a parenthesis, the branches of an `if` and the arms of a `match` drop their value when the construct's own value is dropped, and a loop body always drops its value (`Lowering::part`).
 - The checker's `native` rule accepts the same positions (the last statement of a loop body, a bare loop body, a branch in statement position): `tests/native/clean-r-statement-tails.R` pins them, and `blocked-r-call-read-branch.R` pins that a branch whose value is assigned refuses.
 - A dropped `match` also changes how its arms may disagree (`lower::Expected::Dropped`, `decisions/typed-stdlib.md`, "Stray shapes").
+
+## A loop declares a name its body reads before a later statement sets it
+
+**Status:** settled (`lower::Lowering::looped` and `trial_part`; `native::Judge::in_loop`; `typing-strict/native.R.test` case `a_loop_reads_a_name_a_later_statement_sets`; `tests/native/clean-loop-forward-read.R`).
+
+- Lowering is single-pass, so a read of `last` before `last <- x` in a loop body finds no variable and does not know the name's type. The loop is lowered as a trial that leaves out each statement making such a read, which gives the name's type, then rewound and lowered again with the name declared before the loop as a `Binding::Maybe`: the read tests the flag, and on the first iteration (or any path where the name is unset) the call gives up and the interpreter reads the name as R does.
+- The trial reuses the `match` restart machinery (`Checkpoint`, `restart`), one name per round. A name whose only assignment is in a left-out statement (`acc <- acc + i`) is not learned and refuses as before.
+- The checker's `native` rule runs the same trial over its walk state (`WalkState`), so a function it accepts is one the typed core compiles.

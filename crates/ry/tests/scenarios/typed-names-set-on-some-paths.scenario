@@ -129,3 +129,36 @@ run ry run --runtime ry again.R
 expect exit 0
 expect stdout "2i64\n0i64"
 expect stderr lacks "refused"
+
+# A loop body that reads a name a later statement of it sets declares the name before the loop,
+# not set yet. A read guarded to run once the name is set runs natively; one that runs before it
+# is set gives up, and the interpreter reads the global of that name as R does.
+file forward.R
+| gaps <- function(xs: List<I64>) -> I64 {
+|   widest <- 0
+|   for (x in xs) {
+|     if (x > 1) {
+|       gap <- x - last
+|       if (gap > widest) widest <- gap
+|     }
+|     last <- x
+|   }
+|   widest
+| }
+| unguarded <- function(n: I64) -> I64 {
+|   for (i in List.range(1, n)) {
+|     total <- before + i
+|     before <- i
+|   }
+|   total
+| }
+| before <- 1000
+| print(gaps([1, 4, 5, 9, 10]))
+| print(unguarded(3))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry forward.R
+expect exit 0
+expect stdout "4i64\n5i64"
+expect stderr lacks "refused"
+expect stderr "typed: `unguarded` runs in the interpreter: its native code stopped"

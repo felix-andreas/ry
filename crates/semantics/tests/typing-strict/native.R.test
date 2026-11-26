@@ -1382,6 +1382,32 @@ agreeing: fn(n: I64) -> I64
 113..121 warning[unused] `agreeing` is assigned but never used
 105..106 warning[interpreted] this function runs in the interpreter, because `x` is read before this function sets it, or after branches that set it to values of different types, which is not compiled natively yet. Give `x` one type, and a value before the branch or loop
 
+#---- a_loop_reads_a_name_a_later_statement_sets
+#~~~~ script.R
+deltas <- function(n: I64) -> I64 {
+  total <- 0
+  for (i in List.range(1, n)) {
+    if (i > 1) total <- total + i - previous
+    previous <- i
+  }
+  total
+}
+itself <- function(n: I64) -> I64 {
+  for (i in List.range(1, n)) {
+    acc <- acc + i
+  }
+  n
+}
+#++++
+== script.R
+deltas: fn(n: I64) -> I64
+itself: fn(n: I64) -> I64
+0..6 warning[unused] `deltas` is assigned but never used
+117..125 warning[maybe-undefined] `previous` is only assigned on some paths here, so this read can find nothing
+158..164 warning[unused] `itself` is assigned but never used
+237..240 warning[maybe-undefined] `acc` is only assigned on some paths here, so this read can find nothing
+237..240 warning[interpreted] this function runs in the interpreter, because `acc` is read before this function sets it, or after branches that set it to values of different types, which is not compiled natively yet. Give `acc` one type, and a value before the branch or loop
+
 #---- value_of_an_if_without_else
 #~~~~ script.R
 half <- function(n: I64) -> I64 {

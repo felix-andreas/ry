@@ -323,6 +323,8 @@ unsafe fn lower_calling(
         converted: None,
         checked_items: None,
         pending: Vec::new(),
+        forward: None,
+        probing: 0,
     };
     tail_matches(body, &mut lowering.tails);
     let mut assigned = Vec::new();
@@ -467,6 +469,7 @@ enum Expected {
 }
 
 /// What [`Lowering::rewind`] restores.
+#[derive(Clone)]
 struct Checkpoint {
     scopes: Vec<Scope>,
     variables: Vec<Variable>,
@@ -544,6 +547,13 @@ struct Lowering<'c> {
     /// starts as a list of any tag and takes the item type of the first item appended to it or
     /// list assigned over it ([`Lowering::settle`]).
     pending: Vec<SmallVec<[Local; 4]>>,
+    /// The name the last read refused for because the function sets it only later, with the
+    /// number of scopes at the read, for the loop around the read to declare
+    /// ([`Lowering::looped`]).
+    forward: Option<(Sexp, usize)>,
+    /// How many loop trials enclose the current point: a trial lowers a loop only to learn the
+    /// types of the names it sets, and leaves out each statement that reads one too early.
+    probing: usize,
 }
 
 /// Where typed code may call an R function: where the value is unused, where a conversion
@@ -979,6 +989,7 @@ impl Lowering<'_> {
                 .iter()
                 .any(|&function| assigns(interp::bytecode::closure_body(function), symbol))
         {
+            self.forward = Some((symbol, self.scopes.len()));
             return Err(Refusal(Cow::Owned(format!(
                 "it reads `{}` from outside the function before it assigns it: give the local \
                  another name",
@@ -1452,9 +1463,9 @@ impl Lowering<'_> {
             }
             "<-" | "=" => return self.assignment(call).map(Some),
             "if" => return self.conditional(call, dropped),
-            "for" => return self.for_loop(call),
-            "while" => return self.while_loop(call),
-            "repeat" => return self.repeat_loop(call),
+            "for" => return self.looped(call, Self::for_loop),
+            "while" => return self.looped(call, Self::while_loop),
+            "repeat" => return self.looped(call, Self::repeat_loop),
             "break" | "next" => {
                 let &(continue_to, break_to) = self
                     .loops
@@ -2004,7 +2015,12 @@ impl Lowering<'_> {
         }
         let count = items.len();
         for (position, (_, item)) in items.into_iter().enumerate() {
-            last = self.part(item, dropped || position + 1 < count)?;
+            let dropped = dropped || position + 1 < count;
+            last = if self.probing > 0 {
+                self.trial_part(item, dropped)?
+            } else {
+                self.part(item, dropped)?
+            };
             if last.is_none() {
                 return Ok(None);
             }
@@ -2287,6 +2303,99 @@ impl Lowering<'_> {
         self.builder.switch_to(header);
         self.builder.push(None, Op::Poll);
         header
+    }
+
+    /// Lowers the loop `call` with `lower`. A read in the loop of a name that only a later
+    /// statement of its body sets refuses at first, because the name has no variable yet. The
+    /// loop is then lowered as a trial that leaves out the statements reading such a name, which
+    /// gives the name's type, and lowered again with the name declared before it as a name not
+    /// set yet: the read gives up where the name is unset, and the interpreter reads it as R does.
+    unsafe fn looped(
+        &mut self,
+        call: Sexp,
+        lower: unsafe fn(&mut Self, Sexp) -> Result<Option<Local>, Refusal>,
+    ) -> Result<Option<Local>, Refusal> {
+        let checkpoint = self.checkpoint();
+        let start = self.builder.current;
+        let start_insts = self
+            .builder
+            .function
+            .blocks
+            .get(start.0 as usize)
+            .map_or(0, |block| block.insts.len());
+        let scopes = self.scopes.len();
+        let mut declared: SmallVec<[(Sexp, Type); 2]> = SmallVec::new();
+        loop {
+            self.forward = None;
+            let refusal = match lower(self, call) {
+                Ok(value) => return Ok(value),
+                Err(refusal) => refusal,
+            };
+            let Some((symbol, at)) = self.forward.take() else {
+                return Err(refusal);
+            };
+            if at != scopes
+                || !assigns(call, symbol)
+                || declared.iter().any(|&(name, _)| name == symbol)
+                || !self.restart(checkpoint.clone(), start, start_insts)
+            {
+                return Err(refusal);
+            }
+            self.declare(&declared);
+            self.probing += 1;
+            let trial = lower(self, call);
+            self.probing -= 1;
+            let learned = match (trial, self.lookup(symbol)) {
+                (Ok(_), Some(Binding::Maybe(local) | Binding::Value(local)))
+                    if self.pending_family(local).is_none() =>
+                {
+                    self.builder.ty(local)
+                }
+                _ => return Err(refusal),
+            };
+            if !self.restart(checkpoint.clone(), start, start_insts) {
+                return Err(refusal);
+            }
+            declared.push((symbol, learned));
+            self.declare(&declared);
+        }
+    }
+
+    /// Binds each name of `declared` to a variable of its type that is not set yet.
+    fn declare(&mut self, declared: &[(Sexp, Type)]) {
+        for &(symbol, ty) in declared {
+            let local = self.variable(symbol, ty);
+            self.bind(symbol, Binding::Maybe(local));
+        }
+    }
+
+    /// Lowers `expression`, a statement of a loop trial ([`Lowering::looped`]), leaving it out
+    /// when it reads a name that only a later statement sets.
+    unsafe fn trial_part(
+        &mut self,
+        expression: Sexp,
+        dropped: bool,
+    ) -> Result<Option<Local>, Refusal> {
+        let checkpoint = self.checkpoint();
+        let start = self.builder.current;
+        let start_insts = self
+            .builder
+            .function
+            .blocks
+            .get(start.0 as usize)
+            .map_or(0, |block| block.insts.len());
+        self.forward = None;
+        match self.part(expression, dropped) {
+            Err(refusal) if self.forward.is_some() => {
+                if !self.restart(checkpoint, start, start_insts) {
+                    return Err(refusal);
+                }
+                Ok(Some(
+                    self.builder.emit(Type::Null, Op::Const(Constant::Null)),
+                ))
+            }
+            value => value,
+        }
     }
 
     unsafe fn for_loop(&mut self, call: Sexp) -> Result<Option<Local>, Refusal> {
