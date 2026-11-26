@@ -645,9 +645,17 @@ Each trades a narrow class of missed errors for a class of false reports seen on
   kind, such as `"a"` beside an `F64`, stays open for a use. A literal the number cannot hold is
   a `type-mismatch` at the literal. A loop pass writes fresh literal variables, so an open item
   would differ on each pass and the loop fixpoint would report that `step` does not stabilize.
-- A tag payload's literals are decided as the tag is inferred, because tags join by payload
-  type, so `:Step(0, a)` beside `:Step(q, p)` adapts through `adapt_literal`, as a payload
-  written only with literals does. A ry literal such as `7i64` does not adapt to `F64`.
+- A tag payload's literals are open (`infer_payload` goes through `component`), so a later use
+  decides them as it decides a tuple item: `found <- :Ok(1)` returned from `-> Result<I64, Str>`
+  is `:Ok(1i64)`. Tags of one name join by payload type, so `join_shared_parameters` and
+  `report_conflicting_tags` settle the payloads' literals first; otherwise two open payloads
+  would never join and a conflict would name a type variable. `:Step(0, a)` beside `:Step(q, p)`
+  still adapts through `adapt_literal`. A ry literal such as `7i64` does not adapt to `F64`.
+- A number, string or logical literal passed for a ry function's type parameter (`ry_callee`,
+  an unconstrained or open-literal parameter) is a fresh open literal, so the next argument or
+  the call's use decides it: `List.walk(words, "", f)` with `f` taking `Str`, and
+  `Result.with_default(:Ok(1), 2)` under `-> I64`. Deciding it as R's type at the argument made
+  each of these a `type-mismatch` that only an annotated temporary avoided.
 - `join_writes` treats two writes that resolve to the same type as equal, because each loop pass
   writes fresh variables for its literals.
 - `c` is an R function, so `infer_combine` decides a variable written with a literal as R's type,
