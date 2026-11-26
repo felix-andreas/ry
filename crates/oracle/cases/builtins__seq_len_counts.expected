@@ -1,0 +1,55 @@
+[stdout]
+| integer(0)
+| [1] 1
+| [1] 1 2
+| [1] 1 2 3 4 5
+| integer(0)
+| [1] 1
+| [1] 1 2 3 4
+| [1] 1 2
+| integer(0)
+| [1] "integer"
+| [1] "integer"
+| [1] 100000
+| [1] 5000050000
+| [1] TRUE
+| [1] TRUE
+| [1] TRUE
+| [1] 1 2 3
+| [1] 1 2 3 4
+| [1] 1 2 3 4 5
+| [1] 1 9 3
+| [1] 1 2 3
+| [1] 7
+| [1] 1
+| [1] 4545100
+| [1] 6
+| [1] 0 1 2 3 4 5 6
+| [1] 1 2 3
+| [1] 1 2
+| [1] 1 2 3
+| [1] 1
+| [1] 1 2 3
+| [1] 1 2
+| [1] "first element used of 'length.out' argument"
+| [1] "first element used of 'length.out' argument"
+| [1] "argument must be coercible to non-negative integer"
+| [1] "argument must be coercible to non-negative integer"
+| [1] "argument must be coercible to non-negative integer"
+| [1] "argument must be coercible to non-negative integer"
+| [1] "argument must be coercible to non-negative integer"
+| [1] "argument must be coercible to non-negative integer"
+| [1] "first element used of 'length.out' argument"
+| [1] "NAs introduced by coercion"
+| [1] "error"
+| [1] "double"
+| [1] 2147483648
+| [1] 2147483648
+| [1] "integer"
+| [1] 2147483647
+[messages]
+[warnings]
+[errors]
+[value]
+integer
+| 2147483647L
