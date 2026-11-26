@@ -454,3 +454,12 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 - An inner loop that refuses for a name only the outer body sets leaves the name in `forward` for the outer loop to declare.
 - A trial left pending (an empty list of records or tags nothing appended to yet) declares a pending variable, and a pending list assigned to a declared variable takes its item type. A restart puts back the pending families and the self-inlining count the trial changed, so the trial cannot settle a list from before the loop.
 - Each loop at the function's own level remembers what it declared after its first lowering outside a trial, and the checker does the same per loop body. Without that, lowering an outer loop again relowers every inner loop with its own trials, (k+1)^depth lowerings; with it, depth 10 compiles in 48 ms instead of 18 s. A loop in an inlined function does not remember, because it inlines again with other types.
+
+## Scalar library functions give up where the library raises an error
+
+**Status:** settled (`lower::Lowering::number_function`, `number_operation`, `boolean`, `list_get`, `result_is`; `tests/native/clean-std-scalars.R`).
+
+- A `Num`, `Bool`, `Str.is_empty`, `List.first`/`last`/`get` or `Result.is_ok`/`is_err` call compiles to scalar operations, and every input the library refuses (`NA`, `NaN`, a zero divisor, an `I64` overflow, a logarithm of a number that is not positive, an inverse sine outside `[-1, 1]`, a `NaN` result) fails the call, so the interpreter runs it again and raises the library's own message.
+- An R number beside an `I64` converts exactly (`to_i64`), as `numbers::library` does; a function the library refuses for an `I64` (`Num.div`, `Num.log`, `Num.floor`) refuses at compile time.
+- `Num.div_trunc` and `Num.rem` are their own `I64` operations (`Arith::DivTrunc`, `RemTrunc`), because `%/%` and `%%` round toward the floor. A remainder by -1 divides by 1 instead, so `Num.rem(Num.min_i64, -1)` is 0 as in the library.
+- `Bool.is_eq` compiles for two numbers, strings or Bools; records, tags and lists stay in the interpreter, which compares with `identical()`.
