@@ -657,10 +657,11 @@ Each trades a narrow class of missed errors for a class of false reports seen on
   the call's use decides it: `List.walk(words, "", f)` with `f` taking `Str`, and
   `Result.with_default(:Ok(1), 2)` under `-> I64`. Deciding it as R's type at the argument made
   each of these a `type-mismatch` that only an annotated temporary avoided.
-- Each loop pass writes fresh variables for the literals inside a value, as in `:Stop(1)`. So
-  `join_writes` treats two writes that resolve alike as equal, and on a loop-back edge a write
-  that would change the slot has its nested literals settled (`settle_open_literals`), or every
-  pass would differ and the fixpoint would report that the slot does not stabilize.
+- Each loop pass writes fresh variables for the literals inside a value, as in `:Stop(1)`, and
+  the loop-back join ties them to the previous pass's variables part by part, so they stay open
+  for a later use: `r <- :Err("none"); for (x in xs) r <- :Ok(1); r` under
+  `-> Result<I64, Str>` is `:Ok(1i64)` on every pass. `join_writes` treats two writes that
+  resolve to the same type as equal.
 - An open literal is not a value a caller chooses, so `join_branch_values`' differing-openness
   rule (which unions rather than pins a parameter) ignores literal variables: `(:Stop(1.0), s)`
   beside `(:Go(v), s)` joins to `Tuple{:Go(double) | :Stop(double), I64}`.
@@ -670,6 +671,8 @@ Each trades a narrow class of missed errors for a class of false reports seen on
   integer literal accepts R's widening to double.
 - A report names an open literal by the type it defaults to (`Checker::reported`, a probe that
   settles and rolls back), so `r <- :Ok(1); r + 1` says `found `:Ok(double)``, never `:Ok(T)`.
+  `type_mismatch` and a callback's explanation report through the same probe, so a report never
+  decides a literal for later uses.
 - `c` is an R function, so `infer_combine` decides a variable written with a literal as R's type,
   as any other read does, and `bounds <- 1; bounds <- c(bounds, x)` is a `double[]` in strict
   mode.
