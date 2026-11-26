@@ -12494,25 +12494,22 @@ fn replace_element<'s>(
     (index, value): (Local<'s>, Local<'s>),
     (whole, setter_call): (Local<'s>, Local<'s>),
 ) -> R<Local<'s>> {
-    handles::as_assignment(context, setter_call, whole, |context| {
-        let result = match kind {
-            ElementKind::Single => {
-                subset::assign_subset(context, object, &[index], value, setter_call)
+    let _call = handles::AssignmentCall::enter(context, setter_call, whole);
+    let result = match kind {
+        ElementKind::Single => subset::assign_subset(context, object, &[index], value, setter_call),
+        ElementKind::Double => {
+            subset::assign_subset2(context, object, &[index], value, setter_call)
+        }
+        ElementKind::Dollar => match index.standard::<Str>().filter(|name| name.len() == 1) {
+            Some(name) => {
+                let name = context.root(name.get(context, 0));
+                subset::assign_dollar(context, object, name, value, setter_call)
             }
-            ElementKind::Double => {
-                subset::assign_subset2(context, object, &[index], value, setter_call)
-            }
-            ElementKind::Dollar => match index.standard::<Str>().filter(|name| name.len() == 1) {
-                Some(name) => {
-                    let name = context.root(name.get(context, 0));
-                    subset::assign_dollar(context, object, name, value, setter_call)
-                }
-                None => Err(error("internal error: `$<-` without one name")),
-            },
-        };
-        // An error is signalled while the assignment is the call it reports.
-        result.map_err(|unwind| handles::builtin_failure(context, unwind))
-    })
+            None => Err(error("internal error: `$<-` without one name")),
+        },
+    };
+    // An error is signalled while the assignment is the call it reports.
+    result.map_err(|unwind| handles::builtin_failure(context, unwind))
 }
 
 /// Whether the element replacement of `kind` on the object `target` could run a method in
@@ -15107,7 +15104,15 @@ fn replace_variable<'f, 's>(
     }
     args[0] = target;
     let args: &[Local<'s>] = args;
-    let replace = |context: &mut Cx<'s>| -> R<Option<Local<'s>>> {
+    let result = {
+        let _tmp = handles::TmpValue::bind(
+            context,
+            match home {
+                Home::Binding(environment, _) => Some(environment),
+                Home::Slot(_) => None,
+            },
+            target,
+        );
         let direct = match builtin {
             Some(definition)
                 if definition.direct.is_some()
@@ -15118,38 +15123,27 @@ fn replace_variable<'f, 's>(
             _ => Ok(None),
         };
         if special && matches!(direct, Ok(None)) {
-            return Ok(None);
+            return Ok(false);
         }
         if let Some(environment) = environment {
             handles::count_tmp_binding(context, environment);
         }
         match (direct?, builtin) {
-            (Some(value), _) => Ok(Some(value)),
+            (Some(value), _) => value,
             (None, Some(definition)) => {
-                handles::as_assignment(context, setter_call, whole, |context| {
-                    handles::call_builtin(
-                        context,
-                        definition,
-                        (setter_call, function),
-                        args,
-                        environment,
-                    )
-                })
-                .map(Some)
+                let _call = handles::AssignmentCall::enter(context, setter_call, whole);
+                handles::call_builtin(
+                    context,
+                    definition,
+                    (setter_call, function),
+                    args,
+                    environment,
+                )?
             }
             (None, None) => {
-                replace_with_closure(context, function, (setter_call, whole), args, environment)
-                    .map(Some)
+                replace_with_closure(context, function, (setter_call, whole), args, environment)?
             }
         }
-    };
-    let tmp_home = match home {
-        Home::Binding(environment, _) => Some(environment),
-        Home::Slot(_) => None,
-    };
-    let result = handles::with_tmp_value(context, tmp_home, target, replace)?;
-    let Some(result) = result else {
-        return Ok(false);
     };
     let bound = match home {
         Home::Binding(_, binding) => binding.read(context).content().is(result),

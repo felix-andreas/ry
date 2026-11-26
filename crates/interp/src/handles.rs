@@ -980,14 +980,16 @@ pub unsafe fn with<T>(body: impl for<'s> FnOnce(&mut Cx<'s>) -> R<T>) -> R<T> {
 /// As for [`with`], and the caller releases what `body` roots.
 #[inline(always)]
 pub unsafe fn in_caller_scope<T>(body: impl for<'s> FnOnce(&mut Cx<'s>) -> R<T>) -> R<T> {
-    // SAFETY: the caller's contract.
-    unsafe { in_caller_scope_with(body, |context, body| body(context)) }
+    // SAFETY: as in `with`. The scope `body` sees ends no later than the caller's, which it
+    // cannot outlive, because it must accept every `'s`.
+    let mut context = unsafe { Cx::enter(NonNull::from(&mut *crate::heap())) };
+    body(&mut context)
 }
 
-/// [`in_caller_scope`] for a `body` that takes its operands as `data`. Tier 0 compiles each
-/// handler twice, for running and for stepping, so a closure a handler passes has two callers
-/// and LLVM keeps a large one out of line; an `#[inline(always)]` function item inlines into
-/// both.
+/// [`in_caller_scope`] for a function `body` that takes its operands as `data`. Tier 0
+/// compiles each handler twice, for running and for stepping, so a closure or a generic shim
+/// a handler calls has two callers and LLVM keeps a large one out of line; a call through a
+/// constant function pointer to an `#[inline(always)]` function inlines into both.
 ///
 /// # Safety
 ///
@@ -995,7 +997,7 @@ pub unsafe fn in_caller_scope<T>(body: impl for<'s> FnOnce(&mut Cx<'s>) -> R<T>)
 #[inline(always)]
 pub unsafe fn in_caller_scope_with<D, T>(
     data: D,
-    body: impl for<'s> FnOnce(&mut Cx<'s>, D) -> R<T>,
+    body: for<'s> fn(&mut Cx<'s>, D) -> R<T>,
 ) -> R<T> {
     // SAFETY: as in `with`. The scope `body` sees ends no later than the caller's, which it
     // cannot outlive, because it must accept every `'s` and `data` was made before it began.
@@ -2532,24 +2534,38 @@ pub fn unwrap_assigned<'s>(context: &mut Cx<'s>, result: Local<'s>, bound: bool)
     }
 }
 
-/// Runs `body`, a replacement call of the assignment `whole`, as the call `setter_call` that
-/// the replacement primitives report and may modify their target for.
-#[inline(always)]
-pub fn as_assignment<'s, T>(
-    context: &mut Cx<'s>,
-    setter_call: Local<'s>,
-    whole: Local<'s>,
-    body: impl FnOnce(&mut Cx<'s>) -> R<T>,
-) -> R<T> {
-    let interpreter = crate::interp();
-    let outer = interpreter.assignment_call.replace((
-        setter_call.raw(),
-        whole.raw(),
-        interpreter.frames.len(),
-    ));
-    let result = body(context);
-    crate::interp().assignment_call = outer;
-    result
+/// While it lives, the replacement call running is `setter_call` of the assignment `whole`,
+/// the call the replacement primitives report and may modify their target for.
+pub struct AssignmentCall<'s> {
+    outer: Option<(Sexp, Sexp, usize)>,
+    scope: PhantomData<fn(&'s ()) -> &'s ()>,
+}
+
+impl<'s> AssignmentCall<'s> {
+    #[inline(always)]
+    pub fn enter(
+        _context: &Cx<'s>,
+        setter_call: Local<'s>,
+        whole: Local<'s>,
+    ) -> AssignmentCall<'s> {
+        let interpreter = crate::interp();
+        let outer = interpreter.assignment_call.replace((
+            setter_call.raw(),
+            whole.raw(),
+            interpreter.frames.len(),
+        ));
+        AssignmentCall {
+            outer,
+            scope: PhantomData,
+        }
+    }
+}
+
+impl Drop for AssignmentCall<'_> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        crate::interp().assignment_call = self.outer;
+    }
 }
 
 /// The unwind a failing replacement primitive raises: an error it returned is signalled,
@@ -2559,26 +2575,39 @@ pub fn builtin_failure(_context: &mut Cx<'_>, unwind: Unwind) -> Unwind {
     unsafe { crate::eval::builtin_failure(values::unbound(), unwind) }
 }
 
-/// Runs `body` while `target` is the value of `*tmp*` in `environment`, where the replacement
-/// call `body` makes finds it. A slot frame without an environment (`None`) binds no `*tmp*`.
-#[inline(always)]
-pub fn with_tmp_value<'s, T>(
-    context: &mut Cx<'s>,
-    environment: Option<Local<'s, Environment>>,
-    target: Local<'s>,
-    body: impl FnOnce(&mut Cx<'s>) -> R<T>,
-) -> R<T> {
-    // One call of `body`, which then inlines here.
-    if let Some(environment) = environment {
-        crate::interp()
-            .tmp_values
-            .push((environment.raw(), target.raw()));
+/// While it lives, `target` is the value of `*tmp*` in `environment`, where a replacement call
+/// finds it. A slot frame without an environment (`None`) binds no `*tmp*`.
+pub struct TmpValue<'s> {
+    bound: bool,
+    scope: PhantomData<fn(&'s ()) -> &'s ()>,
+}
+
+impl<'s> TmpValue<'s> {
+    #[inline(always)]
+    pub fn bind(
+        _context: &Cx<'s>,
+        environment: Option<Local<'s, Environment>>,
+        target: Local<'s>,
+    ) -> TmpValue<'s> {
+        if let Some(environment) = environment {
+            crate::interp()
+                .tmp_values
+                .push((environment.raw(), target.raw()));
+        }
+        TmpValue {
+            bound: environment.is_some(),
+            scope: PhantomData,
+        }
     }
-    let result = body(context);
-    if environment.is_some() {
-        crate::interp().tmp_values.pop();
+}
+
+impl Drop for TmpValue<'_> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        if self.bound {
+            crate::interp().tmp_values.pop();
+        }
     }
-    result
 }
 
 /// Counts a `*tmp*` binding that the frame of `environment` holds while a replacement call
