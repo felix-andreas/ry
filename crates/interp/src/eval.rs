@@ -1242,19 +1242,6 @@ pub unsafe fn slot_promise(owner: usize, expression: Sexp) -> R<Sexp> {
     }
 }
 
-/// [`slot_promise`] for code on the handle types.
-pub fn promise_over_slots<'s>(
-    context: &mut Cx<'s>,
-    owner: usize,
-    expression: Local<'s>,
-) -> R<Local<'s, Promise>> {
-    let environment = context.root_answer(|context| pending_environment(context, owner))?;
-    match expression.downcast::<Bytecode>() {
-        Some(code) => handles::compiled_promise(context, code, environment),
-        None => handles::promise(context, expression, environment),
-    }
-}
-
 /// A closure of `formals` and `body` defined in the slot frame whose header register is
 /// `header`, while the frame keeps every variable in its slot. The closure's environment is
 /// the frame's, so defining it leaves the frame in its slots: a call of the closure or
@@ -1370,17 +1357,6 @@ fn box_variable<'s>(context: &mut Cx<'s>, owner: usize, symbol: Local<'s, Symbol
 /// `value` recorded for it. `UseMethod` called from a slot frame without an environment records
 /// `.GenericCallEnv` as unbound, because its value is that caller's environment, which the
 /// caller makes only when something asks. It is read here, when the variable gets a cell.
-pub unsafe fn method_var_value(index: usize, symbol: Sexp, value: Sexp) -> R<Sexp> {
-    handles::in_caller_scope(|context| {
-        let (symbol, value) = (
-            context.root(Gc::<Symbol>::adopt(symbol)),
-            handles::held(context, value),
-        );
-        Ok(method_variable(context, index, symbol, value)?.raw())
-    })
-}
-
-/// [`method_var_value`] for code on the handle types.
 fn method_variable<'s>(
     context: &mut Cx<'s>,
     index: usize,
@@ -1474,41 +1450,8 @@ fn box_slots(context: &mut Cx<'_>, owner: usize, slots: std::ops::Range<usize>) 
             }
         }
     }
-    let frame = handles::live_frame(context, owner);
-    let pending = pending_of(context, owner);
-    let names = frame.slot_names();
-    let mut formals = None;
-    let mut bindings: SmallVec<[LocalBinding<'_>; 12]> = SmallVec::new();
-    for slot in slots.clone() {
-        let value = frame.slot(slot);
-        if handles::is_unbound(value) {
-            continue;
-        }
-        let Some(symbol) = names.get(slot).and_then(|name| name.downcast::<Symbol>()) else {
-            panic!("frame {owner}: slot {slot} has no name");
-        };
-        bindings.push(LocalBinding {
-            symbol,
-            value,
-            missing: frame.is_missing_formal(slot)
-                && slot < *formals.get_or_insert_with(|| frame.formals().count()),
-        });
-    }
-    if bindings.is_empty() {
-        return Ok(());
-    }
-    if syntax::testing::invariants_enabled() {
-        for binding in &bindings {
-            assert!(
-                context.own_binding(pending, binding.symbol).is_none(),
-                "frame {owner}: {:?} is bound in a slot and in a cell at once",
-                handles::text(binding.symbol.name())
-            );
-        }
-    }
-    context.define_locals_uncollected(pending, &bindings)?;
-    activity::count_by(Counter::VariablesBoxed, bindings.len() as u64);
-    frame.unbind_slots(slots);
+    let moved = handles::live_frame(context, owner).move_slots_to_cells(slots)?;
+    activity::count_by(Counter::VariablesBoxed, moved as u64);
     Ok(())
 }
 
@@ -1589,9 +1532,8 @@ fn lift(context: &mut Cx<'_>, index: usize, cause: Option<Site>) -> R<()> {
             .position(|name| name.is(symbol))
             .map(|slot| slot as u32)
     };
-    context.clear_slot_owner(pending);
+    context.release_slot_frame(pending);
     context.order_frame(pending, rank, frame.formals().count() as u32);
-    pending.set_flags(gp::SLOT_FRAME, false);
     let state = interp();
     if !state.pending_closures.is_empty() {
         let own = crate::pending_closures_of(&state.pending_closures, index);
@@ -2195,12 +2137,7 @@ pub fn pending_environment<'a>(context: &'a mut Cx<'_>, owner: usize) -> R<Gc<'a
             let context: &Cx<'_> = context;
             let frame = handles::live_frame(context, owner);
             let function = frame.function();
-            let environment = context.new_environment_uncollected(function.environment(), 0)?;
-            // Compiled code runs on the frame for as long as the environment stands for it.
-            environment.set_flags(
-                gp::FUNCTION_FRAME | gp::PENDING_FRAME | gp::COMPILED_FRAME,
-                true,
-            );
+            let environment = context.new_pending_frame_uncollected(function.environment())?;
             frame.stand_in(environment);
             activity::count(Counter::FrameEnvironments);
             Ok(environment)
@@ -3539,7 +3476,7 @@ pub unsafe fn bind_arguments(
     if let Some(supplied) = supplied {
         for &(symbol, value) in supplied {
             if heap.frame_cell(env, symbol).is_none() {
-                // A deferred `.GenericCallEnv` (see `method_var_value`): this frame's caller is
+                // A deferred `.GenericCallEnv` (see `method_variable`): this frame's caller is
                 // the slot frame the running byte code reads.
                 let value = if value == unbound() && symbol == symbols().dot_generic_call_env {
                     slot_owner_env(Reify::Site(Site::MethodDispatch))?

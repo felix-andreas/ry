@@ -84,7 +84,7 @@ it.
   the frame (`Interp::method_vars`, `Frame::method_vars`) and get a binding cell when something
   reads one by name (`box_variable`) or the environment takes every variable (`lift_frame`).
   `.GenericCallEnv` is recorded as unbound when the generic's caller is a slot frame without an
-  environment, and reading it asks that caller for its environment (`eval::method_var_value`).
+  environment, and reading it asks that caller for its environment (`eval::method_variable`).
   `NextMethod` from such a method reads the dispatch variables without moving them
   (`eval::pending_name`), passes the next method promises over the method's environment, and
   lets the method return in slots when the next method neither forced nor kept them

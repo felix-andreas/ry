@@ -222,7 +222,7 @@ through `&Cx` never invalidates a borrowed slice.
 
 An allocation that cannot collect is not a safepoint either. `cx.reserve(bytes)` takes `&mut Cx`
 and runs the one collection check for a group of objects, and the allocators that follow it take
-`&Cx` (`new_environment_uncollected`, `define_locals_uncollected`), so the frame and slot values a
+`&Cx` (`new_pending_frame_uncollected`, `define_locals_uncollected`), so the frame and slot values a
 slot frame's environment is built from stay `Gc` reads across those allocations.
 
 A function that returns a `Gc` from `&'a mut Cx` holds the context until the `Gc` dies, so a
@@ -619,8 +619,8 @@ environment and the argument references that read a slot frame's variable) with 
 settle a promise without running code (`settle_without_code`, `peeked_variable`,
 `referenced_variable`); and the frame machinery: the argument reference pool (`slot_reference`,
 `take_reference`, `return_references`, `detach`), a slot frame's pending environment and frame
-environment (`pending_environment`, `frame_environment_of`, `caller_environment`), the promises and
-closures over its slots (`promise_over_slots`, `closure_over_slots`), the readers of its slots
+environment (`pending_environment`, `frame_environment_of`, `caller_environment`), the
+closures over its slots (`closure_over_slots`), the readers of its slots
 (`frame_dots`, `variable_register`, `formal_slots`) and the lifting of its slots into an
 environment (`lift`, `box_slots`). The predicates that ask whether a slot or a reference is a
 missing argument (`value_is_missing`, `reference_is_missing`, `symbol_is_missing`) stay raw.
@@ -668,7 +668,7 @@ The order:
    in place go first (tier 0's stores, the replacement and attribute builtins, name matching,
    string encoding), then `values.rs`, the evaluator and the bytecode loop, and the leaf builtins
    last, because a leaf rarely holds a value across a safepoint. The frame machinery writes a
-   slot frame's registers through `LiveFrame` (`store_slot`, `unbind_slots`), which borrows the
+   slot frame's registers through `LiveFrame` (`store_slot`, `move_slots_to_cells`), which borrows the
    context; the bytecode loop's own register accessor comes next.
 2. `stats`, `graphics`, `frames`.
 3. `libr`, `jit`, `typed`: entry points make a `Cx`; raw access leaves their bodies.

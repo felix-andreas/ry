@@ -108,20 +108,25 @@ impl<'s> Cx<'s> {
         unsafe { (*self.heap.as_ptr()).reserve(bytes, &[]) }
     }
 
-    /// A new environment enclosed by `enclosure` with room for `bindings` bindings, made
-    /// without a collection check: it follows a [`Cx::reserve`] that covers it. It takes
-    /// `&self` because an allocation that cannot collect frees and moves nothing.
+    /// A new function frame enclosed by `enclosure` that stands for a running slot frame
+    /// (`gp::FUNCTION_FRAME`, `gp::PENDING_FRAME` and `gp::COMPILED_FRAME`), made without a
+    /// collection check: it follows a [`Cx::reserve`] that covers it. It takes `&self` because
+    /// an allocation that cannot collect frees and moves nothing.
     #[inline]
-    pub fn new_environment_uncollected<'a>(
+    pub fn new_pending_frame_uncollected<'a>(
         &'a self,
         enclosure: impl Pointer<Environment>,
-        bindings: usize,
     ) -> HeapResult<Gc<'a, Environment>> {
         // SAFETY: the heap and the enclosure are live, the allocation collects nothing, and the
-        // new environment lives until the next safepoint, which `'a` ends before.
+        // new environment lives until the next safepoint, which `'a` ends before. The flags
+        // name no slot owner, which the frame records next.
         unsafe {
             let environment =
-                (*self.heap.as_ptr()).alloc_environment_uncollected(enclosure.raw(), bindings)?;
+                (*self.heap.as_ptr()).alloc_environment_uncollected(enclosure.raw(), 0)?;
+            environment.set_gp_bits(
+                gp::FUNCTION_FRAME | gp::PENDING_FRAME | gp::COMPILED_FRAME,
+                true,
+            );
             Ok(Gc::adopt(environment))
         }
     }
@@ -163,17 +168,20 @@ impl<'s> Cx<'s> {
         unsafe { (*self.heap.as_ptr()).set_slot_owner(environment.raw(), Some((owner, names.raw))) }
     }
 
-    /// Records that the environment stands for no slot frame. An environment that stands for
-    /// none keeps its count of removed bindings in the same field, so it is left as it is.
+    /// Records that the environment stands for no slot frame any more and clears its
+    /// `gp::SLOT_FRAME` flags, which tell the heap to read the slot owner. An environment that
+    /// stands for none keeps its count of removed bindings in the same field, so it is left as
+    /// it is.
     #[inline]
-    pub fn clear_slot_owner(&self, environment: impl Pointer<Environment>) {
+    pub fn release_slot_frame(&self, environment: impl Pointer<Environment>) {
         let environment = environment.raw();
-        // SAFETY: the heap and the environment are live, and neither call allocates.
+        // SAFETY: the heap and the environment are live, and no call allocates.
         unsafe {
             let heap = &mut *self.heap.as_ptr();
             if heap.slot_owner(environment).is_some() {
                 heap.set_slot_owner(environment, None);
             }
+            environment.set_gp_bits(gp::SLOT_FRAME, false);
         }
     }
 
@@ -809,14 +817,6 @@ const _: () = {
 };
 
 impl<'a> Gc<'a, Environment> {
-    /// Sets or clears the interpreter's flags `bits` of the environment, which describe the
-    /// frame it stands for and which no reader keeps across a change.
-    #[inline]
-    pub fn set_flags(self, bits: u16, on: bool) {
-        // SAFETY: the environment is live for `'a`, and the flags are bits of its header.
-        unsafe { self.raw.set_gp_bits(bits, on) }
-    }
-
     /// The environment that encloses this one, which lookups continue in, or `None` for the
     /// empty environment, whose enclosure is `NULL`.
     #[inline]

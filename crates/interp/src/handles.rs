@@ -3907,19 +3907,59 @@ impl<'c, 's> LiveFrame<'c, 's> {
         unsafe { crate::heap().store_slot(&mut registers[register], value.raw()) };
     }
 
-    /// Leaves the slots in `slots` unbound, giving up the references they counted. What they
-    /// held stays valid until the next safepoint, as nothing is freed before a collection.
-    #[inline]
-    pub fn unbind_slots(self, slots: Range<usize>) {
+    /// Moves the variables bound in `slots` into cells of the frame's environment, which binds
+    /// none of them yet, each formal with its missing flag, and leaves the slots unbound. The
+    /// cells take over the slots' counts. Returns how many variables moved. The caller has
+    /// suspended collection.
+    pub fn move_slots_to_cells(self, slots: Range<usize>) -> R<usize> {
+        let index = self.index;
+        let Some(environment) = self.pending() else {
+            panic!("frame {index} moved a variable before it had an environment");
+        };
+        let names = self.slot_names();
+        let mut formals = None;
+        let mut bindings: SmallVec<[LocalBinding<'_>; 12]> = SmallVec::new();
+        for slot in slots.clone() {
+            let value = self.slot(slot);
+            if is_unbound(value) {
+                continue;
+            }
+            let Some(symbol) = names.get(slot).and_then(|name| name.downcast::<Symbol>()) else {
+                panic!("frame {index}: slot {slot} has no name");
+            };
+            bindings.push(LocalBinding {
+                symbol,
+                value,
+                missing: self.is_missing_formal(slot)
+                    && slot < *formals.get_or_insert_with(|| self.formals().count()),
+            });
+        }
+        if bindings.is_empty() {
+            return Ok(0);
+        }
+        if syntax::testing::invariants_enabled() {
+            for binding in &bindings {
+                assert!(
+                    self.context
+                        .own_binding(environment, binding.symbol)
+                        .is_none(),
+                    "frame {index}: {:?} is bound in a slot and in a cell at once",
+                    text(binding.symbol.name())
+                );
+            }
+        }
+        self.context
+            .define_locals_uncollected(environment, &bindings)?;
         let start = self.header() + 1;
         let registers = &mut crate::interp().bytecode.registers;
         let unbound = values::unbound();
         for register in &mut registers[start + slots.start..start + slots.end] {
-            // SAFETY: the binding cell that took the variable counts it too, so giving up the
-            // slot's count frees nothing and needs no note of a zero count.
+            // SAFETY: each bound slot's variable has just been bound in a cell, which counts it
+            // too, so giving up the slot's count frees nothing and needs no note of a zero count.
             unsafe { register.decrement_refcount() };
             *register = unbound;
         }
+        Ok(bindings.len())
     }
 
     /// Makes `environment` the one that stands for the slot frame, which the frame then holds.
@@ -4676,19 +4716,6 @@ pub fn promise<'s>(
     // in the context's scope.
     unsafe {
         let promise = crate::eval::make_promise(code.raw(), environment.raw())?;
-        Ok(Local::adopt(promise))
-    }
-}
-
-/// A promise of the compiled `code` in `environment`, whose expression is the code's source.
-pub fn compiled_promise<'s>(
-    _context: &mut Cx<'s>,
-    code: Local<'_, Bytecode>,
-    environment: Local<'_, Environment>,
-) -> R<Local<'s, Promise>> {
-    // SAFETY: as for `promise`.
-    unsafe {
-        let promise = crate::eval::compiled_promise(code.raw(), environment.raw())?;
         Ok(Local::adopt(promise))
     }
 }
