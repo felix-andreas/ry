@@ -1766,7 +1766,8 @@ pub unsafe extern "C" fn ry_list_equal(a: *mut List, b: *mut List) -> u32 {
     equal as u32
 }
 
-/// `a == b` on two boxed records, tuples or tags: 1 when they hold the same value, 0 otherwise.
+/// `a == b` on two boxed records, tuples or tags, or two ry lists: 1 when they hold the same
+/// value, 0 otherwise.
 pub unsafe extern "C" fn ry_box_equal(a: *const Boxed, b: *const Boxed) -> u32 {
     object_equal(a as *const u8, b as *const u8) as u32
 }
@@ -1784,7 +1785,10 @@ unsafe fn object_equal(a: *const u8, b: *const u8) -> bool {
         (BOX, BOX) => box_equal(a as *const Boxed, b as *const Boxed),
         (DICT, _) | (_, DICT) => false,
         (left, right) if left == right => items_equal(a as *const List, b as *const List),
-        _ => false,
+        // Both sides have one static type, and an empty list's storage kind depends on the tier
+        // that built it.
+        (BOX, _) | (_, BOX) => false,
+        _ => (*(a as *const List)).length == 0 && (*(b as *const List)).length == 0,
     }
 }
 
@@ -2657,12 +2661,12 @@ pub unsafe extern "C" fn ry_list_slice(
     result
 }
 
-/// An empty dict. Keys are `INT`, `DBL` or `STR`, values any list kind.
+/// An empty dict. Keys are `INT`, `I64`, `DBL` or `STR`, values any list kind.
 pub unsafe extern "C" fn ry_dict_new(key_kind: u32, value_kind: u32) -> *mut u8 {
     let (Some(key_kind), Some(value_kind)) = (list_kind(key_kind), list_kind(value_kind)) else {
         return null_mut();
     };
-    if key_kind == LGL || key_kind == OBJECT || value_kind == OBJECT {
+    if key_kind == LGL || key_kind == OBJECT {
         return null_mut();
     }
     dict_alloc(key_kind, value_kind, dict_seed()) as *mut u8
@@ -2687,9 +2691,7 @@ pub unsafe extern "C" fn ry_dict_insert(
         && !is_removed(dict, position)
     {
         let value = value_slot(dict, position);
-        if (*dict).value_kind == STR {
-            str_drop(*(value as *const Str));
-        }
+        drop_items((*dict).value_kind, value, 1);
         write_item(value, (*dict).value_kind, 0, value0, value1);
         return dict as *mut u8;
     }
@@ -2705,12 +2707,8 @@ pub unsafe extern "C" fn ry_dict_insert(
         dict_rebuild(dict, capacity);
     }
     if (*dict).entries >= MAX_ENTRIES {
-        if (*dict).value_kind == STR {
-            str_drop(Str {
-                lo: value0,
-                hi: value1,
-            });
-        }
+        let mut value = [value0, value1];
+        drop_items((*dict).value_kind, value.as_mut_ptr() as *mut u8, 1);
         ry_list_drop(dict as *mut List);
         return null_mut();
     }
@@ -2752,9 +2750,7 @@ pub unsafe extern "C" fn ry_dict_put(
         return ry_dict_insert(dict, owned, key0, key1, value0, value1);
     }
     let value = value_slot(held, position as usize);
-    if (*held).value_kind == STR {
-        str_drop(*(value as *const Str));
-    }
+    drop_items((*held).value_kind, value, 1);
     write_item(value, (*held).value_kind, 0, value0, value1);
     dict
 }
@@ -2787,10 +2783,12 @@ pub unsafe extern "C" fn ry_dict_remove(
     let Some(position) = dict_find(dict, key0, key1) else {
         return dict as *mut u8;
     };
-    if (*dict).value_kind == STR {
-        let value = value_slot(dict, position) as *mut Str;
-        str_drop(*value);
-        *value = Str::EMPTY;
+    let value = value_slot(dict, position);
+    drop_items((*dict).value_kind, value, 1);
+    match (*dict).value_kind {
+        STR => *(value as *mut Str) = Str::EMPTY,
+        OBJECT => *(value as *mut *mut List) = null_mut(),
+        _ => {}
     }
     *(*dict).removed_bits.add(position / 64) |= 1 << (position % 64);
     (*dict).removed += 1;
@@ -4333,18 +4331,11 @@ unsafe fn dict_alloc(key_kind: u8, value_kind: u8, seed: u64) -> *mut Dict {
 }
 
 unsafe fn dict_free(dict: *mut Dict) {
-    // Removed entries keep their keys until compaction, and their string values are already
-    // replaced by the empty string, so every slot below the entry count drops safely.
-    if (*dict).key_kind == STR {
-        for position in 0..(*dict).entries {
-            str_drop(*(key_slot(dict, position) as *const Str));
-        }
-    }
-    if (*dict).value_kind == STR {
-        for position in 0..(*dict).entries {
-            str_drop(*(value_slot(dict, position) as *const Str));
-        }
-    }
+    // Removed entries keep their keys until compaction, and their string and object values are
+    // already replaced by the empty string and null, so every slot below the entry count drops
+    // safely.
+    drop_items((*dict).key_kind, (*dict).keys, (*dict).entries);
+    drop_items((*dict).value_kind, (*dict).values, (*dict).entries);
     dict_free_columns(dict);
     object_free(dict as *mut u8, size_of::<Dict>());
 }
@@ -4385,7 +4376,7 @@ unsafe fn dict_free_columns(dict: *mut Dict) {
 }
 
 /// Appends every live entry of `source` to `target`, which has room, and indexes it. With
-/// `duplicate` the strings gain a count each; without it they move.
+/// `duplicate` the strings and objects gain a count each; without it they move.
 unsafe fn dict_copy_live(target: *mut Dict, source: *const Dict, duplicate: bool) {
     let key_width = item_size((*source).key_kind);
     let value_width = item_size((*source).value_kind);
@@ -4402,12 +4393,8 @@ unsafe fn dict_copy_live(target: *mut Dict, source: *const Dict, duplicate: bool
             value_width,
         );
         if duplicate {
-            if (*source).key_kind == STR {
-                str_dup(*(key as *const Str));
-            }
-            if (*source).value_kind == STR {
-                str_dup(*(value_slot(source, position) as *const Str));
-            }
+            dup_items((*source).key_kind, key, 1);
+            dup_items((*source).value_kind, value_slot(source, position), 1);
         }
         let hash = key_hash(target, key);
         if let Probe::Vacant { slot } = probe(target, key, hash) {
@@ -4520,6 +4507,7 @@ unsafe fn key_hash(dict: *const Dict, key: *const u8) -> u64 {
             }
         }
         DBL => hash_word(seed, double_key(*(key as *const f64))),
+        I64 => hash_word(seed, *(key as *const u64)),
         _ => hash_word(seed, *(key as *const i32) as u32 as u64),
     }
 }
@@ -4528,6 +4516,7 @@ unsafe fn key_equal(kind: u8, a: *const u8, b: *const u8) -> bool {
     match kind {
         STR => str_equal(&*(a as *const Str), &*(b as *const Str)),
         DBL => double_key(*(a as *const f64)) == double_key(*(b as *const f64)),
+        I64 => *(a as *const u64) == *(b as *const u64),
         _ => *(a as *const i32) == *(b as *const i32),
     }
 }

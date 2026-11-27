@@ -5734,7 +5734,7 @@ interpreted
 | a column read by its position, as in `table[[2]]` | the column's name: `table[["price"]]` |
 | a table value inside a record, a tuple, a tag or a list | a variable of its own for the table value |
 | an operator applied directly to a table expression that a local function, a function whose result type is an alias, an `if` or a `match` gives | assign the expression to a variable, and apply the operator to the variable |
-| a `Dict` whose keys or values are not `I64`, `F64` or `Str` | keep the values in a `List` and store their positions |
+| a `Dict` whose keys are not `I64`, `F64` or `Str`, or whose values hold something other than numbers, strings, `Bool`s, lists, records, tuples and tags | convert the keys to `I64` or `Str`, and keep such values in a `List` whose positions the dictionary stores |
 | a `Set` whose elements are not `I64` or `Str` | convert the elements to `I64` or `Str`, or keep them in a `List` |
 | a `match` guard that assigns a variable, a pattern with `NA`, `NaN` or a complex number, and a pattern other than a name or `_` on a value that is not a number, a string, a logical, a `List`, a tag, a record or a tuple | compute the value before the `match`, and bind the value to a name |
 | a read of a global that holds a record, a tuple, a tag, a `Dict` or a `Set`, or of a variable of an enclosing boundary function | pass the value in as a parameter |

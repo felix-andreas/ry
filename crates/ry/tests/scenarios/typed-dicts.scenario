@@ -1,6 +1,8 @@
-# Typed code builds a dictionary from `Dict.empty()` natively when its keys and values are `I64`,
-# `F64` or `Str`, including an R string key such as `"z"`. The checker settles the key and value
-# types, and the dictionary is laid out by them before the first insert.
+# Typed code builds a dictionary from `Dict.empty()` natively, including an R string key such as
+# `"z"`. The checker settles the key and value types, and the dictionary is laid out by them before
+# the first insert, so values may be `Bool`, records, tags or lists, and two `I64` keys that share
+# their low 32 bits (`1i64` and `4294967297i64`) stay two keys. `Dict.keep_shared` compares list
+# values whole, and `Dict.single` and `Dict.from_list` take `F64` keys.
 
 requires ry-runtime
 
@@ -23,9 +25,78 @@ file dicts.R
 | print(counts(words))
 | print(sizes(20i64))
 
+file values.R
+| alias Point = Record{x: I64, y: I64}
+| alias Shape = :Circle(r: F64) | :Square(side: F64) | :Dot
+| area <- function(s: Shape) -> F64 {
+|   match (s) {
+|     :Circle(r = r) => 3.0 * r * r
+|     :Square(side = side) => side * side
+|     :Dot => 0.0
+|   }
+| }
+| shapes <- function(n: I64) -> F64 {
+|   by_id: Dict<I64, Shape> <- Dict.empty()
+|   for (i in List.range(1i64, n)) {
+|     shape <- if (i %% 3i64 == 0i64) :Circle(r = 1.0) else if (i %% 3i64 == 1i64) :Square(side = 2.0) else :Dot
+|     by_id <- Dict.insert(by_id, i, shape)
+|   }
+|   by_id <- Dict.remove(by_id, 2i64)
+|   Dict.walk(by_id, 0.0, function(total, k, s) total + area(s))
+| }
+| moved <- function(n: I64) -> I64 {
+|   pts: Dict<Str, Point> <- Dict.empty()
+|   for (i in List.range(1i64, n)) pts <- Dict.insert(pts, Num.to_str(i %% 4i64), (x = i, y = 0i64))
+|   pts <- Dict.remove(pts, "2")
+|   doubled <- Dict.map(pts, function(k, p) (x = p$x * 2i64, y = p$y))
+|   List.walk(Dict.values(doubled), 0i64, function(total, p) total + p$x + p$y)
+| }
+| pairs <- function() -> I64 {
+|   d <- Dict.from_list([("a", [1i64, 2i64]), ("b", [3i64])])
+|   d <- Dict.insert_all(d, Dict.single("c", [4i64, 5i64, 6i64]))
+|   List.walk(Dict.values(d), 0i64, function(total, items) total + List.len(items))
+| }
+| flags <- function(names: List<Str>) -> List<Str> {
+|   seen: Dict<Str, Bool> <- Dict.empty()
+|   for (name in names) seen <- Dict.insert(seen, name, Str.starts_with(name, "x"))
+|   Dict.keys(Dict.drop_if(seen, function(k, v) v))
+| }
+| distinct <- function(a: I64, b: I64) -> I64 {
+|   d: Dict<I64, I64> <- Dict.empty()
+|   d <- Dict.insert(d, a, 1i64)
+|   Dict.len(Dict.insert(d, b, 2i64))
+| }
+| shared_lists <- function() -> I64 {
+|   a <- Dict.from_list([("a", [1i64, 2i64]), ("b", [3i64]), ("c", [])])
+|   b <- Dict.insert(Dict.insert(a, "b", [4i64]), "d", [5i64])
+|   Dict.len(Dict.keep_shared(a, b))
+| }
+| float_keys <- function() -> F64 {
+|   d <- Dict.insert(Dict.single(1.5, 2i64), 2.5, 3i64)
+|   e <- Dict.from_list([(0.5, 1i64), (1.5, 9i64)])
+|   Num.to_f64(List.sum(Dict.values(d)) + List.sum(Dict.values(e)))
+| }
+| print(shapes(10i64))
+| print(moved(9i64))
+| print(pairs())
+| print(flags(["xa", "b", "xb", "c"]))
+| print(distinct(1i64, 4294967297i64))
+| print(shared_lists())
+| print(float_keys())
+
 env RY_TYPED_LOG 1
 run ry run --runtime ry dicts.R
 expect exit 0
 expect stdout "[(\"a\", 1i64), (\"b\", 1i64), (\"d\", 2i64), (\"z\", 9i64)]\n[1] 87.5"
 expect stderr "typed: compiled for [Vector { item: Str, array: true }] -> Vector { item: Record(0), array: true }"
 expect stderr "typed: compiled for [I64] -> Dbl"
+
+run ry run --runtime ry values.R
+expect exit 0
+expect stdout "[1] 25\n48i64\n6i64\n[\"b\", \"c\"]\n2i64\n2i64\n[1] 15"
+expect stderr "typed: compiled for [I64] -> Dbl"
+expect stderr "typed: compiled for [] -> I64"
+expect stderr "typed: compiled for [I64] -> I64"
+expect stderr "typed: compiled for [Vector { item: Str, array: true }] -> Vector { item: Str, array: true }"
+expect stderr "typed: compiled for [I64, I64] -> I64"
+expect stderr "typed: compiled for [] -> Dbl"

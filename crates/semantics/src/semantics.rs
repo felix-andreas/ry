@@ -1480,7 +1480,7 @@ pub fn file_elaborations(db: &dyn Db, file: SourceFile) -> Vec<Elaboration> {
             check
                 .checked_types
                 .iter()
-                .map(|&(id, ty)| Elaboration::CheckedType(module.range(id) + offset, ty)),
+                .map(|(id, ty)| Elaboration::CheckedType(module.range(*id) + offset, ty.clone())),
         );
     }
     elaborations.extend(signature_elaborations(db, file));

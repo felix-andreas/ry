@@ -20,11 +20,12 @@ use {
             Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind, Module,
             PatId, PatternKind, Symbol, UnaryOperator,
         },
+        infer::apply_definition,
         naming::{BindingKind, ItemNaming},
         stubs::{declaring_namespace, is_native_function, is_ry_type},
         types::{
             Atomic, Constraint, FunctionType, Name, NativeScalar, Ty, TyKind, TypeScheme,
-            array_element, dict_entries, set_element,
+            array_element, dict_entries, set_element, stored_spelling,
         },
     },
     rustc_hash::FxHashSet,
@@ -369,8 +370,10 @@ impl Uncompiled {
                  function literal"
             ),
             Uncompiled::DictEntries => format!(
-                "a `Dict` whose keys or values are not `I64`, `F64` or `Str` {YET}. Keep the \
-                 values in a `List` and store their positions in the dictionary"
+                "a `Dict` whose keys are not `I64`, `F64` or `Str`, or whose values hold \
+                 something other than numbers, strings, `Bool`s, lists, records, tuples and tags, \
+                 {YET}. Convert the keys to `I64` or `Str`, and keep such values in a `List` whose \
+                 positions the dictionary stores"
             ),
             Uncompiled::SetElements => format!(
                 "a `Set` whose elements are not `I64` or `Str` {YET}. Convert the elements to \
@@ -1936,7 +1939,7 @@ impl<'a, 'db> Judge<'a, 'db> {
     fn peel(&self, mut ty: Ty<'db>) -> Ty<'db> {
         let db = self.judged.db;
         for _ in 0..8 {
-            let TyKind::Named(name, _) = ty.kind(db) else {
+            let TyKind::Named(name, arguments) = ty.kind(db) else {
                 break;
             };
             let text = name.text(db);
@@ -1950,7 +1953,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             else {
                 break;
             };
-            ty = definition.body;
+            ty = apply_definition(db, definition, arguments);
         }
         ty
     }
@@ -1961,15 +1964,17 @@ impl<'a, 'db> Judge<'a, 'db> {
     fn keyed_blocker(&self, ty: Ty<'db>) -> Option<Uncompiled> {
         let db = self.judged.db;
         if let Some((key, value)) = dict_entries(db, ty) {
-            let fits = [key, value].into_iter().all(|entry| {
-                matches!(
-                    entry.kind(db),
-                    TyKind::Native(NativeScalar::I64 | NativeScalar::F64 | NativeScalar::Str)
-                        | TyKind::Scalar(Atomic::Double | Atomic::Character)
-                        | TyKind::Var(_)
-                )
-            });
-            return (!fits).then_some(Uncompiled::DictEntries);
+            let key_fits = matches!(
+                key.kind(db),
+                TyKind::Native(NativeScalar::I64 | NativeScalar::F64 | NativeScalar::Str)
+                    | TyKind::Scalar(Atomic::Double | Atomic::Character)
+                    | TyKind::Var(_)
+            );
+            // The lowering lays the values out by the checker's spelling of their type, so a
+            // value fits exactly when it has one; a variable is settled by a later insert.
+            let value_fits = matches!(value.kind(db), TyKind::Var(_))
+                || stored_spelling(db, value, &|ty| self.peel(ty), &mut String::new(), 0).is_some();
+            return (!(key_fits && value_fits)).then_some(Uncompiled::DictEntries);
         }
         let element = set_element(db, ty)?;
         let fits = matches!(

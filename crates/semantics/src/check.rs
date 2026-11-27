@@ -469,13 +469,14 @@ pub enum NativeValueKind {
 /// the runtime may build empty or convert from R (for `List.from_r_missing`, of the `:Ok`
 /// payloads), the key and value types of a dictionary or the element type of a set built from no
 /// entries, or the number a `Num.from_r` gives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum CheckedType {
     List(ListItems),
-    /// A `Dict` of `I64`, `F64` or `Str` keys and values, the ones typed code holds unboxed.
+    /// A `Dict` of `I64`, `F64` or `Str` keys, and values whose type `value` spells as a
+    /// signature does ([`stored_spelling`]), so typed code lays them out before any entry exists.
     Dict {
         key: ListItems,
-        value: ListItems,
+        value: Box<str>,
     },
     /// A `Set` of `I64` or `Str` elements.
     Set(ListItems),
@@ -486,12 +487,10 @@ pub enum CheckedType {
 impl CheckedType {
     /// The name `.ry_items` takes: `"I64"` for a list or a number, `"Dict<Str, I64>"` for a
     /// dictionary, `"Set<Str>"` for a set.
-    pub fn name(self) -> std::borrow::Cow<'static, str> {
-        match self {
+    pub fn name(&self) -> std::borrow::Cow<'static, str> {
+        match *self {
             CheckedType::List(items) => items.name().into(),
-            CheckedType::Dict { key, value } => {
-                format!("Dict<{}, {}>", key.name(), value.name()).into()
-            }
+            CheckedType::Dict { key, ref value } => format!("Dict<{}, {value}>", key.name()).into(),
             CheckedType::Set(element) => format!("Set<{}>", element.name()).into(),
             CheckedType::Number(NumberType::I64) => "I64".into(),
             CheckedType::Number(NumberType::F64) => "F64".into(),
@@ -1346,12 +1345,19 @@ fn check_item_in<'db>(
                 };
             }
             if let Some((key, value)) = crate::types::dict_entries(db, ty) {
-                let key = key_items(key);
+                let mut value_spelling = String::new();
+                crate::types::stored_spelling(
+                    db,
+                    value,
+                    &|ty| stored_view(db, &context.table, ty),
+                    &mut value_spelling,
+                    0,
+                )?;
                 return Some((
                     id,
                     CheckedType::Dict {
-                        key: key?,
-                        value: scalar(value)?,
+                        key: key_items(key)?,
+                        value: value_spelling.into(),
                     },
                 ));
             }
@@ -26152,6 +26158,34 @@ fn list_items<'db>(db: &'db dyn Db, item: Ty<'db>) -> Option<ListItems> {
         _ if crate::types::is_ry_value_type(db, item) => Some(ListItems::RyValues),
         _ => None,
     }
+}
+
+/// What `ty` stands for at its top in this item's inference: a variable's binding, or for an
+/// unbound one the tag union it is bounded by (every tag shares one layout, so the bound alone
+/// fixes the storage), and a nominal's representation.
+fn stored_view<'db>(db: &'db dyn Db, table: &InferenceTable<'db>, ty: Ty<'db>) -> Ty<'db> {
+    let mut ty = table.resolve(db, ty);
+    for _ in 0..8 {
+        if let Some(bound) = ty.as_var(db).and_then(|var| table.bound_of(var)) {
+            let bound = table.resolve(db, bound);
+            return if crate::types::is_tag_type(db, bound) {
+                bound
+            } else {
+                ty
+            };
+        }
+        let TyKind::Named(name, arguments) = ty.kind(db) else {
+            return ty;
+        };
+        if crate::types::array_element(db, ty).is_some() {
+            return ty;
+        }
+        let Some(representation) = table.representation(db, *name, arguments) else {
+            return ty;
+        };
+        ty = table.resolve(db, representation);
+    }
+    ty
 }
 
 /// The payload of the `:Ok` member of a `Result`, the item type of a `List.from_r_missing`.
