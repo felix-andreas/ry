@@ -801,9 +801,9 @@ n: I64
 xs: List<F64>
 q: Unknown
 scaled: Unknown
-95..96 error[type-mismatch] expected a numeric value (`integer` or `double`), found `I64`. The function's arithmetic on this value gives an R number (as `/`, `^` or a number literal operand does), so declare its parameter `I64` to compute in ry numbers
-98..99 error[type-mismatch] expected a numeric value (`integer` or `double`), found `I64`. The function's arithmetic on this value gives an R number (as `/`, `^` or a number literal operand does), so declare its parameter `I64` to compute in ry numbers
-124..129 error[type-mismatch] this function is passed `F64`, but its parameter `x` is used as a numeric value (`integer` or `double`). Its arithmetic gives an R number (as `/`, `^` or a number literal operand does), so declare the parameter `F64` to compute in ry numbers
+95..96 error[type-mismatch] expected a numeric value (`integer` or `double`), found `I64`: this takes R's numbers only. To compute in ry numbers, declare the parameter `I64`
+98..99 error[type-mismatch] expected a numeric value (`integer` or `double`), found `I64`: this takes R's numbers only. To compute in ry numbers, declare the parameter `I64`
+124..129 error[type-mismatch] this function is passed `F64`, but its parameter `x` is used as a numeric value (`integer` or `double`), which takes R's numbers only. To compute in ry numbers, declare the parameter `F64`
 
 #---- a_num_parameter_takes_both_families
 #: <T: num> fn(a: T, b: T) -> T
@@ -818,3 +818,44 @@ ratio: <T: num> fn(a: T, b: T) -> double
 x: F64
 y: integer
 121..126 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T`. This arithmetic gives an R number, so declare `<T: numeric>`, which admits R's numbers and the classes with arithmetic between two of their values
+
+#---- a_tested_num_value_takes_r_numbers
+odd <- function(a) { b <- a %% a; if (b) 1L else 2L }
+flip <- function(a) { b <- -a; !b }
+both <- function(a) { b <- a * a; b && TRUE }
+o <- odd(3i64)
+f <- flip(3i64)
+w <- both(3i64)
+r <- odd(3)
+#++++
+odd: <T: numeric> fn(a: T) -> integer
+flip: <T: numeric> fn(a: T) -> logical
+both: <T: numeric> fn(a: T) -> logical
+o: Unknown
+f: Unknown
+w: Unknown
+r: integer
+145..149 error[type-mismatch] expected a numeric value (`integer` or `double`), found `I64`: this takes R's numbers only. To compute in ry numbers, declare the parameter `I64`
+161..165 error[type-mismatch] expected a numeric value (`integer` or `double`), found `I64`: this takes R's numbers only. To compute in ry numbers, declare the parameter `I64`
+177..181 error[type-mismatch] expected a numeric value (`integer` or `double`), found `I64`: this takes R's numbers only. To compute in ry numbers, declare the parameter `I64`
+
+#---- a_declared_num_subtracts_to_its_own_type
+#: <T: num> fn(a: T, b: T) -> T
+minus <- function(a, b) a - b
+d <- minus(3i64, 1i64)
+#++++
+minus: <T: num> fn(a: T, b: T) -> T
+d: I64
+
+#---- num_beside_a_literal_or_scalar_bound
+x <- 0
+y <- -x
+z: I64 <- y
+grow <- function(a, n) { b <- a * a; for (i in 1:n) {}; b + n }
+g <- grow(c(1, 2), 3L)
+#++++
+x: I64
+y: I64
+z: I64
+grow: <T: numeric, U: scalar numeric> fn(a: T, n: U) -> double
+g: double

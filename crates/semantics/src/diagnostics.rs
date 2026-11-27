@@ -3716,15 +3716,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             constraint_description(*constraint),
             renderer.render(db, *found)
         ),
-        // A ry number meets R's arithmetic where the result is R's own type, which differs
-        // from the operand's (`x / 2`, `x + 1`), so the fix is to compute in ry numbers.
+        // A ry number meets a value that takes R's numbers only (`x / 2`, `x + 1`, a
+        // condition, a declared `numeric`), so the fix is to compute in ry numbers.
         TypeErrorKind::ConstraintViolation {
             constraint: Constraint::Numeric | Constraint::Arithmetic,
             found,
         } if matches!(found.kind(db), TyKind::Native(native) if native.is_number()) => {
             let found = renderer.render(db, *found);
             format!(
-                "expected a numeric value (`integer` or `double`), found `{found}`. The function's arithmetic on this value gives an R number (as `/`, `^` or a number literal operand does), so declare its parameter `{found}` to compute in ry numbers"
+                "expected a numeric value (`integer` or `double`), found `{found}`: this takes R's numbers only. To compute in ry numbers, declare the parameter `{found}`"
             )
         }
         // A class may satisfy `arithmetic` by declaring an operator method, so a class that
@@ -3750,6 +3750,15 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                     "expected {description}, found `{found}`. This arithmetic gives an R number, so declare `<{found}: numeric>`, which admits R's numbers and the classes with arithmetic between two of their values"
                 ),
             }
+        }
+        TypeErrorKind::ConstraintViolation {
+            constraint: Constraint::Arithmetic,
+            found,
+        } if matches!(found.kind(db), TyKind::Rigid(_)) => {
+            let found = renderer.render(db, *found);
+            format!(
+                "expected a numeric value (`integer` or `double`), found `{found}`. This arithmetic takes R's numbers and the classes with arithmetic, so declare `<{found}: arithmetic>`"
+            )
         }
         TypeErrorKind::ConstraintViolation { constraint, found } => format!(
             "expected {}, found `{}`",
@@ -3821,7 +3830,7 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                         if ry_number =>
                     {
                         format!(
-                            "this function is passed `{passed}`, but {position} is used as {}. Its arithmetic gives an R number (as `/`, `^` or a number literal operand does), so declare the parameter `{passed}` to compute in ry numbers",
+                            "this function is passed `{passed}`, but {position} is used as {}, which takes R's numbers only. To compute in ry numbers, declare the parameter `{passed}`",
                             constraint_description(*constraint)
                         )
                     }

@@ -815,10 +815,14 @@ impl Constraint {
             | (Key, literal @ (WholeLiteral { .. } | FracLiteral)) => literal,
             (BoolLiteral, Key) | (Key, BoolLiteral) => BoolLiteral,
             (StrLiteral, AtomicElement) | (AtomicElement, StrLiteral) => AtomicElement,
-            // `num` meets a ry constraint as that constraint, and any R constraint or literal as
-            // R's `numeric`: a value used both ways is an R number.
+            // `num` meets a ry constraint as that constraint, and any R constraint as R's
+            // `numeric`: a value used both ways is an R number. `Key` has no exact meet (a
+            // number of either family that is a key), so it takes the R side.
             (Num, c @ (Number | Int | Frac)) | (c @ (Number | Int | Frac), Num) => c,
             (Num, ArrayItem) | (ArrayItem, Num) => Number,
+            // Every type a number literal admits is a number, so the literal stays open.
+            (Num, literal @ (WholeLiteral { .. } | FracLiteral))
+            | (literal @ (WholeLiteral { .. } | FracLiteral), Num) => literal,
             (Num, c) | (c, Num) => return Numeric.join(c),
             (BoolLiteral, c @ (AtomicElement | Numeric | ScalarNumeric))
             | (c @ (AtomicElement | Numeric | ScalarNumeric), BoolLiteral) => c,

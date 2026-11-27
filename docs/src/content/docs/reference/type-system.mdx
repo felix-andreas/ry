@@ -755,8 +755,8 @@ A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
 `<T: numeric> fn(values: T) -> T`. These are the constraints:
 
 - `num` admits everything `numeric` does and the ry numbers `I64` and `F64`. It is what `a + b`,
-  `a * b`, `a %% b`, `a %/% b` and `-a` ask of values of one type, because their result has that
-  type in R and in ry alike, so `function(a, b) a * b` is `<T: num> fn(a: T, b: T) -> T` and
+  `a * b`, `a %% b`, `a %/% b` and `-a` ask of values of one type, because on two numbers of one
+  type they give that type in R and in ry alike (R reads a `logical` as `integer`), so `function(a, b) a * b` is `<T: num> fn(a: T, b: T) -> T` and
   multiplies two `F64`s as well as two `double`s.
 - `numeric` admits `integer` and `double`, scalar or vector, and any class whose arithmetic takes
   two of its values, which an [operator method](#operator-methods-on-a-class) such as
@@ -836,9 +836,9 @@ any two distinct type parameters, and for an unannotated parameter that a scalar
 does arithmetic is a type error, and `atomic` does not imply `numeric`. Under
 `<T: arithmetic> fn(x: T) -> T`, `x + 1` checks and `x + x` is a type error that says to declare
 `<T: num>`, because a `T` such as `Date` adds a number and not another `Date`. Unary minus asks
-`num` too, as R has no `-` on a single `Date`. Under `<T: num>`, `x / x` is a type error that says
-to declare `<T: numeric>`, because an `F64` divides to an `F64` and not to the `double` R's `/`
-gives.
+`num` too, as R has no `-` on a single `Date`. Under `<T: num>`, `x - x` is a `T`, because `num`
+admits no class, and `x / x` is a type error that says to declare `<T: numeric>`, because an `F64`
+divides to an `F64` and not to the `double` R's `/` gives.
 
 Using a type parameter as a vector element, `T[]`, imposes the `atomic` bound, because a vector holds
 only atomic elements. This is what makes element-preserving signatures possible. With
@@ -2768,7 +2768,9 @@ a number it takes the [`arithmetic` constraint](#constraints), and two operands 
 `^`, whose result is always `double`, two operands of one type take `numeric` instead. A
 difference `a - b` is the exception and asks only `arithmetic`, because R subtracts two dates or
 two times. That difference is not a value of the operands' type (two dates subtract to a
-`difftime`), so it is `double`, the representation every arithmetic class shares.
+`difftime`), so it is `double`, the representation every arithmetic class shares. A value tested
+as a condition (`if (a %% 2L)`, `!a`, `a && b`) takes `numeric`, because a condition reads R's
+truth of a number, which a ry number lacks.
 
 - `function(x) x + 1L` is `<T: arithmetic> fn(x: T) -> T`, and calling it with `"oops"` is a type
   error.

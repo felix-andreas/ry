@@ -10511,6 +10511,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             TyKind::Any | TyKind::Unknown => return unknown(self.db),
             TyKind::Var(_) | TyKind::Rigid(_) => {
+                self.narrow_condition_number(operand_range, resolved);
                 if !self.condition_coerces(resolved)
                     && !self.reads_open_defaulted_formal(operand, resolved)
                 {
@@ -12038,6 +12039,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let condition_range = self.blame_range(condition);
         let inferred = self.infer(condition);
         let resolved = self.structural(inferred);
+        self.narrow_condition_number(condition_range, resolved);
         if (self.condition_coerces(resolved) && !self.is_long_combine(condition))
             || self.reads_open_defaulted_formal(condition, resolved)
             || self.reads_null_placeholder(condition, resolved)
@@ -12180,15 +12182,21 @@ impl<'db, 'a> Checker<'db, 'a> {
             // A value already required to be numeric (`if (n %% 2L)`) coerces like a number.
             TyKind::Var(_) => matches!(
                 self.table.open_constraint(self.db, ty),
-                Some(
-                    Constraint::Numeric
-                        | Constraint::Num
-                        | Constraint::Arithmetic
-                        | Constraint::ScalarNumeric
-                )
+                Some(Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric)
             ),
-            TyKind::Rigid(name) => self.table.rigid_operand(self.db, *name),
+            TyKind::Rigid(name) => {
+                self.table
+                    .rigid_satisfies(self.db, *name, Constraint::Arithmetic)
+            }
             _ => false,
+        }
+    }
+
+    /// A condition reads a number's truth as R does, which a ry number lacks, so an open value
+    /// that `num` admits takes R's numbers only once it is tested.
+    fn narrow_condition_number(&mut self, range: TextRange, ty: Ty<'db>) {
+        if self.table.open_constraint(self.db, ty) == Some(Constraint::Num) {
+            self.constrain_operand(range, ty, Constraint::Numeric);
         }
     }
 
@@ -12309,6 +12317,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                                     self.table.variable_constraint(self.db, side),
                                     None | Some(
                                         Constraint::Numeric
+                                            | Constraint::Num
                                             | Constraint::Arithmetic
                                             | Constraint::ScalarNumeric
                                     )
@@ -12341,7 +12350,11 @@ impl<'db, 'a> Checker<'db, 'a> {
         if let Some(ty) = flexible {
             // R subtracts two dates or two times (their difference is a `difftime`), so `a - b`
             // asks no more of a class than `a + 1` does, while `a + b` asks `numeric`.
-            let tied_difference = tied && operator == BinaryOperator::Subtract;
+            // A declared `<T: num>` admits no class, so its difference is `T`.
+            let num_rigid = matches!(ty.kind(self.db), TyKind::Rigid(name)
+                if self.table.rigid_satisfies(self.db, *name, Constraint::Num)
+                    && !self.table.rigid_satisfies(self.db, *name, Constraint::Arithmetic));
+            let tied_difference = tied && operator == BinaryOperator::Subtract && !num_rigid;
             // When the result is the operands' own type (`a * b`, not `a / b`), a ry number
             // computes it as well as an R one does.
             let constraint = match (tied && !tied_difference, always_double) {
