@@ -10963,7 +10963,7 @@ unsafe fn op_call_generic(state: &mut Activation<'_, '_>, instruction: Instructi
         } else if matches!(function.kind(), SexpType::Special | SexpType::Builtin) {
             // Named after the special, so a profile summary says which one took the frame's
             // environment: `<-` for an assignment form the compiler left to it, `switch`, `quote`.
-            state.env(Reify::Builtin(function))?
+            state.env(Reify::Builtin(function.primitive_index()))?
         } else {
             state.env(Reify::Site(Site::GenericCall))?
         };
