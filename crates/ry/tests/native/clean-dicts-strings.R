@@ -6,6 +6,13 @@ word_counts <- function(text: Str) -> Dict<Str, I64> {
   }
   counts
 }
+sized_counts <- function(words: List<Str>) -> I64 {
+  counts: Dict<Str, I64> <- Dict.with_capacity(List.len(words))
+  for (word in words) {
+    counts <- Dict.insert(counts, word, Result.with_default(Dict.get(counts, word), 0) + 1)
+  }
+  Dict.len(counts)
+}
 describe <- function(text: Str) -> Str {
   counts <- word_counts(Str.with_ascii_lowercased(text))
   distinct <- Set.len(Set.from_list(Str.split_on(text, " ")))
@@ -17,3 +24,4 @@ describe <- function(text: Str) -> Str {
   f"{Dict.len(counts)} words, {distinct} spellings, {the} the, {parsed}"
 }
 cat(describe("The cat and the hat and THE bat"), "\n")
+print(sized_counts(["a", "b", "a"]))
