@@ -104,9 +104,10 @@ pub unsafe fn eval_symbol_reporting(
             return None;
         }
         match find_variable(context, symbol, Gc::adopt(env), true) {
-            Found::Value(value) if !handles::is_missing_argument(value) => {
-                Some((value.raw(), settled(value).is_none()))
-            }
+            Found::Value(value) if !handles::is_missing_argument(value) => match settled(value) {
+                Some(value) => Some((value.raw(), false)),
+                None => Some((value.raw(), true)),
+            },
             _ => None,
         }
     });
@@ -853,13 +854,28 @@ fn call_active_setter(
 /// `<<-`: assigns to the nearest existing binding above `env`, or in the global environment.
 /// The caller holds `value` rooted.
 pub unsafe fn set_var(symbol: Sexp, value: Sexp, env: Sexp) -> R<()> {
-    handles::in_caller_scope(|context| {
-        let (symbol, value, env) = (
-            Local::adopt(symbol),
-            handles::held(context, value),
-            Local::adopt(env),
-        );
-        assign_outward(context, symbol, value, env)
+    // A plain binding outward is reachable from `env`, so a raw caller changes it without the
+    // handle scope and roots of the general path.
+    let binding = handles::reading(|context| {
+        enclosing_binding(context, Gc::adopt(symbol), Gc::adopt(env))
+            .map(|(_, binding)| binding)
+            .filter(|binding| !binding.is_active())
+            .map(Gc::raw)
+    });
+    if let Some(binding) = binding {
+        crate::heap().set_binding_value(binding, value)?;
+        binding.set_gp_bits(gp::BINDING_MISSING | gp::BINDING_ABSENT, false);
+        return Ok(());
+    }
+    cold(|| {
+        handles::in_caller_scope(|context| {
+            let (symbol, value, env) = (
+                Local::adopt(symbol),
+                handles::held(context, value),
+                Local::adopt(env),
+            );
+            assign_outward(context, symbol, value, env)
+        })
     })
 }
 
