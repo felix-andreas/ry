@@ -2652,8 +2652,10 @@ impl Lowering<'_> {
                 self.attribute_reads(&values[supplied..], &spans[supplied..], strict)?;
                 Ok(values)
             });
-        let defaults = std::mem::replace(&mut self.formal_reads, held);
+        // A refused call leaves no reads behind for the next inlined function to take.
+        let defaults = std::mem::take(&mut self.formal_reads);
         let values = values?;
+        self.formal_reads = held;
         self.formal_reads.resize(supplied, SmallVec::new());
         self.formal_reads.extend(defaults);
         Ok(values)
