@@ -525,6 +525,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - The evaluator's specials take handles; call machinery and assignment move with the bytecode loop
 - Argument matching and slot binding take handles, and a new frame's formals go through a window
 - Variable lookups take handles, and a frame holds its objects in `Held`
+- Promise forcing takes handles, and a live frame is read through `LiveFrame`
 
 ## C API, R home and packages
 

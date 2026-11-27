@@ -515,10 +515,14 @@ pub fn find_variable<'a>(
 unsafe fn dots_binding(env: Sexp) -> R<Sexp> {
     let dots = symbols().dots;
     if env.has_gp(gp::SLOT_FRAME) && crate::heap().may_bind(env, dots) {
-        let frame = &interp().frames[pending_owner(env)];
-        if frame.role != crate::FrameRole::Inlined
-            && let Some(value) = slot_content(frame.function.raw(), frame.slots as usize, dots)
-        {
+        let found = handles::reading(|context| {
+            let frame = handles::pending_frame(context, Gc::adopt(env));
+            if frame.role() == crate::FrameRole::Inlined {
+                return None;
+            }
+            slot_content(frame, Gc::adopt(dots)).map(|value| value.raw())
+        });
+        if let Some(value) = found {
             return Ok(value);
         }
     }
@@ -537,18 +541,25 @@ pub unsafe fn slot_binding(env: Sexp, symbol: Sexp, forcing: bool) -> Option<Sex
     if !crate::heap().may_bind(env, symbol) {
         return None;
     }
-    let frame = &interp().frames[pending_owner(env)];
-    // A slot of a frame run without its body ([`run_inlined`]) holds the value where a cell
-    // would hold the forced promise of the caller's variable ([`box_slots`]), which a reader
-    // of the binding itself expects.
-    if frame.role == crate::FrameRole::Inlined && !forcing {
-        return None;
-    }
-    let value = slot_content(frame.function.raw(), frame.slots as usize, symbol)?;
-    if value == missing_arg() || value.kind() == SexpType::Dots {
-        return None;
-    }
-    (forcing || !is_reference(value)).then_some(value)
+    handles::reading(|context| {
+        let frame = handles::pending_frame(context, Gc::adopt(env));
+        // A slot of a frame run without its body ([`run_inlined`]) holds the value where a
+        // cell would hold the forced promise of the caller's variable ([`box_slots`]), which a
+        // reader of the binding itself expects.
+        if frame.role() == crate::FrameRole::Inlined && !forcing {
+            return None;
+        }
+        let value = slot_content(frame, Gc::adopt(symbol))?;
+        if handles::is_missing_argument(value)
+            || value.r_type() == SexpType::Dots
+            || (!forcing
+                && value.has_flag(gp::ARGUMENT_REFERENCE)
+                && value.r_type() == SexpType::Promise)
+        {
+            return None;
+        }
+        Some(value.raw())
+    })
 }
 
 /// The `*tmp*` a complex assignment running in `env` or an environment it encloses stands for,
@@ -924,77 +935,93 @@ pub unsafe fn forced_promise(code: Sexp, value: Sexp) -> R<Sexp> {
     triple(SexpType::Promise, value, code, nil())
 }
 
+/// The value of `promise`, which forcing it gives the first time it is asked for. The value of
+/// a promise forced here stays rooted in the caller's handle scope, because the promise may
+/// hold the only reference to it.
 pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     if promise.car() != unbound() {
         return Ok(promise.car());
     }
-    if promise.has_gp(PROMISE_SEEN) {
+    handles::in_caller_scope(|context| {
+        force_unforced(context, Local::<Promise>::adopt(promise)).map(Local::raw)
+    })
+}
+
+/// The value `promise` stands for, which forcing it gives the first time it is asked for.
+pub fn promise_value<'s>(context: &mut Cx<'s>, promise: Local<'_, Promise>) -> R<Local<'s>> {
+    let result = promise.read(context).result();
+    if !handles::is_unbound(result) {
+        return Ok(context.root(result));
+    }
+    force_unforced(context, promise)
+}
+
+/// The value a promise or plain value stands for ([`promise_value`]).
+pub fn forced_value<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>> {
+    match object.downcast::<Promise>() {
+        Some(promise) => promise_value(context, promise),
+        None => Ok(object),
+    }
+}
+
+/// Forces the unforced `promise`. The code being forced can remove the last binding that holds
+/// the promise (a loader placeholder replaces itself), and the promise's environment must
+/// outlive its code, so the promise is rooted while it runs, as GNU R's pending-promise stack
+/// keeps it.
+fn force_unforced<'s>(context: &mut Cx<'s>, promise: Local<'_, Promise>) -> R<Local<'s>> {
+    if promise.read(context).has_flag(PROMISE_SEEN) {
         return Err(error(
             "promise already under evaluation: recursive default argument reference or earlier problems?",
         ));
     }
-    moves::forcing(promise)?;
+    handles::forcing(context, promise)?;
     activity::count(Counter::PromisesForced);
-    // The code being forced can remove the last binding that holds the promise (a loader
-    // placeholder replaces itself), and the promise's environment must outlive its code, so
-    // the promise stays a root while it runs, as GNU R's pending-promise stack keeps it.
-    let heap = crate::heap();
-    let mark = heap.handle_mark();
-    heap.root(promise);
-    promise.set_gp_bits(PROMISE_SEEN, true);
-    if promise.has_gp(PROMISE_INTERRUPTED) {
-        promise.set_gp_bits(PROMISE_INTERRUPTED, false);
-        // A handler that jumps out of this warning leaves the promise marked as under
-        // evaluation, as in GNU R, where the next force reports the recursive reference.
-        if let Err(unwind) = conditions::warning("restarting interrupted promise evaluation") {
-            heap.release_handles(mark);
-            return Err(unwind);
+    context.scope(|context| {
+        let promise = context.root(promise);
+        promise.read(context).set_flags(PROMISE_SEEN, true);
+        if promise.read(context).has_flag(PROMISE_INTERRUPTED) {
+            promise.read(context).set_flags(PROMISE_INTERRUPTED, false);
+            // A handler that jumps out of this warning leaves the promise marked as under
+            // evaluation, as in GNU R, where the next force reports the recursive reference.
+            handles::warning(context, "restarting interrupted promise evaluation")?;
         }
-    }
-    let code = promise.attrib();
-    let env = promise.tag();
-    // Releasing a promise's last counted reference clears its environment, so an unforced
-    // promise without one was held by a root the counts do not see, and forcing it here would
-    // evaluate its code nowhere instead of where it was made.
-    if env == nil()
-        && !promise.has_gp(gp::ARGUMENT_REFERENCE)
-        && (cfg!(debug_assertions)
-            || syntax::testing::invariants_enabled()
-            || heap::gc_stress_requested().is_some())
-    {
-        panic!("a promise was forced after its last counted reference was released");
-    }
+        let result = promise_result(context, promise);
+        promise.read(context).set_flags(PROMISE_SEEN, false);
+        promise
+            .read(context)
+            .set_flags(PROMISE_INTERRUPTED, result.is_err());
+        settle(context, promise, result?)
+    })
+}
+
+/// What running the code of the unforced `promise` gives, before an annotation checks it.
+fn promise_result<'s>(context: &mut Cx<'s>, promise: Local<'s, Promise>) -> R<Local<'s>> {
+    let fields = promise.read(context);
     // A reference records the code it runs itself (`force_reference`): reading another frame's
     // variable runs none, and forcing the promise it reaches records the code that runs.
-    let result = if promise.has_gp(gp::ARGUMENT_REFERENCE) {
-        force_reference(promise)
-    } else {
-        let slot_frame = env.has_gp(gp::SLOT_FRAME);
-        let _recorded = crate::capture::evaluating(|| {
-            if slot_frame {
-                interp().frames[pending_owner(env)].function.raw().tag()
-            } else {
-                env
-            }
-        });
-        if slot_frame {
-            slot_promise_value(promise, pending_owner(env))
-        } else if code.kind() == SexpType::Bytecode {
-            bytecode::run_promise(code, env)
-        } else {
-            eval(promise.cdr(), env)
-        }
-    };
-    promise.set_gp_bits(PROMISE_SEEN, false);
-    promise.set_gp_bits(PROMISE_INTERRUPTED, result.is_err());
-    let settled = result.and_then(|value| settle_promise(promise, value));
-    heap.release_handles(mark);
-    // Releasing dropped the roots made while forcing, and the promise may hold the only
-    // reference to the value it returns.
-    if let Ok(value) = &settled {
-        heap.root(*value);
+    if fields.has_flag(gp::ARGUMENT_REFERENCE) {
+        return force_reference(context, promise);
     }
-    settled
+    let Some(environment) = fields.environment().downcast::<Environment>() else {
+        // Releasing a promise's last counted reference clears its environment, so an unforced
+        // promise without one was held by a root the counts do not see, and forcing it here
+        // would evaluate its code nowhere instead of where it was made.
+        if cfg!(debug_assertions)
+            || syntax::testing::invariants_enabled()
+            || heap::gc_stress_requested().is_some()
+        {
+            panic!("a promise was forced after its last counted reference was released");
+        }
+        return handles::run_promise_code(context, promise);
+    };
+    if environment.has_flag(gp::SLOT_FRAME) {
+        let frame = handles::pending_frame(context, environment);
+        let owner = frame.index();
+        let _recorded = handles::evaluating(context, || frame.enclosure().value());
+        return slot_promise_value(context, promise, owner);
+    }
+    let _recorded = handles::evaluating(context, || environment.value());
+    handles::run_promise_code(context, promise)
 }
 
 /// The value of a promise over the environment of the live slot frame at `owner`. While every
@@ -1005,35 +1032,53 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
 /// whose slot holds an empty argument.
 #[cold]
 #[inline(never)]
-unsafe fn slot_promise_value(promise: Sexp, owner: usize) -> R<Sexp> {
-    let frame = &interp().frames[owner];
-    let (function, header, env) = (frame.function.raw(), frame.slots as usize, frame.env.raw());
-    let code = promise.attrib();
-    if code.kind() == SexpType::Bytecode {
-        // Code compiled against the slot table reads by name by itself once the frame's header
+fn slot_promise_value<'s>(
+    context: &mut Cx<'s>,
+    promise: Local<'s, Promise>,
+    owner: usize,
+) -> R<Local<'s>> {
+    let fields = promise.read(context);
+    if let Some(code) = fields.compiled().downcast::<Bytecode>() {
+        // Code compiled without a slot table reads by name by itself once the frame's header
         // register holds the environment.
-        return if code.cdr().element(bytecode::SLOTS) == nil() {
-            bytecode::run_promise(code, frame.pending.raw())
-        } else {
-            bytecode::run_promise_on_slots(code, function, owner, header)
-        };
+        let slot_table = handles::constants(code)
+            .and_then(|pool| pool.get(bytecode::SLOTS))
+            .is_some_and(|table| table.raw() != nil());
+        if !slot_table {
+            return handles::run_promise_code(context, promise);
+        }
+        let code = context.root(code);
+        return handles::run_on_slots(context, code, owner);
     }
-    let expression = promise.cdr();
-    if env != nil() {
-        return eval(expression, env);
+    let frame = handles::live_frame(context, owner);
+    let expression = fields.code();
+    if let Some(environment) = frame.environment() {
+        let (expression, environment) = (context.root(expression), context.root(environment));
+        return handles::evaluate(context, expression, environment);
     }
-    if expression.kind() == SexpType::Symbol && dot_dot_index(expression).is_none() {
-        match slot_content(function, header, expression) {
-            None => return eval_enclosed_name(expression, function.tag(), owner),
-            Some(value) if value.kind() == SexpType::Promise => return force_promise(value),
-            Some(value) if value != missing_arg() => return Ok(value),
-            Some(_) => {}
+    if let Some(symbol) = expression.downcast::<Symbol>()
+        && dot_dot_position(symbol.name().bytes()).is_none()
+    {
+        match slot_content(frame, symbol) {
+            None => {
+                let symbol = context.root(symbol);
+                return eval_enclosed_name(context, symbol, owner);
+            }
+            Some(value) => {
+                if let Some(promise) = value.downcast::<Promise>() {
+                    let promise = context.root(promise);
+                    return promise_value(context, promise);
+                }
+                if !handles::is_missing_argument(value) {
+                    return Ok(context.root(value));
+                }
+            }
         }
     }
-    eval(
-        expression,
-        frame_env(owner, Reify::Site(Site::PromiseOverFrame))?,
-    )
+    let expression = context.root(expression);
+    let environment =
+        handles::frame_environment(context, owner, Reify::Site(Site::PromiseOverFrame))?;
+    handles::evaluate(context, expression, environment)
 }
 
 /// Where a name is bound for a live slot frame's pending environment ([`pending_name`]).
@@ -1048,47 +1093,62 @@ pub enum PendingName {
 /// nothing yet ([`gp::PENDING_FRAME`]), found where forcing a promise of it there finds it
 /// ([`slot_promise_value`]), but without forcing or evaluating anything.
 pub unsafe fn pending_name(pending: Sexp, symbol: Sexp) -> PendingName {
-    let frame = &interp().frames[pending_owner(pending)];
-    match slot_content(frame.function.raw(), frame.slots as usize, symbol) {
-        Some(value) => PendingName::Slot(value),
-        None => PendingName::Enclosure(frame.function.raw().tag()),
-    }
+    handles::reading(|context| {
+        let frame = handles::pending_frame(context, Gc::adopt(pending));
+        match slot_content(frame, Gc::adopt(symbol)) {
+            Some(value) => PendingName::Slot(value.raw()),
+            None => PendingName::Enclosure(frame.enclosure().raw()),
+        }
+    })
 }
 
-/// What the variable `symbol` is bound to from `env`, read without forcing or calling anything:
-/// a value or a promise, or `None` for an unbound name, the empty argument or an active
-/// binding. A slot frame's environment that binds nothing yet has its names read from the
-/// frame's slots.
+/// [`peeked_variable`] for raw callers.
 pub unsafe fn peek_variable(symbol: Sexp, env: Sexp) -> Option<Sexp> {
-    let env = if env.has_gp(gp::PENDING_FRAME) {
-        match pending_name(env, symbol) {
-            PendingName::Slot(value) => {
-                return (value != missing_arg()).then_some(value);
-            }
-            PendingName::Enclosure(enclosure) => enclosure,
-        }
-    } else {
-        env
-    };
-    let cell = find_cell(symbol, env)?;
-    let value = cell.cdr();
-    (!cell.has_gp(gp::ACTIVE_BINDING) && value != missing_arg() && value != unbound())
-        .then_some(value)
+    handles::reading(|context| {
+        peeked_variable(context, Gc::adopt(symbol), Gc::adopt(env)).map(|value| value.raw())
+    })
 }
 
-/// The value `env`'s own frame binds `symbol` to, read without forcing or calling anything, as
-/// [`peek_variable`] reads it but without looking in an enclosing environment.
-pub unsafe fn peek_frame_variable(symbol: Sexp, env: Sexp) -> Option<Sexp> {
-    let cell = if env.has_gp(gp::PENDING_FRAME) {
-        match pending_name(env, symbol) {
-            PendingName::Slot(value) => return (value != missing_arg()).then_some(value),
-            PendingName::Enclosure(_) => return None,
+/// What the variable `symbol` is bound to from `environment`, read without forcing or calling
+/// anything: a value or a promise, or `None` for an unbound name, the empty argument or an
+/// active binding. A slot frame's environment that binds nothing yet has its names read from
+/// the frame's slots.
+pub fn peeked_variable<'c>(
+    context: &'c Cx<'_>,
+    symbol: Gc<'_, Symbol>,
+    environment: Gc<'c, Environment>,
+) -> Option<Gc<'c>> {
+    let environment = if environment.has_flag(gp::PENDING_FRAME) {
+        let frame = handles::pending_frame(context, environment);
+        match slot_content(frame, symbol) {
+            Some(value) => return (!handles::is_missing_argument(value)).then_some(value),
+            None => frame.enclosure(),
         }
     } else {
-        crate::heap().frame_cell(env, symbol)?
+        environment
     };
-    let value = cell.cdr();
-    (!cell.has_gp(gp::ACTIVE_BINDING) && value != missing_arg() && value != unbound())
+    peeked_binding(visible_binding(context, symbol, environment)?)
+}
+
+/// The value `environment`'s own frame binds `symbol` to, read without forcing or calling
+/// anything, as [`peeked_variable`] reads it but without looking in an enclosing environment.
+pub fn peeked_frame_variable<'c>(
+    context: &'c Cx<'_>,
+    symbol: Gc<'_, Symbol>,
+    environment: Gc<'c, Environment>,
+) -> Option<Gc<'c>> {
+    if environment.has_flag(gp::PENDING_FRAME) {
+        let value = slot_content(handles::pending_frame(context, environment), symbol)?;
+        return (!handles::is_missing_argument(value)).then_some(value);
+    }
+    peeked_binding(handles::frame_binding(context, environment, symbol)?)
+}
+
+/// What `binding` holds when reading it calls nothing: a value or a promise, and not the empty
+/// argument, an unbound marker or an active binding's function.
+fn peeked_binding(binding: Gc<'_, Binding>) -> Option<Gc<'_>> {
+    let value = binding.content();
+    (!binding.is_active() && !handles::is_missing_argument(value) && !handles::is_unbound(value))
         .then_some(value)
 }
 
@@ -1107,71 +1167,63 @@ pub unsafe fn settle_unforced(promise: Sexp, value: Sexp) -> R<Sexp> {
 /// ([`gp::SLOT_FRAME`]), which the environment records.
 #[inline]
 unsafe fn pending_owner(pending: Sexp) -> usize {
-    match crate::heap().slot_owner(pending) {
-        Some(owner)
-            if interp()
-                .frames
-                .get(owner)
-                .is_some_and(|frame| frame.pending.raw() == pending) =>
-        {
-            owner
-        }
-        _ => panic!("the environment of a slot frame was used after the frame returned without it"),
-    }
+    handles::reading(|context| handles::pending_frame(context, Gc::adopt(pending)).index())
 }
 
-/// What the live slot frame at `owner` binds `symbol` to, read without moving a variable: from
-/// its slot while the frame keeps every variable there, and from the cells its environment
-/// holds and the slots together after. `None` when the frame leaves the name to the enclosure.
-pub unsafe fn frame_slot(owner: usize, symbol: Sexp) -> Option<Sexp> {
-    let frame = &interp().frames[owner];
-    if frame.env.raw() != nil()
-        && let Some(cell) = crate::heap().own_cell(frame.env.raw(), symbol)
+/// What the live slot `frame` binds `symbol` to, read without moving a variable: from its slot
+/// while the frame keeps every variable there, and from the cells its environment holds and the
+/// slots together after. `None` when the frame leaves the name to the enclosure.
+pub(crate) fn frame_variable<'c>(
+    context: &'c Cx<'_>,
+    frame: handles::LiveFrame<'c, '_>,
+    symbol: Gc<'_, Symbol>,
+) -> Option<Gc<'c>> {
+    if let Some(environment) = frame.environment()
+        && let Some(binding) = context.own_binding(environment, symbol)
     {
-        let value = cell.cdr();
-        return (value != unbound()).then_some(value);
+        let value = binding.content();
+        return (!handles::is_unbound(value)).then_some(value);
     }
-    slot_content(frame.function.raw(), frame.slots as usize, symbol)
+    slot_content(frame, symbol)
 }
 
-/// [`frame_slot`] for the slot frame whose environment `env` binds nothing yet.
-pub unsafe fn pending_slot(env: Sexp, symbol: Sexp) -> Option<Sexp> {
-    frame_slot(pending_owner(env), symbol)
-}
-
-/// The content of the slot of `function`'s frame at register `header` that binds `symbol`, or
-/// `None` when the slots leave the name to the enclosure: no slot has that name, or it is unbound.
-unsafe fn slot_content(function: Sexp, header: usize, symbol: Sexp) -> Option<Sexp> {
-    let slot = bytecode::frame_slot_names(function)
-        .iter()
-        .position(|&name| name == symbol)?;
-    let value = *bytecode::register_address(header + 1 + slot);
-    (value != unbound()).then_some(value)
+/// What the slot of the live slot `frame` named `symbol` holds, or `None` when the slots leave
+/// the name to the enclosure: no slot has that name, or it is unbound.
+#[inline]
+fn slot_content<'c>(frame: handles::LiveFrame<'c, '_>, symbol: Gc<'_, Symbol>) -> Option<Gc<'c>> {
+    frame
+        .slot_named(symbol)
+        .filter(|&value| !handles::is_unbound(value))
 }
 
 /// The variable `symbol` a replacement in the running slot frame changes, read from `enclosure`
 /// because the frame's own slots do not bind it. GNU R evaluates the name in the enclosure, so
 /// an unbound one is reported against the call that made the enclosure, if a call did.
-pub(crate) unsafe fn enclosed_value(symbol: Sexp, enclosure: Sexp) -> R<Sexp> {
+pub(crate) fn enclosed_value<'s>(
+    context: &mut Cx<'s>,
+    symbol: Local<'_, Symbol>,
+    enclosure: Local<'_, Environment>,
+) -> R<Local<'s>> {
     interp().visible = true;
-    match eval_symbol(symbol, enclosure) {
-        Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
+    let (symbol, enclosure) = (context.root(symbol), context.root(enclosure));
+    match symbol_value(context, symbol, enclosure) {
+        Err(Unwind::Error(failure)) => Err(handles::signal_error(context, failure)),
         result => result,
     }
 }
 
-/// Evaluates `symbol` from `enclosure` for the slot frame at `owner`, whose own slots do not bind
-/// it, so an unbound name is reported against the frame's call and not the enclosure's.
-unsafe fn eval_enclosed_name(symbol: Sexp, enclosure: Sexp, owner: usize) -> R<Sexp> {
+/// Evaluates `symbol` from the enclosure of the slot frame at `owner`, whose own slots do not
+/// bind it, so an unbound name is reported against the frame's call and not the enclosure's.
+fn eval_enclosed_name<'s>(
+    context: &mut Cx<'s>,
+    symbol: Local<'s, Symbol>,
+    owner: usize,
+) -> R<Local<'s>> {
     interp().visible = true;
-    let lexical = || {
-        interp()
-            .frames
-            .get(owner)
-            .map_or(nil(), |frame| frame.call.raw())
-    };
-    match eval_symbol_reporting(symbol, enclosure, lexical, ArgumentReader::Getvar) {
-        Err(Unwind::Error(failure)) => Err(conditions::signal_error(failure)),
+    let enclosure = context.root(handles::live_frame(context, owner).enclosure());
+    let lexical = move |context: &Cx<'s>| context.root(handles::live_frame(context, owner).call());
+    match symbol_value_reporting(context, symbol, enclosure, lexical, ArgumentReader::Getvar) {
+        Err(Unwind::Error(failure)) => Err(handles::signal_error(context, failure)),
         result => result,
     }
 }
@@ -1529,20 +1581,6 @@ pub unsafe fn code_reference(owner: usize, code: Sexp) -> R<Sexp> {
     Ok(reference)
 }
 
-/// The environment an environment reference ([`env_reference`]) reads its variable in.
-#[inline]
-unsafe fn reference_env(reference: Sexp) -> Option<Sexp> {
-    let tag = reference.tag();
-    (tag.kind() == SexpType::Environment).then_some(tag)
-}
-
-/// The compiled code a code reference ([`code_reference`]) runs.
-#[inline]
-pub(crate) unsafe fn reference_code(reference: Sexp) -> Option<Sexp> {
-    let tag = reference.tag();
-    (tag.kind() == SexpType::Bytecode).then_some(tag)
-}
-
 /// The next free reference of [`Interp::references`], naming `symbol`, with its target left
 /// for the caller to fill in.
 unsafe fn pooled_reference(symbol: Sexp) -> R<Sexp> {
@@ -1645,10 +1683,14 @@ pub unsafe fn is_reference(value: Sexp) -> bool {
     value.kind() == SexpType::Promise && value.has_gp(gp::ARGUMENT_REFERENCE)
 }
 
-/// The frame position and slot an argument reference names. A reference is released before
-/// its frame returns, so one that names another frame is a broken invariant.
-pub(crate) unsafe fn reference_target(reference: Sexp) -> (usize, u32) {
-    let &[owner, slot, header] = values::ints(reference.attrib()) else {
+/// The frame position and slot a slot frame's argument reference names. A reference is released
+/// before its frame returns, so one that names another frame is a broken invariant.
+fn reference_target(reference: Gc<'_, Promise>) -> (usize, u32) {
+    let target = reference
+        .compiled()
+        .standard::<Integer>()
+        .map(|target| target.as_slice());
+    let Some(&[owner, slot, header]) = target else {
         panic!("an argument reference lost its target");
     };
     if interp()
@@ -1663,165 +1705,188 @@ pub(crate) unsafe fn reference_target(reference: Sexp) -> (usize, u32) {
 
 /// Forces an unforced argument reference: what its variable holds in the frame it names, read
 /// as a promise of the variable's name in that frame would read it.
-unsafe fn force_reference(reference: Sexp) -> R<Sexp> {
-    let symbol = reference.cdr();
+fn force_reference<'s>(context: &mut Cx<'s>, reference: Local<'s, Promise>) -> R<Local<'s>> {
+    let fields = reference.read(context);
     // An environment or code reference runs its caller's code as the promise it stands for
-    // would, so the boundary-call recorder sees that code as it sees a promise's.
-    if let Some(env) = reference_env(reference) {
-        let _recorded = crate::capture::evaluating(|| env);
-        let code = reference.attrib();
-        if code.kind() == SexpType::Bytecode {
-            return bytecode::run_promise(code, env);
-        }
-        return eval(symbol, env);
+    // would, so the boundary-call recorder sees that code as it sees a promise's. An
+    // environment reference keeps its code and environment where a promise does.
+    if let Some(environment) = fields.environment().downcast::<Environment>() {
+        let _recorded = handles::evaluating(context, || environment.value());
+        return handles::run_promise_code(context, reference);
     }
-    let (owner, slot) = reference_target(reference);
-    let frame = &interp().frames[owner];
-    if let Some(code) = reference_code(reference) {
-        let (function, slots) = (frame.function.raw(), frame.slots as usize);
-        let _recorded = crate::capture::evaluating(|| function.tag());
-        return bytecode::run_promise_on_slots(code, function, owner, slots);
+    let (owner, slot) = reference_target(fields);
+    let frame = handles::live_frame(context, owner);
+    if let Some(code) = fields.environment().downcast::<Bytecode>() {
+        let _recorded = handles::evaluating(context, || frame.enclosure().value());
+        let code = context.root(code);
+        return handles::run_on_slots(context, code, owner);
     }
-    if frame.env.raw() != nil() {
-        return eval(symbol, frame.env.raw());
+    let Some(symbol) = fields.code().downcast::<Symbol>() else {
+        panic!("a slot frame's argument reference names no variable");
+    };
+    if let Some(environment) = frame.environment() {
+        let (symbol, environment) = (context.root(symbol), context.root(environment));
+        return handles::evaluate(context, symbol.value(), environment);
     }
-    if slot == NO_REFERENCE_SLOT {
-        return eval_enclosed_name(symbol, frame.function.raw().tag(), owner);
+    let value = (slot != NO_REFERENCE_SLOT)
+        .then(|| frame.slot(slot as usize))
+        .filter(|&value| !handles::is_unbound(value));
+    let Some(value) = value else {
+        let symbol = context.root(symbol);
+        return eval_enclosed_name(context, symbol, owner);
+    };
+    if let Some(promise) = value.downcast::<Promise>() {
+        let promise = context.root(promise);
+        return promise_value(context, promise);
     }
-    let value = *bytecode::register_address(frame.slots as usize + 1 + slot as usize);
-    if value == unbound() {
-        return eval_enclosed_name(symbol, frame.function.raw().tag(), owner);
+    if handles::is_missing_argument(value) {
+        let symbol = context.root(symbol);
+        let environment =
+            handles::frame_environment(context, owner, Reify::Site(Site::PromiseOverFrame))?;
+        return handles::evaluate(context, symbol.value(), environment);
     }
-    if value.kind() == SexpType::Promise {
-        return force_promise(value);
-    }
-    if value == missing_arg() {
-        return eval(
-            symbol,
-            frame_env(owner, Reify::Site(Site::PromiseOverFrame))?,
-        );
-    }
-    Ok(value)
+    Ok(context.root(value))
+}
+
+/// [`settle_without_code`] for raw callers.
+pub unsafe fn settled_without_code(promise: Sexp) -> R<Option<Sexp>> {
+    Ok(handles::reading(|context| {
+        settle_without_code(context, Gc::adopt(promise)).map(|value| value.raw())
+    }))
 }
 
 /// The value an unforced `promise` stands for when reading it runs no R code, settling it as
 /// forcing would: its code is a constant, or names a variable bound to a value, or to another
 /// such promise, as when a wrapper passes its argument on (`g <- function(x) typeof(x)`). Every
 /// promise on the chain is settled, innermost first, as forcing the outer one settles them.
-/// `None`, with nothing settled, when the chain ends in code that would run.
-pub unsafe fn settled_without_code(promise: Sexp) -> R<Option<Sexp>> {
+/// `None`, with nothing settled, when the chain ends in code that would run or passes a promise
+/// whose value an annotation checks, which forcing checks.
+pub fn settle_without_code<'c>(context: &'c Cx<'_>, promise: Gc<'c, Promise>) -> Option<Gc<'c>> {
     // Longer chains are rare, and a chain that loops back (`function(x = y, y = x)`) must end
     // in the error forcing raises, so it is left to forcing.
     const CHAIN_LIMIT: usize = 16;
-    if promise.has_gp(PROMISE_SEEN | PROMISE_INTERRUPTED) {
-        return Ok(None);
+    let unsettled = PROMISE_SEEN | PROMISE_INTERRUPTED | gp::CHECKED_PROMISE;
+    if promise.has_flag(unsettled) {
+        return None;
     }
-    let mut chain: SmallVec<[Sexp; 4]> = smallvec![promise];
+    let mut chain: SmallVec<[Gc<'c, Promise>; 4]> = smallvec![promise];
     let mut link = promise;
     let mut value = loop {
-        let next = if is_reference(link) {
-            reference_link(link)
+        let next = if link.has_flag(gp::ARGUMENT_REFERENCE) {
+            reference_link(context, link)
         } else {
-            promise_link(link)
-        };
-        let Some(next) = next else {
-            return Ok(None);
-        };
-        if next.kind() != SexpType::Promise {
+            promise_link(context, link)
+        }?;
+        let Some(next) = next.downcast::<Promise>() else {
             break next;
+        };
+        let result = next.result();
+        if !handles::is_unbound(result) {
+            break result;
         }
-        if next.car() != unbound() {
-            break next.car();
-        }
-        if chain.len() == CHAIN_LIMIT || next.has_gp(PROMISE_SEEN | PROMISE_INTERRUPTED) {
-            return Ok(None);
+        if chain.len() == CHAIN_LIMIT || next.has_flag(unsettled) {
+            return None;
         }
         chain.push(next);
         link = next;
     };
     for &link in chain.iter().rev() {
-        value = settle_unforced(link, value)?;
+        // Two arguments can read through the same promise, which only the first settles.
+        let result = link.result();
+        if handles::is_unbound(result) {
+            context.settle_promise(link, value);
+        } else {
+            value = result;
+        }
     }
-    Ok(Some(value))
+    Some(value)
 }
 
 /// What reading an unforced plain promise yields without running code: its constant code, or
 /// the binding its variable code names (a value or another promise). A promise over a slot
-/// frame's pending environment reads its variable from the frame's slots ([`peek_variable`]).
-unsafe fn promise_link(promise: Sexp) -> Option<Sexp> {
-    if promise.has_gp(gp::CHECKED_PROMISE) {
-        return None;
-    }
-    let code = promise.cdr();
-    match code.kind() {
-        SexpType::Symbol if code != missing_arg() && code != symbols().dots => {
-            peek_variable(code, promise.tag())
-        }
-        SexpType::Symbol | SexpType::Language | SexpType::Promise | SexpType::Bytecode => None,
+/// frame's pending environment reads its variable from the frame's slots ([`peeked_variable`]).
+fn promise_link<'c>(context: &'c Cx<'_>, promise: Gc<'c, Promise>) -> Option<Gc<'c>> {
+    let code = promise.code();
+    match code.r_type() {
+        SexpType::Symbol => variable_link(context, code, promise.environment()),
+        SexpType::Language | SexpType::Promise | SexpType::Bytecode => None,
         _ => Some(code),
     }
 }
 
 /// What reading an unforced argument reference yields without running code: what its
 /// variable holds, a value or a promise.
-unsafe fn reference_link(reference: Sexp) -> Option<Sexp> {
-    if let Some(env) = reference_env(reference) {
-        let expression = reference.cdr();
-        if reference.attrib().kind() == SexpType::Bytecode {
-            return None;
-        }
-        return match expression.kind() {
-            // The environment can be a slot frame's pending one, as a call evaluated in
-            // `parent.frame()` makes it.
-            SexpType::Symbol if expression != missing_arg() && expression != symbols().dots => {
-                peek_variable(expression, env)
-            }
-            SexpType::Symbol => None,
-            SexpType::Language => None,
-            _ => Some(expression),
-        };
+fn reference_link<'c>(context: &'c Cx<'_>, reference: Gc<'c, Promise>) -> Option<Gc<'c>> {
+    let Some(environment) = reference.environment().downcast::<Environment>() else {
+        return referenced_variable(context, reference);
+    };
+    if reference.compiled().r_type() == SexpType::Bytecode {
+        return None;
     }
-    reference_variable(reference)
+    let expression = reference.code();
+    match expression.r_type() {
+        // The environment can be a slot frame's pending one, as a call evaluated in
+        // `parent.frame()` makes it.
+        SexpType::Symbol => variable_link(context, expression, environment.value()),
+        SexpType::Language => None,
+        _ => Some(expression),
+    }
+}
+
+/// What the variable named by the symbol `code` reads from `environment` without running code
+/// ([`peeked_variable`]), or `None` for the empty argument and `...`, which are not variables.
+fn variable_link<'c>(context: &'c Cx<'_>, code: Gc<'c>, environment: Gc<'c>) -> Option<Gc<'c>> {
+    let symbol = code.downcast::<Symbol>()?;
+    if symbol.is(handles::missing_argument()) || symbol.is(handles::symbol(|symbols| symbols.dots))
+    {
+        return None;
+    }
+    peeked_variable(context, symbol, environment.downcast::<Environment>()?)
+}
+
+/// [`referenced_variable`] for raw callers.
+pub unsafe fn reference_variable(reference: Sexp) -> Option<Sexp> {
+    handles::reading(|context| {
+        referenced_variable(context, Gc::adopt(reference)).map(|value| value.raw())
+    })
 }
 
 /// What the variable a slot frame's argument reference names holds, read where forcing the
 /// reference would read it but without forcing or calling anything: a value or a promise, or
 /// `None` for a code reference, an environment reference, or an unbound, missing or active
 /// variable. A variable the frame keeps in no slot, or whose slot is unbound, is read in the
-/// frame's enclosure ([`peek_variable`]), so a global passed from a slot frame needs no
+/// frame's enclosure ([`peeked_variable`]), so a global passed from a slot frame needs no
 /// environment for that frame.
-pub unsafe fn reference_variable(reference: Sexp) -> Option<Sexp> {
-    if reference_env(reference).is_some() || reference_code(reference).is_some() {
+pub fn referenced_variable<'c>(context: &'c Cx<'_>, reference: Gc<'c, Promise>) -> Option<Gc<'c>> {
+    if reference.environment().raw() != nil() {
         return None;
     }
-    let symbol = reference.cdr();
+    let symbol = reference.code().downcast::<Symbol>()?;
     let (owner, slot) = reference_target(reference);
-    let frame = &interp().frames[owner];
-    if frame.env.raw() != nil() {
-        return peek_variable(symbol, frame.env.raw());
+    let frame = handles::live_frame(context, owner);
+    if let Some(environment) = frame.environment() {
+        return peeked_variable(context, symbol, environment);
     }
-    let value = if slot == NO_REFERENCE_SLOT {
-        unbound()
-    } else {
-        *bytecode::register_address(frame.slots as usize + 1 + slot as usize)
-    };
-    if value == unbound() {
-        return peek_variable(symbol, frame.function.raw().tag());
+    let value = (slot != NO_REFERENCE_SLOT)
+        .then(|| frame.slot(slot as usize))
+        .filter(|&value| !handles::is_unbound(value));
+    match value {
+        None => peeked_variable(context, symbol, frame.enclosure()),
+        Some(value) => (!handles::is_missing_argument(value)).then_some(value),
     }
-    (value != missing_arg()).then_some(value)
 }
 
 /// Whether the variable an unforced argument reference names is a missing argument in its
 /// frame, as [`value_is_missing`] asks of a promise of a name.
 unsafe fn reference_is_missing(reference: Sexp) -> R<bool> {
     let symbol = reference.cdr();
-    if reference_code(reference).is_some() || symbol.kind() != SexpType::Symbol {
+    if reference.tag().kind() == SexpType::Bytecode || symbol.kind() != SexpType::Symbol {
         return Ok(false);
     }
-    let env = if let Some(env) = reference_env(reference) {
-        env
+    let env = if reference.tag().kind() == SexpType::Environment {
+        reference.tag()
     } else {
-        let (owner, _) = reference_target(reference);
+        let (owner, _) = reference_target(Gc::adopt(reference));
         interp().frames[owner].env.raw()
     };
     if env != nil() {
@@ -1830,7 +1895,7 @@ unsafe fn reference_is_missing(reference: Sexp) -> R<bool> {
         }
         return symbol_is_missing(symbol, env, false);
     }
-    let (owner, slot) = reference_target(reference);
+    let (owner, slot) = reference_target(Gc::adopt(reference));
     let frame = &interp().frames[owner];
     if slot == NO_REFERENCE_SLOT {
         return Ok(false);
@@ -1925,7 +1990,8 @@ unsafe fn reference_promise(reference: Sexp) -> R<[Sexp; 4]> {
     if reference.car() != unbound() {
         return Ok([reference.car(), symbol, nil(), nil()]);
     }
-    let (env, expression) = if let Some(env) = reference_env(reference) {
+    let (env, expression) = if reference.tag().kind() == SexpType::Environment {
+        let env = reference.tag();
         let code = reference.attrib();
         (
             env,
@@ -1936,10 +2002,14 @@ unsafe fn reference_promise(reference: Sexp) -> R<[Sexp; 4]> {
             },
         )
     } else {
-        let (owner, _) = reference_target(reference);
+        let (owner, _) = reference_target(Gc::adopt(reference));
         (
             pending_env(owner)?,
-            reference_code(reference).unwrap_or(symbol),
+            if reference.tag().kind() == SexpType::Bytecode {
+                reference.tag()
+            } else {
+                symbol
+            },
         )
     };
     activity::count(Counter::PromisesCreated);
@@ -1993,10 +2063,10 @@ pub unsafe fn pending_env(owner: usize) -> R<Sexp> {
 pub unsafe fn promise_env(promise: Sexp) -> R<Sexp> {
     if promise.has_gp(gp::ARGUMENT_REFERENCE)
         && promise.car() == unbound()
-        && reference_env(promise).is_none()
+        && promise.tag().kind() != SexpType::Environment
     {
         return frame_env(
-            reference_target(promise).0,
+            reference_target(Gc::adopt(promise)).0,
             Reify::Site(Site::PromiseEnvironment),
         );
     }
@@ -2004,11 +2074,27 @@ pub unsafe fn promise_env(promise: Sexp) -> R<Sexp> {
 }
 
 /// Stores `value` as the value of the unforced `promise`, as forcing it to that value does.
-pub unsafe fn settle_promise(promise: Sexp, mut value: Sexp) -> R<Sexp> {
-    if promise.has_gp(gp::CHECKED_PROMISE) {
-        value = crate::annotations::check_forced(promise, value)?;
+pub unsafe fn settle_promise(promise: Sexp, value: Sexp) -> R<Sexp> {
+    if !promise.has_gp(gp::CHECKED_PROMISE) {
+        crate::heap().settle_promise(promise, value);
+        return Ok(value);
     }
-    crate::heap().settle_promise(promise, value);
+    handles::in_caller_scope(|context| {
+        let promise = context.root(Gc::<Promise>::adopt(promise));
+        let value = handles::adopt(context, value);
+        settle(context, promise, value).map(Local::raw)
+    })
+}
+
+/// Stores `value` as the value of the unforced `promise`, after checking it against the
+/// annotation a checked promise carries, whose conversion is what the promise stores.
+fn settle<'s>(context: &mut Cx<'s>, promise: Local<'s, Promise>, value: Local<'s>) -> R<Local<'s>> {
+    let value = if promise.read(context).has_flag(gp::CHECKED_PROMISE) {
+        handles::check_forced(context, promise, value)?
+    } else {
+        value
+    };
+    context.settle_promise(promise, value);
     Ok(value)
 }
 
