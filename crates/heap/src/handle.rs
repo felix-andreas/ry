@@ -199,6 +199,29 @@ impl<'s> Cx<'s> {
         unsafe { (*self.heap.as_ptr()).discard_frame(environment.raw(), value.raw()) }
     }
 
+    /// Binds `symbol` to `value` in `environment`'s own frame, making the binding when the
+    /// frame has none ([`Heap::define`]).
+    pub fn define(
+        &mut self,
+        environment: impl Pointer<Environment>,
+        symbol: impl Pointer<Symbol>,
+        value: impl Pointer<Value>,
+    ) -> HeapResult<()> {
+        // SAFETY: the heap and the three objects are live, and `&mut self` means no `Gc` of this
+        // context is in use while a new binding allocates.
+        unsafe { (*self.heap.as_ptr()).define(environment.raw(), symbol.raw(), value.raw()) }
+    }
+
+    /// Stores `value` in `binding` ([`Heap::set_binding_value`]).
+    pub fn set_binding_value(
+        &mut self,
+        binding: impl Pointer<Binding>,
+        value: impl Pointer<Value>,
+    ) -> HeapResult<()> {
+        // SAFETY: the heap and both objects are live, and `&mut self` covers the write barrier.
+        unsafe { (*self.heap.as_ptr()).set_binding_value(binding.raw(), value.raw()) }
+    }
+
     /// Tells a method's slot frame environment the names of its dispatch variables
     /// ([`Heap::expect_dispatch_variables`]).
     #[inline]
@@ -1119,6 +1142,19 @@ impl<T: Kind> Held<T> {
     #[inline]
     pub fn raw(&self) -> Sexp {
         self.raw
+    }
+}
+
+impl Held<Value> {
+    /// `NULL`, which lives as long as the heap, so it needs no root source.
+    #[inline]
+    pub fn null(cx: &Cx<'_>) -> Held<Value> {
+        // SAFETY: the context's heap outlives every borrow of it.
+        let raw = unsafe { (*cx.heap.as_ptr()).nil() };
+        Held {
+            raw,
+            kind: PhantomData,
+        }
     }
 }
 

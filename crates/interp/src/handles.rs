@@ -4125,8 +4125,7 @@ impl<'c, 's> LiveFrame<'c, 's> {
     /// Forgets the environment of a returning slot frame that dies with it, so the frame's pop
     /// releases nothing through it.
     pub fn drop_environment(self) {
-        // SAFETY: `NULL` lives as long as the heap.
-        crate::interp().frames[self.index].env = unsafe { Held::adopt(values::nil()) };
+        crate::interp().frames[self.index].env = Held::null(self.context);
     }
 }
 
@@ -4415,25 +4414,21 @@ pub fn tmp_variable<'a>(
 /// Binds `symbol` to `value` in the frame of `environment` itself, making the binding when
 /// the frame has none.
 pub fn define_binding(
-    _context: &mut Cx<'_>,
+    context: &mut Cx<'_>,
     environment: Local<'_, Environment>,
     symbol: Local<'_, Symbol>,
     value: Local<'_>,
 ) -> R<()> {
-    // SAFETY: the three handles are rooted, and a new binding allocates, which `&mut Cx`
-    // permits.
-    unsafe { Ok(crate::heap().define(environment.raw(), symbol.raw(), value.raw())?) }
+    Ok(context.define(environment, symbol, value)?)
 }
 
 /// Stores `value` in `binding`.
 pub fn assign_binding(
-    _context: &mut Cx<'_>,
+    context: &mut Cx<'_>,
     binding: Local<'_, Binding>,
     value: Local<'_>,
 ) -> R<()> {
-    // SAFETY: both are rooted, and the store's write barrier may allocate, which `&mut Cx`
-    // permits.
-    unsafe { Ok(crate::heap().set_binding_value(binding.raw(), value.raw())?) }
+    Ok(context.set_binding_value(binding, value)?)
 }
 
 /// Whether `value` is the marker of an unbound variable or an unforced promise's value.
