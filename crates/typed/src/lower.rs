@@ -4271,14 +4271,42 @@ impl Lowering<'_> {
                     return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
                 };
                 let collection = self.value(collection)?;
+                let collection = self.capacity_operand(name, collection)?;
                 let spare = self.value(spare)?;
                 let spare = self.to_i64(spare)?;
+                // The interpreter answers an empty list with a fresh logical array and raises
+                // an error for a negative count or room past 2^30, so those cases run there.
+                let count = if name == "List.reserve" {
+                    self.builder.emit(Type::I64, Op::Length(collection))
+                } else {
+                    self.builder.emit(Type::I64, Op::DictLen(collection))
+                };
                 let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+                let limit = self
+                    .builder
+                    .emit(Type::I64, Op::Const(Constant::I64(1 << 30)));
+                if name == "List.reserve" {
+                    let empty = self
+                        .builder
+                        .emit(Type::Lgl, Op::Compare(Compare::Eq, Item::I64, count, zero));
+                    self.fail_if(empty);
+                }
                 let negative = self
                     .builder
                     .emit(Type::Lgl, Op::Compare(Compare::Lt, Item::I64, spare, zero));
                 self.fail_if(negative);
-                self.capacity_operand(name, collection)
+                let huge = self
+                    .builder
+                    .emit(Type::Lgl, Op::Compare(Compare::Ge, Item::I64, spare, limit));
+                self.fail_if(huge);
+                let room = self
+                    .builder
+                    .emit(Type::I64, Op::Arith(Arith::Add, Item::I64, count, spare));
+                let crowded = self
+                    .builder
+                    .emit(Type::Lgl, Op::Compare(Compare::Ge, Item::I64, room, limit));
+                self.fail_if(crowded);
+                Ok(collection)
             }
             "List.release_excess_capacity" | "Dict.release_excess_capacity" => {
                 let [collection] = arguments.exactly(1)?[..] else {
@@ -5289,6 +5317,7 @@ impl Lowering<'_> {
             },
         )?;
         let payload = payload.ok_or(Refusal::new("a callback that never gives `:Ok`"))?;
+        self.usable(payload)?;
         Ok((payload, failure))
     }
 
@@ -6575,7 +6604,7 @@ impl Lowering<'_> {
             _ => 3,
         })?;
         let Some((&function, lists)) = parameters.split_last() else {
-            return Err(Refusal::new("a malformed `List.map2`"));
+            return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
         };
         let mut held: SmallVec<[(Local, Item); 3]> = SmallVec::new();
         for &list in lists {
@@ -6628,7 +6657,9 @@ impl Lowering<'_> {
             "a mapped function whose value a list cannot hold",
         ))?;
         if matches!(result_item, Item::Int | Item::Lgl) && self.builder.ty(value) != Type::Bool {
-            return Err(Refusal::new("a `List.map2` to a list of R scalars"));
+            return Err(Refusal(Cow::Owned(format!(
+                "a `{name}` to a list of R scalars"
+            ))));
         }
         let result_item = if self.builder.ty(value) == Type::Bool {
             Item::Lgl
@@ -9221,6 +9252,7 @@ impl Lowering<'_> {
     /// The list or dictionary of a capacity function, which gives it back as it is: native
     /// lists and dictionaries grow by doubling and keep no reserved room a program could read.
     fn capacity_operand(&mut self, name: &str, collection: Local) -> Result<Local, Refusal> {
+        self.usable(collection)?;
         let fits = if name.starts_with("List.") {
             matches!(
                 self.builder.ty(collection),

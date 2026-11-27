@@ -11121,18 +11121,26 @@ impl<'db, 'a> Checker<'db, 'a> {
         // A literal for a ry function's free type parameter is open, so a later argument decides
         // it: the `""` that `List.walk(xs, "", f)` starts from is the `Str` that `f` takes. The
         // parameter may hold an earlier argument's open literal, as the `2` beside `:Ok(1)` in
-        // `Result.with_default(:Ok(1), 2)` does.
-        if self.ry_callee
+        // `Result.with_default(:Ok(1), 2)` does. A `key` parameter keeps a text or logical
+        // literal open too, because each of its types is a key, so the `"a"` of
+        // `Dict.single("a", 1)` is the `Str` an annotated result asks for.
+        let key_literal = open == Some(Constraint::Key)
             && matches!(
-                open,
-                Some(
-                    Constraint::Unconstrained
-                        | Constraint::WholeLiteral { .. }
-                        | Constraint::FracLiteral
-                        | Constraint::StrLiteral
-                        | Constraint::BoolLiteral
-                )
-            )
+                module.kind(value),
+                ExpressionKind::Literal(LiteralKind::String(_) | LiteralKind::Logical(_))
+            );
+        if self.ry_callee
+            && (key_literal
+                || matches!(
+                    open,
+                    Some(
+                        Constraint::Unconstrained
+                            | Constraint::WholeLiteral { .. }
+                            | Constraint::FracLiteral
+                            | Constraint::StrLiteral
+                            | Constraint::BoolLiteral
+                    )
+                ))
         {
             let ty = if let Some(literal) = number_literal(module, value) {
                 let constraint = if literal.is_fraction() {
@@ -20169,10 +20177,13 @@ impl<'db, 'a> Checker<'db, 'a> {
         function: &FunctionType<'db>,
         arguments: &[CallArgument<'db>],
     ) -> Vec<TypeError<'db>> {
+        // A ry constructor such as `Dict.single(key, value)` takes only type variables, so its
+        // result marks it as ry's own too.
         let ry_callee = function
             .positional
             .iter()
             .chain(function.named.iter().map(|parameter| &parameter.ty))
+            .chain(std::iter::once(&function.ret))
             .any(|&parameter| {
                 let parameter = self.table.resolve(self.db, parameter);
                 is_ry_value_type(self.db, parameter)
