@@ -99,6 +99,12 @@ unsourced, as in pkgload), and reloads only when you call it, as devtools' does.
   `.ry_cache/`, so a load after `ry check`, the editor or an earlier load reuses the findings of
   every file that has not changed and checks only the rest. The first reload builds an analysis
   that the process keeps, and every reload after it redoes only what the edit affects.
+- **A typed package runs as the checker elaborates it.** On ry's runtime, when a file is strict or
+  holds ry syntax or `#:` annotations, the load and every reload that changes something first
+  analyze the package and run the [elaborated](/reference/type-system) text, so `3` in an
+  `-> I64` function is `3i64` and an empty `List<Str>` keeps its item type, exactly as under
+  `ry run`. A file that fails to elaborate refuses the load with
+  `<package> was not loaded, because its type check failed`. Untyped packages skip the analysis.
 
 ### S4 definitions
 

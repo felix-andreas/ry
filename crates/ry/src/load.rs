@@ -13,11 +13,11 @@ use {
         r::{RUNTIME_GNUR, RValue, error_value, failure_value, plan_value, rds},
     },
     repl::{
-        ConsoleHooks,
+        ConsoleHooks, ElaboratedSink,
         libr::{self, CallRoutine, Sexp},
     },
     std::{
-        ffi::{CStr, c_char, c_int},
+        ffi::{CStr, c_char, c_int, c_void},
         fmt, fs, io,
         panic::{AssertUnwindSafe, catch_unwind},
         path::{Path, PathBuf},
@@ -541,6 +541,41 @@ pub extern "C" fn strict_check_on_ry_runtime(root: *const c_char) -> c_int {
     // Unwinding into the runtime's frames aborts, so a panic in the check, whose message the
     // panic hook has printed, counts as a failed check.
     catch_unwind(|| check_strict_package(&root)).unwrap_or(StrictCheck::Failed) as c_int
+}
+
+/// The host side of `libr::loader_backend::Elaborate`: ry's runtime calls it before a load of a
+/// typed package runs anything, and runs the text it hands `sink` in place of each file's own.
+pub extern "C" fn elaborate_on_ry_runtime(
+    root: *const c_char,
+    sink: ElaboratedSink,
+    context: *mut c_void,
+) -> c_int {
+    let Some(root) = runtime_path(root) else {
+        return 2;
+    };
+    // Unwinding into the runtime's frames aborts, so a panic, whose message the panic hook has
+    // printed, counts as a failed check.
+    let elaborated = catch_unwind(|| {
+        let config = Config::discover(&root).map_err(|error| {
+            cli::report(&error);
+            CommandError
+        })?;
+        preflight::elaborate_loaded_package(&root, &config)
+    });
+    let Ok(Ok(files)) = elaborated else {
+        return 2;
+    };
+    for (path, written, text) in files {
+        sink(
+            context,
+            path.as_ptr(),
+            path.len(),
+            written,
+            text.as_ptr(),
+            text.len(),
+        );
+    }
+    0
 }
 
 /// The host side of the strict query of `libr::loader_backend::set_check`: 1 when the

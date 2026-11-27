@@ -1404,11 +1404,13 @@ fn runtime_flags(config: &Config, user_profile: bool) -> repl::RuntimeFlags {
 }
 
 /// Makes ry's runtime run strict mode's check before every load of a strict package, as GNU
-/// R's loader in `ry R` does: `load_all()`, a console's reload, and a script's own loads.
+/// R's loader in `ry R` does, and run a typed package as the checker elaborates it:
+/// `load_all()`, a console's reload, and a script's own loads.
 fn checking_loads() -> Result<(), repl::ReplError> {
     repl::set_package_check_on_ry_runtime(
         load::strict_config_on_ry_runtime,
         load::strict_check_on_ry_runtime,
+        load::elaborate_on_ry_runtime,
     )
 }
 

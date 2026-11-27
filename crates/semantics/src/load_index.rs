@@ -8,7 +8,8 @@
 
 use {
     crate::{
-        Db, Item, ItemKind, SourceFile, TypingMode, file_follows_strict, file_typing_mode,
+        Db, Item, ItemKind, SourceFile, TypingMode, file_follows_strict, file_holds_ry_values,
+        file_typing_mode,
         hir::Symbol,
         item_naming, item_spans,
         metadata::{
@@ -295,6 +296,11 @@ pub struct PackageIndex {
     /// Strict mode covers some file, through the project's configuration or a file's own
     /// `# typing: strict` comment, so a host checks the package before it runs any of it.
     pub strict: bool,
+    /// Some file holds typed code: it is strict, or written with ry syntax or `#:`
+    /// annotations. ry's runtime then runs the package as the checker elaborates it, because a
+    /// literal or an empty list can run with a type only the checker knows.
+    #[serde(default)]
+    pub typed: bool,
 }
 
 /// The package's top-level names and how they load.
@@ -535,6 +541,11 @@ pub fn package_index(db: &dyn Db, sources: PackageSources) -> Arc<PackageIndex> 
             .files(db)
             .iter()
             .any(|file| *file_typing_mode(db, file.file) == Some(TypingMode::Strict));
+    let typed = strict
+        || sources
+            .files(db)
+            .iter()
+            .any(|file| *file_holds_typed_code(db, file.file));
     Arc::new(PackageIndex {
         package: description_field(description, "Package").unwrap_or_default(),
         version: description_field(description, "Version").unwrap_or_else(|| "0.0.0".to_owned()),
@@ -543,7 +554,16 @@ pub fn package_index(db: &dyn Db, sources: PackageSources) -> Arc<PackageIndex> 
         bindings,
         files,
         strict,
+        typed,
     })
+}
+
+/// Whether `file` is written with ry syntax or `#:` annotations. Memoized apart from
+/// [`package_index`], so an edit that keeps the answer leaves the index alone; it reads the
+/// file's tree, so a host derives it beside the file's other facts.
+#[salsa::tracked]
+pub fn file_holds_typed_code(db: &dyn Db, file: SourceFile) -> bool {
+    *file_holds_ry_values(db, file) || file.text(db).contains("#:")
 }
 
 /// The package's [`PackageBindings`]. It reads each file's [`file_binds`], which an edit inside

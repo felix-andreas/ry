@@ -4029,6 +4029,7 @@ dependencies = [
  "tracing-subscriber",
  "tracing-tree",
  "unicode-width 0.2.2",
+ "xxhash-rust",
 ]
 
 [[package]]
