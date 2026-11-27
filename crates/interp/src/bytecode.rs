@@ -837,7 +837,7 @@ impl Machine<'_> {
             return Ok(());
         }
         let env = self.reify(Reify::Site(Site::Assignment))?;
-        eval::assign_symbol(symbol, value, env, false)
+        eval::assign_local(symbol, value, env, crate::heap().frame_cell(env, symbol))
     }
 
     /// Binds the slot frame's slot `slot` to `value`, whose reference the caller hands over to
@@ -4878,7 +4878,7 @@ impl Compiler {
             && (index == symbols().dots
                 || index == missing_arg()
                 || eval::dot_dot_index(index).is_some()))
-            && !eval::assigns_to(index, target, symbols())
+            && !eval::assigns_to(Gc::adopt(index), Gc::adopt(target))
     }
 
     /// `x[i] <- value`, guarded by both `<-` and the replacement function.
@@ -14090,7 +14090,7 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
     let target = call.cdr().car();
     if index == unbound() {
         let env = state.env(Reify::Site(Site::Subassignment))?;
-        eval::complex_assign(call, target, value, env, false, &[])?;
+        eval::compiled_complex_assign(call, target, value, env, false, &[])?;
         instruction.output(0, value);
         (*state.interp).visible = false;
         return Ok(Flow::Next);
@@ -14098,7 +14098,7 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
     // A symbol in the register is a formal left for lookup only when the subscript is that
     // formal; any other symbol is a computed subscript, which `[<-` rejects.
     if index.kind() == SexpType::Symbol && index != target.cdr().cdr().car() {
-        eval::complex_assign(
+        eval::compiled_complex_assign(
             call,
             target,
             value,
@@ -14133,7 +14133,7 @@ unsafe fn op_sub_assign(state: &mut Activation<'_, '_>, instruction: Instruction
         handles::in_caller_scope_with((env, variable, [index, value], kind), sub_assign_in_place)?;
     if !done {
         let evaluated = evaluated_arguments(target, &[index])?;
-        eval::complex_assign(call, target, value, env, false, &evaluated)?;
+        eval::compiled_complex_assign(call, target, value, env, false, &evaluated)?;
     }
     instruction.output(0, value);
     (*state.interp).visible = false;
@@ -14259,7 +14259,7 @@ unsafe fn op_super_sub_assign(state: &mut Activation<'_, '_>, instruction: Instr
         let target = call.cdr().car();
         let evaluated = evaluated_arguments(target, &[index])?;
         let env = state.env(Reify::Site(Site::EnclosedSubassignment))?;
-        eval::complex_assign(call, target, value, env, true, &evaluated)?;
+        eval::compiled_complex_assign(call, target, value, env, true, &evaluated)?;
     }
     instruction.output(0, value);
     (*state.interp).visible = false;
@@ -14444,7 +14444,7 @@ unsafe fn op_sub_assign_matrix(
     let subscripts = [instruction.input(2), instruction.input(3)];
     if subscripts.contains(&unbound()) {
         let env = state.env(Reify::Site(Site::MatrixSubassignment))?;
-        eval::complex_assign(call, target, value, env, false, &[])?;
+        eval::compiled_complex_assign(call, target, value, env, false, &[])?;
         instruction.output(0, value);
         (*state.interp).visible = false;
         return Ok(Flow::Next);
@@ -14478,7 +14478,7 @@ unsafe fn op_sub_assign_matrix(
         )?;
     if !done {
         let evaluated = evaluated_arguments(target, &subscripts)?;
-        eval::complex_assign(call, target, value, env, false, &evaluated)?;
+        eval::compiled_complex_assign(call, target, value, env, false, &evaluated)?;
     }
     instruction.output(0, value);
     (*state.interp).visible = false;
@@ -14518,7 +14518,7 @@ unsafe fn op_replace(state: &mut Activation<'_, '_>, instruction: Instruction) -
             let subscripts =
                 std::slice::from_raw_parts(instruction.registers.add(first + 1), count - 2);
             let evaluated = evaluated_arguments(target, subscripts)?;
-            eval::complex_assign(whole, target, value, env, false, &evaluated)?;
+            eval::compiled_complex_assign(whole, target, value, env, false, &evaluated)?;
         }
     }
     instruction.output(0, value);
@@ -14531,7 +14531,7 @@ unsafe fn op_complex_assign(state: &mut Activation<'_, '_>, instruction: Instruc
     let whole = state.constant(instruction, 2);
     let value = instruction.input(1);
     let env = state.env(Reify::Site(Site::DispatchingReplacement))?;
-    eval::complex_assign(whole, whole.cdr().car(), value, env, false, &[])?;
+    eval::compiled_complex_assign(whole, whole.cdr().car(), value, env, false, &[])?;
     // The optimizing tier speculates past a site that has never run.
     state.record(instruction.at, value);
     instruction.output(0, value);

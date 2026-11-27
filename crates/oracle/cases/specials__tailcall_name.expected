@@ -1,0 +1,11 @@
+[stdout]
+| [1] "done"
+| [1] "done"
+| [1] "could not find function \"NA\""
+| [1] "attempt to apply non-function"
+[messages]
+[warnings]
+[errors]
+[value]
+character
+| "attempt to apply non-function"

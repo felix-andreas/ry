@@ -1662,6 +1662,7 @@ impl<'s> Args<'_, 's> {
     }
 
     /// The environment the call was made from, which a slot frame makes on demand.
+    #[inline]
     pub fn environment(&self, context: &mut Cx<'s>) -> R<Local<'s, Environment>> {
         // SAFETY: making the frame's environment allocates, which `&mut Cx` permits, and the
         // result is live until the next allocation.
@@ -1737,6 +1738,55 @@ impl<'s> Args<'_, 's> {
         }
     }
 
+    /// The primitive the call runs.
+    #[inline]
+    pub fn function(&self) -> Local<'s> {
+        // SAFETY: the evaluator keeps the function it calls rooted for the call.
+        unsafe { Local::adopt(self.call.op) }
+    }
+
+    /// What `Recall` calls again, made from the closure that runs the call: that closure's own
+    /// arguments, unforced, for the call and the function of the frame that called it, with
+    /// that frame's caller as the new frame's parent. `None` outside a closure called from
+    /// another one.
+    pub fn recalled(&self, context: &mut Cx<'s>) -> R<Option<Recalled<'s>>> {
+        // SAFETY: the frame stack holds each frame's call, function and arguments until the
+        // frame ends, which is after the context's scope. Detaching the argument references
+        // and making the parent's environment allocate, which `&mut Cx` permits, and each
+        // object is rooted before the next allocation.
+        unsafe {
+            let Some(own) = self.call.frame_index() else {
+                return Ok(None);
+            };
+            let Some(caller) = crate::envir::caller_index(own) else {
+                return Ok(None);
+            };
+            let frame = &crate::interp().frames[caller];
+            let (call, function) = (rooted(context, frame.call), rooted(context, frame.function));
+            crate::eval::materialize_references(own)?;
+            let arguments = crate::frame_args(crate::interp(), own)
+                .iter()
+                .map(|argument| Tagged {
+                    tag: Local::adopt(argument.tag),
+                    value: rooted(context, argument.value),
+                })
+                .collect();
+            let parent = crate::eval::frame_sys_parent(
+                caller,
+                crate::eval::Reify::Site(crate::eval::Site::ParentFrame),
+            )?;
+            let parent = rooted(context, parent)
+                .downcast::<Environment>()
+                .ok_or_else(|| error("internal error: a frame without an environment"))?;
+            Ok(Some(Recalled {
+                call,
+                function,
+                arguments,
+                parent,
+            }))
+        }
+    }
+
     /// The call of the closure the call was made from, or the call itself outside a closure:
     /// the call GNU R names in a warning from an internal.
     pub fn closure_call(&self, _context: &Cx<'s>) -> Local<'s> {
@@ -1749,6 +1799,14 @@ impl<'s> Args<'_, 's> {
             Local::adopt(raw)
         }
     }
+}
+
+/// The call `Recall` makes ([`Args::recalled`]).
+pub struct Recalled<'s> {
+    pub call: Local<'s>,
+    pub function: Local<'s>,
+    pub arguments: SmallVec<[Tagged<'s>; 8]>,
+    pub parent: Local<'s, Environment>,
 }
 
 /// An error that names the call `call`.
@@ -3121,23 +3179,328 @@ pub fn return_jump(environment: Local<'_, Environment>, value: Local<'_>) -> Unw
     })
 }
 
-/// The arguments of `call` evaluated in `environment` as a builtin's are, with `...` expanded,
-/// as (tag, value) pairs.
-pub fn evaluated_arguments<'s>(
-    context: &mut Cx<'s>,
-    call: Local<'s>,
+/// Appends to `arguments` the argument cells `cells` of `call` evaluated in `environment` as a
+/// builtin's are, with `...` expanded, keeping an empty argument when `keep_missing` asks. The
+/// values already in `arguments` count as referenced while the rest evaluate, so an argument
+/// that assigns to one of them copies it first.
+pub fn evaluate_arguments<'s>(
+    _context: &mut Cx<'s>,
+    arguments: &mut SmallVec<[Tagged<'s>; 8]>,
+    (cells, call): (Local<'s>, Local<'s>),
     environment: Local<'s, Environment>,
-) -> R<SmallVec<[(Local<'s>, Local<'s>); 4]>> {
-    // SAFETY: the call and the environment are rooted, evaluation runs R code, which `&mut Cx`
-    // permits, and each value is rooted again before the next allocation.
+    keep_missing: bool,
+) -> R<()> {
+    // SAFETY: the cells, the call, the environment and the values already there are rooted,
+    // evaluation runs R code, which `&mut Cx` permits, and the evaluator roots each value it
+    // adds, in the context's scope, before the next one evaluates; the missing-argument marker
+    // is permanent. A tag is a symbol or `NULL`, which the heap keeps.
     unsafe {
-        let call = call.raw();
-        let arguments = crate::eval::evaluate_args(call.cdr(), environment.raw(), false, call)?;
-        Ok(arguments
+        let mut raw: crate::eval::Args = arguments
             .iter()
-            .map(|argument| (Local::adopt(argument.tag), rooted(context, argument.value)))
+            .map(|argument| Arg {
+                tag: argument.tag.raw(),
+                value: argument.value.raw(),
+            })
+            .collect();
+        let before = raw.len();
+        crate::eval::evaluate_args_into(
+            cells.raw(),
+            environment.raw(),
+            keep_missing,
+            call.raw(),
+            &mut raw,
+        )?;
+        for argument in &raw[before..] {
+            arguments.push(Tagged {
+                tag: Local::adopt(argument.tag),
+                value: Local::adopt(argument.value),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The argument cells `cells` of a closure call from `environment` as the closure receives
+/// them, with `...` expanded: a promise of each expression, or with `eager`, the value of each
+/// constant and variable, which only a callee that cannot tell the two apart may receive.
+pub fn closure_arguments<'s>(
+    context: &mut Cx<'s>,
+    cells: Local<'s>,
+    environment: Local<'s, Environment>,
+    eager: bool,
+) -> R<SmallVec<[Tagged<'s>; 8]>> {
+    // SAFETY: the cells and the environment are rooted, a promise allocates and a variable's
+    // read may force one, which `&mut Cx` permits, and the evaluator roots each argument it
+    // adds before the next allocation.
+    unsafe {
+        let mut raw = crate::eval::Args::new();
+        if eager {
+            crate::eval::eager_args_into(cells.raw(), environment.raw(), &mut raw)?;
+        } else {
+            crate::eval::promise_args_into(cells.raw(), environment.raw(), &mut raw)?;
+        }
+        Ok(raw
+            .iter()
+            .map(|argument| Tagged {
+                tag: Local::adopt(argument.tag),
+                value: rooted(context, argument.value),
+            })
             .collect())
     }
+}
+
+/// Whether calling the closure `function` can have no effect a caller could observe before
+/// its arguments are forced ([`crate::effects::effect_free`]).
+pub fn effect_free(_context: &mut Cx<'_>, function: Local<'_>) -> R<bool> {
+    // SAFETY: the function is rooted, and the analysis may compile its body, which allocates,
+    // as `&mut Cx` permits.
+    unsafe { crate::effects::effect_free(function.raw()) }
+}
+
+/// The function `.Internal(name(...))` calls, if there is one.
+#[inline]
+pub fn internal_function<'s>(context: &Cx<'s>, name: Local<'_, Symbol>) -> Option<Local<'s>> {
+    let function = name.read(context).internal();
+    matches!(function.r_type(), SexpType::Builtin | SexpType::Special)
+        .then(|| context.root(function))
+}
+
+/// The call `head(rest...)`, sharing the cells of `rest`.
+pub fn language<'s>(
+    context: &mut Cx<'s>,
+    head: Local<'_>,
+    rest: Local<'_>,
+) -> R<Local<'s, Language>> {
+    let head = Tagged {
+        tag: null(),
+        value: head.value(),
+    };
+    let call = cells::<true>(context, &[head], rest)?;
+    call.downcast::<Language>()
+        .ok_or_else(|| error("internal error: a call cell is not a call"))
+}
+
+/// The pairlist that starts with `value`, tagged `tag`, and continues with the cells of `rest`.
+pub fn cons<'s, 'a>(
+    context: &mut Cx<'s>,
+    tag: Local<'a>,
+    value: Local<'a>,
+    rest: Local<'_>,
+) -> R<Local<'s>> {
+    let item = Tagged {
+        tag: tag.value(),
+        value: value.value(),
+    };
+    cells::<false>(context, &[item], rest)
+}
+
+/// The pairlist of `items` in order, continued by the cells of `rest`.
+pub fn chain<'s>(context: &mut Cx<'s>, items: &[Tagged<'_>], rest: Local<'_>) -> R<Local<'s>> {
+    cells::<false>(context, items, rest)
+}
+
+/// The cells of `items` before `rest`, the first one a call cell under `CALL`. They are built
+/// back to front, so each is complete when it allocates and none is written through a barrier
+/// afterwards. The cell types are constants, so each allocation's size is too.
+fn cells<'s, const CALL: bool>(
+    context: &mut Cx<'s>,
+    items: &[Tagged<'_>],
+    rest: Local<'_>,
+) -> R<Local<'s>> {
+    let heap = crate::heap();
+    // SAFETY: the items and `rest` are rooted, as `&mut Cx` permits, and an allocation keeps
+    // its arguments, so the cells built so far survive the next one's allocation.
+    unsafe {
+        let mut list = rest.raw();
+        let Some((first, others)) = items.split_first() else {
+            return Ok(rooted(context, list));
+        };
+        for item in others.iter().rev() {
+            list = heap.alloc_triple(SexpType::Pairlist, item.value.raw(), list, item.tag.raw())?;
+        }
+        let kind = if CALL {
+            SexpType::Language
+        } else {
+            SexpType::Pairlist
+        };
+        let list = heap.alloc_triple(kind, first.value.raw(), list, first.tag.raw())?;
+        Ok(rooted(context, list))
+    }
+}
+
+/// The call whose frame evaluates code in `environment`, which an error about a missing
+/// variable names (`eval::lexical_call`).
+pub fn lexical_call<'s>(context: &Cx<'s>, environment: Local<'_, Environment>) -> Local<'s> {
+    // SAFETY: the environment is rooted, the search reads the frame stack, and the frame stack
+    // holds the call it finds until the frame ends, which is after the context's scope.
+    unsafe { rooted(context, crate::eval::lexical_call(environment.raw())) }
+}
+
+/// The call of the innermost frame whose environment is `environment`, or `NULL` when no
+/// frame's is.
+pub fn owning_call<'s>(context: &Cx<'s>, environment: Local<'_, Environment>) -> Local<'s> {
+    let frames = &crate::interp().frames;
+    // SAFETY: the environment is rooted, the test reads the frame, and the frame stack holds the
+    // call it finds.
+    unsafe {
+        let call = frames
+            .iter()
+            .rev()
+            .find(|frame| frame.owns(environment.raw()))
+            .map_or_else(values::nil, |frame| frame.call);
+        rooted(context, call)
+    }
+}
+
+/// The value bound to `symbol` from `environment` outward, the unbound marker when nothing
+/// binds it, or the missing-argument marker. A promise comes back unforced, though an active
+/// binding is called.
+pub fn variable<'s>(
+    context: &mut Cx<'s>,
+    symbol: Local<'_, Symbol>,
+    environment: Local<'_, Environment>,
+) -> R<Local<'s>> {
+    lookup(context, symbol, environment, false)
+}
+
+/// The function a call's head names: a symbol is looked up as a function from `environment`,
+/// anything else (such as `pkg::f`) is evaluated there.
+pub fn head_function<'s>(
+    context: &mut Cx<'s>,
+    head: Local<'s>,
+    environment: Local<'s, Environment>,
+) -> R<Local<'s>> {
+    match head.downcast::<Symbol>() {
+        Some(symbol) => lookup(context, symbol, environment, true),
+        None => evaluate(context, head, environment),
+    }
+}
+
+fn lookup<'s>(
+    context: &mut Cx<'s>,
+    symbol: Local<'_, Symbol>,
+    environment: Local<'_, Environment>,
+    function: bool,
+) -> R<Local<'s>> {
+    // SAFETY: both are rooted, and a lookup may force promises or run an active binding's
+    // function, which `&mut Cx` permits.
+    unsafe {
+        let value = match function {
+            true => crate::eval::find_fun(symbol.raw(), environment.raw())?,
+            false => crate::eval::find_var(symbol.raw(), environment.raw())?,
+        };
+        Ok(rooted(context, value))
+    }
+}
+
+/// Evaluates `value`, the right-hand side of `target <- value` in `environment`, letting a call
+/// that takes `target` as its first argument update the value in place
+/// (`eval::rebind_call`).
+pub fn rebind<'s>(
+    context: &mut Cx<'s>,
+    target: Local<'s>,
+    value: Local<'s>,
+    environment: Local<'s, Environment>,
+) -> R<Local<'s>> {
+    // SAFETY: all three are rooted, and evaluation runs R code, which `&mut Cx` permits.
+    unsafe {
+        let value = crate::eval::rebind(target.raw(), value.raw(), environment.raw())?;
+        Ok(rooted(context, value))
+    }
+}
+
+/// Whether the frame of `environment` runs a compiled body, which keeps values in registers
+/// that count no reference.
+#[inline]
+pub fn is_compiled_frame(context: &Cx<'_>, environment: Local<'_, Environment>) -> bool {
+    environment.read(context).has_flag(gp::COMPILED_FRAME)
+}
+
+/// A promise of `code` already forced to `value`, which counts no reference to either, as
+/// GNU R's `*tmp*` and value promises count none: a replacement then sees its target unshared.
+pub fn uncounted_forced_promise<'s>(
+    context: &mut Cx<'s>,
+    code: Local<'_>,
+    value: Local<'_>,
+) -> R<Local<'s, Promise>> {
+    settled_promise(context, code, value, false)
+}
+
+/// Records a profile sample whose innermost entry is the builtin `name`.
+pub fn record_profile_sample(_context: &mut Cx<'_>, name: &str) -> R<()> {
+    // SAFETY: recording reads the frame stack and allocates, which `&mut Cx` permits.
+    unsafe { crate::utils::record_profile_sample(Some(name)) }
+}
+
+/// The environment a list's named elements are bound in for `eval`, enclosed by `enclosure`, or
+/// by the base environment when there is none (`envir::list_to_env`).
+pub fn list_environment_in<'s>(
+    context: &mut Cx<'s>,
+    list: Local<'_>,
+    enclosure: Option<Local<'_, Environment>>,
+) -> R<Local<'s, Environment>> {
+    let enclosure = enclosure.map_or_else(values::nil, Local::raw);
+    // SAFETY: the list and the enclosure are rooted, the environment allocates, which `&mut Cx`
+    // permits, and it is rooted before anything else allocates.
+    let environment = unsafe { rooted(context, crate::envir::list_to_env(list.raw(), enclosure)?) };
+    environment
+        .downcast::<Environment>()
+        .ok_or_else(|| error("internal error: a list made no environment"))
+}
+
+/// `sys.frame(which)` as seen from the frame of `environment`.
+pub fn sys_frame<'s>(
+    context: &mut Cx<'s>,
+    which: i32,
+    environment: Local<'_, Environment>,
+) -> R<Local<'s, Environment>> {
+    // SAFETY: the environment is rooted, and a slot frame's environment is made on demand,
+    // which allocates, as `&mut Cx` permits; the frame stack holds the environment found.
+    let frame = unsafe { rooted(context, crate::envir::sys_frame(which, environment.raw())?) };
+    frame
+        .downcast::<Environment>()
+        .ok_or_else(|| error("internal error: a frame without an environment"))
+}
+
+/// `expression` evaluated in `environment` in a context of its own, as `eval` runs it: the
+/// context counts as a frame of `function` called from the frame of `caller`, for
+/// `sys.call` and friends, and a `return` in the expression returns from it. An expression
+/// vector evaluates element by element, and a promise is forced.
+pub fn evaluate_in_context<'s>(
+    context: &mut Cx<'s>,
+    expression: Local<'s>,
+    environment: Local<'s, Environment>,
+    (function, caller): (Local<'s>, Local<'s, Environment>),
+) -> R<Local<'s>> {
+    // SAFETY: all four are rooted, and evaluation runs R code, which `&mut Cx` permits.
+    unsafe {
+        let value = crate::eval::eval_in_context(
+            expression.raw(),
+            environment.raw(),
+            function.raw(),
+            caller.raw(),
+        )?;
+        Ok(rooted(context, value))
+    }
+}
+
+/// The symbol of the replacement function for `name`, `name<-`.
+#[inline]
+pub fn replacement_symbol<'s>(
+    context: &mut Cx<'s>,
+    name: Local<'_, Symbol>,
+) -> R<Local<'s, Symbol>> {
+    if let Some(&symbol) = crate::interp().replacement_symbols.get(&name.raw()) {
+        // SAFETY: the table holds symbols, which the heap keeps for as long as it lives.
+        return Ok(unsafe { Local::adopt(symbol) });
+    }
+    let mut bytes: SmallVec<[u8; 32]> = SmallVec::from_slice(name.read(context).name().bytes());
+    bytes.extend_from_slice(b"<-");
+    let symbol = install_bytes(context, &bytes)?;
+    crate::interp()
+        .replacement_symbols
+        .insert(name.raw(), symbol.raw());
+    Ok(context.root(symbol))
 }
 
 /// Ends the moves an assignment into an environment would make observable.
@@ -3611,7 +3974,6 @@ pub fn bind_tmp_value<'s>(
 #[inline(always)]
 pub fn unbind_tmp_value(tmp_value: TmpValue<'_>) {
     if let Some(entry) = tmp_value.entry {
-        // `eval::complex_assign` pushes and pops its own entries, which must balance.
         let popped = crate::interp().tmp_values.pop();
         debug_assert_eq!(popped, Some(entry));
     }
@@ -3682,11 +4044,27 @@ pub fn forced_promise<'s>(
     code: Local<'_>,
     value: Local<'_>,
 ) -> R<Local<'s, Promise>> {
+    settled_promise(context, code, value, true)
+}
+
+fn settled_promise<'s>(
+    context: &mut Cx<'s>,
+    code: Local<'_>,
+    value: Local<'_>,
+    counted: bool,
+) -> R<Local<'s, Promise>> {
     // SAFETY: both are rooted, the promise allocates, which `&mut Cx` permits, and a promise
-    // is what the allocation makes.
+    // is what the allocation makes. An uncounted promise is new, so nothing else relies on the
+    // counts it gives back.
     unsafe {
-        let promise = crate::eval::forced_promise(code.raw(), value.raw())?;
-        Ok(Local::adopt(rooted(context, promise).raw()))
+        let promise = rooted(
+            context,
+            crate::eval::forced_promise(code.raw(), value.raw())?,
+        );
+        if !counted {
+            crate::heap().untrack_references(promise.raw());
+        }
+        Ok(Local::adopt(promise.raw()))
     }
 }
 
@@ -3923,6 +4301,105 @@ pub fn apply_closure<'s>(
         })?;
         Ok(rooted(context, result))
     }
+}
+
+/// [`apply_closure`] on arguments that carry their own tags, as `...` expanded gives them.
+pub fn apply_closure_tagged<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'s, Language>,
+    function: Local<'s>,
+    arguments: &[Tagged<'s>],
+    caller: Option<Local<'s, Environment>>,
+) -> R<Local<'s>> {
+    let caller = caller.map_or_else(values::nil, Local::raw);
+    // SAFETY: everything is rooted, and the closure runs any R code, which `&mut Cx` permits.
+    // `Tagged` has `Arg`'s layout.
+    unsafe {
+        let arguments =
+            std::slice::from_raw_parts(arguments.as_ptr().cast::<Arg>(), arguments.len());
+        let result =
+            crate::eval::apply_closure_owning(call.raw(), function.raw(), arguments, caller, None)?;
+        Ok(rooted(context, result))
+    }
+}
+
+/// The function `function` applied by `call` to the unevaluated argument cells `cells` from
+/// `environment`: a closure receives promises, a builtin their values, and a special the cells.
+pub fn apply_call<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'s>,
+    function: Local<'s>,
+    cells: Local<'s>,
+    environment: Local<'s, Environment>,
+) -> R<Local<'s>> {
+    // SAFETY: everything is rooted, and the function runs any R code, which `&mut Cx` permits.
+    unsafe {
+        let result =
+            crate::eval::apply_call(call.raw(), function.raw(), cells.raw(), environment.raw())?;
+        Ok(rooted(context, result))
+    }
+}
+
+/// The builtin `function`, of `definition`, called by `call` on `arguments` from the frame of
+/// `environment`, or from a slot frame that has none, without looking for a method.
+pub fn call_builtin_tagged<'s>(
+    context: &mut Cx<'s>,
+    definition: &crate::builtins::BuiltinDef,
+    (call, function): (Local<'s>, Local<'s>),
+    arguments: &[Tagged<'s>],
+    environment: Option<Local<'s, Environment>>,
+) -> R<Local<'s>> {
+    let environment = environment.map_or_else(values::nil, Local::raw);
+    // SAFETY: everything is rooted, and the builtin runs any code, which `&mut Cx` permits.
+    // `Tagged` has `Arg`'s layout.
+    unsafe {
+        let arguments =
+            std::slice::from_raw_parts(arguments.as_ptr().cast::<Arg>(), arguments.len());
+        let result = crate::eval::call_builtin(
+            definition,
+            call.raw(),
+            function.raw(),
+            arguments,
+            environment,
+        )?;
+        Ok(rooted(context, result))
+    }
+}
+
+/// [`call_builtin_tagged`] from the frame of `environment`, through the method an internal or
+/// group generic dispatches to when its arguments have one.
+pub fn dispatch_builtin_call<'s>(
+    context: &mut Cx<'s>,
+    definition: &crate::builtins::BuiltinDef,
+    (call, function): (Local<'s>, Local<'s>),
+    arguments: &[Tagged<'s>],
+    environment: Local<'s, Environment>,
+) -> R<Local<'s>> {
+    if definition.generic != crate::builtins::Generic::None {
+        // SAFETY: everything is rooted, and a method runs any R code, which `&mut Cx` permits.
+        // `Tagged` has `Arg`'s layout.
+        let method = unsafe {
+            let raw = std::slice::from_raw_parts(arguments.as_ptr().cast::<Arg>(), arguments.len());
+            crate::dispatch::try_builtin_dispatch(
+                definition,
+                call.raw(),
+                function.raw(),
+                raw,
+                environment.raw(),
+            )?
+            .map(|value| rooted(context, value))
+        };
+        if let Some(value) = method {
+            return Ok(value);
+        }
+    }
+    call_builtin_tagged(
+        context,
+        definition,
+        (call, function),
+        arguments,
+        Some(environment),
+    )
 }
 
 /// How many arguments a call's tagged argument list holds on the stack.

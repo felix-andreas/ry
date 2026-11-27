@@ -151,10 +151,10 @@ only on ry's runtime. A record has named fields and value semantics, a tuple has
 and no recycling:
 
 ```r ry run runtime=ry strict
-point <- (x = 1, y = 2)
+point <- (x = 1.0, y = 2.0)
 point$x
 #> [1] 1
-(..point, y = 5)
+(..point, y = 5.0)
 #> (x = 1, y = 5)
 (1L, "a")
 #> (1L, "a")
