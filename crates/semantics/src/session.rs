@@ -17,7 +17,7 @@ use {
         file_binders, file_definitions, file_syntax_sites, file_type_definitions,
         file_typing_directives,
         hir::Symbol,
-        item_naming, item_tree, sourced_definition, sourced_files, types,
+        item_naming, item_tree, sourced_files, types,
     },
     rustc_hash::{FxHashMap, FxHashSet},
     salsa::Setter,
@@ -77,6 +77,9 @@ pub struct Contributions {
     declared: Vec<Symbol>,
     typing: Option<TypingMode>,
     ry_syntax: bool,
+    /// The files the command `source()`s, as they read when it was checked. A host gives a file
+    /// that changes on disk a new [`SourceFile`], so what the command bound stays what it bound.
+    sourced: Vec<SourceFile>,
 }
 
 /// A new command file, next in the session. It joins the session only through [`commit`], so a
@@ -117,11 +120,12 @@ pub fn command_files(db: &dyn Db) -> Vec<SourceFile> {
 pub fn prepare(db: &dyn Db, file: SourceFile) -> Contributions {
     // `source()` evaluates a file into the global environment, so what the files a command
     // sources define is bound for the commands after it.
+    let sourced = sourced_files(db, file).clone();
     let mut binds: Vec<Symbol> = file_binders(db, file)
         .iter()
         .map(|&(name, _, _)| name)
         .chain(
-            sourced_files(db, file)
+            sourced
                 .iter()
                 .flat_map(|&sourced| file_definitions(db, sourced).iter().map(|&(name, _)| name)),
         )
@@ -179,6 +183,7 @@ pub fn prepare(db: &dyn Db, file: SourceFile) -> Contributions {
         ry_syntax: sites.any(SiteRole::RySyntax)
             || sites.any(SiteRole::InlineSite)
             || sites.any(SiteRole::InlineAnnotation),
+        sourced,
     };
     if let Some(session) = ConsoleSession::try_get(db) {
         let mut log = write(session.log(db));
@@ -361,9 +366,11 @@ pub(crate) fn binder<'db>(
             *history.binders[..before].last()?
         }
     };
-    let file = log.commands.get(at as usize)?.file;
+    let command = log.commands.get(at as usize)?;
+    let file = command.file;
+    let sourced = command.contributions.sourced.clone();
     drop(log);
-    last_binder(db, file, name)
+    last_binder(db, file, &sourced, name)
 }
 
 /// Whether a read of `name` in command `command` that its own file does not bind resolves in
@@ -429,8 +436,14 @@ pub(crate) fn holds_ry_values(db: &dyn Db, file: SourceFile) -> bool {
     })
 }
 
-/// The last binder of `name` in `file`, a command that ran whole before any later read.
-fn last_binder<'db>(db: &'db dyn Db, file: SourceFile, name: Symbol) -> Option<Item<'db>> {
+/// The last binder of `name` in `file`, a command that ran whole before any later read, which
+/// `source()`d `sourced`; the last sourced file to bind the name wins, as at run time.
+fn last_binder<'db>(
+    db: &'db dyn Db,
+    file: SourceFile,
+    sourced: &[SourceFile],
+    name: Symbol,
+) -> Option<Item<'db>> {
     let binders = file_binders(db, file);
     // Sorted by name and then position, so the name's last entry is its last binder.
     let end = binders.partition_point(|&(binder, _, _)| binder.index() <= name.index());
@@ -438,7 +451,15 @@ fn last_binder<'db>(db: &'db dyn Db, file: SourceFile, name: Symbol) -> Option<I
         .last()
         .filter(|&&(binder, _, _)| binder == name)
         .map(|&(_, _, item)| item)
-        .or_else(|| sourced_definition(db, file, name))
+        .or_else(|| {
+            sourced.iter().rev().find_map(|&sourced| {
+                file_definitions(db, sourced)
+                    .iter()
+                    .rev()
+                    .find(|&&(defined, _)| defined == name)
+                    .map(|&(_, item)| item)
+            })
+        })
 }
 
 /// A session never nears `u32::MAX` commands; the index saturates rather than panics.

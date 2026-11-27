@@ -1744,11 +1744,27 @@ pub fn data_file_layout<'db>(db: &'db dyn Db, path: DataPath<'db>) -> Option<sni
 pub struct SourcePaths {
     #[returns(ref)]
     pub paths: BTreeMap<String, SourceFile>,
+    /// What the root of `paths` is to R.
+    #[default]
+    pub base: SourceBase,
+}
+
+/// What a `source()` path is resolved against.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub enum SourceBase {
+    /// The root is R's working directory, as when ry runs the code, so a path resolves against
+    /// it alone, as R resolves it.
+    WorkingDirectory,
+    /// The code runs from a working directory nobody knows yet, usually the project root or
+    /// the sourcing file's own directory, so both are tried, the file's directory first.
+    #[default]
+    RootOrFileDirectory,
 }
 
 /// The literal paths a file passes to `source()` or `sys.source()`, in source order. A call
 /// inside a function counts too, because `source()` evaluates into the global environment
-/// unless told otherwise.
+/// unless told otherwise; a call told to evaluate into another environment does not count,
+/// because nothing it defines is visible from the global one.
 #[salsa::tracked(returns(ref))]
 pub fn file_source_calls(db: &dyn Db, file: SourceFile) -> Vec<String> {
     let mut paths = Vec::new();
@@ -1769,16 +1785,28 @@ pub fn file_source_calls(db: &dyn Db, file: SourceFile) -> Vec<String> {
                 } if package == "base" => *name,
                 _ => continue,
             };
-            if callee != "source" && callee != "sys.source" {
+            // `source(file, local)` and `sys.source(file, envir)` take the environment second.
+            let environment = match callee.as_str() {
+                "source" => "local",
+                "sys.source" => "envir",
+                _ => continue,
+            };
+            let arguments = &module[arguments];
+            let named = |name: &str| {
+                arguments
+                    .iter()
+                    .find(|argument| module.argument_name(argument).as_deref() == Some(name))
+            };
+            let mut positional = arguments.iter().filter(|argument| argument.name.is_none());
+            let path = named("file").or_else(|| positional.next());
+            let environment = named(environment).or_else(|| positional.next());
+            if environment
+                .and_then(|argument| argument.value)
+                .is_some_and(|value| !evaluates_globally(&module, value))
+            {
                 continue;
             }
-            let arguments = &module[arguments];
-            let path = arguments
-                .iter()
-                .find(|argument| module.argument_name(argument).as_deref() == Some("file"))
-                .or_else(|| arguments.iter().find(|argument| argument.name.is_none()))
-                .and_then(|argument| argument.value);
-            if let Some(path) = path
+            if let Some(path) = path.and_then(|argument| argument.value)
                 && let ExpressionKind::Literal(hir::LiteralKind::String(text)) = module.kind(path)
             {
                 paths.push(module[text].to_string());
@@ -1788,19 +1816,39 @@ pub fn file_source_calls(db: &dyn Db, file: SourceFile) -> Vec<String> {
     paths
 }
 
+/// Whether `source()`'s `local` or `sys.source()`'s `envir` argument names an environment whose
+/// bindings a read of the global environment sees: `FALSE`, the global or base environment, or
+/// the caller's own, which is the global one at the top level.
+fn evaluates_globally(module: &hir::Module, value: hir::ExprId) -> bool {
+    match module.kind(value) {
+        ExpressionKind::Literal(hir::LiteralKind::Logical(_)) => true,
+        ExpressionKind::NameRef(name) => *name == ".GlobalEnv",
+        ExpressionKind::Call { callee, arguments } => {
+            module[arguments].is_empty()
+                && matches!(
+                    module.kind(*callee),
+                    ExpressionKind::NameRef(name)
+                        if ["globalenv", "baseenv", "environment", "parent.frame"]
+                            .contains(&name.as_str())
+                )
+        }
+        _ => false,
+    }
+}
+
 /// The project files a script or test reads through `source()` with a literal path,
-/// transitively, in the order the calls appear. R resolves the path against the working
-/// directory, which is usually the project root or the sourcing file's own directory, so both
-/// are tried. A package file is skipped: the namespace already holds every `R/` file.
+/// transitively, in the order the calls appear, each path resolved as [`SourceBase`] says. A
+/// package file is skipped: the namespace already holds every `R/` file.
 #[salsa::tracked(returns(ref))]
 pub fn sourced_files(db: &dyn Db, file: SourceFile) -> Vec<SourceFile> {
     if *file.kind(db) == DocumentKind::Package || file_source_calls(db, file).is_empty() {
         return Vec::new();
     }
-    let Some(paths) = SourcePaths::try_get(db) else {
+    let Some(source_paths) = SourcePaths::try_get(db) else {
         return Vec::new();
     };
-    let paths = paths.paths(db);
+    let paths = source_paths.paths(db);
+    let base = *source_paths.base(db);
     let path_of = |target: SourceFile| {
         paths
             .iter()
@@ -1811,16 +1859,14 @@ pub fn sourced_files(db: &dyn Db, file: SourceFile) -> Vec<SourceFile> {
     let mut pending = vec![file];
     let mut visited = FxHashSet::from_iter([file]);
     while let Some(current) = pending.pop() {
-        let directory = path_of(current)
-            .and_then(|path| path.rsplit_once('/'))
-            .map(|(directory, _)| directory);
+        let directory = match base {
+            SourceBase::WorkingDirectory => None,
+            SourceBase::RootOrFileDirectory => path_of(current)
+                .and_then(|path| path.rsplit_once('/'))
+                .map(|(directory, _)| directory),
+        };
         for literal in file_source_calls(db, current) {
-            let candidates = directory
-                .map(|directory| normalize_relative_path(&format!("{directory}/{literal}")))
-                .into_iter()
-                .chain([normalize_relative_path(literal)]);
-            let Some(target) = candidates
-                .flatten()
+            let Some(target) = source_candidates(directory, literal)
                 .find_map(|candidate| paths.get(&candidate).copied())
             else {
                 continue;
@@ -1834,8 +1880,23 @@ pub fn sourced_files(db: &dyn Db, file: SourceFile) -> Vec<SourceFile> {
     sourced
 }
 
-/// `a/./b/../c.R` as `a/c.R`, or `None` for a path that leaves the project root.
+/// The keys of [`SourcePaths`] that `source(literal)` may read, in the order to try them, for a
+/// file in `directory` when [`SourceBase::RootOrFileDirectory`] applies and `None` otherwise.
+pub fn source_candidates(directory: Option<&str>, literal: &str) -> impl Iterator<Item = String> {
+    directory
+        .map(|directory| format!("{directory}/{literal}"))
+        .into_iter()
+        .chain([literal.to_owned()])
+        .filter(|_| !is_absolute_path(literal))
+        .filter_map(|candidate| normalize_relative_path(&candidate))
+}
+
+/// `a/./b/../c.R` as `a/c.R`, or `None` for a path that leaves the project root or does not
+/// start inside it.
 pub fn normalize_relative_path(path: &str) -> Option<String> {
+    if is_absolute_path(path) {
+        return None;
+    }
     let mut parts: Vec<&str> = Vec::new();
     for part in path.split(['/', '\\']) {
         match part {
@@ -1847,6 +1908,14 @@ pub fn normalize_relative_path(path: &str) -> Option<String> {
         }
     }
     Some(parts.join("/"))
+}
+
+/// A path R reads from outside the working directory: from the file system's root, the home
+/// directory or a Windows drive.
+fn is_absolute_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    matches!(bytes.first(), Some(b'/' | b'\\' | b'~'))
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
 }
 
 /// The item a sourced file binds `name` with; the last sourced file to bind it wins, as at run

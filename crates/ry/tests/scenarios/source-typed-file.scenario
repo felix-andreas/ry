@@ -128,3 +128,28 @@ stdin console.txt
 run ry run --runtime ry
 expect exit 0
 expect stdout "6i64"
+
+# A console command binds what the file read as when it ran: editing the file and sourcing it
+# again in a command strict mode refuses leaves the earlier `six` the one that runs. Plain input
+# before the first typed command sources too, and a file sourced into another environment
+# defines nothing a later command sees.
+file lib/six.R
+| six <- function(x: I64) -> I64 x * 6i64
+file edit.txt
+| source("lib/six.R")
+| writeLines("six <- function(x: Str) -> Str x", "lib/six.R")
+| { source("lib/six.R"); y: Str <- 1i64 }
+| print(six(1i64))
+stdin edit.txt
+run ry run --runtime ry
+expect exit 0
+expect stdout "6i64"
+
+file lib/six.R
+| six <- function(x: I64) -> I64 x * 6i64
+file local.R
+| source("lib/six.R", local = new.env())
+| print(six(1i64))
+run ry run local.R
+expect exit 1
+expect stderr "six"

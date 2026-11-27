@@ -1750,7 +1750,12 @@ A file parsed on ry's runtime, by `source()`, `parse(file = )` or a parse whose 
 elaborated the same way, and the check prints its annotation warnings, once per session for the
 same file and text. The check of a script, of a console command and of a sourced file reads the
 files it `source()`s by a literal path, resolved against the working directory as R resolves it,
-so strict code may call what they define, and a later console command sees it too. Strict mode
+so strict code may call what they define, and a later console command sees what the file defined
+when the command that sourced it ran. A path outside the working directory, such as `/lib.R` or
+`~/lib.R`, is not read, and neither is a call that evaluates into another environment, such as
+`source("lib.R", local = new.env())`, because nothing it defines is visible globally. `ry check`
+and the editor do not know the working directory the code will run in, so they try the sourcing
+file's own directory first and then the project root. Strict mode
 applies to a sourced file only when the file turns it on itself
 (`# typing: strict`), because the project's strict mode belongs to the script that sources it. A
 file with no ry syntax and no `# typing:` directive is not analyzed and reads no `ry.toml`, and its
