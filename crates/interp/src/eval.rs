@@ -3255,39 +3255,73 @@ pub unsafe fn apply_closure(
     sys_parent: Sexp,
     supplied: Option<&[(Sexp, Sexp)]>,
 ) -> R<Sexp> {
-    // The caller holds the call, the closure, its caller's environment, the arguments and the
-    // method variables until the call returns, and releases the handle stack after it.
-    handles::in_caller_scope(|context| {
-        let supplied = supplied.map(|supplied| handles::method_variables(context, supplied));
-        let closure_call = held_call(context, call, function, args, sys_parent, supplied)?;
-        Ok(apply_closure_in(context, &closure_call)?.raw())
-    })
+    match prepare_raw_call(call, function, args, sys_parent, supplied)? {
+        Prepared::Done(value) => Ok(value),
+        Prepared::Slots(frame) => run_frame(
+            call,
+            function,
+            CallFrame::Slots(frame),
+            sys_parent,
+            args,
+            Entry::Unchecked,
+            supplied.unwrap_or(&[]),
+        ),
+        Prepared::Heap => {
+            run_on_heap_frame(call, function, args, sys_parent, supplied, Entry::Unchecked)
+        }
+    }
 }
 
-/// The handles of a raw closure call that its caller holds.
+/// [`prepare_closure_call`] for a raw closure call.
 ///
 /// # Safety
 ///
-/// The caller holds `call`, `function`, `args` and `sys_parent` until the call returns.
+/// The caller holds the call, the closure, its caller's environment, the arguments and the
+/// method variables until the call returns, and releases the handle stack after it.
 #[inline(always)]
-unsafe fn held_call<'a, 's>(
-    context: &Cx<'s>,
+unsafe fn prepare_raw_call(
     call: Sexp,
     function: Sexp,
-    args: &'a [Arg],
+    args: &[Arg],
     sys_parent: Sexp,
+    supplied: Option<&[(Sexp, Sexp)]>,
+) -> R<Prepared<Sexp>> {
+    handles::in_caller_scope(|context| {
+        let supplied = supplied.map(|supplied| handles::method_variables(context, supplied));
+        let closure_call = closure_call(
+            handles::held(context, call),
+            handles::held(context, function),
+            handles::tagged(context, args),
+            handles::held(context, sys_parent),
+            supplied,
+        )?;
+        Ok(match prepare_closure_call(context, &closure_call)? {
+            Prepared::Done(value) => Prepared::Done(value.raw()),
+            Prepared::Slots(frame) => Prepared::Slots(frame),
+            Prepared::Heap => Prepared::Heap,
+        })
+    })
+}
+
+/// The call `call` of `function`, which must be a closure.
+#[inline(always)]
+fn closure_call<'a, 's>(
+    call: Local<'s>,
+    function: Local<'s>,
+    args: &'a [Tagged<'s>],
+    sys_parent: Local<'s>,
     supplied: Option<handles::MethodVariables<'a, 's>>,
 ) -> R<ClosureCall<'a, 's>> {
-    let Some(function) = handles::held(context, function).downcast::<Closure>() else {
+    let Some(function) = function.downcast::<Closure>() else {
         return Err(error(
             "internal error: a closure call's function is not a closure",
         ));
     };
     Ok(ClosureCall {
-        call: handles::held(context, call),
+        call,
         function,
-        args: handles::tagged(context, args),
-        sys_parent: handles::held(context, sys_parent),
+        args,
+        sys_parent,
         supplied,
     })
 }
@@ -3387,7 +3421,13 @@ pub(crate) unsafe fn run_on_heap_frame(
     // method variables and the signature until the call returns.
     handles::in_caller_scope(|context| {
         let supplied = supplied.map(|supplied| handles::method_variables(context, supplied));
-        let closure_call = held_call(context, call, function, args, sys_parent, supplied)?;
+        let closure_call = closure_call(
+            handles::held(context, call),
+            handles::held(context, function),
+            handles::tagged(context, args),
+            handles::held(context, sys_parent),
+            supplied,
+        )?;
         let signature = match entry {
             Entry::Unchecked => Signature::Unchecked,
             Entry::Checked(signature) => {
@@ -3632,18 +3672,7 @@ pub unsafe fn apply_closure_entering(
         header: crate::NO_SLOTS,
         depth: 0,
     };
-    // The caller holds the call, the closure, its caller's environment, the arguments and the
-    // method variables until the call returns, and releases the handle stack after it.
-    let prepared = handles::in_caller_scope(|context| {
-        let held = supplied.map(|supplied| handles::method_variables(context, supplied));
-        let closure_call = held_call(context, call, function, args, sys_parent, held)?;
-        Ok(match prepare_closure_call(context, &closure_call)? {
-            Prepared::Done(value) => Prepared::Done(value.raw()),
-            Prepared::Slots(frame) => Prepared::Slots(frame),
-            Prepared::Heap => Prepared::Heap,
-        })
-    })?;
-    match prepared {
+    match prepare_raw_call(call, function, args, sys_parent, supplied)? {
         Prepared::Done(value) => Ok(whole(value)),
         Prepared::Slots(frame) => enter(
             call,
