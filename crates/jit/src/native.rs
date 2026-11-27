@@ -3264,8 +3264,9 @@ const MAX_PURE_DEPTH: usize = 8;
 /// each named by its base function. A typed closure's call is not read ahead,
 /// although its native code changes nothing, because it may not finish, and an argument the
 /// callee never forces must not run. Evaluating such an argument before the call
-/// gives the value forcing its promise would give, since the native code it is passed to runs
-/// no R code in between. Integer arithmetic that overflows is left to tier 0, which warns.
+/// gives the value forcing its promise would give unless R code the callee runs before it reads
+/// the parameter changes a variable the value was read from, which the typed core watches
+/// ([`typed::Watch`]). Integer arithmetic that overflows is left to tier 0, which warns.
 unsafe fn pure_value(
     expression: Sexp,
     env: Sexp,

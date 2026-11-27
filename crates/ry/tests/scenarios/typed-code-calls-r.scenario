@@ -500,3 +500,35 @@ run ry run --runtime ry loose/watched.R
 expect exit 0
 expect stdout "hello \n4i64\n[1] 2\n[1] 200\n[1] 50"
 unset RY_JIT
+
+# R forces an argument passed on to an R function where that function first reads it, so `pass`,
+# which hands `x` to `g` unread, runs in the interpreter, and `g` sees `y` after its own
+# assignment. A parameter no path reads keeps its promise unforced (`unused`), and one read before
+# `stop()` is forced, as R forces it there, even though the error ends the call (`positive`).
+
+file loose/forced.R
+| g <- function(a) { y <<- 100.0; a }
+| pass <- function(x: F64) -> F64 { Num.from_r(g(x)) + 0.0 }
+| ignore <- function(x: F64, unused: F64) -> F64 { cat("hi\n"); x }
+| keep <- function(z) { ignore(1.0, z); y <<- 100.0; z }
+| positive <- function(x: F64) -> F64 { if (x > 0.0) stop("positive"); x }
+| caught <- function(z) { tryCatch(positive(z), error = function(e) 0.0); y <<- 100.0; z }
+| y <- 1.0
+| print(pass(y))
+| y <- 1.0
+| print(keep(y))
+| y <- 1.0
+| print(caught(y))
+
+run ry run --runtime ry loose/forced.R
+expect exit 0
+expect stdout "[1] 100\nhi\n[1] 100\n[1] 1"
+expect stderr "typed: `pass` runs in the interpreter: it passes a parameter to an R function before reading it"
+expect stderr lacks "`ignore` runs in the interpreter"
+expect stderr lacks "`positive` runs in the interpreter"
+
+env RY_JIT off
+run ry run --runtime ry loose/forced.R
+expect exit 0
+expect stdout "[1] 100\nhi\n[1] 100\n[1] 1"
+unset RY_JIT

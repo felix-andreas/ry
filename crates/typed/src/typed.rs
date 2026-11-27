@@ -165,6 +165,16 @@ pub struct Compiled {
     /// R call comes, on every path, before the parameter's first read or after it, and every R
     /// call is the code's own, since a typed function it calls that calls R has sites of its own.
     pub watchable: u64,
+    /// The parameters the code passes among the arguments of an R call that may run R code
+    /// before it has read them on every path ([`lower::ReadsBefore::passed_late`]).
+    pub passed_late: u64,
+    /// The parameters some path reads before it returns ([`lower::ReadsBefore::returned`]),
+    /// whose arguments a call that returns settles.
+    pub returned: u64,
+    /// The addresses of the code's own R call sites, from the first to past the last, whose
+    /// [`RCall::read_before`] name the parameters of the call the native entry made. Empty when
+    /// the code calls itself, since a site then runs for an activation of other arguments.
+    pub sites: (usize, usize),
     /// The [`interp::numbers::conversion_epoch`] at which this code, or a function it calls,
     /// took the type of a conversion from what the interpreter saw it give
     /// ([`lower::Conversion::guessed`]). The code is stale once a conversion has given another
@@ -301,6 +311,17 @@ fn param_bit(param: u32) -> u64 {
 struct Watching {
     ahead: *const ReadAhead,
     settled: u64,
+    /// The parameters whose variables the code checks after each R call.
+    late: u64,
+    /// The code's own sites ([`Compiled::sites`]).
+    sites: (usize, usize),
+}
+
+impl Watching {
+    fn owns(&self, site: &RCall) -> bool {
+        let address = std::ptr::from_ref(site) as usize;
+        (self.sites.0..self.sites.1).contains(&address)
+    }
 }
 
 /// How many closures a session compiles at most, since each keeps its closure alive. The
@@ -399,6 +420,18 @@ pub unsafe fn call(
     } else {
         0
     };
+    if ahead.lazy() & compiled.passed_late != 0 {
+        arguments.release();
+        decline(|| {
+            String::from(
+                "it passes a parameter to an R function before reading it, and R evaluates an \
+                 argument read from variables only where that function first reads it: read the \
+                 parameter before the R call, or compute the argument into a variable before the \
+                 call",
+            )
+        });
+        return None;
+    }
     if late & ahead.fixed != 0 {
         arguments.release();
         decline(|| {
@@ -416,10 +449,11 @@ pub unsafe fn call(
         arguments.release();
         decline(|| {
             String::from(
-                "it calls R, directly or through a typed function, before it reads an argument \
-                 computed from variables on some paths but not on others, so the R call could \
-                 change what R would force the argument to: read the parameter before the R \
-                 call on every path, or compute the argument into a variable before the call",
+                "it calls R before it reads an argument computed from variables, and native code \
+                 watches such an argument only when the code makes every R call itself, not \
+                 through a typed function, and each comes before the parameter's first read on \
+                 every path or after it on every path: read the parameter before the R call, or \
+                 compute the argument into a variable before the call",
             )
         });
         return None;
@@ -435,15 +469,23 @@ pub unsafe fn call(
     }
     // A watched value must be copied, not changed in place, by R code that assigns into its
     // variable, so that the change shows as a new binding.
-    let watched: &[Watch] = if late != 0 { &ahead.watches } else { &[] };
-    for watch in watched {
-        if let Some(value) = held_value(watch.bound) {
-            value.increment_refcount();
+    let mut held: SmallVec<[Sexp; 4]> = SmallVec::new();
+    if late != 0 {
+        for watch in &ahead.watches {
+            if let Some(value) = held_value(watch.bound) {
+                value.increment_refcount();
+                held.push(value);
+            }
         }
     }
-    let outer_watching = WATCHING.replace((late != 0).then_some(Watching {
+    // Code that reads a promise ahead settles it before each R call that follows the read, as
+    // R would have forced it there, which an error raised in R must find done.
+    let watching = late != 0 || !ahead.promises.is_empty();
+    let outer_watching = WATCHING.replace(watching.then_some(Watching {
         ahead: std::ptr::from_ref(ahead),
         settled: 0,
+        late,
+        sites: compiled.sites,
     }));
     let heap = interp::heap();
     let mark = heap.handle_mark();
@@ -477,10 +519,8 @@ pub unsafe fn call(
     };
     RUNNING.set(outer);
     WATCHING.set(outer_watching);
-    for watch in watched {
-        if let Some(value) = held_value(watch.bound) {
-            value.decrement_refcount();
-        }
+    for value in held {
+        value.decrement_refcount();
     }
     let tripped = WATCH_TRIPPED.take();
     if status != 0 {
@@ -541,13 +581,16 @@ pub unsafe fn call(
     let value = to_r(compiled.result, out);
     drop_words(compiled.result, out);
     arguments.release();
-    // Each promise read ahead settles with the value forcing it gives, as if the interpreter had
-    // forced it: a promise shared through `...` must keep the value this call saw. Settling a
-    // checked promise runs its annotation checks, whose error is the call's.
+    // Each promise read ahead for a parameter the code may have read settles with the value
+    // forcing it gives, as if the interpreter had forced it: a promise shared through `...` must
+    // keep the value this call saw. Settling a checked promise runs its annotation checks, whose
+    // error is the call's. R never forces the promise of a parameter no path reads.
     let value = value.and_then(|value| {
         heap.root(value);
-        for &(promise, read, _) in &ahead.promises {
-            interp::eval::settle_unforced(promise, read)?;
+        for &(promise, read, param) in &ahead.promises {
+            if param_bit(param) & compiled.returned != 0 {
+                interp::eval::settle_unforced(promise, read)?;
+            }
         }
         Ok(value)
     });
@@ -938,6 +981,18 @@ unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<
     } else {
         !reads.before.ambiguous
     };
+    let calls_itself = lowered.function.blocks.iter().any(|block| {
+        block
+            .insts
+            .iter()
+            .any(|inst| matches!(inst.op, ir::Op::CallTyped(lower::SELF, _)))
+    });
+    let own_sites = if calls_itself {
+        (0, 0)
+    } else {
+        let range = lowered.r_calls.as_ptr_range();
+        (range.start as usize, range.end as usize)
+    };
     let mut ir = lowered.function;
     optimize(&mut ir);
     let sites: Vec<usize> = lowered
@@ -946,11 +1001,7 @@ unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<
         .map(|site| site as *const RCall as usize)
         .collect();
     let code = backend::compile(&ir, &linker.callees, &sites)?;
-    let calls_r = linker.calls_r
-        || lowered
-            .r_calls
-            .iter()
-            .any(|site| !site.diverges && !site.effect_free);
+    let calls_r = linker.calls_r || lowered.r_calls.iter().any(|site| acts(site));
     let guesses = lowered.r_calls.iter().any(
         |site| matches!(site.result, RResult::Converted(conversion, _) if conversion.guessed()),
     );
@@ -991,6 +1042,9 @@ unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<
         calls_r,
         read_before_r: reads.before.first,
         watchable,
+        passed_late: reads.before.passed_late,
+        returned: reads.before.returned,
+        sites: own_sites,
         guessed,
         cells: linker.cells,
     })
@@ -1009,10 +1063,7 @@ pub(crate) unsafe fn reads_before_calling_r(
     callee_calls_r: impl Fn(usize) -> bool,
 ) -> CallingR {
     let runs_r = |op: &ir::Op, itself: bool| match *op {
-        ir::Op::CallR(site, _) => lowered
-            .r_calls
-            .get(site)
-            .is_none_or(|site| !site.diverges && !changes_nothing(site)),
+        ir::Op::CallR(site, _) => lowered.r_calls.get(site).is_none_or(|site| acts(site)),
         ir::Op::CallTyped(lower::SELF, _) => itself,
         ir::Op::CallTyped(index, _) => callee_calls_r(index),
         _ => false,
@@ -1940,7 +1991,7 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
     // the code again must give it the same value.
     let effect_free = replayed.is_none() && changes_nothing(site);
     let warnings = interp::conditions::warnings_raised();
-    let watching = WATCHING.get();
+    let watching = WATCHING.get().filter(|watching| watching.owns(site));
     if let Some(watching) = watching
         && let Err(unwind) = settle_read(watching, site.read_before)
     {
@@ -1979,7 +2030,7 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
     }
     if acted
         && made.is_some()
-        && let Some(watching) = WATCHING.get()
+        && let Some(watching) = WATCHING.get().filter(|watching| watching.owns(site))
         && watch_tripped(watching)
     {
         WATCH_TRIPPED.set(true);
@@ -2001,6 +2052,12 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
             1
         }
     }
+}
+
+/// Whether the R call `site` may run R code that changes what a variable holds: it returns, and
+/// it may change something a second run would see.
+pub(crate) unsafe fn acts(site: &RCall) -> bool {
+    !site.diverges && !changes_nothing(site)
 }
 
 /// Whether making the R call `site` changes nothing a second run would see unless it warns. A
@@ -2035,7 +2092,7 @@ unsafe fn settle_read(mut watching: Watching, read: u64) -> Result<(), Unwind> {
 /// else now.
 unsafe fn watch_tripped(watching: Watching) -> bool {
     (*watching.ahead).watches.iter().any(|watch| {
-        if param_bit(watch.param) & !watching.settled == 0 {
+        if param_bit(watch.param) & watching.late & !watching.settled == 0 {
             return false;
         }
         let now = match watch.variable {
