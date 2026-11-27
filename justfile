@@ -103,10 +103,10 @@ ci-stress seed="0":
     FUZZ_SEED={{ seed }} just gc-torture repeat
     just fuzz-differential $(({{ seed }} * 300)) 300 ry-tier0,ry-jit,ry-repeat-gctorture-seeded
 
-# Workspace tests; `zed_ry` needs a wasm toolchain, so it is excluded. They build with the dev
-# profile, not `[profile.fuzz]`, because the runtime suites run `target/debug/ry` and its `libR`.
+# Workspace tests. They build with the dev profile, not `[profile.fuzz]`, because the runtime
+# suites run `target/debug/ry` and its `libR`.
 battery *args:
-    cargo test --workspace --exclude zed_ry {{ args }}
+    cargo test --workspace {{ args }}
 
 # The tests that need no GNU R (test.yml, job `tests`): every test of the crates that build
 # without the interpreter, libR and Polars. A test that compares with GNU R or runs ry's runtime skips when
@@ -116,10 +116,11 @@ test-fast:
     cargo test --no-fail-fast -p syntax -p format -p semantics -p ide -p sniff -p loader -p heap -p numeric -p ssa -p rdb -p crash -p oracle -p rcmd -p repl -p ry-lang
 
 clippy:
-    cargo clippy --workspace --exclude zed_ry --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
 
 fmt-check:
     cargo fmt --all --check
+    cargo fmt --manifest-path editors/zed/Cargo.toml --check
 
 # The fixture cases whose `group__case` id contains `case`: one case, or a whole group with
 # `just fixture pipes__`.
@@ -373,7 +374,7 @@ notices *args:
 
 # Build every binary and ry's runtime (libR), e.g. `just build --release`.
 build *args:
-    cargo build --workspace --exclude zed_ry {{ args }}
+    cargo build --workspace {{ args }}
 
 zigbuild target *args:
     cargo zigbuild --target {{ target }} {{ args }}
@@ -424,7 +425,8 @@ bump-version version:
     sed -i "s/^version = \"[a-zA-Z0-9._-]*\"/version = \"$vscode_version\"/" editors/zed/extension.toml editors/zed/Cargo.toml
 
     cargo check # updates Cargo.lock
-    git add Cargo.toml Cargo.lock editors/code/package.json editors/zed/extension.toml editors/zed/Cargo.toml
+    (cd editors/zed && cargo update --workspace)
+    git add Cargo.toml Cargo.lock editors/code/package.json editors/zed/extension.toml editors/zed/Cargo.toml editors/zed/Cargo.lock
     git commit -m "chore: release {{ version }}"
 
 # Build ry's base R from GNU R's pinned source release (tools/base-r) into target/base-r, where
