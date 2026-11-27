@@ -2610,48 +2610,103 @@ impl Lowering<'_> {
             spans.push(span);
         }
         if matched.iter().any(Option::is_none) {
-            // A typed callee's defaults read names of its own body and environment only.
-            let (visible, body, env, closure) = match frame {
-                Frame::Local(visible, body) => (visible, body, self.env, self.closure),
-                Frame::Typed(function) => (
-                    0,
-                    interp::bytecode::closure_body(function),
-                    function.tag(),
-                    function,
-                ),
-            };
-            let hidden = self.scopes.split_off(visible.min(self.scopes.len()));
-            let loops = std::mem::take(&mut self.loops);
-            let control = std::mem::replace(&mut self.control, 0);
-            let env = std::mem::replace(&mut self.env, env);
-            let closure = std::mem::replace(&mut self.closure, closure);
-            let inlining = match frame {
-                Frame::Local(..) => self.inlining.clone(),
-                Frame::Typed(_) => SmallVec::new(),
-            };
-            let inlining = std::mem::replace(&mut self.inlining, inlining);
-            let mut scope = self.new_scope();
-            for (&(symbol, _), argument) in formals.iter().zip(&matched) {
-                // A default sees a formal passed a function only by calling it, which no default
-                // in typed code needs, and sees a left-out formal once its own default is in.
-                let binding = match *argument {
-                    Some(Argument::Value(value)) => Binding::Value(value),
-                    _ => Binding::Hidden,
-                };
-                scope.names.insert(symbol, binding);
-            }
-            self.scopes.push(scope);
-            let defaults = self.defaults(&formals, &mut matched, spans, body);
-            self.scopes.pop();
-            self.scopes.extend(hidden);
-            self.inlining = inlining;
-            self.closure = closure;
-            self.env = env;
-            self.loops = loops;
-            self.control = control;
-            defaults?;
+            self.frame_defaults(&formals, &mut matched, spans, frame)?;
         }
         Ok(matched.into_iter().flatten().collect())
+    }
+
+    /// The arguments of a call that passes the first formals of a function by position, as a
+    /// standard library function calls the function passed to it, with the formals past them
+    /// taking their defaults as a direct call's do ([`Lowering::matched_arguments`]). `visible`
+    /// counts the scopes the function sees.
+    unsafe fn positional_arguments(
+        &mut self,
+        formals: Sexp,
+        body: Sexp,
+        visible: usize,
+        arguments: &[Argument],
+    ) -> Result<SmallVec<[Argument; 4]>, Refusal> {
+        let items = rvalues::pairlist_items(formals);
+        let supplied = arguments.len();
+        if supplied >= items.len() {
+            return Ok(arguments.iter().copied().collect());
+        }
+        let mut matched: SmallVec<[Option<Argument>; 4]> = arguments
+            .iter()
+            .copied()
+            .map(Some)
+            .chain((supplied..items.len()).map(|_| None))
+            .collect();
+        let mut spans: SmallVec<[ArgumentReads; 4]> =
+            (0..items.len()).map(|_| NO_ARGUMENT_READS).collect();
+        // The passed arguments keep the reads their call attributed; the defaults' reads count
+        // where the body first reads their formals, as a direct call's do.
+        let held = std::mem::take(&mut self.formal_reads);
+        let strict = self.inlined.last().is_none_or(|inlined| inlined.typed)
+            && typed_definition(formals, body);
+        let frame = Frame::Local(visible, body);
+        let values = self
+            .frame_defaults(&items, &mut matched, &mut spans, frame)
+            .and_then(|()| {
+                let values: SmallVec<[Argument; 4]> = matched.into_iter().flatten().collect();
+                self.attribute_reads(&values[supplied..], &spans[supplied..], strict)?;
+                Ok(values)
+            });
+        let defaults = std::mem::replace(&mut self.formal_reads, held);
+        let values = values?;
+        self.formal_reads.resize(supplied, SmallVec::new());
+        self.formal_reads.extend(defaults);
+        Ok(values)
+    }
+
+    /// Computes the defaults of the formals `matched` leaves out, in the callee's `frame`.
+    unsafe fn frame_defaults(
+        &mut self,
+        formals: &[(Sexp, Sexp)],
+        matched: &mut [Option<Argument>],
+        spans: &mut [ArgumentReads],
+        frame: Frame,
+    ) -> Result<(), Refusal> {
+        // A typed callee's defaults read names of its own body and environment only.
+        let (visible, body, env, closure) = match frame {
+            Frame::Local(visible, body) => (visible, body, self.env, self.closure),
+            Frame::Typed(function) => (
+                0,
+                interp::bytecode::closure_body(function),
+                function.tag(),
+                function,
+            ),
+        };
+        let hidden = self.scopes.split_off(visible.min(self.scopes.len()));
+        let loops = std::mem::take(&mut self.loops);
+        let control = std::mem::replace(&mut self.control, 0);
+        let env = std::mem::replace(&mut self.env, env);
+        let closure = std::mem::replace(&mut self.closure, closure);
+        let inlining = match frame {
+            Frame::Local(..) => self.inlining.clone(),
+            Frame::Typed(_) => SmallVec::new(),
+        };
+        let inlining = std::mem::replace(&mut self.inlining, inlining);
+        let mut scope = self.new_scope();
+        for (&(symbol, _), argument) in formals.iter().zip(matched.iter()) {
+            // A default sees a formal passed a function only by calling it, which no default
+            // in typed code needs, and sees a left-out formal once its own default is in.
+            let binding = match *argument {
+                Some(Argument::Value(value)) => Binding::Value(value),
+                _ => Binding::Hidden,
+            };
+            scope.names.insert(symbol, binding);
+        }
+        self.scopes.push(scope);
+        let defaults = self.defaults(formals, matched, spans, body);
+        self.scopes.pop();
+        self.scopes.extend(hidden);
+        self.inlining = inlining;
+        self.closure = closure;
+        self.env = env;
+        self.loops = loops;
+        self.control = control;
+        defaults
     }
 
     /// Binds the formals past the parameters, which a call from R code leaves out, to their
@@ -7645,7 +7700,8 @@ impl Lowering<'_> {
     ) -> Result<Option<Local>, Refusal> {
         match callable {
             Callable::Inline(formals, body, scope) => {
-                self.inline(formals, body, scope + 1, arguments, inline_storage)
+                let arguments = self.positional_arguments(formals, body, scope + 1, arguments)?;
+                self.inline(formals, body, scope + 1, &arguments, inline_storage)
             }
             Callable::Captured(formals, body, capture) => {
                 // The function sees its captured names and its own, so it lowers with the scopes
@@ -7653,7 +7709,11 @@ impl Lowering<'_> {
                 let mut scope = self.new_scope();
                 scope.names = self.captures[capture as usize].clone();
                 let held = std::mem::replace(&mut self.scopes, vec![scope]);
-                let value = self.inline(formals, body, 1, arguments, inline_storage);
+                let value = self
+                    .positional_arguments(formals, body, 1, arguments)
+                    .and_then(|arguments| {
+                        self.inline(formals, body, 1, &arguments, inline_storage)
+                    });
                 self.scopes = held;
                 value
             }
