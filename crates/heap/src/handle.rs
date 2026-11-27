@@ -165,9 +165,13 @@ impl<'s> Cx<'s> {
         unsafe { (*self.heap.as_ptr()).set_slot_owner(environment.raw(), Some((owner, names.raw))) }
     }
 
-    /// Records that the environment stands for no slot frame any longer.
+    /// Records that the environment stands for no slot frame. An environment that stands for
+    /// none keeps its count of removed bindings in the same field, so it is left as it is.
     #[inline]
     pub fn clear_slot_owner(&self, environment: impl Pointer<Environment>) {
+        if self.slot_owner(environment.raw()).is_none() {
+            return;
+        }
         // SAFETY: the heap and the environment are live.
         unsafe { (*self.heap.as_ptr()).set_slot_owner(environment.raw(), None) }
     }

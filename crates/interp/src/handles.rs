@@ -4598,13 +4598,10 @@ pub fn call_cells<'s>(context: &Cx<'s>, call: Local<'s>) -> Option<SmallVec<[Tag
     let mut cells = SmallVec::new();
     let mut cell = head.rest();
     while let Some((expression, tag, rest)) = cell_fields(cell) {
-        // SAFETY: the rooted call holds its cells' tags and expressions, and nothing rewrites
-        // a call's argument cells while code that read them from it runs.
-        cells.push(unsafe {
-            Tagged {
-                tag: Local::adopt(tag.raw()),
-                value: Local::adopt(expression.raw()),
-            }
+        // R code may rewrite a call it holds alone in place, so each part is rooted itself.
+        cells.push(Tagged {
+            tag: context.root(tag),
+            value: context.root(expression),
         });
         cell = rest;
     }

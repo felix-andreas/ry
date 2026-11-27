@@ -2018,8 +2018,9 @@ unsafe fn reference_is_missing(reference: Sexp) -> R<bool> {
 }
 
 /// Turns the argument references the frame at `index` was called with into ordinary promises
-/// over the frames they name ([`detach_reference`]), wherever the frame holds them: its
-/// arguments, its slots and the `...` it collected. A reference is reused once the call
+/// over the frames they name ([`detach_reference`]). It converts each in place, so the frame's
+/// slots and the `...` it collected, which hold the same promises, change with its arguments.
+/// A reference is reused once the call
 /// returns, so the paths that hand a frame's arguments on as promises run this first: S4
 /// dispatch, `NextMethod`, and `UseMethod` when the method does not take over the generic's
 /// slots ([`crate::dispatch::use_method_in_slots`]).
@@ -2087,6 +2088,17 @@ pub fn detach<'s>(context: &mut Cx<'s>, reference: Local<'s, Promise>) -> R<()> 
     }) else {
         panic!("an argument reference outlived the call it was made for");
     };
+    // The promise names its frame's environment from here on, so the target it gave up serves
+    // the reference that takes its place. The pool's count goes with the pool's place: a
+    // promise that kept it would never count as held by its frame alone, so the frame's
+    // release would leave it forced, and the value it holds would look shared for the rest of
+    // its life. The replacement is made first, so a failed allocation leaves the reference
+    // as it was.
+    let Some((_, target)) = handles::pooled_reference(context, index) else {
+        panic!("argument reference {index} left the pool");
+    };
+    let target = context.root(target);
+    let fresh = handles::new_argument_reference(context, handles::null(), target)?;
     context.set_promise_value(reference, value);
     context.set_promise_code(reference, code);
     context.set_promise_environment(reference, environment);
@@ -2094,16 +2106,6 @@ pub fn detach<'s>(context: &mut Cx<'s>, reference: Local<'s, Promise>) -> R<()> 
     reference
         .read(context)
         .set_flags(gp::ARGUMENT_REFERENCE, false);
-    // The promise names its frame's environment from here on, so the target it gave up serves
-    // the reference that takes its place. The pool's count goes with the pool's place: a
-    // promise that kept it would never count as held by its frame alone, so the frame's
-    // release would leave it forced, and the value it holds would look shared for the rest of
-    // its life.
-    let Some((_, target)) = handles::pooled_reference(context, index) else {
-        panic!("argument reference {index} left the pool");
-    };
-    let target = context.root(target);
-    let fresh = handles::new_argument_reference(context, handles::null(), target)?;
     handles::place_reference(context, index, fresh, None);
     Ok(())
 }
