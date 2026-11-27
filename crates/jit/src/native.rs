@@ -56,6 +56,7 @@ use {
         cell::{Cell, RefCell},
         sync::atomic::AtomicBool,
     },
+    typed::{ReadAhead, Watch, Watched},
 };
 
 /// The status a native function returns beside its value when it ran to the end.
@@ -2930,16 +2931,16 @@ unsafe fn call_typed(typed: &TypedCall<'_>) -> Option<R<Sexp>> {
         return None;
     }
     let function = typed.function;
-    let (arguments, read, lazy) = gather(function, typed.args)?;
+    let (arguments, ahead) = gather(function, typed.args)?;
     // A strict typed closure runs on the typed core's native values when it compiles there,
     // and on the scalar natives below when it does not.
-    if let Some(value) = typed::call(typed, &arguments, lazy) {
-        return Some(value.and_then(|value| force_read(&read).map(|()| value)));
+    if let Some(value) = typed::call(typed, &arguments, &ahead) {
+        return Some(value);
     }
     let (types, words) = argument_words(&arguments)?;
     let native = native_for(function, &types)?;
     let trampoline = trampoline(&native.params, native.result)?;
-    run(native.result, &read, |out| {
+    run(native.result, &ahead.promises, |out| {
         trampoline(
             native.address,
             runtime::jit_depth_budget(),
@@ -2952,12 +2953,12 @@ unsafe fn call_typed(typed: &TypedCall<'_>) -> Option<R<Sexp>> {
 
 /// The arguments a native call passes, as values with no promise left: `None` unless every
 /// argument is positional and at hand without evaluating anything, and every formal past them
-/// has a constant scalar default. Also gives each promise read without forcing, with its value,
-/// and whether a value read ahead depends on a variable.
+/// has a constant scalar default. Also gives what reading them ahead read ([`ReadAhead`]): each
+/// promise read without forcing, with its value, and each variable a value depends on.
 pub(crate) unsafe fn gather(
     function: Sexp,
     args: &[interp::builtins::Arg],
-) -> Option<(SmallVec<[Sexp; 4]>, SmallVec<[(Sexp, Sexp); 4]>, bool)> {
+) -> Option<(SmallVec<[Sexp; 4]>, ReadAhead)> {
     if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE) {
         annotations::decline(|| String::from("it is being debugged or traced"));
         return None;
@@ -2969,8 +2970,7 @@ pub(crate) unsafe fn gather(
     let formals = function.car();
     let mut formal = formals;
     let mut arguments: SmallVec<[Sexp; 4]> = SmallVec::new();
-    let mut read: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
-    let mut lazy = false;
+    let mut ahead = ReadAhead::default();
     for (position, arg) in args.iter().enumerate() {
         if formal.kind() != SexpType::Pairlist
             || formal.tag() == values::symbols().dots
@@ -2986,10 +2986,7 @@ pub(crate) unsafe fn gather(
             return None;
         }
         let value = if arg.value.kind() == SexpType::Promise {
-            lazy |= arg.value.car() == values::unbound()
-                && (is_reference(arg.value)
-                    || reads_variables(bytecode::source_of_body(arg.value.cdr()), 0));
-            let Some(value) = promise_value(arg.value, &mut read, 0) else {
+            let Some(value) = promise_value(arg.value, &mut ahead, position as u32, 0) else {
                 let source = bytecode::source_of_body(arg.value.cdr());
                 if source.kind() == SexpType::Language && source.car() == values::symbols().function
                 {
@@ -3037,10 +3034,15 @@ pub(crate) unsafe fn gather(
         let default = formal.car();
         let value = match default.kind() {
             SexpType::Language if !names_a_formal(default, formals, 0) => {
-                lazy |= reads_variables(default, 0);
-                let mut promises: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
-                pure_value(default, function.tag(), &mut promises, 0)
-                    .filter(|_| promises.is_empty())
+                // A default is evaluated where the body first reads the parameter, in the
+                // call's frame, which has no variables to watch before the call starts.
+                let mut read = ReadAhead::default();
+                let value = pure_value(default, function.tag(), &mut read, 0, 0)
+                    .filter(|_| read.promises.is_empty());
+                if !read.watches.is_empty() {
+                    ahead.fixed |= lazy_bit(arguments.len());
+                }
+                value
             }
             _ => Some(default),
         };
@@ -3068,22 +3070,17 @@ pub(crate) unsafe fn gather(
         arguments.push(value);
         formal = formal.cdr();
     }
-    Some((arguments, read, lazy))
+    Some((arguments, ahead))
 }
 
-/// Whether evaluating `code` reads a variable, apart from the functions it calls by name. Too
-/// deep a tree counts as reading one.
-unsafe fn reads_variables(code: Sexp, depth: usize) -> bool {
-    match code.kind() {
-        SexpType::Symbol => true,
-        SexpType::Language => {
-            depth > MAX_PURE_DEPTH
-                || code.car().kind() != SexpType::Symbol && reads_variables(code.car(), depth + 1)
-                || values::pairlist_items(code.cdr())
-                    .into_iter()
-                    .any(|(_, argument)| reads_variables(argument, depth + 1))
-        }
-        _ => false,
+/// The bit of `position` in the mask of arguments read ahead from variables, which
+/// [`typed::call`] compares with the parameters its code reads before calling R. A position past
+/// the mask's width sets every bit.
+fn lazy_bit(position: usize) -> u64 {
+    if position < 64 {
+        1 << position
+    } else {
+        u64::MAX
     }
 }
 
@@ -3136,7 +3133,7 @@ pub(crate) unsafe fn argument_words(
 /// failed, so the caller runs the call in the interpreter.
 pub(crate) unsafe fn run(
     result: Ty,
-    read: &[(Sexp, Sexp)],
+    read: &[(Sexp, Sexp, u32)],
     enter: impl FnOnce(&mut u64) -> i64,
 ) -> Option<R<Sexp>> {
     let heap = interp::heap();
@@ -3167,8 +3164,8 @@ pub(crate) unsafe fn run(
 /// promise runs its annotation checks, which a read took only when they admit the value
 /// unchanged (`annotations::accepts_unchanged`), but the native call may have run R code since
 /// that changed what they admit, and a check's error is the call's.
-unsafe fn force_read(read: &[(Sexp, Sexp)]) -> R<()> {
-    for &(promise, value) in read {
+unsafe fn force_read(read: &[(Sexp, Sexp, u32)]) -> R<()> {
+    for &(promise, value, _) in read {
         settle_unforced(promise, value)?;
     }
     Ok(())
@@ -3179,10 +3176,12 @@ type R<T> = Result<T, interp::unwind::Unwind>;
 /// The value forcing `promise` gives, found without evaluating anything: a forced promise's
 /// value, a constant, or the value of an expression [`pure_value`] reads, in the promise's
 /// environment or in the slots of the slot frame it names. Each unforced promise read on the
-/// way goes to `read` with its value, so a call that succeeds settles it as forcing would have.
+/// way goes to `read` with its value, so a call that succeeds settles it as forcing would have,
+/// and so does each variable read, with the argument `position` it was read for.
 unsafe fn promise_value(
     promise: Sexp,
-    read: &mut SmallVec<[(Sexp, Sexp); 4]>,
+    read: &mut ReadAhead,
+    position: u32,
     depth: usize,
 ) -> Option<Sexp> {
     if promise.car() != values::unbound() {
@@ -3197,14 +3196,14 @@ unsafe fn promise_value(
     // An argument reference from a caller with an environment keeps that environment and the
     // argument's source as a promise does, so only a slot frame's reference reads differently.
     let value = if is_reference(promise) && promise.tag().kind() != SexpType::Environment {
-        match reference_variable(promise) {
-            // The variable holds a promise of the caller's own argument, which the same rules
-            // read in its own environment.
-            Some(inner) if inner.kind() == SexpType::Promise => {
-                promise_value(inner, read, depth + 1)?
-            }
-            Some(value) => value,
-            None => return None,
+        let bound = reference_variable(promise)?;
+        watch(read, Watched::Reference(promise), bound, position);
+        // The variable holds a promise of the caller's own argument, which the same rules read
+        // in its own environment.
+        if bound.kind() == SexpType::Promise {
+            promise_value(bound, read, position, depth + 1)?
+        } else {
+            bound
         }
     } else if matches!(
         expression.kind(),
@@ -3225,7 +3224,13 @@ unsafe fn promise_value(
         }
         // A promise made by compiled code holds its argument compiled, and the compiled code
         // computes what its source does.
-        pure_value(bytecode::source_of_body(expression), env, read, depth + 1)?
+        pure_value(
+            bytecode::source_of_body(expression),
+            env,
+            read,
+            position,
+            depth + 1,
+        )?
     };
     // A checked promise runs the annotation checks of the typed frames it was passed to when it
     // is forced, which settling it does. A value a check would reject or convert is left to the
@@ -3233,8 +3238,20 @@ unsafe fn promise_value(
     if promise.has_gp(gp::CHECKED_PROMISE) && !annotations::accepts_unchanged(promise, value) {
         return None;
     }
-    read.push((promise, value));
+    read.promises.push((promise, value, position));
     Some(value)
+}
+
+/// Records that the argument at `position` read `variable` while it was bound to `bound`. The
+/// collector must keep `bound` alive while the call runs, or a new object at its address could
+/// pass for it.
+unsafe fn watch(read: &mut ReadAhead, variable: Watched, bound: Sexp, position: u32) {
+    interp::heap().root(bound);
+    read.watches.push(Watch {
+        variable,
+        bound,
+        param: position,
+    });
 }
 
 /// How deeply [`pure_value`] reads into an argument expression.
@@ -3252,7 +3269,8 @@ const MAX_PURE_DEPTH: usize = 8;
 unsafe fn pure_value(
     expression: Sexp,
     env: Sexp,
-    read: &mut SmallVec<[(Sexp, Sexp); 4]>,
+    read: &mut ReadAhead,
+    position: u32,
     depth: usize,
 ) -> Option<Sexp> {
     match expression.kind() {
@@ -3265,8 +3283,17 @@ unsafe fn pure_value(
         }
         SexpType::Symbol => {
             let bound = peek_variable(expression, env)?;
+            watch(
+                read,
+                Watched::Variable {
+                    symbol: expression,
+                    env,
+                },
+                bound,
+                position,
+            );
             return if bound.kind() == SexpType::Promise {
-                promise_value(bound, read, depth)
+                promise_value(bound, read, position, depth)
             } else {
                 Some(bound)
             };
@@ -3319,7 +3346,7 @@ unsafe fn pure_value(
     if matches!(name, ".ry_array" | ".ry_record" | ".ry_tuple" | ".ry_tag") {
         let mut built: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
         for &(tag, item) in &items {
-            built.push((tag, pure_value(item, env, read, depth + 1)?));
+            built.push((tag, pure_value(item, env, read, position, depth + 1)?));
         }
         let value = if name == ".ry_array" {
             if built.iter().any(|&(tag, _)| tag != values::nil()) {
@@ -3338,7 +3365,7 @@ unsafe fn pure_value(
     }
     let mut operands: SmallVec<[Sexp; 4]> = SmallVec::new();
     for &(_, item) in &items {
-        let operand = pure_value(item, env, read, depth + 1)?;
+        let operand = pure_value(item, env, read, position, depth + 1)?;
         if !matches!(
             operand.kind(),
             SexpType::Integer | SexpType::Real | SexpType::Logical | SexpType::I64

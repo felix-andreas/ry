@@ -447,3 +447,56 @@ run ry run --runtime ry loose/retyped.R
 expect exit 1
 expect stdout "[1] 125"
 expect stderr "the global `rate` must be `F64`, the type it had when the typed function compiled, not a `double` vector of length 2"
+
+# An argument R code computes from variables is a promise, which R forces where the body first
+# reads the parameter, so an R call the body makes before that read could change what the
+# argument is. The native entry reads such an argument ahead and watches its variables: before
+# each R call the code settles the arguments it has read, and after it checks the variables of
+# the rest. `report` and `early` run natively, and `early` keeps the `y` it read before `rebind`
+# changed it. The R calls in `twice` and `bump_first` rebind and modify `y` before the body reads
+# `x`, so the code gives up and the interpreter runs the call again, forcing `x` to the new value
+# without running `rebind` or `bump` twice. With the native tier off, the program prints the same.
+
+file loose/watched.R
+| report <- function(label: Str, n: I64) -> I64 {
+|   cat(label, "\n")
+|   n + 1i64
+| }
+| rebind <- function() y <<- 100.0
+| bump <- function() y[1] <<- 50.0
+| early <- function(x: F64) -> F64 {
+|   a <- x
+|   rebind()
+|   a + x
+| }
+| twice <- function(x: F64) -> F64 {
+|   rebind()
+|   x * 2.0
+| }
+| bump_first <- function(x: F64) -> F64 {
+|   bump()
+|   x
+| }
+| label <- "hello"
+| k <- 3i64
+| print(report(label, k))
+| y <- 1.0
+| print(early(y))
+| y <- 1.0
+| print(twice(y))
+| y <- 1.0
+| print(bump_first(y))
+
+run ry run --runtime ry loose/watched.R
+expect exit 0
+expect stdout "hello \n4i64\n[1] 2\n[1] 200\n[1] 50"
+expect stderr lacks "`report` runs in the interpreter"
+expect stderr lacks "`early` runs in the interpreter"
+expect stderr "typed: `twice` runs in the interpreter: an R call it made changed a variable an argument is computed from before the function read that argument, so R forces the argument to the changed value, and the interpreter ran the call again with the values its R calls had returned"
+expect stderr "typed: `bump_first` runs in the interpreter: an R call it made changed a variable"
+
+env RY_JIT off
+run ry run --runtime ry loose/watched.R
+expect exit 0
+expect stdout "hello \n4i64\n[1] 2\n[1] 200\n[1] 50"
+unset RY_JIT

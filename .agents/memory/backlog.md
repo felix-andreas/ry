@@ -274,7 +274,7 @@ A typed element loop over a `List<F64>` that tests each item and adds to an `F64
 - **Not judged: how a call enters native code.** A call from top-level or boundary code that the native entry declines has no finding, and the function then runs in the interpreter together with every call it makes with a computed argument. The entry reads ahead constants, variables, arithmetic, `c()` and list, record, tuple and tag literals of them, and converts records, tuples and ry lists of them that R holds. It declines:
   - an argument that calls a function, typed or not (`total([make(1.0)])`, `f(List.from_r(x))`);
   - a function argument, which typed code takes only from typed code, and a `Dict` or `Set` result;
-  - a native function that calls R, given a variable argument from interpreted code ("it calls R, which could change a variable an argument reads"), on every call, so a function such as `report(label)` with a `cat` inside is always interpreted when top-level code calls it with a variable, with advice the caller already followed;
+  - a native function given a variable argument from interpreted code that it reads after an R call on some paths and before it on others, or after an R call made inside a typed function it calls directly (a recursive call included), or that leaves out a parameter whose default reads variables and calls R before reading it (`decisions/typed-native.md`, "Arguments read ahead from variables are watched across R calls");
   - the first call of a function that calls a not-yet-loaded R function or converts a value of unknown type, which waits on the interpreter once.
 
   Report these as `interpreted` at the call.

@@ -25,7 +25,7 @@ use {
         compiled_or_refusal, earliest,
         ir::{Item, Type},
         lower::{self, Conversion, Lowered, Passed, RArgument, RCall, RResult, Speculation},
-        lower_settled, optimize, shapes, storage,
+        lower_settled, optimize, reads_before_calling_r, shapes, storage,
     },
     heap::{
         object::{Sexp, SexpType},
@@ -49,7 +49,7 @@ use {
 };
 
 const MAGIC: &[u8; 8] = b"RYTYPED\0";
-const VERSION: u32 = 7;
+const VERSION: u32 = 8;
 /// The bytes of the fixed header.
 const HEADER_SIZE: usize = 8 + 4 + 8 * 13;
 /// The alignment of the code in the file and of the offset table's reservation, which is the
@@ -839,6 +839,9 @@ pub struct Version {
     pub end: u64,
     pub hash: u64,
     pub calls_r: bool,
+    /// The parameters the code reads before it may call R ([`Compiled::read_before_r`]), with
+    /// every typed call counted as one that may, since a session can link a callee that calls R.
+    pub read_before_r: u64,
     pub lookups: Vec<u32>,
     pub sites: Vec<u32>,
     pub callees: Vec<u32>,
@@ -1157,6 +1160,7 @@ impl Encoder<'_> {
                 .r_calls
                 .iter()
                 .any(|site| !site.diverges && !site.effect_free);
+        let read_before_r = reads_before_calling_r(lowered, |_| true).before.first;
         // The code's place in the file is filled in once it is linked.
         Ok(Version {
             name: self.shapes.strings.id(name),
@@ -1169,6 +1173,7 @@ impl Encoder<'_> {
             end: 0,
             hash: 0,
             calls_r,
+            read_before_r,
             lookups,
             sites,
             callees,
@@ -1748,6 +1753,7 @@ fn encode_metadata(parsed: &Parsed) -> Vec<u8> {
         out.number(version.end);
         out.number(version.hash);
         out.number(u64::from(version.calls_r));
+        out.number(version.read_before_r);
         out.list(&version.lookups);
         out.list(&version.sites);
         out.list(&version.callees);
@@ -2267,6 +2273,7 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
         let end = input.number()?;
         let hash = input.number()?;
         let calls_r = input.flag()?;
+        let read_before_r = input.number()?;
         let lookups = input.list(lookups)?;
         let sites = input.list(parsed.sites.len())?;
         let callees = input.list(parsed.callees.len())?;
@@ -2307,6 +2314,7 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
             end,
             hash,
             calls_r,
+            read_before_r,
             lookups,
             sites,
             callees,
@@ -2987,6 +2995,8 @@ unsafe fn attach_inner(
         speculations,
         epoch,
         calls_r,
+        read_before_r: version.read_before_r,
+        watchable: 0,
         guessed,
         cells: SmallVec::new(),
     })))
@@ -3227,6 +3237,7 @@ unsafe fn build_site_inner(
         result,
         diverges: site.diverges,
         effect_free: site.effect_free,
+        read_before: 0,
     })
 }
 
@@ -3578,6 +3589,7 @@ pub mod testing {
                 end,
                 hash: below(usize::MAX) as u64,
                 calls_r: below(2) == 0,
+                read_before_r: below(usize::MAX) as u64,
                 lookups: pick(&mut below, lookups),
                 sites: pick(&mut below, parsed.sites.len()),
                 callees: pick(&mut below, parsed.callees.len()),

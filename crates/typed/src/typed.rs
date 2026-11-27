@@ -157,6 +157,14 @@ pub struct Compiled {
     pub epoch: Option<u64>,
     /// Whether the code, or a function it calls, calls an R function.
     pub calls_r: bool,
+    /// The parameters, as bits by position, that the code reads on every path before it makes a
+    /// call that may run R code ([`reads_before_calling_r`]).
+    pub read_before_r: u64,
+    /// The parameters whose arguments the native entry may read ahead from variables although
+    /// the code calls R before it reads them, by watching those variables ([`Watching`]): each
+    /// R call comes, on every path, before the parameter's first read or after it, and every R
+    /// call is the code's own, since a typed function it calls that calls R has sites of its own.
+    pub watchable: u64,
     /// The [`interp::numbers::conversion_epoch`] at which this code, or a function it calls,
     /// took the type of a conversion from what the interpreter saw it give
     /// ([`lower::Conversion::guessed`]). The code is stale once a conversion has given another
@@ -208,6 +216,12 @@ thread_local! {
     /// runs in a frame of. A typed callee that compiled code calls directly has no call of its
     /// own, so its R calls see its caller's.
     static RUNNING: Cell<Option<Running>> = const { Cell::new(None) };
+    /// The arguments the running code read ahead from variables that an R call it makes could
+    /// change before the code reads them ([`Watching`]).
+    static WATCHING: Cell<Option<Watching>> = const { Cell::new(None) };
+    /// Whether an R call changed a variable an argument the code had not read yet was read
+    /// from, which made the code give up.
+    static WATCH_TRIPPED: Cell<bool> = const { Cell::new(false) };
     /// The call the interpreter is running again because its native code ran out of depth
     /// budget or stack. Every native entry inside it declines: each would recurse as deep and
     /// stop again, which made a deep recursion quadratic.
@@ -231,6 +245,62 @@ struct Running {
     args: *const Arg,
     count: usize,
     sys_parent: Sexp,
+}
+
+/// What the native entry read when it read a call's arguments ahead without forcing them.
+#[derive(Default)]
+pub struct ReadAhead {
+    /// The arguments, as bits by position, whose values depend on variables that cannot be
+    /// watched, as a left-out default's do: R evaluates it in the call's frame when the body
+    /// first reads the parameter.
+    pub fixed: u64,
+    /// Each unforced promise read, with the value forcing it gives and the position of the
+    /// argument it was read for. A call that succeeds settles each as forcing would have.
+    pub promises: SmallVec<[(Sexp, Sexp, u32); 4]>,
+    /// Each variable an argument's value was read from.
+    pub watches: SmallVec<[Watch; 4]>,
+}
+
+/// A variable the argument at `param` was read from while it was bound to `bound`.
+#[derive(Clone, Copy)]
+pub struct Watch {
+    pub variable: Watched,
+    pub bound: Sexp,
+    pub param: u32,
+}
+
+/// Where a [`Watch`]'s variable is: a name in an environment, or the variable a slot frame's
+/// argument reference names ([`interp::eval::reference_variable`]).
+#[derive(Clone, Copy)]
+pub enum Watched {
+    Variable { symbol: Sexp, env: Sexp },
+    Reference(Sexp),
+}
+
+impl ReadAhead {
+    /// The arguments, as bits by position, whose values depend on a variable. A position past
+    /// the mask's width sets every bit.
+    fn lazy(&self) -> u64 {
+        self.watches
+            .iter()
+            .fold(self.fixed, |bits, watch| bits | param_bit(watch.param))
+    }
+}
+
+fn param_bit(param: u32) -> u64 {
+    if param < 64 { 1 << param } else { u64::MAX }
+}
+
+/// What running code watches while it calls R ([`WATCHING`]): the variables its arguments were
+/// read from, and the parameters, as bits, it has settled. R forces an argument where the body
+/// first reads it, so before each R call the code settles the arguments it has read
+/// ([`RCall::read_before`]), and after each it checks the variables of the arguments it has not:
+/// one that changed makes the code give up, and the interpreter runs the call again, forcing
+/// that argument where R would.
+#[derive(Clone, Copy)]
+struct Watching {
+    ahead: *const ReadAhead,
+    settled: u64,
 }
 
 /// How many closures a session compiles at most, since each keeps its closure alive. The
@@ -258,12 +328,13 @@ const MAX_REVISIONS: usize = 3;
 /// through its compiled code. `None` when the closure does not compile for these values or the
 /// code gives up, and the caller then makes the call in the interpreter.
 ///
-/// `lazy` says that an argument is a promise read ahead without forcing it whose value depends on
-/// variables, which code that calls R could change before the interpreter would have forced it.
+/// `ahead` is what reading the arguments ahead read. An argument whose value depends on variables
+/// is a promise R forces only where the body reads it, so code that calls R first could change
+/// what forcing it gives: the code watches those variables ([`Watching`]).
 pub unsafe fn call(
     typed: &TypedCall<'_>,
     values: &[Sexp],
-    lazy: bool,
+    ahead: &ReadAhead,
 ) -> Option<Result<Sexp, Unwind>> {
     let function = typed.function;
     if !interp::annotations::is_typed(function) {
@@ -320,12 +391,35 @@ pub unsafe fn call(
         arguments.release();
         return None;
     };
-    if lazy && calls_r(compiled) {
+    // An argument the body reads before any R call runs is the value R would force there, since
+    // nothing between the entry and that read runs R code. Any other argument read from
+    // variables is watched while the code calls R.
+    let late = if calls_r(compiled) {
+        ahead.lazy() & !compiled.read_before_r
+    } else {
+        0
+    };
+    if late & ahead.fixed != 0 {
         arguments.release();
         decline(|| {
             String::from(
-                "it calls R, which could change a variable an argument reads before R would force \
-                 that argument: compute the argument into a variable before the call",
+                "it calls R before it reads a parameter it was called without, and R computes \
+                 that parameter's default from variables only where the body first reads it: \
+                 pass the argument, or read the parameter before the R call",
+            )
+        });
+        return None;
+    }
+    // The masks hold 64 parameters, and a watched one past them is never settled.
+    let wide = late != 0 && ahead.watches.iter().any(|watch| watch.param >= 64);
+    if late & !compiled.watchable != 0 || wide {
+        arguments.release();
+        decline(|| {
+            String::from(
+                "it calls R, directly or through a typed function, before it reads an argument \
+                 computed from variables on some paths but not on others, so the R call could \
+                 change what R would force the argument to: read the parameter before the R \
+                 call on every path, or compute the argument into a variable before the call",
             )
         });
         return None;
@@ -339,6 +433,18 @@ pub unsafe fn call(
         });
         return None;
     }
+    // A watched value must be copied, not changed in place, by R code that assigns into its
+    // variable, so that the change shows as a new binding.
+    let watched: &[Watch] = if late != 0 { &ahead.watches } else { &[] };
+    for watch in watched {
+        if let Some(value) = held_value(watch.bound) {
+            value.increment_refcount();
+        }
+    }
+    let outer_watching = WATCHING.replace((late != 0).then_some(Watching {
+        ahead: std::ptr::from_ref(ahead),
+        settled: 0,
+    }));
     let heap = interp::heap();
     let mark = heap.handle_mark();
     let mut out = [0u64; 2];
@@ -370,6 +476,13 @@ pub unsafe fn call(
         stacker::maybe_grow(NATIVE_STACK, NATIVE_SEGMENT, || run(native_stack_limit()))
     };
     RUNNING.set(outer);
+    WATCHING.set(outer_watching);
+    for watch in watched {
+        if let Some(value) = held_value(watch.bound) {
+            value.decrement_refcount();
+        }
+    }
+    let tripped = WATCH_TRIPPED.take();
     if status != 0 {
         arguments.release();
         let unwind = PARKED.take();
@@ -381,7 +494,7 @@ pub unsafe fn call(
                 function,
             }));
         }
-        let reason = || stop_reason(guess, exhausted);
+        let reason = || stop_reason(guess, exhausted, tripped);
         if unwind.is_some() || R_CALLS.get() == r_calls {
             replay::close(segment);
             heap.release_handles(mark);
@@ -428,9 +541,29 @@ pub unsafe fn call(
     let value = to_r(compiled.result, out);
     drop_words(compiled.result, out);
     arguments.release();
+    // Each promise read ahead settles with the value forcing it gives, as if the interpreter had
+    // forced it: a promise shared through `...` must keep the value this call saw. Settling a
+    // checked promise runs its annotation checks, whose error is the call's.
+    let value = value.and_then(|value| {
+        heap.root(value);
+        for &(promise, read, _) in &ahead.promises {
+            interp::eval::settle_unforced(promise, read)?;
+        }
+        Ok(value)
+    });
     heap.release_handles(mark);
     interp::interp().visible = true;
     Some(value)
+}
+
+/// The value R code changes when it assigns into an element of a variable bound to `bound`: the
+/// value itself, or a forced promise's value.
+unsafe fn held_value(bound: Sexp) -> Option<Sexp> {
+    if bound.kind() != SexpType::Promise {
+        return Some(bound);
+    }
+    let value = bound.car();
+    (value != rvalues::unbound()).then_some(value)
 }
 
 /// The compiled code for calling `function` with arguments of types `params`, compiling it on
@@ -577,9 +710,14 @@ pub fn native_stops() -> u64 {
 
 /// Why compiled code stopped partway: the conversion that gave a type the code was not compiled
 /// for when that is why.
-unsafe fn stop_reason(guess: Option<(Sexp, SexpType)>, exhausted: bool) -> String {
+unsafe fn stop_reason(guess: Option<(Sexp, SexpType)>, exhausted: bool, tripped: bool) -> String {
     if exhausted {
         return "its native code ran out of stack or of R's nesting depth".to_owned();
+    }
+    if tripped {
+        return "an R call it made changed a variable an argument is computed from before the \
+                function read that argument, so R forces the argument to the changed value"
+            .to_owned();
     }
     match guess {
         Some((conversion, kind)) => format!(
@@ -773,6 +911,33 @@ unsafe fn lower_guessing(
 
 /// Machine code for a lowered function whose shapes are confirmed.
 unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<Compiled, Refusal> {
+    let callee_calls_r = |index: usize| {
+        match (linker.callees.get(index), linker.called.get(index)) {
+        (Some(Callee { entry: Entry::Address(_), .. }), Some(key)) => COMPILED.with_borrow(|table| {
+            !matches!(table.get(key), Some(Ok(found)) if !found.calls_r && found.cells.is_empty())
+        }),
+        _ => true,
+    }
+    };
+    let mut lowered = lowered;
+    let reads = reads_before_calling_r(&lowered, callee_calls_r);
+    for &(site, read) in &reads.before.sites {
+        if let Some(site) = lowered.r_calls.get_mut(site) {
+            site.read_before = read;
+        }
+    }
+    let through_callee = lowered.function.blocks.iter().any(|block| {
+        block.insts.iter().any(|inst| match inst.op {
+            ir::Op::CallTyped(lower::SELF, _) => reads.calls_r,
+            ir::Op::CallTyped(index, _) => callee_calls_r(index),
+            _ => false,
+        })
+    });
+    let watchable = if through_callee {
+        0
+    } else {
+        !reads.before.ambiguous
+    };
     let mut ir = lowered.function;
     optimize(&mut ir);
     let sites: Vec<usize> = lowered
@@ -824,9 +989,43 @@ unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<
         speculations,
         epoch,
         calls_r,
+        read_before_r: reads.before.first,
+        watchable,
         guessed,
         cells: linker.cells,
     })
+}
+
+/// What `lowered` reads before an R call that may change a variable or a typed call for which
+/// `callee_calls_r` holds by the callee's index ([`lower::reads_before`]), and whether it makes
+/// any such call. A call of the function itself calls R when the function does.
+pub(crate) struct CallingR {
+    pub before: lower::ReadsBefore,
+    pub calls_r: bool,
+}
+
+pub(crate) unsafe fn reads_before_calling_r(
+    lowered: &Lowered,
+    callee_calls_r: impl Fn(usize) -> bool,
+) -> CallingR {
+    let runs_r = |op: &ir::Op, itself: bool| match *op {
+        ir::Op::CallR(site, _) => lowered
+            .r_calls
+            .get(site)
+            .is_none_or(|site| !site.diverges && !changes_nothing(site)),
+        ir::Op::CallTyped(lower::SELF, _) => itself,
+        ir::Op::CallTyped(index, _) => callee_calls_r(index),
+        _ => false,
+    };
+    let calls_r = lowered
+        .function
+        .blocks
+        .iter()
+        .any(|block| block.insts.iter().any(|inst| runs_r(&inst.op, false)));
+    CallingR {
+        before: lower::reads_before(lowered, |op| runs_r(op, calls_r)),
+        calls_r,
+    }
 }
 
 /// The passes between lowering and machine code.
@@ -1739,14 +1938,15 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
     // An effect-free call changes nothing a second run would see unless it warns, so only then
     // does it count as a call the code cannot make again. A replayed call counts, since running
     // the code again must give it the same value.
-    // A call R evaluates among the arguments may have an effect of its own, so the site is
-    // replayed, though it may still stand among another call's arguments.
-    let effect_free = site.effect_free
-        && replayed.is_none()
-        && !site.arguments.iter().any(|argument| {
-            matches!(argument.passed, Passed::Code) && argument.code.kind() == SexpType::Language
-        });
+    let effect_free = replayed.is_none() && changes_nothing(site);
     let warnings = interp::conditions::warnings_raised();
+    let watching = WATCHING.get();
+    if let Some(watching) = watching
+        && let Err(unwind) = settle_read(watching, site.read_before)
+    {
+        PARKED.set(Some(unwind));
+        return 1;
+    }
     let heap = interp::heap();
     let mark = heap.handle_mark();
     let outcome = match RUNNING.get() {
@@ -1770,11 +1970,20 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
     };
     heap.release_handles(mark);
     let made = outcome.as_ref().ok().copied();
-    if !effect_free || interp::conditions::warnings_raised() != warnings {
+    let acted = !effect_free || interp::conditions::warnings_raised() != warnings;
+    if acted {
         R_CALLS.set(R_CALLS.get() + 1);
         if let Some(made) = made {
             replay::record(site.call, made.value);
         }
+    }
+    if acted
+        && made.is_some()
+        && let Some(watching) = WATCHING.get()
+        && watch_tripped(watching)
+    {
+        WATCH_TRIPPED.set(true);
+        return 1;
     }
     // Compiled code holds a table as a bare word, which the collector does not see, so the table
     // stays rooted until the call that entered typed code releases its handles.
@@ -1792,6 +2001,49 @@ pub unsafe extern "C" fn ry_call_r(site: *const RCall, words: *const u64, out: *
             1
         }
     }
+}
+
+/// Whether making the R call `site` changes nothing a second run would see unless it warns. A
+/// call R evaluates among the arguments may have an effect of its own, so its site is replayed,
+/// though it may still stand among another call's arguments.
+unsafe fn changes_nothing(site: &RCall) -> bool {
+    site.effect_free
+        && !site.arguments.iter().any(|argument| {
+            matches!(argument.passed, Passed::Code) && argument.code.kind() == SexpType::Language
+        })
+}
+
+/// Settles the promises of the arguments at `read`, as bits by position, that `watching` has not
+/// settled yet: the code has read those parameters, where R forces them, and the R call it makes
+/// next must not change what they are.
+unsafe fn settle_read(mut watching: Watching, read: u64) -> Result<(), Unwind> {
+    let unsettled = read & !watching.settled;
+    if unsettled == 0 {
+        return Ok(());
+    }
+    watching.settled |= unsettled;
+    WATCHING.set(Some(watching));
+    for &(promise, value, param) in &(*watching.ahead).promises {
+        if param_bit(param) & unsettled != 0 {
+            interp::eval::settle_unforced(promise, value)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether a variable an unsettled argument of `watching` was read from is bound to something
+/// else now.
+unsafe fn watch_tripped(watching: Watching) -> bool {
+    (*watching.ahead).watches.iter().any(|watch| {
+        if param_bit(watch.param) & !watching.settled == 0 {
+            return false;
+        }
+        let now = match watch.variable {
+            Watched::Variable { symbol, env } => interp::eval::peek_variable(symbol, env),
+            Watched::Reference(reference) => interp::eval::reference_variable(reference),
+        };
+        now != Some(watch.bound)
+    })
 }
 
 /// Reads the global that `site` names for compiled code, which was compiled for a value of type

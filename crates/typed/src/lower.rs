@@ -14,8 +14,8 @@ use {
     crate::{
         Refusal,
         ir::{
-            Arith, BitCount, Bits, BlockId, Builder, Compare, Constant, Function, Inst, Item,
-            Local, Math, Op, Overflow, Reduce, StrTest, Terminator, Text, Type,
+            Arith, BitCount, Bits, Block, BlockId, Builder, Compare, Constant, Function, Inst,
+            Item, Local, Math, Op, Overflow, Reduce, StrTest, Terminator, Text, Type,
         },
         shapes, values,
     },
@@ -61,6 +61,114 @@ pub struct Lowered {
     pub any_tag: Option<AnyTag>,
     /// The tag shapes the code constructs, which the caller confirms before it generates code.
     pub constructed: SmallVec<[u32; 4]>,
+    /// Where the body reads each parameter, in the blocks of `function` ([`reads_before`]).
+    pub param_reads: Vec<ParamRead>,
+}
+
+/// A read of parameter `param` in block `block`, which held `position` instructions when
+/// lowering reached it, so the read comes before the instruction at that position.
+#[derive(Clone, Copy, Debug)]
+pub struct ParamRead {
+    pub block: BlockId,
+    pub position: u32,
+    pub param: u32,
+}
+
+/// Which parameters, as bits by position among the first 64, the body has read where it may run
+/// R code. R forces an argument where the body first reads it, so an R call the body makes
+/// before that read could change what the argument computes, while the native entry has read it
+/// ahead.
+#[derive(Debug, Default)]
+pub struct ReadsBefore {
+    /// The parameters every path reads before the first instruction that may run R code.
+    pub first: u64,
+    /// The parameters that some path reads, and some path does not, before an instruction that may
+    /// run R code, so whether R has forced the argument there depends on the path.
+    pub ambiguous: u64,
+    /// The parameters every path reads before each [`Op::CallR`] that may run R code, by site.
+    pub sites: Vec<(usize, u64)>,
+}
+
+/// [`ReadsBefore`] for `lowered`, where `runs_r` says which instructions may run R code.
+pub fn reads_before(lowered: &Lowered, runs_r: impl Fn(&Op) -> bool) -> ReadsBefore {
+    let blocks = &lowered.function.blocks;
+    let mut reads: Vec<SmallVec<[(u32, u64); 2]>> = vec![SmallVec::new(); blocks.len()];
+    for read in &lowered.param_reads {
+        if read.param < 64
+            && let Some(list) = reads.get_mut(read.block.0 as usize)
+        {
+            list.push((read.position, 1 << read.param));
+        }
+    }
+    for list in &mut reads {
+        list.sort_unstable_by_key(|&(position, _)| position);
+    }
+    // What every path into a block has read, and what some path has.
+    let every = entering(blocks, &reads, u64::MAX, |a, b| a & b);
+    let some = entering(blocks, &reads, 0, |a, b| a | b);
+    let mut before = ReadsBefore {
+        first: u64::MAX,
+        ..ReadsBefore::default()
+    };
+    for (index, block) in blocks.iter().enumerate() {
+        let (mut all, mut any) = (every[index], some[index]);
+        let mut events = reads[index].iter().peekable();
+        for (position, inst) in block.insts.iter().enumerate() {
+            while let Some(&&(at, bit)) = events.peek()
+                && at as usize <= position
+            {
+                all |= bit;
+                any |= bit;
+                events.next();
+            }
+            if !runs_r(&inst.op) {
+                continue;
+            }
+            before.first &= all;
+            before.ambiguous |= any & !all;
+            if let Op::CallR(site, _) = inst.op {
+                match before.sites.iter_mut().find(|(known, _)| *known == site) {
+                    Some((_, read)) => *read &= all,
+                    None => before.sites.push((site, all)),
+                }
+            }
+        }
+    }
+    before
+}
+
+/// What the paths into each block of `blocks` have read, joined by `join` from `start`, the value
+/// a block no path has reached yet holds. The entry starts with nothing read.
+fn entering(
+    blocks: &[Block],
+    reads: &[SmallVec<[(u32, u64); 2]>],
+    start: u64,
+    join: impl Fn(u64, u64) -> u64,
+) -> Vec<u64> {
+    let mut entering = vec![start; blocks.len()];
+    if let Some(entry) = entering.first_mut() {
+        *entry = 0;
+    }
+    loop {
+        let mut changed = false;
+        for (index, block) in blocks.iter().enumerate() {
+            let read = reads[index]
+                .iter()
+                .fold(entering[index], |bits, &(_, bit)| bits | bit);
+            for successor in block.terminator.successors() {
+                if let Some(slot) = entering.get_mut(successor.0 as usize)
+                    && successor.0 != 0
+                    && join(*slot, read) != *slot
+                {
+                    *slot = join(*slot, read);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return entering;
+        }
+    }
 }
 
 /// What the matches over any tag in one lowering relied on. Each tests for the confirmed shapes
@@ -100,6 +208,9 @@ pub struct RCall {
     /// up after one may run again in the interpreter, no lazy argument can observe it, and it
     /// may stand inside another call's arguments.
     pub effect_free: bool,
+    /// The parameters, as bits by position, that every path through the code reads before this
+    /// call ([`reads_before`]), which the native entry settles before the call.
+    pub read_before: u64,
 }
 
 /// What compiled code does with the value of an [`RCall`].
@@ -351,6 +462,8 @@ unsafe fn lower_calling(
         declared_loops: Vec::new(),
         probing: 0,
         captures: Vec::new(),
+        param_variables: SmallVec::new(),
+        param_reads: Vec::new(),
     };
     tail_matches(body, &mut lowering.tails);
     let mut assigned = Vec::new();
@@ -367,6 +480,7 @@ unsafe fn lower_calling(
         } else {
             param
         };
+        lowering.param_variables.push(variable);
         lowering.bind(symbol, Binding::Value(variable));
     }
     let value = match lowering.expression(body) {
@@ -405,6 +519,7 @@ unsafe fn lower_calling(
         r_calls: lowering.r_calls,
         any_tag: lowering.any_tag,
         constructed: lowering.constructed,
+        param_reads: lowering.param_reads,
     })
 }
 
@@ -526,6 +641,7 @@ struct Checkpoint {
     blocks: usize,
     self_inlines: usize,
     pending: Vec<SmallVec<[Local; 4]>>,
+    param_reads: usize,
 }
 
 struct Lowering<'c> {
@@ -612,6 +728,10 @@ struct Lowering<'c> {
     probing: usize,
     /// The names each captured function sees ([`Callable::Captured`]).
     captures: Vec<FxHashMap<Sexp, Binding>>,
+    /// The variable each parameter is bound to, by position.
+    param_variables: SmallVec<[Local; 4]>,
+    /// Where the body reads a parameter by name ([`reads_before`]).
+    param_reads: Vec<ParamRead>,
 }
 
 /// A name a loop declares before it ([`Lowering::looped`]): its symbol, its type, and whether
@@ -1040,7 +1160,27 @@ impl Lowering<'_> {
 
     unsafe fn read(&mut self, symbol: Sexp) -> Result<Local, Refusal> {
         match self.lookup(symbol) {
-            Some(Binding::Value(local)) => Ok(local),
+            Some(Binding::Value(local)) => {
+                if let Some(param) = self
+                    .param_variables
+                    .iter()
+                    .position(|&variable| variable == local)
+                {
+                    let block = self.builder.current;
+                    let position = self
+                        .builder
+                        .function
+                        .blocks
+                        .get(block.0 as usize)
+                        .map_or(0, |block| block.insts.len());
+                    self.param_reads.push(ParamRead {
+                        block,
+                        position: position as u32,
+                        param: param as u32,
+                    });
+                }
+                Ok(local)
+            }
             Some(Binding::Maybe(local)) => {
                 // Where the name is unset, R reads it from the enclosing environment or fails,
                 // which the interpreter does when the call gives up.
@@ -1865,6 +2005,7 @@ impl Lowering<'_> {
             result,
             diverges: matches!(r_use, RUse::Diverges),
             effect_free,
+            read_before: 0,
         });
         let site = self.r_calls.len() - 1;
         match result {
@@ -7524,6 +7665,7 @@ impl Lowering<'_> {
             blocks: self.builder.function.blocks.len(),
             self_inlines: self.self_inlines,
             pending: self.pending.clone(),
+            param_reads: self.param_reads.len(),
         }
     }
 
@@ -7567,6 +7709,7 @@ impl Lowering<'_> {
         self.constructed.truncate(checkpoint.constructed);
         self.r_calls.truncate(checkpoint.r_calls);
         self.self_inlines = checkpoint.self_inlines;
+        self.param_reads.truncate(checkpoint.param_reads);
         // A list the forgotten code settled is pending again, with its placeholder item type.
         for family in &checkpoint.pending {
             let settled = family
