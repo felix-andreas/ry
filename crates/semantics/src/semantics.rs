@@ -1835,7 +1835,7 @@ pub fn sourced_files(db: &dyn Db, file: SourceFile) -> Vec<SourceFile> {
 }
 
 /// `a/./b/../c.R` as `a/c.R`, or `None` for a path that leaves the project root.
-fn normalize_relative_path(path: &str) -> Option<String> {
+pub fn normalize_relative_path(path: &str) -> Option<String> {
     let mut parts: Vec<&str> = Vec::new();
     for part in path.split(['/', '\\']) {
         match part {

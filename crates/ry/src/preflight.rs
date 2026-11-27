@@ -15,10 +15,11 @@ use {
     loader::SourceEncoding,
     repl::{Filtered, InputFilter},
     rustc_hash::{FxHashMap, FxHashSet},
+    salsa::Setter,
     semantics::{
-        Elaboration, ProjectFiles, RootDatabase, SourceFile,
+        DocumentKind, Elaboration, ProjectFiles, RootDatabase, SourceFile, SourcePaths,
         diagnostics::{Diagnostic, RelatedLocation, Severity},
-        has_ry_syntax, is_ry_syntax, session,
+        file_source_calls, has_ry_syntax, is_ry_syntax, normalize_relative_path, session,
         stubs::{install_shipped_stubs, is_native_function},
     },
     std::{
@@ -156,6 +157,7 @@ impl Preflight {
         }
         self.flush_plain();
         let file = session::command_file(&self.db, format!("{input}\n"));
+        follow_sources(&mut self.db, file);
         let db = self.db.clone();
         let config = &self.config;
         let (contributions, (verdict, reported, elaborations)) = on_analysis_stack(move || {
@@ -578,14 +580,13 @@ pub fn elaborate_sourced(path: &Path) -> Result<Option<(u64, String)>, CommandEr
     let Ok(source) = String::from_utf8(bytes) else {
         return Ok(None);
     };
-    let source = source.strip_prefix('\u{FEFF}').unwrap_or(&source);
-    let source = source.replace("\r\n", "\n").replace('\r', "\n");
-    let source = source.strip_suffix('\n').unwrap_or(&source);
+    let source = r_source_text(&source);
     // The project's strict mode is the sourcing script's: a plain R file it sources keeps R's
     // types, and one that turns strict mode on itself (`# typing: strict`) is checked strictly.
     config.check.strict = false;
-    let preflight = Preflight::new(config, path.to_path_buf());
+    let mut preflight = Preflight::new(config, path.to_path_buf());
     let file = session::command_file(&preflight.db, format!("{source}\n"));
+    follow_sources(&mut preflight.db, file);
     let db = preflight.db.clone();
     let config = &preflight.config;
     let (_, reported, elaborations) = on_analysis_stack(move || findings(&db, file, config));
@@ -616,8 +617,95 @@ pub fn elaborate_sourced(path: &Path) -> Result<Option<(u64, String)>, CommandEr
     if elaborations.is_empty() {
         return Ok(None);
     }
-    let program = elaborated_program(path, source, &elaborations)?;
+    let program = elaborated_program(path, &source, &elaborations)?;
     Ok(Some((xxh3_64(source.as_bytes()), program)))
+}
+
+/// Gives the analysis the files `file` reads through `source()` with a literal path, and the
+/// files those read in turn, so that a script may call what they define, as `ry check` lets it.
+/// R resolves such a path against the working directory, so the paths are relative to it, and
+/// each file is read again here, because a session may edit one between two `source()` calls.
+fn follow_sources(db: &mut RootDatabase, file: SourceFile) {
+    let Ok(root) = std::env::current_dir() else {
+        return;
+    };
+    let mut paths = SourcePaths::try_get(db)
+        .map(|paths| paths.paths(db).clone())
+        .unwrap_or_default();
+    let mut changed = false;
+    let mut visited = FxHashSet::default();
+    let mut pending: Vec<(SourceFile, Option<String>)> = vec![(file, None)];
+    while let Some((current, key)) = pending.pop() {
+        let analysis = db.clone();
+        let literals = on_analysis_stack(move || file_source_calls(&analysis, current).clone());
+        // `semantics::sourced_files` tries the sourcing file's directory first, then the root.
+        let directory = key
+            .as_deref()
+            .and_then(|key| key.rsplit_once('/'))
+            .map(|(directory, _)| directory.to_owned());
+        for literal in literals {
+            let candidates = directory
+                .iter()
+                .map(|directory| format!("{directory}/{literal}"))
+                .chain([literal.clone()])
+                .filter_map(|candidate| normalize_relative_path(&candidate));
+            let mut found = None;
+            for candidate in candidates {
+                match fs::read_to_string(root.join(&candidate)) {
+                    Ok(text) => {
+                        found = Some((candidate, text));
+                        break;
+                    }
+                    // A file that is gone must not resolve the literal from an earlier read.
+                    Err(_) => changed |= paths.remove(&candidate).is_some(),
+                }
+            }
+            let Some((key, text)) = found else {
+                continue;
+            };
+            if !visited.insert(key.clone()) {
+                continue;
+            }
+            let text = format!("{}\n", r_source_text(&text));
+            let target = match paths.get(&key) {
+                Some(&existing) => {
+                    if existing.text(db) != text {
+                        existing.set_text(db).to(text);
+                    }
+                    existing
+                }
+                None => {
+                    let created = SourceFile::new(db, text, DocumentKind::Script);
+                    paths.insert(key.clone(), created);
+                    changed = true;
+                    created
+                }
+            };
+            pending.push((target, Some(key)));
+        }
+    }
+    if !changed {
+        return;
+    }
+    match SourcePaths::try_get(db) {
+        Some(existing) => {
+            existing.set_paths(db).to(paths);
+        }
+        None => {
+            SourcePaths::new(db, paths);
+        }
+    }
+}
+
+/// `text` as R's parser reads a file: without a byte order mark, with `\n` line endings and one
+/// final `\n` dropped.
+fn r_source_text(text: &str) -> String {
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+    let mut text = text.replace("\r\n", "\n").replace('\r', "\n");
+    if text.ends_with('\n') {
+        text.pop();
+    }
+    text
 }
 
 /// [`elaborate`]s `source`, the text of the file at `path`. The rewrites are ASCII, between
