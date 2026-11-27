@@ -3303,7 +3303,13 @@ unsafe fn try_native_typed(
     }
     // The native tier binds the arguments itself and may keep one, so it gets promises.
     detach_references(args)?;
-    force_typed_arguments(call, args, sys_parent)?;
+    // The caller's frame holds the call, its environment and the arguments.
+    handles::in_caller_scope(|context| {
+        let call = handles::held(context, call);
+        let caller = handles::held(context, sys_parent);
+        let args = handles::tagged(context, args);
+        force_typed_arguments(context, call, args, caller)
+    })?;
     let Some(tier) = bytecode::tier() else {
         crate::annotations::log_interpreted_because(call, "no native tier is loaded");
         return Ok(None);
@@ -3326,63 +3332,81 @@ unsafe fn try_native_typed(
 /// even when the interpreter forwards the caller's promise for a variable (an effect-free
 /// callee's eager arguments). An argument written in R code, including one a typed function
 /// passes on as `...`, stays lazy, and so does a missing one, as `missing()` reads it.
-unsafe fn force_typed_arguments(call: Sexp, args: &[Arg], sys_parent: Sexp) -> R<()> {
-    let dots = symbols().dots;
-    let mut expressions = if is_typed_frame(sys_parent) {
-        call.cdr()
-    } else {
-        nil()
+fn force_typed_arguments(
+    context: &mut Cx<'_>,
+    call: Local<'_>,
+    args: &[Tagged<'_>],
+    caller: Local<'_>,
+) -> R<()> {
+    let dots = handles::symbol(|symbols| symbols.dots);
+    let caller = caller.downcast::<Environment>();
+    let from_typed_caller =
+        caller.is_some_and(|caller| is_typed_frame(context, caller.read(context)));
+    let mut expressions = match call.read(context).downcast::<Language>() {
+        Some(call) if from_typed_caller => Some(context.root(call.rest())),
+        _ => None,
     };
     let mut from_dots = 0usize;
     for arg in args {
         while from_dots == 0
-            && expressions.kind() == SexpType::Pairlist
-            && expressions.car() == dots
+            && let Some(cell) =
+                expressions.and_then(|cells| cells.read(context).downcast::<Pairlist>())
+            && cell.head().is(dots)
+            && let Some(caller) = caller
         {
-            let mut cell = dots_binding(sys_parent)?;
-            while cell.kind() == SexpType::Dots || cell.kind() == SexpType::Pairlist {
-                from_dots += 1;
-                cell = cell.cdr();
-            }
-            expressions = expressions.cdr();
+            let rest = context.root(cell.rest());
+            from_dots += handles::dots_cells(context, caller)?.len();
+            expressions = Some(rest);
         }
         let named_by_typed_caller = if from_dots > 0 {
             from_dots -= 1;
             false
-        } else if expressions.kind() == SexpType::Pairlist {
-            expressions = expressions.cdr();
+        } else if let Some(cell) =
+            expressions.and_then(|cells| cells.read(context).downcast::<Pairlist>())
+        {
+            expressions = Some(context.root(cell.rest()));
             true
         } else {
             false
         };
-        let promise = arg.value;
-        if promise.kind() == SexpType::Promise
-            && promise.car() == unbound()
+        let Some(promise) = arg.value.downcast::<Promise>() else {
+            continue;
+        };
+        let read = promise.read(context);
+        let environment = read.environment().downcast::<Environment>();
+        if handles::is_unbound(read.result())
             && (named_by_typed_caller
-                || (!promise.has_gp(gp::ARGUMENT_REFERENCE) && is_typed_frame(promise.tag())))
-            && !argument_is_missing(promise.cdr(), promise.tag())?
+                || (!read.has_flag(gp::ARGUMENT_REFERENCE)
+                    && environment.is_some_and(|environment| is_typed_frame(context, environment))))
+            && !match environment {
+                Some(environment) => expression_is_missing(context, read.code(), environment)?,
+                None => false,
+            }
         {
-            force_promise(promise)?;
+            promise_value(context, promise)?;
         }
     }
     Ok(())
 }
 
-/// Whether `env` is the frame of a live call of a typed function. A typed function never runs
-/// on slots, so a promise over a slot frame is R code's.
-unsafe fn is_typed_frame(env: Sexp) -> bool {
-    if env.has_gp(gp::SLOT_FRAME) {
+/// Whether `environment` is the frame of a live call of a typed function. A typed function
+/// never runs on slots, so a promise over a slot frame is R code's.
+fn is_typed_frame(context: &Cx<'_>, environment: Gc<'_, Environment>) -> bool {
+    if environment.has_flag(gp::SLOT_FRAME) {
         return false;
     }
     interp()
         .frames
         .iter()
         .rev()
-        .find(|frame| frame.env.raw() == env)
+        .find(|frame| frame.env.get(context).is(environment))
         .is_some_and(|frame| {
             // `eval` and other builtins push frames too, whose function has no formals to read.
-            frame.function.raw().kind() == SexpType::Closure
-                && crate::annotations::is_typed(frame.function.raw())
+            frame
+                .function
+                .get(context)
+                .downcast::<Closure>()
+                .is_some_and(crate::annotations::typed_closure)
         })
 }
 
