@@ -651,8 +651,8 @@ The order:
    string encoding), then `values.rs`, the evaluator and the bytecode loop, and the leaf builtins
    last, because a leaf rarely holds a value across a safepoint. The frame machinery (the
    argument reference pool, a slot frame's pending environment and the lifting of its slots into
-   an environment) moves with the bytecode loop's register accessor, because it writes registers
-   that `Held<T>` does not yet cover.
+   an environment) moves with the bytecode loop's register accessor, because it writes registers,
+   which `Held<T>` does not cover.
 2. `stats`, `graphics`, `frames`.
 3. `libr`, `jit`, `typed`: entry points make a `Cx`; raw access leaves their bodies.
 4. `heap` stops exporting the raw accessors outside a `raw` module that only the boundary imports,

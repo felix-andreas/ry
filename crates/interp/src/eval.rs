@@ -942,8 +942,20 @@ pub unsafe fn force_promise(promise: Sexp) -> R<Sexp> {
     if promise.car() != unbound() {
         return Ok(promise.car());
     }
+    force_unforced_raw(promise)
+}
+
+/// [`force_unforced`] for raw callers, out of line so that where [`force_promise`] inlines,
+/// its caller pays only for the test of a forced promise.
+#[inline(never)]
+unsafe fn force_unforced_raw(promise: Sexp) -> R<Sexp> {
     handles::in_caller_scope(|context| {
-        force_unforced(context, Local::<Promise>::adopt(promise)).map(Local::raw)
+        context
+            .scope(|context| {
+                let promise = context.root(Gc::<Promise>::adopt(promise));
+                force_rooted(context, promise)
+            })
+            .map(Local::raw)
     })
 }
 
@@ -968,7 +980,17 @@ pub fn forced_value<'s>(context: &mut Cx<'s>, object: Local<'s>) -> R<Local<'s>>
 /// the promise (a loader placeholder replaces itself), and the promise's environment must
 /// outlive its code, so the promise is rooted while it runs, as GNU R's pending-promise stack
 /// keeps it.
+#[inline(never)]
 fn force_unforced<'s>(context: &mut Cx<'s>, promise: Local<'_, Promise>) -> R<Local<'s>> {
+    context.scope(|context| {
+        let promise = context.root(promise);
+        force_rooted(context, promise)
+    })
+}
+
+/// [`force_unforced`] in the scope that roots `promise` while its code runs.
+#[inline(always)]
+fn force_rooted<'s>(context: &mut Cx<'s>, promise: Local<'s, Promise>) -> R<Local<'s>> {
     if promise.read(context).has_flag(PROMISE_SEEN) {
         return Err(error(
             "promise already under evaluation: recursive default argument reference or earlier problems?",
@@ -976,22 +998,19 @@ fn force_unforced<'s>(context: &mut Cx<'s>, promise: Local<'_, Promise>) -> R<Lo
     }
     handles::forcing(context, promise)?;
     activity::count(Counter::PromisesForced);
-    context.scope(|context| {
-        let promise = context.root(promise);
-        promise.read(context).set_flags(PROMISE_SEEN, true);
-        if promise.read(context).has_flag(PROMISE_INTERRUPTED) {
-            promise.read(context).set_flags(PROMISE_INTERRUPTED, false);
-            // A handler that jumps out of this warning leaves the promise marked as under
-            // evaluation, as in GNU R, where the next force reports the recursive reference.
-            handles::warning(context, "restarting interrupted promise evaluation")?;
-        }
-        let result = promise_result(context, promise);
-        promise.read(context).set_flags(PROMISE_SEEN, false);
-        promise
-            .read(context)
-            .set_flags(PROMISE_INTERRUPTED, result.is_err());
-        settle(context, promise, result?)
-    })
+    promise.read(context).set_flags(PROMISE_SEEN, true);
+    if promise.read(context).has_flag(PROMISE_INTERRUPTED) {
+        promise.read(context).set_flags(PROMISE_INTERRUPTED, false);
+        // A handler that jumps out of this warning leaves the promise marked as under
+        // evaluation, as in GNU R, where the next force reports the recursive reference.
+        handles::warning(context, "restarting interrupted promise evaluation")?;
+    }
+    let result = promise_result(context, promise);
+    promise.read(context).set_flags(PROMISE_SEEN, false);
+    promise
+        .read(context)
+        .set_flags(PROMISE_INTERRUPTED, result.is_err());
+    settle(context, promise, result?)
 }
 
 /// What running the code of the unforced `promise` gives, before an annotation checks it.
@@ -1163,13 +1182,6 @@ pub unsafe fn settle_unforced(promise: Sexp, value: Sexp) -> R<Sexp> {
     settle_promise(promise, value)
 }
 
-/// The position of the live slot frame whose environment is `pending`
-/// ([`gp::SLOT_FRAME`]), which the environment records.
-#[inline]
-unsafe fn pending_owner(pending: Sexp) -> usize {
-    handles::reading(|context| handles::pending_frame(context, Gc::adopt(pending)).index())
-}
-
 /// What the live slot `frame` binds `symbol` to, read without moving a variable: from its slot
 /// while the frame keeps every variable there, and from the cells its environment holds and the
 /// slots together after. `None` when the frame leaves the name to the enclosure.
@@ -1278,7 +1290,7 @@ pub unsafe fn slot_closure(header: usize, formals: Sexp, body: Sexp, srcref: Sex
 /// anywhere, including native code between allocations it has not protected, so the variables
 /// move with collection suspended.
 pub unsafe fn resolve_pending_access(env: Sexp, access: PendingAccess) {
-    let owner = pending_owner(env);
+    let owner = handles::reading(|context| handles::pending_frame(context, Gc::adopt(env)).index());
     let heap = crate::heap();
     heap.inhibit_collection();
     let result = match access {
@@ -1771,7 +1783,7 @@ pub fn settle_without_code<'c>(context: &'c Cx<'_>, promise: Gc<'c, Promise>) ->
     }
     let mut chain: SmallVec<[Gc<'c, Promise>; 4]> = smallvec![promise];
     let mut link = promise;
-    let mut value = loop {
+    let value = loop {
         let next = if link.has_flag(gp::ARGUMENT_REFERENCE) {
             reference_link(context, link)
         } else {
@@ -1790,14 +1802,9 @@ pub fn settle_without_code<'c>(context: &'c Cx<'_>, promise: Gc<'c, Promise>) ->
         chain.push(next);
         link = next;
     };
+    // Every link was unforced when the walk passed it, and the walk runs no code.
     for &link in chain.iter().rev() {
-        // Two arguments can read through the same promise, which only the first settles.
-        let result = link.result();
-        if handles::is_unbound(result) {
-            context.settle_promise(link, value);
-        } else {
-            value = result;
-        }
+        context.settle_promise(link, value);
     }
     Some(value)
 }
@@ -6129,7 +6136,8 @@ unsafe fn slot_is_missing(env: Sexp, symbol: Sexp, defaults_count: bool) -> R<Op
     if !crate::heap().may_bind(env, symbol) {
         return Ok(None);
     }
-    let frame = &interp().frames[pending_owner(env)];
+    let frame = &interp().frames
+        [handles::reading(|context| handles::pending_frame(context, Gc::adopt(env)).index())];
     let names = frame
         .function
         .raw()
@@ -6206,7 +6214,8 @@ pub(crate) unsafe fn value_is_missing(mut value: Sexp) -> R<bool> {
 /// that order asks what its environment would answer.
 unsafe fn pending_slot_is_missing(pending: Sexp, symbol: Sexp) -> R<bool> {
     let state = interp();
-    let owner = pending_owner(pending);
+    let owner =
+        handles::reading(|context| handles::pending_frame(context, Gc::adopt(pending)).index());
     let frame = &state.frames[owner];
     let names = frame
         .function

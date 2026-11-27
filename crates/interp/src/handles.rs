@@ -1502,7 +1502,9 @@ pub unsafe fn in_caller_scope<T>(body: impl for<'s> FnOnce(&mut Cx<'s>) -> R<T>)
 }
 
 /// [`in_caller_scope`] for a raw entry that allocates nothing a collection could see: it reads
-/// the heap, or moves a slot frame's variable into a binding cell with collection inhibited.
+/// the heap, stores into a promise a value it found without running code (`Cx::settle_promise`,
+/// which frees nothing), or moves a slot frame's variable into a binding cell with collection
+/// inhibited.
 ///
 /// # Safety
 ///
@@ -3716,9 +3718,14 @@ impl<'c, 's> LiveFrame<'c, 's> {
 
     /// What the slot of a slot frame named `symbol` holds ([`LiveFrame::slot`]), or `None` when
     /// the frame keeps no slot of that name.
-    #[inline]
+    #[inline(always)]
     pub fn slot_named(self, symbol: Gc<'_, Symbol>) -> Option<Gc<'c>> {
-        let (names, _) = slot_layout(self.function())?;
+        let function = self
+            .fields()
+            .function
+            .get(self.context)
+            .downcast::<Closure>()?;
+        let (names, _) = slot_layout(function)?;
         let slot = names.iter().position(|name| name.is(symbol))?;
         Some(self.slot(slot))
     }
@@ -3760,13 +3767,14 @@ pub fn run_promise_code<'s>(context: &mut Cx<'s>, promise: Local<'_, Promise>) -
 
 /// What the promise code `code`, compiled against the slot table of `frame`'s function, gives
 /// when run on the frame's slots (`bytecode::run_promise_on_slots`).
+#[inline]
 pub fn run_on_slots<'s>(
     context: &mut Cx<'s>,
     code: Local<'_, Bytecode>,
     frame: usize,
 ) -> R<Local<'s>> {
-    let live = live_frame(context, frame);
-    let (function, header) = (live.function().raw(), live.fields().slots as usize);
+    let fields = &crate::interp().frames[frame];
+    let (function, header) = (fields.function.raw(), fields.slots as usize);
     // SAFETY: the code is rooted, the frame holds its function and its registers while the
     // code runs, and running it runs R code, which `&mut Cx` permits. The result is rooted
     // before anything else allocates.
