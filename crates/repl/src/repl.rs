@@ -252,18 +252,21 @@ pub fn ry_runtime_files() -> Result<(Option<PathBuf>, Option<PathBuf>), ReplErro
 pub type PackageCheck = extern "C" fn(*const std::ffi::c_char) -> std::ffi::c_int;
 
 /// Makes ry's runtime ask `check` before every load of a strict package that changes
-/// something, so code strict mode refuses never runs, and `elaborate` for the text every such
-/// load of a typed package runs. Call it once, before running the runtime.
+/// something, so code strict mode refuses never runs, `elaborate` for the text every such
+/// load of a typed package runs, and `elaborate_source` for the text of every file `source()`
+/// reads. Call it once, before running the runtime.
 pub fn set_package_check_on_ry_runtime(
     strict_config: PackageCheck,
     check: PackageCheck,
     elaborate: PackageElaborate,
+    elaborate_source: SourceElaborate,
 ) -> Result<(), ReplError> {
     let library = ry_runtime()?;
-    type SetCheck = unsafe extern "C" fn(PackageCheck, PackageCheck, PackageElaborate);
+    type SetCheck =
+        unsafe extern "C" fn(PackageCheck, PackageCheck, PackageElaborate, SourceElaborate);
     let set_check = runtime_entry::<SetCheck>(library, "ry_loader_set_check")?;
     // SAFETY: the entry point has this signature in every runtime of this build.
-    unsafe { set_check(strict_config, check, elaborate) };
+    unsafe { set_check(strict_config, check, elaborate, elaborate_source) };
     Ok(())
 }
 
@@ -276,6 +279,16 @@ pub type PackageElaborate = extern "C" fn(
     ElaboratedSink,
     *mut std::ffi::c_void,
 ) -> std::ffi::c_int;
+
+/// Hands the elaborated text of the file `source()` reads, given its NUL-terminated name, to the
+/// sink with the sink's context, or does not call the sink when nothing changes. 0 means
+/// either; any other value that the host could not check the file, after reporting why.
+/// Mirrors `libr::loader_backend::ElaborateSource`.
+pub type SourceElaborate =
+    extern "C" fn(*const std::ffi::c_char, SourceSink, *mut std::ffi::c_void) -> std::ffi::c_int;
+
+/// Mirrors `libr::loader_backend::SourceSink`.
+pub type SourceSink = extern "C" fn(*mut std::ffi::c_void, u64, *const u8, usize);
 
 /// Mirrors `libr::loader_backend::ElaboratedSink`.
 pub type ElaboratedSink =

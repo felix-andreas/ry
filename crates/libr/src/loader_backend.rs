@@ -41,6 +41,7 @@ use {
         time::Duration,
     },
     syntax::{SyntaxNode, TextRange, TextSize},
+    xxhash_rust::xxh3::xxh3_64,
 };
 
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -303,6 +304,20 @@ pub type ElaboratedSink = extern "C" fn(*mut c_void, *const u8, usize, u64, *con
 
 static ELABORATE: OnceLock<Elaborate> = OnceLock::new();
 
+/// Asks the host for the program ry's runtime runs for a file that `source()` or
+/// `parse(file = )` reads, given its NUL-terminated name. The host reads the file, and hands
+/// `sink`, with `context`, the XXH3 64-bit hash of the text it elaborated and the elaborated
+/// text before it returns, or does not call it when nothing changes. It returns 0 in both
+/// cases, and any other value when it could not check the file, after reporting why.
+pub type ElaborateSource = extern "C" fn(*const c_char, SourceSink, *mut c_void) -> c_int;
+
+/// Receives a file's elaborated text: the hash of the text the host read, with its line
+/// endings made `\n` and one final `\n` dropped as the parser reads it, and the elaborated text
+/// as UTF-8 bytes that live for the call.
+pub type SourceSink = extern "C" fn(*mut c_void, u64, *const u8, usize);
+
+static ELABORATE_SOURCE: OnceLock<ElaborateSource> = OnceLock::new();
+
 /// Whether a plan has been made in this session, whose first load the verdict covers.
 static PLANNED: AtomicBool = AtomicBool::new(false);
 
@@ -313,14 +328,61 @@ static PLANNED: AtomicBool = AtomicBool::new(false);
 /// script loads is checked, as it is on GNU R.
 ///
 /// `elaborate` gives every load of a typed package that changes something the text the checker
-/// elaborates, so the package runs as `ry run` would run it.
-pub fn set_check(strict_config: Check, check: Check, elaborate: Elaborate) {
+/// elaborates, so the package runs as `ry run` would run it, and `elaborate_source` does the
+/// same for every file `source()` reads.
+pub fn set_check(
+    strict_config: Check,
+    check: Check,
+    elaborate: Elaborate,
+    elaborate_source: ElaborateSource,
+) {
     if STRICT_CONFIG.set(strict_config).is_err()
         || CHECK.set(check).is_err()
         || ELABORATE.set(elaborate).is_err()
+        || ELABORATE_SOURCE.set(elaborate_source).is_err()
     {
         panic!("the host sets the strict check once per session");
     }
+    interp::lower::set_source_elaborator(elaborated_source);
+}
+
+/// The host's [`ElaborateSource`] as interp's `SourceElaborator`. The elaborated text is
+/// taken only when the host elaborated the text the parse reads, so a file that changed on disk
+/// after R read it parses as R read it.
+fn elaborated_source(name: &str, text: &str) -> Result<Option<String>, ()> {
+    let Some(elaborate) = ELABORATE_SOURCE.get() else {
+        return Ok(None);
+    };
+    // A name with a NUL byte names no file the host could read.
+    let Ok(name) = CString::new(name) else {
+        return Ok(None);
+    };
+    let mut program: Option<(u64, String)> = None;
+    let status = elaborate(
+        name.as_ptr(),
+        receive_source,
+        (&raw mut program).cast::<c_void>(),
+    );
+    if status != 0 {
+        return Err(());
+    }
+    Ok(program
+        .filter(|(written, _)| *written == xxh3_64(text.as_bytes()))
+        .map(|(_, program)| program))
+}
+
+/// The [`SourceSink`] [`elaborated_source`] hands the host, whose context is its
+/// `Option<(u64, String)>`.
+extern "C" fn receive_source(context: *mut c_void, written: u64, text: *const u8, length: usize) {
+    // SAFETY: `elaborated_source` passes its option as the context and the host calls this
+    // before its call returns, with a byte range that lives for this call.
+    let (program, text) = unsafe {
+        (
+            &mut *context.cast::<Option<(u64, String)>>(),
+            std::slice::from_raw_parts(text, length),
+        )
+    };
+    *program = Some((written, String::from_utf8_lossy(text).into_owned()));
 }
 
 /// Returns once the host lets the package run, and otherwise ends the process with the

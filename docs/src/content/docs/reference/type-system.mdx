@@ -403,9 +403,10 @@ Two kinds of signature are not checked at run time:
 
 A signature that is only the name of a type alias, as in `#: Scaler` with
 `#: @alias Scaler {fn(values: double, by: double) -> double}`, is checked and compiled like the
-function type it names, because `ry run`, the console, `ry load`, `ry install` and `ry build` write
-that type out in place of the name before the code runs. Code that `source()` reads is not
-rewritten, so there such a function has no run-time checks and runs in the interpreter.
+function type it names, because `ry run`, the console, `ry load`, `ry install`, `ry build` and a
+parse of a file on ry's runtime write that type out in place of the name before the code runs. Code
+parsed from text, such as `parse(text = )` or `eval(str2lang())`, is not rewritten, so there such a
+function has no run-time checks and runs in the interpreter.
 
 The console attaches a `#:` block the same way. A command that ends in a `#:` block is unfinished,
 so the console reads the next line into the same command, and a blank line ends the wait and leaves
@@ -1740,8 +1741,13 @@ on ry's runtime, every unsuffixed literal the checker typed as `I64` is spelled 
 An empty list keeps its item type the same way: `[]` and a `List.map` whose items come from its
 callback carry the item type the checker gave them, so `List.map(List.range(3, 1), \(v) v * 2)` is
 an empty `List<I64>` and its `List.sum` is `0i64`.
-A file with no ry syntax and no strict mode is not analyzed, and its literals keep R's types. Code
-that `source()` runs is not elaborated this way: there an operator converts a literal
+A file parsed on ry's runtime, by `source()`, `parse(file = )` or a parse whose `srcfilecopy()` has
+`isFile = TRUE` (as `sys.source(keep.source = TRUE)` and testthat make), is checked on its own and
+elaborated the same way, and the check prints its annotation warnings. Strict mode applies to such
+a file only when the file turns it on itself (`# typing: strict`), because the project's strict
+mode belongs to the script that sources it. A file with no ry syntax and no strict mode is not
+analyzed, and its literals keep R's types. Code parsed from text, and `sys.source()` with its
+default `keep.source = FALSE`, is not elaborated: there an operator converts a literal
 operand, and an annotated binding such as `n: I64 <- 5` converts its literal. An `I64` parameter and an `-> I64` result
 convert the same way, so `f(3)` passes `3i64` to `f <- function(n: I64) ...`. A conversion that
 cannot be exact is an error, never a rounded value.
