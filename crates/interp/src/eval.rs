@@ -93,17 +93,47 @@ pub unsafe fn eval_symbol_reporting(
     lexical: impl FnOnce() -> Sexp,
     reader: ArgumentReader,
 ) -> R<Sexp> {
-    handles::in_caller_scope(|context| {
-        let (symbol, env) = (Local::adopt(symbol), Local::adopt(env));
-        Ok(symbol_value_reporting(
-            context,
-            symbol,
-            env,
-            |context| handles::held(context, lexical()),
-            reader,
-        )?
-        .raw())
-    })
+    // A value or a promise found by name is held by its binding, so a raw caller gets it
+    // without the handle scope and the root the general path takes.
+    let read = handles::reading(|context| {
+        let symbol = Gc::<Symbol>::adopt(symbol);
+        if symbol.is(handles::symbol(|symbols| symbols.dots))
+            || symbol.is(handles::missing_argument())
+            || dot_dot_position(symbol.name().bytes()).is_some()
+        {
+            return None;
+        }
+        match find_variable(context, symbol, Gc::adopt(env), true) {
+            Found::Value(value) if !handles::is_missing_argument(value) => {
+                Some((value.raw(), settled(value).is_none()))
+            }
+            _ => None,
+        }
+    });
+    match read {
+        Some((promise, true)) => force_promise(promise),
+        Some((value, false)) => Ok(value),
+        None => cold(|| {
+            handles::in_caller_scope(|context| {
+                let (symbol, env) = (Local::adopt(symbol), Local::adopt(env));
+                Ok(symbol_value_reporting(
+                    context,
+                    symbol,
+                    env,
+                    |context| handles::held(context, lexical()),
+                    reader,
+                )?
+                .raw())
+            })
+        }),
+    }
+}
+
+/// Runs `run` out of line, which keeps a rare path's code out of the common path's prologue.
+#[cold]
+#[inline(never)]
+fn cold<T>(run: impl FnOnce() -> T) -> T {
+    run()
 }
 
 /// The value of the name `symbol` in `environment`, as evaluating the name gives it: its
@@ -327,24 +357,16 @@ fn binding_found(binding: Gc<'_, Binding>) -> Found<'_> {
 /// holding `R_UnboundValue` gives that, which is what a raw caller tests for.
 #[inline]
 pub unsafe fn cell_value(cell: Sexp) -> R<Sexp> {
-    // SAFETY: the caller passes a live binding cell.
-    let binding = unsafe { Gc::<Binding>::adopt(cell) };
+    let binding = Gc::<Binding>::adopt(cell);
     if binding.is_active() {
-        // SAFETY: as for `cell_value`.
-        return unsafe { active_value(cell) };
+        return cold(|| {
+            handles::in_caller_scope(|context| {
+                let found = bound(context, Found::Active(Gc::adopt(cell)));
+                Ok(resolve(context, found)?.map_or_else(unbound, Local::raw))
+            })
+        });
     }
     Ok(binding.content().raw())
-}
-
-/// [`cell_value`] for an active binding, kept apart so that the common read stays small
-/// enough to inline into its callers.
-#[cold]
-#[inline(never)]
-unsafe fn active_value(cell: Sexp) -> R<Sexp> {
-    handles::in_caller_scope(|context| {
-        let found = bound(context, Found::Active(Gc::adopt(cell)));
-        Ok(resolve(context, found)?.map_or_else(unbound, Local::raw))
-    })
 }
 
 /// A [`Found`] rooted, so resolving it may allocate.
@@ -402,19 +424,15 @@ pub(crate) unsafe fn lexical_call(env: Sexp) -> Sexp {
 /// returned unforced.
 #[inline]
 pub unsafe fn find_var(symbol: Sexp, env: Sexp) -> R<Sexp> {
-    // SAFETY: the caller passes a live symbol and environment.
-    let (found, active) = unsafe {
-        handles::reading(|context| {
-            match find_variable(context, Gc::adopt(symbol), Gc::adopt(env), false) {
-                Found::Unbound => (unbound(), false),
-                Found::Value(value) => (value.raw(), false),
-                Found::Active(binding) => (binding.raw(), true),
-            }
-        })
-    };
+    let (found, active) = handles::reading(|context| {
+        match find_variable(context, Gc::adopt(symbol), Gc::adopt(env), false) {
+            Found::Unbound => (unbound(), false),
+            Found::Value(value) => (value.raw(), false),
+            Found::Active(binding) => (binding.raw(), true),
+        }
+    });
     if active {
-        // SAFETY: `found` is the live active binding's cell.
-        return unsafe { active_value(found) };
+        return cell_value(found);
     }
     Ok(found)
 }
@@ -551,16 +569,16 @@ pub(crate) unsafe fn tmp_value(env: Sexp) -> Sexp {
 /// The value bound to `symbol` in `env`'s own frame, or `R_UnboundValue`.
 #[inline]
 pub unsafe fn find_var_in_frame(symbol: Sexp, env: Sexp) -> R<Sexp> {
-    // SAFETY: the caller passes a live symbol and environment.
-    let cell = unsafe {
-        handles::reading(|context| {
-            handles::frame_binding(context, Gc::<Environment>::adopt(env), Gc::<Symbol>::adopt(symbol))
-                .map(|binding| binding.raw())
-        })
-    };
+    let cell = handles::reading(|context| {
+        handles::frame_binding(
+            context,
+            Gc::<Environment>::adopt(env),
+            Gc::<Symbol>::adopt(symbol),
+        )
+        .map(|binding| binding.raw())
+    });
     match cell {
-        // SAFETY: the cell is live.
-        Some(cell) => unsafe { cell_value(cell) },
+        Some(cell) => cell_value(cell),
         None => Ok(unbound()),
     }
 }
@@ -592,11 +610,25 @@ pub unsafe fn find_fun(symbol: Sexp, env: Sexp) -> R<Sexp> {
 /// `findFun3`: [`find_fun`] for the head of `call`, which a missing function's error names, as
 /// in GNU R.
 pub unsafe fn find_called_fun(symbol: Sexp, env: Sexp, call: Sexp) -> R<Sexp> {
-    handles::in_caller_scope(|context| {
-        let (symbol, env) = (Local::adopt(symbol), Local::adopt(env));
-        let call = (call != unbound()).then(|| handles::held(context, call));
-        Ok(function_value(context, symbol, env, call)?.raw())
-    })
+    // A function found without running code is held by its binding, so a raw caller gets it
+    // without the handle scope and the root the general path takes.
+    let function = handles::reading(|context| {
+        let _activity = activity::enter(Activity::Lookup, 0);
+        match function_walk(context, Gc::adopt(symbol), Gc::adopt(env)) {
+            Walk::Function(function) => Some(function.raw()),
+            _ => None,
+        }
+    });
+    match function {
+        Some(function) => Ok(function),
+        None => cold(|| {
+            handles::in_caller_scope(|context| {
+                let (symbol, env) = (Local::adopt(symbol), Local::adopt(env));
+                let call = (call != unbound()).then(|| handles::held(context, call));
+                Ok(function_value(context, symbol, env, call)?.raw())
+            })
+        }),
+    }
 }
 
 /// The first function bound to `symbol` from `environment` outward, forcing the promises on

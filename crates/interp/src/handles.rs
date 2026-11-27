@@ -4228,7 +4228,7 @@ pub struct Window<'c> {
 impl<'c> Window<'c> {
     /// A window of `slots` slots and `registers` registers at the top of the register file.
     /// Growing the file allocates no object, so nothing read through the context is lost.
-    #[inline]
+    #[inline(always)]
     pub fn open(_context: &'c Cx<'_>, slots: usize, registers: usize) -> R<Window<'c>> {
         let header = bytecode::register_top();
         bytecode::reserve_registers(header + 1 + slots + registers)?;
@@ -4368,7 +4368,7 @@ pub fn build_slot_defaults(context: &mut Cx<'_>, function: Local<'_, Closure>) -
 /// The slot names of `function`'s compiled body, the formals first, and how many registers its
 /// code uses after them, when the body is compiled with a slot table. A call reads this on every
 /// bind, so it trusts the constant pool's layout instead of checking each entry.
-#[inline]
+#[inline(always)]
 pub fn slot_layout<'a>(function: Gc<'a, Closure>) -> Option<(&'a [Gc<'a>], usize)> {
     let code = function.body().downcast::<Bytecode>()?;
     // SAFETY: only the compiler and the code image's reader, which restores what the compiler
@@ -4376,14 +4376,16 @@ pub fn slot_layout<'a>(function: Gc<'a, Closure>) -> Option<(&'a [Gc<'a>], usize
     // pool out as `bytecode` says: a list whose `SLOTS` entry is `NULL` or a list with the slot
     // names at entry 1, and whose `REGISTERS` entry is a one-element integer vector. The
     // closure holds its body for `'a`.
+    // Reading the storage directly skips the ALTREP test of each element read, which none of
+    // these vectors can be.
     unsafe {
-        let constants = code.raw().cdr();
-        let table = constants.element(bytecode::SLOTS);
+        let pool = code.raw().cdr().data() as *const Sexp;
+        let table = *pool.add(bytecode::SLOTS);
         if table == values::nil() {
             return None;
         }
-        let names = Gc::<'a, List>::adopt(table.element(1)).elements();
-        let registers = *values::ints(constants.element(bytecode::REGISTERS)).first()?;
+        let names = Gc::<'a, List>::adopt(*(table.data() as *const Sexp).add(1)).elements();
+        let registers = *((*pool.add(bytecode::REGISTERS)).data() as *const i32);
         Some((names, registers as usize))
     }
 }
