@@ -63,8 +63,9 @@ pub struct Lowered {
     pub constructed: SmallVec<[u32; 4]>,
     /// Where the body reads each parameter, in the blocks of `function` ([`reads_before`]).
     pub param_reads: Vec<ParamRead>,
-    /// The types of the defaults of the formals past the parameters, which the code computes
-    /// itself ([`Lowering::left_out_defaults`]).
+    /// The types of the defaults of the formals the call leaves out, in the formals' order: those
+    /// past the parameters and those a parameter of type [`Type::Absent`] stands for. The code
+    /// computes them itself ([`Lowering::left_out_defaults`]).
     pub defaults: SmallVec<[Type; 2]>,
 }
 
@@ -553,11 +554,20 @@ unsafe fn lower_calling(
         if symbol == rvalues::symbols().dots {
             return Err(Refusal::new("a function with `...`"));
         }
-        if index >= params.len() {
-            lowering.bind(symbol, Binding::Hidden);
-            continue;
-        }
         let param = Local(index as u32);
+        match params.get(index) {
+            None => {
+                lowering.bind(symbol, Binding::Hidden);
+                continue;
+            }
+            // The parameter is never read, but keeps the others at their formals' positions.
+            Some(Type::Absent) => {
+                lowering.param_variables.push(param);
+                lowering.bind(symbol, Binding::Hidden);
+                continue;
+            }
+            Some(_) => {}
+        }
         let variable = if assigned.contains(&symbol) {
             // An assigned parameter gets an owned copy, since the parameter only borrows.
             let ty = params[index];
@@ -568,7 +578,7 @@ unsafe fn lower_calling(
         lowering.param_variables.push(variable);
         lowering.bind(symbol, Binding::Value(variable));
     }
-    let defaults = if params.len() < formals.len() {
+    let defaults = if params.len() < formals.len() || params.contains(&Type::Absent) {
         lowering.left_out_defaults(&formals, &assigned)?
     } else {
         SmallVec::new()
@@ -2711,32 +2721,42 @@ impl Lowering<'_> {
         defaults
     }
 
-    /// Binds the formals past the parameters, which a call from R code leaves out, to their
-    /// defaults. R computes a default where the body first reads its formal, so the parameters
-    /// a default reads count as read there (`Lowering::param_aliases`), as an untyped local
-    /// function's argument does.
+    /// Binds the formals a call from R code leaves out, past the parameters or standing for an
+    /// [`Type::Absent`] one, to their defaults. R computes a default where the body first reads
+    /// its formal, so the parameters a default reads count as read there
+    /// (`Lowering::param_aliases`), as an untyped local function's argument does.
     unsafe fn left_out_defaults(
         &mut self,
         formals: &[(Sexp, Sexp)],
         assigned: &[Sexp],
     ) -> Result<SmallVec<[Type; 2]>, Refusal> {
-        let supplied = self.param_variables.len();
+        let left_out: SmallVec<[usize; 4]> = (0..formals.len())
+            .filter(|&index| self.params.get(index).is_none_or(|&ty| ty == Type::Absent))
+            .collect();
         let mut matched: SmallVec<[Option<Argument>; 4]> = (0..formals.len())
             .map(|index| {
                 self.param_variables
                     .get(index)
+                    .filter(|_| !left_out.contains(&index))
                     .map(|&variable| Argument::Value(variable))
             })
             .collect();
         let mut spans: SmallVec<[ArgumentReads; 4]> =
             (0..formals.len()).map(|_| NO_ARGUMENT_READS).collect();
         self.defaults(formals, &mut matched, &mut spans, self.body)?;
-        let values: SmallVec<[Argument; 4]> =
-            matched[supplied..].iter().flatten().copied().collect();
-        self.attribute_reads(&values, &spans[supplied..], false)?;
+        let values: SmallVec<[Argument; 4]> = left_out
+            .iter()
+            .filter_map(|&index| matched.get(index).copied().flatten())
+            .collect();
+        let left_out_spans: SmallVec<[ArgumentReads; 4]> = left_out
+            .iter()
+            .filter_map(|&index| spans.get(index).copied())
+            .collect();
+        self.attribute_reads(&values, &left_out_spans, false)?;
         let formal_reads = std::mem::take(&mut self.formal_reads);
+        let left_out_formals = left_out.iter().filter_map(|&index| formals.get(index));
         let mut types = SmallVec::new();
-        for (offset, (&(symbol, _), value)) in formals[supplied..].iter().zip(&values).enumerate() {
+        for (offset, (&(symbol, _), value)) in left_out_formals.zip(&values).enumerate() {
             let Argument::Value(value) = *value else {
                 return Err(Refusal::new("a default that is a function"));
             };

@@ -1490,6 +1490,7 @@ impl Out {
                 self.number(u64::from(entry));
             }
             Type::Table => self.number(13),
+            Type::Absent => self.number(14),
         }
     }
 
@@ -1882,6 +1883,14 @@ impl In<'_> {
     }
 
     fn ty(&mut self, shapes: &[ShapeEntry]) -> Result<Type, Malformed> {
+        match self.param(shapes)? {
+            Type::Absent => Err(MALFORMED),
+            ty => Ok(ty),
+        }
+    }
+
+    /// A parameter's type, which may also be [`Type::Absent`].
+    fn param(&mut self, shapes: &[ShapeEntry]) -> Result<Type, Malformed> {
         Ok(match self.number()? {
             0 => Type::Int,
             1 => Type::Dbl,
@@ -1912,6 +1921,7 @@ impl In<'_> {
                 _ => return Err(MALFORMED),
             },
             13 => Type::Table,
+            14 => Type::Absent,
             _ => return Err(MALFORMED),
         })
     }
@@ -1926,7 +1936,7 @@ impl In<'_> {
 
     fn types(&mut self, shapes: &[ShapeEntry]) -> Result<SmallVec<[Type; 4]>, Malformed> {
         let count = self.count()?;
-        (0..count).map(|_| self.ty(shapes)).collect()
+        (0..count).map(|_| self.param(shapes)).collect()
     }
 
     fn env(&mut self, strings: usize) -> Result<EnvRef, Malformed> {
@@ -3565,7 +3575,10 @@ pub mod testing {
                 parsed.callees.push(FileCallee {
                     lookup: entropy.below(lookups) as u32,
                     params: (0..entropy.below(3))
-                        .map(|_| random_type(entropy, &parsed.shapes))
+                        .map(|_| match entropy.below(8) {
+                            0 => Type::Absent,
+                            _ => random_type(entropy, &parsed.shapes),
+                        })
                         .collect(),
                     result: random_type(entropy, &parsed.shapes),
                     target,

@@ -78,6 +78,9 @@ pub enum Type {
     /// functions make one or take one apart. The collector owns the object, which the call that
     /// entered typed code keeps alive, so it is not counted.
     Table,
+    /// A formal the R call leaves out before a parameter it passes, which only a compile key's
+    /// parameters hold: the code computes the formal's default, and no local has this type.
+    Absent,
 }
 
 impl Type {

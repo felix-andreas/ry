@@ -2937,6 +2937,10 @@ unsafe fn call_typed(typed: &TypedCall<'_>) -> Option<R<Sexp>> {
     if let Some(value) = typed::call(typed, &arguments, &ahead) {
         return Some(value);
     }
+    // The scalar natives take the formals up to the last passed one.
+    if ahead.absent != 0 {
+        return None;
+    }
     let (types, words) = argument_words(&arguments)?;
     let native = native_for(function, &types)?;
     let trampoline = trampoline(&native.params, native.result)?;
@@ -2953,9 +2957,11 @@ unsafe fn call_typed(typed: &TypedCall<'_>) -> Option<R<Sexp>> {
 
 /// The arguments a native call passes, as values with no promise left: `None` unless every
 /// argument matches a formal as R matches it and is at hand without evaluating anything. A
-/// formal the call leaves out with a constant scalar default gets that value; from the first
-/// one whose default is not, the formals are left out, for the typed core's code to compute. Also gives what reading them ahead read ([`ReadAhead`]): each
-/// promise read without forcing, with its value, and each variable a value depends on.
+/// formal the call leaves out with a constant scalar default gets that value, and the typed
+/// core's code computes any other default; one before a later value stands in the compile key as
+/// `Type::Absent` ([`ReadAhead::absent`]). Also gives what reading them
+/// ahead read ([`ReadAhead`]): each promise read without forcing, with its value, and each
+/// variable a value depends on.
 pub(crate) unsafe fn gather(
     function: Sexp,
     args: &[interp::builtins::Arg],
@@ -3011,35 +3017,15 @@ pub(crate) unsafe fn gather(
     };
     let mut arguments: SmallVec<[Sexp; 4]> = SmallVec::new();
     let mut ahead = ReadAhead::default();
-    // The first formal whose default the typed core computes, in the function's own code.
-    let mut left_out: Option<Sexp> = None;
+    // The formals, with their positions, left out since the last value `arguments` holds, whose
+    // defaults the typed core computes in the function's own code.
+    let mut left_out: SmallVec<[(usize, Sexp); 4]> = SmallVec::new();
     let mut formal = formals;
     for (position, &item) in matched.iter().enumerate() {
-        match item {
+        let value = match item {
             Some(item) => {
-                if let Some(left_out) = left_out {
-                    if left_out.car() == values::missing_arg() {
-                        annotations::decline(|| {
-                            format!(
-                                "the call leaves out `{}`, which has no default",
-                                values::symbol_name(left_out.tag())
-                            )
-                        });
-                        return None;
-                    }
-                    annotations::decline(|| {
-                        format!(
-                            "the call leaves out `{}`, whose default `{}` is not a constant, and \
-                             passes a later parameter: the native tier computes such defaults \
-                             only after the last parameter a call passes",
-                            values::symbol_name(left_out.tag()),
-                            interp::deparse::deparse_first_line(left_out.car())
-                        )
-                    });
-                    return None;
-                }
                 let arg = &args[item];
-                let value = if arg.value.kind() == SexpType::Promise {
+                if arg.value.kind() == SexpType::Promise {
                     let Some(value) = promise_value(arg.value, &mut ahead, position as u32, 0)
                     else {
                         let source = bytecode::source_of_body(arg.value.cdr());
@@ -3075,10 +3061,8 @@ pub(crate) unsafe fn gather(
                     return None;
                 } else {
                     arg.value
-                };
-                arguments.push(value);
+                }
             }
-            None if left_out.is_some() => {}
             None => {
                 // A missing argument's default is evaluated in the call's frame, so a constant
                 // scalar is that constant, and so is code that names no formal and that
@@ -3094,7 +3078,7 @@ pub(crate) unsafe fn gather(
                         let value = pure_value(default, function.tag(), &mut read, 0, 0)
                             .filter(|_| read.promises.is_empty());
                         if !read.watches.is_empty() {
-                            ahead.fixed |= lazy_bit(arguments.len());
+                            ahead.fixed |= lazy_bit(position);
                         }
                         value
                     }
@@ -3111,39 +3095,57 @@ pub(crate) unsafe fn gather(
                     ) && value.length() == 1
                         && value.attrib() == values::nil()
                 }) {
-                    Some(value) => arguments.push(value),
-                    None => left_out = Some(formal),
+                    Some(value) => value,
+                    None => {
+                        left_out.push((position, formal));
+                        formal = formal.cdr();
+                        continue;
+                    }
                 }
             }
+        };
+        // The formals left out before this one stand in the compile key as `Type::Absent`.
+        for &(absent, _) in &left_out {
+            if absent >= 64 {
+                annotations::decline(|| {
+                    String::from(
+                        "the call leaves out a formal past the 64th and passes a later one",
+                    )
+                });
+                return None;
+            }
+            ahead.absent |= 1 << absent;
         }
+        if !left_to_native(&left_out) {
+            return None;
+        }
+        left_out.clear();
+        arguments.push(value);
         formal = formal.cdr();
     }
-    // The typed core computes the defaults from `left_out` on in the function's own code, where
-    // they can read the formals.
-    if let Some(formal) = left_out
-        && !left_to_native(formal)
-    {
+    if !left_to_native(&left_out) {
         return None;
     }
     Some((arguments, ahead))
 }
 
-/// Whether the formals from `formal` on can be left to the typed core's code: each has a
-/// default.
-unsafe fn left_to_native(mut formal: Sexp) -> bool {
-    while formal.kind() == SexpType::Pairlist {
-        if formal.car() == values::missing_arg() {
+/// Whether the formals `left_out` can be left to the typed core's code: each has a default.
+unsafe fn left_to_native(left_out: &[(usize, Sexp)]) -> bool {
+    match left_out
+        .iter()
+        .find(|(_, formal)| formal.car() == values::missing_arg())
+    {
+        Some(&(_, formal)) => {
             annotations::decline(|| {
                 format!(
                     "the call leaves out `{}`, which has no default",
                     values::symbol_name(formal.tag())
                 )
             });
-            return false;
+            false
         }
-        formal = formal.cdr();
+        None => true,
     }
-    true
 }
 
 /// The bit of `position` in the mask of arguments read ahead from variables, which
