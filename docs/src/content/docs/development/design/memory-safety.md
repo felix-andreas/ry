@@ -600,20 +600,27 @@ specials (`{`, `(`, `if`, `for`, `while`, `repeat`, `break`, `next`, `return`, `
 `eval`; and assignment (`<-`, `=`, `<<-` and the replacement chain of `f(x) <- v`, which tier 0
 enters through the raw entry `eval::compiled_complex_assign`); argument matching (`match_args`, the
 match plan a compiled body keeps in its constant pool, and `match.call`); and the slot binders
-(`bind_slots`, `bind_plan`, `enter_method`, `direct_sources` and `matched_sources`). The specials reach the loop and
-function contexts, the srcref and the closure maker through wrappers in `handles.rs` (`in_loop` and
-`loop_jump` hold a loop's environment, `Args::register_on_exit` stores into the frame), because the
-bytecode loop and the JIT share those raw helpers. Two pieces of the API are not built: the bytecode
-loop's register accessor and `Held<T>` fields in traced structures. Two narrow forms of that
-accessor reach a frame's slots. The replacement forms use `RunningFrame` and `Slot` in
-`bytecode.rs`: a slot read is a `Gc` that borrows the context, a store takes a rooted value, and an
-in-place write needs the `Owned` that `claim` returns only when the slot holds the value itself and
-the value is unshared. The binders store a new frame's formals through `handles::Window`, which
-borrows the context while it is open, so everything that allocates (the `...` list, the compiled
-defaults, the match plan) happens before it opens, and a window dropped without `close` gives back
-the references its stores counted and the registers. A method's frame reads the generic's slots
-through `Window::under`. A binding is claimed the same way (`handles::claim_binding`), so a variable bound to a
-promise is copied before its first write instead of written through the promise.
+(`bind_slots`, `bind_plan`, `enter_method`, `direct_sources` and `matched_sources`); and the
+variable lookups (symbol evaluation, `findVar`, `findFun`, a frame's own variable and the outward
+assignment of `<<-`), which return `Found::Unbound` for an unbound name instead of `R_UnboundValue`.
+The specials reach the loop and function contexts, the srcref and the closure maker through wrappers
+in `handles.rs` (`in_loop` and `loop_jump` hold a loop's environment, `Args::register_on_exit`
+stores into the frame), because the bytecode loop and the JIT share those raw helpers. An
+interpreter frame holds its call, function, environment, `sys.parent`, pending environment, srcref
+and `on.exit` code in `Held<T>` fields, so writing one takes `unsafe` (`Held::adopt`). Raw code
+reads a field with `Held::raw`, and migrated code reads it as a `Gc` that borrows the context
+(`Held::get`). The bytecode loop's register accessor is not built. Two narrow forms of that accessor
+reach a frame's slots. The replacement forms use `RunningFrame` and `Slot` in `bytecode.rs`: a slot
+read is a `Gc` that borrows the context, a store takes a rooted value, and an in-place write needs
+the `Owned` that `claim` returns only when the slot holds the value itself and the value is
+unshared. The binders store a new frame's formals through `handles::Window`, which borrows the
+context while it is open, so everything that allocates (the `...` list, the compiled defaults, the
+match plan) happens before it opens, and a window dropped without `close` gives back the references
+its stores counted and the registers. `Window::fill` checks the slot count once for a whole run of
+stores, so a binder's per-formal loop costs what stores into a plain array cost. A method's frame
+reads the generic's slots through `Window::under`. A binding is claimed the same way
+(`handles::claim_binding`), so a variable bound to a promise is copied before its first write
+instead of written through the promise.
 
 An unmigrated caller reaches a migrated function through a raw entry, an `unsafe fn` over `Sexp`
 that states what the caller must hold. Which helper the entry uses decides its cost:
@@ -624,6 +631,7 @@ that states what the caller must hold. Which helper the entry uses decides its c
 | Returns an object to a caller that treats it as rooted | `handles::with_result` | a scope of its own, and the result rooted again in the caller's |
 | Runs once per instruction or per loop iteration, and its caller releases the handle stack | `handles::in_caller_scope` with `handles::held` operands | none of its own: the caller's roots hold the operands, and what the entry roots stays until the caller's release |
 | Reads one object its caller holds, on every dispatch (`class_of_raw`, `implicit_class_raw`) | `handles::held_in_caller_scope` | none of its own: the caller holds the object, which holds its class attribute, and a new answer stays rooted until the caller's release |
+| Finds a binding and runs no code in the common case (`eval_symbol_reporting`, `find_var`, `find_called_fun`, `set_var`) | `handles::reading`, then `handles::in_caller_scope` out of line for the rare cases (`...`, `..N`, an unbound name, an active binding where the caller cannot call it raw) | none on the common path: the binding holds the value it returns or the cell it writes, and symbol evaluation forces a promise through `force_promise`, which roots its result |
 
 The third form is what `subset::vector_element` (the element read of `for` and the apply
 functions) and tier 0's `$` entries use, because a scope and a second root per call measured 15

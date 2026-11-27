@@ -988,11 +988,11 @@ unsafe fn stack(srcref: Sexp) -> Vec<StackFrame> {
             Err(_) => panic!("the debugger could not give frame {index} an environment"),
         };
         stack.push(StackFrame {
-            name: deparse::deparse_first_line(frame.call.car()),
+            name: deparse::deparse_first_line(frame.call.raw().car()),
             env,
             srcref: current,
         });
-        current = frame.srcref;
+        current = frame.srcref.raw();
     }
     stack.push(StackFrame {
         name: "<top level>".to_owned(),

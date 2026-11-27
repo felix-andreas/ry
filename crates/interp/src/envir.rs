@@ -157,7 +157,7 @@ unsafe fn sys_context(call: &Call<'_>) -> Option<usize> {
 /// deeper frames.
 pub(crate) unsafe fn caller_index(own: usize) -> Option<usize> {
     let frames = &interp().frames;
-    let target = frames[own].sys_parent;
+    let target = frames[own].sys_parent.raw();
     if target == nil() {
         let caller = frames[own].caller;
         return (caller != crate::NO_SLOTS).then_some(caller as usize);
@@ -208,7 +208,7 @@ unsafe fn sys_call_at(n: i32, context: Option<usize>, function: bool) -> R<Sexp>
         Some(index) if back <= index as i64 => {
             let frame = &interp().frames[index - back as usize];
             if function {
-                Ok(frame.function)
+                Ok(frame.function.raw())
             } else {
                 call_with_srcref(frame)
             }
@@ -226,9 +226,13 @@ unsafe fn sys_call_at(n: i32, context: Option<usize>, function: bool) -> R<Sexp>
 /// (data.table's `cedta()` runs `sys.calls()` on every `[`). The copy's cells add a reference
 /// to each argument, so writing into one through the returned call copies it first.
 pub unsafe fn call_with_srcref(frame: &crate::Frame) -> R<Sexp> {
-    let call = values::shallow_duplicate(frame.call)?;
-    if frame.srcref != nil() {
-        values::set_attr(call, symbols().srcref, values::duplicate(frame.srcref)?)?;
+    let call = values::shallow_duplicate(frame.call.raw())?;
+    if frame.srcref.raw() != nil() {
+        values::set_attr(
+            call,
+            symbols().srcref,
+            values::duplicate(frame.srcref.raw())?,
+        )?;
     }
     Ok(call)
 }
@@ -243,7 +247,7 @@ pub(crate) unsafe fn sys_parent_number(mut n: i64, context: Option<usize>) -> i6
         n -= 1;
         index -= 1;
     }
-    let parent = frames[index].sys_parent;
+    let parent = frames[index].sys_parent.raw();
     if parent == global_env() {
         return 0;
     }
@@ -346,14 +350,14 @@ unsafe fn do_sys(call: &Call<'_>, kind: SysKind) -> R<Sexp> {
             if count < 2 {
                 // A slot frame's list may hold the expression compiled for its slots.
                 return Ok(match interp().frames[index].on_exit.first() {
-                    Some(&single) => crate::bytecode::source_of_body(single),
+                    Some(single) => crate::bytecode::source_of_body(single.raw()),
                     None => nil(),
                 });
             }
             let mut items = values::PairlistBuilder::new(SexpType::Language);
             items.push(nil(), symbols().brace)?;
             for position in 0..count {
-                let expression = interp().frames[index].on_exit[position];
+                let expression = interp().frames[index].on_exit[position].raw();
                 items.push(nil(), crate::bytecode::source_of_body(expression))?;
             }
             Ok(items.finish())
@@ -2036,7 +2040,7 @@ impl ElementCalls {
     unsafe fn call(&mut self, call: &Call<'_>, position: usize) -> R<Sexp> {
         crate::scope(|| {
             if let Some((frame, _)) = self.slots {
-                let env = interp().frames[frame].env;
+                let env = interp().frames[frame].env.raw();
                 if env != nil() {
                     self.leave_slots(env)?;
                 }
@@ -2079,7 +2083,7 @@ impl ElementCalls {
                         return Ok(value);
                     }
                     // Forcing `...` for the builtin may have given the frame its environment.
-                    let env = interp().frames[frame].env;
+                    let env = interp().frames[frame].env.raw();
                     if env != nil() {
                         self.leave_slots(env)?;
                         self.index.slice_mut::<i32>()[0] = position as i32 + 1;

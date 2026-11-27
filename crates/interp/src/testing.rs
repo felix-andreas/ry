@@ -4,7 +4,9 @@
 
 use {
     crate::{
-        bytecode, code_image, deparse, eval, lower, serialize,
+        bytecode, code_image, deparse, eval,
+        handles::Held,
+        lower, serialize,
         unwind::Unwind,
         values::{self, holds_stand_in},
     },
@@ -1605,27 +1607,23 @@ unsafe fn xdr_item(out: &mut Vec<u8>, object: Sexp) -> bool {
 
 /// The deparsed value of the last expression of `text` in the global environment, or `error`.
 unsafe fn run(text: &str) -> String {
-    unsafe {
-        let mark = crate::heap().handle_mark();
-        let outcome = (|| -> Result<Sexp, Unwind> {
-            let expressions = lower::parse_text(text, "<fuzz>")?;
-            let mut value = values::nil();
-            for index in 0..values::length(expressions) {
-                value = eval::eval(expressions.element(index), values::global_env())?;
-            }
-            Ok(value)
-        })();
-        let rendered = match outcome {
-            Ok(value) => {
-                deparse::deparse_lines(value, 60, deparse::options::KEEP_INTEGER).join("\n")
-            }
-            Err(_) => "error".to_owned(),
-        };
-        crate::truncate_frames(crate::interp(), 0);
-        crate::interp().foreign_calls.clear();
-        crate::heap().release_handles(mark);
-        rendered
-    }
+    let mark = crate::heap().handle_mark();
+    let outcome = (|| -> Result<Sexp, Unwind> {
+        let expressions = lower::parse_text(text, "<fuzz>")?;
+        let mut value = values::nil();
+        for index in 0..values::length(expressions) {
+            value = eval::eval(expressions.element(index), values::global_env())?;
+        }
+        Ok(value)
+    })();
+    let rendered = match outcome {
+        Ok(value) => deparse::deparse_lines(value, 60, deparse::options::KEEP_INTEGER).join("\n"),
+        Err(_) => "error".to_owned(),
+    };
+    crate::truncate_frames(crate::interp(), 0);
+    crate::interp().foreign_calls.clear();
+    crate::heap().release_handles(mark);
+    rendered
 }
 
 /// Assignments, a loop, and a final expression.
@@ -2032,27 +2030,31 @@ pub fn check_frame_stack(entropy: &mut impl Entropy) {
             target: nil,
             next: None,
         });
-        let frame = |id: u32, handlers: HandlerStack, exits: usize| Frame {
-            call: nil,
-            function: nil,
-            env: nil,
-            sys_parent: nil,
-            slots: crate::NO_SLOTS,
-            missing: 0,
-            caller: 0,
-            pending: nil,
-            role: crate::FrameRole::Call,
-            reified_by: crate::NOT_REIFIED,
-            args: id,
-            on_exit: (0..exits).map(|_| nil).collect::<ThinVec<_>>(),
-            handlers,
-            restarts: None,
-            srcref: nil,
-            method_vars: 0,
-            closures: 0,
-            handle_mark: 0,
-            previous_owner: 0,
-            references: 0,
+        // SAFETY: every object the test frames hold is `nil`, which no collection moves or
+        // frees.
+        let frame = |id: u32, handlers: HandlerStack, exits: usize| unsafe {
+            Frame {
+                call: Held::adopt(nil),
+                function: Held::adopt(nil),
+                env: Held::adopt(nil),
+                sys_parent: Held::adopt(nil),
+                slots: crate::NO_SLOTS,
+                missing: 0,
+                caller: 0,
+                pending: Held::adopt(nil),
+                role: crate::FrameRole::Call,
+                reified_by: crate::NOT_REIFIED,
+                args: id,
+                on_exit: (0..exits).map(|_| Held::adopt(nil)).collect::<ThinVec<_>>(),
+                handlers,
+                restarts: None,
+                srcref: Held::adopt(nil),
+                method_vars: 0,
+                closures: 0,
+                handle_mark: 0,
+                previous_owner: 0,
+                references: 0,
+            }
         };
         let mut stack = FrameStack::new();
         // Each live frame's id and whether it holds the shared handler entry.

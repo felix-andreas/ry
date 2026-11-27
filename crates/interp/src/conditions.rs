@@ -491,7 +491,7 @@ unsafe fn context_calls() -> Vec<(Sexp, Sexp)> {
         while let Some(&(call, _)) = foreign.next_if(|(_, below)| *below <= depth) {
             calls.push((call, nil()));
         }
-        calls.push((frame.call, frame.srcref));
+        calls.push((frame.call.raw(), frame.srcref.raw()));
     }
     calls.extend(foreign.map(|&(call, _)| (call, nil())));
     calls
@@ -1037,7 +1037,7 @@ unsafe fn do_default_warn(call: &Call<'_>) -> R<Sexp> {
 unsafe fn caller_call(call: &Call<'_>) -> Sexp {
     let frames = &interp().frames;
     match call.frame_index() {
-        Some(position) if position >= 1 => frames[position - 1].call,
+        Some(position) if position >= 1 => frames[position - 1].call.raw(),
         _ => nil(),
     }
 }

@@ -306,7 +306,7 @@ impl Evaluator for Interpreter {
                 .iter()
                 .rev()
                 .nth(index - 1)
-                .map_or(runtime().nil(), |frame| frame.srcref),
+                .map_or(runtime().nil(), |frame| frame.srcref.raw()),
         })
     }
 

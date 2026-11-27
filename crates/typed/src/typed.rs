@@ -107,7 +107,9 @@ pub unsafe fn inside_exhausted_rerun() -> bool {
     let inside = interp::interp()
         .frames
         .get(rerun.depth)
-        .is_some_and(|frame| frame.call == rerun.call && frame.function == rerun.function);
+        .is_some_and(|frame| {
+            frame.call.raw() == rerun.call && frame.function.raw() == rerun.function
+        });
     if inside {
         decline(|| {
             String::from(
