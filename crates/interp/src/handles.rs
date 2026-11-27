@@ -3183,7 +3183,7 @@ pub fn return_jump(environment: Local<'_, Environment>, value: Local<'_>) -> Unw
 /// values already in `arguments` count as referenced while the rest evaluate, so an argument
 /// that assigns to one of them copies it first.
 pub fn evaluate_arguments<'s>(
-    context: &mut Cx<'s>,
+    _context: &mut Cx<'s>,
     arguments: &mut SmallVec<[Tagged<'s>; 8]>,
     (cells, call): (Local<'s>, Local<'s>),
     environment: Local<'s, Environment>,
@@ -3191,7 +3191,8 @@ pub fn evaluate_arguments<'s>(
 ) -> R<()> {
     // SAFETY: the cells, the call, the environment and the values already there are rooted,
     // evaluation runs R code, which `&mut Cx` permits, and the evaluator roots each value it
-    // adds before the next one evaluates. A tag is a symbol or `NULL`, which the heap keeps.
+    // adds, in the context's scope, before the next one evaluates; the missing-argument marker
+    // is permanent. A tag is a symbol or `NULL`, which the heap keeps.
     unsafe {
         let mut raw: crate::eval::Args = arguments
             .iter()
@@ -3211,7 +3212,7 @@ pub fn evaluate_arguments<'s>(
         for argument in &raw[before..] {
             arguments.push(Tagged {
                 tag: Local::adopt(argument.tag),
-                value: rooted(context, argument.value),
+                value: Local::adopt(argument.value),
             });
         }
     }
@@ -3285,17 +3286,17 @@ pub fn cons<'s>(
 }
 
 fn cell<'s>(
-    context: &mut Cx<'s>,
+    _context: &mut Cx<'s>,
     kind: SexpType,
     tag: Local<'_>,
     value: Local<'_>,
     rest: Local<'_>,
 ) -> R<Local<'s>> {
-    // SAFETY: all three are rooted while the cell allocates, as `&mut Cx` permits, and the cell
-    // is rooted before anything else allocates.
+    // SAFETY: all three are rooted while the cell allocates, as `&mut Cx` permits, and the
+    // allocation roots the cell in the context's scope.
     unsafe {
         let cell = values::triple(kind, value.raw(), rest.raw(), tag.raw())?;
-        Ok(rooted(context, cell))
+        Ok(Local::adopt(cell))
     }
 }
 

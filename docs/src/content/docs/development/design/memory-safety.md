@@ -598,9 +598,9 @@ and language specials (`{`, `(`, `if`, `for`, `while`, `repeat`, `break`, `next`
 `function`, `&&`, `||`, `switch`, `missing`, `on.exit`, `nargs`, `substitute` with the methods
 package's `do_substitute_direct`, `.Primitive`, `~`, `delayedAssign`, `makeLazy`, `call`,
 `expression` and `all.names`); the call specials `.Internal`, `forceAndCall`, `Tailcall`, `Exec`,
-`Recall` and `eval`; and assignment (`<-`, `=`, `<<-` and the complex assignment `f(x) <- v`
-walks, which tier 0 reaches through the raw entry `eval::compiled_complex_assign`). Those specials reach the loop and function contexts, the srcref
-and the closure maker through wrappers in `handles.rs` (`in_loop` and `loop_jump` hold a loop's
+`Recall` and `eval`; and assignment (`<-`, `=`, `<<-` and the replacement chain of `f(x) <- v`,
+which tier 0 enters through the raw entry `eval::compiled_complex_assign`). The specials reach
+the loop and function contexts, the srcref and the closure maker through wrappers in `handles.rs` (`in_loop` and `loop_jump` hold a loop's
 environment, `Args::register_on_exit` stores into the frame), because the bytecode loop and the
 JIT share those raw helpers. Two pieces of the API are not built: the
 bytecode loop's register accessor and `Held<T>` fields in traced structures. The replacement

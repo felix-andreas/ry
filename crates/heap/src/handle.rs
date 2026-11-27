@@ -500,12 +500,16 @@ impl<'a> Gc<'a, Promise> {
 }
 
 impl<'a> Gc<'a, Environment> {
-    /// The environment that encloses this one, which lookups continue in.
+    /// The environment that encloses this one, which lookups continue in, or `None` for the
+    /// empty environment, whose enclosure is `NULL`.
     #[inline]
-    pub fn enclosure(self) -> Gc<'a, Environment> {
-        // SAFETY: the environment is live for `'a` and keeps its enclosure alive, and an
-        // enclosure is an environment.
-        unsafe { Gc::adopt(self.raw.enclosure()) }
+    pub fn enclosure(self) -> Option<Gc<'a, Environment>> {
+        // SAFETY: the environment is live for `'a` and keeps its enclosure alive, and every
+        // enclosure but the empty environment's is an environment.
+        unsafe {
+            let enclosure = self.raw.enclosure();
+            (enclosure.kind() == SexpType::Environment).then(|| Gc::adopt(enclosure))
+        }
     }
 
     /// Whether any of the flags `bits` (`object::gp`) is set on the environment.

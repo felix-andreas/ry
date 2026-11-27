@@ -15,8 +15,9 @@ use {
         coerce::{CoercionWarnings, real_to_int},
         conditions, deparse, dispatch,
         handles::{
-            self, AssignmentCopy, Cells, Chars, Cx, Environment, Expression, Gc, Integer, Language,
-            List, Local, Owned, Pairlist, Promise, Real, Str, StringFill, Symbol, safe,
+            self, AssignmentCall, AssignmentCopy, Cells, Chars, Cx, Environment, Expression, Gc,
+            Integer, Language, List, Local, Owned, Pairlist, Promise, Real, Str, StringFill,
+            Symbol, Tagged, safe,
         },
         interp, moves, scope,
         unwind::{ArgumentReader, Jump, R, Rooted, Unwind, error, error_in, missing_argument},
@@ -5657,7 +5658,7 @@ fn do_paren<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Lo
         .map_or_else(handles::null, |call| {
             context.root(call.read(context).rest())
         });
-    let mut expanded = SmallVec::<[handles::Tagged<'s>; 8]>::new();
+    let mut expanded = SmallVec::<[Tagged<'s>; 8]>::new();
     handles::evaluate_arguments(context, &mut expanded, (cells, call), environment, false)?;
     match expanded.as_slice() {
         [argument] => Ok(argument.value),
@@ -6375,7 +6376,7 @@ fn do_internal<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R
     let definition = handles::builtin_definition(function)?;
     let environment = arguments.environment(context)?;
     let cells = context.root(inner.read(context).rest());
-    let mut values = SmallVec::<[handles::Tagged<'s>; 8]>::new();
+    let mut values = SmallVec::<[Tagged<'s>; 8]>::new();
     if function.r_type() == SexpType::Builtin {
         handles::evaluate_arguments(
             context,
@@ -6387,7 +6388,7 @@ fn do_internal<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R
     } else {
         let mut cell = cells.read(context).downcast::<Pairlist>();
         while let Some(current) = cell {
-            values.push(handles::Tagged {
+            values.push(Tagged {
                 tag: context.root(current.tag()),
                 value: context.root(current.head()),
             });
@@ -6496,7 +6497,7 @@ fn do_tailcall<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R
     let environment = arguments.environment(context)?;
     if arguments.is_empty() || handles::is_missing_argument(arguments.value(0)) {
         let call = handles::lexical_call(context, environment);
-        return Err(crate::unwind::missing_argument(
+        return Err(missing_argument(
             call.raw(),
             "FUN",
             ArgumentReader::TailcallRec,
@@ -6553,7 +6554,7 @@ fn do_exec<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Loc
     };
     let Some(expression) = passed else {
         let call = handles::lexical_call(context, environment);
-        return Err(crate::unwind::missing_argument(
+        return Err(missing_argument(
             call.raw(),
             "expr",
             ArgumentReader::Tailcall,
@@ -7712,12 +7713,24 @@ fn assign_variable<'s>(
     superassign: bool,
 ) -> R<()> {
     if superassign {
-        let enclosure = context.root(environment.read(context).enclosure());
+        let enclosure = enclosure_of(context, environment);
         return handles::assign_outward(context, symbol, value, enclosure);
     }
     let binding =
         handles::frame_binding(context, environment, symbol).map(|cell| context.root(cell));
     handles::assign_local(context, symbol, value, environment, binding)
+}
+
+/// Where `<<-` from `environment` starts: its enclosure, or the empty environment itself, whose
+/// enclosure is `NULL`.
+fn enclosure_of<'s>(
+    context: &Cx<'s>,
+    environment: Local<'s, Environment>,
+) -> Local<'s, Environment> {
+    match environment.read(context).enclosure() {
+        Some(enclosure) => context.root(enclosure),
+        None => handles::empty_environment(),
+    }
 }
 
 /// `f(x, ...) <- value`: evaluates the getter chain down to the variable, then applies the
@@ -7756,7 +7769,7 @@ pub fn complex_assign<'s>(
             "target of assignment expands to non-language object",
         ));
     };
-    let enclosure = context.root(environment.read(context).enclosure());
+    let enclosure = enclosure_of(context, environment);
     let lookup_environment = if superassign { enclosure } else { environment };
     let mut base = handles::variable(context, inner, lookup_environment)?;
     if handles::is_missing_argument(base) {
@@ -7956,7 +7969,7 @@ fn replace_levels<'s>(
         if primitive {
             // The level's target stands for the replacement call, which only an error that
             // names it builds (`generated_replacement_call`).
-            let published = handles::AssignmentCall::enter(context, getter.value(), reported);
+            let published = AssignmentCall::enter(context, getter.value(), reported);
             let level_arguments = if depth == 0 { evaluated } else { &[] };
             // An inner level belongs to the variable's value, which the level's own arguments
             // may share, as `names(x)[{ keep <- x; 2 }]` does after the getters ran.
@@ -7993,11 +8006,11 @@ fn replace_levels<'s>(
         // The call `` `f<-`(`*tmp*`, ..., value = v) `` and the argument list it is applied
         // with differ only in their first argument, so they share the cells after it, unless
         // the arguments are already evaluated: then the call keeps their code.
-        let mut indices: SmallVec<[handles::Tagged<'s>; 4]> = SmallVec::new();
+        let mut indices: SmallVec<[Tagged<'s>; 4]> = SmallVec::new();
         let mut rest = handles::cell_fields(getter.read(context).rest())
             .map_or_else(|| handles::null().read(context), |(_, _, rest)| rest);
         while let Some((index, tag, next)) = handles::cell_fields(rest) {
-            indices.push(handles::Tagged {
+            indices.push(Tagged {
                 tag: context.root(tag),
                 value: context.root(index),
             });
@@ -8038,7 +8051,7 @@ fn replace_levels<'s>(
             )?;
             continue;
         }
-        let published = handles::AssignmentCall::enter(context, setter_call.value(), reported);
+        let published = AssignmentCall::enter(context, setter_call.value(), reported);
         replacement = handles::apply_call(
             context,
             setter_call.value(),
@@ -8132,17 +8145,17 @@ fn replace_through_primitive<'s>(
         return Ok(Some(result));
     }
     let keep_missing = special || definition.keep_missing;
-    let mut arguments: SmallVec<[handles::Tagged<'s>; 8]> = smallvec![handles::Tagged {
+    let mut arguments: SmallVec<[Tagged<'s>; 8]> = smallvec![Tagged {
         tag: handles::null(),
         value: object,
     }];
-    let mut cells = SmallVec::<[(Local<'s>, Local<'s>); 4]>::new();
+    let mut count = 0;
     let mut cell = rest.read(context);
-    while let Some((index, tag, next)) = handles::cell_fields(cell) {
-        cells.push((context.root(tag), context.root(index)));
+    while let Some((_, _, next)) = handles::cell_fields(cell) {
+        count += 1;
         cell = next;
     }
-    if evaluated.is_empty() || evaluated.len() != cells.len() {
+    if evaluated.is_empty() || evaluated.len() != count {
         handles::evaluate_arguments(
             context,
             &mut arguments,
@@ -8163,7 +8176,13 @@ fn replace_through_primitive<'s>(
         if unevaluated {
             return Ok(None);
         }
-        for (&(tag, _), &argument) in cells.iter().zip(evaluated) {
+        let mut cell = rest;
+        for &argument in evaluated {
+            let Some((_, tag, next)) = handles::cell_fields(cell.read(context)) else {
+                break;
+            };
+            let (tag, next) = (context.root(tag), context.root(next));
+            cell = next;
             // A forced promise holds the value compiled code evaluated. Anything else is the
             // argument's code: a constant, an empty argument, or a formal left for this lookup.
             let value = match argument.downcast::<Symbol>() {
@@ -8177,7 +8196,7 @@ fn replace_through_primitive<'s>(
                 Some(symbol) => handles::symbol_value(context, symbol, environment)?,
                 None => argument,
             };
-            arguments.push(handles::Tagged { tag, value });
+            arguments.push(Tagged { tag, value });
         }
     }
     // GNU R's getter marks an attribute it returns as not mutable, so the level is a copy by
@@ -8185,7 +8204,7 @@ fn replace_through_primitive<'s>(
     if owner.is_some_and(|owner| owner.is_shared()) && arguments[0].value.is(object) {
         arguments[0].value = handles::assignment_copy(context, object, AssignmentCopy::Storage)?;
     }
-    arguments.push(handles::Tagged {
+    arguments.push(Tagged {
         tag: handles::permanent_symbol(|s| s.value).value(),
         value,
     });
@@ -8234,11 +8253,11 @@ fn replacement_call_of<'s>(
         handles::null(),
         handles::permanent_symbol(|s| s.tmp).value(),
     )?;
-    let mut indices: SmallVec<[handles::Tagged<'s>; 4]> = SmallVec::new();
+    let mut indices: SmallVec<[Tagged<'s>; 4]> = SmallVec::new();
     let mut rest = handles::cell_fields(arguments.read(context))
         .map_or_else(|| handles::null().read(context), |(_, _, rest)| rest);
     while let Some((index, tag, next)) = handles::cell_fields(rest) {
-        indices.push(handles::Tagged {
+        indices.push(Tagged {
             tag: context.root(tag),
             value: context.root(index),
         });
