@@ -530,3 +530,13 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 - Every rebuilt set is a loop of the dictionary's: `union` is `Dict.insert_all`'s, `intersection` and `difference` are `keep_shared`'s and `remove_all`'s without the value compare, and `map`, `join_map`, `keep_if`, `drop_if`, `walk` and `walk_until` pass the callback the element alone. `Set.map` inserts each result, so equal results merge.
 - `Set.empty()` takes its element type from the checker (`CheckedType::Set`, `.ry_items(Set.empty(), "Set<Str>")`) or from a walk step's state annotation, as `Dict.empty()` does. Elements are `I64` or `Str`; `Set.with_capacity` and `Set.capacity` are not compiled, because the interpreter's capacity is observable.
 - A change to a type's layout bumps `file::VERSION`, so a typed file written for the old layout is rejected rather than misread.
+
+## A native dictionary's value layout comes from the checker's spelling of the value type
+
+**Status:** settled.
+
+- `Dict` values may be any layout a `List` holds: `Bool`, records, tuples, lists and tags, besides `I64`, `F64` and `Str`. Keys stay `INT`, `I64`, `DBL` or `STR`. Object values are counted pointers, and every owned slot (a `STR` or `OBJECT` key or value) goes through `dup_items` and `drop_items`, so a removed entry's value is reset (`Str::EMPTY`, null) and `dict_free` drops every slot below the entry count.
+- The checker spells the value type for the runtime (`CheckedType::Dict { key, value }`, `check::stored_spelling`), as in `.ry_items(Dict.empty(), "Dict<I64, Record{x: I64, y: I64}>")`, in the `TypeRenderer`'s canonical grammar, and `lower::spelled_item` interns the shape. So a dictionary is laid out before its first insert, and a read of an empty one needs no pending layout. A field name outside ASCII letters, digits, `_` and `.` gives no spelling, and the function keeps its `interpreted` finding path.
+- Every tag value is `Item::Tag(shapes::ANY)` and spells as `:`: every tag shares one boxed layout, so the union never needs to reach the runtime. An empty dictionary in a slot annotated with a tag union has a value type that is a variable bounded by the union, and the bound alone settles the spelling.
+- Dictionaries, sets and functions as values stay interpreted (`Uncompiled::DictEntries`), because a stored item (`ir::Item`) has no dictionary, set or function kind, so a `List` cannot hold them natively either.
+- `key_hash` and `key_equal` read an `I64` key as its whole word; reading it as an `INT` merged keys that share their low 32 bits.

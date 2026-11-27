@@ -295,20 +295,20 @@ cat(as_floats(4), "\n")
 as_floats: fn(n: I64) -> F64
 NULL
 
-#---- dict_of_bool
+#---- dict_of_sets
 #~~~~ script.R
-# blocked: distinct
-distinct <- function(first: Str, second: Str) -> I64 {
-  seen: Dict<Str, Bool> <- Dict.empty()
-  for (name in [first, second, first]) seen <- Dict.insert(seen, name, TRUE)
+# blocked: groups
+groups <- function(first: Str, second: Str) -> I64 {
+  seen: Dict<Str, Set<Str>> <- Dict.empty()
+  for (name in [first, second, first]) seen <- Dict.insert(seen, name, Set.single(name))
   Dict.len(seen)
 }
-cat(Num.to_r(distinct("a", "b")), "\n")
+cat(Num.to_r(groups("a", "b")), "\n")
 #++++
 == script.R
-distinct: fn(first: Str, second: Str) -> I64
+groups: fn(first: Str, second: Str) -> I64
 NULL
-102..114 warning[interpreted] this function runs in the interpreter, because a `Dict` whose keys or values are not `I64`, `F64` or `Str` is not compiled natively yet. Keep the values in a `List` and store their positions in the dictionary
+102..114 warning[interpreted] this function runs in the interpreter, because a `Dict` whose keys are not `I64`, `F64` or `Str`, or whose values are dictionaries, sets or functions, is not compiled natively yet. Convert the keys to `I64` or `Str`, and keep such values in a `List` whose positions the dictionary stores
 
 #---- match_guard
 #~~~~ script.R

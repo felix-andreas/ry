@@ -469,13 +469,14 @@ pub enum NativeValueKind {
 /// the runtime may build empty or convert from R (for `List.from_r_missing`, of the `:Ok`
 /// payloads), the key and value types of a dictionary or the element type of a set built from no
 /// entries, or the number a `Num.from_r` gives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum CheckedType {
     List(ListItems),
-    /// A `Dict` of `I64`, `F64` or `Str` keys and values, the ones typed code holds unboxed.
+    /// A `Dict` of `I64`, `F64` or `Str` keys, and values whose type `value` spells as a
+    /// signature does ([`stored_spelling`]), so typed code lays them out before any entry exists.
     Dict {
         key: ListItems,
-        value: ListItems,
+        value: Box<str>,
     },
     /// A `Set` of `I64` or `Str` elements.
     Set(ListItems),
@@ -486,12 +487,10 @@ pub enum CheckedType {
 impl CheckedType {
     /// The name `.ry_items` takes: `"I64"` for a list or a number, `"Dict<Str, I64>"` for a
     /// dictionary, `"Set<Str>"` for a set.
-    pub fn name(self) -> std::borrow::Cow<'static, str> {
-        match self {
+    pub fn name(&self) -> std::borrow::Cow<'static, str> {
+        match *self {
             CheckedType::List(items) => items.name().into(),
-            CheckedType::Dict { key, value } => {
-                format!("Dict<{}, {}>", key.name(), value.name()).into()
-            }
+            CheckedType::Dict { key, ref value } => format!("Dict<{}, {value}>", key.name()).into(),
             CheckedType::Set(element) => format!("Set<{}>", element.name()).into(),
             CheckedType::Number(NumberType::I64) => "I64".into(),
             CheckedType::Number(NumberType::F64) => "F64".into(),
@@ -1346,12 +1345,13 @@ fn check_item_in<'db>(
                 };
             }
             if let Some((key, value)) = crate::types::dict_entries(db, ty) {
-                let key = key_items(key);
+                let mut value_spelling = String::new();
+                stored_spelling(db, &context.table, value, &mut value_spelling, 0)?;
                 return Some((
                     id,
                     CheckedType::Dict {
-                        key: key?,
-                        value: scalar(value)?,
+                        key: key_items(key)?,
+                        value: value_spelling.into(),
                     },
                 ));
             }
@@ -26152,6 +26152,84 @@ fn list_items<'db>(db: &'db dyn Db, item: Ty<'db>) -> Option<ListItems> {
         _ if crate::types::is_ry_value_type(db, item) => Some(ListItems::RyValues),
         _ => None,
     }
+}
+
+/// Appends to `out` the spelling of `ty` that a signature gives it, for a value typed code can
+/// hold in a dictionary: `I64`, `F64`, `Str`, `Bool`, a `List`, a `Record{..}` or `Tuple{..}` of
+/// such values, or a tag, spelled `:` alone because a box's tag field holds any tag. `None` for
+/// any other type, for a nominal that holds itself, whose spelling never ends, and for a field
+/// name the R string literal the spelling goes into could not hold as it is.
+fn stored_spelling<'db>(
+    db: &'db dyn Db,
+    table: &InferenceTable<'db>,
+    ty: Ty<'db>,
+    out: &mut String,
+    depth: usize,
+) -> Option<()> {
+    const DEPTH_LIMIT: usize = 16;
+    if depth > DEPTH_LIMIT {
+        return None;
+    }
+    let ty = table.resolve(db, ty);
+    // A slot annotated with a tag union leaves an empty collection's item a variable bounded by
+    // that union, and every tag shares one layout, so the bound alone fixes the storage.
+    let bounded_by_tags = ty
+        .as_var(db)
+        .and_then(|var| table.bound_of(var))
+        .is_some_and(|bound| crate::types::is_tag_type(db, table.resolve(db, bound)));
+    if bounded_by_tags || crate::types::is_tag_type(db, ty) {
+        out.push(':');
+        return Some(());
+    }
+    if let Some(item) = crate::types::array_element(db, ty) {
+        out.push_str("List<");
+        stored_spelling(db, table, item, out, depth + 1)?;
+        out.push('>');
+        return Some(());
+    }
+    match ty.kind(db) {
+        TyKind::Native(scalar) => out.push_str(match scalar {
+            NativeScalar::I64 => "I64",
+            NativeScalar::F64 => "F64",
+            NativeScalar::Str => "Str",
+            NativeScalar::Bool => "Bool",
+        }),
+        TyKind::NativeRecord(fields, None) => {
+            out.push_str("Record{");
+            for (index, field) in fields.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                let name = field.name.text(db);
+                if !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'.')
+                {
+                    return None;
+                }
+                out.push_str(name);
+                out.push_str(": ");
+                stored_spelling(db, table, field.ty, out, depth + 1)?;
+            }
+            out.push('}');
+        }
+        TyKind::NativeTuple(items) => {
+            out.push_str("Tuple{");
+            for (index, &item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                stored_spelling(db, table, item, out, depth + 1)?;
+            }
+            out.push('}');
+        }
+        TyKind::Named(name, arguments) => {
+            let representation = table.representation(db, *name, arguments)?;
+            stored_spelling(db, table, representation, out, depth + 1)?;
+        }
+        _ => return None,
+    }
+    Some(())
 }
 
 /// The payload of the `:Ok` member of a `Result`, the item type of a `List.from_r_missing`.

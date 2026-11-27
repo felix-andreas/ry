@@ -2288,7 +2288,7 @@ impl Lowering<'_> {
             (Type::Int, Item::Int)
             | (Type::I64, Item::I64)
             | (Type::Dbl, Item::Dbl)
-            | (Type::Lgl, Item::Lgl)
+            | (Type::Lgl | Type::Bool, Item::Lgl)
             | (Type::Str, Item::Str) => Ok(value),
             (Type::Record(a), Item::Record(b)) if a == b => Ok(value),
             (Type::Tag(a), Item::Tag(b)) if shapes::within(a, b) => Ok(value),
@@ -4162,7 +4162,7 @@ impl Lowering<'_> {
                 {
                     let ty = constant_string(hint)
                         .as_deref()
-                        .and_then(keyed_type)
+                        .and_then(|annotation| keyed_type(annotation))
                         .ok_or(Refusal::new(
                             "an empty dictionary or set of an unknown type",
                         ))?;
@@ -4433,19 +4433,19 @@ impl Lowering<'_> {
                 };
                 let key = self.value(key)?;
                 let value = self.value(value)?;
-                let item = |ty: Type| match ty {
-                    Type::Str => Some(Item::Str),
-                    Type::I64 => Some(Item::I64),
-                    Type::Dbl => Some(Item::Dbl),
-                    _ => None,
+                self.usable(value)?;
+                let key_item = match self.builder.ty(key) {
+                    Type::Str => Item::Str,
+                    Type::I64 => Item::I64,
+                    _ => {
+                        return Err(Refusal::new(
+                            "a `Dict.single` of a key that is not an `I64` or a `Str`",
+                        ));
+                    }
                 };
-                let (Some(key_item @ (Item::Str | Item::I64)), Some(value_item)) =
-                    (item(self.builder.ty(key)), item(self.builder.ty(value)))
-                else {
-                    return Err(Refusal::new(
-                        "a `Dict.single` of keys or values that are not scalars",
-                    ));
-                };
+                let value_item = self.builder.ty(value).held_item().ok_or(Refusal::new(
+                    "a `Dict.single` of a value a dictionary cannot hold",
+                ))?;
                 let ty = Type::Dict {
                     key: key_item,
                     value: value_item,
@@ -5147,7 +5147,7 @@ impl Lowering<'_> {
                 };
                 let ty = interp::annotations::formal_annotation(formals, body, 0)
                     .as_deref()
-                    .and_then(keyed_type)
+                    .and_then(|annotation| keyed_type(annotation))
                     .ok_or(Refusal::new(
                         "a walk from an empty collection whose state type is unknown",
                     ))?;
@@ -9079,7 +9079,19 @@ impl Lowering<'_> {
         let key = self.value(key)?;
         let value = self.value(value)?;
         let key = self.dict_key(dict, key)?;
-        let dict_ty = self.builder.ty(dict);
+        self.usable(value)?;
+        // A tag of another shape widens the dictionary's value union: its values are boxes
+        // either way.
+        let dict_ty = match (self.builder.ty(dict), self.builder.ty(value)) {
+            (
+                ty @ Type::Dict {
+                    value: Item::Tag(_),
+                    ..
+                },
+                Type::Tag(found),
+            ) => with_tags(ty, found),
+            (ty, _) => ty,
+        };
         let Type::Dict { value: item, .. } = dict_ty else {
             return Err(Refusal::new(
                 "a `Dict.insert` into something other than a dictionary",
@@ -9172,16 +9184,11 @@ impl Lowering<'_> {
             ));
         };
         let held_shape = shapes::shape(shape);
-        let (
-            &[
-                key @ (Item::Str | Item::I64),
-                value @ (Item::Str | Item::I64 | Item::Dbl),
-            ],
-            true,
-        ) = (&held_shape.fields[..], held_shape.layout == layout)
+        let (&[key @ (Item::Str | Item::I64), value], true) =
+            (&held_shape.fields[..], held_shape.layout == layout)
         else {
             return Err(Refusal::new(
-                "a `Dict.from_list` of something other than pairs of scalars",
+                "a `Dict.from_list` of something other than pairs with `I64` or `Str` keys",
             ));
         };
         let dict_ty = Type::Dict { key, value };
@@ -9404,13 +9411,12 @@ impl Lowering<'_> {
             .ok_or(Refusal(Cow::Owned(format!(
                 "a `{name}` callback that never completes"
             ))))?;
-        let mapped_item = match (over_set, self.builder.ty(mapped)) {
-            (_, Type::Str) => Item::Str,
-            (_, Type::I64) => Item::I64,
-            (false, Type::Dbl) => Item::Dbl,
+        self.usable(mapped)?;
+        let mapped_item = match (over_set, self.builder.ty(mapped).held_item()) {
+            (true, Some(item @ (Item::Str | Item::I64))) | (false, Some(item)) => item,
             _ => {
                 return Err(Refusal(Cow::Owned(format!(
-                    "a `{name}` callback whose result is not a whole number, a double or a string"
+                    "a `{name}` callback whose result its collection cannot hold"
                 ))));
             }
         };
@@ -10540,8 +10546,9 @@ unsafe fn tag_layout(name: &str, count: u32) -> Result<u32, Refusal> {
 }
 
 /// A dictionary's or a set's type from its annotation, such as `Dict<Str, F64>` or `Set<I64>`.
-fn keyed_type(annotation: &str) -> Option<Type> {
-    let item = |name: &str| match name.trim() {
+/// A dictionary's values may be any item, spelled as [`spelled_item`] reads it.
+unsafe fn keyed_type(annotation: &str) -> Option<Type> {
+    let key = |name: &str| match name.trim() {
         "Str" => Some(Item::Str),
         "I64" => Some(Item::I64),
         "F64" => Some(Item::Dbl),
@@ -10549,17 +10556,81 @@ fn keyed_type(annotation: &str) -> Option<Type> {
     };
     let annotation = annotation.trim();
     if let Some(inner) = annotation.strip_prefix("Set<") {
-        return match item(inner.strip_suffix('>')?)? {
+        return match key(inner.strip_suffix('>')?)? {
             Item::Dbl => None,
             element => Some(Type::Set(element)),
         };
     }
     let inner = annotation.strip_prefix("Dict<")?.strip_suffix('>')?;
-    let (key, value) = inner.split_once(',')?;
+    let mut parts = top_level_parts(inner);
+    let (Some(key_text), Some(value_text), None) = (parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
     Some(Type::Dict {
-        key: item(key)?,
-        value: item(value)?,
+        key: key(key_text)?,
+        value: spelled_item(value_text)?,
     })
+}
+
+/// The item of a value of the type `text` spells as a canonical signature does, such as
+/// `Record{x: I64, ys: List<F64>}`. Every tag type is any tag, as a box's tag field is.
+unsafe fn spelled_item(text: &str) -> Option<Item> {
+    let text = text.trim();
+    if text.starts_with(':') {
+        return Some(Item::Tag(shapes::ANY));
+    }
+    match text {
+        "I64" => return Some(Item::I64),
+        "F64" => return Some(Item::Dbl),
+        "Str" => return Some(Item::Str),
+        "Bool" => return Some(Item::Lgl),
+        _ => {}
+    }
+    if let Some(inner) = text.strip_prefix("List<").and_then(|rest| rest.strip_suffix('>')) {
+        return Some(Item::Array(shapes::array_of(spelled_item(inner)?)));
+    }
+    if let Some(inner) = text.strip_prefix("Tuple{").and_then(|rest| rest.strip_suffix('}')) {
+        let items = top_level_parts(inner)
+            .map(|part| spelled_item(part))
+            .collect::<Option<SmallVec<[Item; 4]>>>()?;
+        let names: SmallVec<[Sexp; 4]> = items.iter().map(|_| rvalues::nil()).collect();
+        let (layout, _) = interp::records::constructor_layout(None, &names, false)?;
+        return shapes::intern(layout, &items).map(Item::Record);
+    }
+    let inner = text.strip_prefix("Record{")?.strip_suffix('}')?;
+    let mut names: SmallVec<[Sexp; 4]> = SmallVec::new();
+    let mut items: SmallVec<[Item; 4]> = SmallVec::new();
+    for field in top_level_parts(inner) {
+        let (name, ty) = field.split_once(':')?;
+        names.push(rvalues::install(name.trim()).ok()?);
+        items.push(spelled_item(ty)?);
+    }
+    let (layout, slots) = interp::records::constructor_layout(None, &names, true)?;
+    let mut placed: SmallVec<[(usize, Item); 4]> = slots.into_iter().zip(items).collect();
+    placed.sort_by_key(|&(slot, _)| slot);
+    let fields: SmallVec<[Item; 4]> = placed.into_iter().map(|(_, item)| item).collect();
+    shapes::intern(layout, &fields).map(Item::Record)
+}
+
+/// The comma-separated parts of a type's spelling that no bracket encloses.
+fn top_level_parts(text: &str) -> impl Iterator<Item = &str> {
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut parts: SmallVec<[&str; 4]> = SmallVec::new();
+    for (at, byte) in text.bytes().enumerate() {
+        match byte {
+            b'<' | b'{' | b'(' => depth += 1,
+            b'>' | b'}' | b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                parts.push(&text[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&text[start..]);
+    parts.into_iter()
 }
 
 /// A `match` arm: its pattern, its `if` guard and its value.
@@ -10783,13 +10854,18 @@ unsafe fn eta(name: Sexp, arity: usize) -> Result<(Sexp, Sexp), Refusal> {
     Ok((formals, body))
 }
 
-/// The tags a value of `ty` holds: a tag's union, or the item union of a ry list of tags.
+/// The tags a value of `ty` holds: a tag's union, or the item union of a ry list of tags or of
+/// a dictionary's tag values.
 fn held_tags(ty: Type) -> Option<u32> {
     match ty {
         Type::Tag(union)
         | Type::Vector {
             item: Item::Tag(union),
             array: true,
+        }
+        | Type::Dict {
+            value: Item::Tag(union),
+            ..
         } => Some(union),
         _ => None,
     }
@@ -10805,6 +10881,13 @@ fn with_tags(ty: Type, union: u32) -> Type {
         } => Type::Vector {
             item: Item::Tag(shapes::join(held, union)),
             array: true,
+        },
+        Type::Dict {
+            key,
+            value: Item::Tag(held),
+        } => Type::Dict {
+            key,
+            value: Item::Tag(shapes::join(held, union)),
         },
         ty => ty,
     }

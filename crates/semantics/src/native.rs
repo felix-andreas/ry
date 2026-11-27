@@ -24,7 +24,7 @@ use {
         stubs::{declaring_namespace, is_native_function, is_ry_type},
         types::{
             Atomic, Constraint, FunctionType, Name, NativeScalar, Ty, TyKind, TypeScheme,
-            array_element, dict_entries, set_element,
+            array_element, dict_entries, is_tag_type, set_element,
         },
     },
     rustc_hash::FxHashSet,
@@ -369,8 +369,9 @@ impl Uncompiled {
                  function literal"
             ),
             Uncompiled::DictEntries => format!(
-                "a `Dict` whose keys or values are not `I64`, `F64` or `Str` {YET}. Keep the \
-                 values in a `List` and store their positions in the dictionary"
+                "a `Dict` whose keys are not `I64`, `F64` or `Str`, or whose values are \
+                 dictionaries, sets or functions, {YET}. Convert the keys to `I64` or `Str`, and \
+                 keep such values in a `List` whose positions the dictionary stores"
             ),
             Uncompiled::SetElements => format!(
                 "a `Set` whose elements are not `I64` or `Str` {YET}. Convert the elements to \
@@ -1961,15 +1962,24 @@ impl<'a, 'db> Judge<'a, 'db> {
     fn keyed_blocker(&self, ty: Ty<'db>) -> Option<Uncompiled> {
         let db = self.judged.db;
         if let Some((key, value)) = dict_entries(db, ty) {
-            let fits = [key, value].into_iter().all(|entry| {
-                matches!(
-                    entry.kind(db),
-                    TyKind::Native(NativeScalar::I64 | NativeScalar::F64 | NativeScalar::Str)
-                        | TyKind::Scalar(Atomic::Double | Atomic::Character)
-                        | TyKind::Var(_)
-                )
-            });
-            return (!fits).then_some(Uncompiled::DictEntries);
+            let key_fits = matches!(
+                key.kind(db),
+                TyKind::Native(NativeScalar::I64 | NativeScalar::F64 | NativeScalar::Str)
+                    | TyKind::Scalar(Atomic::Double | Atomic::Character)
+                    | TyKind::Var(_)
+            );
+            // A value is stored as a list item is, so it is any of ry's values but a collection
+            // the native dictionary cannot hold as an item.
+            let value_fits = match value.kind(db) {
+                TyKind::Native(_)
+                | TyKind::Scalar(Atomic::Double | Atomic::Character)
+                | TyKind::Var(_)
+                | TyKind::NativeRecord(..)
+                | TyKind::NativeTuple(_) => true,
+                TyKind::Named(name, _) => !matches!(name.text(db), "Dict" | "Set"),
+                _ => is_tag_type(db, value),
+            };
+            return (!(key_fits && value_fits)).then_some(Uncompiled::DictEntries);
         }
         let element = set_element(db, ty)?;
         let fits = matches!(

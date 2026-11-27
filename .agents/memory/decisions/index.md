@@ -674,6 +674,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Standard library functions that rebuild a dictionary or split a list compile to loops (settled)
 - `Result`-callback list functions leave their loop at the first `:Err` (settled)
 - A native set is a native dictionary with a placeholder value column (settled)
+- A native dictionary's value layout comes from the checker's spelling of the value type (settled)
 
 ## DataFrame and the table engine
 
