@@ -754,21 +754,17 @@ signature only ry inferred binds no name, so `#: T` in an unannotated function i
 A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
 `<T: numeric> fn(values: T) -> T`. These are the constraints:
 
-- `num` admits everything `numeric` does and the ry numbers `I64` and `F64`. It is what `a + b`,
-  `a * b`, `a %% b`, `a %/% b` and `-a` ask of values of one type, because on two numbers of one
-  type they give that type in R and in ry alike (R reads a `logical` as `integer`), so `function(a, b) a * b` is `<T: num> fn(a: T, b: T) -> T` and
-  multiplies two `F64`s as well as two `double`s.
 - `numeric` admits `integer` and `double`, scalar or vector, and any class whose arithmetic takes
   two of its values, which an [operator method](#operator-methods-on-a-class) such as
-  `"+.Money" <- function(e1: Money, e2: Money)` declares. It is what `a / b` and `a ^ b` ask of
-  two values of one type, because their result is R's `double` whatever the operands, so
-  `function(a, b) a / b` is `<T: numeric> fn(a: T, b: T) -> double` and does not take an `F64`.
+  `"+.Money" <- function(e1: Money, e2: Money)` declares.
 - `arithmetic` admits everything `numeric` does and any class that declares an arithmetic operator
-  method at all, such as `Date`, whose `+.Date` adds a number to a date. It is what `x + 1` asks of
-  `x`, so `function(x) x + 1` is `<T: arithmetic> fn(x: T) -> double` and accepts a `Date`, while
-  `add_them(day, day)` under `<T: numeric> fn(a: T, b: T) -> T` reports "expected a numeric value
-  (`integer` or `double`) or a class with arithmetic between two of its values, found `Date`", as R
-  stops on `day + day`.
+  method at all, such as `Date`, whose `+.Date` adds a number to a date. `add_them(day, day)` under
+  `<T: numeric> fn(a: T, b: T) -> T` reports "expected a numeric value (`integer` or `double`) or a
+  class with arithmetic between two of its values, found `Date`", as R stops on `day + day`.
+- `num` admits everything `numeric` does and the ry numbers `I64` and `F64`.
+- `arithmetic or number` admits everything `arithmetic` does and `I64` and `F64`.
+- `arithmetic or F64` admits everything `arithmetic` does and `F64`.
+- `numeric or F64` admits everything `numeric` does and `F64`.
 - `atomic` admits one of the six atomic scalar types: `logical`, `integer`, `double`, `complex`,
   `character`, and `raw`.
 - `key` admits a scalar `logical`, `integer`, `double` or `character`, the types a dictionary key
@@ -777,6 +773,19 @@ A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
   endpoint of `:` infers, so `function(n) 1:n` is `<T: scalar numeric> fn(n: T) -> double[]`.
 - `item` admits what a [`List`](#lists) can hold: a number, a `Bool`, a `Str`, or another ry value.
   `List.from_r` uses it to type a `list[T]` argument.
+
+The last four join an R constraint and a ry one, and they are what
+[unannotated arithmetic](#unannotated-values-in-arithmetic) infers, with a result written
+`Promoted<T>` or `Compared<T>` when R and ry give different results:
+
+| Type | `T` a ry number | `T` an R value |
+| --- | --- | --- |
+| `Promoted<T>` | `T` | `double` |
+| `Compared<T>` | `Bool` | `logical` |
+
+So `function(x) x * 2` is `<T: arithmetic or number> fn(x: T) -> Promoted<T>`: it gives an `I64`
+for an `I64`, as `x * 2` on an `I64` does in ry, and a `double` for an `integer` or a `Date`, as R
+does. `Promoted<T>` and `Compared<T>` may be written in an annotation too.
 
 Any other constraint name is an annotation error, and the error lists the ones that exist. An
 argument whose type violates a constraint is a type error at the call, and the message names the
@@ -1589,12 +1598,13 @@ An `F64` is stored as R's `double`, so an `F64` fits `double` and is passed to R
 `I64` does not share R's `integer`, because R reads one 32-bit pattern as `NA` and overflows to `NA`
 with a warning: `-2147483648i64` is an ordinary `I64`, and overflow is an error.
 
-The constraint `number` admits both types, and `num` admits them and R's numbers, so an
-unannotated helper whose arithmetic keeps its operands' type, such as `mul <- function(a, b) a * b`,
-takes ry numbers: `List.map2(xs, ys, mul)` with `xs, ys: List<F64>` is a `List<F64>`. A helper
-whose arithmetic gives an R number, such as `function(x) x * 2.0` or `function(a, b) a / b`, takes
-R numbers only, and passing it a ry number is a `type-mismatch` that says to declare the parameter's
-type.
+The constraint `number` admits both types. An unannotated helper takes ry numbers wherever ry's
+arithmetic is defined on them, through the [constraints](#constraints) that join R's numbers and
+ry's: `mul <- function(a, b) a * b` multiplies two `F64`s to an `F64`, and
+`scale <- function(x) x * 2` makes `List.map(xs, scale)` with `xs: List<I64>` a `List<I64>`. A
+helper that divides, such as `function(a, b) a / b` or `function(x) x * 0.5`, takes an `F64` and
+not an `I64`, because ry's `/` and fractional literals are defined on `F64` alone, and passing it an
+`I64` is a `type-mismatch`.
 
 ### Number literals
 
@@ -2078,11 +2088,12 @@ p_dist <- function(q, valueOnly = TRUE) {
   prob <- q * 2
   if (valueOnly) prob else list(value = prob, error = prob)
 }
-# p_dist: <T: arithmetic, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
+# p_dist: <T: arithmetic or number, U> fn(q: T, [valueOnly]: U)
+#   -> Promoted<T> | list{value: Promoted<T>, error: Promoted<T>}
 gap <- function(x, p) p_dist(x) - p
 # gap: <T: arithmetic, U: arithmetic> fn(x: T, p: U) -> double
 full <- function(x) p_dist(x, valueOnly = FALSE)$error
-# full: <T: arithmetic> fn(x: T) -> double
+# full: <T: arithmetic or number> fn(x: T) -> Promoted<T>
 ```
 
 Any other flag argument, such as a variable, returns the union. A call that forwards `...` selects
@@ -2761,23 +2772,42 @@ For example, `double * integer[]` is `double[]`, `integer[named] + integer` is `
 
 #### Unannotated values in arithmetic
 
-An unannotated value used as an arithmetic operand is *required to be numeric* rather than rejected:
-it must end up as `integer` or `double`, in any vector shape, or as a class with arithmetic. Beside
-a number it takes the [`arithmetic` constraint](#constraints), and two operands of one type take
-`num`, because a class such as `Date` adds a number but not another value of its own. Under `/` and
-`^`, whose result is always `double`, two operands of one type take `numeric` instead. A
-difference `a - b` is the exception and asks only `arithmetic`, because R subtracts two dates or
-two times. That difference is not a value of the operands' type (two dates subtract to a
-`difftime`), so it is `double`, the representation every arithmetic class shares. A value tested
-as a condition (`if (a %% 2L)`, `!a`, `a && b`) takes `numeric`, because a condition reads R's
-truth of a number, which a ry number lacks.
+An unannotated value used as an arithmetic operand is *required to be a number* rather than
+rejected: it must end up as an R number (`integer` or `double`, in any vector shape), a class with
+arithmetic, or a ry number where ry's arithmetic is defined on it. The operator and the other
+operand pick the [constraint](#constraints) and the result:
 
-- `function(x) x + 1L` is `<T: arithmetic> fn(x: T) -> T`, and calling it with `"oops"` is a type
-  error.
-- `function(x) x / 2` is `<T: arithmetic> fn(x: T) -> double`.
+| Operands | Constraint | Result |
+| --- | --- | --- |
+| `x` beside a whole number literal (`x + 1L`) | `arithmetic or number` | `T` |
+| `x` beside a whole `double` literal (`x * 2`) | `arithmetic or number` | `Promoted<T>` |
+| `x` beside a fractional literal (`x * 0.5`), or under `/` | `arithmetic or F64` | `Promoted<T>` |
+| two of one type, under `+`, `*`, `%%` or `%/%` | `num` | `T` |
+| two of one type, under `-` | `arithmetic or number` | `Promoted<T>` |
+| two of one type, under `/` | `numeric or F64` | `Promoted<T>` |
+| two of one type, under `^` | `num` | `Promoted<T>` |
+| beside any other value | `arithmetic` | R's result |
+| a comparison beside a literal or itself | none | `Compared<T>` |
+
+A whole literal is one with no fractional part, so `2.0` counts as whole and `2.5` does not. A
+class such as `Date` adds a number but not another value of its own, so two operands of one type
+take `num` under `+`. A difference `a - b` is the exception, because R subtracts two dates or two
+times: it asks only `arithmetic` on the R side, and the difference of two dates is a `difftime`,
+so its R result is `double`, the representation every arithmetic class shares. Where only an R
+value fits, such as an argument to an overloaded base function (`abs(x - y)`), a condition or an
+operand beside another open value, `Promoted<T>` is `double` and `Compared<T>` is `logical`. A value tested as a condition (`if (a %% 2L)`, `!a`, `a && b`) takes `numeric`,
+because a condition reads R's truth of a number, which a ry number lacks.
+
+- `function(x) x + 1L` is `<T: arithmetic or number> fn(x: T) -> T`, and calling it with `"oops"`
+  is a type error. Calling it with an `I64` is an `I64`.
+- `function(x) x / 2` is `<T: arithmetic or F64> fn(x: T) -> Promoted<T>`: an `F64` for an `F64`,
+  a `double` for an R number, and a type error for an `I64`.
 - `function(a, b) a + b` is `<T: num> fn(a: T, b: T) -> T`, and calling it with two dates is a
   type error. Calling it with two `I64`s is an `I64`.
-- `function(a, b) a - b` is `<T: arithmetic> fn(a: T, b: T) -> double`, and accepts two dates.
+- `function(a, b) a - b` is `<T: arithmetic or number> fn(a: T, b: T) -> Promoted<T>`, and gives
+  a `double` for two dates and an `I64` for two `I64`s.
+- `function(x) x > 0` is `<T> fn(x: T) -> Compared<T>`, a `Bool` for an `I64` and a `logical` for
+  a `double`.
 
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
 vector, so `f <- function(x) x + c(1L, 2L)` is `<T: arithmetic> fn(x: T) -> double[]` and accepts

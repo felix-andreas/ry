@@ -67,18 +67,18 @@ mirror <- function(x) x
 mixed_apply <- invoke(mirror)
 mixed_apply("ok")
 #++++
-invoke: <T: arithmetic, U> fn(f: fn(T) -> U) -> fn(x: T) -> U
+invoke: <T: arithmetic or number, U> fn(f: fn(T) -> U) -> fn(x: T) -> U
 mirror: <T> fn(x: T) -> T
-mixed_apply: <T: arithmetic> fn(x: T) -> T
+mixed_apply: <T: arithmetic or number> fn(x: T) -> T
 Unknown
-110..114 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+110..114 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
 
 #---- numeric_polymorphic_accepts_integer_and_double
 increment <- function(x) x + 1L
 a <- increment(2L)
 b <- increment(2.5)
 #++++
-increment: <T: arithmetic> fn(x: T) -> T
+increment: <T: arithmetic or number> fn(x: T) -> T
 a: integer
 b: double
 
@@ -86,9 +86,9 @@ b: double
 increment <- function(x) x + 1L
 bad <- increment("oops")
 #++++
-increment: <T: arithmetic> fn(x: T) -> T
+increment: <T: arithmetic or number> fn(x: T) -> T
 bad: Unknown
-49..55 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+49..55 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
 
 #---- arithmetic_on_two_declared_numeric_parameters_is_double
 #: <T: numeric, U: numeric> fn(a: T, b: U) -> double
@@ -126,7 +126,7 @@ span <- function(from, to) to - from
 day <- as.Date("2024-01-02")
 gap <- span(day, day)
 #++++
-span: <T: arithmetic> fn(from: T, to: T) -> double
+span: <T: arithmetic or number> fn(from: T, to: T) -> Promoted<T>
 day: Date
 gap: double
 
@@ -135,9 +135,9 @@ gap: double
 shift <- function(x) x + 1
 levels <- shift(factor("a"))
 #++++
-shift: <T: arithmetic> fn(x: T) -> double
+shift: <T: arithmetic or number> fn(x: T) -> Promoted<T>
 levels: Unknown
-135..146 error[type-mismatch] expected a numeric value (`integer` or `double`) or a class with arithmetic, found `factor`
+135..146 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `factor`
 
 #---- a_class_negates_only_with_arithmetic_between_its_values
 # R stops on `-day` (`-.Date` needs two operands), and a `difftime` negates to itself.
@@ -172,7 +172,7 @@ negated <- negate(day)
 #++++
 add_them: <T: numeric> fn(a: T, b: T) -> T
 add_inferred: <T: num> fn(a: T, b: T) -> T
-shift: <T: arithmetic> fn(x: T) -> double
+shift: <T: arithmetic or number> fn(x: T) -> Promoted<T>
 negate: <T: num> fn(x: T) -> T
 twice: <T: arithmetic> fn(x: T) -> T
 day: Date

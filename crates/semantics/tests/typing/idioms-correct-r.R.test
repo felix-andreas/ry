@@ -114,7 +114,7 @@ both <- function(x) {
 }
 use <- function() both(if (append) 1 else 2)
 #++++
-both: <T: arithmetic> fn(x: T) -> double
+both: <T: arithmetic or number> fn(x: T) -> Promoted<T>
 use: Unknown
 82..88 error[type-mismatch] expected `logical`, found `fn(x: Any, values: Any, [after]: Any) -> Any`
 
@@ -212,14 +212,14 @@ is_even <- function(x) {
   return(x %% 2L == 0L)
 }
 #++++
-is_even: <T: arithmetic> fn(x: T) -> logical
+is_even: <T: arithmetic or number> fn(x: T) -> Compared<T>
 
 #---- arithmetic_takes_logicals_and_complex_numbers
 double_it <- function(x) x * 2
 a <- double_it(TRUE)
 z <- 1i + 2
 #++++
-double_it: <T: arithmetic> fn(x: T) -> double
+double_it: <T: arithmetic or number> fn(x: T) -> Promoted<T>
 a: double
 z: complex
 
@@ -741,7 +741,7 @@ pick <- function(flag) {
   shift(start)
 }
 #++++
-shift: <T: arithmetic> fn(n: T) -> T
+shift: <T: arithmetic or number> fn(n: T) -> T
 pick: fn(flag: logical) -> double | integer
 
 #---- arithmetic_rejects_a_union_with_a_string
@@ -1285,9 +1285,9 @@ call: fn() -> Any
 expression <- function(x) x + 1
 label <- function() expression("a")
 #++++
-expression: <T: arithmetic> fn(x: T) -> double
+expression: <T: arithmetic or number> fn(x: T) -> Promoted<T>
 label: Unknown
-63..66 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+63..66 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
 
 #---- an_argument_named_dots_with_value_dots_forwards_the_dots
 skip_na <- function(x, FUN, ...) FUN(na.omit(x), ... = ...)
@@ -1339,7 +1339,7 @@ none: list{character[], character[]} | list{logical, logical}
 #---- a_list_branch_keeps_a_constrained_variable_open
 pair <- function(dp) { n <- dp + 1L; if (n > 0L) list(dp, dp) else list(2L, 2L) }
 #++++
-pair: <T: arithmetic> fn(dp: T) -> list{T, T} | list{integer, integer}
+pair: <T: arithmetic or number> fn(dp: T) -> list{T, T} | list{integer, integer}
 
 #---- unlink_takes_a_vector_as_its_recursive_flag
 remove_paths <- function(paths) unlink(paths, recursive = dir.exists(paths) & rep(TRUE, 2))
@@ -1356,14 +1356,14 @@ remove_paths: Unknown
 span <- function(from, to) to - from
 count_up <- function(fine) span(1L, if (fine) 2.5 else 2L)
 #++++
-span: <T: arithmetic> fn(from: T, to: T) -> double
+span: <T: arithmetic or number> fn(from: T, to: T) -> Promoted<T>
 count_up: fn(fine: logical) -> double
 
 #---- a_numeric_binding_still_rejects_a_union_with_text
 span <- function(from, to) to - from
 count_up <- function(fine) span(1L, if (fine) 2.5 else "2")
 #++++
-span: <T: arithmetic> fn(from: T, to: T) -> double
+span: <T: arithmetic or number> fn(from: T, to: T) -> Promoted<T>
 count_up: Unknown
 73..95 error[type-mismatch] expected `integer`, found `double | character`
 
@@ -1390,7 +1390,7 @@ step <- function(f, pars, arglist) {
   f(pars = pars + 1, arglist) - base
 }
 #++++
-step: <T: arithmetic, U, V: arithmetic> fn(f: fn(T, U) -> V, pars: T, arglist: U) -> double
+step: <T: arithmetic or number, U, V: arithmetic or number> fn(f: fn(T, U) -> V, pars: T, arglist: U) -> Promoted<V>
 
 #---- a_callback_may_later_be_called_without_an_argument_an_earlier_call_passed
 # AzureRMR calls `api_func(op, options = ...)` and then `api_func(op)`, relying on the callee's
@@ -1450,7 +1450,7 @@ labelled: Unknown
 half <- function(n) if (n %% 2 == 1L) 0L else 1L
 halves <- function(n) if (length(n) == 1L) half(n) else lapply(n, half)
 #++++
-half: <T: arithmetic> fn(n: T) -> integer
+half: <T: arithmetic or number> fn(n: T) -> integer
 halves: <T: scalar numeric> fn(n: T[]) -> integer | list[integer]
 
 #---- a_mapped_number_still_rejects_text
@@ -1458,7 +1458,7 @@ half <- function(n) if (n %% 2 == 1L) 0L else 1L
 halves <- function(n) if (length(n) == 1L) half(n) else lapply(n, half)
 wrong <- halves(c("a", "b"))
 #++++
-half: <T: arithmetic> fn(n: T) -> integer
+half: <T: arithmetic or number> fn(n: T) -> integer
 halves: <T: scalar numeric> fn(n: T[]) -> integer | list[integer]
 wrong: Unknown
 137..148 error[type-mismatch] expected `T[]`, found `character[]`
@@ -1659,10 +1659,10 @@ gap <- function(x, p) p_dist(x) - p
 full <- function(x) p_dist(x, valueOnly = FALSE)$error
 either <- function(x, flag) p_dist(x, flag)
 #++++
-p_dist: <T: arithmetic, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
+p_dist: <T: arithmetic or number, U> fn(q: T, [valueOnly]: U) -> Promoted<T> | list{value: Promoted<T>, error: Promoted<T>}
 gap: <T: arithmetic, U: arithmetic> fn(x: T, p: U) -> double
-full: <T: arithmetic> fn(x: T) -> double
-either: <T: arithmetic, U> fn(x: T, flag: U) -> double | list{value: double, error: double}
+full: <T: arithmetic or number> fn(x: T) -> Promoted<T>
+either: <T: arithmetic or number, U> fn(x: T, flag: U) -> Promoted<T> | list{value: Promoted<T>, error: Promoted<T>}
 
 #---- a_flag_default_selects_a_returned_branch_written_with_return
 # pracma's `gcd(a, b, extended = FALSE)` returns from each branch.
@@ -1677,7 +1677,7 @@ gcd <- function(a, b, extended = FALSE) {
 lcm <- function(a, b) a / gcd(a, b, extended = FALSE) * b
 #++++
 gcd: <T: num, U> fn(a: T, b: T, [extended]: U) -> list{g: T, c: T} | T
-lcm: <T: numeric> fn(a: T, b: T) -> double
+lcm: <T: numeric or F64> fn(a: T, b: T) -> Promoted<T>
 
 #---- a_negated_flag_guard_block_selects_its_returns
 # survival's `is.ratetable(x, verbose = FALSE)` answers `TRUE` or `FALSE` under `if (!verbose)`
@@ -1733,9 +1733,9 @@ p_dist <- function(q, valueOnly = TRUE) {
 }
 bad <- function(x) p_dist(x, valueOnly = FALSE) - 1
 #++++
-p_dist: <T: arithmetic, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
+p_dist: <T: arithmetic or number, U> fn(q: T, [valueOnly]: U) -> Promoted<T> | list{value: Promoted<T>, error: Promoted<T>}
 bad: Unknown
-139..167 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list{value: double, error: double}`
+139..167 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list{value: Promoted<T>, error: Promoted<T>}`
 
 #---- a_reassigned_flag_selects_nothing
 p_dist <- function(q, valueOnly = TRUE) {
@@ -1745,8 +1745,8 @@ p_dist <- function(q, valueOnly = TRUE) {
 }
 gap <- function(x) p_dist(x)
 #++++
-p_dist: <T: arithmetic, U> fn(q: T, [valueOnly]: U) -> double | list{value: double}
-gap: <T: arithmetic> fn(x: T) -> double | list{value: double}
+p_dist: <T: arithmetic or number, U> fn(q: T, [valueOnly]: U) -> Promoted<T> | list{value: Promoted<T>}
+gap: <T: arithmetic or number> fn(x: T) -> Promoted<T> | list{value: Promoted<T>}
 
 #---- an_inferred_logical_callback_parameter_takes_numbers
 # gmp's `lapply(0:(n-1L), Eulerian, n = n)`: a direct call `not(1L)` is accepted, so
@@ -2110,7 +2110,7 @@ make <- function() {
   outer
 }
 #++++
-make: <T> fn() -> fn([x]: T) -> double
+make: <T> fn() -> fn([x]: T) -> Unknown
 
 #---- a_formal_read_only_by_another_formals_default_is_required_when_that_default_runs
 # `y`'s default reads `x`, so `g()` fails in R, while `g(y = 1)` never reads `x`.
@@ -2419,7 +2419,7 @@ mixed <- function(a) {
 }
 #++++
 mixed: Unknown
-72..95 error[type-mismatch] this function is passed `double | character`, but its parameter `item` is used as a numeric value (`integer` or `double`)
+72..95 error[type-mismatch] this function is passed `double | character`, but its parameter `item` is used as a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic
 
 #---- lapply_over_an_empty_list_on_one_path_is_not_null
 items <- function(a, idx) {
@@ -2476,9 +2476,9 @@ simplify: <T, U> fn(x: T, [reals]: U) -> list[Any]
 add <- function(count, value) count + 1L
 run <- function() Reduce(add, list(1, 2), "start")
 #++++
-add: <T: arithmetic, U> fn(count: T, [value]: U) -> T
+add: <T: arithmetic or number, U> fn(count: T, [value]: U) -> T
 run: Unknown
-83..90 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+83..90 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
 
 #---- a_fold_over_known_elements_returns_the_widened_accumulator
 same <- function(x, y) if (identical(x, y)) x
@@ -2529,9 +2529,9 @@ p_dist <- function(q, valueOnly = TRUE) {
 wrapper <- function(x, ...) p_dist(x, ...)
 use <- function(x) wrapper(x, valueOnly = FALSE)
 #++++
-p_dist: <T: arithmetic, U> fn(q: T, [valueOnly]: U) -> double | list{value: double, error: double}
-wrapper: <T: arithmetic> fn(x: T, ...: Any) -> double
-use: <T: arithmetic> fn(x: T) -> double
+p_dist: <T: arithmetic or number, U> fn(q: T, [valueOnly]: U) -> Promoted<T> | list{value: Promoted<T>, error: Promoted<T>}
+wrapper: <T: arithmetic or number> fn(x: T, ...: Any) -> Promoted<T>
+use: <T: arithmetic or number> fn(x: T) -> Promoted<T>
 
 #---- a_wrapper_that_forwards_to_reduce_folds_like_reduce
 reduce <- function(.x, .f, ..., .init) {
@@ -2645,7 +2645,7 @@ iam <- function(j, both = FALSE) {
 rows <- function() iam(1, both = TRUE)$row.index
 next_index <- function() iam(1) * 2
 #++++
-iam: <T: arithmetic, U> fn(j: T, [both]: U) -> list{row.index: T} | double
+iam: <T: arithmetic or number, U> fn(j: T, [both]: U) -> list{row.index: T} | Promoted<T>
 rows: fn() -> double
 next_index: fn() -> double
 
@@ -2726,7 +2726,7 @@ rewritten <- function(f, flag) {
 f: <T, U> fn(xs: T, [col.fun]: fn(n: integer) -> U) -> Unknown
 g: <T, U, V> fn(xs: T, [col.fun]: fn(n: integer) -> U) -> Unknown
 rewritten: Unknown
-602..605 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+602..605 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
 
 #---- a_formal_forwarded_by_name_to_an_undeclared_library_function_is_not_forced
 # PerformanceAnalytics: graphics' `rect`, stubbed as `Any`, reads `angle` only when `density` is
@@ -2763,7 +2763,7 @@ renamed <- function() {
   ret$y
 }
 #++++
-risk: <T: arithmetic, U> fn(v: T, cv: U) -> list{VaR: double, contribution: U}
+risk: <T: arithmetic or number, U> fn(v: T, cv: U) -> list{VaR: Promoted<T>, contribution: U}
 use: fn() -> double
 computed: <T> fn(keys: T) -> double | character | NULL
 renamed: fn() -> character
@@ -2785,13 +2785,13 @@ none <- function() search(fun = function(x) 1, constraint = NULL, target = NULL)
 maybe <- function(flag) search(fun = function(x) 1, target = if (flag) 2 else NULL)
 wrong <- function() search(fun = function(x) 1, target = "a")
 #++++
-check: <T, U: arithmetic> fn(pars: T, fun: fn(T) -> U, target: U) -> double
-solve: <T, U, V: arithmetic> fn(pars: T, [fun]: fn(T) -> U, [constraint]: (fn(T) -> V) | NULL, [target]: V) -> double | U
-search: <T, U, V: arithmetic> fn([pars]: T, fun: fn(T) -> U, [constraint]: (fn(T) -> V) | NULL, [target]: V) -> double | U
+check: <T, U: arithmetic or number> fn(pars: T, fun: fn(T) -> U, target: U) -> Promoted<U>
+solve: <T, U, V: arithmetic or number> fn(pars: T, [fun]: fn(T) -> U, [constraint]: (fn(T) -> V) | NULL, [target]: V) -> Promoted<V> | U
+search: <T, U, V: arithmetic or number> fn([pars]: T, fun: fn(T) -> U, [constraint]: (fn(T) -> V) | NULL, [target]: V) -> Promoted<V> | U
 none: fn() -> double
 maybe: fn(flag: logical) -> double
 wrong: Unknown
-577..580 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+577..580 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
 
 #---- a_callback_defaulted_to_an_untyped_function_takes_any_arguments
 bench <- function(n, timefun = bit::repeat.time) {
@@ -2869,10 +2869,10 @@ twice <- function(name, format_name = identity) {
   if (identical(format_name, identity)) c(format_name(1), format_name("a")) else "b"
 }
 #++++
-usage: <T: arithmetic, U, V> fn([name]: T, [format_name]: fn(character) -> U) -> double | U
+usage: <T: arithmetic or number, U> fn([name]: T, [format_name]: fn(character) -> Promoted<T>) -> Promoted<T>
 unguarded: Unknown
 twice: <T, U, V> fn([name]: T, [format_name]: U) -> character[] | character
-271..279 error[type-mismatch] expected `character`, found `double`
+271..279 error[type-mismatch] expected `character`, found `Promoted<T>`
 
 #---- sweep_takes_a_vector_of_margins
 # pracma: `MARGIN = c(1, 2)` sweeps over both dimensions of an array.
@@ -3082,7 +3082,7 @@ insert_rows <- function(rows, extra, .before = NULL, .after = NULL) {
   rows
 }
 #++++
-insert_rows: <T, U, V: arithmetic, W> fn(rows: T, [extra]: U, [.before]: V | NULL, [.after]: W) -> Unknown
+insert_rows: <T, U, V: arithmetic or number, W> fn(rows: T, [extra]: U, [.before]: V | NULL, [.after]: W) -> Unknown
 
 #---- a_vector_index_passes_to_a_parameter_the_body_reads_as_a_sequence_bound
 # `1:after` makes `after` a scalar number, which R also takes from a vector by

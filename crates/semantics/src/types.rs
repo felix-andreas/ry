@@ -307,6 +307,86 @@ pub enum TyKind<'db> {
     /// A skolem from an explicit `<T>` binder: refuses to bind while its scope is
     /// checked, generalizes back out afterwards.
     Rigid(Name<'db>),
+    /// The result of an operator whose operand is still open: `Promoted<T>` is `T` for a ry
+    /// number and `double` for an R one, and `Compared<T>` is `Bool` for a ry value and
+    /// `logical` for an R one. The operand is always a type variable or parameter, because
+    /// `family_result` decides the outcome as soon as the operand is known.
+    Family(FamilyResult, Ty<'db>),
+}
+
+/// Which outcome a [`TyKind::Family`] picks for each side of the R and ry divide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub enum FamilyResult {
+    /// `x * 2.5`, `x / y`, `x ^ 2`: ry's numbers keep their type, R's give `double`.
+    Arithmetic,
+    /// `x > 0`: ry's values give `Bool`, R's give `logical`.
+    Comparison,
+}
+
+impl FamilyResult {
+    pub fn head(self) -> &'static str {
+        match self {
+            FamilyResult::Arithmetic => "Promoted",
+            FamilyResult::Comparison => "Compared",
+        }
+    }
+
+    pub fn from_head(head: &str) -> Option<FamilyResult> {
+        match head {
+            "Promoted" => Some(FamilyResult::Arithmetic),
+            "Compared" => Some(FamilyResult::Comparison),
+            _ => None,
+        }
+    }
+
+    /// The outcome for an operand on ry's side.
+    pub fn ry_outcome<'db>(self, db: &'db dyn Db, operand: Ty<'db>) -> Ty<'db> {
+        match self {
+            FamilyResult::Arithmetic => operand,
+            FamilyResult::Comparison => Ty::new(db, TyKind::Native(NativeScalar::Bool)),
+        }
+    }
+
+    /// The outcome for an operand on R's side.
+    pub fn r_outcome<'db>(self, db: &'db dyn Db) -> Ty<'db> {
+        Ty::new(
+            db,
+            TyKind::Scalar(match self {
+                FamilyResult::Arithmetic => Atomic::Double,
+                FamilyResult::Comparison => Atomic::Logical,
+            }),
+        )
+    }
+}
+
+/// The result of `result` over `operand`, decided as far as the operand allows: a ry
+/// scalar gives the ry outcome, a known R type the R one, and an open operand keeps the
+/// family. Inference decides an open operand by its constraint (`Table::reduce_family`).
+pub fn family_result<'db>(db: &'db dyn Db, result: FamilyResult, operand: Ty<'db>) -> Ty<'db> {
+    match operand.kind(db) {
+        TyKind::Native(_) => result.ry_outcome(db, operand),
+        TyKind::Family(_, inner) => family_result(db, result, *inner),
+        TyKind::Var(_) | TyKind::Rigid(_) => Ty::new(db, TyKind::Family(result, operand)),
+        TyKind::Unknown | TyKind::Any => operand,
+        TyKind::Union(members)
+            if members
+                .iter()
+                .any(|member| matches!(member.kind(db), TyKind::Var(_) | TyKind::Rigid(_))) =>
+        {
+            Ty::new(db, TyKind::Family(result, operand))
+        }
+        TyKind::Union(members)
+            if members
+                .iter()
+                .all(|member| matches!(member.kind(db), TyKind::Native(_))) =>
+        {
+            match result {
+                FamilyResult::Arithmetic => operand,
+                FamilyResult::Comparison => result.ry_outcome(db, operand),
+            }
+        }
+        _ => result.r_outcome(db),
+    }
 }
 
 /// What a table type is. The kinds never fit each other: a `data.table` runs data.table's code,
@@ -697,9 +777,16 @@ pub enum Constraint {
     /// so `function(a, b) a * b` multiplies two `F64`s as well as two `double`s.
     Num,
     /// A number, or a class that declares any arithmetic method: `Date + 1` is legal R, while
-    /// `Date + Date` is not. It is what `x + 1` asks of `x`, and two values of it combine only
-    /// once it is `Numeric`.
+    /// `Date + Date` is not. Two values of it combine only once it is `Numeric`.
     Arithmetic,
+    /// What `arithmetic` admits and the ry numbers: what `x + 1` asks of `x`, because R adds
+    /// the literal to a number or a `Date` and a ry number takes it as its own type.
+    ArithmeticOrNumber,
+    /// What `arithmetic` admits and `F64`: what `x * 0.5` and `x / 2` ask of `x`, because an
+    /// `I64` holds no fraction and divides only with `%/%`.
+    ArithmeticOrF64,
+    /// What `numeric` admits and `F64`: what `a / b` asks of two values of one type.
+    NumericOrF64,
     AtomicElement,
     /// A dictionary key or set element: a `logical`, `integer`, `double` or `character` scalar.
     /// `complex` and `raw` are left out because they have no total order or hash that the
@@ -736,10 +823,13 @@ pub enum Constraint {
 impl Constraint {
     /// Shared by rendering and parsing, so every constraint the checker prints can
     /// be written back in an annotation.
-    pub const SPELLINGS: [(&'static str, Constraint); 9] = [
+    pub const SPELLINGS: [(&'static str, Constraint); 12] = [
         ("num", Constraint::Num),
         ("numeric", Constraint::Numeric),
         ("arithmetic", Constraint::Arithmetic),
+        ("arithmetic or number", Constraint::ArithmeticOrNumber),
+        ("arithmetic or F64", Constraint::ArithmeticOrF64),
+        ("numeric or F64", Constraint::NumericOrF64),
         ("atomic", Constraint::AtomicElement),
         ("key", Constraint::Key),
         ("scalar numeric", Constraint::ScalarNumeric),
@@ -762,10 +852,66 @@ impl Constraint {
             .map(|(_, constraint)| *constraint)
     }
 
+    /// The two halves of a constraint that admits numbers of both families: what it admits of
+    /// R's types and what of ry's. `num` is `numeric` and `number`.
+    pub fn families(self) -> Option<(Constraint, Constraint)> {
+        use Constraint::*;
+        Some(match self {
+            Num => (Numeric, Number),
+            ArithmeticOrNumber => (Arithmetic, Number),
+            ArithmeticOrF64 => (Arithmetic, Frac),
+            NumericOrF64 => (Numeric, Frac),
+            _ => return None,
+        })
+    }
+
+    /// The constraint that admits what `r` admits of R's types and what `ry` admits of ry's.
+    fn of_families(r: Option<Constraint>, ry: Option<Constraint>) -> Option<Constraint> {
+        use Constraint::*;
+        match (r, ry) {
+            (Some(Numeric), Some(Number)) => Some(Num),
+            (Some(Arithmetic), Some(Number)) => Some(ArithmeticOrNumber),
+            (Some(Arithmetic), Some(Frac)) => Some(ArithmeticOrF64),
+            (Some(Numeric), Some(Frac)) => Some(NumericOrF64),
+            (Some(r), _) => Some(r),
+            (None, ry) => ry,
+        }
+    }
+
+    /// The part of the constraint R's types can meet: `arithmetic` for `arithmetic or number`.
+    pub fn r_side(self) -> Constraint {
+        self.families().map_or(self, |(r, _)| r)
+    }
+
     /// The constraint a type must meet to satisfy both, or `None` when no type can: an R number
     /// is never a ry number, and an integer type is never a fraction type.
     pub fn join(self, other: Constraint) -> Option<Constraint> {
         use Constraint::*;
+        // A constraint of both families meets another half by half, since no type is in both.
+        match (self.families(), other.families()) {
+            (Some((r, ry)), Some((other_r, other_ry))) => {
+                return Constraint::of_families(r.join(other_r), ry.join(other_ry));
+            }
+            (Some((r, ry)), None) | (None, Some((r, ry))) => {
+                let (both, single) = if self.families().is_some() {
+                    (self, other)
+                } else {
+                    (other, self)
+                };
+                return match single {
+                    Unconstrained | Eq => Some(both),
+                    Number | Int | Frac | ArrayItem => ry.join(single),
+                    // Every type a number literal admits is a number, so the literal stays open,
+                    // unless only fractions are wanted.
+                    WholeLiteral { .. } | FracLiteral if ry == Number => Some(single),
+                    WholeLiteral { .. } | FracLiteral => Some(FracLiteral),
+                    // A value used both ways is an R number. `Key` has no exact meet (a number of
+                    // either family that is a key), so it takes the R side.
+                    _ => r.join(single),
+                };
+            }
+            (None, None) => {}
+        }
         // `arithmetic` meets everything as `numeric` does, and only `numeric` itself or a
         // stronger constraint makes the result closed.
         let loosen = |joined: Option<Constraint>| match joined {
@@ -815,15 +961,6 @@ impl Constraint {
             | (Key, literal @ (WholeLiteral { .. } | FracLiteral)) => literal,
             (BoolLiteral, Key) | (Key, BoolLiteral) => BoolLiteral,
             (StrLiteral, AtomicElement) | (AtomicElement, StrLiteral) => AtomicElement,
-            // `num` meets a ry constraint as that constraint, and any R constraint as R's
-            // `numeric`: a value used both ways is an R number. `Key` has no exact meet (a
-            // number of either family that is a key), so it takes the R side.
-            (Num, c @ (Number | Int | Frac)) | (c @ (Number | Int | Frac), Num) => c,
-            (Num, ArrayItem) | (ArrayItem, Num) => Number,
-            // Every type a number literal admits is a number, so the literal stays open.
-            (Num, literal @ (WholeLiteral { .. } | FracLiteral))
-            | (literal @ (WholeLiteral { .. } | FracLiteral), Num) => literal,
-            (Num, c) | (c, Num) => return Numeric.join(c),
             (BoolLiteral, c @ (AtomicElement | Numeric | ScalarNumeric))
             | (c @ (AtomicElement | Numeric | ScalarNumeric), BoolLiteral) => c,
             (StrLiteral | BoolLiteral, _) | (_, StrLiteral | BoolLiteral) => return None,
@@ -1474,6 +1611,7 @@ fn rebuilt_type<'db>(
             native_record_with_row(db, fields, row.map(&mut *map))
         }
         TyKind::Tag(name, payload) => Ty::new(db, TyKind::Tag(*name, payload.map(&mut *map))),
+        TyKind::Family(result, operand) => family_result(db, *result, map(*operand)),
         TyKind::Frame(frame, Some(columns), row) => {
             let columns = mapped_fields(columns, map);
             frame_with_row(db, *frame, &columns, row.map(&mut *map))
@@ -1537,7 +1675,8 @@ fn for_each_child<'db>(kind: &TyKind<'db>, visit: &mut impl FnMut(Ty<'db>)) {
         TyKind::Vector(inner)
         | TyKind::NamedVector(inner)
         | TyKind::List(inner)
-        | TyKind::NamedList(inner) => visit(*inner),
+        | TyKind::NamedList(inner)
+        | TyKind::Family(_, inner) => visit(*inner),
         TyKind::Tuple(items) | TyKind::NativeTuple(items) | TyKind::Union(items) => {
             items.iter().copied().for_each(visit)
         }
@@ -1813,6 +1952,7 @@ fn stored_kind<'a>(arena: &'a Bump, kind: TyKind<'a>) -> TyKind<'a> {
         | TyKind::Tag(..)
         | TyKind::OtherTags
         | TyKind::Frame(_, None, _)
+        | TyKind::Family(..)
         | TyKind::Var(_)
         | TyKind::Rigid(_) => kind,
     }

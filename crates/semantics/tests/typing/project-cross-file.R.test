@@ -36,7 +36,7 @@ add_one <- function(x) x + 1L
 r <- add_one(2L)
 #++++
 == R/a.R
-add_one: <T: arithmetic> fn(x: T) -> T
+add_one: <T: arithmetic or number> fn(x: T) -> T
 == R/b.R
 r: integer
 
@@ -47,10 +47,10 @@ add_one <- function(x) x + 1L
 r <- add_one("x")
 #++++
 == R/a.R
-add_one: <T: arithmetic> fn(x: T) -> T
+add_one: <T: arithmetic or number> fn(x: T) -> T
 == R/b.R
 r: Unknown
-13..16 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+13..16 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
 
 #---- later_file_value_wins_for_type
 #~~~~ R/a.R
@@ -106,12 +106,12 @@ f: <T> fn(value: T) -> T
 0..1 warning[duplicate] top-level binding `f` is overwritten by a later top-level binding in this package
   = 0..1 the later binding is here
 == R/b.R
-f: <T: arithmetic> fn(x: T) -> T
+f: <T: arithmetic or number> fn(x: T) -> T
 0..1 warning[duplicate] top-level binding `f` overwrites an earlier top-level binding in this package
   = 0..1 the earlier binding is here
 == R/c.R
 r: Unknown
-7..10 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+7..10 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
 
 #---- cross_file_arithmetic_on_package_value
 #~~~~ R/a.R
@@ -281,11 +281,11 @@ add_one <- function(x) x + 1L
 r <- add_one("x")
 #++++
 == R/a.R
-add_one: <T: arithmetic> fn(x: T) -> T
+add_one: <T: arithmetic or number> fn(x: T) -> T
 == scripts/use.R
 r: Unknown
 0..1 warning[unused] `r` is assigned but never used
-13..16 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+13..16 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
 
 #---- script_binding_not_visible_to_other_script
 #~~~~ scripts/define.R

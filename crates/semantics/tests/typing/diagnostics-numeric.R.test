@@ -26,9 +26,9 @@ Unknown
 f <- function(x) x + 1L
 f("oops")
 #++++
-f: <T: arithmetic> fn(x: T) -> T
+f: <T: arithmetic or number> fn(x: T) -> T
 Unknown
-26..32 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+26..32 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
 
 #---- two_param_numeric_call_character
 add <- function(a, b) a + b
@@ -62,7 +62,7 @@ double
 increment <- function(x) x + 1L
 increment(2.5)
 #++++
-increment: <T: arithmetic> fn(x: T) -> T
+increment: <T: arithmetic or number> fn(x: T) -> T
 double
 
 #---- clean_modulo_double

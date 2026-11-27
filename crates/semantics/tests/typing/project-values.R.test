@@ -335,7 +335,7 @@ is_odd <- function(n) if (n == 0L) FALSE else is_even(n - 1L)
 check <- is_even(4L)
 #++++
 == R/pair.R
-is_even: <T: arithmetic> fn(n: T) -> logical
-is_odd: <T: arithmetic> fn(n: T) -> logical
+is_even: <T: arithmetic or number> fn(n: T) -> logical
+is_odd: <T: arithmetic or number> fn(n: T) -> logical
 == R/use.R
 check: logical

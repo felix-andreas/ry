@@ -999,7 +999,7 @@ pick <- function(x) {
 }
 pick(2L)
 #++++
-pick: <T: arithmetic> fn([x]: T) -> T | integer
+pick: <T: arithmetic or number> fn([x]: T) -> T | integer
 integer
 
 #---- seq_from_beyond_the_integer_range_is_double_vector

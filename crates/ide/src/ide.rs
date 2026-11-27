@@ -6761,6 +6761,7 @@ fn value_shapes<'db>(db: &'db dyn Db, ty: Ty<'db>, shapes: &mut Vec<ValueShape<'
         | TyKind::Unknown
         | TyKind::Var(_)
         | TyKind::Rigid(_)
+        | TyKind::Family(..)
         | TyKind::Environment(_) => return false,
     };
     shapes.push(shape);
@@ -7415,7 +7416,7 @@ fn is_impossible_vector(db: &dyn Db, ty: Ty<'_>) -> bool {
 fn is_hintable(db: &dyn Db, ty: Ty<'_>, variables_allowed: bool) -> bool {
     match ty.kind(db) {
         TyKind::Unknown => false,
-        TyKind::Var(_) | TyKind::Rigid(_) => variables_allowed,
+        TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Family(..) => variables_allowed,
         TyKind::Any | TyKind::Null | TyKind::Scalar(_) | TyKind::OtherTags | TyKind::Native(_) => {
             true
         }

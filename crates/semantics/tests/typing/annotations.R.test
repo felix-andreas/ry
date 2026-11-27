@@ -245,11 +245,11 @@ also: <N: integer | logical> fn(x: N) -> N
 one: integer
 many: integer[]
 inferred: integer
-bump: <T: arithmetic> fn(x: T) -> T
+bump: <T: arithmetic or number> fn(x: T) -> T
 bumped: integer
 cost: <T: num> fn(price: T, rate: T) -> T
 priced: double
-keep: <T: arithmetic> fn(x: T) -> T
+keep: <T: arithmetic or number> fn(x: T) -> T
 kept: integer
 dbl: <N: numeric> fn(x: N[]) -> N[]
 doubled: integer[]
@@ -310,8 +310,8 @@ two <- function(x) x
 #++++
 one: <T> fn(x: T) -> T
 two: <T> fn(x: T) -> T
-7..15 error[annotation] unknown type-parameter constraint `nonsense`; the available constraints are `num`, `numeric`, `arithmetic`, `atomic`, `key`, `scalar numeric`, `item`, `number`, or `eq`
-59..71 error[annotation] unknown type-parameter constraint `scalar bogus`; the available constraints are `num`, `numeric`, `arithmetic`, `atomic`, `key`, `scalar numeric`, `item`, `number`, or `eq`
+7..15 error[annotation] unknown type-parameter constraint `nonsense`; the available constraints are `num`, `numeric`, `arithmetic`, `arithmetic or number`, `arithmetic or F64`, `numeric or F64`, `atomic`, `key`, `scalar numeric`, `item`, `number`, or `eq`
+59..71 error[annotation] unknown type-parameter constraint `scalar bogus`; the available constraints are `num`, `numeric`, `arithmetic`, `arithmetic or number`, `arithmetic or F64`, `numeric or F64`, `atomic`, `key`, `scalar numeric`, `item`, `number`, or `eq`
 
 #---- value_annotation_checks
 #: integer
@@ -458,7 +458,7 @@ value: integer
 f <- function(x) x
 #++++
 f: <T> fn(x: T) -> T
-7..17 error[annotation] unknown type-parameter constraint `frobnicate`; the available constraints are `num`, `numeric`, `arithmetic`, `atomic`, `key`, `scalar numeric`, `item`, `number`, or `eq`
+7..17 error[annotation] unknown type-parameter constraint `frobnicate`; the available constraints are `num`, `numeric`, `arithmetic`, `arithmetic or number`, `arithmetic or F64`, `numeric or F64`, `atomic`, `key`, `scalar numeric`, `item`, `number`, or `eq`
 
 #---- a_refused_higher_rank_block_carries_no_payload
 # The parser refuses the binder and reads the type as if it were absent, which
@@ -481,7 +481,7 @@ apply1: <T> fn(f: fn(integer) -> T) -> T
 #: @returns {integer}
 f <- function(count) count + 1L
 #++++
-f: <T: arithmetic> fn(count: T) -> T
+f: <T: arithmetic or number> fn(count: T) -> T
 304..311 error[annotation] expected `{TYPE}` after `@param`
 
 #---- applied_type_parameter_is_refused
@@ -637,7 +637,7 @@ total: integer
 f <- function(n, label = "x") n + 1L
 y <- f(1L)
 #++++
-f: <T: arithmetic, U> fn(n: T, [label]: U) -> T
+f: <T: arithmetic or number, U> fn(n: T, [label]: U) -> T
 y: integer
 26..27 error[annotation] expected `:` after `[name]` in an optional parameter
 
@@ -851,7 +851,7 @@ g <- f
 #: @trust fn(integer)
 h <- f
 #++++
-f: <T: arithmetic> fn(x: T) -> T
+f: <T: arithmetic or number> fn(x: T) -> T
 g: fn(integer) -> integer
 h: fn(integer) -> integer
 
@@ -1083,7 +1083,7 @@ annotated_body <- function(x)
   #: character
   x + 1L
 #++++
-annotated_body: <T: arithmetic> fn(x: T) -> character
+annotated_body: <T: arithmetic or number> fn(x: T) -> character
 208..214 error[type-mismatch] expected `character`, found `T`
 
 #---- a_parenthesised_expression_does_attach

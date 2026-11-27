@@ -35,10 +35,10 @@ use {
         },
         top_level::super_assigned_names,
         types::{
-            Atomic, Binder, Bound, Constraint, DefaultRead, FlagReturn, FrameKind, FunctionType,
-            InferenceVar, Name, NativeField, NativeScalar, NullUnless, NumberLiteral, Parameter,
-            QueryName, RecordField, ReduceForward, RestParameter, TYPE_SIZE_CEILING, Ty, TyKind,
-            TypeList, TypeScheme, any, array, array_element, column_type, conflicting_tags,
+            Atomic, Binder, Bound, Constraint, DefaultRead, FamilyResult, FlagReturn, FrameKind,
+            FunctionType, InferenceVar, Name, NativeField, NativeScalar, NullUnless, NumberLiteral,
+            Parameter, QueryName, RecordField, ReduceForward, RestParameter, TYPE_SIZE_CEILING, Ty,
+            TyKind, TypeList, TypeScheme, any, array, array_element, column_type, conflicting_tags,
             contains_inference_var, contains_rigid, erase_vars, for_each_child_type,
             frame_with_row, is_bare_tags, is_ry_value_type, is_tag_type, map_child_types,
             native_record, native_scalar, null, r_column_type, scalar, substitute_rigid, type_size,
@@ -1865,6 +1865,9 @@ fn erase_residual_vars_at<'db>(
             Constraint::Numeric
             | Constraint::Num
             | Constraint::Arithmetic
+            | Constraint::ArithmeticOrNumber
+            | Constraint::ArithmeticOrF64
+            | Constraint::NumericOrF64
             | Constraint::ScalarNumeric => scalar(db, Atomic::Double),
             Constraint::WholeLiteral { .. }
             | Constraint::FracLiteral
@@ -3660,6 +3663,15 @@ fn literal_meets(literal: &NumberLiteral, constraint: Constraint) -> bool {
         Constraint::Frac => !literal.integer,
         _ => true,
     }
+}
+
+/// The number literal an operand is, through parentheses.
+fn literal_operand(module: &Module, id: ExprId) -> Option<NumberLiteral> {
+    let mut id = id;
+    while let ExpressionKind::Paren(inner) = module.kind(id) {
+        id = *inner;
+    }
+    number_literal(module, id)
 }
 
 fn number_literal(module: &Module, id: ExprId) -> Option<NumberLiteral> {
@@ -10390,6 +10402,10 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             _ => resolved,
         };
+        if let TyKind::Family(FamilyResult::Arithmetic, _) = resolved.kind(self.db) {
+            return resolved;
+        }
+        let resolved = self.r_side_of_family(operand_range, resolved);
         match self.classify_numeric_operand(resolved) {
             NumericOperand::Concrete(shape, atomic) => self.shaped(shape, atomic),
             NumericOperand::ConcreteUnion(parts) => {
@@ -10502,7 +10518,9 @@ impl<'db, 'a> Checker<'db, 'a> {
             );
         }
         match resolved.kind(self.db) {
-            TyKind::Native(NativeScalar::Bool) => return resolved,
+            TyKind::Native(NativeScalar::Bool) | TyKind::Family(FamilyResult::Comparison, _) => {
+                return resolved;
+            }
             TyKind::Native(_) => {
                 let expected = native_scalar(self.db, NativeScalar::Bool);
                 let error = self.type_mismatch(operand_range, expected, resolved, Some(operand));
@@ -10894,7 +10912,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         // The other operand takes the known type when it is a literal or an open variable.
         let fits = match other_ty.kind(self.db) {
-            TyKind::Native(_) | TyKind::Rigid(_) => {
+            TyKind::Native(_) | TyKind::Rigid(_) | TyKind::Family(..) => {
                 self.table.unify(self.db, other_ty, known_side).is_ok()
             }
             TyKind::Any | TyKind::Unknown => true,
@@ -12179,6 +12197,8 @@ impl<'db, 'a> Checker<'db, 'a> {
             // passes as a vector of unknown length does.
             TyKind::Named(class, _) if class.text(self.db) == "matrix" => true,
             TyKind::Union(members) => members.iter().all(|&member| self.condition_coerces(member)),
+            // A comparison's result is a condition on either side of the divide.
+            TyKind::Family(FamilyResult::Comparison, _) => true,
             // A value already required to be numeric (`if (n %% 2L)`) coerces like a number.
             TyKind::Var(_) => matches!(
                 self.table.open_constraint(self.db, ty),
@@ -12195,12 +12215,108 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// A condition reads a number's truth as R does, which a ry number lacks, so an open value
     /// that `num` admits takes R's numbers only once it is tested.
     fn narrow_condition_number(&mut self, range: TextRange, ty: Ty<'db>) {
-        if self.table.open_constraint(self.db, ty) == Some(Constraint::Num) {
-            self.constrain_operand(range, ty, Constraint::Numeric);
+        if let TyKind::Family(FamilyResult::Arithmetic, _) = ty.kind(self.db) {
+            self.r_side_of_family(range, ty);
+            return;
+        }
+        if let Some(constraint) = self.table.open_constraint(self.db, ty)
+            && constraint.families().is_some()
+        {
+            self.constrain_operand(range, ty, constraint.r_side());
         }
     }
 
+    /// A family result read where only R's values fit, as an operand beside an R number or a
+    /// condition: its operand takes R's side, and the result is the R outcome.
+    /// A union's family members take their R outcome the same way.
+    fn r_side_of_family(&mut self, range: TextRange, ty: Ty<'db>) -> Ty<'db> {
+        match ty.kind(self.db) {
+            TyKind::Family(result, _) => {
+                let outcome = result.r_outcome(self.db);
+                self.unify_or_report(range, outcome, ty);
+                outcome
+            }
+            TyKind::Union(members)
+                if members
+                    .iter()
+                    .any(|member| matches!(member.kind(self.db), TyKind::Family(..))) =>
+            {
+                let members: Vec<Ty<'db>> = members.iter().copied().collect();
+                let members: Vec<Ty<'db>> = members
+                    .into_iter()
+                    .map(|member| self.r_side_of_family(range, member))
+                    .collect();
+                union_of(self.db, members)
+            }
+            _ => ty,
+        }
+    }
+
+    /// The operator of `lhs` and `rhs` with a `Promoted<T>` operand. Beside a number literal,
+    /// `T` itself or another `Promoted<T>`, the operand computes as `T` and the result is
+    /// promoted the same way; beside anything else it is R's `double`.
     fn infer_binary_numeric(
+        &mut self,
+        range: TextRange,
+        operator: BinaryOperator,
+        lhs: ExprId,
+        rhs: ExprId,
+        lhs_ty: Ty<'db>,
+        rhs_ty: Ty<'db>,
+    ) -> Ty<'db> {
+        let mut left = self.table.shallow_resolve(self.db, lhs_ty);
+        let mut right = self.table.shallow_resolve(self.db, rhs_ty);
+        // A union holding a family result (`NULL | Promoted<T>`) computes as R's value.
+        let (mut lhs_ty, mut rhs_ty) = (lhs_ty, rhs_ty);
+        for (side, given, own) in [(&mut left, &mut lhs_ty, lhs), (&mut right, &mut rhs_ty, rhs)] {
+            if let TyKind::Union(_) = side.kind(self.db) {
+                let narrowed = self.r_side_of_family(self.blame_range(own), *side);
+                if narrowed != *side {
+                    *side = narrowed;
+                    *given = narrowed;
+                }
+            }
+        }
+        let family_operand = |ty: Ty<'db>| match ty.kind(self.db) {
+            TyKind::Family(result, operand) => Some((*result, *operand)),
+            _ => None,
+        };
+        if family_operand(left).is_none() && family_operand(right).is_none() {
+            return self.infer_binary_numeric_operands(range, operator, lhs, rhs, lhs_ty, rhs_ty);
+        }
+        let mut promoted = None;
+        let mut operands = [left, right];
+        for (index, (ty, own, partner)) in [(left, lhs, rhs), (right, rhs, lhs)]
+            .into_iter()
+            .enumerate()
+        {
+            let Some((result, operand)) = family_operand(ty) else {
+                continue;
+            };
+            let partner_ty = if index == 0 { right } else { left };
+            let computes_as_operand = result == FamilyResult::Arithmetic
+                && (literal_operand(self.module, partner).is_some()
+                    || partner_ty == operand
+                    || partner_ty == ty);
+            operands[index] = if computes_as_operand {
+                promoted = Some(operand);
+                operand
+            } else {
+                let own_range = self.blame_range(own);
+                self.r_side_of_family(own_range, ty)
+            };
+        }
+        let [left, right] = operands;
+        let computed = self.infer_binary_numeric_operands(range, operator, lhs, rhs, left, right);
+        match promoted {
+            Some(operand) if self.table.shallow_resolve(self.db, computed) == operand => self
+                .table
+                .family(self.db, FamilyResult::Arithmetic, operand),
+            _ => computed,
+        }
+    }
+
+    fn infer_binary_numeric_operands(
         &mut self,
         range: TextRange,
         operator: BinaryOperator,
@@ -12355,18 +12471,42 @@ impl<'db, 'a> Checker<'db, 'a> {
                 if self.table.rigid_satisfies(self.db, *name, Constraint::Num)
                     && !self.table.rigid_satisfies(self.db, *name, Constraint::Arithmetic));
             let tied_difference = tied && operator == BinaryOperator::Subtract && !num_rigid;
-            // When the result is the operands' own type (`a * b`, not `a / b`), a ry number
-            // computes it as well as an R one does.
-            let constraint = match (tied && !tied_difference, always_double) {
-                (true, false) => Constraint::Num,
-                (true, true) => Constraint::Numeric,
-                (false, _) => Constraint::Arithmetic,
+            // A number literal beside an open operand takes that operand's type when it is a ry
+            // number, as `x * 2` does for an `I64`, so the operand may be either kind of number.
+            // A fraction or `/` needs an `F64` on ry's side, since `I64` has no fractions.
+            let literal = match (tied, &left) {
+                (true, _) => None,
+                (false, NumericOperand::Flexible(_)) => literal_operand(self.module, rhs),
+                (false, _) => literal_operand(self.module, lhs),
+            };
+            let fraction = operator == BinaryOperator::Divide
+                || literal.is_some_and(|literal| literal.is_fraction());
+            // Each side keeps what R gives it: two dates subtract to a `difftime` and `/` and
+            // `^` give R's `double`, while a ry number keeps its type.
+            let constraint = match (tied, operator) {
+                (true, BinaryOperator::Subtract) if tied_difference => {
+                    Constraint::ArithmeticOrNumber
+                }
+                (true, BinaryOperator::Divide) => Constraint::NumericOrF64,
+                (true, _) => Constraint::Num,
+                (false, _) if literal.is_none() => Constraint::Arithmetic,
+                (false, _) if fraction => Constraint::ArithmeticOrF64,
+                (false, _) => Constraint::ArithmeticOrNumber,
             };
             self.constrain_operand(range, ty, constraint);
-            // The difference is not `T` itself: two dates subtract to a `difftime`. It claims
-            // `double`, the representation every arithmetic class shares.
-            if tied_difference {
+            let promoted = match literal {
+                Some(literal) => always_double || !literal.integer,
+                None => tied_difference || (tied && always_double),
+            };
+            // A declared parameter that lacks the constraint was reported above, and the
+            // result is R's, which is what the declaration most likely meant.
+            let violated = matches!(ty.kind(self.db), TyKind::Rigid(name)
+                if !self.table.rigid_satisfies(self.db, *name, constraint));
+            if promoted && violated {
                 return scalar(self.db, Atomic::Double);
+            }
+            if promoted {
+                return self.table.family(self.db, FamilyResult::Arithmetic, ty);
             }
         }
         // Combined with its existing atomic-element bound, an arithmetic `T[]` element
@@ -12629,6 +12769,26 @@ impl<'db, 'a> Checker<'db, 'a> {
         {
             return unknown(self.db);
         }
+        // An open operand compared with a number literal, or with itself, gives `Bool` for a ry
+        // value and `logical` for an R one.
+        let open_operand = |ty: Ty<'db>| match ty.kind(self.db) {
+            TyKind::Var(_) | TyKind::Rigid(_) => Some(ty),
+            TyKind::Family(FamilyResult::Arithmetic, operand) => Some(*operand),
+            _ => None,
+        };
+        let compared = match (open_operand(resolved_left), open_operand(resolved_right)) {
+            (Some(left), Some(right)) if left == right => Some(left),
+            (Some(left), None) if literal_operand(self.module, rhs).is_some() => Some(left),
+            (None, Some(right)) if literal_operand(self.module, lhs).is_some() => Some(right),
+            _ => None,
+        };
+        if let Some(operand) = compared {
+            return self
+                .table
+                .family(self.db, FamilyResult::Comparison, operand);
+        }
+        let resolved_left = self.r_side_of_family(lhs_range, resolved_left);
+        let resolved_right = self.r_side_of_family(rhs_range, resolved_right);
         // R deparses a language object to a string before comparing it, so ape's
         // `formula(object) == ~1` is a plain test.
         let language = |ty: Ty<'db>| matches!(ty.kind(self.db), TyKind::Named(name, _) if name.text(self.db) == "formula");
@@ -14934,7 +15094,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             TyKind::Function(_) | TyKind::Any | TyKind::Unknown => Callable::Yes,
             // A nominal left after projection is abstract (`matrix`, `Date`, `data.frame`): an R
             // object with a class, never a closure, so R's function lookup skips it.
-            TyKind::Named(..) | TyKind::Native(_) => Callable::No,
+            TyKind::Named(..) | TyKind::Native(_) | TyKind::Family(..) => Callable::No,
             TyKind::Rigid(_) => Callable::Untyped,
             TyKind::Var(_) => match self.table.open_constraint(self.db, resolved) {
                 Some(Constraint::Unconstrained) => Callable::Untyped,
@@ -18227,6 +18387,37 @@ impl<'db, 'a> Checker<'db, 'a> {
         schemes: &[TypeScheme<'db>],
         call_arguments: &[CallArgument<'db>],
     ) -> Ty<'db> {
+        // An overload set describes R's values, so a family result passed to it takes its R
+        // outcome (`abs(x - y)` is a `double`).
+        let narrowed: Vec<CallArgument<'db>>;
+        let call_arguments = if call_arguments.iter().any(|argument| {
+            argument.ty.is_some_and(|ty| {
+                matches!(
+                    self.table.shallow_resolve(self.db, ty).kind(self.db),
+                    TyKind::Family(..)
+                )
+            })
+        }) {
+            narrowed = call_arguments
+                .iter()
+                .map(|argument| {
+                    let ty = argument.ty.map(|ty| {
+                        let resolved = self.table.shallow_resolve(self.db, ty);
+                        match resolved.kind(self.db) {
+                            TyKind::Family(..) => self.r_side_of_family(argument.range, resolved),
+                            _ => ty,
+                        }
+                    });
+                    CallArgument {
+                        ty,
+                        ..argument.clone()
+                    }
+                })
+                .collect();
+            &narrowed[..]
+        } else {
+            call_arguments
+        };
         // A fit leaving the caller's open variables untouched beats one that narrows them:
         // binding `function(x) sum(x)`'s `x` to the first-probed candidate would reject
         // calls R accepts. Ties go to declaration order.
@@ -21321,13 +21512,10 @@ impl<'db, 'a> Checker<'db, 'a> {
     fn numeric_parameter(&self, expected: Ty<'db>) -> bool {
         let numeric = |ty: Ty<'db>| {
             matches!(
-                self.table.open_constraint(self.db, ty),
-                Some(
-                    Constraint::Numeric
-                        | Constraint::Num
-                        | Constraint::Arithmetic
-                        | Constraint::ScalarNumeric
-                )
+                self.table
+                    .open_constraint(self.db, ty)
+                    .map(Constraint::r_side),
+                Some(Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric)
             )
         };
         match self.table.resolve(self.db, expected).kind(self.db) {
@@ -23906,7 +24094,9 @@ impl<'db, 'a> Checker<'db, 'a> {
             | TyKind::Any
             | TyKind::Var(_)
             | TyKind::Rigid(_)
+            | TyKind::Family(FamilyResult::Arithmetic, _)
             | TyKind::Named(..) => Ok(VectorIndexShape::ScalarLike),
+            TyKind::Family(FamilyResult::Comparison, _) => Ok(VectorIndexShape::VectorLike),
             TyKind::Union(members) => {
                 let mut shape = VectorIndexShape::ScalarLike;
                 for &member in members.iter() {
@@ -24949,6 +25139,24 @@ impl<'db, 'a> Checker<'db, 'a> {
         Ty::new(self.db, TyKind::Rigid(name))
     }
 
+    fn collect_family_operand_vars(
+        &self,
+        ty: Ty<'db>,
+        seen: &mut FxHashSet<Ty<'db>>,
+        found: &mut FxHashSet<InferenceVar>,
+    ) {
+        if !contains_inference_var(self.db, ty) || !seen.insert(ty) {
+            return;
+        }
+        if let TyKind::Family(_, operand) = ty.kind(self.db) {
+            self.table.collect_unbound_vars(self.db, *operand, found);
+            return;
+        }
+        for_each_child_type(self.db, ty, &mut |child| {
+            self.collect_family_operand_vars(child, seen, found)
+        });
+    }
+
     /// A bounded variable earns a binder only where it ties two places of a signature together
     /// (a parameter and the return, or two parameters); anywhere else it is its bound, which
     /// reads better than a binder that says nothing more.
@@ -24996,6 +25204,41 @@ impl<'db, 'a> Checker<'db, 'a> {
                 if self.table.settle_bound(self.db, var).is_err() {
                     // A bounded variable carries no constraint and no cycle, so this does not
                     // happen; if it did, keeping the binder still gives a correct scheme.
+                    self.table.rollback(snapshot);
+                }
+            }
+        }
+        self.settle_unchosen_numbers(resolved);
+    }
+
+    /// A number variable that no parameter holds, as in `fn() -> Promoted<T>`, is one type no
+    /// caller chooses, and R's arithmetic gave it: it is `double`.
+    fn settle_unchosen_numbers(&mut self, resolved: Ty<'db>) {
+        let mut chosen = FxHashSet::default();
+        collect_parameter_vars(self.db, &self.table, resolved, &mut chosen);
+        // Only a family's operand: a bare result variable (`fn(...) -> T` forwarding its
+        // arguments) is what the hidden arguments make it.
+        let mut vars = FxHashSet::default();
+        let mut seen = FxHashSet::default();
+        self.collect_family_operand_vars(resolved, &mut seen, &mut vars);
+        let mut unchosen: Vec<InferenceVar> = vars
+            .into_iter()
+            .map(|var| self.table.find(var))
+            .filter(|var| !chosen.contains(var))
+            .collect();
+        unchosen.sort_unstable_by_key(|var| var.0);
+        unchosen.dedup();
+        let double = scalar(self.db, Atomic::Double);
+        for var in unchosen {
+            if let Entry::Unbound {
+                level, constraint, ..
+            } = *self.table.entry(var)
+                && level > self.table.level
+                && constraint.families().is_some()
+            {
+                let snapshot = self.table.snapshot();
+                let var_ty = Ty::new(self.db, TyKind::Var(var));
+                if self.table.unify(self.db, var_ty, double).is_err() {
                     self.table.rollback(snapshot);
                 }
             }
@@ -25745,6 +25988,7 @@ fn is_row_index<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
         | TyKind::Any
         | TyKind::Var(_)
         | TyKind::Rigid(_)
+        | TyKind::Family(..)
         | TyKind::Named(..) => true,
         TyKind::List(_)
         | TyKind::NamedList(_)

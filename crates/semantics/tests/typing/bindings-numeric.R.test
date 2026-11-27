@@ -97,37 +97,37 @@ x: logical[]
 #---- numeric_param_modulo
 f <- function(x) x %% 2L
 #++++
-f: <T: arithmetic> fn(x: T) -> T
+f: <T: arithmetic or number> fn(x: T) -> T
 
 #---- numeric_param_intdiv
 f <- function(x) x %/% 2L
 #++++
-f: <T: arithmetic> fn(x: T) -> T
+f: <T: arithmetic or number> fn(x: T) -> T
 
 #---- numeric_param_power
 f <- function(x) x ^ 2L
 #++++
-f: <T: arithmetic> fn(x: T) -> double
+f: <T: arithmetic or number> fn(x: T) -> Promoted<T>
 
 #---- numeric_param_times
 f <- function(x) x * 2L
 #++++
-f: <T: arithmetic> fn(x: T) -> T
+f: <T: arithmetic or number> fn(x: T) -> T
 
 #---- numeric_param_minus
 f <- function(x) x - 1L
 #++++
-f: <T: arithmetic> fn(x: T) -> T
+f: <T: arithmetic or number> fn(x: T) -> T
 
 #---- numeric_param_compare_eq
 f <- function(x) x == 0L
 #++++
-f: <T> fn(x: T) -> logical
+f: <T> fn(x: T) -> Compared<T>
 
 #---- numeric_param_compare_le
 f <- function(x) x <= 10L
 #++++
-f: <T> fn(x: T) -> logical
+f: <T> fn(x: T) -> Compared<T>
 
 #---- numeric_two_params_mul
 f <- function(a, b) a * b
@@ -137,26 +137,26 @@ f: <T: num> fn(a: T, b: T) -> T
 #---- numeric_param_unary_minus_in_expr
 f <- function(x) -x + 1L
 #++++
-f: <T: numeric> fn(x: T) -> T
+f: <T: num> fn(x: T) -> T
 
 #---- call_numeric_fn_integer
 f <- function(x) x + 1L
 r <- f(2L)
 #++++
-f: <T: arithmetic> fn(x: T) -> T
+f: <T: arithmetic or number> fn(x: T) -> T
 r: integer
 
 #---- call_numeric_fn_double
 f <- function(x) x + 1L
 r <- f(2.5)
 #++++
-f: <T: arithmetic> fn(x: T) -> T
+f: <T: arithmetic or number> fn(x: T) -> T
 r: double
 
 #---- numeric_param_div_two_double_result
 f <- function(x, y) x / y
 #++++
-f: <T: numeric> fn(x: T, y: T) -> double
+f: <T: numeric or F64> fn(x: T, y: T) -> Promoted<T>
 
 #---- numeric_chain_local
 f <- function(x) {
@@ -165,7 +165,7 @@ f <- function(x) {
   b
 }
 #++++
-f: <T: arithmetic> fn(x: T) -> T
+f: <T: arithmetic or number> fn(x: T) -> T
 
 #---- numeric_escape_defaults_double
 make <- function() {
@@ -183,7 +183,7 @@ f <- function(x) {
   x
 }
 #++++
-f: <T: arithmetic> fn(x: T) -> T
+f: <T: arithmetic or number> fn(x: T) -> T
 
 #---- promotion_array_mix
 x <- c(1L, 2L) + c(1.0, 2.0)
@@ -208,7 +208,7 @@ x: integer[]
 #---- numeric_double_div_literal
 f <- function(x) x / 2.0
 #++++
-f: <T: arithmetic> fn(x: T) -> double
+f: <T: arithmetic or F64> fn(x: T) -> Promoted<T>
 
 #---- nested_arith_double
 x <- (1L + 2L) / (3L - 1L)
@@ -230,12 +230,12 @@ y: double[]
 #---- self_power_param
 f <- function(x) x ^ x
 #++++
-f: <T: numeric> fn(x: T) -> double
+f: <T: num> fn(x: T) -> Promoted<T>
 
 #---- two_params_div_double
 f <- function(a, b) a / b
 #++++
-f: <T: numeric> fn(a: T, b: T) -> double
+f: <T: numeric or F64> fn(a: T, b: T) -> Promoted<T>
 
 #---- compare_then_arith_param
 f <- function(x) {
@@ -243,13 +243,13 @@ f <- function(x) {
   x + 1L
 }
 #++++
-f: <T: arithmetic> fn(x: T) -> T
+f: <T: arithmetic or number> fn(x: T) -> T
 21..22 warning[unused] `y` is assigned but never used
 
 #---- param_sum_then_compare
 f <- function(a, b) a + b > 0L
 #++++
-f: <T: num> fn(a: T, b: T) -> logical
+f: <T: num> fn(a: T, b: T) -> Compared<T>
 
 #---- numeric_escape_top_integer
 y <- 1L
@@ -261,7 +261,7 @@ z: integer
 #---- modulo_param_double_literal
 f <- function(x) x %% 2.0
 #++++
-f: <T: arithmetic> fn(x: T) -> double
+f: <T: arithmetic or number> fn(x: T) -> Promoted<T>
 
 #---- range_both_double_vars
 a <- 1
@@ -277,7 +277,7 @@ f <- function(x) x
 g <- function(x) x + 1L
 #++++
 f: <T> fn(x: T) -> T
-g: <T: arithmetic> fn(x: T) -> T
+g: <T: arithmetic or number> fn(x: T) -> T
 
 #---- nested_closure_captures_numeric
 outer <- function(x) {
@@ -285,7 +285,7 @@ outer <- function(x) {
   inner()
 }
 #++++
-outer: <T: arithmetic> fn(x: T) -> T
+outer: <T: arithmetic or number> fn(x: T) -> T
 
 #---- arith_div_result_double_local
 f <- function(x) {
@@ -293,12 +293,12 @@ f <- function(x) {
   a
 }
 #++++
-f: <T: arithmetic> fn(x: T) -> double
+f: <T: arithmetic or F64> fn(x: T) -> Promoted<T>
 
 #---- param_add_double_literal_stays_numeric
 f <- function(x) x + 2.5
 #++++
-f: <T: arithmetic> fn(x: T) -> double
+f: <T: arithmetic or F64> fn(x: T) -> Promoted<T>
 
 #---- compare_against_character_leaves_unconstrained
 f <- function(x) x == "a"
@@ -308,7 +308,7 @@ f: <T> fn(x: T) -> logical
 #---- compare_against_numeric_literal_leaves_the_operand_open
 f <- function(x) x == 1L
 #++++
-f: <T> fn(x: T) -> logical
+f: <T> fn(x: T) -> Compared<T>
 
 #==== range_numeric_var
 #---- range_over_numeric_var_is_double

@@ -12,9 +12,9 @@ integer
 countdown <- function(x) if (x > 0L) countdown(x - 1L) else "done"
 countdown("not an integer")
 #++++
-countdown: <T: arithmetic> fn(x: T) -> Unknown
+countdown: <T: arithmetic or number> fn(x: T) -> Unknown
 Unknown
-77..93 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+77..93 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
 
 #---- local_recursive_helper_inside_a_function
 driver <- function(n) {
@@ -42,13 +42,13 @@ is_even <- function(n) if (n == 0L) TRUE else is_odd(n - 1L)
 is_odd <- function(n) if (n == 0L) FALSE else is_even(n - 1L)
 is_even(4L)
 #++++
-is_even: <T: arithmetic> fn(n: T) -> logical
-is_odd: <T: arithmetic> fn(n: T) -> logical
+is_even: <T: arithmetic or number> fn(n: T) -> logical
+is_odd: <T: arithmetic or number> fn(n: T) -> logical
 logical
 
 #---- mutual_pair_without_in_file_call
 even2 <- function(n) if (n == 0L) TRUE else odd2(n - 1L)
 odd2 <- function(n) if (n == 0L) FALSE else even2(n - 1L)
 #++++
-even2: <T: arithmetic> fn(n: T) -> logical
-odd2: <T: arithmetic> fn(n: T) -> logical
+even2: <T: arithmetic or number> fn(n: T) -> logical
+odd2: <T: arithmetic or number> fn(n: T) -> logical
