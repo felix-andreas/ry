@@ -1141,23 +1141,23 @@ references: 20..23*
 rename: 1 edit(s)
 signature: none
 action: Add inferred type annotation for `half`
-  edit 16..16 -> "<T: numeric>"
+  edit 16..16 -> "<T: numeric or F64>"
   edit 18..18 -> ": T"
   edit 23..23 -> ": Any"
   edit 27..27 -> ": T"
-  edit 32..32 -> " -> double"
+  edit 32..32 -> " -> Promoted<T>"
 action: Add inferred type annotations for the whole file
-  edit 16..16 -> "<T: numeric>"
+  edit 16..16 -> "<T: numeric or F64>"
   edit 18..18 -> ": T"
   edit 23..23 -> ": Any"
   edit 27..27 -> ": T"
-  edit 32..32 -> " -> double"
+  edit 32..32 -> " -> Promoted<T>"
 completion (33): ...elt, ...length, ...names, .__C__anova.glm.null, as.data.frame.array, as.data.frame.AsIs, as.data.frame.character, as.data.frame.complex
-hint @16<T: numeric>
+hint @16<T: numeric or F64>
 hint @18: T
 hint @23: Any
 hint @27: T
-hint @32 -> double
+hint @32 -> Promoted<T>
 
 #---- hover_on_a_loop_variable_shows_its_type
 f <- function(xs) {
