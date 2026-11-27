@@ -2926,6 +2926,9 @@ pub(crate) unsafe fn with_released_roots(
 
 unsafe fn call_typed(typed: &TypedCall<'_>) -> Option<R<Sexp>> {
     annotations::attempt_native();
+    if typed::inside_exhausted_rerun() {
+        return None;
+    }
     let function = typed.function;
     let (arguments, read, lazy) = gather(function, typed.args)?;
     // A strict typed closure runs on the typed core's native values when it compiles there,

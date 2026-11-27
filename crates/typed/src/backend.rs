@@ -636,16 +636,32 @@ impl Emitter<'_> {
         let limit = self.word(Slot::StackLimit, || {
             &crate::STACK_LIMIT as *const AtomicUsize as i64
         });
+        let address = limit;
         let limit = self
             .builder
             .ins()
-            .load(I64, MemFlagsData::trusted(), limit, 0);
+            .load(I64, MemFlagsData::trusted(), address, 0);
         let low = self
             .builder
             .ins()
             .icmp(IntCC::UnsignedLessThan, here, limit);
         let exhausted = self.builder.ins().bor(deep, low);
-        self.fail_if(exhausted, &[])?;
+        // The stop leaves [`crate::EXHAUSTED_LIMIT`] as the limit, which tells the native entry
+        // why the code gave up and makes any frame entered before it returns give up too.
+        let failure = self.builder.create_block();
+        let go = self.builder.create_block();
+        self.builder.set_cold_block(failure);
+        self.builder.ins().brif(exhausted, failure, &[], go, &[]);
+        self.builder.switch_to_block(failure);
+        let sentinel = self
+            .builder
+            .ins()
+            .iconst(I64, crate::EXHAUSTED_LIMIT as i64);
+        self.builder
+            .ins()
+            .store(MemFlagsData::trusted(), sentinel, address, 0);
+        self.give_up();
+        self.builder.switch_to_block(go);
         let first = *self
             .blocks
             .first()
@@ -2011,7 +2027,7 @@ impl Emitter<'_> {
             Op::CallTyped(index, arguments) => self.call_typed(*index, arguments, inst)?,
             Op::CallR(index, arguments) => self.call_r(*index, arguments, inst)?,
             Op::Construct(shape, fields) => self.construct(*shape, fields, inst)?,
-            Op::Field(a, shape, index) => {
+            Op::Field(a, shape, index) | Op::Take(a, shape, index) => {
                 let pointer = self.one(*a)?;
                 let shape = shapes::shape(*shape);
                 let (Some(&item), Some(&offset)) = (
@@ -2025,7 +2041,11 @@ impl Emitter<'_> {
                     .ins()
                     .iadd_imm_s(pointer, (values::BOX_FIELDS + 8 * offset as usize) as i64);
                 let values = self.load_item(address, item);
-                self.dup(Type::of_item(item), &values);
+                if matches!(inst.op, Op::Take(..)) {
+                    self.take(pointer, address, Type::of_item(item), &values);
+                } else {
+                    self.dup(Type::of_item(item), &values);
+                }
                 values
             }
             Op::ShapeOf(a) => {
@@ -2767,6 +2787,32 @@ impl Emitter<'_> {
         self.builder.ins().jump(done, &[copied]);
         self.builder.switch_to_block(done);
         self.builder.block_params(done)[0]
+    }
+
+    /// Gives the caller the field at `address` of the box at `pointer`: moved out of a box with a
+    /// count of one, whose slot is left empty for its drop to skip, else counted again.
+    fn take(&mut self, pointer: Value, address: Value, ty: Type, values: &[Value]) {
+        let count = self
+            .builder
+            .ins()
+            .load(I32, MemFlagsData::trusted(), pointer, 0);
+        let alone = self.builder.ins().icmp_imm_s(IntCC::Equal, count, 1);
+        let (take, share, done) = (
+            self.builder.create_block(),
+            self.builder.create_block(),
+            self.builder.create_block(),
+        );
+        self.builder.ins().brif(alone, take, &[], share, &[]);
+        self.builder.switch_to_block(take);
+        let empty = self.iconst(0);
+        self.builder
+            .ins()
+            .store(MemFlagsData::trusted(), empty, address, 0);
+        self.builder.ins().jump(done, &[]);
+        self.builder.switch_to_block(share);
+        self.dup(ty, values);
+        self.builder.ins().jump(done, &[]);
+        self.builder.switch_to_block(done);
     }
 
     /// A new box of `shape` holding the fields, which it takes over: a field that does not die

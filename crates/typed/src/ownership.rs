@@ -31,6 +31,7 @@ pub fn insert(function: &mut Function) {
         counted
     };
     let live_in = liveness(function, &counted);
+    take_unread_fields(function, &live_in, &counted);
     let blocks = function.blocks.len();
     for index in 0..blocks {
         let mut live = live_out(function, &live_in, index, &counted);
@@ -125,6 +126,49 @@ fn retarget_self_updates(function: &mut Function) {
             rewritten.push(Inst::new(Some(dest), Op::Copy(fresh)));
         }
         function.blocks[index].insts = rewritten;
+    }
+}
+
+/// Turns a field read into [`Op::Take`] when no later read of the box sees that field: the rest
+/// of the block reads the box only for other fields until it overwrites the box, or ends with the
+/// box dead. A uniquely held box then gives the field up instead of sharing it, so updating a
+/// record's list, `(..r, items = List.append(r$items, x), label = r$label)`, appends in place
+/// although the old box is read again afterwards.
+fn take_unread_fields(function: &mut Function, live_in: &[Bits], counted: &Bits) {
+    for index in 0..function.blocks.len() {
+        let live = live_out(function, live_in, index, counted);
+        let Function { blocks, locals, .. } = &mut *function;
+        let block = &mut blocks[index];
+        for position in 0..block.insts.len() {
+            let inst = &block.insts[position];
+            let (Op::Field(boxed, shape, field), Some(dest)) = (&inst.op, inst.dest) else {
+                continue;
+            };
+            let (boxed, shape, field) = (*boxed, *shape, *field);
+            if !counted.contains(boxed.0 as usize)
+                || dest == boxed
+                || !locals[dest.0 as usize].is_object()
+            {
+                continue;
+            }
+            let mut unread = !live.contains(boxed.0 as usize);
+            for later in &block.insts[position + 1..] {
+                let other_field = matches!(later.op,
+                    Op::Field(source, _, read) | Op::Take(source, _, read)
+                        if source == boxed && read != field);
+                if !other_field && later.op.operands().contains(&boxed) {
+                    unread = false;
+                    break;
+                }
+                if later.dest == Some(boxed) {
+                    unread = true;
+                    break;
+                }
+            }
+            if unread {
+                block.insts[position].op = Op::Take(boxed, shape, field);
+            }
+        }
     }
 }
 
