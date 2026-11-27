@@ -665,7 +665,7 @@ impl Deparser {
             let result = values::string_elt(types, RETURN_SLOT);
             if !result.bytes().is_empty() {
                 self.print(" -> ");
-                self.print(&String::from_utf8_lossy(result.bytes()));
+                self.print(&annotation_line(result.bytes()));
             }
         }
         self.print(" ");
@@ -709,7 +709,7 @@ impl Deparser {
                         let text = values::string_elt(types, position + FIRST_FORMAL_SLOT);
                         if !text.bytes().is_empty() {
                             self.print(": ");
-                            self.print(&String::from_utf8_lossy(text.bytes()));
+                            self.print(&annotation_line(text.bytes()));
                         }
                     }
                     if list.car() != values::missing_arg() {
@@ -2075,7 +2075,7 @@ pub(crate) unsafe fn do_deparse(call: &Call<'_>) -> R<Sexp> {
     } else {
         cutoff as usize
     };
-    let opts = values::as_integer_scalar(call.arg(3)).max(0) as u32;
+    let opts = values::as_integer_scalar(call.arg(3)).max(0) as u32 & !options::TYPED_SIGNATURES;
     let nlines = values::as_integer_scalar(call.arg(4));
     let backtick = values::as_logical_scalar(call.arg(2)) == 1;
     let max_lines = if nlines > 0 {
@@ -2093,7 +2093,7 @@ unsafe fn do_dump(call: &Call<'_>) -> R<Sexp> {
     let names = call.arg(0);
     let file = call.arg(1);
     let env = call.arg(2);
-    let opts = values::as_integer_scalar(call.arg(3)).max(0) as u32;
+    let opts = values::as_integer_scalar(call.arg(3)).max(0) as u32 & !options::TYPED_SIGNATURES;
     let evaluate = values::as_logical_scalar(call.arg(4)) != 0;
     if names.kind() != SexpType::String {
         return Err(call.error("character arguments expected"));
@@ -2136,10 +2136,24 @@ unsafe fn do_dump(call: &Call<'_>) -> R<Sexp> {
 unsafe fn do_dput(call: &Call<'_>) -> R<Sexp> {
     let object = call.arg(0);
     let file = call.arg(1);
-    let opts = values::as_integer_scalar(call.arg(2)).max(0) as u32;
+    let opts = values::as_integer_scalar(call.arg(2)).max(0) as u32 & !options::TYPED_SIGNATURES;
     let lines = deparse_warning(object, 60, opts, true, usize::MAX)?;
     let mut text = lines.join("\n");
     text.push('\n');
     crate::connections::write_text(file, &text)?;
     Ok(object)
+}
+
+/// An annotation's source text on one line, because a type written across lines would
+/// otherwise break the line it prints on.
+fn annotation_line(text: &[u8]) -> String {
+    let text = String::from_utf8_lossy(text);
+    let mut line = String::with_capacity(text.len());
+    for word in text.split_whitespace() {
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    line
 }

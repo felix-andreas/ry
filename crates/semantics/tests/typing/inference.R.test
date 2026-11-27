@@ -576,6 +576,22 @@ b: double[]
 d: Date
 m: matrix
 
+#---- a_fold_accumulator_settles_at_the_first_value_that_meets_it
+# A value checked against the callback's `double` settles it, so a later one of another type is
+# checked against `double` too, and one rebind settles the variable for the values after it.
+fold3 <- function<A>(f: fn(A, integer) -> A, a: A, b: A) -> A f(a, 1L)
+t1 <- fold3(function(acc, x) acc * 2, 1.5, Sys.Date())
+t2 <- fold3(function(acc, x) acc * 2, 1i64, Sys.Date())
+t3 <- fold3(function(acc, x) acc * 2, c(1L, 2L), 1i64)
+#++++
+fold3: <A> fn(f: fn(A, integer) -> A, a: A, b: A) -> A
+t1: Unknown
+t2: Unknown
+t3: Unknown
+303..313 error[type-mismatch] expected `double`, found `Date`
+359..369 error[type-mismatch] expected `I64`, found `Date`
+420..424 error[type-mismatch] expected `double[]`, found `I64`
+
 #---- a_comparison_refuses_an_environment
 # R compares only atomic values and lists: `globalenv() == 1` stops.
 same <- function(a, b) a == b

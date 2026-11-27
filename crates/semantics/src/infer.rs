@@ -60,10 +60,10 @@ pub enum Widening {
     /// as a union rather than rebinding it.
     Joined,
     /// Settled as R's outcome of arithmetic a fold's callback does on its accumulator
-    /// (`Promoted<T> = T` binds `double`). A later init the variable's earlier `constraint`
-    /// admits rebinds it to what the fold returns from that init: a number vector promotes
-    /// (`integer[]` gives `double[]`), and a class with arithmetic (`Date`) or a ry number keeps
-    /// its type.
+    /// (`Promoted<T> = T` binds `double`). The first value that meets it settles it: one that
+    /// fits keeps `double`, and an init the variable's earlier `constraint` admits rebinds it
+    /// to what the fold returns from that init: a number vector promotes (`integer[]` gives
+    /// `double[]`), and a class with arithmetic (`Date`) or a ry number keeps its type.
     Folded {
         constraint: Constraint,
     },
@@ -1510,21 +1510,32 @@ impl<'db> InferenceTable<'db> {
                 self.widen_numeric_binding(db, representative, bound, actual, widening)
             }
             Widening::Folded { constraint } => {
-                if self.compatible(db, actual, bound)
-                    || constraint_rejects(db, self, constraint, actual).is_some()
-                {
+                // The outcome is provisional until the first value meets it: one that fits
+                // settles it, and one that does not rebinds it once, so a value checked
+                // against the outcome never goes unchecked against what it rebinds to.
+                let fixed = Entry::Bound {
+                    ty: bound,
+                    widening: Widening::Fixed,
+                };
+                if self.compatible(db, actual, bound) {
+                    self.set(representative, fixed);
                     return false;
                 }
                 let folded = match numeric_join(db, [bound, actual]) {
-                    Some(promoted) => promoted,
-                    None if is_ry_value_type(db, actual) || is_r_value(db, actual) => actual,
-                    None => return false,
+                    _ if constraint_rejects(db, self, constraint, actual).is_some() => None,
+                    Some(promoted) => Some(promoted),
+                    None if is_ry_value_type(db, actual) || is_r_value(db, actual) => Some(actual),
+                    None => None,
+                };
+                let Some(folded) = folded else {
+                    self.set(representative, fixed);
+                    return false;
                 };
                 self.set(
                     representative,
                     Entry::Bound {
                         ty: folded,
-                        widening,
+                        widening: Widening::Fixed,
                     },
                 );
                 true

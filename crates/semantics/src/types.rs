@@ -846,7 +846,8 @@ pub enum Constraint {
     /// A string literal compared with an open value, which only `Str` admits on ry's side,
     /// because ry compares a `Str` only with a `Str`. Like `Int`, it is never generalized.
     Str,
-    /// Every type but a function or an environment: the values `==` compares (a ry value structurally).
+    /// Every type but a function or an environment: the values `==` compares, a ry value
+    /// structurally.
     Eq,
     /// An R value a comparison takes: an atomic value other than `complex` or `raw` in any
     /// vector shape, a list (compared element by element) or a class, which R's `Ops` methods
