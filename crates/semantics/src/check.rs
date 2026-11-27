@@ -7605,7 +7605,15 @@ impl<'db, 'a> Checker<'db, 'a> {
             (PatternKind::Tuple(_), TyKind::NativeRecord(native, _)) => {
                 let fields: Vec<String> = native
                     .iter()
-                    .map(|field| format!("{0} = {0}", field.name.text(self.db)))
+                    .enumerate()
+                    .map(|(at, field)| {
+                        let field = field.name.text(self.db);
+                        if is_syntactic_name(field) {
+                            format!("{field} = {field}")
+                        } else {
+                            format!("`{field}` = x{}", at + 1)
+                        }
+                    })
                     .collect();
                 return Some((
                     format!(

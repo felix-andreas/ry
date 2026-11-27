@@ -755,8 +755,6 @@ const TABLE_R_CALLS: [&str; 9] = [
     "LazyFrame.explain",
 ];
 
-/// Whether `name` is a table function whose result is a table, a group or an expression, which
-/// native code holds as it holds any ry value.
 /// Whether `name` heads a table type, as `lower::returns_table` in `crates/typed` reads a
 /// written result type.
 fn is_table_type(name: &str) -> bool {
@@ -766,6 +764,8 @@ fn is_table_type(name: &str) -> bool {
     )
 }
 
+/// Whether `name` is a table function whose result is a table, a group or an expression, which
+/// native code holds as it holds any ry value.
 pub fn gives_table_value(name: &str) -> bool {
     (name == "DataFrame"
         || name == "as.DataFrame"

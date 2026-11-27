@@ -911,8 +911,8 @@ the declaration's arity:
 A type definition cannot take the name of a built-in type: an atomic or ry scalar name (`double`,
 `I64`, `Str`), `Any`, `Unknown`, `NULL`, a table type (`DataFrame`, `LazyFrame`, `GroupBy`,
 `LazyGroupBy`), `Record`, `Tuple`, `Promoted`, `Compared`, or the standard library's `List`, `Dict`,
-`Set` and `Expr`. An annotation resolves the built-in name first, so such a definition would never
-be used, and ry reports it as an `annotation` error at its name. The standard library's `Result` is
+`Set` and `Expr`. Annotations and checks read such a name as the built-in type, so a definition
+with it would conflict, and ry reports it as an `annotation` error at its name. The standard library's `Result` is
 an alias, which a project's own definition of `Result` replaces.
 
 #### Type aliases

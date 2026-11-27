@@ -1034,30 +1034,34 @@ fn classify_name_read(
 /// An alias whose expansion reaches itself never becomes a type. It is reported at each
 /// declaration on the cycle, including one no annotation uses; a use only compares like
 /// `Unknown`, so the one mistake is reported once, where the fix goes. A definition named like
-/// a built-in type is never used, because an annotation resolves the built-in head first.
+/// a built-in type conflicts with it, because lowering or the checker reads that name as the
+/// built-in one.
 fn type_definition_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let table = TypeDefinitions::of(db, file);
     let mut diagnostics = Vec::new();
     for (name, range) in type_declaration_sites(db, file) {
         if ANNOTATION_PRIMITIVES.contains(&name.as_str())
             || matches!(name.as_str(), "any" | "unknown" | "null")
-            || FamilyResult::from_head(&name).is_some()
-            || NativeScalar::from_name(&name).is_some()
+            || FamilyResult::from_head(name).is_some()
+            || NativeScalar::from_name(name).is_some()
             // The checker reads these standard-library types by name; a project's own `Result`
             // shadows the library's alias instead.
             || (matches!(name.as_str(), "List" | "Dict" | "Set" | "Expr") && is_ry_type(db, name))
         {
-            // The site spans the whole definition; the name follows its keyword.
+            // The site spans the whole definition, maybe over several `#:` lines; the name is
+            // its first whole word with that spelling.
             let range = *range;
+            let identifier = |c: char| c.is_alphanumeric() || c == '_' || c == '.';
             let written = file
                 .text(db)
                 .get(Range::<usize>::from(range))
                 .and_then(|text| {
-                    let rest = text.trim_start_matches(|c: char| !c.is_whitespace());
-                    let start = text.len() - rest.trim_start().len();
-                    rest.trim_start()
-                        .starts_with(name.as_str())
-                        .then_some(start)
+                    text.match_indices(name.as_str())
+                        .map(|(start, _)| start)
+                        .find(|&start| {
+                            !text[..start].ends_with(identifier)
+                                && !text[start + name.len()..].starts_with(identifier)
+                        })
                 });
             let range = written.map_or(range, |start| {
                 TextRange::at(
@@ -1070,7 +1074,7 @@ fn type_definition_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic>
                 Severity::Error,
                 "annotation",
                 format!(
-                    "`{name}` is a built-in type, so every annotation that writes `{name}` means the built-in one and this definition is never used. Give it another name"
+                    "`{name}` is a built-in type, so this definition conflicts with it: annotations and checks read `{name}` as the built-in one. Give it another name"
                 ),
             ));
             continue;
@@ -2804,9 +2808,6 @@ fn size_function(name: &str) -> Option<String> {
     }
 }
 
-/// A misspelled parameter, field, or column is spelled somewhere inside the error's range, which
-/// may cover a whole call or subset. The fix replaces that spelling only when it occurs exactly
-/// once as a whole name, so it never guesses between two places.
 /// An R list never becomes a ry record or tuple, so a mismatch between them names the literal
 /// that builds one.
 fn native_literal_for_r_list<'db>(
@@ -2825,7 +2826,7 @@ fn native_literal_for_r_list<'db>(
             "record",
             fields
                 .iter()
-                .map(|field| format!("{} = ...", field.name.text(db)))
+                .map(|field| format!("{} = ...", display_name(field.name.text(db))))
                 .collect::<Vec<_>>(),
         ),
         TyKind::NativeTuple(items) if !items.is_empty() => {
@@ -2851,12 +2852,22 @@ fn native_literal_fix(
     let TypeErrorKind::Mismatch { expected, found } = kind else {
         return None;
     };
-    native_literal_for_r_list(db, *expected, *found)?;
-    let items = match found.kind(db) {
-        TyKind::Tuple(items) => items.len(),
-        TyKind::Record(fields) => fields.len(),
+    // The call's own names decide which literal it becomes, so it must already be the kind and
+    // size the expected type wants.
+    let items = match (found.kind(db), expected.kind(db)) {
+        (TyKind::Tuple(items), TyKind::NativeTuple(expected)) if items.len() == expected.len() => {
+            items.len()
+        }
+        (TyKind::Record(fields), TyKind::NativeRecord(expected, _))
+            if fields.len() == expected.len() =>
+        {
+            fields.len()
+        }
         _ => return None,
     };
+    if items == 0 {
+        return None;
+    }
     let covered = text.get(usize::from(range.start())..usize::from(range.end()))?;
     let inner = covered.strip_prefix("list(")?.strip_suffix(')')?;
     let trailing = if items == 1 && !inner.trim_end().ends_with(',') {
@@ -2871,6 +2882,9 @@ fn native_literal_fix(
     ))
 }
 
+/// A misspelled parameter, field, or column is spelled somewhere inside the error's range, which
+/// may cover a whole call or subset. The fix replaces that spelling only when it occurs exactly
+/// once as a whole name, so it never guesses between two places.
 fn misspelling_fix(
     text: &str,
     range: TextRange,
