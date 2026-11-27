@@ -19249,17 +19249,42 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// The hint for a formal, if one survives the probe's rollback: a type with no open
-    /// variable, or an undecided ry number that an argument brought (the items of `[1, 2]`),
-    /// named by the argument's own variable, which the lambda body may still decide, as
-    /// `\(x) x / 2` decides `x` is a fraction.
+    /// The hint for a formal, if one survives the probe's rollback: a type whose open variables
+    /// an argument brought, each named by the argument's own variable, or an undecided ry number
+    /// that an argument brought (the items of `[1, 2]`). The lambda body may still decide such a
+    /// variable, as `\(x) x / 2` decides `x` is a fraction and `\(acc, x) (..acc, values =
+    /// List.append(acc$values, x))` decides the items of a state's empty `values`.
     fn settled_hint(
         &self,
         formal: Ty<'db>,
         argument_vars: &FxHashSet<InferenceVar>,
     ) -> Option<Ty<'db>> {
+        let argument_var = |representative: InferenceVar| {
+            argument_vars
+                .iter()
+                .copied()
+                .filter(|&candidate| self.table.find(candidate) == representative)
+                .min_by_key(|candidate| candidate.0)
+        };
         let TyKind::Var(var) = *formal.kind(self.db) else {
-            return (!self.table.contains_unbound_var(self.db, formal)).then_some(formal);
+            let mut open = FxHashSet::default();
+            self.table.collect_unbound_vars(self.db, formal, &mut open);
+            if open.is_empty() {
+                return Some(formal);
+            }
+            let mut renamed = FxHashMap::default();
+            for var in open {
+                let representative = self.table.find(var);
+                let named = argument_var(representative)?;
+                renamed.insert(representative, Ty::new(self.db, TyKind::Var(named)));
+            }
+            return Some(rename_vars(
+                self.db,
+                &self.table,
+                formal,
+                &renamed,
+                &mut FxHashMap::default(),
+            ));
         };
         let representative = self.table.find(var);
         if !matches!(
@@ -19271,12 +19296,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         ) {
             return None;
         }
-        argument_vars
-            .iter()
-            .copied()
-            .filter(|&candidate| self.table.find(candidate) == representative)
-            .min_by_key(|candidate| candidate.0)
-            .map(|candidate| Ty::new(self.db, TyKind::Var(candidate)))
+        argument_var(representative).map(|candidate| Ty::new(self.db, TyKind::Var(candidate)))
     }
 
     /// A function literal with a formal that has neither a type annotation nor a default. A
@@ -19493,10 +19513,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                                     widening.get(argument_index).is_some_and(|states| {
                                         states.iter().any(|&(widened, ..)| widened == index)
                                     });
+                                let settled = self.settled_hint(formal, &argument_vars);
                                 let widening_accumulator = accumulators.contains(index)
                                     && !(is_ry_value_type(self.db, formal)
                                         && (tag_state_widens || !mentions_tag(self.db, formal))
-                                        && !self.table.contains_unbound_var(self.db, formal));
+                                        && settled.is_some());
                                 if widening_accumulator
                                     || (index < declared_count
                                         && matches!(
@@ -19506,7 +19527,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                                 {
                                     return None;
                                 }
-                                self.settled_hint(formal, &argument_vars)
+                                settled
                             })
                             .collect(),
                     )
@@ -26218,6 +26239,34 @@ fn builds_empty_keyed<'db>(db: &'db dyn Db, scheme: &TypeScheme<'db>) -> bool {
             .iter()
             .chain(function.named.iter().map(|parameter| &parameter.ty))
             .any(|&parameter| keyed(parameter))
+}
+
+/// `ty` with each open variable that `renamed` names replaced, found by its representative, so
+/// `ty` must be resolved.
+fn rename_vars<'db>(
+    db: &'db dyn Db,
+    table: &InferenceTable<'db>,
+    ty: Ty<'db>,
+    renamed: &FxHashMap<InferenceVar, Ty<'db>>,
+    memo: &mut FxHashMap<Ty<'db>, Ty<'db>>,
+) -> Ty<'db> {
+    if !contains_inference_var(db, ty) {
+        return ty;
+    }
+    if let Some(&done) = memo.get(&ty) {
+        return done;
+    }
+    let mapped = match ty.kind(db) {
+        TyKind::Var(var) => match renamed.get(&table.find(*var)) {
+            Some(&replacement) => replacement,
+            None => ty,
+        },
+        _ => map_child_types(db, ty, &mut |child| {
+            rename_vars(db, table, child, renamed, memo)
+        }),
+    };
+    memo.insert(ty, mapped);
+    mapped
 }
 
 /// The storage of a list of `item`s, or `None` for `Bool`, whose storage is the empty list's

@@ -298,7 +298,7 @@ Typed ports of the public suite (`tools/bench/public/*/*.typed.R`, plain idiomat
   - a record or tag payload literal stays R-typed at run time;
   - an empty list keeps its item type only in elaborated code (`development/design/language-climb.md`, "Open questions").
 - **A latin1 package's non-ASCII string literal installs as U+FFFD on ry's runtime.** A package with `Encoding: latin1` whose `R/` file binds `x <- "café"` (byte `0xE9`) installs with `ry install`, and `charToRaw(x)` gives `63 61 66 ef bf bd`, typed or not. The tarball keeps the latin1 byte, so the loss is in ry's `R CMD INSTALL` reading the code.
-- **Smaller typed-language gaps** (unverified): a string literal compared with `==` against a `Str` list gives an R logical; `[]` hovers as `List<T>`; f-strings build R `character`.
+- **`[]` hovers as `List<T>`** (unverified) instead of the item type the checker settled.
 
 ## Open: ahead-of-time compilation
 
@@ -1147,9 +1147,6 @@ The rule ships (`decisions/syntax-semantics.md`, "A strict library file's top le
   precedence exactly; a factor inside a list prints its codes;
   `cov` and `sd` route through an R-level fallback instead of a native `C_cov`; `pkg::name` for a
   name the namespace does not export gives a different message from GNU R.
-- **Strict users must annotate `seq()` results.** The `seq` stub returns `Any`, so
-  `x <- seq(...)` passes strict mode only with an annotation such as `x: double[]`. A precise
-  overload set for `seq` and `seq_len` would remove that.
 - **The oracle's `stats__*` cases depend on the BLAS build.** Their expectations come from
   reference BLAS; under OpenBLAS, `stats__formulas_and_least_squares` and
   `stats__models_and_tests` differ in the last printed digits and `stats__lbfgsb` warns in
