@@ -1039,10 +1039,10 @@ pub(crate) fn resolve_subscript<'s>(
                     None => positions.push(UNMATCHED),
                 }
             }
-            let mut new_names = Vec::with_capacity(appended.len());
-            for &name in &appended {
-                new_names.push(context.root(name));
-            }
+            let new_names = appended
+                .into_iter()
+                .map(|name| context.root(name))
+                .collect();
             Ok((positions, new_names))
         }
         SexpType::Symbol => {

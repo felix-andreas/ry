@@ -3797,41 +3797,48 @@ fn plan_sources(
             *source = position as i32;
         }
     }
+    // A left-out formal whose default is code needs the defaults compiled over the slots. The
+    // first plan that meets them uncompiled compiles them all, which allocates, and the walk
+    // starts again with the sources it settled.
     let missing_value = handles::missing_argument();
-    let mut formal = function.read(context).formals();
-    let needs_defaults = sources[..formal_count].iter().any(|&source| {
-        let Some(cell) = formal.downcast::<Pairlist>() else {
-            return false;
-        };
-        let default = cell.head();
-        formal = cell.rest();
-        source == -1 && !default.is(missing_value) && !is_literal(default)
-    });
-    if needs_defaults && slot_defaults(context, function.read(context)).is_none() {
-        handles::build_slot_defaults(context, function)?;
-    }
-    let closure = function.read(context);
-    let defaults = needs_defaults
-        .then(|| slot_defaults(context, closure))
-        .flatten();
-    let mut formal = closure.formals();
-    for (index, source) in sources[..formal_count].iter_mut().enumerate() {
-        let Some(cell) = formal.downcast::<Pairlist>() else {
-            break;
-        };
-        let default = cell.head();
-        if *source == -1 && !default.is(missing_value) {
-            *source = if is_literal(default) {
-                LITERAL_DEFAULT
-            } else if defaults.is_some_and(|defaults| default_fits(defaults, index)) {
-                PROMISED_DEFAULT
-            } else {
-                return Ok(None);
+    let mut compiled = false;
+    loop {
+        let closure = function.read(context);
+        let mut defaults = None;
+        let mut uncompiled = false;
+        let mut formal = closure.formals();
+        for (index, source) in sources[..formal_count].iter_mut().enumerate() {
+            let Some(cell) = formal.downcast::<Pairlist>() else {
+                break;
             };
+            formal = cell.rest();
+            let default = cell.head();
+            if *source != -1 || default.is(missing_value) {
+                continue;
+            }
+            if is_literal(default) {
+                *source = LITERAL_DEFAULT;
+                continue;
+            }
+            defaults = defaults.or_else(|| slot_defaults(context, closure));
+            match defaults {
+                None => {
+                    uncompiled = true;
+                    break;
+                }
+                Some(defaults) if default_fits(defaults, index) => *source = PROMISED_DEFAULT,
+                Some(_) => return Ok(None),
+            }
         }
-        formal = cell.rest();
+        if !uncompiled {
+            return Ok(Some((shape, sources)));
+        }
+        if compiled {
+            return Ok(None);
+        }
+        handles::build_slot_defaults(context, function)?;
+        compiled = true;
     }
-    Ok(Some((shape, sources)))
 }
 
 /// Calls `function` for a call whose site plans per call ([`MATCH_PER_CALL`]): in a slot frame
@@ -3953,8 +3960,9 @@ fn bind_planned<'s>(
     // Only a formal the call leaves out reads its default, so the walk over the formals goes
     // no further than the last of them.
     let (mut formal, mut formal_index) = (function.read(context).formals(), 0);
-    for (index, &source) in sources.iter().enumerate() {
-        let value = match args.get(source as usize) {
+    window.fill(sources.len(), |index| {
+        let source = *sources.get(index)?;
+        Some(match args.get(source as usize) {
             Some(arg) if source >= 0 => arg.value.read(context),
             _ if source == DOTS_SOURCE => dots.read(context),
             _ if source <= LITERAL_DEFAULT => {
@@ -3973,9 +3981,8 @@ fn bind_planned<'s>(
                     .map_or(missing_value.read(context), |cell| cell.head())
             }
             _ => missing_value.read(context),
-        };
-        window.push(value);
-    }
+        })
+    });
     Ok((window.close() as u32, missing, promised))
 }
 
