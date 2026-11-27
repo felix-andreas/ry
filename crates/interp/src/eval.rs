@@ -1345,9 +1345,8 @@ fn box_variable<'s>(context: &mut Cx<'s>, owner: usize, symbol: Local<'s, Symbol
     }
     let recorded = frame
         .method_vars()
-        .iter()
         .find(|(name, _)| name.is(symbol))
-        .map(|&(_, value)| context.root(value));
+        .map(|(_, value)| context.root(value));
     if let Some(recorded) = recorded {
         let value = method_variable(context, owner, symbol, recorded)?;
         let pending = pending_of(context, owner);
@@ -1445,7 +1444,10 @@ fn box_slots(context: &mut Cx<'_>, owner: usize, slots: std::ops::Range<usize>) 
                 cell = rest;
             }
             for reference in references {
-                detach(context, reference)?;
+                // A list that holds one reference twice detaches it at the first.
+                if reference.read(context).has_flag(gp::ARGUMENT_REFERENCE) {
+                    detach(context, reference)?;
+                }
             }
         } else if let Some((shape, sources)) = &sources
             && slot < shape.formals as usize
@@ -1551,8 +1553,7 @@ fn lift(context: &mut Cx<'_>, index: usize, cause: Option<Site>) -> R<()> {
     let pending = context.root(pending_of(context, index));
     let method_vars: SmallVec<[(Local<'_, Symbol>, Local<'_>); 6]> = frame
         .method_vars()
-        .iter()
-        .map(|&(symbol, value)| (context.root(symbol), context.root(value)))
+        .map(|(symbol, value)| (context.root(symbol), context.root(value)))
         .collect();
     for &(symbol, value) in &method_vars {
         if context.own_binding(pending, symbol).is_none() {
@@ -1575,7 +1576,7 @@ fn lift(context: &mut Cx<'_>, index: usize, cause: Option<Site>) -> R<()> {
             .position(|name| name.is(symbol))
             .map(|slot| slot as u32)
     };
-    context.set_slot_owner(pending, None);
+    context.clear_slot_owner(pending);
     context.order_frame(pending, rank, frame.formals().count() as u32);
     pending.read(context).set_flags(gp::SLOT_FRAME, false);
     let state = interp();
@@ -1644,7 +1645,6 @@ pub fn slot_reference<'a>(
     symbol: Local<'_>,
 ) -> R<Gc<'a, Promise>> {
     let index = take_reference(context, symbol)?;
-    let context: &'a Cx<'_> = context;
     let header = handles::live_frame(context, owner).header();
     handles::set_reference_target(context, index, owner, slot, header);
     Ok(reference_at(context, index))
@@ -1674,7 +1674,9 @@ pub unsafe fn env_reference(env: Sexp, expression: Sexp) -> R<Sexp> {
 pub unsafe fn env_code_reference(env: Sexp, code: Sexp) -> R<Sexp> {
     handles::in_caller_scope(|context| {
         let (environment, code) = (handles::held(context, env), handles::held(context, code));
-        let index = take_reference(context, source_of(context, code))?;
+        // The code holds its constant pool, and the caller holds the code.
+        let source = handles::held(context, source_of(context, code).raw());
+        let index = take_reference(context, source)?;
         let reference = reference_at(context, index);
         context.set_promise_environment(reference, environment);
         context.set_promise_compiled(reference, code);
@@ -1690,7 +1692,9 @@ pub unsafe fn env_code_reference(env: Sexp, code: Sexp) -> R<Sexp> {
 pub unsafe fn code_reference(owner: usize, code: Sexp) -> R<Sexp> {
     handles::in_caller_scope(|context| {
         let code = handles::held(context, code);
-        let index = take_reference(context, source_of(context, code))?;
+        // The code holds its constant pool, and the caller holds the code.
+        let source = handles::held(context, source_of(context, code).raw());
+        let index = take_reference(context, source)?;
         let header = handles::live_frame(context, owner).header();
         handles::set_reference_target(context, index, owner, NO_REFERENCE_SLOT, header);
         let reference = reference_at(context, index);
@@ -1700,15 +1704,14 @@ pub unsafe fn code_reference(owner: usize, code: Sexp) -> R<Sexp> {
 }
 
 /// The source a compiled argument's `code` was compiled from, which its constant pool keeps.
-fn source_of<'s>(context: &Cx<'s>, code: Local<'s>) -> Local<'s> {
+fn source_of<'c, 's>(context: &'c Cx<'s>, code: Local<'s>) -> Gc<'c> {
     let source = code
         .read(context)
         .downcast::<Bytecode>()
         .and_then(handles::constants)
         .and_then(|constants| constants.get(bytecode::SOURCE).copied());
     match source {
-        // The code holds its constant pool, and the caller holds the code for the scope.
-        Some(source) => context.root(source),
+        Some(source) => source,
         None => panic!("compiled argument code without a constant pool"),
     }
 }
@@ -2139,7 +2142,7 @@ fn reference_promise<'s>(context: &mut Cx<'s>, reference: Local<'s, Promise>) ->
         };
     activity::count(Counter::PromisesCreated);
     Ok(if expression.r_type() == SexpType::Bytecode {
-        let source = source_of(context, expression);
+        let source = context.root(source_of(context, expression));
         [handles::unbound(), source, environment, expression]
     } else {
         [handles::unbound(), symbol, environment, null]
@@ -2172,13 +2175,10 @@ pub fn pending_environment<'a>(context: &'a mut Cx<'_>, owner: usize) -> R<Gc<'a
                 true,
             );
             // A lookup of any other name passes the environment without asking the frame.
-            let Some(table) = handles::slot_table(context, function) else {
-                panic!("slot frame {owner} runs code without a slot table");
-            };
-            context.set_slot_owner(environment, Some((owner, table.get(1))));
+            frame.stand_in(environment);
             context.expect_dispatch_variables(
                 environment,
-                frame.method_vars().iter().map(|&(symbol, _)| symbol),
+                frame.method_vars().map(|(symbol, _)| symbol),
             );
             frame.set_pending(environment);
             activity::count(Counter::FrameEnvironments);
@@ -3927,45 +3927,35 @@ pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<CallPlan>> 
 }
 
 /// [`direct_sources`] for code on the handle types.
-pub fn call_plan(
-    context: &mut Cx<'_>,
-    function: Local<'_>,
-    call: Local<'_>,
+pub fn call_plan<'s>(
+    context: &mut Cx<'s>,
+    function: Local<'s>,
+    call: Local<'s>,
 ) -> R<Option<CallPlan>> {
-    {
-        let Some(function) = function.downcast::<Closure>() else {
-            return Ok(None);
-        };
-        let Some((shape, dots_index)) = plannable(function.read(context)) else {
-            return Ok(None);
-        };
-        let dots = handles::symbol(|symbols| symbols.dots);
-        let mut args: SmallVec<[Tagged<'_>; 8]> = SmallVec::new();
-        let mut forwards_dots = false;
-        let Some(head) = call.read(context).downcast::<Language>() else {
-            return Ok(None);
-        };
-        // C code may link a call's argument cells with `LCONS`, which GNU R evaluates the same.
-        let mut cell = head.rest();
-        while let Some((expression, tag, rest)) = handles::cell_fields(cell) {
-            if let Some(symbol) = expression.downcast::<Symbol>() {
-                if symbol.is(dots) {
-                    forwards_dots = true;
-                } else if dot_dot_position(symbol.name().bytes()).is_some() {
-                    return Ok(None);
-                }
+    let Some(function) = function.downcast::<Closure>() else {
+        return Ok(None);
+    };
+    let Some((shape, dots_index)) = plannable(function.read(context)) else {
+        return Ok(None);
+    };
+    let Some(args) = handles::call_cells(context, call) else {
+        return Ok(None);
+    };
+    let dots = handles::symbol(|symbols| symbols.dots);
+    let mut forwards_dots = false;
+    for argument in &args {
+        if let Some(symbol) = argument.value.read(context).downcast::<Symbol>() {
+            if symbol.is(dots) {
+                forwards_dots = true;
+            } else if dot_dot_position(symbol.name().bytes()).is_some() {
+                return Ok(None);
             }
-            args.push(Tagged {
-                tag: context.root(tag),
-                value: context.root(expression),
-            });
-            cell = rest;
         }
-        if forwards_dots {
-            return Ok(Some((shape, smallvec![MATCH_PER_CALL])));
-        }
-        plan_sources(context, function, shape, dots_index, &args, call)
     }
+    if forwards_dots {
+        return Ok(Some((shape, smallvec![MATCH_PER_CALL])));
+    }
+    plan_sources(context, function, shape, dots_index, &args, call)
 }
 
 /// The plan of a call whose site plans per call ([`MATCH_PER_CALL`]), from `args`, the

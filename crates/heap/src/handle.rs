@@ -148,22 +148,28 @@ impl<'s> Cx<'s> {
     }
 
     /// Records that the environment stands for the live slot frame at `owner` whose slot
-    /// names are `names`, or with `None` that it stands for no frame any longer
-    /// ([`Heap::set_slot_owner`]). The frame's function must hold `names`.
+    /// names are `names` ([`Heap::set_slot_owner`]).
+    ///
+    /// # Safety
+    ///
+    /// The record holds `names` without counting them, so something must keep them alive for
+    /// as long as the environment stands for the frame: the frame's function does.
     #[inline]
-    pub fn set_slot_owner(
+    pub unsafe fn set_slot_owner(
         &self,
         environment: impl Pointer<Environment>,
-        owner: Option<(usize, Gc<'_>)>,
+        owner: usize,
+        names: Gc<'_>,
     ) {
-        // SAFETY: the heap and the environment are live, and the record holds the names
-        // without counting them, which the frame's function keeps alive.
-        unsafe {
-            (*self.heap.as_ptr()).set_slot_owner(
-                environment.raw(),
-                owner.map(|(owner, names)| (owner, names.raw)),
-            )
-        }
+        // SAFETY: the heap and the environment are live, and the caller keeps the names alive.
+        unsafe { (*self.heap.as_ptr()).set_slot_owner(environment.raw(), Some((owner, names.raw))) }
+    }
+
+    /// Records that the environment stands for no slot frame any longer.
+    #[inline]
+    pub fn clear_slot_owner(&self, environment: impl Pointer<Environment>) {
+        // SAFETY: the heap and the environment are live.
+        unsafe { (*self.heap.as_ptr()).set_slot_owner(environment.raw(), None) }
     }
 
     /// Tells a method's slot frame environment the names of its dispatch variables
