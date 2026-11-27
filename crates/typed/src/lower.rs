@@ -704,6 +704,14 @@ struct ArgumentReads {
     lazy: bool,
 }
 
+/// Where an argument's paths go: [`Lowering::argument_paths`].
+struct ArgumentPaths {
+    reaches_exit: bool,
+    /// Some path leaves the argument other than through its exit: a `return`, or a `break` or
+    /// `next` of a loop outside it.
+    escapes: bool,
+}
+
 const NO_ARGUMENT_READS: ArgumentReads = ArgumentReads {
     start: 0,
     end: 0,
@@ -1317,12 +1325,29 @@ impl Lowering<'_> {
             if let Argument::Value(_) = value
                 && (span.lazy || !strict)
             {
+                if self.argument_paths(span, &[]).escapes {
+                    return Err(Refusal::new(
+                        "an argument of a local function leaves through `return`, `break` or \
+                         `next`, which R runs where the function reads the argument: compute the \
+                         argument into a variable first",
+                    ));
+                }
                 let reads = self.param_reads.get(span.start..span.end).unwrap_or(&[]);
                 let mut everywhere: SmallVec<[u32; 2]> = SmallVec::new();
+                let mut checked: SmallVec<[u32; 2]> = SmallVec::new();
                 for read in reads {
-                    if read.into.is_none()
-                        && !everywhere.contains(&read.param)
-                        && self.on_every_path(span, read.block)
+                    if read.into.is_some() || checked.contains(&read.param) {
+                        continue;
+                    }
+                    checked.push(read.param);
+                    let blocks: SmallVec<[BlockId; 4]> = reads
+                        .iter()
+                        .filter(|other| other.into.is_none() && other.param == read.param)
+                        .map(|other| other.block)
+                        .collect();
+                    if blocks.contains(&span.entry)
+                        || blocks.contains(&span.exit)
+                        || !self.argument_paths(span, &blocks).reaches_exit
                     {
                         everywhere.push(read.param);
                     }
@@ -1359,29 +1384,37 @@ impl Lowering<'_> {
         Ok(())
     }
 
-    /// Whether every path of the argument `span` from its entry to its exit runs `block`.
-    fn on_every_path(&self, span: &ArgumentReads, block: BlockId) -> bool {
-        if block == span.entry || block == span.exit {
-            return true;
-        }
+    /// Where the paths of the argument `span` that run none of `avoid` go from its entry.
+    fn argument_paths(&self, span: &ArgumentReads, avoid: &[BlockId]) -> ArgumentPaths {
         let blocks = &self.builder.function.blocks;
+        let mut paths = ArgumentPaths {
+            reaches_exit: false,
+            escapes: false,
+        };
         let mut seen = vec![0u64; blocks.len().div_ceil(64)];
         let mut stack: SmallVec<[BlockId; 8]> = SmallVec::from_slice(&[span.entry]);
         while let Some(id) = stack.pop() {
-            if id == span.exit {
-                return false;
-            }
             let index = id.0 as usize;
-            let inside = id == span.entry || id.0 >= span.first_block;
-            if id == block || !inside || seen[index / 64] & (1 << (index % 64)) != 0 {
+            if id == span.exit {
+                paths.reaches_exit = true;
+                continue;
+            }
+            if id != span.entry && id.0 < span.first_block {
+                paths.escapes = true;
+                continue;
+            }
+            if avoid.contains(&id) || seen[index / 64] & (1 << (index % 64)) != 0 {
                 continue;
             }
             seen[index / 64] |= 1 << (index % 64);
-            if let Some(next) = blocks.get(index) {
-                stack.extend(next.terminator.successors());
+            if let Some(block) = blocks.get(index) {
+                if let Terminator::Return(_) = block.terminator {
+                    paths.escapes = true;
+                }
+                stack.extend(block.terminator.successors());
             }
         }
-        true
+        paths
     }
 
     /// Where lowering stands before an argument of a local function, which
