@@ -602,7 +602,14 @@ enters through the raw entry `eval::compiled_complex_assign`); argument matching
 match plan a compiled body keeps in its constant pool, and `match.call`); and the slot binders
 (`bind_slots`, `bind_plan`, `enter_method`, `direct_sources` and `matched_sources`); and the
 variable lookups (symbol evaluation, `findVar`, `findFun`, a frame's own variable and the outward
-assignment of `<<-`), which return `Found::Unbound` for an unbound name instead of `R_UnboundValue`.
+assignment of `<<-`), which return `Found::Unbound` for an unbound name instead of `R_UnboundValue`;
+and promise forcing (`promise_value`, `forced_value`, the promises over a slot frame's pending
+environment and the argument references that read a slot frame's variable) with the readers that
+settle a promise without running code (`settle_without_code`, `peeked_variable`,
+`referenced_variable`). A promise is rooted for as long as its code runs, because that code can
+remove the last binding that holds it. A reader reaches a live frame through
+`handles::LiveFrame`, which borrows the context, so a slot read through it cannot outlive an
+allocation; `handles::pending_frame` panics when the environment's frame has returned.
 The specials reach the loop and function contexts, the srcref and the closure maker through wrappers
 in `handles.rs` (`in_loop` and `loop_jump` hold a loop's environment, `Args::register_on_exit`
 stores into the frame), because the bytecode loop and the JIT share those raw helpers. An
@@ -642,10 +649,10 @@ The order:
 1. `interp`, by risk and not by ease: the paths that keep a value across an allocation or write
    in place go first (tier 0's stores, the replacement and attribute builtins, name matching,
    string encoding), then `values.rs`, the evaluator and the bytecode loop, and the leaf builtins
-   last, because a leaf rarely holds a value across a safepoint. The evaluator's call machinery
-   (`eval`, `apply_closure` and promises) moves with the bytecode loop,
-   because it keeps values in frames and unwinds, which need the register accessor and
-   `Held<T>`.
+   last, because a leaf rarely holds a value across a safepoint. The frame machinery (the
+   argument reference pool, a slot frame's pending environment and the lifting of its slots into
+   an environment) moves with the bytecode loop's register accessor, because it writes registers,
+   which `Held<T>` does not cover.
 2. `stats`, `graphics`, `frames`.
 3. `libr`, `jit`, `typed`: entry points make a `Cx`; raw access leaves their bodies.
 4. `heap` stops exporting the raw accessors outside a `raw` module that only the boundary imports,

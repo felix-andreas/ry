@@ -1502,7 +1502,9 @@ pub unsafe fn in_caller_scope<T>(body: impl for<'s> FnOnce(&mut Cx<'s>) -> R<T>)
 }
 
 /// [`in_caller_scope`] for a raw entry that allocates nothing a collection could see: it reads
-/// the heap, or moves a slot frame's variable into a binding cell with collection inhibited.
+/// the heap, stores into a promise a value it found without running code (`Cx::settle_promise`,
+/// which frees nothing), or moves a slot frame's variable into a binding cell with collection
+/// inhibited.
 ///
 /// # Safety
 ///
@@ -2834,11 +2836,7 @@ pub fn evaluate<'s>(
 
 /// `value`, or the value of the promise it is, forced.
 pub fn force<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s>> {
-    // SAFETY: the value is rooted, and forcing a promise runs R code, which `&mut Cx` permits.
-    unsafe {
-        let value = crate::eval::value_of(value.raw())?;
-        Ok(rooted(context, value))
-    }
+    crate::eval::forced_value(context, value)
 }
 
 /// The S3 method of the internal generic `generic` for `arguments` applied, or `None` when
@@ -3611,6 +3609,220 @@ pub fn global_binding<'a>(
     }
 }
 
+/// A live interpreter frame seen through the handle types: its fields and, for a slot frame,
+/// its slots. It names the frame by its position, because pushing a frame can move the frame
+/// list, and what it reads borrows the context: the frame's `Held` fields and the register
+/// file, which the collector traces, keep each object alive until the next safepoint.
+#[derive(Clone, Copy)]
+pub struct LiveFrame<'c, 's> {
+    index: usize,
+    context: &'c Cx<'s>,
+}
+
+/// The live frame at position `index` of the frame stack.
+#[inline]
+pub fn live_frame<'c, 's>(context: &'c Cx<'s>, index: usize) -> LiveFrame<'c, 's> {
+    assert!(
+        index < crate::interp().frames.len(),
+        "frame {index} is not live"
+    );
+    LiveFrame { index, context }
+}
+
+/// The live slot frame that `environment` stands for ([`gp::SLOT_FRAME`]), which the
+/// environment records.
+#[inline]
+pub fn pending_frame<'c, 's>(
+    context: &'c Cx<'s>,
+    environment: Gc<'_, Environment>,
+) -> LiveFrame<'c, 's> {
+    match context.slot_owner(environment) {
+        Some(owner)
+            if crate::interp()
+                .frames
+                .get(owner)
+                .is_some_and(|frame| frame.pending.raw() == environment.raw()) =>
+        {
+            LiveFrame {
+                index: owner,
+                context,
+            }
+        }
+        _ => panic!("the environment of a slot frame was used after the frame returned without it"),
+    }
+}
+
+impl<'c, 's> LiveFrame<'c, 's> {
+    /// The frame's position on the frame stack.
+    #[inline]
+    pub fn index(self) -> usize {
+        self.index
+    }
+
+    #[inline]
+    fn fields(self) -> &'c crate::Frame {
+        &crate::interp().frames[self.index]
+    }
+
+    /// The closure the frame runs.
+    #[inline]
+    pub fn function(self) -> Gc<'c, Closure> {
+        match self
+            .fields()
+            .function
+            .get(self.context)
+            .downcast::<Closure>()
+        {
+            Some(function) => function,
+            None => panic!("frame {} runs no closure", self.index),
+        }
+    }
+
+    /// The call as written, which `sys.call` returns.
+    #[inline]
+    pub fn call(self) -> Gc<'c> {
+        self.fields().call.get(self.context)
+    }
+
+    /// The environment the frame runs in, `None` for a slot frame that runs in its slots.
+    #[inline]
+    pub fn environment(self) -> Option<Gc<'c, Environment>> {
+        self.fields()
+            .env
+            .get(self.context)
+            .downcast::<Environment>()
+    }
+
+    /// The environment the frame's function was defined in, where a name its slots leave
+    /// unbound is read.
+    #[inline]
+    pub fn enclosure(self) -> Gc<'c, Environment> {
+        self.function().environment()
+    }
+
+    /// How the frame was entered.
+    #[inline]
+    pub fn role(self) -> crate::FrameRole {
+        self.fields().role
+    }
+
+    /// What slot `slot` of a slot frame holds: a value, a promise, the empty argument, `...`,
+    /// or nothing (`unbound`).
+    #[inline]
+    pub fn slot(self, slot: usize) -> Gc<'c> {
+        let value = crate::interp().bytecode.registers[self.fields().slots as usize + 1 + slot];
+        // SAFETY: the collector traces the register file, and the borrow of the context lets
+        // nothing store into the register before the value's last use.
+        unsafe { Gc::adopt(value) }
+    }
+
+    /// What the slot of a slot frame named `symbol` holds ([`LiveFrame::slot`]), or `None` when
+    /// the frame keeps no slot of that name.
+    #[inline(always)]
+    pub fn slot_named(self, symbol: Gc<'_, Symbol>) -> Option<Gc<'c>> {
+        let function = self
+            .fields()
+            .function
+            .get(self.context)
+            .downcast::<Closure>()?;
+        let (names, _) = slot_layout(function)?;
+        let slot = names.iter().position(|name| name.is(symbol))?;
+        Some(self.slot(slot))
+    }
+}
+
+/// The environment of the live frame at `index`, made for a slot frame that has none yet
+/// (`eval::frame_env`); `cause` says what asked for it.
+pub fn frame_environment<'s>(
+    context: &mut Cx<'s>,
+    index: usize,
+    cause: crate::eval::Reify,
+) -> R<Local<'s, Environment>> {
+    // SAFETY: making the environment allocates, which `&mut Cx` permits, and the frame holds
+    // the environment it returns.
+    unsafe {
+        let environment = crate::eval::frame_env(index, cause)?;
+        Ok(context.root(Gc::<Environment>::adopt(environment)))
+    }
+}
+
+/// What the code of the unforced `promise` gives when run where the promise was made: its
+/// compiled code if it has any, else its expression evaluated in its environment. An
+/// environment reference keeps its code and environment where a promise does.
+pub fn run_promise_code<'s>(context: &mut Cx<'s>, promise: Local<'_, Promise>) -> R<Local<'s>> {
+    let fields = promise.read(context);
+    // SAFETY: the promise is rooted and holds its code and environment while its code runs,
+    // and running it runs R code, which `&mut Cx` permits. The result is rooted before
+    // anything else allocates.
+    unsafe {
+        let (code, environment) = (fields.compiled().raw(), fields.environment().raw());
+        let value = if code.kind() == SexpType::Bytecode {
+            bytecode::run_promise(code, environment)?
+        } else {
+            crate::eval::eval(fields.code().raw(), environment)?
+        };
+        Ok(rooted(context, value))
+    }
+}
+
+/// What the promise code `code`, compiled against the slot table of `frame`'s function, gives
+/// when run on the frame's slots (`bytecode::run_promise_on_slots`).
+#[inline]
+pub fn run_on_slots<'s>(
+    context: &mut Cx<'s>,
+    code: Local<'_, Bytecode>,
+    frame: usize,
+) -> R<Local<'s>> {
+    let fields = &crate::interp().frames[frame];
+    let (function, header) = (fields.function.raw(), fields.slots as usize);
+    // SAFETY: the code is rooted, the frame holds its function and its registers while the
+    // code runs, and running it runs R code, which `&mut Cx` permits. The result is rooted
+    // before anything else allocates.
+    unsafe {
+        let value = bytecode::run_promise_on_slots(code.raw(), function, frame, header)?;
+        Ok(rooted(context, value))
+    }
+}
+
+/// `value` checked against the annotation the checked `promise` carries
+/// (`annotations::check_forced`).
+pub fn check_forced<'s>(
+    context: &mut Cx<'s>,
+    promise: Local<'_, Promise>,
+    value: Local<'_>,
+) -> R<Local<'s>> {
+    // SAFETY: both are rooted, and a check may raise an error or convert the value, which
+    // `&mut Cx` permits. The result is rooted before anything else allocates.
+    unsafe {
+        let value = crate::annotations::check_forced(promise.raw(), value.raw())?;
+        Ok(rooted(context, value))
+    }
+}
+
+/// Ends the tracked moves that forcing `promise` could observe (`moves::forcing`).
+#[inline]
+pub fn forcing(_context: &mut Cx<'_>, promise: Local<'_, Promise>) -> R<()> {
+    // SAFETY: the promise is rooted, and ending a move may run code, which `&mut Cx` permits.
+    unsafe { crate::moves::forcing(promise.raw()) }
+}
+
+/// Records for the boundary-call recorder that R code runs in the environment `environment`
+/// gives ([`crate::capture::evaluating`]) until the returned scope drops.
+#[inline(always)]
+pub fn evaluating<'c>(
+    _context: &'c Cx<'_>,
+    environment: impl FnOnce() -> Gc<'c>,
+) -> crate::capture::Scope {
+    // SAFETY: the environment is live when the recorder reads it, which it does at once.
+    unsafe { crate::capture::evaluating(|| environment().raw()) }
+}
+
+/// `failure`, signalled as an error raised by the evaluator (`conditions::signal_error`).
+pub fn signal_error(_context: &mut Cx<'_>, failure: crate::unwind::RError) -> Unwind {
+    // SAFETY: signalling runs the calling handlers, which are R code, as `&mut Cx` permits.
+    unsafe { conditions::signal_error(failure) }
+}
+
 /// What a read by name of `symbol` finds in the slot of the live slot frame that `environment`
 /// stands for (`eval::slot_binding`).
 #[inline]
@@ -3701,21 +3913,6 @@ pub fn assign_local(
             environment.raw(),
             binding.map(Local::raw),
         )
-    }
-}
-
-/// The variable `symbol` a replacement in a slot frame changes, read from the frame's
-/// `enclosure` because its slots do not bind it.
-pub fn enclosed_value<'s>(
-    context: &mut Cx<'s>,
-    symbol: Local<'_, Symbol>,
-    enclosure: Local<'_, Environment>,
-) -> R<Local<'s>> {
-    // SAFETY: both are rooted, and the lookup forces promises and may signal, which `&mut Cx`
-    // permits.
-    unsafe {
-        let value = crate::eval::enclosed_value(symbol.raw(), enclosure.raw())?;
-        Ok(rooted(context, value))
     }
 }
 

@@ -66,6 +66,38 @@ impl<'s> Cx<'s> {
         }
     }
 
+    /// The cell `environment`'s own frame holds for `symbol` as it stands. A slot frame's
+    /// environment answers for its cells alone ([`Heap::own_cell`]), so no variable moves.
+    #[inline]
+    pub fn own_binding<'a>(
+        &'a self,
+        environment: impl Pointer<Environment>,
+        symbol: impl Pointer<Symbol>,
+    ) -> Option<Gc<'a, Binding>> {
+        // SAFETY: the heap is live, both objects are live, and the read allocates nothing.
+        let cell = unsafe { (*self.heap.as_ptr()).own_cell(environment.raw(), symbol.raw())? };
+        // SAFETY: the environment holds the cell, and nothing collects while `self` is borrowed.
+        Some(unsafe { Gc::adopt(cell) })
+    }
+
+    /// The position on the interpreter's frame stack of the live slot frame `environment`
+    /// stands for ([`Heap::slot_owner`]).
+    #[inline]
+    pub fn slot_owner(&self, environment: impl Pointer<Environment>) -> Option<usize> {
+        // SAFETY: the heap and the environment are live, and the read allocates nothing.
+        unsafe { (*self.heap.as_ptr()).slot_owner(environment.raw()) }
+    }
+
+    /// Stores `value` as the value of the unforced `promise` and drops its environment
+    /// ([`Heap::settle_promise`]). It takes `&self` because the store frees nothing: an object
+    /// that loses its last counted reference is only listed for the next collection.
+    #[inline]
+    pub fn settle_promise(&self, promise: impl Pointer<Promise>, value: impl Pointer<Value>) {
+        // SAFETY: the heap and both objects are live, and the store counts the reference and
+        // runs the write barrier without allocating or freeing.
+        unsafe { (*self.heap.as_ptr()).settle_promise(promise.raw(), value.raw()) }
+    }
+
     /// The answer `read` finds in the heap, or else the answer of `rest`, which may allocate.
     /// Because the answer borrows the context, a caller returns it before the next safepoint
     /// and it needs no root.
@@ -517,6 +549,33 @@ impl<'a> Gc<'a, Promise> {
         // SAFETY: the promise is live for `'a` and keeps its value alive.
         unsafe { Gc::adopt(self.raw.car()) }
     }
+
+    /// Sets or clears the interpreter's flags `bits` of the promise: its forcing state, which
+    /// only the interpreter reads.
+    #[inline]
+    pub fn set_flags(self, bits: u16, on: bool) {
+        // SAFETY: the promise is live for `'a`, and the flags are bits of its header that no
+        // reader keeps across a change.
+        unsafe { self.raw.set_gp_bits(bits, on) }
+    }
+
+    /// The environment the expression is evaluated in, `NULL` once the promise is forced. An
+    /// argument reference ([`gp::ARGUMENT_REFERENCE`]) keeps its caller's environment or code
+    /// here, or `NULL`.
+    #[inline]
+    pub fn environment(self) -> Gc<'a> {
+        // SAFETY: the promise is live for `'a` and keeps its environment alive.
+        unsafe { Gc::adopt(self.raw.tag()) }
+    }
+
+    /// The compiled code the promise runs in place of its expression, or `NULL`: the
+    /// interpreter keeps it in the attribute field, which a promise otherwise never uses. A slot
+    /// frame's argument reference keeps the frame and slot it reads here.
+    #[inline]
+    pub fn compiled(self) -> Gc<'a> {
+        // SAFETY: the promise is live for `'a` and keeps its attribute field alive.
+        unsafe { Gc::adopt(self.raw.attrib()) }
+    }
 }
 
 impl<'a> Gc<'a, Closure> {
@@ -532,6 +591,14 @@ impl<'a> Gc<'a, Closure> {
     pub fn body(self) -> Gc<'a> {
         // SAFETY: the closure is live for `'a` and keeps its body alive.
         unsafe { Gc::adopt(self.raw.cdr()) }
+    }
+
+    /// The environment the closure was defined in, which encloses the environment of a call.
+    #[inline]
+    pub fn environment(self) -> Gc<'a, Environment> {
+        // SAFETY: the closure is live for `'a` and keeps its environment alive, and a closure's
+        // environment is always an environment.
+        unsafe { Gc::adopt(self.raw.tag()) }
     }
 }
 

@@ -35,12 +35,13 @@ use {
         builtins::Arg,
         bytecode,
         eval::{self, Args},
-        interp, records, standard_library,
+        handles, interp, records, standard_library,
         unwind::R,
         values::{self, missing_arg, nil, symbol_name, symbols},
     },
     heap::{
         Marker, activity,
+        handle::Gc,
         object::{Sexp, SexpType, gp},
         records::NativeKind,
     },
@@ -905,8 +906,10 @@ unsafe fn resolve_function(symbol: Sexp, heads: Heads) -> Option<Sexp> {
     let mut env = match heads {
         Heads::Env(env) => env,
         Heads::Frame(owner) => {
-            if let Some(value) = eval::frame_slot(owner, symbol)
-                && let Some(found) = function_of(value)
+            if let Some(value) = handles::reading(|context| {
+                let frame = handles::live_frame(context, owner);
+                eval::frame_variable(context, frame, Gc::adopt(symbol)).map(|value| value.raw())
+            }) && let Some(found) = function_of(value)
             {
                 return found;
             }
@@ -922,7 +925,10 @@ unsafe fn resolve_function(symbol: Sexp, heads: Heads) -> Option<Sexp> {
             return function_of(cell.cdr()).flatten();
         }
         let value = if env.has_gp(gp::PENDING_FRAME) {
-            eval::pending_slot(env, symbol)
+            handles::reading(|context| {
+                let frame = handles::pending_frame(context, Gc::adopt(env));
+                eval::frame_variable(context, frame, Gc::adopt(symbol)).map(|value| value.raw())
+            })
         } else {
             match heap.frame_cell(env, symbol) {
                 Some(cell) if cell.has_gp(gp::ACTIVE_BINDING) => return None,
