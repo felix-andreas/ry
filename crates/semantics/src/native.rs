@@ -3031,10 +3031,7 @@ fn matched_formals(
     let mut filled = supplied;
     for (name, _) in arguments {
         if name.is_none() {
-            match open.next() {
-                Some(index) => filled |= bit(index),
-                None => return None,
-            }
+            filled |= bit(open.next()?);
         }
     }
     parameters
