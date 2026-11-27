@@ -346,13 +346,17 @@ pub fn set_check(
     interp::lower::set_source_elaborator(elaborated_source);
 }
 
-/// The host's [`ElaborateSource`] as interp's `SourceElaborator`. The elaborated text is
-/// taken only when the host elaborated the text the parse reads, so a file that changed on disk
-/// after R read it parses as R read it.
-fn elaborated_source(name: &str, text: &str) -> Result<Option<String>, ()> {
+/// The host's [`ElaborateSource`] as interp's `SourceElaborator`. A file whose parse holds no
+/// ry syntax runs as R reads it without asking the host, so plain R code pays one scan of its
+/// parse and reads no configuration. The elaborated text is taken only when the host elaborated
+/// the text the parse reads, so a file that changed on disk after R read it parses as R read it.
+fn elaborated_source(name: &str, text: &str, root: &SyntaxNode) -> Result<Option<String>, ()> {
     let Some(elaborate) = ELABORATE_SOURCE.get() else {
         return Ok(None);
     };
+    if !semantics::has_ry_syntax(root, text) {
+        return Ok(None);
+    }
     // A name with a NUL byte names no file the host could read.
     let Ok(name) = CString::new(name) else {
         return Ok(None);

@@ -18,7 +18,7 @@ use {
     semantics::{
         Elaboration, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{Diagnostic, RelatedLocation, Severity},
-        is_ry_syntax, session,
+        has_ry_syntax, is_ry_syntax, session,
         stubs::{install_shipped_stubs, is_native_function},
     },
     std::{
@@ -571,10 +571,6 @@ pub fn elaborate_sourced(path: &Path) -> Result<Option<(u64, String)>, CommandEr
     // The project's strict mode is the sourcing script's: a plain R file it sources keeps R's
     // types, and one that turns strict mode on itself (`# typing: strict`) is checked strictly.
     config.check.strict = false;
-    let directive = source.contains("typing: strict");
-    if !directive && !has_ry_syntax(&syntax::parse(source).syntax_node(), source) {
-        return Ok(None);
-    }
     let preflight = Preflight::new(config, path.to_path_buf());
     let file = session::command_file(&preflight.db, format!("{source}\n"));
     let db = preflight.db.clone();
@@ -993,28 +989,6 @@ fn is_strict_error(diagnostic: &Diagnostic) -> bool {
 
 fn has_inline_annotation(root: &SyntaxNode) -> bool {
     root.descendants().any(|node| is_inline_annotation(&node))
-}
-
-/// Whether `source` holds anything analysis decides: an inline or comment annotation, a
-/// `# typing:` directive, a record, tuple, list, tag or `match`, a suffixed number, or a native
-/// function call such as `List.range(1, 10)`. Missing one of these leaves an `I64` literal an R double at run time, so
-/// the test errs toward analysis.
-fn has_ry_syntax(root: &SyntaxNode, source: &str) -> bool {
-    source.contains("#:")
-        || has_inline_annotation(root)
-        || root.descendants_with_tokens().any(|element| match element {
-            NodeOrToken::Node(node) => is_ry_syntax(node.kind()),
-            NodeOrToken::Token(token) => match token.kind() {
-                SyntaxKind::SUFFIXED_NUMBER => true,
-                SyntaxKind::COMMENT => token
-                    .text()
-                    .trim_start_matches('#')
-                    .trim_start()
-                    .starts_with("typing:"),
-                SyntaxKind::IDENT => is_native_function(token.text()),
-                _ => false,
-            },
-        })
 }
 
 /// GNU R reads the plain program an annotated one means.

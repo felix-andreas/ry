@@ -820,6 +820,40 @@ pub fn comment_annotation<'db>(
     annotations.get(index).map(|(_, annotation)| annotation)
 }
 
+/// Whether `source`, parsed as `root`, holds anything analysis decides: an inline or comment
+/// annotation, a `# typing:` directive, a record, tuple, list, tag or `match`, a suffixed number,
+/// or a native function call such as `List.range(1, 10)`. Missing one of these leaves an `I64`
+/// literal an R double at run time, so the test errs toward analysis. It reads the tree's kind
+/// column and its tokens once and builds nothing, so a host runs it on every file R parses.
+pub fn has_ry_syntax(root: &SyntaxNode, source: &str) -> bool {
+    let root = root.node_ref();
+    source.contains("#:")
+        || root.any_kind(|kind| {
+            is_ry_syntax(kind)
+                || matches!(
+                    kind,
+                    SyntaxKind::SUFFIXED_NUMBER
+                        | SyntaxKind::TYPE_ASCRIPTION
+                        | SyntaxKind::RETURN_TYPE
+                        | SyntaxKind::TYPE_DEFINITION
+                        | SyntaxKind::NEW_TYPE
+                        | SyntaxKind::PURE_MARKER
+                        // A binder list outside a function's sits in a type definition or a
+                        // `#:` comment, which count anyway.
+                        | SyntaxKind::TYPE_BINDER_LIST
+                )
+        })
+        || root.tokens().any(|token| match token.kind() {
+            SyntaxKind::COMMENT => token
+                .text()
+                .trim_start_matches('#')
+                .trim_start()
+                .starts_with("typing:"),
+            SyntaxKind::IDENT => stubs::is_native_function(token.text()),
+            _ => false,
+        })
+}
+
 /// Whether a node of `kind` builds a ry value: a record, tuple, list, tag or `match`.
 pub fn is_ry_syntax(kind: SyntaxKind) -> bool {
     matches!(
