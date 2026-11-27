@@ -530,6 +530,13 @@ impl<'a, T: Kind> Gc<'a, T> {
         unsafe { self.raw.kind() }
     }
 
+    /// Whether more than one object refers to this one ([`Local::is_shared`]).
+    #[inline]
+    pub fn is_shared(self) -> bool {
+        // SAFETY: the object is live for `'a`.
+        unsafe { self.raw.refcount() > 1 }
+    }
+
     /// Whether any of the flags `bits` (`object::gp`) is set in the object's header.
     #[inline]
     pub fn has_flag(self, bits: u16) -> bool {

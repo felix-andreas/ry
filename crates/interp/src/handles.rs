@@ -3950,14 +3950,6 @@ pub fn pooled_reference<'c>(
     Some(unsafe { (Gc::adopt(reference), Gc::adopt(target)) })
 }
 
-/// Whether anything but the pool counts a reference to `reference`: a `...` list that collected
-/// it, or a frame it was detached for.
-#[inline]
-pub fn counted_elsewhere(reference: Gc<'_, Promise>) -> bool {
-    // SAFETY: the reference is live, and the count is a field of its header.
-    unsafe { reference.raw().refcount() > 1 }
-}
-
 /// A new argument reference naming `symbol` that keeps its target in `target`, outside the
 /// pool until [`place_reference`] puts it there.
 pub fn new_argument_reference<'s>(

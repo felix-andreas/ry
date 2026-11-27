@@ -220,6 +220,17 @@ for index in 0..n {
 Lists and string vectors hand out no slice of their elements, only single loads, so a store
 through `&Cx` never invalidates a borrowed slice.
 
+An allocation that cannot collect is not a safepoint either. `cx.reserve(bytes)` takes `&mut Cx`
+and runs the one collection check for a group of objects, and the allocators that follow it take
+`&Cx` (`new_environment_uncollected`, `define_locals_uncollected`), so the frame and slot values a
+slot frame's environment is built from stay `Gc` reads across those allocations.
+
+A function that returns a `Gc` from `&'a mut Cx` holds the context until the `Gc` dies, so a
+caller that needs both roots the answer (`cx.root_answer`), and code that reads an object or
+else makes it goes through `cx.read_or_make`, which tries the read under `&Cx` first. The
+argument reference pool hands out positions for the same reason: `take_reference` returns an
+index, the caller writes the target through it, and only then reads the reference.
+
 **In-place modification.** Whether an object may be changed in place is a fact about the
 interpreter: its count is one, and no register, handle or escaped list holds it uncounted
 (`slot_owns`, a call's `reusable` test). That fact is a value, `Owned<'s, T>`. It has two sources.
@@ -606,7 +617,13 @@ assignment of `<<-`), which return `Found::Unbound` for an unbound name instead 
 and promise forcing (`promise_value`, `forced_value`, the promises over a slot frame's pending
 environment and the argument references that read a slot frame's variable) with the readers that
 settle a promise without running code (`settle_without_code`, `peeked_variable`,
-`referenced_variable`). A promise is rooted for as long as its code runs, because that code can
+`referenced_variable`); and the frame machinery: the argument reference pool (`slot_reference`,
+`take_reference`, `return_references`, `detach`), a slot frame's pending environment and frame
+environment (`pending_environment`, `frame_environment_of`, `caller_environment`), the promises and
+closures over its slots (`promise_over_slots`, `closure_over_slots`), the readers of its slots
+(`frame_dots`, `variable_register`, `formal_slots`) and the lifting of its slots into an
+environment (`lift`, `box_slots`). The predicates that ask whether a slot or a reference is a
+missing argument (`value_is_missing`, `reference_is_missing`, `symbol_is_missing`) stay raw. A promise is rooted for as long as its code runs, because that code can
 remove the last binding that holds it. A reader reaches a live frame through
 `handles::LiveFrame`, which borrows the context, so a slot read through it cannot outlive an
 allocation; `handles::pending_frame` panics when the environment's frame has returned.
@@ -649,10 +666,9 @@ The order:
 1. `interp`, by risk and not by ease: the paths that keep a value across an allocation or write
    in place go first (tier 0's stores, the replacement and attribute builtins, name matching,
    string encoding), then `values.rs`, the evaluator and the bytecode loop, and the leaf builtins
-   last, because a leaf rarely holds a value across a safepoint. The frame machinery (the
-   argument reference pool, a slot frame's pending environment and the lifting of its slots into
-   an environment) moves with the bytecode loop's register accessor, because it writes registers,
-   which `Held<T>` does not cover.
+   last, because a leaf rarely holds a value across a safepoint. The frame machinery writes a
+   slot frame's registers through `LiveFrame` (`store_slot`, `unbind_slots`), which borrows the
+   context; the bytecode loop's own register accessor comes next.
 2. `stats`, `graphics`, `frames`.
 3. `libr`, `jit`, `typed`: entry points make a `Cx`; raw access leaves their bodies.
 4. `heap` stops exporting the raw accessors outside a `raw` module that only the boundary imports,

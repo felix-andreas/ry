@@ -1726,7 +1726,7 @@ fn reference_at<'c>(context: &'c Cx<'_>, index: usize) -> Gc<'c, Promise> {
 fn take_reference<'s>(context: &mut Cx<'s>, symbol: Local<'_>) -> R<usize> {
     let index = interp().references_used as usize;
     match handles::pooled_reference(context, index) {
-        Some((reference, _)) if !handles::counted_elsewhere(reference) => {
+        Some((reference, _)) if !reference.is_shared() => {
             context.set_promise_code(reference, symbol);
             // A call that failed while forcing the reference left it marked, and the mark
             // belongs to that call's argument, not to the one that takes the reference next.
