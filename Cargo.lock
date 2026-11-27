@@ -2211,6 +2211,7 @@ dependencies = [
  "syntax",
  "table",
  "typed",
+ "xxhash-rust",
 ]
 
 [[package]]

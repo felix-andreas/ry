@@ -1172,6 +1172,7 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - A result that differs by family is `Promoted<T>` (the operand type for a ry number, `double` for an R value) or `Compared<T>` (`Bool` or `logical`). It is a type, not an overload pair, so one signature serves both families and reduces as soon as `T` resolves. A whole-number literal keeps `T` under integer-preserving arithmetic (`x + 1L`).
 - Where only R values fit (an overload set's argument, a union operand, a condition, an operand beside another open value) a family narrows to its R outcome, because those rules type R's semantics.
 - A family operand variable that reaches no parameter defaults to `double` at generalization, so no unsolvable family leaks into an export.
+- A function return `Promoted<T>` (alone or in a union with `T`) checked against `T` itself (a fold callback against `fn(U, T) -> U`) settles `T` to a fixed point of the family (`InferenceTable::family_fixed_point`): R's outcome when the constraint admits it, else the ry half (`number`, or `Bool` for `Compared<T>`). A settled `logical` takes `Widening::Joined`, so a later init of another R type joins it as a union instead of rebinding it to a number, which would break `Compared<T> = T`. Only function returns settle this way, because a branch join (`if (flag) x <- x + 1`) must keep `T | Promoted<T>` polymorphic. Both halves admitted picks R's `double`, the R result of the untyped callbacks this comes from; keeping both would need a constraint of exactly `double` or a ry number, which no `Constraint` spells.
 - `num` meets a ry constraint as that constraint, a `List` item as `number`, and anything R as `numeric`; a number literal stays the literal. A condition narrows an open `num` value to `numeric` (`Checker::narrow_condition_number`). `has_r_bound` counts every joined constraint, so such a signature is a boundary function.
 
 ## A comparison of an open operand asks what both families compare
@@ -1184,3 +1185,20 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - `Compared<T>` over a ry record, tuple, tag or nominal is `Bool`, and over a ry `List` `List<Bool>`, since a `List` compares item by item (`InferenceTable::family`); a `List` meets the comparison constraints through its item type.
 - `key` admits ry values, so it meets a comparison family as an R atomic scalar (`AtomicElement`), as it meets an arithmetic one; otherwise a key compared with a number would let a `Str` through.
 - Two different open operands record a compared pair (the entry above); one beside a string literal asks `comparable or Str`.
+
+## Record and tag payload fields display in sorted order
+
+**Status:** settled (type rendering in `types.rs`).
+
+- A record type and a tag payload show their fields sorted by name, in diagnostics as in hovers, so `:Rect(width: double, height: double)` displays as `:Rect(height: double, width: double)`.
+- The sorted order is the semantics: a positional index counts the sorted fields (`type-system.mdx`), and a structural type has no declaration order to recover, since two spellings of one record are the same interned type. Roc sorts record fields the same way.
+
+## A fold's accumulator rebinds to the type its init gives under arithmetic
+
+**Status:** built (`Widening::Folded` in `infer.rs`; `inference.R.test` case `a_fold_accumulator_takes_the_type_its_init_gives_under_arithmetic`).
+
+- Previous shape: a callback doing arithmetic on its accumulator (`function(acc, x) acc * 2`) settled `T = Promoted<T>` as `double` with a fixed binding, so `Reduce(f, list(1:3, 4:6), c(1L, 2L, 3L))` and `Reduce(function(acc, x) acc - 0.5, 1:3, Sys.Date())` were false errors blamed on the init.
+- The binding keeps the variable's constraint from before the fixed point, and a later init it admits rebinds it to what R's fold returns: a number joins `double` by `numeric_join` (`integer[]` gives `double[]`, a scalar `integer` stays `double`), and a class with arithmetic (`Date`, `matrix`) or a ry number keeps its own type.
+- The constraint is the guard, so `acc * 1.5` with an `I64` init is refused, and a `character` init fails.
+- The `double` is provisional only until the first value meets it: a value that fits settles it, and one that does not rebinds it once and settles it. A value checked against `double` is never left unchecked against a later rebinding (`fold3(f, 1.5, Sys.Date())` for `fn(f: fn(A, integer) -> A, a: A, b: A)` is a mismatch; case `a_fold_accumulator_settles_at_the_first_value_that_meets_it`).
+- Known gap: `arithmetic` admits any class, so `Reduce(function(acc, x) acc * 2, 1:3, Sys.Date())` types as `Date` although R's `*` refuses a `Date`, as `twice(Sys.Date())` does for `twice <- function(x) x * 2`. Asking whether a class defines the operator closes both.

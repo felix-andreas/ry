@@ -4,6 +4,7 @@
 //! reader against each other over the types a parameter can declare.
 
 use {
+    interp::testing::with_interpreter,
     semantics::{
         DocumentKind, ProjectFiles, RootDatabase, SourceFile, TypeDefinitions,
         canonical_annotation, stubs::install_shipped_stubs,
@@ -32,21 +33,59 @@ type Tree = :Leaf(I64) | :Node(Tree, Tree)
 type Meters = F64
 ";
 
+/// What the reader gives for a canonical spelling: a type, or the field items of a record or
+/// tuple shape in slot order, written out (`Record{Dbl, Str}`, `List<Record{I64}>`).
+#[derive(Debug, PartialEq)]
+enum Read {
+    Exact(Option<Type>),
+    Boxed(String),
+}
+
+fn read(ty: Option<Type>) -> Read {
+    match ty {
+        Some(Type::Record(shape)) => Read::Boxed(written_item(Item::Record(shape))),
+        Some(Type::Vector {
+            item: item @ Item::Record(_),
+            array: true,
+        }) => Read::Boxed(format!("List<{}>", written_item(item))),
+        other => Read::Exact(other),
+    }
+}
+
+fn written_item(item: Item) -> String {
+    match item {
+        Item::Record(shape) => {
+            let items: Vec<String> = shapes::fields(shape)
+                .1
+                .into_iter()
+                .map(written_item)
+                .collect();
+            format!("Record{{{}}}", items.join(", "))
+        }
+        Item::Array(array) => format!("List<{}>", written_item(shapes::array_item(array))),
+        other => format!("{other:?}"),
+    }
+}
+
 /// Each written parameter type, its canonical spelling (`None` when it stays as written), and
-/// the values the reader expects from R for that spelling (`None` when none arrive from R).
+/// the values the reader expects from R for that spelling (`Exact(None)` when none arrive from
+/// R).
 #[test]
 fn canonical_spellings_read_back() {
-    let vector = |item, array| Some(Type::Vector { item, array });
-    let tag = Some(Type::Tag(shapes::ANY));
-    let cases: Vec<(&str, Option<&str>, Option<Type>)> = vec![
-        ("I64", Some("I64"), Some(Type::I64)),
-        ("F64", Some("F64"), Some(Type::Dbl)),
-        ("Bool", Some("Bool"), Some(Type::Lgl)),
-        ("Str", Some("Str"), Some(Type::Str)),
-        ("integer", Some("integer"), Some(Type::Int)),
-        ("double", Some("double"), Some(Type::Dbl)),
-        ("logical", Some("logical"), Some(Type::Lgl)),
-        ("character", Some("character"), Some(Type::Str)),
+    let vector = |item, array| Read::Exact(Some(Type::Vector { item, array }));
+    let exact = |ty| Read::Exact(Some(ty));
+    let boxed = |written: &str| Read::Boxed(written.to_string());
+    let none = || Read::Exact(None);
+    let tag = || exact(Type::Tag(shapes::ANY));
+    let cases: Vec<(&str, Option<&str>, Read)> = vec![
+        ("I64", Some("I64"), exact(Type::I64)),
+        ("F64", Some("F64"), exact(Type::Dbl)),
+        ("Bool", Some("Bool"), exact(Type::Lgl)),
+        ("Str", Some("Str"), exact(Type::Str)),
+        ("integer", Some("integer"), exact(Type::Int)),
+        ("double", Some("double"), exact(Type::Dbl)),
+        ("logical", Some("logical"), exact(Type::Lgl)),
+        ("character", Some("character"), exact(Type::Str)),
         ("double[]", Some("double[]"), vector(Item::Dbl, false)),
         ("integer[]", Some("integer[]"), vector(Item::Int, false)),
         ("character[]", Some("character[]"), vector(Item::Str, false)),
@@ -58,40 +97,57 @@ fn canonical_spellings_read_back() {
         ("Ids", Some("List<I64>"), vector(Item::I64, true)),
         ("Prices", Some("double[]"), vector(Item::Dbl, false)),
         ("Costs", Some("double[]"), vector(Item::Dbl, false)),
-        ("Region", Some(":North | :South"), tag),
-        (":A | :B(I64)", Some(":A | :B(I64)"), tag),
-        ("Tree", Some(":Leaf(I64) | :Node(Tree, Tree)"), tag),
-        ("Meters", Some("F64"), Some(Type::Dbl)),
+        ("Region", Some(":North | :South"), tag()),
+        (":A | :B(I64)", Some(":A | :B(I64)"), tag()),
+        ("Tree", Some(":Leaf(I64) | :Node(Tree, Tree)"), tag()),
+        ("Meters", Some("F64"), exact(Type::Dbl)),
         ("List<Meters>", Some("List<F64>"), vector(Item::Dbl, true)),
         ("List< I64 >", Some("List<I64>"), vector(Item::I64, true)),
         (
             "List<Tree>",
             Some("List<:Leaf(I64) | :Node(Tree, Tree)>"),
-            None,
+            none(),
         ),
         (
             "Sales",
             Some("DataFrame{price: double[]}"),
-            Some(Type::Table),
+            exact(Type::Table),
         ),
-        ("DataFrame", Some("DataFrame"), Some(Type::Table)),
-        ("Rule", Some("Expr"), Some(Type::Table)),
-        ("Point", Some("Record{x: F64, y: F64}"), None),
-        ("Boxed<I64>", Some("Record{value: I64}"), None),
+        ("DataFrame", Some("DataFrame"), exact(Type::Table)),
+        ("Rule", Some("Expr"), exact(Type::Table)),
+        (
+            "Point",
+            Some("Record{x: F64, y: F64}"),
+            boxed("Record{Dbl, Dbl}"),
+        ),
+        (
+            "Boxed<I64>",
+            Some("Record{value: I64}"),
+            boxed("Record{I64}"),
+        ),
         (
             "Record{id: I64, region: Region}",
             Some("Record{id: I64, region: :North | :South}"),
-            None,
+            none(),
         ),
-        ("List<Point>", Some("List<Record{x: F64, y: F64}>"), None),
-        ("Pair", Some("Tuple{I64, Str}"), None),
-        ("Counts", Some("Dict<Str, I64>"), None),
-        ("Dict<Str, List<F64>>", Some("Dict<Str, List<F64>>"), None),
-        ("Set<I64>", Some("Set<I64>"), None),
-        ("Step", Some("fn(I64) -> I64"), None),
-        ("fn(F64) -> F64", Some("fn(F64) -> F64"), None),
+        (
+            "List<Point>",
+            Some("List<Record{x: F64, y: F64}>"),
+            boxed("List<Record{Dbl, Dbl}>"),
+        ),
+        ("Pair", Some("Tuple{I64, Str}"), boxed("Record{I64, Str}")),
+        (
+            "Record{name: Str, at: Point, ids: List<I64>}",
+            Some("Record{at: Record{x: F64, y: F64}, ids: List<I64>, name: Str}"),
+            boxed("Record{Record{Dbl, Dbl}, List<I64>, Str}"),
+        ),
+        ("Counts", Some("Dict<Str, I64>"), none()),
+        ("Dict<Str, List<F64>>", Some("Dict<Str, List<F64>>"), none()),
+        ("Set<I64>", Some("Set<I64>"), none()),
+        ("Step", Some("fn(I64) -> I64"), none()),
+        ("fn(F64) -> F64", Some("fn(F64) -> F64"), none()),
         // An open record has no closed spelling, so it stays as written.
-        ("Record{a: I64, ..}", None, None),
+        ("Record{a: I64, ..}", None, none()),
     ];
     let mut source = format!("# typing: strict\n{DEFINITIONS}");
     for (index, (written, _, _)) in cases.iter().enumerate() {
@@ -115,7 +171,7 @@ fn canonical_spellings_read_back() {
         })
         .collect();
     assert_eq!(formals.len(), cases.len());
-    for (node, (written, canonical, read)) in formals.iter().zip(&cases) {
+    for (node, (written, canonical, expected)) in formals.iter().zip(&cases) {
         assert_eq!(node.text().to_string(), *written);
         let spelled = canonical_annotation(&db, definitions, node);
         assert_eq!(
@@ -124,7 +180,9 @@ fn canonical_spellings_read_back() {
             "the canonical spelling of `{written}`"
         );
         let text = spelled.unwrap_or_else(|| written.to_string());
-        assert_eq!(annotated_type(&text), *read, "the reading of `{text}`");
+        // SAFETY: the reader interns symbols and layouts on the interpreter, held here.
+        let got = with_interpreter(|| read(unsafe { annotated_type(&text) }));
+        assert_eq!(got, *expected, "the reading of `{text}`");
     }
 }
 

@@ -14,8 +14,8 @@
 //! the name finds then, as any typed function does after a rebinding.
 //!
 //! A function compiles ahead only when each parameter declares a type that says which values
-//! arrive from R. One that takes a record or a function compiles when a typed caller compiles,
-//! for the types the caller passes.
+//! arrive from R. One that takes an open record or a function compiles when a typed caller
+//! compiles, for the types the caller passes.
 
 use {
     crate::{
@@ -23,7 +23,10 @@ use {
         ir::{Item, Type},
         shapes,
     },
-    heap::object::Sexp,
+    heap::{
+        object::Sexp,
+        records::{Fields, Layout},
+    },
     interp::{ahead::Program, annotations, values as rvalues},
     rustc_hash::FxHashMap,
     smallvec::SmallVec,
@@ -200,13 +203,22 @@ pub(crate) unsafe fn declared_params(closure: Sexp) -> Result<SmallVec<[Type; 4]
 /// the checks' storage masks do not give. The preflight spells every type of a signature
 /// canonically (`semantics::canonical_annotation`), with no alias or type of the program left to
 /// look up, so the text alone says which values arrive. A tag from R is any tag, whichever union
-/// the annotation names, because R code can build every tag. A record or tuple from R takes its
-/// type from its value at the call, and a set or a dictionary has no R value, so this gives no
-/// type for a parameter of one and its closure compiles at its first call.
-pub fn annotated_type(annotation: &str) -> Option<Type> {
+/// the annotation names, because R code can build every tag. A record or tuple takes the shape
+/// its fields give a value converted from R (`to_box`), so a value of another storage, such as
+/// an integer in a `double` field, misses the code and compiles at the call. An open record, a
+/// record or list that holds a tag, and a set or a dictionary, which has no R value, give no
+/// type, and such a closure compiles at its first call.
+///
+/// # Safety
+///
+/// Interns symbols and layouts, so it runs on the interpreter's thread.
+pub unsafe fn annotated_type(annotation: &str) -> Option<Type> {
     let annotation = annotation.trim();
     if annotation.starts_with(':') {
         return Some(Type::Tag(shapes::ANY));
+    }
+    if let Some(boxed) = annotated_box(annotation) {
+        return Some(Type::of_item(boxed));
     }
     if let Some(items) = annotation.strip_suffix("[]") {
         return annotated_item(items.trim_end()).map(Type::vector);
@@ -216,7 +228,7 @@ pub fn annotated_type(annotation: &str) -> Option<Type> {
         .and_then(|rest| rest.trim_start().strip_prefix('<'))
         .and_then(|rest| rest.strip_suffix('>'))
     {
-        return annotated_item(items.trim()).map(|item| Type::Vector { item, array: true });
+        return annotated_field(items.trim()).map(|item| Type::Vector { item, array: true });
     }
     // A table type may spell out its columns, as in `DataFrame{price: double[]}`, which say
     // nothing about how the value arrives.
@@ -231,6 +243,91 @@ pub fn annotated_type(annotation: &str) -> Option<Type> {
         return Some(Type::Table);
     }
     annotated_item(annotation).map(Type::of_item)
+}
+
+/// The item of a record or tuple annotation, `Record{x: F64, y: F64}` or `Tuple{I64, Str}`,
+/// with fields in the layout's slot order: named fields sorted by the bytes of their names.
+unsafe fn annotated_box(annotation: &str) -> Option<Item> {
+    let (named, inner) = if let Some(inner) = annotation.strip_prefix("Record{") {
+        (true, inner.strip_suffix('}')?)
+    } else {
+        (false, annotation.strip_prefix("Tuple{")?.strip_suffix('}')?)
+    };
+    let parts = top_level_parts(inner)?;
+    let mut fields: SmallVec<[(&str, Item); 4]> = SmallVec::new();
+    for part in parts {
+        let (name, ty) = if named {
+            let (name, ty) = part.split_once(':')?;
+            (name.trim().trim_matches('`'), ty)
+        } else {
+            ("", part)
+        };
+        if ty.trim().starts_with("..") || name.starts_with("..") {
+            return None;
+        }
+        fields.push((name, annotated_field(ty.trim())?));
+    }
+    if fields.is_empty() {
+        return None;
+    }
+    let layout_fields = if named {
+        fields.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let mut symbols = Vec::with_capacity(fields.len());
+        for (name, _) in &fields {
+            // A name R cannot intern leaves the parameter to its first call, which reports why.
+            symbols.push(rvalues::install(name).ok()?);
+        }
+        Fields::Named(symbols.into_boxed_slice())
+    } else {
+        Fields::Positional(u32::try_from(fields.len()).ok()?)
+    };
+    let layout = interp::heap().layouts.intern(Layout {
+        tag: None,
+        fields: layout_fields,
+    });
+    let items: SmallVec<[Item; 4]> = fields.iter().map(|&(_, item)| item).collect();
+    shapes::intern(layout, &items).map(Item::Record)
+}
+
+/// The item a record field or list item of this annotation holds once converted from R: a
+/// scalar, a ry list or a nested record or tuple. A tag gives none: a `match` on a tag inside a
+/// box compiles only for the tag shapes a converted value confirmed, and before the script runs
+/// none is, so the closure waits for its first call.
+unsafe fn annotated_field(annotation: &str) -> Option<Item> {
+    if let Some(items) = annotation
+        .strip_prefix("List")
+        .and_then(|rest| rest.trim_start().strip_prefix('<'))
+        .and_then(|rest| rest.strip_suffix('>'))
+    {
+        let item = annotated_field(items.trim())?;
+        return Some(Item::Array(shapes::with(|shapes| shapes.array_of(item))));
+    }
+    annotated_box(annotation).or_else(|| annotated_item(annotation))
+}
+
+/// The parts of a field list between commas outside brackets, or `None` when the brackets do
+/// not balance. A trailing comma ends the list.
+fn top_level_parts(text: &str) -> Option<SmallVec<[&str; 4]>> {
+    let mut parts = SmallVec::new();
+    let (mut depth, mut start) = (0usize, 0);
+    for (index, byte) in text.bytes().enumerate() {
+        match byte {
+            b'{' | b'<' | b'(' | b'[' => depth += 1,
+            b'}' | b'>' | b')' | b']' => depth = depth.checked_sub(1)?,
+            b',' if depth == 0 => {
+                parts.push(&text[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    if !text[start..].trim().is_empty() {
+        parts.push(&text[start..]);
+    }
+    Some(parts)
 }
 
 fn annotated_item(name: &str) -> Option<Item> {

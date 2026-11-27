@@ -4922,6 +4922,35 @@ fn typed_to_typed_calls_evaluate_their_arguments_first() {
 }
 
 #[test]
+fn typed_calls_force_the_variables_they_pass_but_not_missing_ones() {
+    // A typed function's call evaluates a variable it passes even when that variable is its own
+    // still lazy argument from R code, and a local callee that never reads it changes nothing.
+    // A missing argument it passes on stays missing, so `missing()` in the callee reads it.
+    with_interpreter(|| {
+        // SAFETY: the interpreter is installed.
+        unsafe {
+            for mode in [Mode::Off, Mode::On] {
+                jit::install_mode(mode);
+                run("pass_calls <- 0");
+                run("pass_count <- function() { pass_calls <<- pass_calls + 1; 2 }");
+                run("pass_local <- function(x: F64) -> F64 { \
+                     h <- function(a: F64) -> F64 1; v <- h(x); v }");
+                run("pass_missing <- function(a: double) missing(a)");
+                run("pass_through <- function(b: double) pass_missing(b)");
+                run("pass_r <- function(c) pass_through(c)");
+                for _ in 0..3 {
+                    assert_eq!(run("pass_local(pass_count())"), run("1"));
+                    assert_eq!(run("pass_r()"), run("TRUE"), "in mode {mode:?}");
+                    assert_eq!(run("pass_r(1)"), run("FALSE"), "in mode {mode:?}");
+                }
+                assert_eq!(run("pass_calls"), run("3"), "in mode {mode:?}");
+            }
+            jit::install_mode(Mode::Off);
+        }
+    });
+}
+
+#[test]
 fn typed_core_runs_list_programs_without_stopping() {
     // Each case compiles and must finish natively on every call, agreeing with tier 0: native
     // code that stops and lets the interpreter run the call again gives the right value too, so

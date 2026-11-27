@@ -56,6 +56,17 @@ pub enum Widening {
     Compared {
         equality: bool,
     },
+    /// Settled as the outcome a callback keeps (`Compared<T> = T`), so another R type joins it
+    /// as a union rather than rebinding it.
+    Joined,
+    /// Settled as R's outcome of arithmetic a fold's callback does on its accumulator
+    /// (`Promoted<T> = T` binds `double`). The first value that meets it settles it: one that
+    /// fits keeps `double`, and an init the variable's earlier `constraint` admits rebinds it
+    /// to what the fold returns from that init: a number vector promotes (`integer[]` gives
+    /// `double[]`), and a class with arithmetic (`Date`) or a ry number keeps its type.
+    Folded {
+        constraint: Constraint,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -773,7 +784,13 @@ impl<'db> InferenceTable<'db> {
                 if let (Some(left), Some(right)) = (&left.variadic, &right.variadic) {
                     self.unify(db, left.element, right.element)?;
                 }
-                self.unify(db, left.ret, right.ret)?;
+                match self
+                    .family_fixed_point(db, left.ret, right.ret)
+                    .or_else(|| self.family_fixed_point(db, right.ret, left.ret))
+                {
+                    Some(settled) => settled?,
+                    None => self.unify(db, left.ret, right.ret)?,
+                }
                 // A ry value compares only with its own type, so a pair one function compares
                 // makes the other side of it that type.
                 for pair in left.compared.iter().chain(right.compared) {
@@ -1226,6 +1243,94 @@ impl<'db> InferenceTable<'db> {
         }
     }
 
+    /// [`Self::compatible`] for a function's return against the one expected of it.
+    pub fn return_compatible(
+        &mut self,
+        db: &'db dyn Db,
+        actual: Ty<'db>,
+        expected: Ty<'db>,
+    ) -> bool {
+        match self.family_fixed_point(db, actual, expected) {
+            Some(settled) => settled.is_ok(),
+            None => self.compatible(db, actual, expected),
+        }
+    }
+
+    /// A callback returning `Promoted<T>` (alone or beside `T`) where `T` is expected back, as
+    /// a fold's accumulator asks: `T` settles to a type the family keeps, R's outcome first
+    /// (`.agents/memory/decisions/type-checker.md`). `None` when the returns are not that shape.
+    fn family_fixed_point(
+        &mut self,
+        db: &'db dyn Db,
+        actual: Ty<'db>,
+        expected: Ty<'db>,
+    ) -> Option<Result<(), UnifyError<'db>>> {
+        let TyKind::Var(expected) = *self.shallow_resolve(db, expected).kind(db) else {
+            return None;
+        };
+        let var = self.find(expected);
+        let Entry::Unbound { constraint, .. } = *self.entry(var) else {
+            return None;
+        };
+        let actual = self.shallow_resolve(db, actual);
+        let members = match actual.kind(db) {
+            TyKind::Union(members) => *members,
+            _ => std::slice::from_ref(&actual),
+        };
+        let mut family = None;
+        for &member in members {
+            let member = self.shallow_resolve(db, member);
+            let operand = match *member.kind(db) {
+                TyKind::Family(result, operand) if family.is_none_or(|known| known == result) => {
+                    family = Some(result);
+                    operand
+                }
+                _ => member,
+            };
+            let TyKind::Var(operand) = *self.shallow_resolve(db, operand).kind(db) else {
+                return None;
+            };
+            if self.find(operand) != var {
+                return None;
+            }
+        }
+        let result = family?;
+        let snapshot = self.snapshot();
+        let r_outcome = result.r_outcome(db);
+        let settled = if constraint_rejects(db, self, constraint, r_outcome).is_none() {
+            self.bind(db, var, r_outcome).map(|()| {
+                // A fold's result is its init or the callback's, so a later init of another
+                // R type joins the outcome instead of rebinding it (`Compared<T> = T` must hold),
+                // and one that arithmetic keeps or promotes rebinds it (`Promoted<T> = T`).
+                let widening = match result {
+                    FamilyResult::Comparison => Widening::Joined,
+                    FamilyResult::Arithmetic => Widening::Folded { constraint },
+                };
+                self.set(
+                    var,
+                    Entry::Bound {
+                        ty: r_outcome,
+                        widening,
+                    },
+                );
+            })
+        } else {
+            match result {
+                FamilyResult::Arithmetic if constraint.join(Constraint::Number).is_some() => {
+                    self.constrain(db, var, Constraint::Number)
+                }
+                FamilyResult::Comparison => {
+                    self.bind(db, var, native_scalar(db, NativeScalar::Bool))
+                }
+                FamilyResult::Arithmetic => Err(UnifyError::Occurs(var, actual)),
+            }
+        };
+        if settled.is_err() {
+            self.rollback(snapshot);
+        }
+        Some(settled)
+    }
+
     fn family_operand_constraint(&self, db: &'db dyn Db, operand: Ty<'db>) -> Constraint {
         match self.shallow_resolve(db, operand).kind(db) {
             TyKind::Var(var) => match self.entry(self.find(*var)) {
@@ -1328,7 +1433,11 @@ impl<'db> InferenceTable<'db> {
         }
         let resolved: Vec<Ty<'db>> = returns.iter().map(|&ret| self.resolve(db, ret)).collect();
         let joined = union_of(db, resolved);
-        if self.compatible_probe(db, joined, target.ret, depth + 1) {
+        let fits = match self.family_fixed_point(db, joined, target.ret) {
+            Some(settled) => settled.is_ok(),
+            None => self.compatible_probe(db, joined, target.ret, depth + 1),
+        };
+        if fits {
             true
         } else {
             self.rollback(snapshot);
@@ -1381,26 +1490,67 @@ impl<'db> InferenceTable<'db> {
         let actual = self.resolve(db, actual);
         match widening {
             Widening::Fixed => false,
+            Widening::Joined => {
+                if !is_r_value(db, bound)
+                    || !is_r_value(db, actual)
+                    || self.compatible(db, actual, bound)
+                {
+                    return false;
+                }
+                self.set(
+                    representative,
+                    Entry::Bound {
+                        ty: union_of(db, [bound, actual]),
+                        widening,
+                    },
+                );
+                true
+            }
             Widening::Numeric => {
                 self.widen_numeric_binding(db, representative, bound, actual, widening)
+            }
+            Widening::Folded { constraint } => {
+                // The outcome is provisional until the first value meets it: one that fits
+                // settles it, and one that does not rebinds it once, so a value checked
+                // against the outcome never goes unchecked against what it rebinds to.
+                let fixed = Entry::Bound {
+                    ty: bound,
+                    widening: Widening::Fixed,
+                };
+                if self.compatible(db, actual, bound) {
+                    self.set(representative, fixed);
+                    return false;
+                }
+                let folded = match numeric_join(db, [bound, actual]) {
+                    _ if constraint_rejects(db, self, constraint, actual).is_some() => None,
+                    Some(promoted) => Some(promoted),
+                    None if is_ry_value_type(db, actual) || is_r_value(db, actual) => Some(actual),
+                    None => None,
+                };
+                let Some(folded) = folded else {
+                    self.set(representative, fixed);
+                    return false;
+                };
+                self.set(
+                    representative,
+                    Entry::Bound {
+                        ty: folded,
+                        widening: Widening::Fixed,
+                    },
+                );
+                true
             }
             Widening::Compared { equality } => {
                 if numeric_rank(db, bound).is_some() && numeric_rank(db, actual).is_some() {
                     return self.widen_numeric_binding(db, representative, bound, actual, widening);
                 }
-                let r_value = |ty: Ty<'db>| {
-                    !matches!(
-                        ty.kind(db),
-                        TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Any | TyKind::Unknown
-                    ) && !is_ry_value_type(db, ty)
-                };
                 let constraint = if equality {
                     Constraint::Equatable
                 } else {
                     Constraint::Comparable
                 };
-                if !r_value(bound)
-                    || !r_value(actual)
+                if !is_r_value(db, bound)
+                    || !is_r_value(db, actual)
                     || constraint_rejects(db, self, constraint, actual).is_some()
                     || self.compatible(db, actual, bound)
                 {
@@ -2193,7 +2343,11 @@ impl<'db> InferenceTable<'db> {
                 return false;
             }
         }
-        if !self.compatible_probe(db, actual.ret, expected.ret, depth + 1) {
+        let returns = match self.family_fixed_point(db, actual.ret, expected.ret) {
+            Some(settled) => settled.is_ok(),
+            None => self.compatible_probe(db, actual.ret, expected.ret, depth + 1),
+        };
+        if !returns {
             return false;
         }
         // The parameters are bound by now, so a pair the actual function compares is checked
@@ -2245,7 +2399,7 @@ impl<'db> InferenceTable<'db> {
                 accepts,
             });
         }
-        if !self.compatible(db, actual.ret, expected.ret) {
+        if !self.return_compatible(db, actual.ret, expected.ret) {
             let returns = self.resolve(db, actual.ret);
             let required = self.resolve(db, expected.ret);
             return Some(FunctionMismatch::Return {
@@ -2875,7 +3029,8 @@ pub(crate) fn constraint_rejects<'db>(
             _ => false,
         },
         Constraint::Eq => match ty.kind(db) {
-            TyKind::Function(_) => false,
+            TyKind::Function(_) | TyKind::Environment(_) => false,
+            TyKind::Named(name, _) if name.text(db) == "environment" => false,
             TyKind::Rigid(name) => binder_implies(name),
             _ => true,
         },
@@ -2883,6 +3038,9 @@ pub(crate) fn constraint_rejects<'db>(
             // `NULL > 0` is `logical(0)`.
             TyKind::Any | TyKind::Unknown | TyKind::Frame(..) | TyKind::Null => true,
             TyKind::Rigid(name) => binder_implies(name),
+            // R compares only atomic values and lists: `globalenv() == 1` is an error.
+            TyKind::Environment(_) => false,
+            TyKind::Named(name, _) if name.text(db) == "environment" => false,
             // A class compares through R's `Ops` methods; a ry nominal is a ry value.
             TyKind::Named(name, _) => {
                 !is_ry_value_type(db, ty)
@@ -3081,6 +3239,14 @@ fn numeric_rank<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<(bool, u8)> {
             }),
         _ => atomic_rank(ty).map(|rank| (false, rank)),
     }
+}
+
+/// A concrete R value: not open, not `Any` or `Unknown`, and not a ry value.
+fn is_r_value<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
+    !matches!(
+        ty.kind(db),
+        TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Any | TyKind::Unknown
+    ) && !is_ry_value_type(db, ty)
 }
 
 #[cfg(test)]

@@ -4925,7 +4925,7 @@ fn constraint_description(constraint: Constraint) -> &'static str {
         Constraint::Int => "an `I64`",
         Constraint::Frac => "an `F64`",
         Constraint::Str => "a `Str`",
-        Constraint::Eq => "a value `==` can compare (anything but a function)",
+        Constraint::Eq => "a value `==` can compare (anything but a function or an environment)",
         Constraint::Comparable => {
             "a comparable R value (a numeric, `character` or `logical` value, or a class)"
         }

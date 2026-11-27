@@ -23,7 +23,7 @@ use {
     },
     numeric::long_double::{Exactness, strtod},
     smallvec::SmallVec,
-    std::borrow::Cow,
+    std::{borrow::Cow, sync::OnceLock},
     syntax::{
         Classed, ElementRef, EscapeErrorKind, EscapePiece, NodeOrToken, NodeRef, NumberType,
         PipeCheck, SyntaxElement, SyntaxError, SyntaxKind, SyntaxNode, SyntaxToken, TextRange,
@@ -36,6 +36,23 @@ pub const BUILTINS: &[BuiltinDef] = &[
     internal("str2lang", 1, do_str2lang),
     internal("str2expression", 1, do_str2expression),
 ];
+
+/// The host's rewrite of the text of a file that `source()` or `parse(file = )` reads, given
+/// the file's name and text, into the program the checker elaborates (`preflight::elaborate` in
+/// the `ry` crate): `Ok(None)` when nothing changes, and `Err` when the host could not check the
+/// file, after it reported why.
+pub type SourceElaborator = fn(&str, &str) -> Result<Option<String>, ()>;
+
+static SOURCE_ELABORATOR: OnceLock<SourceElaborator> = OnceLock::new();
+
+/// Makes every parse of a file run the text `elaborator` gives for it. A host that checks code
+/// sets it once per session (`libr::loader_backend::set_check`); without one, a file parses as
+/// written.
+pub fn set_source_elaborator(elaborator: SourceElaborator) {
+    if SOURCE_ELABORATOR.set(elaborator).is_err() {
+        panic!("the host sets the source elaborator once per session");
+    }
+}
 
 /// Parses `text` into an expression vector, or reports the first syntax error in GNU R's form.
 pub unsafe fn parse_text(text: &str, source_name: &str) -> R<Sexp> {
@@ -2593,6 +2610,43 @@ unsafe fn do_parse(call: &Call<'_>) -> R<Sexp> {
         SexpType::String if values::length(filename) > 0 => values::string_at(filename, 0)
             .map_or_else(|| "NA".to_owned(), |filename| filename.into_owned()),
         _ => String::new(),
+    };
+    // A file that `source()` or `parse(file = )` reads runs as the checker elaborates it, as
+    // `ry run` runs a script: `source()` passes the file's name, or a srcfile copy of its lines.
+    let reads_file = match srcfile.kind() {
+        SexpType::Environment => {
+            values::is_true(crate::eval::find_var_in_frame(install("isFile")?, srcfile)?)
+        }
+        SexpType::String => text == nil(),
+        _ => false,
+    };
+    let source = match SOURCE_ELABORATOR.get() {
+        Some(elaborate)
+            if reads_file
+                && std::path::Path::new(&crate::connections::expand_path(&name)).is_file() =>
+        {
+            match elaborate(&crate::connections::expand_path(&name), &source) {
+                // Source references count columns in the text they were parsed from, so the
+                // srcfile copy holds the program's lines, as `ry run` shows a script's.
+                Ok(Some(program)) if srcfile.kind() == SexpType::Environment => {
+                    let lines: Vec<&str> = program.lines().collect();
+                    crate::heap().define(
+                        srcfile,
+                        install("lines")?,
+                        values::string_vector(&lines)?,
+                    )?;
+                    program
+                }
+                Ok(Some(program)) => program,
+                Ok(None) => source,
+                Err(()) => {
+                    return Err(error(format!(
+                        "ry could not elaborate the typed code in {name}"
+                    )));
+                }
+            }
+        }
+        _ => source,
     };
     let expressions = parse_with_srcfile(&source, &name, srcfile)?;
     if text == nil() && count < 0 {

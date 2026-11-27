@@ -44,7 +44,7 @@ file pkg/R/strict.R
 
 run ry install pkg -l library
 expect exit 0
-expect stdout "typed code: closures=7 written=6 (left out: compiles with its caller (1))"
+expect stdout "typed code: closures=7 written=7"
 
 file use.R
 | library(typedpkg, lib.loc = "library")
@@ -56,6 +56,8 @@ file use.R
 | print(tryCatch(length_of(wrong), error = conditionMessage))
 | print(capped(20) == 10)
 | print(step_total() == 10)
+| print(label)
+| print(deparse(label)[[1]])
 
 env RY_TYPED_LOG 1
 run ry run --runtime ry use.R
@@ -74,6 +76,10 @@ expect stdout "[1] TRUE\n[1] TRUE"
 expect stderr "typed: attached `capped` for [I64] -> I64 from typedpkg's code file"
 expect stderr "typed: attached `step_total` for [] -> I64 from typedpkg's code file"
 expect stderr lacks "`capped` runs in the interpreter"
+# An installed function keeps no source, so `print` shows the signature's annotation texts, and
+# `deparse` writes the R code another R reads.
+expect stdout "function (name: Str, n: I64) -> Str "
+expect stdout "[1] \"function (name, n) \""
 
 env RY_CODE_IMAGE 0
 run ry run --runtime ry use.R
@@ -132,7 +138,7 @@ expect stdout "NULL"
 # points a script at `ry run --aot`.
 run ry build --aot pkg -l built
 expect exit 0
-expect stdout "typed code: closures=7 written=6"
+expect stdout "typed code: closures=7 written=7"
 env RY_TYPED_LOG 1
 file use-built.R
 | library(typedpkg, lib.loc = "built")
@@ -162,7 +168,7 @@ env RY_TYPED_LOG 1
 run ry run --aot --runtime ry use-built.R
 expect exit 0
 expect stdout "[1] 718640.9"
-expect stderr "typed: compiled 6 functions ahead of time"
+expect stderr "typed: compiled 7 functions ahead of time"
 expect stderr "ry: another build of ry installed typedpkg, so its typed functions compiled as it loaded; reinstall it to compile them at install"
 expect stderr lacks "typed: attached"
 
@@ -204,7 +210,7 @@ file shapes/R/shapes.R
 
 run ry install shapes -l library
 expect exit 0
-expect stdout "typed code: closures=5 written=4 (left out: compiles with its caller (1))"
+expect stdout "typed code: closures=5 written=5"
 
 file shapes-first.R
 | other <- function(n: I64) -> I64 {

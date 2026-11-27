@@ -541,6 +541,74 @@ pub fn elaborate_loaded_package(
     }
 }
 
+/// The program ry's runtime runs for the file at `path` that `source()` reads, beside the
+/// [`xxh3_64`] of the text the checker read, as R's parser reads it (line endings made `\n`, one
+/// final `\n` dropped), or `None` when the checker rewrites nothing. The file is checked on its
+/// own under the configuration that governs it, as `ry run` checks a script, and prints the
+/// same annotation warnings, but strict mode refuses nothing here: a sourced file reads names
+/// the code that sources it binds, which a check of the file alone reports as unresolved.
+pub fn elaborate_sourced(path: &Path) -> Result<Option<(u64, String)>, CommandError> {
+    // A sourced file that ry cannot check runs as R reads it: R reports a file it cannot read,
+    // and a broken `ry.toml` beside it must not stop plain R code.
+    let mut config = match Config::discover(path) {
+        Ok(config) => config,
+        Err(error) => {
+            report(&error);
+            return Ok(None);
+        }
+    };
+    let Ok(bytes) = fs::read(path) else {
+        return Ok(None);
+    };
+    // R reads the file in the session's encoding, UTF-8, and drops a byte order mark; text
+    // that is not UTF-8 is no file the parse reads as the checker would.
+    let Ok(source) = String::from_utf8(bytes) else {
+        return Ok(None);
+    };
+    let source = source.strip_prefix('\u{FEFF}').unwrap_or(&source);
+    let source = source.replace("\r\n", "\n").replace('\r', "\n");
+    let source = source.strip_suffix('\n').unwrap_or(&source);
+    // The project's strict mode is the sourcing script's: a plain R file it sources keeps R's
+    // types, and one that turns strict mode on itself (`# typing: strict`) is checked strictly.
+    config.check.strict = false;
+    let directive = source.contains("typing: strict");
+    if !directive && !has_ry_syntax(&syntax::parse(source).syntax_node(), source) {
+        return Ok(None);
+    }
+    let preflight = Preflight::new(config, path.to_path_buf());
+    let file = session::command_file(&preflight.db, format!("{source}\n"));
+    let db = preflight.db.clone();
+    let config = &preflight.config;
+    let (_, reported, elaborations) = on_analysis_stack(move || findings(&db, file, config));
+    // Checked on its own, the file cannot see the names the sourcing script binds.
+    let warnings: Vec<Diagnostic> = reported
+        .into_iter()
+        .filter(|diagnostic| diagnostic.code != "unresolved")
+        .collect();
+    let text = file.text(&preflight.db);
+    let resolve_note = |related: &RelatedLocation| {
+        (related.file == file).then_some(RelatedNote {
+            path,
+            source: text,
+            range: related.range,
+            message: related.message,
+        })
+    };
+    render_findings(
+        OutputFormat::Human,
+        MinSeverity::Warning,
+        path,
+        text,
+        &warnings,
+        &resolve_note,
+    );
+    if elaborations.is_empty() {
+        return Ok(None);
+    }
+    let program = elaborated_program(path, source, &elaborations)?;
+    Ok(Some((xxh3_64(source.as_bytes()), program)))
+}
+
 /// [`elaborate`]s `source`, the text of the file at `path`. The rewrites are ASCII, between
 /// tokens or in place of whole ones, so the program is UTF-8, keeps every line where it was,
 /// and parses into as many functions with as many errors as the source. A rewrite that breaks
