@@ -134,17 +134,15 @@ impl<'s> Cx<'s> {
         environment: impl Pointer<Environment>,
         bindings: &[LocalBinding<'_>],
     ) -> HeapResult<()> {
-        let formals: smallvec::SmallVec<[crate::Formal; 12]> = bindings
-            .iter()
-            .map(|binding| crate::Formal {
-                symbol: binding.symbol.raw,
-                value: binding.value.raw,
-                missing: binding.missing,
-            })
-            .collect();
-        // SAFETY: the heap, the environment and every bound object are live, and the cells
-        // are made without a collection.
-        unsafe { (*self.heap.as_ptr()).define_locals_uncollected(environment.raw(), &formals) }
+        // SAFETY: a binding is laid out as a formal, the heap, the environment and every bound
+        // object are live, and the cells are made without a collection.
+        unsafe {
+            let formals = std::slice::from_raw_parts(
+                bindings.as_ptr().cast::<crate::Formal>(),
+                bindings.len(),
+            );
+            (*self.heap.as_ptr()).define_locals_uncollected(environment.raw(), formals)
+        }
     }
 
     /// Records that the environment stands for the live slot frame at `owner` whose slot
@@ -169,11 +167,14 @@ impl<'s> Cx<'s> {
     /// none keeps its count of removed bindings in the same field, so it is left as it is.
     #[inline]
     pub fn clear_slot_owner(&self, environment: impl Pointer<Environment>) {
-        if self.slot_owner(environment.raw()).is_none() {
-            return;
+        let environment = environment.raw();
+        // SAFETY: the heap and the environment are live, and neither call allocates.
+        unsafe {
+            let heap = &mut *self.heap.as_ptr();
+            if heap.slot_owner(environment).is_some() {
+                heap.set_slot_owner(environment, None);
+            }
         }
-        // SAFETY: the heap and the environment are live.
-        unsafe { (*self.heap.as_ptr()).set_slot_owner(environment.raw(), None) }
     }
 
     /// Tells a method's slot frame environment the names of its dispatch variables
@@ -788,13 +789,24 @@ impl<'a> Gc<'a, Bytecode> {
 }
 
 /// A variable a function frame binds: its symbol, its value and whether it is a missing
-/// formal ([`Cx::define_locals_uncollected`]).
+/// formal ([`Cx::define_locals_uncollected`]). It is laid out as a [`Formal`], so a list of
+/// them binds without a copy.
 #[derive(Clone, Copy)]
+#[repr(C)]
 pub struct LocalBinding<'a> {
     pub symbol: Gc<'a, Symbol>,
     pub value: Gc<'a>,
     pub missing: bool,
 }
+
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
+    assert!(size_of::<LocalBinding<'static>>() == size_of::<crate::Formal>());
+    assert!(align_of::<LocalBinding<'static>>() == align_of::<crate::Formal>());
+    assert!(offset_of!(LocalBinding<'static>, symbol) == offset_of!(crate::Formal, symbol));
+    assert!(offset_of!(LocalBinding<'static>, value) == offset_of!(crate::Formal, value));
+    assert!(offset_of!(LocalBinding<'static>, missing) == offset_of!(crate::Formal, missing));
+};
 
 impl<'a> Gc<'a, Environment> {
     /// Sets or clears the interpreter's flags `bits` of the environment, which describe the

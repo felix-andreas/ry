@@ -1549,26 +1549,35 @@ fn lift(context: &mut Cx<'_>, index: usize, cause: Option<Site>) -> R<()> {
     let count = frame.slot_names().len();
     box_slots(context, index, 0..count)?;
     leave_slots(context, index);
-    let frame = handles::live_frame(context, index);
-    let pending = context.root(pending_of(context, index));
-    let method_vars: SmallVec<[(Local<'_, Symbol>, Local<'_>); 6]> = frame
+    // Only a method's frame has dispatch variables, so most frames skip rooting them.
+    let mut method_vars: SmallVec<[(Local<'_, Symbol>, Local<'_>); 6]> = SmallVec::new();
+    if handles::live_frame(context, index)
         .method_vars()
-        .map(|(symbol, value)| (context.root(symbol), context.root(value)))
-        .collect();
-    for &(symbol, value) in &method_vars {
-        if context.own_binding(pending, symbol).is_none() {
-            let value = method_variable(context, index, symbol, value)?;
-            context.define_locals_uncollected(
-                pending,
-                &[LocalBinding {
-                    symbol: symbol.read(context),
-                    value: value.read(context),
-                    missing: false,
-                }],
-            )?;
+        .next()
+        .is_some()
+    {
+        let pending = context.root(pending_of(context, index));
+        method_vars.extend(
+            handles::live_frame(context, index)
+                .method_vars()
+                .map(|(symbol, value)| (context.root(symbol), context.root(value))),
+        );
+        for &(symbol, value) in &method_vars {
+            if context.own_binding(pending, symbol).is_none() {
+                let value = method_variable(context, index, symbol, value)?;
+                context.define_locals_uncollected(
+                    pending,
+                    &[LocalBinding {
+                        symbol: symbol.read(context),
+                        value: value.read(context),
+                        missing: false,
+                    }],
+                )?;
+            }
         }
     }
     let frame = handles::live_frame(context, index);
+    let pending = pending_of(context, index);
     let names = frame.slot_names();
     let rank = |symbol: Gc<'_, Symbol>| {
         names
@@ -1578,7 +1587,7 @@ fn lift(context: &mut Cx<'_>, index: usize, cause: Option<Site>) -> R<()> {
     };
     context.clear_slot_owner(pending);
     context.order_frame(pending, rank, frame.formals().count() as u32);
-    pending.read(context).set_flags(gp::SLOT_FRAME, false);
+    pending.set_flags(gp::SLOT_FRAME, false);
     let state = interp();
     if !state.pending_closures.is_empty() {
         let own = crate::pending_closures_of(&state.pending_closures, index);
@@ -1597,7 +1606,7 @@ fn lift(context: &mut Cx<'_>, index: usize, cause: Option<Site>) -> R<()> {
 fn check_lifted(
     context: &Cx<'_>,
     index: usize,
-    environment: Local<'_, Environment>,
+    environment: Gc<'_, Environment>,
     method_vars: &[(Local<'_, Symbol>, Local<'_>)],
 ) {
     let frame = handles::live_frame(context, index);
@@ -1675,7 +1684,7 @@ pub unsafe fn env_code_reference(env: Sexp, code: Sexp) -> R<Sexp> {
     handles::in_caller_scope(|context| {
         let (environment, code) = (handles::held(context, env), handles::held(context, code));
         // The code holds its constant pool, and the caller holds the code.
-        let source = handles::held(context, source_of(context, code).raw());
+        let source = handles::held(context, source_of(code.read(context)).raw());
         let index = take_reference(context, source)?;
         let reference = reference_at(context, index);
         context.set_promise_environment(reference, environment);
@@ -1693,7 +1702,7 @@ pub unsafe fn code_reference(owner: usize, code: Sexp) -> R<Sexp> {
     handles::in_caller_scope(|context| {
         let code = handles::held(context, code);
         // The code holds its constant pool, and the caller holds the code.
-        let source = handles::held(context, source_of(context, code).raw());
+        let source = handles::held(context, source_of(code.read(context)).raw());
         let index = take_reference(context, source)?;
         let header = handles::live_frame(context, owner).header();
         handles::set_reference_target(context, index, owner, NO_REFERENCE_SLOT, header);
@@ -1704,9 +1713,8 @@ pub unsafe fn code_reference(owner: usize, code: Sexp) -> R<Sexp> {
 }
 
 /// The source a compiled argument's `code` was compiled from, which its constant pool keeps.
-fn source_of<'c, 's>(context: &'c Cx<'s>, code: Local<'s>) -> Gc<'c> {
+fn source_of<'c>(code: Gc<'c>) -> Gc<'c> {
     let source = code
-        .read(context)
         .downcast::<Bytecode>()
         .and_then(handles::constants)
         .and_then(|constants| constants.get(bytecode::SOURCE).copied());
@@ -2081,24 +2089,31 @@ pub unsafe fn detach_reference(reference: Sexp) -> R<()> {
 
 /// [`detach_reference`] for code on the handle types.
 pub fn detach<'s>(context: &mut Cx<'s>, reference: Local<'s, Promise>) -> R<()> {
-    let [value, code, environment, compiled] = reference_promise(context, reference)?;
     let used = interp().references_used as usize;
-    let Some(index) = (0..used).find(|&index| {
-        handles::pooled_reference(context, index).is_some_and(|(pooled, _)| pooled.is(reference))
-    }) else {
+    let Some(index) = interp().references[..used]
+        .iter()
+        .position(|&pooled| pooled == reference.raw())
+    else {
         panic!("an argument reference outlived the call it was made for");
     };
-    // The promise names its frame's environment from here on, so the target it gave up serves
-    // the reference that takes its place. The pool's count goes with the pool's place: a
-    // promise that kept it would never count as held by its frame alone, so the frame's
-    // release would leave it forced, and the value it holds would look shared for the rest of
-    // its life. The replacement is made first, so a failed allocation leaves the reference
-    // as it was.
+    // Everything that allocates comes first, so a failed allocation leaves the reference as it
+    // was: the environment of the frame an unforced reference names, and the replacement. The
+    // promise names its frame's environment from here on, so the target it gave up serves the
+    // reference that takes its place.
+    let fields = reference.read(context);
+    if handles::is_unbound(fields.result())
+        && fields.environment().r_type() != SexpType::Environment
+    {
+        let (owner, _) = reference_target(fields);
+        pending_environment(context, owner)?;
+    }
     let Some((_, target)) = handles::pooled_reference(context, index) else {
         panic!("argument reference {index} left the pool");
     };
     let target = context.root(target);
     let fresh = handles::new_argument_reference(context, handles::null(), target)?;
+    let context: &Cx<'s> = context;
+    let [value, code, environment, compiled] = reference_promise(context, reference.read(context));
     context.set_promise_value(reference, value);
     context.set_promise_code(reference, code);
     context.set_promise_environment(reference, environment);
@@ -2106,49 +2121,57 @@ pub fn detach<'s>(context: &mut Cx<'s>, reference: Local<'s, Promise>) -> R<()> 
     reference
         .read(context)
         .set_flags(gp::ARGUMENT_REFERENCE, false);
+    // The pool's count goes with the pool's place: a promise that kept it would never count as
+    // held by its frame alone, so the frame's release would leave it forced, and the value it
+    // holds would look shared for the rest of its life.
     handles::place_reference(context, index, fresh, None);
     Ok(())
 }
 
 /// The fields (value, code, environment, compiled code) of the ordinary promise that stands for
 /// an argument reference: a forced promise of its name once it is forced, and a promise of its
-/// name in the frame it names before. [`detach`] writes them into the reference itself, so no
-/// promise is allocated only to be copied.
-fn reference_promise<'s>(context: &mut Cx<'s>, reference: Local<'s, Promise>) -> R<[Local<'s>; 4]> {
-    let fields = reference.read(context);
-    let symbol = context.root(fields.code());
-    let null = handles::null();
-    if !handles::is_unbound(fields.result()) {
-        return Ok([context.root(fields.result()), symbol, null, null]);
+/// name in the frame it names before, whose environment [`detach`] has made. [`detach`] writes
+/// them into the reference itself, so no promise is allocated only to be copied.
+fn reference_promise<'c>(context: &'c Cx<'_>, reference: Gc<'c, Promise>) -> [Gc<'c>; 4] {
+    let symbol = reference.code();
+    let null = handles::null().read(context);
+    if !handles::is_unbound(reference.result()) {
+        return [reference.result(), symbol, null, null];
     }
     let (environment, expression) =
-        if let Some(environment) = fields.environment().downcast::<Environment>() {
-            let code = fields.compiled();
+        if let Some(environment) = reference.environment().downcast::<Environment>() {
+            let code = reference.compiled();
             (
-                context.root(environment.value()),
+                environment.value(),
                 if code.r_type() == SexpType::Bytecode {
-                    context.root(code)
+                    code
                 } else {
                     symbol
                 },
             )
         } else {
-            let (owner, _) = reference_target(fields);
-            let expression = if fields.environment().r_type() == SexpType::Bytecode {
-                context.root(fields.environment())
+            let (owner, _) = reference_target(reference);
+            let Some(environment) = handles::live_frame(context, owner).pending() else {
+                panic!("frame {owner} lost the environment of an argument reference");
+            };
+            let expression = if reference.environment().r_type() == SexpType::Bytecode {
+                reference.environment()
             } else {
                 symbol
             };
-            let environment = context.root_answer(|context| pending_environment(context, owner))?;
             (environment.value(), expression)
         };
     activity::count(Counter::PromisesCreated);
-    Ok(if expression.r_type() == SexpType::Bytecode {
-        let source = context.root(source_of(context, expression));
-        [handles::unbound(), source, environment, expression]
+    if expression.r_type() == SexpType::Bytecode {
+        [
+            handles::unbound().read(context),
+            source_of(expression),
+            environment,
+            expression,
+        ]
     } else {
-        [handles::unbound(), symbol, environment, null]
-    })
+        [handles::unbound().read(context), symbol, environment, null]
+    }
 }
 
 /// The environment that stands for the slot frame at `owner`, made on first use: an environment

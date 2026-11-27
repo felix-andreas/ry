@@ -3872,27 +3872,30 @@ impl<'c, 's> LiveFrame<'c, 's> {
 
     /// Leaves the slots in `slots` unbound, giving up the references they counted. What they
     /// held stays valid until the next safepoint, as nothing is freed before a collection.
+    #[inline]
     pub fn unbind_slots(self, slots: Range<usize>) {
         let start = self.header() + 1;
         let registers = &mut crate::interp().bytecode.registers;
         let unbound = values::unbound();
         for register in &mut registers[start + slots.start..start + slots.end] {
-            // SAFETY: as for `store_slot`.
-            unsafe { crate::heap().store_slot(register, unbound) };
+            // SAFETY: the binding cell that took the variable counts it too, so giving up the
+            // slot's count frees nothing and needs no note of a zero count.
+            unsafe { register.decrement_refcount() };
+            *register = unbound;
         }
     }
 
     /// Records in `environment` that it stands for the slot frame, with the frame's slot names,
     /// so a lookup of any other name passes it without asking the frame.
     pub fn stand_in(self, environment: Gc<'_, Environment>) {
-        let Some(table) = slot_table(self.context, self.function()) else {
+        let Some((names, _)) = compiled_slots(self.function()) else {
             panic!("slot frame {} runs code without a slot table", self.index);
         };
         // SAFETY: the frame's function holds its slot table, and so the names, for as long as
         // the environment stands for the frame.
         unsafe {
             self.context
-                .set_slot_owner(environment, self.index, table.get(1))
+                .set_slot_owner(environment, self.index, names.value())
         };
     }
 
@@ -3908,13 +3911,14 @@ impl<'c, 's> LiveFrame<'c, 's> {
     /// Makes the environment that stands for the slot frame its environment, in its header
     /// register too, so the frame's code reads and writes by name from here on. `false`, with
     /// nothing changed, when the frame has an environment already.
+    #[inline]
     pub fn enter_environment(self) -> bool {
+        if self.fields().env.raw() != values::nil() {
+            return false;
+        }
         let Some(pending) = self.pending() else {
             panic!("frame {} has no environment to switch to", self.index);
         };
-        if self.environment().is_some() {
-            return false;
-        }
         let header = self.header();
         let frame = &mut crate::interp().frames[self.index];
         // SAFETY: the pending environment is the frame's own, which it holds, and the header
@@ -3994,6 +3998,7 @@ pub fn new_argument_reference<'s>(
 /// and else keeping the one there. The pool counts a reference to what it puts there and gives
 /// up the ones it counted on what the position held; at the end of the pool it grows by one,
 /// which needs a target. Counting frees nothing, so what the context reads stays valid.
+#[inline]
 pub fn place_reference(
     _context: &Cx<'_>,
     index: usize,
@@ -4929,6 +4934,14 @@ pub fn build_slot_defaults(context: &mut Cx<'_>, function: Local<'_, Closure>) -
 /// bind, so it trusts the constant pool's layout instead of checking each entry.
 #[inline(always)]
 pub fn slot_layout<'a>(function: Gc<'a, Closure>) -> Option<(&'a [Gc<'a>], usize)> {
+    let (names, registers) = compiled_slots(function)?;
+    Some((names.elements(), registers))
+}
+
+/// The list of slot names of `function`'s compiled body and the number of registers its code
+/// uses beyond them ([`slot_layout`]).
+#[inline]
+fn compiled_slots<'a>(function: Gc<'a, Closure>) -> Option<(Gc<'a, List>, usize)> {
     let code = function.body().downcast::<Bytecode>()?;
     // SAFETY: only the compiler and the code image's reader, which restores what the compiler
     // wrote, make a `BCODESXP` (GNU R's byte code loads as its source). Both lay the constant
@@ -4943,7 +4956,7 @@ pub fn slot_layout<'a>(function: Gc<'a, Closure>) -> Option<(&'a [Gc<'a>], usize
         if table == values::nil() {
             return None;
         }
-        let names = Gc::<'a, List>::adopt(*(table.data() as *const Sexp).add(1)).elements();
+        let names = Gc::<'a, List>::adopt(*(table.data() as *const Sexp).add(1));
         let registers = *((*pool.add(bytecode::REGISTERS)).data() as *const i32);
         Some((names, registers as usize))
     }
