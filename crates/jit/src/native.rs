@@ -3025,7 +3025,7 @@ pub(crate) unsafe fn gather(
         let value = match item {
             Some(item) => {
                 let arg = &args[item];
-                let value = if arg.value.kind() == SexpType::Promise {
+                if arg.value.kind() == SexpType::Promise {
                     let Some(value) = promise_value(arg.value, &mut ahead, position as u32, 0)
                     else {
                         let source = bytecode::source_of_body(arg.value.cdr());
@@ -3061,8 +3061,7 @@ pub(crate) unsafe fn gather(
                     return None;
                 } else {
                     arg.value
-                };
-                value
+                }
             }
             None => {
                 // A missing argument's default is evaluated in the call's frame, so a constant
