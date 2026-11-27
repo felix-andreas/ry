@@ -142,7 +142,6 @@ fn lists_follow_their_models() {
                             }
                         }
                     }
-                    6 => (ry_list_unique(list, flag), model.unique()),
                     7 => {
                         let start = rng.below(model.len() + 1);
                         let count = rng.below(model.len() - start + 1);
@@ -1633,39 +1632,6 @@ impl Model {
         }
     }
 
-    fn unique(&self) -> Model {
-        match self {
-            Model::Int(values) => {
-                let mut seen = Vec::new();
-                for &value in values {
-                    if !seen.contains(&value) {
-                        seen.push(value);
-                    }
-                }
-                Model::Int(seen)
-            }
-            Model::Dbl(values) => {
-                let mut seen: Vec<f64> = Vec::new();
-                for &value in values {
-                    if !seen.iter().any(|&kept| same_double_key(kept, value)) {
-                        seen.push(value);
-                    }
-                }
-                Model::Dbl(seen)
-            }
-            Model::Str(values) => {
-                let mut seen: Vec<String> = Vec::new();
-                for value in values {
-                    if !seen.contains(value) {
-                        seen.push(value.clone());
-                    }
-                }
-                Model::Str(seen)
-            }
-            Model::Lgl(_) => panic!("unique of a logical model"),
-        }
-    }
-
     fn slice(&self, start: usize, count: usize) -> Model {
         let range = start..start + count;
         match self {
@@ -1838,14 +1804,6 @@ fn same_double(a: f64, b: f64) -> bool {
         a.is_nan() && b.is_nan() && is_na(a) == is_na(b)
     } else {
         a.to_bits() == b.to_bits()
-    }
-}
-
-fn same_double_key(a: f64, b: f64) -> bool {
-    if a.is_nan() || b.is_nan() {
-        same_double(a, b)
-    } else {
-        a == b
     }
 }
 

@@ -61,8 +61,9 @@ pub enum Type {
     },
     /// An R list whose elements are scalars of these items.
     List(Item),
-    /// ry's `Set` of these items: their distinct values in first-insertion order, held in a list
-    /// object, which never crosses back to R.
+    /// ry's `Set` of these items: their distinct values in first-insertion order. A set never
+    /// crosses back to R, and it is held in the native dictionary with a placeholder value per
+    /// element (`entry_items`).
     Set(Item),
     Dict {
         key: Item,
@@ -144,6 +145,16 @@ impl Type {
         match self {
             Type::Vector { item, array: true } => Some(Item::Array(crate::shapes::array_of(item))),
             _ => self.item(),
+        }
+    }
+
+    /// The key and value items of a native dictionary. A set is a dictionary too, whose value
+    /// column holds one placeholder logical per key.
+    pub fn entry_items(self) -> Option<(Item, Item)> {
+        match self {
+            Type::Dict { key, value } => Some((key, value)),
+            Type::Set(item) => Some((item, Item::Lgl)),
+            _ => None,
         }
     }
 
@@ -507,8 +518,6 @@ pub enum Op {
     /// `x[mask]` of a vector and a logical vector of the same length. Fails on any other length
     /// and on an `NA` in the mask.
     Select(Local, Local),
-    /// `Set.from_list`: the distinct items of a list, in first-occurrence order.
-    Unique(Local),
     /// `List.sort_asc`, or `List.sort_desc` when true, of a numeric list. Fails on `NA` or NaN.
     Sort(Local, bool),
     /// Elementwise arithmetic where at least one operand is a vector. The item type is the
@@ -683,7 +692,6 @@ impl Op {
             | Coerce(a, _)
             | Reduce(_, _, a)
             | Relabel(a, _)
-            | Unique(a)
             | Sort(a, _)
             | Text(_, a)
             | VectorText(_, a)
@@ -775,7 +783,7 @@ impl Op {
         use Op::*;
         match self {
             Copy(_) | Relabel(..) | Coerce(..) | VectorNot(_) | VectorMath(..) | Text(..)
-            | VectorText(..) | Unique(_) | Sort(..) | DropAffix(..) => position == 0,
+            | VectorText(..) | Sort(..) | DropAffix(..) => position == 0,
             VectorArith(..) | VectorCompare(..) | VectorLogic(..) => position < 2,
             VectorRound(..) => position == 0,
             // The list, and the new item, which the list then owns.
@@ -832,7 +840,6 @@ impl Op {
             | DictFind(..)
             | DictAt(..)
             | Push(..)
-            | Unique(_)
             | Swap(..)
             | ToUtf8(_)
             | DictLen(_)

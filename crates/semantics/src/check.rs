@@ -467,8 +467,8 @@ pub enum NativeValueKind {
 
 /// A type only the checker knows that the runtime needs: the storage of a list's items for a list
 /// the runtime may build empty or convert from R (for `List.from_r_missing`, of the `:Ok`
-/// payloads), the key and value types of a dictionary built from no entries, or the number a
-/// `Num.from_r` gives.
+/// payloads), the key and value types of a dictionary or the element type of a set built from no
+/// entries, or the number a `Num.from_r` gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub enum CheckedType {
     List(ListItems),
@@ -477,19 +477,22 @@ pub enum CheckedType {
         key: ListItems,
         value: ListItems,
     },
+    /// A `Set` of `I64` or `Str` elements.
+    Set(ListItems),
     /// A `Num.from_r(x)` of an `x` the checker typed `integer` (`I64`) or `double` (`F64`).
     Number(NumberType),
 }
 
 impl CheckedType {
     /// The name `.ry_items` takes: `"I64"` for a list or a number, `"Dict<Str, I64>"` for a
-    /// dictionary.
+    /// dictionary, `"Set<Str>"` for a set.
     pub fn name(self) -> std::borrow::Cow<'static, str> {
         match self {
             CheckedType::List(items) => items.name().into(),
             CheckedType::Dict { key, value } => {
                 format!("Dict<{}, {}>", key.name(), value.name()).into()
             }
+            CheckedType::Set(element) => format!("Set<{}>", element.name()).into(),
             CheckedType::Number(NumberType::I64) => "I64".into(),
             CheckedType::Number(NumberType::F64) => "F64".into(),
         }
@@ -1316,7 +1319,7 @@ fn check_item_in<'db>(
                                 .is_some_and(|candidates| {
                                     candidates.iter().any(|scheme| {
                                         builds_fresh_items(db, scheme)
-                                            || builds_empty_dict(db, scheme)
+                                            || builds_empty_keyed(db, scheme)
                                     })
                                 })
                     }
@@ -1328,14 +1331,22 @@ fn check_item_in<'db>(
                 return None;
             }
             let ty = context.table.resolve(db, (*slot)?);
-            if let Some((key, value)) = crate::types::dict_entries(db, ty) {
-                let scalar = |ty| list_items(db, ty).filter(|&items| items != ListItems::RyValues);
-                // A dictionary key is always a single value, so an R string key such as `"a"` is
-                // held as a `Str`, the value the runtime hashes it as.
-                let key = match key.kind(db) {
-                    TyKind::Scalar(Atomic::Character) => Some(ListItems::Str),
-                    _ => scalar(key),
+            let scalar =
+                |ty: Ty<'db>| list_items(db, ty).filter(|&items| items != ListItems::RyValues);
+            // A dictionary key or a set element is always a single value, so an R string such as
+            // `"a"` is held as a `Str`, the value the runtime hashes it as.
+            let key_items = |key: Ty<'db>| match key.kind(db) {
+                TyKind::Scalar(Atomic::Character) => Some(ListItems::Str),
+                _ => scalar(key),
+            };
+            if let Some(element) = crate::types::set_element(db, ty) {
+                return match key_items(element)? {
+                    ListItems::F64 => None,
+                    element => Some((id, CheckedType::Set(element))),
                 };
+            }
+            if let Some((key, value)) = crate::types::dict_entries(db, ty) {
+                let key = key_items(key);
                 return Some((
                     id,
                     CheckedType::Dict {
@@ -26113,18 +26124,21 @@ fn builds_fresh_items<'db>(db: &'db dyn Db, scheme: &TypeScheme<'db>) -> bool {
             .any(|&parameter| crate::types::array_element(db, parameter) == Some(item))
 }
 
-/// Whether a library function returns a `Dict` and takes none, so only the checker knows its
-/// key and value types (`Dict.empty`, `Dict.with_capacity`).
-fn builds_empty_dict<'db>(db: &'db dyn Db, scheme: &TypeScheme<'db>) -> bool {
+/// Whether a library function returns a `Dict` or a `Set` and takes none, so only the checker
+/// knows its key and value types (`Dict.empty`, `Set.empty`, `Dict.with_capacity`).
+fn builds_empty_keyed<'db>(db: &'db dyn Db, scheme: &TypeScheme<'db>) -> bool {
     let TyKind::Function(function) = scheme.body.kind(db) else {
         return false;
     };
-    crate::types::dict_entries(db, function.ret).is_some()
+    let keyed = |ty| {
+        crate::types::dict_entries(db, ty).is_some() || crate::types::set_element(db, ty).is_some()
+    };
+    keyed(function.ret)
         && !function
             .positional
             .iter()
             .chain(function.named.iter().map(|parameter| &parameter.ty))
-            .any(|&parameter| crate::types::dict_entries(db, parameter).is_some())
+            .any(|&parameter| keyed(parameter))
 }
 
 /// The storage of a list of `item`s, or `None` for `Bool`, whose storage is the empty list's

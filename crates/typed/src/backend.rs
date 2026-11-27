@@ -240,7 +240,6 @@ All => values::ry_all,
     ListSwap => values::ry_list_swap,
     ListTolower => values::ry_list_tolower,
     ListToupper => values::ry_list_toupper,
-    ListUnique => values::ry_list_unique,
     ListUnshare => values::ry_list_unshare,
     ListWithCapacity => values::ry_list_with_capacity,
     Logic => values::ry_logic,
@@ -1736,12 +1735,6 @@ impl Emitter<'_> {
                 self.fail_if_null(list, inst)?;
                 SmallVec::from_slice(&[list])
             }
-            Op::Unique(a) => {
-                let x = self.one(*a)?;
-                let owned = self.owned(inst, 0);
-                let list = self.call_words(Helper::ListUnique, I64, &[x, owned]);
-                SmallVec::from_slice(&[list])
-            }
             Op::Sort(a, descending) => {
                 let x = self.one(*a)?;
                 let owned = self.owned(inst, 0);
@@ -2200,7 +2193,7 @@ impl Emitter<'_> {
                 let dest = inst
                     .dest
                     .ok_or(Refusal::new("a dictionary without a destination"))?;
-                let Type::Dict { key, value } = ty(dest) else {
+                let Some((key, value)) = ty(dest).entry_items() else {
                     return Err(Refusal::new("a new dictionary of another type"));
                 };
                 let (key, value) = (self.iconst(kind(key)), self.iconst(kind(value)));
@@ -2229,7 +2222,7 @@ impl Emitter<'_> {
                 ))
             }
             Op::DictAt(dict, position) => {
-                let Type::Dict { value, .. } = ty(*dict) else {
+                let Some((_, value)) = ty(*dict).entry_items() else {
                     return Err(Refusal::new(
                         "a lookup in something other than a dictionary",
                     ));

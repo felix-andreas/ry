@@ -24,7 +24,7 @@ use {
         stubs::{declaring_namespace, is_native_function, is_ry_type},
         types::{
             Atomic, Constraint, FunctionType, Name, NativeScalar, Ty, TyKind, TypeScheme,
-            array_element, dict_entries,
+            array_element, dict_entries, set_element,
         },
     },
     rustc_hash::FxHashSet,
@@ -132,6 +132,7 @@ pub enum Uncompiled {
     StdFunction(Symbol),
     MappedFunction,
     DictEntries,
+    SetElements,
     MatchGuard,
     MatchPattern,
     MatchScrutinee,
@@ -370,6 +371,10 @@ impl Uncompiled {
             Uncompiled::DictEntries => format!(
                 "a `Dict` whose keys or values are not `I64`, `F64` or `Str` {YET}. Keep the \
                  values in a `List` and store their positions in the dictionary"
+            ),
+            Uncompiled::SetElements => format!(
+                "a `Set` whose elements are not `I64` or `Str` {YET}. Convert the elements to \
+                 `I64` or `Str`, or keep them in a `List`"
             ),
             Uncompiled::MatchGuard => format!(
                 "a `match` guard that assigns a variable {YET}. Compute the value before the \
@@ -636,9 +641,26 @@ pub const COMPILED_STD: &[&str] = &[
     "Result.map_err",
     "Result.on_err",
     "Result.with_default",
+    "Set.contains",
+    "Set.difference",
+    "Set.drop_if",
+    "Set.empty",
     "Set.from_list",
+    "Set.insert",
+    "Set.intersection",
+    "Set.is_empty",
+    "Set.join_map",
+    "Set.keep_if",
     "Set.len",
+    "Set.map",
+    "Set.release_excess_capacity",
+    "Set.remove",
+    "Set.reserve",
+    "Set.single",
     "Set.to_list",
+    "Set.union",
+    "Set.walk",
+    "Set.walk_until",
     "Str.caseless_ascii_equals",
     "Str.concat",
     "Str.contains",
@@ -739,7 +761,7 @@ pub fn native_blockers(judged: Judged<'_, '_>) -> ThinVec<NativeBlocker> {
         locals: FxHashSet::default(),
         hidden: FxHashSet::default(),
         reported: FxHashSet::default(),
-        reported_dict: false,
+        reported_keyed: false,
         control_depth: 0,
         probing: 0,
         nested: 0,
@@ -950,7 +972,7 @@ struct Judge<'a, 'db> {
     hidden: FxHashSet<Symbol>,
     /// Outside names already reported, so each is reported where it first appears.
     reported: FxHashSet<Symbol>,
-    reported_dict: bool,
+    reported_keyed: bool,
     control_depth: u32,
     /// How many loop trials enclose the walk ([`Judge::in_loop`]).
     probing: u32,
@@ -994,7 +1016,7 @@ struct WalkState<'db> {
     early_reads: usize,
     hidden: FxHashSet<Symbol>,
     reported: FxHashSet<Symbol>,
-    reported_dict: bool,
+    reported_keyed: bool,
     local_functions: Vec<(ExprId, bool)>,
     invisible: Option<ExprId>,
     converted_locals: Vec<(Symbol, usize)>,
@@ -1030,14 +1052,11 @@ impl<'a, 'db> Judge<'a, 'db> {
         self.block(expression, NativeBlockerKind::Uncompiled(construct));
     }
 
-    /// Reports a dictionary the typed core has no layout for, once per judged function: every
-    /// later use of the same dictionary would repeat the finding.
-    fn dict_entries(&mut self, range: TextRange) {
-        if !std::mem::replace(&mut self.reported_dict, true) {
-            self.block_at(
-                range,
-                NativeBlockerKind::Uncompiled(Uncompiled::DictEntries),
-            );
+    /// Reports a dictionary or set the typed core has no layout for, once per judged function:
+    /// every later use of the same collection would repeat the finding.
+    fn keyed_layout(&mut self, range: TextRange, uncompiled: Uncompiled) {
+        if !std::mem::replace(&mut self.reported_keyed, true) {
+            self.block_at(range, NativeBlockerKind::Uncompiled(uncompiled));
         }
     }
 
@@ -1093,7 +1112,7 @@ impl<'a, 'db> Judge<'a, 'db> {
         };
         self.scope.clear();
         self.reported.clear();
-        self.reported_dict = false;
+        self.reported_keyed = false;
         self.locals.clear();
         self.hidden.clear();
         self.control_depth = 0;
@@ -1146,8 +1165,8 @@ impl<'a, 'db> Judge<'a, 'db> {
                 // is lowered in place of the parameter.
                 if matches!(self.peel(declared).kind(db), TyKind::Function(_)) {
                     slot = Slot::FunctionParameter;
-                } else if !self.dict_compiles(declared) {
-                    self.dict_entries(parameter.range);
+                } else if let Some(uncompiled) = self.keyed_blocker(declared) {
+                    self.keyed_layout(parameter.range, uncompiled);
                 }
             }
             self.scope.push((parameter.name, slot));
@@ -1794,7 +1813,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             early_reads: self.early_reads.len(),
             hidden: self.hidden.clone(),
             reported: self.reported.clone(),
-            reported_dict: self.reported_dict,
+            reported_keyed: self.reported_keyed,
             local_functions: self.local_functions.clone(),
             invisible: self.invisible,
             converted_locals: self.converted_locals.clone(),
@@ -1807,7 +1826,7 @@ impl<'a, 'db> Judge<'a, 'db> {
         self.early_reads.truncate(state.early_reads);
         self.hidden = state.hidden;
         self.reported = state.reported;
-        self.reported_dict = state.reported_dict;
+        self.reported_keyed = state.reported_keyed;
         self.local_functions = state.local_functions;
         self.invisible = state.invisible;
         self.converted_locals = state.converted_locals;
@@ -1936,20 +1955,30 @@ impl<'a, 'db> Judge<'a, 'db> {
         ty
     }
 
-    /// The typed core keys and fills a dictionary with `I64`, `F64` or `Str` only.
-    fn dict_compiles(&self, ty: Ty<'db>) -> bool {
+    /// Why the typed core has no layout for `ty`: it keys and fills a dictionary with `I64`,
+    /// `F64` or `Str` only, and a set, whose elements are a dictionary's keys, with `I64` or
+    /// `Str` (a float's equality is not a key's).
+    fn keyed_blocker(&self, ty: Ty<'db>) -> Option<Uncompiled> {
         let db = self.judged.db;
-        let Some((key, value)) = dict_entries(db, ty) else {
-            return true;
-        };
-        [key, value].into_iter().all(|entry| {
-            matches!(
-                entry.kind(db),
-                TyKind::Native(NativeScalar::I64 | NativeScalar::F64 | NativeScalar::Str)
-                    | TyKind::Scalar(Atomic::Double | Atomic::Character)
-                    | TyKind::Var(_)
-            )
-        })
+        if let Some((key, value)) = dict_entries(db, ty) {
+            let fits = [key, value].into_iter().all(|entry| {
+                matches!(
+                    entry.kind(db),
+                    TyKind::Native(NativeScalar::I64 | NativeScalar::F64 | NativeScalar::Str)
+                        | TyKind::Scalar(Atomic::Double | Atomic::Character)
+                        | TyKind::Var(_)
+                )
+            });
+            return (!fits).then_some(Uncompiled::DictEntries);
+        }
+        let element = set_element(db, ty)?;
+        let fits = matches!(
+            element.kind(db),
+            TyKind::Native(NativeScalar::I64 | NativeScalar::Str)
+                | TyKind::Scalar(Atomic::Character)
+                | TyKind::Var(_)
+        );
+        (!fits).then_some(Uncompiled::SetElements)
     }
 
     /// Whether the typed core compiles `pattern`. `top` says it stands at the top of an arm, or
@@ -2498,8 +2527,8 @@ impl<'a, 'db> Judge<'a, 'db> {
                 for &(_, value) in arguments {
                     self.function_argument(value);
                 }
-                if self.ty(id).is_some_and(|ty| !self.dict_compiles(ty)) {
-                    self.dict_entries(module.range(id));
+                if let Some(uncompiled) = self.ty(id).and_then(|ty| self.keyed_blocker(ty)) {
+                    self.keyed_layout(module.range(id), uncompiled);
                 }
             }
             Callee::Table => {

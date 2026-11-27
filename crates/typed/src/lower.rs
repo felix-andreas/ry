@@ -3268,35 +3268,65 @@ impl Lowering<'_> {
                 self.builder.switch_to(join);
                 Ok(result)
             }
-            "Set.from_list" => {
-                let [list] = arguments.exactly(1)?[..] else {
-                    return Err(Refusal::new("a malformed `Set.from_list`"));
+            "Set.from_list" => self.set_from_list(&arguments),
+            "Set.single" => {
+                let [element] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal::new("a malformed `Set.single`"));
                 };
-                let list = self.value(list)?;
-                match self.builder.ty(list) {
-                    Type::Vector {
-                        item: item @ (Item::I64 | Item::Str),
-                        array: true,
-                    } => Ok(self.builder.emit(Type::Set(item), Op::Unique(list))),
-                    _ => Err(Refusal::new(
-                        "a `Set.from_list` of something other than a list of integers or strings",
-                    )),
-                }
+                let element = self.value(element)?;
+                let item = match self.builder.ty(element) {
+                    Type::I64 => Item::I64,
+                    Type::Str => Item::Str,
+                    _ => {
+                        return Err(Refusal::new(
+                            "a `Set.single` of something other than a whole number or a string",
+                        ));
+                    }
+                };
+                let ty = Type::Set(item);
+                let empty = self.builder.emit(ty, Op::DictNew);
+                let member = self.set_member();
+                Ok(self
+                    .builder
+                    .emit(ty, Op::DictInsert(empty, element, member)))
             }
-            "Set.to_list" | "Set.len" => {
+            "Set.to_list" | "Set.len" | "Set.is_empty" => {
                 let [set] = arguments.exactly(1)?[..] else {
-                    return Err(Refusal::new("a malformed set function"));
+                    return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
                 };
                 let set = self.value(set)?;
-                let Type::Set(item) = self.builder.ty(set) else {
-                    return Err(Refusal::new("a set function of something other than a set"));
+                let item = self.set_item(set, name)?;
+                Ok(match name {
+                    "Set.to_list" => self
+                        .builder
+                        .emit(Type::Vector { item, array: true }, Op::DictKeys(set)),
+                    "Set.len" => self.builder.emit(Type::I64, Op::DictLen(set)),
+                    _ => {
+                        let count = self.builder.emit(Type::I64, Op::DictLen(set));
+                        let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+                        self.test(Compare::Eq, Item::I64, count, zero)
+                    }
+                })
+            }
+            "Set.contains" | "Set.insert" | "Set.remove" => {
+                let [set, element] = arguments.exactly(2)?[..] else {
+                    return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
                 };
-                if name == "Set.len" {
-                    return Ok(self.builder.emit(Type::I64, Op::Length(set)));
-                }
-                // The set's items are already a list in first-insertion order.
-                let list = Type::Vector { item, array: true };
-                Ok(self.builder.emit(list, Op::Relabel(set, list)))
+                let set = self.value(set)?;
+                let element = self.value(element)?;
+                let item = self.set_item(set, name)?;
+                let element = self.convert_scalar(element, item)?;
+                let ty = self.builder.ty(set);
+                Ok(match name {
+                    "Set.contains" => self
+                        .builder
+                        .emit(Type::Bool, Op::DictContains(set, element)),
+                    "Set.insert" => {
+                        let member = self.set_member();
+                        self.builder.emit(ty, Op::DictInsert(set, element, member))
+                    }
+                    _ => self.builder.emit(ty, Op::DictRemove(set, element)),
+                })
             }
             "List.sort_asc" | "List.sort_desc" => {
                 let [list] = arguments.exactly(1)?[..] else {
@@ -3605,7 +3635,9 @@ impl Lowering<'_> {
             | "List.walk_from_until"
             | "List.walk_try"
             | "Dict.walk"
-            | "Dict.walk_until" => self.walk(name, &arguments),
+            | "Dict.walk_until"
+            | "Set.walk"
+            | "Set.walk_until" => self.walk(name, &arguments),
             "List.any" | "List.all" => self.any_all(name == "List.all", &arguments),
             "List.product" => self.product(&arguments),
             "List.single" | "List.prepend" => self.single_or_prepend(name, &arguments),
@@ -4125,11 +4157,15 @@ impl Lowering<'_> {
                     let empty = Arguments { items: Vec::new() };
                     return self.list_literal(&empty, hint.as_deref(), Some(capacity));
                 }
-                if self.is_library_call(list, "Dict.empty", 0)? {
+                if self.is_library_call(list, "Dict.empty", 0)?
+                    || self.is_library_call(list, "Set.empty", 0)?
+                {
                     let ty = constant_string(hint)
                         .as_deref()
-                        .and_then(dict_type)
-                        .ok_or(Refusal::new("an empty dictionary of an unknown type"))?;
+                        .and_then(keyed_type)
+                        .ok_or(Refusal::new(
+                            "an empty dictionary or set of an unknown type",
+                        ))?;
                     return Ok(self.builder.emit(ty, Op::DictNew));
                 }
                 if self.is_library_call(list, "Num.from_r", 1)? {
@@ -4260,13 +4296,14 @@ impl Lowering<'_> {
             "Dict.insert" => self.dict_insert(&arguments),
             "Dict.to_list" => self.dict_to_list(&arguments),
             "Dict.from_list" => self.dict_from_list(&arguments),
-            "Dict.map" => self.dict_map(&arguments),
-            "Dict.keep_if" | "Dict.drop_if" | "Dict.keep_shared" | "Dict.remove_all" => {
+            "Dict.map" | "Set.map" => self.dict_map(name, &arguments),
+            "Dict.keep_if" | "Dict.drop_if" | "Dict.keep_shared" | "Dict.remove_all"
+            | "Set.keep_if" | "Set.drop_if" | "Set.intersection" | "Set.difference" => {
                 self.dict_filter(name, &arguments)
             }
-            "Dict.insert_all" => self.dict_insert_all(&arguments),
-            "Dict.join_map" => self.dict_join_map(&arguments),
-            "List.reserve" | "Dict.reserve" => {
+            "Dict.insert_all" | "Set.union" => self.dict_insert_all(name, &arguments),
+            "Dict.join_map" | "Set.join_map" => self.dict_join_map(name, &arguments),
+            "List.reserve" | "Dict.reserve" | "Set.reserve" => {
                 let [collection, spare] = arguments.exactly(2)?[..] else {
                     return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
                 };
@@ -4308,7 +4345,9 @@ impl Lowering<'_> {
                 self.fail_if(crowded);
                 Ok(collection)
             }
-            "List.release_excess_capacity" | "Dict.release_excess_capacity" => {
+            "List.release_excess_capacity"
+            | "Dict.release_excess_capacity"
+            | "Set.release_excess_capacity" => {
                 let [collection] = arguments.exactly(1)?[..] else {
                     return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
                 };
@@ -4989,7 +5028,7 @@ impl Lowering<'_> {
         let backwards = name.starts_with("List.walk_backwards");
         let with_index = name.starts_with("List.walk_with_index");
         let from = name.starts_with("List.walk_from");
-        let over_dict = name.starts_with("Dict.");
+        let over_dict = name.starts_with("Dict.") || name.starts_with("Set.");
         let until = name.ends_with("_until");
         let trying = name == "List.walk_try";
         let (list, start, state, function) = match (
@@ -5019,7 +5058,7 @@ impl Lowering<'_> {
                 let list = self.value(list)?;
                 let ty = self.builder.ty(list);
                 let walkable = if over_dict {
-                    matches!(ty, Type::Dict { .. })
+                    ty.entry_items().is_some()
                 } else {
                     matches!(ty, Type::Vector { array: true, .. } | Type::List(_))
                 };
@@ -5093,18 +5132,24 @@ impl Lowering<'_> {
             return Ok(self.count_true(mask));
         }
         let state = match state {
-            Some(state) if self.is_library_call(state, "Dict.empty", 0)? => {
-                // An empty dictionary's type is the one the step function declares for its state.
+            Some(state)
+                if self.is_library_call(state, "Dict.empty", 0)?
+                    || self.is_library_call(state, "Set.empty", 0)? =>
+            {
+                // An empty dictionary's or set's type is the one the step function declares for
+                // its state.
                 let (Callable::Inline(formals, body, _) | Callable::Captured(formals, body, _)) =
                     callable
                 else {
-                    return Err(Refusal::new("a walk from `Dict.empty()` with a named step"));
+                    return Err(Refusal::new(
+                        "a walk from an empty collection with a named step",
+                    ));
                 };
                 let ty = interp::annotations::formal_annotation(formals, body, 0)
                     .as_deref()
-                    .and_then(dict_type)
+                    .and_then(keyed_type)
                     .ok_or(Refusal::new(
-                        "a walk from `Dict.empty()` whose state type is unknown",
+                        "a walk from an empty collection whose state type is unknown",
                     ))?;
                 self.builder.emit(ty, Op::DictNew)
             }
@@ -5124,33 +5169,16 @@ impl Lowering<'_> {
                 (positions, element, positions.counter)
             }
             (None, Some(dict)) if over_dict => {
-                let Type::Dict { key, value } = ty else {
-                    return Err(Refusal::new(
-                        "a walk over something that is not a dictionary",
-                    ));
-                };
-                let keys = self.builder.emit(
-                    Type::Vector {
-                        item: key,
-                        array: true,
-                    },
-                    Op::DictKeys(dict),
-                );
-                let values = self.builder.emit(
-                    Type::Vector {
-                        item: value,
-                        array: true,
-                    },
-                    Op::DictValues(dict),
-                );
+                let (keys, values, key, value) = self.entries(dict, name)?;
                 let positions = self.positions(keys);
                 let element = self
                     .builder
                     .emit(Type::of_item(key), Op::ItemAt(keys, positions.counter));
-                entry_value = Some(
+                // A set's step takes only the element.
+                entry_value = values.map(|values| {
                     self.builder
-                        .emit(Type::of_item(value), Op::ItemAt(values, positions.counter)),
-                );
+                        .emit(Type::of_item(value), Op::ItemAt(values, positions.counter))
+                });
                 (positions, element, positions.counter)
             }
             (None, Some(list)) => {
@@ -9174,12 +9202,21 @@ impl Lowering<'_> {
         Ok(dict)
     }
 
-    /// The keys and values of `dict` as two ry lists in the dictionary's order, and the
-    /// dictionary's type.
-    fn entries(&mut self, dict: Local, name: &str) -> Result<(Local, Local, Item, Item), Refusal> {
-        let Type::Dict { key, value } = self.builder.ty(dict) else {
+    /// The keys and values of `dict` as two ry lists in the dictionary's order, and their
+    /// items. `dict` is a set for a `Set` function, which gives no list of values because
+    /// every value is the same placeholder (`entry_value`).
+    fn entries(
+        &mut self,
+        dict: Local,
+        name: &str,
+    ) -> Result<(Local, Option<Local>, Item, Item), Refusal> {
+        let ty = self.builder.ty(dict);
+        let (Some((key, value)), true) = (
+            ty.entry_items(),
+            matches!(ty, Type::Set(_)) == name.starts_with("Set."),
+        ) else {
             return Err(Refusal(Cow::Owned(format!(
-                "a `{name}` of something other than a dictionary"
+                "a `{name}` of something other than its collection"
             ))));
         };
         let keys = self.builder.emit(
@@ -9189,25 +9226,42 @@ impl Lowering<'_> {
             },
             Op::DictKeys(dict),
         );
-        let values = self.builder.emit(
-            Type::Vector {
-                item: value,
-                array: true,
-            },
-            Op::DictValues(dict),
-        );
+        let values = (!matches!(ty, Type::Set(_))).then(|| {
+            self.builder.emit(
+                Type::Vector {
+                    item: value,
+                    array: true,
+                },
+                Op::DictValues(dict),
+            )
+        });
         Ok((keys, values, key, value))
+    }
+
+    /// The value at `position` of the values `entries` gave, or a set's placeholder.
+    fn entry_value(&mut self, values: Option<Local>, value: Item, position: Local) -> Local {
+        match values {
+            Some(values) => self
+                .builder
+                .emit(Type::of_item(value), Op::ItemAt(values, position)),
+            None => self.set_member(),
+        }
     }
 
     /// `Dict.join_map(dict, f)`: the entries of the dictionary `f` gives for each key and value,
     /// inserted in order into one fresh dictionary, in a loop with `f` inlined.
-    unsafe fn dict_join_map(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+    /// `Set.join_map(set, f)` is the same loop over the set's elements.
+    unsafe fn dict_join_map(
+        &mut self,
+        name: &str,
+        arguments: &Arguments,
+    ) -> Result<Local, Refusal> {
         let [dict, function] = arguments.exactly(2)?[..] else {
-            return Err(Refusal::new("a malformed `Dict.join_map`"));
+            return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
         };
         let dict = self.value(dict)?;
         let callable = self.function_argument(function)?;
-        let (keys, values, key, value) = self.entries(dict, "Dict.join_map")?;
+        let (keys, values, key, value) = self.entries(dict, name)?;
         // The result's type is known only once the body is lowered, as for `Dict.map`.
         let preheader = self.builder.current;
         let output = self.builder.local(Type::Null);
@@ -9215,27 +9269,27 @@ impl Lowering<'_> {
         let entry_key = self
             .builder
             .emit(Type::of_item(key), Op::ItemAt(keys, positions.counter));
-        let entry_value = self
-            .builder
-            .emit(Type::of_item(value), Op::ItemAt(values, positions.counter));
+        let mut inputs: SmallVec<[Local; 2]> = SmallVec::from_slice(&[entry_key]);
+        if let Some(values) = values {
+            inputs.push(
+                self.builder
+                    .emit(Type::of_item(value), Op::ItemAt(values, positions.counter)),
+            );
+        }
         let inner = self
-            .apply(callable, &[entry_key, entry_value])?
-            .ok_or(Refusal::new(
-                "a `Dict.join_map` callback that never completes",
-            ))?;
+            .apply(callable, &inputs)?
+            .ok_or(Refusal(Cow::Owned(format!(
+                "a `{name}` callback that never completes"
+            ))))?;
         let output_ty = self.builder.ty(inner);
-        let (inner_keys, inner_values, inner_key, inner_value) =
-            self.entries(inner, "Dict.join_map")?;
+        let (inner_keys, inner_values, inner_key, inner_value) = self.entries(inner, name)?;
         self.builder.function.locals[output.0 as usize] = output_ty;
         let inner_positions = self.positions(inner_keys);
         let joined_key = self.builder.emit(
             Type::of_item(inner_key),
             Op::ItemAt(inner_keys, inner_positions.counter),
         );
-        let joined_value = self.builder.emit(
-            Type::of_item(inner_value),
-            Op::ItemAt(inner_values, inner_positions.counter),
-        );
+        let joined_value = self.entry_value(inner_values, inner_value, inner_positions.counter);
         let grown = self
             .builder
             .emit(output_ty, Op::DictInsert(output, joined_key, joined_value));
@@ -9249,18 +9303,19 @@ impl Lowering<'_> {
         Ok(output)
     }
 
-    /// The list or dictionary of a capacity function, which gives it back as it is: native
-    /// lists and dictionaries grow by doubling and keep no reserved room a program could read.
+    /// The list, dictionary or set of a capacity function, which gives it back as it is: native
+    /// collections grow by doubling and keep no reserved room a program could read.
     fn capacity_operand(&mut self, name: &str, collection: Local) -> Result<Local, Refusal> {
         self.usable(collection)?;
-        let fits = if name.starts_with("List.") {
-            matches!(
+        let fits = matches!(
+            (
+                name.split_once('.').map(|(module, _)| module),
                 self.builder.ty(collection),
-                Type::Vector { array: true, .. }
-            )
-        } else {
-            matches!(self.builder.ty(collection), Type::Dict { .. })
-        };
+            ),
+            (Some("List"), Type::Vector { array: true, .. })
+                | (Some("Dict"), Type::Dict { .. })
+                | (Some("Set"), Type::Set(_))
+        );
         if !fits {
             return Err(Refusal(Cow::Owned(format!(
                 "a `{name}` of something other than its collection"
@@ -9269,15 +9324,66 @@ impl Lowering<'_> {
         Ok(collection)
     }
 
+    /// `Set.from_list(list)`: each item inserted in turn into an empty set, so a repeated item
+    /// keeps its first position.
+    unsafe fn set_from_list(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [list] = arguments.exactly(1)?[..] else {
+            return Err(Refusal::new("a malformed `Set.from_list`"));
+        };
+        let list = self.value(list)?;
+        let ty = self.builder.ty(list);
+        let Type::Vector {
+            item: item @ (Item::I64 | Item::Str),
+            array: true,
+        } = ty
+        else {
+            return Err(Refusal::new(
+                "a `Set.from_list` of something other than a list of whole numbers or strings",
+            ));
+        };
+        let set_ty = Type::Set(item);
+        let set = self.builder.local(set_ty);
+        self.builder.push(Some(set), Op::DictNew);
+        let held = self.builder.emit(ty, Op::Copy(list));
+        let positions = self.positions(held);
+        let element = self
+            .builder
+            .emit(Type::of_item(item), Op::ItemAt(held, positions.counter));
+        let member = self.set_member();
+        let grown = self
+            .builder
+            .emit(set_ty, Op::DictInsert(set, element, member));
+        self.builder.push(Some(set), Op::Copy(grown));
+        self.next_position(positions);
+        Ok(set)
+    }
+
+    /// The element item of `set`, the operand of the set function `name`.
+    fn set_item(&mut self, set: Local, name: &str) -> Result<Item, Refusal> {
+        match self.builder.ty(set) {
+            Type::Set(item) => Ok(item),
+            _ => Err(Refusal(Cow::Owned(format!(
+                "a `{name}` of something other than a set"
+            )))),
+        }
+    }
+
+    /// The placeholder a set's dictionary maps each element to.
+    fn set_member(&mut self) -> Local {
+        self.builder.emit(Type::Lgl, Op::Const(Constant::Lgl(1)))
+    }
+
     /// `Dict.map(dict, f)`: each key with `f` of its key and value, inserted in order into a
-    /// fresh dictionary, in a loop with `f` inlined.
-    unsafe fn dict_map(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+    /// fresh dictionary, in a loop with `f` inlined. `Set.map(set, f)` inserts `f` of each
+    /// element into a fresh set instead, so equal results merge.
+    unsafe fn dict_map(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
         let [dict, function] = arguments.exactly(2)?[..] else {
-            return Err(Refusal::new("a malformed `Dict.map`"));
+            return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
         };
         let dict = self.value(dict)?;
         let callable = self.function_argument(function)?;
-        let (keys, values, key, value) = self.entries(dict, "Dict.map")?;
+        let (keys, values, key, value) = self.entries(dict, name)?;
+        let over_set = name == "Set.map";
         // The result's value type is known only once the body is lowered, so the output is made
         // in the preheader afterwards, as `List.map` makes its output.
         let preheader = self.builder.current;
@@ -9286,30 +9392,41 @@ impl Lowering<'_> {
         let entry_key = self
             .builder
             .emit(Type::of_item(key), Op::ItemAt(keys, positions.counter));
-        let entry_value = self
-            .builder
-            .emit(Type::of_item(value), Op::ItemAt(values, positions.counter));
+        let mut inputs: SmallVec<[Local; 2]> = SmallVec::from_slice(&[entry_key]);
+        if let Some(values) = values {
+            inputs.push(
+                self.builder
+                    .emit(Type::of_item(value), Op::ItemAt(values, positions.counter)),
+            );
+        }
         let mapped = self
-            .apply(callable, &[entry_key, entry_value])?
-            .ok_or(Refusal::new("a `Dict.map` callback that never completes"))?;
-        let mapped_item = match self.builder.ty(mapped) {
-            Type::Str => Item::Str,
-            Type::I64 => Item::I64,
-            Type::Dbl => Item::Dbl,
+            .apply(callable, &inputs)?
+            .ok_or(Refusal(Cow::Owned(format!(
+                "a `{name}` callback that never completes"
+            ))))?;
+        let mapped_item = match (over_set, self.builder.ty(mapped)) {
+            (_, Type::Str) => Item::Str,
+            (_, Type::I64) => Item::I64,
+            (false, Type::Dbl) => Item::Dbl,
             _ => {
-                return Err(Refusal::new(
-                    "a `Dict.map` callback whose value is not a whole number, a double or a string",
-                ));
+                return Err(Refusal(Cow::Owned(format!(
+                    "a `{name}` callback whose result is not a whole number, a double or a string"
+                ))));
             }
         };
-        let output_ty = Type::Dict {
-            key,
-            value: mapped_item,
+        let (output_ty, key, value) = if over_set {
+            (Type::Set(mapped_item), mapped, self.set_member())
+        } else {
+            let output_ty = Type::Dict {
+                key,
+                value: mapped_item,
+            };
+            (output_ty, entry_key, mapped)
         };
         self.builder.function.locals[output.0 as usize] = output_ty;
         let grown = self
             .builder
-            .emit(output_ty, Op::DictInsert(output, entry_key, mapped));
+            .emit(output_ty, Op::DictInsert(output, key, value));
         self.builder.push(Some(output), Op::Copy(grown));
         self.next_position(positions);
         self.builder.switch_to(preheader);
@@ -9322,21 +9439,26 @@ impl Lowering<'_> {
     /// `Dict.keep_if(dict, predicate)`, `Dict.drop_if`, `Dict.keep_shared(first, second)` and
     /// `Dict.remove_all(first, second)`: the entries that pass, inserted in order into a fresh
     /// dictionary, so the kept entries keep their order. A shared entry needs an equal value too,
-    /// as the interpreter's `identical` compares it.
+    /// as the interpreter's `identical` compares it. The `Set` functions `keep_if`, `drop_if`,
+    /// `intersection` and `difference` are the same loops, whose predicate takes the element.
     unsafe fn dict_filter(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
         let [dict, other] = arguments.exactly(2)?[..] else {
             return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
         };
         let dict = self.value(dict)?;
         let ty = self.builder.ty(dict);
-        let by_predicate = matches!(name, "Dict.keep_if" | "Dict.drop_if");
+        let by_predicate = matches!(
+            name,
+            "Dict.keep_if" | "Dict.drop_if" | "Set.keep_if" | "Set.drop_if"
+        );
+        let over_set = name.starts_with("Set.");
         let (callable, second) = if by_predicate {
             (Some(self.function_argument(other)?), None)
         } else {
             let second = self.value(other)?;
             if self.builder.ty(second) != ty {
                 return Err(Refusal(Cow::Owned(format!(
-                    "a `{name}` of dictionaries of different types"
+                    "a `{name}` of collections of different types"
                 ))));
             }
             (None, Some(second))
@@ -9348,21 +9470,24 @@ impl Lowering<'_> {
         let entry_key = self
             .builder
             .emit(Type::of_item(key), Op::ItemAt(keys, positions.counter));
-        let entry_value = self
-            .builder
-            .emit(Type::of_item(value), Op::ItemAt(values, positions.counter));
+        let entry_value = self.entry_value(values, value, positions.counter);
         let (keep, next) = (self.builder.block(), self.builder.block());
         match (callable, second) {
             (Some(callable), _) => {
+                let inputs: &[Local] = if over_set {
+                    &[entry_key]
+                } else {
+                    &[entry_key, entry_value]
+                };
                 let answer = self
-                    .apply(callable, &[entry_key, entry_value])?
+                    .apply(callable, inputs)?
                     .ok_or(Refusal::new("a predicate that never completes"))?;
                 let answer = match self.builder.ty(answer) {
                     Type::Bool => answer,
                     Type::Lgl => self.builder.emit(Type::Bool, Op::Truth(answer)),
                     _ => return Err(Refusal::new("a predicate whose answer is not a logical")),
                 };
-                let (then, otherwise) = if name == "Dict.keep_if" {
+                let (then, otherwise) = if name.ends_with(".keep_if") {
                     (keep, next)
                 } else {
                     (next, keep)
@@ -9379,11 +9504,17 @@ impl Lowering<'_> {
                     .emit(Type::I64, Op::DictFind(second, entry_key));
                 let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
                 let present = self.test(Compare::Ge, Item::I64, position, zero);
-                if name == "Dict.remove_all" {
+                if matches!(name, "Dict.remove_all" | "Set.difference") {
                     self.builder.terminate(Terminator::Branch {
                         condition: present,
                         then: next,
                         otherwise: keep,
+                    });
+                } else if over_set {
+                    self.builder.terminate(Terminator::Branch {
+                        condition: present,
+                        then: keep,
+                        otherwise: next,
                     });
                 } else {
                     let compare = self.builder.block();
@@ -9418,29 +9549,32 @@ impl Lowering<'_> {
     }
 
     /// `Dict.insert_all(first, second)`: each entry of `second` inserted in order into `first`,
-    /// whose values for the same keys it replaces.
-    unsafe fn dict_insert_all(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+    /// whose values for the same keys it replaces. `Set.union(first, second)` is the same loop,
+    /// which leaves the elements of `first` first.
+    unsafe fn dict_insert_all(
+        &mut self,
+        name: &str,
+        arguments: &Arguments,
+    ) -> Result<Local, Refusal> {
         let [first, second] = arguments.exactly(2)?[..] else {
-            return Err(Refusal::new("a malformed `Dict.insert_all`"));
+            return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
         };
         let first = self.value(first)?;
         let second = self.value(second)?;
         let ty = self.builder.ty(first);
         if self.builder.ty(second) != ty {
-            return Err(Refusal::new(
-                "a `Dict.insert_all` of dictionaries of different types",
-            ));
+            return Err(Refusal(Cow::Owned(format!(
+                "a `{name}` of collections of different types"
+            ))));
         }
-        let (keys, values, key, value) = self.entries(second, "Dict.insert_all")?;
+        let (keys, values, key, value) = self.entries(second, name)?;
         let output = self.builder.local(ty);
         self.builder.push(Some(output), Op::Copy(first));
         let positions = self.positions(keys);
         let entry_key = self
             .builder
             .emit(Type::of_item(key), Op::ItemAt(keys, positions.counter));
-        let entry_value = self
-            .builder
-            .emit(Type::of_item(value), Op::ItemAt(values, positions.counter));
+        let entry_value = self.entry_value(values, value, positions.counter);
         let grown = self
             .builder
             .emit(ty, Op::DictInsert(output, entry_key, entry_value));
@@ -10405,16 +10539,23 @@ unsafe fn tag_layout(name: &str, count: u32) -> Result<u32, Refusal> {
     }))
 }
 
-/// A dictionary's type from its annotation, such as `Dict<Str, F64>`.
-fn dict_type(annotation: &str) -> Option<Type> {
-    let inner = annotation.trim().strip_prefix("Dict<")?.strip_suffix('>')?;
-    let (key, value) = inner.split_once(',')?;
+/// A dictionary's or a set's type from its annotation, such as `Dict<Str, F64>` or `Set<I64>`.
+fn keyed_type(annotation: &str) -> Option<Type> {
     let item = |name: &str| match name.trim() {
         "Str" => Some(Item::Str),
         "I64" => Some(Item::I64),
         "F64" => Some(Item::Dbl),
         _ => None,
     };
+    let annotation = annotation.trim();
+    if let Some(inner) = annotation.strip_prefix("Set<") {
+        return match item(inner.strip_suffix('>')?)? {
+            Item::Dbl => None,
+            element => Some(Type::Set(element)),
+        };
+    }
+    let inner = annotation.strip_prefix("Dict<")?.strip_suffix('>')?;
+    let (key, value) = inner.split_once(',')?;
     Some(Type::Dict {
         key: item(key)?,
         value: item(value)?,
