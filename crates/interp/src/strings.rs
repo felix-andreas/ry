@@ -734,13 +734,15 @@ pub fn with_byte_buffer<T>(body: impl FnOnce(&mut Vec<u8>) -> R<T>) -> R<T> {
 /// [`with_byte_buffer`] for text that is UTF-8.
 #[inline(always)]
 pub fn with_text_buffer<T>(body: impl FnOnce(&mut String) -> R<T>) -> R<T> {
-    with_byte_buffer(|bytes| {
-        // SAFETY: the buffer arrives empty, and an empty buffer is valid UTF-8.
-        let mut text = unsafe { String::from_utf8_unchecked(std::mem::take(bytes)) };
-        let result = body(&mut text);
-        *bytes = text.into_bytes();
-        result
-    })
+    // Written out rather than through `with_byte_buffer`, whose closure the compiler may leave
+    // out of line, which costs `sprintf` a call and a buffer move per use.
+    let mut bytes = crate::interp().text_buffers.pop().unwrap_or_default();
+    bytes.clear();
+    // SAFETY: the buffer is empty, and an empty buffer is valid UTF-8.
+    let mut text = unsafe { String::from_utf8_unchecked(bytes) };
+    let result = body(&mut text);
+    crate::interp().text_buffers.push(text.into_bytes());
+    result
 }
 
 /// One `%` conversion of a format string.

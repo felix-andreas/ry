@@ -14,7 +14,10 @@ use {
         conditions::{self, Handler},
         dispatch::{self, MethodsState},
         eval,
-        handles::{self, Cx, Expression, List, Local, NativeArgs, Str, StringFill, Symbol, safe},
+        handles::{
+            self, Cx, Environment, Expression, List, Local, NativeArgs, Str, StringFill, Symbol,
+            safe,
+        },
         interp,
         unwind::{Jump, R, Unwind, error, error_in},
         values::{self, length, missing_arg, nil, symbol_name, symbols, unbound},
@@ -54,7 +57,7 @@ pub const ROUTINES: &[(&str, NativeFn)] = &[
     ("R_set_el_named", safe!(native set_element_named)),
     ("R_set_slot", set_slot),
     ("R_standardGeneric", standard_generic),
-    ("do_substitute_direct", substitute_direct),
+    ("do_substitute_direct", safe!(native substitute_direct)),
     ("Rf_allocS4Object", alloc_s4_object),
     ("R_set_method_dispatch", safe!(native set_method_dispatch)),
     ("R_get_primname", primitive_name),
@@ -1681,39 +1684,40 @@ unsafe fn standard_generic(call: &NativeCall<'_>) -> R<Sexp> {
 
 /// `substitute(object, frame)` where `object` is the value itself, not the expression that
 /// computes it. A list `frame` is turned into an environment first.
-unsafe fn substitute_direct(call: &NativeCall<'_>) -> R<Sexp> {
-    let (object, frame) = (call.arg(0), call.arg(1));
-    let env = match frame.kind() {
-        SexpType::Environment => frame,
-        SexpType::List | SexpType::Pairlist => {
-            let env = values::new_env(values::base_env())?;
-            let items = if frame.kind() == SexpType::List {
-                let names = values::names(frame);
-                (0..length(frame))
-                    .map(|index| {
-                        let tag = if names.kind() == SexpType::String
-                            && !names.element(index).bytes().is_empty()
-                        {
-                            values::install_charsxp(names.element(index))
-                        } else {
-                            Ok(nil())
-                        };
-                        tag.map(|tag| (tag, frame.element(index)))
-                    })
-                    .collect::<R<Vec<_>>>()?
+fn substitute_direct<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -> R<Local<'s>> {
+    let (object, frame) = (arguments.value(0), arguments.value(1));
+    let environment = match frame.downcast::<Environment>() {
+        Some(environment) => environment,
+        None if matches!(frame.r_type(), SexpType::List | SexpType::Pairlist) => {
+            let environment = handles::new_environment(context, handles::base_environment())?;
+            if let Some(list) = handles::dense::<List>(context, frame)? {
+                let names = handles::names_of(context, frame)?;
+                if let Some(names) = handles::dense::<Str>(context, names)? {
+                    for index in 0..list.len() {
+                        if names.get(context, index).bytes().is_empty() {
+                            continue;
+                        }
+                        let symbol = handles::install_name_at(context, names, index)?;
+                        let value = context.root(list.get(context, index));
+                        handles::define(context, context.root(symbol), value, environment)?;
+                    }
+                }
             } else {
-                values::pairlist_items(frame)
-            };
-            for (tag, value) in items {
-                if tag != nil() {
-                    eval::define(tag, value, env)?;
+                let mut cell = frame;
+                while let Some((value, tag, rest)) = handles::cell_fields(cell.read(context)) {
+                    let (value, tag) = (context.root(value), tag.downcast::<Symbol>());
+                    let tag = tag.map(|tag| context.root(tag));
+                    cell = context.root(rest);
+                    if let Some(symbol) = tag {
+                        handles::define(context, symbol, value, environment)?;
+                    }
                 }
             }
-            env
+            environment
         }
-        _ => return Err(call.error("invalid list for substitution")),
+        None => return Err(arguments.error("invalid list for substitution")),
     };
-    eval::substitute(object, env)
+    eval::substitute(context, object, environment)
 }
 
 unsafe fn alloc_s4_object(_call: &NativeCall<'_>) -> R<Sexp> {
