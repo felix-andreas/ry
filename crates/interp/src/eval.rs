@@ -3371,53 +3371,33 @@ fn bind_formals<'s>(
         activity::count(Counter::FormalsMatchedByName);
         Some(match_args_cached(context, function, args, call)?)
     };
-    let actual = |index: usize| match &actuals {
-        Some(actuals) => actuals.get(index).copied().unwrap_or(missing_value),
-        None => args.get(index).map_or(missing_value, |arg| arg.value),
-    };
     // A left-out formal whose default is code runs as a promise compiled over the slots. The
     // first call that needs one compiles them all, which allocates, so a window that meets
     // them uncompiled gives its stores back and the walk starts again.
     let mut compiled = false;
     loop {
         let closure = function.read(context);
-        let mut defaults = None;
         let mut window = handles::Window::open(context, slot_count, registers)?;
-        let (mut missing, mut promised) = (0u64, 0u64);
-        let mut uncompiled = false;
-        let mut formal = closure.formals();
-        for index in 0..formal_count {
-            let Some(cell) = formal.downcast::<Pairlist>() else {
-                break;
-            };
-            let default = cell.head();
-            let value = actual(index).read(context);
-            let value = if value.is(missing_value) && !default.is(missing_value) {
-                if !is_literal(default) {
-                    defaults = defaults.or_else(|| slot_defaults(context, closure));
-                    let Some(defaults) = defaults else {
-                        uncompiled = true;
-                        break;
-                    };
-                    if !default_fits(defaults, index) {
-                        return Ok(None);
-                    }
-                    promised |= 1 << index;
-                }
-                missing |= 1 << index;
-                default
-            } else {
-                value
-            };
-            window.push(value);
-            formal = cell.rest();
-        }
-        if !uncompiled {
-            return Ok(Some(CallFrame::Slots {
-                header: window.close() as u32,
-                missing,
-                promised,
-            }));
+        // Each way of reading the arguments gets its own copy of the loop, which keeps the
+        // test of which one out of the per-formal stores.
+        let stored = match &actuals {
+            Some(actuals) => store_formals(context, closure, &mut window, formal_count, |index| {
+                actuals.get(index).copied().unwrap_or(missing_value)
+            }),
+            None => store_formals(context, closure, &mut window, formal_count, |index| {
+                args.get(index).map_or(missing_value, |arg| arg.value)
+            }),
+        };
+        match stored {
+            Stored::All { missing, promised } => {
+                return Ok(Some(CallFrame::Slots {
+                    header: window.close() as u32,
+                    missing,
+                    promised,
+                }));
+            }
+            Stored::Unfit => return Ok(None),
+            Stored::Uncompiled => {}
         }
         drop(window);
         if compiled {
@@ -3426,6 +3406,55 @@ fn bind_formals<'s>(
         handles::build_slot_defaults(context, function)?;
         compiled = true;
     }
+}
+
+/// How [`store_formals`] ends: every formal stored, a default that fits no slot, or a default
+/// whose code is not compiled to run over the slots yet.
+enum Stored {
+    All { missing: u64, promised: u64 },
+    Unfit,
+    Uncompiled,
+}
+
+/// Stores each of `closure`'s first `formal_count` formals in `window`: the argument `actual`
+/// reads for it, or its default when the argument is missing.
+#[inline(always)]
+fn store_formals<'c, 'a>(
+    context: &'c Cx<'_>,
+    closure: Gc<'c, Closure>,
+    window: &mut handles::Window<'_>,
+    formal_count: usize,
+    actual: impl Fn(usize) -> Local<'a>,
+) -> Stored {
+    let missing_value = handles::missing_argument();
+    let (mut missing, mut promised) = (0u64, 0u64);
+    let mut defaults = None;
+    let mut ending = None;
+    let mut formal = closure.formals();
+    window.fill(formal_count, |index| {
+        let cell = formal.downcast::<Pairlist>()?;
+        formal = cell.rest();
+        let default = cell.head();
+        let value = actual(index).read(context);
+        if !value.is(missing_value) || default.is(missing_value) {
+            return Some(value);
+        }
+        if !is_literal(default) {
+            defaults = defaults.or_else(|| slot_defaults(context, closure));
+            let Some(defaults) = defaults else {
+                ending = Some(Stored::Uncompiled);
+                return None;
+            };
+            if !default_fits(defaults, index) {
+                ending = Some(Stored::Unfit);
+                return None;
+            }
+            promised |= 1 << index;
+        }
+        missing |= 1 << index;
+        Some(default)
+    });
+    ending.unwrap_or(Stored::All { missing, promised })
 }
 
 /// Whether a default goes into a slot as it is: a constant, not code to run.

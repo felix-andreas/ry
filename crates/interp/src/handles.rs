@@ -4282,6 +4282,32 @@ impl<'c> Window<'c> {
         self.written += 1;
     }
 
+    /// Stores the value `next` gives for each slot up to `end`, in order, and stops at the first
+    /// `None`. The bound is checked once, before the stores, which keeps the binding loops'
+    /// stores as tight as stores into a plain array.
+    #[inline(always)]
+    pub fn fill<V: Pointer<Value>>(
+        &mut self,
+        end: usize,
+        mut next: impl FnMut(usize) -> Option<V>,
+    ) {
+        let end = end.min(self.slot_count);
+        let mut written = self.written;
+        while written < end {
+            let Some(value) = next(written) else {
+                break;
+            };
+            let raw = value.raw();
+            // SAFETY: as in `push`, and `written` is below the window's slot count.
+            unsafe {
+                self.slots.add(written).write(raw);
+                raw.increment_refcount();
+            }
+            written += 1;
+        }
+        self.written = written;
+    }
+
     /// Leaves the slots no value was stored in unbound and returns the header register.
     #[inline]
     pub fn close(self) -> usize {
