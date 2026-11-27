@@ -3018,6 +3018,15 @@ pub(crate) unsafe fn gather(
         match item {
             Some(item) => {
                 if let Some(left_out) = left_out {
+                    if left_out.car() == values::missing_arg() {
+                        annotations::decline(|| {
+                            format!(
+                                "the call leaves out `{}`, which has no default",
+                                values::symbol_name(left_out.tag())
+                            )
+                        });
+                        return None;
+                    }
                     annotations::decline(|| {
                         format!(
                             "the call leaves out `{}`, whose default `{}` is not a constant, and \

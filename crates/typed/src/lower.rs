@@ -2760,17 +2760,23 @@ impl Lowering<'_> {
             SexpType::Symbol => match self.lookup(code) {
                 Some(Binding::Value(_) | Binding::Maybe(_)) => !assigns(body, code),
                 Some(Binding::Function(_) | Binding::Hidden) => false,
-                None => std_binding(code, self.env).is_some_and(|value| {
-                    !matches!(
-                        value.kind(),
-                        SexpType::Closure | SexpType::Builtin | SexpType::Special
-                    )
-                }),
+                None => {
+                    !assigns(body, code)
+                        && std_binding(code, self.env).is_some_and(|value| {
+                            !matches!(
+                                value.kind(),
+                                SexpType::Closure | SexpType::Builtin | SexpType::Special
+                            )
+                        })
+                }
             },
+            // The body's own definitions are not in scope at the call, so a head it binds
+            // (`` `+` <- ``, `Num.abs <- `) would call another function where R reads the default.
             SexpType::Language => {
                 let head = code.car();
                 head.kind() == SexpType::Symbol
                     && self.lookup(head).is_none()
+                    && !assigns(body, head)
                     && (is_ahead_operator(&rvalues::symbol_name(head))
                         || std_binding(head, self.env).is_some())
                     && rvalues::pairlist_items(code.cdr())
