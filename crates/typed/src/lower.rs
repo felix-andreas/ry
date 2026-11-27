@@ -715,6 +715,9 @@ struct ArgumentReads {
     /// Whether R computes the argument where the callee reads it even under a strict call,
     /// which holds for a default.
     lazy: bool,
+    /// The R call sites of [`Lowering::r_calls`] the argument made, from `first_r_call` on.
+    first_r_call: usize,
+    end_r_call: usize,
 }
 
 /// Where an argument's paths go: [`Lowering::argument_paths`].
@@ -732,6 +735,8 @@ const NO_ARGUMENT_READS: ArgumentReads = ArgumentReads {
     exit: BlockId(0),
     first_block: 0,
     lazy: true,
+    first_r_call: 0,
+    end_r_call: 0,
 };
 
 /// What a `match`'s value must be, which decides how [`Lowering::switch_shapes`] treats arms
@@ -1440,6 +1445,8 @@ impl Lowering<'_> {
             exit: self.builder.current,
             first_block: self.builder.function.blocks.len() as u32,
             lazy: false,
+            first_r_call: self.r_calls.len(),
+            end_r_call: self.r_calls.len(),
         }
     }
 
@@ -1449,6 +1456,7 @@ impl Lowering<'_> {
             end: self.param_reads.len(),
             exit: self.builder.current,
             lazy,
+            end_r_call: self.r_calls.len(),
             ..start
         }
     }
@@ -2078,6 +2086,7 @@ impl Lowering<'_> {
                 let strict = self.inlined.last().is_none_or(|inlined| inlined.typed)
                     && typed_definition(formals, body);
                 self.attribute_reads(&values, &spans, strict)?;
+                lazy_r_calls(formals, body, &values, &spans, strict)?;
             }
             return self.apply_arguments(callable, &values);
         }
@@ -11974,6 +11983,93 @@ unsafe fn constant_string(value: Sexp) -> Option<String> {
         return None;
     }
     rvalues::string_at(value, 0).map(|text| text.into_owned())
+}
+
+/// Declines a call of a local function whose lazy arguments make R calls, unless there is one
+/// such argument and the body reads its formal before anything R could observe
+/// ([`forced_first`]). R makes the calls where the body first reads the formal, or never, and
+/// native code makes them at the call. A typed function an argument calls is taken to make no R
+/// call.
+unsafe fn lazy_r_calls(
+    formals: Sexp,
+    body: Sexp,
+    values: &[Argument],
+    spans: &[ArgumentReads],
+    strict: bool,
+) -> Result<(), Refusal> {
+    let formals = rvalues::pairlist_items(formals);
+    let mut calling = values
+        .iter()
+        .zip(spans)
+        .zip(&formals)
+        .filter(|((value, span), _)| {
+            matches!(value, Argument::Value(_))
+                && (span.lazy || !strict)
+                && span.first_r_call != span.end_r_call
+        })
+        .map(|(_, &(symbol, _))| symbol);
+    let Some(formal) = calling.next() else {
+        return Ok(());
+    };
+    if calling.next().is_none() && forced_first(body, formal, body) == Some(true) {
+        return Ok(());
+    }
+    Err(Refusal::new(
+        "an argument of a local function calls R, which R does where the function first reads \
+         the argument: compute the argument into a variable first",
+    ))
+}
+
+/// Whether evaluating `expression` reads `formal` before anything R could observe: `Some(true)`
+/// when the read comes first, `Some(false)` when something else may (any call, an operator or
+/// a `Num` function applied before the read, a `return`, an assignment to the formal, or a read
+/// on some paths only), and `None` when it neither reads the formal nor does anything. A function `body` defines
+/// for itself is a call.
+unsafe fn forced_first(expression: Sexp, formal: Sexp, body: Sexp) -> Option<bool> {
+    match expression.kind() {
+        SexpType::Symbol => return (expression == formal).then_some(true),
+        SexpType::Language => {}
+        _ => return None,
+    }
+    let head = expression.car();
+    if head.kind() != SexpType::Symbol || assigns(body, head) {
+        return Some(false);
+    }
+    let items = rvalues::pairlist_items(expression.cdr());
+    let first = |index: usize| {
+        items
+            .get(index)
+            .and_then(|&(_, item)| forced_first(item, formal, body))
+    };
+    let in_order = || {
+        items
+            .iter()
+            .find_map(|&(_, item)| forced_first(item, formal, body))
+    };
+    // An operator or a library call can fail (an `I64` overflow, a division by zero), and its
+    // error shows before the read unless one of its operands reads the formal first.
+    let applied = || in_order().or(Some(false));
+    let name = rvalues::symbol_name(head);
+    match &*name {
+        "{" | "(" => in_order(),
+        "return" => first(0).or(Some(false)),
+        "+" | "-" | "*" | "/" | "^" | "%%" | "%/%" | "==" | "!=" | "<" | ">" | "<=" | ">="
+        | "!" | "&" | "|" => applied(),
+        "&&" | "||" => first(0).or_else(|| first(1).map(|_| false)),
+        "if" => first(0).or_else(|| match (first(1), first(2)) {
+            (None, None) => None,
+            (Some(true), Some(true)) => Some(true),
+            _ => Some(false),
+        }),
+        "<-" | "=" => match items.as_slice() {
+            &[(_, target), (_, value)] if target.kind() == SexpType::Symbol && target != formal => {
+                forced_first(value, formal, body)
+            }
+            _ => Some(false),
+        },
+        _ if name.starts_with("Num.") => applied(),
+        _ => Some(false),
+    }
 }
 
 /// Whether `expression`, local functions included, assigns `symbol` with `<-`, `=`, `<<-`, as a

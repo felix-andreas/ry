@@ -387,14 +387,13 @@ pub unsafe fn leave(depth: usize) {
 /// failed check leaves the promise unforced and still checked, as an error while evaluating it
 /// would, so code that catches the error can never read the value unchecked. Returns the value
 /// to store, which an `I64` annotation may have converted.
+///
+/// The checks run outermost first, the order in which R would force the promise each frame
+/// binds. A check that may convert gets a promise of its own ([`check_argument`]), so it is the
+/// first entry on its promise, and every frame after it sees its conversion.
 pub unsafe fn check_forced(promise: Sexp, mut value: Sexp) -> R<Sexp> {
     let pending = &interp().annotations.pending;
-    // The innermost frame is the most specific, so its failure is the one reported.
-    for entry in pending
-        .iter()
-        .rev()
-        .filter(|entry| entry.promise == promise)
-    {
+    for entry in pending.iter().filter(|entry| entry.promise == promise) {
         value = check_value(entry.call, entry.signature, entry.slot, value)?;
     }
     promise.set_gp_bits(gp::CHECKED_PROMISE, false);
@@ -732,7 +731,14 @@ enum Holder {
 }
 
 /// Checks the argument `value` that `holder` binds. A value the check converts replaces the
-/// binding, or the forced promise's value.
+/// binding.
+///
+/// A promise may be the caller's own (a variable passed to an effect-free closure, or an
+/// element of `...`), where GNU R binds a new promise that forces it. So a converted value goes
+/// into a new promise, and a shared unforced promise whose check may convert is wrapped in one
+/// before the check is registered: storing the conversion in the caller's promise would change
+/// the caller's variable, and fail the check of an outer typed frame that binds the same
+/// promise. `missing()` sees through the wrapper (`eval::value_is_missing`).
 unsafe fn check_argument(
     call: Sexp,
     signature: Sexp,
@@ -741,35 +747,56 @@ unsafe fn check_argument(
     value: Sexp,
     depth: usize,
 ) -> R<()> {
+    let rebind = |value: Sexp| -> R<()> {
+        match holder {
+            Holder::Binding(cell) => crate::heap().set_binding_value(cell, value)?,
+            Holder::Dots(cell) => crate::heap().set_car(cell, value),
+        }
+        Ok(())
+    };
     if value.kind() != SexpType::Promise {
         if value == values::missing_arg() {
             return Ok(());
         }
         let checked = check_value(call, signature, slot, value)?;
         if checked != value {
-            match holder {
-                Holder::Binding(cell) => crate::heap().set_binding_value(cell, checked)?,
-                Holder::Dots(cell) => crate::heap().set_car(cell, checked),
-            }
+            rebind(checked)?;
         }
         return Ok(());
     }
     if value.car() != values::unbound() {
         let checked = check_value(call, signature, slot, value.car())?;
         if checked != value.car() {
-            crate::heap().set_car(value, checked);
+            rebind(crate::eval::forced_promise(value.cdr(), checked)?)?;
         }
         return Ok(());
     }
-    value.set_gp_bits(gp::CHECKED_PROMISE, true);
+    let mut promise = value;
+    // A promise made for this call is held by its binding alone. An argument reference holds
+    // the value it is forced to itself, so its conversion never reaches the caller either.
+    if may_convert(mask_at(signature.element(MASKS), slot))
+        && value.refcount() > 1
+        && !crate::eval::is_reference(value)
+    {
+        // Evaluating a promise forces it. The global environment, never a slot frame's, keeps
+        // the wrapper an ordinary promise when it is forced.
+        promise = crate::eval::make_promise(value, values::global_env())?;
+        rebind(promise)?;
+    }
+    promise.set_gp_bits(gp::CHECKED_PROMISE, true);
     interp().annotations.pending.push(Pending {
-        promise: value,
+        promise,
         call,
         signature,
         slot,
         depth,
     });
     Ok(())
+}
+
+/// Whether [`converted`] may replace a value checked against `mask`.
+fn may_convert(mask: Mask) -> bool {
+    mask & I64 != 0 || (mask & ARRAY == 0 && mask & CHARACTER != 0)
 }
 
 /// Checks `value` against the annotation in `slot`, and returns the value to bind: `value`
