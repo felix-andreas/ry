@@ -400,14 +400,23 @@ pub(crate) unsafe fn lexical_call(env: Sexp) -> Sexp {
 
 /// `findVar`: the value bound to `symbol` from `env` outward, or `R_UnboundValue`. Promises are
 /// returned unforced.
+#[inline]
 pub unsafe fn find_var(symbol: Sexp, env: Sexp) -> R<Sexp> {
-    handles::in_caller_scope(|context| {
-        let found = match find_variable(context, Gc::adopt(symbol), Gc::adopt(env), false) {
-            Found::Value(value) => return Ok(value.raw()),
-            found => bound(context, found),
-        };
-        Ok(resolve(context, found)?.map_or_else(unbound, Local::raw))
-    })
+    // SAFETY: the caller passes a live symbol and environment.
+    let (found, active) = unsafe {
+        handles::reading(|context| {
+            match find_variable(context, Gc::adopt(symbol), Gc::adopt(env), false) {
+                Found::Unbound => (unbound(), false),
+                Found::Value(value) => (value.raw(), false),
+                Found::Active(binding) => (binding.raw(), true),
+            }
+        })
+    };
+    if active {
+        // SAFETY: `found` is the live active binding's cell.
+        return unsafe { active_value(found) };
+    }
+    Ok(found)
 }
 
 /// The value bound to `symbol` from `environment` outward, `None` when nothing binds it.
@@ -3294,7 +3303,8 @@ fn bind_formals<'s>(
     let mut formal_count = 0;
     let mut by_position = true;
     let mut formal = closure.formals();
-    while let Some((_, name, rest)) = handles::cell_fields(formal) {
+    while let Some(cell) = formal.downcast::<Pairlist>() {
+        let name = cell.tag();
         if formal_count >= bytecode::MAX_SLOT_FORMALS
             || !names.get(formal_count).is_some_and(|slot| slot.is(name))
         {
@@ -3302,7 +3312,7 @@ fn bind_formals<'s>(
         }
         by_position &= !name.is(dots);
         formal_count += 1;
-        formal = rest;
+        formal = cell.rest();
     }
     let actuals = if by_position
         && args.len() <= formal_count
@@ -3329,9 +3339,10 @@ fn bind_formals<'s>(
         let mut uncompiled = false;
         let mut formal = closure.formals();
         for index in 0..formal_count {
-            let Some((default, _, rest)) = handles::cell_fields(formal) else {
+            let Some(cell) = formal.downcast::<Pairlist>() else {
                 break;
             };
+            let default = cell.head();
             let value = actual(index).read(context);
             let value = if value.is(missing_value) && !default.is(missing_value) {
                 if !is_literal(default) {
@@ -3351,7 +3362,7 @@ fn bind_formals<'s>(
                 value
             };
             window.push(value);
-            formal = rest;
+            formal = cell.rest();
         }
         if !uncompiled {
             return Ok(Some(CallFrame::Slots {
@@ -3484,6 +3495,7 @@ pub unsafe fn enter_method(
 /// The slot window of [`enter_method`]: its header register, and its formals' missing and
 /// promised bits, from the slots of the generic's frame at `source` whose missing bits are
 /// `source_missing`.
+#[inline(always)]
 fn bind_method_formals(
     context: &mut Cx<'_>,
     method: Local<'_, Closure>,
@@ -3509,7 +3521,8 @@ fn bind_method_formals(
         let mut uncompiled = false;
         let mut formal = closure.formals();
         let mut index = 0;
-        while let Some((default, name, rest)) = handles::cell_fields(formal) {
+        while let Some(cell) = formal.downcast::<Pairlist>() {
+            let (default, name) = (cell.head(), cell.tag());
             if index >= bytecode::MAX_SLOT_FORMALS
                 || !names.get(index).is_some_and(|slot| slot.is(name))
             {
@@ -3546,7 +3559,7 @@ fn bind_method_formals(
             };
             missing |= source_missing & (1 << index);
             window.push(value);
-            formal = rest;
+            formal = cell.rest();
             index += 1;
         }
         if !uncompiled {
@@ -3599,10 +3612,12 @@ pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<CallPlan>> 
         let dots = handles::symbol(|symbols| symbols.dots);
         let mut args: SmallVec<[Tagged<'_>; 8]> = SmallVec::new();
         let mut forwards_dots = false;
-        let Some((_, _, mut cell)) = handles::cell_fields(call.read(context)) else {
+        let Some(head) = call.read(context).downcast::<Language>() else {
             return Ok(None);
         };
-        while let Some((expression, tag, rest)) = handles::cell_fields(cell) {
+        let mut cell = head.rest();
+        while let Some(argument) = cell.downcast::<Pairlist>() {
+            let (expression, tag) = (argument.head(), argument.tag());
             if let Some(symbol) = expression.downcast::<Symbol>() {
                 if symbol.is(dots) {
                     forwards_dots = true;
@@ -3614,7 +3629,7 @@ pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<CallPlan>> 
                 tag: handles::held(context, tag.raw()),
                 value: handles::held(context, expression.raw()),
             });
-            cell = rest;
+            cell = argument.rest();
         }
         if forwards_dots {
             return Ok(Some((shape, smallvec![MATCH_PER_CALL])));
@@ -3708,10 +3723,11 @@ fn plan_sources(
     let missing_value = handles::missing_argument();
     let mut formal = function.read(context).formals();
     let needs_defaults = sources[..formal_count].iter().any(|&source| {
-        let Some((default, _, rest)) = handles::cell_fields(formal) else {
+        let Some(cell) = formal.downcast::<Pairlist>() else {
             return false;
         };
-        formal = rest;
+        let default = cell.head();
+        formal = cell.rest();
         source == -1 && !default.is(missing_value) && !is_literal(default)
     });
     if needs_defaults && slot_defaults(context, function.read(context)).is_none() {
@@ -3723,9 +3739,10 @@ fn plan_sources(
         .flatten();
     let mut formal = closure.formals();
     for (index, source) in sources[..formal_count].iter_mut().enumerate() {
-        let Some((default, _, rest)) = handles::cell_fields(formal) else {
+        let Some(cell) = formal.downcast::<Pairlist>() else {
             break;
         };
+        let default = cell.head();
         if *source == -1 && !default.is(missing_value) {
             *source = if is_literal(default) {
                 LITERAL_DEFAULT
@@ -3735,7 +3752,7 @@ fn plan_sources(
                 return Ok(None);
             };
         }
-        formal = rest;
+        formal = cell.rest();
     }
     Ok(Some((shape, sources)))
 }
@@ -3865,17 +3882,18 @@ fn bind_planned<'s>(
             _ if source == DOTS_SOURCE => dots.read(context),
             _ if source <= LITERAL_DEFAULT => {
                 while formal_index < index
-                    && let Some((_, _, rest)) = handles::cell_fields(formal)
+                    && let Some(cell) = formal.downcast::<Pairlist>()
                 {
-                    formal = rest;
+                    formal = cell.rest();
                     formal_index += 1;
                 }
                 missing |= 1 << index;
                 if source == PROMISED_DEFAULT {
                     promised |= 1 << index;
                 }
-                handles::cell_fields(formal)
-                    .map_or(missing_value.read(context), |(default, ..)| default)
+                formal
+                    .downcast::<Pairlist>()
+                    .map_or(missing_value.read(context), |cell| cell.head())
             }
             _ => missing_value.read(context),
         };

@@ -4259,13 +4259,18 @@ impl<'c> Window<'c> {
         Some(unsafe { Gc::adopt(*bytecode::register_address(register)) })
     }
 
-    /// Stores `value` in the next slot, which counts a reference to it.
+    /// Stores `value` in the next slot, which counts a reference to it. A value past the last
+    /// slot is a caller's bug, which a debug build reports and a release build drops. Not
+    /// panicking keeps the count of stores in a register on the binding loops.
     #[inline]
     pub fn push(&mut self, value: impl Pointer<Value>) {
-        assert!(
+        debug_assert!(
             self.written < self.slot_count,
             "a slot window holds more values than slots"
         );
+        if self.written >= self.slot_count {
+            return;
+        }
         let raw = value.raw();
         // SAFETY: the slot is one of the window's reserved registers, the value is live, as
         // any pointer is while it can be used, and the register file is traced, so the slot
