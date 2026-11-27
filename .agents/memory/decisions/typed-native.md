@@ -623,3 +623,11 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 - A closure without source references (an installed package, `ry run` with `keep.source = FALSE`) prints by deparsing, which wrote `function (name, n)` for `function(name: Str, n: I64) -> Str`. The signature's texts are on the closure (`annotations::signature_of`), so the deparser writes `name: T` per formal and `-> T` after the list.
 - Only `print` sets the option bit. `deparse`, `dput` and `dump` produce R code that another R reads, and a `#:`-annotated plain R file must deparse as plain R.
 - The texts are taken once per closure (`Deparser::formal_types`), so a function literal in a default deparses its own formals untyped.
+
+## `source()` runs a typed file as the checker elaborated it
+
+**Status:** built (`lower::set_source_elaborator`, `loader_backend::elaborated_source`, `preflight::elaborate_sourced`; scenario `source-typed-file`).
+
+- `source()` parses its file through `parse()`, so `do_parse` asks the host for a parse whose source reference reads a file (`isFile` in a `srcfilecopy`, or a file name with no text). The host reads the file itself, checks it as `ry run` would and returns the elaborated program with an xxh3 hash of the text it elaborated. libr takes the program only when the hash matches the text the parse holds, so a file that changed in between, or text that is already elaborated, runs as written. The host never sees R's text, which keeps `unsafe` out of `crates/ry`.
+- A strict project does not refuse a `source()`d file with errors: the file is checked on its own, so every name the sourcing script binds would read as `unresolved`. The check prints its annotation warnings, and the sourcing script's own check is where strict mode applies.
+- `sys.source()` passes no source reference and `parse(text = )` has no file, so both run unelaborated text. Each `source()` of a typed file checks it again, because nothing ties two calls to one analysis.

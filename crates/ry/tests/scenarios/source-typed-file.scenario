@@ -1,0 +1,39 @@
+# A script that `source()`s a typed file runs that file as the checker elaborated it, the same as
+# `ry run` on the file itself: an unsuffixed literal the checker typed `I64` is an `I64`, a record
+# literal holds ry numbers, an empty `List.map` result keeps its item type, and an aliased
+# signature checks its arguments, and the file's annotation warnings print. `sys.source()` reads the file without a source reference, so it
+# runs the text as written.
+
+requires ry-runtime
+
+file ry.toml
+| [check]
+file helpers.R
+| #: @alias Scaler {fn(values: double, by: double) -> double}
+|
+| double_it <- function(n: I64) -> I64 n * 2
+| print(double_it(21))
+| point <- (x = 1, y = 2)
+| print(point)
+| print(List.sum(List.map(List.range(3, 1), \(v) v * 2)))
+|
+| #: Scaler
+| scale <- function(values, by) values * by
+| print(tryCatch(scale("a", 3), error = function(e) conditionMessage(e)))
+file plain.R
+| print(1 + 1)
+file warn.R
+| #: @param n {double}
+| f <- function(n: I64) -> I64 n
+file main.R
+| source("helpers.R")
+| options(keep.source = TRUE)
+| source("helpers.R", local = new.env())
+| source("plain.R")
+| source("warn.R")
+| sys.source("helpers.R", envir = new.env())
+
+run ry run main.R
+expect exit 0
+expect stdout "42i64\n(x = 1i64, y = 2i64)\n0i64\n[1] \"argument `values` must be `double`, not `character`\"\n42i64\n(x = 1i64, y = 2i64)\n0i64\n[1] \"argument `values` must be `double`, not `character`\"\n[1] 2\n42i64\n(x = 1, y = 2)\n[1] 0\n[1] \"non-numeric argument to binary operator\""
+expect stderr "the inline annotation gives parameter `n` the type `I64`, but the `#:` comment gives it `double`"

@@ -692,6 +692,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Arguments read ahead from variables are watched across R calls (settled)
 - A long `List<Str>` crosses to R as a string list over the native list (settled)
 - `print` writes a closure's annotations; `deparse` writes the erasure
+- `source()` runs a typed file as the checker elaborated it
 
 ## DataFrame and the table engine
 

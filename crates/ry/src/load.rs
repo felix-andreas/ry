@@ -13,7 +13,7 @@ use {
         r::{RUNTIME_GNUR, RValue, error_value, failure_value, plan_value, rds},
     },
     repl::{
-        ConsoleHooks, ElaboratedSink,
+        ConsoleHooks, ElaboratedSink, SourceSink,
         libr::{self, CallRoutine, Sexp},
     },
     std::{
@@ -575,6 +575,27 @@ pub extern "C" fn elaborate_on_ry_runtime(
             text.as_ptr(),
             text.len(),
         );
+    }
+    0
+}
+
+/// The host side of `libr::loader_backend::ElaborateSource`: ry's runtime calls it when
+/// `source()` reads a file, and runs the text it hands `sink` in place of the file's own.
+pub extern "C" fn elaborate_source_on_ry_runtime(
+    path: *const c_char,
+    sink: SourceSink,
+    context: *mut c_void,
+) -> c_int {
+    let Some(path) = runtime_path(path) else {
+        return 2;
+    };
+    // Unwinding into the runtime's frames aborts, so a panic, whose message the panic hook has
+    // printed, counts as a failed check.
+    let Ok(Ok(elaborated)) = catch_unwind(|| preflight::elaborate_sourced(&path)) else {
+        return 2;
+    };
+    if let Some((written, program)) = elaborated {
+        sink(context, written, program.as_ptr(), program.len());
     }
     0
 }

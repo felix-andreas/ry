@@ -58,8 +58,8 @@ one batch rather than being decided inside the climb.
 
 ## Open questions
 
-- **Empty lists in code that is not elaborated.** `ry run`, the console and `ry load` pass `[]` and
-  every library call whose result items come from a callback (`List.map`) through `.ry_items` with
-  the item type the checker gave them, so an empty result keeps its type. `source()` runs
-  unelaborated text, where such an empty list is still a `logical` vector of length zero unless a
-  `List<I64>` parameter or result converts it.
+- **Empty lists in code that is not elaborated.** `ry run`, the console, `ry load` and `source()`
+  pass `[]` and every library call whose result items come from a callback (`List.map`) through
+  `.ry_items` with the item type the checker gave them, so an empty result keeps its type.
+  `sys.source()` and `parse(text = )` run unelaborated text, where such an empty list is still a
+  `logical` vector of length zero unless a `List<I64>` parameter or result converts it.
