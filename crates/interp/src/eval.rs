@@ -592,9 +592,14 @@ pub fn frame_value<'s>(
     symbol: impl Pointer<Symbol>,
 ) -> R<Option<Local<'s>>> {
     handles::reaching_environment(context)?;
-    let found = match handles::frame_binding(context, environment, symbol) {
-        Some(binding) => bound(context, binding_found(binding)),
-        None => Bound::Unbound,
+    let Some(binding) = handles::frame_binding(context, environment, symbol) else {
+        return Ok(None);
+    };
+    let found = match binding_found(binding) {
+        Found::Value(value) if value.downcast::<Promise>().is_none() => {
+            return Ok(Some(context.root(value)));
+        }
+        found => bound(context, found),
     };
     let Some(value) = resolve(context, found)? else {
         return Ok(None);

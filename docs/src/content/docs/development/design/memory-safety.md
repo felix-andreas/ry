@@ -617,7 +617,8 @@ in-place write needs the `Owned` that `claim` returns only when the slot holds t
 the value is unshared. The binders store a new frame's formals through `handles::Window`, which
 borrows the context while it is open, so everything that allocates (the `...` list, the compiled
 defaults, the match plan) happens before it opens, and a window dropped without `close` gives back
-the references its stores counted and the registers. A method's frame reads the generic's slots
+the references its stores counted and the registers. `Window::fill` checks the slot count once for
+a whole run of stores, so a binder's per-formal loop costs what stores into a plain array cost. A method's frame reads the generic's slots
 through `Window::under`. A binding is claimed the same way (`handles::claim_binding`), so a variable bound to a
 promise is copied before its first write instead of written through the promise.
 
@@ -630,6 +631,7 @@ that states what the caller must hold. Which helper the entry uses decides its c
 | Returns an object to a caller that treats it as rooted | `handles::with_result` | a scope of its own, and the result rooted again in the caller's |
 | Runs once per instruction or per loop iteration, and its caller releases the handle stack | `handles::in_caller_scope` with `handles::held` operands | none of its own: the caller's roots hold the operands, and what the entry roots stays until the caller's release |
 | Reads one object its caller holds, on every dispatch (`class_of_raw`, `implicit_class_raw`) | `handles::held_in_caller_scope` | none of its own: the caller holds the object, which holds its class attribute, and a new answer stays rooted until the caller's release |
+| Reads a value a binding holds, and runs no code in the common case (`find_var`, `find_called_fun`, `set_var`) | `handles::reading`, then `handles::in_caller_scope` out of line for a promise, an active binding or an unbound name | none on the common path: the binding holds the value it returns |
 
 The third form is what `subset::vector_element` (the element read of `for` and the apply
 functions) and tier 0's `$` entries use, because a scope and a second root per call measured 15
