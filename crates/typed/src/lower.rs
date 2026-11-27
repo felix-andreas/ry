@@ -345,6 +345,7 @@ unsafe fn lower_calling(
         r_use: None,
         converted: None,
         checked_items: None,
+        settled_empty: false,
         pending: Vec::new(),
         forward: None,
         declared_loops: Vec::new(),
@@ -590,6 +591,10 @@ struct Lowering<'c> {
     /// The item type the checker gave the `List.from_r` or sibling lowered next
     /// ([`Conversion::checked`]).
     checked_items: Option<Item>,
+    /// Whether the mapping call lowered next sits in a `.ry_items`, whose run-time function
+    /// gives an empty result the checker's storage in the interpreter too, so the native code
+    /// builds the empty list instead of stopping. The call takes it before lowering anything.
+    settled_empty: bool,
     /// Each empty list literal of records or tags whose item type the code has not shown yet,
     /// with the locals that hold it. The preflight names only the storage of such a list, so it
     /// starts as a list of any tag and takes the item type of the first item appended to it or
@@ -4192,7 +4197,14 @@ impl Lowering<'_> {
                     self.checked_items = None;
                     return value;
                 }
-                self.value(list)
+                let mut settled = false;
+                for (name, arity) in SETTLED_EMPTY {
+                    settled = settled || self.is_library_call(list, name, arity)?;
+                }
+                self.settled_empty = settled;
+                let value = self.value(list);
+                self.settled_empty = false;
+                value
             }
             ".ry_array" => self.list_literal(&arguments, None, None),
             "List.append" => self.append(&arguments),
@@ -4728,6 +4740,7 @@ impl Lowering<'_> {
                 }
                 _ => return Err(Refusal::new("a map of an unsupported form")),
             };
+        let settled = std::mem::take(&mut self.settled_empty);
         let with_index = name == "List.map_with_index";
         let callable = self.function_argument(function)?;
         let vector = self.value(vector)?;
@@ -4746,7 +4759,7 @@ impl Lowering<'_> {
             None => None,
         };
         // `List.map` over a ry list builds a ry list of the results, which the interpreter
-        // cannot do from no items at all.
+        // cannot type from no items at all unless a `.ry_items` gives it the storage.
         let to_array = name.starts_with("List.") && matches!(ty, Type::Vector { array: true, .. });
         if with_index && !to_array {
             return Err(Refusal::new(
@@ -4755,7 +4768,7 @@ impl Lowering<'_> {
         }
         let held = self.builder.emit(ty, Op::Copy(vector));
         let count = self.builder.emit(Type::Int, Op::Length(held));
-        if to_array {
+        if to_array && !settled {
             let zero = self.int(0);
             let empty = self.builder.emit(Type::Bool, Op::Same(count, zero));
             self.fail_if(empty);
@@ -6533,9 +6546,10 @@ impl Lowering<'_> {
     }
 
     /// `List.join_map(list, f)`: the lists `f` gives for each item, concatenated in a loop with
-    /// `f` inlined. An empty result stops the native code, because the interpreter builds it
-    /// without an item type, as for `List.map`.
+    /// `f` inlined. An empty result stops the native code unless a `.ry_items` settles it,
+    /// because the interpreter builds it without an item type, as for `List.map`.
     unsafe fn join_map(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let settled = std::mem::take(&mut self.settled_empty);
         let [list, function] = arguments.exactly(2)?[..] else {
             return Err(Refusal::new("a malformed `List.join_map`"));
         };
@@ -6575,10 +6589,12 @@ impl Lowering<'_> {
         let empty = self.empty_list(output_item);
         self.builder.push(Some(output), Op::Copy(empty));
         self.builder.switch_to(exit);
-        let length = self.builder.emit(Type::Int, Op::Length(output));
-        let zero = self.int(0);
-        let nothing = self.builder.emit(Type::Bool, Op::Same(length, zero));
-        self.fail_if(nothing);
+        if !settled {
+            let length = self.builder.emit(Type::Int, Op::Length(output));
+            let zero = self.int(0);
+            let nothing = self.builder.emit(Type::Bool, Op::Same(length, zero));
+            self.fail_if(nothing);
+        }
         Ok(output)
     }
 
@@ -6632,9 +6648,10 @@ impl Lowering<'_> {
     /// `List.map2(a, b, f)`, `List.map3(a, b, c, f)` and `List.map4`: `f` of the items at each
     /// position up to the shortest list's length, in a loop with `f` inlined. `List.map_try(list,
     /// f)` maps one list with an `f` that gives results, leaves with the first `:Err` and wraps
-    /// the list in `:Ok`. An empty result stops the native code, because the interpreter builds
-    /// it without an item type, as for `List.map`.
+    /// the list in `:Ok`. An empty result stops the native code unless a `.ry_items` settles it,
+    /// because the interpreter builds it without an item type, as for `List.map`.
     unsafe fn map_many(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
+        let settled = std::mem::take(&mut self.settled_empty);
         let trying = name == "List.map_try";
         let parameters = arguments.exactly(match name {
             "List.map_try" => 2,
@@ -6663,10 +6680,12 @@ impl Lowering<'_> {
             self.builder.push(Some(total), Op::Copy(shorter));
         }
         let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
-        let empty = self
-            .builder
-            .emit(Type::Lgl, Op::Compare(Compare::Eq, Item::I64, total, zero));
-        self.fail_if(empty);
+        if !settled {
+            let empty = self
+                .builder
+                .emit(Type::Lgl, Op::Compare(Compare::Eq, Item::I64, total, zero));
+            self.fail_if(empty);
+        }
         let count = self.builder.emit(Type::Int, Op::CountOfI64(total));
         let preheader = self.builder.current;
         let output = self.builder.local(Type::Null);
@@ -10972,6 +10991,17 @@ enum Step {
     /// `List.range(a, b)`: up by this step, an `I64`, empty when the end is below the start.
     Inclusive(Local),
 }
+
+/// The mapping calls whose empty result the native code builds when a `.ry_items` wraps them,
+/// with their arities: the checker wraps each whose result items only a callback gives.
+const SETTLED_EMPTY: [(&str, usize); 6] = [
+    ("List.map", 2),
+    ("List.map_with_index", 2),
+    ("List.map2", 3),
+    ("List.map3", 4),
+    ("List.map4", 5),
+    ("List.join_map", 2),
+];
 
 /// The item a `vapply` template such as `numeric(1)` declares.
 unsafe fn template_item(template: Sexp) -> Option<Item> {

@@ -200,19 +200,19 @@ hint @81: double[]
 p <- (x = 1, y$0 = 2L)
 y <- p[["y"]]
 #++++
-hover 13..14: y: integer
+hover 13..14: y: I64
 definition 13..14
 references: 13..14*
 rename: none
 signature: none
 action: Add inferred type annotation for `p`
-  edit 1..1 -> ": Record{x: double, y: integer}"
+  edit 1..1 -> ": Record{x: I64, y: I64}"
 action: Add inferred type annotations for the whole file
-  edit 1..1 -> ": Record{x: double, y: integer}"
-  edit 22..22 -> ": integer"
+  edit 1..1 -> ": Record{x: I64, y: I64}"
+  edit 22..22 -> ": I64"
 completion: none
-hint @1: Record{x: double, y: integer}
-hint @22: integer
+hint @1: Record{x: I64, y: I64}
+hint @22: I64
 
 #---- column_read_by_a_frame_query_is_refused
 prices <- DataFrame(id = 1:3, pri$0ce = c(1, 2, 3))

@@ -3292,6 +3292,12 @@ pub extern "C" fn jit_depth_budget() -> i64 {
 
 const RETRY_NESTING: i64 = 8_000_000;
 
+/// The stack limit a native function called from compiled code compares its frames against
+/// ([`typed::native_stack_limit`]).
+pub extern "C" fn jit_stack_limit() -> u64 {
+    typed::native_stack_limit() as u64
+}
+
 /// `^` on doubles, as tier 0 computes it.
 pub extern "C" fn jit_power(base: f64, exponent: f64) -> f64 {
     if exponent == 2.0 && !is_na_real(base) {

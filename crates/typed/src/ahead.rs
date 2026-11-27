@@ -200,8 +200,9 @@ pub(crate) unsafe fn declared_params(closure: Sexp) -> Result<SmallVec<[Type; 4]
 /// the checks' storage masks do not give. The preflight spells every type of a signature
 /// canonically (`semantics::canonical_annotation`), with no alias or type of the program left to
 /// look up, so the text alone says which values arrive. A tag from R is any tag, whichever union
-/// the annotation names, because R code can build every tag. A record from R has no type of its
-/// own and a set or a dictionary has no R value, so a parameter of one is never passed from R.
+/// the annotation names, because R code can build every tag. A record or tuple from R takes its
+/// type from its value at the call, and a set or a dictionary has no R value, so this gives no
+/// type for a parameter of one and its closure compiles at its first call.
 pub fn annotated_type(annotation: &str) -> Option<Type> {
     let annotation = annotation.trim();
     if annotation.starts_with(':') {

@@ -1382,7 +1382,7 @@ q <- (..p, z = 3)
 ```text ry check typing
 type-mismatch
 
-  x field `z` does not exist in `Record{x: double, y: double}`
+  x field `z` does not exist in `Record{x: I64, y: I64}`
 ```
 
 Only a record, or a nominal type whose representation is a record, can be updated this way, and
@@ -1557,8 +1557,10 @@ trial_size(time, treated)
 #> 2i64
 ```
 
-A record that R code converts with `as.record()` passes the type check, but compiled typed code
-takes records only from typed code, so a call that passes one runs in the interpreter.
+A record or tuple that R code builds with `as.record()` passes to compiled typed code when each
+field is a scalar, a string, another such record or tuple, or a ry list, and its shape is then its
+type. One with a longer R vector in a field, an `NA` string, a class or attributes makes the call
+run in the interpreter.
 
 ## Numbers, `Bool` and `Str`
 
@@ -1618,7 +1620,11 @@ A ry type asks in three places:
   is a ry value: `count <- 3` is an `I64`, `rate <- 2.0` an `F64`, `name <- "ry"` a `Str` and
   `flag <- TRUE` a `Bool`. A literal written with a decimal point or an exponent (but not `1e3L`),
   or a whole number past the range of `I64`, is an `F64`, and arithmetic on literals alone is one
-  literal, so `step <- 1 / 4` is an `F64`. Each top-level
+  literal, so `step <- 1 / 4` is an `F64`. The tuple items, record fields and tag payload items of
+  a literal bound there are ry values too, also inside a nested literal or a `List`, so
+  `pt <- (x = 3.0, y = 4.0)` is a `Record{x: F64, y: F64}` and `pair <- ("a", 1)` a
+  `Tuple{Str, I64}`. A literal inside a call keeps R's type, as `f(1)` does: `f((x = 1,))` passes
+  a `Record{x: double}`. Each top-level
   statement is checked on its own, so nothing later in the file decides the type. In any other file
   a top-level literal has R's type.
 

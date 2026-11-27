@@ -49,7 +49,7 @@ use {
 };
 
 const MAGIC: &[u8; 8] = b"RYTYPED\0";
-const VERSION: u32 = 6;
+const VERSION: u32 = 7;
 /// The bytes of the fixed header.
 const HEADER_SIZE: usize = 8 + 4 + 8 * 13;
 /// The alignment of the code in the file and of the offset table's reservation, which is the
@@ -1657,6 +1657,7 @@ fn encode_metadata(parsed: &Parsed) -> Vec<u8> {
                 out.number(6);
                 out.number(u64::from(callee));
             }
+            Slot::StackLimit => out.number(7),
         }
     }
     out.number(parsed.lookups.len() as u64);
@@ -2150,6 +2151,7 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, Malformed> {
                 callees_named = callees_named.max(callee.saturating_add(1));
                 Slot::Callee(callee)
             }
+            7 => Slot::StackLimit,
             _ => return Err(MALFORMED),
         });
     }
@@ -2567,6 +2569,7 @@ unsafe fn open_file(
                 callee_slots[callee as usize] = Some(number);
                 0
             }
+            Slot::StackLimit => &crate::STACK_LIMIT as *const std::sync::atomic::AtomicUsize as u64,
         };
         write_slot(base, number, word);
     }
@@ -3525,6 +3528,7 @@ pub mod testing {
                 5 if !parsed.sites.is_empty() => {
                     Slot::Site(entropy.below(parsed.sites.len()) as u32)
                 }
+                6 => Slot::StackLimit,
                 _ => Slot::Interrupt,
             };
             parsed.slots.push(slot);

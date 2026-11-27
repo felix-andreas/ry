@@ -849,8 +849,17 @@ impl<'p> Translator<'p> {
                         &[],
                     )
                     .ok_or(Refusal("a helper without a result"))?;
-                let mut values: SmallVec<[Value; 5]> = SmallVec::new();
+                let limit = self
+                    .call(
+                        runtime::jit_stack_limit as *const () as usize,
+                        &[],
+                        Some(I64),
+                        &[],
+                    )
+                    .ok_or(Refusal("a helper without a result"))?;
+                let mut values: SmallVec<[Value; 6]> = SmallVec::new();
                 values.push(budget);
+                values.push(limit);
                 for argument in args {
                     values.push(match *argument {
                         Argument::Slot(slot) => self.load_slot_cell(slot),

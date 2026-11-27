@@ -126,11 +126,11 @@ point <- (x = 1, y = 2)
 point$x <- "a"
 point[["w"]]
 #++++
-point: Record{x: double, y: double}
+point: Record{x: I64, y: I64}
 character
 Unknown
-122..125 error[type-mismatch] expected `double`, found `character`
-133..136 error[type-mismatch] field `w` does not exist in `Record{x: double, y: double}`
+122..125 error[type-mismatch] expected `I64`, found `character`
+133..136 error[type-mismatch] field `w` does not exist in `Record{x: I64, y: I64}`
 
 #==== resolution
 #---- a_dangling_operator_reports_the_target_not_the_swallowed_names
