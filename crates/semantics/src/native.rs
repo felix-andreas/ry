@@ -288,7 +288,8 @@ impl NativeBlockerKind {
                 "a call that leaves out this parameter runs in the interpreter, because R \
                  computes a default where the body first reads it, and native code computes one \
                  at the call only when it is made of constants, operators, standard library \
-                 calls and names the body does not set. Compute the value in the body instead",
+                 calls and parameters or local variables the body does not set. Compute the \
+                 value in the body instead",
             ),
         }
     }
@@ -1219,9 +1220,9 @@ impl<'a, 'db> Judge<'a, 'db> {
 
     /// Whether the default `default` of a function whose body is `body` has the same value and
     /// effect computed at the call as where the body first reads it, which is how native code
-    /// takes a default (`computed_ahead` in `typed::lower`): it is made of constants, names the
-    /// body does not set and that hold no function, operators, ry literals and calls of the
-    /// standard library.
+    /// takes a default (`computed_ahead` in `typed::lower`): it is made of constants, values of
+    /// the frame the body does not set, the standard library's constants, operators, ry literals
+    /// and calls of the standard library. A global may change under any R call the body makes.
     fn computed_ahead(&self, default: ExprId, body: ExprId) -> bool {
         let module = self.judged.module;
         let db = self.judged.db;
@@ -1229,20 +1230,21 @@ impl<'a, 'db> Judge<'a, 'db> {
         match *module.kind(default) {
             ExpressionKind::Literal(_) => true,
             ExpressionKind::NameRef(name) => {
-                !assigns_name(module, body, name)
-                    && !self
-                        .ty(default)
-                        .is_some_and(|ty| matches!(self.peel(ty).kind(db), TyKind::Function(_)))
+                is_std_constant(name)
+                    || !matches!(
+                        self.lookup(name),
+                        None | Some(Slot::Function(_) | Slot::FunctionParameter)
+                    ) && !assigns_name(module, body, name)
+                        && !self
+                            .ty(default)
+                            .is_some_and(|ty| matches!(self.peel(ty).kind(db), TyKind::Function(_)))
             }
             ExpressionKind::Unary {
                 operator: UnaryOperator::Minus | UnaryOperator::Plus | UnaryOperator::Not,
                 operand,
             } => ahead(operand),
             ExpressionKind::Binary {
-                operator,
-                lhs,
-                rhs,
-                ..
+                operator, lhs, rhs, ..
             } => {
                 !matches!(
                     operator,
@@ -2712,6 +2714,15 @@ impl<'a, 'db> Judge<'a, 'db> {
         arguments: &[(Option<Symbol>, ExprId)],
         usage: Use,
     ) {
+        if name == "missing" && origin == ROrigin::Library {
+            self.uncompiled(
+                id,
+                Uncompiled::Advised(
+                    "`missing`",
+                    "Give the parameter a default, such as a tag that marks it missing, and test that",
+                ),
+            );
+        }
         // R evaluates a call made only of R code where it stands among another call's arguments,
         // lazily, as the interpreter would, so its value needs no ry type.
         if !(is_r_argument(usage) && self.is_r_code(id)) {
@@ -2998,6 +3009,16 @@ fn matches_formals(parameters: &[Parameter], arguments: &[(Option<Symbol>, ExprI
         .all(|(index, parameter)| filled & bit(index) != 0 || parameter.default.is_some())
 }
 
+/// Whether `name` is a constant of ry's standard library, such as `Num.pi`.
+fn is_std_constant(name: Symbol) -> bool {
+    name.as_str().split_once('.').is_some_and(|(module, _)| {
+        matches!(
+            module,
+            "Num" | "Str" | "List" | "Dict" | "Set" | "Result" | "Bool"
+        )
+    })
+}
+
 /// What a name of R, of a package or of ry's own library calls.
 fn library_callee(name: Symbol) -> Callee {
     let text = name.as_str();
@@ -3049,12 +3070,29 @@ fn writes(module: &Module, id: ExprId) -> bool {
     found
 }
 
-/// Whether `id` sets the local `name`, by an assignment or as a `for` loop's variable.
+/// Whether `id` sets the local `name`, by an assignment (of a part of it, as in `xs[[i]] <- v`,
+/// included), as a `for` loop's variable or in a `match` pattern.
 fn assigns_name(module: &Module, id: ExprId, name: Symbol) -> bool {
     let sets = match *module.kind(id) {
-        ExpressionKind::Assign { target, .. } => {
-            matches!(*module.kind(target), ExpressionKind::NameRef(target) if target == name)
-        }
+        ExpressionKind::Assign { mut target, .. } => loop {
+            match *module.kind(target) {
+                ExpressionKind::NameRef(target) => break target == name,
+                ExpressionKind::Index { target: base, .. }
+                | ExpressionKind::Field { target: base, .. } => target = base,
+                ExpressionKind::Call { arguments, .. } => match module[arguments].first() {
+                    Some(&Argument {
+                        value: Some(base), ..
+                    }) => target = base,
+                    _ => break false,
+                },
+                _ => break false,
+            }
+        },
+        ExpressionKind::Match { arms, .. } => module[arms].iter().any(|arm| {
+            module[arm.bindings]
+                .iter()
+                .any(|&bound| matches!(*module.kind(bound), ExpressionKind::NameRef(bound) if bound == name))
+        }),
         ExpressionKind::For {
             variable: Some(variable),
             ..

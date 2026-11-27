@@ -303,7 +303,7 @@ cat(offset(1, 1), "\n")
 == script.R
 offset: fn(a: F64, [b]: F64) -> F64
 NULL
-36..43 warning[interpreted] a call that leaves out this parameter runs in the interpreter, because R computes a default where the body first reads it, and native code computes one at the call only when it is made of constants, operators, standard library calls and names the body does not set. Compute the value in the body instead
+36..43 warning[interpreted] a call that leaves out this parameter runs in the interpreter, because R computes a default where the body first reads it, and native code computes one at the call only when it is made of constants, operators, standard library calls and parameters or local variables the body does not set. Compute the value in the body instead
 
 #---- default_that_calls_r
 #~~~~ script.R
@@ -313,7 +313,60 @@ cat(noisy(1, 2), "\n")
 == script.R
 noisy: fn(a: F64, [b]: F64) -> F64
 NULL
-35..58 warning[interpreted] a call that leaves out this parameter runs in the interpreter, because R computes a default where the body first reads it, and native code computes one at the call only when it is made of constants, operators, standard library calls and names the body does not set. Compute the value in the body instead
+35..58 warning[interpreted] a call that leaves out this parameter runs in the interpreter, because R computes a default where the body first reads it, and native code computes one at the call only when it is made of constants, operators, standard library calls and parameters or local variables the body does not set. Compute the value in the body instead
+
+#---- default_that_a_match_arm_rebinds
+#~~~~ script.R
+alias Reading = :Value(amount: F64) | :Missing
+grade <- function(reading: Reading, a: F64 = 1.0, s: F64 = a * 2.0) -> F64 {
+  t <- match (reading) {
+    :Value(amount = a) => a
+    :Missing => 0.0
+  }
+  t + s
+}
+cat(grade(:Missing), "\n")
+#++++
+== script.R
+grade: fn(reading: Reading, [a]: F64, [s]: F64) -> F64
+NULL
+106..113 warning[interpreted] a call that leaves out this parameter runs in the interpreter, because R computes a default where the body first reads it, and native code computes one at the call only when it is made of constants, operators, standard library calls and parameters or local variables the body does not set. Compute the value in the body instead
+
+#---- default_that_reads_a_global
+#~~~~ script.R
+limit <- 10.0
+capped <- function(x: F64, l: F64 = limit) -> F64 Num.min(x, l)
+cat(capped(1, 2), "\n")
+#++++
+== script.R
+limit: F64
+capped: fn(x: F64, [l]: F64) -> F64
+NULL
+50..55 warning[interpreted] a call that leaves out this parameter runs in the interpreter, because R computes a default where the body first reads it, and native code computes one at the call only when it is made of constants, operators, standard library calls and parameters or local variables the body does not set. Compute the value in the body instead
+
+#---- default_of_a_list_the_body_changes_in_place
+#~~~~ script.R
+first_of <- function(xs: List<F64>, first: F64 = List.sum(xs)) -> F64 {
+  xs[[1]] <- 99.0
+  first
+}
+cat(first_of([1.0, 2.0], 0.0), "\n")
+#++++
+== script.R
+first_of: fn(xs: List<F64>, [first]: F64) -> F64
+NULL
+49..61 warning[interpreted] a call that leaves out this parameter runs in the interpreter, because R computes a default where the body first reads it, and native code computes one at the call only when it is made of constants, operators, standard library calls and parameters or local variables the body does not set. Compute the value in the body instead
+
+#---- missing_in_a_native_function
+#~~~~ script.R
+# blocked: given
+given <- function(a: F64, b: F64 = 2.0) -> Bool Bool.from_r(missing(b))
+print(given(1))
+#++++
+== script.R
+given: fn(a: F64, [b]: F64) -> Bool
+Bool
+77..87 warning[interpreted] this function runs in the interpreter, because `missing` is not compiled natively yet. Give the parameter a default, such as a tag that marks it missing, and test that
 
 #---- default_of_standard_library_calls
 #~~~~ script.R

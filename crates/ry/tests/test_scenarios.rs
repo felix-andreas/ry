@@ -1403,7 +1403,9 @@ fn native_diagnostics_agree_with_the_typed_core() {
                 .and_then(|(_, owner)| *owner)
                 .unwrap_or(function);
             // A function falls back with its callee, which is the one that has the finding.
-            let calls_blocked = CALLEE_REFUSED.iter().any(|refused| reason.contains(refused))
+            let calls_blocked = CALLEE_REFUSED
+                .iter()
+                .any(|refused| reason.contains(refused))
                 && lines.iter().zip(&owners).any(|(line, owner)| {
                     *owner == Some(function)
                         && blocked.iter().any(|callee| {

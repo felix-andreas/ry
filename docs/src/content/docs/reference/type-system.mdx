@@ -5730,7 +5730,8 @@ interpreted
 | parameter types in a `#:` comment or on the assigned name, as in `f: fn(x: I64) -> I64 <- function(x) x` | write the types on the parameters |
 | a call of a standard library function with named arguments (`Num.is_approx_eq` takes them) | pass every argument by position |
 | a call of a function parameter with named arguments | pass every argument by position |
-| a call that leaves out a parameter whose default is more than constants, operators, ry literals, standard library calls and names the body does not set (the warning is on the default) | compute the value in the body |
+| a call that leaves out a parameter whose default is more than constants, operators, ry literals, standard library calls and parameters or local variables the body does not set (the warning is on the default) | compute the value in the body |
+| `missing(x)` | a default, such as a tag that marks the parameter missing |
 | a standard library function called with a `ry::` prefix | the name without the prefix |
 | an `I64`, a `List<I64>`, a `Dict` or a `Set` passed to an R function as it is | `Num.to_r(x)`, `List.to_r(xs)`, `Dict.keys` and `Dict.values`, or `Set.to_list` |
 | `<<-`, and an assignment to anything but a variable or `xs[[i]]` | return the new value; build a new record with `(..record, field = value)` |

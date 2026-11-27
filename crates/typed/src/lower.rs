@@ -1674,6 +1674,11 @@ impl Lowering<'_> {
 
     /// A call of the R function `function`, whose value is used as `r_use` says.
     unsafe fn r_call(&mut self, call: Sexp, function: Sexp, r_use: RUse) -> Result<Local, Refusal> {
+        // `missing` reads how R called the function, and a native call passes values.
+        if call.car().kind() == SexpType::Symbol && &*rvalues::symbol_name(call.car()) == "missing"
+        {
+            return Err(Refusal::new("a call of `missing`"));
+        }
         let name = || interp::deparse::deparse_first_line(call.car());
         let result = r_result(r_use)?;
         let table = matches!(r_use, RUse::Table);
@@ -2112,9 +2117,12 @@ impl Lowering<'_> {
             // A typed callee's defaults read names of its own body and environment only.
             let (visible, body, env, closure) = match frame {
                 Frame::Local(visible, body) => (visible, body, self.env, self.closure),
-                Frame::Typed(function) => {
-                    (0, interp::bytecode::closure_body(function), function.tag(), function)
-                }
+                Frame::Typed(function) => (
+                    0,
+                    interp::bytecode::closure_body(function),
+                    function.tag(),
+                    function,
+                ),
             };
             let hidden = self.scopes.split_off(visible.min(self.scopes.len()));
             let loops = std::mem::take(&mut self.loops);
@@ -2205,17 +2213,21 @@ impl Lowering<'_> {
 
     /// Whether the default `code` of a function whose body is `body` has the same value and
     /// effect computed before the body runs as where the body first reads it: it is made of
-    /// constants, names the body does not set and that hold no function, operators, ry literals
-    /// and calls of the standard library. The checker judges defaults the same way
+    /// constants, values of the frame the body does not set, operators, ry literals and calls of
+    /// the standard library. A global may change under any R call the body makes, so a default
+    /// reads none but the library's constants. The checker judges defaults the same way
     /// (`computed_ahead` in `semantics::native`).
     unsafe fn computed_ahead(&self, code: Sexp, body: Sexp) -> bool {
         match code.kind() {
-            SexpType::Symbol => !assigns(body, code) && !self.passes_function(code),
+            SexpType::Symbol => {
+                is_std_name(&rvalues::symbol_name(code))
+                    || matches!(self.lookup(code), Some(Binding::Value(_))) && !assigns(body, code)
+            }
             SexpType::Language => {
                 let head = code.car();
                 head.kind() == SexpType::Symbol
                     && self.lookup(head).is_none()
-                    && (AHEAD_OPERATORS.contains(&&*rvalues::symbol_name(head))
+                    && (is_ahead_operator(&rvalues::symbol_name(head))
                         || is_std_name(&rvalues::symbol_name(head)))
                     && rvalues::pairlist_items(code.cdr())
                         .iter()
@@ -11111,17 +11123,43 @@ enum Frame {
     Typed(Sexp),
 }
 
-/// The calls a default computed at the call may make, besides the standard library's: each
+/// Whether a default computed at the call may call `name` besides the standard library: each
 /// gives a value and has no effect but an error.
-const AHEAD_OPERATORS: &[&str] = &[
-    "+", "-", "*", "/", "^", "%%", "%/%", "<", ">", "<=", ">=", "==", "!=", "&", "&&", "|", "||",
-    "!", "(", ".ry_array", ".ry_record", ".ry_tuple", ".ry_tag",
-];
+fn is_ahead_operator(name: &str) -> bool {
+    matches!(
+        name,
+        "+" | "-"
+            | "*"
+            | "/"
+            | "^"
+            | "%%"
+            | "%/%"
+            | "<"
+            | ">"
+            | "<="
+            | ">="
+            | "=="
+            | "!="
+            | "&"
+            | "&&"
+            | "|"
+            | "||"
+            | "!"
+            | "("
+            | ".ry_array"
+            | ".ry_record"
+            | ".ry_tuple"
+            | ".ry_tag"
+    )
+}
 
-/// Whether `name` names a function of ry's standard library, such as `Num.abs`.
+/// Whether `name` names a function or a constant of ry's standard library, such as `Num.abs`.
 fn is_std_name(name: &str) -> bool {
     name.split_once('.').is_some_and(|(module, _)| {
-        matches!(module, "Num" | "Str" | "List" | "Dict" | "Set" | "Result" | "Bool")
+        matches!(
+            module,
+            "Num" | "Str" | "List" | "Dict" | "Set" | "Result" | "Bool"
+        )
     })
 }
 
@@ -11309,14 +11347,23 @@ unsafe fn constant_string(value: Sexp) -> Option<String> {
     rvalues::string_at(value, 0).map(|text| text.into_owned())
 }
 
-/// Whether `expression`, local functions included, assigns `symbol` with `<-`, `=`, `<<-` or
-/// as a `for` variable.
+/// Whether `expression`, local functions included, assigns `symbol` with `<-`, `=`, `<<-`, as a
+/// `for` variable or in a `match` pattern.
 unsafe fn assigns(expression: Sexp, symbol: Sexp) -> bool {
     if expression.kind() != SexpType::Language {
         return false;
     }
     let head = expression.car();
     let items = rvalues::pairlist_items(expression.cdr());
+    // A pattern reads no names, so any name in it is one the arm binds.
+    if head.kind() == SexpType::Symbol
+        && &*rvalues::symbol_name(head) == "=>"
+        && items
+            .first()
+            .is_some_and(|&(_, pattern)| mentions_outside(pattern, rvalues::nil(), symbol))
+    {
+        return true;
+    }
     if head.kind() == SexpType::Symbol
         && matches!(&*rvalues::symbol_name(head), "<-" | "=" | "<<-" | "for")
         && let Some(&(_, mut target)) = items.first()
