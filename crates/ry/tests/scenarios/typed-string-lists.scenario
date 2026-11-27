@@ -34,7 +34,18 @@ file strings.R
 | print(count(last, "south!!"))
 | latin <- rep(iconv("caf\u00e9", "UTF-8", "latin1"), 64)
 | print(c(Encoding(List.from_r(latin)[[1]]), nchar(tag(List.from_r(latin))[[1]])))
+| named <- function() { x <- tag(words); names(x) <- paste0("n", seq_along(x)); x }
+| kept <- named()
+| invisible(gc())
+| for (i in 1:5) other <- tag(List.from_r(paste0("z", 1:200)))
+| invisible(gc())
+| print(paste(unname(kept[c(1, 120)]), collapse = "|"))
+| plain <- tag(words)
+| alias <- plain
+| names(alias) <- paste0("n", seq_along(alias))
+| invisible(paste(alias, collapse = ""))
+| print(substr(paste(plain, collapse = ","), 1, 20))
 
 run ry run --runtime ry strings.R
 expect exit 0
-expect stdout "[1] \"character\" \"120\"      \n[\"north!\", \"a string of more than fifteen bytes!\"]\n40i64\n40i64\n[1] 40\n[1] TRUE\n[1] \"west\"   \"south!\"\n[1] -1\n[1]  TRUE FALSE\n[1] \"north!|south!|a string of more than fifteen bytes!|north!\"\n40i64\n[1] \"latin1\" \"5\"     \n"
+expect stdout "[1] \"character\" \"120\"      \n[\"north!\", \"a string of more than fifteen bytes!\"]\n40i64\n40i64\n[1] 40\n[1] TRUE\n[1] \"west\"   \"south!\"\n[1] -1\n[1]  TRUE FALSE\n[1] \"north!|south!|a string of more than fifteen bytes!|north!\"\n40i64\n[1] \"latin1\" \"5\"     \n[1] \"north!|a string of more than fifteen bytes!\"\n[1] \"north!,south!,a stri\"\n"

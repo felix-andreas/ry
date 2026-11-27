@@ -1910,7 +1910,11 @@ pub unsafe fn shared_string_vector(vector: Sexp) -> Result<Option<Sexp>, Unwind>
     let length = rvalues::length(vector);
     if length < SHARED_STRINGS_AT
         || vector.is_altrep()
-        || !(0..length).all(|index| usable_string(vector.element(index)))
+        || !(0..length).all(|index| {
+            // An unmarked string in the native encoding would come back marked UTF-8.
+            let string = vector.element(index);
+            usable_string(string) && string.has_gp(gp::ASCII | gp::UTF8)
+        })
     {
         return Ok(None);
     }

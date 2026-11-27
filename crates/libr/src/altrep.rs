@@ -1924,26 +1924,23 @@ unsafe fn deferred_unserialize(class: Sexp, state: Sexp) -> ApiResult<Sexp> {
     new_altrep(AltrepClass { pointer: class }, state, nil)
 }
 
-// String lists. data1 is an external pointer whose address is the typed-core list, and null
-// once native code has written to the vector. data2 is `NULL` until the first element is read,
-// then a character vector whose unread elements hold `NULL`. The pointer's tag is that character
-// vector once every element is in it, and `NULL` before; a vector native code has written to is
-// always complete. R itself never writes to one, because an instance is not mutable.
+// String lists. data1 is an external pointer that holds all of an instance's state, and data2
+// is `NULL`, because a replacement function's copy of an instance shares its data
+// (`handles::replacement_copy`) and the copies must agree on what they hold. The pointer's
+// address is the typed-core list, and null once native code has written to the vector. Its
+// protected value is `NULL` until the first element is read, then a character vector whose
+// unread elements hold `NULL`, and its tag is that vector once every element is in it; a vector
+// native code has written to is always complete. R itself never writes to one, because an
+// instance is not mutable.
 
 /// A character vector over the typed-core list of strings `list`, holding one more reference to
 /// it, which R reads one element at a time and typed code takes back without converting.
 pub unsafe fn string_list(list: *mut List) -> ApiResult<Sexp> {
     let class = builtins()?.string_list;
-    // A list another string list shares already counts.
-    let bytes = if (*list).wrappers == 0 {
-        list_bytes(list)
-    } else {
-        0
-    };
     // The collector sees only a small vector, so the lists' own bytes decide when to look for
     // dead string lists: a minor collection each time those bytes double, and a major one when
     // the minor one frees less than half, because the rest may be old vectors that died.
-    if SHARED_BYTES.get() + bytes > SHARED_COLLECTION_AT.get() {
+    if SHARED_BYTES.get() + list_bytes(list) > SHARED_COLLECTION_AT.get() {
         runtime().heap.collect(Collection::Minor);
         if SHARED_BYTES.get() * 2 > SHARED_COLLECTION_AT.get() {
             runtime().heap.collect(Collection::Major);
@@ -1955,9 +1952,13 @@ pub unsafe fn string_list(list: *mut List) -> ApiResult<Sexp> {
     let pointer = heap.alloc_external_ptr(list.cast(), nil, nil)?;
     let vector = new_altrep(class, pointer, nil)?;
     values::ry_list_dup(list);
+    // A list another string list shares already counts, and the collection above may have
+    // released one.
+    if (*list).wrappers == 0 {
+        SHARED_BYTES.set(SHARED_BYTES.get() + list_bytes(list));
+    }
     (*list).wrappers = (*list).wrappers.saturating_add(1);
-    SHARED_BYTES.set(SHARED_BYTES.get() + bytes);
-    STRING_LISTS.with_borrow_mut(|entries| entries.push((vector, list)));
+    STRING_LISTS.with_borrow_mut(|entries| entries.push((pointer, list)));
     Ok(vector)
 }
 
@@ -1973,7 +1974,8 @@ pub unsafe fn string_list_of(object: Sexp) -> Option<*mut List> {
 /// The complete character vector inside a string list native code has wrote to, flagged as
 /// `object` is, or `None` for any other vector.
 pub unsafe fn written_string_list(object: Sexp) -> Option<Sexp> {
-    (is_string_list(object) && object.car().external_address().is_null()).then(|| object.cdr())
+    (is_string_list(object) && object.car().external_address().is_null())
+        .then(|| object.car().external_protected())
 }
 
 /// Hands typed code the string lists, and the collector their release.
@@ -1987,8 +1989,9 @@ pub unsafe fn install_string_lists(heap: &mut heap::Heap) {
 }
 
 thread_local! {
-    /// Each string list with the list it holds a reference to, which a collection releases once
-    /// the vector has died or native code has written to it.
+    /// Each string list's external pointer with the list it holds a reference to, which a
+    /// collection releases once every vector over the pointer has died or native code has written
+    /// to one.
     static STRING_LISTS: RefCell<Vec<(Sexp, *mut List)>> = const { RefCell::new(Vec::new()) };
     /// The bytes of the distinct lists in [`STRING_LISTS`].
     static SHARED_BYTES: Cell<usize> = const { Cell::new(0) };
@@ -2008,12 +2011,11 @@ impl RootSource for StringListReferences {
 
     fn clear_dead(&self, liveness: &Liveness<'_>) {
         // SAFETY: the collector calls this after marking, before it frees anything, so every
-        // vector here is still an object, a live one's data1 is its external pointer, and each
-        // entry owns the reference it releases.
+        // pointer here is still an object, and each entry owns the reference it releases.
         STRING_LISTS.with_borrow_mut(|entries| unsafe {
-            entries.retain(|&(vector, list)| {
-                let held = liveness.is_live(vector)
-                    && vector.car().external_address() == list.cast::<c_void>();
+            entries.retain(|&(pointer, list)| {
+                let held = liveness.is_live(pointer)
+                    && pointer.external_address() == list.cast::<c_void>();
                 if !held {
                     release_string_list(list);
                 }
@@ -2050,8 +2052,9 @@ unsafe fn is_string_list(object: Sexp) -> bool {
 
 /// Stops `object` from sharing its list, which the next collection releases.
 unsafe fn unlink_string_list(object: Sexp) {
-    object.car().set_external_address(std::ptr::null_mut());
-    object.cdr().set_array(object.is_array());
+    let pointer = object.car();
+    pointer.set_external_address(std::ptr::null_mut());
+    pointer.external_protected().set_array(object.is_array());
 }
 
 unsafe fn strings_list(object: Sexp) -> Option<*mut List> {
@@ -2062,7 +2065,7 @@ unsafe fn strings_list(object: Sexp) -> Option<*mut List> {
 unsafe fn strings_length(object: Sexp) -> ApiResult<R_xlen_t> {
     Ok(match strings_list(object) {
         Some(list) => (*list).length as R_xlen_t,
-        None => object.cdr().length() as R_xlen_t,
+        None => object.car().external_protected().length() as R_xlen_t,
     })
 }
 
@@ -2073,7 +2076,7 @@ unsafe fn strings_elt(object: Sexp, index: R_xlen_t) -> ApiResult<Sexp> {
         ));
     }
     let nil = runtime().nil();
-    let read = object.cdr();
+    let read = object.car().external_protected();
     if read != nil {
         let element = read.element(index as usize);
         if element != nil {
@@ -2096,15 +2099,16 @@ unsafe fn strings_elt(object: Sexp, index: R_xlen_t) -> ApiResult<Sexp> {
 unsafe fn strings_storage(object: Sexp) -> ApiResult<Sexp> {
     let heap = &mut runtime().heap;
     let nil = heap.nil();
-    if object.cdr() != nil {
-        return Ok(object.cdr());
+    let pointer = object.car();
+    if pointer.external_protected() != nil {
+        return Ok(pointer.external_protected());
     }
     heap.root(object);
     let length = strings_length(object)?;
     let heap = &mut runtime().heap;
     let read = heap.alloc_vector(SexpType::String, length)?;
     read.slice_mut::<Sexp>().fill(nil);
-    heap.set_cdr(object, read);
+    heap.set_external_protected(pointer, read);
     Ok(read)
 }
 
@@ -2112,7 +2116,7 @@ unsafe fn strings_storage(object: Sexp) -> ApiResult<Sexp> {
 unsafe fn strings_expand(object: Sexp) -> ApiResult<Sexp> {
     let pointer = object.car();
     if pointer.external_tag() != runtime().nil() {
-        return Ok(object.cdr());
+        return Ok(pointer.external_tag());
     }
     runtime().heap.root(object);
     let read = strings_storage(object)?;
@@ -2133,8 +2137,9 @@ unsafe fn strings_dataptr(object: Sexp, writable: bool) -> ApiResult<*mut u8> {
 }
 
 unsafe fn strings_dataptr_or_null(object: Sexp) -> ApiResult<*const c_void> {
-    Ok(if object.car().external_tag() != runtime().nil() {
-        object.cdr().data() as *const c_void
+    let complete = object.car().external_tag();
+    Ok(if complete != runtime().nil() {
+        complete.data() as *const c_void
     } else {
         std::ptr::null()
     })
@@ -2166,7 +2171,7 @@ unsafe fn strings_inspect(
         ),
         None => {
             write_console(b"  <string list R has written to>\n", false);
-            subtree(object.cdr(), pre, deep, pvec);
+            subtree(object.car().external_protected(), pre, deep, pvec);
         }
     }
     Ok(true)
