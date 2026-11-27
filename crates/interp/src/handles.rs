@@ -3124,7 +3124,7 @@ pub fn compiled_loop<'s>(
 /// copies it: the sequence of a `for` loop, whose elements still to come must not change.
 pub fn referenced_while<'s, T>(
     context: &mut Cx<'s>,
-    value: Local<'s>,
+    value: Local<'_>,
     body: impl FnOnce(&mut Cx<'s>) -> R<T>,
 ) -> R<T> {
     // SAFETY: the value is rooted, and the count is given back whatever the body does.
@@ -4383,14 +4383,9 @@ pub fn force_holding<'s>(
     promise: Local<'s, Promise>,
     held: Local<'_>,
 ) -> R<Local<'s>> {
-    // SAFETY: both are rooted, the count is given back whatever the forcing does, and forcing
-    // runs R code, which `&mut Cx` permits.
-    unsafe {
-        held.raw().increment_refcount();
-        let value = crate::eval::force_promise(promise.raw());
-        held.raw().decrement_refcount();
-        Ok(rooted(context, value?))
-    }
+    referenced_while(context, held, |context| {
+        crate::eval::promise_value(context, promise)
+    })
 }
 
 /// The definition of the builtin or special `function`.

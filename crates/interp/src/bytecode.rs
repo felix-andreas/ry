@@ -9268,7 +9268,7 @@ unsafe fn call_fast<
         values::get_attr(function, symbols().srcref)
     };
     if promised != 0
-        && let Err(unwind) = eval::default_promises(depth, function, header, promised)
+        && let Err(unwind) = eval::default_promises(depth, promised)
     {
         let result = eval::leave(depth + 1, Err(unwind));
         return Some(call_fast_left(state, at, references, result));

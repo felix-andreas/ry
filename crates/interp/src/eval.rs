@@ -1646,14 +1646,21 @@ pub unsafe fn env_code_reference(env: Sexp, code: Sexp) -> R<Sexp> {
 pub unsafe fn code_reference(owner: usize, code: Sexp) -> R<Sexp> {
     handles::in_caller_scope(|context| {
         let code = handles::held(context, code);
-        // The code holds its constant pool, and the caller holds the code.
-        let source = handles::held(context, source_of(code.read(context)).raw());
-        let index = take_reference(context, source)?;
-        handles::aim_reference(context, index, owner, NO_REFERENCE_SLOT);
-        let reference = reference_at(context, index);
-        context.set_promise_environment(reference, code);
-        Ok(reference.raw())
+        let index = compiled_reference(context, owner, code)?;
+        Ok(reference_at(context, index).raw())
     })
+}
+
+/// [`code_reference`] for code on the handle types: the position in the pool of the reference
+/// that runs `code`.
+fn compiled_reference(context: &mut Cx<'_>, owner: usize, code: Local<'_>) -> R<usize> {
+    // The code holds its constant pool, which holds the source.
+    let source = context.root(source_of(code.read(context)));
+    let index = take_reference(context, source)?;
+    handles::aim_reference(context, index, owner, NO_REFERENCE_SLOT);
+    let reference = reference_at(context, index);
+    context.set_promise_environment(reference, code);
+    Ok(index)
 }
 
 /// The source a compiled argument's `code` was compiled from, which its constant pool keeps.
@@ -4834,7 +4841,7 @@ unsafe fn push_slot_frame(
     );
     let defaults = sampled.and_then(|()| match promised {
         0 => Ok(()),
-        _ => default_promises(depth - 1, function, header as usize, promised),
+        _ => default_promises(depth - 1, promised),
     });
     match defaults {
         Ok(()) => {
@@ -5024,9 +5031,7 @@ unsafe fn run_frame_general(
     }
     let signature = match entry {
         // A slot frame's closure is never typed (`bind_slots`).
-        _ if slots != crate::NO_SLOTS => {
-            default_promises(depth - 1, function, slots as usize, promised).map(|()| None)
-        }
+        _ if slots != crate::NO_SLOTS => default_promises(depth - 1, promised).map(|()| None),
         Entry::Unchecked => crate::annotations::enter(call, function, env, depth),
         Entry::Checked(signature) => Ok(signature),
     };
@@ -5451,34 +5456,44 @@ pub(crate) unsafe fn count_package_call(function: Sexp, frame: Option<&Frame>, a
 /// pool, so a default costs the call no promise and no environment, and the frame gives it
 /// back when it returns ([`release_frame_references`]). A frame that moves the formal into a
 /// cell makes it the promise it stands for ([`detach_reference`]).
-pub(crate) unsafe fn default_promises(
-    owner: usize,
-    function: Sexp,
-    header: usize,
-    promised: u64,
-) -> R<()> {
+pub(crate) unsafe fn default_promises(owner: usize, promised: u64) -> R<()> {
+    handles::in_caller_scope(|context| promise_defaults(context, owner, promised))
+}
+
+/// [`default_promises`] for code on the handle types.
+pub(crate) fn promise_defaults(context: &mut Cx<'_>, owner: usize, promised: u64) -> R<()> {
     if promised == 0 {
         return Ok(());
     }
-    let defaults = bytecode::slot_defaults(function)?;
+    if slot_defaults(context, handles::live_frame(context, owner).function()).is_none() {
+        let function = context.root(handles::live_frame(context, owner).function());
+        handles::build_slot_defaults(context, function)?;
+    }
     let mut pending = promised;
     while pending != 0 {
         let index = pending.trailing_zeros() as usize;
         pending &= pending - 1;
-        let code = defaults.element(index);
-        let reference = if code.kind() == SexpType::Bytecode {
-            code_reference(owner, code)?
-        } else {
-            let slot = bytecode::frame_slot_names(function)
-                .iter()
-                .position(|&name| name == code)
-                .map_or(NO_REFERENCE_SLOT, |slot| slot as u32);
-            argument_reference(owner, slot, code)?
+        let frame = handles::live_frame(context, owner);
+        let Some(defaults) = slot_defaults(context, frame.function()) else {
+            panic!("a slot frame's defaults were not kept for its formals");
         };
-        crate::heap().store_slot(
-            &mut *bytecode::register_address(header + 1 + index),
-            reference,
-        );
+        // The frame holds its function, which holds the defaults, but the reference may
+        // allocate, so the code is rooted.
+        let code = context.root(defaults.get(index));
+        let reference = if code.r_type() == SexpType::Bytecode {
+            compiled_reference(context, owner, code)?
+        } else {
+            let slot = handles::live_frame(context, owner)
+                .slot_names()
+                .iter()
+                .position(|name| name.is(code))
+                .map_or(NO_REFERENCE_SLOT, |slot| slot as u32);
+            let place = take_reference(context, code)?;
+            handles::aim_reference(context, place, owner, slot);
+            place
+        };
+        handles::live_frame(context, owner)
+            .store_slot(index, reference_at(context, reference).value());
     }
     Ok(())
 }
