@@ -9,11 +9,11 @@ use {
         diagnostics::nearest_name,
         stubs::stubs,
         types::{
-            Atomic, Binder, Constraint, FrameKind, FunctionType, InferenceVar, Name, NativeField,
-            NativeScalar, RecordField, Ty, TyKind, array_element, contains_inference_var,
-            for_each_child_type, frame_with_row, is_ry_value_type, map_child_types,
-            native_record_with_row, native_scalar, r_column_type, scalar, substitute_rigid,
-            union_of, unknown,
+            Atomic, Binder, Constraint, FamilyResult, FrameKind, FunctionType, InferenceVar, Name,
+            NativeField, NativeScalar, RecordField, Ty, TyKind, array_element,
+            contains_inference_var, family_result, for_each_child_type, frame_with_row,
+            is_ry_value_type, map_child_types, native_record_with_row, native_scalar,
+            r_column_type, scalar, substitute_rigid, union_of, unknown,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -270,7 +270,47 @@ impl<'db> InferenceTable<'db> {
                 _ => return Ty::new(db, TyKind::Var(representative)),
             }
         }
-        current
+        match current.kind(db) {
+            TyKind::Family(result, operand) => self.family(db, *result, *operand),
+            _ => current,
+        }
+    }
+
+    /// The result of `result` over `operand` as far as this table decides it: an open operand
+    /// whose constraint admits only ry's numbers or only R's types picks that side's outcome.
+    pub fn family(&self, db: &'db dyn Db, result: FamilyResult, operand: Ty<'db>) -> Ty<'db> {
+        let operand = self.shallow_resolve(db, operand);
+        let constraint = match operand.kind(db) {
+            TyKind::Var(_) | TyKind::Rigid(_) => Some(self.family_operand_constraint(db, operand)),
+            // A nominal or alias over a ry number (`type Count = I64`) computes as the number.
+            TyKind::Named(name, arguments) => {
+                let expanded = self.resolve(db, operand);
+                if expanded != operand {
+                    return self.family(db, result, expanded);
+                }
+                return match self.representation(db, *name, arguments) {
+                    Some(representation)
+                        if matches!(representation.kind(db), TyKind::Native(_)) =>
+                    {
+                        result.ry_outcome(db, operand)
+                    }
+                    _ => result.r_outcome(db),
+                };
+            }
+            _ => None,
+        };
+        match constraint {
+            Some(
+                Constraint::Number | Constraint::Int | Constraint::Frac | Constraint::ArrayItem,
+            ) => result.ry_outcome(db, operand),
+            Some(constraint)
+                if constraint != Constraint::Unconstrained
+                    && constraint.join(Constraint::Number).is_none() =>
+            {
+                result.r_outcome(db)
+            }
+            _ => family_result(db, result, operand),
+        }
     }
 
     /// Also expands aliases. Self-referential bindings and aliases cut to
@@ -334,6 +374,10 @@ impl<'db> InferenceTable<'db> {
             clean &= child_clean;
             child
         });
+        let resolved = match resolved.kind(db) {
+            TyKind::Family(result, operand) => self.family(db, *result, *operand),
+            _ => resolved,
+        };
         // Aliases never survive into unification. A self-referential alias re-enters
         // through the same interned application, so the visiting stack bounds it.
         let alias = match resolved.kind(db) {
@@ -407,6 +451,12 @@ impl<'db> InferenceTable<'db> {
                 }
             }
         }
+        let ty = match ty.kind(db) {
+            TyKind::Family(result, operand) if constraint != Constraint::Unconstrained => {
+                self.narrow_family(db, constraint, *result, *operand)?
+            }
+            _ => ty,
+        };
         if let Some(error) = constraint_rejects(db, self, constraint, ty) {
             return Err(error);
         }
@@ -416,8 +466,8 @@ impl<'db> InferenceTable<'db> {
             return Err(UnifyError::Mismatch(ty, bound));
         }
         if matches!(
-            constraint,
-            Constraint::Numeric | Constraint::Num | Constraint::Arithmetic
+            constraint.r_side(),
+            Constraint::Numeric | Constraint::Arithmetic
         ) && let TyKind::Vector(element) | TyKind::NamedVector(element) = ty.kind(db)
             && let TyKind::Var(element) = self.shallow_resolve(db, *element).kind(db)
         {
@@ -442,11 +492,8 @@ impl<'db> InferenceTable<'db> {
         }
         self.adjust_levels(db, level, ty);
         let numeric = matches!(
-            constraint,
-            Constraint::Numeric
-                | Constraint::Num
-                | Constraint::Arithmetic
-                | Constraint::ScalarNumeric
+            constraint.r_side(),
+            Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric
         );
         self.set(representative, Entry::Bound { ty, numeric });
         Ok(())
@@ -597,6 +644,17 @@ impl<'db> InferenceTable<'db> {
             // a variable still binds to them.
             (TyKind::Any, _) | (_, TyKind::Any) | (TyKind::Unknown, _) | (_, TyKind::Unknown) => {
                 Ok(())
+            }
+            (TyKind::Family(left_result, left), TyKind::Family(right_result, right))
+                if left_result == right_result =>
+            {
+                self.unify(db, *left, *right)
+            }
+            (TyKind::Family(result, operand), _) => {
+                self.unify_family(db, *result, *operand, b, UnifyError::Mismatch(a, b))
+            }
+            (_, TyKind::Family(result, operand)) => {
+                self.unify_family(db, *result, *operand, a, UnifyError::Mismatch(a, b))
             }
             (TyKind::Named(..), _) | (_, TyKind::Named(..))
                 if self.undeclared_nominal(db, a) || self.undeclared_nominal(db, b) =>
@@ -1013,9 +1071,13 @@ impl<'db> InferenceTable<'db> {
     /// Whether a type parameter's values are arithmetic operands: a `<T: num>` is, though it
     /// does not imply `arithmetic`, which admits R numbers only.
     pub fn rigid_operand(&self, db: &'db dyn Db, name: Name<'db>) -> bool {
-        [Constraint::Arithmetic, Constraint::Num]
-            .into_iter()
-            .any(|constraint| self.rigid_satisfies(db, name, constraint))
+        [
+            Constraint::Arithmetic,
+            Constraint::Num,
+            Constraint::ArithmeticOrNumber,
+        ]
+        .into_iter()
+        .any(|constraint| self.rigid_satisfies(db, name, constraint))
     }
 
     pub fn open_constraint(&self, db: &'db dyn Db, ty: Ty<'db>) -> Option<Constraint> {
@@ -1071,6 +1133,106 @@ impl<'db> InferenceTable<'db> {
             },
             Entry::Redirect(_) => unreachable!("find returns a representative"),
         }
+    }
+
+    /// A family result meets a concrete type, which decides the side of its operand:
+    /// `Promoted<T>` is `F64` only when `T` is, and `double` only when `T` is an R number.
+    fn unify_family(
+        &mut self,
+        db: &'db dyn Db,
+        result: FamilyResult,
+        operand: Ty<'db>,
+        other: Ty<'db>,
+        mismatch: UnifyError<'db>,
+    ) -> Result<(), UnifyError<'db>> {
+        match (result, other.kind(db)) {
+            (FamilyResult::Arithmetic, TyKind::Native(native)) if native.is_number() => {
+                self.unify(db, operand, other)
+            }
+            (FamilyResult::Comparison, TyKind::Native(NativeScalar::Bool)) => self
+                .constrain_family_operand(db, operand, Constraint::ArrayItem)
+                .map_err(|_| mismatch),
+            (FamilyResult::Arithmetic, TyKind::Scalar(Atomic::Double))
+            | (FamilyResult::Comparison, TyKind::Scalar(Atomic::Logical)) => {
+                let side = self.family_operand_constraint(db, operand).r_side();
+                self.constrain_family_operand(db, operand, side)
+                    .map_err(|_| mismatch)
+            }
+            _ => Err(mismatch),
+        }
+    }
+
+    fn family_operand_constraint(&self, db: &'db dyn Db, operand: Ty<'db>) -> Constraint {
+        match self.shallow_resolve(db, operand).kind(db) {
+            TyKind::Var(var) => match self.entry(self.find(*var)) {
+                Entry::Unbound { constraint, .. } => *constraint,
+                _ => Constraint::Unconstrained,
+            },
+            TyKind::Rigid(name) => self
+                .rigid_constraints
+                .get(name)
+                .copied()
+                .unwrap_or(Constraint::Unconstrained),
+            _ => Constraint::Unconstrained,
+        }
+    }
+
+    /// Restricts a family's open operand to one side; a type parameter cannot be restricted,
+    /// so it must already satisfy the constraint.
+    fn constrain_family_operand(
+        &mut self,
+        db: &'db dyn Db,
+        operand: Ty<'db>,
+        constraint: Constraint,
+    ) -> Result<(), UnifyError<'db>> {
+        let operand = self.shallow_resolve(db, operand);
+        match operand.kind(db) {
+            TyKind::Var(var) => self.constrain(db, *var, constraint),
+            _ => match constraint_rejects(db, self, constraint, operand) {
+                Some(error) => Err(error),
+                None => Ok(()),
+            },
+        }
+    }
+
+    /// A family result that binds a constrained variable: when the constraint admits only one
+    /// side's outcome, the operand takes that side, and the decided result is what binds.
+    fn narrow_family(
+        &mut self,
+        db: &'db dyn Db,
+        constraint: Constraint,
+        result: FamilyResult,
+        operand: Ty<'db>,
+    ) -> Result<Ty<'db>, UnifyError<'db>> {
+        let r_admitted = constraint_rejects(db, self, constraint, result.r_outcome(db)).is_none();
+        let ry_side = match result {
+            FamilyResult::Arithmetic => constraint
+                .families()
+                .map_or(constraint, |(_, ry_half)| ry_half),
+            FamilyResult::Comparison => Constraint::ArrayItem,
+        };
+        let ry_admitted = match result {
+            FamilyResult::Arithmetic => constraint.join(Constraint::Number).is_some(),
+            FamilyResult::Comparison => {
+                constraint_rejects(db, self, constraint, native_scalar(db, NativeScalar::Bool))
+                    .is_none()
+            }
+        };
+        let side = match (r_admitted, ry_admitted) {
+            (true, true) => None,
+            (true, false) => Some(self.family_operand_constraint(db, operand).r_side()),
+            (false, true) => Some(ry_side),
+            (false, false) => {
+                return Err(UnifyError::ConstraintRejected(
+                    constraint,
+                    Ty::new(db, TyKind::Family(result, operand)),
+                ));
+            }
+        };
+        if let Some(side) = side {
+            self.constrain_family_operand(db, operand, side)?;
+        }
+        Ok(self.family(db, result, operand))
     }
 
     /// Directional compatibility: the coercions unification never applies (scalar to
@@ -1187,7 +1349,14 @@ impl<'db> InferenceTable<'db> {
                 }
                 TyKind::Rigid(name) => matches!(
                     self.rigid_constraints.get(name),
-                    Some(Constraint::Numeric | Constraint::Num | Constraint::Arithmetic)
+                    Some(
+                        Constraint::Numeric
+                            | Constraint::Num
+                            | Constraint::Arithmetic
+                            | Constraint::ArithmeticOrNumber
+                            | Constraint::ArithmeticOrF64
+                            | Constraint::NumericOrF64
+                    )
                 ),
                 _ => false,
             };
@@ -1248,6 +1417,36 @@ impl<'db> InferenceTable<'db> {
         }
         if actual == expected {
             return true;
+        }
+        if matches!(expected.kind(db), TyKind::Family(..)) {
+            return self.unify(db, actual, expected).is_ok();
+        }
+        // A family result fits where one of its outcomes does, and its operand takes that side.
+        if let TyKind::Family(result, operand) = *actual.kind(db)
+            && !matches!(expected.kind(db), TyKind::Var(_))
+        {
+            let r_side = self.family_operand_constraint(db, operand).r_side();
+            let ry_side = match result {
+                FamilyResult::Arithmetic => Constraint::Number,
+                FamilyResult::Comparison => Constraint::ArrayItem,
+            };
+            let mut sides = [
+                (r_side, result.r_outcome(db)),
+                (ry_side, result.ry_outcome(db, operand)),
+            ];
+            if matches!(expected.kind(db), TyKind::Native(_)) {
+                sides.reverse();
+            }
+            for (side, outcome) in sides {
+                let snapshot = self.snapshot();
+                if self.constrain_family_operand(db, operand, side).is_ok()
+                    && self.compatible_inner(db, outcome, expected, depth + 1)
+                {
+                    return true;
+                }
+                self.rollback(snapshot);
+            }
+            return false;
         }
         // An argument fits an open `T | NULL` with `T` taking its non-`NULL` part. Binding an
         // open argument to the whole union would tell the caller its own value may be `NULL`
@@ -2367,6 +2566,19 @@ pub(crate) fn constraint_rejects<'db>(
                 .get(name)
                 .is_some_and(|&bound| constraint_rejects(db, table, constraint, bound).is_none())
     };
+    // A family result satisfies a bound when one of its outcomes does; `bind` narrows the
+    // operand to that side.
+    if let TyKind::Family(result, operand) = ty.kind(db) {
+        let admissible = constraint_rejects(db, table, constraint, result.r_outcome(db)).is_none()
+            || match result {
+                FamilyResult::Arithmetic => constraint.join(Constraint::Number).is_some(),
+                FamilyResult::Comparison => {
+                    constraint_rejects(db, table, constraint, result.ry_outcome(db, *operand))
+                        .is_none()
+                }
+            };
+        return (!admissible).then_some(UnifyError::ConstraintRejected(constraint, ty));
+    }
     // A union satisfies a bound when every member does: `double | integer` is a number either way.
     if let TyKind::Union(members) = ty.kind(db) {
         let every_member_admissible = members
@@ -2389,9 +2601,21 @@ pub(crate) fn constraint_rejects<'db>(
     }
     let admissible = match constraint {
         Constraint::Unconstrained => true,
+        // A constraint of both families admits what either half admits, since no type is on
+        // both sides of the divide.
+        Constraint::Num
+        | Constraint::ArithmeticOrNumber
+        | Constraint::ArithmeticOrF64
+        | Constraint::NumericOrF64 => match (ty.kind(db), constraint.families()) {
+            (TyKind::Rigid(name), _) if binder_implies(name) => true,
+            (_, Some((r_half, ry_half))) => {
+                constraint_rejects(db, table, r_half, ty).is_none()
+                    || constraint_rejects(db, table, ry_half, ty).is_none()
+            }
+            (_, None) => false,
+        },
         // R's arithmetic takes logicals (as 0 and 1) and complex numbers as well as numbers.
-        Constraint::Numeric | Constraint::Num | Constraint::Arithmetic => match ty.kind(db) {
-            TyKind::Native(native) => constraint == Constraint::Num && native.is_number(),
+        Constraint::Numeric | Constraint::Arithmetic => match ty.kind(db) {
             TyKind::Scalar(
                 Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Complex,
             )

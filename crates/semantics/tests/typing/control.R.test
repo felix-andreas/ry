@@ -565,7 +565,7 @@ f <- function(x) {
   x + 1L
 }
 #++++
-f: <T: arithmetic> fn(x: T | NULL) -> T
+f: <T: arithmetic or number> fn(x: T | NULL) -> T
 
 #---- a_length_test_rules_out_null
 #: fn(flag: logical) -> integer[] | NULL
@@ -1124,7 +1124,7 @@ f <- function(n) {
   even(n)
 }
 #++++
-f: <T: arithmetic> fn(n: T) -> logical
+f: <T: arithmetic or number> fn(n: T) -> logical
 
 #---- forward_capture_sees_the_frame_write
 f <- function() {
@@ -1385,12 +1385,12 @@ fact: fn(n: integer) -> integer
 is_zero <- function(n) if (n == 0L) 1L else step_down(n)
 step_down <- function(n) is_zero(n - 1L)
 #++++
-is_zero: <T: arithmetic> fn(n: T) -> integer
-step_down: <T: arithmetic> fn(n: T) -> integer
+is_zero: <T: arithmetic or number> fn(n: T) -> integer
+step_down: <T: arithmetic or number> fn(n: T) -> integer
 
 #---- a_cycle_with_a_genuine_unknown_stays_unknown
 first <- function(n) if (n == 0L) 1L %then% 2L else second(n)
 second <- function(n) first(n - 1L)
 #++++
-first: <T: arithmetic> fn(n: T) -> Unknown
-second: <T: arithmetic> fn(n: T) -> Unknown
+first: <T: arithmetic or number> fn(n: T) -> Unknown
+second: <T: arithmetic or number> fn(n: T) -> Unknown

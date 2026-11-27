@@ -8,10 +8,11 @@ use {
         Db, SourceFile,
         diagnostics::TypeRenderer,
         types::{
-            Atomic, Binder, Bound, Constraint, FrameKind, FunctionType, Name, NativeField,
-            NativeScalar, Parameter, RecordField, RestParameter, Ty, TyKind, TypeScheme, any,
-            column_type, conflicting_tags, is_ry_value_type, native_record, native_record_with_row,
-            null, scalar, substitute_rigid, union_of, unknown,
+            Atomic, Binder, Bound, Constraint, FamilyResult, FrameKind, FunctionType, Name,
+            NativeField, NativeScalar, Parameter, RecordField, RestParameter, Ty, TyKind,
+            TypeScheme, any, column_type, conflicting_tags, family_result, is_ry_value_type,
+            native_record, native_record_with_row, null, scalar, substitute_rigid, union_of,
+            unknown,
         },
     },
     rustc_hash::FxHashSet,
@@ -1514,7 +1515,9 @@ impl<'db> Lowering<'db> {
                     ));
                     return unknown(self.db);
                 }
-                if let Some(range) = reference {
+                if let Some(range) = reference
+                    && FamilyResult::from_head(&text).is_none()
+                {
                     self.nominal_references.push((text.clone(), range));
                 }
                 // A bare binder passed to a generic may fill a row there, which the diagnostics
@@ -1537,6 +1540,16 @@ impl<'db> Lowering<'db> {
                     })
                     .unwrap_or_default();
                 let arguments: Vec<Ty<'db>> = applied.iter().map(|(ty, _)| *ty).collect();
+                if let Some(result) = FamilyResult::from_head(&text) {
+                    let [operand] = arguments.as_slice() else {
+                        self.errors.push((
+                            format!("`{text}` takes one type argument, as in `{text}<T>`"),
+                            node.text_range(),
+                        ));
+                        return unknown(self.db);
+                    };
+                    return family_result(self.db, result, *operand);
+                }
                 // A `List` holds ry values only, so an R vector, R scalar, `NULL` or function item
                 // has no place in it.
                 if text == "List"

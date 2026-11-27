@@ -894,9 +894,8 @@ fn side<'db>(
 pub fn has_r_bound(scheme: &TypeScheme<'_>) -> bool {
     scheme.binders.iter().any(|binder| {
         matches!(
-            binder.constraint(),
+            binder.constraint().r_side(),
             Constraint::Numeric
-                | Constraint::Num
                 | Constraint::Arithmetic
                 | Constraint::ScalarNumeric
                 | Constraint::AtomicElement

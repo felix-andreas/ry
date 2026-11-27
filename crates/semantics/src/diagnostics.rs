@@ -3752,6 +3752,18 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             }
         }
         TypeErrorKind::ConstraintViolation {
+            constraint:
+                constraint @ (Constraint::ArithmeticOrNumber
+                | Constraint::ArithmeticOrF64
+                | Constraint::NumericOrF64),
+            found,
+        } if matches!(found.kind(db), TyKind::Rigid(_)) => {
+            let found = renderer.render(db, *found);
+            let description = constraint_description(*constraint);
+            let spelling = constraint.spelling().unwrap_or("num");
+            format!("expected {description}, found `{found}`. Declare `<{found}: {spelling}>`")
+        }
+        TypeErrorKind::ConstraintViolation {
             constraint: Constraint::Arithmetic,
             found,
         } if matches!(found.kind(db), TyKind::Rigid(_)) => {
@@ -4493,6 +4505,9 @@ impl<'db> TypeRenderer<'db> {
             TyKind::Null => "NULL".to_owned(),
             TyKind::Scalar(atomic) => atomic_name(*atomic).to_owned(),
             TyKind::Native(native) => native.name().to_owned(),
+            TyKind::Family(result, operand) => {
+                format!("{}<{}>", result.head(), self.render(db, *operand))
+            }
             TyKind::Vector(element) => format!("{}[]", self.render_postfix_operand(db, *element)),
             TyKind::NamedVector(element) => {
                 format!("{}[named]", self.render_postfix_operand(db, *element))
@@ -4739,6 +4754,13 @@ fn constraint_description(constraint: Constraint) -> &'static str {
         Constraint::Numeric => "a numeric value (`integer` or `double`)",
         Constraint::Num => "a number (`integer`, `double`, `I64` or `F64`)",
         Constraint::Arithmetic => "a numeric value (`integer` or `double`)",
+        Constraint::ArithmeticOrNumber => {
+            "a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic"
+        }
+        Constraint::ArithmeticOrF64 => {
+            "a numeric value (`integer` or `double`), a class with arithmetic, or an `F64`"
+        }
+        Constraint::NumericOrF64 => "a numeric value (`integer` or `double`) or an `F64`",
         Constraint::AtomicElement => {
             "an atomic value (`logical`, `integer`, `double`, `complex`, `character`, or `raw`)"
         }

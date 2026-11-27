@@ -5,7 +5,7 @@ increment <- function(x) x + 1L
 anything <- 1L
 result <- increment(anything)
 #++++
-increment: <T: arithmetic> fn(x: T) -> T
+increment: <T: arithmetic or number> fn(x: T) -> T
 anything: Any
 result: double
 
@@ -26,7 +26,7 @@ id: <T> fn(x: T) -> T
 #---- arithmetic_generalizes
 add1 <- function(x) x + 1L
 #++++
-add1: <T: arithmetic> fn(x: T) -> T
+add1: <T: arithmetic or number> fn(x: T) -> T
 
 #---- two_operands_tie
 add <- function(a, b) a + b
@@ -36,12 +36,12 @@ add: <T: num> fn(a: T, b: T) -> T
 #---- division_is_double
 half <- function(x) x / 2
 #++++
-half: <T: arithmetic> fn(x: T) -> double
+half: <T: arithmetic or F64> fn(x: T) -> Promoted<T>
 
 #---- comparison_leaves_the_operand_open
 positive <- function(x) x > 0L
 #++++
-positive: <T> fn(x: T) -> logical
+positive: <T> fn(x: T) -> Compared<T>
 
 #---- two_flexible_comparison_stays_unconstrained
 cmp <- function(a, b) a < b
@@ -85,7 +85,7 @@ f <- function() {
 }
 #++++
 f: Unknown
-54..59 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+54..59 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
 
 #---- forward_read_is_tolerant
 f <- function() later()
@@ -141,7 +141,7 @@ h <- function(x) x ^ 2L
 #++++
 f: fn() -> double
 g: fn() -> double
-h: <T: arithmetic> fn(x: T) -> double
+h: <T: arithmetic or number> fn(x: T) -> Promoted<T>
 
 #---- unary_minus_keeps_the_atom_and_shape
 f <- function() -1L
@@ -275,7 +275,7 @@ f: <T: num> fn(x: T) -> T
 #---- division_by_literal_keeps_the_parameter_numeric
 f <- function(x) x / 2
 #++++
-f: <T: arithmetic> fn(x: T) -> double
+f: <T: arithmetic or F64> fn(x: T) -> Promoted<T>
 
 #---- a_long_arithmetic_chain_checks_in_linear_time
 # Both operands of an arithmetic or comparison operator infer once, at the

@@ -260,7 +260,7 @@ f: <T> fn(callbacks: T) -> Any
 defer <- function(x) x + 1L
 call_it <- function() withr::defer(2L)
 #++++
-defer: <T: arithmetic> fn(x: T) -> T
+defer: <T: arithmetic or number> fn(x: T) -> T
 call_it: fn() -> integer
 
 #---- an_own_package_name_with_no_definition_in_view_stays_quiet
@@ -621,7 +621,7 @@ qp <- function(sigma) {
   solve.QP(Dmat = 2 * sigma, dvec = rep(0, n), Amat = diag(n), bvec = rep(0, n))
 }
 #++++
-qp: <T: arithmetic> fn(sigma: T) -> list{solution: double[], value: double, unconstrained.solution: double[], iterations: integer[], Lagrangian: double[], iact: integer[]}
+qp: <T: arithmetic or number> fn(sigma: T) -> list{solution: double[], value: double, unconstrained.solution: double[], iterations: integer[], Lagrangian: double[], iact: integer[]}
 
 #---- arithmetic_on_a_known_number_is_still_not_a_matrix
 #namespace import(quadprog)
@@ -637,7 +637,7 @@ business_days <- function(start, days = 45L) {
   candidates[!wday(candidates) %in% c(1L, 7L)]
 }
 #++++
-business_days: <T, U: arithmetic> fn(start: T, [days]: U) -> Unknown
+business_days: <T, U: arithmetic or number> fn(start: T, [days]: U) -> Unknown
 
 #---- a_string_plus_a_period_is_still_an_error
 #namespace import(lubridate)
@@ -842,7 +842,7 @@ mpfr: <T, U> fn([x]: T, [precBits]: U, ...: Any) -> Any
 mpfr.default: <T> fn(x: T, ...: Any) -> T
 mpfr_from_bigz: <T, U> fn(x: T, [precBits]: U, ...: Any) -> T
 mpfr_from_text: <T> fn(text: T, ...: Any) -> T
-mpfr.is.0: <T> fn(x: T) -> logical
+mpfr.is.0: <T> fn(x: T) -> Compared<T>
 298..302 warning[s3-method-signature] this method of `mpfr` takes `text` where the generic takes `x`, so a call that passes `x` by name fails for this class. Rename it to `x`
 
 #---- rlang_exprs_quotes_its_arguments

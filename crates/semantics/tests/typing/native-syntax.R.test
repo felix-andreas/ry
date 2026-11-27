@@ -787,23 +787,99 @@ products: List<F64>
 negated: F64
 r_sum: integer
 
-#---- arithmetic_with_an_r_result_takes_r_numbers_only
-half <- function(a, b) a / b
-scale <- function(x) x * 2.0
-n <- 3i64
-xs <- [1.0, 2.0]
-q <- half(n, n)
-scaled <- List.map(xs, scale)
+#---- a_literal_beside_a_parameter_takes_its_type
+scale <- function(x) x * 2
+inc <- function(x) x + 1L
+frac <- function(x) x * 0.5
+a <- scale(3i64)
+b <- scale(2L)
+c <- inc(2L)
+d <- inc(3i64)
+e <- frac(2.5f64)
+f <- frac(3i64)
+xs <- List.map([1.0, 2.0], scale)
 #++++
-half: <T: numeric> fn(a: T, b: T) -> double
-scale: <T: arithmetic> fn(x: T) -> double
-n: I64
+scale: <T: arithmetic or number> fn(x: T) -> Promoted<T>
+inc: <T: arithmetic or number> fn(x: T) -> T
+frac: <T: arithmetic or F64> fn(x: T) -> Promoted<T>
+a: I64
+b: double
+c: integer
+d: I64
+e: F64
+f: Unknown
 xs: List<F64>
-q: Unknown
-scaled: Unknown
-95..96 error[type-mismatch] expected a numeric value (`integer` or `double`), found `I64`: this takes R's numbers only. To compute in ry numbers, declare the parameter `I64`
-98..99 error[type-mismatch] expected a numeric value (`integer` or `double`), found `I64`: this takes R's numbers only. To compute in ry numbers, declare the parameter `I64`
-124..129 error[type-mismatch] this function is passed `F64`, but its parameter `x` is used as a numeric value (`integer` or `double`), which takes R's numbers only. To compute in ry numbers, declare the parameter `F64`
+169..173 error[type-mismatch] expected a numeric value (`integer` or `double`), a class with arithmetic, or an `F64`, found `I64`
+
+#---- a_division_takes_an_f64_on_the_ry_side
+half <- function(a, b) a / b
+q <- half(2.5f64, 1.5f64)
+r <- half(1L, 2L)
+bad <- half(3i64, 3i64)
+#++++
+half: <T: numeric or F64> fn(a: T, b: T) -> Promoted<T>
+q: F64
+r: double
+bad: Unknown
+85..89 error[type-mismatch] expected a numeric value (`integer` or `double`) or an `F64`, found `I64`
+91..95 error[type-mismatch] expected a numeric value (`integer` or `double`) or an `F64`, found `I64`
+
+#---- a_comparison_gives_bool_for_a_ry_number
+pos <- function(a) a > 0
+same <- function(a) a == a
+b <- pos(3i64)
+l <- pos(2L)
+s <- same(1.5f64)
+picked <- if (pos(3i64)) 1L else 2L
+#++++
+pos: <T> fn(a: T) -> Compared<T>
+same: <T> fn(a: T) -> Compared<T>
+b: Bool
+l: logical
+s: Bool
+picked: integer
+
+#---- a_difference_of_two_ry_numbers_keeps_their_type
+gap <- function(a, b) a - b
+g <- gap(3i64, 1i64)
+d <- gap(Sys.Date(), Sys.Date())
+#++++
+gap: <T: arithmetic or number> fn(a: T, b: T) -> Promoted<T>
+g: I64
+d: double
+
+#---- a_family_result_takes_r_outcome_where_only_r_values_fit
+tested <- function(x) if (x * 2) 1L else 2L
+negated <- function(x) !(x / 2)
+picked <- function(x) { z <- x * 2; z[1] }
+combined <- function(x) c(x * 2, 1)
+looped <- function(x) { for (i in x * 2) print(i); NULL }
+flags <- function(x) (x > 0) & TRUE
+kept <- function(x) { y <- x * 2; y }
+held <- function(x) list(value = x * 2)
+k <- kept(3i64)
+h <- held(3i64)
+#++++
+tested: <T: arithmetic> fn(x: T) -> integer
+negated: <T: arithmetic> fn(x: T) -> logical
+picked: <T: arithmetic> fn(x: T) -> double
+combined: <T: arithmetic> fn(x: T) -> double[]
+looped: <T: arithmetic> fn(x: T) -> NULL
+flags: <T> fn(x: T) -> logical
+kept: <T: arithmetic or number> fn(x: T) -> Promoted<T>
+held: <T: arithmetic or number> fn(x: T) -> list{value: Promoted<T>}
+k: I64
+h: list{value: I64}
+
+#---- a_comparison_over_a_nominal_number_is_bool
+type Count = I64
+pos <- function(a) a > 0
+n <- @Count(3i64)
+b <- pos(n)
+#++++
+pos: <T> fn(a: T) -> Compared<T>
+n: Count
+b: Bool
 
 #---- a_num_parameter_takes_both_families
 #: <T: num> fn(a: T, b: T) -> T
@@ -817,7 +893,7 @@ add: <T: num> fn(a: T, b: T) -> T
 ratio: <T: num> fn(a: T, b: T) -> double
 x: F64
 y: integer
-121..126 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T`. This arithmetic gives an R number, so declare `<T: numeric>`, which admits R's numbers and the classes with arithmetic between two of their values
+121..126 error[type-mismatch] expected a numeric value (`integer` or `double`) or an `F64`, found `T`. Declare `<T: numeric or F64>`
 
 #---- a_tested_num_value_takes_r_numbers
 odd <- function(a) { b <- a %% a; if (b) 1L else 2L }

@@ -89,7 +89,7 @@ third: Unknown
 f <- function(x) x + 1L
 #++++
 typing mode: Strict
-f: <T: arithmetic> fn(x: T) -> T
+f: <T: arithmetic or number> fn(x: T) -> T
 
 #---- last_directive_wins
 # typing: strict
@@ -177,8 +177,8 @@ fact: fn(n: integer) -> integer
 even <- function(n) if (n == 0L) TRUE else odd(n - 1L)
 odd <- function(n) if (n == 0L) FALSE else even(n - 1L)
 #++++
-even: <T: arithmetic> fn(n: T) -> logical
-odd: <T: arithmetic> fn(n: T) -> logical
+even: <T: arithmetic or number> fn(n: T) -> logical
+odd: <T: arithmetic or number> fn(n: T) -> logical
 
 #---- annotated_recursion_has_no_origin
 #: fn(n: integer) -> integer
@@ -258,9 +258,9 @@ h <- function(x, depth) {
   list(value = a$value - b$value, parts = list(a, b))
 }
 #++++
-f: <T: arithmetic, U: arithmetic> fn(x: T, depth: U) -> list{value: T, parts: list{}} | list{value: Unknown, parts: list{Unknown, Unknown}}
-g: <T: arithmetic, U: arithmetic> fn(x: T, depth: U) -> Unknown
-h: <T: arithmetic, U: arithmetic> fn(x: T, depth: U) -> Unknown
+f: <T: arithmetic or number, U: arithmetic or number> fn(x: T, depth: U) -> list{value: T, parts: list{}} | list{value: Unknown, parts: list{Unknown, Unknown}}
+g: <T: arithmetic or number, U: arithmetic or number> fn(x: T, depth: U) -> Unknown
+h: <T: arithmetic or number, U: arithmetic or number> fn(x: T, depth: U) -> Unknown
 225..418 error[strict] strict mode: could not determine the full type of `f`, because it is defined recursively. Add a type annotation
 419..608 error[strict] strict mode: could not determine the full type of `g`, because it is defined recursively. Add a type annotation
 609..794 error[strict] strict mode: could not determine the full type of `h`, because it is defined recursively. Add a type annotation

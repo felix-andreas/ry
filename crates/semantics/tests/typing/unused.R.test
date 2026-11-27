@@ -77,7 +77,7 @@ f <- function(n) {
   }
 }
 #++++
-f: <T: arithmetic> fn(n: T) -> NULL
+f: <T: arithmetic or number> fn(n: T) -> NULL
 42..43 warning[unused] `y` is assigned but never used
 47..48 warning[maybe-undefined] `x` is only assigned on some paths here, so this read can find nothing
 
@@ -229,7 +229,7 @@ f <- function(x) {
   x
 }
 #++++
-f: <T: arithmetic> fn(x: T) -> T
+f: <T: arithmetic or number> fn(x: T) -> T
 21..22 warning[unused] `z` is assigned but never used
 
 #---- next_method_forwards_a_reassigned_formal
@@ -313,7 +313,7 @@ f <- function(z) {
   eval(parse(text = "plot(m2)"))
 }
 #++++
-f: <T: arithmetic> fn(z: T) -> Any
+f: <T: arithmetic or number> fn(z: T) -> Any
 
 #---- a_quoting_alias_quotes_its_arguments
 f <- function() {

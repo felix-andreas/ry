@@ -202,7 +202,7 @@ g <- function(x, flag) {
 }
 f <- function() g(flag = FALSE)
 #++++
-g: <T: arithmetic> fn(x: T, flag: logical) -> Unknown
+g: <T: arithmetic or number> fn(x: T, flag: logical) -> T | Promoted<T>
 f: Unknown
 70..71 error[type-mismatch] this call leaves out `x`, which the function requires
 
@@ -551,7 +551,7 @@ f <- function(x) {
 }
 #++++
 f: Unknown
-63..68 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list[T] | T[] | NULL`
+63..68 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `list[T] | T[] | NULL`
 
 #---- a_settled_bound_checks_a_later_caller
 f <- function(x) {
@@ -564,7 +564,7 @@ g <- function() f("a")
 f: Unknown
 g: fn() -> Unknown
 63..64 warning[unused] `y` is assigned but never used
-68..73 error[type-mismatch] expected a numeric value (`integer` or `double`), found `list[T] | T[] | NULL`
+68..73 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `list[T] | T[] | NULL`
 
 #---- a_bounded_variable_unified_into_its_own_bound_settles
 #: <T> fn(a: T, b: T) -> T
@@ -1040,12 +1040,12 @@ mixed_apply <- invoke(mirror)
 bad <- mixed_apply("ok")
 ok <- mixed_apply(2L)
 #++++
-invoke: <T: arithmetic, U> fn(f: fn(T) -> U) -> fn(x: T) -> U
+invoke: <T: arithmetic or number, U> fn(f: fn(T) -> U) -> fn(x: T) -> U
 mirror: <T> fn(x: T) -> T
-mixed_apply: <T: arithmetic> fn(x: T) -> T
+mixed_apply: <T: arithmetic or number> fn(x: T) -> T
 bad: Unknown
 ok: integer
-117..121 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+117..121 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `character`
 
 #---- a_wrapper_over_an_overload_set_leaves_its_parameter_unknown
 wrap <- function(x) sum(x)
@@ -1213,9 +1213,9 @@ f: <T> fn(x: T) -> double
 half <- function(n) n / 2
 f <- function() "text" |> half()
 #++++
-half: <T: arithmetic> fn(n: T) -> double
+half: <T: arithmetic or F64> fn(n: T) -> Promoted<T>
 f: Unknown
-42..48 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+42..48 error[type-mismatch] expected a numeric value (`integer` or `double`), a class with arithmetic, or an `F64`, found `character`
 
 #---- pipe_named_placeholder_receives_the_value
 scale_by <- function(value, factor) value * factor

@@ -177,7 +177,7 @@ action: Add inferred type annotations for the whole file
 completion (32): helper, help, help.request, help.search, help.start, shell, shell.exec, contr.helmert
 hint @19 -> double
 hint @44: T
-hint @45 -> double
+hint @45 -> Promoted<T>
 hint @73 -> double
 hint @86: character
 

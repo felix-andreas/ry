@@ -154,7 +154,7 @@ hint @45 -> T
 #---- inferred_annotation_fills_a_backslash_lambda
 twi$0ce <- \(x) x * 2L
 #++++
-hover 0..5: twice: <T: arithmetic> fn(x: T) -> T
+hover 0..5: twice: <T: arithmetic or number> fn(x: T) -> T
 hover-definition: global 0..5
 definition 0..5
 references: 0..5*
@@ -162,15 +162,15 @@ rename: 1 edit(s)
 calls twice: in  | out
 signature: none
 action: Add inferred type annotation for `twice`
-  edit 10..10 -> "<T: arithmetic>"
+  edit 10..10 -> "<T: arithmetic or number>"
   edit 12..12 -> ": T"
   edit 13..13 -> " -> T"
 action: Add inferred type annotations for the whole file
-  edit 10..10 -> "<T: arithmetic>"
+  edit 10..10 -> "<T: arithmetic or number>"
   edit 12..12 -> ": T"
   edit 13..13 -> " -> T"
 completion (63): twice, getWindowsHandle, getWindowsHandles, getWindowTitle, getWinProgressBar, setWindowTitle, setWinProgressBar, HoltWinters
-hint @10<T: arithmetic>
+hint @10<T: arithmetic or number>
 hint @12: T
 hint @13 -> T
 

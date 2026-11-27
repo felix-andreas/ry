@@ -504,7 +504,7 @@ print(bump(price))
 #++++
 +.Money: <T, U> fn(e1: T, [e2]: U) -> T
 price: Money
-bump: <T: arithmetic> fn(x: T) -> T
+bump: <T: arithmetic or number> fn(x: T) -> T
 Money
 
 #---- a_class_with_no_arithmetic_method_is_still_refused
@@ -518,9 +518,9 @@ bump <- function(x) x + 1L
 print(bump(label))
 #++++
 label: Tag
-bump: <T: arithmetic> fn(x: T) -> T
+bump: <T: arithmetic or number> fn(x: T) -> T
 T
-158..163 error[type-mismatch] expected a numeric value (`integer` or `double`) or a class with arithmetic, found `Tag`
+158..163 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `Tag`
 
 #---- a_recursive_function_keeps_the_arithmetic_classes
 # A cyclic group is checked through its own view of the world, and that view has
@@ -535,8 +535,8 @@ recursive <- function(k) {
 }
 not_recursive <- function() shift(Sys.Date())
 #++++
-shift: <T: arithmetic> fn(x: T) -> double
-recursive: <T: arithmetic> fn(k: T) -> double
+shift: <T: arithmetic or number> fn(x: T) -> Promoted<T>
+recursive: <T: arithmetic or number> fn(k: T) -> double
 not_recursive: fn() -> double
 
 #---- every_arithmetic_operator_method_makes_its_class_arithmetic
@@ -575,12 +575,12 @@ pw: Pow
 md: Mod
 dv: Div
 tg: Tag
-bump: <T: arithmetic> fn(x: T) -> double
+bump: <T: arithmetic or number> fn(x: T) -> Promoted<T>
 double
 double
 double
-double
-669..671 error[type-mismatch] expected a numeric value (`integer` or `double`) or a class with arithmetic, found `Tag`
+T
+669..671 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic, found `Tag`
 
 #---- a_dollar_method_types_field_reads_on_its_class
 # R dispatches `x$name` on a classed `x` to a `$.class` method, so its result types the read.
