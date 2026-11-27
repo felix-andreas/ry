@@ -300,10 +300,10 @@ f <- function(x) x + 2.5
 #++++
 f: <T: arithmetic or F64> fn(x: T) -> Promoted<T>
 
-#---- compare_against_character_leaves_unconstrained
+#---- compare_against_character_asks_for_a_string_comparison
 f <- function(x) x == "a"
 #++++
-f: <T> fn(x: T) -> logical
+f: <T: comparable or Str> fn(x: T) -> Compared<T>
 
 #---- compare_against_numeric_literal_leaves_the_operand_open
 f <- function(x) x == 1L

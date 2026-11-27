@@ -145,7 +145,7 @@ twice: <T: num> fn(x: T) -> T
 #---- compare_character_literal
 gtchar <- function(x) x > "a"
 #++++
-gtchar: <T> fn(x: T) -> logical
+gtchar: <T: comparable or Str> fn(x: T) -> Compared<T>
 
 #---- closure_captures_outer
 outer <- 1L

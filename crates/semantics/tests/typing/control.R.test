@@ -645,7 +645,7 @@ flag <- function(flag) {
   if (!flag) toupper(x) else x$a
 }
 #++++
-excluded: <T> fn(case: T) -> double
+excluded: <T: comparable or Str> fn(case: T) -> double
 sets: <T> fn(case: T) -> double
 flag: fn(flag: logical) -> character | double
 
@@ -677,7 +677,7 @@ uncovered <- function(case) {
   }
 }
 #++++
-covered: <T> fn(case: T) -> double | NULL
+covered: <T: comparable or Str> fn(case: T) -> double | NULL
 uncovered: Unknown
 294..295 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character | double`
 
@@ -896,7 +896,7 @@ f <- function(k) {
   r
 }
 #++++
-f: <T> fn(k: T) -> character | integer
+f: <T: comparable or Str> fn(k: T) -> character | integer
 
 #---- every_branch_joins_not_just_the_last_two
 f <- function(k) {

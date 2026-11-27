@@ -544,6 +544,7 @@ pub enum OperandExpectation {
     ScalarNumeric,
     Logical,
     Comparable,
+    Ordered,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
@@ -1859,11 +1860,12 @@ fn erase_residual_vars_at<'db>(
             None => {}
         }
     }
-    // `Int` and `Frac` each admit one type, so a literal they describe is that type rather than
+    // `Int`, `Frac` and `Str` each admit one type, so a literal they describe is that type rather than
     // a type parameter.
     match constraint {
         Constraint::Int => return native_scalar(db, NativeScalar::I64),
         Constraint::Frac => return native_scalar(db, NativeScalar::F64),
+        Constraint::Str => return native_scalar(db, NativeScalar::Str),
         _ => {}
     }
     if !closer.abstracted.contains(&table.find(var)) {
@@ -1887,11 +1889,13 @@ fn erase_residual_vars_at<'db>(
             | Constraint::Number
             | Constraint::Int
             | Constraint::Frac
+            | Constraint::Str
             | Constraint::Eq
             | Constraint::Comparable
             | Constraint::Ordered
             | Constraint::ComparableOrNumber
             | Constraint::ComparableOrOrdered
+            | Constraint::ComparableOrStr
             | Constraint::Unconstrained => unknown(db),
         };
     }
@@ -3684,6 +3688,18 @@ fn literal_operand(module: &Module, id: ExprId) -> Option<NumberLiteral> {
     number_literal(module, id)
 }
 
+/// Whether `id` is a string literal, in parentheses or not.
+fn string_operand(module: &Module, id: ExprId) -> bool {
+    let mut id = id;
+    while let ExpressionKind::Paren(inner) = module.kind(id) {
+        id = *inner;
+    }
+    matches!(
+        module.kind(id),
+        ExpressionKind::Literal(LiteralKind::String(_))
+    )
+}
+
 fn number_literal(module: &Module, id: ExprId) -> Option<NumberLiteral> {
     let (id, negative) = match module.kind(id) {
         ExpressionKind::Unary {
@@ -3913,8 +3929,20 @@ fn literal_leaves_fit(module: &Module, id: ExprId, target: NativeScalar) -> bool
     }
 }
 
+/// `complex` compares under `==` and `!=` only, which `Checker::infer_compare` enforces for
+/// concrete operands.
 fn comparable_atomic(atomic: Atomic) -> bool {
-    !matches!(atomic, Atomic::Complex | Atomic::Raw)
+    atomic != Atomic::Raw
+}
+
+/// Whether a comparison operand may hold `complex` values, which R has no order for.
+fn holds_complex<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
+    match ty.kind(db) {
+        TyKind::Scalar(Atomic::Complex) => true,
+        TyKind::Vector(element) | TyKind::NamedVector(element) => holds_complex(db, *element),
+        TyKind::Union(members) => members.iter().any(|&member| holds_complex(db, member)),
+        _ => false,
+    }
 }
 
 /// A `return(value)` or a `try` that leaves its function early, with the range a mismatch
@@ -11244,7 +11272,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         // A literal for an undecided `List` item is a ry value, as it is when written in the
         // list itself, and so is a number literal for a type parameter bounded by `number`,
-        // `int` or `frac`.
+        // `int` or `frac`, and a number or string literal for one bounded by `ordered`.
         let open = match target {
             None => self.table.open_constraint(self.db, expected),
             Some(_) => None,
@@ -11254,6 +11282,14 @@ impl<'db, 'a> Checker<'db, 'a> {
             Some(constraint @ (Constraint::Number | Constraint::Int | Constraint::Frac)) => {
                 number_literal(module, value)
                     .is_some_and(|literal| literal_meets(&literal, constraint))
+            }
+            // Every type `ordered` admits is a ry number or `Str`.
+            Some(Constraint::Ordered) => {
+                number_literal(module, value).is_some()
+                    || matches!(
+                        module.kind(value),
+                        ExpressionKind::Literal(LiteralKind::String(_))
+                    )
             }
             _ => false,
         };
@@ -12847,10 +12883,10 @@ impl<'db, 'a> Checker<'db, 'a> {
         {
             return unknown(self.db);
         }
-        // An open operand compared with a number literal, or with itself, gives `Bool` for a ry
-        // value and `logical` for an R one. R compares any atomic value, while ry compares a
-        // number with a number literal, any value but a function with itself under `==`, and
-        // only numbers and strings in order.
+        // An open operand compared with a number or string literal, or with another open
+        // operand, gives `Bool` for a ry value and `logical` for an R one. R compares any atomic
+        // value, while ry compares a number with a number literal, a `Str` with a string, any
+        // value but a function under `==`, and only numbers and strings in order.
         let open_operand = |ty: Ty<'db>| match ty.kind(self.db) {
             TyKind::Var(_) | TyKind::Rigid(_) => Some(ty),
             TyKind::Family(FamilyResult::Arithmetic, operand) => Some(*operand),
@@ -12861,13 +12897,26 @@ impl<'db, 'a> Checker<'db, 'a> {
         } else {
             Constraint::ComparableOrOrdered
         };
+        let beside_literal = |literal: ExprId| {
+            if literal_operand(self.module, literal).is_some() {
+                Some(Constraint::ComparableOrNumber)
+            } else {
+                string_operand(self.module, literal).then_some(Constraint::ComparableOrStr)
+            }
+        };
         let compared = match (open_operand(resolved_left), open_operand(resolved_right)) {
             (Some(left), Some(right)) if left == right => Some((left, lhs_range, itself)),
-            (Some(left), None) if literal_operand(self.module, rhs).is_some() => {
-                Some((left, lhs_range, Constraint::ComparableOrNumber))
+            // Two different open operands each take the constraint, but stay separate types:
+            // R compares an `integer` with a `character`, so tying them would reject valid R.
+            (Some(left), Some(right)) => {
+                self.constrain_operand(rhs_range, right, itself);
+                Some((left, lhs_range, itself))
             }
-            (None, Some(right)) if literal_operand(self.module, lhs).is_some() => {
-                Some((right, rhs_range, Constraint::ComparableOrNumber))
+            (Some(left), None) => {
+                beside_literal(rhs).map(|constraint| (left, lhs_range, constraint))
+            }
+            (None, Some(right)) => {
+                beside_literal(lhs).map(|constraint| (right, rhs_range, constraint))
             }
             _ => None,
         };
@@ -12907,6 +12956,19 @@ impl<'db, 'a> Checker<'db, 'a> {
                 });
                 return unknown(self.db);
             };
+            if !matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual)
+                && holds_complex(self.db, resolved)
+            {
+                let resolved = self.reported(resolved);
+                self.errors.push(TypeError {
+                    range: operand_range,
+                    kind: TypeErrorKind::InvalidOperand {
+                        expected: OperandExpectation::Ordered,
+                        found: resolved,
+                    },
+                });
+                return unknown(self.db);
+            }
             operand_shapes.push(shapes);
         }
         let mut results = Vec::new();
@@ -19512,6 +19574,13 @@ impl<'db, 'a> Checker<'db, 'a> {
                     return number_literal(self.module, value)
                         .is_some_and(|literal| literal_meets(&literal, constraint));
                 }
+                Some(Constraint::Ordered) => {
+                    return number_literal(self.module, value).is_some()
+                        || matches!(
+                            self.module.kind(value),
+                            ExpressionKind::Literal(LiteralKind::String(_))
+                        );
+                }
                 _ => return false,
             },
             _ => return false,
@@ -24748,10 +24817,18 @@ impl<'db, 'a> Checker<'db, 'a> {
                             self.table.entry(self.table.find(*var)),
                             Entry::Unbound { level: var_level, .. } if *var_level >= level
                         )
+                        // A comparison asks only what any caller's value offers, so it leaves
+                        // the value the caller's own (`if (x < lo) lo else x`).
                         && matches!(
                             self.table
                                 .open_constraint(self.db, Ty::new(self.db, TyKind::Var(*var))),
-                            Some(Constraint::Unconstrained)
+                            Some(
+                                Constraint::Unconstrained
+                                    | Constraint::Eq
+                                    | Constraint::ComparableOrOrdered
+                                    | Constraint::ComparableOrNumber
+                                    | Constraint::ComparableOrStr
+                            )
                         )
                 })
             };

@@ -777,10 +777,12 @@ A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
 - `item` admits what a [`List`](#lists) can hold: a number, a `Bool`, a `Str`, or another ry value.
   `List.from_r` uses it to type a `list[T]` argument.
 - `eq` admits every value but a function: the values `==` compares.
-- `comparable` admits the R values a comparison takes: an atomic value other than `complex` or
-  `raw` in any vector shape, a list, which R compares element by element, and a class.
-- `ordered` admits the ry values with an order: `I64`, `F64` and `Str`.
+- `comparable` admits the R values a comparison takes: an atomic value other than `raw` in any
+  vector shape, a list, which R compares element by element, and a class.
+- `ordered` admits the ry values with an order: `I64`, `F64` and `Str`. A number literal passed for
+  an `ordered` parameter is a ry number, and a string literal a `Str`.
 - `comparable or number` admits everything `comparable` does and `I64` and `F64`.
+- `comparable or Str` admits everything `comparable` does and `Str`.
 - `comparable or ordered` admits everything `comparable` does and what `ordered` does.
 
 The constraints named `... or ...` join an R constraint and a ry one, and they are what
@@ -2806,8 +2808,9 @@ operand pick the [constraint](#constraints) and the result:
 | two of one type, under `^` | `num` | `Promoted<T>` |
 | beside any other value | `arithmetic` | R's result |
 | a comparison beside a number literal (`x > 0`) | `comparable or number` | `Compared<T>` |
-| a value compared with itself under `==` or `!=` | `eq` | `Compared<T>` |
-| a value compared with itself under `<`, `>`, `<=` or `>=` | `comparable or ordered` | `Compared<T>` |
+| a comparison beside a string literal (`x == "a"`) | `comparable or Str` | `Compared<T>` |
+| a value compared with itself, or with another open value, under `==` or `!=` | `eq` | `Compared<T>` |
+| a value compared with itself, or with another open value, under `<`, `>`, `<=` or `>=` | `comparable or ordered` | `Compared<T>` |
 
 A whole literal is one with no fractional part, so `2.0` counts as whole and `2.5` does not. A
 class such as `Date` adds a number but not another value of its own, so two operands of one type
@@ -2834,10 +2837,16 @@ the same way, because a condition reads R's truth of a number, which a ry number
   `I64` and a `logical` for a `double` or a `character`. Calling it with a `Str` is a type error,
   because ry compares a `Str` only with a `Str`.
 
+- `function(a, b) a < b` is `<T: comparable or ordered, U: comparable or ordered> fn(a: T, b: U)
+  -> Compared<T>`. The two operands stay separate types, because R compares an `integer` with a
+  `character`, so `cmp(1L, "s")` is a `logical`, two `Str`s give a `Bool`, and two records are a
+  type error.
+
 A ry `List` meets a comparison's constraint through its items, as it compares item by item, and a
-ry nominal through its representation. Two different open operands (`function(a, b) a < b`), or
-an open operand beside a string literal, are a gap in the checker: it asks nothing of them and
-types the result `logical`, which is wrong for a ry value.
+ry nominal through its representation. Two different open operands are a gap on ry's side: ry
+compares only two values of one type, but the checker accepts an `I64` beside a `Str`. And
+`comparable` admits `complex`, which R compares under `==` and `!=` only, so an open operand
+compared under `<` accepts a `complex` that R refuses at run time.
 
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
 vector, so `f <- function(x) x + c(1L, 2L)` is `<T: arithmetic> fn(x: T) -> double[]` and accepts
@@ -2946,8 +2955,9 @@ operator is never reported as unused.
 
 `<`, `<=`, `>`, `>=`, `==`, and `!=` compare two `logical`, `integer`, `double`, or `character`
 operands, mixed freely. R coerces both operands to a common type before comparing, so
-`Sys.getenv("RSTUDIO") == 1` and `1L < "a"` are legal R and are not reported. `complex` and `raw`
-operands are not supported, so `1i < 2` is a type error. A map-like vector takes part through its
+`Sys.getenv("RSTUDIO") == 1` and `1L < "a"` are legal R and are not reported. A `complex` operand
+compares under `==` and `!=` only, so `1i == 0` is a `logical` and `1i < 2` is a type error. `raw`
+operands are not supported. A map-like vector takes part through its
 compatibility with an array-like vector. A `NULL` operand, or a `NULL` member of a union, is
 accepted, because R answers an empty `logical` vector instead of failing, as
 [union operands](#operators-over-union-operands) describe. A list compared with an atomic value

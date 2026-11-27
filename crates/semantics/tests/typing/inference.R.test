@@ -43,11 +43,13 @@ positive <- function(x) x > 0L
 #++++
 positive: <T: comparable or number> fn(x: T) -> Compared<T>
 
-#---- two_flexible_comparison_stays_unconstrained
+#---- two_flexible_comparison_operands_stay_separate_types
+# R compares an `integer` with a `character`, so each operand takes the comparison's constraint
+# without being tied to the other.
 cmp <- function(a, b) a < b
 mixed <- cmp(1L, "s")
 #++++
-cmp: <T, U> fn(a: T, b: U) -> logical
+cmp: <T: comparable or ordered, U: comparable or ordered> fn(a: T, b: U) -> Compared<T>
 mixed: logical
 
 #---- values
