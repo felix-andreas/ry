@@ -267,10 +267,14 @@ unsafe fn annotated_box(annotation: &str) -> Option<Item> {
         }
         fields.push((name, annotated_field(ty.trim())?));
     }
+    if fields.is_empty() {
+        return None;
+    }
     let layout_fields = if named {
         fields.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
         let mut symbols = Vec::with_capacity(fields.len());
         for (name, _) in &fields {
+            // A name R cannot intern leaves the parameter to its first call, which reports why.
             symbols.push(rvalues::install(name).ok()?);
         }
         Fields::Named(symbols.into_boxed_slice())

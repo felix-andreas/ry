@@ -31,7 +31,7 @@ expect stderr "typed: compiled for [I64] -> Dbl"
 run ry run --runtime ry --aot update.R
 expect exit 0
 expect stdout "[1] 13\n(x = 1, y = 3)\n"
-expect stderr "typed: compiled 1 function ahead of time in "
+expect stderr "typed: compiled 2 functions ahead of time in "
 
 unset RY_TYPED_LOG
 env RY_JIT off
