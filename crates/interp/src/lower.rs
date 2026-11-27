@@ -2621,8 +2621,22 @@ unsafe fn do_parse(call: &Call<'_>) -> R<Sexp> {
         _ => false,
     };
     let source = match SOURCE_ELABORATOR.get() {
-        Some(elaborate) if reads_file && std::path::Path::new(&name).is_file() => {
-            match elaborate(&name, &source) {
+        Some(elaborate)
+            if reads_file
+                && std::path::Path::new(&crate::connections::expand_path(&name)).is_file() =>
+        {
+            match elaborate(&crate::connections::expand_path(&name), &source) {
+                // Source references count columns in the text they were parsed from, so the
+                // srcfile copy holds the program's lines, as `ry run` shows a script's.
+                Ok(Some(program)) if srcfile.kind() == SexpType::Environment => {
+                    let lines: Vec<&str> = program.lines().collect();
+                    crate::heap().define(
+                        srcfile,
+                        install("lines")?,
+                        values::string_vector(&lines)?,
+                    )?;
+                    program
+                }
                 Ok(Some(program)) => program,
                 Ok(None) => source,
                 Err(()) => {

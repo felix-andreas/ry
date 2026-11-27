@@ -1,8 +1,8 @@
 # A script that `source()`s a typed file runs that file as the checker elaborated it, the same as
 # `ry run` on the file itself: an unsuffixed literal the checker typed `I64` is an `I64`, a record
-# literal holds ry numbers, an empty `List.map` result keeps its item type, and an aliased
-# signature checks its arguments, and the file's annotation warnings print. `sys.source()` reads the file without a source reference, so it
-# runs the text as written.
+# literal holds ry numbers, an empty `List.map` result keeps its item type, an aliased signature
+# checks its arguments, and the file's annotation warnings print. `sys.source()` with its default
+# `keep.source = FALSE` parses without a source reference, so it runs the text as written.
 
 requires ry-runtime
 
@@ -20,6 +20,8 @@ file helpers.R
 | #: Scaler
 | scale <- function(values, by) values * by
 | print(tryCatch(scale("a", 3), error = function(e) conditionMessage(e)))
+file ks.R
+| k <- (a = 1, b = 2); g <- function(x: I64) -> I64 x + 2
 file plain.R
 | print(1 + 1)
 file warn.R
@@ -29,11 +31,27 @@ file main.R
 | source("helpers.R")
 | options(keep.source = TRUE)
 | source("helpers.R", local = new.env())
+| source("ks.R")
+| print(g)
 | source("plain.R")
 | source("warn.R")
 | sys.source("helpers.R", envir = new.env())
 
 run ry run main.R
 expect exit 0
-expect stdout "42i64\n(x = 1i64, y = 2i64)\n0i64\n[1] \"argument `values` must be `double`, not `character`\"\n42i64\n(x = 1i64, y = 2i64)\n0i64\n[1] \"argument `values` must be `double`, not `character`\"\n[1] 2\n42i64\n(x = 1, y = 2)\n[1] 0\n[1] \"non-numeric argument to binary operator\""
+expect stdout "42i64\n(x = 1i64, y = 2i64)\n0i64\n[1] \"argument `values` must be `double`, not `character`\"\n42i64\n(x = 1i64, y = 2i64)\n0i64\n[1] \"argument `values` must be `double`, not `character`\"\nfunction(x: I64) -> I64 x + 2i64\n[1] 2\n42i64\n(x = 1, y = 2)\n[1] 0\n[1] \"non-numeric argument to binary operator\""
 expect stderr "the inline annotation gives parameter `n` the type `I64`, but the `#:` comment gives it `double`"
+
+# A strict project's mode belongs to the script: a plain R file it sources keeps R's types.
+file ry.toml
+| [check]
+| strict = true
+file lit.R
+| y <- 1
+| print(class(y))
+| print(y / 3)
+file strict.R
+| source("lit.R")
+run ry run strict.R
+expect exit 0
+expect stdout "[1] \"numeric\"\n[1] 0.3333333"

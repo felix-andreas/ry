@@ -548,22 +548,31 @@ pub fn elaborate_loaded_package(
 /// same annotation warnings, but strict mode refuses nothing here: a sourced file reads names
 /// the code that sources it binds, which a check of the file alone reports as unresolved.
 pub fn elaborate_sourced(path: &Path) -> Result<Option<(u64, String)>, CommandError> {
-    let config = Config::discover(path).map_err(|error| {
-        report(&error);
-        CommandError
-    })?;
-    let bytes = fs::read(path).map_err(|error| {
-        crate::cli::error(&format!("cannot read {}: {error}", path.display()));
-        CommandError
-    })?;
-    // R reads the file in the session's encoding, UTF-8; text that is not UTF-8 is no file the
-    // parse reads as the checker would.
+    // A sourced file that ry cannot check runs as R reads it: R reports a file it cannot read,
+    // and a broken `ry.toml` beside it must not stop plain R code.
+    let mut config = match Config::discover(path) {
+        Ok(config) => config,
+        Err(error) => {
+            report(&error);
+            return Ok(None);
+        }
+    };
+    let Ok(bytes) = fs::read(path) else {
+        return Ok(None);
+    };
+    // R reads the file in the session's encoding, UTF-8, and drops a byte order mark; text
+    // that is not UTF-8 is no file the parse reads as the checker would.
     let Ok(source) = String::from_utf8(bytes) else {
         return Ok(None);
     };
+    let source = source.strip_prefix('\u{FEFF}').unwrap_or(&source);
     let source = source.replace("\r\n", "\n").replace('\r', "\n");
     let source = source.strip_suffix('\n').unwrap_or(&source);
-    if !config.check.strict && !has_ry_syntax(&syntax::parse(source).syntax_node(), source) {
+    // The project's strict mode is the sourcing script's: a plain R file it sources keeps R's
+    // types, and one that turns strict mode on itself (`# typing: strict`) is checked strictly.
+    config.check.strict = false;
+    let directive = source.contains("typing: strict");
+    if !directive && !has_ry_syntax(&syntax::parse(source).syntax_node(), source) {
         return Ok(None);
     }
     let preflight = Preflight::new(config, path.to_path_buf());
@@ -571,9 +580,10 @@ pub fn elaborate_sourced(path: &Path) -> Result<Option<(u64, String)>, CommandEr
     let db = preflight.db.clone();
     let config = &preflight.config;
     let (_, reported, elaborations) = on_analysis_stack(move || findings(&db, file, config));
+    // Checked on its own, the file cannot see the names the sourcing script binds.
     let warnings: Vec<Diagnostic> = reported
         .into_iter()
-        .filter(|diagnostic| !is_strict_error(diagnostic))
+        .filter(|diagnostic| diagnostic.code != "unresolved")
         .collect();
     let text = file.text(&preflight.db);
     let resolve_note = |related: &RelatedLocation| {
