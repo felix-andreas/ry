@@ -1944,34 +1944,35 @@ pub fn referenced_variable<'c>(context: &'c Cx<'_>, reference: Gc<'c, Promise>) 
 }
 
 /// Whether the variable an unforced argument reference names is a missing argument in its
-/// frame, as [`value_is_missing`] asks of a promise of a name.
-unsafe fn reference_is_missing(reference: Sexp) -> R<bool> {
-    let symbol = reference.cdr();
-    if reference.tag().kind() == SexpType::Bytecode || symbol.kind() != SexpType::Symbol {
+/// frame, as [`content_is_missing`] asks of a promise of a name.
+fn reference_is_missing(context: &Cx<'_>, reference: Gc<'_, Promise>) -> R<bool> {
+    let place = reference.environment();
+    let Some(symbol) = reference.code().downcast::<Symbol>() else {
+        return Ok(false);
+    };
+    if place.r_type() == SexpType::Bytecode {
         return Ok(false);
     }
-    let env = if reference.tag().kind() == SexpType::Environment {
-        reference.tag()
-    } else {
-        let (owner, _) = reference_target(Gc::adopt(reference));
-        interp().frames[owner].env.raw()
+    let in_environment = |environment| match handles::frame_binding(context, environment, symbol) {
+        Some(_) => symbol_is_missing(context, symbol, environment, false),
+        None => Ok(false),
     };
-    if env != nil() {
-        if crate::heap().frame_cell(env, symbol).is_none() {
-            return Ok(false);
-        }
-        return symbol_is_missing(symbol, env, false);
+    if let Some(environment) = place.downcast::<Environment>() {
+        return in_environment(environment);
     }
-    let (owner, slot) = reference_target(Gc::adopt(reference));
-    let frame = &interp().frames[owner];
+    let (owner, slot) = reference_target(reference);
+    let frame = handles::live_frame(context, owner);
+    if let Some(environment) = frame.environment() {
+        return in_environment(environment);
+    }
     if slot == NO_REFERENCE_SLOT {
         return Ok(false);
     }
-    let value = *bytecode::register_address(frame.slots as usize + 1 + slot as usize);
-    if value == unbound() {
+    let value = frame.slot(slot as usize);
+    if handles::is_unbound(value) {
         return Ok(false);
     }
-    value_is_missing(value)
+    content_is_missing(context, value)
 }
 
 /// Turns the argument references the frame at `index` was called with into ordinary promises
@@ -6195,7 +6196,20 @@ fn match_positional_args<'s>(
 /// Whether `symbol` is missing in `env`: unbound to a supplied argument, or bound to a promise of
 /// a symbol that is itself missing in the caller.
 pub unsafe fn is_missing(symbol: Sexp, env: Sexp) -> R<bool> {
-    symbol_is_missing(symbol, env, true)
+    // SAFETY: both are live, and the test allocates nothing.
+    unsafe {
+        handles::reading(|context| formal_is_missing(context, Gc::adopt(symbol), Gc::adopt(env)))
+    }
+}
+
+/// [`is_missing`] for code on the handle types: `missing()` of `symbol` in `environment`,
+/// where a formal that got its default counts as missing.
+pub fn formal_is_missing(
+    context: &Cx<'_>,
+    symbol: Gc<'_, Symbol>,
+    environment: Gc<'_, Environment>,
+) -> R<bool> {
+    symbol_is_missing(context, symbol, environment, true)
 }
 
 /// Whether an argument expression is a symbol bound in `env`'s own frame to a missing argument,
@@ -6203,72 +6217,106 @@ pub unsafe fn is_missing(symbol: Sexp, env: Sexp) -> R<bool> {
 /// as `f(m, )` passes an empty `i`, which selects everything. A defaulted formal is not missing,
 /// and an unbound symbol is left to evaluation to report.
 pub unsafe fn argument_is_missing(expression: Sexp, env: Sexp) -> R<bool> {
-    if expression.kind() != SexpType::Symbol || expression == symbols().dots {
+    // SAFETY: both are live, and the test allocates nothing.
+    unsafe {
+        handles::reading(|context| {
+            expression_is_missing(context, Gc::adopt(expression), Gc::adopt(env))
+        })
+    }
+}
+
+/// [`argument_is_missing`] for code on the handle types.
+pub fn expression_is_missing(
+    context: &Cx<'_>,
+    expression: Gc<'_>,
+    environment: Gc<'_, Environment>,
+) -> R<bool> {
+    let Some(symbol) = expression.downcast::<Symbol>() else {
+        return Ok(false);
+    };
+    let dots = handles::symbol(|symbols| symbols.dots);
+    if symbol.is(dots) {
         return Ok(false);
     }
-    let symbol = if dot_dot_index(expression).is_some() {
-        symbols().dots
+    let bound = if dot_dot_position(symbol.name().bytes()).is_some() {
+        dots
     } else {
-        expression
+        symbol
     };
-    if env.has_gp(gp::SLOT_FRAME)
-        && let Some(answer) = slot_is_missing(env, expression, false)?
+    if environment.has_flag(gp::SLOT_FRAME)
+        && let Some(answer) = slot_is_missing(context, environment, symbol, false)?
     {
         return Ok(answer);
     }
-    if crate::heap().frame_cell(env, symbol).is_none() {
+    if handles::frame_binding(context, environment, bound).is_none() {
         return Ok(false);
     }
-    symbol_is_missing(expression, env, false)
+    symbol_is_missing(context, symbol, environment, false)
+}
+
+/// Whether what a binding or slot holds is a missing argument: the empty argument, or an
+/// unforced promise of a name that is missing where the promise reads it.
+pub(crate) unsafe fn value_is_missing(value: Sexp) -> R<bool> {
+    // SAFETY: the value is live, and the test allocates nothing.
+    unsafe { handles::reading(|context| content_is_missing(context, Gc::adopt(value))) }
 }
 
 /// `missing()` of `symbol` in `env`. `defaults_count` says whether a formal that got its default
 /// counts as missing: it does for the function asking, but not for a caller its argument came
 /// from, so `h(where)` with `where` defaulted passes a non-missing argument to `h`.
-unsafe fn symbol_is_missing(symbol: Sexp, env: Sexp, defaults_count: bool) -> R<bool> {
+fn symbol_is_missing(
+    context: &Cx<'_>,
+    symbol: Gc<'_, Symbol>,
+    environment: Gc<'_, Environment>,
+    defaults_count: bool,
+) -> R<bool> {
     // `eval.parent(substitute(missing(x)))` with `x` bound to an empty argument asks about the
     // empty symbol itself, which GNU R reports as missing.
-    if symbol == missing_arg() {
+    if handles::is_missing_argument(symbol.value()) {
         return Ok(true);
     }
-    if env.has_gp(gp::SLOT_FRAME)
-        && let Some(answer) = slot_is_missing(env, symbol, defaults_count)?
+    if environment.has_flag(gp::SLOT_FRAME)
+        && let Some(answer) = slot_is_missing(context, environment, symbol, defaults_count)?
     {
         return Ok(answer);
     }
-    let heap = crate::heap();
-    let (symbol, index) = match dot_dot_index(symbol) {
-        Some(index) => (symbols().dots, Some(index)),
+    let (bound, index) = match dot_dot_position(symbol.name().bytes()) {
+        Some(index) => (handles::symbol(|symbols| symbols.dots), Some(index)),
         None => (symbol, None),
     };
-    let Some(cell) = heap.frame_cell(env, symbol) else {
+    let Some(binding) = handles::frame_binding(context, environment, bound) else {
         return Err(error(format!(
             "'missing({})' did not find an argument",
-            symbol_name(symbol)
+            handles::text(bound.name())
         )));
     };
     if let Some(index) = index {
-        return dots_element_is_missing(cell.cdr(), index);
+        return dots_element_is_missing(context, binding.content(), index);
     }
-    if cell.has_gp(gp::BINDING_ABSENT) || (defaults_count && cell.has_gp(gp::BINDING_MISSING)) {
+    if binding.has_flag(gp::BINDING_ABSENT)
+        || (defaults_count && binding.has_flag(gp::BINDING_MISSING))
+    {
         return Ok(true);
     }
-    value_is_missing(cell.cdr())
+    content_is_missing(context, binding.content())
 }
 
 /// [`symbol_is_missing`] of `..index` where `...` holds `dots`.
-unsafe fn dots_element_is_missing(dots: Sexp, index: usize) -> R<bool> {
-    if dots == missing_arg() || dots.kind() != SexpType::Dots {
+fn dots_element_is_missing(context: &Cx<'_>, dots: Gc<'_>, index: usize) -> R<bool> {
+    if handles::is_missing_argument(dots) || dots.r_type() != SexpType::Dots {
         return Ok(true);
     }
     let mut item = dots;
     for _ in 1..index {
-        item = item.cdr();
-        if item.kind() != SexpType::Dots {
-            return Ok(true);
-        }
+        item = match handles::cell_fields(item) {
+            Some((_, _, rest)) if rest.r_type() == SexpType::Dots => rest,
+            _ => return Ok(true),
+        };
     }
-    value_is_missing(item.car())
+    match handles::cell_fields(item) {
+        Some((head, _, _)) => content_is_missing(context, head),
+        None => Ok(true),
+    }
 }
 
 /// [`symbol_is_missing`] answered in the slot of the live slot frame that `env` stands for,
@@ -6276,82 +6324,85 @@ unsafe fn dots_element_is_missing(dots: Sexp, index: usize) -> R<bool> {
 /// not in a slot: the frame keeps none of that name, or the slot is unbound because the
 /// variable moved into a cell or is not bound yet. A formal that got its default is flagged in
 /// the frame's missing bits, where a cell carries the flag itself.
-unsafe fn slot_is_missing(env: Sexp, symbol: Sexp, defaults_count: bool) -> R<Option<bool>> {
-    let (symbol, index) = match dot_dot_index(symbol) {
-        Some(index) => (symbols().dots, Some(index)),
+fn slot_is_missing(
+    context: &Cx<'_>,
+    environment: Gc<'_, Environment>,
+    symbol: Gc<'_, Symbol>,
+    defaults_count: bool,
+) -> R<Option<bool>> {
+    let (bound, index) = match dot_dot_position(symbol.name().bytes()) {
+        Some(index) => (handles::symbol(|symbols| symbols.dots), Some(index)),
         None => (symbol, None),
     };
-    if !crate::heap().may_bind(env, symbol) {
+    if !environment.may_bind(bound) {
         return Ok(None);
     }
-    let frame = &interp().frames
-        [handles::reading(|context| handles::pending_frame(context, Gc::adopt(env)).index())];
-    let names = frame
-        .function
-        .raw()
-        .cdr()
-        .cdr()
-        .element(bytecode::SLOTS)
-        .element(1);
-    let Some(slot) = (0..values::length(names)).find(|&slot| names.element(slot) == symbol) else {
+    let frame = handles::pending_frame(context, environment);
+    let Some(slot) = frame.slot_names().iter().position(|name| name.is(bound)) else {
         return Ok(None);
     };
-    let value = *bytecode::register_address(frame.slots as usize + 1 + slot);
-    if value == unbound() {
+    let value = frame.slot(slot);
+    if handles::is_unbound(value) {
         return Ok(None);
     }
     if let Some(index) = index {
-        return dots_element_is_missing(value, index).map(Some);
+        return dots_element_is_missing(context, value, index).map(Some);
     }
-    let formals = values::length(frame.function.raw().car());
-    if defaults_count && slot < formals.min(64) && frame.missing & (1 << slot) != 0 {
+    if defaults_count && frame.is_missing_formal(slot) && slot < frame.formals().count() {
         return Ok(Some(true));
     }
-    value_is_missing(value).map(Some)
+    content_is_missing(context, value).map(Some)
 }
 
-pub(crate) unsafe fn value_is_missing(mut value: Sexp) -> R<bool> {
+/// [`value_is_missing`] for code on the handle types.
+pub fn content_is_missing(context: &Cx<'_>, value: Gc<'_>) -> R<bool> {
     // An argument check that may convert wraps its caller's promise in one of its own
     // (`annotations::check_argument`), so the root of the chain is asked, as GNU R's
     // `findRootPromise` finds it.
-    while value.kind() == SexpType::Promise
-        && value.car() == unbound()
-        && value.cdr().kind() == SexpType::Promise
+    let mut value = value;
+    while let Some(promise) = value.downcast::<Promise>()
+        && handles::is_unbound(promise.result())
+        && promise.code().r_type() == SexpType::Promise
     {
-        value = value.cdr();
+        value = promise.code();
     }
-    if value == missing_arg() {
+    if handles::is_missing_argument(value) {
         return Ok(true);
     }
-    if is_reference(value) && value.car() == unbound() {
-        return reference_is_missing(value);
+    let Some(promise) = value.downcast::<Promise>() else {
+        return Ok(false);
+    };
+    if !handles::is_unbound(promise.result()) {
+        return Ok(false);
     }
-    if value.kind() == SexpType::Promise
-        && value.car() == unbound()
-        && value.cdr().kind() == SexpType::Symbol
-        && value.tag().kind() == SexpType::Environment
+    if promise.has_flag(gp::ARGUMENT_REFERENCE) {
+        return reference_is_missing(context, promise);
+    }
+    let (Some(code), Some(caller)) = (
+        promise.code().downcast::<Symbol>(),
+        promise.environment().downcast::<Environment>(),
+    ) else {
+        return Ok(false);
+    };
+    let dot_dot = dot_dot_position(code.name().bytes()).is_some();
+    // A promise over a slot frame that has no environment yet reads the frame's slot, as
+    // reifying the frame and asking its binding would, without making the environment.
+    if caller.has_flag(gp::PENDING_FRAME) && !dot_dot {
+        return pending_slot_is_missing(context, caller, code);
+    }
+    if caller.has_flag(gp::PARTIAL_FRAME)
+        && let Some(answer) = slot_is_missing(context, caller, code, false)?
     {
-        let code = value.cdr();
-        // A promise over a slot frame that has no environment yet reads the frame's slot, as
-        // reifying the frame and asking its binding would, without making the environment.
-        if value.tag().has_gp(gp::PENDING_FRAME) && dot_dot_index(code).is_none() {
-            return pending_slot_is_missing(value.tag(), code);
-        }
-        if value.tag().has_gp(gp::PARTIAL_FRAME)
-            && let Some(answer) = slot_is_missing(value.tag(), code, false)?
-        {
-            return Ok(answer);
-        }
-        let caller = promise_env(value)?;
-        // A promise for `..1` asks about the caller's `...`, the binding that holds it.
-        let bound = if dot_dot_index(code).is_some() {
-            symbols().dots
-        } else {
-            code
-        };
-        if crate::heap().frame_cell(caller, bound).is_some() {
-            return symbol_is_missing(code, caller, false);
-        }
+        return Ok(answer);
+    }
+    // A promise for `..1` asks about the caller's `...`, the binding that holds it.
+    let bound = if dot_dot {
+        handles::symbol(|symbols| symbols.dots)
+    } else {
+        code
+    };
+    if handles::frame_binding(context, caller, bound).is_some() {
+        return symbol_is_missing(context, code, caller, false);
     }
     Ok(false)
 }
@@ -6360,32 +6411,22 @@ pub(crate) unsafe fn value_is_missing(mut value: Sexp) -> R<bool> {
 /// for a caller the argument came from, so a defaulted formal is not missing. A reified slot
 /// frame binds each slot to its content and the method variables after them, so reading them in
 /// that order asks what its environment would answer.
-unsafe fn pending_slot_is_missing(pending: Sexp, symbol: Sexp) -> R<bool> {
-    let state = interp();
-    let owner =
-        handles::reading(|context| handles::pending_frame(context, Gc::adopt(pending)).index());
-    let frame = &state.frames[owner];
-    let names = frame
-        .function
-        .raw()
-        .cdr()
-        .cdr()
-        .element(bytecode::SLOTS)
-        .element(1);
-    if let Some(slot) = (0..values::length(names)).find(|&slot| names.element(slot) == symbol) {
-        let value = *bytecode::register_address(frame.slots as usize + 1 + slot);
-        return if value == unbound() {
+fn pending_slot_is_missing(
+    context: &Cx<'_>,
+    pending: Gc<'_, Environment>,
+    symbol: Gc<'_, Symbol>,
+) -> R<bool> {
+    let frame = handles::pending_frame(context, pending);
+    if let Some(slot) = frame.slot_names().iter().position(|name| name.is(symbol)) {
+        let value = frame.slot(slot);
+        return if handles::is_unbound(value) {
             Ok(false)
         } else {
-            value_is_missing(value)
+            content_is_missing(context, value)
         };
     }
-    let bound = crate::method_vars(state, owner)
-        .iter()
-        .find(|(name, _)| *name == symbol)
-        .map(|&(_, value)| value);
-    match bound {
-        Some(value) => value_is_missing(value),
+    match frame.method_vars().find(|(name, _)| name.is(symbol)) {
+        Some((_, value)) => content_is_missing(context, value),
         None => Ok(false),
     }
 }
@@ -7318,7 +7359,7 @@ fn do_missing<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<
         return Err(arguments.error("invalid use of 'missing'"));
     };
     let environment = arguments.environment(context)?;
-    let missing = handles::is_missing(context, context.root(symbol), environment)?;
+    let missing = formal_is_missing(context, symbol, environment.read(context))?;
     handles::logical_constant(context, missing as i32)
 }
 
@@ -7531,7 +7572,11 @@ fn do_exec<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Loc
     let passed = match expression {
         Some(expression) if !handles::is_missing_argument(expression) => {
             let missing = match expression.downcast::<Symbol>() {
-                Some(symbol) => handles::is_missing_in(context, symbol, environment)?,
+                Some(symbol) => expression_is_missing(
+                    context,
+                    symbol.read(context).value(),
+                    environment.read(context),
+                )?,
                 None => false,
             };
             (!missing).then_some(expression)
@@ -9192,7 +9237,12 @@ fn replace_through_primitive<'s>(
                 _ if argument.r_type() == SexpType::Promise => handles::force(context, argument)?,
                 Some(_) if handles::is_missing_argument(argument) => argument,
                 Some(symbol)
-                    if keep_missing && handles::is_missing_in(context, symbol, environment)? =>
+                    if keep_missing
+                        && expression_is_missing(
+                            context,
+                            symbol.read(context).value(),
+                            environment.read(context),
+                        )? =>
                 {
                     handles::missing_argument()
                 }

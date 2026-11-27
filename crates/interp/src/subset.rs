@@ -7193,7 +7193,9 @@ fn bind<'s>(context: &mut Cx<'s>, arguments: &Args<'_, 's>, by_row: bool) -> R<L
     let environment = arguments.environment(context)?;
     let level = arguments.value(0);
     let level_missing = match level.downcast::<Symbol>() {
-        Some(level) => handles::is_missing(context, level, environment)?,
+        Some(level) => {
+            eval::formal_is_missing(context, level.read(context), environment.read(context))?
+        }
         None => false,
     };
     let level_value = handles::evaluate(context, level, environment)?;

@@ -4367,27 +4367,6 @@ pub fn assign_local(
     }
 }
 
-/// Whether `symbol` is a missing argument of the frame of `environment`, as `missing()` asks.
-pub fn is_missing_in(
-    _context: &mut Cx<'_>,
-    symbol: Local<'_, Symbol>,
-    environment: Local<'_, Environment>,
-) -> R<bool> {
-    // SAFETY: both are rooted, and the test may force a promise, which `&mut Cx` permits.
-    unsafe { crate::eval::argument_is_missing(symbol.raw(), environment.raw()) }
-}
-
-/// Whether `symbol` is a missing argument in `environment`, counting a defaulted formal as
-/// missing in its own function, as `missing()` does.
-pub fn is_missing(
-    _context: &mut Cx<'_>,
-    symbol: Local<'_, Symbol>,
-    environment: Local<'_, Environment>,
-) -> R<bool> {
-    // SAFETY: both are rooted, and the test may force a promise, which `&mut Cx` permits.
-    unsafe { crate::eval::is_missing(symbol.raw(), environment.raw()) }
-}
-
 /// The namespace registered as `name`, if it is loaded.
 pub fn registered_namespace<'s>(context: &mut Cx<'s>, name: &str) -> R<Option<Local<'s>>> {
     let symbol = install_bytes(context, name.as_bytes())?;

@@ -828,6 +828,14 @@ impl<'a> Gc<'a, Environment> {
             (enclosure.kind() == SexpType::Environment).then(|| Gc::adopt(enclosure))
         }
     }
+
+    /// Whether the environment's own frame may bind `symbol` ([`crate::Heap::may_bind`]):
+    /// `false` proves it does not, and `true` asks for a search of its cells or slots.
+    #[inline(always)]
+    pub fn may_bind(self, symbol: impl Pointer<Symbol>) -> bool {
+        // SAFETY: the environment is live for `'a`, and the test reads its frame's filter.
+        unsafe { (*self.raw.frame_ptr()).may_bind(symbol.raw()) }
+    }
 }
 
 impl<'a> Gc<'a, Binding> {
