@@ -10,7 +10,7 @@ use {
         builtins::{Arg, BuiltinDef, Call, Generic, Kind, Visibility, builtin, internal, special},
         eval::{self, Args, apply_closure, call_builtin, forced_promise, value_of},
         handles::{
-            self, Cx, Environment, Gc, Integer, Language, Local, Pairlist, Promise, Str,
+            self, Cx, Environment, Gc, Held, Integer, Language, Local, Pairlist, Promise, Str,
             StringFill, Symbol, Tagged, Value, attribute_copy, attributes_unshared, dense,
             get_attribute, is_s4, null, safe, set_class, symbol, unreferenced,
         },
@@ -1028,7 +1028,7 @@ unsafe fn do_usemethod(call: &Call<'_>) -> R<Sexp> {
     };
     let (frame_call, function) = {
         let frame: &Frame = &interp().frames[position];
-        (frame.call, frame.function)
+        (frame.call.raw(), frame.function.raw())
     };
     // Methods are looked up from the generic's caller and see it as their `parent.frame()`,
     // so a generic called from a slot frame gives that frame its environment.
@@ -1124,7 +1124,7 @@ pub(crate) unsafe fn use_method_in_slots(
     let dispatching = activity::enter(Activity::S3Dispatch, 0);
     let (frame_call, function) = {
         let frame: &Frame = &interp().frames[position];
-        (frame.call, frame.function)
+        (frame.call.raw(), frame.function.raw())
     };
     let caller = lazy_caller(position, generic)?;
     let sys_parent = match caller {
@@ -1196,11 +1196,13 @@ unsafe fn pending_enclosure(env: Sexp, prefixes: &[&[u8]]) -> Option<Sexp> {
         return None;
     }
     let frames = &interp().frames;
-    let frame = &frames[frames.iter().rposition(|frame| frame.pending == env)?];
-    if frame.env != nil() || frame.slots == crate::NO_SLOTS {
+    let frame = &frames[frames
+        .iter()
+        .rposition(|frame| frame.pending.raw() == env)?];
+    if frame.env.raw() != nil() || frame.slots == crate::NO_SLOTS {
         return None;
     }
-    let function = frame.function;
+    let function = frame.function.raw();
     let probed = prefixes
         .iter()
         .any(|prefix| slot_named_like_method(function, prefix));
@@ -1227,17 +1229,17 @@ unsafe fn slot_named_like_method(function: Sexp, prefix: &[u8]) -> bool {
 unsafe fn lazy_caller(position: usize, generic: Sexp) -> R<Option<(usize, Sexp)>> {
     let frames = &interp().frames;
     let frame = &frames[position];
-    if frame.sys_parent != nil() || frame.caller == crate::NO_SLOTS {
+    if frame.sys_parent.raw() != nil() || frame.caller == crate::NO_SLOTS {
         return Ok(None);
     }
     let owner = frame.caller as usize;
     let Some(caller) = frames.get(owner) else {
         return Ok(None);
     };
-    if caller.env != nil() || caller.slots == crate::NO_SLOTS {
+    if caller.env.raw() != nil() || caller.slots == crate::NO_SLOTS {
         return Ok(None);
     }
-    let function = caller.function;
+    let function = caller.function.raw();
     let probed = slot_named_like_method(function, generic.element(0).bytes());
     Ok((!probed).then(|| (owner, function.tag())))
 }
@@ -1428,7 +1430,7 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     };
     let (frame_call, function, frame_env) = {
         let frame = &interp().frames[position];
-        (frame.call, frame.function, frame.env)
+        (frame.call.raw(), frame.function.raw(), frame.env.raw())
     };
     // A method running in slots keeps them: its variables are read from the slots, and the
     // promises the next method gets are over its pending environment, as a promise of an
@@ -1673,8 +1675,8 @@ unsafe fn do_nextmethod(call: &Call<'_>) -> R<Sexp> {
     // position, through the slot owner, as when byte code running on it makes a call.
     let (sys_parent, owner) = if method.kind() == SexpType::Closure {
         let frame = &interp().frames[position];
-        (frame.sys_parent, frame.caller)
-    } else if interp().frames[position].env == nil() {
+        (frame.sys_parent.raw(), frame.caller)
+    } else if interp().frames[position].env.raw() == nil() {
         (nil(), position as u32)
     } else {
         (method_env, crate::NO_SLOTS)
@@ -2110,7 +2112,7 @@ pub unsafe fn has_internal_method(
     let call_env = match caller {
         Caller::Env(env) => env,
         Caller::SlotFrame => {
-            let function = state.frames[state.slot_owner as usize].function;
+            let function = state.frames[state.slot_owner as usize].function.raw();
             let prefix = generic.car().bytes();
             let method_like = |name: &Sexp| {
                 let name = name.car().bytes();
@@ -2434,21 +2436,21 @@ unsafe fn apply_internal_method(call: Sexp, found: Found, promised: &[Arg], env:
     state.frame_args.extend_from_slice(promised);
     state.calls_ever = state.calls_ever.wrapping_add(1);
     state.frames.push(Frame {
-        call,
-        function: found.method,
-        env: context_env,
-        sys_parent: env,
+        call: Held::adopt(call),
+        function: Held::adopt(found.method),
+        env: Held::adopt(context_env),
+        sys_parent: Held::adopt(env),
         args: start,
         on_exit: ThinVec::new(),
         handlers: handlers.clone(),
         restarts: restarts.clone(),
-        srcref: state.srcref,
+        srcref: Held::adopt(state.srcref),
         method_vars: state.method_vars.len() as u32,
         closures: state.frame_closures.len() as u32,
         slots: crate::NO_SLOTS,
         missing: 0,
         caller: crate::NO_SLOTS,
-        pending: nil(),
+        pending: Held::adopt(nil()),
         role: crate::FrameRole::Context,
         reified_by: crate::NOT_REIFIED,
         handle_mark: crate::heap().handle_mark() as u32,
@@ -2868,7 +2870,7 @@ unsafe fn this_generic(name: Sexp) -> R<Sexp> {
     }
     let wanted = wanted.bytes();
     for frame in interp().frames.iter().rev() {
-        let function = frame.function;
+        let function = frame.function.raw();
         if function.kind() != SexpType::Closure {
             continue;
         }

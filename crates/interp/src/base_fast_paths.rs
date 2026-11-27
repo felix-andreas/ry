@@ -17,6 +17,7 @@ use {
         builtins::{Arg, BuiltinDef, BuiltinFn, Call, internal},
         conditions::{Handler, calling_established, make_condition, new_handler},
         eval::{self, CallFrame, Entering, Reify, Site},
+        handles::Held,
         interp,
         session::{FNV_OFFSET, stable_hash},
         sort::{self, IdenticalFlags},
@@ -1463,7 +1464,7 @@ impl ClosureFrame {
     unsafe fn resolve(self) -> Result<usize, Sexp> {
         match self {
             ClosureFrame::Env(env) => Err(env),
-            ClosureFrame::Slots(index) => match interp().frames[index].env {
+            ClosureFrame::Slots(index) => match interp().frames[index].env.raw() {
                 env if env == nil() => Ok(index),
                 env => Err(env),
             },
@@ -1770,7 +1771,7 @@ unsafe fn default_choices(frame: ClosureFrame) -> R<Option<Sexp>> {
         return Ok(None);
     }
     let caller = parent as usize - 1;
-    let function = interp().frames[caller].function;
+    let function = interp().frames[caller].function.raw();
     if function.kind() != SexpType::Closure {
         return Ok(None);
     }
@@ -1822,11 +1823,12 @@ unsafe fn calls_base_c(index: usize) -> R<bool> {
     let heap = crate::heap();
     let symbol = symbols().c;
     let frame = &interp().frames[index];
-    let scope = if frame.env != nil() || frame.slots == crate::NO_SLOTS {
-        frame.env
+    let scope = if frame.env.raw() != nil() || frame.slots == crate::NO_SLOTS {
+        frame.env.raw()
     } else {
         let names = frame
             .function
+            .raw()
             .cdr()
             .cdr()
             .element(crate::bytecode::SLOTS)
@@ -1839,7 +1841,7 @@ unsafe fn calls_base_c(index: usize) -> R<bool> {
                 return Ok(false);
             }
         }
-        frame.function.tag()
+        frame.function.raw().tag()
     };
     if scope == nil() {
         return Ok(false);
@@ -3896,7 +3898,7 @@ unsafe fn list_field(list: Sexp, name: &[u8]) -> Option<Sexp> {
 /// The statements of the R body behind the prologue of the closure running in frame `index`,
 /// which is `{ .Internal(ryX()); original }`, so a fast path can run some of them as they are.
 unsafe fn original_statements(index: usize) -> Sexp {
-    let body = crate::bytecode::closure_body(interp().frames[index].function);
+    let body = crate::bytecode::closure_body(interp().frames[index].function.raw());
     body.cdr().cdr().car().cdr()
 }
 
@@ -3935,8 +3937,8 @@ unsafe fn bind_local(index: usize, symbol: Sexp, value: Sexp) -> R<()> {
 /// allocates nothing.
 unsafe fn variable_reference(index: usize, symbol: Sexp) -> R<Sexp> {
     let frame = &interp().frames[index];
-    if frame.env != nil() || frame.slots == crate::NO_SLOTS {
-        return eval::env_reference(frame.env, symbol);
+    if frame.env.raw() != nil() || frame.slots == crate::NO_SLOTS {
+        return eval::env_reference(frame.env.raw(), symbol);
     }
     let first = frame.slots as usize + 1;
     let slot = eval::slot_register(index, symbol).map_or(eval::NO_REFERENCE_SLOT, |register| {
@@ -4004,7 +4006,7 @@ unsafe fn do_try_catch(call: &Call<'_>) -> R<Sexp> {
     if is_supplied(frame, names.finally)? {
         let on_exit = &mut interp().frames[index].on_exit;
         on_exit.clear();
-        on_exit.push(names.finally);
+        on_exit.push(Held::adopt(names.finally));
     }
     let mut forced: SmallVec<[(Sexp, Sexp); 8]> = SmallVec::new();
     for &(tag, item) in &items {
@@ -4227,7 +4229,7 @@ unsafe fn push_frame(call: Sexp, function: Sexp, caller: usize, args: [Sexp; 4])
         return Err(error("internal error: a frame of tryCatch got no slots"));
     };
     let state = interp();
-    let sys_parent = state.frames[caller].env;
+    let sys_parent = state.frames[caller].env.raw();
     if sys_parent == nil() {
         state.slot_owner = caller as u32;
     }
@@ -4294,7 +4296,7 @@ unsafe fn call_exiting_handler(index: usize, caught: Sexp, statements: Sexp) -> 
     let simple = caught.kind() == SexpType::List
         && length(caught) == 3
         && caught.element(0).kind() != SexpType::String
-        && (caught.element(0) != nil() || interp().frames[index].env == nil());
+        && (caught.element(0) != nil() || interp().frames[index].env.raw() == nil());
     if !simple {
         let env = eval::frame_env(index, Reify::Site(Site::UncompiledExpression))?;
         eval::eval(nth(statements, 2), env)?;
@@ -4326,7 +4328,7 @@ unsafe fn call_exiting_handler(index: usize, caught: Sexp, statements: Sexp) -> 
         value: variable_reference(index, names.cond)?,
     }];
     let state = interp();
-    let sys_parent = state.frames[index].env;
+    let sys_parent = state.frames[index].env.raw();
     if sys_parent == nil() {
         state.slot_owner = index as u32;
     }

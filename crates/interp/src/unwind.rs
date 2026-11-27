@@ -454,7 +454,7 @@ pub unsafe fn resolve_call(call: Sexp) -> Sexp {
             return state
                 .frames
                 .last()
-                .map_or(crate::heap().nil(), |frame| frame.call);
+                .map_or(crate::heap().nil(), |frame| frame.call.raw());
         }
         _ => return call,
     };

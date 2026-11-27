@@ -2228,8 +2228,8 @@ pub unsafe extern "C" fn jit_frame_read_later(activation: *mut Activation) -> i3
         let dies = machine.env() == values::nil()
             && interp::interp().frames.last().is_some_and(|frame| {
                 frame.slots as usize == machine.header
-                    && frame.env == values::nil()
-                    && frame.pending == values::nil()
+                    && frame.env.raw() == values::nil()
+                    && frame.pending.raw() == values::nil()
                     && frame.on_exit.is_empty()
             });
         i32::from(!dies)

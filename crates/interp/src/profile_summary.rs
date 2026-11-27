@@ -532,7 +532,8 @@ pub(crate) unsafe fn resolve_samples(depth: usize) {
         let frames = &interp().frames;
         for index in depth.saturating_sub(SAMPLED_FRAMES)..depth.min(frames.len()) {
             let frame = &frames[index];
-            if frame.role == FrameRole::Context || frame.function.kind() != SexpType::Closure {
+            if frame.role == FrameRole::Context || frame.function.raw().kind() != SexpType::Closure
+            {
                 continue;
             }
             let (owner, name, body) = unsafe { frame_identity(stacked, frame) };
@@ -586,7 +587,7 @@ fn queue_sample(word: u32) -> bool {
 /// What a sample records of `frame`: the label of the package that owns its closure, the symbol
 /// the call names it by (zero for a call of anything else), and its body.
 unsafe fn frame_identity(stacked: &mut Stacked, frame: &Frame) -> (u32, usize, usize) {
-    let function = frame.function;
+    let function = frame.function.raw();
     let owner = unsafe { crate::dispatch::top_env(function.tag()) };
     let body = unsafe { crate::bytecode::closure_body(function) }.as_ptr() as usize;
     let owner = *stacked
@@ -603,7 +604,7 @@ unsafe fn frame_identity(stacked: &mut Stacked, frame: &Frame) -> (u32, usize, u
     // `pkg::f()`, `obj$f()` and `obj@f()` take the name `f`; GNU R's `Rprof()` writes these as
     // `pkg::f`, `obj$f` and `obj@f`, and `tools/bench/compare_profiles.py` reduces those to `f` so
     // the two engines' rows match.
-    let mut head = frame.call.car();
+    let mut head = frame.call.raw().car();
     if head.kind() == SexpType::Language
         && head.car().kind() == SexpType::Symbol
         && matches!(

@@ -910,7 +910,7 @@ unsafe fn resolve_function(symbol: Sexp, heads: Heads) -> Option<Sexp> {
             {
                 return found;
             }
-            interp().frames[owner].function.tag()
+            interp().frames[owner].function.raw().tag()
         }
     };
     while env != known.empty_env {

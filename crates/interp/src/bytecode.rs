@@ -53,8 +53,9 @@ use {
         envir::namespace_binding,
         eval::{self, Reify, Site, SwitchSelector, as_condition},
         handles::{
-            self, AssignmentCopy, Atomic, Binding, Chars, Cx, Environment, Gc, Integer, Language,
-            List, Local, Logical, Names, Owned, Pairlist, Promise, Real, Str, Symbol, Vector, safe,
+            self, AssignmentCopy, Atomic, Binding, Chars, Cx, Environment, Gc, Held, Integer,
+            Language, List, Local, Logical, Names, Owned, Pairlist, Promise, Real, Str, Symbol,
+            Vector, safe,
         },
         interp,
         kernels::{self, Element, MAX_NODES, Node, Reduction},
@@ -1293,7 +1294,7 @@ pub(crate) unsafe fn inner_closure(
 ) -> R<Sexp> {
     let heap = crate::heap();
     let frame = &interp().frames[index];
-    let (outer, env, header) = (frame.function.cdr(), frame.env, frame.slots);
+    let (outer, env, header) = (frame.function.raw().cdr(), frame.env.raw(), frame.slots);
     let site = shared_body(outer, body);
     let shared = site.map_or(body, |(_, _, shared)| shared);
     let closure = if env == nil() && header != crate::NO_SLOTS {
@@ -9235,15 +9236,15 @@ unsafe fn call_fast<
     interp.calls_ever = interp.calls_ever.wrapping_add(1);
     let previous_owner = interp.slot_owner;
     let frame = Frame {
-        call,
-        function,
-        env: nil,
-        sys_parent: caller_env,
+        call: Held::adopt(call),
+        function: Held::adopt(function),
+        env: Held::adopt(nil),
+        sys_parent: Held::adopt(caller_env),
         args: args_start as u32,
         on_exit: ThinVec::new(),
         handlers: interp.handlers.clone(),
         restarts: interp.restarts.clone(),
-        srcref: interp.srcref,
+        srcref: Held::adopt(interp.srcref),
         method_vars: interp.method_vars.len() as u32,
         closures: interp.frame_closures.len() as u32,
         slots: header as u32,
@@ -9253,7 +9254,7 @@ unsafe fn call_fast<
         } else {
             previous_owner
         },
-        pending: nil,
+        pending: Held::adopt(nil),
         role: crate::FrameRole::Call,
         reified_by: crate::NOT_REIFIED,
         handle_mark: (*heap).handle_mark() as u32,
@@ -9385,11 +9386,11 @@ unsafe fn leave_fast<const DISCARD: bool, const STEPPED: bool, const HOOKS: u8>(
         return None;
     }
     let frame = &interp.frames[depth - 1];
-    let pending = frame.pending;
+    let pending = frame.pending.raw();
     if !frame.on_exit.is_empty() || DISCARD == (pending == nil) {
         return None;
     }
-    debug_assert!(frame.env == nil && frame.slots as usize == state.machine.header);
+    debug_assert!(frame.env.raw() == nil && frame.slots as usize == state.machine.header);
     // A counted reference to the environment may be one that dies with the frame, such as a
     // closure only the frame's slots hold, which `outliving_cause` works out.
     let outlived = DISCARD
@@ -9412,7 +9413,7 @@ unsafe fn leave_fast<const DISCARD: bool, const STEPPED: bool, const HOOKS: u8>(
     let frame = &interp.frames[depth - 1];
     if HOOKS == SUMMARIZED {
         let args = interp.frame_args.get_unchecked(frame.args as usize..);
-        eval::count_package_call(frame.function, Some(frame), args);
+        eval::count_package_call(frame.function.raw(), Some(frame), args);
     }
     if DISCARD && !outlived {
         crate::forget_pending_closures(interp, depth - 1);
@@ -9425,7 +9426,7 @@ unsafe fn leave_fast<const DISCARD: bool, const STEPPED: bool, const HOOKS: u8>(
     let (args, method_vars, closures) = (frame.args, frame.method_vars, frame.closures);
     heap.release_handles(frame.handle_mark as usize);
     interp.slot_owner = frame.previous_owner;
-    interp.srcref = frame.srcref;
+    interp.srcref = frame.srcref.raw();
     let Some((handlers, restarts)) = interp.frames.pop() else {
         unreachable!("the returning call's frame is on the stack");
     };
@@ -10030,7 +10031,7 @@ unsafe fn sub_assign_fast(state: &mut Activation<'_, '_>, at: usize) -> Option<u
     if state.machine.function == known.nil
         || moves::tracking()
         || !interp.frames.last().is_some_and(|frame| {
-            frame.slots as usize == header && frame.function == state.machine.function
+            frame.slots as usize == header && frame.function.raw() == state.machine.function
         })
     {
         return None;
@@ -12017,9 +12018,9 @@ unsafe fn slot_on_exit(
     }
     if expression != missing_arg() && expression != nil() {
         if after {
-            frame.on_exit.push(registered);
+            frame.on_exit.push(Held::adopt(registered));
         } else {
-            frame.on_exit.insert(0, registered);
+            frame.on_exit.insert(0, Held::adopt(registered));
         }
     }
     interp().visible = false;
@@ -12246,7 +12247,7 @@ unsafe fn slot_owns(state: &Activation<'_, '_>, value: Sexp) -> bool {
     let header = state.header.offset_from(registers.as_ptr()) as usize;
     if state.machine.function != nil()
         && interp().frames.last().is_some_and(|frame| {
-            frame.slots as usize == header && frame.function == state.machine.function
+            frame.slots as usize == header && frame.function.raw() == state.machine.function
         })
     {
         return true;
@@ -15683,7 +15684,7 @@ impl LexicalFrame {
                 .iter()
                 .rev()
                 .find(|frame| frame.slots as usize == header)
-                .map_or(nil(), |frame| frame.call),
+                .map_or(nil(), |frame| frame.call.raw()),
         }
     }
 }

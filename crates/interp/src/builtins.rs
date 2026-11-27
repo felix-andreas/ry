@@ -99,7 +99,7 @@ impl Call<'_> {
     pub unsafe fn slot_frame(&self) -> Option<usize> {
         (self.rho == nil()
             && self.frame != crate::NO_SLOTS
-            && crate::interp().frames[self.frame as usize].env == nil())
+            && crate::interp().frames[self.frame as usize].env.raw() == nil())
         .then_some(self.frame as usize)
     }
 

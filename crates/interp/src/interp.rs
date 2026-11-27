@@ -124,7 +124,7 @@ use {
         base_fast_paths::Entry,
         builtins::{Arg, BuiltinDef, Kind},
         conditions::{Handler, HandlerStack, RestartStack},
-        handles::{Alt, Chars, Cx, Local},
+        handles::{Alt, Chars, Cx, Held, Local},
         unwind::{R, Unwind},
     },
     heap::{
@@ -139,17 +139,17 @@ use {
 /// One closure call: GNU R's function context.
 pub struct Frame {
     /// The call as written, which `sys.call` returns.
-    pub call: Sexp,
-    pub function: Sexp,
+    pub call: Held,
+    pub function: Held,
     /// The environment the closure body runs in. A slot frame (see [`Frame::slots`]) runs in
     /// its slots and holds `NULL` here until one of its variables moves into a binding cell of
     /// [`Frame::pending`], which is its environment from then on. Read it through
     /// [`eval::frame_env`] wherever the environment is handed on.
-    pub env: Sexp,
+    pub env: Held,
     /// The environment the call was evaluated in, which `parent.frame` returns, or `NULL` when
     /// the caller is a slot frame that had no environment when it made the call: the caller is
     /// then the frame at [`Frame::caller`] ([`eval::frame_sys_parent`]).
-    pub sys_parent: Sexp,
+    pub sys_parent: Held,
     /// For a slot frame, the register that holds its environment once it has one, followed by
     /// its slots (`docs/src/content/docs/development/design/slot-frames.md`); [`NO_SLOTS`] for
     /// a frame that has an environment from the start.
@@ -166,7 +166,7 @@ pub struct Frame {
     /// ([`heap::object::gp::PENDING_FRAME`]), takes a variable into a binding cell when
     /// something reads that variable through it ([`heap::object::gp::PARTIAL_FRAME`], from when
     /// it is [`Frame::env`] too), and takes them all if it outlives the frame.
-    pub pending: Sexp,
+    pub pending: Held,
     pub role: FrameRole,
     /// The number of what last asked for the slot frame's environment ([`eval::Site`]), while a
     /// profile summary is collected; [`NOT_REIFIED`] otherwise.
@@ -177,12 +177,12 @@ pub struct Frame {
     pub args: u32,
     /// `on.exit` expressions, in the order they run. A thin vector is one word and allocates
     /// nothing while empty, which keeps the frame small enough to copy without a `memcpy` call.
-    pub on_exit: ThinVec<Sexp>,
+    pub on_exit: ThinVec<Held>,
     pub handlers: HandlerStack,
     pub restarts: RestartStack,
     /// The srcref current when the call was made (`R_Srcref`), which `sys.call` and `traceback`
     /// attach to the call, and which is current again once the call returns.
-    pub srcref: Sexp,
+    pub srcref: Held,
     /// Where this call's entries in [`Interp::method_vars`] start; they run up to the next
     /// frame's start.
     pub method_vars: u32,
@@ -203,7 +203,7 @@ impl Frame {
     /// Whether `env` is this frame's environment, which for a slot frame is the one that
     /// stands for it whether or not it binds anything yet.
     pub unsafe fn owns(&self, env: Sexp) -> bool {
-        self.env == env || (self.pending == env && env.kind() == SexpType::Environment)
+        self.env.raw() == env || (self.pending.raw() == env && env.kind() == SexpType::Environment)
     }
 }
 
@@ -1134,17 +1134,17 @@ impl RootSource for InterpRoots {
             let interp = interp();
             for frame in &interp.frames {
                 for object in [
-                    frame.call,
-                    frame.function,
-                    frame.env,
-                    frame.sys_parent,
-                    frame.srcref,
-                    frame.pending,
+                    frame.call.raw(),
+                    frame.function.raw(),
+                    frame.env.raw(),
+                    frame.sys_parent.raw(),
+                    frame.srcref.raw(),
+                    frame.pending.raw(),
                 ] {
                     marker.mark(object);
                 }
-                for &expression in &frame.on_exit {
-                    marker.mark(expression);
+                for expression in &frame.on_exit {
+                    marker.mark(expression.raw());
                 }
                 conditions::trace_handlers(&frame.handlers, marker);
                 conditions::trace_restarts(&frame.restarts, marker);

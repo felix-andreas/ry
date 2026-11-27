@@ -9,7 +9,7 @@
 
 pub use heap::handle::{
     Alt, Atomic, Binding, Bytecode, Chars, Closure, Complex, Cx, Elements, Enclosing, Environment,
-    Exact, Expression, Fresh, Gc, I64, Identity, Integer, Item, Kind, Language, List, Local,
+    Exact, Expression, Fresh, Gc, Held, I64, Identity, Integer, Item, Kind, Language, List, Local,
     Logical, Owned, Pairlist, Pointer, Promise, Raw, Real, Str, Symbol, Unfilled, Value, Vector,
 };
 use {
@@ -1703,7 +1703,7 @@ impl<'s> Args<'_, 's> {
                 // `eval`'s own frame counts its three arguments, as GNU R's context for it
                 // keeps them, so `nargs()` in code that `eval` or `source` runs at top level
                 // answers 3.
-                if state.frames[index].function.kind() != SexpType::Closure {
+                if state.frames[index].function.raw().kind() != SexpType::Closure {
                     return 3;
                 }
                 crate::frame_args(state, index).len() as i32
@@ -1731,10 +1731,13 @@ impl<'s> Args<'_, 's> {
             frame.on_exit.clear();
         }
         if expression.r_type() != SexpType::Nil {
+            // SAFETY: the expression is rooted, and the frame's `on.exit` list is marked with
+            // the frame.
+            let expression = unsafe { Held::adopt(expression.raw()) };
             if after {
-                frame.on_exit.push(expression.raw());
+                frame.on_exit.push(expression);
             } else {
-                frame.on_exit.insert(0, expression.raw());
+                frame.on_exit.insert(0, expression);
             }
         }
     }
@@ -1763,7 +1766,10 @@ impl<'s> Args<'_, 's> {
                 return Ok(None);
             };
             let frame = &crate::interp().frames[caller];
-            let (call, function) = (rooted(context, frame.call), rooted(context, frame.function));
+            let (call, function) = (
+                rooted(context, frame.call.raw()),
+                rooted(context, frame.function.raw()),
+            );
             crate::eval::materialize_references(own)?;
             let arguments = crate::frame_args(crate::interp(), own)
                 .iter()
@@ -1795,7 +1801,7 @@ impl<'s> Args<'_, 's> {
         // it is evaluating, until the builtin returns.
         unsafe {
             let raw = self.call.frame_index().map_or(self.call.call, |position| {
-                crate::interp().frames[position].call
+                crate::interp().frames[position].call.raw()
             });
             Local::adopt(raw)
         }
@@ -3364,7 +3370,7 @@ pub fn owning_call<'s>(context: &Cx<'s>, environment: Local<'_, Environment>) ->
             .iter()
             .rev()
             .find(|frame| frame.owns(environment.raw()))
-            .map_or_else(values::nil, |frame| frame.call);
+            .map_or_else(values::nil, |frame| frame.call.raw());
         rooted(context, call)
     }
 }
