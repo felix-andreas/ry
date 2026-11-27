@@ -2952,8 +2952,9 @@ unsafe fn call_typed(typed: &TypedCall<'_>) -> Option<R<Sexp>> {
 }
 
 /// The arguments a native call passes, as values with no promise left: `None` unless every
-/// argument is positional and at hand without evaluating anything, and every formal past them
-/// has a constant scalar default. Also gives what reading them ahead read ([`ReadAhead`]): each
+/// argument matches a formal as R matches it and is at hand without evaluating anything. A
+/// formal the call leaves out with a constant scalar default gets that value; from the first
+/// one whose default is not, the formals are left out, for the typed core's code to compute. Also gives what reading them ahead read ([`ReadAhead`]): each
 /// promise read without forcing, with its value, and each variable a value depends on.
 pub(crate) unsafe fn gather(
     function: Sexp,
@@ -2968,109 +2969,172 @@ pub(crate) unsafe fn gather(
         return None;
     }
     let formals = function.car();
+    // Arguments in the order of the formals, as most calls pass them, match without names.
+    let mut count = 0;
+    let mut in_order = true;
     let mut formal = formals;
-    let mut arguments: SmallVec<[Sexp; 4]> = SmallVec::new();
-    let mut ahead = ReadAhead::default();
-    for (position, arg) in args.iter().enumerate() {
-        if formal.kind() != SexpType::Pairlist
-            || formal.tag() == values::symbols().dots
-            || arg.tag != values::nil() && arg.tag != formal.tag()
-        {
-            annotations::decline(|| {
-                format!(
-                    "argument {} is named out of order or goes to `...`, and the native tier \
-                     takes only arguments in the order of the parameters",
-                    position + 1
-                )
-            });
-            return None;
-        }
-        let value = if arg.value.kind() == SexpType::Promise {
-            let Some(value) = promise_value(arg.value, &mut ahead, position as u32, 0) else {
-                let source = bytecode::source_of_body(arg.value.cdr());
-                if source.kind() == SexpType::Language && source.car() == values::symbols().function
-                {
-                    annotations::decline(|| {
-                        format!(
-                            "argument {} is a function R code wrote, and typed code takes \
-                             functions only from typed code",
-                            position + 1
-                        )
-                    });
-                    return None;
-                }
-                annotations::decline(|| {
-                    format!(
-                        "argument {} is `{}`, which R code wrote, so it stays lazy until the \
-                         function uses it, as in R, and the native tier reads ahead only \
-                         constants, variables, arithmetic and literals: compute it into a \
-                         variable before the call",
-                        position + 1,
-                        interp::deparse::deparse_first_line(bytecode::source_of_body(
-                            arg.value.cdr()
-                        ))
-                    )
-                });
-                return None;
-            };
-            value
-        } else if arg.value == values::missing_arg() {
-            annotations::decline(|| format!("argument {} is empty", position + 1));
-            return None;
-        } else {
-            arg.value
-        };
-        arguments.push(value);
-        formal = formal.cdr();
-    }
-    // A missing argument's default is evaluated in the call's frame, so a constant scalar is
-    // that constant, and so is code that names no formal and that `pure_value` reads in the
-    // closure's environment, such as `1 / 12`: the frame could give it no other value.
     while formal.kind() == SexpType::Pairlist {
         if formal.tag() == values::symbols().dots {
             annotations::decline(|| String::from("the function takes `...`"));
             return None;
         }
-        let default = formal.car();
-        let value = match default.kind() {
-            SexpType::Language if !names_a_formal(default, formals, 0) => {
-                // A default is evaluated where the body first reads the parameter, in the
-                // call's frame, which has no variables to watch before the call starts.
-                let mut read = ReadAhead::default();
-                let value = pure_value(default, function.tag(), &mut read, 0, 0)
-                    .filter(|_| read.promises.is_empty());
-                if !read.watches.is_empty() {
-                    ahead.fixed |= lazy_bit(arguments.len());
-                }
-                value
-            }
-            _ => Some(default),
-        };
-        let Some(value) = value.filter(|value| {
-            matches!(
-                value.kind(),
-                SexpType::Real
-                    | SexpType::Integer
-                    | SexpType::I64
-                    | SexpType::Logical
-                    | SexpType::String
-            ) && value.length() == 1
-                && value.attrib() == values::nil()
-        }) else {
+        if let Some(arg) = args.get(count)
+            && arg.tag != values::nil()
+            && arg.tag != formal.tag()
+        {
+            in_order = false;
+        }
+        count += 1;
+        formal = formal.cdr();
+    }
+    let matched: SmallVec<[Option<usize>; 4]> = if in_order && args.len() <= count {
+        (0..count)
+            .map(|index| (index < args.len()).then_some(index))
+            .collect()
+    } else {
+        let items: SmallVec<[(Option<String>, Sexp); 4]> = args
+            .iter()
+            .map(|arg| {
+                let name =
+                    (arg.tag != values::nil()).then(|| values::symbol_name(arg.tag).into_owned());
+                (name, arg.value)
+            })
+            .collect();
+        let Ok(matched) = typed::lower::match_formals(&values::pairlist_items(formals), &items)
+        else {
             annotations::decline(|| {
-                format!(
-                    "the call leaves out `{}`, whose default `{}` is not a constant single value \
-                     the native tier can compute ahead",
-                    values::symbol_name(formal.tag()),
-                    interp::deparse::deparse_first_line(default)
-                )
+                String::from("R raises an error matching its arguments to the parameters")
             });
             return None;
         };
-        arguments.push(value);
+        matched
+    };
+    let mut arguments: SmallVec<[Sexp; 4]> = SmallVec::new();
+    let mut ahead = ReadAhead::default();
+    // The first formal whose default the typed core computes, in the function's own code.
+    let mut left_out: Option<Sexp> = None;
+    let mut formal = formals;
+    for (position, &item) in matched.iter().enumerate() {
+        match item {
+            Some(item) => {
+                if let Some(left_out) = left_out {
+                    annotations::decline(|| {
+                        format!(
+                            "the call leaves out `{}`, whose default `{}` is not a constant, and \
+                             passes a later parameter: the native tier computes such defaults \
+                             only after the last parameter a call passes",
+                            values::symbol_name(left_out.tag()),
+                            interp::deparse::deparse_first_line(left_out.car())
+                        )
+                    });
+                    return None;
+                }
+                let arg = &args[item];
+                let value = if arg.value.kind() == SexpType::Promise {
+                    let Some(value) = promise_value(arg.value, &mut ahead, position as u32, 0)
+                    else {
+                        let source = bytecode::source_of_body(arg.value.cdr());
+                        if source.kind() == SexpType::Language
+                            && source.car() == values::symbols().function
+                        {
+                            annotations::decline(|| {
+                                format!(
+                                    "argument {} is a function R code wrote, and typed code \
+                                     takes functions only from typed code",
+                                    item + 1
+                                )
+                            });
+                            return None;
+                        }
+                        annotations::decline(|| {
+                            format!(
+                                "argument {} is `{}`, which R code wrote, so it stays lazy until \
+                                 the function uses it, as in R, and the native tier reads ahead \
+                                 only constants, variables, arithmetic and literals: compute it \
+                                 into a variable before the call",
+                                item + 1,
+                                interp::deparse::deparse_first_line(bytecode::source_of_body(
+                                    arg.value.cdr()
+                                ))
+                            )
+                        });
+                        return None;
+                    };
+                    value
+                } else if arg.value == values::missing_arg() {
+                    annotations::decline(|| format!("argument {} is empty", item + 1));
+                    return None;
+                } else {
+                    arg.value
+                };
+                arguments.push(value);
+            }
+            None if left_out.is_some() => {}
+            None => {
+                // A missing argument's default is evaluated in the call's frame, so a constant
+                // scalar is that constant, and so is code that names no formal and that
+                // `pure_value` reads in the closure's environment, such as `1 / 12`: the frame
+                // could give it no other value.
+                let default = formal.car();
+                let value = match default.kind() {
+                    SexpType::Language if !names_a_formal(default, formals, 0) => {
+                        // A default is evaluated where the body first reads the parameter, in
+                        // the call's frame, which has no variables to watch before the call
+                        // starts.
+                        let mut read = ReadAhead::default();
+                        let value = pure_value(default, function.tag(), &mut read, 0, 0)
+                            .filter(|_| read.promises.is_empty());
+                        if !read.watches.is_empty() {
+                            ahead.fixed |= lazy_bit(arguments.len());
+                        }
+                        value
+                    }
+                    _ => Some(default),
+                };
+                match value.filter(|value| {
+                    matches!(
+                        value.kind(),
+                        SexpType::Real
+                            | SexpType::Integer
+                            | SexpType::I64
+                            | SexpType::Logical
+                            | SexpType::String
+                    ) && value.length() == 1
+                        && value.attrib() == values::nil()
+                }) {
+                    Some(value) => arguments.push(value),
+                    None => left_out = Some(formal),
+                }
+            }
+        }
         formal = formal.cdr();
     }
+    // The typed core computes the defaults from `left_out` on in the function's own code, where
+    // they can read the formals.
+    if let Some(formal) = left_out
+        && !left_to_native(formal)
+    {
+        return None;
+    }
     Some((arguments, ahead))
+}
+
+/// Whether the formals from `formal` on can be left to the typed core's code: each has a
+/// default.
+unsafe fn left_to_native(mut formal: Sexp) -> bool {
+    while formal.kind() == SexpType::Pairlist {
+        if formal.car() == values::missing_arg() {
+            annotations::decline(|| {
+                format!(
+                    "the call leaves out `{}`, which has no default",
+                    values::symbol_name(formal.tag())
+                )
+            });
+            return false;
+        }
+        formal = formal.cdr();
+    }
+    true
 }
 
 /// The bit of `position` in the mask of arguments read ahead from variables, which

@@ -63,6 +63,9 @@ pub struct Lowered {
     pub constructed: SmallVec<[u32; 4]>,
     /// Where the body reads each parameter, in the blocks of `function` ([`reads_before`]).
     pub param_reads: Vec<ParamRead>,
+    /// The types of the defaults of the formals past the parameters, which the code computes
+    /// itself ([`Lowering::left_out_defaults`]).
+    pub defaults: SmallVec<[Type; 2]>,
 }
 
 /// A read of parameter `param` in block `block`, which held `position` instructions when
@@ -484,9 +487,9 @@ unsafe fn lower_calling(
     returned: &mut Option<Type>,
 ) -> Result<Lowered, Refusal> {
     let formals = rvalues::pairlist_items(closure.car());
-    if formals.len() != params.len() {
+    if formals.len() < params.len() {
         return Err(Refusal::new(
-            "the call does not supply every formal positionally",
+            "the call passes more arguments than the function takes",
         ));
     }
     let body = interp::bytecode::closure_body(closure);
@@ -550,6 +553,10 @@ unsafe fn lower_calling(
         if symbol == rvalues::symbols().dots {
             return Err(Refusal::new("a function with `...`"));
         }
+        if index >= params.len() {
+            lowering.bind(symbol, Binding::Hidden);
+            continue;
+        }
         let param = Local(index as u32);
         let variable = if assigned.contains(&symbol) {
             // An assigned parameter gets an owned copy, since the parameter only borrows.
@@ -561,6 +568,11 @@ unsafe fn lower_calling(
         lowering.param_variables.push(variable);
         lowering.bind(symbol, Binding::Value(variable));
     }
+    let defaults = if params.len() < formals.len() {
+        lowering.left_out_defaults(&formals, &assigned)?
+    } else {
+        SmallVec::new()
+    };
     let value = match lowering.expression(body) {
         Ok(value) => value,
         Err(why) => {
@@ -598,6 +610,7 @@ unsafe fn lower_calling(
         any_tag: lowering.any_tag,
         constructed: lowering.constructed,
         param_reads: lowering.param_reads,
+        defaults,
     })
 }
 
@@ -2630,6 +2643,50 @@ impl Lowering<'_> {
             defaults?;
         }
         Ok(matched.into_iter().flatten().collect())
+    }
+
+    /// Binds the formals past the parameters, which a call from R code leaves out, to their
+    /// defaults. R computes a default where the body first reads its formal, so the parameters
+    /// a default reads count as read there (`Lowering::param_aliases`), as an untyped local
+    /// function's argument does.
+    unsafe fn left_out_defaults(
+        &mut self,
+        formals: &[(Sexp, Sexp)],
+        assigned: &[Sexp],
+    ) -> Result<SmallVec<[Type; 2]>, Refusal> {
+        let supplied = self.param_variables.len();
+        let mut matched: SmallVec<[Option<Argument>; 4]> = (0..formals.len())
+            .map(|index| {
+                self.param_variables
+                    .get(index)
+                    .map(|&variable| Argument::Value(variable))
+            })
+            .collect();
+        let mut spans: SmallVec<[ArgumentReads; 4]> =
+            (0..formals.len()).map(|_| NO_ARGUMENT_READS).collect();
+        self.defaults(formals, &mut matched, &mut spans, self.body)?;
+        let values: SmallVec<[Argument; 4]> =
+            matched[supplied..].iter().flatten().copied().collect();
+        self.attribute_reads(&values, &spans[supplied..], false)?;
+        let formal_reads = std::mem::take(&mut self.formal_reads);
+        let mut types = SmallVec::new();
+        for (offset, (&(symbol, _), value)) in formals[supplied..].iter().zip(&values).enumerate() {
+            let Argument::Value(value) = *value else {
+                return Err(Refusal::new("a default that is a function"));
+            };
+            let ty = self.builder.ty(value);
+            types.push(ty);
+            let variable = if assigned.contains(&symbol) {
+                self.builder.emit(ty, Op::Copy(value))
+            } else {
+                value
+            };
+            if let Some(reads) = formal_reads.get(offset).filter(|reads| !reads.is_empty()) {
+                self.param_aliases.push((variable, reads.clone()));
+            }
+            self.bind(symbol, Binding::Value(variable));
+        }
+        Ok(types)
     }
 
     /// The defaults of the formals `matched` leaves out of a call of the function whose body is
@@ -11591,7 +11648,7 @@ thread_local! {
 /// For each of `formals`, the index of the argument among `items` that supplies it, matched as R
 /// matches a call: by exact name, then by a prefix that fits one formal only, then the unnamed
 /// arguments in order. A call R would reject, and a function with `...`, refuse.
-unsafe fn match_formals(
+pub unsafe fn match_formals(
     formals: &[(Sexp, Sexp)],
     items: &[(Option<String>, Sexp)],
 ) -> Result<SmallVec<[Option<usize>; 4]>, Refusal> {
