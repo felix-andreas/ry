@@ -4018,6 +4018,7 @@ impl<'c, 's> LiveFrame<'c, 's> {
     /// none of them yet, each formal with its missing flag, and leaves the slots unbound. The
     /// cells take over the slots' counts. Returns how many variables moved. The caller has
     /// suspended collection.
+    #[inline(always)]
     pub fn move_slots_to_cells(self, slots: Range<usize>) -> R<usize> {
         let index = self.index;
         let Some(environment) = self.pending() else {

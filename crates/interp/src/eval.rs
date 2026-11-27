@@ -1388,6 +1388,7 @@ fn pending_of<'c>(context: &'c Cx<'_>, owner: usize) -> Gc<'c, Environment> {
 /// ([`detach_reference`]), since a cell can be read after the call that made the reference
 /// returns. A slot that binds nothing is skipped. The slots give up their references and read
 /// as unbound from here on. The caller has suspended collection.
+#[inline(always)]
 fn box_slots(context: &mut Cx<'_>, owner: usize, slots: std::ops::Range<usize>) -> R<()> {
     let frame = handles::live_frame(context, owner);
     // A variable the caller passed to a frame run without its body ([`run_inlined`]) sits in
