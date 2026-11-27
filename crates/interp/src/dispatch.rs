@@ -1823,7 +1823,7 @@ fn patch_argument<'s>(
     } else {
         FormalMatch::Present
     };
-    let promise = handles::variable_promise(context, name, method_env)?;
+    let promise = handles::promise(context, name.value(), method_env)?;
     made.hold(promise, method_env);
     arg.value = promise.value();
     Ok(found)
