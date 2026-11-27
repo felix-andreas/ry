@@ -308,11 +308,22 @@ impl<'db> InferenceTable<'db> {
         };
         match constraint {
             Some(
-                Constraint::Number | Constraint::Int | Constraint::Frac | Constraint::ArrayItem,
+                Constraint::Number
+                | Constraint::Int
+                | Constraint::Frac
+                | Constraint::Str
+                | Constraint::ArrayItem,
             ) => result.ry_outcome(db, operand),
+            // An operand no ry value of the result's kind satisfies is an R value: a number for
+            // arithmetic, and any ry value for a comparison (`x == "a"` admits a `Str`).
             Some(constraint)
                 if constraint != Constraint::Unconstrained
-                    && constraint.join(Constraint::Number).is_none() =>
+                    && constraint
+                        .join(match result {
+                            FamilyResult::Arithmetic => Constraint::Number,
+                            FamilyResult::Comparison => Constraint::ArrayItem,
+                        })
+                        .is_none() =>
             {
                 result.r_outcome(db)
             }
@@ -2610,7 +2621,9 @@ pub(crate) fn constraint_rejects<'db>(
     // number.
     if matches!(
         constraint,
-        Constraint::ComparableOrNumber | Constraint::ComparableOrOrdered
+        Constraint::ComparableOrNumber
+            | Constraint::ComparableOrOrdered
+            | Constraint::ComparableOrStr
     ) && let TyKind::Named(name, _) = ty.kind(db)
     {
         // A ry `List` compares item by item, and a ry nominal as its representation.
@@ -2635,7 +2648,8 @@ pub(crate) fn constraint_rejects<'db>(
         | Constraint::ArithmeticOrF64
         | Constraint::NumericOrF64
         | Constraint::ComparableOrNumber
-        | Constraint::ComparableOrOrdered => match (ty.kind(db), constraint.families()) {
+        | Constraint::ComparableOrOrdered
+        | Constraint::ComparableOrStr => match (ty.kind(db), constraint.families()) {
             (TyKind::Rigid(name), _) if binder_implies(name) => true,
             (_, Some((r_half, ry_half))) => {
                 constraint_rejects(db, table, r_half, ty).is_none()
@@ -2741,7 +2755,13 @@ pub(crate) fn constraint_rejects<'db>(
                         .and_then(|definitions| definitions.get(db, *name))
                         .is_some_and(|definition| is_ry_value_type(db, definition.body))
             }
-            _ => comparison_operand_shape(db, ty).is_some(),
+            _ => comparison_operand_shape(db, ty, false).is_some(),
+        },
+        Constraint::Str => match ty.kind(db) {
+            TyKind::Native(native) => *native == NativeScalar::Str,
+            TyKind::Any | TyKind::Unknown => true,
+            TyKind::Rigid(name) => binder_implies(name),
+            _ => false,
         },
         Constraint::Ordered => match ty.kind(db) {
             TyKind::Native(native) => native.is_number() || *native == NativeScalar::Str,

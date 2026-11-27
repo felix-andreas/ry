@@ -65,6 +65,17 @@ list(1L) == list(1L)
 Unknown
 0..8 error[type-mismatch] expected a comparable value (numeric, `character`, or `logical`), found `list{integer}`
 
+#---- complex_values_compare_for_equality_only
+# R compares `complex` values under `==` and `!=`, and has no order for them.
+1i == 0
+c(1i, 2i) != 1i
+1i < 0
+#++++
+logical
+logical[]
+Unknown
+102..104 error[type-mismatch] expected a comparable value (numeric, `character`, or `logical`), found `complex`
+
 #==== negation
 #---- not_logical_scalar
 !TRUE

@@ -95,15 +95,19 @@ interface group therefore resolves through an explicit canonical fixpoint in
 Pinned by `cyclic_group_answers_are_forcing_order_independent` in `crates/semantics/tests/test_parallel.rs`
 and the fixture `recursion__a_long_recursive_chain_settles_through_its_annotation`.
 
-## There is no third constraint kind, so two flexible comparison operands stay unconstrained
+## Two open comparison operands each take the comparison's constraint, untied
 
-**Status:** built, except the same-family error on two concrete operands, which "Comparisons coerce across atomic types" supersedes, and the two-kind limit: `Constraint` has `Key`, `Number`, `Eq` and other kinds.
+**Status:** built. The gap: ry compares only two values of one type, and nothing ties the two operands on ry's side, so a ry value passes beside any other type and `Compared<T>` follows the left operand alone.
 
-Two flexible operands of a comparison stay unconstrained: `function(a, b) a < b` infers
-`<T, U> fn(a: T, b: U) -> logical`, and a cross-family call is accepted. R coerces across atomic families
-(`1 < "2"` compares as characters), so tying the operands to a family or to each other rejects legal
-programs. A "comparable" constraint was rejected: it would be nearly vacuous (every atomic family is
-comparable) and is the traits tripwire. Pinned by `two_flexible_comparison_stays_unconstrained`.
+`function(a, b) a < b` is `<T: comparable or ordered, U: comparable or ordered> fn(a: T, b: U) -> Compared<T>`
+(`eq` under `==` and `!=`). Unifying the operands, as arithmetic does, rejects legal R
+(`clamp(5L, 0, 10.5)`, `1L < "s"`), and leaving them unconstrained let two records through `<`. A
+constraint that only a comparison gave leaves an `if`'s two open branches joined by union
+(`join_branch_values`), as an unconstrained one does, because the caller still chooses each value. A
+string literal operand asks `comparable or Str`. `comparable` serves `==` and `<` alike, so it
+leaves out `complex`, which only a concrete operand under `==` or `!=` admits. Pinned by
+`two_open_operands_and_a_string_literal_ask_for_a_comparison` and
+`two_flexible_comparison_operands_stay_separate_types`.
 
 ## Union compatibility commits a flexible argument at first use, in program order
 

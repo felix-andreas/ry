@@ -920,6 +920,59 @@ loose: <T> fn(x: T) -> logical
 535..536 error[type-mismatch] expected a value with an order (numeric, `character`, `logical`, a class, `I64`, `F64` or `Str`), found `Record{a: I64}`
 605..606 error[type-mismatch] expected a value a number compares with (numeric, `character`, `logical`, a class, `I64` or `F64`), found `T`. Declare `<T: comparable or number>`
 
+#---- two_open_operands_and_a_string_literal_ask_for_a_comparison
+# Each of two open operands needs what the operator compares, so two records have no order. A
+# string literal compares with any R value but only with a `Str` on ry's side.
+between <- function(a, b) a < b
+is_a <- function(x) x == "a"
+s: Str <- "x"
+r: Record{a: I64} <- (a = 1,)
+ok_mixed <- between(1L, "s")
+ok_str <- between(s, s)
+bad_record <- between(r, r)
+ok_r_str <- is_a("b")
+ok_ry_str <- is_a(s)
+bad_number <- is_a(3i64)
+#: <T, U> fn(a: T, b: U) -> logical
+declared <- function(a, b) a == b
+# `1:n` makes `n` a scalar R number, so its comparison is R's.
+upto <- function(n) {
+  print(1:n)
+  n > 0
+}
+#++++
+between: <T: comparable or ordered, U: comparable or ordered> fn(a: T, b: U) -> Compared<T>
+is_a: <T: comparable or Str> fn(x: T) -> Compared<T>
+s: Str
+r: Record{a: I64}
+ok_mixed: logical
+ok_str: Bool
+bad_record: Unknown
+ok_r_str: logical
+ok_ry_str: Bool
+bad_number: Unknown
+declared: <T, U> fn(a: T, b: U) -> logical
+upto: <T: scalar numeric> fn(n: T) -> logical
+353..354 error[type-mismatch] expected a value with an order (numeric, `character`, `logical`, a class, `I64`, `F64` or `Str`), found `Record{a: I64}`
+356..357 error[type-mismatch] expected a value with an order (numeric, `character`, `logical`, a class, `I64`, `F64` or `Str`), found `Record{a: I64}`
+421..425 error[type-mismatch] expected a value a string compares with (numeric, `character`, `logical`, a class, or `Str`), found `I64`
+490..491 error[type-mismatch] expected a value `==` can compare (anything but a function), found `T`. Declare `<T: eq>`
+495..496 error[type-mismatch] expected a value `==` can compare (anything but a function), found `U`. Declare `<U: eq>`
+
+#---- a_literal_argument_takes_the_ry_type_an_ordered_parameter_admits
+# Every type `ordered` admits is a ry number or `Str`, so a literal argument is one, as it is for
+# a `number` parameter.
+#: <T: ordered> fn(a: T, b: T) -> T
+pick <- function(a, b) if (a < b) a else b
+numbers <- pick(2, 3)
+whole <- pick(2L, 3L)
+words <- pick("a", "b")
+#++++
+pick: <T: ordered> fn(a: T, b: T) -> T
+numbers: I64
+whole: I64
+words: Str
+
 #---- a_comparison_takes_null_ry_lists_and_nominals
 # `NULL > 0` is `logical(0)`, a ry `List` compares item by item, and a ry nominal compares as its
 # representation. A key also admits ry values, so a key compared with a number is an R key.

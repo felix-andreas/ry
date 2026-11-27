@@ -1859,11 +1859,12 @@ fn erase_residual_vars_at<'db>(
             None => {}
         }
     }
-    // `Int` and `Frac` each admit one type, so a literal they describe is that type rather than
+    // `Int`, `Frac` and `Str` each admit one type, so a literal they describe is that type rather than
     // a type parameter.
     match constraint {
         Constraint::Int => return native_scalar(db, NativeScalar::I64),
         Constraint::Frac => return native_scalar(db, NativeScalar::F64),
+        Constraint::Str => return native_scalar(db, NativeScalar::Str),
         _ => {}
     }
     if !closer.abstracted.contains(&table.find(var)) {
@@ -1887,11 +1888,13 @@ fn erase_residual_vars_at<'db>(
             | Constraint::Number
             | Constraint::Int
             | Constraint::Frac
+            | Constraint::Str
             | Constraint::Eq
             | Constraint::Comparable
             | Constraint::Ordered
             | Constraint::ComparableOrNumber
             | Constraint::ComparableOrOrdered
+            | Constraint::ComparableOrStr
             | Constraint::Unconstrained => unknown(db),
         };
     }
@@ -3574,19 +3577,32 @@ fn numeric_operand_parts<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<(OperandSh
     }
 }
 
-fn comparison_operand_shapes<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Vec<OperandShape>> {
+fn comparison_operand_shapes<'db>(
+    db: &'db dyn Db,
+    ty: Ty<'db>,
+    equality: bool,
+) -> Option<Vec<OperandShape>> {
     match ty.kind(db) {
         TyKind::Union(members) => members
             .iter()
-            .map(|&member| comparison_operand_shape(db, member))
+            .map(|&member| comparison_operand_shape(db, member, equality))
             .collect(),
-        _ => comparison_operand_shape(db, ty).map(|shape| vec![shape]),
+        _ => comparison_operand_shape(db, ty, equality).map(|shape| vec![shape]),
     }
 }
 
 /// A comparison coerces across atomic types, so an operand only needs to be atomic. An open
 /// operand (a variable, or a vector of one) passes here, and `Checker::infer_compare` constrains it.
-pub(crate) fn comparison_operand_shape<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<OperandShape> {
+/// `complex` compares only under `==` and `!=` (`equality`).
+pub(crate) fn comparison_operand_shape<'db>(
+    db: &'db dyn Db,
+    ty: Ty<'db>,
+    equality: bool,
+) -> Option<OperandShape> {
+    let comparable_atomic = |atomic: Atomic| match atomic {
+        Atomic::Complex => equality,
+        atomic => comparable_atomic(atomic),
+    };
     match ty.kind(db) {
         TyKind::Var(_) | TyKind::Rigid(_) => Some(OperandShape::Scalar),
         TyKind::Scalar(atomic) => comparable_atomic(*atomic).then_some(OperandShape::Scalar),
@@ -3599,7 +3615,7 @@ pub(crate) fn comparison_operand_shape<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Opt
                 .iter()
                 .all(|&member| {
                     matches!(member.kind(db), TyKind::Null)
-                        || comparison_operand_shape(db, member).is_some()
+                        || comparison_operand_shape(db, member, equality).is_some()
                 })
                 .then_some(OperandShape::Vector),
             _ => None,
@@ -3682,6 +3698,18 @@ fn literal_operand(module: &Module, id: ExprId) -> Option<NumberLiteral> {
         id = *inner;
     }
     number_literal(module, id)
+}
+
+/// Whether `id` is a string literal, in parentheses or not.
+fn string_operand(module: &Module, id: ExprId) -> bool {
+    let mut id = id;
+    while let ExpressionKind::Paren(inner) = module.kind(id) {
+        id = *inner;
+    }
+    matches!(
+        module.kind(id),
+        ExpressionKind::Literal(LiteralKind::String(_))
+    )
 }
 
 fn number_literal(module: &Module, id: ExprId) -> Option<NumberLiteral> {
@@ -3913,6 +3941,8 @@ fn literal_leaves_fit(module: &Module, id: ExprId, target: NativeScalar) -> bool
     }
 }
 
+/// R has no order for `complex`, so a `comparable` constraint, which serves `==` and `<` alike,
+/// leaves it out.
 fn comparable_atomic(atomic: Atomic) -> bool {
     !matches!(atomic, Atomic::Complex | Atomic::Raw)
 }
@@ -11244,7 +11274,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
         // A literal for an undecided `List` item is a ry value, as it is when written in the
         // list itself, and so is a number literal for a type parameter bounded by `number`,
-        // `int` or `frac`.
+        // `int` or `frac`, and a number or string literal for one bounded by `ordered`.
         let open = match target {
             None => self.table.open_constraint(self.db, expected),
             Some(_) => None,
@@ -11254,6 +11284,14 @@ impl<'db, 'a> Checker<'db, 'a> {
             Some(constraint @ (Constraint::Number | Constraint::Int | Constraint::Frac)) => {
                 number_literal(module, value)
                     .is_some_and(|literal| literal_meets(&literal, constraint))
+            }
+            // Every type `ordered` admits is a ry number or `Str`.
+            Some(Constraint::Ordered) => {
+                number_literal(module, value).is_some()
+                    || matches!(
+                        module.kind(value),
+                        ExpressionKind::Literal(LiteralKind::String(_))
+                    )
             }
             _ => false,
         };
@@ -12847,27 +12885,42 @@ impl<'db, 'a> Checker<'db, 'a> {
         {
             return unknown(self.db);
         }
-        // An open operand compared with a number literal, or with itself, gives `Bool` for a ry
-        // value and `logical` for an R one. R compares any atomic value, while ry compares a
-        // number with a number literal, any value but a function with itself under `==`, and
-        // only numbers and strings in order.
+        // An open operand compared with a number or string literal, or with another open
+        // operand, gives `Bool` for a ry value and `logical` for an R one. R compares any atomic
+        // value, while ry compares a number with a number literal, a `Str` with a string, any
+        // value but a function under `==`, and only numbers and strings in order.
         let open_operand = |ty: Ty<'db>| match ty.kind(self.db) {
             TyKind::Var(_) | TyKind::Rigid(_) => Some(ty),
             TyKind::Family(FamilyResult::Arithmetic, operand) => Some(*operand),
             _ => None,
         };
-        let itself = if matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual) {
+        let equality = matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual);
+        let itself = if equality {
             Constraint::Eq
         } else {
             Constraint::ComparableOrOrdered
         };
+        let beside_literal = |literal: ExprId| {
+            if literal_operand(self.module, literal).is_some() {
+                Some(Constraint::ComparableOrNumber)
+            } else {
+                string_operand(self.module, literal).then_some(Constraint::ComparableOrStr)
+            }
+        };
         let compared = match (open_operand(resolved_left), open_operand(resolved_right)) {
             (Some(left), Some(right)) if left == right => Some((left, lhs_range, itself)),
-            (Some(left), None) if literal_operand(self.module, rhs).is_some() => {
-                Some((left, lhs_range, Constraint::ComparableOrNumber))
+            // Two different open operands each take the constraint, but stay separate types:
+            // R compares an `integer` with a `character`, so tying them would reject valid R.
+            (Some(left), Some(right)) => {
+                self.constrain_operand(lhs_range, left, itself);
+                self.constrain_operand(rhs_range, right, itself);
+                return self.table.family(self.db, FamilyResult::Comparison, left);
             }
-            (None, Some(right)) if literal_operand(self.module, lhs).is_some() => {
-                Some((right, rhs_range, Constraint::ComparableOrNumber))
+            (Some(left), None) => {
+                beside_literal(rhs).map(|constraint| (left, lhs_range, constraint))
+            }
+            (None, Some(right)) => {
+                beside_literal(lhs).map(|constraint| (right, rhs_range, constraint))
             }
             _ => None,
         };
@@ -12895,7 +12948,8 @@ impl<'db, 'a> Checker<'db, 'a> {
         let both_lists = is_list(resolved_left) && is_list(resolved_right);
         let mut operand_shapes = Vec::with_capacity(2);
         for (resolved, operand_range) in [(resolved_left, lhs_range), (resolved_right, rhs_range)] {
-            let shapes = comparison_operand_shapes(self.db, resolved).filter(|_| !both_lists);
+            let shapes =
+                comparison_operand_shapes(self.db, resolved, equality).filter(|_| !both_lists);
             let Some(shapes) = shapes else {
                 let resolved = self.reported(resolved);
                 self.errors.push(TypeError {
@@ -19512,6 +19566,13 @@ impl<'db, 'a> Checker<'db, 'a> {
                     return number_literal(self.module, value)
                         .is_some_and(|literal| literal_meets(&literal, constraint));
                 }
+                Some(Constraint::Ordered) => {
+                    return number_literal(self.module, value).is_some()
+                        || matches!(
+                            self.module.kind(value),
+                            ExpressionKind::Literal(LiteralKind::String(_))
+                        );
+                }
                 _ => return false,
             },
             _ => return false,
@@ -24748,10 +24809,18 @@ impl<'db, 'a> Checker<'db, 'a> {
                             self.table.entry(self.table.find(*var)),
                             Entry::Unbound { level: var_level, .. } if *var_level >= level
                         )
+                        // A comparison asks only what any caller's value offers, so it leaves
+                        // the value the caller's own (`if (x < lo) lo else x`).
                         && matches!(
                             self.table
                                 .open_constraint(self.db, Ty::new(self.db, TyKind::Var(*var))),
-                            Some(Constraint::Unconstrained)
+                            Some(
+                                Constraint::Unconstrained
+                                    | Constraint::Eq
+                                    | Constraint::ComparableOrOrdered
+                                    | Constraint::ComparableOrNumber
+                                    | Constraint::ComparableOrStr
+                            )
                         )
                 })
             };

@@ -813,6 +813,9 @@ pub enum Constraint {
     /// A number literal known to be fractional and used as a ry number, which only `F64` admits.
     /// Like `Int`, it is never generalized.
     Frac,
+    /// A string literal compared with an open value, which only `Str` admits on ry's side,
+    /// because ry compares a `Str` only with a `Str`. Like `Int`, it is never generalized.
+    Str,
     /// Every ry type but a function, the values `==` compares structurally.
     Eq,
     /// An R value a comparison takes: an atomic value other than `complex` or `raw` in any
@@ -827,6 +830,8 @@ pub enum Constraint {
     /// What `comparable` admits and what `ordered` does: what `a < b` asks of two values of one
     /// type.
     ComparableOrOrdered,
+    /// What `comparable` admits and `Str`: what `x == "a"` asks of `x`.
+    ComparableOrStr,
     /// The type of a variable written with a whole-number literal (`total <- 0`), decided by its
     /// first use: a ry integer or fraction type, or R's `double` (`integer` for `0L`).
     WholeLiteral {
@@ -844,7 +849,7 @@ pub enum Constraint {
 impl Constraint {
     /// Shared by rendering and parsing, so every constraint the checker prints can
     /// be written back in an annotation.
-    pub const SPELLINGS: [(&'static str, Constraint); 16] = [
+    pub const SPELLINGS: [(&'static str, Constraint); 17] = [
         ("num", Constraint::Num),
         ("numeric", Constraint::Numeric),
         ("arithmetic", Constraint::Arithmetic),
@@ -861,6 +866,7 @@ impl Constraint {
         ("ordered", Constraint::Ordered),
         ("comparable or number", Constraint::ComparableOrNumber),
         ("comparable or ordered", Constraint::ComparableOrOrdered),
+        ("comparable or Str", Constraint::ComparableOrStr),
     ];
 
     pub fn spelling(self) -> Option<&'static str> {
@@ -888,6 +894,7 @@ impl Constraint {
             NumericOrF64 => (Numeric, Frac),
             ComparableOrNumber => (Comparable, Number),
             ComparableOrOrdered => (Comparable, Ordered),
+            ComparableOrStr => (Comparable, Str),
             _ => return None,
         })
     }
@@ -902,6 +909,7 @@ impl Constraint {
             (Some(Numeric), Some(Frac)) => Some(NumericOrF64),
             (Some(Comparable), Some(Number)) => Some(ComparableOrNumber),
             (Some(Comparable), Some(Ordered)) => Some(ComparableOrOrdered),
+            (Some(Comparable), Some(Str)) => Some(ComparableOrStr),
             (Some(r), _) => Some(r),
             (None, ry) => ry,
         }
@@ -929,7 +937,9 @@ impl Constraint {
                 };
                 return match single {
                     Unconstrained | Eq => Some(both),
-                    Number | Int | Frac | ArrayItem | Ordered => ry.join(single),
+                    Number | Int | Frac | Str | ArrayItem | Ordered => ry.join(single),
+                    // A string half admits no number, so a number literal is an R number.
+                    WholeLiteral { .. } | FracLiteral if ry == Str => r.join(single),
                     // Every type a number literal admits is a number, so the literal stays open,
                     // unless only fractions are wanted.
                     WholeLiteral { .. } | FracLiteral if matches!(ry, Number | Ordered) => {
@@ -997,6 +1007,9 @@ impl Constraint {
             // A key also admits ry values, which `comparable` does not.
             (Comparable, Key) | (Key, Comparable) => AtomicElement,
             (Comparable, _) | (_, Comparable) => return None,
+            (Str, Ordered | ArrayItem | Key) | (Ordered | ArrayItem | Key, Str) => Str,
+            (Str, StrLiteral) | (StrLiteral, Str) => Str,
+            (Str, _) | (_, Str) => return None,
             (Ordered, c @ (Number | Int | Frac)) | (c @ (Number | Int | Frac), Ordered) => c,
             (Ordered, ArrayItem | Key) | (ArrayItem | Key, Ordered) => Ordered,
             (Ordered, WholeLiteral { .. }) | (WholeLiteral { .. }, Ordered) => Number,
@@ -1031,6 +1044,8 @@ impl Constraint {
             // A literal used where R's number constraints apply is an R number.
             (WholeLiteral { .. } | FracLiteral, c) | (c, WholeLiteral { .. } | FracLiteral) => c,
             (Number | Int | Frac, _) | (_, Number | Int | Frac) => return None,
+            // `scalar numeric` admits no ry value.
+            (ScalarNumeric, ArrayItem) | (ArrayItem, ScalarNumeric) => return None,
             (ScalarNumeric, _) | (_, ScalarNumeric) => ScalarNumeric,
             (Numeric, AtomicElement | Key) | (AtomicElement | Key, Numeric) => ScalarNumeric,
             (Key, AtomicElement) | (AtomicElement, Key) => Key,
