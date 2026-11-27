@@ -66,7 +66,10 @@ use {
         borrow::Cow,
         cell::{Cell, RefCell},
         mem::MaybeUninit,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            OnceLock,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::{Duration, Instant},
     },
 };
@@ -1282,8 +1285,17 @@ unsafe fn type_of(value: Sexp) -> Option<Type> {
     if (interp::interp().extensions.tables.is_table_value)(value) {
         return Some(Type::Table);
     }
-    if value.is_altrep() || value.attrib() != rvalues::nil() {
+    if value.attrib() != rvalues::nil() {
         return None;
+    }
+    if value.is_altrep() {
+        if string_list_of(value).is_some() {
+            return Some(Type::Vector {
+                item: Item::Str,
+                array: value.is_array(),
+            });
+        }
+        return written_string_list(value).and_then(|written| type_of(written));
     }
     if value.kind() == SexpType::Record {
         return (!value.is_object() && interp::records::native_kind(value) == NativeKind::Tag)
@@ -1523,8 +1535,14 @@ unsafe fn str_of(charsxp: Sexp) -> Str {
     values::ry_str_from_bytes(bytes.as_ptr(), bytes.len() as u64)
 }
 
-/// A string list holding the strings of the character vector `value`.
+/// A string list holding the strings of the character vector `value`: the list it shares, with
+/// one more reference, or a new one.
 unsafe fn string_list(value: Sexp) -> *mut List {
+    if let Some(list) = string_list_of(value) {
+        values::ry_list_dup(list);
+        return list;
+    }
+    let value = written_string_list(value).unwrap_or(value);
     let length = rvalues::length(value);
     let list = values::ry_list_new(u32::from(values::STR), length as u64);
     if list.is_null() {
@@ -1712,7 +1730,11 @@ unsafe fn field_word(
         let (boxed, item) = to_box_in(shapes, field, depth)?;
         return Ok((item, [boxed, 0]));
     }
-    if field.is_array() && !field.is_altrep() && field.attrib() == rvalues::nil() {
+    if field.attrib() != rvalues::nil() {
+        return Err(FIELD);
+    }
+    let field = written_string_list(field).unwrap_or(field);
+    if field.is_array() && (!field.is_altrep() || string_list_of(field).is_some()) {
         let (list, item) = list_of_array(shapes, field, depth)?;
         return Ok((Item::Array(shapes.array_of(item)), [list as u64, 0]));
     }
@@ -1747,7 +1769,9 @@ unsafe fn list_of_array(
         SexpType::Logical => Item::Lgl,
         SexpType::I64 => Item::I64,
         SexpType::String => {
-            if !(0..length).all(|index| usable_string(array.element(index))) {
+            if string_list_of(array).is_none()
+                && !(0..length).all(|index| usable_string(array.element(index)))
+            {
                 return Err(FIELD);
             }
             Item::Str
@@ -1831,21 +1855,100 @@ unsafe fn from_box(boxed: u64) -> Result<Sexp, Unwind> {
         heap.root(record);
         return Ok(record);
     }
-    // A lazy record keeps its whole native tree alive while the R heap sees one small record,
-    // so trees R drops would never make the collector run. Native objects past a limit run a
-    // minor collection, and the limit doubles past what survives, so values typed code holds
-    // itself cost collections only geometrically often.
-    if values::ry_live_objects() > NATIVE_COLLECTION_AT.get() {
-        interp::heap().collect(Collection::Minor);
-        NATIVE_COLLECTION_AT.set((values::ry_live_objects() * 2).max(NATIVE_COLLECTION_FLOOR));
-    }
+    collect_for_native_values();
     values::ry_list_dup(boxed as *mut List);
     interp::records::alloc_lazy(layout, fields.len(), boxed, NATIVE_VALUES)
         .inspect_err(|_| values::ry_list_drop(boxed as *mut List))
 }
 
-/// The fewest live native objects at which [`from_box`] runs a collection.
+/// Runs a minor collection when R holds many native objects. A lazy record or a string list
+/// keeps its whole native value alive while the R heap sees one small object, so values R drops
+/// would never make the collector run. Native objects past a limit run a minor collection, and
+/// the limit doubles past what survives, so values typed code holds itself cost collections
+/// only geometrically often.
+unsafe fn collect_for_native_values() {
+    if values::ry_live_objects() > NATIVE_COLLECTION_AT.get() {
+        interp::heap().collect(Collection::Minor);
+        NATIVE_COLLECTION_AT.set((values::ry_live_objects() * 2).max(NATIVE_COLLECTION_FLOOR));
+    }
+}
+
+/// The fewest live native objects at which [`collect_for_native_values`] runs a collection.
 const NATIVE_COLLECTION_FLOOR: i64 = 1 << 20;
+
+/// How R holds a `List<Str>` without converting it: a character vector over the native list,
+/// whose ALTREP class the host defines (`libr`). Without a host, a string list converts each
+/// time it crosses.
+#[derive(Clone, Copy)]
+pub struct StringLists {
+    /// A character vector over `list` that takes one more reference to it.
+    pub wrap: unsafe fn(*mut List) -> Result<Sexp, Unwind>,
+    /// The list a character vector of that class holds, borrowed, or `None` for any other
+    /// vector and for one native code has written to.
+    pub list: unsafe fn(Sexp) -> Option<*mut List>,
+    /// The complete character vector, flagged as the original, inside one native code has
+    /// written to, or `None` for any other vector.
+    pub written: unsafe fn(Sexp) -> Option<Sexp>,
+}
+
+static STRING_LISTS: OnceLock<StringLists> = OnceLock::new();
+
+/// The shortest string list that crosses into R as a vector over its native list. A shorter
+/// one is converted, which costs less than the ALTREP object and the external pointer that
+/// sharing makes.
+const SHARED_STRINGS_AT: usize = 64;
+
+/// Installs the host's string lists.
+pub fn install_string_lists(lists: StringLists) {
+    STRING_LISTS.get_or_init(|| lists);
+}
+
+/// The character vector `vector` as a vector over a native list of its strings, for
+/// `List.from_r`, or `None` when it is shorter than [`SHARED_STRINGS_AT`], already one, or holds
+/// a string typed code cannot (`NA` or not UTF-8).
+pub unsafe fn shared_string_vector(vector: Sexp) -> Result<Option<Sexp>, Unwind> {
+    let length = rvalues::length(vector);
+    if length < SHARED_STRINGS_AT
+        || vector.is_altrep()
+        || !(0..length).all(|index| usable_string(vector.element(index)))
+    {
+        return Ok(None);
+    }
+    let list = string_list(vector);
+    if list.is_null() {
+        return Err(interp::unwind::error("cannot allocate a ry list"));
+    }
+    let shared = share_strings(list);
+    values::ry_list_drop(list);
+    shared
+}
+
+/// A character vector over `list`, which stays owned by the caller, or `None` on a host
+/// without string lists.
+unsafe fn share_strings(list: *mut List) -> Result<Option<Sexp>, Unwind> {
+    let Some(lists) = STRING_LISTS.get() else {
+        return Ok(None);
+    };
+    collect_for_native_values();
+    (lists.wrap)(list).map(Some)
+}
+
+/// The native list a character vector shares, borrowed.
+unsafe fn string_list_of(value: Sexp) -> Option<*mut List> {
+    if !value.is_altrep() {
+        return None;
+    }
+    (STRING_LISTS.get()?.list)(value)
+}
+
+/// The complete vector inside a string list native code has written to, which converts as a
+/// character vector R built.
+unsafe fn written_string_list(value: Sexp) -> Option<Sexp> {
+    if !value.is_altrep() {
+        return None;
+    }
+    (STRING_LISTS.get()?.written)(value)
+}
 
 /// How R fills the lazy records [`from_box`] makes and releases their boxes.
 const NATIVE_VALUES: NativeValues = NativeValues {
@@ -1924,6 +2027,15 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
         Type::Absent => Err(interp::unwind::error(
             "a typed function returned a formal its call left out",
         )),
+        Type::Vector {
+            item: Item::Str,
+            array,
+        } if (*(word as *const List)).length as usize >= SHARED_STRINGS_AT
+            && let Some(shared) = share_strings(word as *mut List)? =>
+        {
+            shared.set_array(array);
+            Ok(shared)
+        }
         Type::Vector { item, array } => {
             let list = word as *mut List;
             let length = (*list).length as usize;

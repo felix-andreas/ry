@@ -130,6 +130,10 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
             let deferred = crate::altrep::deferred_string(object.raw())?;
             Ok(Some(rooted(context, deferred)))
         },
+        share_strings: |context, object| unsafe {
+            let shared = typed::shared_string_vector(object.raw())?;
+            Ok(shared.map(|shared| rooted(context, shared)))
+        },
         altrep_wrap: |context, object| unsafe {
             Ok(rooted(context, crate::altrep::try_wrap(object.raw())?))
         },
@@ -197,6 +201,7 @@ pub(crate) unsafe fn install_interpreter(runtime: &mut Runtime) {
     frames::install();
     services::install();
     jit::install();
+    crate::altrep::install_string_lists(&mut runtime.heap);
     interp::register_builtins(typed::file::BUILTINS);
     interp::register_builtins(NATIVE_BUILTINS);
     interp::register_builtins(BOOTSTRAP_BUILTINS);

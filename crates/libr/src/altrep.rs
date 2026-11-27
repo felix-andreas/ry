@@ -14,7 +14,8 @@
 //!
 //! The built-in classes are GNU R's, under GNU R's class and package names, so inspection and
 //! serialization agree: `compact_intseq` and `compact_realseq`, `deferred_string`, and the
-//! `wrap_*` classes that attach sortedness and missing-value metadata to a vector.
+//! `wrap_*` classes that attach sortedness and missing-value metadata to a vector. One class is
+//! ry's own: `string_list`, a character vector over a typed-core list of strings.
 
 use {
     crate::{
@@ -23,16 +24,24 @@ use {
         memory, runtime,
         vectors::{self, sexp_type},
     },
-    heap::object::{Header, NA_INTEGER, Rcomplex, Sexp, SexpType, gp},
+    heap::{
+        Collection, Liveness, Marker, RootSource,
+        object::{Header, NA_INTEGER, Rcomplex, Sexp, SexpType, gp},
+        strings::Encoding,
+    },
     interp::{
         builtins::{BuiltinDef, Call, internal},
         dispatch::top_env,
         values::{as_integer_scalar, base_namespace},
     },
     std::{
+        cell::{Cell, RefCell},
         convert::Infallible,
         ffi::{CStr, c_char, c_int, c_void},
+        mem::size_of,
+        rc::Rc,
     },
+    typed::values::{self, List, Str},
 };
 
 pub const UNKNOWN_SORTEDNESS: c_int = i32::MIN;
@@ -1305,6 +1314,7 @@ struct Builtins {
     compact_intseq: AltrepClass,
     compact_realseq: AltrepClass,
     deferred_string: AltrepClass,
+    string_list: AltrepClass,
     wrap_integer: AltrepClass,
     wrap_logical: AltrepClass,
     wrap_real: AltrepClass,
@@ -1362,6 +1372,17 @@ unsafe fn builtins() -> ApiResult<Builtins> {
         methods.serialized_state = Method::Builtin(deferred_state);
         methods.unserialize = Method::Builtin(deferred_unserialize);
     }
+    let string_list = make_class(b"string_list", b"ry", SexpType::String)?;
+    {
+        let methods = class_methods(string_list);
+        methods.length = Method::Builtin(strings_length);
+        methods.sexp_elt = Method::Builtin(strings_elt);
+        methods.set_elt = Method::Builtin(strings_set_elt);
+        methods.dataptr = Method::Builtin(strings_dataptr);
+        methods.dataptr_or_null = Method::Builtin(strings_dataptr_or_null);
+        methods.no_na = Method::Builtin(strings_no_na);
+        methods.inspect = Method::Builtin(strings_inspect);
+    }
     let wrapper = |name: &[u8], kind: SexpType| -> ApiResult<AltrepClass> {
         let class = make_class(name, b"base", kind)?;
         let methods = class_methods(class);
@@ -1402,6 +1423,7 @@ unsafe fn builtins() -> ApiResult<Builtins> {
         compact_intseq,
         compact_realseq,
         deferred_string,
+        string_list,
         wrap_integer: wrapper(b"wrap_integer", SexpType::Integer)?,
         wrap_logical: wrapper(b"wrap_logical", SexpType::Logical)?,
         wrap_real: wrapper(b"wrap_real", SexpType::Real)?,
@@ -1900,6 +1922,254 @@ unsafe fn deferred_unserialize(class: Sexp, state: Sexp) -> ApiResult<Sexp> {
     state.car().mark_not_mutable();
     let nil = runtime().nil();
     new_altrep(AltrepClass { pointer: class }, state, nil)
+}
+
+// String lists. data1 is an external pointer whose address is the typed-core list, and null
+// once native code has written to the vector. data2 is `NULL` until the first element is read,
+// then a character vector whose unread elements hold `NULL`. The pointer's tag is that character
+// vector once every element is in it, and `NULL` before; a vector native code has written to is
+// always complete. R itself never writes to one, because an instance is not mutable.
+
+/// A character vector over the typed-core list of strings `list`, holding one more reference to
+/// it, which R reads one element at a time and typed code takes back without converting.
+pub unsafe fn string_list(list: *mut List) -> ApiResult<Sexp> {
+    let class = builtins()?.string_list;
+    // A list another string list shares already counts.
+    let bytes = if (*list).wrappers == 0 {
+        list_bytes(list)
+    } else {
+        0
+    };
+    // The collector sees only a small vector, so the lists' own bytes decide when to look for
+    // dead string lists: a minor collection each time those bytes double, and a major one when
+    // the minor one frees less than half, because the rest may be old vectors that died.
+    if SHARED_BYTES.get() + bytes > SHARED_COLLECTION_AT.get() {
+        runtime().heap.collect(Collection::Minor);
+        if SHARED_BYTES.get() * 2 > SHARED_COLLECTION_AT.get() {
+            runtime().heap.collect(Collection::Major);
+        }
+        SHARED_COLLECTION_AT.set((SHARED_BYTES.get() * 2).max(SHARED_COLLECTION_FLOOR));
+    }
+    let heap = &mut runtime().heap;
+    let nil = heap.nil();
+    let pointer = heap.alloc_external_ptr(list.cast(), nil, nil)?;
+    let vector = new_altrep(class, pointer, nil)?;
+    values::ry_list_dup(list);
+    (*list).wrappers = (*list).wrappers.saturating_add(1);
+    SHARED_BYTES.set(SHARED_BYTES.get() + bytes);
+    STRING_LISTS.with_borrow_mut(|entries| entries.push((vector, list)));
+    Ok(vector)
+}
+
+/// The list `object` shares, borrowed, if it is a string list native code has not written to.
+pub unsafe fn string_list_of(object: Sexp) -> Option<*mut List> {
+    if !is_string_list(object) {
+        return None;
+    }
+    let list = object.car().external_address() as *mut List;
+    (!list.is_null()).then_some(list)
+}
+
+/// The complete character vector inside a string list native code has wrote to, flagged as
+/// `object` is, or `None` for any other vector.
+pub unsafe fn written_string_list(object: Sexp) -> Option<Sexp> {
+    (is_string_list(object) && object.car().external_address().is_null()).then(|| object.cdr())
+}
+
+/// Hands typed code the string lists, and the collector their release.
+pub unsafe fn install_string_lists(heap: &mut heap::Heap) {
+    heap.add_root_source(Rc::new(StringListReferences));
+    typed::install_string_lists(typed::StringLists {
+        wrap: string_list,
+        list: string_list_of,
+        written: written_string_list,
+    });
+}
+
+thread_local! {
+    /// Each string list with the list it holds a reference to, which a collection releases once
+    /// the vector has died or native code has written to it.
+    static STRING_LISTS: RefCell<Vec<(Sexp, *mut List)>> = const { RefCell::new(Vec::new()) };
+    /// The bytes of the distinct lists in [`STRING_LISTS`].
+    static SHARED_BYTES: Cell<usize> = const { Cell::new(0) };
+    /// The held bytes past which making a string list collects first.
+    static SHARED_COLLECTION_AT: Cell<usize> = const { Cell::new(SHARED_COLLECTION_FLOOR) };
+}
+
+const SHARED_COLLECTION_FLOOR: usize = 64 << 20;
+
+/// Releases the lists of dead or written string lists after each collection, as the interpreter
+/// releases the values of lazy records. Releasing frees native memory only, so it runs no R
+/// code and allocates nothing on the heap.
+struct StringListReferences;
+
+impl RootSource for StringListReferences {
+    fn trace(&self, _marker: &mut Marker<'_>) {}
+
+    fn clear_dead(&self, liveness: &Liveness<'_>) {
+        // SAFETY: the collector calls this after marking, before it frees anything, so every
+        // vector here is still an object, a live one's data1 is its external pointer, and each
+        // entry owns the reference it releases.
+        STRING_LISTS.with_borrow_mut(|entries| unsafe {
+            entries.retain(|&(vector, list)| {
+                let held = liveness.is_live(vector)
+                    && vector.car().external_address() == list.cast::<c_void>();
+                if !held {
+                    release_string_list(list);
+                }
+                held
+            })
+        });
+    }
+}
+
+/// Drops the reference of one string list to `list`. A count that saturated stays, which only
+/// keeps the list's bytes counted.
+unsafe fn release_string_list(list: *mut List) {
+    match (*list).wrappers {
+        u16::MAX => {}
+        1 => {
+            (*list).wrappers = 0;
+            SHARED_BYTES.set(SHARED_BYTES.get().saturating_sub(list_bytes(list)));
+        }
+        wrappers => (*list).wrappers = wrappers - 1,
+    }
+    values::ry_list_drop(list);
+}
+
+/// A list's items, leaving out the buffers of strings too long to sit inline.
+unsafe fn list_bytes(list: *mut List) -> usize {
+    (*list).length as usize * size_of::<Str>()
+}
+
+unsafe fn is_string_list(object: Sexp) -> bool {
+    BUILTINS
+        .get()
+        .is_some_and(|builtins| object.is_altrep() && object.tag() == builtins.string_list.pointer)
+}
+
+/// Stops `object` from sharing its list, which the next collection releases.
+unsafe fn unlink_string_list(object: Sexp) {
+    object.car().set_external_address(std::ptr::null_mut());
+    object.cdr().set_array(object.is_array());
+}
+
+unsafe fn strings_list(object: Sexp) -> Option<*mut List> {
+    let list = object.car().external_address() as *mut List;
+    (!list.is_null()).then_some(list)
+}
+
+unsafe fn strings_length(object: Sexp) -> ApiResult<R_xlen_t> {
+    Ok(match strings_list(object) {
+        Some(list) => (*list).length as R_xlen_t,
+        None => object.cdr().length() as R_xlen_t,
+    })
+}
+
+unsafe fn strings_elt(object: Sexp, index: R_xlen_t) -> ApiResult<Sexp> {
+    if index < 0 || index >= strings_length(object)? {
+        return Err(error(
+            "attempt to access an element of a string list out of bounds",
+        ));
+    }
+    let nil = runtime().nil();
+    let read = object.cdr();
+    if read != nil {
+        let element = read.element(index as usize);
+        if element != nil {
+            return Ok(element);
+        }
+    }
+    let Some(list) = strings_list(object) else {
+        return Err(error("a string list lost its strings"));
+    };
+    // The storage is allocated before the element, so nothing allocates between making the
+    // element and storing it where the collector finds it.
+    let read = strings_storage(object)?;
+    let string = *((*list).data as *const Str).add(index as usize);
+    // Not `mkchar_bytes`, which roots the element: nothing allocates before it is stored.
+    let element = runtime().heap.mk_char(string.bytes(), Encoding::Utf8)?;
+    runtime().heap.set_element(read, index as usize, element);
+    Ok(element)
+}
+
+unsafe fn strings_storage(object: Sexp) -> ApiResult<Sexp> {
+    let heap = &mut runtime().heap;
+    let nil = heap.nil();
+    if object.cdr() != nil {
+        return Ok(object.cdr());
+    }
+    heap.root(object);
+    let length = strings_length(object)?;
+    let heap = &mut runtime().heap;
+    let read = heap.alloc_vector(SexpType::String, length)?;
+    read.slice_mut::<Sexp>().fill(nil);
+    heap.set_cdr(object, read);
+    Ok(read)
+}
+
+/// Reads every element into data2, keeping the list.
+unsafe fn strings_expand(object: Sexp) -> ApiResult<Sexp> {
+    let pointer = object.car();
+    if pointer.external_tag() != runtime().nil() {
+        return Ok(object.cdr());
+    }
+    runtime().heap.root(object);
+    let read = strings_storage(object)?;
+    for index in 0..strings_length(object)? {
+        strings_elt(object, index)?;
+    }
+    runtime().heap.set_external_tag(pointer, read);
+    Ok(read)
+}
+
+unsafe fn strings_dataptr(object: Sexp, writable: bool) -> ApiResult<*mut u8> {
+    let read = strings_expand(object)?;
+    // Native code may store through a writable pointer, which the list would not see.
+    if writable {
+        unlink_string_list(object);
+    }
+    Ok(read.data())
+}
+
+unsafe fn strings_dataptr_or_null(object: Sexp) -> ApiResult<*const c_void> {
+    Ok(if object.car().external_tag() != runtime().nil() {
+        object.cdr().data() as *const c_void
+    } else {
+        std::ptr::null()
+    })
+}
+
+unsafe fn strings_set_elt(object: Sexp, index: R_xlen_t, value: Sexp) -> ApiResult<()> {
+    let read = strings_expand(object)?;
+    unlink_string_list(object);
+    runtime().heap.set_element(read, index as usize, value);
+    Ok(())
+}
+
+/// A typed-core string is never `NA`; R may have stored one since.
+unsafe fn strings_no_na(object: Sexp) -> ApiResult<c_int> {
+    Ok(c_int::from(strings_list(object).is_some()))
+}
+
+unsafe fn strings_inspect(
+    object: Sexp,
+    pre: c_int,
+    deep: c_int,
+    pvec: c_int,
+    subtree: InspectSubtree,
+) -> ApiResult<bool> {
+    match strings_list(object) {
+        Some(list) => write_console(
+            format!("  <string list of {} typed-core strings>\n", (*list).length).as_bytes(),
+            false,
+        ),
+        None => {
+            write_console(b"  <string list R has written to>\n", false);
+            subtree(object.cdr(), pre, deep, pvec);
+        }
+    }
+    Ok(true)
 }
 
 // Wrappers. data1 is the wrapped vector and data2 the integer vector (sortedness, no_na),
