@@ -467,6 +467,19 @@ pub unsafe fn compiled_promise(code: Sexp, env: Sexp) -> R<Sexp> {
     Ok(promise)
 }
 
+/// The promise at the end of a chain of unforced promises over promises, which `missing()` asks
+/// about, as GNU R's `findRootPromise` finds it. An argument check that may convert wraps its
+/// caller's promise in one (`annotations::check_argument`).
+pub unsafe fn root_promise(mut value: Sexp) -> Sexp {
+    while value.kind() == SexpType::Promise
+        && value.car() == unbound()
+        && value.cdr().kind() == SexpType::Promise
+    {
+        value = value.cdr();
+    }
+    value
+}
+
 /// A promise that already holds `value`, whose code is `code` for `substitute` to see.
 pub unsafe fn forced_promise(code: Sexp, value: Sexp) -> R<Sexp> {
     triple(SexpType::Promise, value, code, nil())
@@ -5350,6 +5363,7 @@ unsafe fn slot_is_missing(env: Sexp, symbol: Sexp, defaults_count: bool) -> R<Op
 }
 
 pub(crate) unsafe fn value_is_missing(value: Sexp) -> R<bool> {
+    let value = root_promise(value);
     if value == missing_arg() {
         return Ok(true);
     }

@@ -721,9 +721,10 @@ enum Holder {
 ///
 /// A promise may be the caller's own (a variable passed to an effect-free closure, or an
 /// element of `...`), where GNU R binds a new promise that forces it. So a converted value goes
-/// into a new promise, and an unforced promise whose check may convert is wrapped in one before
-/// the check is registered: storing the conversion in the caller's promise would change the
-/// caller's variable, and fail the check of an outer typed frame that binds the same promise.
+/// into a new promise, and a shared unforced promise whose check may convert is wrapped in one
+/// before the check is registered: storing the conversion in the caller's promise would change
+/// the caller's variable, and fail the check of an outer typed frame that binds the same
+/// promise. `missing()` sees through the wrapper ([`crate::eval::root_promise`]).
 unsafe fn check_argument(
     call: Sexp,
     signature: Sexp,
@@ -745,18 +746,17 @@ unsafe fn check_argument(
     if value.car() != values::unbound() {
         let checked = check_value(call, signature, slot, value.car())?;
         if checked != value.car() {
-            // The code is the expression `substitute()` reads; a forced promise never runs it.
-            let fresh = crate::eval::make_promise(value.cdr(), nil())?;
-            crate::heap().set_car(fresh, checked);
-            rebind(holder, fresh)?;
+            rebind(holder, crate::eval::forced_promise(value.cdr(), checked)?)?;
         }
         return Ok(());
     }
     let mut promise = value;
-    if may_convert(mask_at(signature.element(MASKS), slot)) {
-        if crate::eval::is_reference(promise) {
-            crate::eval::detach_reference(promise)?;
-        }
+    // A promise made for this call is held by its binding alone. An argument reference holds
+    // the value it is forced to itself, so its conversion never reaches the caller either.
+    if may_convert(mask_at(signature.element(MASKS), slot))
+        && value.refcount() > 1
+        && !crate::eval::is_reference(value)
+    {
         // Evaluating a promise forces it. The global environment, never a slot frame's, keeps
         // the wrapper an ordinary promise when it is forced.
         promise = crate::eval::make_promise(value, values::global_env())?;
