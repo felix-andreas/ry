@@ -30,6 +30,7 @@ pub fn enable_invariants() {
     INVARIANTS.store(true, Ordering::Relaxed);
 }
 
+#[inline]
 pub fn invariants_enabled() -> bool {
     INVARIANTS.load(Ordering::Relaxed)
 }

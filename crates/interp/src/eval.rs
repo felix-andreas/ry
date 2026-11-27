@@ -1600,8 +1600,7 @@ pub fn slot_reference<'a>(
     slot: u32,
     symbol: Local<'_>,
 ) -> R<Gc<'a, Promise>> {
-    let index = take_reference(context, symbol)?;
-    Ok(handles::aim_reference(context, index, owner, slot))
+    Ok(take_reference(context, symbol, Some((owner, slot)))?.2)
 }
 
 /// An argument reference to `expression`, a variable, uncompiled code or a constant, of a
@@ -1615,8 +1614,7 @@ pub unsafe fn env_reference(env: Sexp, expression: Sexp) -> R<Sexp> {
             handles::held(context, env),
             handles::held(context, expression),
         );
-        let index = take_reference(context, expression)?;
-        let reference = reference_at(context, index);
+        let (context, _, reference) = take_reference(context, expression, None)?;
         context.set_promise_environment(reference, environment);
         Ok(reference.raw())
     })
@@ -1630,8 +1628,7 @@ pub unsafe fn env_code_reference(env: Sexp, code: Sexp) -> R<Sexp> {
         let (environment, code) = (handles::held(context, env), handles::held(context, code));
         // The code holds its constant pool, and the caller holds the code.
         let source = handles::held(context, source_of(code.read(context)).raw());
-        let index = take_reference(context, source)?;
-        let reference = reference_at(context, index);
+        let (context, _, reference) = take_reference(context, source, None)?;
         context.set_promise_environment(reference, environment);
         context.set_promise_compiled(reference, code);
         Ok(reference.raw())
@@ -1646,21 +1643,23 @@ pub unsafe fn env_code_reference(env: Sexp, code: Sexp) -> R<Sexp> {
 pub unsafe fn code_reference(owner: usize, code: Sexp) -> R<Sexp> {
     handles::in_caller_scope(|context| {
         let code = handles::held(context, code);
-        let index = compiled_reference(context, owner, code)?;
-        Ok(reference_at(context, index).raw())
+        Ok(compiled_reference(context, owner, code)?.1.raw())
     })
 }
 
 /// [`code_reference`] for code on the handle types: the position in the pool of the reference
-/// that runs `code`.
-fn compiled_reference(context: &mut Cx<'_>, owner: usize, code: Local<'_>) -> R<usize> {
+/// that runs `code`, and the reference.
+fn compiled_reference<'c>(
+    context: &'c mut Cx<'_>,
+    owner: usize,
+    code: Local<'_>,
+) -> R<(usize, Gc<'c, Promise>)> {
     // The code holds its constant pool, which holds the source.
     let source = context.root(source_of(code.read(context)));
-    let index = take_reference(context, source)?;
-    handles::aim_reference(context, index, owner, NO_REFERENCE_SLOT);
-    let reference = reference_at(context, index);
+    let (context, index, reference) =
+        take_reference(context, source, Some((owner, NO_REFERENCE_SLOT)))?;
     context.set_promise_environment(reference, code);
-    Ok(index)
+    Ok((index, reference))
 }
 
 /// The source a compiled argument's `code` was compiled from, which its constant pool keeps.
@@ -1675,31 +1674,38 @@ fn source_of<'c>(code: Gc<'c>) -> Gc<'c> {
     }
 }
 
-/// The pool's reference at `index`, which [`take_reference`] handed out.
-fn reference_at<'c>(context: &'c Cx<'_>, index: usize) -> Gc<'c, Promise> {
-    match handles::pooled_reference(context, index) {
-        Some((reference, _)) => reference,
-        None => panic!("argument reference {index} is not in the pool"),
-    }
-}
-
-/// The position in [`Interp::references`] of the next free reference, now naming `symbol`,
-/// with its target left for the caller to fill in.
-#[inline]
-fn take_reference<'s>(context: &mut Cx<'s>, symbol: Local<'_>) -> R<usize> {
+/// The next free reference of [`Interp::references`], now naming `symbol`, with its position in
+/// the pool and the context, which nothing can collect through while the reference is used.
+/// `aim` gives the frame and the slot a slot frame's reference reads ([`handles::aim_target`]);
+/// without it the target is left for the caller to fill in.
+#[inline(always)]
+fn take_reference<'c, 's>(
+    context: &'c mut Cx<'s>,
+    symbol: Local<'_>,
+    aim: Option<(usize, u32)>,
+) -> R<(&'c Cx<'s>, usize, Gc<'c, Promise>)> {
     let index = interp().references_used as usize;
-    match handles::pooled_reference(context, index) {
-        Some((reference, _)) if !reference.is_shared() => {
-            context.set_promise_code(reference, symbol);
-            // A call that failed while forcing the reference left it marked, and the mark
-            // belongs to that call's argument, not to the one that takes the reference next.
-            reference.set_flags(PROMISE_INTERRUPTED, false);
-        }
-        _ => renew_reference(context, index, symbol)?,
+    let free = handles::pooled_reference(context, index)
+        .is_some_and(|(reference, _)| !reference.is_shared());
+    if !free {
+        renew_reference(context, index, symbol)?;
+    }
+    let context = &*context;
+    let Some((reference, target)) = handles::pooled_reference(context, index) else {
+        panic!("argument reference {index} is not in the pool");
+    };
+    if free {
+        context.set_promise_code(reference, symbol);
+        // A call that failed while forcing the reference left it marked, and the mark belongs
+        // to that call's argument, not to the one that takes the reference next.
+        reference.set_flags(PROMISE_INTERRUPTED, false);
+    }
+    if let Some((owner, slot)) = aim {
+        handles::aim_target(context, target, owner, slot);
     }
     interp().references_used += 1;
     activity::count(Counter::ArgumentReferences);
-    Ok(index)
+    Ok((context, index, reference))
 }
 
 /// Puts a new reference naming `symbol` at position `index` of the pool, which ends the pool or
@@ -2049,7 +2055,7 @@ pub fn detach<'s>(context: &mut Cx<'s>, reference: Local<'s, Promise>) -> R<()> 
     let state = interp();
     let Some(index) = state.references[..state.references_used as usize]
         .iter()
-        .position(|&pooled| pooled == reference.raw())
+        .position(|pooled| pooled.promise == reference.raw())
     else {
         panic!("an argument reference outlived the call it was made for");
     };
@@ -2692,19 +2698,21 @@ unsafe fn run_builtin(
         },
         reusable,
     };
-    if checks.native != NativeArgs::Accepted
-        && args
-            .iter()
-            .any(|arg| matches!(arg.value.kind(), SexpType::Record | SexpType::I64))
-    {
-        let skip_numbers = match checks.native {
-            NativeArgs::Accepted | NativeArgs::RefusedExceptNumbers => true,
-            NativeArgs::Refused => false,
-            NativeArgs::RefusedExceptArrayIndexes => {
-                args.first().is_some_and(|target| target.value.is_array())
+    if checks.native != NativeArgs::Accepted {
+        // A loop, where `Iterator::any` shares one out-of-line copy with other callers.
+        for arg in args {
+            if matches!(arg.value.kind(), SexpType::Record | SexpType::I64) {
+                let skip_numbers = match checks.native {
+                    NativeArgs::Accepted | NativeArgs::RefusedExceptNumbers => true,
+                    NativeArgs::Refused => false,
+                    NativeArgs::RefusedExceptArrayIndexes => {
+                        args.first().is_some_and(|target| target.value.is_array())
+                    }
+                };
+                crate::records::check_native_args(call, args, skip_numbers)?;
+                break;
             }
-        };
-        crate::records::check_native_args(call, args, skip_numbers)?;
+        }
     }
     // An ALTREP method's error, parked by the element accessor the builtin went through, is
     // raised before the builtin's value goes anywhere, so `tryCatch` around the call sees it
@@ -5521,20 +5529,20 @@ pub(crate) fn promise_defaults(context: &mut Cx<'_>, owner: usize, promised: u64
         // The frame holds its function, which holds the defaults, but the reference may
         // allocate, so the code is rooted.
         let code = context.root(defaults.get(index));
-        let reference = if code.r_type() == SexpType::Bytecode {
-            compiled_reference(context, owner, code)?
+        let place = if code.r_type() == SexpType::Bytecode {
+            compiled_reference(context, owner, code)?.0
         } else {
             let slot = handles::live_frame(context, owner)
                 .slot_names()
                 .iter()
                 .position(|name| name.is(code))
                 .map_or(NO_REFERENCE_SLOT, |slot| slot as u32);
-            let place = take_reference(context, code)?;
-            handles::aim_reference(context, place, owner, slot);
-            place
+            take_reference(context, code, Some((owner, slot)))?.1
         };
-        handles::live_frame(context, owner)
-            .store_slot(index, reference_at(context, reference).value());
+        let Some((reference, _)) = handles::pooled_reference(context, place) else {
+            panic!("argument reference {place} is not in the pool");
+        };
+        handles::live_frame(context, owner).store_slot(index, reference.value());
     }
     Ok(())
 }
@@ -5763,10 +5771,10 @@ fn exit_code<'s>(context: &mut Cx<'s>, depth: usize) -> R<Option<ExitCode<'s>>> 
     }
     // The code taken from the frame is held by nothing else, and making its environment
     // allocates.
-    let expressions: SmallVec<[Local<'s>; 2]> = listed
-        .iter()
-        .map(|expression| context.root(expression.get(context)))
-        .collect();
+    let mut expressions: SmallVec<[Local<'s>; 2]> = SmallVec::new();
+    for expression in &listed {
+        expressions.push(context.root(expression.get(context)));
+    }
     // A slot frame keeps exit code compiled for its slots, which runs there without an
     // environment; only an expression that did not compile needs one. Other exit code, such
     // as the call `withr::defer` registers through `do.call`, runs in the frame's environment,
@@ -5800,8 +5808,11 @@ fn exit_passes<'s>(
         let environment = pass.environment;
         let mut jumped = false;
         for (position, &expression) in pass.expressions.iter().enumerate() {
-            handles::live_frame(context, depth - 1)
-                .set_exit_code(&pass.expressions[position + 1..]);
+            let rest = &pass.expressions[position + 1..];
+            // The pass took the frame's list, so it stays empty unless exit code added to it.
+            if !rest.is_empty() || !interp().frames[depth - 1].on_exit.is_empty() {
+                handles::live_frame(context, depth - 1).set_exit_code(rest);
+            }
             // A handler stack that a condition left in place must not run the exit code.
             let saved_handlers = interp().handlers.clone();
             let _saved = crate::conditions::set_aside(saved_handlers.clone(), None);

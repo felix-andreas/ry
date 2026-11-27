@@ -15,7 +15,7 @@ pub use heap::handle::{
 };
 use {
     crate::{
-        TaskCallbackRoutine,
+        PooledReference, TaskCallbackRoutine,
         builtin_libraries::NativeCall,
         builtins::{Arg, Call},
         bytecode,
@@ -4018,10 +4018,14 @@ impl<'c, 's> LiveFrame<'c, 's> {
             panic!("frame {index} moved a variable before it had an environment");
         };
         let names = self.slot_names();
+        let fields = self.fields();
+        let missing = fields.missing;
+        let registers =
+            fields.slots as usize + 1 + slots.start..fields.slots as usize + 1 + slots.end;
         let mut formals = None;
         let mut bindings: SmallVec<[LocalBinding<'_>; 12]> = SmallVec::new();
-        for slot in slots.clone() {
-            let value = self.slot(slot);
+        for (slot, &value) in slots.zip(&crate::interp().bytecode.registers[registers.clone()]) {
+            let value = register_value(self.context, value);
             if is_unbound(value) {
                 continue;
             }
@@ -4031,7 +4035,8 @@ impl<'c, 's> LiveFrame<'c, 's> {
             bindings.push(LocalBinding {
                 symbol,
                 value,
-                missing: self.is_missing_formal(slot)
+                missing: slot < 64
+                    && missing & (1 << slot) != 0
                     && slot < *formals.get_or_insert_with(|| self.formals().count()),
             });
         }
@@ -4051,10 +4056,8 @@ impl<'c, 's> LiveFrame<'c, 's> {
         }
         self.context
             .define_locals_uncollected(environment, &bindings)?;
-        let start = self.header() + 1;
-        let registers = &mut crate::interp().bytecode.registers;
         let unbound = values::unbound();
-        for register in &mut registers[start + slots.start..start + slots.end] {
+        for register in &mut crate::interp().bytecode.registers[registers] {
             // SAFETY: each bound slot's variable has just been bound in a cell, which counts it
             // too, so giving up the slot's count frees nothing and needs no note of a zero count.
             unsafe { register.decrement_refcount() };
@@ -4225,15 +4228,11 @@ pub fn pooled_reference<'c>(
     _context: &'c Cx<'_>,
     index: usize,
 ) -> Option<(Gc<'c, Promise>, Gc<'c, Integer>)> {
-    let state = crate::interp();
-    let (&reference, &target) = state
-        .references
-        .get(index)
-        .zip(state.reference_targets.get(index))?;
+    let pooled = crate::interp().references.get(index)?;
     // SAFETY: the pool roots each reference and target it made, and makes each as a promise
     // and an integer vector. One replaced under `&Cx` is only noted at count zero, and the
     // borrow of the context lets nothing collect before its last use.
-    Some(unsafe { (Gc::adopt(reference), Gc::adopt(target)) })
+    Some(unsafe { (Gc::adopt(pooled.promise), Gc::adopt(pooled.target)) })
 }
 
 /// Puts a new argument reference naming `symbol` over `target` at position `index` of the pool,
@@ -4261,16 +4260,18 @@ pub fn replace_pooled_reference(
         reference.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
         reference.increment_refcount();
         target.increment_refcount();
-        let state = crate::interp();
-        if index == state.references.len() {
-            state.references.push(reference);
-            state.reference_targets.push(target);
+        let references = &mut crate::interp().references;
+        let replacement = PooledReference {
+            promise: reference,
+            target,
+        };
+        let Some(pooled) = references.get_mut(index) else {
+            references.push(replacement);
             return Ok(());
-        }
-        state.references[index].decrement_refcount();
-        state.references[index] = reference;
-        state.reference_targets[index].decrement_refcount();
-        state.reference_targets[index] = target;
+        };
+        pooled.promise.decrement_refcount();
+        pooled.target.decrement_refcount();
+        *pooled = replacement;
     }
     Ok(())
 }
@@ -4281,7 +4282,7 @@ pub fn replace_pooled_reference(
 /// holds it.
 #[inline]
 pub fn refill_detached_place(_context: &mut Cx<'_>, index: usize) -> R<()> {
-    let Some(&target) = crate::interp().reference_targets.get(index) else {
+    let Some(&PooledReference { target, .. }) = crate::interp().references.get(index) else {
         panic!("argument reference {index} left the pool");
     };
     // SAFETY: the pool roots the target while the promise allocates, which `&mut Cx` permits,
@@ -4296,37 +4297,22 @@ pub fn refill_detached_place(_context: &mut Cx<'_>, index: usize) -> R<()> {
         )?;
         reference.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
         reference.increment_refcount();
-        let state = crate::interp();
-        state.references[index].decrement_refcount();
-        state.references[index] = reference;
+        let pooled = &mut crate::interp().references[index];
+        pooled.promise.decrement_refcount();
+        pooled.promise = reference;
     }
     Ok(())
 }
 
-/// The pool's reference at `index`, its target pointed at slot `slot` of the frame at `owner`:
-/// the frame's position, the slot and the frame's header register. One read of the pool serves
-/// both, since every call into slots takes its references here.
+/// Points a pooled reference's `target` ([`pooled_reference`]) at slot `slot` of the frame at
+/// `owner`: the frame's position, the slot and the frame's header register.
 #[inline]
-pub fn aim_reference<'c>(
-    _context: &'c mut Cx<'_>,
-    index: usize,
-    owner: usize,
-    slot: u32,
-) -> Gc<'c, Promise> {
-    let state = crate::interp();
-    let header = state.frames[owner].slots;
-    let (Some(&reference), Some(&target)) = (
-        state.references.get(index),
-        state.reference_targets.get(index),
-    ) else {
-        panic!("argument reference {index} is not in the pool");
-    };
-    // SAFETY: the pool makes each target as a three-element integer vector of its own, and
-    // `&mut Cx` ends every slice read through the context. The pool holds the reference, and
-    // the answer borrows the context.
+pub fn aim_target(_context: &Cx<'_>, target: Gc<'_, Integer>, owner: usize, slot: u32) {
+    let header = crate::interp().frames[owner].slots;
+    // SAFETY: the pool makes each target as a three-element integer vector that only the pool
+    // writes, and no reader keeps a slice of it across a call that takes a reference.
     unsafe {
-        values::ints_mut(target).copy_from_slice(&[owner as i32, slot as i32, header as i32]);
-        Gc::adopt(reference)
+        values::ints_mut(target.raw()).copy_from_slice(&[owner as i32, slot as i32, header as i32]);
     }
 }
 
