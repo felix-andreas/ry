@@ -14,8 +14,8 @@ use {
     crate::{
         Refusal,
         ir::{
-            Arith, BitCount, Bits, BlockId, Builder, Compare, Constant, Function, Inst, Item,
-            Local, Math, Op, Overflow, Reduce, StrTest, Terminator, Text, Type,
+            Arith, BitCount, Bits, Block, BlockId, Builder, Compare, Constant, Function, Inst,
+            Item, Local, Math, Op, Overflow, Reduce, StrTest, Terminator, Text, Type,
         },
         shapes, values,
     },
@@ -61,6 +61,164 @@ pub struct Lowered {
     pub any_tag: Option<AnyTag>,
     /// The tag shapes the code constructs, which the caller confirms before it generates code.
     pub constructed: SmallVec<[u32; 4]>,
+    /// Where the body reads each parameter, in the blocks of `function` ([`reads_before`]).
+    pub param_reads: Vec<ParamRead>,
+    /// The types of the defaults of the formals past the parameters, which the code computes
+    /// itself ([`Lowering::left_out_defaults`]).
+    pub defaults: SmallVec<[Type; 2]>,
+}
+
+/// A read of parameter `param` in block `block`, which held `position` instructions when
+/// lowering reached it, so the read comes before the instruction at that position. A read among
+/// the arguments of an R call names that call's [`Op::CallR`] site in `into`. A read among the
+/// arguments of a local function counts where the inlined body reads the formal, as R forces
+/// the argument there ([`Lowering::param_aliases`]).
+#[derive(Clone, Copy, Debug)]
+pub struct ParamRead {
+    pub block: BlockId,
+    pub position: u32,
+    pub param: u32,
+    pub into: Option<usize>,
+}
+
+/// Which parameters, as bits by position among the first 64, the body has read where it may run
+/// R code. R forces an argument where the body first reads it, so an R call the body makes
+/// before that read could change what the argument computes, while the native entry has read it
+/// ahead.
+#[derive(Debug, Default)]
+pub struct ReadsBefore {
+    /// The parameters every path reads before the first instruction that may run R code.
+    pub first: u64,
+    /// The parameters that some path reads, and some path does not, before an instruction that may
+    /// run R code, so whether R has forced the argument there depends on the path.
+    pub ambiguous: u64,
+    /// The parameters every path reads before each [`Op::CallR`], by site.
+    pub sites: Vec<(usize, u64)>,
+    /// The parameters the code passes among the arguments of an R call that may run R code on
+    /// some path without having read them first, so R would force them inside that call.
+    pub passed_late: u64,
+    /// The parameters some path reads before it returns, outside the arguments of R calls.
+    pub returned: u64,
+}
+
+/// [`ReadsBefore`] for `lowered`, where `runs_r` says which instructions may run R code. A read
+/// among the arguments of a site that runs R counts at no point, since R forces it somewhere
+/// inside the call.
+pub fn reads_before(lowered: &Lowered, runs_r: impl Fn(&Op) -> bool) -> ReadsBefore {
+    let blocks = &lowered.function.blocks;
+    let mut acting = vec![false; lowered.r_calls.len()];
+    for inst in blocks.iter().flat_map(|block| &block.insts) {
+        if let Op::CallR(site, _) = inst.op
+            && let Some(slot) = acting.get_mut(site)
+        {
+            *slot = runs_r(&inst.op);
+        }
+    }
+    let mut passed = vec![0u64; lowered.r_calls.len()];
+    // Each block's reads by position.
+    let mut reads: Vec<SmallVec<[(u32, u64); 2]>> = vec![SmallVec::new(); blocks.len()];
+    for read in &lowered.param_reads {
+        let bit = if read.param < 64 { 1 << read.param } else { 0 };
+        if let Some(site) = read.into
+            && acting.get(site).is_none_or(|&acting| acting)
+        {
+            match passed.get_mut(site) {
+                Some(slot) => *slot |= bit,
+                None => return ReadsBefore::unknown(),
+            }
+        } else if let Some(list) = reads.get_mut(read.block.0 as usize) {
+            list.push((read.position, bit));
+        }
+    }
+    for list in &mut reads {
+        list.sort_unstable_by_key(|&(position, _)| position);
+    }
+    // What every path into a block has read, and what some path has.
+    let every = entering(blocks, &reads, u64::MAX, |a, b| a & b);
+    let some = entering(blocks, &reads, 0, |a, b| a | b);
+    let mut before = ReadsBefore {
+        first: u64::MAX,
+        ..ReadsBefore::default()
+    };
+    for (index, block) in blocks.iter().enumerate() {
+        let (mut all, mut any) = (every[index], some[index]);
+        let mut events = reads[index].iter().peekable();
+        for (position, inst) in block.insts.iter().enumerate() {
+            while let Some(&&(at, bit)) = events.peek()
+                && at as usize <= position
+            {
+                all |= bit;
+                any |= bit;
+                events.next();
+            }
+            if let Op::CallR(site, _) = inst.op {
+                match before.sites.iter_mut().find(|(known, _)| *known == site) {
+                    Some((_, read)) => *read &= all,
+                    None => before.sites.push((site, all)),
+                }
+                before.passed_late |= passed.get(site).copied().unwrap_or(u64::MAX) & !all;
+            }
+            if runs_r(&inst.op) {
+                before.first &= all;
+                before.ambiguous |= any & !all;
+            }
+        }
+        for &(at, bit) in events {
+            debug_assert!(at as usize >= block.insts.len());
+            any |= bit;
+        }
+        if let Terminator::Return(_) = block.terminator {
+            before.returned |= any;
+        }
+    }
+    before
+}
+
+impl ReadsBefore {
+    /// What a lowering whose reads name sites it does not have reads: nothing settles, every
+    /// parameter is late and ambiguous, and every one counts as returned.
+    fn unknown() -> ReadsBefore {
+        ReadsBefore {
+            first: 0,
+            ambiguous: u64::MAX,
+            sites: Vec::new(),
+            passed_late: u64::MAX,
+            returned: u64::MAX,
+        }
+    }
+}
+
+/// What the paths into each block of `blocks` have read, joined by `join` from `start`, the value
+/// a block no path has reached yet holds. The entry starts with nothing read.
+fn entering(
+    blocks: &[Block],
+    reads: &[SmallVec<[(u32, u64); 2]>],
+    start: u64,
+    join: impl Fn(u64, u64) -> u64,
+) -> Vec<u64> {
+    let mut entering = vec![start; blocks.len()];
+    if let Some(entry) = entering.first_mut() {
+        *entry = 0;
+    }
+    loop {
+        let mut changed = false;
+        for (index, block) in blocks.iter().enumerate() {
+            let read = reads[index]
+                .iter()
+                .fold(entering[index], |bits, &(_, bit)| bits | bit);
+            for successor in block.terminator.successors() {
+                if let Some(slot) = entering.get_mut(successor.0 as usize)
+                    && join(*slot, read) != *slot
+                {
+                    *slot = join(*slot, read);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return entering;
+        }
+    }
 }
 
 /// What the matches over any tag in one lowering relied on. Each tests for the confirmed shapes
@@ -100,6 +258,9 @@ pub struct RCall {
     /// up after one may run again in the interpreter, no lazy argument can observe it, and it
     /// may stand inside another call's arguments.
     pub effect_free: bool,
+    /// The parameters, as bits by position, that every path through the code reads before this
+    /// call ([`reads_before`]), which the native entry settles before the call.
+    pub read_before: u64,
 }
 
 /// What compiled code does with the value of an [`RCall`].
@@ -212,11 +373,39 @@ pub fn awaited() -> Option<Awaited> {
     AWAITED.get()
 }
 
+/// Whether the definition `formals`/`body` may carry a signature, as
+/// `interp::annotations::is_typed` tests a closure's.
+unsafe fn typed_definition(formals: Sexp, body: Sexp) -> bool {
+    let key = if formals.kind() == SexpType::Pairlist {
+        formals
+    } else {
+        body
+    };
+    key.has_gp(heap::object::gp::TYPED_DEFINITION)
+}
+
 /// The index [`Op::CallTyped`] uses for the function calling itself.
 pub const SELF: usize = usize::MAX;
 
 /// How deeply local functions inline into each other.
 const MAX_INLINE_DEPTH: usize = 8;
+
+/// Base R closures that force every argument they are passed before they run R code a caller
+/// could have written: they format, print or report what they are given and call no function
+/// it names. A ry value crosses to R without a class, so `print` and `format` reach base methods.
+const FORCING_BASE_FUNCTIONS: [&str; 11] = [
+    "cat",
+    "format",
+    "message",
+    "paste",
+    "paste0",
+    "print",
+    "sprintf",
+    "stop",
+    "toString",
+    "warning",
+    "writeLines",
+];
 
 /// How many variables and walks a function's lowering widens to more tags before it gives up.
 const MAX_WIDENINGS: usize = 8;
@@ -298,9 +487,9 @@ unsafe fn lower_calling(
     returned: &mut Option<Type>,
 ) -> Result<Lowered, Refusal> {
     let formals = rvalues::pairlist_items(closure.car());
-    if formals.len() != params.len() {
+    if formals.len() < params.len() {
         return Err(Refusal::new(
-            "the call does not supply every formal positionally",
+            "the call passes more arguments than the function takes",
         ));
     }
     let body = interp::bytecode::closure_body(closure);
@@ -351,6 +540,11 @@ unsafe fn lower_calling(
         declared_loops: Vec::new(),
         probing: 0,
         captures: Vec::new(),
+        param_variables: SmallVec::new(),
+        param_aliases: Vec::new(),
+        formal_reads: SmallVec::new(),
+        reassigned: Vec::new(),
+        param_reads: Vec::new(),
     };
     tail_matches(body, &mut lowering.tails);
     let mut assigned = Vec::new();
@@ -358,6 +552,10 @@ unsafe fn lower_calling(
     for (index, &(symbol, _)) in formals.iter().enumerate() {
         if symbol == rvalues::symbols().dots {
             return Err(Refusal::new("a function with `...`"));
+        }
+        if index >= params.len() {
+            lowering.bind(symbol, Binding::Hidden);
+            continue;
         }
         let param = Local(index as u32);
         let variable = if assigned.contains(&symbol) {
@@ -367,8 +565,14 @@ unsafe fn lower_calling(
         } else {
             param
         };
+        lowering.param_variables.push(variable);
         lowering.bind(symbol, Binding::Value(variable));
     }
+    let defaults = if params.len() < formals.len() {
+        lowering.left_out_defaults(&formals, &assigned)?
+    } else {
+        SmallVec::new()
+    };
     let value = match lowering.expression(body) {
         Ok(value) => value,
         Err(why) => {
@@ -405,6 +609,8 @@ unsafe fn lower_calling(
         r_calls: lowering.r_calls,
         any_tag: lowering.any_tag,
         constructed: lowering.constructed,
+        param_reads: lowering.param_reads,
+        defaults,
     })
 }
 
@@ -491,7 +697,42 @@ struct Inlined {
     exit: BlockId,
     returns_i64: bool,
     early: SmallVec<[(BlockId, Local); 2]>,
+    /// Whether the function is annotated, which makes its calls of annotated functions strict
+    /// ([`Lowering::attribute_reads`]).
+    typed: bool,
 }
+
+/// The parameter reads computing one argument of a local function made: those of
+/// [`Lowering::param_reads`] from `start` to `end`, lowered from block `entry` to block `exit`
+/// through the blocks from `first_block` on.
+#[derive(Clone, Copy)]
+struct ArgumentReads {
+    start: usize,
+    end: usize,
+    entry: BlockId,
+    exit: BlockId,
+    first_block: u32,
+    /// Whether R computes the argument where the callee reads it even under a strict call,
+    /// which holds for a default.
+    lazy: bool,
+}
+
+/// Where an argument's paths go: [`Lowering::argument_paths`].
+struct ArgumentPaths {
+    reaches_exit: bool,
+    /// Some path leaves the argument other than through its exit: a `return`, or a `break` or
+    /// `next` of a loop outside it.
+    escapes: bool,
+}
+
+const NO_ARGUMENT_READS: ArgumentReads = ArgumentReads {
+    start: 0,
+    end: 0,
+    entry: BlockId(0),
+    exit: BlockId(0),
+    first_block: 0,
+    lazy: true,
+};
 
 /// What a `match`'s value must be, which decides how [`Lowering::switch_shapes`] treats arms
 /// whose types disagree.
@@ -526,6 +767,8 @@ struct Checkpoint {
     blocks: usize,
     self_inlines: usize,
     pending: Vec<SmallVec<[Local; 4]>>,
+    param_reads: usize,
+    reassigned: usize,
 }
 
 struct Lowering<'c> {
@@ -612,6 +855,20 @@ struct Lowering<'c> {
     probing: usize,
     /// The names each captured function sees ([`Callable::Captured`]).
     captures: Vec<FxHashMap<Sexp, Binding>>,
+    /// The variable each parameter is bound to, by position.
+    param_variables: SmallVec<[Local; 4]>,
+    /// The formals of inlined local functions whose arguments read parameters, with those
+    /// parameters: R forces an argument where the body first reads the formal, so each read of
+    /// the formal counts as a read of them ([`Lowering::attribute_reads`]).
+    param_aliases: Vec<(Local, SmallVec<[u32; 2]>)>,
+    /// The parameters the arguments of the local function about to inline read, by formal,
+    /// which [`Lowering::inline`] gives the formals' variables as aliases.
+    formal_reads: SmallVec<[SmallVec<[u32; 2]>; 4]>,
+    /// The variables of parameters and aliases assigned outside any branch or loop, whose later
+    /// reads read the assigned value and force no argument.
+    reassigned: Vec<Local>,
+    /// Where the body reads a parameter by name ([`reads_before`]).
+    param_reads: Vec<ParamRead>,
 }
 
 /// A name a loop declares before it ([`Lowering::looped`]): its symbol, its type, and whether
@@ -1038,9 +1295,184 @@ impl Lowering<'_> {
             .emit(Type::Str, Op::Const(Constant::Str(words.lo, words.hi)))
     }
 
+    /// The parameters a read of `local` forces: its own if it is a parameter's variable, or those
+    /// its argument read if it is the formal of an inlined local function.
+    fn forced_by(&self, local: Local) -> SmallVec<[u32; 2]> {
+        if self.reassigned.contains(&local) {
+            return SmallVec::new();
+        }
+        match self
+            .param_variables
+            .iter()
+            .position(|&variable| variable == local)
+        {
+            Some(param) => SmallVec::from_slice(&[param as u32]),
+            None => self
+                .param_aliases
+                .iter()
+                .find(|(alias, _)| *alias == local)
+                .map(|(_, params)| params.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Takes the parameter reads made computing the arguments `values` of a local function out
+    /// of [`Lowering::param_reads`], into [`Lowering::formal_reads`] by formal, where `spans`
+    /// gives the reads of each argument. R forces an argument where the function first reads its
+    /// formal, so they count there. A `strict` call, of an annotated function from annotated
+    /// code, forces its arguments at the call as the interpreter does, except a lazy one
+    /// ([`ArgumentReads::lazy`]). A read passed into an R call stays, as native code makes that
+    /// call at the call of the function (earlier than R), and so do the reads of a passed
+    /// function. Moving reads made on some paths only would count them on every path, so an
+    /// argument with such reads declines.
+    fn attribute_reads(
+        &mut self,
+        values: &[Argument],
+        spans: &[ArgumentReads],
+        strict: bool,
+    ) -> Result<(), Refusal> {
+        let mut moved: SmallVec<[usize; 8]> = SmallVec::new();
+        let mut formal_reads = SmallVec::new();
+        for (value, span) in values.iter().zip(spans) {
+            let mut params: SmallVec<[u32; 2]> = SmallVec::new();
+            if let Argument::Value(_) = value
+                && (span.lazy || !strict)
+            {
+                if self.argument_paths(span, &[]).escapes {
+                    return Err(Refusal::new(
+                        "an argument of a local function leaves through `return`, `break` or \
+                         `next`, which R runs where the function reads the argument: compute the \
+                         argument into a variable first",
+                    ));
+                }
+                let reads = self.param_reads.get(span.start..span.end).unwrap_or(&[]);
+                let mut everywhere: SmallVec<[u32; 2]> = SmallVec::new();
+                let mut checked: SmallVec<[u32; 2]> = SmallVec::new();
+                for read in reads {
+                    if read.into.is_some() || checked.contains(&read.param) {
+                        continue;
+                    }
+                    checked.push(read.param);
+                    let blocks: SmallVec<[BlockId; 4]> = reads
+                        .iter()
+                        .filter(|other| other.into.is_none() && other.param == read.param)
+                        .map(|other| other.block)
+                        .collect();
+                    if blocks.contains(&span.entry)
+                        || blocks.contains(&span.exit)
+                        || !self.argument_paths(span, &blocks).reaches_exit
+                    {
+                        everywhere.push(read.param);
+                    }
+                }
+                let everywhere = |param: u32| everywhere.contains(&param);
+                for index in span.start..span.end {
+                    if let Some(read) = self.param_reads.get(index)
+                        && read.into.is_none()
+                    {
+                        if !everywhere(read.param) {
+                            return Err(Refusal::new(
+                                "it reads a parameter on some paths of an argument of a local \
+                                 function, which R computes where the function reads it: compute \
+                                 the argument into a variable first",
+                            ));
+                        }
+                        if !params.contains(&read.param) {
+                            params.push(read.param);
+                        }
+                        moved.push(index);
+                    }
+                }
+            }
+            formal_reads.push(params);
+        }
+        self.formal_reads = formal_reads;
+        moved.sort_unstable();
+        moved.dedup();
+        let mut index = 0;
+        self.param_reads.retain(|_| {
+            index += 1;
+            moved.binary_search(&(index - 1)).is_err()
+        });
+        Ok(())
+    }
+
+    /// Where the paths of the argument `span` that run none of `avoid` go from its entry.
+    fn argument_paths(&self, span: &ArgumentReads, avoid: &[BlockId]) -> ArgumentPaths {
+        let blocks = &self.builder.function.blocks;
+        let mut paths = ArgumentPaths {
+            reaches_exit: false,
+            escapes: false,
+        };
+        let mut seen = vec![0u64; blocks.len().div_ceil(64)];
+        let mut stack: SmallVec<[BlockId; 8]> = SmallVec::from_slice(&[span.entry]);
+        while let Some(id) = stack.pop() {
+            let index = id.0 as usize;
+            if id == span.exit {
+                paths.reaches_exit = true;
+                continue;
+            }
+            if id != span.entry && id.0 < span.first_block {
+                paths.escapes = true;
+                continue;
+            }
+            if avoid.contains(&id) || seen[index / 64] & (1 << (index % 64)) != 0 {
+                continue;
+            }
+            seen[index / 64] |= 1 << (index % 64);
+            if let Some(block) = blocks.get(index) {
+                if let Terminator::Return(_) = block.terminator {
+                    paths.escapes = true;
+                }
+                stack.extend(block.terminator.successors());
+            }
+        }
+        paths
+    }
+
+    /// Where lowering stands before an argument of a local function, which
+    /// [`Lowering::argument_reads`] completes.
+    fn argument_start(&self) -> ArgumentReads {
+        ArgumentReads {
+            start: self.param_reads.len(),
+            end: self.param_reads.len(),
+            entry: self.builder.current,
+            exit: self.builder.current,
+            first_block: self.builder.function.blocks.len() as u32,
+            lazy: false,
+        }
+    }
+
+    /// The reads of the argument lowered since `start`.
+    fn argument_reads(&self, start: ArgumentReads, lazy: bool) -> ArgumentReads {
+        ArgumentReads {
+            end: self.param_reads.len(),
+            exit: self.builder.current,
+            lazy,
+            ..start
+        }
+    }
+
     unsafe fn read(&mut self, symbol: Sexp) -> Result<Local, Refusal> {
         match self.lookup(symbol) {
-            Some(Binding::Value(local)) => Ok(local),
+            Some(Binding::Value(local)) => {
+                let block = self.builder.current;
+                let position = self
+                    .builder
+                    .function
+                    .blocks
+                    .get(block.0 as usize)
+                    .map_or(0, |block| block.insts.len());
+                for param in self.forced_by(local) {
+                    self.param_reads.push(ParamRead {
+                        block,
+                        position: position as u32,
+                        param,
+                        into: None,
+                    });
+                }
+                Ok(local)
+            }
             Some(Binding::Maybe(local)) => {
                 // Where the name is unset, R reads it from the enclosing environment or fails,
                 // which the interpreter does when the call gives up.
@@ -1180,6 +1612,9 @@ impl Lowering<'_> {
                 }
                 if variable != value {
                     self.builder.push(Some(variable), Op::Copy(value));
+                }
+                if self.control == 0 && !self.forced_by(variable).is_empty() {
+                    self.reassigned.push(variable);
                 }
                 self.bind(symbol, Binding::Value(variable));
                 Ok(variable)
@@ -1614,14 +2049,18 @@ impl Lowering<'_> {
         }
         if let Some(Binding::Function(callable)) = self.lookup(head) {
             let arguments = Arguments::of(call);
+            let mut spans = SmallVec::new();
             let values = match callable {
                 Callable::Inline(formals, body, scope) => {
                     let frame = Frame::Local(scope + 1, body);
-                    self.matched_arguments(formals, &arguments, frame)?
+                    self.matched_arguments(formals, &arguments, frame, &mut spans)?
                 }
-                Callable::Typed(_, function) => {
-                    self.matched_arguments(function.car(), &arguments, Frame::Typed(function))?
-                }
+                Callable::Typed(_, function) => self.matched_arguments(
+                    function.car(),
+                    &arguments,
+                    Frame::Typed(function),
+                    &mut spans,
+                )?,
                 Callable::Captured(..) | Callable::Library(_)
                     if arguments.items.iter().any(|(tag, _)| tag.is_some()) =>
                 {
@@ -1630,9 +2069,16 @@ impl Lowering<'_> {
                     ));
                 }
                 Callable::Captured(..) | Callable::Library(_) => {
-                    self.passed_arguments(&arguments)?
+                    self.passed_arguments(&arguments, &mut spans)?
                 }
             };
+            if let Callable::Inline(formals, body, _) | Callable::Captured(formals, body, _) =
+                callable
+            {
+                let strict = self.inlined.last().is_none_or(|inlined| inlined.typed)
+                    && typed_definition(formals, body);
+                self.attribute_reads(&values, &spans, strict)?;
+            }
             return self.apply_arguments(callable, &values);
         }
         match self.lookup(head) {
@@ -1661,8 +2107,12 @@ impl Lowering<'_> {
         if function.kind() == SexpType::Closure && interp::annotations::is_typed(function) {
             self.speculations.push(speculation);
             let arguments = Arguments::of(call);
-            let values =
-                self.matched_arguments(function.car(), &arguments, Frame::Typed(function))?;
+            let values = self.matched_arguments(
+                function.car(),
+                &arguments,
+                Frame::Typed(function),
+                &mut SmallVec::new(),
+            )?;
             return self.typed_function(head, function, &values);
         }
         if let Some(r_use) = r_use {
@@ -1687,6 +2137,7 @@ impl Lowering<'_> {
         let result = r_result(r_use)?;
         let table = matches!(r_use, RUse::Table);
         let calls = self.r_calls.len();
+        let reads = self.param_reads.len();
         let mut arguments: SmallVec<[RArgument; 4]> = SmallVec::new();
         let mut values: SmallVec<[Local; 4]> = SmallVec::new();
         for (tag, code) in rvalues::pairlist_items(call.cdr()) {
@@ -1747,7 +2198,28 @@ impl Lowering<'_> {
                 name()
             ))));
         }
-        Ok(self.r_site(call, function, (r_use, result), table, arguments, values))
+        // A base builtin, or a base function that only formats or reports what it is passed,
+        // forces its arguments before it runs any R code of the caller's, which only a variable
+        // or a call passed as code could bring, so its arguments count as read at the call.
+        let forced_at_call = called_symbol(call.car()).is_some_and(|symbol| {
+            is_base_value(symbol, function)
+                && (function.kind() == SexpType::Builtin
+                    || FORCING_BASE_FUNCTIONS.contains(&&*rvalues::symbol_name(symbol)))
+        }) && arguments.iter().all(|argument| {
+            !matches!(argument.passed, Passed::Code)
+                || !matches!(
+                    argument.code.kind(),
+                    SexpType::Language | SexpType::Symbol | SexpType::Promise
+                )
+        });
+        let local = self.r_site(call, function, (r_use, result), table, arguments, values);
+        if !forced_at_call {
+            let site = self.r_calls.len() - 1;
+            for read in self.param_reads.iter_mut().skip(reads) {
+                read.into = Some(site);
+            }
+        }
+        Ok(local)
     }
 
     /// Whether the argument `code` of an R call passes as code for R to evaluate: a literal, or
@@ -1865,6 +2337,7 @@ impl Lowering<'_> {
             result,
             diverges: matches!(r_use, RUse::Diverges),
             effect_free,
+            read_before: 0,
         });
         let site = self.r_calls.len() - 1;
         match result {
@@ -2080,14 +2553,17 @@ impl Lowering<'_> {
     unsafe fn passed_arguments(
         &mut self,
         arguments: &Arguments,
+        spans: &mut SmallVec<[ArgumentReads; 4]>,
     ) -> Result<SmallVec<[Argument; 4]>, Refusal> {
         let mut passed = SmallVec::new();
         for &(_, argument) in &arguments.items {
+            let start = self.argument_start();
             passed.push(if self.passes_function(argument) {
                 Argument::Function(self.function_argument(argument)?)
             } else {
                 Argument::Value(self.value(argument)?)
             });
+            spans.push(self.argument_reads(start, false));
         }
         Ok(passed)
     }
@@ -2095,28 +2571,35 @@ impl Lowering<'_> {
     /// The arguments of a call of a function with `formals`, one per formal in their order and
     /// matched as R matches them ([`match_formals`]), computed in the order they are written. A
     /// formal the call leaves out takes its default, lowered as the callee's `frame` computes it.
+    /// `spans` gets the parameter reads each argument made, by formal.
     unsafe fn matched_arguments(
         &mut self,
         formals: Sexp,
         arguments: &Arguments,
         frame: Frame,
+        spans: &mut SmallVec<[ArgumentReads; 4]>,
     ) -> Result<SmallVec<[Argument; 4]>, Refusal> {
         let formals = rvalues::pairlist_items(formals);
         let supplied = match_formals(&formals, &arguments.items)?;
-        let mut written: SmallVec<[Option<Argument>; 4]> = SmallVec::new();
+        let mut written: SmallVec<[(Option<Argument>, ArgumentReads); 4]> = SmallVec::new();
         for &(_, code) in &arguments.items {
-            written.push(if code == rvalues::missing_arg() {
+            let start = self.argument_start();
+            let argument = if code == rvalues::missing_arg() {
                 None
             } else if self.passes_function(code) {
                 Some(Argument::Function(self.function_argument(code)?))
             } else {
                 Some(Argument::Value(self.value(code)?))
-            });
+            };
+            written.push((argument, self.argument_reads(start, false)));
         }
-        let mut matched: SmallVec<[Option<Argument>; 4]> = supplied
-            .iter()
-            .map(|&item| item.and_then(|item| written[item]))
-            .collect();
+        let mut matched: SmallVec<[Option<Argument>; 4]> = SmallVec::new();
+        spans.clear();
+        for &item in &supplied {
+            let (argument, span) = item.map_or((None, NO_ARGUMENT_READS), |item| written[item]);
+            matched.push(argument);
+            spans.push(span);
+        }
         if matched.iter().any(Option::is_none) {
             // A typed callee's defaults read names of its own body and environment only.
             let (visible, body, env, closure) = match frame {
@@ -2149,7 +2632,7 @@ impl Lowering<'_> {
                 scope.names.insert(symbol, binding);
             }
             self.scopes.push(scope);
-            let defaults = self.defaults(&formals, &mut matched, body);
+            let defaults = self.defaults(&formals, &mut matched, spans, body);
             self.scopes.pop();
             self.scopes.extend(hidden);
             self.inlining = inlining;
@@ -2162,6 +2645,50 @@ impl Lowering<'_> {
         Ok(matched.into_iter().flatten().collect())
     }
 
+    /// Binds the formals past the parameters, which a call from R code leaves out, to their
+    /// defaults. R computes a default where the body first reads its formal, so the parameters
+    /// a default reads count as read there (`Lowering::param_aliases`), as an untyped local
+    /// function's argument does.
+    unsafe fn left_out_defaults(
+        &mut self,
+        formals: &[(Sexp, Sexp)],
+        assigned: &[Sexp],
+    ) -> Result<SmallVec<[Type; 2]>, Refusal> {
+        let supplied = self.param_variables.len();
+        let mut matched: SmallVec<[Option<Argument>; 4]> = (0..formals.len())
+            .map(|index| {
+                self.param_variables
+                    .get(index)
+                    .map(|&variable| Argument::Value(variable))
+            })
+            .collect();
+        let mut spans: SmallVec<[ArgumentReads; 4]> =
+            (0..formals.len()).map(|_| NO_ARGUMENT_READS).collect();
+        self.defaults(formals, &mut matched, &mut spans, self.body)?;
+        let values: SmallVec<[Argument; 4]> =
+            matched[supplied..].iter().flatten().copied().collect();
+        self.attribute_reads(&values, &spans[supplied..], false)?;
+        let formal_reads = std::mem::take(&mut self.formal_reads);
+        let mut types = SmallVec::new();
+        for (offset, (&(symbol, _), value)) in formals[supplied..].iter().zip(&values).enumerate() {
+            let Argument::Value(value) = *value else {
+                return Err(Refusal::new("a default that is a function"));
+            };
+            let ty = self.builder.ty(value);
+            types.push(ty);
+            let variable = if assigned.contains(&symbol) {
+                self.builder.emit(ty, Op::Copy(value))
+            } else {
+                value
+            };
+            if let Some(reads) = formal_reads.get(offset).filter(|reads| !reads.is_empty()) {
+                self.param_aliases.push((variable, reads.clone()));
+            }
+            self.bind(symbol, Binding::Value(variable));
+        }
+        Ok(types)
+    }
+
     /// The defaults of the formals `matched` leaves out of a call of the function whose body is
     /// `body`. R computes a default when the body first reads it, and native code computes it at
     /// the call, so a default compiles only when that cannot change its value or what the call
@@ -2171,6 +2698,7 @@ impl Lowering<'_> {
         &mut self,
         formals: &[(Sexp, Sexp)],
         matched: &mut [Option<Argument>],
+        spans: &mut [ArgumentReads],
         body: Sexp,
     ) -> Result<(), Refusal> {
         loop {
@@ -2209,8 +2737,12 @@ impl Lowering<'_> {
                     name()
                 ))));
             }
+            let start = self.argument_start();
             let value = self.value(default)?;
             matched[index] = Some(Argument::Value(value));
+            if let Some(span) = spans.get_mut(index) {
+                *span = self.argument_reads(start, true);
+            }
             self.bind(symbol, Binding::Value(value));
         }
     }
@@ -2228,17 +2760,23 @@ impl Lowering<'_> {
             SexpType::Symbol => match self.lookup(code) {
                 Some(Binding::Value(_) | Binding::Maybe(_)) => !assigns(body, code),
                 Some(Binding::Function(_) | Binding::Hidden) => false,
-                None => std_binding(code, self.env).is_some_and(|value| {
-                    !matches!(
-                        value.kind(),
-                        SexpType::Closure | SexpType::Builtin | SexpType::Special
-                    )
-                }),
+                None => {
+                    !assigns(body, code)
+                        && std_binding(code, self.env).is_some_and(|value| {
+                            !matches!(
+                                value.kind(),
+                                SexpType::Closure | SexpType::Builtin | SexpType::Special
+                            )
+                        })
+                }
             },
+            // The body's own definitions are not in scope at the call, so a head it binds
+            // (`` `+` <- ``, `Num.abs <- `) would call another function where R reads the default.
             SexpType::Language => {
                 let head = code.car();
                 head.kind() == SexpType::Symbol
                     && self.lookup(head).is_none()
+                    && !assigns(body, head)
                     && (is_ahead_operator(&rvalues::symbol_name(head))
                         || std_binding(head, self.env).is_some())
                     && rvalues::pairlist_items(code.cdr())
@@ -3157,6 +3695,7 @@ impl Lowering<'_> {
         arguments: &[Argument],
         storage: fn(Type) -> Option<(SexpType, bool)>,
     ) -> Result<Option<Local>, Refusal> {
+        let formal_reads = std::mem::take(&mut self.formal_reads);
         if self.inlined.len() >= MAX_INLINE_DEPTH {
             return Err(Refusal::new("local functions inline too deeply"));
         }
@@ -3184,7 +3723,7 @@ impl Lowering<'_> {
         }
         let arguments = &converted[..];
         let mut scope = self.new_scope();
-        for (&(symbol, _), &argument) in formals.iter().zip(arguments) {
+        for (index, (&(symbol, _), &argument)) in formals.iter().zip(arguments).enumerate() {
             if symbol == rvalues::symbols().dots {
                 return Err(Refusal::new("a local function with `...`"));
             }
@@ -3200,6 +3739,11 @@ impl Lowering<'_> {
             let ty = self.widened_type(symbol, self.builder.ty(argument));
             let variable = self.builder.local(ty);
             self.builder.push(Some(variable), Op::Copy(argument));
+            if let Some(params) = formal_reads.get(index)
+                && !params.is_empty()
+            {
+                self.param_aliases.push((variable, params.clone()));
+            }
             scope.names.insert(symbol, Binding::Value(variable));
         }
         // The body sees the names of the scope that defines the function, as R's lexical scoping
@@ -3217,6 +3761,7 @@ impl Lowering<'_> {
             exit,
             returns_i64,
             early: SmallVec::new(),
+            typed: typed_definition(definition, body),
         });
         let value = match self.expression(body) {
             Ok(Some(value)) => self.usable(value).and_then(|()| {
@@ -4872,14 +5417,27 @@ impl Lowering<'_> {
                 };
                 // The interpreter computes the default after the vector, and compiled code before
                 // it, which agree while the default calls no R function.
+                let default_reads = self.param_reads.len();
                 let default = match default {
                     Some(code) => {
                         let calls = self.r_calls.len();
+                        let blocks = self.builder.function.blocks.len();
                         let value = self.value(code)?;
                         if self.r_calls.len() != calls {
                             return Err(Refusal::new(
                                 "it calls R in the default of `List.from_r_or`, which R computes \
                                  after the vector: compute the default into a variable first",
+                            ));
+                        }
+                        // The reads move to where R computes the default, which keeps their
+                        // paths only for a default without branches.
+                        if self.builder.function.blocks.len() != blocks
+                            && self.param_reads.len() != default_reads
+                        {
+                            return Err(Refusal::new(
+                                "it reads a parameter on some paths of the default of \
+                                 `List.from_r_or`, which R computes after the vector: compute the \
+                                 default into a variable first",
                             ));
                         }
                         Some(value)
@@ -4895,10 +5453,28 @@ impl Lowering<'_> {
                     },
                     default,
                 ));
+                let default_end = self.param_reads.len();
                 let value = self.value(inner);
                 self.r_use = None;
                 let value = value?;
                 if self.converted.take() == Some(value) {
+                    // The default's reads come after the R call, where R computes it.
+                    let block = self.builder.current;
+                    let position = self
+                        .builder
+                        .function
+                        .blocks
+                        .get(block.0 as usize)
+                        .map_or(0, |block| block.insts.len());
+                    for read in self
+                        .param_reads
+                        .iter_mut()
+                        .take(default_end)
+                        .skip(default_reads)
+                    {
+                        read.block = block;
+                        read.position = position as u32;
+                    }
                     return Ok(value);
                 }
                 // A conversion of a value that already has the type it gives is that value.
@@ -7524,6 +8100,8 @@ impl Lowering<'_> {
             blocks: self.builder.function.blocks.len(),
             self_inlines: self.self_inlines,
             pending: self.pending.clone(),
+            param_reads: self.param_reads.len(),
+            reassigned: self.reassigned.len(),
         }
     }
 
@@ -7567,6 +8145,8 @@ impl Lowering<'_> {
         self.constructed.truncate(checkpoint.constructed);
         self.r_calls.truncate(checkpoint.r_calls);
         self.self_inlines = checkpoint.self_inlines;
+        self.param_reads.truncate(checkpoint.param_reads);
+        self.reassigned.truncate(checkpoint.reassigned);
         // A list the forgotten code settled is pending again, with its placeholder item type.
         for family in &checkpoint.pending {
             let settled = family
@@ -11074,7 +11654,7 @@ thread_local! {
 /// For each of `formals`, the index of the argument among `items` that supplies it, matched as R
 /// matches a call: by exact name, then by a prefix that fits one formal only, then the unnamed
 /// arguments in order. A call R would reject, and a function with `...`, refuse.
-unsafe fn match_formals(
+pub unsafe fn match_formals(
     formals: &[(Sexp, Sexp)],
     items: &[(Option<String>, Sexp)],
 ) -> Result<SmallVec<[Option<usize>; 4]>, Refusal> {

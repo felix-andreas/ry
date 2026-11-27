@@ -480,15 +480,18 @@ ry has its own data types, which a checker can follow completely where R's lists
 defeat it. They run only on ry's runtime:
 
 ```r
-point <- (x = 1, y = 2)       # Record{x: double, y: double}
-pair <- (1L, "a")             # Tuple{integer, character}
+point <- (x = 1, y = 2)       # Record{x: I64, y: I64}
+pair <- (1L, "a")             # Tuple{I64, Str}
 one <- (x = 1,)               # a one-field record needs the trailing comma
 point$x + point$y
 ```
 
 ```text ry run runtime=ry exact
-[1] 3
+3i64
 ```
+
+In a file written with ry syntax, a literal bound outside any function is a ry value, so `x = 1` is
+an `I64`, and `x = 1.0` would be an `F64`.
 
 A record's fields are fixed and checked, and it has value semantics: `point$x <- 3` changes a copy
 only `point` sees. A *tag* is a name starting with `:`, with an optional payload, and a union of
