@@ -1323,7 +1323,7 @@ picked: fn(sales: DataFrame{units: integer[], price: double[]}, wide: Bool) -> D
 helped: fn(sales: DataFrame{units: integer[], price: double[]}) -> DataFrame
 46..52 warning[unused] `picked` is assigned but never used
 232..238 warning[unused] `helped` is assigned but never used
-171..223 warning[interpreted] this function runs in the interpreter, because an operator applied directly to a table expression that a local function, a function whose result type is an alias, an `if` or a `match` gives is not compiled natively yet. Assign the expression to a variable first, and apply the operator to the variable
+171..223 warning[interpreted] this function runs in the interpreter, because an operator applied directly to a table expression that a local function, a function whose result type is an alias of an open or generic type, an `if` or a `match` gives is not compiled natively yet. Assign the expression to a variable first, and apply the operator to the variable
 
 #---- signature_written_on_the_name
 #~~~~ script.R
@@ -1375,8 +1375,6 @@ in_a_comment: Pick
 on_the_name: Pick
 52..64 warning[unused] `in_a_comment` is assigned but never used
 85..96 warning[unused] `on_the_name` is assigned but never used
-77..81 warning[interpreted] this function runs in the interpreter, because a function whose signature is a type alias is not compiled natively yet: the runtime reads the types where they are written, and an alias only names them. Write the function type out in place of the alias, as in `fn(x: I64) -> I64`, or write the types on the parameters
-115..119 warning[interpreted] this function runs in the interpreter, because a function whose signature is a type alias is not compiled natively yet: the runtime reads the types where they are written, and an alias only names them. Write the function type out in place of the alias, as in `fn(x: I64) -> I64`, or write the types on the parameters
 
 #---- signature_alias_is_blamed_only_when_an_alias_is_the_cause
 #~~~~ script.R
@@ -1716,7 +1714,6 @@ direct: fn(sales: Sales) -> DataFrame
 through_a_variable: fn(sales: Sales) -> DataFrame
 129..135 warning[unused] `direct` is assigned but never used
 226..244 warning[unused] `through_a_variable` is assigned but never used
-203..217 warning[interpreted] this function runs in the interpreter, because an operator applied directly to a table expression that a local function, a function whose result type is an alias, an `if` or a `match` gives is not compiled natively yet. Assign the expression to a variable first, and apply the operator to the variable
 
 #---- a_nested_r_call_moves_into_a_variable_before_its_statement
 #~~~~ script.R

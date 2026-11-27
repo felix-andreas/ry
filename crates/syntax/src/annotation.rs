@@ -127,6 +127,37 @@ pub fn signature_from(
     }
 }
 
+/// The written type that declares the whole signature of `function` by a name rather than as a
+/// function type: `Step` in `f: Step <- function(n) n` or under a `#: Step` block. The runtime
+/// reads a signature only where it is written out, so the preflight spells this type out in
+/// place. `None` when the statement writes a function type, declares nothing, or coerces.
+pub fn named_signature(function: &SyntaxNode, inline: bool) -> Option<SyntaxNode> {
+    let statement = statement_of(function);
+    let block = attached_annotation(&statement);
+    let binding_type = statement
+        .children()
+        .find(|child| child.kind() == SyntaxKind::TYPE_ASCRIPTION)
+        .filter(|_| inline && statement != *function);
+    if binding_type.as_ref().is_some_and(has_coercion)
+        || block
+            .as_ref()
+            .is_some_and(|block| block_refusal(block).is_none() && has_coercion(block))
+    {
+        return None;
+    }
+    let written = match binding_type {
+        Some(ascription) => ascription.first_child()?,
+        None => {
+            let block = block?;
+            if block_refusal(&block).is_some() || !misplaced_directives(&block).is_empty() {
+                return None;
+            }
+            block.children().find(|child| is_type_kind(child.kind()))?
+        }
+    };
+    written_function_type(&written).is_none().then_some(written)
+}
+
 /// The statement a function literal's signature can be declared on: the assignment it is the
 /// value of, or else the literal itself.
 fn statement_of(function: &SyntaxNode) -> SyntaxNode {

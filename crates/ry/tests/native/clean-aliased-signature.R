@@ -1,7 +1,7 @@
-# blocked: aliased_in_a_comment, aliased_on_the_name
 # A signature runs natively wherever its types are written: on the parameters, in the `#:` comment
-# above the function, or on the name the function is assigned to. A type alias names a signature
-# without writing it, which the runtime does not read.
+# above the function, or on the name the function is assigned to. A type alias that names the
+# whole signature runs natively too, because the preflight writes the function type out in its
+# place.
 #: @alias Pick {fn(n: I64, m: I64) -> I64}
 
 #: Pick

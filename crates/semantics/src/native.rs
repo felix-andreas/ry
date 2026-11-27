@@ -13,7 +13,7 @@
 
 use {
     crate::{
-        Db, TypeDefinitions,
+        Db, TypeDefinitions, canonical_spelling,
         check::GlobalEnv,
         dense::{Bitset, Column},
         hir::{
@@ -408,7 +408,8 @@ impl Uncompiled {
             ),
             Uncompiled::TableOperand => format!(
                 "an operator applied directly to a table expression that a local function, a \
-                 function whose result type is an alias, an `if` or a `match` gives {YET}. \
+                 function whose result type is an alias of an open or generic type, an `if` or \
+                 a `match` gives {YET}. \
                  Assign the expression to a variable first, and apply the operator to the variable"
             ),
             Uncompiled::BranchOnlyName(name) => format!(
@@ -435,10 +436,10 @@ impl Uncompiled {
                 format!("a call of a computed function {YET}. Call a function by its name")
             }
             Uncompiled::AliasedSignature => format!(
-                "a function whose signature is a type alias {YET}: the runtime reads the types \
-                 where they are written, and an alias only names them. Write the function type \
-                 out in place of the alias, as in `fn(x: I64) -> I64`, or write the types on the \
-                 parameters"
+                "a function whose signature is a type alias that cannot be written out in full \
+                 {YET}: the runtime reads the types where they are written. Write the function \
+                 type out in place of the alias, as in `fn(x: I64) -> I64`, or write the types \
+                 on the parameters"
             ),
             Uncompiled::IfWithoutElse => format!(
                 "the value of an `if` without `else` {YET}: it is `NULL` when the condition is \
@@ -756,6 +757,15 @@ const TABLE_R_CALLS: [&str; 9] = [
 
 /// Whether `name` is a table function whose result is a table, a group or an expression, which
 /// native code holds as it holds any ry value.
+/// Whether `name` heads a table type, as `lower::returns_table` in `crates/typed` reads a
+/// written result type.
+fn is_table_type(name: &str) -> bool {
+    matches!(
+        name,
+        "Expr" | "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy"
+    )
+}
+
 pub fn gives_table_value(name: &str) -> bool {
     (name == "DataFrame"
         || name == "as.DataFrame"
@@ -1855,20 +1865,29 @@ impl<'a, 'db> Judge<'a, 'db> {
         let db = self.judged.db;
         let told = called.is_some_and(|callee| match self.callee(callee) {
             Callee::Table => true,
-            // The typed core reads the result type as it is written, so an alias of a table
-            // type tells it nothing.
+            // The typed core reads the result type as the preflight spells it, so an alias of a
+            // table type tells it something only when it has a canonical spelling.
             Callee::Native(name) => !self
                 .judged
                 .globals
                 .and_then(|globals| globals.scheme(name, true))
                 .is_some_and(|scheme| match scheme.body.kind(db) {
-                    TyKind::Function(function) => matches!(
-                        function.ret.kind(db),
-                        TyKind::Named(written, _) if !matches!(
-                            written.text(db),
-                            "Expr" | "DataFrame" | "LazyFrame" | "GroupBy" | "LazyGroupBy"
-                        )
-                    ),
+                    TyKind::Function(function) => match function.ret.kind(db) {
+                        TyKind::Named(written, _) if !is_table_type(written.text(db)) => !self
+                            .judged
+                            .definitions
+                            .and_then(|definitions| {
+                                canonical_spelling(db, definitions, function.ret)
+                            })
+                            .is_some_and(|text| {
+                                is_table_type(
+                                    text.split(|next: char| !next.is_alphanumeric())
+                                        .next()
+                                        .unwrap_or_default(),
+                                )
+                            }),
+                        _ => false,
+                    },
                     _ => false,
                 }),
             _ => false,

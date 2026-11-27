@@ -5,7 +5,7 @@ use {
     crate::{
         DataPath, Db, TypeDefinitions,
         annotations::{Annotation, Opaque},
-        data_file_layout,
+        canonical_spelling, data_file_layout,
         dense::{Bitset, Column},
         diagnostics::{STANDARD_MODULES, annotation_misuses_vocabulary, nearest_name},
         exhaustiveness::{MatchFinding, match_findings},
@@ -1422,7 +1422,13 @@ fn check_item_in<'db>(
             }
             match body.kind(db) {
                 TyKind::Function(function) if !has_r_bound(declared) => {
-                    Some((*function, through_alias && !annotation.written_signature))
+                    // The preflight spells a closed alias out where the runtime reads it.
+                    let aliased = through_alias
+                        && !annotation.written_signature
+                        && context.table.definitions.is_none_or(|definitions| {
+                            canonical_spelling(db, definitions, declared.body).is_none()
+                        });
+                    Some((*function, aliased))
                 }
                 _ => None,
             }
