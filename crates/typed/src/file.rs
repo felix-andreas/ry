@@ -1490,6 +1490,7 @@ impl Out {
                 self.number(u64::from(entry));
             }
             Type::Table => self.number(13),
+            Type::Absent => self.number(14),
         }
     }
 
@@ -1912,6 +1913,7 @@ impl In<'_> {
                 _ => return Err(MALFORMED),
             },
             13 => Type::Table,
+            14 => Type::Absent,
             _ => return Err(MALFORMED),
         })
     }
@@ -3679,7 +3681,7 @@ pub mod testing {
     }
 
     fn random_type(entropy: &mut impl Entropy, shapes: &[ShapeEntry]) -> Type {
-        match entropy.below(14) {
+        match entropy.below(15) {
             0 => Type::Int,
             1 => Type::Dbl,
             2 => Type::Lgl,
@@ -3705,6 +3707,7 @@ pub mod testing {
                 _ => Type::Tag(shapes::ANY),
             },
             13 => Type::Table,
+            14 => Type::Absent,
             _ => Type::I64,
         }
     }
