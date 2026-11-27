@@ -4129,6 +4129,35 @@ impl<'c, 's> LiveFrame<'c, 's> {
     }
 }
 
+/// A dispatch variable that a method's frame binds, such as `.Generic`.
+#[derive(Clone, Copy)]
+pub struct MethodVariable<'s> {
+    pub symbol: Local<'s, Symbol>,
+    pub value: Local<'s>,
+}
+
+/// The dispatch variables `variables`, symbols paired with their values, as handles of the
+/// caller's scope.
+///
+/// # Safety
+///
+/// Each first field is a symbol, and the caller holds every value until the scope ends.
+pub unsafe fn method_variables<'s>(
+    _context: &Cx<'s>,
+    variables: &[(Sexp, Sexp)],
+) -> SmallVec<[MethodVariable<'s>; 4]> {
+    variables
+        .iter()
+        // SAFETY: the caller's contract.
+        .map(|&(symbol, value)| unsafe {
+            MethodVariable {
+                symbol: Local::adopt(symbol),
+                value: Local::adopt(value),
+            }
+        })
+        .collect()
+}
+
 /// The live frame at position `index` of the frame stack, `None` past its top.
 #[inline]
 pub fn frame_if_live<'c, 's>(context: &'c Cx<'s>, index: usize) -> Option<LiveFrame<'c, 's>> {

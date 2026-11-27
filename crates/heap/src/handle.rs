@@ -131,6 +131,70 @@ impl<'s> Cx<'s> {
         }
     }
 
+    /// A new function frame (`gp::FUNCTION_FRAME`) enclosed by `enclosure` with room for
+    /// `bindings` cells, made without a collection check: it follows a [`Cx::reserve`] that
+    /// covers it. It takes `&self` because an allocation that cannot collect frees and moves
+    /// nothing.
+    #[inline]
+    pub fn new_function_frame_uncollected<'a>(
+        &'a self,
+        enclosure: impl Pointer<Environment>,
+        bindings: usize,
+    ) -> HeapResult<Gc<'a, Environment>> {
+        // SAFETY: the heap and the enclosure are live, the allocation collects nothing, and the
+        // new environment lives until the next safepoint, which `'a` ends before.
+        unsafe {
+            let environment =
+                (*self.heap.as_ptr()).alloc_environment_uncollected(enclosure.raw(), bindings)?;
+            environment.set_gp_bits(gp::FUNCTION_FRAME, true);
+            Ok(Gc::adopt(environment))
+        }
+    }
+
+    /// A new unforced promise of `code` in `environment`, made without a collection check: it
+    /// follows a [`Cx::reserve`] that covers it.
+    #[inline]
+    pub fn new_promise_uncollected<'a>(
+        &'a self,
+        code: impl Pointer<Value>,
+        environment: impl Pointer<Environment>,
+    ) -> HeapResult<Gc<'a, Promise>> {
+        // SAFETY: the heap, the code and the environment are live, the allocation collects
+        // nothing, and the promise lives until the next safepoint, which `'a` ends before.
+        unsafe {
+            let heap = &mut *self.heap.as_ptr();
+            let unbound = heap.known.unbound;
+            let promise = heap.alloc_triple_uncollected(
+                SexpType::Promise,
+                unbound,
+                code.raw(),
+                environment.raw(),
+            )?;
+            Ok(Gc::adopt(promise))
+        }
+    }
+
+    /// Binds the formals `bindings` in the new function frame `environment`, which binds
+    /// nothing yet, without a collection check ([`Heap::define_formals_uncollected`]), and
+    /// marks them as its formals, which its listing puts last.
+    pub fn define_formals_uncollected(
+        &self,
+        environment: impl Pointer<Environment>,
+        bindings: &[LocalBinding<'_>],
+    ) -> HeapResult<()> {
+        // SAFETY: as in `define_locals_uncollected`.
+        unsafe {
+            let formals = std::slice::from_raw_parts(
+                bindings.as_ptr().cast::<crate::Formal>(),
+                bindings.len(),
+            );
+            let heap = &mut *self.heap.as_ptr();
+            heap.define_formals_uncollected(environment.raw(), formals)?;
+            heap.mark_frame_formals(environment.raw());
+            Ok(())
+        }
+    }
+
     /// Binds `bindings`, none of which the function frame `environment` binds yet, without a
     /// collection check ([`Heap::define_locals_uncollected`]). It takes `&self` because the
     /// cells it makes cannot collect: the caller has reserved room or inhibited collection.

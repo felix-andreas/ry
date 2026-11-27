@@ -25,7 +25,7 @@ use {
         values::{self, alloc, length, missing_arg, nil, symbol_name, symbols, triple, unbound},
     },
     heap::{
-        ENVIRONMENT_BYTES, Formal, PendingAccess, TRIPLE_BYTES,
+        ENVIRONMENT_BYTES, PendingAccess, TRIPLE_BYTES,
         activity::{self, Activity, Counter},
         object::{NA_INTEGER, Sexp, SexpType, gp},
     },
@@ -3288,7 +3288,11 @@ unsafe fn try_native_typed(
     }
     // The native tier binds the arguments itself and may keep one, so it gets promises.
     detach_references(args)?;
-    force_typed_arguments(args)?;
+    // The caller holds the arguments, and the promises keep the values forcing gives them.
+    handles::in_caller_scope(|context| {
+        let args = handles::tagged(context, args);
+        force_typed_arguments(context, args)
+    })?;
     let Some(tier) = bytecode::tier() else {
         crate::annotations::log_interpreted_because(call, "no native tier is loaded");
         return Ok(None);
@@ -3309,14 +3313,15 @@ unsafe fn try_native_typed(
 /// function to another evaluates its arguments before the callee runs, as compiled typed code
 /// does, so the tiers agree on a typed program. An argument written in R code, including one a
 /// typed function receives through `...`, stays lazy.
-unsafe fn force_typed_arguments(args: &[Arg]) -> R<()> {
+fn force_typed_arguments(context: &mut Cx<'_>, args: &[Tagged<'_>]) -> R<()> {
     for arg in args {
-        let promise = arg.value;
-        if promise.kind() == SexpType::Promise
-            && promise.car() == unbound()
-            && written_in_typed_code(promise)
+        let Some(promise) = arg.value.downcast::<Promise>() else {
+            continue;
+        };
+        if handles::is_unbound(promise.read(context).result())
+            && written_in_typed_code(context, promise.read(context))
         {
-            force_promise(promise)?;
+            promise_value(context, promise)?;
         }
     }
     Ok(())
@@ -3325,23 +3330,26 @@ unsafe fn force_typed_arguments(args: &[Arg]) -> R<()> {
 /// Whether `promise`'s code is in the body of a typed function: its environment is the frame of
 /// a live call of one. A typed function never runs on slots, so a promise over a slot frame is
 /// R code's.
-unsafe fn written_in_typed_code(promise: Sexp) -> bool {
-    if promise.has_gp(gp::ARGUMENT_REFERENCE) {
+fn written_in_typed_code(context: &Cx<'_>, promise: Gc<'_, Promise>) -> bool {
+    if promise.has_flag(gp::ARGUMENT_REFERENCE) {
         return false;
     }
-    let env = promise.tag();
-    if env.has_gp(gp::SLOT_FRAME) {
+    let environment = promise.environment();
+    if environment.has_flag(gp::SLOT_FRAME) {
         return false;
     }
     interp()
         .frames
         .iter()
         .rev()
-        .find(|frame| frame.env.raw() == env)
+        .find(|frame| frame.env.get(context).is(environment))
         .is_some_and(|frame| {
             // `eval` and other builtins push frames too, whose function has no formals to read.
-            frame.function.raw().kind() == SexpType::Closure
-                && crate::annotations::is_typed(frame.function.raw())
+            frame
+                .function
+                .get(context)
+                .downcast::<Closure>()
+                .is_some_and(crate::annotations::typed_closure)
         })
 }
 
@@ -3431,71 +3439,142 @@ pub unsafe fn apply_closure_entering(
 }
 
 /// A fresh environment for a call of the closure `function`, with `args` matched to its formals
-/// and bound, and rooted.
+/// and bound, and rooted in the caller's handle scope.
 pub unsafe fn bind_arguments(
     call: Sexp,
     function: Sexp,
     args: &[Arg],
     supplied: Option<&[(Sexp, Sexp)]>,
 ) -> R<Sexp> {
+    // The caller holds the call, the closure, the arguments and the method variables until the
+    // call returns.
+    handles::in_caller_scope(|context| {
+        let call = handles::held(context, call);
+        let Some(function) = handles::held(context, function).downcast::<Closure>() else {
+            return Err(error(
+                "internal error: a closure call's function is not a closure",
+            ));
+        };
+        let args = handles::tagged(context, args);
+        let supplied = supplied.map(|supplied| handles::method_variables(context, supplied));
+        let arguments = match &supplied {
+            Some(supplied) => Arguments::Matched(supplied),
+            None => Arguments::Unsupplied,
+        };
+        Ok(bind_environment(context, call, function, args, arguments)?.raw())
+    })
+}
+
+/// How [`bind_environment`] takes a call's arguments.
+enum Arguments<'a, 's> {
+    /// Matched to the formals, by position when that is all they need.
+    Unsupplied,
+    /// Matched to the formals, with the method variables of a dispatched call bound after.
+    Matched(&'a [handles::MethodVariable<'s>]),
+    /// By position alone: argument `i` binds formal `i` ([`apply_closure_moved`]).
+    Positional,
+}
+
+/// A fresh environment for a call of `function` that binds `args` to its formals, rooted.
+fn bind_environment<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'_>,
+    function: Local<'_, Closure>,
+    args: &[Tagged<'s>],
+    arguments: Arguments<'_, 's>,
+) -> R<Local<'s, Environment>> {
     let _activity = activity::enter(Activity::CallSetup, 0);
-    let formals = function.car();
     // Most calls pass every argument by position to a function without `...`, which needs no
     // matching table: argument `i` binds formal `i`, and the formals past the last argument are
     // missing.
-    let actuals = if supplied.is_none() && positional(formals, args) {
-        None
+    let by_position = match arguments {
+        Arguments::Positional => true,
+        Arguments::Unsupplied => positional(function.read(context), args),
+        Arguments::Matched(_) => false,
+    };
+    let actuals: Matched<'s> = if by_position {
+        args.iter().map(|arg| arg.value).collect()
     } else {
         activity::count(Counter::FormalsMatchedByName);
-        // The `...` lists matching builds stay rooted in the caller's handle scope while the
-        // frame binds them.
-        let matched = handles::in_caller_scope(|context| {
-            let call = handles::held(context, call);
-            let Some(function) = handles::held(context, function).downcast::<Closure>() else {
-                return Err(error(
-                    "internal error: a closure call's function is not a closure",
-                ));
-            };
-            let args = handles::tagged(context, args);
-            let matched = match_args_cached(context, function, args, call)?;
-            Ok(matched
-                .iter()
-                .map(|value| value.raw())
-                .collect::<SmallVec<[Sexp; 8]>>())
-        })?;
-        Some(matched)
+        match_args_cached(context, function, args, call)?
     };
-    let env = new_function_frame(function, formals)?;
-    let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
-    let mut formal = formals;
+    let missing_value = handles::missing_argument();
+    let closure = function.read(context);
+    let mut count = 0;
+    let mut formal = closure.formals();
+    while let Some(cell) = formal.downcast::<Pairlist>() {
+        count += 1;
+        formal = cell.rest();
+    }
+    // One check covers the frame, a binding cell and a default promise per formal, so they are
+    // made without one. The function, the arguments and the matched values are rooted.
+    context.reserve(ENVIRONMENT_BYTES + 2 * TRIPLE_BYTES * count);
+    let context_ref: &Cx<'s> = context;
+    let closure = function.read(context_ref);
+    let environment = context_ref.new_function_frame_uncollected(closure.environment(), count)?;
+    let mut bindings: SmallVec<[LocalBinding<'_>; 12]> = SmallVec::new();
+    let mut formal = closure.formals();
     let mut index = 0;
-    while formal.kind() == SexpType::Pairlist {
-        let actual = match &actuals {
-            Some(actuals) => actuals.get(index).copied().unwrap_or(missing_arg()),
-            None => args.get(index).map_or(missing_arg(), |arg| arg.value),
+    while let Some(cell) = formal.downcast::<Pairlist>() {
+        let Some(symbol) = cell.tag().downcast::<Symbol>() else {
+            return Err(error("internal error: a formal has no name"));
         };
-        bindings.push(formal_binding(env, formal, actual)?);
-        formal = formal.cdr();
+        let actual = actuals.get(index).map_or(missing_value, |actual| *actual);
+        let default = cell.head();
+        let bound = if actual.is(missing_value) && !default.is(missing_value) {
+            // A literal default evaluates to itself, so it is bound as is: the promise would
+            // cost an allocation and a force on every call that omits it, for the same value.
+            let value = if is_literal(default) {
+                default
+            } else {
+                context_ref
+                    .new_promise_uncollected(default, environment)?
+                    .value()
+            };
+            LocalBinding {
+                symbol,
+                value,
+                missing: true,
+            }
+        } else {
+            LocalBinding {
+                symbol,
+                value: actual.read(context_ref),
+                missing: false,
+            }
+        };
+        bindings.push(bound);
+        formal = cell.rest();
         index += 1;
     }
-    let heap = crate::heap();
-    heap.define_formals_uncollected(env, &bindings)?;
-    heap.mark_frame_formals(env);
-    if let Some(supplied) = supplied {
-        for &(symbol, value) in supplied {
-            if heap.frame_cell(env, symbol).is_none() {
-                // A deferred `.GenericCallEnv` (see `method_variable`): this frame's caller is
-                // the slot frame the running byte code reads.
-                let value = if value == unbound() && symbol == symbols().dot_generic_call_env {
-                    slot_owner_env(Reify::Site(Site::MethodDispatch))?
-                } else {
-                    value
-                };
-                heap.define(env, symbol, value)?;
+    context_ref.define_formals_uncollected(environment, &bindings)?;
+    drop(bindings);
+    let environment = context_ref.root(environment);
+    if let Arguments::Matched(supplied) = arguments {
+        let generic_call_env = handles::symbol(|symbols| symbols.dot_generic_call_env);
+        for variable in supplied {
+            if context.own_binding(environment, variable.symbol).is_some() {
+                continue;
             }
+            // A deferred `.GenericCallEnv` (see `method_variable`): this frame's caller is the
+            // slot frame the running byte code reads.
+            let value =
+                if variable.value.is(handles::unbound()) && variable.symbol.is(generic_call_env) {
+                    let owner = interp().slot_owner;
+                    if owner == crate::NO_SLOTS {
+                        panic!(
+                            "byte code handed out a slot frame's environment outside any slot frame"
+                        );
+                    }
+                    frame_environment(context, owner as usize, Reify::Site(Site::MethodDispatch))?
+                        .value()
+                } else {
+                    variable.value
+                };
+            context.define(environment, variable.symbol, value)?;
         }
     }
-    Ok(env)
+    Ok(environment)
 }
 
 /// The frame a closure call runs in: an environment, or a slot frame
@@ -4562,20 +4641,6 @@ pub fn pending_env_of(header: usize) -> Sexp {
         .map_or(nil(), |index| frames[index].pending.raw())
 }
 
-/// A fresh, rooted function frame for a call of `function`, after one collection check that
-/// covers the frame, a binding cell and a default promise per formal, so the caller builds them
-/// with the `_uncollected` allocators. The caller keeps the arguments alive, and the formals'
-/// defaults are reachable from `function`.
-unsafe fn new_function_frame(function: Sexp, formals: Sexp) -> R<Sexp> {
-    let heap = crate::heap();
-    let count = values::length(formals);
-    heap.reserve(ENVIRONMENT_BYTES + 2 * TRIPLE_BYTES * count, &[function]);
-    let env = heap.alloc_environment_uncollected(function.tag(), count)?;
-    heap.root(env);
-    env.set_gp_bits(gp::FUNCTION_FRAME, true);
-    Ok(env)
-}
-
 /// [`apply_closure`] for a call whose first argument is a value moved out of the caller's
 /// variable (see [`moves::call_moving`]): the frame's record of the arguments does not count as
 /// a reference to it, so the parameter holds the only one.
@@ -4585,63 +4650,32 @@ pub unsafe fn apply_closure_moved(
     args: &[Arg],
     sys_parent: Sexp,
 ) -> R<Sexp> {
-    let formals = function.car();
-    let env = new_function_frame(function, formals)?;
-    let mut bindings: SmallVec<[Formal; 12]> = SmallVec::new();
-    let mut formal = formals;
-    let mut index = 0;
-    while formal.kind() == SexpType::Pairlist {
-        let actual = args.get(index).map_or(missing_arg(), |arg| arg.value);
-        bindings.push(formal_binding(env, formal, actual)?);
-        formal = formal.cdr();
-        index += 1;
-    }
-    let heap = crate::heap();
-    heap.define_formals_uncollected(env, &bindings)?;
-    heap.mark_frame_formals(env);
+    let env = handles::in_caller_scope(|context| {
+        let call = handles::held(context, call);
+        let Some(function) = handles::held(context, function).downcast::<Closure>() else {
+            return Err(error(
+                "internal error: a closure call's function is not a closure",
+            ));
+        };
+        let args = handles::tagged(context, args);
+        Ok(bind_environment(context, call, function, args, Arguments::Positional)?.raw())
+    })?;
     run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
 }
 
 /// Whether every argument is untagged and the formals, which have no `...`, take them all.
-unsafe fn positional(formals: Sexp, args: &[Arg]) -> bool {
+fn positional(closure: Gc<'_, Closure>, args: &[Tagged<'_>]) -> bool {
+    let dots = handles::symbol(|symbols| symbols.dots);
     let mut count = 0;
-    let mut formal = formals;
-    while formal.kind() == SexpType::Pairlist {
-        if formal.tag() == symbols().dots {
+    let mut formal = closure.formals();
+    while let Some(cell) = formal.downcast::<Pairlist>() {
+        if cell.tag().is(dots) {
             return false;
         }
         count += 1;
-        formal = formal.cdr();
+        formal = cell.rest();
     }
-    args.len() <= count && args.iter().all(|arg| arg.tag == nil())
-}
-
-/// The binding of the formal at the head of `formal` to its matched argument, or to a promise of
-/// its default when the argument is missing. The promise comes from the budget that
-/// [`frame_environment`] reserved, so it needs no root before the frame holds it.
-unsafe fn formal_binding(env: Sexp, formal: Sexp, actual: Sexp) -> R<Formal> {
-    let missing = missing_arg();
-    let symbol = formal.tag();
-    if actual == missing && formal.car() != missing {
-        // A literal default evaluates to itself, so it is bound as is: the promise would cost
-        // an allocation and a force on every call that omits it, for the same value.
-        let default = formal.car();
-        let value = if default.kind().is_atomic() || default == nil() {
-            default
-        } else {
-            crate::heap().alloc_triple_uncollected(SexpType::Promise, unbound(), default, env)?
-        };
-        return Ok(Formal {
-            symbol,
-            value,
-            missing: true,
-        });
-    }
-    Ok(Formal {
-        symbol,
-        value: actual,
-        missing: false,
-    })
+    args.len() <= count && args.iter().all(|arg| arg.tag.is(handles::null()))
 }
 
 /// Runs a closure body in an environment whose arguments are already bound.
