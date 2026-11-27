@@ -29,13 +29,14 @@
 
 use {
     crate::{
-        bytecode, interp,
+        bytecode, handles, interp,
         lower::{Script, lower_script_expression},
         unwind::R,
         values::{self, global_env, nil, symbols},
     },
     heap::{
         Marker,
+        handle::Gc,
         object::{Sexp, SexpType},
     },
     rustc_hash::FxHashMap,
@@ -199,7 +200,12 @@ pub unsafe fn parsed_file(expressions: Sexp, env: Sexp) -> R<()> {
     }
     // Only the frame's own binding counts: one an enclosing environment holds, such as a global
     // `envir`, says nothing about where this frame evaluates the file.
-    let Some(mut envir) = crate::eval::peek_frame_variable(values::install("envir")?, env) else {
+    let symbol = values::install("envir")?;
+    let envir = handles::reading(|context| {
+        crate::eval::peeked_frame_variable(context, Gc::adopt(symbol), Gc::adopt(env))
+            .map(|value| value.raw())
+    });
+    let Some(mut envir) = envir else {
         return Ok(());
     };
     if envir.kind() == SexpType::Promise {

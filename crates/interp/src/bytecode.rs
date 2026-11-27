@@ -12441,7 +12441,7 @@ fn assign_slot_element<'f, 's>(
         // A name the frame has not bound is read from the enclosure, and the assignment binds
         // the changed value in the frame.
         let enclosure = frame.enclosure(context);
-        let outer = handles::enclosed_value(context, variable, enclosure)?;
+        let outer = eval::enclosed_value(context, variable, enclosure)?;
         if frame.has_environment() {
             return Ok(false);
         }
@@ -15090,7 +15090,7 @@ fn replace_variable<'f, 's>(
             Some(promise) => handles::force(context, promise.value())?,
             None => {
                 let enclosure = frame.enclosure(context);
-                handles::enclosed_value(context, variable, enclosure)?
+                eval::enclosed_value(context, variable, enclosure)?
             }
         };
         direct = false;
