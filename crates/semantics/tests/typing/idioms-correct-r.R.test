@@ -78,8 +78,8 @@ trim <- function(op, n) {
   if (op == "tail") out else rev(out)
 }
 #++++
-spread: <T, U> fn(x: T, [var]: U) -> Any
-trim: <T: comparable or Str, U, V> fn(op: T, n: U) -> list[V]
+spread: <T, U: comparable> fn(x: T, [var]: U) -> Any
+trim: <T: equatable or Str, U, V> fn(op: T, n: U) -> list[V]
 
 #---- a_formal_used_only_as_a_function_still_infers_as_one
 each <- function(f) lapply(list(1, 2), f)
@@ -330,7 +330,7 @@ sa <- function(x, name, value) {
 sa(1, "names", NULL)
 #++++
 nm: <T, U> fn(x: T, v: U) -> T
-sa: <T, U: comparable or Str, V> fn(x: T, name: U, value: V | NULL) -> T
+sa: <T, U: equatable or Str, V> fn(x: T, name: U, value: V | NULL) -> T
 double
 
 #---- a_branch_that_rebinds_a_parameter_does_not_pin_its_type
@@ -893,7 +893,7 @@ drop_marked <- function(res, labels) {
 }
 negate_nothing <- function() -NULL
 #++++
-drop_marked: <T, U: comparable or Str> fn(res: T, labels: U) -> Unknown
+drop_marked: <T, U: equatable or Str> fn(res: T, labels: U) -> Unknown
 negate_nothing: Unknown
 169..173 error[type-mismatch] expected a numeric value (`integer` or `double`), found `NULL`
 
@@ -1087,7 +1087,7 @@ rel <- function(is_abs, rc_ref, fo = "A1") {
 }
 h <- function() rel(TRUE, fo = "A1")
 #++++
-rel: <T, U, V: comparable or Str> fn([is_abs]: T, [rc_ref]: U, [fo]: V) -> character | U
+rel: <T, U, V: equatable or Str> fn([is_abs]: T, [rc_ref]: U, [fo]: V) -> character | U
 h: fn() -> Unknown
 
 #---- a_formal_read_before_an_early_return_is_required
@@ -1098,7 +1098,7 @@ rel <- function(is_abs, rc_ref, fo = "A1") {
 }
 h <- function() rel(TRUE, fo = "A1")
 #++++
-rel: <T, U, V: comparable or Str> fn([is_abs]: T, rc_ref: U, [fo]: V) -> character | U
+rel: <T, U, V: equatable or Str> fn([is_abs]: T, rc_ref: U, [fo]: V) -> character | U
 h: Unknown
 129..132 error[type-mismatch] this call leaves out `rc_ref`, which the function requires
 
@@ -2801,7 +2801,7 @@ bench <- function(n, timefun = bit::repeat.time) {
   c(x, w)
 }
 #++++
-bench: <T: comparable or number, U> fn(n: T, [timefun]: U) -> Unknown
+bench: <T: equatable or number, U> fn(n: T, [timefun]: U) -> Unknown
 31..47 warning[unresolved] unknown package namespace `bit`
 
 #---- a_scalar_bound_does_not_spread_through_arithmetic
@@ -3018,7 +3018,7 @@ available <- function(model, rcp) {
   i
 }
 #++++
-available: <T, U> fn(model: T, rcp: U) -> matrix | NULL
+available: <T: equatable, U: equatable> fn(model: T, rcp: U) -> matrix | NULL
 
 #---- a_name_a_computed_assign_may_bind_is_not_the_package_function
 layout <- function(p) p
@@ -3053,7 +3053,7 @@ render_row <- function(content, type) {
 }
 render_all <- function(rows) vapply(rows, FUN.VALUE = character(1L), render_row, type = "row")
 #++++
-render_row: <T, U: comparable or Str> fn([content]: T, type: U) -> character | NULL
+render_row: <T, U: equatable or Str> fn([content]: T, type: U) -> character | NULL
 render_all: <T> fn(rows: list[T] | T[] | NULL) -> character[]
 
 #---- an_elementwise_function_applied_over_unknown_elements_is_no_length_one_claim

@@ -850,7 +850,7 @@ up_a: <T, U> fn(geom: T, new: U) -> list{T, U}
 up_b: <T, U> fn(stat: T, new: U) -> list{T, U}
 both: <T> fn(type: T, names: Unknown) -> Unknown
 apply_at: <T, U> fn(func: fn(T, ...: Any) -> U, x: T, ...: Any) -> U
-pick: <T: comparable or Str, U> fn(type: T, object: U) -> double
+pick: <T: equatable or Str, U> fn(type: T, object: U) -> double
 
 #---- a_list_of_functions_maps
 # Every member of the element union must serve the callback interface; the

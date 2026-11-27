@@ -696,6 +696,12 @@ pub struct FunctionType<'db> {
     /// or a closure that only forwards to one, so a call folds like a direct `Reduce` and its
     /// accumulator may widen past the start. Inferred only.
     pub reduces: Option<ReduceForward<'db>>,
+    /// Two operand types the body compares that stay separate variables, because R compares
+    /// across its types (`function(x, lo) x < lo` takes a `Date` and a string). A ry value
+    /// compares only with its own type, so a call where either side is one must make both
+    /// that type. Inferred only, and part of the type's identity, so two signatures that print
+    /// alike can differ in it.
+    pub compared: &'db [ComparedPair<'db>],
     /// Built from a call on a value of unknown type, so its parameters are the arguments that
     /// call passed rather than formals: another call may pass a different set of names, which
     /// the real callee's defaults or `...` may accept.
@@ -725,6 +731,7 @@ impl<'db> FunctionType<'db> {
             dispatch: None,
             null_unless: None,
             reduces: None,
+            compared: &[],
             from_calls: false,
         }
     }
@@ -754,6 +761,29 @@ pub struct NullUnless<'db> {
 pub struct DefaultRead<'db> {
     pub formal: Name<'db>,
     pub default_of: Name<'db>,
+}
+
+/// The two operand types of a comparison between different open values
+/// ([`FunctionType::compared`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub struct ComparedPair<'db> {
+    pub left: Ty<'db>,
+    pub right: Ty<'db>,
+    /// The literal constraint of the default of the parameter a side types, when that default
+    /// is a literal, so a call that leaves the parameter out adapts it as a passed literal.
+    pub left_literal: Option<Constraint>,
+    pub right_literal: Option<Constraint>,
+}
+
+impl<'db> ComparedPair<'db> {
+    pub fn new(left: Ty<'db>, right: Ty<'db>) -> Self {
+        ComparedPair {
+            left,
+            right,
+            left_literal: None,
+            right_literal: None,
+        }
+    }
 }
 
 /// `function(q, valueOnly = TRUE) if (valueOnly) prob else list(value = prob)`: `ret` is the
@@ -822,6 +852,9 @@ pub enum Constraint {
     /// vector shape, a list (compared element by element) or a class, which R's `Ops` methods
     /// compare.
     Comparable,
+    /// An R value `==` takes: what `comparable` admits, and `complex` and `raw`, which R tests
+    /// for equality but does not order.
+    Equatable,
     /// A ry value with an order: `I64`, `F64` or `Str`.
     Ordered,
     /// What `comparable` admits and the ry numbers: what `x > 0` asks of `x`, because R compares
@@ -830,8 +863,12 @@ pub enum Constraint {
     /// What `comparable` admits and what `ordered` does: what `a < b` asks of two values of one
     /// type.
     ComparableOrOrdered,
-    /// What `comparable` admits and `Str`: what `x == "a"` asks of `x`.
+    /// What `comparable` admits and `Str`: what `x < "a"` asks of `x`.
     ComparableOrStr,
+    /// What `equatable` admits and the ry numbers: what `x == 0` asks of `x`.
+    EquatableOrNumber,
+    /// What `equatable` admits and `Str`: what `x == "a"` asks of `x`.
+    EquatableOrStr,
     /// The type of a variable written with a whole-number literal (`total <- 0`), decided by its
     /// first use: a ry integer or fraction type, or R's `double` (`integer` for `0L`).
     WholeLiteral {
@@ -849,7 +886,7 @@ pub enum Constraint {
 impl Constraint {
     /// Shared by rendering and parsing, so every constraint the checker prints can
     /// be written back in an annotation.
-    pub const SPELLINGS: [(&'static str, Constraint); 17] = [
+    pub const SPELLINGS: [(&'static str, Constraint); 20] = [
         ("num", Constraint::Num),
         ("numeric", Constraint::Numeric),
         ("arithmetic", Constraint::Arithmetic),
@@ -867,6 +904,9 @@ impl Constraint {
         ("comparable or number", Constraint::ComparableOrNumber),
         ("comparable or ordered", Constraint::ComparableOrOrdered),
         ("comparable or Str", Constraint::ComparableOrStr),
+        ("equatable", Constraint::Equatable),
+        ("equatable or number", Constraint::EquatableOrNumber),
+        ("equatable or Str", Constraint::EquatableOrStr),
     ];
 
     pub fn spelling(self) -> Option<&'static str> {
@@ -895,6 +935,8 @@ impl Constraint {
             ComparableOrNumber => (Comparable, Number),
             ComparableOrOrdered => (Comparable, Ordered),
             ComparableOrStr => (Comparable, Str),
+            EquatableOrNumber => (Equatable, Number),
+            EquatableOrStr => (Equatable, Str),
             _ => return None,
         })
     }
@@ -910,6 +952,8 @@ impl Constraint {
             (Some(Comparable), Some(Number)) => Some(ComparableOrNumber),
             (Some(Comparable), Some(Ordered)) => Some(ComparableOrOrdered),
             (Some(Comparable), Some(Str)) => Some(ComparableOrStr),
+            (Some(Equatable), Some(Number)) => Some(EquatableOrNumber),
+            (Some(Equatable), Some(Str)) => Some(EquatableOrStr),
             (Some(r), _) => Some(r),
             (None, ry) => ry,
         }
@@ -1004,9 +1048,34 @@ impl Constraint {
                 | BoolLiteral),
                 Comparable,
             ) => c,
+            (Comparable, Equatable) | (Equatable, Comparable) => Comparable,
             // A key also admits ry values, which `comparable` does not.
             (Comparable, Key) | (Key, Comparable) => AtomicElement,
             (Comparable, _) | (_, Comparable) => return None,
+            // `equatable` admits every R value `comparable` does, and every R type the other R
+            // constraints admit.
+            (
+                Equatable,
+                c @ (Numeric
+                | ScalarNumeric
+                | AtomicElement
+                | WholeLiteral { .. }
+                | FracLiteral
+                | StrLiteral
+                | BoolLiteral),
+            )
+            | (
+                c @ (Numeric
+                | ScalarNumeric
+                | AtomicElement
+                | WholeLiteral { .. }
+                | FracLiteral
+                | StrLiteral
+                | BoolLiteral),
+                Equatable,
+            ) => c,
+            (Equatable, Key) | (Key, Equatable) => AtomicElement,
+            (Equatable, _) | (_, Equatable) => return None,
             (Str, Ordered | ArrayItem | Key) | (Ordered | ArrayItem | Key, Str) => Str,
             (Str, StrLiteral) | (StrLiteral, Str) => Str,
             (Str, _) | (_, Str) => return None,
@@ -1299,6 +1368,15 @@ pub fn is_ry_value_type(db: &dyn Db, ty: Ty<'_>) -> bool {
             !members.is_empty() && members.iter().all(|&member| is_ry_value_type(db, member))
         }
         _ => false,
+    }
+}
+
+/// A ry value, or a union with one among its members: a value that compares only with its
+/// own type (`I64 | NULL` beside a `character` is an error, as `m == "s"` is).
+pub fn holds_ry_value(db: &dyn Db, ty: Ty<'_>) -> bool {
+    match ty.kind(db) {
+        TyKind::Union(members) => members.iter().any(|&member| is_ry_value_type(db, member)),
+        _ => is_ry_value_type(db, ty),
     }
 }
 
@@ -1716,6 +1794,15 @@ fn rebuilt_type<'db>(
                 when_false: map(flag.when_false),
                 ..flag
             });
+            let compared: SmallVec<[ComparedPair<'db>; 2]> = function
+                .compared
+                .iter()
+                .map(|pair| ComparedPair {
+                    left: map(pair.left),
+                    right: map(pair.right),
+                    ..*pair
+                })
+                .collect();
             Ty::new(
                 db,
                 TyKind::Function(&FunctionType {
@@ -1724,6 +1811,7 @@ fn rebuilt_type<'db>(
                     variadic,
                     ret,
                     flag_return,
+                    compared: &compared,
                     ..**function
                 }),
             )
@@ -1787,6 +1875,10 @@ fn for_each_child<'db>(kind: &TyKind<'db>, visit: &mut impl FnMut(Ty<'db>)) {
             if let Some(flag) = function.flag_return {
                 visit(flag.when_true);
                 visit(flag.when_false);
+            }
+            for pair in function.compared {
+                visit(pair.left);
+                visit(pair.right);
             }
         }
         TyKind::Named(_, arguments) => arguments.iter().copied().for_each(visit),
@@ -2015,6 +2107,7 @@ fn stored_kind<'a>(arena: &'a Bump, kind: TyKind<'a>) -> TyKind<'a> {
             missing_tested: arena.alloc_slice_copy(function.missing_tested),
             condition_only: arena.alloc_slice_copy(function.condition_only),
             elementwise: arena.alloc_slice_copy(function.elementwise),
+            compared: arena.alloc_slice_copy(function.compared),
             ..*function
         })),
         TyKind::Union(members) => TyKind::Union(arena.alloc_slice_copy(members)),
