@@ -5440,8 +5440,8 @@ pub fn namespace_loaded(_context: &mut Cx<'_>, namespace: Local<'_>) {
 }
 
 /// The closure `function` applied by `call` to `arguments`, each tagged as the argument of
-/// `call` in its position is, from the frame of `caller`, or from a slot frame that has none.
-/// The closure's frame keeps the arguments (`eval::apply_closure_owning`).
+/// `call` in its position is, from the frame of `caller`, or from a slot frame that has none
+/// (`eval::apply_closure_in`).
 #[inline(always)]
 pub fn apply_closure<'s>(
     context: &mut Cx<'s>,
@@ -5450,14 +5450,25 @@ pub fn apply_closure<'s>(
     arguments: impl ExactSizeIterator<Item = Local<'s>>,
     caller: Option<Local<'s, Environment>>,
 ) -> R<Local<'s>> {
-    let caller = caller.map_or_else(values::nil, Local::raw);
-    // SAFETY: the call, the function, the arguments and the caller's environment are rooted,
-    // and the closure runs any R code, which `&mut Cx` permits.
+    let Some(function) = function.downcast::<Closure>() else {
+        return Err(error(
+            "internal error: a closure call's function is not a closure",
+        ));
+    };
+    let sys_parent = caller.map_or_else(null, Local::value);
+    // SAFETY: the call is live and has an argument for each value, and the tagged arguments
+    // are rooted through the values they hold. `Tagged` has `Arg`'s layout.
     unsafe {
-        let result = tagged_as_in(call.raw(), arguments, |tagged| {
-            crate::eval::apply_closure_owning(call.raw(), function.raw(), tagged, caller, None)
-        })?;
-        Ok(rooted(context, result))
+        tagged_as_in(call.raw(), arguments, |raw| {
+            let closure_call = crate::eval::ClosureCall {
+                call: call.value(),
+                function,
+                args: tagged(context, raw),
+                sys_parent,
+                supplied: None,
+            };
+            crate::eval::apply_closure_in(context, &closure_call)
+        })
     }
 }
 
@@ -5469,15 +5480,124 @@ pub fn apply_closure_tagged<'s>(
     arguments: &[Tagged<'s>],
     caller: Option<Local<'s, Environment>>,
 ) -> R<Local<'s>> {
-    let caller = caller.map_or_else(values::nil, Local::raw);
-    // SAFETY: everything is rooted, and the closure runs any R code, which `&mut Cx` permits.
+    let Some(function) = function.downcast::<Closure>() else {
+        return Err(error(
+            "internal error: a closure call's function is not a closure",
+        ));
+    };
+    let closure_call = crate::eval::ClosureCall {
+        call: call.value(),
+        function,
+        args: arguments,
+        sys_parent: caller.map_or_else(null, Local::value),
+        supplied: None,
+    };
+    crate::eval::apply_closure_in(context, &closure_call)
+}
+
+/// The value of a call of `function`, which has a native entry, on `args` when the native code
+/// takes them (`base_fast_paths::native_entry`).
+#[inline(always)]
+pub fn native_entry<'s>(
+    context: &mut Cx<'s>,
+    function: Local<'_, Closure>,
+    args: &[Tagged<'_>],
+) -> R<Option<Local<'s>>> {
+    // SAFETY: everything is rooted, and the native code may allocate, which `&mut Cx` permits.
     // `Tagged` has `Arg`'s layout.
     unsafe {
-        let arguments =
-            std::slice::from_raw_parts(arguments.as_ptr().cast::<Arg>(), arguments.len());
-        let result =
-            crate::eval::apply_closure_owning(call.raw(), function.raw(), arguments, caller, None)?;
-        Ok(rooted(context, result))
+        let args = std::slice::from_raw_parts(args.as_ptr().cast::<Arg>(), args.len());
+        let value = crate::base_fast_paths::native_entry(function.raw(), args)?;
+        Ok(value.map(|value| rooted(context, value)))
+    }
+}
+
+/// Reports, while typed code is logged, that the call `call` of a typed closure runs in the
+/// interpreter for `reason` (`annotations::log_interpreted_because`).
+pub fn log_interpreted_because(_context: &mut Cx<'_>, call: Local<'_>, reason: &str) {
+    // SAFETY: the call is rooted, and the report allocates, which `&mut Cx` permits.
+    unsafe { crate::annotations::log_interpreted_because(call.raw(), reason) }
+}
+
+/// The value of the call `call` of the typed closure `function` on `args` from the frame of
+/// `sys_parent` when the native tier takes it, and otherwise `None`, reported as a call that
+/// runs in the interpreter. The arguments are promises, never argument references.
+pub fn call_native_tier<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'_>,
+    function: Local<'_, Closure>,
+    args: &[Tagged<'_>],
+    sys_parent: Local<'_>,
+) -> Option<R<Local<'s>>> {
+    let Some(tier) = crate::bytecode::tier() else {
+        log_interpreted_because(context, call, "no native tier is loaded");
+        return None;
+    };
+    // SAFETY: everything is rooted, the native code runs any R code, which `&mut Cx` permits,
+    // and its value is rooted before anything else runs. `Tagged` has `Arg`'s layout.
+    unsafe {
+        let args = std::slice::from_raw_parts(args.as_ptr().cast::<Arg>(), args.len());
+        let value = (tier.call)(&crate::bytecode::TypedCall {
+            call: call.raw(),
+            function: function.raw(),
+            args,
+            sys_parent: sys_parent.raw(),
+        });
+        match value {
+            Some(value) => Some(value.map(|value| rooted(context, value))),
+            None => {
+                crate::annotations::log_interpreted(call.raw());
+                None
+            }
+        }
+    }
+}
+
+/// Compiles the body of `function` when its first call would compile it, and whether the body
+/// is then compiled (`bytecode::compile_before_call`).
+#[inline]
+pub fn compile_before_call(_context: &mut Cx<'_>, function: Local<'_, Closure>) -> R<bool> {
+    // SAFETY: the closure is rooted, and compiling allocates, which `&mut Cx` permits; the
+    // compiled body is held by the closure's shared code and only its type is read.
+    unsafe {
+        let body = crate::bytecode::compile_before_call(function.raw())?;
+        Ok(body.kind() == SexpType::Bytecode)
+    }
+}
+
+/// Runs `closure_call` in the slot frame its arguments were bound in, `frame`, from the push
+/// of its frame to its exit (`eval::run_frame`).
+#[inline(always)]
+pub fn run_slot_frame<'s>(
+    context: &mut Cx<'s>,
+    closure_call: &crate::eval::ClosureCall<'_, 's>,
+    frame: crate::eval::SlotFrame,
+) -> R<Local<'s>> {
+    let method_vars: SmallVec<[(Sexp, Sexp); 4]> = closure_call
+        .supplied
+        .unwrap_or(&[])
+        .iter()
+        .map(|variable| (variable.symbol.raw(), variable.value.raw()))
+        .collect();
+    // SAFETY: the caller's scope holds the call, the closure, the arguments, the method
+    // variables and the caller's environment, the frame holds them once pushed, and the body
+    // runs any R code, which `&mut Cx` permits. Its value is rooted before anything else runs.
+    // `Tagged` has `Arg`'s layout.
+    unsafe {
+        let args = std::slice::from_raw_parts(
+            closure_call.args.as_ptr().cast::<Arg>(),
+            closure_call.args.len(),
+        );
+        let value = crate::eval::run_frame(
+            closure_call.call.raw(),
+            closure_call.function.raw(),
+            crate::eval::CallFrame::Slots(frame),
+            closure_call.sys_parent.raw(),
+            args,
+            crate::annotations::Entry::Unchecked,
+            &method_vars,
+        )?;
+        Ok(rooted(context, value))
     }
 }
 

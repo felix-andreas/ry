@@ -875,7 +875,7 @@ unsafe fn invoke(call: &Call<'_>, callback: Callback, arguments: &[Sexp]) -> R<S
             eval::run_frame(
                 form,
                 function,
-                frame,
+                eval::CallFrame::Slots(frame),
                 call.env()?,
                 &arguments,
                 Entry::Unchecked,

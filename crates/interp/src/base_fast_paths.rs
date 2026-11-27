@@ -16,7 +16,7 @@ use {
         Jump,
         builtins::{Arg, BuiltinDef, BuiltinFn, Call, internal},
         conditions::{Handler, calling_established, make_condition, new_handler},
-        eval::{self, CallFrame, Entering, Reify, Site},
+        eval::{self, Entering, Reify, Site, SlotFrame},
         handles::{self, Held},
         interp,
         session::{FNV_OFFSET, stable_hash},
@@ -4232,7 +4232,7 @@ unsafe fn push_levels(
 /// [`try_catch_chain`] has checked that such a call gets a slot frame.
 unsafe fn push_frame(call: Sexp, function: Sexp, caller: usize, args: [Sexp; 4]) -> R<usize> {
     let args = args.map(|value| Arg { tag: nil(), value });
-    let Some(CallFrame::Slots {
+    let Some(SlotFrame {
         header,
         missing,
         promised,

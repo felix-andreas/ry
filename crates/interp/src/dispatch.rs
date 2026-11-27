@@ -1378,7 +1378,7 @@ unsafe fn apply_method(
 ) -> R<Sexp> {
     match method.kind() {
         SexpType::Closure if owned => {
-            eval::apply_closure_owning(call, method, args, sys_parent, Some(vars))
+            eval::apply_closure(call, method, args, sys_parent, Some(vars))
         }
         SexpType::Closure => apply_closure(call, method, args, sys_parent, Some(vars)),
         SexpType::Builtin => {
