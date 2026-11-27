@@ -263,7 +263,12 @@ is inferred exactly once, because a probe snapshot does not reverse environment 
   (`S` in `fn(S, T) -> S`) is a fold accumulator, but only when another argument is that bare variable (the
   initial state); otherwise `List.update`'s `fn(T) -> T` lost its item hint. Hinting it pinned
   `List.walk(xs, list(), ...)` to `list{}`. `parameter_hints_for` reads the variables before the probe
-  binds them.
+  binds them. A settled ry state is the exception and keeps its hint, and "settled" admits open
+  variables the arguments brought (`settled_hint` names each by the argument's own variable, which
+  survives the probe's rollback). So `(values = [], n = 0i64)` hints `values: List<a>` with the empty
+  list's own `a`, the step function decides it, and the preflight hands the runtime its item type.
+  Without the hint the step read an open `acc`, a record update on it tied nothing, and the empty
+  list stayed untyped, so the walk ran in the interpreter (quadratic: 8,000 appends took 14 s).
 
 ## Strict mode implies type errors
 

@@ -108,6 +108,11 @@ total <- List.walk([1, 2], 0, function(acc, x) acc + x)
 #++++
 total: I64
 
+#---- walk_state_with_an_empty_list_takes_the_callbacks_items
+state <- List.walk([1.5, 2.5], (values = [], n = 0i64), function(acc, x) (..acc, values = List.append(acc$values, x)))
+#++++
+state: Record{n: I64, values: List<F64>}
+
 #---- map_changes_the_element_type
 names <- List.map([1, 2], function(x) Num.to_str(x))
 #++++
