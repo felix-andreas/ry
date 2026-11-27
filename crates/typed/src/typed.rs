@@ -77,6 +77,11 @@ use {
 /// limit is known.
 pub static STACK_LIMIT: AtomicUsize = AtomicUsize::new(0);
 
+/// The value a compiled function's prologue leaves in [`STACK_LIMIT`] when it stops for want of
+/// depth budget or stack, above every frame address so that nothing compiled runs again before
+/// the native entry restores the limit.
+pub const EXHAUSTED_LIMIT: usize = usize::MAX;
+
 /// The stack the native entry makes sure of before it runs compiled code, growing onto a fresh
 /// segment of [`NATIVE_SEGMENT`] when less is left: the interpreter keeps only a small red zone,
 /// so compiled code entered from deep in an interpreted recursion would otherwise start near
@@ -176,6 +181,18 @@ thread_local! {
     /// runs in a frame of. A typed callee that compiled code calls directly has no call of its
     /// own, so its R calls see its caller's.
     static RUNNING: Cell<Option<Running>> = const { Cell::new(None) };
+    /// The call the interpreter is running again because its native code ran out of depth
+    /// budget or stack. Every native entry inside it declines: each would recurse as deep and
+    /// stop again, which made a deep recursion quadratic.
+    static EXHAUSTED: Cell<Option<Rerun>> = const { Cell::new(None) };
+}
+
+/// A call's interpreter frame, by its position on the frame stack and what it calls.
+#[derive(Clone, Copy)]
+struct Rerun {
+    depth: usize,
+    call: Sexp,
+    function: Sexp,
 }
 
 /// A [`TypedCall`] without its lifetime, for [`RUNNING`], which holds it only while the call
@@ -228,6 +245,24 @@ pub unsafe fn call(
     if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE) {
         decline(|| String::from("it is being debugged or traced"));
         return None;
+    }
+    if let Some(rerun) = EXHAUSTED.get() {
+        // A native entry runs before the interpreter pushes the call's frame, so the frame of
+        // the call being run again sits at the depth its entry saw while that call runs.
+        let frames = &interp::interp().frames;
+        let inside = frames
+            .get(rerun.depth)
+            .is_some_and(|frame| frame.call == rerun.call && frame.function == rerun.function);
+        if inside {
+            decline(|| {
+                String::from(
+                    "it runs inside a call whose native code ran out of stack or of R's nesting \
+                     depth, which the interpreter is running instead",
+                )
+            });
+            return None;
+        }
+        EXHAUSTED.set(None);
     }
     // Converting a record or a tag confirms its shapes, which the code compiled next must
     // consider.
@@ -312,15 +347,15 @@ pub unsafe fn call(
     let mut run = |limit: usize| {
         let outer_limit = STACK_LIMIT.swap(limit, Ordering::Relaxed);
         let status = trampoline(depth_budget(), words, out.as_mut_ptr());
-        STACK_LIMIT.store(outer_limit, Ordering::Relaxed);
-        status
+        let exhausted = STACK_LIMIT.swap(outer_limit, Ordering::Relaxed) == EXHAUSTED_LIMIT;
+        (status, exhausted)
     };
     // The interpreter's bounds answer for a call entered on its segment with room to spare,
     // which skips `stacker`'s thread-local reads.
     let marker = 0u8;
     let here = std::ptr::addr_of!(marker) as usize;
     let floor = interp::eval::stack_floor();
-    let status = if floor != 0 && here.saturating_sub(floor) >= NATIVE_STACK {
+    let (status, exhausted) = if floor != 0 && here.saturating_sub(floor) >= NATIVE_STACK {
         run(floor + NATIVE_RESERVE)
     } else {
         stacker::maybe_grow(NATIVE_STACK, NATIVE_SEGMENT, || run(native_stack_limit()))
@@ -330,6 +365,14 @@ pub unsafe fn call(
         arguments.release();
         let unwind = PARKED.take();
         let guess = FAILED_GUESS.take();
+        if exhausted {
+            EXHAUSTED.set(Some(Rerun {
+                depth: interp::interp().frames.len(),
+                call: typed.call,
+                function,
+            }));
+        }
+        let reason = || stop_reason(guess, exhausted);
         if unwind.is_some() || R_CALLS.get() == r_calls {
             replay::close(segment);
             heap.release_handles(mark);
@@ -337,12 +380,7 @@ pub unsafe fn call(
                 return Some(Err(unwind));
             }
             STOPS.set(STOPS.get() + 1);
-            decline(|| {
-                format!(
-                    "{}, and the interpreter ran the call again",
-                    stop_reason(guess)
-                )
-            });
+            decline(|| format!("{}, and the interpreter ran the call again", reason()));
             return None;
         }
         // The code called R before it stopped, so the interpreter runs the call again with
@@ -355,7 +393,7 @@ pub unsafe fn call(
                 "{}, after it had called R more than {} times or kept more than {} MiB of what \
                  those calls returned, so the interpreter cannot run the call again without \
                  calling R a second time: make fewer R calls in one typed call",
-                stop_reason(guess),
+                reason(),
                 replay::MAX_RECORDED,
                 replay::MAX_RECORDED_MIB,
             ))));
@@ -370,7 +408,7 @@ pub unsafe fn call(
                 &format!(
                     "{}, and the interpreter ran the call again with the values its R calls had \
                      returned",
-                    stop_reason(guess)
+                    reason()
                 ),
             );
         }
@@ -530,7 +568,10 @@ pub fn native_stops() -> u64 {
 
 /// Why compiled code stopped partway: the conversion that gave a type the code was not compiled
 /// for when that is why.
-unsafe fn stop_reason(guess: Option<(Sexp, SexpType)>) -> String {
+unsafe fn stop_reason(guess: Option<(Sexp, SexpType)>, exhausted: bool) -> String {
+    if exhausted {
+        return "its native code ran out of stack or of R's nesting depth".to_owned();
+    }
     match guess {
         Some((conversion, kind)) => format!(
             "`{}` gave {}, which its native code was not compiled for",

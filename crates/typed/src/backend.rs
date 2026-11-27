@@ -636,16 +636,32 @@ impl Emitter<'_> {
         let limit = self.word(Slot::StackLimit, || {
             &crate::STACK_LIMIT as *const AtomicUsize as i64
         });
+        let address = limit;
         let limit = self
             .builder
             .ins()
-            .load(I64, MemFlagsData::trusted(), limit, 0);
+            .load(I64, MemFlagsData::trusted(), address, 0);
         let low = self
             .builder
             .ins()
             .icmp(IntCC::UnsignedLessThan, here, limit);
         let exhausted = self.builder.ins().bor(deep, low);
-        self.fail_if(exhausted, &[])?;
+        // The stop leaves [`crate::EXHAUSTED_LIMIT`] as the limit, which tells the native entry
+        // why the code gave up and makes any frame entered before it returns give up too.
+        let failure = self.builder.create_block();
+        let go = self.builder.create_block();
+        self.builder.set_cold_block(failure);
+        self.builder.ins().brif(exhausted, failure, &[], go, &[]);
+        self.builder.switch_to_block(failure);
+        let sentinel = self
+            .builder
+            .ins()
+            .iconst(I64, crate::EXHAUSTED_LIMIT as i64);
+        self.builder
+            .ins()
+            .store(MemFlagsData::trusted(), sentinel, address, 0);
+        self.give_up();
+        self.builder.switch_to_block(go);
         let first = *self
             .blocks
             .first()

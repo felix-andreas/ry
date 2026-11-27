@@ -1,0 +1,31 @@
+# A typed recursion deeper than R allows stops its native code, and the interpreter runs the call
+# again and reports R's error. Native code is not entered again inside that call: each entry
+# would recurse as deep and stop again, which made the error take quadratic time.
+
+requires ry-runtime
+
+file deep.R
+| alias Acc = Record{n: I64, values: List<F64>}
+| rec_grow <- function(acc: Acc, i: I64, count: I64) -> Acc {
+|   if (i > count) acc else rec_grow((..acc, values = List.append(acc$values, Num.to_f64(i))), i + 1i64, count)
+| }
+| rec_len <- function(count: I64) -> I64 {
+|   start: Acc <- (n = 0i64, values = [])
+|   List.len(rec_grow(start, 1i64, count)$values)
+| }
+| sum_to <- function(i: I64) -> I64 if (i == 0i64) 0i64 else i + sum_to(i - 1i64)
+| print(rec_len(1000i64))
+| options(expressions = 2000)
+| print(conditionMessage(tryCatch(rec_len(4000i64), error = identity)))
+| print(rec_len(1000i64))
+| options(expressions = 500000)
+| print(sum_to(200000i64))
+
+run ry run --runtime ry deep.R
+env RY_TYPED_LOG 1
+expect exit 0
+expect stdout "1000i64"
+expect stdout "[1] \"evaluation nested too deeply: infinite recursion / options(expressions=)?\""
+expect stdout "20000100000i64"
+expect stderr "typed: `rec_len` runs in the interpreter: its native code ran out of stack or of R's nesting depth, and the interpreter ran the call again"
+expect stderr "typed: `rec_grow` runs in the interpreter: it runs inside a call whose native code ran out of stack or of R's nesting depth, which the interpreter is running instead"
