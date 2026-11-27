@@ -686,9 +686,9 @@ A test user's application workload (`tools/bench/appsuite`) spends its time flat
 
 Rule and order: `development/design/memory-safety.md`, "Migration".
 
-- **Raw, in order.** Frame entry (`run_frame_general`, `push_frame`, `run_on_heap_frame`,
-  `run_closure`, `apply_closure`) and the bytecode loop's call and return handlers on `Held`
-  registers, which must also clear the "Measured, not closed" rows; the raw `force_promise` entry
+- **Raw, in order.** The bytecode loop's call and return handlers on `Held` registers, over
+  the closure application core (`apply_closure_in`, whose raw entries `apply_closure`,
+  `apply_closure_entering` and `run_on_heap_frame` they call); the raw `force_promise` entry
   goes with them (`enter` and `leave` stay `unsafe fn` by decision, `decisions/heap-gc.md`); the
   constructors, element readers and coercions of `values.rs` (`alloc`, `cons`, `mkchar`, `install`,
   the scalars, `list_get`, `as_*_scalar`) move with those callers. The raw helpers that the bytecode

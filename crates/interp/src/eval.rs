@@ -3408,7 +3408,9 @@ pub unsafe fn run_interpreted(
 }
 
 /// Runs a call of `function` in a fresh environment that binds `args`, the path of a call
-/// that gets no slot frame ([`run_heap_call`]).
+/// that gets no slot frame ([`run_heap_call`]). Out of line, so a caller that tries a slot
+/// frame first keeps a small stack frame on that path.
+#[inline(never)]
 pub(crate) unsafe fn run_on_heap_frame(
     call: Sexp,
     function: Sexp,
@@ -3520,12 +3522,8 @@ fn run_heap_frame<'s>(
         supplied,
     } = closure_call;
     detach_arguments(context, args)?;
-    let variables: SmallVec<[handles::MethodVariable<'_>; 8]>;
     let arguments = match supplied {
-        Some(supplied) => {
-            variables = supplied.iter().collect();
-            Arguments::Matched(&variables)
-        }
+        Some(supplied) => Arguments::Matched(supplied),
         None => Arguments::Unsupplied,
     };
     let environment = bind_environment(context, call, function, args, arguments)?;
@@ -3535,7 +3533,7 @@ fn run_heap_frame<'s>(
         body: BodyFrame::Environment(environment),
         sys_parent,
         args,
-        method_vars: &[],
+        method_vars: handles::MethodVariables::none(),
     };
     run_general(context, &general, signature)
 }
@@ -3698,7 +3696,7 @@ enum Arguments<'a, 's> {
     /// Matched to the formals, by position when that is all they need.
     Unsupplied,
     /// Matched to the formals, with the method variables of a dispatched call bound after.
-    Matched(&'a [handles::MethodVariable<'s>]),
+    Matched(handles::MethodVariables<'a, 's>),
     /// By position alone: argument `i` binds formal `i` ([`apply_closure_moved`]).
     Positional,
 }
@@ -3784,7 +3782,7 @@ fn bind_environment<'s>(
     let environment = reading.root(environment);
     if let Arguments::Matched(supplied) = arguments {
         let generic_call_env = handles::symbol(|symbols| symbols.dot_generic_call_env);
-        for variable in supplied {
+        for variable in supplied.iter() {
             if context.own_binding(environment, variable.symbol).is_some() {
                 continue;
             }
@@ -4566,7 +4564,7 @@ pub unsafe fn run_inlined(
         nil(),
         sys_parent,
         args,
-        std::iter::empty(),
+        &[],
         header,
         missing,
         caller,
@@ -4599,6 +4597,14 @@ pub unsafe fn frame_env(index: usize, cause: Reify) -> R<Sexp> {
     if frame.pending.raw() != nil() && !activity::enabled() {
         return Ok(frame.pending.raw());
     }
+    reify_frame_environment(index, cause)
+}
+
+/// The environment [`frame_env`] makes for the slot frame at `index`, out of line so that
+/// the fast reads of [`frame_env`] and [`frame_sys_parent`] inline into their callers.
+#[cold]
+#[inline(never)]
+unsafe fn reify_frame_environment(index: usize, cause: Reify) -> R<Sexp> {
     handles::in_caller_scope(|context| Ok(reified_environment(context, index, cause)?.raw()))
 }
 
@@ -4852,6 +4858,7 @@ pub unsafe fn slot_owner_env(cause: Reify) -> R<Sexp> {
 }
 
 /// `parent.frame()` of the frame at `index`: the environment its call was made from.
+#[inline]
 pub unsafe fn frame_sys_parent(index: usize, cause: Reify) -> R<Sexp> {
     let frame = &interp().frames[index];
     if frame.sys_parent.raw() != nil() || frame.caller == crate::NO_SLOTS {
@@ -4865,7 +4872,7 @@ pub unsafe fn frame_sys_parent(index: usize, cause: Reify) -> R<Sexp> {
     if fields.pending.raw() != nil() && !activity::enabled() {
         return Ok(fields.pending.raw());
     }
-    handles::in_caller_scope(|context| Ok(reified_environment(context, caller, cause)?.raw()))
+    reify_frame_environment(caller, cause)
 }
 
 /// [`frame_sys_parent`] for code on the handle types.
@@ -4932,7 +4939,7 @@ pub unsafe fn apply_closure_moved(
             body: BodyFrame::Environment(environment),
             sys_parent,
             args,
-            method_vars: &[],
+            method_vars: handles::MethodVariables::none(),
         };
         Ok(run_general(context, &frame, Signature::Unchecked)?.raw())
     })
@@ -5122,7 +5129,7 @@ unsafe fn push_slot_frame(
         nil(),
         sys_parent,
         args,
-        method_vars.iter().copied(),
+        method_vars,
         header,
         missing,
         caller,
@@ -5169,7 +5176,7 @@ pub unsafe fn run_in_frame(
         env,
         typed.sys_parent,
         typed.args,
-        std::iter::empty(),
+        &[],
         crate::NO_SLOTS,
         0,
         caller,
@@ -5288,15 +5295,7 @@ unsafe fn run_frame_general(
         };
         let sys_parent = handles::held(context, sys_parent);
         let args = handles::tagged(context, args);
-        let variables: SmallVec<[handles::MethodVariable<'_>; 8]>;
-        let method_vars: &[handles::MethodVariable<'_>] = if method_vars.is_empty() {
-            &[]
-        } else {
-            variables = handles::method_variables(context, method_vars)
-                .iter()
-                .collect();
-            &variables
-        };
+        let method_vars = handles::method_variables(context, method_vars);
         let signature = match entry {
             Entry::Unchecked => Signature::Unchecked,
             Entry::Checked(signature) => {
@@ -5324,7 +5323,7 @@ struct GeneralFrame<'a, 's> {
     /// this one and has no environment yet.
     sys_parent: Local<'s>,
     args: &'a [Tagged<'s>],
-    method_vars: &'a [handles::MethodVariable<'s>],
+    method_vars: handles::MethodVariables<'a, 's>,
 }
 
 /// Where the body of a call on the general path runs: [`CallFrame`] on the handle types.
@@ -5707,7 +5706,7 @@ pub(crate) unsafe fn push_frame(
     env: Sexp,
     sys_parent: Sexp,
     args: &[Arg],
-    method_vars: impl Iterator<Item = (Sexp, Sexp)>,
+    method_vars: &[(Sexp, Sexp)],
     slots: u32,
     missing: u64,
     caller: u32,
@@ -5717,7 +5716,7 @@ pub(crate) unsafe fn push_frame(
     let start = state.frame_args.len() as u32;
     state.frame_args.extend_from_slice(args);
     let method_vars_start = state.method_vars.len() as u32;
-    state.method_vars.extend(method_vars);
+    state.method_vars.extend_from_slice(method_vars);
     state.calls_ever = state.calls_ever.wrapping_add(1);
     let (handlers, restarts) = (state.handlers.clone(), state.restarts.clone());
     let (srcref, closures) = (state.srcref, state.frame_closures.len() as u32);

@@ -4173,6 +4173,14 @@ pub struct MethodVariables<'a, 's> {
 }
 
 impl<'a, 's> MethodVariables<'a, 's> {
+    /// The variables of a call that dispatch did not make, which has none.
+    pub fn none() -> Self {
+        MethodVariables {
+            pairs: &[],
+            scope: PhantomData,
+        }
+    }
+
     pub fn iter(self) -> impl Iterator<Item = MethodVariable<'s>> + 'a {
         self.pairs.iter().map(|&(symbol, value)| {
             // SAFETY: `method_variables` made the view from symbols paired with values that
@@ -5332,7 +5340,7 @@ pub struct FrameEntry<'a, 's> {
     /// frame at `caller`.
     pub sys_parent: Local<'s>,
     pub args: &'a [Tagged<'s>],
-    pub method_vars: &'a [MethodVariable<'s>],
+    pub method_vars: MethodVariables<'a, 's>,
     /// The header register of a slot frame, or [`crate::NO_SLOTS`].
     pub slots: u32,
     /// The formals a slot frame's call left missing, one bit each.
@@ -5345,10 +5353,6 @@ pub struct FrameEntry<'a, 's> {
 #[inline(always)]
 pub fn push_frame(_context: &mut Cx<'_>, entry: &FrameEntry<'_, '_>) -> (usize, R<()>) {
     let environment = entry.environment.map_or_else(values::nil, Local::raw);
-    let method_vars = entry
-        .method_vars
-        .iter()
-        .map(|variable| (variable.symbol.raw(), variable.value.raw()));
     // SAFETY: the frame holds what it records from here on, and until then the caller's scope
     // does. A profile sample may run R code, which `&mut Cx` permits. `Tagged` has `Arg`'s
     // layout.
@@ -5360,7 +5364,7 @@ pub fn push_frame(_context: &mut Cx<'_>, entry: &FrameEntry<'_, '_>) -> (usize, 
             environment,
             entry.sys_parent.raw(),
             args,
-            method_vars,
+            entry.method_vars.pairs,
             entry.slots,
             entry.missing,
             entry.caller,
@@ -5377,16 +5381,12 @@ pub fn record_closure_entry(
     call: Local<'_>,
     function: Local<'_, Closure>,
     sys_parent: Local<'_>,
-    method_vars: &[MethodVariable<'_>],
+    method_vars: MethodVariables<'_, '_>,
     environment: Option<Local<'_, Environment>>,
 ) -> crate::profile_summary::ClosureScope {
     if heap::activity::hooks() & heap::activity::CAPTURE == 0 {
         return crate::profile_summary::ClosureScope::default();
     }
-    let method_vars: SmallVec<[(Sexp, Sexp); 4]> = method_vars
-        .iter()
-        .map(|variable| (variable.symbol.raw(), variable.value.raw()))
-        .collect();
     let environment = environment.map_or_else(values::nil, Local::raw);
     // SAFETY: everything is rooted, and the recorder may run R code, which `&mut Cx` permits.
     unsafe {
@@ -5394,7 +5394,7 @@ pub fn record_closure_entry(
             call.raw(),
             function.raw(),
             sys_parent.raw(),
-            &method_vars,
+            method_vars.pairs,
             environment,
         )
     }

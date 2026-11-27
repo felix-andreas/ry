@@ -630,8 +630,10 @@ one `reserve` with the `_uncollected` allocators); the forcing of a typed call's
 `pop_frame`); and closure application (`apply_closure_in`): the native entry and the native tier
 it tries first, the checks that choose a slot frame, and the general path that runs a heap frame
 or a frame that must be run whole (`run_heap_frame`, `run_general`, `run_closure_body`), whose raw
-names (`apply_closure`, `run_on_heap_frame`, `run_frame_general`) are thin entries. Entering and leaving a frame (`eval::enter`, `eval::leave`) stay `unsafe fn` by
-design: a frame's lifetime is not lexical, because `leave` truncates the handle stack to the mark
+names (`apply_closure`, `run_on_heap_frame`, `run_frame_general`) are thin entries. A dispatched
+call's method variables cross into handles as `handles::MethodVariables`, a view over the
+dispatcher's pairs that every layer down to the frame push takes, so they are never copied.
+Entering and leaving a frame (`eval::enter`, `eval::leave`) stay `unsafe fn` by design: a frame's lifetime is not lexical, because `leave` truncates the handle stack to the mark
 `enter` recorded, so no borrow of the context can span it. Both are built from safe pieces, and the
 lexical paths that wrap them take a `Cx`.
 A promise is rooted for as long as its code runs, because that code can remove the last binding
