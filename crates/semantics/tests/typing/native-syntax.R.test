@@ -921,8 +921,8 @@ loose: <T> fn(x: T) -> logical
 605..606 error[type-mismatch] expected a value a number compares with (numeric, `character`, `logical`, a class, `I64` or `F64`), found `T`. Declare `<T: comparable or number>`
 
 #---- two_open_operands_and_a_string_literal_ask_for_a_comparison
-# Each of two open operands needs what the operator compares, so two records have no order. A
-# string literal compares with any R value but only with a `Str` on ry's side.
+# Two open operands are one type that needs what the operator compares, so two records have no
+# order. A string literal compares with any R value but only with a `Str` on ry's side.
 between <- function(a, b) a < b
 is_a <- function(x) x == "a"
 s: Str <- "x"
@@ -941,8 +941,8 @@ upto <- function(n) {
   n > 0
 }
 #++++
-between: <T: comparable or ordered, U: comparable or ordered> fn(a: T, b: U) -> Compared<T>
-is_a: <T: comparable or Str> fn(x: T) -> Compared<T>
+between: <T: comparable or ordered> fn(a: T, b: T) -> Compared<T>
+is_a: <T: equatable or Str> fn(x: T) -> Compared<T>
 s: Str
 r: Record{a: I64}
 ok_mixed: logical
@@ -953,11 +953,11 @@ ok_ry_str: Bool
 bad_number: Unknown
 declared: <T, U> fn(a: T, b: U) -> logical
 upto: <T: scalar numeric> fn(n: T) -> logical
-353..354 error[type-mismatch] expected a value with an order (numeric, `character`, `logical`, a class, `I64`, `F64` or `Str`), found `Record{a: I64}`
-356..357 error[type-mismatch] expected a value with an order (numeric, `character`, `logical`, a class, `I64`, `F64` or `Str`), found `Record{a: I64}`
-421..425 error[type-mismatch] expected a value a string compares with (numeric, `character`, `logical`, a class, or `Str`), found `I64`
-490..491 error[type-mismatch] expected a value `==` can compare (anything but a function), found `T`. Declare `<T: eq>`
-495..496 error[type-mismatch] expected a value `==` can compare (anything but a function), found `U`. Declare `<U: eq>`
+363..364 error[type-mismatch] expected a value with an order (numeric, `character`, `logical`, a class, `I64`, `F64` or `Str`), found `Record{a: I64}`
+366..367 error[type-mismatch] expected a value with an order (numeric, `character`, `logical`, a class, `I64`, `F64` or `Str`), found `Record{a: I64}`
+431..435 error[type-mismatch] expected a value `==` can test against a string (an atomic value, a class, or `Str`), found `I64`
+500..501 error[type-mismatch] expected a value `==` can compare (anything but a function), found `T`. Declare `<T: eq>`
+505..506 error[type-mismatch] expected a value `==` can compare (anything but a function), found `U`. Declare `<U: eq>`
 
 #---- a_literal_argument_takes_the_ry_type_an_ordered_parameter_admits
 # Every type `ordered` admits is a ry number or `Str`, so a literal argument is one, as it is for

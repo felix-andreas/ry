@@ -43,14 +43,59 @@ positive <- function(x) x > 0L
 #++++
 positive: <T: comparable or number> fn(x: T) -> Compared<T>
 
-#---- two_flexible_comparison_operands_stay_separate_types
-# R compares an `integer` with a `character`, so each operand takes the comparison's constraint
-# without being tied to the other.
+#---- two_flexible_comparison_operands_are_one_type
+# ry compares only like values, so the two operands are one type. R compares across types, so
+# a call with two R values widens that type to their union instead.
 cmp <- function(a, b) a < b
+same <- function(a, b) a == b
+k: I64 <- 1
+x: F64 <- 2.5
+s: Str <- "s"
 mixed <- cmp(1L, "s")
+shaped <- cmp(1L, 1:3)
+promoted <- cmp(c(1.5, 2), 3L)
+dated <- cmp(Sys.Date(), "2020-01-01")
+equal_mixed <- same(1L, "a")
+ry_numbers <- cmp(k, 2)
+ry_strings <- same(s, s)
+bad_numbers <- cmp(k, x)
+bad_string <- same(k, s)
+whole_literal <- cmp(k, 2L)
 #++++
-cmp: <T: comparable or ordered, U: comparable or ordered> fn(a: T, b: U) -> Compared<T>
+cmp: <T: comparable or ordered> fn(a: T, b: T) -> Compared<T>
+same: <T: eq> fn(a: T, b: T) -> Compared<T>
+k: I64
+x: F64
+s: Str
 mixed: logical
+shaped: logical[]
+promoted: logical[]
+dated: logical
+equal_mixed: logical
+ry_numbers: Bool
+ry_strings: Bool
+bad_numbers: Unknown
+bad_string: Unknown
+whole_literal: Bool
+475..476 error[type-mismatch] expected `I64`, found `F64`
+500..501 error[type-mismatch] expected `I64`, found `Str`
+
+#---- an_open_value_tested_for_equality_admits_complex
+# R tests `complex` values for equality but has no order for them.
+is_zero <- function(x) x == 0
+is_a <- function(x) x != "a"
+negative <- function(x) x < 0
+zero <- is_zero(1i)
+items <- is_a(c(1i, 2i))
+ordered <- negative(1i)
+#++++
+is_zero: <T: equatable or number> fn(x: T) -> Compared<T>
+is_a: <T: equatable or Str> fn(x: T) -> Compared<T>
+negative: <T: comparable or number> fn(x: T) -> Compared<T>
+zero: logical
+items: logical[]
+ordered: Unknown
+221..223 error[type-mismatch] expected a value a number compares with (numeric, `character`, `logical`, a class, `I64` or `F64`), found `complex`
 
 #---- values
 n <- 1L

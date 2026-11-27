@@ -3880,6 +3880,8 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 | Constraint::ComparableOrNumber
                 | Constraint::ComparableOrOrdered
                 | Constraint::ComparableOrStr
+                | Constraint::EquatableOrNumber
+                | Constraint::EquatableOrStr
                 | Constraint::Eq),
             found,
         } if matches!(found.kind(db), TyKind::Rigid(_)) => {
@@ -4902,6 +4904,7 @@ fn constraint_description(constraint: Constraint) -> &'static str {
         Constraint::Comparable => {
             "a comparable R value (a numeric, `character` or `logical` value, or a class)"
         }
+        Constraint::Equatable => "an R value `==` can compare (an atomic value or a class)",
         Constraint::Ordered => "an ordered ry value (`I64`, `F64` or `Str`)",
         Constraint::ComparableOrNumber => {
             "a value a number compares with (numeric, `character`, `logical`, a class, `I64` or `F64`)"
@@ -4911,6 +4914,12 @@ fn constraint_description(constraint: Constraint) -> &'static str {
         }
         Constraint::ComparableOrStr => {
             "a value a string compares with (numeric, `character`, `logical`, a class, or `Str`)"
+        }
+        Constraint::EquatableOrNumber => {
+            "a value `==` can test against a number (an atomic value, a class, `I64` or `F64`)"
+        }
+        Constraint::EquatableOrStr => {
+            "a value `==` can test against a string (an atomic value, a class, or `Str`)"
         }
         Constraint::WholeLiteral { .. } | Constraint::FracLiteral => "a number",
         Constraint::StrLiteral => "a string",

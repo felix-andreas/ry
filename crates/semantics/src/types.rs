@@ -822,6 +822,9 @@ pub enum Constraint {
     /// vector shape, a list (compared element by element) or a class, which R's `Ops` methods
     /// compare.
     Comparable,
+    /// An R value `==` takes: what `comparable` admits, and `complex` and `raw`, which R tests
+    /// for equality but does not order.
+    Equatable,
     /// A ry value with an order: `I64`, `F64` or `Str`.
     Ordered,
     /// What `comparable` admits and the ry numbers: what `x > 0` asks of `x`, because R compares
@@ -830,8 +833,12 @@ pub enum Constraint {
     /// What `comparable` admits and what `ordered` does: what `a < b` asks of two values of one
     /// type.
     ComparableOrOrdered,
-    /// What `comparable` admits and `Str`: what `x == "a"` asks of `x`.
+    /// What `comparable` admits and `Str`: what `x < "a"` asks of `x`.
     ComparableOrStr,
+    /// What `equatable` admits and the ry numbers: what `x == 0` asks of `x`.
+    EquatableOrNumber,
+    /// What `equatable` admits and `Str`: what `x == "a"` asks of `x`.
+    EquatableOrStr,
     /// The type of a variable written with a whole-number literal (`total <- 0`), decided by its
     /// first use: a ry integer or fraction type, or R's `double` (`integer` for `0L`).
     WholeLiteral {
@@ -849,7 +856,7 @@ pub enum Constraint {
 impl Constraint {
     /// Shared by rendering and parsing, so every constraint the checker prints can
     /// be written back in an annotation.
-    pub const SPELLINGS: [(&'static str, Constraint); 17] = [
+    pub const SPELLINGS: [(&'static str, Constraint); 20] = [
         ("num", Constraint::Num),
         ("numeric", Constraint::Numeric),
         ("arithmetic", Constraint::Arithmetic),
@@ -867,6 +874,9 @@ impl Constraint {
         ("comparable or number", Constraint::ComparableOrNumber),
         ("comparable or ordered", Constraint::ComparableOrOrdered),
         ("comparable or Str", Constraint::ComparableOrStr),
+        ("equatable", Constraint::Equatable),
+        ("equatable or number", Constraint::EquatableOrNumber),
+        ("equatable or Str", Constraint::EquatableOrStr),
     ];
 
     pub fn spelling(self) -> Option<&'static str> {
@@ -895,6 +905,8 @@ impl Constraint {
             ComparableOrNumber => (Comparable, Number),
             ComparableOrOrdered => (Comparable, Ordered),
             ComparableOrStr => (Comparable, Str),
+            EquatableOrNumber => (Equatable, Number),
+            EquatableOrStr => (Equatable, Str),
             _ => return None,
         })
     }
@@ -910,6 +922,8 @@ impl Constraint {
             (Some(Comparable), Some(Number)) => Some(ComparableOrNumber),
             (Some(Comparable), Some(Ordered)) => Some(ComparableOrOrdered),
             (Some(Comparable), Some(Str)) => Some(ComparableOrStr),
+            (Some(Equatable), Some(Number)) => Some(EquatableOrNumber),
+            (Some(Equatable), Some(Str)) => Some(EquatableOrStr),
             (Some(r), _) => Some(r),
             (None, ry) => ry,
         }
@@ -1004,9 +1018,34 @@ impl Constraint {
                 | BoolLiteral),
                 Comparable,
             ) => c,
+            (Comparable, Equatable) | (Equatable, Comparable) => Comparable,
             // A key also admits ry values, which `comparable` does not.
             (Comparable, Key) | (Key, Comparable) => AtomicElement,
             (Comparable, _) | (_, Comparable) => return None,
+            // `equatable` admits every R value `comparable` does, and every R type the other R
+            // constraints admit.
+            (
+                Equatable,
+                c @ (Numeric
+                | ScalarNumeric
+                | AtomicElement
+                | WholeLiteral { .. }
+                | FracLiteral
+                | StrLiteral
+                | BoolLiteral),
+            )
+            | (
+                c @ (Numeric
+                | ScalarNumeric
+                | AtomicElement
+                | WholeLiteral { .. }
+                | FracLiteral
+                | StrLiteral
+                | BoolLiteral),
+                Equatable,
+            ) => c,
+            (Equatable, Key) | (Key, Equatable) => AtomicElement,
+            (Equatable, _) | (_, Equatable) => return None,
             (Str, Ordered | ArrayItem | Key) | (Ordered | ArrayItem | Key, Str) => Str,
             (Str, StrLiteral) | (StrLiteral, Str) => Str,
             (Str, _) | (_, Str) => return None,

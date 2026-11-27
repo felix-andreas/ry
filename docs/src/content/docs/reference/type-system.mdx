@@ -779,11 +779,15 @@ A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
 - `eq` admits every value but a function: the values `==` compares.
 - `comparable` admits the R values a comparison takes: an atomic value other than `complex` or
   `raw` in any vector shape, a list, which R compares element by element, and a class.
+- `equatable` admits what `comparable` does and `complex` and `raw`, which R tests for equality but
+  does not order.
 - `ordered` admits the ry values with an order: `I64`, `F64` and `Str`. A number literal passed for
   an `ordered` parameter is a ry number, and a string literal a `Str`.
 - `comparable or number` admits everything `comparable` does and `I64` and `F64`.
 - `comparable or Str` admits everything `comparable` does and `Str`.
 - `comparable or ordered` admits everything `comparable` does and what `ordered` does.
+- `equatable or number` and `equatable or Str` admit everything `equatable` does and the ry numbers
+  or `Str`.
 
 The constraints named `... or ...` join an R constraint and a ry one, and they are what
 [unannotated arithmetic](#unannotated-values-in-arithmetic) and comparisons infer, with a result
@@ -2807,10 +2811,12 @@ operand pick the [constraint](#constraints) and the result:
 | two of one type, under `/` | `numeric or F64` | `Promoted<T>` |
 | two of one type, under `^` | `num` | `Promoted<T>` |
 | beside any other value | `arithmetic` | R's result |
-| a comparison beside a number literal (`x > 0`) | `comparable or number` | `Compared<T>` |
-| a comparison beside a string literal (`x == "a"`) | `comparable or Str` | `Compared<T>` |
-| a value compared with itself, or with another open value, under `==` or `!=` | `eq` | `Compared<T>` |
-| a value compared with itself, or with another open value, under `<`, `>`, `<=` or `>=` | `comparable or ordered` | `Compared<T>` |
+| `x` beside a number literal, under `<`, `>`, `<=` or `>=` (`x > 0`) | `comparable or number` | `Compared<T>` |
+| `x` beside a string literal, under `<`, `>`, `<=` or `>=` | `comparable or Str` | `Compared<T>` |
+| `x` beside a number literal, under `==` or `!=` (`x == 0`) | `equatable or number` | `Compared<T>` |
+| `x` beside a string literal, under `==` or `!=` (`x == "a"`) | `equatable or Str` | `Compared<T>` |
+| two of one type, under `==` or `!=` | `eq` | `Compared<T>` |
+| two of one type, under `<`, `>`, `<=` or `>=` | `comparable or ordered` | `Compared<T>` |
 
 A whole literal is one with no fractional part, so `2.0` counts as whole and `2.5` does not. A
 class such as `Date` adds a number but not another value of its own, so two operands of one type
@@ -2837,17 +2843,17 @@ the same way, because a condition reads R's truth of a number, which a ry number
   `I64` and a `logical` for a `double` or a `character`. Calling it with a `Str` is a type error,
   because ry compares a `Str` only with a `Str`.
 
-- `function(a, b) a < b` is `<T: comparable or ordered, U: comparable or ordered> fn(a: T, b: U)
-  -> Compared<T>`. The two operands stay separate types, because R compares an `integer` with a
-  `character`, so `cmp(1L, "s")` is a `logical`, two `Str`s give a `Bool`, and two records are a
-  type error.
+- `function(a, b) a < b` is `<T: comparable or ordered> fn(a: T, b: T) -> Compared<T>`, because
+  ry compares only two values of one type: two `Str`s give a `Bool`, and an `I64` beside an `F64`,
+  a `Str` or an R value is a type error. R compares across types, so a call with two R values binds
+  `T` to their union instead: `cmp(1L, "s")` is a `logical`, and `cmp(1L, 1:3)` a `logical[]`.
+  Two records are a type error.
 
 A ry `List` meets a comparison's constraint through its items, as it compares item by item, and a
-ry nominal through its representation. Two different open operands are a gap on ry's side: ry
-compares only two values of one type, but the checker accepts a ry value beside a value of another
-type (an `I64` beside a `Str`, an `F64` or an `integer`), which stops at run time, and the result
-follows the left operand alone. `comparable` leaves out `complex`, so `function(x) x == 0` rejects
-a `complex` argument that R compares.
+ry nominal through its representation. A declared binder widens the same way, so
+`Bool.is_eq(1L, "one")` is a `Bool`, while `Bool.is_eq(1i64, "one")` is a type error. A
+`complex` value passes `function(x) x == 0` but not `function(x) x > 0`, because R tests it for
+equality and has no order for it.
 
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
 vector, so `f <- function(x) x + c(1L, 2L)` is `<T: arithmetic> fn(x: T) -> double[]` and accepts

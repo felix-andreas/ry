@@ -35,13 +35,25 @@ pub enum Entry<'db> {
         /// where binding it to the union would hand every caller back the whole union.
         bound: Option<Ty<'db>>,
     },
-    /// `numeric` records that the variable was numeric-constrained when it bound, which
-    /// lets a later, wider numeric argument rebind it (`f(1L, 0.5)`).
+    /// `widening` records how a later argument of another R type may rebind the variable.
     Bound {
         ty: Ty<'db>,
-        numeric: bool,
+        widening: Widening,
     },
     Redirect(InferenceVar),
+}
+
+/// How a bound variable meets a later argument of another R type. A ry value never widens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Widening {
+    Fixed,
+    /// Numeric-constrained when it bound, so a wider number rebinds it (`f(1L, 0.5)`).
+    Numeric,
+    /// Tied by a comparison of two open operands, so another comparable R type joins it as a
+    /// union (`f(1L, "a")` for `function(a, b) a < b`): R compares across types.
+    Compared {
+        equality: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -509,11 +521,15 @@ impl<'db> InferenceTable<'db> {
             }
         }
         self.adjust_levels(db, level, ty);
-        let numeric = matches!(
-            constraint.r_side(),
-            Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric
-        );
-        self.set(representative, Entry::Bound { ty, numeric });
+        let widening = match constraint.r_side() {
+            Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric => {
+                Widening::Numeric
+            }
+            Constraint::Comparable => Widening::Compared { equality: false },
+            Constraint::Eq | Constraint::Equatable => Widening::Compared { equality: true },
+            _ => Widening::Fixed,
+        };
+        self.set(representative, Entry::Bound { ty, widening });
         Ok(())
     }
 
@@ -1320,24 +1336,63 @@ impl<'db> InferenceTable<'db> {
     /// `integer` is compatible with `double`. Logicals never widen a binding, since a
     /// body like `stopifnot(x + 1L > 0L); x` returns the argument's own type. A `matrix`
     /// absorbs any numeric shape the same way.
-    fn widen_numeric_binding(
-        &mut self,
-        db: &'db dyn Db,
-        actual: Ty<'db>,
-        expected: Ty<'db>,
-    ) -> bool {
+    fn widen_binding(&mut self, db: &'db dyn Db, actual: Ty<'db>, expected: Ty<'db>) -> bool {
         let TyKind::Var(var) = expected.kind(db) else {
             return false;
         };
         let representative = self.find(*var);
         let Entry::Bound {
             ty: bound,
-            numeric: true,
+            widening,
         } = *self.entry(representative)
         else {
             return false;
         };
         let actual = self.resolve(db, actual);
+        match widening {
+            Widening::Fixed => false,
+            Widening::Numeric => self.widen_numeric_binding(db, representative, bound, actual),
+            Widening::Compared { equality } => {
+                if numeric_rank(db, bound).is_some() && numeric_rank(db, actual).is_some() {
+                    return self.widen_numeric_binding(db, representative, bound, actual);
+                }
+                let r_value = |ty: Ty<'db>| {
+                    !matches!(
+                        ty.kind(db),
+                        TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Any | TyKind::Unknown
+                    ) && !is_ry_value_type(db, ty)
+                };
+                let constraint = if equality {
+                    Constraint::Eq
+                } else {
+                    Constraint::Comparable
+                };
+                if !r_value(bound)
+                    || !r_value(actual)
+                    || constraint_rejects(db, self, constraint, actual).is_some()
+                    || self.compatible(db, actual, bound)
+                {
+                    return false;
+                }
+                self.set(
+                    representative,
+                    Entry::Bound {
+                        ty: union_of(db, [bound, actual]),
+                        widening,
+                    },
+                );
+                true
+            }
+        }
+    }
+
+    fn widen_numeric_binding(
+        &mut self,
+        db: &'db dyn Db,
+        representative: InferenceVar,
+        bound: Ty<'db>,
+        actual: Ty<'db>,
+    ) -> bool {
         // Arithmetic between a matrix and a plain number or vector gives a matrix, so a
         // variable tied by `a * H` takes `f(2, m)` and `f(m, 2)` alike and binds the matrix.
         let is_matrix = |ty: Ty<'db>| matches!(ty.kind(db), TyKind::Named(name, _) if name.text(db) == "matrix");
@@ -1389,7 +1444,7 @@ impl<'db> InferenceTable<'db> {
                 representative,
                 Entry::Bound {
                     ty: actual,
-                    numeric: true,
+                    widening: Widening::Numeric,
                 },
             );
             return true;
@@ -1406,7 +1461,7 @@ impl<'db> InferenceTable<'db> {
                     representative,
                     Entry::Bound {
                         ty: widened,
-                        numeric: true,
+                        widening: Widening::Numeric,
                     },
                 );
                 true
@@ -1422,7 +1477,7 @@ impl<'db> InferenceTable<'db> {
         expected: Ty<'db>,
         depth: usize,
     ) -> bool {
-        if self.widen_numeric_binding(db, actual, expected) {
+        if self.widen_binding(db, actual, expected) {
             return true;
         }
         let actual = self.resolve(db, actual);
@@ -2624,6 +2679,8 @@ pub(crate) fn constraint_rejects<'db>(
         Constraint::ComparableOrNumber
             | Constraint::ComparableOrOrdered
             | Constraint::ComparableOrStr
+            | Constraint::EquatableOrNumber
+            | Constraint::EquatableOrStr
     ) && let TyKind::Named(name, _) = ty.kind(db)
     {
         // A ry `List` compares item by item, and a ry nominal as its representation.
@@ -2649,7 +2706,9 @@ pub(crate) fn constraint_rejects<'db>(
         | Constraint::NumericOrF64
         | Constraint::ComparableOrNumber
         | Constraint::ComparableOrOrdered
-        | Constraint::ComparableOrStr => match (ty.kind(db), constraint.families()) {
+        | Constraint::ComparableOrStr
+        | Constraint::EquatableOrNumber
+        | Constraint::EquatableOrStr => match (ty.kind(db), constraint.families()) {
             (TyKind::Rigid(name), _) if binder_implies(name) => true,
             (_, Some((r_half, ry_half))) => {
                 constraint_rejects(db, table, r_half, ty).is_none()
@@ -2743,7 +2802,7 @@ pub(crate) fn constraint_rejects<'db>(
             TyKind::Rigid(name) => binder_implies(name),
             _ => true,
         },
-        Constraint::Comparable => match ty.kind(db) {
+        Constraint::Comparable | Constraint::Equatable => match ty.kind(db) {
             // `NULL > 0` is `logical(0)`.
             TyKind::Any | TyKind::Unknown | TyKind::Frame(..) | TyKind::Null => true,
             TyKind::Rigid(name) => binder_implies(name),
@@ -2755,7 +2814,7 @@ pub(crate) fn constraint_rejects<'db>(
                         .and_then(|definitions| definitions.get(db, *name))
                         .is_some_and(|definition| is_ry_value_type(db, definition.body))
             }
-            _ => comparison_operand_shape(db, ty, false).is_some(),
+            _ => comparison_operand_shape(db, ty, constraint == Constraint::Equatable).is_some(),
         },
         Constraint::Str => match ty.kind(db) {
             TyKind::Native(native) => *native == NativeScalar::Str,

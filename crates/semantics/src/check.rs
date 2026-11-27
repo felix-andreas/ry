@@ -1895,6 +1895,9 @@ fn erase_residual_vars_at<'db>(
             | Constraint::ComparableOrNumber
             | Constraint::ComparableOrOrdered
             | Constraint::ComparableOrStr
+            | Constraint::Equatable
+            | Constraint::EquatableOrNumber
+            | Constraint::EquatableOrStr
             | Constraint::Unconstrained => unknown(db),
         };
     }
@@ -12901,20 +12904,33 @@ impl<'db, 'a> Checker<'db, 'a> {
             Constraint::ComparableOrOrdered
         };
         let beside_literal = |literal: ExprId| {
-            if literal_operand(self.module, literal).is_some() {
-                Some(Constraint::ComparableOrNumber)
+            let (number, string) = if equality {
+                (Constraint::EquatableOrNumber, Constraint::EquatableOrStr)
             } else {
-                string_operand(self.module, literal).then_some(Constraint::ComparableOrStr)
+                (Constraint::ComparableOrNumber, Constraint::ComparableOrStr)
+            };
+            if literal_operand(self.module, literal).is_some() {
+                Some(number)
+            } else {
+                string_operand(self.module, literal).then_some(string)
             }
         };
         let compared = match (open_operand(resolved_left), open_operand(resolved_right)) {
             (Some(left), Some(right)) if left == right => Some((left, lhs_range, itself)),
-            // Two different open operands each take the constraint, but stay separate types:
-            // R compares an `integer` with a `character`, so tying them would reject valid R.
+            // Two different open operands are one type, as ry compares only like values. A
+            // call widens the type over R's types instead (`f(1L, "a")` binds
+            // `integer | character`), since R compares across them.
             (Some(left), Some(right)) => {
-                self.constrain_operand(lhs_range, left, itself);
-                self.constrain_operand(rhs_range, right, itself);
-                return self.table.family(self.db, FamilyResult::Comparison, left);
+                let snapshot = self.table.snapshot();
+                if self.table.unify(self.db, left, right).is_ok() {
+                    Some((left, lhs_range, itself))
+                } else {
+                    self.table.rollback(snapshot);
+                    // Two declared binders stay apart, and each must admit the comparison.
+                    self.constrain_operand(lhs_range, left, itself);
+                    self.constrain_operand(rhs_range, right, itself);
+                    return self.table.family(self.db, FamilyResult::Comparison, left);
+                }
             }
             (Some(left), None) => {
                 beside_literal(rhs).map(|constraint| (left, lhs_range, constraint))
@@ -24820,6 +24836,8 @@ impl<'db, 'a> Checker<'db, 'a> {
                                     | Constraint::ComparableOrOrdered
                                     | Constraint::ComparableOrNumber
                                     | Constraint::ComparableOrStr
+                                    | Constraint::EquatableOrNumber
+                                    | Constraint::EquatableOrStr
                             )
                         )
                 })

@@ -122,7 +122,7 @@ f: <T: arithmetic or number> fn(x: T) -> T
 #---- numeric_param_compare_eq
 f <- function(x) x == 0L
 #++++
-f: <T: comparable or number> fn(x: T) -> Compared<T>
+f: <T: equatable or number> fn(x: T) -> Compared<T>
 
 #---- numeric_param_compare_le
 f <- function(x) x <= 10L
@@ -303,12 +303,12 @@ f: <T: arithmetic or F64> fn(x: T) -> Promoted<T>
 #---- compare_against_character_asks_for_a_string_comparison
 f <- function(x) x == "a"
 #++++
-f: <T: comparable or Str> fn(x: T) -> Compared<T>
+f: <T: equatable or Str> fn(x: T) -> Compared<T>
 
 #---- compare_against_numeric_literal_leaves_the_operand_open
 f <- function(x) x == 1L
 #++++
-f: <T: comparable or number> fn(x: T) -> Compared<T>
+f: <T: equatable or number> fn(x: T) -> Compared<T>
 
 #==== range_numeric_var
 #---- range_over_numeric_var_is_double

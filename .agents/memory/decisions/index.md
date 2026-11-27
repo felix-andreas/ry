@@ -100,7 +100,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Recursion in a function-valued assignment is monomorphic (built, with exceptions)
 - Deep resolve cuts a cycle to `Unknown` and resolves a shared subtree once
 - The interface fixpoint is canonical per group, so a cyclic scheme does not depend on forcing order (built, with exceptions)
-- Two open comparison operands each take the comparison's constraint, untied
+- Two open comparison operands are one type that widens over R's types
 - Union compatibility commits a flexible argument at first use, in program order
 - Strict mode attributes a recursive binding the fixpoint cannot fully type
 - An undeclared type name errors once at the reference and compares like `Unknown`
