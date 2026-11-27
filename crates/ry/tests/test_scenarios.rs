@@ -1139,7 +1139,7 @@ const NATIVE_CHECK_EXCEPTIONS: [(&str, &str, &str); 0] = [];
 /// the call leaves out a parameter whose default the callee's finding is about.
 const CALLEE_REFUSED: [&str; 2] = [
     "a typed function it calls does not compile",
-    "runs code other than operators and the standard library",
+    "is not made of constants, operators, the standard library",
 ];
 
 /// One strict typed program of the corpus `native_diagnostics_agree_with_the_typed_core` runs.

@@ -30,7 +30,7 @@ use {
         borrow::Cow,
         cell::{Cell, RefCell},
     },
-    syntax::native_values::reads_its_frame,
+    syntax::native_values::{reads_its_frame, uses_its_frame},
 };
 
 /// A function lookup the compiled code assumes keeps finding the same function.
@@ -1674,10 +1674,14 @@ impl Lowering<'_> {
 
     /// A call of the R function `function`, whose value is used as `r_use` says.
     unsafe fn r_call(&mut self, call: Sexp, function: Sexp, r_use: RUse) -> Result<Local, Refusal> {
-        // `missing` reads how R called the function, and a native call passes values.
-        if call.car().kind() == SexpType::Symbol && &*rvalues::symbol_name(call.car()) == "missing"
+        if let Some(symbol) = called_symbol(call.car())
+            && uses_its_frame(&rvalues::symbol_name(symbol))
+            && is_base_value(symbol, function)
         {
-            return Err(Refusal::new("a call of `missing`"));
+            return Err(Refusal(Cow::Owned(format!(
+                "a call of R's `{}`, which looks at the frame it is called from",
+                rvalues::symbol_name(symbol)
+            ))));
         }
         let name = || interp::deparse::deparse_first_line(call.car());
         let result = r_result(r_use)?;
@@ -2200,8 +2204,8 @@ impl Lowering<'_> {
             }
             if !self.computed_ahead(default, body) {
                 return Err(Refusal(Cow::Owned(format!(
-                    "the default of `{}` runs code other than operators and the standard \
-                     library on names the body does not set",
+                    "the default of `{}` is not made of constants, operators, the standard \
+                     library and parameters or local variables the body does not set",
                     name()
                 ))));
             }
@@ -2219,16 +2223,24 @@ impl Lowering<'_> {
     /// (`computed_ahead` in `semantics::native`).
     unsafe fn computed_ahead(&self, code: Sexp, body: Sexp) -> bool {
         match code.kind() {
-            SexpType::Symbol => {
-                is_std_name(&rvalues::symbol_name(code))
-                    || matches!(self.lookup(code), Some(Binding::Value(_))) && !assigns(body, code)
-            }
+            // A name set on some paths only reads as the interpreter does where it is set, and
+            // gives the call up where it is not.
+            SexpType::Symbol => match self.lookup(code) {
+                Some(Binding::Value(_) | Binding::Maybe(_)) => !assigns(body, code),
+                Some(Binding::Function(_) | Binding::Hidden) => false,
+                None => std_binding(code, self.env).is_some_and(|value| {
+                    !matches!(
+                        value.kind(),
+                        SexpType::Closure | SexpType::Builtin | SexpType::Special
+                    )
+                }),
+            },
             SexpType::Language => {
                 let head = code.car();
                 head.kind() == SexpType::Symbol
                     && self.lookup(head).is_none()
                     && (is_ahead_operator(&rvalues::symbol_name(head))
-                        || is_std_name(&rvalues::symbol_name(head)))
+                        || std_binding(head, self.env).is_some())
                     && rvalues::pairlist_items(code.cdr())
                         .iter()
                         .all(|&(_, item)| self.computed_ahead(item, body))
@@ -11153,14 +11165,51 @@ fn is_ahead_operator(name: &str) -> bool {
     )
 }
 
-/// Whether `name` names a function or a constant of ry's standard library, such as `Num.abs`.
-fn is_std_name(name: &str) -> bool {
-    name.split_once('.').is_some_and(|(module, _)| {
-        matches!(
-            module,
-            "Num" | "Str" | "List" | "Dict" | "Set" | "Result" | "Bool"
-        )
-    })
+/// The value of the function or constant of ry's standard library that `symbol` finds from
+/// `env`, such as `Num.abs` or `Num.pi`, unless a binding of the program hides it.
+unsafe fn std_binding(symbol: Sexp, env: Sexp) -> Option<Sexp> {
+    let original = interp::standard_library::builtins_env()
+        .and_then(|builtins| interp::heap().frame_cell(builtins, symbol))
+        .map(|cell| cell.cdr())?;
+    resolve_value(symbol, env)
+        .is_some_and(|speculation| speculation.function == original)
+        .then_some(original)
+}
+
+/// The symbol a call's head names: `f` in `f(...)`, and `f` in `pkg::f(...)` or `pkg:::f(...)`.
+unsafe fn called_symbol(head: Sexp) -> Option<Sexp> {
+    match head.kind() {
+        SexpType::Symbol => Some(head),
+        SexpType::Language
+            if head.car().kind() == SexpType::Symbol
+                && matches!(&*rvalues::symbol_name(head.car()), "::" | ":::") =>
+        {
+            match rvalues::pairlist_items(head.cdr())[..] {
+                [_, (_, symbol)] if symbol.kind() == SexpType::Symbol => Some(symbol),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether `function` is base R's function `symbol`, as [`is_base_function`] tells for a
+/// lookup.
+unsafe fn is_base_value(symbol: Sexp, function: Sexp) -> bool {
+    match function.kind() {
+        SexpType::Builtin | SexpType::Special => interp::eval::builtin_def(function)
+            .is_ok_and(|def| rvalues::symbol_name(symbol) == def.name),
+        SexpType::Closure => {
+            let heap = interp::heap();
+            heap.frame_cell(heap.known().base_namespace, symbol)
+                .is_some_and(|cell| {
+                    let value = cell.cdr();
+                    value == function
+                        || value.kind() == SexpType::Promise && value.car() == function
+                })
+        }
+        _ => false,
+    }
 }
 
 /// The formals and body of `function(a1, ..., an) name(a1, ..., an)` for the library function

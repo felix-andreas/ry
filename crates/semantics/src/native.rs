@@ -33,7 +33,7 @@ use {
     syntax::{
         TextRange, TextSize,
         annotation::{Paired, pair_formals},
-        native_values::reads_its_frame,
+        native_values::{reads_its_frame, uses_its_frame},
     },
     thin_vec::ThinVec,
 };
@@ -149,6 +149,7 @@ pub enum Uncompiled {
     ComputedCall,
     AliasedSignature,
     IfWithoutElse,
+    FrameCall(Symbol),
     RArgument(Symbol, Crossing),
     Construct(&'static str),
     /// A construct, then what to write instead.
@@ -463,6 +464,16 @@ impl Uncompiled {
                     "a `Set` passed to R's `{function}` {YET}. Pass `Set.to_list(...)` instead"
                 ),
             },
+            Uncompiled::FrameCall(function) if function == "missing" => format!(
+                "`missing` {YET}: a native call passes values, so it does not keep how R called \
+                 the function. Give the parameter a default, such as a tag that marks it \
+                 missing, and test that"
+            ),
+            Uncompiled::FrameCall(function) => format!(
+                "a call of R's `{function}` {YET}: it looks at the frame it is called from, \
+                 which native code does not keep. Move the call into a function with an R type \
+                 in its signature"
+            ),
             Uncompiled::Construct(construct) => format!("{construct} {YET}"),
             Uncompiled::Advised(construct, fix) => format!("{construct} {YET}. {fix}"),
         }
@@ -1189,7 +1200,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             }
             self.scope.push((parameter.name, slot));
         }
-        self.defaults(&module[parameters], body);
+        self.defaults(&module[parameters], body, 0);
         if let Some(invisible) = self.invisible_tail(body) {
             self.uncompiled(invisible, Uncompiled::InvisibleResult);
             self.invisible = Some(invisible);
@@ -1205,15 +1216,23 @@ impl<'a, 'db> Judge<'a, 'db> {
         self.scope.clear();
     }
 
-    /// Reports each default of `parameters` that native code cannot compute at the call: R
-    /// computes a default where the body first reads it, so a call that leaves out such a
-    /// parameter runs in the interpreter.
-    fn defaults(&mut self, parameters: &[Parameter], body: ExprId) {
-        for parameter in parameters {
-            if let Some(default) = parameter.default
-                && !self.computed_ahead(default, body)
-            {
-                self.block(default, NativeBlockerKind::LazyDefault);
+    /// Reports each default of `parameters` outside the mask `supplied` that native code cannot
+    /// compute at the call: R computes a default where the body first reads it, so a call that
+    /// leaves out such a parameter runs in the interpreter.
+    fn defaults(&mut self, parameters: &[Parameter], body: ExprId, supplied: u64) {
+        for (index, parameter) in parameters.iter().enumerate() {
+            let Some(default) = parameter.default else {
+                continue;
+            };
+            if index < 64 && supplied & (1 << index) != 0 || self.computed_ahead(default, body) {
+                continue;
+            }
+            let range = self.judged.module.range(default);
+            let reported = self.blockers.iter().any(|blocker| {
+                blocker.range == range && matches!(blocker.kind, NativeBlockerKind::LazyDefault)
+            });
+            if !reported {
+                self.block_at(range, NativeBlockerKind::LazyDefault);
             }
         }
     }
@@ -1230,14 +1249,21 @@ impl<'a, 'db> Judge<'a, 'db> {
         match *module.kind(default) {
             ExpressionKind::Literal(_) => true,
             ExpressionKind::NameRef(name) => {
-                is_std_constant(name)
-                    || !matches!(
-                        self.lookup(name),
-                        None | Some(Slot::Function(_) | Slot::FunctionParameter)
-                    ) && !assigns_name(module, body, name)
-                        && !self
-                            .ty(default)
-                            .is_some_and(|ty| matches!(self.peel(ty).kind(db), TyKind::Function(_)))
+                let function = self
+                    .ty(default)
+                    .is_some_and(|ty| matches!(self.peel(ty).kind(db), TyKind::Function(_)));
+                !function
+                    && match self.lookup(name) {
+                        None => {
+                            is_native_function(name.as_str())
+                                && !self
+                                    .judged
+                                    .globals
+                                    .is_some_and(|globals| globals.defined_in_project(name, true))
+                        }
+                        Some(Slot::Function(_) | Slot::FunctionParameter) => false,
+                        Some(_) => !assigns_name(module, body, name),
+                    }
             }
             ExpressionKind::Unary {
                 operator: UnaryOperator::Minus | UnaryOperator::Plus | UnaryOperator::Not,
@@ -2417,7 +2443,6 @@ impl<'a, 'db> Judge<'a, 'db> {
             }
             self.scope.push((parameter.name, Slot::Parameter(None)));
         }
-        self.defaults(&module[parameters], body);
         let control_depth = std::mem::replace(&mut self.control_depth, 0);
         let r_arguments = self.r_arguments.take();
         let hoist = self.hoist.take();
@@ -2532,18 +2557,26 @@ impl<'a, 'db> Judge<'a, 'db> {
             // builds the message, so its arguments may hold anything.
             Callee::Stop => {}
             Callee::Local(function) => {
-                let matched = match *module.kind(function) {
-                    ExpressionKind::Function { parameters, .. } => {
-                        matches_formals(&module[parameters], arguments)
-                    }
-                    _ => true,
-                };
                 let name = match *module.kind(callee) {
                     ExpressionKind::NameRef(name) => name,
                     _ => Symbol::default(),
                 };
-                if !matched {
-                    self.uncompiled(id, Uncompiled::ArgumentCount(name));
+                // The call computes the defaults it leaves out with the names in scope here.
+                if let ExpressionKind::Function { parameters, body } = *module.kind(function) {
+                    let parameters = &module[parameters];
+                    match matched_formals(parameters, arguments) {
+                        Some(supplied) => {
+                            let mark = self.scope.len();
+                            self.scope.extend(
+                                parameters
+                                    .iter()
+                                    .map(|parameter| (parameter.name, Slot::Parameter(None))),
+                            );
+                            self.defaults(parameters, body, supplied);
+                            self.scope.truncate(mark);
+                        }
+                        None => self.uncompiled(id, Uncompiled::ArgumentCount(name)),
+                    }
                 }
                 for &(_, value) in arguments {
                     self.function_argument(value);
@@ -2714,14 +2747,11 @@ impl<'a, 'db> Judge<'a, 'db> {
         arguments: &[(Option<Symbol>, ExprId)],
         usage: Use,
     ) {
-        if name == "missing" && origin == ROrigin::Library {
-            self.uncompiled(
-                id,
-                Uncompiled::Advised(
-                    "`missing`",
-                    "Give the parameter a default, such as a tag that marks it missing, and test that",
-                ),
-            );
+        if origin == ROrigin::Library
+            && uses_its_frame(name.as_str())
+            && declaring_namespace(self.judged.db, name.as_str()) == Some("base")
+        {
+            self.uncompiled(id, Uncompiled::FrameCall(name));
         }
         // R evaluates a call made only of R code where it stands among another call's arguments,
         // lazily, as the interpreter would, so its value needs no ry type.
@@ -2959,15 +2989,19 @@ fn defers_arguments(name: &str) -> bool {
             .any(|prefix| name.starts_with(prefix))
 }
 
-/// Whether a call passing `arguments` matches them to `parameters` as R does (by exact name, then
-/// by a prefix that fits one parameter, then by position) and leaves out only parameters with a
-/// default, which is how native code calls a local function.
-fn matches_formals(parameters: &[Parameter], arguments: &[(Option<Symbol>, ExprId)]) -> bool {
+/// The mask of the parameters a call passing `arguments` supplies, when it matches them to
+/// `parameters` as R does (by exact name, then by a prefix that fits one parameter, then by
+/// position) and leaves out only parameters with a default, which is how native code calls a
+/// local function.
+fn matched_formals(
+    parameters: &[Parameter],
+    arguments: &[(Option<Symbol>, ExprId)],
+) -> Option<u64> {
     if parameters.iter().any(|parameter| parameter.name == "...") {
-        return true;
+        return Some(u64::MAX);
     }
     if parameters.len() > 64 {
-        return false;
+        return None;
     }
     let bit = |index: usize| 1u64 << index;
     let mut supplied = 0u64;
@@ -2979,7 +3013,7 @@ fn matches_formals(parameters: &[Parameter], arguments: &[(Option<Symbol>, ExprI
             .position(|parameter| parameter.name == *name)
         {
             Some(index) if supplied & bit(index) == 0 => supplied |= bit(index),
-            Some(_) => return false,
+            Some(_) => return None,
             None => partial.push(*name),
         }
     }
@@ -2990,7 +3024,7 @@ fn matches_formals(parameters: &[Parameter], arguments: &[(Option<Symbol>, ExprI
         });
         match (fits.next(), fits.next()) {
             (Some(index), None) if supplied & bit(index) == 0 => supplied |= bit(index),
-            _ => return false,
+            _ => return None,
         }
     }
     let mut open = (0..parameters.len()).filter(|&index| supplied & bit(index) == 0);
@@ -2999,7 +3033,7 @@ fn matches_formals(parameters: &[Parameter], arguments: &[(Option<Symbol>, ExprI
         if name.is_none() {
             match open.next() {
                 Some(index) => filled |= bit(index),
-                None => return false,
+                None => return None,
             }
         }
     }
@@ -3007,16 +3041,7 @@ fn matches_formals(parameters: &[Parameter], arguments: &[(Option<Symbol>, ExprI
         .iter()
         .enumerate()
         .all(|(index, parameter)| filled & bit(index) != 0 || parameter.default.is_some())
-}
-
-/// Whether `name` is a constant of ry's standard library, such as `Num.pi`.
-fn is_std_constant(name: Symbol) -> bool {
-    name.as_str().split_once('.').is_some_and(|(module, _)| {
-        matches!(
-            module,
-            "Num" | "Str" | "List" | "Dict" | "Set" | "Result" | "Bool"
-        )
-    })
+        .then_some(filled)
 }
 
 /// What a name of R, of a package or of ry's own library calls.
