@@ -26241,9 +26241,8 @@ fn builds_empty_keyed<'db>(db: &'db dyn Db, scheme: &TypeScheme<'db>) -> bool {
             .any(|&parameter| keyed(parameter))
 }
 
-/// The storage of a list of `item`s, or `None` for `Bool`, whose storage is the empty list's
-/// default, and for an item type left open.
-/// `ty` with each open variable `renamed` names replaced, through the variables' bindings.
+/// `ty` with each open variable that `renamed` names replaced, found by its representative, so
+/// `ty` must be resolved.
 fn rename_vars<'db>(
     db: &'db dyn Db,
     table: &InferenceTable<'db>,
@@ -26270,6 +26269,8 @@ fn rename_vars<'db>(
     mapped
 }
 
+/// The storage of a list of `item`s, or `None` for `Bool`, whose storage is the empty list's
+/// default, and for an item type left open.
 fn list_items<'db>(db: &'db dyn Db, item: Ty<'db>) -> Option<ListItems> {
     match item.kind(db) {
         TyKind::Native(NativeScalar::I64) => Some(ListItems::I64),
