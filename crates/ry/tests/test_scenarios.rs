@@ -877,7 +877,7 @@ fn typed_script(rng: &mut SplitMix64) -> (String, bool) {
     let mut erasable = true;
     for index in 0..rng.below(4) + 2 {
         let n = rng.below(9) + 2;
-        let mut lines = match rng.below(18) {
+        let mut lines = match rng.below(19) {
             0 => {
                 let operator = ["+", "*", "-"][rng.below(3)];
                 let mut definitions = vec![
@@ -1098,6 +1098,27 @@ fn typed_script(rng: &mut SplitMix64) -> (String, bool) {
                 definitions.push(format!("print(Num.to_f64(times_{index}({n}, 3)))"));
                 definitions.push(format!("print(Num.to_f64(times_{index}({n} + 1, 2)))"));
                 definitions
+            }
+            17 => {
+                // A call R returns invisibly shows nothing at the top level, however it compiles,
+                // also through a function that ends in calling it.
+                let ending = match rng.below(3) {
+                    0 => format!("y <- x * {n}"),
+                    1 => "for (i in List.range(1, 2)) cat(Num.to_r(x), \"\\n\")".to_owned(),
+                    _ => format!("if (x > {n}) stop(\"big\")\n  y <- x + 1"),
+                };
+                let result = if ending.starts_with("for") {
+                    "NULL"
+                } else {
+                    "F64"
+                };
+                vec![
+                    format!("quiet_{index} <- function(x: F64) -> {result} {{\n  {ending}\n}}"),
+                    format!("via_{index} <- function(x: F64) -> {result} quiet_{index}(x)"),
+                    format!("quiet_{index}({n})"),
+                    format!("via_{index}({n})"),
+                    format!("print(via_{index}({n}))"),
+                ]
             }
             _ => vec![
                 format!("plain_{index} <- function(x) x + 1"),

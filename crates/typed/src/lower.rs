@@ -67,6 +67,8 @@ pub struct Lowered {
     /// past the parameters and those a parameter of type [`Type::Absent`] stands for. The code
     /// computes them itself ([`Lowering::left_out_defaults`]).
     pub defaults: SmallVec<[Type; 2]>,
+    /// Whether R returns the value invisibly, as after an assignment or a loop ([`visibility`]).
+    pub invisible: bool,
 }
 
 /// A read of parameter `param` in block `block`, which held `position` instructions when
@@ -498,9 +500,15 @@ unsafe fn lower_calling(
         ));
     }
     let body = interp::bytecode::closure_body(closure);
-    if tail_invisible(body) {
-        return Err(Refusal::new("the body's value may be invisible"));
-    }
+    let invisible = match visibility(closure) {
+        Visibility::Visible => false,
+        Visibility::Invisible => true,
+        Visibility::Mixed => {
+            return Err(Refusal::new(
+                "R returns the body's value invisibly on some paths only",
+            ));
+        }
+    };
     let name = String::from("typed");
     let mut lowering = Lowering {
         builder: Builder::new(name, params),
@@ -662,6 +670,7 @@ unsafe fn lower_calling(
         constructed: lowering.constructed,
         param_reads: lowering.param_reads,
         defaults,
+        invisible,
     })
 }
 
@@ -2615,9 +2624,6 @@ impl Lowering<'_> {
                 && !self.inlining.contains(&function)
                 && !self.called.contains(&function)
             {
-                if tail_invisible(body) {
-                    return Err(Refusal::new("the body's value may be invisible"));
-                }
                 self.inlining.push(function);
                 let value = self.inline(function.car(), body, 0, arguments, crate::storage);
                 self.inlining.pop();
@@ -2697,7 +2703,6 @@ impl Lowering<'_> {
             && !self.called.contains(&function)
             && self.inlined.len() < MAX_TYPED_INLINE_DEPTH
             && rvalues::pairlist_items(function.car()).len() == values.len()
-            && !tail_invisible(body)
             && small_body(body, name, &mut own_calls, &mut 0)
         {
             self.self_inlines += own as usize;
@@ -12772,26 +12777,301 @@ unsafe fn small_body(
             .all(|(_, item)| small_body(item, own, own_calls, calls))
 }
 
-/// Whether the value of `expression` may be invisible, as an assignment's is, which a compiled
-/// call could not reproduce.
-pub unsafe fn tail_invisible(expression: Sexp) -> bool {
-    if expression.kind() != SexpType::Language || expression.car().kind() != SexpType::Symbol {
-        return false;
+/// How R shows the value a call gives. An assignment, a loop, `invisible()` and `List.for_each`
+/// give an invisible value, which top-level R code does not print, and a compiled call sets the
+/// interpreter's visibility from this when it returns. `Mixed` is a body whose paths disagree,
+/// which compiled code does not track.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Visibility {
+    Visible,
+    Invisible,
+    Mixed,
+}
+
+/// The visibility of what a call of `closure` gives: that of the body's last expression and of
+/// every `return` in it. A call in the last position gives what the local function, typed
+/// function or passed function it calls gives, as R's visibility flag outlives the callee's
+/// return.
+pub unsafe fn visibility(closure: Sexp) -> Visibility {
+    let mut walk = Visibilities {
+        locals: SmallVec::new(),
+        bound: SmallVec::new(),
+        seen: SmallVec::new(),
+    };
+    let scope = VisibilityScope {
+        formals: closure.car(),
+        env: closure.tag(),
+        depth: 0,
+    };
+    walk.body(interp::bytecode::closure_body(closure), scope)
+        .unwrap_or(Visibility::Visible)
+}
+
+/// How many bodies a visibility walk follows calls through before it calls the result mixed.
+const MAX_VISIBILITY_DEPTH: usize = 8;
+
+struct Visibilities {
+    /// The local functions in view, by name: the literal each assignment in a body walked binds.
+    locals: SmallVec<[(Sexp, Sexp); 4]>,
+    /// What the calls followed pass for the formals of the function they call: the formal, the
+    /// depth of the callee's body, the argument, and the caller's scope it reads names in.
+    bound: SmallVec<[(Sexp, usize, Sexp, VisibilityScope); 2]>,
+    /// The bodies being walked. A call back into one adds nothing, since its value is that of
+    /// the other paths of the body (`None` while none is known).
+    seen: SmallVec<[Sexp; 4]>,
+}
+
+/// Where the names of a body walked resolve: its function's formals, the environment it was
+/// defined in, and how many calls the walk followed to reach it.
+#[derive(Clone, Copy)]
+struct VisibilityScope {
+    formals: Sexp,
+    env: Sexp,
+    depth: usize,
+}
+
+fn join(left: Option<Visibility>, right: Option<Visibility>) -> Option<Visibility> {
+    match (left, right) {
+        (Some(left), Some(right)) if left != right => Some(Visibility::Mixed),
+        (left, right) => left.or(right),
     }
-    let args = rvalues::pairlist_items(expression.cdr());
-    match &*rvalues::symbol_name(expression.car()) {
-        "<-" | "=" | "invisible" | "for" | "while" | "repeat" | "List.for_each" => true,
-        "{" => args.last().is_some_and(|&(_, last)| tail_invisible(last)),
-        // An `if` without `else` whose condition is false gives an invisible `NULL`.
-        "if" => {
-            args.len() < 3
-                || args
-                    .iter()
-                    .skip(1)
-                    .any(|&(_, branch)| tail_invisible(branch))
+}
+
+impl Visibilities {
+    unsafe fn body(&mut self, body: Sexp, scope: VisibilityScope) -> Option<Visibility> {
+        if self.seen.contains(&body) {
+            return None;
         }
-        _ => false,
+        if self.seen.len() >= MAX_VISIBILITY_DEPTH {
+            return Some(Visibility::Mixed);
+        }
+        self.seen.push(body);
+        let held = self.locals.len();
+        self.collect_locals(body);
+        let mut found = self.tail(body, scope);
+        self.returns(body, scope, &mut found);
+        self.locals.truncate(held);
+        self.seen.pop();
+        found
     }
+
+    unsafe fn tail(&mut self, expression: Sexp, scope: VisibilityScope) -> Option<Visibility> {
+        let visible = Some(Visibility::Visible);
+        if expression.kind() != SexpType::Language || expression.car().kind() != SexpType::Symbol {
+            return visible;
+        }
+        let head = expression.car();
+        let args = rvalues::pairlist_items(expression.cdr());
+        match &*rvalues::symbol_name(head) {
+            "<-" | "=" | "<<-" | "invisible" | "for" | "while" | "repeat" | "List.for_each" => {
+                Some(Visibility::Invisible)
+            }
+            "{" => match args.last() {
+                Some(&(_, last)) => self.tail(last, scope),
+                None => visible,
+            },
+            "if" => {
+                let then = match args.get(1) {
+                    Some(&(_, then)) => self.tail(then, scope),
+                    None => visible,
+                };
+                // An `if` without `else` whose condition is false gives an invisible `NULL`.
+                let otherwise = match args.get(2) {
+                    Some(&(_, otherwise)) => self.tail(otherwise, scope),
+                    None => Some(Visibility::Invisible),
+                };
+                join(then, otherwise)
+            }
+            ".ry_match" => args
+                .iter()
+                .skip(1)
+                .filter(|&&(_, arm)| arm.kind() == SexpType::Language)
+                .filter_map(|&(_, arm)| rvalues::pairlist_items(arm.cdr()).last().copied())
+                .fold(None, |found, (_, body)| join(found, self.tail(body, scope))),
+            "return" => match args.first() {
+                // GNU R shows `return(y <- x)` and the interpreter does not, so the interpreter
+                // runs it rather than native code picking one.
+                Some(&(_, value))
+                    if value.kind() == SexpType::Language
+                        && value.car().kind() == SexpType::Symbol
+                        && matches!(&*rvalues::symbol_name(value.car()), "<-" | "=" | "<<-") =>
+                {
+                    Some(Visibility::Mixed)
+                }
+                Some(&(_, value)) => self.tail(value, scope),
+                None => visible,
+            },
+            // A path that stops or leaves a loop gives no value.
+            "stop" | "break" | "next" => None,
+            _ => self.called(head, &args, scope),
+        }
+    }
+
+    /// What a call of the function `symbol` names with `args` gives: a local function's body,
+    /// what a caller passed for a parameter, or a typed function's body. Any other function
+    /// counts as visible.
+    unsafe fn called(
+        &mut self,
+        symbol: Sexp,
+        args: &[(Sexp, Sexp)],
+        scope: VisibilityScope,
+    ) -> Option<Visibility> {
+        let visible = Some(Visibility::Visible);
+        if rvalues::pairlist_items(scope.formals)
+            .iter()
+            .any(|&(name, _)| name == symbol)
+        {
+            let passed = self
+                .bound
+                .iter()
+                .rev()
+                .find(|&&(formal, depth, ..)| formal == symbol && depth == scope.depth)
+                .map(|&(_, _, value, caller)| (value, caller));
+            return match passed {
+                Some((value, caller)) if is_function_literal(value) => {
+                    let parts = rvalues::pairlist_items(value.cdr());
+                    match (parts.first(), parts.get(1)) {
+                        (Some(&(_, own)), Some(&(_, body))) => self.body(
+                            body,
+                            VisibilityScope {
+                                formals: own,
+                                ..caller
+                            },
+                        ),
+                        _ => visible,
+                    }
+                }
+                Some((value, caller)) if value.kind() == SexpType::Symbol => {
+                    self.called(value, &[], caller)
+                }
+                _ => visible,
+            };
+        }
+        let literals: SmallVec<[Sexp; 2]> = self
+            .locals
+            .iter()
+            .filter(|&&(name, _)| name == symbol)
+            .map(|&(_, literal)| literal)
+            .collect();
+        if !literals.is_empty() {
+            let mut found = None;
+            for literal in literals {
+                let parts = rvalues::pairlist_items(literal.cdr());
+                if let (Some(&(_, own)), Some(&(_, body))) = (parts.first(), parts.get(1)) {
+                    let inner = VisibilityScope {
+                        formals: own,
+                        ..scope
+                    };
+                    found = join(found, self.body(body, inner));
+                }
+            }
+            return found;
+        }
+        let function = match find_function(symbol, scope.env) {
+            Some(speculation)
+                if speculation.function.kind() == SexpType::Closure
+                    && interp::annotations::is_typed(speculation.function) =>
+            {
+                speculation.function
+            }
+            _ => return visible,
+        };
+        // The arguments match the callee's formals by name, then by position, as R matches
+        // them; a function passed for a parameter the callee calls last decides what it gives.
+        let held = self.bound.len();
+        let depth = scope.depth + 1;
+        let formals = rvalues::pairlist_items(function.car());
+        let mut open: SmallVec<[Sexp; 4]> = formals.iter().map(|&(name, _)| name).collect();
+        for &(name, _) in args {
+            open.retain(|formal| *formal != name);
+        }
+        let mut positional = open.into_iter();
+        for &(name, value) in args {
+            let formal = if name == rvalues::nil() {
+                positional.next()
+            } else {
+                formals
+                    .iter()
+                    .map(|&(formal, _)| formal)
+                    .find(|&formal| formal == name)
+            };
+            if let Some(formal) = formal {
+                self.bound.push((formal, depth, value, scope));
+            }
+        }
+        let found = self.body(
+            interp::bytecode::closure_body(function),
+            VisibilityScope {
+                formals: function.car(),
+                env: function.tag(),
+                depth,
+            },
+        );
+        self.bound.truncate(held);
+        found
+    }
+
+    /// Joins into `found` what each `return` in `expression` gives, outside the functions it
+    /// defines. The error a `?` returns early is visible.
+    unsafe fn returns(
+        &mut self,
+        expression: Sexp,
+        scope: VisibilityScope,
+        found: &mut Option<Visibility>,
+    ) {
+        if expression.kind() != SexpType::Language {
+            return;
+        }
+        let head = expression.car();
+        if head.kind() == SexpType::Symbol {
+            match &*rvalues::symbol_name(head) {
+                "function" => return,
+                "return" => *found = join(*found, self.tail(expression, scope)),
+                ".ry_try" => *found = join(*found, Some(Visibility::Visible)),
+                _ => {}
+            }
+        }
+        let mut items = expression;
+        while items.kind() == SexpType::Language || items.kind() == SexpType::Pairlist {
+            self.returns(items.car(), scope, found);
+            items = items.cdr();
+        }
+    }
+
+    /// Records each local function `body` binds by assignment, outside the functions it defines.
+    unsafe fn collect_locals(&mut self, expression: Sexp) {
+        if expression.kind() != SexpType::Language {
+            return;
+        }
+        let head = expression.car();
+        if head.kind() == SexpType::Symbol {
+            let name = rvalues::symbol_name(head);
+            if name == "function" {
+                return;
+            }
+            if name == "<-" || name == "=" {
+                let parts = rvalues::pairlist_items(expression.cdr());
+                if let (Some(&(_, target)), Some(&(_, value))) = (parts.first(), parts.get(1))
+                    && target.kind() == SexpType::Symbol
+                    && is_function_literal(value)
+                {
+                    self.locals.push((target, value));
+                    return;
+                }
+            }
+        }
+        let mut items = expression;
+        while items.kind() == SexpType::Language || items.kind() == SexpType::Pairlist {
+            self.collect_locals(items.car());
+            items = items.cdr();
+        }
+    }
+}
+
+unsafe fn is_function_literal(value: Sexp) -> bool {
+    value.kind() == SexpType::Language
+        && value.car().kind() == SexpType::Symbol
+        && rvalues::symbol_name(value.car()) == "function"
 }
 
 /// Whether `expression` mentions `symbol` anywhere but inside `skipped`.

@@ -1,14 +1,18 @@
-# blocked: remember, show_all, bump_all
-remember <- function(x: F64) -> F64 {
-  doubled <- x * 2
+# blocked: mixed, early, mixed_local
+# A function whose paths disagree about whether R shows its value: one gives it visibly, another
+# invisibly, as after an assignment.
+mixed <- function(x: F64) -> F64 if (x > 0) x else { y <- 0 }
+early <- function(x: F64) -> F64 {
+  if (x > 0) return(x)
+  y <- 0
 }
-show_all <- function(n: I64) -> NULL {
-  for (i in List.range(1, n)) {
-    cat("row", Num.to_r(i), "\n")
-    NULL
-  }
+mixed_local <- function(x: F64) -> F64 {
+  keep <- function(y: F64) -> F64 if (y > 0) y else { z <- y }
+  keep(x)
 }
-bump_all <- function(xs: List<I64>) List.for_each(xs, function(x: I64) x + 1)
-show_all(2)
-cat(remember(2), "\n")
-bump_all([1, 2])
+mixed(1)
+mixed(-1)
+early(2)
+early(-2)
+mixed_local(1)
+mixed_local(-1)

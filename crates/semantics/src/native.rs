@@ -341,8 +341,9 @@ impl Uncompiled {
                  its own"
             ),
             Uncompiled::InvisibleResult => format!(
-                "the function ends in an expression whose value R returns invisibly, which {YET}. \
-                 End the function with the value itself, or with `NULL`"
+                "R returns the value this path gives invisibly, as after an assignment or a loop, \
+                 but other paths give a visible value, and a function whose paths disagree {YET}. \
+                 End this path with the value itself, or end every path the same way"
             ),
             Uncompiled::SuperAssignment => format!(
                 "`<<-` {YET}: a native function changes only its own variables. Return the new \
@@ -1213,7 +1214,11 @@ impl<'a, 'db> Judge<'a, 'db> {
             self.scope.push((parameter.name, slot));
         }
         self.defaults(&module[parameters], body, 0);
-        if let Some(invisible) = self.invisible_tail(body) {
+        if let Shown {
+            visible: Some(_),
+            invisible: Some(invisible),
+        } = self.shown(body)
+        {
             self.uncompiled(invisible, Uncompiled::InvisibleResult);
             self.invisible = Some(invisible);
         }
@@ -1378,36 +1383,19 @@ impl<'a, 'db> Judge<'a, 'db> {
         module.for_each_child(id, |child| self.collect_locals(child));
     }
 
-    /// The expression that makes the function's result invisible, which the typed core cannot
-    /// return: an assignment, a loop, an `if` without `else`, `invisible` or `List.for_each` in the
-    /// last position.
-    fn invisible_tail(&self, id: ExprId) -> Option<ExprId> {
-        let module = self.judged.module;
-        match *module.kind(id) {
-            ExpressionKind::Assign { .. }
-            | ExpressionKind::For { .. }
-            | ExpressionKind::While { .. }
-            | ExpressionKind::Repeat { .. } => Some(id),
-            ExpressionKind::If {
-                then_branch,
-                else_branch,
-                ..
-            } => match else_branch {
-                None => Some(id),
-                Some(else_branch) => self
-                    .invisible_tail(then_branch)
-                    .or_else(|| self.invisible_tail(else_branch)),
-            },
-            ExpressionKind::Block { statements } => module[statements]
-                .last()
-                .and_then(|&last| self.invisible_tail(last)),
-            ExpressionKind::Call { callee, .. } => matches!(
-                *module.kind(callee),
-                ExpressionKind::NameRef(name) if name == "invisible" || name == "List.for_each"
-            )
-            .then_some(id),
-            _ => None,
-        }
+    /// Where the paths of a function with this body give its value visibly and where invisibly,
+    /// as R shows it. An assignment, a loop, an `if` without `else`, `invisible` and
+    /// `List.for_each` give an invisible value, and so does a call of a local function that ends
+    /// in one. The typed core returns either kind, but not a body whose paths disagree.
+    fn shown(&self, body: ExprId) -> Shown {
+        let mut shown = Shown::default();
+        let mut walk = ShownWalk {
+            module: self.judged.module,
+            locals: Vec::new(),
+            seen: Vec::new(),
+        };
+        walk.body(body, &mut shown);
+        shown
     }
 
     /// Whether control never leaves `id` by its end.
@@ -1516,7 +1504,14 @@ impl<'a, 'db> Judge<'a, 'db> {
                 {
                     self.uncompiled(id, Uncompiled::BranchTypes);
                 }
-                if branch_use == Use::Value && else_branch.is_none() && self.invisible != Some(id) {
+                // A branch that gives `NULL` gives it on both paths.
+                if branch_use == Use::Value
+                    && else_branch.is_none()
+                    && self.invisible != Some(id)
+                    && !self
+                        .ty(then_branch)
+                        .is_some_and(|ty| matches!(ty.kind(db), TyKind::Null))
+                {
                     self.uncompiled(id, Uncompiled::IfWithoutElse);
                 }
             }
@@ -3197,4 +3192,152 @@ fn assigns_name(module: &Module, id: ExprId, name: Symbol) -> bool {
         found = found || assigns_name(module, child, name);
     });
     found
+}
+
+/// The first expression found that gives a function's value visibly, and the first that gives
+/// it invisibly ([`Judge::shown`]).
+#[derive(Default, Clone, Copy)]
+struct Shown {
+    visible: Option<ExprId>,
+    invisible: Option<ExprId>,
+}
+
+/// How many local function bodies a visibility walk follows calls through.
+const MAX_SHOWN_DEPTH: usize = 8;
+
+struct ShownWalk<'a> {
+    module: &'a Module,
+    /// The local functions in view, by name: the literal each assignment in a body walked binds.
+    locals: Vec<(Symbol, ExprId)>,
+    /// The bodies being walked. A call back into one adds nothing its other paths do not.
+    seen: Vec<ExprId>,
+}
+
+impl ShownWalk<'_> {
+    fn body(&mut self, body: ExprId, shown: &mut Shown) {
+        if self.seen.contains(&body) || self.seen.len() >= MAX_SHOWN_DEPTH {
+            return;
+        }
+        self.seen.push(body);
+        let held = self.locals.len();
+        self.collect_locals(body);
+        self.tail(body, shown);
+        self.returns(body, shown);
+        self.locals.truncate(held);
+        self.seen.pop();
+    }
+
+    fn tail(&mut self, id: ExprId, shown: &mut Shown) {
+        let module = self.module;
+        match *module.kind(id) {
+            ExpressionKind::Assign { .. }
+            | ExpressionKind::For { .. }
+            | ExpressionKind::While { .. }
+            | ExpressionKind::Repeat { .. } => {
+                shown.invisible.get_or_insert(id);
+            }
+            ExpressionKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.tail(then_branch, shown);
+                match else_branch {
+                    Some(else_branch) => self.tail(else_branch, shown),
+                    None => {
+                        shown.invisible.get_or_insert(id);
+                    }
+                }
+            }
+            ExpressionKind::Block { statements } => match module[statements].last() {
+                Some(&last) => self.tail(last, shown),
+                None => {
+                    shown.visible.get_or_insert(id);
+                }
+            },
+            ExpressionKind::Match { arms, .. } => {
+                for arm in &module[arms] {
+                    self.tail(arm.body, shown);
+                }
+            }
+            ExpressionKind::Call { callee, arguments } => {
+                let ExpressionKind::NameRef(name) = *module.kind(callee) else {
+                    shown.visible.get_or_insert(id);
+                    return;
+                };
+                if name == "invisible" || name == "List.for_each" {
+                    shown.invisible.get_or_insert(id);
+                } else if name == "stop" {
+                    // A path that stops gives no value.
+                } else if name == "return" {
+                    match module[arguments]
+                        .first()
+                        .and_then(|argument| argument.value)
+                    {
+                        Some(value) => self.tail(value, shown),
+                        None => {
+                            shown.visible.get_or_insert(id);
+                        }
+                    }
+                } else if let Some(literals) = self.local(name) {
+                    for literal in literals {
+                        if let ExpressionKind::Function { body, .. } = *module.kind(literal) {
+                            self.body(body, shown);
+                        }
+                    }
+                } else {
+                    shown.visible.get_or_insert(id);
+                }
+            }
+            ExpressionKind::Break | ExpressionKind::Next => {}
+            _ => {
+                shown.visible.get_or_insert(id);
+            }
+        }
+    }
+
+    fn local(&self, name: Symbol) -> Option<Vec<ExprId>> {
+        let literals: Vec<ExprId> = self
+            .locals
+            .iter()
+            .filter(|&&(local, _)| local == name)
+            .map(|&(_, literal)| literal)
+            .collect();
+        (!literals.is_empty()).then_some(literals)
+    }
+
+    /// Records what each `return` and `?` outside the functions `id` defines gives.
+    fn returns(&mut self, id: ExprId, shown: &mut Shown) {
+        let module = self.module;
+        match *module.kind(id) {
+            ExpressionKind::Function { .. } => return,
+            ExpressionKind::Try(_) => {
+                shown.visible.get_or_insert(id);
+            }
+            ExpressionKind::Call { callee, .. } if matches!(*module.kind(callee), ExpressionKind::NameRef(name) if name == "return") =>
+            {
+                self.tail(id, shown);
+            }
+            _ => {}
+        }
+        module.for_each_child(id, |child| self.returns(child, shown));
+    }
+
+    /// Records each local function `id` binds by assignment, outside the functions it defines.
+    fn collect_locals(&mut self, id: ExprId) {
+        let module = self.module;
+        match *module.kind(id) {
+            ExpressionKind::Function { .. } => return,
+            ExpressionKind::Assign { target, value, .. } => {
+                if let (ExpressionKind::NameRef(name), ExpressionKind::Function { .. }) =
+                    (*module.kind(target), *module.kind(value))
+                {
+                    self.locals.push((name, value));
+                    return;
+                }
+            }
+            _ => {}
+        }
+        module.for_each_child(id, |child| self.collect_locals(child));
+    }
 }

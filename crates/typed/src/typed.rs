@@ -190,6 +190,8 @@ pub struct Compiled {
     /// because they were being compiled, each with the result type the call assumed. The code
     /// is right only while each of them has current code of that result type.
     pub cells: SmallVec<[(Key, Type); 1]>,
+    /// Whether R returns the value invisibly ([`lower::visibility`]).
+    pub invisible: bool,
 }
 
 type Key = (Sexp, SmallVec<[Type; 4]>);
@@ -614,7 +616,7 @@ pub unsafe fn call(
         Ok(value)
     });
     heap.release_handles(mark);
-    interp::interp().visible = true;
+    interp::interp().visible = !compiled.invisible;
     Some(value)
 }
 
@@ -1075,6 +1077,7 @@ unsafe fn generate(params: &[Type], lowered: Lowered, linker: Linker) -> Result<
         sites: own_sites,
         guessed,
         cells: linker.cells,
+        invisible: lowered.invisible,
     })
 }
 
