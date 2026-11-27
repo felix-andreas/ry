@@ -92,7 +92,7 @@ Build profiles, releases, platforms, the dev shell, CI, fuzzing harnesses and be
 
 **Status:** built, except that the job sets up GNU R itself, which "CI runs in the flake's dev shell" supersedes: the job runs `just ci` in that shell.
 
-- CI runs the recipes `just gate` runs, with the toolchain from `rust-toolchain.toml` (a pinned nightly for `allocator_api`; stable cannot build the workspace), so CI and the local gate cannot diverge. It covers the whole workspace, not `default-members`, except `zed_ry` (wasm).
+- CI runs the recipes `just gate` runs, with the toolchain from `rust-toolchain.toml` (a pinned nightly for `allocator_api`; stable cannot build the workspace), so CI and the local gate cannot diverge. It covers the whole workspace, not `default-members`. The Zed extension (`editors/zed`) is a separate stable-toolchain workspace outside it.
 - **GNU R is required,** because the runtime's suites skip without one; it is 4.6.2, the release the oracle records with and ry bundles.
 - **Ignored suites stay manual** (`just fuzz-deep`, `just perf`): `ide::fuzz_deep` alone takes about an hour, the corpus benchmarks need a fetched corpus, and `format_directory` needs `RY_FORMAT_DIR`.
 - **Triggers (user decision):** `workflow_dispatch` only, never push or pull request; the orchestrator starts it on main when main has new commits.

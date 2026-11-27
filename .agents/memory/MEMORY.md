@@ -118,8 +118,7 @@ Cross-cutting traps and conventions. A trap that belongs to one crate lives in t
 ### Build, CI and platforms
 
 - **The toolchain is a dated nightly in `rust-toolchain.toml` (user directive), which `flake.nix` reads too.** Its rustfmt applies `rustfmt.toml`'s unstable import options; a stable rustfmt ignores them and rewrites every `use` tree.
-- **The Zed extension is the one stable-Rust crate** (`editors/zed/rust-toolchain.toml`): the nightly's `wasm32-wasip2` std imports `exit-with-code`, which Zed's host lacks. In the nix shell, build it through the rustup proxy.
-- **Exclude exactly `zed_ry` from workspace builds**: cargo only warns on a misspelled `--exclude` and builds the crate anyway.
+- **The Zed extension is the one stable-Rust crate** (`editors/zed/rust-toolchain.toml`): the nightly's `wasm32-wasip2` std imports `exit-with-code`, which Zed's host lacks. In the nix shell, build it through the rustup proxy. It is its own workspace with its own `Cargo.lock`, because stable cargo cannot parse the root manifest's profile `rustflags`; `just bump-version` updates both lockfiles.
 - **The interpreter is linked into `libR.so`, which `cargo build -p ry-lang` does not rebuild**, so a runtime fix seems to have no effect. Use `just ry`; `just doctor` names stale binaries. `cargo test` puts its fresh `libR.so` under `target/<profile>/build/libr/<hash>/out/` (`library_path`, `harness.rs`).
 - **A new dev-dependency feature goes into `crates/features`**, or building and testing compile two dependency trees (`decisions/tooling-bench-ci.md`, "Workspace-wide feature unification").
 - **A full disk shows up as a test-build failure** (ENOSPC, or a Bus error at link). Run `just prune` first; a cloud container's quota is about 40 GB whatever `df` says.

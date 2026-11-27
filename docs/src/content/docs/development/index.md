@@ -78,7 +78,9 @@ API and other unstable features are worth having before they stabilize (the poli
 `.agents/memory/decisions/docs-process.md`, "Data-oriented design and explicit allocators").
 With rustup, cargo downloads that toolchain, with clippy and rustfmt, on the first build. The Zed extension is the
 exception: `editors/zed/rust-toolchain.toml` pins a stable toolchain, because the nightly's
-`wasm32-wasip2` std imports a WASI function that Zed's host does not provide yet.
+`wasm32-wasip2` std imports a WASI function that Zed's host does not provide yet. Stable cargo
+cannot read the root manifest's profile `rustflags`, so `editors/zed` is its own workspace with
+its own `Cargo.lock`, outside the root workspace.
 The nix dev shell reads the same file. Nightly rustfmt also applies the import settings in
 `rustfmt.toml`, so `cargo fmt` keeps a single `use { ... }` tree per file.
 
@@ -91,7 +93,7 @@ just build                          # every binary and ry's runtime (`just build
 just try                            # build ry and walk through every command in a demo project
 just try-editor                     # build ry and print how to point an editor at it
 just gate                           # tests, clippy -D warnings, and fmt --check
-just battery                        # all workspace tests, excluding zed_ry
+just battery                        # all workspace tests
 just fixture <group__case>          # one fixture case
 just bless -p semantics --test ...  # rewrite fixture expectations from current output
 just docs-test [page]               # run the docs' marked examples through the real binary
@@ -115,10 +117,10 @@ bless records whatever the code produces, right or wrong.
 Without `just`:
 
 ```sh
-cargo build                              # the ry binary (the workspace default member)
-cargo test                               # the ry crate's tests
-cargo test --workspace --exclude zed_ry  # every crate
-cargo test -p semantics                  # the analysis core, the usual loop while iterating
+cargo build              # the ry binary (the workspace default member)
+cargo test               # the ry crate's tests
+cargo test --workspace   # every crate
+cargo test -p semantics  # the analysis core, the usual loop while iterating
 ```
 
 Most behavior is pinned by fixture tests, plain-text `.test` files whose rendered output is compared
