@@ -1501,7 +1501,8 @@ pub unsafe fn in_caller_scope<T>(body: impl for<'s> FnOnce(&mut Cx<'s>) -> R<T>)
     body(&mut context)
 }
 
-/// [`in_caller_scope`] for a raw entry that only reads the heap.
+/// [`in_caller_scope`] for a raw entry that allocates nothing a collection could see: it reads
+/// the heap, or moves a slot frame's variable into a binding cell with collection inhibited.
 ///
 /// # Safety
 ///

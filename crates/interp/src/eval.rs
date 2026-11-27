@@ -663,7 +663,7 @@ pub fn function_value<'s>(
             };
         if let Some(value) = resolve(context, found)? {
             let value = handles::force(context, value)?;
-            if is_function(value.r_type()) {
+            if values::is_function_type(value.r_type()) {
                 return Ok(value);
             }
             if !in_slot && handles::is_missing_argument(value) {
@@ -718,7 +718,7 @@ fn function_walk<'a>(
             if let Some(binding) = handles::global_binding(context, symbol)
                 && !binding.is_active()
                 && let Some(value) = settled(binding.content())
-                && is_function(value.r_type())
+                && values::is_function_type(value.r_type())
             {
                 return Walk::Function(value);
             }
@@ -727,7 +727,9 @@ fn function_walk<'a>(
             && let Some(value) = handles::slot_variable(context, scope, symbol, true)
         {
             match settled(value) {
-                Some(value) if is_function(value.r_type()) => return Walk::Function(value),
+                Some(value) if values::is_function_type(value.r_type()) => {
+                    return Walk::Function(value);
+                }
                 // The variable sits in its slot, so no cell binds the name.
                 Some(_) => None,
                 None => {
@@ -744,7 +746,9 @@ fn function_walk<'a>(
         };
         match found {
             Some(Found::Value(value)) => match settled(value) {
-                Some(value) if is_function(value.r_type()) => return Walk::Function(value),
+                Some(value) if values::is_function_type(value.r_type()) => {
+                    return Walk::Function(value);
+                }
                 Some(value) if handles::is_missing_argument(value) => return Walk::Missing,
                 Some(_) => {}
                 None => {
@@ -794,14 +798,6 @@ fn head_function<'s>(
         Some(symbol) => function_value(context, symbol, environment, None),
         None => handles::evaluate(context, head, environment),
     }
-}
-
-/// Whether a value of type `kind` can be called: a closure, a builtin or a special.
-fn is_function(kind: SexpType) -> bool {
-    matches!(
-        kind,
-        SexpType::Closure | SexpType::Builtin | SexpType::Special
-    )
 }
 
 /// Binds `symbol` in `env`'s own frame. The caller holds `value` rooted.
@@ -3697,9 +3693,9 @@ pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<CallPlan>> 
         let Some(head) = call.read(context).downcast::<Language>() else {
             return Ok(None);
         };
+        // C code may link a call's argument cells with `LCONS`, which GNU R evaluates the same.
         let mut cell = head.rest();
-        while let Some(argument) = cell.downcast::<Pairlist>() {
-            let (expression, tag) = (argument.head(), argument.tag());
+        while let Some((expression, tag, rest)) = handles::cell_fields(cell) {
             if let Some(symbol) = expression.downcast::<Symbol>() {
                 if symbol.is(dots) {
                     forwards_dots = true;
@@ -3711,7 +3707,7 @@ pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<CallPlan>> 
                 tag: handles::held(context, tag.raw()),
                 value: handles::held(context, expression.raw()),
             });
-            cell = argument.rest();
+            cell = rest;
         }
         if forwards_dots {
             return Ok(Some((shape, smallvec![MATCH_PER_CALL])));
@@ -5428,7 +5424,7 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         if expressions.is_empty() {
             break;
         }
-        // The frame no longer holds the code it handed over, and making its environment
+        // The code taken from the frame is held by nothing else, and making its environment
         // allocates.
         for expression in &expressions {
             crate::heap().root(expression.raw());
