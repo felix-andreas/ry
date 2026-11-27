@@ -73,12 +73,12 @@ parameters: [x: double]
 action: Add inferred type annotation for `g`
   edit 43..43 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 18..18 -> "<T: numeric>"
+  edit 18..18 -> "<T: num>"
   edit 20..20 -> ": T"
   edit 21..21 -> " -> T"
   edit 43..43 -> " -> double"
 completion (25): double, stdout, as.double, as.double.difftime, as.double.POSIXlt, is.double, .__C__double, DataFrame.columns
-hint @18<T: numeric>
+hint @18<T: num>
 hint @20: T
 hint @21 -> T
 hint @43 -> double
@@ -394,12 +394,12 @@ rename: none
 signature: fn(x: double, y: double = 2) -> double
 parameters: [x: double] | y: double = 2
 action: Add inferred type annotations for the whole file
-  edit 276..276 -> "<T: numeric>"
+  edit 276..276 -> "<T: num>"
   edit 278..278 -> ": T"
   edit 281..281 -> ": T"
   edit 286..286 -> " -> T"
 completion (128+): x = , y = , f, g, function, break, else, FALSE
-hint @276<T: numeric>
+hint @276<T: num>
 hint @278: T
 hint @281: T
 hint @286 -> T
@@ -417,13 +417,13 @@ parameters: x: double | [y: double = 2]
 action: Add inferred type annotation for `g`
   edit 45..45 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 13..13 -> "<T: numeric>"
+  edit 13..13 -> "<T: num>"
   edit 15..15 -> ": T"
   edit 18..18 -> ": T"
   edit 23..23 -> " -> T"
   edit 45..45 -> " -> double"
 completion (128+): y = , f, g, function, break, else, FALSE, for
-hint @13<T: numeric>
+hint @13<T: num>
 hint @15: T
 hint @18: T
 hint @23 -> T
@@ -437,15 +437,15 @@ hover 46..53: Unknown
 definition: none
 references: none
 rename: none
-signature: <T: numeric> fn(x: T, y: T = 2) -> T
+signature: <T: num> fn(x: T, y: T = 2) -> T
 parameters: x: T | [y: T = 2]
 action: Add inferred type annotations for the whole file
-  edit 13..13 -> "<T: numeric>"
+  edit 13..13 -> "<T: num>"
   edit 15..15 -> ": T"
   edit 18..18 -> ": T"
   edit 23..23 -> " -> T"
 completion (128+): f, g, function, break, else, FALSE, for, if
-hint @13<T: numeric>
+hint @13<T: num>
 hint @15: T
 hint @18: T
 hint @23 -> T
@@ -1084,7 +1084,7 @@ hint @137years =
 g <- function(rate, rate_max, years) rate + rate_max + years
 a <- g(rate = 0.1, 0.2, 3)
 #++++
-hint @13<T: numeric>
+hint @13<T: num>
 hint @18: T
 hint @28: T
 hint @35: T
@@ -1104,7 +1104,7 @@ hint @34: double
 grow <- function(principal, rate, years) principal * rate * years
 wrap <- function(...) grow(1, ..., 3)
 #++++
-hint @16<T: numeric>
+hint @16<T: num>
 hint @26: T
 hint @32: T
 hint @39: T
@@ -1117,7 +1117,7 @@ hint @93principal =
 scale_by <- function(values, factor, offset) values * factor + offset
 a <- c(1, 2) |> scale_by(2, 3)
 #++++
-hint @20<T: numeric>
+hint @20<T: num>
 hint @27: T
 hint @35: T
 hint @43: T

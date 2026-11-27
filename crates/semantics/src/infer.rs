@@ -415,8 +415,10 @@ impl<'db> InferenceTable<'db> {
         {
             return Err(UnifyError::Mismatch(ty, bound));
         }
-        if matches!(constraint, Constraint::Numeric | Constraint::Arithmetic)
-            && let TyKind::Vector(element) | TyKind::NamedVector(element) = ty.kind(db)
+        if matches!(
+            constraint,
+            Constraint::Numeric | Constraint::Num | Constraint::Arithmetic
+        ) && let TyKind::Vector(element) | TyKind::NamedVector(element) = ty.kind(db)
             && let TyKind::Var(element) = self.shallow_resolve(db, *element).kind(db)
         {
             let element = self.find(*element);
@@ -441,7 +443,10 @@ impl<'db> InferenceTable<'db> {
         self.adjust_levels(db, level, ty);
         let numeric = matches!(
             constraint,
-            Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric
+            Constraint::Numeric
+                | Constraint::Num
+                | Constraint::Arithmetic
+                | Constraint::ScalarNumeric
         );
         self.set(representative, Entry::Bound { ty, numeric });
         Ok(())
@@ -1005,6 +1010,14 @@ impl<'db> InferenceTable<'db> {
         constraint_rejects(db, self, constraint, Ty::new(db, TyKind::Rigid(name))).is_none()
     }
 
+    /// Whether a type parameter's values are arithmetic operands: a `<T: num>` is, though it
+    /// does not imply `arithmetic`, which admits R numbers only.
+    pub fn rigid_operand(&self, db: &'db dyn Db, name: Name<'db>) -> bool {
+        [Constraint::Arithmetic, Constraint::Num]
+            .into_iter()
+            .any(|constraint| self.rigid_satisfies(db, name, constraint))
+    }
+
     pub fn open_constraint(&self, db: &'db dyn Db, ty: Ty<'db>) -> Option<Constraint> {
         let resolved = self.resolve(db, ty);
         let TyKind::Var(var) = resolved.kind(db) else {
@@ -1163,6 +1176,7 @@ impl<'db> InferenceTable<'db> {
                             Entry::Unbound {
                                 constraint: Constraint::Unconstrained
                                     | Constraint::Numeric
+                                    | Constraint::Num
                                     | Constraint::Arithmetic,
                                 ..
                             }
@@ -1173,7 +1187,7 @@ impl<'db> InferenceTable<'db> {
                 }
                 TyKind::Rigid(name) => matches!(
                     self.rigid_constraints.get(name),
-                    Some(Constraint::Numeric | Constraint::Arithmetic)
+                    Some(Constraint::Numeric | Constraint::Num | Constraint::Arithmetic)
                 ),
                 _ => false,
             };
@@ -2376,7 +2390,8 @@ pub(crate) fn constraint_rejects<'db>(
     let admissible = match constraint {
         Constraint::Unconstrained => true,
         // R's arithmetic takes logicals (as 0 and 1) and complex numbers as well as numbers.
-        Constraint::Numeric | Constraint::Arithmetic => match ty.kind(db) {
+        Constraint::Numeric | Constraint::Num | Constraint::Arithmetic => match ty.kind(db) {
+            TyKind::Native(native) => constraint == Constraint::Num && native.is_number(),
             TyKind::Scalar(
                 Atomic::Logical | Atomic::Integer | Atomic::Double | Atomic::Complex,
             )

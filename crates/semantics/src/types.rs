@@ -691,6 +691,11 @@ pub enum Constraint {
     /// A number, or a class whose arithmetic takes two of it (`Money + Money`), so `a + b` on
     /// two values of the type is legal R.
     Numeric,
+    /// A number of either family, or a class whose arithmetic takes two of it, where arithmetic
+    /// keeps the type: what `a + b` asks of two values of one type when the sum has that type.
+    /// It admits what `Numeric` does and the ry numbers `I64` and `F64`, as Roc's `Num a` does,
+    /// so `function(a, b) a * b` multiplies two `F64`s as well as two `double`s.
+    Num,
     /// A number, or a class that declares any arithmetic method: `Date + 1` is legal R, while
     /// `Date + Date` is not. It is what `x + 1` asks of `x`, and two values of it combine only
     /// once it is `Numeric`.
@@ -731,7 +736,8 @@ pub enum Constraint {
 impl Constraint {
     /// Shared by rendering and parsing, so every constraint the checker prints can
     /// be written back in an annotation.
-    pub const SPELLINGS: [(&'static str, Constraint); 8] = [
+    pub const SPELLINGS: [(&'static str, Constraint); 9] = [
+        ("num", Constraint::Num),
         ("numeric", Constraint::Numeric),
         ("arithmetic", Constraint::Arithmetic),
         ("atomic", Constraint::AtomicElement),
@@ -763,7 +769,13 @@ impl Constraint {
         // `arithmetic` meets everything as `numeric` does, and only `numeric` itself or a
         // stronger constraint makes the result closed.
         let loosen = |joined: Option<Constraint>| match joined {
-            Some(Numeric) if self != Numeric && other != Numeric => Some(Arithmetic),
+            Some(Numeric)
+                if ![self, other]
+                    .iter()
+                    .any(|side| matches!(side, Numeric | Num)) =>
+            {
+                Some(Arithmetic)
+            }
             joined => joined,
         };
         let tighten = |constraint: Constraint| match constraint {
@@ -803,6 +815,15 @@ impl Constraint {
             | (Key, literal @ (WholeLiteral { .. } | FracLiteral)) => literal,
             (BoolLiteral, Key) | (Key, BoolLiteral) => BoolLiteral,
             (StrLiteral, AtomicElement) | (AtomicElement, StrLiteral) => AtomicElement,
+            // `num` meets a ry constraint as that constraint, and any R constraint as R's
+            // `numeric`: a value used both ways is an R number. `Key` has no exact meet (a
+            // number of either family that is a key), so it takes the R side.
+            (Num, c @ (Number | Int | Frac)) | (c @ (Number | Int | Frac), Num) => c,
+            (Num, ArrayItem) | (ArrayItem, Num) => Number,
+            // Every type a number literal admits is a number, so the literal stays open.
+            (Num, literal @ (WholeLiteral { .. } | FracLiteral))
+            | (literal @ (WholeLiteral { .. } | FracLiteral), Num) => literal,
+            (Num, c) | (c, Num) => return Numeric.join(c),
             (BoolLiteral, c @ (AtomicElement | Numeric | ScalarNumeric))
             | (c @ (AtomicElement | Numeric | ScalarNumeric), BoolLiteral) => c,
             (StrLiteral | BoolLiteral, _) | (_, StrLiteral | BoolLiteral) => return None,

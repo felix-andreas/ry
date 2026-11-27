@@ -1,0 +1,43 @@
+# A local function passed to the standard library, or to a local function that calls it with
+# positional arguments, leaves out parameters that have defaults. The formals past the passed
+# arguments take their defaults as a direct call's do, so these functions run natively and print
+# what the interpreter prints. One runs in the interpreter: its default reads a name the body sets
+# before reading the parameter, so the default's value depends on where R computes it.
+
+requires ry-runtime
+
+file ry.toml
+| [check]
+| typing = true
+
+file callbacks.R
+| xs <- List.repeat(1.5, 3i64)
+| other <- function(xs: List<F64>) -> List<F64> { loc <- function(x, k = x + 1.0) x * k; List.map(xs, loc) }
+| print(other(xs))
+| outer <- function(xs: List<F64>, n: F64) -> List<F64> { loc <- function(x, k = n) x * k; List.map(xs, loc) }
+| print(outer(xs, 10.0))
+| walked <- function(xs: List<F64>) -> F64 { add <- function(acc, x, w = 2.0) acc + x * w; List.walk(xs, 0.0, add) }
+| print(walked(xs))
+| passed <- function(xs: List<F64>) -> List<F64> {
+|   scale <- function(x, k = 3.0) x * k
+|   each <- function(f) List.map(xs, function(x) f(x))
+|   each(scale)
+| }
+| print(passed(xs))
+| set <- function(xs: List<F64>, n: F64) -> List<F64> { loc <- function(x, k = n * 2.0) { n <- 1.0; x * k }; List.map(xs, loc) }
+| print(set(xs, 10.0))
+
+env RY_TYPED_LOG 1
+run ry run --runtime ry callbacks.R
+expect exit 0
+expect stdout "[3.75, 3.75, 3.75]\n[15, 15, 15]\n[1] 9\n[4.5, 4.5, 4.5]\n[3, 3, 3]\n"
+expect stderr lacks "`other` runs in the interpreter"
+expect stderr lacks "`outer` runs in the interpreter"
+expect stderr lacks "`walked` runs in the interpreter"
+expect stderr lacks "`passed` runs in the interpreter"
+expect stderr "`set` runs in the interpreter: no code for [Vector { item: Dbl, array: true }, Dbl]: the default of `k`"
+
+env RY_JIT off
+run ry run --runtime ry callbacks.R
+expect exit 0
+expect stdout "[3.75, 3.75, 3.75]\n[15, 15, 15]\n[1] 9\n[4.5, 4.5, 4.5]\n[3, 3, 3]\n"

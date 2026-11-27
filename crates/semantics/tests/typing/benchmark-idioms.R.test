@@ -5,7 +5,7 @@ a <- mix(1L, 0.5)
 b <- mix(0.5, 1L)
 c <- mix(rbinom(3, 1, 0.5), 1 - rbinom(3, 1, 0.5))
 #++++
-mix: <T: numeric> fn(price: T, rate: T) -> T
+mix: <T: num> fn(price: T, rate: T) -> T
 a: double
 b: double
 c: double[]
@@ -101,7 +101,7 @@ x <- scale(c(1L, 2L), 0.5)
 y <- scale(1L, c(0.5, 1))
 v <- function(flags) !!flags
 #++++
-scale: <T: numeric> fn(a: T, b: T) -> T
+scale: <T: num> fn(a: T, b: T) -> T
 x: double[]
 y: double[]
 v: <T> fn(flags: T) -> Unknown
@@ -111,7 +111,7 @@ weigh <- function(a, H) a * H
 direct <- weigh(2, matrix(1, 2, 2))
 flipped <- weigh(matrix(1, 2, 2), 2)
 #++++
-weigh: <T: numeric> fn(a: T, H: T) -> T
+weigh: <T: num> fn(a: T, H: T) -> T
 direct: matrix
 flipped: matrix
 
@@ -125,7 +125,7 @@ accepts <- function() {
   NULL
 }
 #++++
-weigh: <T: numeric> fn(a: T, H: T) -> T
+weigh: <T: num> fn(a: T, H: T) -> T
 outer: <T: arithmetic> fn(H: T) -> double
 whole: double
 accepts: fn() -> NULL

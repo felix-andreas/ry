@@ -263,7 +263,12 @@ is inferred exactly once, because a probe snapshot does not reverse environment 
   (`S` in `fn(S, T) -> S`) is a fold accumulator, but only when another argument is that bare variable (the
   initial state); otherwise `List.update`'s `fn(T) -> T` lost its item hint. Hinting it pinned
   `List.walk(xs, list(), ...)` to `list{}`. `parameter_hints_for` reads the variables before the probe
-  binds them.
+  binds them. A settled ry state is the exception and keeps its hint, and "settled" admits open
+  variables the arguments brought (`settled_hint` names each by the argument's own variable, which
+  survives the probe's rollback). So `(values = [], n = 0i64)` hints `values: List<a>` with the empty
+  list's own `a`, the step function decides it, and the preflight hands the runtime its item type.
+  Without the hint the step read an open `acc`, a record update on it tied nothing, and the empty
+  list stayed untyped, so the walk ran in the interpreter (quadratic: 8,000 appends took 14 s).
 
 ## Strict mode implies type errors
 
@@ -1132,3 +1137,15 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - A `List.walk` step function may return more tags than its initial state. The accumulator formal takes the settled initial state as its hint, and after inferring the step function `widen_accumulators` joins its result into the state, rolls back that pass (environment, unification table, findings, pending enclosing writes, as the capture repass does) and infers the step again under the join, at most `ACCUMULATOR_PASS_CAP` times. The join must be closed, because the rollback drops the pass's bindings. The state argument's type becomes the join, an upcast. A callback that returns the state as every tag's payload (`List.walk_until`'s `:Continue(S) | :Break(S)`) widens by the join of the payloads.
 - Only a single candidate callee widens, because the hints of several candidates must agree. With several candidates, or a callback that returns the state any other way, a tag-bearing state gives the formal no hint, so the formal stays open. The hint side asks `accumulator_states` itself, so a kept hint always widens.
 - The typed core derives types from values, so it widens by relowering, as for a variable: `List.append`, `List.prepend` and `List.set` of a tag outside the list's item union return the wider list (its items are boxes either way), the branches of an `if` and a function's returns join tag lists (`joined`), an assignment of a list of more tags widens the variable, and a walk's state widens keyed by its step function's `Sexp`. `Dict.insert` does not widen, because the interpreter checks the value against the dictionary's value type.
+
+## Arithmetic that keeps its operands' type asks `num`
+
+**Status:** built (`Constraint::Num` in `types.rs`, its arm in `infer::constraint_rejects`, the tied operand rule in `Checker::infer_binary_numeric` and unary minus in `check.rs`; `native-syntax.R.test` group `unannotated_arithmetic`).
+
+- `a + b`, `a * b`, `a %% b`, `a %/% b` on two values of one open type, and `-a`, ask `num`, which admits what `numeric` does and `I64` and `F64`, as Roc's `Num a` does. Their result is the operands' type in R and in ry alike, so `mul <- function(a, b) a * b` is generic over both families and `List.map2(xs, ys, mul)` over `List<F64>` checks.
+- Other arithmetic asks an R-only constraint, because the checker types its result by R's rules: `a / b` and `a ^ b` give `double` and ask `numeric`, and a number literal operand (`x * 2.0`) gives R's promotion and asks `arithmetic`. Admitting a ry number there would claim `double` for an `F64` result, so those helpers reject ry numbers with a hint to declare the parameter.
+- `num` meets a ry constraint (`number`, `Int`, `Frac`) as that constraint, a `List` item as `number`, and anything R (a literal, `numeric`, `arithmetic`, `atomic`, `key`) as `numeric`: a value used both ways is an R number. A number literal is the exception and stays the literal, because every type it admits is a number, which keeps the join associative. `key` has no exact meet with `num` (a key of either number family), so it takes the R side. `numeric` names R values only, as the stubs' `<T: numeric>` (data.table's `nafill`) need.
+- A condition (`if`, `!`, `&&`) narrows an open `num` value to `numeric` (`Checker::narrow_condition_number`), because R's truth of a number does not exist for an `I64`; a declared `<T: num>` is no condition.
+- `a - b` on an open type asks `arithmetic` and gives `double`, so that two dates subtract. Under a declared `<T: num>` it gives `T`. An unannotated subtraction of two ry numbers is rejected: typing it `T` would need a result that depends on the family (the backlog item on R results).
+- `has_r_bound` counts `num`, so a `<T: num>` signature is a boundary function rather than a native one.
+- A declared `<T: num>` parameter is an arithmetic operand (`InferenceTable::rigid_operand`), though `num` does not imply `arithmetic`, and `x / x` under it is an error that says to declare `<T: numeric>`.

@@ -6068,7 +6068,16 @@ unsafe fn slot_is_missing(env: Sexp, symbol: Sexp, defaults_count: bool) -> R<Op
     value_is_missing(value).map(Some)
 }
 
-pub(crate) unsafe fn value_is_missing(value: Sexp) -> R<bool> {
+pub(crate) unsafe fn value_is_missing(mut value: Sexp) -> R<bool> {
+    // An argument check that may convert wraps its caller's promise in one of its own
+    // (`annotations::check_argument`), so the root of the chain is asked, as GNU R's
+    // `findRootPromise` finds it.
+    while value.kind() == SexpType::Promise
+        && value.car() == unbound()
+        && value.cdr().kind() == SexpType::Promise
+    {
+        value = value.cdr();
+    }
     if value == missing_arg() {
         return Ok(true);
     }

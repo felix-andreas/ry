@@ -448,7 +448,7 @@ shifted <- function(x) x + c(1L, 2L)
 flagged <- function() cost(TRUE, 0.5)
 both <- function() shifted(c(1, 2))
 #++++
-cost: <T: numeric> fn(price: T, rate: T) -> T
+cost: <T: num> fn(price: T, rate: T) -> T
 shifted: <T: arithmetic> fn(x: T) -> double[]
 flagged: fn() -> double
 both: fn() -> double[]
@@ -797,12 +797,12 @@ fine <- function() scale_by(2, 1)
 omitted <- function(m) pair(m)
 broken <- function() scale_by("a", 1)
 #++++
-scale_by: <T: numeric> fn(m: T, [tol]: T) -> T
+scale_by: <T: num> fn(m: T, [tol]: T) -> T
 pair: <T, U> fn(m: T, [tol]: U) -> list{T, U}
 fine: fn() -> double
 omitted: <T> fn(m: T) -> list{T, double}
 broken: Unknown
-430..433 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+430..433 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`), found `character`
 
 #---- a_missing_path_default_ends_with_its_if
 # A `missing()` branch that returns skips the join, so the later write under another test is a
@@ -823,8 +823,8 @@ scale_by <- function(m, factor) m * factor
 rescale <- function(m, factor) scale_by(m, factor)
 broken <- function(m) rescale(m)
 #++++
-scale_by: <T: numeric> fn(m: T, factor: T) -> T
-rescale: <T: numeric> fn(m: T, factor: T) -> T
+scale_by: <T: num> fn(m: T, factor: T) -> T
+rescale: <T: num> fn(m: T, factor: T) -> T
 broken: Unknown
 116..123 error[type-mismatch] this call leaves out `factor`, which the function requires
 
@@ -882,8 +882,8 @@ solve <- function(H = NULL, Z) {
   if (quadratic) scale_by(Z, H) else Z
 }
 #++++
-scale_by: <T: numeric> fn(Z: T, H: T) -> T
-solve: <T: numeric> fn([H]: T | NULL, Z: T) -> T
+scale_by: <T: num> fn(Z: T, H: T) -> T
+solve: <T: num> fn([H]: T | NULL, Z: T) -> T
 
 #---- negating_a_value_that_may_be_null_negates_the_value
 drop_marked <- function(res, labels) {
@@ -1676,7 +1676,7 @@ gcd <- function(a, b, extended = FALSE) {
 }
 lcm <- function(a, b) a / gcd(a, b, extended = FALSE) * b
 #++++
-gcd: <T: numeric, U> fn(a: T, b: T, [extended]: U) -> list{g: T, c: T} | T
+gcd: <T: num, U> fn(a: T, b: T, [extended]: U) -> list{g: T, c: T} | T
 lcm: <T: numeric> fn(a: T, b: T) -> double
 
 #---- a_negated_flag_guard_block_selects_its_returns
@@ -2551,7 +2551,7 @@ reduce: <T, U> fn(.x: list[T] | T[], [.f]: fn(U, T, ...: Any) -> U, ...: Any, [.
 locations: <T> fn(sizes: list[T] | T[]) -> list{double} | list[Unknown]
 starts: Unknown
 scaled: fn(xs: list[double] | double[]) -> double
-356..362 error[type-mismatch] expected a numeric value (`integer` or `double`), found `character`
+356..362 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`), found `character`
 
 #---- a_string_naming_the_reduce_function_is_accepted
 op <- "sum"
@@ -2959,8 +2959,8 @@ size <- function(ncontrols = NULL, ncases = NULL, kappa = 1) {
   solve_z(nd = ncases, v0 = 2)
 }
 #++++
-solve_z: <T: numeric> fn(nd: T, v0: T) -> double
-size: <T: numeric, U: numeric> fn([ncontrols]: T | NULL, [ncases]: U | NULL, [kappa]: T) -> double
+solve_z: <T: num> fn(nd: T, v0: T) -> double
+size: <T: numeric, U: num> fn([ncontrols]: T | NULL, [ncases]: U | NULL, [kappa]: T) -> double
 
 #---- a_list_grown_by_element_writes_holds_what_was_written
 # `list(n)` is a one-item tuple that a write at the next position grows, and a write under a

@@ -307,4 +307,4 @@ plain <- function() {
   )
 }
 #++++
-plain: <T: numeric, U> fn() -> list{double_it: fn(x: T) -> T, label: fn(x: U) -> character}
+plain: <T: num, U> fn() -> list{double_it: fn(x: T) -> T, label: fn(x: U) -> character}

@@ -28,7 +28,7 @@ increment: <T: arithmetic> fn(x: T) -> T
 #---- numeric_param_negate
 negate <- function(x) -x
 #++++
-negate: <T: numeric> fn(x: T) -> T
+negate: <T: num> fn(x: T) -> T
 
 #---- numeric_param_compare_literal
 is_positive <- function(x) x > 0L

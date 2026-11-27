@@ -34,7 +34,7 @@ Unknown
 add <- function(a, b) a + b
 add(1L, "x")
 #++++
-add: <T: numeric> fn(a: T, b: T) -> T
+add: <T: num> fn(a: T, b: T) -> T
 integer
 36..39 error[type-mismatch] expected `integer`, found `character`
 
@@ -78,4 +78,4 @@ double
 #---- clean_self_arith_param
 f <- function(x) x + x
 #++++
-f: <T: numeric> fn(x: T) -> T
+f: <T: num> fn(x: T) -> T

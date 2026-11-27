@@ -56,11 +56,11 @@ references: 30..37*, 49..56
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `compute`
-  edit 0..0 -> "#: <T, U: numeric> fn([x]: T, y: U) -> U\n"
+  edit 0..0 -> "#: <T, U: num> fn([x]: T, y: U) -> U\n"
 action: Add inferred type annotations for the whole file
-  edit 0..0 -> "#: <T, U: numeric> fn([x]: T, y: U) -> U\n"
+  edit 0..0 -> "#: <T, U: num> fn([x]: T, y: U) -> U\n"
 completion (26): doubled, double, stdout, as.double, as.double.difftime, as.double.POSIXlt, is.double, .__C__double
-hint @7: <T, U: numeric> fn([x]: T, y: U) -> U
+hint @7: <T, U: num> fn([x]: T, y: U) -> U
 hint @37: U
 
 #---- a_declared_signatures_local_offers_its_t
@@ -407,12 +407,12 @@ rename: 3 edit(s)
 signature: fn(values: double[], factor: double[] = 2) -> double[]
 parameters: values: double[] | [factor: double[] = 2]
 action: Add inferred type annotations for the whole file
-  edit 17..17 -> "<T: numeric>"
+  edit 17..17 -> "<T: num>"
   edit 24..24 -> ": T"
   edit 32..32 -> ": T"
   edit 37..37 -> " -> T"
 completion (74): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
-hint @17<T: numeric>
+hint @17<T: num>
 hint @24: T
 hint @32: T
 hint @37 -> T
@@ -428,17 +428,17 @@ references: 26..32*, 47..53, 69..75, 87..93
 rename: 4 edit(s)
 signature: none
 action: Add inferred type annotation for `scale`
-  edit 17..17 -> "<T: numeric>"
+  edit 17..17 -> "<T: num>"
   edit 24..24 -> ": T"
   edit 32..32 -> ": T"
   edit 37..37 -> " -> T"
 action: Add inferred type annotations for the whole file
-  edit 17..17 -> "<T: numeric>"
+  edit 17..17 -> "<T: num>"
   edit 24..24 -> ": T"
   edit 32..32 -> ": T"
   edit 37..37 -> " -> T"
 completion (74): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
-hint @17<T: numeric>
+hint @17<T: num>
 hint @24: T
 hint @32: T
 hint @37 -> T
@@ -499,12 +499,12 @@ references: 26..32*, 47..53, 114..120
 rename: 3 edit(s)
 signature: none
 action: Add inferred type annotation for `scale`
-  edit 17..17 -> "<T: numeric>"
+  edit 17..17 -> "<T: num>"
   edit 24..24 -> ": T"
   edit 32..32 -> ": T"
   edit 37..37 -> " -> T"
 action: Add inferred type annotations for the whole file
-  edit 17..17 -> "<T: numeric>"
+  edit 17..17 -> "<T: num>"
   edit 24..24 -> ": T"
   edit 32..32 -> ": T"
   edit 37..37 -> " -> T"
@@ -512,7 +512,7 @@ action: Add inferred type annotations for the whole file
   edit 78..78 -> ": T"
   edit 79..79 -> " -> T"
 completion (74): factor, factanal, factor.scope, factorial, format.factor, lfactorial, [.factor, c.factor
-hint @17<T: numeric>
+hint @17<T: num>
 hint @24: T
 hint @32: T
 hint @37 -> T
@@ -1231,17 +1231,17 @@ references: 21..27*, 41..47
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotation for `f`
-  edit 13..13 -> "<T: numeric>"
+  edit 13..13 -> "<T: num>"
   edit 19..19 -> ": T"
   edit 27..27 -> ": T"
   edit 32..32 -> " -> T"
 action: Add inferred type annotations for the whole file
-  edit 13..13 -> "<T: numeric>"
+  edit 13..13 -> "<T: num>"
   edit 19..19 -> ": T"
   edit 27..27 -> ": T"
   edit 32..32 -> " -> T"
 completion (7): second, .leap.seconds, simpleCondition, as.character.condition, messageCondition, browserCondition, conditionMessage.condition
-hint @13<T: numeric>
+hint @13<T: num>
 hint @19: T
 hint @27: T
 hint @32 -> T

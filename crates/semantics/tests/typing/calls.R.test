@@ -395,7 +395,7 @@ f: Unknown
 g <- function(x, y) x + y
 f <- function() g(y = 1, 2, 3)
 #++++
-g: <T: numeric> fn(x: T, y: T) -> T
+g: <T: num> fn(x: T, y: T) -> T
 f: Unknown
 54..55 error[type-mismatch] this call passes 2 positional arguments, but the function only takes 1
 
@@ -1194,9 +1194,9 @@ two <- function(a, b) a + b
 wrap <- function(...) two(...)
 partial <- function(x, ...) two(x, ...)
 #++++
-two: <T: numeric> fn(a: T, b: T) -> T
-wrap: <T: numeric> fn(...: Any) -> T
-partial: <T: numeric> fn(x: T, ...: Any) -> T
+two: <T: num> fn(a: T, b: T) -> T
+wrap: <T: num> fn(...: Any) -> T
+partial: <T: num> fn(x: T, ...: Any) -> T
 
 #==== pipes
 #---- pipe_lowers_to_first_argument_call
@@ -1221,14 +1221,14 @@ f: Unknown
 scale_by <- function(value, factor) value * factor
 f <- function(x) x |> scale_by(2, factor = _)
 #++++
-scale_by: <T: numeric> fn(value: T, factor: T) -> T
+scale_by: <T: num> fn(value: T, factor: T) -> T
 f: <T: arithmetic> fn(x: T) -> double
 
 #---- placeholder_without_the_piped_first_argument_is_missing_an_argument
 scale_by <- function(value, factor) value * factor
 f <- function() 2 |> scale_by(factor = _)
 #++++
-scale_by: <T: numeric> fn(value: T, factor: T) -> T
+scale_by: <T: num> fn(value: T, factor: T) -> T
 f: Unknown
 72..80 error[type-mismatch] this call leaves out `value`, which the function requires
 

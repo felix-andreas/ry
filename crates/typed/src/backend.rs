@@ -152,6 +152,7 @@ pub fn words(ty: Type) -> SmallVec<[Machine; 2]> {
         | Type::Record(_)
         | Type::Tag(_)
         | Type::Table => SmallVec::from_slice(&[I64]),
+        Type::Absent => SmallVec::new(),
     }
 }
 

@@ -267,6 +267,9 @@ pub struct ReadAhead {
     /// watched, as a left-out default's do: R evaluates it in the call's frame when the body
     /// first reads the parameter.
     pub fixed: u64,
+    /// The formals, as bits by position, that the call leaves out before a later one it passes.
+    /// Each has a default, which the typed core's code computes ([`Type::Absent`]).
+    pub absent: u64,
     /// Each unforced promise read, with the value forcing it gives and the position of the
     /// argument it was read for. A call that succeeds settles each as forcing would have.
     pub promises: SmallVec<[(Sexp, Sexp, u32); 4]>,
@@ -372,13 +375,22 @@ pub unsafe fn call(
     // consider.
     let mut params: SmallVec<[Type; 4]> = SmallVec::new();
     let mut arguments = Arguments::default();
-    for (position, &value) in values.iter().enumerate() {
+    // `values` holds the passed formals' values in order, and `params` every formal up to the
+    // last passed one, at its position.
+    let mut position = 0;
+    for &value in values {
+        while position < 64 && ahead.absent & (1 << position) != 0 {
+            params.push(Type::Absent);
+            position += 1;
+        }
+        let formal = position;
+        position += 1;
         let found = type_of(value);
         let converted = match found {
             // An `I64` formal converts a whole R number at the boundary, which `Arguments::push`
             // does, or gives up for the interpreter to raise the error.
             Some(Type::Int | Type::Dbl | Type::I64)
-                if interp::annotations::declares_i64(function, position) =>
+                if interp::annotations::declares_i64(function, formal) =>
             {
                 arguments.push(value, Type::I64).map(|()| Type::I64)
             }
@@ -387,7 +399,7 @@ pub unsafe fn call(
             Some(ty) => {
                 let ty = match ty.item() {
                     Some(item @ (Item::Int | Item::Dbl | Item::Lgl | Item::Str | Item::I64))
-                        if interp::annotations::declares_vector(function, position) =>
+                        if interp::annotations::declares_vector(function, formal) =>
                     {
                         Type::vector(item)
                     }
@@ -398,7 +410,7 @@ pub unsafe fn call(
             None if holds_boxes(value) => arguments.push_boxes(value),
             None => {
                 arguments.release();
-                decline(|| format!("argument {}: {}", position + 1, boundary_refusal(value)));
+                decline(|| format!("argument {}: {}", formal + 1, boundary_refusal(value)));
                 return None;
             }
         };
@@ -406,7 +418,7 @@ pub unsafe fn call(
             Ok(ty) => params.push(ty),
             Err(reason) => {
                 arguments.release();
-                decline(|| format!("argument {} does not convert: {reason}", position + 1));
+                decline(|| format!("argument {} does not convert: {reason}", formal + 1));
                 return None;
             }
         }
@@ -871,11 +883,16 @@ unsafe fn compile(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> 
     for _ in 0..MAX_SHAPE_ROUNDS {
         let (lowered, linker) = lower_settled(function, params)?;
         // A left-out formal's default meets its annotation where R would check it.
-        let arguments: SmallVec<[Option<(SexpType, bool)>; 4]> = params
-            .iter()
-            .chain(&lowered.defaults)
-            .map(|&ty| storage(ty))
-            .collect();
+        let mut defaults = lowered.defaults.iter().copied();
+        let mut arguments: SmallVec<[Option<(SexpType, bool)>; 4]> = SmallVec::new();
+        for &ty in params {
+            let ty = match ty {
+                Type::Absent => defaults.next().unwrap_or(Type::Absent),
+                ty => ty,
+            };
+            arguments.push(storage(ty));
+        }
+        arguments.extend(defaults.map(storage));
         let result = storage(lowered.function.result);
         if !interp::annotations::admits_storage(function, &arguments, result) {
             return Err(Refusal::new("the types fail the closure's annotations"));
@@ -1230,7 +1247,7 @@ pub(crate) fn storage(ty: Type) -> Option<(SexpType, bool)> {
         Type::List(_) => (SexpType::List, false),
         Type::Record(_) | Type::Tag(_) => (SexpType::Record, false),
         Type::Table => (SexpType::ExternalPtr, false),
-        Type::Set(_) | Type::Dict { .. } => return None,
+        Type::Set(_) | Type::Dict { .. } | Type::Absent => return None,
     })
 }
 
@@ -1458,7 +1475,12 @@ impl Arguments {
             }
             // The caller keeps its argument alive for the call.
             Type::Table => self.words.push(value.as_ptr() as u64),
-            Type::Bool | Type::Null | Type::Set(_) | Type::Dict { .. } | Type::Record(_) => {
+            Type::Bool
+            | Type::Null
+            | Type::Set(_)
+            | Type::Dict { .. }
+            | Type::Record(_)
+            | Type::Absent => {
                 return Err(UNTYPED);
             }
         }
@@ -1901,6 +1923,9 @@ unsafe fn to_r(ty: Type, out: [u64; 2]) -> Result<Sexp, Unwind> {
         Type::Record(_) | Type::Tag(_) => from_box(word),
         Type::Table => Sexp::from_raw(word as *mut _)
             .ok_or_else(|| interp::unwind::error("a typed function read a table it never set")),
+        Type::Absent => Err(interp::unwind::error(
+            "a typed function returned a formal its call left out",
+        )),
         Type::Vector { item, array } => {
             let list = word as *mut List;
             let length = (*list).length as usize;

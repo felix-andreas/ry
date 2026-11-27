@@ -1263,6 +1263,7 @@ fn check_item_in<'db>(
     let num_from_r = Symbol::lookup("Num.from_r");
     let from_r_or = Symbol::lookup("List.from_r_or");
     let from_r_missing = Symbol::lookup("List.from_r_missing");
+    let map_try = Symbol::lookup("List.map_try");
     let mut checked_types: ThinVec<(ExprId, CheckedType)> = recorded
         .iter()
         .enumerate()
@@ -1307,6 +1308,16 @@ fn check_item_in<'db>(
                         } else {
                             item
                         };
+                        return list_items(db, item).map(|items| (id, CheckedType::List(items)));
+                    }
+                    // The list inside `:Ok` takes its items from the callback, as `List.map`'s.
+                    ExpressionKind::NameRef(name) if Some(*name) == map_try => {
+                        if !library(callee, *name) {
+                            return None;
+                        }
+                        let ty = context.table.resolve(db, (*slot)?);
+                        let list = ok_payload(db, ty)?;
+                        let item = crate::types::array_element(db, list)?;
                         return list_items(db, item).map(|items| (id, CheckedType::List(items)));
                     }
                     // `.ry_items` returns any other value unchanged, so a library name a project
@@ -1851,9 +1862,10 @@ fn erase_residual_vars_at<'db>(
     }
     if !closer.abstracted.contains(&table.find(var)) {
         return match constraint {
-            Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric => {
-                scalar(db, Atomic::Double)
-            }
+            Constraint::Numeric
+            | Constraint::Num
+            | Constraint::Arithmetic
+            | Constraint::ScalarNumeric => scalar(db, Atomic::Double),
             Constraint::WholeLiteral { .. }
             | Constraint::FracLiteral
             | Constraint::StrLiteral
@@ -10390,7 +10402,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             // R has no unary `-` on a `Date`, which only adds a number, so the operand needs
             // the arithmetic a class has with its own values.
             NumericOperand::Flexible(ty) => {
-                self.constrain_operand(operand_range, ty, Constraint::Numeric);
+                self.constrain_operand(operand_range, ty, Constraint::Num);
                 ty
             }
             NumericOperand::FlexibleVector(element) => {
@@ -10499,6 +10511,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             TyKind::Any | TyKind::Unknown => return unknown(self.db),
             TyKind::Var(_) | TyKind::Rigid(_) => {
+                self.narrow_condition_number(operand_range, resolved);
                 if !self.condition_coerces(resolved)
                     && !self.reads_open_defaulted_formal(operand, resolved)
                 {
@@ -11869,11 +11882,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         // A generic bounded `numeric` probes as the `double` it may be.
         let probe_operand =
             |ty: Ty<'db>| match self.table.shallow_resolve(self.db, ty).kind(self.db) {
-                TyKind::Rigid(name)
-                    if self
-                        .table
-                        .rigid_satisfies(self.db, *name, Constraint::Arithmetic) =>
-                {
+                TyKind::Rigid(name) if self.table.rigid_operand(self.db, *name) => {
                     scalar(self.db, Atomic::Double)
                 }
                 _ => ty,
@@ -12030,6 +12039,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         let condition_range = self.blame_range(condition);
         let inferred = self.infer(condition);
         let resolved = self.structural(inferred);
+        self.narrow_condition_number(condition_range, resolved);
         if (self.condition_coerces(resolved) && !self.is_long_combine(condition))
             || self.reads_open_defaulted_formal(condition, resolved)
             || self.reads_null_placeholder(condition, resolved)
@@ -12182,6 +12192,14 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
+    /// A condition reads a number's truth as R does, which a ry number lacks, so an open value
+    /// that `num` admits takes R's numbers only once it is tested.
+    fn narrow_condition_number(&mut self, range: TextRange, ty: Ty<'db>) {
+        if self.table.open_constraint(self.db, ty) == Some(Constraint::Num) {
+            self.constrain_operand(range, ty, Constraint::Numeric);
+        }
+    }
+
     fn infer_binary_numeric(
         &mut self,
         range: TextRange,
@@ -12299,6 +12317,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                                     self.table.variable_constraint(self.db, side),
                                     None | Some(
                                         Constraint::Numeric
+                                            | Constraint::Num
                                             | Constraint::Arithmetic
                                             | Constraint::ScalarNumeric
                                     )
@@ -12331,10 +12350,17 @@ impl<'db, 'a> Checker<'db, 'a> {
         if let Some(ty) = flexible {
             // R subtracts two dates or two times (their difference is a `difftime`), so `a - b`
             // asks no more of a class than `a + 1` does, while `a + b` asks `numeric`.
-            let tied_difference = tied && operator == BinaryOperator::Subtract;
-            let constraint = match tied && !tied_difference {
-                true => Constraint::Numeric,
-                false => Constraint::Arithmetic,
+            // A declared `<T: num>` admits no class, so its difference is `T`.
+            let num_rigid = matches!(ty.kind(self.db), TyKind::Rigid(name)
+                if self.table.rigid_satisfies(self.db, *name, Constraint::Num)
+                    && !self.table.rigid_satisfies(self.db, *name, Constraint::Arithmetic));
+            let tied_difference = tied && operator == BinaryOperator::Subtract && !num_rigid;
+            // When the result is the operands' own type (`a * b`, not `a / b`), a ry number
+            // computes it as well as an R one does.
+            let constraint = match (tied && !tied_difference, always_double) {
+                (true, false) => Constraint::Num,
+                (true, true) => Constraint::Numeric,
+                (false, _) => Constraint::Arithmetic,
             };
             self.constrain_operand(range, ty, constraint);
             // The difference is not `T` itself: two dates subtract to a `difftime`. It claims
@@ -12774,15 +12800,10 @@ impl<'db, 'a> Checker<'db, 'a> {
             {
                 self.classify_numeric_operand(bound)
             }
-            TyKind::Rigid(name) => {
-                match self
-                    .table
-                    .rigid_satisfies(self.db, *name, Constraint::Arithmetic)
-                {
-                    true => NumericOperand::Flexible(resolved),
-                    false => NumericOperand::Invalid,
-                }
-            }
+            TyKind::Rigid(name) => match self.table.rigid_operand(self.db, *name) {
+                true => NumericOperand::Flexible(resolved),
+                false => NumericOperand::Invalid,
+            },
             TyKind::Vector(element) | TyKind::NamedVector(element) => match element.kind(self.db) {
                 TyKind::Var(_) => NumericOperand::FlexibleVector(Some(*element)),
                 // `N[]` under `<N: integer | logical>` is a vector of one of the bound's members.
@@ -12801,11 +12822,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     });
                     self.classify_numeric_operand(union_of(self.db, vectors))
                 }
-                TyKind::Rigid(name)
-                    if self
-                        .table
-                        .rigid_satisfies(self.db, *name, Constraint::Arithmetic) =>
-                {
+                TyKind::Rigid(name) if self.table.rigid_operand(self.db, *name) => {
                     NumericOperand::FlexibleVector(Some(*element))
                 }
                 TyKind::Any | TyKind::Unknown => NumericOperand::FlexibleVector(None),
@@ -19232,17 +19249,42 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
-    /// The hint for a formal, if one survives the probe's rollback: a type with no open
-    /// variable, or an undecided ry number that an argument brought (the items of `[1, 2]`),
-    /// named by the argument's own variable, which the lambda body may still decide, as
-    /// `\(x) x / 2` decides `x` is a fraction.
+    /// The hint for a formal, if one survives the probe's rollback: a type whose open variables
+    /// an argument brought, each named by the argument's own variable, or an undecided ry number
+    /// that an argument brought (the items of `[1, 2]`). The lambda body may still decide such a
+    /// variable, as `\(x) x / 2` decides `x` is a fraction and `\(acc, x) (..acc, values =
+    /// List.append(acc$values, x))` decides the items of a state's empty `values`.
     fn settled_hint(
         &self,
         formal: Ty<'db>,
         argument_vars: &FxHashSet<InferenceVar>,
     ) -> Option<Ty<'db>> {
+        let argument_var = |representative: InferenceVar| {
+            argument_vars
+                .iter()
+                .copied()
+                .filter(|&candidate| self.table.find(candidate) == representative)
+                .min_by_key(|candidate| candidate.0)
+        };
         let TyKind::Var(var) = *formal.kind(self.db) else {
-            return (!self.table.contains_unbound_var(self.db, formal)).then_some(formal);
+            let mut open = FxHashSet::default();
+            self.table.collect_unbound_vars(self.db, formal, &mut open);
+            if open.is_empty() {
+                return Some(formal);
+            }
+            let mut renamed = FxHashMap::default();
+            for var in open {
+                let representative = self.table.find(var);
+                let named = argument_var(representative)?;
+                renamed.insert(representative, Ty::new(self.db, TyKind::Var(named)));
+            }
+            return Some(rename_vars(
+                self.db,
+                &self.table,
+                formal,
+                &renamed,
+                &mut FxHashMap::default(),
+            ));
         };
         let representative = self.table.find(var);
         if !matches!(
@@ -19254,12 +19296,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         ) {
             return None;
         }
-        argument_vars
-            .iter()
-            .copied()
-            .filter(|&candidate| self.table.find(candidate) == representative)
-            .min_by_key(|candidate| candidate.0)
-            .map(|candidate| Ty::new(self.db, TyKind::Var(candidate)))
+        argument_var(representative).map(|candidate| Ty::new(self.db, TyKind::Var(candidate)))
     }
 
     /// A function literal with a formal that has neither a type annotation nor a default. A
@@ -19476,10 +19513,11 @@ impl<'db, 'a> Checker<'db, 'a> {
                                     widening.get(argument_index).is_some_and(|states| {
                                         states.iter().any(|&(widened, ..)| widened == index)
                                     });
+                                let settled = self.settled_hint(formal, &argument_vars);
                                 let widening_accumulator = accumulators.contains(index)
                                     && !(is_ry_value_type(self.db, formal)
                                         && (tag_state_widens || !mentions_tag(self.db, formal))
-                                        && !self.table.contains_unbound_var(self.db, formal));
+                                        && settled.is_some());
                                 if widening_accumulator
                                     || (index < declared_count
                                         && matches!(
@@ -19489,7 +19527,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                                 {
                                     return None;
                                 }
-                                self.settled_hint(formal, &argument_vars)
+                                settled
                             })
                             .collect(),
                     )
@@ -21284,7 +21322,12 @@ impl<'db, 'a> Checker<'db, 'a> {
         let numeric = |ty: Ty<'db>| {
             matches!(
                 self.table.open_constraint(self.db, ty),
-                Some(Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric)
+                Some(
+                    Constraint::Numeric
+                        | Constraint::Num
+                        | Constraint::Arithmetic
+                        | Constraint::ScalarNumeric
+                )
             )
         };
         match self.table.resolve(self.db, expected).kind(self.db) {
@@ -26196,6 +26239,34 @@ fn builds_empty_keyed<'db>(db: &'db dyn Db, scheme: &TypeScheme<'db>) -> bool {
             .iter()
             .chain(function.named.iter().map(|parameter| &parameter.ty))
             .any(|&parameter| keyed(parameter))
+}
+
+/// `ty` with each open variable that `renamed` names replaced, found by its representative, so
+/// `ty` must be resolved.
+fn rename_vars<'db>(
+    db: &'db dyn Db,
+    table: &InferenceTable<'db>,
+    ty: Ty<'db>,
+    renamed: &FxHashMap<InferenceVar, Ty<'db>>,
+    memo: &mut FxHashMap<Ty<'db>, Ty<'db>>,
+) -> Ty<'db> {
+    if !contains_inference_var(db, ty) {
+        return ty;
+    }
+    if let Some(&done) = memo.get(&ty) {
+        return done;
+    }
+    let mapped = match ty.kind(db) {
+        TyKind::Var(var) => match renamed.get(&table.find(*var)) {
+            Some(&replacement) => replacement,
+            None => ty,
+        },
+        _ => map_child_types(db, ty, &mut |child| {
+            rename_vars(db, table, child, renamed, memo)
+        }),
+    };
+    memo.insert(ty, mapped);
+    mapped
 }
 
 /// The storage of a list of `item`s, or `None` for `Bool`, whose storage is the empty list's

@@ -130,5 +130,5 @@ trim <- function(drop) {
   NULL
 }
 #++++
-trim: <T: numeric> fn(drop: T) -> NULL
+trim: <T: num> fn(drop: T) -> NULL
 140..144 warning[unused] `trim` is assigned but never used

@@ -132,7 +132,7 @@ f: <T> fn(x: T) -> logical
 #---- numeric_two_params_mul
 f <- function(a, b) a * b
 #++++
-f: <T: numeric> fn(a: T, b: T) -> T
+f: <T: num> fn(a: T, b: T) -> T
 
 #---- numeric_param_unary_minus_in_expr
 f <- function(x) -x + 1L
@@ -249,7 +249,7 @@ f: <T: arithmetic> fn(x: T) -> T
 #---- param_sum_then_compare
 f <- function(a, b) a + b > 0L
 #++++
-f: <T: numeric> fn(a: T, b: T) -> logical
+f: <T: num> fn(a: T, b: T) -> logical
 
 #---- numeric_escape_top_integer
 y <- 1L
