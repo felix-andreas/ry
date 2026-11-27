@@ -3280,7 +3280,7 @@ unsafe fn try_native_typed(
     }
     // The native tier binds the arguments itself and may keep one, so it gets promises.
     detach_references(args)?;
-    force_typed_arguments(args)?;
+    force_typed_arguments(call, args, sys_parent)?;
     let Some(tier) = bytecode::tier() else {
         crate::annotations::log_interpreted_because(call, "no native tier is loaded");
         return Ok(None);
@@ -3299,14 +3299,45 @@ unsafe fn try_native_typed(
 
 /// Forces, left to right, each argument promise that typed code wrote: a call from one typed
 /// function to another evaluates its arguments before the callee runs, as compiled typed code
-/// does, so the tiers agree on a typed program. An argument written in R code, including one a
-/// typed function receives through `...`, stays lazy.
-unsafe fn force_typed_arguments(args: &[Arg]) -> R<()> {
+/// does, so the tiers agree on a typed program. An argument the typed caller names is its own
+/// even when the interpreter forwards the caller's promise for a variable (an effect-free
+/// callee's eager arguments). An argument written in R code, including one a typed function
+/// passes on as `...`, stays lazy, and so does a missing one, as `missing()` reads it.
+unsafe fn force_typed_arguments(call: Sexp, args: &[Arg], sys_parent: Sexp) -> R<()> {
+    let dots = symbols().dots;
+    let mut expressions = if is_typed_frame(sys_parent) {
+        call.cdr()
+    } else {
+        nil()
+    };
+    let mut from_dots = 0usize;
     for arg in args {
+        while from_dots == 0
+            && expressions.kind() == SexpType::Pairlist
+            && expressions.car() == dots
+        {
+            let mut cell = dots_binding(sys_parent)?;
+            while cell.kind() == SexpType::Dots || cell.kind() == SexpType::Pairlist {
+                from_dots += 1;
+                cell = cell.cdr();
+            }
+            expressions = expressions.cdr();
+        }
+        let named_by_typed_caller = if from_dots > 0 {
+            from_dots -= 1;
+            false
+        } else if expressions.kind() == SexpType::Pairlist {
+            expressions = expressions.cdr();
+            true
+        } else {
+            false
+        };
         let promise = arg.value;
         if promise.kind() == SexpType::Promise
             && promise.car() == unbound()
-            && written_in_typed_code(promise)
+            && (named_by_typed_caller
+                || (!promise.has_gp(gp::ARGUMENT_REFERENCE) && is_typed_frame(promise.tag())))
+            && !argument_is_missing(promise.cdr(), promise.tag())?
         {
             force_promise(promise)?;
         }
@@ -3314,14 +3345,9 @@ unsafe fn force_typed_arguments(args: &[Arg]) -> R<()> {
     Ok(())
 }
 
-/// Whether `promise`'s code is in the body of a typed function: its environment is the frame of
-/// a live call of one. A typed function never runs on slots, so a promise over a slot frame is
-/// R code's.
-unsafe fn written_in_typed_code(promise: Sexp) -> bool {
-    if promise.has_gp(gp::ARGUMENT_REFERENCE) {
-        return false;
-    }
-    let env = promise.tag();
+/// Whether `env` is the frame of a live call of a typed function. A typed function never runs
+/// on slots, so a promise over a slot frame is R code's.
+unsafe fn is_typed_frame(env: Sexp) -> bool {
     if env.has_gp(gp::SLOT_FRAME) {
         return false;
     }
