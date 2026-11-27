@@ -544,7 +544,6 @@ pub enum OperandExpectation {
     ScalarNumeric,
     Logical,
     Comparable,
-    Ordered,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
@@ -3578,19 +3577,32 @@ fn numeric_operand_parts<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<(OperandSh
     }
 }
 
-fn comparison_operand_shapes<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Vec<OperandShape>> {
+fn comparison_operand_shapes<'db>(
+    db: &'db dyn Db,
+    ty: Ty<'db>,
+    equality: bool,
+) -> Option<Vec<OperandShape>> {
     match ty.kind(db) {
         TyKind::Union(members) => members
             .iter()
-            .map(|&member| comparison_operand_shape(db, member))
+            .map(|&member| comparison_operand_shape(db, member, equality))
             .collect(),
-        _ => comparison_operand_shape(db, ty).map(|shape| vec![shape]),
+        _ => comparison_operand_shape(db, ty, equality).map(|shape| vec![shape]),
     }
 }
 
 /// A comparison coerces across atomic types, so an operand only needs to be atomic. An open
 /// operand (a variable, or a vector of one) passes here, and `Checker::infer_compare` constrains it.
-pub(crate) fn comparison_operand_shape<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<OperandShape> {
+/// `complex` compares only under `==` and `!=` (`equality`).
+pub(crate) fn comparison_operand_shape<'db>(
+    db: &'db dyn Db,
+    ty: Ty<'db>,
+    equality: bool,
+) -> Option<OperandShape> {
+    let comparable_atomic = |atomic: Atomic| match atomic {
+        Atomic::Complex => equality,
+        atomic => comparable_atomic(atomic),
+    };
     match ty.kind(db) {
         TyKind::Var(_) | TyKind::Rigid(_) => Some(OperandShape::Scalar),
         TyKind::Scalar(atomic) => comparable_atomic(*atomic).then_some(OperandShape::Scalar),
@@ -3603,7 +3615,7 @@ pub(crate) fn comparison_operand_shape<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Opt
                 .iter()
                 .all(|&member| {
                     matches!(member.kind(db), TyKind::Null)
-                        || comparison_operand_shape(db, member).is_some()
+                        || comparison_operand_shape(db, member, equality).is_some()
                 })
                 .then_some(OperandShape::Vector),
             _ => None,
@@ -3929,20 +3941,10 @@ fn literal_leaves_fit(module: &Module, id: ExprId, target: NativeScalar) -> bool
     }
 }
 
-/// `complex` compares under `==` and `!=` only, which `Checker::infer_compare` enforces for
-/// concrete operands.
+/// R has no order for `complex`, so a `comparable` constraint, which serves `==` and `<` alike,
+/// leaves it out.
 fn comparable_atomic(atomic: Atomic) -> bool {
-    atomic != Atomic::Raw
-}
-
-/// Whether a comparison operand may hold `complex` values, which R has no order for.
-fn holds_complex<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
-    match ty.kind(db) {
-        TyKind::Scalar(Atomic::Complex) => true,
-        TyKind::Vector(element) | TyKind::NamedVector(element) => holds_complex(db, *element),
-        TyKind::Union(members) => members.iter().any(|&member| holds_complex(db, member)),
-        _ => false,
-    }
+    !matches!(atomic, Atomic::Complex | Atomic::Raw)
 }
 
 /// A `return(value)` or a `try` that leaves its function early, with the range a mismatch
@@ -12892,7 +12894,8 @@ impl<'db, 'a> Checker<'db, 'a> {
             TyKind::Family(FamilyResult::Arithmetic, operand) => Some(*operand),
             _ => None,
         };
-        let itself = if matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual) {
+        let equality = matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual);
+        let itself = if equality {
             Constraint::Eq
         } else {
             Constraint::ComparableOrOrdered
@@ -12909,8 +12912,9 @@ impl<'db, 'a> Checker<'db, 'a> {
             // Two different open operands each take the constraint, but stay separate types:
             // R compares an `integer` with a `character`, so tying them would reject valid R.
             (Some(left), Some(right)) => {
+                self.constrain_operand(lhs_range, left, itself);
                 self.constrain_operand(rhs_range, right, itself);
-                Some((left, lhs_range, itself))
+                return self.table.family(self.db, FamilyResult::Comparison, left);
             }
             (Some(left), None) => {
                 beside_literal(rhs).map(|constraint| (left, lhs_range, constraint))
@@ -12944,7 +12948,8 @@ impl<'db, 'a> Checker<'db, 'a> {
         let both_lists = is_list(resolved_left) && is_list(resolved_right);
         let mut operand_shapes = Vec::with_capacity(2);
         for (resolved, operand_range) in [(resolved_left, lhs_range), (resolved_right, rhs_range)] {
-            let shapes = comparison_operand_shapes(self.db, resolved).filter(|_| !both_lists);
+            let shapes =
+                comparison_operand_shapes(self.db, resolved, equality).filter(|_| !both_lists);
             let Some(shapes) = shapes else {
                 let resolved = self.reported(resolved);
                 self.errors.push(TypeError {
@@ -12956,19 +12961,6 @@ impl<'db, 'a> Checker<'db, 'a> {
                 });
                 return unknown(self.db);
             };
-            if !matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual)
-                && holds_complex(self.db, resolved)
-            {
-                let resolved = self.reported(resolved);
-                self.errors.push(TypeError {
-                    range: operand_range,
-                    kind: TypeErrorKind::InvalidOperand {
-                        expected: OperandExpectation::Ordered,
-                        found: resolved,
-                    },
-                });
-                return unknown(self.db);
-            }
             operand_shapes.push(shapes);
         }
         let mut results = Vec::new();

@@ -97,15 +97,15 @@ and the fixture `recursion__a_long_recursive_chain_settles_through_its_annotatio
 
 ## Two open comparison operands each take the comparison's constraint, untied
 
-**Status:** built. The gap: ry compares only two values of one type, and nothing ties the two operands on ry's side.
+**Status:** built. The gap: ry compares only two values of one type, and nothing ties the two operands on ry's side, so a ry value passes beside any other type and `Compared<T>` follows the left operand alone.
 
 `function(a, b) a < b` is `<T: comparable or ordered, U: comparable or ordered> fn(a: T, b: U) -> Compared<T>`
 (`eq` under `==` and `!=`). Unifying the operands, as arithmetic does, rejects legal R
 (`clamp(5L, 0, 10.5)`, `1L < "s"`), and leaving them unconstrained let two records through `<`. A
 constraint that only a comparison gave leaves an `if`'s two open branches joined by union
 (`join_branch_values`), as an unconstrained one does, because the caller still chooses each value. A
-string literal operand asks `comparable or Str`. `comparable` admits `complex`, and a concrete
-`complex` operand under `<` is the error; an open one under `<` slips through. Pinned by
+string literal operand asks `comparable or Str`. `comparable` serves `==` and `<` alike, so it
+leaves out `complex`, which only a concrete operand under `==` or `!=` admits. Pinned by
 `two_open_operands_and_a_string_literal_ask_for_a_comparison` and
 `two_flexible_comparison_operands_stay_separate_types`.
 

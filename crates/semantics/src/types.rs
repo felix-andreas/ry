@@ -1044,6 +1044,8 @@ impl Constraint {
             // A literal used where R's number constraints apply is an R number.
             (WholeLiteral { .. } | FracLiteral, c) | (c, WholeLiteral { .. } | FracLiteral) => c,
             (Number | Int | Frac, _) | (_, Number | Int | Frac) => return None,
+            // `scalar numeric` admits no ry value.
+            (ScalarNumeric, ArrayItem) | (ArrayItem, ScalarNumeric) => return None,
             (ScalarNumeric, _) | (_, ScalarNumeric) => ScalarNumeric,
             (Numeric, AtomicElement | Key) | (AtomicElement | Key, Numeric) => ScalarNumeric,
             (Key, AtomicElement) | (AtomicElement, Key) => Key,

@@ -67,16 +67,14 @@ Unknown
 
 #---- complex_values_compare_for_equality_only
 # R compares `complex` values under `==` and `!=`, and has no order for them.
-f <- function(x) x == 0
-f(1i)
+1i == 0
 c(1i, 2i) != 1i
 1i < 0
 #++++
-f: <T: comparable or number> fn(x: T) -> Compared<T>
 logical
 logical[]
 Unknown
-124..126 error[type-mismatch] expected a value with an order (`integer`, `double`, `character`, or `logical`), found `complex`
+102..104 error[type-mismatch] expected a comparable value (numeric, `character`, or `logical`), found `complex`
 
 #==== negation
 #---- not_logical_scalar

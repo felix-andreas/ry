@@ -777,8 +777,8 @@ A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
 - `item` admits what a [`List`](#lists) can hold: a number, a `Bool`, a `Str`, or another ry value.
   `List.from_r` uses it to type a `list[T]` argument.
 - `eq` admits every value but a function: the values `==` compares.
-- `comparable` admits the R values a comparison takes: an atomic value other than `raw` in any
-  vector shape, a list, which R compares element by element, and a class.
+- `comparable` admits the R values a comparison takes: an atomic value other than `complex` or
+  `raw` in any vector shape, a list, which R compares element by element, and a class.
 - `ordered` admits the ry values with an order: `I64`, `F64` and `Str`. A number literal passed for
   an `ordered` parameter is a ry number, and a string literal a `Str`.
 - `comparable or number` admits everything `comparable` does and `I64` and `F64`.
@@ -2844,9 +2844,10 @@ the same way, because a condition reads R's truth of a number, which a ry number
 
 A ry `List` meets a comparison's constraint through its items, as it compares item by item, and a
 ry nominal through its representation. Two different open operands are a gap on ry's side: ry
-compares only two values of one type, but the checker accepts an `I64` beside a `Str`. And
-`comparable` admits `complex`, which R compares under `==` and `!=` only, so an open operand
-compared under `<` accepts a `complex` that R refuses at run time.
+compares only two values of one type, but the checker accepts a ry value beside a value of another
+type (an `I64` beside a `Str`, an `F64` or an `integer`), which stops at run time, and the result
+follows the left operand alone. `comparable` leaves out `complex`, so `function(x) x == 0` rejects
+a `complex` argument that R compares.
 
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
 vector, so `f <- function(x) x + c(1L, 2L)` is `<T: arithmetic> fn(x: T) -> double[]` and accepts

@@ -2755,7 +2755,7 @@ pub(crate) fn constraint_rejects<'db>(
                         .and_then(|definitions| definitions.get(db, *name))
                         .is_some_and(|definition| is_ry_value_type(db, definition.body))
             }
-            _ => comparison_operand_shape(db, ty).is_some(),
+            _ => comparison_operand_shape(db, ty, false).is_some(),
         },
         Constraint::Str => match ty.kind(db) {
             TyKind::Native(native) => *native == NativeScalar::Str,

@@ -3879,7 +3879,8 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 | Constraint::NumericOrF64
                 | Constraint::ComparableOrNumber
                 | Constraint::ComparableOrOrdered
-                | Constraint::ComparableOrStr),
+                | Constraint::ComparableOrStr
+                | Constraint::Eq),
             found,
         } if matches!(found.kind(db), TyKind::Rigid(_)) => {
             let found = renderer.render(db, *found);
@@ -4869,9 +4870,6 @@ fn operand_description(expected: OperandExpectation) -> &'static str {
         OperandExpectation::ScalarNumeric => "a scalar numeric value (`integer` or `double`)",
         OperandExpectation::Logical => "a `logical` value",
         OperandExpectation::Comparable => "a comparable value (numeric, `character`, or `logical`)",
-        OperandExpectation::Ordered => {
-            "a value with an order (`integer`, `double`, `character`, or `logical`)"
-        }
     }
 }
 

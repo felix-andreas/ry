@@ -933,6 +933,13 @@ bad_record <- between(r, r)
 ok_r_str <- is_a("b")
 ok_ry_str <- is_a(s)
 bad_number <- is_a(3i64)
+#: <T, U> fn(a: T, b: U) -> logical
+declared <- function(a, b) a == b
+# `1:n` makes `n` a scalar R number, so its comparison is R's.
+upto <- function(n) {
+  print(1:n)
+  n > 0
+}
 #++++
 between: <T: comparable or ordered, U: comparable or ordered> fn(a: T, b: U) -> Compared<T>
 is_a: <T: comparable or Str> fn(x: T) -> Compared<T>
@@ -944,9 +951,13 @@ bad_record: Unknown
 ok_r_str: logical
 ok_ry_str: Bool
 bad_number: Unknown
+declared: <T, U> fn(a: T, b: U) -> logical
+upto: <T: scalar numeric> fn(n: T) -> logical
 353..354 error[type-mismatch] expected a value with an order (numeric, `character`, `logical`, a class, `I64`, `F64` or `Str`), found `Record{a: I64}`
 356..357 error[type-mismatch] expected a value with an order (numeric, `character`, `logical`, a class, `I64`, `F64` or `Str`), found `Record{a: I64}`
 421..425 error[type-mismatch] expected a value a string compares with (numeric, `character`, `logical`, a class, or `Str`), found `I64`
+490..491 error[type-mismatch] expected a value `==` can compare (anything but a function), found `T`. Declare `<T: eq>`
+495..496 error[type-mismatch] expected a value `==` can compare (anything but a function), found `U`. Declare `<U: eq>`
 
 #---- a_literal_argument_takes_the_ry_type_an_ordered_parameter_admits
 # Every type `ordered` admits is a ry number or `Str`, so a literal argument is one, as it is for
