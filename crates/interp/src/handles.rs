@@ -1676,10 +1676,11 @@ impl<'s> Args<'_, 's> {
 
     /// The environment the call was made from, which a slot frame makes on demand.
     #[inline]
-    pub fn environment(&self, context: &mut Cx<'s>) -> R<Local<'s, Environment>> {
-        // SAFETY: making the frame's environment allocates, which `&mut Cx` permits, and the
-        // result is live until the next allocation.
-        let environment = unsafe { rooted(context, self.call.env()?) };
+    pub fn environment(&self, _context: &mut Cx<'s>) -> R<Local<'s, Environment>> {
+        // SAFETY: making the frame's environment allocates, which `&mut Cx` permits. The
+        // environment is the evaluator's, which holds it for the call, or the calling frame's,
+        // which keeps the one it made, and either outlives the call's scope.
+        let environment: Local<'s> = unsafe { Local::adopt(self.call.env()?) };
         environment
             .downcast::<Environment>()
             .ok_or_else(|| error("internal error: a call has no environment"))
