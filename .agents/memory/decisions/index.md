@@ -186,6 +186,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Unannotated arithmetic infers a constraint per number family and a family-dependent result
 - A comparison of an open operand asks what both families compare
 - Record and tag payload fields display in sorted order (settled)
+- A fold's accumulator rebinds to the type its init gives under arithmetic
 
 ## Analysis core
 

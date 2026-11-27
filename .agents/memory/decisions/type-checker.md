@@ -1192,3 +1192,11 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 
 - A record type and a tag payload show their fields sorted by name, in diagnostics as in hovers, so `:Rect(width: double, height: double)` displays as `:Rect(height: double, width: double)`.
 - The sorted order is the semantics: a positional index counts the sorted fields (`type-system.mdx`), and a structural type has no declaration order to recover, since two spellings of one record are the same interned type. Roc sorts record fields the same way.
+
+## A fold's accumulator rebinds to the type its init gives under arithmetic
+
+**Status:** built (`Widening::Folded` in `infer.rs`; `inference.R.test` case `a_fold_accumulator_takes_the_type_its_init_gives_under_arithmetic`).
+
+- Previous shape: a callback doing arithmetic on its accumulator (`function(acc, x) acc * 2`) settled `T = Promoted<T>` as `double` with a fixed binding, so `Reduce(f, list(1:3, 4:6), c(1L, 2L, 3L))` and `Reduce(function(acc, x) acc - 0.5, 1:3, Sys.Date())` were false errors blamed on the init.
+- The binding keeps the variable's constraint from before the fixed point, and a later init it admits rebinds it to what R's fold returns: a number joins `double` by `numeric_join` (`integer[]` gives `double[]`, a scalar `integer` stays `double`), and a class with arithmetic (`Date`, `matrix`) or a ry number keeps its own type.
+- The constraint is the guard, so `acc * 1.5` with an `I64` init is still refused, and a `character` init still fails.

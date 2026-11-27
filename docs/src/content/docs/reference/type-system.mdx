@@ -2891,11 +2891,12 @@ a type the family keeps: R's outcome (`double` or `logical`) when it fits, else 
 `Bool`). So `Reduce(function(acc, x) acc * 2, 1:3, 1L)` is a `double`, and so is a callback that
 returns the accumulator unchanged in one branch (`if (x > 1L) acc * 2 else acc`).
 `List.walk(xs, k, function(acc, x) acc * 2)` with `k: I64` is an `I64`. A fold's result is its
-init or its callback's, so `Reduce(function(a, b) a < b, 1:3, 0L)` is `logical | integer`. Two
-gaps remain: an accumulator that admits both families takes R's `double`, so `function(ys, init)
-List.walk(ys, init, function(acc, y) acc * 2)` refuses an `I64` `init`, and the outcome is a
-scalar, so a vector init (`Reduce(function(acc, x) acc * 2, list(1:3, 4:6), c(1L, 2L, 3L))`) is a
-type error.
+init or its callback's, so `Reduce(function(a, b) a < b, 1:3, 0L)` is `logical | integer`. An
+init the callback's arithmetic promotes or keeps gives the fold its own type:
+`Reduce(function(acc, x) acc * 2, list(1:3, 4:6), c(1L, 2L, 3L))` is a `double[]`, and
+`Reduce(function(acc, x) acc - 0.5, 1:3, Sys.Date())` a `Date`. One gap remains: an accumulator
+that a function's parameter gives, and that admits both families, takes R's `double`, so
+`function(ys, init) List.walk(ys, init, function(acc, y) acc * 2)` refuses an `I64` `init`.
 
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
 vector, so `f <- function(x) x + c(1L, 2L)` is `<T: arithmetic> fn(x: T) -> double[]` and accepts
