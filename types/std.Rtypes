@@ -94,7 +94,7 @@ Result.and_then : <A, B, E, F> fn(result: Result<A, E>, f: fn(A) -> Result<B, F>
 #'
 #' ```r dput
 #' Result.on_err(Str.to_i64("x"), function(e) :Ok(0))
-#' #> :Ok(0)
+#' #> :Ok(0i64)
 #' ```
 Result.on_err : <T, A, B> fn(result: Result<T, A>, f: fn(A) -> Result<T, B>) -> Result<T, B>
 

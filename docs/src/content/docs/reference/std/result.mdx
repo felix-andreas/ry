@@ -283,7 +283,7 @@ Recovers from an `:Err`: `f` gets the error and returns the next result.
 
 ```r ry run runtime=ry dput
 Result.on_err(Str.to_i64("x"), function(e) :Ok(0))
-#> :Ok(0)
+#> :Ok(0i64)
 ```
 
 [Source](https://github.com/felix-andreas/ry/blob/main/types/std.Rtypes#L99)
