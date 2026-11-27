@@ -94,20 +94,9 @@ impl Preflight {
     }
 
     pub fn new(config: Config, path: PathBuf) -> Preflight {
-        let db = RootDatabase::default();
-        install_shipped_stubs(&db);
-        semantics::AnalysisSettings::new(
-            &db,
-            config.check.inline_annotations,
-            config.check.strict,
-            config.check.prelude,
-        );
-        // The commands are not project files: a project-wide fold over them would make every
-        // command cost time in proportion to the session.
-        ProjectFiles::new(&db, Vec::new());
         Preflight {
             analyzed: config.check.strict,
-            db,
+            db: analysis_database(&config),
             config,
             path: Arc::from(path),
             command_paths: Vec::new(),
@@ -302,6 +291,22 @@ impl Preflight {
             .get(index as usize)
             .map(|(path, _)| &**path)
     }
+}
+
+/// A database with the shipped stubs and `config`'s analysis settings, and no project files:
+/// the files it checks are not a project, and a project-wide fold over them would make each check
+/// cost time in proportion to the files before it.
+fn analysis_database(config: &Config) -> RootDatabase {
+    let db = RootDatabase::default();
+    install_shipped_stubs(&db);
+    semantics::AnalysisSettings::new(
+        &db,
+        config.check.inline_annotations,
+        config.check.strict,
+        config.check.prelude,
+    );
+    ProjectFiles::new(&db, Vec::new());
+    db
 }
 
 /// Runs `work` on a thread with the stack analysis needs: inference recurses per nested
@@ -544,6 +549,18 @@ pub fn elaborate_loaded_package(
 }
 
 /// The program ry's runtime runs for the file at `path` that `source()` reads, beside the
+/// The analysis of the files `source()` has read in this process under one configuration. It
+/// lives for the process, so a file sourced again re-derives only what its edit changed, and no
+/// `source()` builds the shipped stubs again.
+struct SourcedAnalysis {
+    db: RootDatabase,
+    config: Config,
+    /// Each file by its canonical path, so its identity and memos outlive one `source()`.
+    files: FxHashMap<PathBuf, SourceFile>,
+}
+
+static SOURCED_ANALYSES: LazyLock<Mutex<Vec<SourcedAnalysis>>> = LazyLock::new(Mutex::default);
+
 /// [`xxh3_64`] of the text the checker read, as R's parser reads it (line endings made `\n`, one
 /// final `\n` dropped), or `None` when the checker rewrites nothing. The file is checked on its
 /// own under the configuration that governs it, as `ry run` checks a script, and prints the
@@ -584,18 +601,49 @@ pub fn elaborate_sourced(path: &Path) -> Result<Option<(u64, String)>, CommandEr
     // The project's strict mode is the sourcing script's: a plain R file it sources keeps R's
     // types, and one that turns strict mode on itself (`# typing: strict`) is checked strictly.
     config.check.strict = false;
-    let mut preflight = Preflight::new(config, path.to_path_buf());
-    let file = session::command_file(&preflight.db, format!("{source}\n"));
-    follow_sources(&mut preflight.db, file);
-    let db = preflight.db.clone();
-    let config = &preflight.config;
-    let (_, reported, elaborations) = on_analysis_stack(move || findings(&db, file, config));
+    let mut analyses = SOURCED_ANALYSES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let index = match analyses
+        .iter()
+        .position(|analysis| analysis.config == config)
+    {
+        Some(index) => index,
+        None => {
+            analyses.push(SourcedAnalysis {
+                db: analysis_database(&config),
+                config,
+                files: FxHashMap::default(),
+            });
+            analyses.len() - 1
+        }
+    };
+    let SourcedAnalysis { db, config, files } = &mut analyses[index];
+    let text = format!("{source}\n");
+    let file = match files.get(&canonical) {
+        Some(&file) => {
+            if file.text(db) != text {
+                file.set_text(db).to(text);
+            }
+            file
+        }
+        None => {
+            let file = SourceFile::new(db, text, DocumentKind::Script);
+            files.insert(canonical, file);
+            file
+        }
+    };
+    follow_sources(db, file);
+    let analysis = db.clone();
+    let config = &*config;
+    let (_, reported, elaborations) = on_analysis_stack(move || findings(&analysis, file, config));
+    let db = &*db;
     // Checked on its own, the file cannot see the names the sourcing script binds.
     let warnings: Vec<Diagnostic> = reported
         .into_iter()
         .filter(|diagnostic| diagnostic.code != "unresolved")
         .collect();
-    let text = file.text(&preflight.db);
+    let text = file.text(db);
     let resolve_note = |related: &RelatedLocation| {
         (related.file == file).then_some(RelatedNote {
             path,
