@@ -61,8 +61,8 @@ expect stdout "8i64"
 expect stdout "[1] \"argument `n` must be `I64`, not `character`\""
 expect stderr "typed: compiled for [I64] -> I64"
 
-# A signature that is only the name of an alias is the one form the runtime does not read, and
-# the check says so.
+# A signature that is only the name of an alias runs natively too: the preflight writes the
+# function type out where the runtime reads it.
 file aliased.R
 | #: @alias Pick {fn(n: I64, m: I64) -> I64}
 |
@@ -71,9 +71,12 @@ file aliased.R
 | print(first_of(1, 2))
 
 run ry check aliased.R
-expect exit 1
-expect stderr "interpreted"
-expect stderr "a function whose signature is a type alias"
+expect exit 0
+
+run ry run --runtime ry aliased.R
+expect exit 0
+expect stdout "1i64"
+expect stderr "typed: compiled for [I64, I64] -> I64"
 
 # A script that ends in a `#:` block is still checked before it runs: the block annotates
 # nothing, and only a console waits for the statement after one. `cat` writes the file without

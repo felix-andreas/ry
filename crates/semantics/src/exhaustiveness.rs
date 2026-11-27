@@ -12,7 +12,7 @@ use {
         infer::apply_definition,
         types::{Atomic, NativeScalar, Ty, TyKind, union_of, unknown},
     },
-    syntax::TextRange,
+    syntax::{TextRange, is_syntactic_name},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
@@ -661,7 +661,13 @@ fn render_fields(constructor: &Constructor, fields: &[Pat]) -> Vec<String> {
         Constructor::Record(names) => names
             .iter()
             .zip(fields)
-            .map(|(name, field)| format!("{name} = {}", render(field)))
+            .map(|(name, field)| {
+                if is_syntactic_name(name) {
+                    format!("{name} = {}", render(field))
+                } else {
+                    format!("`{name}` = {}", render(field))
+                }
+            })
             .collect(),
         _ => fields.iter().map(render).collect(),
     }

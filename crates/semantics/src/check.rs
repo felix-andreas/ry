@@ -5,7 +5,7 @@ use {
     crate::{
         DataPath, Db, TypeDefinitions,
         annotations::{Annotation, Opaque},
-        data_file_layout,
+        canonical_spelling, data_file_layout,
         dense::{Bitset, Column},
         diagnostics::{STANDARD_MODULES, annotation_misuses_vocabulary, nearest_name},
         exhaustiveness::{MatchFinding, match_findings},
@@ -1422,7 +1422,13 @@ fn check_item_in<'db>(
             }
             match body.kind(db) {
                 TyKind::Function(function) if !has_r_bound(declared) => {
-                    Some((*function, through_alias && !annotation.written_signature))
+                    // The preflight spells a closed alias out where the runtime reads it.
+                    let aliased = through_alias
+                        && !annotation.written_signature
+                        && context.table.definitions.is_none_or(|definitions| {
+                            canonical_spelling(db, definitions, declared.body).is_none()
+                        });
+                    Some((*function, aliased))
                 }
                 _ => None,
             }
@@ -7594,7 +7600,44 @@ impl<'db, 'a> Checker<'db, 'a> {
             ));
         };
         let payload = (*payload)?;
-        let PatternKind::Record { fields, .. } = &self.module.pattern(payload).kind else {
+        let payload_pattern = &self.module.pattern(payload).kind;
+        match (payload_pattern, tag_payload.kind(self.db)) {
+            (PatternKind::Tuple(_), TyKind::NativeRecord(native, _)) => {
+                let fields: Vec<String> = native
+                    .iter()
+                    .enumerate()
+                    .map(|(at, field)| {
+                        let field = field.name.text(self.db);
+                        if is_syntactic_name(field) {
+                            format!("{field} = {field}")
+                        } else {
+                            format!("`{field}` = x{}", at + 1)
+                        }
+                    })
+                    .collect();
+                return Some((
+                    format!(
+                        "`:{0}` carries named fields, so its pattern names them, as in `:{0}({1})`",
+                        name.as_str(),
+                        fields.join(", ")
+                    ),
+                    None,
+                ));
+            }
+            (PatternKind::Record { .. }, TyKind::NativeTuple(items)) => {
+                let items: Vec<String> = (1..=items.len()).map(|at| format!("x{at}")).collect();
+                return Some((
+                    format!(
+                        "`:{0}` carries positional items, so its pattern lists them in order, as in `:{0}({1})`",
+                        name.as_str(),
+                        items.join(", ")
+                    ),
+                    None,
+                ));
+            }
+            _ => {}
+        }
+        let PatternKind::Record { fields, .. } = payload_pattern else {
             return None;
         };
         let TyKind::NativeRecord(native, _) = tag_payload.kind(self.db) else {

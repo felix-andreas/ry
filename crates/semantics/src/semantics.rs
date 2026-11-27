@@ -1492,7 +1492,9 @@ pub fn file_elaborations(db: &dyn Db, file: SourceFile) -> Vec<Elaboration> {
 }
 
 /// The canonical spelling of each type the signatures in `file` write where the runtime reads
-/// it ([`syntax::annotation::signature`]) and spell differently. A type is left as written when
+/// it ([`syntax::annotation::signature`]) and spell differently, and of each signature declared
+/// by a name ([`syntax::annotation::named_signature`]), which the runtime reads once it is a
+/// function type written out. A type is left as written when
 /// it has no canonical spelling ([`canonical_annotation`]), or when it spans lines, because a
 /// rewrite must keep every line where it is.
 fn signature_elaborations(db: &dyn Db, file: SourceFile) -> Vec<Elaboration> {
@@ -1506,6 +1508,7 @@ fn signature_elaborations(db: &dyn Db, file: SourceFile) -> Vec<Elaboration> {
     {
         let signature = syntax::annotation::signature(&function, inline);
         written.extend(signature.formals.into_iter().flatten().chain(signature.ret));
+        written.extend(syntax::annotation::named_signature(&function, inline));
     }
     written.sort_unstable_by_key(|node| node.text_range().start());
     written.dedup_by_key(|node| node.text_range());
@@ -1530,7 +1533,16 @@ pub fn canonical_annotation<'db>(
     definitions: TypeDefinitions<'db>,
     node: &SyntaxNode,
 ) -> Option<String> {
-    let ty = canonical_type(db, definitions, annotations::lower_written_type(db, node)?)?;
+    canonical_spelling(db, definitions, annotations::lower_written_type(db, node)?)
+}
+
+/// [`canonical_annotation`] of the type `ty` the checker lowered from a written one.
+pub(crate) fn canonical_spelling<'db>(
+    db: &'db dyn Db,
+    definitions: TypeDefinitions<'db>,
+    ty: Ty<'db>,
+) -> Option<String> {
+    let ty = canonical_type(db, definitions, ty)?;
     let text = diagnostics::TypeRenderer::default().render(db, ty);
     for (program, result) in [
         (format!("function(x: {text}) NULL"), false),
@@ -1628,7 +1640,11 @@ fn unfold_nominal<'db>(
 fn is_closed<'db>(db: &'db dyn Db, definitions: TypeDefinitions<'db>, ty: Ty<'db>) -> bool {
     let own = match ty.kind(db) {
         TyKind::Unknown | TyKind::Var(_) | TyKind::Rigid(_) => false,
-        TyKind::Named(name, _) => definitions.get(db, *name).is_some(),
+        // A stub's class with no representation, such as `Expr`, is spelled by its name.
+        TyKind::Named(name, _) => {
+            definitions.get(db, *name).is_some()
+                || stubs::stubs(db).is_some_and(|library| library.nominals.contains(name.text(db)))
+        }
         _ => true,
     };
     let mut children = own;

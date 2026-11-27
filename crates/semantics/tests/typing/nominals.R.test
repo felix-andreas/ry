@@ -37,6 +37,29 @@ value: integer
 3..15 error[annotation] the alias `A` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle
 19..31 error[annotation] the alias `B` expands back into itself, so it never stands for a type. Write a type in place of one alias on the cycle
 
+#---- a_definition_named_like_a_built_in_type_is_reported
+# Lowering resolves some built-in heads before any definition, and the checker reads the rest
+# by name, so each of these conflicts with the built-in type. The standard library's `Result` is
+# an alias, which a project definition replaces.
+type List<T> = Record{items: T}
+type Promoted<T> = Record{value: T}
+type I64 = Record{n: Str}
+#: @alias DataFrame {Str}
+#: @type Record {Str}
+#: @type
+#:   Dict {Str}
+type Result<T, E> = Record{value: T, error: E}
+
+f <- function(x: Result<Str, I64>) -> Str x$value
+#++++
+f: fn(x: Result<Str, I64>) -> Str
+245..249 error[annotation] `List` is a built-in type, so this definition conflicts with it: annotations and checks read `List` as the built-in one. Give it another name
+277..285 error[annotation] `Promoted` is a built-in type, so this definition conflicts with it: annotations and checks read `Promoted` as the built-in one. Give it another name
+313..316 error[annotation] `I64` is a built-in type, so this definition conflicts with it: annotations and checks read `I64` as the built-in one. Give it another name
+344..353 error[annotation] `DataFrame` is a built-in type, so this definition conflicts with it: annotations and checks read `DataFrame` as the built-in one. Give it another name
+369..375 error[annotation] `Record` is a built-in type, so this definition conflicts with it: annotations and checks read `Record` as the built-in one. Give it another name
+396..400 error[annotation] `Dict` is a built-in type, so this definition conflicts with it: annotations and checks read `Dict` as the built-in one. Give it another name
+
 #==== nominals
 #---- alias_cycle_is_reported_at_its_declarations_when_unused
 #: @alias A {list{rest: B}}
