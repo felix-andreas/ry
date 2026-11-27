@@ -3729,6 +3729,156 @@ impl<'c, 's> LiveFrame<'c, 's> {
         let slot = names.iter().position(|name| name.is(symbol))?;
         Some(self.slot(slot))
     }
+
+    /// The register below a slot frame's slots, which holds its environment once it has one.
+    #[inline]
+    pub fn header(self) -> usize {
+        self.fields().slots as usize
+    }
+
+    /// Whether the frame runs on slots, with or without an environment.
+    #[inline]
+    pub fn has_slots(self) -> bool {
+        self.fields().slots != crate::NO_SLOTS
+    }
+
+    /// Whether the frame keeps every variable in its slot: a slot frame without an environment.
+    #[inline]
+    pub fn in_slots(self) -> bool {
+        self.has_slots() && self.fields().env.raw() == values::nil()
+    }
+
+    /// The environment that stands for a slot frame, once something has asked for it.
+    #[inline]
+    pub fn pending(self) -> Option<Gc<'c, Environment>> {
+        self.fields()
+            .pending
+            .get(self.context)
+            .downcast::<Environment>()
+    }
+
+    /// The environment the call was made from, `None` when the caller is the slot frame at
+    /// [`LiveFrame::caller`] and had no environment when it made the call.
+    #[inline]
+    pub fn sys_parent(self) -> Option<Gc<'c, Environment>> {
+        self.fields()
+            .sys_parent
+            .get(self.context)
+            .downcast::<Environment>()
+    }
+
+    /// The position of the slot frame the call was made from, when the frame records its caller
+    /// by position instead of by environment.
+    #[inline]
+    pub fn caller(self) -> Option<usize> {
+        let caller = self.fields().caller;
+        (caller != crate::NO_SLOTS).then_some(caller as usize)
+    }
+
+    /// Whether formal `position` of a slot frame is missing (`missing()`).
+    #[inline]
+    pub fn is_missing_formal(self, position: usize) -> bool {
+        position < 64 && self.fields().missing & (1 << position) != 0
+    }
+
+    /// The names of a slot frame's slots, its formals first.
+    #[inline]
+    pub fn slot_names(self) -> &'c [Gc<'c>] {
+        slot_layout(self.function()).map_or(&[], |(names, _)| names)
+    }
+
+    /// The dispatch variables a method's frame binds (`.Generic` and the like), each with the
+    /// value recorded for it.
+    #[inline]
+    pub fn method_vars(self) -> &'c [(Gc<'c, Symbol>, Gc<'c>)] {
+        let vars = crate::method_vars(crate::interp(), self.index);
+        // SAFETY: `Gc` is a transparent pointer, the interpreter traces the dispatch variables
+        // of every live frame, and each first field is a symbol, which `UseMethod` records.
+        unsafe { std::slice::from_raw_parts(vars.as_ptr().cast(), vars.len()) }
+    }
+
+    /// Stores `value` in slot `slot`, which counts a reference to it and gives up the one to
+    /// what the slot held. The store frees nothing, so what the context reads stays valid.
+    #[inline]
+    pub fn store_slot(self, slot: usize, value: impl Pointer<Value>) {
+        let register = self.header() + 1 + slot;
+        let registers = &mut crate::interp().bytecode.registers;
+        assert!(register < registers.len(), "slot {slot} is past the register file");
+        // SAFETY: the register is one of the live frame's slots, which only running code writes,
+        // the value is live, and the store counts references without freeing anything.
+        unsafe { crate::heap().store_slot(&mut registers[register], value.raw()) };
+    }
+
+    /// Leaves the slots in `slots` unbound, giving up the references they counted. What they
+    /// held stays valid until the next safepoint, as nothing is freed before a collection.
+    pub fn unbind_slots(self, slots: Range<usize>) {
+        let start = self.header() + 1;
+        let registers = &mut crate::interp().bytecode.registers;
+        let unbound = values::unbound();
+        for register in &mut registers[start + slots.start..start + slots.end] {
+            // SAFETY: as for `store_slot`.
+            unsafe { crate::heap().store_slot(register, unbound) };
+        }
+    }
+
+    /// Records `environment` as the one that stands for the slot frame, which the frame then
+    /// holds.
+    #[inline]
+    pub fn set_pending(self, environment: Gc<'_, Environment>) {
+        // SAFETY: the frame holds the environment from here on, and the interpreter traces its
+        // fields.
+        crate::interp().frames[self.index].pending = unsafe { Held::adopt(environment.raw()) };
+    }
+
+    /// Makes the environment that stands for the slot frame its environment, in its header
+    /// register too, so the frame's code reads and writes by name from here on. `false`, with
+    /// nothing changed, when the frame has an environment already.
+    pub fn enter_environment(self) -> bool {
+        let Some(pending) = self.pending() else {
+            panic!("frame {} has no environment to switch to", self.index);
+        };
+        if self.environment().is_some() {
+            return false;
+        }
+        let header = self.header();
+        let frame = &mut crate::interp().frames[self.index];
+        // SAFETY: the pending environment is the frame's own, which it holds, and the header
+        // register is the frame's, which the collector traces.
+        unsafe {
+            frame.env = Held::adopt(pending.raw());
+            crate::interp().bytecode.registers[header] = pending.raw();
+            pending.raw().set_gp_bits(gp::PENDING_FRAME, false);
+            pending.raw().set_gp_bits(gp::PARTIAL_FRAME, true);
+        }
+        true
+    }
+
+    /// Records `reason` as what last asked for the slot frame's environment, for the profile
+    /// summary.
+    #[inline]
+    pub fn set_reified_by(self, reason: u32) {
+        crate::interp().frames[self.index].reified_by = reason;
+    }
+
+    /// What last asked for the slot frame's environment, for the profile summary.
+    #[inline]
+    pub fn reified_by(self) -> u32 {
+        self.fields().reified_by
+    }
+}
+
+/// The live frame whose header register is `header`, the innermost one when promise code runs
+/// on an outer frame's slots.
+#[inline]
+pub fn frame_at_header<'c, 's>(context: &'c Cx<'s>, header: usize) -> LiveFrame<'c, 's> {
+    let Some(index) = crate::interp()
+        .frames
+        .iter()
+        .rposition(|frame| frame.slots as usize == header)
+    else {
+        panic!("a slot frame's activation outlived its frame");
+    };
+    LiveFrame { index, context }
 }
 
 /// The environment of the live frame at `index`, made for a slot frame that has none yet
