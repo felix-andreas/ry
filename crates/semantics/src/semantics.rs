@@ -830,18 +830,10 @@ pub fn has_ry_syntax(root: &SyntaxNode, source: &str) -> bool {
     source.contains("#:")
         || root.any_kind(|kind| {
             is_ry_syntax(kind)
-                || matches!(
-                    kind,
-                    SyntaxKind::SUFFIXED_NUMBER
-                        | SyntaxKind::TYPE_ASCRIPTION
-                        | SyntaxKind::RETURN_TYPE
-                        | SyntaxKind::TYPE_DEFINITION
-                        | SyntaxKind::NEW_TYPE
-                        | SyntaxKind::PURE_MARKER
-                        // A binder list outside a function's sits in a type definition or a
-                        // `#:` comment, which count anyway.
-                        | SyntaxKind::TYPE_BINDER_LIST
-                )
+                || kind == SyntaxKind::SUFFIXED_NUMBER
+                // The kind column has no parents, so a binder list counts wherever it sits:
+                // outside a function's it is in a type definition or a `#:` comment anyway.
+                || syntax::is_inline_annotation_kind(kind, Some(SyntaxKind::FUNCTION_DEF))
         })
         || root.tokens().any(|token| match token.kind() {
             SyntaxKind::COMMENT => token

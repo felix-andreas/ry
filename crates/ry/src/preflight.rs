@@ -14,7 +14,7 @@ use {
     },
     loader::SourceEncoding,
     repl::{Filtered, InputFilter},
-    rustc_hash::FxHashMap,
+    rustc_hash::{FxHashMap, FxHashSet},
     semantics::{
         Elaboration, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{Diagnostic, RelatedLocation, Severity},
@@ -23,7 +23,6 @@ use {
     },
     std::{
         borrow::Cow,
-        collections::HashSet,
         fs, io,
         path::{Path, PathBuf},
         sync::{Arc, LazyLock, Mutex, PoisonError},
@@ -551,15 +550,28 @@ pub fn elaborate_loaded_package(
 pub fn elaborate_sourced(path: &Path) -> Result<Option<(u64, String)>, CommandError> {
     // A sourced file that ry cannot check runs as R reads it: R reports a file it cannot read,
     // and a broken `ry.toml` beside it must not stop plain R code.
+    let Ok(bytes) = fs::read(path) else {
+        return Ok(None);
+    };
+    // A script that sources a helper in a loop would repeat the same findings each time, so
+    // they print for the first `source()` of a file with this text.
+    static REPORTED: LazyLock<Mutex<FxHashSet<u64>>> = LazyLock::new(Mutex::default);
+    let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let first = REPORTED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(xxh3_64_with_seed(
+            &bytes,
+            xxh3_64(canonical.as_os_str().as_encoded_bytes()),
+        ));
     let mut config = match Config::discover(path) {
         Ok(config) => config,
         Err(error) => {
-            report(&error);
+            if first {
+                report(&error);
+            }
             return Ok(None);
         }
-    };
-    let Ok(bytes) = fs::read(path) else {
-        return Ok(None);
     };
     // R reads the file in the session's encoding, UTF-8, and drops a byte order mark; text
     // that is not UTF-8 is no file the parse reads as the checker would.
@@ -591,17 +603,7 @@ pub fn elaborate_sourced(path: &Path) -> Result<Option<(u64, String)>, CommandEr
             message: related.message,
         })
     };
-    // A script that sources a helper in a loop would repeat the same findings each time.
-    static REPORTED: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(Mutex::default);
-    let key = xxh3_64_with_seed(
-        source.as_bytes(),
-        xxh3_64(path.as_os_str().as_encoded_bytes()),
-    );
-    if REPORTED
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(key)
-    {
+    if first {
         render_findings(
             OutputFormat::Human,
             MinSeverity::Warning,
