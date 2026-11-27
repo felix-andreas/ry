@@ -1029,6 +1029,7 @@ fn check_item_in<'db>(
         },
         scheme_arena: Vec::new(),
         literal_reads: Bitset::new_in(arena, expressions),
+        ry_components: Bitset::new_in(arena, expressions),
         recorded: RecordedTypes {
             types: vec![None; expressions],
             undo: Vec::new(),
@@ -2114,6 +2115,9 @@ struct Checker<'db, 'a> {
     /// The reads that may keep a literal variable open, because they are an operand whose
     /// other operand may decide it. Every other read decides it as R's type.
     literal_reads: Bitset<'a, ExprId>,
+    /// The tuple items, record fields and tag payloads of a literal bound to a name where
+    /// `binds_ry_value` holds, which are ry values as a scalar literal bound there is.
+    ry_components: Bitset<'a, ExprId>,
     recorded: RecordedTypes<'db>,
     recorded_patterns: Column<'a, PatId, Ty<'db>>,
     recorded_expectations: Column<'a, ExprId, Ty<'db>>,
@@ -4522,6 +4526,13 @@ impl<'db, 'a> Checker<'db, 'a> {
                             );
                         if binds_name {
                             self.table.level += 1;
+                        }
+                        if binds_name
+                            && !value_annotated
+                            && !self.expression_annotations.contains_key(id)
+                            && self.binds_ry_value()
+                        {
+                            self.mark_ry_components(value);
                         }
                         let literal = number_literal(self.module, value).filter(|_| {
                             binds_name
@@ -7990,17 +8001,53 @@ impl<'db, 'a> Checker<'db, 'a> {
         }
     }
 
+    /// Marks the components of the tuple, record and tag literals in `value`, through list
+    /// literals and nested literals but not into any other expression, so `f((x = 1,))`
+    /// keeps R's type for `1` as `f(1)` does.
+    fn mark_ry_components(&mut self, value: ExprId) {
+        let module = self.module;
+        let mut pending: SmallVec<[ExprId; 8]> = smallvec![value];
+        while let Some(mut id) = pending.pop() {
+            while let ExpressionKind::Paren(paren) = module.kind(id) {
+                id = *paren;
+            }
+            match module.kind(id) {
+                ExpressionKind::Tuple(items) => {
+                    for &item in &module[*items] {
+                        self.ry_components.insert(item);
+                        pending.push(item);
+                    }
+                }
+                ExpressionKind::Record(fields) => {
+                    for field in &module[*fields] {
+                        self.ry_components.insert(field.value);
+                        pending.push(field.value);
+                    }
+                }
+                ExpressionKind::Tag {
+                    payload: Some(payload),
+                    ..
+                } => {
+                    self.ry_components.insert(*payload);
+                    pending.push(*payload);
+                }
+                ExpressionKind::Array(items) => pending.extend(module[*items].iter().copied()),
+                _ => {}
+            }
+        }
+    }
+
     /// A tuple item or a record field. A literal there is open, as a literal bound
     /// to a variable is: a later use decides it (`Str.concat(s, pair[[1]])` makes `"a"` in
-    /// `pair <- ("a", 1)` a `Str`), and otherwise it has R's type, or a ry type where a
-    /// literal bound to a name has one (`binds_ry_value`).
+    /// `pair <- ("a", 1)` a `Str`), and otherwise it has R's type, or a ry type inside a
+    /// literal bound to a name where `binds_ry_value` holds (`ry_components`).
     fn component(&mut self, value: ExprId) -> Ty<'db> {
         let module = self.module;
         let mut inner = value;
         while let ExpressionKind::Paren(paren) = module.kind(inner) {
             inner = *paren;
         }
-        let native = self.binds_ry_value();
+        let native = self.ry_components.contains(value);
         let ty = if let Some(literal) = number_literal(module, inner) {
             let constraint = if literal.is_fraction()
                 || (native && literal.default_native() == NativeScalar::F64)

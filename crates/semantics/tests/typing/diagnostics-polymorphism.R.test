@@ -118,7 +118,7 @@ result <- pick(:Ok(1L), :Err(:Missing))
 #++++
 pick: <T> fn(a: T, b: T) -> T
 color: :Red | :Green
-result: :Ok(I64) | :Err(:Missing)
+result: :Ok(integer) | :Err(:Missing)
 
 #---- a_difference_of_two_values_of_one_class_is_a_double
 # Two dates subtract to a `difftime`, not a date, so a generic difference claims the representation.

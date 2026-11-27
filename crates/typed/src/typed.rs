@@ -66,9 +66,25 @@ use {
         borrow::Cow,
         cell::{Cell, RefCell},
         mem::MaybeUninit,
+        sync::atomic::{AtomicUsize, Ordering},
         time::{Duration, Instant},
     },
 };
+
+/// The lowest frame address compiled code may reach, which every compiled function compares
+/// its frame against on entry, so a deep recursion gives up before the machine stack runs out.
+/// The native entry sets it for the stack segment it runs on ([`NATIVE_STACK`]); zero means no
+/// limit is known.
+pub static STACK_LIMIT: AtomicUsize = AtomicUsize::new(0);
+
+/// The stack the native entry makes sure of before it runs compiled code, growing onto a fresh
+/// segment of [`NATIVE_SEGMENT`] when less is left: the interpreter keeps only a small red zone,
+/// so compiled code entered from deep in an interpreted recursion would otherwise start near
+/// the end of its segment.
+const NATIVE_STACK: usize = 1024 * 1024;
+const NATIVE_SEGMENT: usize = 8 * 1024 * 1024;
+/// The stack below [`STACK_LIMIT`] left for the runtime functions the deepest frame calls.
+const NATIVE_RESERVE: usize = 128 * 1024;
 
 /// Why a closure does not compile, for the log.
 #[derive(Clone, Debug)]
@@ -281,7 +297,18 @@ pub unsafe fn call(
         count: typed.args.len(),
         sys_parent: typed.sys_parent,
     }));
-    let status = trampoline(depth_budget(), arguments.words.as_ptr(), out.as_mut_ptr());
+    let words = arguments.words.as_ptr();
+    let status = stacker::maybe_grow(NATIVE_STACK, NATIVE_SEGMENT, || {
+        let marker = 0u8;
+        let here = std::ptr::addr_of!(marker) as usize;
+        let limit = stacker::remaining_stack().map_or(0, |remaining| {
+            here.saturating_sub(remaining) + NATIVE_RESERVE
+        });
+        let outer_limit = STACK_LIMIT.swap(limit, Ordering::Relaxed);
+        let status = trampoline(depth_budget(), words, out.as_mut_ptr());
+        STACK_LIMIT.store(outer_limit, Ordering::Relaxed);
+        status
+    });
     RUNNING.set(outer);
     if status != 0 {
         arguments.release();
@@ -965,7 +992,7 @@ unsafe fn holds_boxes(value: Sexp) -> bool {
     }
     match value.kind() {
         SexpType::Record => true,
-        SexpType::List => value.is_array() && rvalues::length(value) > 0,
+        SexpType::List => value.is_array(),
         _ => false,
     }
 }

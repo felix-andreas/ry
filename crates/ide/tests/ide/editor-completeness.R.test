@@ -774,15 +774,15 @@ hint @73: Any
 point <- (x = 1, y = 2)
 point$$0x
 #++++
-hover 30..31: x: double
+hover 30..31: x: I64
 definition 10..11
 references: 10..11*, 30..31
 rename: 2 edit(s)
 signature: none
 action: Add inferred type annotations for the whole file
-  edit 5..5 -> ": Record{x: double, y: double}"
+  edit 5..5 -> ": Record{x: I64, y: I64}"
 completion (2): x, y
-hint @5: Record{x: double, y: double}
+hint @5: Record{x: I64, y: I64}
 
 #---- field_parameter_fallback
 total <- function(order) order$amo$0unt
