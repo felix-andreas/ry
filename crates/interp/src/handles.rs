@@ -4268,18 +4268,8 @@ impl<'c> Window<'c> {
             self.written < self.slot_count,
             "a slot window holds more values than slots"
         );
-        if self.written >= self.slot_count {
-            return;
-        }
-        let raw = value.raw();
-        // SAFETY: the slot is one of the window's reserved registers, the value is live, as
-        // any pointer is while it can be used, and the register file is traced, so the slot
-        // keeps it alive from here on.
-        unsafe {
-            self.slots.add(self.written).write(raw);
-            raw.increment_refcount();
-        }
-        self.written += 1;
+        let mut value = Some(value);
+        self.fill(self.written + 1, |_| value.take());
     }
 
     /// Stores the value `next` gives for each slot up to `end`, in order, and stops at the first
@@ -4298,7 +4288,9 @@ impl<'c> Window<'c> {
                 break;
             };
             let raw = value.raw();
-            // SAFETY: as in `push`, and `written` is below the window's slot count.
+            // SAFETY: the slot is one of the window's reserved registers, as `written` is below
+            // the slot count, the value is live, as any pointer is while it can be used, and the
+            // register file is traced, so the slot keeps it alive from here on.
             unsafe {
                 self.slots.add(written).write(raw);
                 raw.increment_refcount();
