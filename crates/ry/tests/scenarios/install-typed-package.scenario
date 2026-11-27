@@ -44,7 +44,7 @@ file pkg/R/strict.R
 
 run ry install pkg -l library
 expect exit 0
-expect stdout "typed code: closures=7 written=6 (left out: compiles with its caller (1))"
+expect stdout "typed code: closures=7 written=7"
 
 file use.R
 | library(typedpkg, lib.loc = "library")
@@ -138,7 +138,7 @@ expect stdout "NULL"
 # points a script at `ry run --aot`.
 run ry build --aot pkg -l built
 expect exit 0
-expect stdout "typed code: closures=7 written=6"
+expect stdout "typed code: closures=7 written=7"
 env RY_TYPED_LOG 1
 file use-built.R
 | library(typedpkg, lib.loc = "built")
@@ -168,7 +168,7 @@ env RY_TYPED_LOG 1
 run ry run --aot --runtime ry use-built.R
 expect exit 0
 expect stdout "[1] 718640.9"
-expect stderr "typed: compiled 6 functions ahead of time"
+expect stderr "typed: compiled 7 functions ahead of time"
 expect stderr "ry: another build of ry installed typedpkg, so its typed functions compiled as it loaded; reinstall it to compile them at install"
 expect stderr lacks "typed: attached"
 
@@ -210,7 +210,7 @@ file shapes/R/shapes.R
 
 run ry install shapes -l library
 expect exit 0
-expect stdout "typed code: closures=5 written=4 (left out: compiles with its caller (1))"
+expect stdout "typed code: closures=5 written=5"
 
 file shapes-first.R
 | other <- function(n: I64) -> I64 {
