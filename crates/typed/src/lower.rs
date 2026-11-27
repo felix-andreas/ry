@@ -1614,7 +1614,24 @@ impl Lowering<'_> {
         }
         if let Some(Binding::Function(callable)) = self.lookup(head) {
             let arguments = Arguments::of(call);
-            let values = self.passed_arguments(&arguments)?;
+            let values = match callable {
+                Callable::Inline(formals, _, scope) => {
+                    self.matched_arguments(formals, &arguments, scope + 1, self.env)?
+                }
+                Callable::Typed(_, function) => {
+                    self.matched_arguments(function.car(), &arguments, 0, function.tag())?
+                }
+                Callable::Captured(..) | Callable::Library(_)
+                    if arguments.items.iter().any(|(tag, _)| tag.is_some()) =>
+                {
+                    return Err(Refusal::new(
+                        "a function passed to a parameter called with named arguments",
+                    ));
+                }
+                Callable::Captured(..) | Callable::Library(_) => {
+                    self.passed_arguments(&arguments)?
+                }
+            };
             return self.apply_arguments(callable, &values);
         }
         match self.lookup(head) {
@@ -1643,10 +1660,7 @@ impl Lowering<'_> {
         if function.kind() == SexpType::Closure && interp::annotations::is_typed(function) {
             self.speculations.push(speculation);
             let arguments = Arguments::of(call);
-            if arguments.items.iter().any(|(tag, _)| tag.is_some()) {
-                return Err(Refusal::new("a typed call with named arguments"));
-            }
-            let values = self.passed_arguments(&arguments)?;
+            let values = self.matched_arguments(function.car(), &arguments, 0, function.tag())?;
             return self.typed_function(head, function, &values);
         }
         if let Some(r_use) = r_use {
@@ -2065,6 +2079,108 @@ impl Lowering<'_> {
             });
         }
         Ok(passed)
+    }
+
+    /// The arguments of a call of a function with `formals`, one per formal in their order and
+    /// matched as R matches them ([`match_formals`]), computed in the order they are written. A
+    /// formal the call leaves out takes its default, lowered as the callee's frame computes it:
+    /// with the first `visible` scopes, the other formals and `env` in view.
+    unsafe fn matched_arguments(
+        &mut self,
+        formals: Sexp,
+        arguments: &Arguments,
+        visible: usize,
+        env: Sexp,
+    ) -> Result<SmallVec<[Argument; 4]>, Refusal> {
+        let formals = rvalues::pairlist_items(formals);
+        let supplied = match_formals(&formals, &arguments.items)?;
+        let mut written: SmallVec<[Option<Argument>; 4]> = SmallVec::new();
+        for &(_, code) in &arguments.items {
+            written.push(if code == rvalues::missing_arg() {
+                None
+            } else if self.passes_function(code) {
+                Some(Argument::Function(self.function_argument(code)?))
+            } else {
+                Some(Argument::Value(self.value(code)?))
+            });
+        }
+        let mut matched: SmallVec<[Option<Argument>; 4]> = supplied
+            .iter()
+            .map(|&item| item.and_then(|item| written[item]))
+            .collect();
+        if matched.iter().any(Option::is_none) {
+            let hidden = self.scopes.split_off(visible.min(self.scopes.len()));
+            let loops = std::mem::take(&mut self.loops);
+            let control = std::mem::replace(&mut self.control, 0);
+            let env = std::mem::replace(&mut self.env, env);
+            let mut scope = self.new_scope();
+            for (&(symbol, _), argument) in formals.iter().zip(&matched) {
+                // A default sees a formal passed a function only by calling it, which no default
+                // in typed code needs, and sees a left-out formal once its own default is in.
+                let binding = match *argument {
+                    Some(Argument::Value(value)) => Binding::Value(value),
+                    _ => Binding::Hidden,
+                };
+                scope.names.insert(symbol, binding);
+            }
+            self.scopes.push(scope);
+            let defaults = self.defaults(&formals, &mut matched);
+            self.scopes.pop();
+            self.scopes.extend(hidden);
+            self.env = env;
+            self.loops = loops;
+            self.control = control;
+            defaults?;
+        }
+        Ok(matched.into_iter().flatten().collect())
+    }
+
+    /// The defaults of the formals `matched` leaves out. R computes a default when the body
+    /// first reads it, so one that reads another left-out formal comes after that formal's.
+    unsafe fn defaults(
+        &mut self,
+        formals: &[(Sexp, Sexp)],
+        matched: &mut [Option<Argument>],
+    ) -> Result<(), Refusal> {
+        loop {
+            let waiting = |matched: &[Option<Argument>], default: Sexp| {
+                formals.iter().zip(matched).any(|(&(symbol, _), argument)| {
+                    argument.is_none() && mentions_outside(default, rvalues::nil(), symbol)
+                })
+            };
+            let next = formals
+                .iter()
+                .zip(matched.iter())
+                .position(|(&(_, default), argument)| {
+                    argument.is_none() && !waiting(matched, default)
+                });
+            let Some(index) = next else {
+                return match matched.iter().position(Option::is_none) {
+                    Some(index) => Err(Refusal(Cow::Owned(format!(
+                        "the default of `{}` reads a formal whose default reads it in turn",
+                        rvalues::symbol_name(formals[index].0)
+                    )))),
+                    None => Ok(()),
+                };
+            };
+            let (symbol, default) = formals[index];
+            let name = || rvalues::symbol_name(symbol);
+            if default == rvalues::missing_arg() {
+                return Err(Refusal(Cow::Owned(format!(
+                    "the call leaves out `{}`, which has no default",
+                    name()
+                ))));
+            }
+            if self.passes_function(default) || leaves_frame(default) {
+                return Err(Refusal(Cow::Owned(format!(
+                    "the default of `{}` is a function or leaves the function",
+                    name()
+                ))));
+            }
+            let value = self.value(default)?;
+            matched[index] = Some(Argument::Value(value));
+            self.bind(symbol, Binding::Value(value));
+        }
     }
 
     /// Whether the argument `code` is a function: a function literal, a local function, or a
@@ -10887,6 +11003,71 @@ fn plain_values(arguments: &[Argument]) -> Option<SmallVec<[Local; 4]>> {
 thread_local! {
     /// The function of each library function and arity that [`eta`] made, kept for the session.
     static ETA: RefCell<Vec<(Sexp, usize, Sexp, Sexp)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// For each of `formals`, the index of the argument among `items` that supplies it, matched as R
+/// matches a call: by exact name, then by a prefix that fits one formal only, then the unnamed
+/// arguments in order. A call R would reject, and a function with `...`, refuse.
+unsafe fn match_formals(
+    formals: &[(Sexp, Sexp)],
+    items: &[(Option<String>, Sexp)],
+) -> Result<SmallVec<[Option<usize>; 4]>, Refusal> {
+    if formals
+        .iter()
+        .any(|&(symbol, _)| symbol == rvalues::symbols().dots)
+    {
+        return Err(Refusal::new("a function with `...`"));
+    }
+    let unmatched = || Refusal::new("a call whose arguments R would not match to the formals");
+    let names: SmallVec<[Cow<'_, str>; 4]> = formals
+        .iter()
+        .map(|&(symbol, _)| rvalues::symbol_name(symbol))
+        .collect();
+    let mut supplied: SmallVec<[Option<usize>; 4]> = SmallVec::from_elem(None, formals.len());
+    let mut partial: SmallVec<[usize; 4]> = SmallVec::new();
+    for (item, (tag, _)) in items.iter().enumerate() {
+        let Some(tag) = tag else { continue };
+        match names.iter().position(|name| name == tag) {
+            Some(formal) if supplied[formal].is_none() => supplied[formal] = Some(item),
+            Some(_) => return Err(unmatched()),
+            None => partial.push(item),
+        }
+    }
+    // A prefix matches only the formals no exact name took.
+    let exact = supplied.clone();
+    for item in partial {
+        let Some(tag) = items[item].0.as_deref() else {
+            continue;
+        };
+        let mut fits = (0..formals.len())
+            .filter(|&formal| exact[formal].is_none() && names[formal].starts_with(tag));
+        match (fits.next(), fits.next()) {
+            (Some(formal), None) if supplied[formal].is_none() => supplied[formal] = Some(item),
+            _ => return Err(unmatched()),
+        }
+    }
+    let open: SmallVec<[usize; 4]> = (0..formals.len())
+        .filter(|&formal| supplied[formal].is_none())
+        .collect();
+    let mut open = open.into_iter();
+    for (item, (tag, _)) in items.iter().enumerate() {
+        if tag.is_none() {
+            supplied[open.next().ok_or_else(unmatched)?] = Some(item);
+        }
+    }
+    Ok(supplied)
+}
+
+/// Whether `code` holds a `return`, `break` or `next`, which in a default would leave the
+/// callee's frame rather than give a value.
+unsafe fn leaves_frame(code: Sexp) -> bool {
+    match code.kind() {
+        SexpType::Symbol => matches!(&*rvalues::symbol_name(code), "return" | "break" | "next"),
+        SexpType::Language => rvalues::pairlist_items(code)
+            .iter()
+            .any(|&(_, item)| leaves_frame(item)),
+        _ => false,
+    }
 }
 
 /// The formals and body of `function(a1, ..., an) name(a1, ..., an)` for the library function

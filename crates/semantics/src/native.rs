@@ -18,7 +18,7 @@ use {
         dense::{Bitset, Column},
         hir::{
             Argument, AssignSpelling, BinaryOperator, ExprId, ExpressionKind, LiteralKind, Module,
-            PatId, PatternKind, Symbol, UnaryOperator,
+            Parameter, PatId, PatternKind, Symbol, UnaryOperator,
         },
         infer::apply_definition,
         naming::{BindingKind, ItemNaming},
@@ -356,8 +356,8 @@ impl Uncompiled {
                  position"
             ),
             Uncompiled::ArgumentCount(function) => format!(
-                "this call of `{function}` does not pass every parameter, which {YET}. Pass each \
-                 argument by position"
+                "this call of `{function}` leaves out a parameter without a default, or passes an \
+                 argument that matches no parameter, which {YET}. Pass one argument per parameter"
             ),
             Uncompiled::StdFunction(name) => format!(
                 "`{name}` {YET}. Write the step with a loop or another standard library \
@@ -957,9 +957,8 @@ enum Callee {
     ToR(Symbol),
     Std(Symbol),
     Table,
-    /// A top-level native function, with how many arguments a call passes it unless it takes
-    /// `...`.
-    Native(Symbol, Option<usize>),
+    /// A top-level native function.
+    Native(Symbol),
     R(Symbol, ROrigin),
     Computed,
 }
@@ -1725,7 +1724,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             Callee::Table => true,
             // The typed core reads the result type as it is written, so an alias of a table
             // type tells it nothing.
-            Callee::Native(name, _) => !self
+            Callee::Native(name) => !self
                 .judged
                 .globals
                 .and_then(|globals| globals.scheme(name, true))
@@ -2404,8 +2403,7 @@ impl<'a, 'db> Judge<'a, 'db> {
         match ty.map(|ty| ty.kind(db)) {
             Some(TyKind::Function(function)) if !function.inferred => {
                 if is_native_signature(db, self.judged.definitions, function, 0) {
-                    let formals = function.positional.len() + function.named.len();
-                    Callee::Native(name, function.variadic.is_none().then_some(formals))
+                    Callee::Native(name)
                 } else {
                     Callee::R(name, ROrigin::Boundary)
                 }
@@ -2451,17 +2449,17 @@ impl<'a, 'db> Judge<'a, 'db> {
             // builds the message, so its arguments may hold anything.
             Callee::Stop => {}
             Callee::Local(function) => {
-                let formals = match *module.kind(function) {
-                    ExpressionKind::Function { parameters, .. } => module[parameters].len(),
-                    _ => arguments.len(),
+                let matched = match *module.kind(function) {
+                    ExpressionKind::Function { parameters, .. } => {
+                        matches_formals(&module[parameters], arguments)
+                    }
+                    _ => true,
                 };
                 let name = match *module.kind(callee) {
                     ExpressionKind::NameRef(name) => name,
                     _ => Symbol::default(),
                 };
-                if named {
-                    self.uncompiled(id, Uncompiled::NamedArguments(name));
-                } else if formals != arguments.len() {
+                if !matched {
                     self.uncompiled(id, Uncompiled::ArgumentCount(name));
                 }
                 for &(_, value) in arguments {
@@ -2553,12 +2551,9 @@ impl<'a, 'db> Judge<'a, 'db> {
                 }
                 self.r_arguments = outer;
             }
-            Callee::Native(name, formals) => {
-                if named {
-                    self.uncompiled(id, Uncompiled::NamedArguments(name));
-                } else if formals.is_some_and(|formals| formals != arguments.len()) {
-                    self.uncompiled(id, Uncompiled::ArgumentCount(name));
-                }
+            // The type check matches the arguments to the formals, and native code matches them
+            // as R does, left-out formals taking their defaults.
+            Callee::Native(name) => {
                 let mut passes_function = false;
                 for &(_, value) in arguments {
                     passes_function |= self.function_argument(value);
@@ -2864,6 +2859,56 @@ fn defers_arguments(name: &str) -> bool {
 }
 
 /// What a name of R, of a package or of ry's own library calls.
+/// Whether a call passing `arguments` matches them to `parameters` as R does (by exact name, then
+/// by a prefix that fits one parameter, then by position) and leaves out only parameters with a
+/// default, which is how native code calls a local function.
+fn matches_formals(parameters: &[Parameter], arguments: &[(Option<Symbol>, ExprId)]) -> bool {
+    if parameters.iter().any(|parameter| parameter.name == "...") {
+        return true;
+    }
+    if parameters.len() > 64 {
+        return false;
+    }
+    let bit = |index: usize| 1u64 << index;
+    let mut supplied = 0u64;
+    let mut partial: SmallVec<[Symbol; 4]> = SmallVec::new();
+    for (name, _) in arguments {
+        let Some(name) = name else { continue };
+        match parameters
+            .iter()
+            .position(|parameter| parameter.name == *name)
+        {
+            Some(index) if supplied & bit(index) == 0 => supplied |= bit(index),
+            Some(_) => return false,
+            None => partial.push(*name),
+        }
+    }
+    let exact = supplied;
+    for name in partial {
+        let mut fits = (0..parameters.len()).filter(|&index| {
+            exact & bit(index) == 0 && parameters[index].name.as_str().starts_with(name.as_str())
+        });
+        match (fits.next(), fits.next()) {
+            (Some(index), None) if supplied & bit(index) == 0 => supplied |= bit(index),
+            _ => return false,
+        }
+    }
+    let mut open = (0..parameters.len()).filter(|&index| supplied & bit(index) == 0);
+    let mut filled = supplied;
+    for (name, _) in arguments {
+        if name.is_none() {
+            match open.next() {
+                Some(index) => filled |= bit(index),
+                None => return false,
+            }
+        }
+    }
+    parameters
+        .iter()
+        .enumerate()
+        .all(|(index, parameter)| filled & bit(index) != 0 || parameter.default.is_some())
+}
+
 fn library_callee(name: Symbol) -> Callee {
     let text = name.as_str();
     match text {

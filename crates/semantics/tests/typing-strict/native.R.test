@@ -245,7 +245,6 @@ NULL
 
 #---- typed_call_with_named_arguments
 #~~~~ script.R
-# blocked: area_of
 area <- function(width: F64, height: F64) -> F64 width * height
 area_of <- function(side: F64) -> F64 area(width = side, height = 2 * side)
 cat(area_of(3), "\n")
@@ -254,11 +253,9 @@ cat(area_of(3), "\n")
 area: fn(width: F64, height: F64) -> F64
 area_of: fn(side: F64) -> F64
 NULL
-121..158 warning[interpreted] this function runs in the interpreter, because a call of `area` with named arguments is not compiled natively yet. Pass the arguments by position
 
 #---- typed_call_that_leaves_a_default_out
 #~~~~ script.R
-# blocked: with_default
 scaled <- function(x: F64, factor: F64 = 2) -> F64 x * factor
 with_default <- function(x: F64) -> F64 scaled(x)
 cat(with_default(3), "\n")
@@ -267,7 +264,33 @@ cat(with_default(3), "\n")
 scaled: fn(x: F64, [factor]: F64) -> F64
 with_default: fn(x: F64) -> F64
 NULL
-126..135 warning[interpreted] this function runs in the interpreter, because this call of `scaled` does not pass every parameter, which is not compiled natively yet. Pass each argument by position
+
+#---- local_call_with_named_arguments_and_a_default
+#~~~~ script.R
+shifted <- function(x: F64) -> F64 {
+  minus <- function(a: F64, b: F64 = 1.0) -> F64 a - b
+  minus(b = x, a = 10.0) + minus(x)
+}
+cat(shifted(3), "\n")
+#++++
+== script.R
+shifted: fn(x: F64) -> F64
+NULL
+
+#---- local_call_that_leaves_out_a_required_parameter
+#~~~~ script.R
+# blocked: shifted
+shifted <- function(x: F64) -> F64 {
+  minus <- function(a: F64, b: F64) -> F64 a - b
+  minus(x)
+}
+cat(shifted(3), "\n")
+#++++
+== script.R
+shifted: fn(x: F64) -> F64
+NULL
+107..112 error[type-mismatch] this call leaves out `b`, which the function requires
+107..115 warning[interpreted] this function runs in the interpreter, because this call of `minus` leaves out a parameter without a default, or passes an argument that matches no parameter, which is not compiled natively yet. Pass one argument per parameter
 
 #---- standard_library_function_without_native_code
 #~~~~ script.R
