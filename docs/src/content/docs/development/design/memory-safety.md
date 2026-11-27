@@ -623,10 +623,11 @@ environment (`pending_environment`, `frame_environment_of`, `caller_environment`
 closures over its slots (`promise_over_slots`, `closure_over_slots`), the readers of its slots
 (`frame_dots`, `variable_register`, `formal_slots`) and the lifting of its slots into an
 environment (`lift`, `box_slots`). The predicates that ask whether a slot or a reference is a
-missing argument (`value_is_missing`, `reference_is_missing`, `symbol_is_missing`) stay raw. A promise is rooted for as long as its code runs, because that code can
-remove the last binding that holds it. A reader reaches a live frame through
-`handles::LiveFrame`, which borrows the context, so a slot read through it cannot outlive an
-allocation; `handles::pending_frame` panics when the environment's frame has returned.
+missing argument (`value_is_missing`, `reference_is_missing`, `symbol_is_missing`) stay raw.
+A promise is rooted for as long as its code runs, because that code can remove the last binding
+that holds it. A reader reaches a live frame through `handles::LiveFrame`, which borrows the
+context, so a slot read through it cannot outlive an allocation; `handles::pending_frame` panics
+when the environment's frame has returned.
 The specials reach the loop and function contexts, the srcref and the closure maker through wrappers
 in `handles.rs` (`in_loop` and `loop_jump` hold a loop's environment, `Args::register_on_exit`
 stores into the frame), because the bytecode loop and the JIT share those raw helpers. An
