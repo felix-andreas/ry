@@ -769,6 +769,21 @@ pub struct DefaultRead<'db> {
 pub struct ComparedPair<'db> {
     pub left: Ty<'db>,
     pub right: Ty<'db>,
+    /// The literal constraint of the default of the parameter a side types, when that default
+    /// is a literal, so a call that leaves the parameter out adapts it as a passed literal.
+    pub left_literal: Option<Constraint>,
+    pub right_literal: Option<Constraint>,
+}
+
+impl<'db> ComparedPair<'db> {
+    pub fn new(left: Ty<'db>, right: Ty<'db>) -> Self {
+        ComparedPair {
+            left,
+            right,
+            left_literal: None,
+            right_literal: None,
+        }
+    }
 }
 
 /// `function(q, valueOnly = TRUE) if (valueOnly) prob else list(value = prob)`: `ret` is the
@@ -1785,6 +1800,7 @@ fn rebuilt_type<'db>(
                 .map(|pair| ComparedPair {
                     left: map(pair.left),
                     right: map(pair.right),
+                    ..*pair
                 })
                 .collect();
             Ty::new(

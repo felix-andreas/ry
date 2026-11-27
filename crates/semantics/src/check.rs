@@ -3687,16 +3687,48 @@ fn holds_ry_scalar(db: &dyn Db, ty: Ty<'_>) -> bool {
     }
 }
 
-/// Whether an R literal of `found`'s type would take the ry scalar `expected` where it is
-/// written: a number for a ry number, a string for a `Str` and a logical for a `Bool`.
-fn literal_family(db: &dyn Db, expected: Ty<'_>, found: Ty<'_>) -> bool {
-    match (expected.kind(db), found.kind(db)) {
-        (TyKind::Native(native), TyKind::Scalar(Atomic::Integer | Atomic::Double)) => {
-            native.is_number()
-        }
-        (TyKind::Native(NativeScalar::Str), TyKind::Scalar(Atomic::Character))
-        | (TyKind::Native(NativeScalar::Bool), TyKind::Scalar(Atomic::Logical)) => true,
-        _ => false,
+/// Where a call's value for one side of a compared pair comes from.
+enum ComparedSource<'call, 'db> {
+    /// The arguments matched to the parameter typed by the side.
+    Passed(SmallVec<[&'call CallArgument<'db>; 1]>),
+    /// The parameter typed by the side has a default, and no argument passed it.
+    Default(Ty<'db>),
+    /// No parameter is typed by the side, or one without a default went unpassed.
+    Unpassed,
+}
+
+/// Finds the parameter whose type is the side itself, so a body that settles a parameter's
+/// type never makes another parameter of that type the compared one.
+fn compared_source<'call, 'db>(
+    function: &FunctionType<'db>,
+    arguments: &'call [CallArgument<'db>],
+    targets: &[Option<ArgumentTarget>],
+    side: Ty<'db>,
+) -> ComparedSource<'call, 'db> {
+    let positional = function.positional.iter().position(|&ty| ty == side);
+    let named = function.named.iter().position(|parameter| parameter.ty == side);
+    if positional.is_none() && named.is_none() {
+        return ComparedSource::Unpassed;
+    }
+    let passed: SmallVec<[&CallArgument<'db>; 1]> = targets
+        .iter()
+        .zip(arguments)
+        .filter(|(target, _)| match target {
+            Some(ArgumentTarget::Positional(index)) => Some(*index) == positional,
+            Some(ArgumentTarget::Named(index)) => Some(*index) == named,
+            _ => false,
+        })
+        .map(|(_, argument)| argument)
+        .collect();
+    if !passed.is_empty() {
+        return ComparedSource::Passed(passed);
+    }
+    match named
+        .and_then(|index| function.named.get(index))
+        .and_then(|parameter| parameter.default)
+    {
+        Some(default) => ComparedSource::Default(default),
+        None => ComparedSource::Unpassed,
     }
 }
 
@@ -12950,7 +12982,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 self.constrain_operand(lhs_range, left, itself);
                 self.constrain_operand(rhs_range, right, itself);
                 self.table.comparisons.push(PendingComparison {
-                    pair: ComparedPair { left, right },
+                    pair: ComparedPair::new(left, right),
                     range: lhs_range.cover(rhs_range),
                     operator: operator_spelling(operator),
                 });
@@ -12964,6 +12996,25 @@ impl<'db, 'a> Checker<'db, 'a> {
             }
             _ => None,
         };
+        // An open operand beside a settled R value admits only what R compares with it, which
+        // the enclosing function's end decides, once the operand has met its other uses.
+        if compared.is_none() {
+            let settled_r = |ty: Ty<'db>| {
+                !self.table.contains_unbound_var(self.db, ty) && !holds_ry_value(self.db, ty)
+            };
+            let open = match (open_operand(resolved_left), open_operand(resolved_right)) {
+                (Some(left), None) if settled_r(resolved_right) => Some((left, resolved_right)),
+                (None, Some(right)) if settled_r(resolved_left) => Some((right, resolved_left)),
+                _ => None,
+            };
+            if let Some((left, right)) = open {
+                self.table.comparisons.push(PendingComparison {
+                    pair: ComparedPair::new(left, right),
+                    range: lhs_range.cover(rhs_range),
+                    operator: operator_spelling(operator),
+                });
+            }
+        }
         if let Some((operand, range, constraint)) = compared {
             self.constrain_operand(range, operand, constraint);
             return self
@@ -13224,6 +13275,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         };
 
         self.table.level += 1;
+        let compared_mark = self.table.comparisons.len();
         let enclosing_frame_level = mem::replace(&mut self.frame_level, self.table.level);
         // Pairs formals with declared types as R's matcher pairs arguments; any declared
         // entry the walk never consumes is a disagreement.
@@ -13488,9 +13540,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             .expect("return frames stay balanced around body inference");
         // An `Unknown` declared return (elided `->`) is inferred from the body, so
         // annotating only the parameters does not drop the return.
+        let mut signature_ret = declared.ret;
         if matches!(declared.ret.kind(self.db), TyKind::Unknown) {
             let ret = self.join_early_returns(&early_returns, trailing_ty, *body);
             signature.ret = ret;
+            signature_ret = ret;
             self.record_untyped_parameters(function_id, &untyped_candidates, ret);
         } else {
             self.record_untyped_parameters(function_id, &untyped_candidates, declared.ret);
@@ -13594,10 +13648,17 @@ impl<'db, 'a> Checker<'db, 'a> {
         self.environment.rollback(mark);
         self.reapply_enclosing_writes(pending_mark);
         self.frame_level = enclosing_frame_level;
+        let compared = self.function_compared_pairs(compared_mark, &named, signature_ret);
         self.table.level -= 1;
         // Not resolved: annotation-sourced types hold no inference variables, and resolving
         // would expand the aliases and nominals the author wrote.
-        Ty::new(self.db, TyKind::Function(&signature))
+        Ty::new(
+            self.db,
+            TyKind::Function(&FunctionType {
+                compared: &compared,
+                ..signature
+            }),
+        )
     }
 
     /// DistributionUtils' `pDist(..., valueOnly = TRUE)` ends in `if (valueOnly) prob else
@@ -14255,18 +14316,15 @@ impl<'db, 'a> Checker<'db, 'a> {
             .collect_unbound_vars(self.db, ret, &mut signature_vars);
         let mut kept: Vec<ComparedPair<'db>> = Vec::new();
         for comparison in pending {
-            let left = self.table.resolve(self.db, comparison.pair.left);
-            let right = self.table.resolve(self.db, comparison.pair.right);
-            let mut vars = FxHashSet::default();
-            self.table.collect_unbound_vars(self.db, left, &mut vars);
-            self.table.collect_unbound_vars(self.db, right, &mut vars);
-            if vars.is_empty() {
-                self.settle_comparison(comparison, left, right);
+            let Some((left, right)) = self.settle_pending(comparison) else {
                 continue;
-            }
+            };
             if left == right {
                 continue;
             }
+            let mut vars = FxHashSet::default();
+            self.table.collect_unbound_vars(self.db, left, &mut vars);
+            self.table.collect_unbound_vars(self.db, right, &mut vars);
             let level = self.table.level;
             let mut outer = 0;
             let mut named = 0;
@@ -14278,7 +14336,12 @@ impl<'db, 'a> Checker<'db, 'a> {
                     outer += 1;
                 }
             }
-            let pair = ComparedPair { left, right };
+            let pair = ComparedPair {
+                left,
+                right,
+                left_literal: self.literal_default(parameters, left),
+                right_literal: self.literal_default(parameters, right),
+            };
             if outer > 0 {
                 self.table
                     .comparisons
@@ -14294,21 +14357,92 @@ impl<'db, 'a> Checker<'db, 'a> {
         kept
     }
 
-    /// Checks the comparisons left pending at the item's end whose two sides it settled.
-    fn settle_item_comparisons(&mut self) {
-        for comparison in mem::take(&mut self.table.comparisons) {
-            let left = self.table.resolve(self.db, comparison.pair.left);
-            let right = self.table.resolve(self.db, comparison.pair.right);
-            if !self.table.contains_unbound_var(self.db, left)
-                && !self.table.contains_unbound_var(self.db, right)
-            {
-                self.settle_comparison(comparison, left, right);
-            }
+    /// The literal constraint of the default of the parameter typed by `side`, while that
+    /// default is a literal nothing has decided yet (`function(a, lo = 0) a < lo`).
+    fn literal_default(&self, parameters: &[Parameter<'db>], side: Ty<'db>) -> Option<Constraint> {
+        let parameter = parameters
+            .iter()
+            .find(|parameter| self.table.resolve(self.db, parameter.ty) == side)?;
+        eprintln!("DBG default {:?} {:?}", parameter.default.map(|d| self.table.resolve(self.db, d).kind(self.db)), parameter.default.map(|d| d.kind(self.db)));
+        let TyKind::Var(var) = self.table.resolve(self.db, parameter.default?).kind(self.db) else {
+            return None;
+        };
+        match *self.table.entry(*var) {
+            Entry::Unbound {
+                constraint:
+                    constraint @ (Constraint::WholeLiteral { .. }
+                    | Constraint::FracLiteral
+                    | Constraint::StrLiteral),
+                ..
+            } => Some(constraint),
+            _ => None,
         }
     }
 
+    /// Checks the comparisons left pending at the item's end that it settled, whole or half.
+    fn settle_item_comparisons(&mut self) {
+        for comparison in mem::take(&mut self.table.comparisons) {
+            self.settle_pending(comparison);
+        }
+    }
+
+    /// Settles a pending comparison once a side is known, and gives back the resolved pair
+    /// while both stay open. A side settled on a ry value makes the other side that type; a
+    /// side settled on an R value keeps every ry value from the other side, which then admits
+    /// only what R compares.
+    fn settle_pending(
+        &mut self,
+        comparison: PendingComparison<'db>,
+    ) -> Option<(Ty<'db>, Ty<'db>)> {
+        let left = self.table.resolve(self.db, comparison.pair.left);
+        let right = self.table.resolve(self.db, comparison.pair.right);
+        let (settled, open) = match (
+            self.table.contains_unbound_var(self.db, left),
+            self.table.contains_unbound_var(self.db, right),
+        ) {
+            (false, false) => {
+                self.settle_comparison(comparison, left, right);
+                return None;
+            }
+            (true, true) => return Some((left, right)),
+            (true, false) => (right, left),
+            (false, true) => (left, right),
+        };
+        if matches!(settled.kind(self.db), TyKind::Any | TyKind::Unknown) {
+            return None;
+        }
+        if holds_ry_value(self.db, settled) {
+            let snapshot = self.table.snapshot();
+            if self.table.unify(self.db, open, settled).is_err() {
+                self.table.rollback(snapshot);
+                self.settle_comparison(comparison, left, right);
+            }
+            return None;
+        }
+        let open = self.table.shallow_resolve(self.db, open);
+        let constraint = match open.kind(self.db) {
+            TyKind::Var(var) => match *self.table.entry(self.table.find(*var)) {
+                Entry::Unbound { constraint, .. } => constraint,
+                _ => Constraint::Unconstrained,
+            },
+            TyKind::Rigid(name) => self
+                .table
+                .rigid_constraints
+                .get(name)
+                .copied()
+                .unwrap_or(Constraint::Unconstrained),
+            _ => return None,
+        };
+        let r_side = match constraint.r_side() {
+            Constraint::Unconstrained | Constraint::Eq => Constraint::Equatable,
+            r_side => r_side,
+        };
+        self.constrain_operand(comparison.range, open, r_side);
+        None
+    }
+
     /// A comparison whose sides are settled: a ry value on one side needs its own type on
-    /// the other.
+    /// the other, and both sides holding one need types that meet.
     fn settle_comparison(
         &mut self,
         comparison: PendingComparison<'db>,
@@ -14317,9 +14451,14 @@ impl<'db, 'a> Checker<'db, 'a> {
     ) {
         let left_ry = holds_ry_value(self.db, left);
         let right_ry = holds_ry_value(self.db, right);
+        let unchecked = |ty: Ty<'db>| matches!(ty.kind(self.db), TyKind::Any | TyKind::Unknown);
         if (!left_ry && !right_ry)
-            || self.table.compatible(self.db, left, right)
-            || self.table.compatible(self.db, right, left)
+            || unchecked(left)
+            || unchecked(right)
+            || (left_ry
+                && right_ry
+                && (self.table.compatible(self.db, left, right)
+                    || self.table.compatible(self.db, right, left)))
         {
             return;
         }
@@ -14333,7 +14472,8 @@ impl<'db, 'a> Checker<'db, 'a> {
                     .find(|&side| !holds_ry_value(self.db, side)),
             },
             None => {
-                let (expected, found) = if left_ry {
+                // Operand order, unless one side alone is ry's: then it is the target.
+                let (expected, found) = if left_ry && !right_ry {
                     (left, right)
                 } else {
                     (right, left)
@@ -20815,6 +20955,11 @@ impl<'db, 'a> Checker<'db, 'a> {
         arguments: &[CallArgument<'db>],
     ) -> Vec<TypeError<'db>> {
         let mut findings = Vec::new();
+        if function.compared.is_empty() {
+            return findings;
+        }
+        let arena = self.arena;
+        let targets = argument_targets(self.db, arena, function, argument_shapes(arena, arguments));
         for pair in function.compared {
             let left = self.table.resolve(self.db, pair.left);
             let right = self.table.resolve(self.db, pair.right);
@@ -20824,8 +20969,13 @@ impl<'db, 'a> Checker<'db, 'a> {
                 if self.table.contains_unbound_var(self.db, left)
                     || self.table.contains_unbound_var(self.db, right)
                 {
+                    // A literal argument adapts to whatever the other side settles on, so the
+                    // pending side is the literal, not its R default.
+                    let left = self.literal_side(function, arguments, &targets, pair.left, left);
+                    let right =
+                        self.literal_side(function, arguments, &targets, pair.right, right);
                     self.table.comparisons.push(PendingComparison {
-                        pair: ComparedPair { left, right },
+                        pair: ComparedPair::new(left, right),
                         range: callee_range,
                         operator: None,
                     });
@@ -20837,88 +20987,112 @@ impl<'db, 'a> Checker<'db, 'a> {
             } else {
                 (left, right, pair.right)
             };
-            // The argument that passed the other side is checked against the ry value, as a
-            // direct parameter of that type would check it, so a number literal adapts.
-            if let Some(argument) = self.compared_argument(function, arguments, found_side, found)
-                && let Some(ty) = argument.ty
-            {
-                if let Err(mut error) = self.check_argument(
-                    expected,
-                    ty,
-                    argument.range,
-                    argument.whole_double,
-                    argument.value,
-                ) {
-                    if let TypeErrorKind::Mismatch { expected, found } = error.kind {
-                        error.kind = TypeErrorKind::ComparedOperands {
+            match compared_source(function, arguments, &targets, found_side) {
+                // The argument that passed the other side is checked against the ry value, as
+                // a direct parameter of that type would check it, so a number literal adapts.
+                ComparedSource::Passed(passed) => {
+                    for argument in passed {
+                        let Some(ty) = argument.ty else {
+                            continue;
+                        };
+                        if let Err(mut error) = self.check_argument(
+                            expected,
+                            ty,
+                            argument.range,
+                            argument.whole_double,
+                            argument.value,
+                        ) {
+                            if let TypeErrorKind::Mismatch { expected, found } = error.kind {
+                                error.kind = TypeErrorKind::ComparedOperands {
+                                    expected,
+                                    found,
+                                    argument: true,
+                                };
+                            }
+                            findings.push(error);
+                        }
+                    }
+                }
+                // The parameter's default is what the body compares, and a literal default
+                // adapts as a passed literal does.
+                ComparedSource::Default(default) => {
+                    let literal = if found_side == pair.left {
+                        pair.left_literal
+                    } else {
+                        pair.right_literal
+                    };
+                    let default = match literal {
+                        Some(constraint) => self.fresh_literal(constraint, false),
+                        None => default,
+                    };
+                    let snapshot = self.table.snapshot();
+                    if self.table.unify(self.db, expected, default).is_err() {
+                        self.table.rollback(snapshot);
+                        findings.push(TypeError {
+                            range: callee_range,
+                            kind: TypeErrorKind::ComparedOperands {
+                                expected,
+                                found: self.table.resolve(self.db, default),
+                                argument: false,
+                            },
+                        });
+                    }
+                }
+                // No argument passed that side: an open side takes the ry value's type (a
+                // curried `function(a) function(b) a < b` given an `I64`).
+                ComparedSource::Unpassed => {
+                    let snapshot = self.table.snapshot();
+                    if self.table.contains_unbound_var(self.db, found)
+                        && self.table.unify(self.db, expected, found).is_ok()
+                        || self.table.compatible(self.db, found, expected)
+                    {
+                        continue;
+                    }
+                    self.table.rollback(snapshot);
+                    findings.push(TypeError {
+                        range: callee_range,
+                        kind: TypeErrorKind::ComparedOperands {
                             expected,
                             found,
-                            argument: true,
-                        };
-                    }
-                    findings.push(error);
+                            argument: false,
+                        },
+                    });
                 }
-                continue;
             }
-            // No argument passed that side. An open side takes the ry value's type (a curried
-            // `function(a) function(b) a < b` given an `I64`), and a settled one came from a
-            // parameter's default, whose literal adapts as a passed literal would.
-            if self.table.contains_unbound_var(self.db, found) {
-                let snapshot = self.table.snapshot();
-                if self.table.unify(self.db, expected, found).is_ok() {
-                    continue;
-                }
-                self.table.rollback(snapshot);
-            } else if self.table.compatible(self.db, found, expected)
-                || literal_family(self.db, expected, found)
-            {
-                continue;
-            }
-            findings.push(TypeError {
-                range: callee_range,
-                kind: TypeErrorKind::ComparedOperands {
-                    expected,
-                    found,
-                    argument: false,
-                },
-            });
         }
         findings
     }
 
-    /// The argument the parameter typed `side` took, or, where no parameter is typed by the
-    /// side itself, the last argument whose type is `found`.
-    fn compared_argument<'arguments>(
+    /// The side a call leaves pending: a fresh literal variable where the only argument
+    /// that passed it is a number or string literal, else the side as it resolves.
+    fn literal_side(
         &mut self,
         function: &FunctionType<'db>,
-        arguments: &'arguments [CallArgument<'db>],
+        arguments: &[CallArgument<'db>],
+        targets: &[Option<ArgumentTarget>],
         side: Ty<'db>,
-        found: Ty<'db>,
-    ) -> Option<&'arguments CallArgument<'db>> {
-        let arena = self.arena;
-        let targets = argument_targets(self.db, arena, function, argument_shapes(arena, arguments));
-        let by_parameter = targets
-            .iter()
-            .zip(arguments)
-            .find_map(|(target, argument)| {
-                let parameter = match target {
-                    Some(ArgumentTarget::Positional(index)) => {
-                        function.positional.get(*index).copied()
-                    }
-                    Some(ArgumentTarget::Named(index)) => {
-                        function.named.get(*index).map(|parameter| parameter.ty)
-                    }
-                    _ => None,
-                };
-                (parameter == Some(side)).then_some(argument)
-            });
-        by_parameter.or_else(|| {
-            arguments.iter().rev().find(|argument| {
-                argument
-                    .ty
-                    .is_some_and(|ty| self.table.resolve(self.db, ty) == found)
-            })
-        })
+        resolved: Ty<'db>,
+    ) -> Ty<'db> {
+        if self.table.contains_unbound_var(self.db, resolved) {
+            return resolved;
+        }
+        let ComparedSource::Passed(passed) =
+            compared_source(function, arguments, targets, side)
+        else {
+            return resolved;
+        };
+        let [argument] = passed.as_slice() else {
+            return resolved;
+        };
+        let Some(value) = argument.value else {
+            return resolved;
+        };
+        let constraint = match self.literal_leaves(value, false) {
+            Some((constraint, _)) => constraint,
+            None if string_operand(self.module, value) => Constraint::StrLiteral,
+            None => return resolved,
+        };
+        self.fresh_literal(constraint, false)
     }
 
     fn match_argument_targets(

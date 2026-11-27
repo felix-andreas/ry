@@ -35,7 +35,7 @@ use {
         types::{
             Atomic, Binder, Bound, Constraint, FamilyResult, FrameKind, FunctionType, InferenceVar,
             Name, NativeField, NativeScalar, QueryName, RecordField, Ty, TyKind, TypeScheme,
-            array_element, contains_inference_var, for_each_child_type, is_ry_value_type,
+            array_element, contains_inference_var, for_each_child_type,
             map_child_types, null, substitute_rigid, union_of,
         },
     },
@@ -4413,11 +4413,9 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                     renderer.render(db, *expected)
                 )
             };
-            match r_conversion(db, *found) {
-                Some(conversion) if is_ry_value_type(db, *expected) => {
-                    format!("{head}. Convert the R value with `{conversion}`")
-                }
-                _ => head,
+            match r_conversion(db, *found, *expected) {
+                Some(conversion) => format!("{head}. Convert the R value with `{conversion}`"),
+                None => head,
             }
         }
         TypeErrorKind::NumberOperands {
@@ -4446,10 +4444,11 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             };
             let equality = matches!(*operator, "==" | "!=");
             if let Some(r_side) = r_side {
+                let ry_side = if r_side == left { *right } else { *left };
                 let conversion = if native(*left).is_none() && native(*right).is_none() {
                     None
                 } else {
-                    r_conversion(db, *r_side)
+                    r_conversion(db, *r_side, ry_side)
                 };
                 return match conversion {
                     Some(conversion) => format!(
@@ -4965,12 +4964,25 @@ fn atomic_name(atomic: Atomic) -> &'static str {
 }
 
 /// The conversion that turns an R value into the ry value it meets.
-fn r_conversion(db: &dyn Db, r_side: Ty<'_>) -> Option<&'static str> {
+/// The conversion that turns the R value `r_side` into the ry type `ry_side`, when one does.
+fn r_conversion(db: &dyn Db, r_side: Ty<'_>, ry_side: Ty<'_>) -> Option<&'static str> {
+    let native = match ry_side.kind(db) {
+        TyKind::Native(native) => Some(*native),
+        _ => None,
+    };
     match r_side.kind(db) {
-        TyKind::Scalar(Atomic::Character) => Some("Str.from_r()"),
-        TyKind::Scalar(Atomic::Logical) => Some("Bool.from_r()"),
-        TyKind::Scalar(Atomic::Integer | Atomic::Double) => Some("Num.from_r()"),
-        TyKind::Vector(_) => Some("List.from_r()"),
+        TyKind::Scalar(Atomic::Character) if native == Some(NativeScalar::Str) => {
+            Some("Str.from_r()")
+        }
+        TyKind::Scalar(Atomic::Logical) if native == Some(NativeScalar::Bool) => {
+            Some("Bool.from_r()")
+        }
+        TyKind::Scalar(Atomic::Integer | Atomic::Double)
+            if native.is_some_and(NativeScalar::is_number) =>
+        {
+            Some("Num.from_r()")
+        }
+        TyKind::Vector(_) if array_element(db, ry_side).is_some() => Some("List.from_r()"),
         _ => None,
     }
 }
