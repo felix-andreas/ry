@@ -19,7 +19,7 @@ expect stderr "parameter `shape` has no type"
 run ry check --annotate
 expect exit 1
 expect stdout "added 2 inferred annotations"
-expect file R/area.R "area <- function<T: numeric>(width: T, height: T = 1) -> T width * height"
+expect file R/area.R "area <- function<T: num>(width: T, height: T = 1) -> T width * height"
 expect file R/area.R "unit: I64 <- 1L"
 expect stderr "parameter `shape` has no type"
 
@@ -39,7 +39,7 @@ file R/area.R
 run ry check --annotate
 expect exit 0
 expect stdout "added 1 inferred annotation"
-expect file R/area.R "#: <T: numeric> fn(width: T, [height]: T) -> T"
+expect file R/area.R "#: <T: num> fn(width: T, [height]: T) -> T"
 
 # A function passed as an argument gets the signature the call fixes for it, in a `#:` line above
 # the argument when it starts its own line.
