@@ -3759,9 +3759,7 @@ impl<'c, 's> LiveFrame<'c, 's> {
     #[inline]
     pub fn slot(self, slot: usize) -> Gc<'c> {
         let value = crate::interp().bytecode.registers[self.fields().slots as usize + 1 + slot];
-        // SAFETY: the collector traces the register file, and the borrow of the context lets
-        // nothing collect before the value's last use; a store under `&Cx` frees nothing.
-        unsafe { Gc::adopt(value) }
+        register_value(self.context, value)
     }
 
     /// What the slot of a slot frame named `symbol` holds ([`LiveFrame::slot`]), or `None` when
@@ -3990,6 +3988,49 @@ pub fn frame_if_live<'c, 's>(context: &'c Cx<'s>, index: usize) -> Option<LiveFr
     (index < crate::interp().frames.len()).then_some(LiveFrame { index, context })
 }
 
+/// The slot and the missing flag of each formal `symbols` names in the frame at `index`, read in
+/// one walk of the formals, so `symbols` must be listed in the order the closure declares them.
+/// `None` when the frame is no slot frame that keeps every variable in its slot, or a symbol is
+/// not a formal at its place in that order. Prologues read their arguments through it on every
+/// call, so it reads the frame once.
+#[inline(always)]
+pub fn formal_slots<'c, const N: usize>(
+    context: &'c Cx<'_>,
+    index: usize,
+    symbols: [Gc<'_, Symbol>; N],
+) -> Option<[(Gc<'c>, bool); N]> {
+    let state = crate::interp();
+    let frame = state.frames.get(index)?;
+    if frame.slots == crate::NO_SLOTS || frame.env.raw() != values::nil() {
+        return None;
+    }
+    let slots = state.bytecode.registers.get(frame.slots as usize + 1..)?;
+    let mut cell = frame.function.get(context).downcast::<Closure>()?.formals();
+    let mut next = 0;
+    let mut found = [(null().read(context), false); N];
+    for (entry, symbol) in found.iter_mut().zip(symbols) {
+        let position = loop {
+            let pair = cell.downcast::<Pairlist>()?;
+            cell = pair.rest();
+            next += 1;
+            if pair.tag().is(symbol) {
+                break next - 1;
+            }
+        };
+        let missing = position < 64 && frame.missing & (1 << position) != 0;
+        *entry = (register_value(context, *slots.get(position)?), missing);
+    }
+    Some(found)
+}
+
+/// `value`, read from a register, as a handle.
+#[inline(always)]
+fn register_value<'c>(_context: &'c Cx<'_>, value: Sexp) -> Gc<'c> {
+    // SAFETY: the collector traces the register file, and the borrow of the context lets
+    // nothing collect before the value's last use; a store under `&Cx` frees nothing.
+    unsafe { Gc::adopt(value) }
+}
+
 /// The argument reference at position `index` of the interpreter's pool and its target, a
 /// three-element integer vector (`eval::argument_reference`), once the pool has made one there.
 #[inline]
@@ -4078,21 +4119,30 @@ fn place_reference(
     }
 }
 
-/// Writes the frame position `owner`, the slot and the frame's header register into the target
-/// of the pool's reference at `index`.
+/// The pool's reference at `index`, its target pointed at slot `slot` of the frame at `owner`:
+/// the frame's position, the slot and the frame's header register. One read of the pool serves
+/// both, since every call into slots takes its references here.
 #[inline]
-pub fn set_reference_target(
-    _context: &mut Cx<'_>,
+pub fn aim_reference<'c>(
+    _context: &'c mut Cx<'_>,
     index: usize,
     owner: usize,
     slot: u32,
-    header: usize,
-) {
-    let target = crate::interp().reference_targets[index];
+) -> Gc<'c, Promise> {
+    let state = crate::interp();
+    let header = state.frames[owner].slots;
+    let (Some(&reference), Some(&target)) = (
+        state.references.get(index),
+        state.reference_targets.get(index),
+    ) else {
+        panic!("argument reference {index} is not in the pool");
+    };
     // SAFETY: the pool makes each target as a three-element integer vector of its own, and
-    // `&mut Cx` ends every slice read through the context.
+    // `&mut Cx` ends every slice read through the context. The pool holds the reference, and
+    // the answer borrows the context.
     unsafe {
         values::ints_mut(target).copy_from_slice(&[owner as i32, slot as i32, header as i32]);
+        Gc::adopt(reference)
     }
 }
 
@@ -4643,11 +4693,18 @@ pub fn compiled_promise<'s>(
     }
 }
 
-/// The tag and the expression of each argument cell of `call`, `None` when it is no call. C
-/// code may link the cells with `LCONS`, which GNU R evaluates the same.
-pub fn call_cells<'s>(context: &Cx<'s>, call: Local<'s>) -> Option<SmallVec<[Tagged<'s>; 8]>> {
-    let head = call.read(context).downcast::<Language>()?;
-    let mut cells = SmallVec::new();
+/// Appends the tag and the expression of each argument cell of `call` to `cells`, `false` when
+/// it is no call. C code may link the cells with `LCONS`, which GNU R evaluates the same. The
+/// caller owns the buffer, so a list of many cells is never moved on return.
+#[inline]
+pub fn call_cells<'s>(
+    context: &Cx<'s>,
+    call: Local<'s>,
+    cells: &mut SmallVec<[Tagged<'s>; 8]>,
+) -> bool {
+    let Some(head) = call.read(context).downcast::<Language>() else {
+        return false;
+    };
     let mut cell = head.rest();
     while let Some((expression, tag, rest)) = cell_fields(cell) {
         // R code may rewrite a call it holds alone in place, so each part is rooted itself.
@@ -4657,7 +4714,7 @@ pub fn call_cells<'s>(context: &Cx<'s>, call: Local<'s>) -> Option<SmallVec<[Tag
         });
         cell = rest;
     }
-    Some(cells)
+    true
 }
 
 /// The tag and the unforced value of each cell of `...` in `environment`, none when it holds

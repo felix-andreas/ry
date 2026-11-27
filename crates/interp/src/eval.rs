@@ -1659,9 +1659,7 @@ pub fn slot_reference<'a>(
     symbol: Local<'_>,
 ) -> R<Gc<'a, Promise>> {
     let index = take_reference(context, symbol)?;
-    let header = handles::live_frame(context, owner).header();
-    handles::set_reference_target(context, index, owner, slot, header);
-    Ok(reference_at(context, index))
+    Ok(handles::aim_reference(context, index, owner, slot))
 }
 
 /// An argument reference to `expression`, a variable, uncompiled code or a constant, of a
@@ -1709,8 +1707,7 @@ pub unsafe fn code_reference(owner: usize, code: Sexp) -> R<Sexp> {
         // The code holds its constant pool, and the caller holds the code.
         let source = handles::held(context, source_of(code.read(context)).raw());
         let index = take_reference(context, source)?;
-        let header = handles::live_frame(context, owner).header();
-        handles::set_reference_target(context, index, owner, NO_REFERENCE_SLOT, header);
+        handles::aim_reference(context, index, owner, NO_REFERENCE_SLOT);
         let reference = reference_at(context, index);
         context.set_promise_environment(reference, code);
         Ok(reference.raw())
@@ -3968,9 +3965,10 @@ pub fn call_plan<'s>(
     let Some((shape, dots_index)) = plannable(function.read(context)) else {
         return Ok(None);
     };
-    let Some(args) = handles::call_cells(context, call) else {
+    let mut args = SmallVec::new();
+    if !handles::call_cells(context, call, &mut args) {
         return Ok(None);
-    };
+    }
     let dots = handles::symbol(|symbols| symbols.dots);
     let mut forwards_dots = false;
     for argument in &args {
@@ -4512,10 +4510,9 @@ fn raw_frame_dots(context: &Cx<'_>, index: usize) -> Option<Sexp> {
 /// [`slot_dots`] for code on the handle types.
 #[inline(always)]
 pub fn frame_dots<'c>(context: &'c Cx<'_>, index: usize) -> Option<Gc<'c>> {
-    let frame = handles::frame_if_live(context, index).filter(|frame| frame.in_slots())?;
     let dots = handles::symbol(|symbols| symbols.dots);
-    let position = frame.formals().position(|formal| formal.is(dots))?;
-    Some(frame.slot(position))
+    let [(value, _)] = handles::formal_slots(context, index, [dots])?;
+    Some(value)
 }
 
 /// The register that holds the variable `symbol` of the frame at `index`, when it is a slot
@@ -4554,31 +4551,14 @@ pub unsafe fn slot_formals<const N: usize>(
     handles::reading_with((index, symbols), raw_formal_slots)
 }
 
-/// [`formal_slots`] as raw pointers, for the raw entries.
+/// [`handles::formal_slots`] as raw pointers, for the raw entries.
 #[inline(always)]
 fn raw_formal_slots<const N: usize>(
     context: &Cx<'_>,
     (index, symbols): (usize, [Gc<'_, Symbol>; N]),
 ) -> Option<[(Sexp, bool); N]> {
-    let found = formal_slots(context, index, symbols)?;
+    let found = handles::formal_slots(context, index, symbols)?;
     Some(found.map(|(value, missing)| (value.raw(), missing)))
-}
-
-/// [`slot_formals`] for code on the handle types.
-#[inline(always)]
-pub fn formal_slots<'c, const N: usize>(
-    context: &'c Cx<'_>,
-    index: usize,
-    symbols: [Gc<'_, Symbol>; N],
-) -> Option<[(Gc<'c>, bool); N]> {
-    let frame = handles::frame_if_live(context, index).filter(|frame| frame.in_slots())?;
-    let mut formals = frame.formals().enumerate();
-    let mut found = [(handles::null().read(context), false); N];
-    for (slot, symbol) in found.iter_mut().zip(symbols) {
-        let (position, _) = formals.find(|(_, formal)| formal.is(symbol))?;
-        *slot = (frame.slot(position), frame.is_missing_formal(position));
-    }
-    Some(found)
 }
 
 /// The environment of the slot frame whose slots the running byte code reads, which a `NULL`
