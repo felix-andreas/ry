@@ -1807,14 +1807,6 @@ fn same_double(a: f64, b: f64) -> bool {
     }
 }
 
-fn same_double_key(a: f64, b: f64) -> bool {
-    if a.is_nan() || b.is_nan() {
-        same_double(a, b)
-    } else {
-        a == b
-    }
-}
-
 fn iterations(default: usize) -> usize {
     std::env::var("FUZZ_ITERS")
         .ok()
