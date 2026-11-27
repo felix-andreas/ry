@@ -618,7 +618,11 @@ pub fn typed_closure(function: Gc<'_, Closure>) -> bool {
     } else {
         let body = function.body();
         body.downcast::<Bytecode>()
-            .and_then(|code| handles::constant(code, crate::bytecode::SOURCE))
+            .and_then(|code| {
+                handles::constants(code)?
+                    .get(crate::bytecode::SOURCE)
+                    .copied()
+            })
             .unwrap_or(body)
     };
     key.has_flag(gp::TYPED_DEFINITION)

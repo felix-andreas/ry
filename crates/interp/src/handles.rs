@@ -1646,7 +1646,7 @@ impl<'s> Args<'_, 's> {
 
     /// [`Args::matched`] that keeps the empty argument a call passed, for the builtins GNU R
     /// lets read one as a value.
-    #[inline]
+    #[inline(always)]
     pub fn matched_as_passed<const N: usize>(
         &self,
         _context: &mut Cx<'s>,
@@ -4280,6 +4280,18 @@ impl<'c> Window<'c> {
         self.header
     }
 
+    /// The value in `register`, below the window, which a frame under the new one holds: a
+    /// value, a promise, `R_MissingArg` or the unbound marker. `None` at the window or above.
+    #[inline]
+    pub fn under(&self, register: usize) -> Option<Gc<'c>> {
+        if register >= self.header {
+            return None;
+        }
+        // SAFETY: the register is in the file below the window, which is traced and which only
+        // running code writes, and no code runs while the window borrows the context.
+        Some(unsafe { Gc::adopt(*bytecode::register_address(register)) })
+    }
+
     /// Stores `value` in the next slot, which counts a reference to it.
     #[inline]
     pub fn push(&mut self, value: impl Pointer<Value>) {
@@ -4327,19 +4339,6 @@ impl Drop for Window<'_> {
         }
         bytecode::release_registers(self.header);
     }
-}
-
-/// The value in slot `index` of the slot frame whose header register is `header`: a value, a
-/// promise, `R_MissingArg` or the unbound marker.
-#[inline]
-pub fn slot<'a>(_context: &'a Cx<'_>, header: usize, index: usize) -> Option<Gc<'a>> {
-    let register = header + 1 + index;
-    if register >= bytecode::register_top() {
-        return None;
-    }
-    // SAFETY: the register is in the file, which is traced and which only running code writes,
-    // and no code runs while the context is borrowed.
-    Some(unsafe { Gc::adopt(*bytecode::register_address(register)) })
 }
 
 /// Stores `value` as entry `index` of the constant pool of `function`'s compiled body, one of the
@@ -4399,14 +4398,13 @@ pub fn build_slot_defaults(context: &mut Cx<'_>, function: Local<'_, Closure>) -
 #[inline]
 pub fn slot_table<'a>(_context: &Cx<'_>, function: Gc<'a, Closure>) -> Option<Gc<'a, List>> {
     let code = function.body().downcast::<Bytecode>()?;
-    constant(code, bytecode::SLOTS)?.standard::<List>()
+    constants(code)?.get(bytecode::SLOTS)?.standard::<List>()
 }
 
-/// Entry `index` of the constant pool of `code`, or `None` when the pool has none.
+/// The constant pool of `code`, or `None` when it is not a list.
 #[inline]
-pub fn constant(code: Gc<'_, Bytecode>, index: usize) -> Option<Gc<'_>> {
-    let constants = code.constants().standard::<List>()?;
-    (index < constants.len()).then(|| constants.get(index))
+pub fn constants(code: Gc<'_, Bytecode>) -> Option<&[Gc<'_>]> {
+    Some(code.constants().standard::<List>()?.elements())
 }
 
 /// `setter_call` as the call a replacement closure is applied by: `*tmp*` in place of its

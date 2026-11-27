@@ -290,7 +290,9 @@ unsafe impl Reroot for crate::HeapError {
 }
 
 /// A pointer read from the heap and not rooted. It borrows the context it was read through, so
-/// it ends at the next safepoint.
+/// it ends at the next safepoint. It is laid out as the pointer, so a vector's element storage
+/// reads as a slice of them ([`Gc::elements`]).
+#[repr(transparent)]
 pub struct Gc<'a, T: Kind = Value> {
     raw: Sexp,
     borrow: PhantomData<&'a ()>,
@@ -402,6 +404,17 @@ impl<'a, T: Atomic> Gc<'a, T> {
 }
 
 impl<'a, T: Elements> Gc<'a, T> {
+    /// The elements, which live as long as the borrow that keeps the vector from collection.
+    #[inline]
+    pub fn elements(self) -> &'a [Gc<'a, T::Element>] {
+        // SAFETY: `Gc` is laid out as a `Sexp`, and a standard vector of pointers stores
+        // `length` live objects of the element kind, which no store replaces while the context
+        // is borrowed shared.
+        unsafe {
+            std::slice::from_raw_parts(self.raw.data() as *const Gc<'a, T::Element>, self.len())
+        }
+    }
+
     #[inline]
     pub fn get(self, index: usize) -> Gc<'a, T::Element> {
         assert!(index < self.len(), "element index out of bounds");
