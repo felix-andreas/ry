@@ -14,9 +14,10 @@ use {
     crate::{
         Db, DocumentKind, Item, RootDatabase, SiteRole, SourceFile, TypingMode, annotations,
         diagnostics::{file_global_variable_declarations, super_globals},
-        file_binders, file_syntax_sites, file_type_definitions, file_typing_directives,
+        file_binders, file_definitions, file_syntax_sites, file_type_definitions,
+        file_typing_directives,
         hir::Symbol,
-        item_naming, item_tree, types,
+        item_naming, item_tree, sourced_definition, sourced_files, types,
     },
     rustc_hash::{FxHashMap, FxHashSet},
     salsa::Setter,
@@ -114,10 +115,18 @@ pub fn command_files(db: &dyn Db) -> Vec<SourceFile> {
 /// bodies' reads of a name later commands rebind depend on that name's [`SessionBinder`],
 /// which this creates for every name they read.
 pub fn prepare(db: &dyn Db, file: SourceFile) -> Contributions {
+    // `source()` evaluates a file into the global environment, so what the files a command
+    // sources define is bound for the commands after it.
     let mut binds: Vec<Symbol> = file_binders(db, file)
         .iter()
         .map(|&(name, _, _)| name)
+        .chain(
+            sourced_files(db, file)
+                .iter()
+                .flat_map(|&sourced| file_definitions(db, sourced).iter().map(|&(name, _)| name)),
+        )
         .collect();
+    binds.sort_unstable();
     binds.dedup();
     let mut deferred_reads = Vec::new();
     for &item in item_tree(db, file) {
@@ -420,7 +429,9 @@ pub(crate) fn holds_ry_values(db: &dyn Db, file: SourceFile) -> bool {
     })
 }
 
-/// The last binder of `name` in `file`, a command that ran whole before any later read.
+/// The last binder of `name` in `file`, a command that ran whole before any later read. The
+/// files it sourced are the ones it read when it ran, because a host that runs code records them
+/// in the command file ([`SourceFile::sources`]).
 fn last_binder<'db>(db: &'db dyn Db, file: SourceFile, name: Symbol) -> Option<Item<'db>> {
     let binders = file_binders(db, file);
     // Sorted by name and then position, so the name's last entry is its last binder.
@@ -429,6 +440,7 @@ fn last_binder<'db>(db: &'db dyn Db, file: SourceFile, name: Symbol) -> Option<I
         .last()
         .filter(|&&(binder, _, _)| binder == name)
         .map(|&(_, _, item)| item)
+        .or_else(|| sourced_definition(db, file, name))
 }
 
 /// A session never nears `u32::MAX` commands; the index saturates rather than panics.

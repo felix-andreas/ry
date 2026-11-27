@@ -14,15 +14,17 @@ use {
     },
     loader::SourceEncoding,
     repl::{Filtered, InputFilter},
-    rustc_hash::FxHashMap,
+    rustc_hash::{FxHashMap, FxHashSet},
+    salsa::Setter,
     semantics::{
-        Elaboration, ProjectFiles, RootDatabase, SourceFile,
+        DocumentKind, Elaboration, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{Diagnostic, RelatedLocation, Severity},
-        is_ry_syntax, session,
+        file_source_calls, has_ry_syntax, is_absolute_path, is_ry_syntax, session,
         stubs::{install_shipped_stubs, is_native_function},
     },
     std::{
         borrow::Cow,
+        env::current_dir,
         fs, io,
         path::{Path, PathBuf},
         sync::{Arc, LazyLock, Mutex, PoisonError},
@@ -32,7 +34,7 @@ use {
         NodeOrToken, SyntaxKind, SyntaxNode, erase_inline_annotations, erased_lines_end,
         input_is_unfinished, is_inline_annotation,
     },
-    xxhash_rust::xxh3::xxh3_64,
+    xxhash_rust::xxh3::{xxh3_64, xxh3_64_with_seed},
 };
 
 /// Analysis state for one run or one console session. Each accepted command is a file of its
@@ -58,6 +60,8 @@ pub struct Preflight {
     /// Where the last accepted input went, so that [`Preflight::retract`] can take back the part
     /// of it that never ran.
     last: Option<Last>,
+    /// The files the session's `source()` calls have read.
+    sourced: SourcedFiles,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -93,26 +97,16 @@ impl Preflight {
     }
 
     pub fn new(config: Config, path: PathBuf) -> Preflight {
-        let db = RootDatabase::default();
-        install_shipped_stubs(&db);
-        semantics::AnalysisSettings::new(
-            &db,
-            config.check.inline_annotations,
-            config.check.strict,
-            config.check.prelude,
-        );
-        // The commands are not project files: a project-wide fold over them would make every
-        // command cost time in proportion to the session.
-        ProjectFiles::new(&db, Vec::new());
         Preflight {
             analyzed: config.check.strict,
-            db,
+            db: analysis_database(&config),
             config,
             path: Arc::from(path),
             command_paths: Vec::new(),
             plain: String::new(),
             plain_path: None,
             last: None,
+            sourced: SourcedFiles::default(),
         }
     }
 
@@ -143,7 +137,7 @@ impl Preflight {
     pub fn check_elaborations(&mut self, input: &str) -> Option<Vec<Elaboration>> {
         self.last = None;
         if !self.analyzed {
-            if !has_ry_syntax(&syntax::parse(input).syntax_node(), input) {
+            if !has_ry_syntax(&syntax::parse(input).syntax_node()) {
                 self.last = Some(Last::Plain {
                     start: self.plain.len(),
                 });
@@ -156,6 +150,7 @@ impl Preflight {
         }
         self.flush_plain();
         let file = session::command_file(&self.db, format!("{input}\n"));
+        follow_sources(&mut self.db, &mut self.sourced, file);
         let db = self.db.clone();
         let config = &self.config;
         let (contributions, (verdict, reported, elaborations)) = on_analysis_stack(move || {
@@ -282,6 +277,7 @@ impl Preflight {
 
     fn push_unchecked(&mut self, text: String, path: Arc<Path>) {
         let file = session::command_file(&self.db, text);
+        follow_sources(&mut self.db, &mut self.sourced, file);
         let db = self.db.clone();
         let contributions = on_analysis_stack(move || session::prepare(&db, file));
         // The readers a command that already ran breaks are not this command's to refuse.
@@ -300,6 +296,22 @@ impl Preflight {
             .get(index as usize)
             .map(|(path, _)| &**path)
     }
+}
+
+/// A database with the shipped stubs and `config`'s analysis settings, and no project files:
+/// the files it checks are not a project, and a project-wide fold over them would make each check
+/// cost time in proportion to the files before it.
+fn analysis_database(config: &Config) -> RootDatabase {
+    let db = RootDatabase::default();
+    install_shipped_stubs(&db);
+    semantics::AnalysisSettings::new(
+        &db,
+        config.check.inline_annotations,
+        config.check.strict,
+        config.check.prelude,
+    );
+    ProjectFiles::new(&db, Vec::new());
+    db
 }
 
 /// Runs `work` on a thread with the stack analysis needs: inference recurses per nested
@@ -438,7 +450,7 @@ pub fn elaborate_package(
         // A file that is not text in the package's encoding is the analysis's to report.
         typed = encoding.decode(bytes).is_none_or(|source| {
             source.contains("typing: strict")
-                || has_ry_syntax(&syntax::parse(&source).syntax_node(), &source)
+                || has_ry_syntax(&syntax::parse(&source).syntax_node())
         });
     }
     if !typed {
@@ -541,6 +553,22 @@ pub fn elaborate_loaded_package(
     }
 }
 
+/// The analysis of the files `source()` has read in this process under one set of analysis
+/// settings. It lives for the process, so a file sourced again re-derives nothing, and no
+/// `source()` builds the shipped stubs again.
+struct SourcedAnalysis {
+    db: RootDatabase,
+    /// `[check] inline-annotations` and `prelude`, the settings the database reads.
+    settings: (bool, bool),
+    /// Past [`SOURCED_FILES_LIMIT`] files, counting each version of an edited file, a fresh
+    /// database replaces this one, so a process that sources ever new files stays bounded.
+    sourced: SourcedFiles,
+}
+
+static SOURCED_ANALYSES: LazyLock<Mutex<Vec<SourcedAnalysis>>> = LazyLock::new(Mutex::default);
+
+const SOURCED_FILES_LIMIT: usize = 4096;
+
 /// The program ry's runtime runs for the file at `path` that `source()` reads, beside the
 /// [`xxh3_64`] of the text the checker read, as R's parser reads it (line endings made `\n`, one
 /// final `\n` dropped), or `None` when the checker rewrites nothing. The file is checked on its
@@ -550,42 +578,91 @@ pub fn elaborate_loaded_package(
 pub fn elaborate_sourced(path: &Path) -> Result<Option<(u64, String)>, CommandError> {
     // A sourced file that ry cannot check runs as R reads it: R reports a file it cannot read,
     // and a broken `ry.toml` beside it must not stop plain R code.
+    let Ok(bytes) = fs::read(path) else {
+        return Ok(None);
+    };
+    // A script that sources a helper in a loop would repeat the same findings each time, so
+    // they print for the first `source()` of a file with this text.
+    static REPORTED: LazyLock<Mutex<FxHashSet<u64>>> = LazyLock::new(Mutex::default);
+    let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let first = REPORTED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(xxh3_64_with_seed(
+            &bytes,
+            xxh3_64(canonical.as_os_str().as_encoded_bytes()),
+        ));
     let mut config = match Config::discover(path) {
         Ok(config) => config,
         Err(error) => {
-            report(&error);
+            if first {
+                report(&error);
+            }
             return Ok(None);
         }
-    };
-    let Ok(bytes) = fs::read(path) else {
-        return Ok(None);
     };
     // R reads the file in the session's encoding, UTF-8, and drops a byte order mark; text
     // that is not UTF-8 is no file the parse reads as the checker would.
     let Ok(source) = String::from_utf8(bytes) else {
         return Ok(None);
     };
-    let source = source.strip_prefix('\u{FEFF}').unwrap_or(&source);
-    let source = source.replace("\r\n", "\n").replace('\r', "\n");
-    let source = source.strip_suffix('\n').unwrap_or(&source);
+    let source = r_source_text(&source);
     // The project's strict mode is the sourcing script's: a plain R file it sources keeps R's
     // types, and one that turns strict mode on itself (`# typing: strict`) is checked strictly.
     config.check.strict = false;
-    let directive = source.contains("typing: strict");
-    if !directive && !has_ry_syntax(&syntax::parse(source).syntax_node(), source) {
-        return Ok(None);
-    }
-    let preflight = Preflight::new(config, path.to_path_buf());
-    let file = session::command_file(&preflight.db, format!("{source}\n"));
-    let db = preflight.db.clone();
-    let config = &preflight.config;
-    let (_, reported, elaborations) = on_analysis_stack(move || findings(&db, file, config));
+    let settings = (config.check.inline_annotations, config.check.prelude);
+    let mut analyses = SOURCED_ANALYSES.lock().unwrap_or_else(|poisoned| {
+        // A panic interrupted an analysis this guard held, so none of them is trusted.
+        let mut analyses = poisoned.into_inner();
+        analyses.clear();
+        SOURCED_ANALYSES.clear_poison();
+        analyses
+    });
+    let index = match analyses
+        .iter()
+        .position(|analysis| analysis.settings == settings)
+    {
+        Some(index) if analyses[index].sourced.created <= SOURCED_FILES_LIMIT => index,
+        Some(index) => {
+            analyses[index] = SourcedAnalysis {
+                db: analysis_database(&config),
+                settings,
+                sourced: SourcedFiles::default(),
+            };
+            index
+        }
+        None => {
+            analyses.push(SourcedAnalysis {
+                db: analysis_database(&config),
+                settings,
+                sourced: SourcedFiles::default(),
+            });
+            analyses.len() - 1
+        }
+    };
+    let SourcedAnalysis { db, sourced, .. } = &mut analyses[index];
+    // The file joins the same store as the files it sources, so a file sourced both directly and
+    // through another is one file to the analysis.
+    let file = match current_dir() {
+        Ok(root) => {
+            let mut follow = Follow {
+                root: &root,
+                loaded: FxHashMap::default(),
+                stack: vec![canonical.clone()],
+            };
+            load_sourced(db, sourced, &mut follow, canonical, format!("{source}\n"))
+        }
+        Err(_) => SourceFile::new(db, format!("{source}\n"), DocumentKind::Script),
+    };
+    let analysis = db.clone();
+    let (_, reported, elaborations) = on_analysis_stack(move || findings(&analysis, file, &config));
+    let db = &*db;
     // Checked on its own, the file cannot see the names the sourcing script binds.
     let warnings: Vec<Diagnostic> = reported
         .into_iter()
         .filter(|diagnostic| diagnostic.code != "unresolved")
         .collect();
-    let text = file.text(&preflight.db);
+    let text = file.text(db);
     let resolve_note = |related: &RelatedLocation| {
         (related.file == file).then_some(RelatedNote {
             path,
@@ -594,19 +671,154 @@ pub fn elaborate_sourced(path: &Path) -> Result<Option<(u64, String)>, CommandEr
             message: related.message,
         })
     };
-    render_findings(
-        OutputFormat::Human,
-        MinSeverity::Warning,
-        path,
-        text,
-        &warnings,
-        &resolve_note,
-    );
+    if first {
+        render_findings(
+            OutputFormat::Human,
+            MinSeverity::Warning,
+            path,
+            text,
+            &warnings,
+            &resolve_note,
+        );
+    }
     if elaborations.is_empty() {
         return Ok(None);
     }
-    let program = elaborated_program(path, source, &elaborations)?;
+    let program = elaborated_program(path, &source, &elaborations)?;
     Ok(Some((xxh3_64(source.as_bytes()), program)))
+}
+
+/// The files a host that runs code has read for `source()`, each by its canonical path in its
+/// latest version.
+#[derive(Default)]
+struct SourcedFiles {
+    files: FxHashMap<PathBuf, SourceFile>,
+    /// How many files this has made, counting each version of an edited file.
+    created: usize,
+}
+
+/// One walk over the files a check sources.
+struct Follow<'a> {
+    /// The working directory, which R resolves a relative path against.
+    root: &'a Path,
+    /// Each file this walk has loaded, so a file sourced from two places is read once.
+    loaded: FxHashMap<PathBuf, SourceFile>,
+    /// The files being loaded, outermost first: a file that sources itself, directly or not,
+    /// never finishes in R either, so that call is left out.
+    stack: Vec<PathBuf>,
+}
+
+/// Records in `file`, a command nothing has read yet, the file each of its literal `source()`
+/// calls reads, resolved against the working directory as R resolves it, and loads those in
+/// turn, so that a script may call what they define, as `ry check` lets it. Each file is read
+/// again here, because a session may edit one between two `source()` calls.
+fn follow_sources(db: &mut RootDatabase, sourced: &mut SourcedFiles, file: SourceFile) {
+    // A command that never names `source` reads no file, and most commands are such.
+    if !file.text(db).contains("source") {
+        return;
+    }
+    // Without a working directory R resolves no relative path either.
+    let Ok(root) = current_dir() else {
+        return;
+    };
+    let mut follow = Follow {
+        root: &root,
+        loaded: FxHashMap::default(),
+        stack: Vec::new(),
+    };
+    let targets = direct_targets(db, sourced, &mut follow, file);
+    file.set_sources(db).to(Some(targets.into()));
+}
+
+/// The file whose canonical path is `canonical` and whose text is `text`, with what it sources
+/// recorded. A file keeps its [`SourceFile`] only while its text and the files it sources are
+/// the same, because a record never changes: a console command that sourced an earlier version
+/// keeps binding what that version defined.
+fn load_sourced(
+    db: &mut RootDatabase,
+    sourced: &mut SourcedFiles,
+    follow: &mut Follow<'_>,
+    canonical: PathBuf,
+    text: String,
+) -> SourceFile {
+    let existing = sourced
+        .files
+        .get(&canonical)
+        .copied()
+        .filter(|existing| *existing.text(db) == text);
+    let probe = existing.unwrap_or_else(|| {
+        sourced.created += 1;
+        SourceFile::new(db, text.clone(), DocumentKind::Script)
+    });
+    let targets = direct_targets(db, sourced, follow, probe);
+    let file = match existing {
+        Some(existing) if existing.sources(db).as_deref() == Some(&targets[..]) => existing,
+        Some(_) => {
+            sourced.created += 1;
+            let file = SourceFile::new(db, text, DocumentKind::Script);
+            file.set_sources(db).to(Some(targets.into()));
+            file
+        }
+        None => {
+            probe.set_sources(db).to(Some(targets.into()));
+            probe
+        }
+    };
+    sourced.files.insert(canonical.clone(), file);
+    follow.loaded.insert(canonical, file);
+    file
+}
+
+/// The file each of `file`'s literal `source()` calls reads, in call order, loaded.
+fn direct_targets(
+    db: &mut RootDatabase,
+    sourced: &mut SourcedFiles,
+    follow: &mut Follow<'_>,
+    file: SourceFile,
+) -> Vec<SourceFile> {
+    let analysis = db.clone();
+    let literals = on_analysis_stack(move || file_source_calls(&analysis, file).clone());
+    let mut targets = Vec::new();
+    for literal in literals {
+        if is_absolute_path(&literal) {
+            continue;
+        }
+        let Ok(canonical) = fs::canonicalize(follow.root.join(&literal)) else {
+            continue;
+        };
+        if follow.stack.contains(&canonical) {
+            continue;
+        }
+        if let Some(&loaded) = follow.loaded.get(&canonical) {
+            targets.push(loaded);
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&canonical) else {
+            continue;
+        };
+        follow.stack.push(canonical.clone());
+        let target = load_sourced(
+            db,
+            sourced,
+            follow,
+            canonical,
+            format!("{}\n", r_source_text(&text)),
+        );
+        follow.stack.pop();
+        targets.push(target);
+    }
+    targets
+}
+
+/// `text` as R's parser reads a file: without a byte order mark, with `\n` line endings and one
+/// final `\n` dropped.
+fn r_source_text(text: &str) -> String {
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+    let mut text = text.replace("\r\n", "\n").replace('\r', "\n");
+    if text.ends_with('\n') {
+        text.pop();
+    }
+    text
 }
 
 /// [`elaborate`]s `source`, the text of the file at `path`. The rewrites are ASCII, between
@@ -993,28 +1205,6 @@ fn is_strict_error(diagnostic: &Diagnostic) -> bool {
 
 fn has_inline_annotation(root: &SyntaxNode) -> bool {
     root.descendants().any(|node| is_inline_annotation(&node))
-}
-
-/// Whether `source` holds anything analysis decides: an inline or comment annotation, a
-/// `# typing:` directive, a record, tuple, list, tag or `match`, a suffixed number, or a native
-/// function call such as `List.range(1, 10)`. Missing one of these leaves an `I64` literal an R double at run time, so
-/// the test errs toward analysis.
-fn has_ry_syntax(root: &SyntaxNode, source: &str) -> bool {
-    source.contains("#:")
-        || has_inline_annotation(root)
-        || root.descendants_with_tokens().any(|element| match element {
-            NodeOrToken::Node(node) => is_ry_syntax(node.kind()),
-            NodeOrToken::Token(token) => match token.kind() {
-                SyntaxKind::SUFFIXED_NUMBER => true,
-                SyntaxKind::COMMENT => token
-                    .text()
-                    .trim_start_matches('#')
-                    .trim_start()
-                    .starts_with("typing:"),
-                SyntaxKind::IDENT => is_native_function(token.text()),
-                _ => false,
-            },
-        })
 }
 
 /// GNU R reads the plain program an annotated one means.

@@ -26,7 +26,7 @@ use {
         infer::InferenceTable,
         naming::RefClassKey,
         sorted::{SortedMap, SortedSet},
-        types::{Ty, TyKind},
+        types::{NativeScalar, Ty, TyKind},
     },
     rustc_hash::{FxHashMap, FxHashSet},
     salsa::plumbing::AsId,
@@ -139,6 +139,13 @@ pub struct SourceFile {
     /// [`session`]).
     #[default]
     pub command: Option<u32>,
+    /// The file each literal `source()` call reads, in call order, as a host that runs the code
+    /// resolved it on reading the file; `None` resolves the calls through [`SourcePaths`]. Set
+    /// once, before anything reads it, so the files a console command sourced stay the ones it
+    /// ran, however the files on disk change later.
+    #[default]
+    #[returns(ref)]
+    pub sources: Option<Box<[SourceFile]>>,
 }
 
 /// The file's syntax tree, from the host's [`TreeStore`]. No query memoizes a tree: a query that
@@ -659,6 +666,8 @@ pub enum SiteRole {
     InlineSite,
     /// An inline annotation itself, as [`syntax::is_inline_annotation_kind`].
     InlineAnnotation,
+    /// An inline annotation that names one of ry's own types, as [`names_ry_type`].
+    RyTypeAnnotation,
     /// The file or a brace body with a `#:` block among its statements.
     AnnotatedSequence,
     /// A call that attaches a namespace, as [`metadata::is_attach_call_ref`].
@@ -672,6 +681,7 @@ impl SiteRole {
             SiteRole::InlineAnnotation => 2,
             SiteRole::AnnotatedSequence => 4,
             SiteRole::AttachCall => 8,
+            SiteRole::RyTypeAnnotation => 16,
             SiteRole::Annotation
             | SiteRole::TypeDefinition
             | SiteRole::Declaration
@@ -690,6 +700,7 @@ impl SiteRole {
             SiteRole::RySyntax => is_ry_syntax(site.kind),
             SiteRole::InlineSite
             | SiteRole::InlineAnnotation
+            | SiteRole::RyTypeAnnotation
             | SiteRole::AnnotatedSequence
             | SiteRole::AttachCall => site.roles & self.bit() != 0,
         }
@@ -768,6 +779,9 @@ pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
         };
         if syntax::is_inline_annotation_kind(kind, node.parent().map(NodeRef::kind)) {
             roles |= SiteRole::InlineAnnotation.bit();
+            if names_ry_type(node) {
+                roles |= SiteRole::RyTypeAnnotation.bit();
+            }
         }
         if (node == root || kind == SyntaxKind::BRACE_EXPR || kind == SyntaxKind::ARGUMENT_LIST)
             && node.has_child(SyntaxKind::ANNOTATION)
@@ -783,6 +797,26 @@ pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
         }
     }
     SyntaxSites(sites)
+}
+
+/// Whether the inline annotation `node` names one of ry's own types: a ry number, `Str`, `Bool`,
+/// a standard library collection or `Result`, a `Record{...}` or `Tuple{...}`, or a tag. R's
+/// `list{...}` shares the record's syntax and an R class may be called `Record`, so a record or
+/// tuple counts by its head. Names count by spelling alone, which keeps this a syntax fact that
+/// no attached package or stub edit invalidates.
+fn names_ry_type(node: NodeRef<'_>) -> bool {
+    node.descendants().any(|child| match child.kind() {
+        SyntaxKind::TYPE_TAG => true,
+        SyntaxKind::TYPE_RECORD | SyntaxKind::TYPE_TUPLE => child
+            .first_token()
+            .is_some_and(|head| matches!(head.text(), "Record" | "Tuple")),
+        SyntaxKind::TYPE_REF | SyntaxKind::TYPE_APPLY => child.first_token().is_some_and(|head| {
+            let name = head.text();
+            NativeScalar::from_name(name).is_some()
+                || matches!(name, "List" | "Dict" | "Set" | "Result")
+        }),
+        _ => false,
+    })
 }
 
 /// Every `#:` block of the file lowered once, in source order. The diagnostics, the type
@@ -818,6 +852,32 @@ pub fn comment_annotation<'db>(
         .binary_search_by_key(&start, |(offset, _)| *offset)
         .ok()?;
     annotations.get(index).map(|(_, annotation)| annotation)
+}
+
+/// Whether the parse `root` holds anything analysis decides: an inline or comment annotation,
+/// a `# typing:` directive, a record, tuple, list, tag or `match`, a suffixed number, or a
+/// native function call such as `List.range(1, 10)`. Missing one of these leaves an `I64`
+/// literal an R double at run time, so the test errs toward analysis. It reads the tree's kind
+/// column once, and the text only of comments and names, so a host runs it on every file R
+/// parses.
+pub fn has_ry_syntax(root: &SyntaxNode) -> bool {
+    root.node_ref().any_element(|kind, token| match kind {
+        SyntaxKind::ANNOTATION_MARKER | SyntaxKind::SUFFIXED_NUMBER => true,
+        SyntaxKind::COMMENT => token.is_some_and(|token| {
+            token
+                .text()
+                .trim_start_matches('#')
+                .trim_start()
+                .starts_with("typing:")
+        }),
+        SyntaxKind::IDENT => token.is_some_and(|token| stubs::is_native_function(token.text())),
+        // The kind column has no parents, so a binder list counts wherever it sits: outside a
+        // function's it is in a type definition or a `#:` comment anyway.
+        _ => {
+            is_ry_syntax(kind)
+                || syntax::is_inline_annotation_kind(kind, Some(SyntaxKind::FUNCTION_DEF))
+        }
+    })
 }
 
 /// Whether a node of `kind` builds a ry value: a record, tuple, list, tag or `match`.
@@ -1411,7 +1471,9 @@ pub fn file_is_strict(db: &dyn Db, file: SourceFile) -> bool {
 }
 
 /// Whether a literal bound outside any function in `file` is a ry value: the file is strict,
-/// or written with ry syntax (an inline annotation, a record, tuple, tag, `List` or `match`).
+/// builds a ry value (a record, tuple, tag, `List` or `match`), or has an inline annotation that
+/// names one of ry's own types. An annotation written in R's types alone leaves the file R code
+/// that behaves like its erasure.
 #[salsa::tracked]
 pub fn file_holds_ry_values(db: &dyn Db, file: SourceFile) -> bool {
     // Unlike `file_is_strict`, a host with no settings does not count as strict here, because
@@ -1424,8 +1486,7 @@ pub fn file_holds_ry_values(db: &dyn Db, file: SourceFile) -> bool {
     }
     let sites = file_syntax_sites(db, file);
     sites.any(SiteRole::RySyntax)
-        || sites.any(SiteRole::InlineSite)
-        || sites.any(SiteRole::InlineAnnotation)
+        || sites.any(SiteRole::RyTypeAnnotation)
         || session::holds_ry_values(db, file)
 }
 
@@ -1692,9 +1753,12 @@ pub struct SourcePaths {
     pub paths: BTreeMap<String, SourceFile>,
 }
 
-/// The literal paths a file passes to `source()` or `sys.source()`, in source order. A call
-/// inside a function counts too, because `source()` evaluates into the global environment
-/// unless told otherwise.
+/// The literal paths a file passes to `source()` or `sys.source()` that evaluate into the global
+/// environment, in source order. A call inside a function counts too, because `source()`
+/// evaluates into the global environment unless told otherwise; a call told to evaluate
+/// elsewhere does not, because nothing it defines is visible from the global environment.
+/// `sys.source()` counts only with `keep.source = TRUE`, because without a source reference the
+/// runtime runs its text unelaborated, which the file's typed signatures do not describe.
 #[salsa::tracked(returns(ref))]
 pub fn file_source_calls(db: &dyn Db, file: SourceFile) -> Vec<String> {
     let mut paths = Vec::new();
@@ -1702,6 +1766,7 @@ pub fn file_source_calls(db: &dyn Db, file: SourceFile) -> Vec<String> {
         let Some(module) = item_hir(db, span.item) else {
             continue;
         };
+        let mut in_function: Option<Vec<u64>> = None;
         for id in module.expression_ids() {
             let ExpressionKind::Call { callee, arguments } = module.kind(id) else {
                 continue;
@@ -1715,18 +1780,41 @@ pub fn file_source_calls(db: &dyn Db, file: SourceFile) -> Vec<String> {
                 } if package == "base" => *name,
                 _ => continue,
             };
-            if callee != "source" && callee != "sys.source" {
-                continue;
+            let (formals, keep_source) = match callee.as_str() {
+                "source" => (SOURCE_FORMALS, None),
+                "sys.source" => (SYS_SOURCE_FORMALS, Some(SYS_SOURCE_KEEP_SOURCE)),
+                _ => continue,
+            };
+            let values = match_arguments(module, &module[arguments], formals);
+            if let Some(keep_source) = keep_source {
+                let kept = values[keep_source].is_some_and(|value| {
+                    matches!(
+                        module.kind(value),
+                        ExpressionKind::Literal(hir::LiteralKind::Logical(true))
+                    ) || matches!(module.kind(value), ExpressionKind::NameRef(name) if name == "T")
+                });
+                if !kept {
+                    continue;
+                }
             }
-            let arguments = &module[arguments];
-            let path = arguments
-                .iter()
-                .find(|argument| module.argument_name(argument).as_deref() == Some("file"))
-                .or_else(|| arguments.iter().find(|argument| argument.name.is_none()))
-                .and_then(|argument| argument.value);
-            if let Some(path) = path
-                && let ExpressionKind::Literal(hir::LiteralKind::String(text)) = module.kind(path)
-            {
+            let Some(path) = values[0] else {
+                continue;
+            };
+            let ExpressionKind::Literal(hir::LiteralKind::String(text)) = module.kind(path) else {
+                continue;
+            };
+            let global = match values[1].map(|value| environment_kind(module, value)) {
+                None | Some(EnvironmentKind::Global) => true,
+                Some(EnvironmentKind::Caller) => {
+                    let inside = in_function.get_or_insert_with(|| function_bodies(module));
+                    let index = id.index();
+                    inside
+                        .get(index / 64)
+                        .is_none_or(|word| word & (1 << (index % 64)) == 0)
+                }
+                Some(EnvironmentKind::Other) => false,
+            };
+            if global {
                 paths.push(module[text].to_string());
             }
         }
@@ -1734,54 +1822,228 @@ pub fn file_source_calls(db: &dyn Db, file: SourceFile) -> Vec<String> {
     paths
 }
 
-/// The project files a script or test reads through `source()` with a literal path,
-/// transitively, in the order the calls appear. R resolves the path against the working
-/// directory, which is usually the project root or the sourcing file's own directory, so both
-/// are tried. A package file is skipped: the namespace already holds every `R/` file.
+/// Every formal of `source()` and `sys.source()` in R's order, which partial matching of argument
+/// names needs: the file is the first, the environment the second.
+const SOURCE_FORMALS: &[&str] = &[
+    "file",
+    "local",
+    "echo",
+    "print.eval",
+    "exprs",
+    "spaced",
+    "verbose",
+    "prompt.echo",
+    "max.deparse.length",
+    "width.cutoff",
+    "deparseCtrl",
+    "chdir",
+    "catch.aborts",
+    "encoding",
+    "continue.echo",
+    "skip.echo",
+    "keep.source",
+];
+const SYS_SOURCE_FORMALS: &[&str] = &[
+    "file",
+    "envir",
+    "chdir",
+    "keep.source",
+    "keep.parse.data",
+    "toplevel.env",
+];
+const SYS_SOURCE_KEEP_SOURCE: usize = 3;
+
+/// The value a call passes for each formal, matched as R matches them: exact names, then unique
+/// prefixes, then position.
+fn match_arguments(
+    module: &hir::Module,
+    arguments: &[hir::Argument],
+    formals: &[&str],
+) -> Vec<Option<hir::ExprId>> {
+    let mut matched: Vec<Option<usize>> = vec![None; arguments.len()];
+    let mut taken = vec![false; formals.len()];
+    for (argument, slot) in arguments.iter().zip(&mut matched) {
+        let Some(name) = module.argument_name(argument) else {
+            continue;
+        };
+        if let Some(formal) = formals.iter().position(|formal| *formal == name.as_str()) {
+            *slot = Some(formal);
+            taken[formal] = true;
+        }
+    }
+    for (argument, slot) in arguments.iter().zip(&mut matched) {
+        let Some(name) = module.argument_name(argument) else {
+            continue;
+        };
+        if slot.is_some() {
+            continue;
+        }
+        let mut prefixed = (0..formals.len())
+            .filter(|&formal| !taken[formal] && formals[formal].starts_with(name.as_str()));
+        if let (Some(formal), None) = (prefixed.next(), prefixed.next()) {
+            *slot = Some(formal);
+            taken[formal] = true;
+        }
+    }
+    let mut free = (0..formals.len())
+        .filter(|&formal| !taken[formal])
+        .collect::<Vec<_>>()
+        .into_iter();
+    for (argument, slot) in arguments.iter().zip(&mut matched) {
+        if argument.name.is_none() {
+            *slot = free.next();
+        }
+    }
+    let mut values = vec![None; formals.len()];
+    for (argument, slot) in arguments.iter().zip(&matched) {
+        if let Some(formal) = *slot {
+            values[formal] = argument.value;
+        }
+    }
+    values
+}
+
+enum EnvironmentKind {
+    /// An environment a read of the global one sees: `FALSE`, the global or the base one.
+    Global,
+    /// What `TRUE`, `environment()` and `parent.frame()` name: the global environment at the top
+    /// level, and inside a function its frame or its caller's, which the check does not know.
+    Caller,
+    Other,
+}
+
+/// What `source()`'s `local` or `sys.source()`'s `envir` argument names.
+fn environment_kind(module: &hir::Module, value: hir::ExprId) -> EnvironmentKind {
+    let name = match module.kind(value) {
+        ExpressionKind::Literal(hir::LiteralKind::Logical(false)) => {
+            return EnvironmentKind::Global;
+        }
+        ExpressionKind::Literal(hir::LiteralKind::Logical(true)) => return EnvironmentKind::Caller,
+        ExpressionKind::NameRef(name) => *name,
+        ExpressionKind::Call { callee, arguments } if module[arguments].is_empty() => {
+            match module.kind(*callee) {
+                ExpressionKind::NameRef(name) => match name.as_str() {
+                    "globalenv" | "baseenv" => return EnvironmentKind::Global,
+                    "environment" | "parent.frame" => return EnvironmentKind::Caller,
+                    _ => return EnvironmentKind::Other,
+                },
+                _ => return EnvironmentKind::Other,
+            }
+        }
+        _ => return EnvironmentKind::Other,
+    };
+    // `F` and `T` are `FALSE` and `TRUE` unless code rebinds them, which almost none does.
+    match name.as_str() {
+        ".GlobalEnv" | "F" => EnvironmentKind::Global,
+        "T" => EnvironmentKind::Caller,
+        _ => EnvironmentKind::Other,
+    }
+}
+
+/// A bitset of the expressions inside a function body or default. Lowering allocates an
+/// expression after its children, so a walk from the last id down reaches a function before
+/// what it contains.
+fn function_bodies(module: &hir::Module) -> Vec<u64> {
+    let count = module.expression_count();
+    let mut inside = vec![0u64; count.div_ceil(64)];
+    let contains = |inside: &[u64], index: usize| {
+        inside
+            .get(index / 64)
+            .is_some_and(|word| word & (1 << (index % 64)) != 0)
+    };
+    for id in module
+        .expression_ids()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        if !matches!(module.kind(id), ExpressionKind::Function { .. })
+            && !contains(&inside, id.index())
+        {
+            continue;
+        }
+        module.for_each_child(id, |child| {
+            if let Some(word) = inside.get_mut(child.index() / 64) {
+                *word |= 1 << (child.index() % 64);
+            }
+        });
+    }
+    inside
+}
+
+/// The files a script or test reads through `source()` with a literal path, transitively, each
+/// once at the last place it runs, in run order, so that the last file to define a name is the
+/// last one listed. A package file is skipped: the namespace already holds every `R/` file.
 #[salsa::tracked(returns(ref))]
 pub fn sourced_files(db: &dyn Db, file: SourceFile) -> Vec<SourceFile> {
     if *file.kind(db) == DocumentKind::Package || file_source_calls(db, file).is_empty() {
         return Vec::new();
     }
-    let Some(paths) = SourcePaths::try_get(db) else {
-        return Vec::new();
-    };
-    let paths = paths.paths(db);
-    let path_of = |target: SourceFile| {
-        paths
-            .iter()
-            .find(|(_, candidate)| **candidate == target)
-            .map(|(path, _)| path.as_str())
-    };
-    let mut sourced = Vec::new();
-    let mut pending = vec![file];
+    let paths = SourcePaths::try_get(db).map(|paths| paths.paths(db));
+    // Walking the calls from the last to the first and keeping each file's first visit lists
+    // every file at its last run once reversed, and a file met again adds nothing new, so the
+    // walk is linear even when files share what they source.
     let mut visited = FxHashSet::from_iter([file]);
-    while let Some(current) = pending.pop() {
-        let directory = path_of(current)
-            .and_then(|path| path.rsplit_once('/'))
-            .map(|(directory, _)| directory);
-        for literal in file_source_calls(db, current) {
-            let candidates = directory
-                .map(|directory| normalize_relative_path(&format!("{directory}/{literal}")))
-                .into_iter()
-                .chain([normalize_relative_path(literal)]);
-            let Some(target) = candidates
-                .flatten()
-                .find_map(|candidate| paths.get(&candidate).copied())
-            else {
-                continue;
-            };
-            if visited.insert(target) {
-                sourced.push(target);
-                pending.push(target);
-            }
-        }
-    }
-    sourced
+    let mut reversed = Vec::new();
+    walk_sources(db, paths, file, &mut visited, &mut reversed);
+    reversed.reverse();
+    reversed
 }
 
-/// `a/./b/../c.R` as `a/c.R`, or `None` for a path that leaves the project root.
-fn normalize_relative_path(path: &str) -> Option<String> {
+fn walk_sources(
+    db: &dyn Db,
+    paths: Option<&BTreeMap<String, SourceFile>>,
+    file: SourceFile,
+    visited: &mut FxHashSet<SourceFile>,
+    reversed: &mut Vec<SourceFile>,
+) {
+    for target in direct_sources(db, paths, file).into_iter().rev() {
+        // Pushing a file before what it sources lists, once reversed, each file after the files
+        // it sources, as they finish running, so its own later definitions win.
+        if visited.insert(target) {
+            reversed.push(target);
+            walk_sources(db, paths, target, visited, reversed);
+        }
+    }
+}
+
+/// The file each of `file`'s literal `source()` calls reads, in call order: as the host
+/// recorded them, or else through `paths`. A host that does not know the working directory the
+/// code runs in tries the sourcing file's own directory and then the project root.
+fn direct_sources(
+    db: &dyn Db,
+    paths: Option<&BTreeMap<String, SourceFile>>,
+    file: SourceFile,
+) -> Vec<SourceFile> {
+    if let Some(sources) = file.sources(db) {
+        return sources.to_vec();
+    }
+    let Some(paths) = paths else {
+        return Vec::new();
+    };
+    let directory = paths
+        .iter()
+        .find(|(_, candidate)| **candidate == file)
+        .and_then(|(path, _)| path.rsplit_once('/'))
+        .map(|(directory, _)| directory);
+    file_source_calls(db, file)
+        .iter()
+        .filter_map(|literal| {
+            directory
+                .and_then(|directory| normalize_relative_path(&format!("{directory}/{literal}")))
+                .into_iter()
+                .chain(normalize_relative_path(literal))
+                .find_map(|candidate| paths.get(&candidate).copied())
+        })
+        .collect()
+}
+
+/// `a/./b/../c.R` as `a/c.R`, or `None` for a path that leaves the project root or does not
+/// start inside it.
+pub fn normalize_relative_path(path: &str) -> Option<String> {
+    if is_absolute_path(path) {
+        return None;
+    }
     let mut parts: Vec<&str> = Vec::new();
     for part in path.split(['/', '\\']) {
         match part {
@@ -1793,6 +2055,14 @@ fn normalize_relative_path(path: &str) -> Option<String> {
         }
     }
     Some(parts.join("/"))
+}
+
+/// A path R reads from outside the working directory: from the file system's root, the home
+/// directory or a Windows drive.
+pub fn is_absolute_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    matches!(bytes.first(), Some(b'/' | b'\\' | b'~'))
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
 }
 
 /// The item a sourced file binds `name` with; the last sourced file to bind it wins, as at run
@@ -4759,6 +5029,25 @@ fn set_generic_target(node: &SyntaxNode) -> Option<(String, TextRange)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ry_syntax_gate_reads_kinds_comments_and_names() {
+        let cases = [
+            ("f <- function(x) x + 1\nprint(f(2)) # done\n", false),
+            ("x <- \"#: in a string\"\n", false),
+            ("x <- 1L\n", false),
+            ("#: (x: double) -> double\nf <- function(x) x\n", true),
+            ("# typing: strict\nf <- function(x) x\n", true),
+            ("f <- function(x: double) -> double x\n", true),
+            ("n <- 3i64\n", true),
+            ("p <- (x = 1, y = 2)\n", true),
+            ("for (i in List.range(1, 3)) print(i)\n", true),
+        ];
+        for (text, expected) in cases {
+            let root = syntax::parse(text).syntax_node();
+            assert_eq!(has_ry_syntax(&root), expected, "{text:?}");
+        }
+    }
 
     #[test]
     fn refusal_is_idempotent() {
