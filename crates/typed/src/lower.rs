@@ -4162,7 +4162,33 @@ impl Lowering<'_> {
                     let empty = Arguments { items: Vec::new() };
                     return self.list_literal(&empty, hint.as_deref(), Some(capacity));
                 }
-                if self.is_library_call(list, "Dict.empty", 0)?
+                let with_capacity = self.is_library_call(list, "Dict.with_capacity", 1)?
+                    || self.is_library_call(list, "Set.with_capacity", 1)?;
+                if with_capacity {
+                    // Native collections keep no reserved room a program could read, so the
+                    // room only has to be one the interpreter accepts: below 2^30.
+                    let [capacity] = Arguments::of(list).exactly(1)?[..] else {
+                        return Err(Refusal::new("a malformed `with_capacity`"));
+                    };
+                    let capacity = self.value(capacity)?;
+                    let capacity = self.to_i64(capacity)?;
+                    let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+                    let limit = self
+                        .builder
+                        .emit(Type::I64, Op::Const(Constant::I64(1 << 30)));
+                    let negative = self.builder.emit(
+                        Type::Lgl,
+                        Op::Compare(Compare::Lt, Item::I64, capacity, zero),
+                    );
+                    self.fail_if(negative);
+                    let huge = self.builder.emit(
+                        Type::Lgl,
+                        Op::Compare(Compare::Ge, Item::I64, capacity, limit),
+                    );
+                    self.fail_if(huge);
+                }
+                if with_capacity
+                    || self.is_library_call(list, "Dict.empty", 0)?
                     || self.is_library_call(list, "Set.empty", 0)?
                 {
                     let ty = constant_string(hint)

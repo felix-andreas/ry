@@ -91,6 +91,33 @@ const NATIVE_SEGMENT: usize = 8 * 1024 * 1024;
 /// The stack below [`STACK_LIMIT`] left for the runtime functions the deepest frame calls.
 const NATIVE_RESERVE: usize = 128 * 1024;
 
+/// Whether a native entry runs inside a call that the interpreter runs again because its native
+/// code ran out of stack or of R's nesting depth: entering native code there would recurse as
+/// deep and stop again at every level. The JIT's scalar natives ask too, before they run. An
+/// entry outside that call forgets it.
+pub unsafe fn inside_exhausted_rerun() -> bool {
+    let Some(rerun) = EXHAUSTED.get() else {
+        return false;
+    };
+    // A native entry runs before the interpreter pushes the call's frame, so the frame of the
+    // call being run again sits at the depth its entry saw while that call runs.
+    let inside = interp::interp()
+        .frames
+        .get(rerun.depth)
+        .is_some_and(|frame| frame.call == rerun.call && frame.function == rerun.function);
+    if inside {
+        decline(|| {
+            String::from(
+                "it runs inside a call whose native code ran out of stack or of R's nesting \
+                 depth, which the interpreter is running instead",
+            )
+        });
+    } else {
+        EXHAUSTED.set(None);
+    }
+    inside
+}
+
 /// The lowest frame address native code started on the caller's stack segment may reach, or 0
 /// when the segment cannot be measured. The JIT's scalar native functions take it as an
 /// argument and compare their frames against it, as typed code compares against
@@ -245,24 +272,6 @@ pub unsafe fn call(
     if function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP | gp::CLOSURE_TRACE) {
         decline(|| String::from("it is being debugged or traced"));
         return None;
-    }
-    if let Some(rerun) = EXHAUSTED.get() {
-        // A native entry runs before the interpreter pushes the call's frame, so the frame of
-        // the call being run again sits at the depth its entry saw while that call runs.
-        let frames = &interp::interp().frames;
-        let inside = frames
-            .get(rerun.depth)
-            .is_some_and(|frame| frame.call == rerun.call && frame.function == rerun.function);
-        if inside {
-            decline(|| {
-                String::from(
-                    "it runs inside a call whose native code ran out of stack or of R's nesting \
-                     depth, which the interpreter is running instead",
-                )
-            });
-            return None;
-        }
-        EXHAUSTED.set(None);
     }
     // Converting a record or a tag confirms its shapes, which the code compiled next must
     // consider.
