@@ -1,5 +1,5 @@
-# blocked: direct
-# An operator applied to a call whose result type is an alias of a table type.
+# An operator applied to a call whose result type is an alias of a table type compiles, because
+# the preflight writes the table type out in place of the alias.
 alias Rule = Expr
 alias Sales = DataFrame{units: integer[], price: double[]}
 sales <- DataFrame(units = c(1L, 2L, 3L), price = c(10, 20, 30))

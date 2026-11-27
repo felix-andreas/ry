@@ -27,6 +27,7 @@ alias Costs = Prices
 alias Boxed<T> = Record{value: T}
 alias Sales = DataFrame{price: double[]}
 alias Step = fn(I64) -> I64
+alias Rule = Expr
 type Tree = :Leaf(I64) | :Node(Tree, Tree)
 type Meters = F64
 ";
@@ -74,6 +75,7 @@ fn canonical_spellings_read_back() {
             Some(Type::Table),
         ),
         ("DataFrame", Some("DataFrame"), Some(Type::Table)),
+        ("Rule", Some("Expr"), Some(Type::Table)),
         ("Point", Some("Record{x: F64, y: F64}"), None),
         ("Boxed<I64>", Some("Record{value: I64}"), None),
         (

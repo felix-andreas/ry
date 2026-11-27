@@ -373,18 +373,21 @@ Error in halve("a") : argument `value` must be `double`, not `character`
 GNU R reads a `#:` block as a comment, so a file annotated only in `#:` blocks runs under
 `Rscript` without checks.
 
-Three kinds of signature are not checked at run time:
+Two kinds of signature are not checked at run time:
 
 - **A coercion.** `@trust`, `@if-unknown` and `@new` say how the value gets its type instead of
   declaring one to check, and a coercion governs the value wherever it is written. A function under
   one has no run-time checks, whatever types its literal writes, and it is not compiled.
-- **The name of a type alias**, as in `#: Scaler` with
-  `#: @alias Scaler {fn(values: double, by: double) -> double}`. The runtime reads the types where
-  they are written, and resolving an alias takes the checker.
 - **A block the checker rejects.** A `#:` line that does not parse is a comment, and a block whose
   directives are out of order declares nothing. A block with an error that only the checker can
   see, such as an unknown type name, declares nothing to the checker, and the runtime checks the
   types it recognizes in it.
+
+A signature that is only the name of a type alias, as in `#: Scaler` with
+`#: @alias Scaler {fn(values: double, by: double) -> double}`, is checked and compiled like the
+function type it names, because `ry run`, the console, `ry install` and `ry build` write that type
+out in place of the name before the code runs. Code that `source()` or `ry load` reads is not
+rewritten, so there such a function has no run-time checks and runs in the interpreter.
 
 The console attaches a `#:` block the same way. A command that ends in a `#:` block is unfinished,
 so the console reads the next line into the same command, and a blank line ends the wait and leaves
@@ -904,6 +907,13 @@ the declaration's arity:
   [`@new`](#nominal-introduction).
 - A wrongly applied name then compares like `Unknown`, so the one arity error never cascades into
   mismatches between values.
+
+A type definition cannot take the name of a built-in type: an atomic or ry scalar name (`double`,
+`I64`, `Str`), `Any`, `Unknown`, `NULL`, a table type (`DataFrame`, `LazyFrame`, `GroupBy`,
+`LazyGroupBy`), `Record`, `Tuple`, `Promoted`, `Compared`, or the standard library's `List`, `Dict`,
+`Set` and `Expr`. Annotations and checks read such a name as the built-in type, so a definition
+with it would conflict, and ry reports it as an `annotation` error at its name. The standard library's `Result` is
+an alias, which a project's own definition of `Result` replaces.
 
 #### Type aliases
 
@@ -1556,7 +1566,7 @@ trial_size(trial)
 ```text ry run runtime=ry strict
 type-mismatch
 
-  x expected `Record{time: List<I64>, treated: List<Bool>}`, found `list{time: integer[], treated: logical[]}`
+  x expected `Record{time: List<I64>, treated: List<Bool>}`, found `list{time: integer[], treated: logical[]}`. An R list never becomes a record: write a record literal, `(time = ..., treated = ...)`
    --[main.R:4:12]
  3 | trial <- list(time = c(5L, 3L), treated = c(TRUE, FALSE))
  4 | trial_size(trial)
@@ -1564,6 +1574,9 @@ type-mismatch
 
   x strict mode found 1 error, so this code does not run
 ```
+
+When the value is written as a `list(...)` call, `ry check --fix --unsafe-fixes` rewrites it as the
+literal, `list(time = t, treated = d)` as `(time = t, treated = d)`.
 
 Pass the fields as parameters instead, and build any record inside the typed function:
 
@@ -5536,10 +5549,8 @@ type: `double`, `integer`, `character`, `logical`, R vectors such as `double[]`,
 annotated with a ry type, the declared result is a ry type, `NULL` or left out, and at least one of
 them is a ry type. A signature written in a `#:` comment, or on the name the function is assigned
 to, is judged by the same rules and compiles exactly like the inline form
-([Annotations at run time](#annotations-at-run-time)). The one exception is a signature that is
-only the name of a type alias. The runtime reads the types where they are written, so such a
-function runs in the interpreter and gets an `interpreted` warning that asks for the function type
-in place of the alias.
+([Annotations at run time](#annotations-at-run-time)), and so is a signature that is only the
+name of a type alias, which the preflight writes out as the function type it names.
 
 A type parameter bounded by an R type, as in `<T: numeric>`, counts as an R type.
 
@@ -5794,7 +5805,7 @@ interpreted
 | `xs[i]` with a position, which takes a part of a list | `xs[[i]]` for one item, `List.sublist` for a part |
 | a column read by its position, as in `table[[2]]` | the column's name: `table[["price"]]` |
 | a table value inside a record, a tuple, a tag or a list | a variable of its own for the table value |
-| an operator applied directly to a table expression that a local function, a function whose result type is an alias, an `if` or a `match` gives | assign the expression to a variable, and apply the operator to the variable |
+| an operator applied directly to a table expression that a local function, a function whose result type is an alias of an open or generic type, an `if` or a `match` gives | assign the expression to a variable, and apply the operator to the variable |
 | a `Dict` whose keys are not `I64`, `F64` or `Str`, or whose values hold something other than numbers, strings, `Bool`s, lists, records, tuples and tags | convert the keys to `I64` or `Str`, and keep such values in a `List` whose positions the dictionary stores |
 | a `Set` whose elements are not `I64` or `Str` | convert the elements to `I64` or `Str`, or keep them in a `List` |
 | a `match` guard that assigns a variable, a pattern with `NA`, `NaN` or a complex number, and a pattern other than a name or `_` on a value that is not a number, a string, a logical, a `List`, a tag, a record or a tuple | compute the value before the `match`, and bind the value to a name |

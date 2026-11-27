@@ -28,14 +28,15 @@ use {
         package_name, parse, prelude_enabled, project_type_definitions, reads_use_method, s4,
         stubs::{
             CONDITIONAL_NAMESPACES, STANDARD_LIBRARY, StubLibrary, SymbolSet,
-            dormant_namespace_exports, namespace_exports, namespace_known, outside_prelude, stubs,
+            dormant_namespace_exports, is_ry_type, namespace_exports, namespace_known,
+            outside_prelude, stubs,
         },
         top_level::{CalleeOrigin, Effect, TopLevel, item_top_level},
         types::{
-            Atomic, Binder, Bound, Constraint, FrameKind, FunctionType, InferenceVar, Name,
-            NativeField, QueryName, RecordField, Ty, TyKind, TypeScheme, array_element,
-            contains_inference_var, for_each_child_type, map_child_types, null, substitute_rigid,
-            union_of,
+            Atomic, Binder, Bound, Constraint, FamilyResult, FrameKind, FunctionType, InferenceVar,
+            Name, NativeField, NativeScalar, QueryName, RecordField, Ty, TyKind, TypeScheme,
+            array_element, contains_inference_var, for_each_child_type, map_child_types, null,
+            substitute_rigid, union_of,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -554,7 +555,9 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 "type-mismatch",
                 render_type_error_message(db, error),
             );
-            let mut diagnostic = match misspelling_fix(file.text(db), range, &error.kind) {
+            let fix = misspelling_fix(file.text(db), range, &error.kind)
+                .or_else(|| native_literal_fix(db, file.text(db), range, &error.kind));
+            let mut diagnostic = match fix {
                 Some((title, at, replacement)) => {
                     diagnostic.with_fix(Applicability::Unsafe, title, at, replacement)
                 }
@@ -839,7 +842,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     diagnostics.extend(duplicate_binding_diagnostics(db, file));
     diagnostics.extend(duplicate_type_diagnostics(db, file));
     diagnostics.extend(unknown_type_diagnostics(db, file));
-    diagnostics.extend(alias_cycle_diagnostics(db, file));
+    diagnostics.extend(type_definition_diagnostics(db, file));
     diagnostics.extend(annotation_rule_diagnostics(db, file));
     diagnostics.extend(annotation_agreement_diagnostics(db, file));
 
@@ -1030,11 +1033,52 @@ fn classify_name_read(
 
 /// An alias whose expansion reaches itself never becomes a type. It is reported at each
 /// declaration on the cycle, including one no annotation uses; a use only compares like
-/// `Unknown`, so the one mistake is reported once, where the fix goes.
-fn alias_cycle_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
+/// `Unknown`, so the one mistake is reported once, where the fix goes. A definition named like
+/// a built-in type conflicts with it, because lowering or the checker reads that name as the
+/// built-in one.
+fn type_definition_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     let table = TypeDefinitions::of(db, file);
     let mut diagnostics = Vec::new();
     for (name, range) in type_declaration_sites(db, file) {
+        if ANNOTATION_PRIMITIVES.contains(&name.as_str())
+            || matches!(name.as_str(), "any" | "unknown" | "null")
+            || FamilyResult::from_head(name).is_some()
+            || NativeScalar::from_name(name).is_some()
+            // The checker reads these standard-library types by name; a project's own `Result`
+            // shadows the library's alias instead.
+            || (matches!(name.as_str(), "List" | "Dict" | "Set" | "Expr") && is_ry_type(db, name))
+        {
+            // The site spans the whole definition, maybe over several `#:` lines; the name is
+            // its first whole word with that spelling.
+            let range = *range;
+            let identifier = |c: char| c.is_alphanumeric() || c == '_' || c == '.';
+            let written = file
+                .text(db)
+                .get(Range::<usize>::from(range))
+                .and_then(|text| {
+                    text.match_indices(name.as_str())
+                        .map(|(start, _)| start)
+                        .find(|&start| {
+                            !text[..start].ends_with(identifier)
+                                && !text[start + name.len()..].starts_with(identifier)
+                        })
+                });
+            let range = written.map_or(range, |start| {
+                TextRange::at(
+                    range.start() + TextSize::from(start as u32),
+                    TextSize::from(name.len() as u32),
+                )
+            });
+            diagnostics.push(Diagnostic::new(
+                range,
+                Severity::Error,
+                "annotation",
+                format!(
+                    "`{name}` is a built-in type, so this definition conflicts with it: annotations and checks read `{name}` as the built-in one. Give it another name"
+                ),
+            ));
+            continue;
+        }
         let interned = Name::new(db, name.as_str());
         let Some(definition) = table.get(db, interned) else {
             continue;
@@ -1958,8 +2002,8 @@ fn vector_element_atomic<'db>(
     }
 }
 
-/// Typo-suggestion candidates only: lowering resolves these before the
-/// unknown-name check.
+/// The heads lowering resolves before the unknown-name check and before any type definition,
+/// besides the ry scalars, the lower-case spellings and `Promoted`/`Compared`.
 const ANNOTATION_PRIMITIVES: &[&str] = &[
     "Any",
     "Unknown",
@@ -2764,6 +2808,80 @@ fn size_function(name: &str) -> Option<String> {
     }
 }
 
+/// An R list never becomes a ry record or tuple, so a mismatch between them names the literal
+/// that builds one.
+fn native_literal_for_r_list<'db>(
+    db: &'db dyn Db,
+    expected: Ty<'db>,
+    found: Ty<'db>,
+) -> Option<String> {
+    if !matches!(
+        found.kind(db),
+        TyKind::List(_) | TyKind::NamedList(_) | TyKind::Tuple(_) | TyKind::Record(_)
+    ) {
+        return None;
+    }
+    let (kind, parts) = match expected.kind(db) {
+        TyKind::NativeRecord(fields, _) if !fields.is_empty() => (
+            "record",
+            fields
+                .iter()
+                .map(|field| format!("{} = ...", display_name(field.name.text(db))))
+                .collect::<Vec<_>>(),
+        ),
+        TyKind::NativeTuple(items) if !items.is_empty() => {
+            ("tuple", items.iter().map(|_| "...".to_owned()).collect())
+        }
+        _ => return None,
+    };
+    let trailing = if parts.len() == 1 { "," } else { "" };
+    Some(format!(
+        ". An R list never becomes a {kind}: write a {kind} literal, `({}{trailing})`",
+        parts.join(", ")
+    ))
+}
+
+/// `list(a = 1, b = 2)` where a record or tuple goes becomes the literal `(a = 1, b = 2)`; one
+/// item takes a trailing comma, or the parentheses only group it.
+fn native_literal_fix(
+    db: &dyn Db,
+    text: &str,
+    range: TextRange,
+    kind: &TypeErrorKind<'_>,
+) -> Option<(String, TextRange, String)> {
+    let TypeErrorKind::Mismatch { expected, found } = kind else {
+        return None;
+    };
+    // The call's own names decide which literal it becomes, so it must already be the kind and
+    // size the expected type wants.
+    let items = match (found.kind(db), expected.kind(db)) {
+        (TyKind::Tuple(items), TyKind::NativeTuple(expected)) if items.len() == expected.len() => {
+            items.len()
+        }
+        (TyKind::Record(fields), TyKind::NativeRecord(expected, _))
+            if fields.len() == expected.len() =>
+        {
+            fields.len()
+        }
+        _ => return None,
+    };
+    if items == 0 {
+        return None;
+    }
+    let covered = text.get(usize::from(range.start())..usize::from(range.end()))?;
+    let inner = covered.strip_prefix("list(")?.strip_suffix(')')?;
+    let trailing = if items == 1 && !inner.trim_end().ends_with(',') {
+        ","
+    } else {
+        ""
+    };
+    Some((
+        "Write a literal in place of `list(...)`".to_owned(),
+        range,
+        format!("({inner}{trailing})"),
+    ))
+}
+
 /// A misspelled parameter, field, or column is spelled somewhere inside the error's range, which
 /// may cover a whole call or subset. The fix replaces that spelling only when it occurs exactly
 /// once as a whole name, so it never guesses between two places.
@@ -3555,6 +3673,9 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                     }
                     _ => {}
                 }
+            }
+            if let Some(literal) = native_literal_for_r_list(db, *expected, *found) {
+                message.push_str(&literal);
             }
             message
         }
