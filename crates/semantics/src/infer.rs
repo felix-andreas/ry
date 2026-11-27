@@ -3195,6 +3195,14 @@ fn numeric_rank<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<(bool, u8)> {
     }
 }
 
+/// A concrete R value: not open, not `Any` or `Unknown`, and not a ry value.
+fn is_r_value<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
+    !matches!(
+        ty.kind(db),
+        TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Any | TyKind::Unknown
+    ) && !is_ry_value_type(db, ty)
+}
+
 #[cfg(test)]
 mod tests {
     use {
@@ -3359,12 +3367,4 @@ mod tests {
         );
         assert!(table.compatible(&db, named_lambda, positional_interface));
     }
-}
-
-/// A concrete R value: not open, not `Any` or `Unknown`, and not a ry value.
-fn is_r_value<'db>(db: &'db dyn Db, ty: Ty<'db>) -> bool {
-    !matches!(
-        ty.kind(db),
-        TyKind::Var(_) | TyKind::Rigid(_) | TyKind::Any | TyKind::Unknown
-    ) && !is_ry_value_type(db, ty)
 }
