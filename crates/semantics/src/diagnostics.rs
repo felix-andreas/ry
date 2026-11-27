@@ -3709,12 +3709,24 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
         }
         // `Date` has arithmetic with a number, so the message says what it lacks.
         TypeErrorKind::ConstraintViolation {
-            constraint: Constraint::Numeric,
+            constraint: constraint @ (Constraint::Numeric | Constraint::Num),
             found,
         } if matches!(found.kind(db), TyKind::Named(..)) => format!(
-            "expected a numeric value (`integer` or `double`) or a class with arithmetic between two of its values, found `{}`",
+            "expected {} or a class with arithmetic between two of its values, found `{}`",
+            constraint_description(*constraint),
             renderer.render(db, *found)
         ),
+        // A ry number meets a value that takes R's numbers only (`x / 2`, `x + 1`, a
+        // condition, a declared `numeric`), so the fix is to compute in ry numbers.
+        TypeErrorKind::ConstraintViolation {
+            constraint: Constraint::Numeric | Constraint::Arithmetic,
+            found,
+        } if matches!(found.kind(db), TyKind::Native(native) if native.is_number()) => {
+            let found = renderer.render(db, *found);
+            format!(
+                "expected a numeric value (`integer` or `double`), found `{found}`: this takes R's numbers only. To compute in ry numbers, declare the parameter `{found}`"
+            )
+        }
         // A class may satisfy `arithmetic` by declaring an operator method, so a class that
         // fails it is told what it lacks; a plain value is not, because that would be noise.
         TypeErrorKind::ConstraintViolation {
@@ -3725,12 +3737,27 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             renderer.render(db, *found)
         ),
         TypeErrorKind::ConstraintViolation {
-            constraint: Constraint::Numeric,
+            constraint: constraint @ (Constraint::Numeric | Constraint::Num),
+            found,
+        } if matches!(found.kind(db), TyKind::Rigid(_)) => {
+            let found = renderer.render(db, *found);
+            let description = constraint_description(*constraint);
+            match constraint {
+                Constraint::Num => format!(
+                    "expected {description}, found `{found}`. Declare `<{found}: num>` to combine two of its values, because `arithmetic` admits classes such as `Date` that only add a number"
+                ),
+                _ => format!(
+                    "expected {description}, found `{found}`. This arithmetic gives an R number, so declare `<{found}: numeric>`, which admits R's numbers and the classes with arithmetic between two of their values"
+                ),
+            }
+        }
+        TypeErrorKind::ConstraintViolation {
+            constraint: Constraint::Arithmetic,
             found,
         } if matches!(found.kind(db), TyKind::Rigid(_)) => {
             let found = renderer.render(db, *found);
             format!(
-                "expected a numeric value (`integer` or `double`), found `{found}`. Declare `<{found}: numeric>` to combine two of its values, because `arithmetic` admits classes such as `Date` that only add a number"
+                "expected a numeric value (`integer` or `double`), found `{found}`. This arithmetic takes R's numbers and the classes with arithmetic, so declare `<{found}: arithmetic>`"
             )
         }
         TypeErrorKind::ConstraintViolation { constraint, found } => format!(
@@ -3791,12 +3818,22 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 accepts,
                 constraint,
             } => {
+                let ry_number =
+                    matches!(passed.kind(db), TyKind::Native(native) if native.is_number());
                 let passed = renderer.render(db, *passed);
                 let position = match name {
                     Some(name) => format!("its parameter `{name}`"),
                     None => "its parameter".to_owned(),
                 };
                 match constraint {
+                    Some(constraint @ (Constraint::Numeric | Constraint::Arithmetic))
+                        if ry_number =>
+                    {
+                        format!(
+                            "this function is passed `{passed}`, but {position} is used as {}, which takes R's numbers only. To compute in ry numbers, declare the parameter `{passed}`",
+                            constraint_description(*constraint)
+                        )
+                    }
                     Some(constraint) => format!(
                         "this function is passed `{passed}`, but {position} is used as {}",
                         constraint_description(*constraint)
@@ -4700,6 +4737,7 @@ fn constraint_description(constraint: Constraint) -> &'static str {
     match constraint {
         Constraint::Unconstrained => "a value",
         Constraint::Numeric => "a numeric value (`integer` or `double`)",
+        Constraint::Num => "a number (`integer`, `double`, `I64` or `F64`)",
         Constraint::Arithmetic => "a numeric value (`integer` or `double`)",
         Constraint::AtomicElement => {
             "an atomic value (`logical`, `integer`, `double`, `complex`, `character`, or `raw`)"

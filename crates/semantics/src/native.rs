@@ -889,12 +889,14 @@ fn side<'db>(
 }
 
 /// Whether a declared signature has a type parameter that stands for R values, such as
-/// `<T: numeric>`. Such a signature names an R type, so its function is a boundary function.
+/// `<T: numeric>` or `<T: num>`. Such a signature admits an R type, so its function is a
+/// boundary function.
 pub fn has_r_bound(scheme: &TypeScheme<'_>) -> bool {
     scheme.binders.iter().any(|binder| {
         matches!(
             binder.constraint(),
             Constraint::Numeric
+                | Constraint::Num
                 | Constraint::Arithmetic
                 | Constraint::ScalarNumeric
                 | Constraint::AtomicElement

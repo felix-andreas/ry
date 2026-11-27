@@ -220,7 +220,7 @@ h <- function(k) {
   } else 2
 }
 #++++
-f: <T: numeric> fn(x: T, value: T) -> T
+f: <T: num> fn(x: T, value: T) -> T
 h: fn(k: logical) -> double
 
 #---- an_assignment_before_the_tail_is_still_reported

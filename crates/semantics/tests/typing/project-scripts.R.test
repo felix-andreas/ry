@@ -205,7 +205,7 @@ input <- function() 2L
 total <- add(input(), 1L)
 #++++
 == R/a.R
-add: <T: numeric> fn(x: T, y: T) -> T
+add: <T: num> fn(x: T, y: T) -> T
 == tests/testthat/helper-input.R
 input: fn() -> integer
 == tests/testthat/test-add.R

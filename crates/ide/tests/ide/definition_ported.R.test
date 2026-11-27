@@ -200,14 +200,14 @@ action: Add inferred type annotation for `apply_scale`
   edit 60..60 -> ": double"
   edit 61..61 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 20..20 -> "<T: numeric>"
+  edit 20..20 -> "<T: num>"
   edit 22..22 -> ": T"
   edit 26..26 -> ": T"
   edit 27..27 -> " -> T"
   edit 60..60 -> ": double"
   edit 61..61 -> " -> double"
 completion (39): scale_by, scale, scale.default, cmdscale, apply_scale, sequence.default, setGraphicsEventHandlers, srcfilealias
-hint @20<T: numeric>
+hint @20<T: num>
 hint @22: T
 hint @26: T
 hint @27 -> T

@@ -66,7 +66,7 @@ total: integer
 sum <- function(a, b) a + b
 shadowed <- sum(1L, 2L)
 #++++
-sum: <T: numeric> fn(a: T, b: T) -> T
+sum: <T: num> fn(a: T, b: T) -> T
 shadowed: integer
 28..36 warning[unused] `shadowed` is assigned but never used
 
@@ -746,7 +746,7 @@ takes_two <- function(a, b) a + b
 quoted <- quote({ takes_two(1) })
 direct <- takes_two(1)
 #++++
-takes_two: <T: numeric> fn(a: T, b: T) -> T
+takes_two: <T: num> fn(a: T, b: T) -> T
 quoted: Any
 direct: Unknown
 267..273 warning[unused] `quoted` is assigned but never used

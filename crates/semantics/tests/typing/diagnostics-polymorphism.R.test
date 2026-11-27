@@ -171,9 +171,9 @@ shifted <- shift(day)
 negated <- negate(day)
 #++++
 add_them: <T: numeric> fn(a: T, b: T) -> T
-add_inferred: <T: numeric> fn(a: T, b: T) -> T
+add_inferred: <T: num> fn(a: T, b: T) -> T
 shift: <T: arithmetic> fn(x: T) -> double
-negate: <T: numeric> fn(x: T) -> T
+negate: <T: num> fn(x: T) -> T
 twice: <T: arithmetic> fn(x: T) -> T
 day: Date
 dates: Unknown
@@ -181,12 +181,12 @@ inferred: Unknown
 gaps: difftime
 shifted: double
 negated: Unknown
-470..475 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T`. Declare `<T: numeric>` to combine two of its values, because `arithmetic` admits classes such as `Date` that only add a number
+470..475 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`), found `T`. Declare `<T: num>` to combine two of its values, because `arithmetic` admits classes such as `Date` that only add a number
 523..526 error[type-mismatch] expected a numeric value (`integer` or `double`) or a class with arithmetic between two of its values, found `Date`
 528..531 error[type-mismatch] expected a numeric value (`integer` or `double`) or a class with arithmetic between two of its values, found `Date`
-558..561 error[type-mismatch] expected a numeric value (`integer` or `double`) or a class with arithmetic between two of its values, found `Date`
-563..566 error[type-mismatch] expected a numeric value (`integer` or `double`) or a class with arithmetic between two of its values, found `Date`
-647..650 error[type-mismatch] expected a numeric value (`integer` or `double`) or a class with arithmetic between two of its values, found `Date`
+558..561 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic between two of its values, found `Date`
+563..566 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic between two of its values, found `Date`
+647..650 error[type-mismatch] expected a number (`integer`, `double`, `I64` or `F64`) or a class with arithmetic between two of its values, found `Date`
 
 #---- a_difference_of_two_values_asks_only_arithmetic
 # R subtracts two dates or two times, and testthat compares them with `abs(x - y) < tol`.
@@ -205,7 +205,7 @@ b <- add(1.5, 1L)
 c <- Num.add(1, 2)
 d <- Num.max(1, 2.5)
 #++++
-add: <T: numeric> fn(a: T, b: T) -> T
+add: <T: num> fn(a: T, b: T) -> T
 a: double
 b: double
 c: I64
@@ -284,7 +284,7 @@ twice <- function(y) {
   doubled
 }
 #++++
-twice: <T: numeric> fn(y: T) -> T
+twice: <T: num> fn(y: T) -> T
 28..29 error[annotation] I do not know the type `T`. It is not a built-in type, a type defined with `type`, `alias`, `@type` or `@alias`, or a class from the standard-library stubs
 
 #---- a_body_annotation_widens_the_signatures_type_parameter
