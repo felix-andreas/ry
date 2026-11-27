@@ -1610,7 +1610,8 @@ unsafe fn is_supplied(frame: ClosureFrame, symbol: Sexp) -> R<bool> {
 /// argument, in one scope with the slot's read; `None` as for [`handles::formal_slots`].
 fn supplied_in_slot(context: &Cx<'_>, (index, symbol): (usize, Gc<'_, Symbol>)) -> Option<R<bool>> {
     let [(value, missing)] = handles::formal_slots(context, index, [symbol])?;
-    if missing {
+    // A formal the call left out holds the missing marker, which needs no call to ask.
+    if missing || handles::is_missing_argument(value) {
         return Some(Ok(false));
     }
     Some(eval::content_is_missing(context, value).map(|missing| !missing))
