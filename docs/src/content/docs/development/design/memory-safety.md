@@ -600,11 +600,16 @@ specials (`{`, `(`, `if`, `for`, `while`, `repeat`, `break`, `next`, `return`, `
 `eval`; and assignment (`<-`, `=`, `<<-` and the replacement chain of `f(x) <- v`, which tier 0
 enters through the raw entry `eval::compiled_complex_assign`); argument matching (`match_args`, the
 match plan a compiled body keeps in its constant pool, and `match.call`); and the slot binders
-(`bind_slots`, `bind_plan`, `enter_method`, `direct_sources` and `matched_sources`). The specials reach the loop and
+(`bind_slots`, `bind_plan`, `enter_method`, `direct_sources` and `matched_sources`); and the
+variable lookups (symbol evaluation, `findVar`, `findFun`, a frame's own variable, `define` and the
+outward assignment of `<<-`), which return `None` for an unbound name instead of
+`R_UnboundValue`. The specials reach the loop and
 function contexts, the srcref and the closure maker through wrappers in `handles.rs` (`in_loop` and
 `loop_jump` hold a loop's environment, `Args::register_on_exit` stores into the frame), because the
-bytecode loop and the JIT share those raw helpers. Two pieces of the API are not built: the bytecode
-loop's register accessor and `Held<T>` fields in traced structures. Two narrow forms of that
+bytecode loop and the JIT share those raw helpers. An interpreter frame holds its call, function,
+environment, `sys.parent`, pending promise, srcref and `on.exit` code in `Held<T>` fields, so
+writing one takes `unsafe` (`Held::adopt`) and reading one as a handle takes the context. The
+bytecode loop's register accessor is not built. Two narrow forms of that
 accessor reach a frame's slots. The replacement forms use `RunningFrame` and `Slot` in
 `bytecode.rs`: a slot read is a `Gc` that borrows the context, a store takes a rooted value, and an
 in-place write needs the `Owned` that `claim` returns only when the slot holds the value itself and
