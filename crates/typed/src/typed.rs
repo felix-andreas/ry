@@ -202,39 +202,47 @@ pub unsafe fn call(
         decline(|| String::from("it is being debugged or traced"));
         return None;
     }
+    // Converting a record or a tag confirms its shapes, which the code compiled next must
+    // consider.
     let mut params: SmallVec<[Type; 4]> = SmallVec::new();
-    for (position, &value) in values.iter().enumerate() {
-        // An `I64` formal converts a whole R number at the boundary, which `Arguments::push`
-        // does, or gives up for the interpreter to raise the error.
-        if interp::annotations::declares_i64(function, position)
-            && matches!(type_of(value), Some(Type::Int | Type::Dbl | Type::I64))
-        {
-            params.push(Type::I64);
-            continue;
-        }
-        let Some(ty) = type_of(value) else {
-            decline(|| format!("argument {}: {}", position + 1, boundary_refusal(value)));
-            return None;
-        };
-        // A length-one vector passed where the closure declares a vector is that vector, not a
-        // scalar.
-        let ty = match ty.item() {
-            Some(item @ (Item::Int | Item::Dbl | Item::Lgl | Item::Str | Item::I64))
-                if interp::annotations::declares_vector(function, position) =>
-            {
-                Type::vector(item)
-            }
-            _ => ty,
-        };
-        params.push(ty);
-    }
-    // Converting a tag confirms its shapes, which the code compiled next must consider.
     let mut arguments = Arguments::default();
-    for (position, (&value, &ty)) in values.iter().zip(&params).enumerate() {
-        if let Err(reason) = arguments.push(value, ty) {
-            arguments.release();
-            decline(|| format!("argument {} does not convert: {reason}", position + 1));
-            return None;
+    for (position, &value) in values.iter().enumerate() {
+        let found = type_of(value);
+        let converted = match found {
+            // An `I64` formal converts a whole R number at the boundary, which `Arguments::push`
+            // does, or gives up for the interpreter to raise the error.
+            Some(Type::Int | Type::Dbl | Type::I64)
+                if interp::annotations::declares_i64(function, position) =>
+            {
+                arguments.push(value, Type::I64).map(|()| Type::I64)
+            }
+            // A length-one vector passed where the closure declares a vector is that vector, not
+            // a scalar.
+            Some(ty) => {
+                let ty = match ty.item() {
+                    Some(item @ (Item::Int | Item::Dbl | Item::Lgl | Item::Str | Item::I64))
+                        if interp::annotations::declares_vector(function, position) =>
+                    {
+                        Type::vector(item)
+                    }
+                    _ => ty,
+                };
+                arguments.push(value, ty).map(|()| ty)
+            }
+            None if holds_boxes(value) => arguments.push_boxes(value),
+            None => {
+                arguments.release();
+                decline(|| format!("argument {}: {}", position + 1, boundary_refusal(value)));
+                return None;
+            }
+        };
+        match converted {
+            Ok(ty) => params.push(ty),
+            Err(reason) => {
+                arguments.release();
+                decline(|| format!("argument {} does not convert: {reason}", position + 1));
+                return None;
+            }
         }
     }
     let Some(compiled) = compiled_for(function, &params) else {
@@ -902,7 +910,8 @@ fn item_kind(item: Item) -> u32 {
 /// is a scalar, a longer or empty one a vector, an `Array` an array, a plain list of length-one
 /// strings, numbers or logicals of one storage type a list of them, an `Array` list of plain tags
 /// an array of tags, a plain tag any tag, and a value of the table API a table.
-/// A record or tuple has none, because a typed closure takes one only from typed code.
+/// A record or tuple has none here, because its type is the shape its conversion finds
+/// ([`Arguments::push_boxes`]).
 unsafe fn type_of(value: Sexp) -> Option<Type> {
     if (interp::interp().extensions.tables.is_table_value)(value) {
         return Some(Type::Table);
@@ -948,15 +957,22 @@ unsafe fn type_of(value: Sexp) -> Option<Type> {
     Some(Type::Vector { item, array })
 }
 
+/// Whether `value` is a plain record or tuple, or a ry list of records, tuples, tags or lists,
+/// which [`Arguments::push_boxes`] converts into boxes that also give its type.
+unsafe fn holds_boxes(value: Sexp) -> bool {
+    if value.is_altrep() || value.attrib() != rvalues::nil() || value.is_object() {
+        return false;
+    }
+    match value.kind() {
+        SexpType::Record => true,
+        SexpType::List => value.is_array() && rvalues::length(value) > 0,
+        _ => false,
+    }
+}
+
 /// Why an argument from R has no type in the typed core, and what to pass instead.
 unsafe fn boundary_refusal(value: Sexp) -> String {
-    if value.kind() == SexpType::Record {
-        return String::from(
-            "it is a record or tuple from R, which typed code takes only from typed code: pass \
-             its fields as parameters, or build it inside a typed function",
-        );
-    }
-    if value.attrib() != rvalues::nil() {
+    if value.attrib() != rvalues::nil() || value.is_object() {
         return String::from(
             "it is an R value with attributes, such as a data frame or a factor, which typed code \
              cannot hold: pass its columns or plain vectors",
@@ -1096,6 +1112,23 @@ impl Arguments {
             }
         }
         Ok(())
+    }
+
+    /// Appends the plain record or tuple `value`, or the ry list of records, tuples, tags or
+    /// lists `value`, converted deeply, with the type the converted value has. The type comes
+    /// from the value, as `list_of_array` explains.
+    unsafe fn push_boxes(&mut self, value: Sexp) -> Result<Type, &'static str> {
+        let (word, ty) = if value.kind() == SexpType::Record {
+            let (boxed, item) = to_box(value)?;
+            (boxed, Type::of_item(item))
+        } else {
+            let length = rvalues::length(value);
+            let (list, item) = shapes::with(|shapes| list_of_objects(shapes, value, length, 0))?;
+            (list as u64, Type::Vector { item, array: true })
+        };
+        self.lists.push(word as *mut List);
+        self.words.push(word);
+        Ok(ty)
     }
 
     unsafe fn release(&mut self) {

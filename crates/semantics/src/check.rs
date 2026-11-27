@@ -7992,22 +7992,26 @@ impl<'db, 'a> Checker<'db, 'a> {
 
     /// A tuple item or a record field. A literal there is open, as a literal bound
     /// to a variable is: a later use decides it (`Str.concat(s, pair[[1]])` makes `"a"` in
-    /// `pair <- ("a", 1)` a `Str`), and otherwise it has R's type.
+    /// `pair <- ("a", 1)` a `Str`), and otherwise it has R's type, or a ry type where a
+    /// literal bound to a name has one (`binds_ry_value`).
     fn component(&mut self, value: ExprId) -> Ty<'db> {
         let module = self.module;
         let mut inner = value;
         while let ExpressionKind::Paren(paren) = module.kind(inner) {
             inner = *paren;
         }
+        let native = self.binds_ry_value();
         let ty = if let Some(literal) = number_literal(module, inner) {
-            let constraint = if literal.is_fraction() {
+            let constraint = if literal.is_fraction()
+                || (native && literal.default_native() == NativeScalar::F64)
+            {
                 Constraint::FracLiteral
             } else {
                 Constraint::WholeLiteral {
                     integer: literal.integer,
                 }
             };
-            let ty = self.fresh_literal(constraint, false);
+            let ty = self.fresh_literal(constraint, native);
             self.record_literal(inner, ty);
             ty
         } else {
@@ -8016,7 +8020,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 ExpressionKind::Literal(LiteralKind::Logical(_)) => Constraint::BoolLiteral,
                 _ => return self.infer(value),
             };
-            let ty = self.fresh_literal(constraint, false);
+            let ty = self.fresh_literal(constraint, native);
             self.record(inner, ty)
         };
         if inner != value {

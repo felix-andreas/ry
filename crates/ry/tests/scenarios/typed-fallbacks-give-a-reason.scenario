@@ -82,6 +82,31 @@ expect stdout "0i64"
 expect stderr "typed: compiled for [Tag"
 expect stderr "typed: `size` runs in the interpreter: argument 1 does not convert: it holds an empty list whose item type is unknown"
 
+# A record or tuple that R holds converts too, whether R built it or typed code returned it, and
+# so does a ry list of records. A record literal bound at the top level has ry fields, so `pt`
+# is a `Record{x: F64, y: F64}` as the literal at the call would be.
+file records.R
+| alias P = Record{x: F64, y: F64}
+| norm <- function(p: P) -> F64 p$x * p$x + p$y * p$y
+| first <- function(t: Tuple{I64, Str}) -> I64 t[[1]]
+| make <- function(a: F64) -> P (x = a, y = a)
+| sum_norms <- function(ps: List<P>) -> F64 List.walk(ps, 0.0, function(total, p) total + norm(p))
+| pt <- (x = 3.0, y = 4.0)
+| print(norm(pt))
+| print(first((2, "a")))
+| m <- make(1.0)
+| print(norm(m))
+| ps <- [(x = 1.0, y = 0.0), (x = 0.0, y = 2.0)]
+| print(sum_norms(ps))
+
+run ry run --runtime ry records.R
+expect exit 0
+expect stdout "[1] 25\n2i64\n[1] 2\n[1] 5"
+expect stderr "typed: compiled for [Record(0)] -> Dbl"
+expect stderr "typed: compiled for [Record(1)] -> I64"
+expect stderr "typed: compiled for [Vector { item: Record(0), array: true }] -> Dbl"
+expect stderr lacks "runs in the interpreter"
+
 # A function written in ry types that holds an R value does not compile. Strict mode reports it
 # and refuses to run it; without strict mode it runs in the interpreter, and the log says why.
 file shout.R
