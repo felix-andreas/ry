@@ -38,10 +38,11 @@ pub const BUILTINS: &[BuiltinDef] = &[
 ];
 
 /// The host's rewrite of the text of a file that `source()` or `parse(file = )` reads, given
-/// the file's name and text, into the program the checker elaborates (`preflight::elaborate` in
-/// the `ry` crate): `Ok(None)` when nothing changes, and `Err` when the host could not check the
-/// file, after it reported why.
-pub type SourceElaborator = fn(&str, &str) -> Result<Option<String>, ()>;
+/// the name R read it by, its text and the text's parse, into the program the checker
+/// elaborates (`preflight::elaborate` in the `ry` crate): `Ok(None)` when nothing changes, and
+/// `Err` when the host could not check the file, after it reported why. The parse lets a host
+/// decline a plain R file before it looks for the file on disk.
+pub type SourceElaborator = fn(&str, &str, &SyntaxNode) -> Result<Option<String>, ()>;
 
 static SOURCE_ELABORATOR: OnceLock<SourceElaborator> = OnceLock::new();
 
@@ -56,23 +57,14 @@ pub fn set_source_elaborator(elaborator: SourceElaborator) {
 
 /// Parses `text` into an expression vector, or reports the first syntax error in GNU R's form.
 pub unsafe fn parse_text(text: &str, source_name: &str) -> R<Sexp> {
-    parse_with_srcfile(text, source_name, nil())
+    lower_script(&parse_script(text, source_name, nil())?, nil())
 }
 
-/// Parses `text` like [`parse_text`], and keeps source references against `srcfile` when it is a
-/// srcfile environment, as GNU R's parser does when `parse` is given one.
-pub unsafe fn parse_with_srcfile(text: &str, source_name: &str, srcfile: Sexp) -> R<Sexp> {
-    let condition_file = if srcfile.kind() == SexpType::Environment {
-        let filename = crate::eval::find_var_in_frame(install("filename")?, srcfile)?;
-        match filename.kind() {
-            SexpType::String => values::string_at(filename, 0)
-                .map_or_else(|| "<input>".to_owned(), |name| name.into_owned()),
-            _ => "<input>".to_owned(),
-        }
-    } else {
-        "<input>".to_owned()
-    };
-    let script = parse_script(text, source_name, &condition_file)?;
+/// Lowers every expression of `script` into an expression vector, and keeps source references
+/// against `srcfile` when it is a srcfile environment, as GNU R's parser does when `parse` is
+/// given one.
+pub unsafe fn lower_script(script: &Script<'_>, srcfile: Sexp) -> R<Sexp> {
+    let text = script.text;
     let source = if srcfile.kind() == SexpType::Environment {
         Some(SourceMap::new(text, 0, srcfile)?)
     } else {
@@ -179,24 +171,33 @@ pub enum ConditionValue {
     Integer(i32),
 }
 
-/// Parses `text`, or reports the first syntax error in GNU R's form. `condition_file` is the
-/// file name a `parseError` condition reports.
+/// Parses `text`, or reports the first syntax error in GNU R's form. A `parseError` condition
+/// names the `filename` of `srcfile` when it is a srcfile environment.
 pub unsafe fn parse_script<'text>(
     text: &'text str,
     source_name: &str,
-    condition_file: &str,
+    srcfile: Sexp,
 ) -> R<Script<'text>> {
     let (script, failure) = parse_script_prefix(text);
-    match failure {
-        None => Ok(script),
-        Some(failure) => Err(syntax_failure_unwind(
-            text,
-            &failure,
-            source_name,
-            condition_file,
-            None,
-        )),
-    }
+    let Some(failure) = failure else {
+        return Ok(script);
+    };
+    let filename = match srcfile.kind() {
+        SexpType::Environment => crate::eval::find_var_in_frame(install("filename")?, srcfile)?,
+        _ => nil(),
+    };
+    let condition_file = match filename.kind() {
+        SexpType::String => values::string_at(filename, 0)
+            .map_or_else(|| "<input>".to_owned(), |name| name.into_owned()),
+        _ => "<input>".to_owned(),
+    };
+    Err(syntax_failure_unwind(
+        text,
+        &failure,
+        source_name,
+        &condition_file,
+        None,
+    ))
 }
 
 /// Parses `text` as far as it goes: the expressions a newline or `;` ends before the first
@@ -2620,35 +2621,32 @@ unsafe fn do_parse(call: &Call<'_>) -> R<Sexp> {
         SexpType::String => text == nil(),
         _ => false,
     };
-    let source = match SOURCE_ELABORATOR.get() {
-        Some(elaborate)
-            if reads_file
-                && std::path::Path::new(&crate::connections::expand_path(&name)).is_file() =>
-        {
-            match elaborate(&crate::connections::expand_path(&name), &source) {
-                // Source references count columns in the text they were parsed from, so the
-                // srcfile copy holds the program's lines, as `ry run` shows a script's.
-                Ok(Some(program)) if srcfile.kind() == SexpType::Environment => {
-                    let lines: Vec<&str> = program.lines().collect();
-                    crate::heap().define(
-                        srcfile,
-                        install("lines")?,
-                        values::string_vector(&lines)?,
-                    )?;
-                    program
-                }
-                Ok(Some(program)) => program,
-                Ok(None) => source,
-                Err(()) => {
-                    return Err(error(format!(
-                        "ry could not elaborate the typed code in {name}"
-                    )));
-                }
+    // The text is parsed once: the host reads the parse to decline a plain R file, and only a
+    // program it rewrote is parsed again.
+    let script = parse_script(&source, &name, srcfile)?;
+    let elaborated = match SOURCE_ELABORATOR.get() {
+        Some(elaborate) if reads_file => match elaborate(&name, &source, &script.root) {
+            Ok(program) => program,
+            Err(()) => {
+                return Err(error(format!(
+                    "ry could not elaborate the typed code in {name}"
+                )));
             }
-        }
-        _ => source,
+        },
+        _ => None,
     };
-    let expressions = parse_with_srcfile(&source, &name, srcfile)?;
+    let expressions = match elaborated {
+        Some(program) => {
+            // Source references count columns in the text they were parsed from, so the
+            // srcfile copy holds the program's lines, as `ry run` shows a script's.
+            if srcfile.kind() == SexpType::Environment {
+                let lines: Vec<&str> = program.lines().collect();
+                crate::heap().define(srcfile, install("lines")?, values::string_vector(&lines)?)?;
+            }
+            lower_script(&parse_script(&program, &name, srcfile)?, srcfile)?
+        }
+        None => lower_script(&script, srcfile)?,
+    };
     if text == nil() && count < 0 {
         crate::heap().root(expressions);
         crate::ahead::parsed_file(expressions, call.env()?)?;

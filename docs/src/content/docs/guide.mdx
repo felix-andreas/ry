@@ -490,8 +490,9 @@ point$x + point$y
 3i64
 ```
 
-In a file written with ry syntax, a literal bound outside any function is a ry value, so `x = 1` is
-an `I64`, and `x = 1.0` would be an `F64`.
+In a file written in ry's own types or values, a literal bound outside any function is a ry value,
+so `x = 1` is an `I64`, and `x = 1.0` would be an `F64`. A file annotated only in R's types, such
+as `function(x: double)`, keeps R's types and runs like the same code without annotations.
 
 A record's fields are fixed and checked, and it has value semantics: `point$x <- 3` changes a copy
 only `point` sees. A *tag* is a name starting with `:`, with an optional payload, and a union of

@@ -1333,7 +1333,10 @@ mod tests {
             // SAFETY: the interpreter is installed.
             unsafe {
                 let hash_of = |srcfile: Sexp| -> R<u64> {
-                    let parsed = crate::lower::parse_with_srcfile(text, "<test>", srcfile)?;
+                    let parsed = crate::lower::lower_script(
+                        &crate::lower::parse_script(text, "<test>", srcfile)?,
+                        srcfile,
+                    )?;
                     let mut hash = FNV_OFFSET;
                     stable_hash(parsed.element(0), &mut hash);
                     Ok(hash)

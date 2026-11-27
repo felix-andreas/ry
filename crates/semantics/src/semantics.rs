@@ -26,7 +26,7 @@ use {
         infer::InferenceTable,
         naming::RefClassKey,
         sorted::{SortedMap, SortedSet},
-        types::{Ty, TyKind},
+        types::{NativeScalar, Ty, TyKind},
     },
     rustc_hash::{FxHashMap, FxHashSet},
     salsa::plumbing::AsId,
@@ -659,6 +659,8 @@ pub enum SiteRole {
     InlineSite,
     /// An inline annotation itself, as [`syntax::is_inline_annotation_kind`].
     InlineAnnotation,
+    /// An inline annotation that names one of ry's own types, as [`names_ry_type`].
+    RyTypeAnnotation,
     /// The file or a brace body with a `#:` block among its statements.
     AnnotatedSequence,
     /// A call that attaches a namespace, as [`metadata::is_attach_call_ref`].
@@ -672,6 +674,7 @@ impl SiteRole {
             SiteRole::InlineAnnotation => 2,
             SiteRole::AnnotatedSequence => 4,
             SiteRole::AttachCall => 8,
+            SiteRole::RyTypeAnnotation => 16,
             SiteRole::Annotation
             | SiteRole::TypeDefinition
             | SiteRole::Declaration
@@ -690,6 +693,7 @@ impl SiteRole {
             SiteRole::RySyntax => is_ry_syntax(site.kind),
             SiteRole::InlineSite
             | SiteRole::InlineAnnotation
+            | SiteRole::RyTypeAnnotation
             | SiteRole::AnnotatedSequence
             | SiteRole::AttachCall => site.roles & self.bit() != 0,
         }
@@ -768,6 +772,9 @@ pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
         };
         if syntax::is_inline_annotation_kind(kind, node.parent().map(NodeRef::kind)) {
             roles |= SiteRole::InlineAnnotation.bit();
+            if names_ry_type(node) {
+                roles |= SiteRole::RyTypeAnnotation.bit();
+            }
         }
         if (node == root || kind == SyntaxKind::BRACE_EXPR || kind == SyntaxKind::ARGUMENT_LIST)
             && node.has_child(SyntaxKind::ANNOTATION)
@@ -783,6 +790,26 @@ pub fn file_syntax_sites(db: &dyn Db, file: SourceFile) -> SyntaxSites {
         }
     }
     SyntaxSites(sites)
+}
+
+/// Whether the inline annotation `node` names one of ry's own types: a ry number, `Str`, `Bool`,
+/// a standard library collection or `Result`, a `Record{...}` or `Tuple{...}`, or a tag. R's
+/// `list{...}` shares the record's syntax and an R class may be called `Record`, so a record or
+/// tuple counts by its head. Names count by spelling alone, which keeps this a syntax fact that
+/// no attached package or stub edit invalidates.
+fn names_ry_type(node: NodeRef<'_>) -> bool {
+    node.descendants().any(|child| match child.kind() {
+        SyntaxKind::TYPE_TAG => true,
+        SyntaxKind::TYPE_RECORD | SyntaxKind::TYPE_TUPLE => child
+            .first_token()
+            .is_some_and(|head| matches!(head.text(), "Record" | "Tuple")),
+        SyntaxKind::TYPE_REF | SyntaxKind::TYPE_APPLY => child.first_token().is_some_and(|head| {
+            let name = head.text();
+            NativeScalar::from_name(name).is_some()
+                || matches!(name, "List" | "Dict" | "Set" | "Result")
+        }),
+        _ => false,
+    })
 }
 
 /// Every `#:` block of the file lowered once, in source order. The diagnostics, the type
@@ -818,6 +845,32 @@ pub fn comment_annotation<'db>(
         .binary_search_by_key(&start, |(offset, _)| *offset)
         .ok()?;
     annotations.get(index).map(|(_, annotation)| annotation)
+}
+
+/// Whether the parse `root` holds anything analysis decides: an inline or comment annotation,
+/// a `# typing:` directive, a record, tuple, list, tag or `match`, a suffixed number, or a
+/// native function call such as `List.range(1, 10)`. Missing one of these leaves an `I64`
+/// literal an R double at run time, so the test errs toward analysis. It reads the tree's kind
+/// column once, and the text only of comments and names, so a host runs it on every file R
+/// parses.
+pub fn has_ry_syntax(root: &SyntaxNode) -> bool {
+    root.node_ref().any_element(|kind, token| match kind {
+        SyntaxKind::ANNOTATION_MARKER | SyntaxKind::SUFFIXED_NUMBER => true,
+        SyntaxKind::COMMENT => token.is_some_and(|token| {
+            token
+                .text()
+                .trim_start_matches('#')
+                .trim_start()
+                .starts_with("typing:")
+        }),
+        SyntaxKind::IDENT => token.is_some_and(|token| stubs::is_native_function(token.text())),
+        // The kind column has no parents, so a binder list counts wherever it sits: outside a
+        // function's it is in a type definition or a `#:` comment anyway.
+        _ => {
+            is_ry_syntax(kind)
+                || syntax::is_inline_annotation_kind(kind, Some(SyntaxKind::FUNCTION_DEF))
+        }
+    })
 }
 
 /// Whether a node of `kind` builds a ry value: a record, tuple, list, tag or `match`.
@@ -1411,7 +1464,9 @@ pub fn file_is_strict(db: &dyn Db, file: SourceFile) -> bool {
 }
 
 /// Whether a literal bound outside any function in `file` is a ry value: the file is strict,
-/// or written with ry syntax (an inline annotation, a record, tuple, tag, `List` or `match`).
+/// builds a ry value (a record, tuple, tag, `List` or `match`), or has an inline annotation that
+/// names one of ry's own types. An annotation written in R's types alone leaves the file R code
+/// that behaves like its erasure.
 #[salsa::tracked]
 pub fn file_holds_ry_values(db: &dyn Db, file: SourceFile) -> bool {
     // Unlike `file_is_strict`, a host with no settings does not count as strict here, because
@@ -1424,8 +1479,7 @@ pub fn file_holds_ry_values(db: &dyn Db, file: SourceFile) -> bool {
     }
     let sites = file_syntax_sites(db, file);
     sites.any(SiteRole::RySyntax)
-        || sites.any(SiteRole::InlineSite)
-        || sites.any(SiteRole::InlineAnnotation)
+        || sites.any(SiteRole::RyTypeAnnotation)
         || session::holds_ry_values(db, file)
 }
 
@@ -4759,6 +4813,25 @@ fn set_generic_target(node: &SyntaxNode) -> Option<(String, TextRange)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ry_syntax_gate_reads_kinds_comments_and_names() {
+        let cases = [
+            ("f <- function(x) x + 1\nprint(f(2)) # done\n", false),
+            ("x <- \"#: in a string\"\n", false),
+            ("x <- 1L\n", false),
+            ("#: (x: double) -> double\nf <- function(x) x\n", true),
+            ("# typing: strict\nf <- function(x) x\n", true),
+            ("f <- function(x: double) -> double x\n", true),
+            ("n <- 3i64\n", true),
+            ("p <- (x = 1, y = 2)\n", true),
+            ("for (i in List.range(1, 3)) print(i)\n", true),
+        ];
+        for (text, expected) in cases {
+            let root = syntax::parse(text).syntax_node();
+            assert_eq!(has_ry_syntax(&root), expected, "{text:?}");
+        }
+    }
 
     #[test]
     fn refusal_is_idempotent() {

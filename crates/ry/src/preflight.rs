@@ -14,11 +14,11 @@ use {
     },
     loader::SourceEncoding,
     repl::{Filtered, InputFilter},
-    rustc_hash::FxHashMap,
+    rustc_hash::{FxHashMap, FxHashSet},
     semantics::{
         Elaboration, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{Diagnostic, RelatedLocation, Severity},
-        is_ry_syntax, session,
+        has_ry_syntax, is_ry_syntax, session,
         stubs::{install_shipped_stubs, is_native_function},
     },
     std::{
@@ -32,7 +32,7 @@ use {
         NodeOrToken, SyntaxKind, SyntaxNode, erase_inline_annotations, erased_lines_end,
         input_is_unfinished, is_inline_annotation,
     },
-    xxhash_rust::xxh3::xxh3_64,
+    xxhash_rust::xxh3::{xxh3_64, xxh3_64_with_seed},
 };
 
 /// Analysis state for one run or one console session. Each accepted command is a file of its
@@ -143,7 +143,7 @@ impl Preflight {
     pub fn check_elaborations(&mut self, input: &str) -> Option<Vec<Elaboration>> {
         self.last = None;
         if !self.analyzed {
-            if !has_ry_syntax(&syntax::parse(input).syntax_node(), input) {
+            if !has_ry_syntax(&syntax::parse(input).syntax_node()) {
                 self.last = Some(Last::Plain {
                     start: self.plain.len(),
                 });
@@ -438,7 +438,7 @@ pub fn elaborate_package(
         // A file that is not text in the package's encoding is the analysis's to report.
         typed = encoding.decode(bytes).is_none_or(|source| {
             source.contains("typing: strict")
-                || has_ry_syntax(&syntax::parse(&source).syntax_node(), &source)
+                || has_ry_syntax(&syntax::parse(&source).syntax_node())
         });
     }
     if !typed {
@@ -550,15 +550,28 @@ pub fn elaborate_loaded_package(
 pub fn elaborate_sourced(path: &Path) -> Result<Option<(u64, String)>, CommandError> {
     // A sourced file that ry cannot check runs as R reads it: R reports a file it cannot read,
     // and a broken `ry.toml` beside it must not stop plain R code.
+    let Ok(bytes) = fs::read(path) else {
+        return Ok(None);
+    };
+    // A script that sources a helper in a loop would repeat the same findings each time, so
+    // they print for the first `source()` of a file with this text.
+    static REPORTED: LazyLock<Mutex<FxHashSet<u64>>> = LazyLock::new(Mutex::default);
+    let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let first = REPORTED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(xxh3_64_with_seed(
+            &bytes,
+            xxh3_64(canonical.as_os_str().as_encoded_bytes()),
+        ));
     let mut config = match Config::discover(path) {
         Ok(config) => config,
         Err(error) => {
-            report(&error);
+            if first {
+                report(&error);
+            }
             return Ok(None);
         }
-    };
-    let Ok(bytes) = fs::read(path) else {
-        return Ok(None);
     };
     // R reads the file in the session's encoding, UTF-8, and drops a byte order mark; text
     // that is not UTF-8 is no file the parse reads as the checker would.
@@ -571,10 +584,6 @@ pub fn elaborate_sourced(path: &Path) -> Result<Option<(u64, String)>, CommandEr
     // The project's strict mode is the sourcing script's: a plain R file it sources keeps R's
     // types, and one that turns strict mode on itself (`# typing: strict`) is checked strictly.
     config.check.strict = false;
-    let directive = source.contains("typing: strict");
-    if !directive && !has_ry_syntax(&syntax::parse(source).syntax_node(), source) {
-        return Ok(None);
-    }
     let preflight = Preflight::new(config, path.to_path_buf());
     let file = session::command_file(&preflight.db, format!("{source}\n"));
     let db = preflight.db.clone();
@@ -594,14 +603,16 @@ pub fn elaborate_sourced(path: &Path) -> Result<Option<(u64, String)>, CommandEr
             message: related.message,
         })
     };
-    render_findings(
-        OutputFormat::Human,
-        MinSeverity::Warning,
-        path,
-        text,
-        &warnings,
-        &resolve_note,
-    );
+    if first {
+        render_findings(
+            OutputFormat::Human,
+            MinSeverity::Warning,
+            path,
+            text,
+            &warnings,
+            &resolve_note,
+        );
+    }
     if elaborations.is_empty() {
         return Ok(None);
     }
@@ -993,28 +1004,6 @@ fn is_strict_error(diagnostic: &Diagnostic) -> bool {
 
 fn has_inline_annotation(root: &SyntaxNode) -> bool {
     root.descendants().any(|node| is_inline_annotation(&node))
-}
-
-/// Whether `source` holds anything analysis decides: an inline or comment annotation, a
-/// `# typing:` directive, a record, tuple, list, tag or `match`, a suffixed number, or a native
-/// function call such as `List.range(1, 10)`. Missing one of these leaves an `I64` literal an R double at run time, so
-/// the test errs toward analysis.
-fn has_ry_syntax(root: &SyntaxNode, source: &str) -> bool {
-    source.contains("#:")
-        || has_inline_annotation(root)
-        || root.descendants_with_tokens().any(|element| match element {
-            NodeOrToken::Node(node) => is_ry_syntax(node.kind()),
-            NodeOrToken::Token(token) => match token.kind() {
-                SyntaxKind::SUFFIXED_NUMBER => true,
-                SyntaxKind::COMMENT => token
-                    .text()
-                    .trim_start_matches('#')
-                    .trim_start()
-                    .starts_with("typing:"),
-                SyntaxKind::IDENT => is_native_function(token.text()),
-                _ => false,
-            },
-        })
 }
 
 /// GNU R reads the plain program an annotated one means.

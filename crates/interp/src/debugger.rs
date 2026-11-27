@@ -969,7 +969,7 @@ unsafe fn is_other_test(expression: Sexp, name: &str) -> bool {
 /// file's own line numbers.
 unsafe fn program_expressions(text: &str, path: &str) -> R<Sexp> {
     let srcfile = lower::file_srcfile(path, text)?;
-    lower::parse_with_srcfile(text, path, srcfile)
+    lower::lower_script(&lower::parse_script(text, path, srcfile)?, srcfile)
 }
 
 /// The frames of the stopped program, innermost first, ending with the top level. Each closure

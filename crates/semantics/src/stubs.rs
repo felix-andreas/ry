@@ -415,7 +415,11 @@ pub const STANDARD_LIBRARY: &str = "std";
 /// Whether `name` is a function a native namespace declares, such as `List.map`. R's own
 /// dotted names (`Sys.time`) and S3 methods (`Ops.money`) share the spelling but are not.
 pub fn is_native_function(name: &str) -> bool {
-    NATIVE_FUNCTIONS.binary_search(&name).is_ok()
+    // Every native name is `Module.function` with an uppercase module (`build.rs`), and the
+    // sourced-file gate asks about every identifier R code holds.
+    name.starts_with(|first: char| first.is_ascii_uppercase())
+        && name.contains('.')
+        && NATIVE_FUNCTIONS.binary_search(&name).is_ok()
 }
 
 /// Whether `[check] prelude` keeps the bare `name` out of scope: the standard library exports it

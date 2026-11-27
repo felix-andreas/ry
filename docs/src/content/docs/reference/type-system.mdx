@@ -1684,18 +1684,22 @@ A ry type asks in three places:
   `Str.concat(s, pair[[1]])` makes `"a"` a `Str`, and with no such use `pair` is a
   `Tuple{character, double}`. In a function declared `-> Result<I64, Str>`, `found <- :Ok(1)`
   then `found` makes the `1` an `I64`.
-- **A top-level binding in a typed file.** In a strict file, or a file written with ry syntax (an
-  inline annotation, a record, tuple, tag, `List` or `match`), a literal bound outside any function
-  is a ry value: `count <- 3` is an `I64`, `rate <- 2.0` an `F64`, `name <- "ry"` a `Str` and
-  `flag <- TRUE` a `Bool`. A literal written with a decimal point or an exponent (but not `1e3L`),
-  or a whole number past the range of `I64`, is an `F64`, and arithmetic on literals alone is one
-  literal, so `step <- 1 / 4` is an `F64`. The tuple items, record fields and tag payload items of
-  a literal bound there are ry values too, also inside a nested literal or a `List`, so
-  `pt <- (x = 3.0, y = 4.0)` is a `Record{x: F64, y: F64}` and `pair <- ("a", 1)` a
-  `Tuple{Str, I64}`. A literal inside a call keeps R's type, as `f(1)` does: `f((x = 1,))` passes
-  a `Record{x: double}`. Each top-level
-  statement is checked on its own, so nothing later in the file decides the type. In any other file
-  a top-level literal has R's type.
+- **A top-level binding in a typed file.** In a strict file, a file that builds a ry value (a
+  record, tuple, tag, `List` or `match`), or a file with an inline annotation that names one of ry's
+  own types (a ry number, `Str`, `Bool`, `List`, `Dict`, `Set`, `Result`, a `Record{...}`, a
+  `Tuple{...}` or a tag), a literal bound outside any function is a ry value: `count <- 3` is an
+  `I64`, `rate <- 2.0` an `F64`, `name <- "ry"` a `Str` and `flag <- TRUE` a `Bool`. A literal
+  written with a decimal point or an exponent (but not `1e3L`), or a whole number past the range of
+  `I64`, is an `F64`, and arithmetic on literals alone is one literal, so `step <- 1 / 4` is an
+  `F64`. The tuple items, record fields and tag payload items of a literal bound there are ry values
+  too, also inside a nested literal or a `List`, so `pt <- (x = 3.0, y = 4.0)` is a `Record{x: F64,
+  y: F64}` and `pair <- ("a", 1)` a `Tuple{Str, I64}`. A literal inside a call keeps R's type, as
+  `f(1)` does: `f((x = 1,))` passes a `Record{x: double}`. Each top-level statement is checked on
+  its own, so nothing later in the file decides the type. In any other file a top-level literal has
+  R's type, so a file annotated in R's types alone (`f <- function(x: double) -> double`, `p:
+  list{name: character}`) runs like its erasure. A record or tuple type counts by its head, so an R
+  class named `Tuple` does not, and a `#:` comment never counts, because comment annotations leave
+  the code ordinary R that computes what R computes.
 
 A value written with literals alone is decided as one literal, wherever a lone literal would be:
 
@@ -1743,10 +1747,11 @@ callback carry the item type the checker gave them, so `List.map(List.range(3, 1
 an empty `List<I64>` and its `List.sum` is `0i64`.
 A file parsed on ry's runtime, by `source()`, `parse(file = )` or a parse whose `srcfilecopy()` has
 `isFile = TRUE` (as `sys.source(keep.source = TRUE)` and testthat make), is checked on its own and
-elaborated the same way, and the check prints its annotation warnings. Strict mode applies to such
-a file only when the file turns it on itself (`# typing: strict`), because the project's strict
-mode belongs to the script that sources it. A file with no ry syntax and no strict mode is not
-analyzed, and its literals keep R's types. Code parsed from text, and `sys.source()` with its
+elaborated the same way, and the check prints its annotation warnings, once per session for the
+same file and text. Strict mode applies to such a file only when the file turns it on itself
+(`# typing: strict`), because the project's strict mode belongs to the script that sources it. A
+file with no ry syntax and no `# typing:` directive is not analyzed and reads no `ry.toml`, and its
+literals keep R's types. Code parsed from text, and `sys.source()` with its
 default `keep.source = FALSE`, is not elaborated: there an operator converts a literal
 operand, and an annotated binding such as `n: I64 <- 5` converts its literal. An `I64` parameter and an `-> I64` result
 convert the same way, so `f(3)` passes `3i64` to `f <- function(n: I64) ...`. A conversion that

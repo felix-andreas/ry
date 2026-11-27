@@ -1202,3 +1202,14 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - The constraint is the guard, so `acc * 1.5` with an `I64` init is refused, and a `character` init fails.
 - The `double` is provisional only until the first value meets it: a value that fits settles it, and one that does not rebinds it once and settles it. A value checked against `double` is never left unchecked against a later rebinding (`fold3(f, 1.5, Sys.Date())` for `fn(f: fn(A, integer) -> A, a: A, b: A)` is a mismatch; case `a_fold_accumulator_settles_at_the_first_value_that_meets_it`).
 - Known gap: `arithmetic` admits any class, so `Reduce(function(acc, x) acc * 2, 1:3, Sys.Date())` types as `Date` although R's `*` refuses a `Date`, as `twice(Sys.Date())` does for `twice <- function(x) x * 2`. Asking whether a class defines the operator closes both.
+
+## A file's top-level literals are ry values only when it uses ry's own types or values
+
+**Status:** built (`semantics::file_holds_ry_values`, `SiteRole::RyTypeAnnotation`; cases `top_level_ry_values__annotations_in_r_types_keep_top_level_literals_r_values` and the two after it, oracle `annotations__lazy_parameters`).
+
+- A file's top level holds ry values when it is strict, builds a ry value (a record, tuple, tag, `List` or `match`), or has an inline annotation naming a ry type: a ry number, `Str`, `Bool`, `List`, `Dict`, `Set`, `Result`, `Record{...}`, `Tuple{...}` or a tag.
+- Previous shape: any inline annotation counted, so `side_effect <- function(x: double) -> double` made `counter <- 0` an `I64`. Once `source()` and `ry run` ran annotated files as elaborated, that printed `1i64` where R prints `[1] 1`, breaking the contract that annotated R behaves like its erasure.
+- An annotation in R's types is a typed R file, not ry code, so it keeps R's literals. ry's own vocabulary is the opt-in. `list{...}` shares the record's syntax tree, so the head's name decides, not the node kind.
+- A record or tuple type counts by its head (`Record{...}`, `Tuple{...}`), so an R class named `Tuple` stays R. Names count by spelling, never by a stub or attached-package read, which keeps the fact a syntax property of the file that no other file's edit invalidates.
+- A `#:` comment annotation never counts: a comment must not change what a file computes, and comment-annotated code is ordinary R for every other tool. `Expr` and `DataFrame` are not on the list.
+- A type that a project's alias hides (`p: Point` with `Point` a record defined in another file) does not count. The file then keeps R's types until it names a ry type, builds a ry value or turns strict.
