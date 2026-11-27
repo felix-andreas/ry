@@ -615,3 +615,11 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 - typed defines the boundary (`typed::StringLists`, `install_string_lists`) and libr installs the class, because ALTREP lives in libr and typed must not depend on it. `List.from_r` reaches typed through the interpreter hook `Hooks::share_strings`.
 - The serialized form is a plain character vector (the default `serialized_state`), and `identical` compares elements; only `.Internal(inspect())` names the class.
 
+
+## `print` writes a closure's annotations; `deparse` writes the erasure
+
+**Status:** built (`deparse::options::TYPED_SIGNATURES`, set only by `print::print_closure`; scenario `install-typed-package`).
+
+- A closure without source references (an installed package, `ry run` with `keep.source = FALSE`) prints by deparsing, which wrote `function (name, n)` for `function(name: Str, n: I64) -> Str`. The signature's texts are on the closure (`annotations::signature_of`), so the deparser writes `name: T` per formal and `-> T` after the list.
+- Only `print` sets the option bit. `deparse`, `dput` and `dump` produce R code that another R reads, and a `#:`-annotated plain R file must deparse as plain R.
+- The texts are taken once per closure (`Deparser::formal_types`), so a function literal in a default deparses its own formals untyped.

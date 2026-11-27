@@ -373,6 +373,24 @@ Error in halve("a") : argument `value` must be `double`, not `character`
 GNU R reads a `#:` block as a comment, so a file annotated only in `#:` blocks runs under
 `Rscript` without checks.
 
+**`print` shows the annotations; `deparse` does not.** A function that keeps no source references,
+such as one from an installed package or, by default, any function under `ry run`, prints from its
+code, and `print` writes the signature's types into it. A generic function prints without its
+type parameters (`function (y: T) -> T`). `deparse` and `dput` write the erasure, because they
+produce R code that another R may read:
+
+```r
+scale <- function(values: double, by: double = 1) -> double values * by
+scale
+deparse(scale)
+```
+
+```text ry run runtime=ry
+function (values: double, by: double = 1) -> double 
+values * by
+[1] "function (values, by = 1) " "values * by"
+```
+
 Two kinds of signature are not checked at run time:
 
 - **A coercion.** `@trust`, `@if-unknown` and `@new` say how the value gets its type instead of
@@ -777,7 +795,7 @@ A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
   endpoint of `:` infers, so `function(n) 1:n` is `<T: scalar numeric> fn(n: T) -> double[]`.
 - `item` admits what a [`List`](#lists) can hold: a number, a `Bool`, a `Str`, or another ry value.
   `List.from_r` uses it to type a `list[T]` argument.
-- `eq` admits every value but a function: the values `==` compares.
+- `eq` admits every value but a function or an environment: the values `==` compares.
 - `comparable` admits the R values a comparison takes: an atomic value other than `complex` or
   `raw` in any vector shape, a list, which R compares element by element, and a class.
 - `equatable` admits what `comparable` does and `complex` and `raw`, which R tests for equality but
@@ -2874,11 +2892,12 @@ a type the family keeps: R's outcome (`double` or `logical`) when it fits, else 
 `Bool`). So `Reduce(function(acc, x) acc * 2, 1:3, 1L)` is a `double`, and so is a callback that
 returns the accumulator unchanged in one branch (`if (x > 1L) acc * 2 else acc`).
 `List.walk(xs, k, function(acc, x) acc * 2)` with `k: I64` is an `I64`. A fold's result is its
-init or its callback's, so `Reduce(function(a, b) a < b, 1:3, 0L)` is `logical | integer`. Two
-gaps remain: an accumulator that admits both families takes R's `double`, so `function(ys, init)
-List.walk(ys, init, function(acc, y) acc * 2)` refuses an `I64` `init`, and the outcome is a
-scalar, so a vector init (`Reduce(function(acc, x) acc * 2, list(1:3, 4:6), c(1L, 2L, 3L))`) is a
-type error.
+init or its callback's, so `Reduce(function(a, b) a < b, 1:3, 0L)` is `logical | integer`. An
+init the callback's arithmetic promotes or keeps gives the fold its own type:
+`Reduce(function(acc, x) acc * 2, list(1:3, 4:6), c(1L, 2L, 3L))` is a `double[]`, and
+`Reduce(function(acc, x) acc - 0.5, 1:3, Sys.Date())` a `Date`. One gap remains: an accumulator
+that a function's parameter gives, and that admits both families, takes R's `double`, so
+`function(ys, init) List.walk(ys, init, function(acc, y) acc * 2)` refuses an `I64` `init`.
 
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
 vector, so `f <- function(x) x + c(1L, 2L)` is `<T: arithmetic> fn(x: T) -> double[]` and accepts

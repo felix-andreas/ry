@@ -956,8 +956,8 @@ upto: <T: scalar numeric> fn(n: T) -> logical
 363..364 error[type-mismatch] expected a value with an order (numeric, `character`, `logical`, a class, `I64`, `F64` or `Str`), found `Record{a: I64}`
 366..367 error[type-mismatch] expected a value with an order (numeric, `character`, `logical`, a class, `I64`, `F64` or `Str`), found `Record{a: I64}`
 431..435 error[type-mismatch] expected a value `==` can test against a string (an atomic value, a class, or `Str`), found `I64`
-500..501 error[type-mismatch] expected a value `==` can compare (anything but a function), found `T`. Declare `<T: eq>`
-505..506 error[type-mismatch] expected a value `==` can compare (anything but a function), found `U`. Declare `<U: eq>`
+500..501 error[type-mismatch] expected a value `==` can compare (anything but a function or an environment), found `T`. Declare `<T: eq>`
+505..506 error[type-mismatch] expected a value `==` can compare (anything but a function or an environment), found `U`. Declare `<U: eq>`
 
 #---- a_literal_argument_takes_the_ry_type_an_ordered_parameter_admits
 # Every type `ordered` admits is a ry number or `Str`, so a literal argument is one, as it is for

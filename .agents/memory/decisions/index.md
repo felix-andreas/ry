@@ -185,6 +185,8 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - ry values join covariantly, and a walk's tag state widens
 - Unannotated arithmetic infers a constraint per number family and a family-dependent result
 - A comparison of an open operand asks what both families compare
+- Record and tag payload fields display in sorted order (settled)
+- A fold's accumulator rebinds to the type its init gives under arithmetic
 
 ## Analysis core
 
@@ -689,6 +691,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A call of a typed or local function matches its arguments as R does (settled)
 - Arguments read ahead from variables are watched across R calls (settled)
 - A long `List<Str>` crosses to R as a string list over the native list (settled)
+- `print` writes a closure's annotations; `deparse` writes the erasure
 
 ## DataFrame and the table engine
 

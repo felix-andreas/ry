@@ -56,6 +56,8 @@ file use.R
 | print(tryCatch(length_of(wrong), error = conditionMessage))
 | print(capped(20) == 10)
 | print(step_total() == 10)
+| print(label)
+| print(deparse(label)[[1]])
 
 env RY_TYPED_LOG 1
 run ry run --runtime ry use.R
@@ -74,6 +76,10 @@ expect stdout "[1] TRUE\n[1] TRUE"
 expect stderr "typed: attached `capped` for [I64] -> I64 from typedpkg's code file"
 expect stderr "typed: attached `step_total` for [] -> I64 from typedpkg's code file"
 expect stderr lacks "`capped` runs in the interpreter"
+# An installed function keeps no source, so `print` shows the signature's annotation texts, and
+# `deparse` writes the R code another R reads.
+expect stdout "function (name: Str, n: I64) -> Str "
+expect stdout "[1] \"function (name, n) \""
 
 env RY_CODE_IMAGE 0
 run ry run --runtime ry use.R

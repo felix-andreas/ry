@@ -59,6 +59,14 @@ pub enum Widening {
     /// Settled as the outcome a callback keeps (`Compared<T> = T`), so another R type joins it
     /// as a union rather than rebinding it.
     Joined,
+    /// Settled as R's outcome of arithmetic a fold's callback does on its accumulator
+    /// (`Promoted<T> = T` binds `double`). The first value that meets it settles it: one that
+    /// fits keeps `double`, and an init the variable's earlier `constraint` admits rebinds it
+    /// to what the fold returns from that init: a number vector promotes (`integer[]` gives
+    /// `double[]`), and a class with arithmetic (`Date`) or a ry number keeps its type.
+    Folded {
+        constraint: Constraint,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1292,16 +1300,19 @@ impl<'db> InferenceTable<'db> {
         let settled = if constraint_rejects(db, self, constraint, r_outcome).is_none() {
             self.bind(db, var, r_outcome).map(|()| {
                 // A fold's result is its init or the callback's, so a later init of another
-                // R type joins the outcome instead of rebinding it (`Compared<T> = T` must hold).
-                if result == FamilyResult::Comparison {
-                    self.set(
-                        var,
-                        Entry::Bound {
-                            ty: r_outcome,
-                            widening: Widening::Joined,
-                        },
-                    );
-                }
+                // R type joins the outcome instead of rebinding it (`Compared<T> = T` must hold),
+                // and one that arithmetic keeps or promotes rebinds it (`Promoted<T> = T`).
+                let widening = match result {
+                    FamilyResult::Comparison => Widening::Joined,
+                    FamilyResult::Arithmetic => Widening::Folded { constraint },
+                };
+                self.set(
+                    var,
+                    Entry::Bound {
+                        ty: r_outcome,
+                        widening,
+                    },
+                );
             })
         } else {
             match result {
@@ -1497,6 +1508,37 @@ impl<'db> InferenceTable<'db> {
             }
             Widening::Numeric => {
                 self.widen_numeric_binding(db, representative, bound, actual, widening)
+            }
+            Widening::Folded { constraint } => {
+                // The outcome is provisional until the first value meets it: one that fits
+                // settles it, and one that does not rebinds it once, so a value checked
+                // against the outcome never goes unchecked against what it rebinds to.
+                let fixed = Entry::Bound {
+                    ty: bound,
+                    widening: Widening::Fixed,
+                };
+                if self.compatible(db, actual, bound) {
+                    self.set(representative, fixed);
+                    return false;
+                }
+                let folded = match numeric_join(db, [bound, actual]) {
+                    _ if constraint_rejects(db, self, constraint, actual).is_some() => None,
+                    Some(promoted) => Some(promoted),
+                    None if is_ry_value_type(db, actual) || is_r_value(db, actual) => Some(actual),
+                    None => None,
+                };
+                let Some(folded) = folded else {
+                    self.set(representative, fixed);
+                    return false;
+                };
+                self.set(
+                    representative,
+                    Entry::Bound {
+                        ty: folded,
+                        widening: Widening::Fixed,
+                    },
+                );
+                true
             }
             Widening::Compared { equality } => {
                 if numeric_rank(db, bound).is_some() && numeric_rank(db, actual).is_some() {
@@ -2987,7 +3029,8 @@ pub(crate) fn constraint_rejects<'db>(
             _ => false,
         },
         Constraint::Eq => match ty.kind(db) {
-            TyKind::Function(_) => false,
+            TyKind::Function(_) | TyKind::Environment(_) => false,
+            TyKind::Named(name, _) if name.text(db) == "environment" => false,
             TyKind::Rigid(name) => binder_implies(name),
             _ => true,
         },
@@ -2995,6 +3038,9 @@ pub(crate) fn constraint_rejects<'db>(
             // `NULL > 0` is `logical(0)`.
             TyKind::Any | TyKind::Unknown | TyKind::Frame(..) | TyKind::Null => true,
             TyKind::Rigid(name) => binder_implies(name),
+            // R compares only atomic values and lists: `globalenv() == 1` is an error.
+            TyKind::Environment(_) => false,
+            TyKind::Named(name, _) if name.text(db) == "environment" => false,
             // A class compares through R's `Ops` methods; a ry nominal is a ry value.
             TyKind::Named(name, _) => {
                 !is_ry_value_type(db, ty)
