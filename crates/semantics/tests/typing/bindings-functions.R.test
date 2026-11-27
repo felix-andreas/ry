@@ -33,4 +33,4 @@ negate: <T: num> fn(x: T) -> T
 #---- numeric_param_compare_literal
 is_positive <- function(x) x > 0L
 #++++
-is_positive: <T> fn(x: T) -> Compared<T>
+is_positive: <T: comparable or number> fn(x: T) -> Compared<T>

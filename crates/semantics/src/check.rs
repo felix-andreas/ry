@@ -3586,10 +3586,7 @@ fn comparison_operand_shapes<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<Vec<Op
 
 /// A comparison coerces across atomic types, so an operand only needs to be atomic, and an
 /// open one (a variable, or a vector of one) constrains nothing.
-pub(crate) fn comparison_operand_shape<'db>(
-    db: &'db dyn Db,
-    ty: Ty<'db>,
-) -> Option<OperandShape> {
+pub(crate) fn comparison_operand_shape<'db>(db: &'db dyn Db, ty: Ty<'db>) -> Option<OperandShape> {
     match ty.kind(db) {
         TyKind::Var(_) | TyKind::Rigid(_) => Some(OperandShape::Scalar),
         TyKind::Scalar(atomic) => comparable_atomic(*atomic).then_some(OperandShape::Scalar),

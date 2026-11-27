@@ -392,6 +392,8 @@ pub fn family_result<'db>(db: &'db dyn Db, result: FamilyResult, operand: Ty<'db
                 FamilyResult::Comparison => result.ry_outcome(db, operand),
             }
         }
+        // `==` compares two ry records or lists as ry does.
+        _ if is_ry_value_type(db, operand) => result.ry_outcome(db, operand),
         _ => result.r_outcome(db),
     }
 }
@@ -972,12 +974,24 @@ impl Constraint {
             // is, so the literal stays open and keeps its default.
             (
                 Comparable,
-                c @ (Numeric | ScalarNumeric | AtomicElement | Key | WholeLiteral { .. }
-                | FracLiteral | StrLiteral | BoolLiteral),
+                c @ (Numeric
+                | ScalarNumeric
+                | AtomicElement
+                | Key
+                | WholeLiteral { .. }
+                | FracLiteral
+                | StrLiteral
+                | BoolLiteral),
             )
             | (
-                c @ (Numeric | ScalarNumeric | AtomicElement | Key | WholeLiteral { .. }
-                | FracLiteral | StrLiteral | BoolLiteral),
+                c @ (Numeric
+                | ScalarNumeric
+                | AtomicElement
+                | Key
+                | WholeLiteral { .. }
+                | FracLiteral
+                | StrLiteral
+                | BoolLiteral),
                 Comparable,
             ) => c,
             (Comparable, _) | (_, Comparable) => return None,
