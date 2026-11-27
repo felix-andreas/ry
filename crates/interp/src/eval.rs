@@ -1649,17 +1649,17 @@ pub unsafe fn code_reference(owner: usize, code: Sexp) -> R<Sexp> {
 
 /// [`code_reference`] for code on the handle types: the position in the pool of the reference
 /// that runs `code`, and the reference.
-fn compiled_reference<'c>(
-    context: &'c mut Cx<'_>,
+fn compiled_reference<'c, 's>(
+    context: &'c mut Cx<'s>,
     owner: usize,
     code: Local<'_>,
-) -> R<(usize, Gc<'c, Promise>)> {
+) -> R<(&'c Cx<'s>, Gc<'c, Promise>)> {
     // The code holds its constant pool, which holds the source.
     let source = context.root(source_of(code.read(context)));
-    let (context, index, reference) =
+    let (context, _, reference) =
         take_reference(context, source, Some((owner, NO_REFERENCE_SLOT)))?;
     context.set_promise_environment(reference, code);
-    Ok((index, reference))
+    Ok((context, reference))
 }
 
 /// The source a compiled argument's `code` was compiled from, which its constant pool keeps.
@@ -3506,11 +3506,11 @@ fn bind_environment<'s>(
         Arguments::Unsupplied => positional(function.read(context), args),
         Arguments::Matched(_) => false,
     };
-    let actuals: Matched<'s> = if by_position {
-        args.iter().map(|arg| arg.value).collect()
+    let matched: Option<Matched<'s>> = if by_position {
+        None
     } else {
         activity::count(Counter::FormalsMatchedByName);
-        match_args_cached(context, function, args, call)?
+        Some(match_args_cached(context, function, args, call)?)
     };
     let missing_value = handles::missing_argument();
     let closure = function.read(context);
@@ -3533,7 +3533,11 @@ fn bind_environment<'s>(
         let Some(symbol) = cell.tag().downcast::<Symbol>() else {
             return Err(error("internal error: a formal has no name"));
         };
-        let actual = actuals.get(index).map_or(missing_value, |actual| *actual);
+        let actual = match &matched {
+            Some(matched) => matched.get(index).copied(),
+            None => args.get(index).map(|arg| arg.value),
+        };
+        let actual = actual.unwrap_or(missing_value);
         let default = cell.head();
         let bound = if actual.is(missing_value) && !default.is(missing_value) {
             // A literal default evaluates to itself, so it is bound as is: the promise would
@@ -4371,21 +4375,14 @@ pub fn frame_environment_of<'a>(context: &'a mut Cx<'_>, index: usize, cause: Re
     context.read_or_make(
         |context| {
             let frame = handles::live_frame(context, index);
-            if !frame.in_slots() {
-                return Some(frame.recorded_environment());
-            }
-            // A profile summary records who asked, so it takes the path that records.
-            if activity::enabled() {
-                return None;
-            }
-            frame.pending().map(|environment| environment.value())
+            (!frame.in_slots()).then(|| frame.recorded_environment())
         },
         |context| Ok(reified_environment(context, index, cause)?.value()),
     )
 }
 
 /// The environment that stands for the slot frame at `index`, which `cause` asked for.
-#[inline]
+#[inline(always)]
 fn reified_environment<'a>(
     context: &'a mut Cx<'_>,
     index: usize,
@@ -5543,31 +5540,30 @@ pub(crate) fn promise_defaults(context: &mut Cx<'_>, owner: usize, promised: u64
         let function = context.root(handles::live_frame(context, owner).function());
         handles::build_slot_defaults(context, function)?;
     }
+    let Some(defaults) = slot_defaults(context, handles::live_frame(context, owner).function())
+    else {
+        panic!("a slot frame's defaults were not kept for its formals");
+    };
+    // The frame holds its function, which holds the defaults, but a reference may allocate,
+    // so the defaults are rooted.
+    let defaults = context.root(defaults);
     let mut pending = promised;
     while pending != 0 {
         let index = pending.trailing_zeros() as usize;
         pending &= pending - 1;
-        let frame = handles::live_frame(context, owner);
-        let Some(defaults) = slot_defaults(context, frame.function()) else {
-            panic!("a slot frame's defaults were not kept for its formals");
-        };
-        // The frame holds its function, which holds the defaults, but the reference may
-        // allocate, so the code is rooted.
-        let code = context.root(defaults.get(index));
-        let place = if code.r_type() == SexpType::Bytecode {
-            compiled_reference(context, owner, code)?.0
+        let code = context.root(defaults.read(context).get(index));
+        let (reading, reference) = if code.r_type() == SexpType::Bytecode {
+            compiled_reference(context, owner, code)?
         } else {
             let slot = handles::live_frame(context, owner)
                 .slot_names()
                 .iter()
                 .position(|name| name.is(code))
                 .map_or(NO_REFERENCE_SLOT, |slot| slot as u32);
-            take_reference(context, code, Some((owner, slot)))?.1
+            let (reading, _, reference) = take_reference(context, code, Some((owner, slot)))?;
+            (reading, reference)
         };
-        let Some((reference, _)) = handles::pooled_reference(context, place) else {
-            panic!("argument reference {place} is not in the pool");
-        };
-        handles::live_frame(context, owner).store_slot(index, reference.value());
+        handles::live_frame(reading, owner).store_slot(index, reference.value());
     }
     Ok(())
 }

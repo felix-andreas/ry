@@ -473,7 +473,7 @@ pub fn forget_pending_closures(state: &mut Interp, depth: usize) {
 }
 
 /// Keeps the first `depth` frames and drops the rest with their arguments.
-#[inline]
+#[inline(always)]
 pub fn truncate_frames(state: &mut Interp, depth: usize) {
     if activity::sample_ticked() {
         resolve_samples_before_truncating(state);
