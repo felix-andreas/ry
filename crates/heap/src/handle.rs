@@ -491,6 +491,16 @@ impl<'a> Gc<'a, Promise> {
     }
 }
 
+impl<'a> Gc<'a, Environment> {
+    /// The environment that encloses this one, which lookups continue in.
+    #[inline]
+    pub fn enclosure(self) -> Gc<'a, Environment> {
+        // SAFETY: the environment is live for `'a` and keeps its enclosure alive, and an
+        // enclosure is an environment.
+        unsafe { Gc::adopt(self.raw.enclosure()) }
+    }
+}
+
 impl<'a> Gc<'a, Binding> {
     /// The bound value: a variable's value, a promise, or an active binding's function.
     #[inline]

@@ -16,7 +16,7 @@ use {
         conditions, deparse, dispatch,
         handles::{
             self, Cells, Chars, Cx, Environment, Expression, Gc, Integer, Language, List, Local,
-            Promise, Real, Str, StringFill, Symbol, safe,
+            Owned, Pairlist, Promise, Real, Str, StringFill, Symbol, safe,
         },
         interp, moves, scope,
         unwind::{ArgumentReader, Jump, R, Rooted, Unwind, error, error_in, missing_argument},
@@ -5441,17 +5441,17 @@ pub const BUILTINS: &[BuiltinDef] = &[
     special("switch", -1, safe!(do_switch)).keep_visibility(),
     special("missing", 1, safe!(do_missing)),
     special("on.exit", -1, safe!(do_on_exit)).invisible(),
-    special(".Internal", 1, do_internal).keep_visibility(),
+    special(".Internal", 1, safe!(do_internal)).keep_visibility(),
     special("substitute", -1, safe!(do_substitute)),
     builtin("invisible", -1, safe!(do_invisible)).invisible(),
     builtin("nargs", 0, safe!(do_nargs)),
-    special("forceAndCall", -1, do_force_and_call).keep_visibility(),
-    special("Tailcall", -1, do_tailcall).keep_visibility(),
-    special("Exec", -1, do_exec).keep_visibility(),
+    special("forceAndCall", -1, safe!(do_force_and_call)).keep_visibility(),
+    special("Tailcall", -1, safe!(do_tailcall)).keep_visibility(),
+    special("Exec", -1, safe!(do_exec)).keep_visibility(),
     special("declare", -1, |_| Ok(nil())).invisible(),
-    internal("eval", 3, do_eval).keep_visibility(),
+    internal("eval", 3, safe!(do_eval)).keep_visibility(),
     internal("withVisible", 1, safe!(do_with_visible)),
-    internal_special("Recall", -1, do_recall).keep_visibility(),
+    internal_special("Recall", -1, safe!(do_recall)).keep_visibility(),
     builtin(".Primitive", 1, safe!(do_primitive)),
     internal("identity", 1, |call| Ok(call.arg(0))),
     special("~", -1, safe!(do_tilde)),
@@ -5667,9 +5667,16 @@ fn do_paren<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Lo
         return handles::evaluate(context, expression, environment);
     }
     // `(...)` is a builtin call in GNU R, so the dots expand into its single argument.
-    let expanded = handles::evaluated_arguments(context, arguments.expression(), environment)?;
+    let call = arguments.expression();
+    let cells = call
+        .downcast::<Language>()
+        .map_or_else(handles::null, |call| {
+            context.root(call.read(context).rest())
+        });
+    let mut expanded = SmallVec::<[handles::Tagged<'s>; 8]>::new();
+    handles::evaluate_arguments(context, &mut expanded, (cells, call), environment, false)?;
     match expanded.as_slice() {
-        [(_, value)] => Ok(*value),
+        [argument] => Ok(argument.value),
         _ => Err(arguments.error(format!(
             "{} argument{} passed to '(' which requires 1",
             expanded.len(),
@@ -6367,30 +6374,49 @@ fn do_on_exit<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<
     Ok(handles::null())
 }
 
-unsafe fn do_internal(call: &Call<'_>) -> R<Sexp> {
-    let inner = call.arg(0);
-    if inner.kind() != SexpType::Language || inner.car().kind() != SexpType::Symbol {
-        return Err(call.error("invalid .Internal() argument"));
-    }
-    let Some(function) = crate::builtins::internal_function(inner.car()) else {
-        return Err(call.error(format!(
+fn do_internal<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let invalid = || arguments.error("invalid .Internal() argument");
+    let inner = arguments
+        .value(0)
+        .downcast::<Language>()
+        .ok_or_else(invalid)?;
+    let name = inner.read(context).head();
+    let name = context.root(name.downcast::<Symbol>().ok_or_else(invalid)?);
+    let Some(function) = handles::internal_function(name) else {
+        return Err(arguments.error(format!(
             "there is no .Internal function '{}'",
-            symbol_name(inner.car())
+            handles::text(name.read(context).name())
         )));
     };
-    let definition = builtin_def(function)?;
-    let args = if function.kind() == SexpType::Builtin {
-        evaluate_args(inner.cdr(), call.env()?, definition.keep_missing, inner)?
+    let definition = handles::builtin_definition(function)?;
+    let environment = arguments.environment(context)?;
+    let cells = context.root(inner.read(context).rest());
+    let mut values = SmallVec::<[handles::Tagged<'s>; 8]>::new();
+    if function.r_type() == SexpType::Builtin {
+        handles::evaluate_arguments(
+            context,
+            &mut values,
+            (cells, inner.value()),
+            environment,
+            definition.keep_missing,
+        )?;
     } else {
-        unevaluated_args(inner.cdr())
-    };
-    if definition.generic != Generic::None
-        && let Some(value) =
-            dispatch::try_builtin_dispatch(definition, inner, function, &args, call.env()?)?
-    {
-        return Ok(value);
+        let mut cell = cells.read(context).downcast::<Pairlist>();
+        while let Some(current) = cell {
+            values.push(handles::Tagged {
+                tag: context.root(current.tag()),
+                value: context.root(current.head()),
+            });
+            cell = current.rest().downcast::<Pairlist>();
+        }
     }
-    call_builtin(definition, inner, function, &args, call.env()?)
+    handles::dispatch_builtin_call(
+        context,
+        definition,
+        (inner.value(), function),
+        &values,
+        environment,
+    )
 }
 
 fn do_invisible<'s>(_context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
@@ -6403,158 +6429,172 @@ fn do_nargs<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Lo
     handles::integer(context, count)
 }
 
-unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
-    let count = values::as_integer_scalar(eval(call.arg(0), call.env()?)?).max(0) as usize;
-    let function = eval(call.arg(1), call.env()?)?;
-    let heap = crate::heap();
-    heap.root(function);
+fn do_force_and_call<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let environment = arguments.environment(context)?;
+    let count = handles::evaluate(context, arguments.value(0), environment)?;
+    let count = handles::integer_scalar(context, count).max(0) as usize;
+    let function = handles::evaluate(context, arguments.value(1), environment)?;
     // The callee's arguments are the call's own cells after `n` and `FUN` whenever the special
     // received them unchanged, which is every call written in source, so `Reduce` and the
     // apply family pay no pairlist per call. GNU R conses the same tail into one new call.
     // A call without `FUN` reaches the "attempt to apply non-function" error below, as in GNU R.
-    let arguments = call.args.get(2..).unwrap_or(&[]);
-    let rest = match call_tail(call.call, arguments) {
+    let rest = match call_tail(context, arguments) {
         Some(rest) => rest,
-        None => values::pairlist(
-            &arguments
-                .iter()
-                .map(|arg| (arg.tag, arg.value))
-                .collect::<SmallVec<[(Sexp, Sexp); 8]>>(),
-            SexpType::Pairlist,
-        )?,
-    };
-    heap.root(rest);
-    let inner_call = values::lcons(call.arg(1), rest)?;
-    heap.root(inner_call);
-    match function.kind() {
-        SexpType::Closure => {
-            let mut args = Args::new();
-            // As for a compiled call (see `op_call_generic`): a variable passes its value, or
-            // the caller's own promise for it, when no argument can assign and neither the
-            // callee nor a handler can look at the promise before it is forced.
-            if no_calls(rest)
-                && !crate::effects::calling_handler_established()
-                && crate::effects::effect_free(function)?
-            {
-                eager_args_into(rest, call.env()?, &mut args)?;
-            } else {
-                promise_args_into(rest, call.env()?, &mut args)?;
+        None => {
+            let mut cells = Cells::new(SexpType::Pairlist);
+            for index in 2..arguments.len() {
+                cells.push(context, arguments.tag(index), arguments.value(index))?;
             }
-            for arg in args.iter().take(count) {
-                if arg.value.kind() == SexpType::Promise {
-                    force_promise(arg.value)?;
-                }
-            }
-            apply_closure_owning(inner_call, function, &args, call.env()?, None)
+            cells.finish().map_or_else(handles::null, Owned::finish)
         }
-        _ => apply_call(inner_call, function, rest, call.env()?),
+    };
+    let inner_call = handles::language(context, arguments.value(1), rest)?;
+    if function.r_type() != SexpType::Closure {
+        return handles::apply_call(context, inner_call.value(), function, rest, environment);
     }
+    // As for a compiled call (see `op_call_generic`): a variable passes its value, or the
+    // caller's own promise for it, when no argument can assign and neither the callee nor a
+    // handler can look at the promise before it is forced.
+    let eager = no_calls(context, rest)
+        && !crate::effects::calling_handler_established()
+        && handles::effect_free(context, function)?;
+    let values = handles::closure_arguments(context, rest, environment, eager)?;
+    for argument in values.iter().take(count) {
+        if argument.value.r_type() == SexpType::Promise {
+            handles::force(context, argument.value)?;
+        }
+    }
+    handles::apply_closure_tagged(context, inner_call, function, &values, Some(environment))
 }
 
 /// Whether no argument expression in the pairlist `arguments` is a call.
-unsafe fn no_calls(mut arguments: Sexp) -> bool {
-    while arguments.kind() == SexpType::Pairlist {
+fn no_calls(context: &Cx<'_>, arguments: Local<'_>) -> bool {
+    let mut cell = arguments.read(context).downcast::<Pairlist>();
+    while let Some(current) = cell {
         if matches!(
-            arguments.car().kind(),
+            current.head().r_type(),
             SexpType::Language | SexpType::Bytecode | SexpType::Promise
         ) {
             return false;
         }
-        arguments = arguments.cdr();
+        cell = current.rest().downcast::<Pairlist>();
     }
     true
 }
 
-/// The cells of `call` after its first two arguments, when they hold exactly `args`.
-unsafe fn call_tail(call: Sexp, args: &[Arg]) -> Option<Sexp> {
-    let mut cell = call.cdr();
+/// The cells of the call after its first two arguments, when they hold exactly the arguments
+/// after the first two.
+fn call_tail<'s>(context: &Cx<'s>, arguments: &handles::Args<'_, 's>) -> Option<Local<'s>> {
+    let call = arguments
+        .expression()
+        .read(context)
+        .downcast::<Language>()?;
+    let mut cell = call.rest();
     for _ in 0..2 {
-        if cell.kind() != SexpType::Pairlist {
-            return None;
-        }
-        cell = cell.cdr();
+        cell = cell.downcast::<Pairlist>()?.rest();
     }
     let tail = cell;
-    for arg in args {
-        if cell.kind() != SexpType::Pairlist || cell.car() != arg.value || cell.tag() != arg.tag {
+    for index in 2..arguments.len() {
+        let current = cell.downcast::<Pairlist>()?;
+        if !current.head().is(arguments.value(index)) || !current.tag().is(arguments.tag(index)) {
             return None;
         }
-        cell = cell.cdr();
+        cell = current.rest();
     }
-    (cell == nil()).then_some(tail)
+    cell.is(handles::null()).then(|| context.root(tail))
 }
 
 /// `Tailcall(FUN, ...)`, R 4.4's request to call `FUN(...)` in place of the calling frame.
 /// GNU R only reuses the frame when the call is in tail position and no `on.exit` is pending,
 /// and otherwise evaluates the call normally, which is what this does every time: the value is
 /// the same, but deep recursion still grows the stack.
-unsafe fn do_tailcall(call: &Call<'_>) -> R<Sexp> {
-    let function = call.args.split_first();
-    let Some((function, rest)) = function.filter(|(function, _)| function.value != missing_arg())
-    else {
-        return Err(missing_argument(
-            lexical_call(call.env()?),
+fn do_tailcall<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let environment = arguments.environment(context)?;
+    if arguments.is_empty() || handles::is_missing_argument(arguments.value(0)) {
+        let call = handles::lexical_call(context, environment);
+        return Err(crate::unwind::missing_argument(
+            call.raw(),
             "FUN",
             ArgumentReader::TailcallRec,
         ));
+    }
+    let function = match handles::dense::<Str>(context, arguments.value(0))? {
+        Some(name) if name.len() == 1 => handles::install_element(context, name, 0)?.value(),
+        _ => arguments.value(0),
     };
-    let function = if function.value.kind() == SexpType::String && length(function.value) == 1 {
-        values::install(&values::string_at(function.value, 0).unwrap_or_default())?
-    } else {
-        function.value
-    };
-    let rest = values::pairlist(
-        &rest
-            .iter()
-            .map(|arg| (arg.tag, arg.value))
-            .collect::<Vec<_>>(),
-        SexpType::Pairlist,
-    )?;
-    eval(values::lcons(function, rest)?, call.env()?)
+    let mut cells = Cells::new(SexpType::Language);
+    cells.push(context, handles::null(), function)?;
+    for index in 1..arguments.len() {
+        cells.push(context, arguments.tag(index), arguments.value(index))?;
+    }
+    let call = cells.finish().map_or_else(handles::null, Owned::finish);
+    handles::evaluate(context, call, environment)
 }
 
 /// `Exec(expr, envir)`: evaluates the call `expr` in `envir`, by default the caller's frame,
 /// as a tail call in the same sense as [`do_tailcall`].
-unsafe fn do_exec(call: &Call<'_>) -> R<Sexp> {
-    let mut expr = None;
+fn do_exec<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let environment = arguments.environment(context)?;
+    let mut expression = None;
     let mut envir = None;
-    let mut positional = Vec::new();
-    for arg in call.args {
-        match arg.tag {
-            tag if tag != nil() && values::symbol_name(tag) == "expr" => expr = Some(arg.value),
-            tag if tag != nil() && values::symbol_name(tag) == "envir" => envir = Some(arg.value),
-            _ => positional.push(arg.value),
+    let mut positional = SmallVec::<[Local<'s>; 2]>::new();
+    for index in 0..arguments.len() {
+        let name = arguments
+            .tag(index)
+            .read(context)
+            .downcast::<Symbol>()
+            .map(|tag| tag.name().bytes());
+        match name {
+            Some(b"expr") => expression = Some(arguments.value(index)),
+            Some(b"envir") => envir = Some(arguments.value(index)),
+            _ => positional.push(arguments.value(index)),
         }
     }
     let mut positional = positional.into_iter();
-    let expr = expr.or_else(|| positional.next());
+    let expression = expression.or_else(|| positional.next());
     let envir = envir.or_else(|| positional.next());
     if positional.next().is_some() {
         return Err(error("unused argument"));
     }
     // GNU R keeps a missing argument passed on as `expr` missing instead of evaluating it.
-    let expr = match expr.filter(|expr| *expr != values::missing_arg()) {
-        Some(expr) if !argument_is_missing(expr, call.env()?)? => expr,
-        _ => {
-            return Err(missing_argument(
-                lexical_call(call.env()?),
-                "expr",
-                ArgumentReader::Tailcall,
-            ));
+    let passed = match expression {
+        Some(expression) if !handles::is_missing_argument(expression) => {
+            let missing = match expression.downcast::<Symbol>() {
+                Some(symbol) => handles::is_missing_in(context, symbol, environment)?,
+                None => false,
+            };
+            (!missing).then_some(expression)
         }
+        _ => None,
     };
-    let mut expr = eval(expr, call.env()?)?;
-    if expr.kind() == SexpType::Expression && length(expr) == 1 {
-        expr = values::list_elt(expr, 0);
+    let Some(expression) = passed else {
+        let call = handles::lexical_call(context, environment);
+        return Err(crate::unwind::missing_argument(
+            call.raw(),
+            "expr",
+            ArgumentReader::Tailcall,
+        ));
+    };
+    let mut expression = handles::evaluate(context, expression, environment)?;
+    if expression.r_type() == SexpType::Expression && handles::length(context, expression) == 1 {
+        expression = handles::item(context, expression, 0)?;
     }
-    if expr.kind() != SexpType::Language {
+    if expression.r_type() != SexpType::Language {
         return Err(error("\"expr\" must be a call expression"));
     }
-    let env = match envir.filter(|envir| *envir != values::missing_arg()) {
-        Some(envir) => eval(envir, call.env()?)?,
-        None => call.env()?,
+    let target = match envir.filter(|envir| !handles::is_missing_argument(*envir)) {
+        Some(envir) => {
+            let envir = handles::evaluate(context, envir, environment)?;
+            envir.downcast::<Environment>().ok_or_else(|| {
+                error(format!(
+                    "invalid 'envir' argument of type '{}'",
+                    envir.r_type().name()
+                ))
+            })?
+        }
+        None => environment,
     };
-    eval(expr, env)
+    handles::evaluate(context, expression, target)
 }
 
 /// `R_forceAndCall`: evaluates `call` in `env`, forcing the promises of a closure's first
@@ -6834,61 +6874,87 @@ unsafe fn call_seeded(
     run_on_heap_frame(call, function, args, env, None, entry)
 }
 
-unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
-    let expression = call.arg(0);
-    let mut env = call.arg(1);
+fn do_eval<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let expression = arguments.value(0);
     // An S4 object that extends "environment" stands for the environment in its `.xData`
     // slot. GNU R names the type of what that conversion made of a bad `enclos`, which is
     // `NULL`.
-    let enclosure = match call.arg(2) {
-        enclosure if matches!(enclosure.kind(), SexpType::Nil | SexpType::Environment) => enclosure,
-        enclosure => match values::get_attr(enclosure, values::symbols().dot_xdata) {
-            data if enclosure.kind() == SexpType::Object
-                && data.kind() == SexpType::Environment =>
-            {
-                data
-            }
-            _ => return Err(error("invalid 'enclos' argument of type 'NULL'")),
-        },
+    let enclosure = arguments.value(2);
+    let enclosure = match enclosure.downcast::<Environment>() {
+        Some(enclosure) => Some(enclosure),
+        None if enclosure.r_type() == SexpType::Nil => None,
+        None => Some(
+            extended_environment(context, enclosure)
+                .ok_or_else(|| error("invalid 'enclos' argument of type 'NULL'"))?,
+        ),
     };
-    if env.kind() == SexpType::Object {
-        let data = values::get_attr(env, values::symbols().dot_xdata);
-        env = if data.kind() == SexpType::Environment {
-            data
-        } else {
-            nil()
-        };
+    let mut envir = arguments.value(1);
+    if envir.r_type() == SexpType::Object {
+        envir = extended_environment(context, envir).map_or_else(handles::null, Local::value);
     }
-    match env.kind() {
-        SexpType::Environment => {}
-        SexpType::Nil => {
-            env = if enclosure.kind() == SexpType::Environment {
-                enclosure
-            } else {
-                values::base_env()
-            };
-        }
-        SexpType::List => {
-            env = crate::envir::list_to_env(env, enclosure)?;
-        }
+    let environment = match envir.r_type() {
+        SexpType::Environment => envir
+            .downcast::<Environment>()
+            .ok_or_else(|| invalid_envir(envir))?,
+        SexpType::Nil => enclosure.unwrap_or_else(handles::base_environment),
+        SexpType::List => handles::list_environment_in(context, envir, enclosure)?,
         SexpType::Pairlist => {
-            let list = values::pairlist_to_list(env)?;
-            env = crate::envir::list_to_env(list, enclosure)?;
+            let list = handles::pairlist_to_list(context, envir)?;
+            handles::list_environment_in(context, list, enclosure)?
         }
         SexpType::Integer | SexpType::Real => {
-            if length(env) != 1 {
+            if handles::length(context, envir) != 1 {
                 return Err(error("numeric 'envir' arg not of length one"));
             }
-            let which = values::as_integer_scalar(env);
+            let which = handles::integer_scalar(context, envir);
             if which == NA_INTEGER {
-                return Err(invalid_envir(env));
+                return Err(invalid_envir(envir));
             }
-            env = crate::envir::sys_frame(which, call.env()?)?;
+            let caller = arguments.environment(context)?;
+            handles::sys_frame(context, which, caller)?
         }
-        _ => return Err(invalid_envir(env)),
+        _ => return Err(invalid_envir(envir)),
+    };
+    let caller = arguments.environment(context)?;
+    handles::evaluate_in_context(
+        context,
+        expression,
+        environment,
+        (arguments.function(), caller),
+    )
+}
+
+/// The environment in the `.xData` slot of an S4 object that extends "environment".
+fn extended_environment<'s>(context: &Cx<'s>, object: Local<'s>) -> Option<Local<'s, Environment>> {
+    if object.r_type() != SexpType::Object {
+        return None;
     }
-    // `eval` runs its expression in a context of its own, as GNU R's does: it counts as a frame
-    // for `sys.call` and friends, and a `return` in the expression returns from `eval`.
+    let data = handles::get_attribute(context, object, handles::symbol(|s| s.dot_xdata));
+    data.downcast::<Environment>()
+        .map(|data| context.root(data))
+}
+
+fn invalid_envir(envir: Local<'_>) -> Unwind {
+    error(format!(
+        "invalid 'envir' argument of type '{}'",
+        envir.r_type().name()
+    ))
+}
+
+/// Evaluates `expression` in `env` in a context of its own, as GNU R's `eval` does: it counts
+/// as a frame of `function` for `sys.call` and friends, with `sys_parent` as its parent, and a
+/// `return` in the expression returns from it. An expression vector evaluates element by
+/// element, and a promise is forced.
+///
+/// # Safety
+///
+/// All four are rooted.
+pub(crate) unsafe fn eval_in_context(
+    expression: Sexp,
+    env: Sexp,
+    function: Sexp,
+    sys_parent: Sexp,
+) -> R<Sexp> {
     let state = interp();
     let caller = state.frames.last().map_or(nil(), |frame| frame.call);
     let handlers = state.handlers.clone();
@@ -6896,9 +6962,9 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     state.calls_ever = state.calls_ever.wrapping_add(1);
     state.frames.push(Frame {
         call: caller,
-        function: call.op,
+        function,
         env,
-        sys_parent: call.env()?,
+        sys_parent,
         args: state.frame_args.len() as u32,
         on_exit: ThinVec::new(),
         handlers: handlers.clone(),
@@ -6938,13 +7004,6 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     result
 }
 
-unsafe fn invalid_envir(env: Sexp) -> Unwind {
-    error(format!(
-        "invalid 'envir' argument of type '{}'",
-        env.kind().name()
-    ))
-}
-
 fn do_with_visible<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
     let flag = handles::logical_constant(context, i32::from(interp().visible))?;
     let mut list = context.alloc::<List>(2)?;
@@ -6969,21 +7028,16 @@ fn do_with_visible<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) 
 /// closure itself received, unforced, so the function decides afresh whether to evaluate each
 /// one, and `substitute` in it sees the code `Recall` was called with. Neither frame needs an
 /// environment, so a slot frame hands out its pending one.
-unsafe fn do_recall(call: &Call<'_>) -> R<Sexp> {
-    let outside = || call.error("'Recall' called from outside a closure");
-    let own = call.frame_index().ok_or_else(outside)?;
-    let caller = crate::envir::caller_index(own).ok_or_else(outside)?;
-    let (caller_call, function) = (
-        interp().frames[caller].call,
-        interp().frames[caller].function,
-    );
-    materialize_references(own)?;
-    let args: Args = crate::frame_args(interp(), own).iter().copied().collect();
-    apply(
-        caller_call,
-        function,
-        &args,
-        frame_sys_parent(caller, Reify::Site(Site::ParentFrame))?,
+fn do_recall<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let Some(recalled) = arguments.recalled(context)? else {
+        return Err(arguments.error("'Recall' called from outside a closure"));
+    };
+    handles::apply(
+        context,
+        recalled.call,
+        recalled.function,
+        &recalled.arguments,
+        recalled.parent,
     )
 }
 
@@ -7296,7 +7350,7 @@ unsafe fn do_assign(call: &Call<'_>) -> R<Sexp> {
 /// `target` itself as the first argument, as in `d <- Dict.insert(d, k, v)` or
 /// `state$seen <- Set.insert(state$seen, k)`, the call may update the value in place (see
 /// [`rebind_call`]).
-unsafe fn rebind(target: Sexp, value: Sexp, env: Sexp) -> R<Sexp> {
+pub(crate) unsafe fn rebind(target: Sexp, value: Sexp, env: Sexp) -> R<Sexp> {
     let first_argument_is_target = value.kind() == SexpType::Language
         && value.car().kind() == SexpType::Symbol
         && value.cdr().kind() == SexpType::Pairlist
