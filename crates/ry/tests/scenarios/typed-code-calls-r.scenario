@@ -447,3 +447,183 @@ run ry run --runtime ry loose/retyped.R
 expect exit 1
 expect stdout "[1] 125"
 expect stderr "the global `rate` must be `F64`, the type it had when the typed function compiled, not a `double` vector of length 2"
+
+# An argument R code computes from variables is a promise, which R forces where the body first
+# reads the parameter, so an R call the body makes before that read could change what the
+# argument is. The native entry reads such an argument ahead and watches its variables: before
+# each R call the code settles the arguments it has read, and after it checks the variables of
+# the rest. `report` and `early` run natively, and `early` keeps the `y` it read before `rebind`
+# changed it. The R calls in `twice` and `bump_first` rebind and modify `y` before the body reads
+# `x`, so the code gives up and the interpreter runs the call again, forcing `x` to the new value
+# without running `rebind` or `bump` twice. With the native tier off, the program prints the same.
+
+file loose/watched.R
+| report <- function(label: Str, n: I64) -> I64 {
+|   cat(label, "\n")
+|   n + 1i64
+| }
+| rebind <- function() y <<- 100.0
+| bump <- function() y[1] <<- 50.0
+| early <- function(x: F64) -> F64 {
+|   a <- x
+|   rebind()
+|   a + x
+| }
+| twice <- function(x: F64) -> F64 {
+|   rebind()
+|   x * 2.0
+| }
+| bump_first <- function(x: F64) -> F64 {
+|   bump()
+|   x
+| }
+| label <- "hello"
+| k <- 3i64
+| print(report(label, k))
+| y <- 1.0
+| print(early(y))
+| y <- 1.0
+| print(twice(y))
+| y <- 1.0
+| print(bump_first(y))
+
+run ry run --runtime ry loose/watched.R
+expect exit 0
+expect stdout "hello \n4i64\n[1] 2\n[1] 200\n[1] 50"
+expect stderr lacks "`report` runs in the interpreter"
+expect stderr lacks "`early` runs in the interpreter"
+expect stderr "typed: `twice` runs in the interpreter: an R call it made changed a variable an argument is computed from before the function read that argument, so R forces the argument to the changed value, and the interpreter ran the call again with the values its R calls had returned"
+expect stderr "typed: `bump_first` runs in the interpreter: an R call it made changed a variable"
+
+env RY_JIT off
+run ry run --runtime ry loose/watched.R
+expect exit 0
+expect stdout "hello \n4i64\n[1] 2\n[1] 200\n[1] 50"
+unset RY_JIT
+
+# R forces an argument passed on to an R function where that function first reads it, so `pass`,
+# which hands `x` to `g` unread, runs in the interpreter, and `g` sees `y` after its own
+# assignment. A parameter no path reads keeps its promise unforced (`unused`), and one read before
+# `stop()` is forced, as R forces it there, even though the error ends the call (`positive`).
+
+file loose/forced.R
+| g <- function(a) { y <<- 100.0; a }
+| pass <- function(x: F64) -> F64 { Num.from_r(g(x)) + 0.0 }
+| ignore <- function(x: F64, unused: F64) -> F64 { cat("hi\n"); x }
+| keep <- function(z) { ignore(1.0, z); y <<- 100.0; z }
+| positive <- function(x: F64) -> F64 { if (x > 0.0) stop("positive"); x }
+| caught <- function(z) { tryCatch(positive(z), error = function(e) 0.0); y <<- 100.0; z }
+| y <- 1.0
+| print(pass(y))
+| y <- 1.0
+| print(keep(y))
+| y <- 1.0
+| print(caught(y))
+
+run ry run --runtime ry loose/forced.R
+expect exit 0
+expect stdout "[1] 100\nhi\n[1] 100\n[1] 1"
+expect stderr "typed: `pass` runs in the interpreter: it passes a parameter to an R function before reading it"
+expect stderr lacks "`ignore` runs in the interpreter"
+expect stderr lacks "`positive` runs in the interpreter"
+
+env RY_JIT off
+run ry run --runtime ry loose/forced.R
+expect exit 0
+expect stdout "[1] 100\nhi\n[1] 100\n[1] 1"
+unset RY_JIT
+
+# A base function that calls the function a string names forwards its arguments unforced, and so
+# does an untyped local function, so the R code they run first decides what the argument is:
+# `apply_named` and `local_late` run in the interpreter or give up, and every result is the
+# interpreter's. A parameter passed to a local function as itself counts where the local function
+# reads it, so `local_square` runs natively. The default of `List.from_r_or` comes after its R
+# call, so `fill` sees the `y` that call set.
+
+file loose/forwarded.R
+| g <- function(i, a) { y <<- 100.0; a }
+| rebind <- function() y <<- 100.0
+| na_after <- function() { y <<- 100.0; NA_real_ }
+| apply_named <- function(x: F64) -> F64 Num.from_r(sapply(1.0, "g", x))
+| local_late <- function(x: F64) -> F64 { h <- function(a) { rebind(); a }; h(x) }
+| local_square <- function(x: F64) -> F64 { h <- function(a) a * a; cat("r\n"); h(x) }
+| fill <- function(x: F64) -> F64 List.sum(List.from_r_or(na_after(), x))
+| for (i in 1:2) { y <- 1.0; print(apply_named(y)) }
+| y <- 1.0
+| print(local_late(y))
+| y <- 3.0
+| print(local_square(y))
+| y <- 1.0
+| print(fill(y))
+
+run ry run --runtime ry loose/forwarded.R
+expect exit 0
+expect stdout "[1] 100\n[1] 100\n[1] 100\nr\n[1] 9\n[1] 100"
+expect stderr lacks "`local_square` runs in the interpreter"
+
+env RY_JIT off
+run ry run --runtime ry loose/forwarded.R
+expect exit 0
+expect stdout "[1] 100\n[1] 100\n[1] 100\nr\n[1] 9\n[1] 100"
+unset RY_JIT
+
+# A local function's argument is forced where the function first reads its formal, so the
+# parameters it reads count there, and not at all once the formal is overwritten. An annotated
+# local function forces its arguments at the call, as any typed call does.
+file loose/helpers.R
+| rebind <- function() y <<- 100.0
+| id_na <- function() NA_real_
+| plus_one <- function(x: F64) -> F64 { h <- function(a) a + 1.0; h(x * 2.0) }
+| overwritten <- function(x: F64) -> F64 { h <- function(a) { a <- 2.0; a }; h(x) }
+| square_after <- function(x: F64) -> F64 { h <- function(a) { v <- a * a; cat("r\n"); v }; h(x + 1.0) }
+| late_double <- function(x: F64) -> F64 { h <- function(a) { rebind(); a }; h(x * 2.0) }
+| checked <- function(x: F64) -> F64 { if (x > 5.0) stop("bad: ", x); x }
+| chosen <- function(x: F64, flag: Bool) -> F64 { v <- List.sum(List.from_r_or(id_na(), if (flag) x else 0.0)); rebind(); v }
+| keep_plus <- function(z) { plus_one(z); y <<- 100.0; z }
+| keep_overwritten <- function(z) { overwritten(z); y <<- 100.0; z }
+| keep_chosen <- function(z) { chosen(z, FALSE); z }
+| strict_late <- function(x: F64) -> F64 { h <- function(a: F64) -> F64 { rebind(); a }; h(x * 2.0) }
+| branch_argument <- function(x: F64, flag: Bool) -> F64 { h <- function(a) { v <- a + 1.0; if (v > 0.5) stop("e"); v }; h(if (flag) x else 1.0) }
+| keep_branch <- function(z) { tryCatch(branch_argument(z, FALSE), error = function(e) 0); y <<- 100.0; z }
+| strict_bare <- function(x: F64) -> F64 { h <- function(a: F64) -> F64 { rebind(); a }; h(x) }
+| keep_bare <- function(z) { strict_bare(z) }
+| magnitude <- function(x: F64, c: F64) -> F64 { g <- function(b) b + 1.0; g(if (c > 0.0) x else -x) }
+| early <- function(x: F64, flag: Bool) -> F64 { g <- function(a) { rebind(); a }; g(if (flag) return(5.0) else x) }
+| keep_early <- function(z) { r <- early(z, TRUE); c(r, y) }
+| y <- 1.0
+| print(keep_plus(y))
+| y <- 1.0
+| print(keep_overwritten(y))
+| y <- 2.0
+| print(square_after(y))
+| y <- 1.0
+| print(late_double(y))
+| y <- 2.0
+| print(checked(y))
+| y <- 1.0
+| print(keep_chosen(y))
+| y <- 1.0
+| print(strict_late(y))
+| y <- 1.0
+| print(keep_branch(y))
+| y <- 1.0
+| print(keep_bare(y))
+| y <- -1.0
+| print(magnitude(y, -1.0))
+| y <- 1.0
+| print(keep_early(y))
+
+run ry run --runtime ry loose/helpers.R
+expect exit 0
+expect stdout "[1] 1\n[1] 100\nr\n[1] 9\n[1] 200\n[1] 2\n[1] 100\n[1] 2\n[1] 100\n[1] 1\n[1] 2\n[1]   5 100"
+expect stderr lacks "`checked` runs in the interpreter"
+expect stderr lacks "`square_after` runs in the interpreter"
+expect stderr lacks "`strict_late` runs in the interpreter"
+expect stderr lacks "`strict_bare` runs in the interpreter"
+expect stderr lacks "`magnitude` runs in the interpreter"
+
+env RY_JIT off
+run ry run --runtime ry loose/helpers.R
+expect exit 0
+expect stdout "[1] 1\n[1] 100\nr\n[1] 9\n[1] 200\n[1] 2\n[1] 100\n[1] 2\n[1] 100\n[1] 1\n[1] 2\n[1]   5 100"
+unset RY_JIT
