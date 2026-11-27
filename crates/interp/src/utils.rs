@@ -2442,7 +2442,7 @@ pub unsafe fn record_profile_sample(innermost: Option<&str>) -> R<()> {
         line.push_str(&format!("\"{name}\" "));
     }
     for frame in crate::interp().frames.iter().rev() {
-        line.push_str(&format!("\"{}\" ", profile_name(frame.call.car())));
+        line.push_str(&format!("\"{}\" ", profile_name(frame.call.raw().car())));
     }
     if line.is_empty() {
         return Ok(());
@@ -2543,7 +2543,7 @@ fn record_allocation(size: usize) -> bool {
     let mut line = format!("{size} :");
     for frame in crate::interp().frames.iter().rev() {
         line.push_str(&format!("\"{}\" ", unsafe {
-            profile_name(frame.call.car())
+            profile_name(frame.call.raw().car())
         }));
     }
     line.push('\n');

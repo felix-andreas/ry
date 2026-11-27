@@ -208,7 +208,7 @@ pub(crate) unsafe fn select_in_slots(name: Sexp, position: usize) -> R<Option<Se
     }
     let (generic, header, missing) = {
         let frame = &state.frames[position];
-        (frame.function, frame.slots as usize, frame.missing)
+        (frame.function.raw(), frame.slots as usize, frame.missing)
     };
     let Some(mut site) = valid_site(generic) else {
         return Ok(None);
@@ -253,7 +253,8 @@ pub(crate) unsafe fn select_in_slots(name: Sexp, position: usize) -> R<Option<Se
                         // The argument's code may have defined a method or left the frame
                         // with an environment, so the site and the frame are read again.
                         let state = interp();
-                        if position + 1 != state.frames.len() || state.frames[position].env != nil()
+                        if position + 1 != state.frames.len()
+                            || state.frames[position].env.raw() != nil()
                         {
                             return Ok(None);
                         }
@@ -760,7 +761,7 @@ pub unsafe fn exec_method(method: Sexp, generic_env: Sexp) -> R<Sexp> {
         .iter()
         .rposition(|frame| frame.owns(generic_env))
         .ok_or_else(|| error("could not find the generic function's frame"))?;
-    let call = state.frames[position].call;
+    let call = state.frames[position].call.raw();
     let sys_parent = eval::frame_sys_parent(position, eval::Reify::Site(eval::Site::S4Dispatch))?;
     eval::materialize_references(position)?;
     let promargs: eval::Args = crate::frame_args(state, position).into();
@@ -1699,7 +1700,12 @@ fn substitute_direct<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -
                         }
                         let symbol = handles::install_name_at(context, names, index)?;
                         let value = context.root(list.get(context, index));
-                        handles::define(context, context.root(symbol), value, environment)?;
+                        crate::eval::define_variable(
+                            context,
+                            context.root(symbol),
+                            value,
+                            environment,
+                        )?;
                     }
                 }
             } else {
@@ -1709,7 +1715,7 @@ fn substitute_direct<'s>(context: &mut Cx<'s>, arguments: &NativeArgs<'_, 's>) -
                     let tag = tag.map(|tag| context.root(tag));
                     cell = context.root(rest);
                     if let Some(symbol) = tag {
-                        handles::define(context, symbol, value, environment)?;
+                        crate::eval::define_variable(context, symbol, value, environment)?;
                     }
                 }
             }

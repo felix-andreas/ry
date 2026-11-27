@@ -76,7 +76,7 @@ pub unsafe extern "C" fn write_traceback(emit: Emit, readable: Readable) {
                 printed += 1;
                 let frame = frames.add(position);
                 if out.readable(frame.cast(), size_of::<Frame>()) {
-                    out.line(printed, (*frame).call);
+                    out.line(printed, (*frame).call.raw());
                 } else {
                     out.numbered(printed);
                     out.text(b"<unreadable frame>\n");

@@ -781,6 +781,45 @@ impl<'s> Local<'s, Chars> {
     }
 }
 
+/// A pointer kept in a structure that a root source marks, such as an interpreter frame. It
+/// reads as a [`Gc`] for as long as the context is borrowed, and it is neither `Copy` nor
+/// `Clone`, so it cannot leave the structure that keeps its object alive.
+#[repr(transparent)]
+pub struct Held<T: Kind = Value> {
+    raw: Sexp,
+    kind: PhantomData<T>,
+}
+
+impl<T: Kind> Held<T> {
+    /// # Safety
+    ///
+    /// `raw` is a live object that `T` admits, and the `Held` is stored where a root source
+    /// marks it before the next safepoint.
+    #[inline]
+    pub unsafe fn adopt(raw: Sexp) -> Held<T> {
+        Held {
+            raw,
+            kind: PhantomData,
+        }
+    }
+
+    /// The object, for as long as the context is borrowed: the structure that holds it is
+    /// marked at every collection.
+    #[inline]
+    pub fn get<'a>(&self, _cx: &'a Cx<'_>) -> Gc<'a, T> {
+        Gc {
+            raw: self.raw,
+            borrow: PhantomData,
+            kind: PhantomData,
+        }
+    }
+
+    #[inline]
+    pub fn raw(&self) -> Sexp {
+        self.raw
+    }
+}
+
 /// A new object nothing else can see. It is the only pointer to its object until `finish`,
 /// which is why filling it needs no ownership check.
 pub struct Fresh<'s, T: Vector> {

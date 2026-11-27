@@ -245,7 +245,7 @@ unsafe fn do_trace_back(call: &Call<'_>) -> R<Sexp> {
         return decline();
     }
     for index in 0..count {
-        let head = interp().frames[index].call.car();
+        let head = interp().frames[index].call.raw().car();
         if head.kind() == SexpType::Promise && head.car() == values::unbound() {
             return decline();
         }
@@ -255,7 +255,7 @@ unsafe fn do_trace_back(call: &Call<'_>) -> R<Sexp> {
     let mut contexts = Vec::with_capacity(count);
     for index in 0..count {
         let entry = &interp().frames[index];
-        let function = entry.function;
+        let function = entry.function.raw();
         let copy = envir::call_with_srcref(entry)?;
         if copy.is_object() {
             return decline();

@@ -1363,8 +1363,13 @@ pub unsafe fn first_string<'a>(object: Sexp) -> Option<Cow<'a, str>> {
 }
 
 pub unsafe fn is_function(object: Sexp) -> bool {
+    is_function_type(object.kind())
+}
+
+/// Whether a value of type `kind` can be called: a closure, a builtin or a special.
+pub fn is_function_type(kind: SexpType) -> bool {
     matches!(
-        object.kind(),
+        kind,
         SexpType::Closure | SexpType::Builtin | SexpType::Special
     )
 }
