@@ -2374,8 +2374,30 @@ pub unsafe extern "C" fn ry_str_split_bounds(
     found as u64 + 1
 }
 
-/// The bytes of a borrowed string from `start` to `end`, which [`ry_str_split_bounds`] gave for
-/// the same string, as a string of their own.
+/// The byte offset of the first (`last` 0) or the last place `pattern` occurs in a borrowed
+/// string, or -1 where it does not occur, as `str::find` and `str::rfind` give it.
+pub unsafe extern "C" fn ry_str_find(
+    lo: u64,
+    hi: u64,
+    pattern_lo: u64,
+    pattern_hi: u64,
+    last: u32,
+) -> i64 {
+    let string = Str { lo, hi };
+    let pattern = Str {
+        lo: pattern_lo,
+        hi: pattern_hi,
+    };
+    let found = if last != 0 {
+        string.as_str().rfind(pattern.as_str())
+    } else {
+        string.as_str().find(pattern.as_str())
+    };
+    found.map_or(-1, |at| at as i64)
+}
+
+/// The bytes of a borrowed string from `start` to `end`, which [`ry_str_split_bounds`] or
+/// [`ry_str_find`] gave for the same string, as a string of their own.
 pub unsafe extern "C" fn ry_str_piece(lo: u64, hi: u64, start: u64, end: u64) -> Str {
     let string = Str { lo, hi };
     str_from_bytes(string.bytes().get_unchecked(start as usize..end as usize))

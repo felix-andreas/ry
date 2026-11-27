@@ -315,6 +315,20 @@ d: Dict<character, double>
 got: Unknown
 44..46 error[type-mismatch] expected `character`, found `integer`
 
+#---- dict_key_literal_takes_the_expected_key_type
+one <- function() -> Dict<Str, I64> Dict.single("a", 1i64)
+two <- function() -> Dict<Str, I64> Dict.insert(Dict.empty(), "a", 1i64)
+named <- function() -> Dict<I64, Str> Dict.single(1i64, "b")
+held <- function() -> Dict<Bool, I64> {
+  d <- Dict.single(TRUE, 1i64)
+  d
+}
+#++++
+one: fn() -> Dict<Str, I64>
+two: fn() -> Dict<Str, I64>
+named: fn() -> Dict<I64, Str>
+held: fn() -> Dict<Bool, I64>
+
 #---- dict_is_not_an_r_object
 d <- Dict.single("a", 1)
 n <- sum(d)

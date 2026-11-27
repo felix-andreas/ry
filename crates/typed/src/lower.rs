@@ -1357,6 +1357,11 @@ impl Lowering<'_> {
         };
         let list = self.value(list)?;
         let value = self.value(item)?;
+        self.append_value(list, value)
+    }
+
+    /// `list` with `value` appended, in place when the list is uniquely held.
+    unsafe fn append_value(&mut self, list: Local, value: Local) -> Result<Local, Refusal> {
         self.usable(list)?;
         self.usable(value)?;
         let item = self
@@ -3598,6 +3603,7 @@ impl Lowering<'_> {
             | "List.walk_with_index_until"
             | "List.walk_from"
             | "List.walk_from_until"
+            | "List.walk_try"
             | "Dict.walk"
             | "Dict.walk_until" => self.walk(name, &arguments),
             "List.any" | "List.all" => self.any_all(name == "List.all", &arguments),
@@ -4154,7 +4160,8 @@ impl Lowering<'_> {
             }
             ".ry_array" => self.list_literal(&arguments, None, None),
             "List.append" => self.append(&arguments),
-            "List.keep_if" | "List.drop_if" => self.keep_if(name, &arguments),
+            "List.append_if_ok" | "List.prepend_if_ok" => self.add_if_ok(name, &arguments),
+            "List.keep_if" | "List.drop_if" | "List.keep_if_try" => self.keep_if(name, &arguments),
             "List.find_first"
             | "List.find_first_index"
             | "List.find_last"
@@ -4164,7 +4171,12 @@ impl Lowering<'_> {
             "List.max" | "List.min" => self.list_extreme(name, &arguments),
             "List.join_map" => self.join_map(&arguments),
             "List.chunks_of" => self.chunks_of(&arguments),
-            "List.map2" | "List.map3" => self.map_many(name, &arguments),
+            "List.map2" | "List.map3" | "List.map4" | "List.map_try" => {
+                self.map_many(name, &arguments)
+            }
+            "Str.split_first" | "Str.split_last" | "Str.replace_first" | "Str.replace_last" => {
+                self.around_pattern(name, &arguments)
+            }
             "Str.replace_each" => {
                 let [string, pattern, replacement] = arguments.exactly(3)?[..] else {
                     return Err(Refusal::new("a malformed `Str.replace_each`"));
@@ -4253,6 +4265,71 @@ impl Lowering<'_> {
                 self.dict_filter(name, &arguments)
             }
             "Dict.insert_all" => self.dict_insert_all(&arguments),
+            "Dict.join_map" => self.dict_join_map(&arguments),
+            "List.reserve" | "Dict.reserve" => {
+                let [collection, spare] = arguments.exactly(2)?[..] else {
+                    return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
+                };
+                let collection = self.value(collection)?;
+                let collection = self.capacity_operand(name, collection)?;
+                let spare = self.value(spare)?;
+                let spare = self.to_i64(spare)?;
+                // The interpreter answers an empty list with a fresh logical array and raises
+                // an error for a negative count or room past 2^30, so those cases run there.
+                let count = if name == "List.reserve" {
+                    self.builder.emit(Type::I64, Op::Length(collection))
+                } else {
+                    self.builder.emit(Type::I64, Op::DictLen(collection))
+                };
+                let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+                let limit = self
+                    .builder
+                    .emit(Type::I64, Op::Const(Constant::I64(1 << 30)));
+                if name == "List.reserve" {
+                    let empty = self
+                        .builder
+                        .emit(Type::Lgl, Op::Compare(Compare::Eq, Item::I64, count, zero));
+                    self.fail_if(empty);
+                }
+                let negative = self
+                    .builder
+                    .emit(Type::Lgl, Op::Compare(Compare::Lt, Item::I64, spare, zero));
+                self.fail_if(negative);
+                let huge = self
+                    .builder
+                    .emit(Type::Lgl, Op::Compare(Compare::Ge, Item::I64, spare, limit));
+                self.fail_if(huge);
+                let room = self
+                    .builder
+                    .emit(Type::I64, Op::Arith(Arith::Add, Item::I64, count, spare));
+                let crowded = self
+                    .builder
+                    .emit(Type::Lgl, Op::Compare(Compare::Ge, Item::I64, room, limit));
+                self.fail_if(crowded);
+                Ok(collection)
+            }
+            "List.release_excess_capacity" | "Dict.release_excess_capacity" => {
+                let [collection] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
+                };
+                let collection = self.value(collection)?;
+                self.capacity_operand(name, collection)
+            }
+            "Dict.clear" => {
+                let [dict] = arguments.exactly(1)?[..] else {
+                    return Err(Refusal::new("a malformed `Dict.clear`"));
+                };
+                let dict = self.value(dict)?;
+                let ty = self.builder.ty(dict);
+                if !matches!(ty, Type::Dict { .. }) {
+                    return Err(Refusal::new(
+                        "a `Dict.clear` of something other than a dictionary",
+                    ));
+                }
+                Ok(self.builder.emit(ty, Op::DictNew))
+            }
+            "Num.to_i64_checked" => self.to_i64_checked(&arguments),
+            "List.split_on" | "List.split_on_list" => self.split_on(name, &arguments),
             "Result.map2" => self.result_map2(&arguments),
             "Dict.len" | "Dict.keys" | "Dict.values" => {
                 let [dict] = arguments.exactly(1)?[..] else {
@@ -4905,7 +4982,8 @@ impl Lowering<'_> {
 
     /// `List.count_if(list, predicate)` as an `I64` count, or `List.walk(list, state, f)` as the
     /// state each item's step leaves, in a loop over the items with the function inlined.
-    /// `List.walk_from` starts at a position, and `Dict.walk` steps with each key and value.
+    /// `List.walk_from` starts at a position, `Dict.walk` steps with each key and value, and
+    /// `List.walk_try` leaves with the first `:Err` a step gives and wraps the state in `:Ok`.
     unsafe fn walk(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
         let counting = name == "List.count_if";
         let backwards = name.starts_with("List.walk_backwards");
@@ -4913,6 +4991,7 @@ impl Lowering<'_> {
         let from = name.starts_with("List.walk_from");
         let over_dict = name.starts_with("Dict.");
         let until = name.ends_with("_until");
+        let trying = name == "List.walk_try";
         let (list, start, state, function) = match (
             counting,
             from,
@@ -5037,6 +5116,7 @@ impl Lowering<'_> {
         let state_ty = self.widened_type(function, self.builder.ty(state));
         let total = self.builder.emit(state_ty, Op::Copy(state));
         let mut entry_value = None;
+        let mut failure = None;
         let (positions, element, position) = match (range, list) {
             (Some((start, end, _)), _) => {
                 let positions = self.count_up(start, end);
@@ -5129,6 +5209,13 @@ impl Lowering<'_> {
                 .ok_or(Refusal::new("a walk step that never completes"))?;
             if until {
                 self.walk_step(step, total, (function, state_ty), positions.exit)?;
+            } else if trying {
+                let (next, failed) = self.ok_or_leave(step)?;
+                if !self.fits_widening(function, state_ty, self.builder.ty(next)) {
+                    return Err(Refusal::new("a walk whose state changes type"));
+                }
+                self.builder.push(Some(total), Op::Copy(next));
+                failure = failed;
             } else {
                 if !self.fits_widening(function, state_ty, self.builder.ty(step)) {
                     return Err(Refusal::new("a walk whose state changes type"));
@@ -5137,6 +5224,9 @@ impl Lowering<'_> {
             }
         }
         self.next_position(positions);
+        if trying {
+            return self.ok_or_failure(total, failure);
+        }
         Ok(total)
     }
 
@@ -5184,6 +5274,147 @@ impl Lowering<'_> {
             },
         )?;
         Ok(())
+    }
+
+    /// The payload of `result`, a `Result` a callback gave inside a loop, for the code that goes
+    /// on with it. An `:Err` is kept in a local and leaves for a block that reads it, both
+    /// returned for [`Self::ok_or_failure`], or `None` when the callback never fails.
+    unsafe fn ok_or_leave(
+        &mut self,
+        result: Local,
+    ) -> Result<(Local, Option<(Local, BlockId)>), Refusal> {
+        let (ok, err) = (tag_layout("Ok", 1)?, tag_layout("Err", 1)?);
+        let (candidates, exhaustive) = self.shapes_of(self.builder.ty(result), &[ok, err], &[])?;
+        let failures: SmallVec<[u32; 4]> = candidates
+            .iter()
+            .copied()
+            .filter(|&shape| shapes::shape(shape).layout == err)
+            .collect();
+        let failure = (!failures.is_empty()).then(|| {
+            let ty = Type::Tag(shapes::union_of(&failures));
+            (self.builder.local(ty), self.builder.block())
+        });
+        let payload = self.switch_shapes(
+            result,
+            &candidates,
+            exhaustive,
+            Expected::Free,
+            &mut |lowering, shape| match (shape, failure) {
+                (Some(shape), _) if shapes::shape(shape).layout == ok => {
+                    lowering.field(result, shape, 0).map(Some)
+                }
+                (Some(shape), Some((kept, failed))) if shapes::shape(shape).layout == err => {
+                    let ty = Type::Tag(shapes::union_of(&[shape]));
+                    let narrowed = lowering.builder.emit(ty, Op::Relabel(result, ty));
+                    lowering.builder.push(Some(kept), Op::Copy(narrowed));
+                    lowering.builder.terminate(Terminator::Jump(failed));
+                    let unreachable = lowering.builder.block();
+                    lowering.builder.switch_to(unreachable);
+                    Ok(None)
+                }
+                // Something other than a result, which the interpreter rejects.
+                _ => Ok(lowering.unreachable()),
+            },
+        )?;
+        let payload = payload.ok_or(Refusal::new("a callback that never gives `:Ok`"))?;
+        self.usable(payload)?;
+        Ok((payload, failure))
+    }
+
+    /// `:Ok(value)` built in the current block, joined with the `:Err` an
+    /// [`Self::ok_or_leave`] kept when the callback can fail.
+    unsafe fn ok_or_failure(
+        &mut self,
+        value: Local,
+        failure: Option<(Local, BlockId)>,
+    ) -> Result<Local, Refusal> {
+        let ok = self.tag("Ok", &[value])?;
+        let Some((err, failed)) = failure else {
+            return Ok(ok);
+        };
+        let succeeded = self.builder.current;
+        self.builder.switch_to(failed);
+        self.joined_result(succeeded, ok, err)
+    }
+
+    /// `Str.split_first`, `split_last`, `replace_first` and `replace_last`: a search for the
+    /// first or the last place a pattern occurs, and the record of the text before and after
+    /// it, or the string with that place replaced.
+    unsafe fn around_pattern(
+        &mut self,
+        name: &str,
+        arguments: &Arguments,
+    ) -> Result<Local, Refusal> {
+        let replacing = name.starts_with("Str.replace");
+        let mut strings: SmallVec<[Local; 3]> = SmallVec::new();
+        for &argument in &arguments.exactly(if replacing { 3 } else { 2 })? {
+            let value = self.value(argument)?;
+            if self.builder.ty(value) != Type::Str {
+                return Err(Refusal(Cow::Owned(format!(
+                    "a `{name}` of something other than strings"
+                ))));
+            }
+            strings.push(value);
+        }
+        let (string, pattern) = (strings[0], strings[1]);
+        let at = self.builder.emit(
+            Type::I64,
+            Op::Find(name.ends_with("_last"), string, pattern),
+        );
+        let width = self.builder.emit(Type::I64, Op::ByteCount(pattern));
+        let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+        let found = self
+            .builder
+            .emit(Type::Lgl, Op::Compare(Compare::Ge, Item::I64, at, zero));
+        // Every string holds an empty pattern, which the library splits at and does not replace.
+        let found = if replacing {
+            let wide = self
+                .builder
+                .emit(Type::Lgl, Op::Compare(Compare::Gt, Item::I64, width, zero));
+            self.builder.emit(Type::Lgl, Op::And(found, wide))
+        } else {
+            found
+        };
+        let found = self.builder.emit(Type::Bool, Op::Truth(found));
+        let (hit, missing) = (self.builder.block(), self.builder.block());
+        self.builder.terminate(Terminator::Branch {
+            condition: found,
+            then: hit,
+            otherwise: missing,
+        });
+        self.builder.switch_to(hit);
+        let before = self
+            .builder
+            .emit(Type::Str, Op::Substring(string, zero, at));
+        let resume = self
+            .builder
+            .emit(Type::I64, Op::Arith(Arith::Add, Item::I64, at, width));
+        let total = self.builder.emit(Type::I64, Op::ByteCount(string));
+        let after = self
+            .builder
+            .emit(Type::Str, Op::Substring(string, resume, total));
+        if !replacing {
+            let parts = self.record_of(&[("before", before), ("after", after)])?;
+            let ok = self.tag("Ok", &[parts])?;
+            self.builder.switch_to(missing);
+            let reason = self.tag("NotFound", &[])?;
+            let err = self.tag("Err", &[reason])?;
+            return self.joined_result(hit, ok, err);
+        }
+        let empty = self.string("");
+        let replaced = self.builder.emit(
+            Type::Str,
+            Op::Concat(SmallVec::from_slice(&[before, strings[2], after]), empty),
+        );
+        let result = self.builder.local(Type::Str);
+        let join = self.builder.block();
+        self.builder.push(Some(result), Op::Copy(replaced));
+        self.builder.terminate(Terminator::Jump(join));
+        self.builder.switch_to(missing);
+        self.builder.push(Some(result), Op::Copy(string));
+        self.builder.terminate(Terminator::Jump(join));
+        self.builder.switch_to(join);
+        Ok(result)
     }
 
     /// One past the last position of `list`, from which a loop counting up from 1 counts the
@@ -5301,6 +5532,15 @@ impl Lowering<'_> {
         };
         let list = list.map(|list| self.known_list(list, name)).transpose()?;
         let value = self.value(value)?;
+        self.prepend_value(list, value)
+    }
+
+    /// A fresh list of `value` followed by the items of `list`, if any.
+    unsafe fn prepend_value(
+        &mut self,
+        list: Option<(Local, Type)>,
+        value: Local,
+    ) -> Result<Local, Refusal> {
         self.usable(value)?;
         let item = self
             .builder
@@ -5323,6 +5563,40 @@ impl Lowering<'_> {
             Some((list, ty)) => self.builder.emit(ty, Op::Extend(single, list)),
             None => single,
         })
+    }
+
+    /// `List.append_if_ok(list, result)`, or `List.prepend_if_ok`: the list with the payload of
+    /// an `:Ok` added, or the list itself for an `:Err`, in a switch on the result's shape.
+    unsafe fn add_if_ok(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [list, result] = arguments.exactly(2)?[..] else {
+            return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
+        };
+        let (list, ty) = self.known_list(list, name)?;
+        let result = self.value(result)?;
+        let (ok, err) = (tag_layout("Ok", 1)?, tag_layout("Err", 1)?);
+        let (candidates, exhaustive) = self.shapes_of(self.builder.ty(result), &[ok, err], &[])?;
+        let appending = name == "List.append_if_ok";
+        let value = self.switch_shapes(
+            result,
+            &candidates,
+            exhaustive,
+            Expected::Free,
+            &mut |lowering, shape| match shape {
+                Some(shape) if shapes::shape(shape).layout == ok => {
+                    let payload = lowering.field(result, shape, 0)?;
+                    if appending {
+                        lowering.append_value(list, payload).map(Some)
+                    } else {
+                        lowering.prepend_value(Some((list, ty)), payload).map(Some)
+                    }
+                }
+                Some(shape) if shapes::shape(shape).layout == err => Ok(Some(list)),
+                _ => Ok(lowering.unreachable()),
+            },
+        )?;
+        let value = value.ok_or(Refusal(Cow::Owned(format!("a `{name}` of no result"))))?;
+        self.usable(value)?;
+        Ok(value)
     }
 
     /// `List.set(list, index, value)`. An index outside the list leaves it unchanged.
@@ -5573,6 +5847,129 @@ impl Lowering<'_> {
         let reason = self.tag("NotFound", &[])?;
         let err = self.tag("Err", &[reason])?;
         self.joined_result(split_end, ok, err)
+    }
+
+    /// `List.split_on(list, delimiter)`: the pieces of the list between the items equal to
+    /// `delimiter`, as slices pushed onto a list of lists. `List.split_on_list` splits on a run
+    /// of items equal to the delimiter list's, and a match resumes the search after the run.
+    /// Items compare as in [`Self::split_around`]; an empty delimiter list runs in the
+    /// interpreter.
+    unsafe fn split_on(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [list, delimiter] = arguments.exactly(2)?[..] else {
+            return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
+        };
+        let (list, ty) = self.known_list(list, name)?;
+        let Some(item @ (Item::I64 | Item::Str | Item::Lgl)) = ty.items() else {
+            return Err(Refusal(Cow::Owned(format!(
+                "a `{name}` of items other than whole numbers, strings and Bools"
+            ))));
+        };
+        let delimiter = if name == "List.split_on_list" {
+            let (delimiter, delimiter_ty) = self.known_list(delimiter, name)?;
+            if delimiter_ty != ty {
+                return Err(Refusal(Cow::Owned(format!(
+                    "a `{name}` with a delimiter of another type"
+                ))));
+            }
+            self.builder.emit(ty, Op::Copy(delimiter))
+        } else {
+            let delimiter = self.value(delimiter)?;
+            self.usable(delimiter)?;
+            if self.builder.ty(delimiter).held_item() != Some(item) {
+                return Err(Refusal(Cow::Owned(format!(
+                    "a `{name}` with a delimiter of another type"
+                ))));
+            }
+            // A lone item is a run of one.
+            let empty = self.empty_list(item);
+            self.builder.emit(ty, Op::Push(empty, delimiter))
+        };
+        let held = self.builder.emit(ty, Op::Copy(list));
+        let total = self.builder.emit(Type::I64, Op::Length(held));
+        let run = self.builder.emit(Type::I64, Op::Length(delimiter));
+        let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
+        let one = self.builder.emit(Type::I64, Op::Const(Constant::I64(1)));
+        let no_run = self
+            .builder
+            .emit(Type::Lgl, Op::Compare(Compare::Eq, Item::I64, run, zero));
+        self.fail_if(no_run);
+        let pieces = self.empty_list(
+            ty.held_item()
+                .ok_or(Refusal::new("a split of something a list cannot hold"))?,
+        );
+        let pieces_ty = self.builder.ty(pieces);
+        // `start` is where the current piece begins and `resume` the first position a run may
+        // start at, both as 0-based offsets.
+        let start = self.builder.emit(Type::I64, Op::Copy(zero));
+        let resume = self.builder.emit(Type::I64, Op::Copy(zero));
+        let last_start = self
+            .builder
+            .emit(Type::I64, Op::Arith(Arith::Sub, Item::I64, total, run));
+        let positions = self.positions(held);
+        let at = self.builder.emit(
+            Type::I64,
+            Op::Arith(Arith::Sub, Item::I64, positions.counter, one),
+        );
+        let resumed = self
+            .builder
+            .emit(Type::Lgl, Op::Compare(Compare::Ge, Item::I64, at, resume));
+        let room = self.builder.emit(
+            Type::Lgl,
+            Op::Compare(Compare::Le, Item::I64, at, last_start),
+        );
+        let candidate = self.builder.emit(Type::Lgl, Op::And(resumed, room));
+        let candidate = self.builder.emit(Type::Bool, Op::Truth(candidate));
+        let (compare, next) = (self.builder.block(), self.builder.block());
+        self.builder.terminate(Terminator::Branch {
+            condition: candidate,
+            then: compare,
+            otherwise: next,
+        });
+        self.builder.switch_to(compare);
+        let window = self.count_up(one, run);
+        let offset = self.builder.emit(
+            Type::I64,
+            Op::Arith(Arith::Add, Item::I64, at, window.counter),
+        );
+        let element = self
+            .builder
+            .emit(Type::of_item(item), Op::ItemAt(held, offset));
+        let wanted = self
+            .builder
+            .emit(Type::of_item(item), Op::ItemAt(delimiter, window.counter));
+        let equal = self.identical_items(element, wanted, name)?;
+        let (same, differs) = (self.builder.block(), self.builder.block());
+        self.builder.terminate(Terminator::Branch {
+            condition: equal,
+            then: same,
+            otherwise: differs,
+        });
+        self.builder.switch_to(differs);
+        self.builder.terminate(Terminator::Jump(next));
+        self.builder.switch_to(same);
+        self.next_position(window);
+        // Every item of the run matched: the piece before it ends here.
+        let length = self
+            .builder
+            .emit(Type::I64, Op::Arith(Arith::Sub, Item::I64, at, start));
+        let piece = self.builder.emit(ty, Op::Slice(held, start, length));
+        let grown = self.builder.emit(pieces_ty, Op::Push(pieces, piece));
+        self.builder.push(Some(pieces), Op::Copy(grown));
+        let after = self
+            .builder
+            .emit(Type::I64, Op::Arith(Arith::Add, Item::I64, at, run));
+        self.builder.push(Some(start), Op::Copy(after));
+        self.builder.push(Some(resume), Op::Copy(after));
+        self.builder.terminate(Terminator::Jump(next));
+        self.builder.switch_to(next);
+        self.next_position(positions);
+        let rest = self
+            .builder
+            .emit(Type::I64, Op::Arith(Arith::Sub, Item::I64, total, start));
+        let piece = self.builder.emit(ty, Op::Slice(held, start, rest));
+        let grown = self.builder.emit(pieces_ty, Op::Push(pieces, piece));
+        self.builder.push(Some(pieces), Op::Copy(grown));
+        Ok(pieces)
     }
 
     /// `List.starts_with(list, prefix)`, or `List.ends_with(list, suffix)`, in a loop over the
@@ -5830,7 +6227,9 @@ impl Lowering<'_> {
     }
 
     /// `List.keep_if(list, predicate)`: the items the predicate is true for, pushed in order
-    /// onto a fresh list in a loop with the predicate inlined. `List.drop_if` keeps the others.
+    /// onto a fresh list in a loop with the predicate inlined. `List.drop_if` keeps the others,
+    /// and `List.keep_if_try` takes a predicate that gives `:Ok(answer)` and leaves with the first
+    /// `:Err`.
     unsafe fn keep_if(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
         let [list, predicate] = arguments.exactly(2)?[..] else {
             return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
@@ -5840,15 +6239,29 @@ impl Lowering<'_> {
             "a `{name}` of something other than a ry list"
         ))))?;
         let callable = self.function_argument(predicate)?;
+        let trying = name == "List.keep_if_try";
         let kept = self.empty_list(item);
         let held = self.builder.emit(ty, Op::Copy(list));
         let positions = self.positions(held);
         let element = self
             .builder
             .emit(Type::of_item(item), Op::ItemAt(held, positions.counter));
-        let answer = self.predicate(callable, element)?;
+        let (answer, failure) = if trying {
+            let result = self
+                .apply(callable, &[element])?
+                .ok_or(Refusal::new("a predicate that never completes"))?;
+            let (answer, failure) = self.ok_or_leave(result)?;
+            let answer = match self.builder.ty(answer) {
+                Type::Bool => answer,
+                Type::Lgl => self.builder.emit(Type::Bool, Op::Truth(answer)),
+                _ => return Err(Refusal::new("a predicate whose answer is not a logical")),
+            };
+            (answer, failure)
+        } else {
+            (self.predicate(callable, element)?, None)
+        };
         let (keep, after) = (self.builder.block(), self.builder.block());
-        let (then, otherwise) = if name == "List.keep_if" {
+        let (then, otherwise) = if name != "List.drop_if" {
             (keep, after)
         } else {
             (after, keep)
@@ -5864,6 +6277,9 @@ impl Lowering<'_> {
         self.builder.terminate(Terminator::Jump(after));
         self.builder.switch_to(after);
         self.next_position(positions);
+        if trying {
+            return self.ok_or_failure(kept, failure);
+        }
         Ok(kept)
     }
 
@@ -6174,13 +6590,21 @@ impl Lowering<'_> {
         Ok(chunks)
     }
 
-    /// `List.map2(a, b, f)` and `List.map3(a, b, c, f)`: `f` of the items at each position up
-    /// to the shortest list's length, in a loop with `f` inlined. An empty result stops the native
-    /// code, because the interpreter builds it without an item type, as for `List.map`.
+    /// `List.map2(a, b, f)`, `List.map3(a, b, c, f)` and `List.map4`: `f` of the items at each
+    /// position up to the shortest list's length, in a loop with `f` inlined. `List.map_try(list,
+    /// f)` maps one list with an `f` that gives results, leaves with the first `:Err` and wraps
+    /// the list in `:Ok`. An empty result stops the native code, because the interpreter builds
+    /// it without an item type, as for `List.map`.
     unsafe fn map_many(&mut self, name: &str, arguments: &Arguments) -> Result<Local, Refusal> {
-        let parameters = arguments.exactly(if name == "List.map3" { 4 } else { 3 })?;
+        let trying = name == "List.map_try";
+        let parameters = arguments.exactly(match name {
+            "List.map_try" => 2,
+            "List.map3" => 4,
+            "List.map4" => 5,
+            _ => 3,
+        })?;
         let Some((&function, lists)) = parameters.split_last() else {
-            return Err(Refusal::new("a malformed `List.map2`"));
+            return Err(Refusal(Cow::Owned(format!("a malformed `{name}`"))));
         };
         let mut held: SmallVec<[(Local, Item); 3]> = SmallVec::new();
         for &list in lists {
@@ -6219,6 +6643,11 @@ impl Lowering<'_> {
         let value = self
             .apply(callable, &elements)?
             .ok_or(Refusal::new("a mapped function that never completes"))?;
+        let (value, failure) = if trying {
+            self.ok_or_leave(value)?
+        } else {
+            (value, None)
+        };
         let value = if self.builder.ty(value) == Type::Lgl {
             self.builder.emit(Type::Bool, Op::Truth(value))
         } else {
@@ -6228,7 +6657,9 @@ impl Lowering<'_> {
             "a mapped function whose value a list cannot hold",
         ))?;
         if matches!(result_item, Item::Int | Item::Lgl) && self.builder.ty(value) != Type::Bool {
-            return Err(Refusal::new("a `List.map2` to a list of R scalars"));
+            return Err(Refusal(Cow::Owned(format!(
+                "a `{name}` to a list of R scalars"
+            ))));
         }
         let result_item = if self.builder.ty(value) == Type::Bool {
             Item::Lgl
@@ -6253,6 +6684,9 @@ impl Lowering<'_> {
         self.builder
             .push(Some(output), Op::Relabel(fresh, output_ty));
         self.builder.switch_to(exit);
+        if trying {
+            return self.ok_or_failure(output, failure);
+        }
         Ok(output)
     }
 
@@ -7991,6 +8425,72 @@ impl Lowering<'_> {
             .emit(Type::I64, Op::Overflowing(overflow, op, a, b)))
     }
 
+    /// `Num.to_i64_checked(number)`: `:Ok` of an `I64`, or of an `F64` that is a whole number
+    /// an `I64` holds, and `:Err(:OutOfBounds)` for any other `F64`.
+    unsafe fn to_i64_checked(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [number] = arguments.exactly(1)?[..] else {
+            return Err(Refusal::new("a malformed `Num.to_i64_checked`"));
+        };
+        let number = self.value(number)?;
+        match self.builder.ty(number) {
+            Type::I64 => return self.tag("Ok", &[number]),
+            Type::Dbl => {}
+            _ => {
+                return Err(Refusal::new(
+                    "a `Num.to_i64_checked` of something other than an I64 or an F64",
+                ));
+            }
+        }
+        // A whole number from -2^63 up to but not including 2^63. `NaN` skips the tests, whose
+        // comparisons would give `NA`.
+        let (exact, inexact, checking) = (
+            self.builder.block(),
+            self.builder.block(),
+            self.builder.block(),
+        );
+        let missing = self.builder.emit(Type::Bool, Op::IsNan(number));
+        self.builder.terminate(Terminator::Branch {
+            condition: missing,
+            then: inexact,
+            otherwise: checking,
+        });
+        self.builder.switch_to(checking);
+        let whole = self
+            .builder
+            .emit(Type::Dbl, Op::Math(Math::Floor, Item::Dbl, number));
+        let compare = |lowering: &mut Self, op: Compare, a: Local, b: Local| {
+            lowering
+                .builder
+                .emit(Type::Lgl, Op::Compare(op, Item::Dbl, a, b))
+        };
+        let is_whole = compare(self, Compare::Eq, whole, number);
+        let low = self.builder.emit(
+            Type::Dbl,
+            Op::Const(Constant::Dbl(-9_223_372_036_854_775_808.0)),
+        );
+        let high = self.builder.emit(
+            Type::Dbl,
+            Op::Const(Constant::Dbl(9_223_372_036_854_775_808.0)),
+        );
+        let above = compare(self, Compare::Ge, number, low);
+        let below = compare(self, Compare::Lt, number, high);
+        let within = self.builder.emit(Type::Lgl, Op::And(above, below));
+        let fits = self.builder.emit(Type::Lgl, Op::And(is_whole, within));
+        let fits = self.builder.emit(Type::Bool, Op::Truth(fits));
+        self.builder.terminate(Terminator::Branch {
+            condition: fits,
+            then: exact,
+            otherwise: inexact,
+        });
+        self.builder.switch_to(exact);
+        let value = self.builder.emit(Type::I64, Op::ToI64(number));
+        let ok = self.tag("Ok", &[value])?;
+        self.builder.switch_to(inexact);
+        let reason = self.tag("OutOfBounds", &[])?;
+        let err = self.tag("Err", &[reason])?;
+        self.joined_result(exact, ok, err)
+    }
+
     /// `Num.div_checked`, `Num.sqrt_checked` and `Num.log_checked` on doubles, and
     /// `Num.div_trunc_checked`, `Num.div_ceil_checked` and `Num.rem_checked` on `I64`s: `:Ok` of
     /// the operation, or the `:Err` the library gives for the operands it rejects.
@@ -8697,6 +9197,76 @@ impl Lowering<'_> {
             Op::DictValues(dict),
         );
         Ok((keys, values, key, value))
+    }
+
+    /// `Dict.join_map(dict, f)`: the entries of the dictionary `f` gives for each key and value,
+    /// inserted in order into one fresh dictionary, in a loop with `f` inlined.
+    unsafe fn dict_join_map(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
+        let [dict, function] = arguments.exactly(2)?[..] else {
+            return Err(Refusal::new("a malformed `Dict.join_map`"));
+        };
+        let dict = self.value(dict)?;
+        let callable = self.function_argument(function)?;
+        let (keys, values, key, value) = self.entries(dict, "Dict.join_map")?;
+        // The result's type is known only once the body is lowered, as for `Dict.map`.
+        let preheader = self.builder.current;
+        let output = self.builder.local(Type::Null);
+        let positions = self.positions(keys);
+        let entry_key = self
+            .builder
+            .emit(Type::of_item(key), Op::ItemAt(keys, positions.counter));
+        let entry_value = self
+            .builder
+            .emit(Type::of_item(value), Op::ItemAt(values, positions.counter));
+        let inner = self
+            .apply(callable, &[entry_key, entry_value])?
+            .ok_or(Refusal::new(
+                "a `Dict.join_map` callback that never completes",
+            ))?;
+        let output_ty = self.builder.ty(inner);
+        let (inner_keys, inner_values, inner_key, inner_value) =
+            self.entries(inner, "Dict.join_map")?;
+        self.builder.function.locals[output.0 as usize] = output_ty;
+        let inner_positions = self.positions(inner_keys);
+        let joined_key = self.builder.emit(
+            Type::of_item(inner_key),
+            Op::ItemAt(inner_keys, inner_positions.counter),
+        );
+        let joined_value = self.builder.emit(
+            Type::of_item(inner_value),
+            Op::ItemAt(inner_values, inner_positions.counter),
+        );
+        let grown = self
+            .builder
+            .emit(output_ty, Op::DictInsert(output, joined_key, joined_value));
+        self.builder.push(Some(output), Op::Copy(grown));
+        self.next_position(inner_positions);
+        self.next_position(positions);
+        self.builder.switch_to(preheader);
+        let fresh = self.builder.emit(output_ty, Op::DictNew);
+        self.builder.push(Some(output), Op::Copy(fresh));
+        self.builder.switch_to(positions.exit);
+        Ok(output)
+    }
+
+    /// The list or dictionary of a capacity function, which gives it back as it is: native
+    /// lists and dictionaries grow by doubling and keep no reserved room a program could read.
+    fn capacity_operand(&mut self, name: &str, collection: Local) -> Result<Local, Refusal> {
+        self.usable(collection)?;
+        let fits = if name.starts_with("List.") {
+            matches!(
+                self.builder.ty(collection),
+                Type::Vector { array: true, .. }
+            )
+        } else {
+            matches!(self.builder.ty(collection), Type::Dict { .. })
+        };
+        if !fits {
+            return Err(Refusal(Cow::Owned(format!(
+                "a `{name}` of something other than its collection"
+            ))));
+        }
+        Ok(collection)
     }
 
     /// `Dict.map(dict, f)`: each key with `f` of its key and value, inserted in order into a

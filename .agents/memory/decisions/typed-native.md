@@ -511,3 +511,14 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 - `List.split_first`, `split_last`, `starts_with`, `ends_with` and `Dict.keep_shared` compare items with `==`, which agrees with the interpreter's `identical` on the item types they accept (`I64`, `Str`, `Lgl`, and `I64`, `F64` or `Str` dictionary values); a `NaN` gives `NA`, which fails the call and leaves it to the interpreter.
 - The checked divisions compile for the operand types whose interpreter result they reproduce: `Num.div_checked`, `sqrt_checked` and `log_checked` on `F64`s, `div_trunc_checked`, `div_ceil_checked` and `rem_checked` on `I64`s. A `NaN` quotient (`Inf / Inf`) fails the call, so the interpreter gives its `:Err(:Undefined)`.
 - `Num.is_approx_eq` matches named arguments as R does (names first, then the others in order), so `native::STD_NAMED_ARGUMENTS` exempts it from the named-argument finding. Another function joins that list only once its lowering matches names the same way.
+
+## `Result`-callback list functions leave their loop at the first `:Err`
+
+**Status:** settled.
+
+- `List.walk_try`, `map_try` and `keep_if_try` switch on each callback result (`ok_or_leave`): an `:Ok` payload continues the loop, and an `:Err` is copied into one local of the union of the callback's `:Err` shapes and jumps to a failure block. After the loop, `ok_or_failure` joins `:Ok(result)` with that block, so a callback that never fails builds no failure path. `append_if_ok` and `prepend_if_ok` switch once and keep the list on `:Err`.
+- `List.for_each_try` runs in the interpreter, because its `:Ok(NULL)` result is a tag with a `NULL` payload, which no box field holds (`Type::held_item`).
+- `List.split_on` and `split_on_list` scan with an inner window of `identical_items` and skip past a matched run, as the interpreter does; an empty delimiter list fails the call. `Dict.join_map` inserts each inner dictionary's entries in order into a dictionary made in the loop's preheader once the callback's type is known.
+- The capacity functions (`List.reserve`, `Dict.reserve`, both `release_excess_capacity`) give the collection itself. A `reserve` of an empty list (the interpreter answers a fresh logical array), a negative count, or room past 2^30 (the interpreter's error) fails the call; `Dict.clear` is a fresh dictionary of the same type. `Dict.with_capacity` and `Dict.capacity` are not compiled, because the interpreter's capacity is observable.
+- `Num.to_i64_checked` of an `F64` tests `NaN` first (`Op::IsNan`), because a comparison with `NaN` gives `NA`, which fails the call; then wholeness and the range from -2^63 up to 2^63.
+- `Str.split_first`, `split_last`, `replace_first` and `replace_last` are `Op::Find` (`str::find` or `rfind`, -1 when absent) and `Op::Substring` (`ry_str_piece` on the offsets `Find` gave), so an empty pattern splits at the start or the end and replaces nothing, as the interpreter does.
