@@ -3270,7 +3270,8 @@ pub fn language<'s>(
     head: Local<'_>,
     rest: Local<'_>,
 ) -> R<Local<'s, Language>> {
-    let call = cell(context, SexpType::Language, null(), head, rest)?;
+    let head = Tagged { tag: null(), value: head.value() };
+    let call = chain(context, SexpType::Language, &[head], rest)?;
     call.downcast::<Language>()
         .ok_or_else(|| error("internal error: a call cell is not a call"))
 }
@@ -3282,21 +3283,33 @@ pub fn cons<'s>(
     value: Local<'_>,
     rest: Local<'_>,
 ) -> R<Local<'s>> {
-    cell(context, SexpType::Pairlist, tag, value, rest)
+    let item = Tagged { tag: tag.value(), value: value.value() };
+    chain(context, SexpType::Pairlist, &[item], rest)
 }
 
-fn cell<'s>(
-    _context: &mut Cx<'s>,
+/// The cells of `items` in order, continued by the cells of `rest`: a call when `kind` is
+/// [`SexpType::Language`]. The cells are built back to front, so each is complete when it
+/// allocates and none is written through a barrier afterwards.
+pub fn chain<'s>(
+    context: &mut Cx<'s>,
     kind: SexpType,
-    tag: Local<'_>,
-    value: Local<'_>,
+    items: &[Tagged<'_>],
     rest: Local<'_>,
 ) -> R<Local<'s>> {
-    // SAFETY: all three are rooted while the cell allocates, as `&mut Cx` permits, and the
-    // allocation roots the cell in the context's scope.
+    let heap = crate::heap();
+    // SAFETY: the items and `rest` are rooted, as `&mut Cx` permits, and an allocation keeps
+    // its arguments, so the cells built so far survive the next one's allocation.
     unsafe {
-        let cell = values::triple(kind, value.raw(), rest.raw(), tag.raw())?;
-        Ok(Local::adopt(cell))
+        let mut list = rest.raw();
+        for (position, item) in items.iter().enumerate().rev() {
+            let cell_kind = if position == 0 {
+                kind
+            } else {
+                SexpType::Pairlist
+            };
+            list = heap.alloc_triple(cell_kind, item.value.raw(), list, item.tag.raw())?;
+        }
+        Ok(rooted(context, list))
     }
 }
 

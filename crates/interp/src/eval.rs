@@ -7956,15 +7956,16 @@ fn replace_levels<'s>(
                 || handles::null().read(context),
                 |whole| whole.read(context).head(),
             ));
-            let mut cells = Cells::new(SexpType::Language);
-            cells.push(context, handles::null(), assign)?;
-            cells.push(context, handles::null(), getter.value())?;
-            cells.push(
-                context,
-                handles::null(),
-                handles::permanent_symbol(|s| s.vtmp).value(),
-            )?;
-            cells.finish().map_or_else(handles::null, Owned::finish)
+            let untagged = |value| Tagged {
+                tag: handles::null(),
+                value,
+            };
+            let items = [
+                untagged(assign),
+                untagged(getter.value()),
+                untagged(handles::permanent_symbol(|s| s.vtmp).value()),
+            ];
+            handles::chain(context, SexpType::Language, &items, handles::null())?
         };
         if primitive {
             // The level's target stands for the replacement call, which only an error that
@@ -8006,32 +8007,43 @@ fn replace_levels<'s>(
         // The call `` `f<-`(`*tmp*`, ..., value = v) `` and the argument list it is applied
         // with differ only in their first argument, so they share the cells after it, unless
         // the arguments are already evaluated: then the call keeps their code.
-        let mut indices: SmallVec<[Tagged<'s>; 4]> = SmallVec::new();
+        let mut items: SmallVec<[Tagged<'s>; 6]> = SmallVec::new();
+        items.push(Tagged {
+            tag: handles::null(),
+            value: tmp,
+        });
         let mut rest = handles::cell_fields(getter.read(context).rest())
             .map_or_else(|| handles::null().read(context), |(_, _, rest)| rest);
         while let Some((index, tag, next)) = handles::cell_fields(rest) {
-            indices.push(Tagged {
+            items.push(Tagged {
                 tag: context.root(tag),
                 value: context.root(index),
             });
             rest = next;
         }
-        let mut tail = Cells::new(SexpType::Pairlist);
-        for index in &indices {
-            tail.push(context, index.tag, index.value)?;
-        }
-        tail.push(context, value_symbol, value_promise.value())?;
-        let tail = tail.finish().map_or_else(handles::null, Owned::finish);
-        let first = handles::cons(context, handles::null(), tmp, tail)?;
-        let setter_call = handles::language(context, setter, first)?;
+        let value_item = Tagged {
+            tag: value_symbol,
+            value: value_promise.value(),
+        };
+        items.push(value_item);
+        let setter_call = handles::chain(context, SexpType::Pairlist, &items, handles::null())?;
+        let indices = &items[1..items.len() - 1];
+        // The arguments after `*tmp*` are the call's own cells.
+        let tail = handles::cell_fields(setter_call.read(context))
+            .map_or_else(handles::null, |(_, _, tail)| context.root(tail));
+        let setter_call = handles::language(context, setter, setter_call)?;
         let argument_tail =
             if depth == 0 && !evaluated.is_empty() && evaluated.len() == indices.len() {
-                let mut cells = Cells::new(SexpType::Pairlist);
-                for (index, &argument) in indices.iter().zip(evaluated) {
-                    cells.push(context, index.tag, argument)?;
-                }
-                cells.push(context, value_symbol, value_promise.value())?;
-                cells.finish().map_or_else(handles::null, Owned::finish)
+                let mut arguments: SmallVec<[Tagged<'s>; 6]> = indices
+                    .iter()
+                    .zip(evaluated)
+                    .map(|(index, &value)| Tagged {
+                        tag: index.tag,
+                        value,
+                    })
+                    .collect();
+                arguments.push(value_item);
+                handles::chain(context, SexpType::Pairlist, &arguments, handles::null())?
             } else {
                 tail
             };
