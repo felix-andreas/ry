@@ -908,6 +908,13 @@ the declaration's arity:
 - A wrongly applied name then compares like `Unknown`, so the one arity error never cascades into
   mismatches between values.
 
+A type definition cannot take the name of a built-in type: an atomic or ry scalar name (`double`,
+`I64`, `Str`), `Any`, `Unknown`, `NULL`, a table type (`DataFrame`, `LazyFrame`, `GroupBy`,
+`LazyGroupBy`), `Record`, `Tuple`, `Promoted`, `Compared`, or the standard library's `List`, `Dict`,
+`Set` and `Expr`. An annotation resolves the built-in name first, so such a definition would never
+be used, and ry reports it as an `annotation` error at its name. The standard library's `Result` is
+an alias, which a project's own definition of `Result` replaces.
+
 #### Type aliases
 
 An alias is purely structural: writing its name is the same as writing the type it stands for. It
@@ -1559,7 +1566,7 @@ trial_size(trial)
 ```text ry run runtime=ry strict
 type-mismatch
 
-  x expected `Record{time: List<I64>, treated: List<Bool>}`, found `list{time: integer[], treated: logical[]}`
+  x expected `Record{time: List<I64>, treated: List<Bool>}`, found `list{time: integer[], treated: logical[]}`. An R list never becomes a record: write a record literal, `(time = ..., treated = ...)`
    --[main.R:4:12]
  3 | trial <- list(time = c(5L, 3L), treated = c(TRUE, FALSE))
  4 | trial_size(trial)
@@ -1567,6 +1574,9 @@ type-mismatch
 
   x strict mode found 1 error, so this code does not run
 ```
+
+When the value is written as a `list(...)` call, `ry check --fix --unsafe-fixes` rewrites it as the
+literal, `list(time = t, treated = d)` as `(time = t, treated = d)`.
 
 Pass the fields as parameters instead, and build any record inside the typed function:
 

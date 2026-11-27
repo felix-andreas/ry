@@ -155,7 +155,7 @@ y <- f(list(x = 1))
 #++++
 f: fn(r: Record{x: double}) -> double
 y: Unknown
-66..77 error[type-mismatch] expected `Record{x: double}`, found `list{x: double}`
+66..77 error[type-mismatch] expected `Record{x: double}`, found `list{x: double}`. An R list never becomes a record: write a record literal, `(x = ...,)`
 
 #---- record_field_order_does_not_matter
 #: fn(r: Record{x: double, y: double}) -> double
@@ -590,6 +590,27 @@ f <- function(n, name, flag) {
 #++++
 f: fn(n: I64, name: Str, flag: Bool) -> I64
 177..178 error[type-mismatch] this pattern can never match: the value is `Str`
+
+#---- a_positional_pattern_against_named_fields_names_them
+area <- function(s: :Rect(width: F64, height: F64) | :Empty) -> F64 {
+  match (s) {
+    :Rect(w, h) => w * h
+    :Empty => 0.0
+  }
+}
+first <- function(s: :Pair(F64, F64) | :Empty) -> F64 {
+  match (s) {
+    :Pair(a = x, b = y) => x
+    :Empty => 0.0
+  }
+}
+#++++
+area: fn(s: :Rect(height: F64, width: F64) | :Empty) -> F64
+first: fn(s: :Pair(F64, F64) | :Empty) -> F64
+72..81 error[non-exhaustive-match] this `match` does not handle `:Rect(height = _, width = _)`: add an arm for it, or a catch-all `_ => ...` arm
+88..99 error[type-mismatch] this pattern can never match: the value is `:Rect(height: F64, width: F64) | :Empty`. `:Rect` carries named fields, so its pattern names them, as in `:Rect(height = height, width = width)`
+191..200 error[non-exhaustive-match] this `match` does not handle `:Pair(_, _)`: add an arm for it, or a catch-all `_ => ...` arm
+207..226 error[type-mismatch] this pattern can never match: the value is `:Pair(F64, F64) | :Empty`. `:Pair` carries positional items, so its pattern lists them in order, as in `:Pair(x1, x2)`
 
 #==== guards
 #---- guard_sees_the_bindings

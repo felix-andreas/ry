@@ -7600,7 +7600,36 @@ impl<'db, 'a> Checker<'db, 'a> {
             ));
         };
         let payload = (*payload)?;
-        let PatternKind::Record { fields, .. } = &self.module.pattern(payload).kind else {
+        let payload_pattern = &self.module.pattern(payload).kind;
+        match (payload_pattern, tag_payload.kind(self.db)) {
+            (PatternKind::Tuple(_), TyKind::NativeRecord(native, _)) => {
+                let fields: Vec<String> = native
+                    .iter()
+                    .map(|field| format!("{0} = {0}", field.name.text(self.db)))
+                    .collect();
+                return Some((
+                    format!(
+                        "`:{0}` carries named fields, so its pattern names them, as in `:{0}({1})`",
+                        name.as_str(),
+                        fields.join(", ")
+                    ),
+                    None,
+                ));
+            }
+            (PatternKind::Record { .. }, TyKind::NativeTuple(items)) => {
+                let items: Vec<String> = (1..=items.len()).map(|at| format!("x{at}")).collect();
+                return Some((
+                    format!(
+                        "`:{0}` carries positional items, so its pattern lists them in order, as in `:{0}({1})`",
+                        name.as_str(),
+                        items.join(", ")
+                    ),
+                    None,
+                ));
+            }
+            _ => {}
+        }
+        let PatternKind::Record { fields, .. } = payload_pattern else {
             return None;
         };
         let TyKind::NativeRecord(native, _) = tag_payload.kind(self.db) else {
