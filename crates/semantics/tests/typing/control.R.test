@@ -257,8 +257,8 @@ compared <- function(A = NULL, b = NULL) {
   b
 }
 #++++
-paired: <T, U: numeric> fn([A]: T | NULL, [b]: U | NULL) -> U | NULL
-compared: <T, U: numeric> fn([A]: T | NULL, [b]: U | NULL) -> U | NULL
+paired: <T, U: num> fn([A]: T | NULL, [b]: U | NULL) -> U | NULL
+compared: <T, U: num> fn([A]: T | NULL, [b]: U | NULL) -> U | NULL
 
 #---- inherits_a_class_rules_out_unclassed_members
 fetch <- function(url) {

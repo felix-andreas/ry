@@ -1862,9 +1862,10 @@ fn erase_residual_vars_at<'db>(
     }
     if !closer.abstracted.contains(&table.find(var)) {
         return match constraint {
-            Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric => {
-                scalar(db, Atomic::Double)
-            }
+            Constraint::Numeric
+            | Constraint::Num
+            | Constraint::Arithmetic
+            | Constraint::ScalarNumeric => scalar(db, Atomic::Double),
             Constraint::WholeLiteral { .. }
             | Constraint::FracLiteral
             | Constraint::StrLiteral
@@ -10401,7 +10402,7 @@ impl<'db, 'a> Checker<'db, 'a> {
             // R has no unary `-` on a `Date`, which only adds a number, so the operand needs
             // the arithmetic a class has with its own values.
             NumericOperand::Flexible(ty) => {
-                self.constrain_operand(operand_range, ty, Constraint::Numeric);
+                self.constrain_operand(operand_range, ty, Constraint::Num);
                 ty
             }
             NumericOperand::FlexibleVector(element) => {
@@ -11880,11 +11881,7 @@ impl<'db, 'a> Checker<'db, 'a> {
         // A generic bounded `numeric` probes as the `double` it may be.
         let probe_operand =
             |ty: Ty<'db>| match self.table.shallow_resolve(self.db, ty).kind(self.db) {
-                TyKind::Rigid(name)
-                    if self
-                        .table
-                        .rigid_satisfies(self.db, *name, Constraint::Arithmetic) =>
-                {
+                TyKind::Rigid(name) if self.table.rigid_operand(self.db, *name) => {
                     scalar(self.db, Atomic::Double)
                 }
                 _ => ty,
@@ -12183,12 +12180,14 @@ impl<'db, 'a> Checker<'db, 'a> {
             // A value already required to be numeric (`if (n %% 2L)`) coerces like a number.
             TyKind::Var(_) => matches!(
                 self.table.open_constraint(self.db, ty),
-                Some(Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric)
+                Some(
+                    Constraint::Numeric
+                        | Constraint::Num
+                        | Constraint::Arithmetic
+                        | Constraint::ScalarNumeric
+                )
             ),
-            TyKind::Rigid(name) => {
-                self.table
-                    .rigid_satisfies(self.db, *name, Constraint::Arithmetic)
-            }
+            TyKind::Rigid(name) => self.table.rigid_operand(self.db, *name),
             _ => false,
         }
     }
@@ -12343,9 +12342,12 @@ impl<'db, 'a> Checker<'db, 'a> {
             // R subtracts two dates or two times (their difference is a `difftime`), so `a - b`
             // asks no more of a class than `a + 1` does, while `a + b` asks `numeric`.
             let tied_difference = tied && operator == BinaryOperator::Subtract;
-            let constraint = match tied && !tied_difference {
-                true => Constraint::Numeric,
-                false => Constraint::Arithmetic,
+            // When the result is the operands' own type (`a * b`, not `a / b`), a ry number
+            // computes it as well as an R one does.
+            let constraint = match (tied && !tied_difference, always_double) {
+                (true, false) => Constraint::Num,
+                (true, true) => Constraint::Numeric,
+                (false, _) => Constraint::Arithmetic,
             };
             self.constrain_operand(range, ty, constraint);
             // The difference is not `T` itself: two dates subtract to a `difftime`. It claims
@@ -12785,15 +12787,10 @@ impl<'db, 'a> Checker<'db, 'a> {
             {
                 self.classify_numeric_operand(bound)
             }
-            TyKind::Rigid(name) => {
-                match self
-                    .table
-                    .rigid_satisfies(self.db, *name, Constraint::Arithmetic)
-                {
-                    true => NumericOperand::Flexible(resolved),
-                    false => NumericOperand::Invalid,
-                }
-            }
+            TyKind::Rigid(name) => match self.table.rigid_operand(self.db, *name) {
+                true => NumericOperand::Flexible(resolved),
+                false => NumericOperand::Invalid,
+            },
             TyKind::Vector(element) | TyKind::NamedVector(element) => match element.kind(self.db) {
                 TyKind::Var(_) => NumericOperand::FlexibleVector(Some(*element)),
                 // `N[]` under `<N: integer | logical>` is a vector of one of the bound's members.
@@ -12812,11 +12809,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     });
                     self.classify_numeric_operand(union_of(self.db, vectors))
                 }
-                TyKind::Rigid(name)
-                    if self
-                        .table
-                        .rigid_satisfies(self.db, *name, Constraint::Arithmetic) =>
-                {
+                TyKind::Rigid(name) if self.table.rigid_operand(self.db, *name) => {
                     NumericOperand::FlexibleVector(Some(*element))
                 }
                 TyKind::Any | TyKind::Unknown => NumericOperand::FlexibleVector(None),
@@ -21295,7 +21288,12 @@ impl<'db, 'a> Checker<'db, 'a> {
         let numeric = |ty: Ty<'db>| {
             matches!(
                 self.table.open_constraint(self.db, ty),
-                Some(Constraint::Numeric | Constraint::Arithmetic | Constraint::ScalarNumeric)
+                Some(
+                    Constraint::Numeric
+                        | Constraint::Num
+                        | Constraint::Arithmetic
+                        | Constraint::ScalarNumeric
+                )
             )
         };
         match self.table.resolve(self.db, expected).kind(self.db) {

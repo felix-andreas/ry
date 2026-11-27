@@ -183,6 +183,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Literal variables stay open through joins, tail reads and `List` positions
 - A record pattern's `..` takes no name
 - ry values join covariantly, and a walk's tag state widens
+- Arithmetic that keeps its operands' type asks `num`
 
 ## Analysis core
 

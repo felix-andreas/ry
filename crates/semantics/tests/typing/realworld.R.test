@@ -680,7 +680,7 @@ report <- function() {
   sprintf("total %.1f, difference %.1f", total, difference)
 }
 #++++
-handlers: <T: numeric, U: arithmetic, V: numeric> list{add: fn(left: T, right: T) -> T, subtract: fn(left: U, right: U) -> double, multiply: fn(left: V, right: V) -> V}
+handlers: <T: num, U: arithmetic, V: num> list{add: fn(left: T, right: T) -> T, subtract: fn(left: U, right: U) -> double, multiply: fn(left: V, right: V) -> V}
 apply_operation: <T> fn(name: T, left: Unknown, right: Unknown) -> Unknown
 report: fn() -> character
 
@@ -695,7 +695,7 @@ broken <- function(name) {
   handler(1, 2)
 }
 #++++
-handlers: <T: numeric> list{add: fn(left: T, right: T) -> T, shout: fn(text: Unknown) -> character}
+handlers: <T: num> list{add: fn(left: T, right: T) -> T, shout: fn(text: Unknown) -> character}
 broken: Unknown
 174..175 error[type-mismatch] this call passes 2 positional arguments, but the function only takes 1
 

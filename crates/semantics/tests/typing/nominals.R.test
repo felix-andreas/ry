@@ -656,7 +656,7 @@ scale_to.unit <- function(x) x
 render <- function(x) UseMethod("print")
 render.html <- function(page) page
 #++++
-scale_to: <T: numeric> fn(x: T, by: T) -> T
+scale_to: <T: num> fn(x: T, by: T) -> T
 scale_to.unit: <T> fn(x: T) -> T
 render: <T> fn([x]: T) -> Any
 render.html: <T> fn(page: T) -> T

@@ -420,7 +420,7 @@ g <- function(pair) {
   }
 }
 #++++
-g: <T: numeric> fn(pair: Tuple{T, T}) -> T
+g: <T: num> fn(pair: Tuple{T, T}) -> T
 
 #---- binding_after_the_match_joins_the_arms
 #: fn(o: :Some(integer) | :None) -> integer

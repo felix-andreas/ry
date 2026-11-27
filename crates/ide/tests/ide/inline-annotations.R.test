@@ -125,7 +125,7 @@ completion (26): Any, character, complex, double, fn, integer, list, logical
 #---- inferred_annotation_fills_a_generic_function_header
 sca$0le_by <- function(values, factor = 2, ...) values * factor
 #++++
-hover 0..8: scale_by: <T: numeric> fn(values: T, [factor]: T, ...: Any) -> T
+hover 0..8: scale_by: <T: num> fn(values: T, [factor]: T, ...: Any) -> T
 hover-definition: global 0..8
 definition 0..8
 references: 0..8*
@@ -133,19 +133,19 @@ rename: 1 edit(s)
 calls scale_by: in  | out
 signature: none
 action: Add inferred type annotation for `scale_by`
-  edit 20..20 -> "<T: numeric>"
+  edit 20..20 -> "<T: num>"
   edit 27..27 -> ": T"
   edit 35..35 -> ": T"
   edit 44..44 -> ": Any"
   edit 45..45 -> " -> T"
 action: Add inferred type annotations for the whole file
-  edit 20..20 -> "<T: numeric>"
+  edit 20..20 -> "<T: num>"
   edit 27..27 -> ": T"
   edit 35..35 -> ": T"
   edit 44..44 -> ": Any"
   edit 45..45 -> " -> T"
 completion (128+): scale_by, scale, scale.default, scan, scatter.smooth, smoothScatter, cmdscale, LazyFrame.scan_csv
-hint @20<T: numeric>
+hint @20<T: num>
 hint @27: T
 hint @35: T
 hint @44: Any

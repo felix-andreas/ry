@@ -31,7 +31,7 @@ add1: <T: arithmetic> fn(x: T) -> T
 #---- two_operands_tie
 add <- function(a, b) a + b
 #++++
-add: <T: numeric> fn(a: T, b: T) -> T
+add: <T: num> fn(a: T, b: T) -> T
 
 #---- division_is_double
 half <- function(x) x / 2
@@ -270,7 +270,7 @@ g: Unknown
 #---- unary_minus_generalizes
 f <- function(x) -x
 #++++
-f: <T: numeric> fn(x: T) -> T
+f: <T: num> fn(x: T) -> T
 
 #---- division_by_literal_keeps_the_parameter_numeric
 f <- function(x) x / 2
@@ -287,4 +287,4 @@ f: <T: arithmetic> fn(x: T) -> double
 # than as a failure — the hard guard belongs with the per-item scaling witness.
 f <- function(x) x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x + x
 #++++
-f: <T: numeric> fn(x: T) -> T
+f: <T: num> fn(x: T) -> T

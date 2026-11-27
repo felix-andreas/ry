@@ -666,27 +666,27 @@ report <- function(total) {
 squares <- lapply(1:3, square)
 first <- square(2)
 #++++
-hover 119..125: square: <T: numeric> fn(x: T) -> T
+hover 119..125: square: <T: num> fn(x: T) -> T
 hover-definition: global R/math.R:0..6
 definition R/math.R:0..6
 references: R/math.R:0..6*, R/math.R:119..125, R/report.R:47..53, R/report.R:86..92, R/report.R:103..109
 rename: 5 edit(s)
 calls square: in sum_of_squares [R/math.R:119..125], report [R/report.R:47..53], first [R/report.R:103..109] | out
-signature: <T: numeric> fn(x: T) -> T
+signature: <T: num> fn(x: T) -> T
 parameters: [x: T]
 action: Add inferred type annotation for `sum_of_squares`
   edit 54..54 -> "<T>"
   edit 61..61 -> ": T"
   edit 62..62 -> " -> double"
 action: Add inferred type annotations for the whole file
-  edit 18..18 -> "<T: numeric>"
+  edit 18..18 -> "<T: num>"
   edit 20..20 -> ": T"
   edit 21..21 -> " -> T"
   edit 54..54 -> "<T>"
   edit 61..61 -> ": T"
   edit 62..62 -> " -> double"
 completion (13): square, squares, sQuote, sum_of_squares, seq.default, sequence, sequence.default, setequal
-hint @18<T: numeric>
+hint @18<T: num>
 hint @20: T
 hint @21 -> T
 hint @54<T>
@@ -718,14 +718,14 @@ action: Add inferred type annotation for `sum_of_squares`
   edit 61..61 -> ": T"
   edit 62..62 -> " -> NULL"
 action: Add inferred type annotations for the whole file
-  edit 18..18 -> "<T: numeric>"
+  edit 18..18 -> "<T: num>"
   edit 20..20 -> ": T"
   edit 21..21 -> " -> T"
   edit 54..54 -> "<T>"
   edit 61..61 -> ": T"
   edit 62..62 -> " -> NULL"
 completion (1): sum_of_squares
-hint @18<T: numeric>
+hint @18<T: num>
 hint @20: T
 hint @21 -> T
 hint @54<T>

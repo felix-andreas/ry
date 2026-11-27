@@ -5,7 +5,7 @@ compute <- function(x) {
   doubled
 }
 #++++
-hint @19<T: numeric>
+hint @19<T: num>
 hint @21: T
 hint @22 -> T
 hint @34: T

@@ -32,7 +32,7 @@ inc: <T: arithmetic> fn(x: T) -> T
 #---- param_numeric_from_negate
 neg <- function(x) -x
 #++++
-neg: <T: numeric> fn(x: T) -> T
+neg: <T: num> fn(x: T) -> T
 
 #---- param_numeric_from_compare
 is_pos <- function(x) x > 0L
@@ -82,7 +82,7 @@ greet: <T, U> fn(count: T, [label]: U) -> T
 #---- default_non_null_optional
 withdef <- function(x, y = 1L) x + y
 #++++
-withdef: <T: numeric> fn(x: T, [y]: T) -> T
+withdef: <T: num> fn(x: T, [y]: T) -> T
 
 #---- local_binding_return
 compute <- function(x) {
@@ -90,7 +90,7 @@ compute <- function(x) {
   doubled
 }
 #++++
-compute: <T: numeric> fn(x: T) -> T
+compute: <T: num> fn(x: T) -> T
 
 #---- block_last_expr_return
 f <- function(x) {
@@ -125,7 +125,7 @@ sumlit: <T: numeric> fn(x: T, y: T) -> T
 #---- nested_function_returns_function
 adder <- function(x) function(y) x + y
 #++++
-adder: <T: numeric> fn(x: T) -> fn(y: T) -> T
+adder: <T: num> fn(x: T) -> fn(y: T) -> T
 
 #---- param_used_as_nullary_callee
 call_it <- function(f) f()
@@ -140,7 +140,7 @@ noop: <T> fn([x]: T) -> NULL
 #---- param_passed_to_two_funcs_same_constraint
 twice <- function(x) x + x
 #++++
-twice: <T: numeric> fn(x: T) -> T
+twice: <T: num> fn(x: T) -> T
 
 #---- compare_character_literal
 gtchar <- function(x) x > "a"
@@ -206,12 +206,12 @@ modp: <T: arithmetic> fn(x: T) -> T
 #---- double_negate
 dn <- function(x) -(-x)
 #++++
-dn: <T: numeric> fn(x: T) -> T
+dn: <T: num> fn(x: T) -> T
 
 #---- three_param_sum
 sum3 <- function(a, b, c) a + b + c
 #++++
-sum3: <T: numeric> fn(a: T, b: T, c: T) -> T
+sum3: <T: num> fn(a: T, b: T, c: T) -> T
 
 #---- param_used_in_sequence_block
 seqf <- function(x) { x; x }

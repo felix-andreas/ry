@@ -764,3 +764,57 @@ fraction: fn() -> Tree
 text: fn(s: Str) -> Tree
 203..206 error[type-mismatch] this literal does not fit `I64`, which cannot hold its value exactly
 254..255 error[type-mismatch] expected `I64`, found `Str`
+
+#==== unannotated_arithmetic
+#---- arithmetic_that_keeps_its_type_takes_ry_numbers
+twice <- function(a) a + a
+mul <- function(a, b) a * b
+neg <- function(a) -a
+n <- 3i64
+xs <- [1.0, 2.0]
+doubled <- twice(n)
+products <- List.map2(xs, xs, mul)
+negated <- neg(2.5f64)
+r_sum <- twice(2L)
+#++++
+twice: <T: num> fn(a: T) -> T
+mul: <T: num> fn(a: T, b: T) -> T
+neg: <T: num> fn(a: T) -> T
+n: I64
+xs: List<F64>
+doubled: I64
+products: List<F64>
+negated: F64
+r_sum: integer
+
+#---- arithmetic_with_an_r_result_takes_r_numbers_only
+half <- function(a, b) a / b
+scale <- function(x) x * 2.0
+n <- 3i64
+xs <- [1.0, 2.0]
+q <- half(n, n)
+scaled <- List.map(xs, scale)
+#++++
+half: <T: numeric> fn(a: T, b: T) -> double
+scale: <T: arithmetic> fn(x: T) -> double
+n: I64
+xs: List<F64>
+q: Unknown
+scaled: Unknown
+95..96 error[type-mismatch] expected a numeric value (`integer` or `double`), found `I64`. The function's arithmetic on this value gives an R number (as `/`, `^` or a number literal operand does), so declare its parameter `I64` to compute in ry numbers
+98..99 error[type-mismatch] expected a numeric value (`integer` or `double`), found `I64`. The function's arithmetic on this value gives an R number (as `/`, `^` or a number literal operand does), so declare its parameter `I64` to compute in ry numbers
+124..129 error[type-mismatch] this function is passed `F64`, but its parameter `x` is used as a numeric value (`integer` or `double`). Its arithmetic gives an R number (as `/`, `^` or a number literal operand does), so declare the parameter `F64` to compute in ry numbers
+
+#---- a_num_parameter_takes_both_families
+#: <T: num> fn(a: T, b: T) -> T
+add <- function(a, b) a + b
+#: <T: num> fn(a: T, b: T) -> double
+ratio <- function(a, b) a / b
+x <- add(1.5f64, 2.5f64)
+y <- add(1L, 2L)
+#++++
+add: <T: num> fn(a: T, b: T) -> T
+ratio: <T: num> fn(a: T, b: T) -> double
+x: F64
+y: integer
+121..126 error[type-mismatch] expected a numeric value (`integer` or `double`), found `T`. This arithmetic gives an R number, so declare `<T: numeric>`, which admits R's numbers and the classes with arithmetic between two of their values

@@ -754,10 +754,15 @@ signature only ry inferred binds no name, so `#: T` in an unannotated function i
 A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
 `<T: numeric> fn(values: T) -> T`. These are the constraints:
 
+- `num` admits everything `numeric` does and the ry numbers `I64` and `F64`. It is what `a + b`,
+  `a * b`, `a %% b`, `a %/% b` and `-a` ask of values of one type, because their result has that
+  type in R and in ry alike, so `function(a, b) a * b` is `<T: num> fn(a: T, b: T) -> T` and
+  multiplies two `F64`s as well as two `double`s.
 - `numeric` admits `integer` and `double`, scalar or vector, and any class whose arithmetic takes
   two of its values, which an [operator method](#operator-methods-on-a-class) such as
-  `"+.Money" <- function(e1: Money, e2: Money)` declares. It is what `a + b` asks of two values of
-  one type, so `function(a, b) a + b` is `<T: numeric> fn(a: T, b: T) -> T`.
+  `"+.Money" <- function(e1: Money, e2: Money)` declares. It is what `a / b` and `a ^ b` ask of
+  two values of one type, because their result is R's `double` whatever the operands, so
+  `function(a, b) a / b` is `<T: numeric> fn(a: T, b: T) -> double` and does not take an `F64`.
 - `arithmetic` admits everything `numeric` does and any class that declares an arithmetic operator
   method at all, such as `Date`, whose `+.Date` adds a number to a date. It is what `x + 1` asks of
   `x`, so `function(x) x + 1` is `<T: arithmetic> fn(x: T) -> double` and accepts a `Date`, while
@@ -830,8 +835,10 @@ any two distinct type parameters, and for an unannotated parameter that a scalar
 `n` in `for (i in 1:n)`: `x + n` is `double`, so a call passing `1L` and `2.5` checks. A body under a plain `<T>` that
 does arithmetic is a type error, and `atomic` does not imply `numeric`. Under
 `<T: arithmetic> fn(x: T) -> T`, `x + 1` checks and `x + x` is a type error that says to declare
-`<T: numeric>`, because a `T` such as `Date` adds a number and not another `Date`. Unary minus asks
-`numeric` too, as R has no `-` on a single `Date`.
+`<T: num>`, because a `T` such as `Date` adds a number and not another `Date`. Unary minus asks
+`num` too, as R has no `-` on a single `Date`. Under `<T: num>`, `x / x` is a type error that says
+to declare `<T: numeric>`, because an `F64` divides to an `F64` and not to the `double` R's `/`
+gives.
 
 Using a type parameter as a vector element, `T[]`, imposes the `atomic` bound, because a vector holds
 only atomic elements. This is what makes element-preserving signatures possible. With
@@ -1582,7 +1589,12 @@ An `F64` is stored as R's `double`, so an `F64` fits `double` and is passed to R
 `I64` does not share R's `integer`, because R reads one 32-bit pattern as `NA` and overflows to `NA`
 with a warning: `-2147483648i64` is an ordinary `I64`, and overflow is an error.
 
-The constraint `number` admits both types.
+The constraint `number` admits both types, and `num` admits them and R's numbers, so an
+unannotated helper whose arithmetic keeps its operands' type, such as `mul <- function(a, b) a * b`,
+takes ry numbers: `List.map2(xs, ys, mul)` with `xs, ys: List<F64>` is a `List<F64>`. A helper
+whose arithmetic gives an R number, such as `function(x) x * 2.0` or `function(a, b) a / b`, takes
+R numbers only, and passing it a ry number is a `type-mismatch` that says to declare the parameter's
+type.
 
 ### Number literals
 
@@ -2043,7 +2055,7 @@ An unannotated `function(...)` expression gets its type from the definition itse
 - Parameter and return types are inferred, and a parameter nothing constrains generalizes when the
   function is bound to a name, so `function(x) x` is `<T> fn(x: T) -> T`.
 - A requirement inference could not discharge survives into the exported type: a parameter used as a
-  number exports as `<T: numeric>`, so calls from other files keep being checked.
+  number exports with its constraint, such as `<T: num>`, so calls from other files keep being checked.
 
 `function(count, label = NULL) count` may therefore be called as `f(1L)`, `f(count = 1L)`, or
 `f(1L, "x")`.
@@ -2752,7 +2764,8 @@ For example, `double * integer[]` is `double[]`, `integer[named] + integer` is `
 An unannotated value used as an arithmetic operand is *required to be numeric* rather than rejected:
 it must end up as `integer` or `double`, in any vector shape, or as a class with arithmetic. Beside
 a number it takes the [`arithmetic` constraint](#constraints), and two operands of one type take
-`numeric`, because a class such as `Date` adds a number but not another value of its own. A
+`num`, because a class such as `Date` adds a number but not another value of its own. Under `/` and
+`^`, whose result is always `double`, two operands of one type take `numeric` instead. A
 difference `a - b` is the exception and asks only `arithmetic`, because R subtracts two dates or
 two times. That difference is not a value of the operands' type (two dates subtract to a
 `difftime`), so it is `double`, the representation every arithmetic class shares.
@@ -2760,8 +2773,8 @@ two times. That difference is not a value of the operands' type (two dates subtr
 - `function(x) x + 1L` is `<T: arithmetic> fn(x: T) -> T`, and calling it with `"oops"` is a type
   error.
 - `function(x) x / 2` is `<T: arithmetic> fn(x: T) -> double`.
-- `function(a, b) a + b` is `<T: numeric> fn(a: T, b: T) -> T`, and calling it with two dates is a
-  type error.
+- `function(a, b) a + b` is `<T: num> fn(a: T, b: T) -> T`, and calling it with two dates is a
+  type error. Calling it with two `I64`s is an `I64`.
 - `function(a, b) a - b` is `<T: arithmetic> fn(a: T, b: T) -> double`, and accepts two dates.
 
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
