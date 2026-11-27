@@ -42,6 +42,23 @@ expect exit 0
 expect stdout "42i64\n(x = 1i64, y = 2i64)\n0i64\n[1] \"argument `values` must be `double`, not `character`\"\n42i64\n(x = 1i64, y = 2i64)\n0i64\n[1] \"argument `values` must be `double`, not `character`\"\nfunction(x: I64) -> I64 x + 2i64\n[1] 2\n42i64\n(x = 1, y = 2)\n[1] 0\n[1] \"non-numeric argument to binary operator\""
 expect stderr "the inline annotation gives parameter `n` the type `I64`, but the `#:` comment gives it `double`"
 
+# A file sourced again with the same text prints its warnings only the first time, because a
+# script that sources a helper in a loop would repeat them.
+
+file again.R
+| source("warn.R")
+| message("again")
+| source("warn.R")
+| print(f(2))
+
+run ry run again.R
+expect exit 0
+expect stdout "2i64"
+expect stderr "the inline annotation gives parameter `n` the type `I64`"
+expect stderr "\n\nagain\n"
+expect stderr lacks "again\n\nannotation-mismatch"
+expect stderr lacks "again\n  ! the inline annotation"
+
 # A strict project's mode belongs to the script: a plain R file it sources keeps R's types.
 file ry.toml
 | [check]

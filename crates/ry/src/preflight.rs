@@ -23,6 +23,7 @@ use {
     },
     std::{
         borrow::Cow,
+        collections::HashSet,
         fs, io,
         path::{Path, PathBuf},
         sync::{Arc, LazyLock, Mutex, PoisonError},
@@ -32,7 +33,7 @@ use {
         NodeOrToken, SyntaxKind, SyntaxNode, erase_inline_annotations, erased_lines_end,
         input_is_unfinished, is_inline_annotation,
     },
-    xxhash_rust::xxh3::xxh3_64,
+    xxhash_rust::xxh3::{xxh3_64, xxh3_64_with_seed},
 };
 
 /// Analysis state for one run or one console session. Each accepted command is a file of its
@@ -590,14 +591,26 @@ pub fn elaborate_sourced(path: &Path) -> Result<Option<(u64, String)>, CommandEr
             message: related.message,
         })
     };
-    render_findings(
-        OutputFormat::Human,
-        MinSeverity::Warning,
-        path,
-        text,
-        &warnings,
-        &resolve_note,
+    // A script that sources a helper in a loop would repeat the same findings each time.
+    static REPORTED: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(Mutex::default);
+    let key = xxh3_64_with_seed(
+        source.as_bytes(),
+        xxh3_64(path.as_os_str().as_encoded_bytes()),
     );
+    if REPORTED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key)
+    {
+        render_findings(
+            OutputFormat::Human,
+            MinSeverity::Warning,
+            path,
+            text,
+            &warnings,
+            &resolve_note,
+        );
+    }
     if elaborations.is_empty() {
         return Ok(None);
     }
