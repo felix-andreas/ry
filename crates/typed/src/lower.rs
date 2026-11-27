@@ -5175,11 +5175,8 @@ impl Lowering<'_> {
                     .builder
                     .emit(Type::of_item(key), Op::ItemAt(keys, positions.counter));
                 // A set's step takes only the element.
-                if !matches!(ty, Type::Set(_)) {
-                    entry_value = Some(
-                        self.builder
-                            .emit(Type::of_item(value), Op::ItemAt(values, positions.counter)),
-                    );
+                if values.is_some() {
+                    entry_value = Some(self.entry_value(values, value, positions.counter));
                 }
                 (positions, element, positions.counter)
             }
@@ -9205,8 +9202,13 @@ impl Lowering<'_> {
     }
 
     /// The keys and values of `dict` as two ry lists in the dictionary's order, and their
-    /// items. `dict` is a set for a `Set` function, whose values are its placeholders.
-    fn entries(&mut self, dict: Local, name: &str) -> Result<(Local, Local, Item, Item), Refusal> {
+    /// items. `dict` is a set for a `Set` function, which gives no list of values because
+    /// every value is the same placeholder (`entry_value`).
+    fn entries(
+        &mut self,
+        dict: Local,
+        name: &str,
+    ) -> Result<(Local, Option<Local>, Item, Item), Refusal> {
         let ty = self.builder.ty(dict);
         let (Some((key, value)), true) = (
             ty.entry_items(),
@@ -9223,14 +9225,26 @@ impl Lowering<'_> {
             },
             Op::DictKeys(dict),
         );
-        let values = self.builder.emit(
-            Type::Vector {
-                item: value,
-                array: true,
-            },
-            Op::DictValues(dict),
-        );
+        let values = (!matches!(ty, Type::Set(_))).then(|| {
+            self.builder.emit(
+                Type::Vector {
+                    item: value,
+                    array: true,
+                },
+                Op::DictValues(dict),
+            )
+        });
         Ok((keys, values, key, value))
+    }
+
+    /// The value at `position` of the values `entries` gave, or a set's placeholder.
+    fn entry_value(&mut self, values: Option<Local>, value: Item, position: Local) -> Local {
+        match values {
+            Some(values) => self
+                .builder
+                .emit(Type::of_item(value), Op::ItemAt(values, position)),
+            None => self.set_member(),
+        }
     }
 
     /// `Dict.join_map(dict, f)`: the entries of the dictionary `f` gives for each key and value,
@@ -9247,7 +9261,6 @@ impl Lowering<'_> {
         let dict = self.value(dict)?;
         let callable = self.function_argument(function)?;
         let (keys, values, key, value) = self.entries(dict, name)?;
-        let over_set = name == "Set.join_map";
         // The result's type is known only once the body is lowered, as for `Dict.map`.
         let preheader = self.builder.current;
         let output = self.builder.local(Type::Null);
@@ -9256,11 +9269,8 @@ impl Lowering<'_> {
             .builder
             .emit(Type::of_item(key), Op::ItemAt(keys, positions.counter));
         let mut inputs: SmallVec<[Local; 2]> = SmallVec::from_slice(&[entry_key]);
-        if !over_set {
-            inputs.push(
-                self.builder
-                    .emit(Type::of_item(value), Op::ItemAt(values, positions.counter)),
-            );
+        if values.is_some() {
+            inputs.push(self.entry_value(values, value, positions.counter));
         }
         let inner = self
             .apply(callable, &inputs)?
@@ -9275,10 +9285,7 @@ impl Lowering<'_> {
             Type::of_item(inner_key),
             Op::ItemAt(inner_keys, inner_positions.counter),
         );
-        let joined_value = self.builder.emit(
-            Type::of_item(inner_value),
-            Op::ItemAt(inner_values, inner_positions.counter),
-        );
+        let joined_value = self.entry_value(inner_values, inner_value, inner_positions.counter);
         let grown = self
             .builder
             .emit(output_ty, Op::DictInsert(output, joined_key, joined_value));
@@ -9292,19 +9299,19 @@ impl Lowering<'_> {
         Ok(output)
     }
 
-    /// The list or dictionary of a capacity function, which gives it back as it is: native
-    /// lists and dictionaries grow by doubling and keep no reserved room a program could read.
+    /// The list, dictionary or set of a capacity function, which gives it back as it is: native
+    /// collections grow by doubling and keep no reserved room a program could read.
     fn capacity_operand(&mut self, name: &str, collection: Local) -> Result<Local, Refusal> {
         self.usable(collection)?;
-        let fits = match (
-            name.split_once('.').map(|(module, _)| module),
-            self.builder.ty(collection),
-        ) {
-            (Some("List"), Type::Vector { array: true, .. }) => true,
-            (Some("Dict"), Type::Dict { .. }) => true,
-            (Some("Set"), Type::Set(_)) => true,
-            _ => false,
-        };
+        let fits = matches!(
+            (
+                name.split_once('.').map(|(module, _)| module),
+                self.builder.ty(collection),
+            ),
+            (Some("List"), Type::Vector { array: true, .. })
+                | (Some("Dict"), Type::Dict { .. })
+                | (Some("Set"), Type::Set(_))
+        );
         if !fits {
             return Err(Refusal(Cow::Owned(format!(
                 "a `{name}` of something other than its collection"
@@ -9382,11 +9389,8 @@ impl Lowering<'_> {
             .builder
             .emit(Type::of_item(key), Op::ItemAt(keys, positions.counter));
         let mut inputs: SmallVec<[Local; 2]> = SmallVec::from_slice(&[entry_key]);
-        if !over_set {
-            inputs.push(
-                self.builder
-                    .emit(Type::of_item(value), Op::ItemAt(values, positions.counter)),
-            );
+        if values.is_some() {
+            inputs.push(self.entry_value(values, value, positions.counter));
         }
         let mapped = self
             .apply(callable, &inputs)?
@@ -9459,9 +9463,7 @@ impl Lowering<'_> {
         let entry_key = self
             .builder
             .emit(Type::of_item(key), Op::ItemAt(keys, positions.counter));
-        let entry_value = self
-            .builder
-            .emit(Type::of_item(value), Op::ItemAt(values, positions.counter));
+        let entry_value = self.entry_value(values, value, positions.counter);
         let (keep, next) = (self.builder.block(), self.builder.block());
         match (callable, second) {
             (Some(callable), _) => {
@@ -9565,9 +9567,7 @@ impl Lowering<'_> {
         let entry_key = self
             .builder
             .emit(Type::of_item(key), Op::ItemAt(keys, positions.counter));
-        let entry_value = self
-            .builder
-            .emit(Type::of_item(value), Op::ItemAt(values, positions.counter));
+        let entry_value = self.entry_value(values, value, positions.counter);
         let grown = self
             .builder
             .emit(ty, Op::DictInsert(output, entry_key, entry_value));

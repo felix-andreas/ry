@@ -61,8 +61,9 @@ pub enum Type {
     },
     /// An R list whose elements are scalars of these items.
     List(Item),
-    /// ry's `Set` of these items: their distinct values in first-insertion order, held in a list
-    /// object, which never crosses back to R.
+    /// ry's `Set` of these items: their distinct values in first-insertion order, held in the
+    /// native dictionary with a placeholder value per element (`entry_items`), which never
+    /// crosses back to R.
     Set(Item),
     Dict {
         key: Item,
@@ -147,7 +148,6 @@ impl Type {
         }
     }
 
-    /// The items of a vector or list.
     /// The key and value items of a native dictionary. A set is a dictionary too, whose value
     /// column holds one placeholder logical per key.
     pub fn entry_items(self) -> Option<(Item, Item)> {
@@ -158,6 +158,7 @@ impl Type {
         }
     }
 
+    /// The items of a vector or list.
     pub fn items(self) -> Option<Item> {
         match self {
             Type::Vector { item, .. } | Type::List(item) => Some(item),
