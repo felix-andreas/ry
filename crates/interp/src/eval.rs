@@ -1601,7 +1601,7 @@ pub fn slot_reference<'a>(
     slot: u32,
     symbol: Local<'_>,
 ) -> R<Gc<'a, Promise>> {
-    Ok(take_reference(context, symbol, Some((owner, slot)))?.2)
+    Ok(take_reference(context, symbol, Some((owner, slot)))?.1)
 }
 
 /// An argument reference to `expression`, a variable, uncompiled code or a constant, of a
@@ -1615,7 +1615,7 @@ pub unsafe fn env_reference(env: Sexp, expression: Sexp) -> R<Sexp> {
             handles::held(context, env),
             handles::held(context, expression),
         );
-        let (context, _, reference) = take_reference(context, expression, None)?;
+        let (context, reference) = take_reference(context, expression, None)?;
         context.set_promise_environment(reference, environment);
         Ok(reference.raw())
     })
@@ -1629,7 +1629,7 @@ pub unsafe fn env_code_reference(env: Sexp, code: Sexp) -> R<Sexp> {
         let (environment, code) = (handles::held(context, env), handles::held(context, code));
         // The code holds its constant pool, and the caller holds the code.
         let source = handles::held(context, source_of(code.read(context)).raw());
-        let (context, _, reference) = take_reference(context, source, None)?;
+        let (context, reference) = take_reference(context, source, None)?;
         context.set_promise_environment(reference, environment);
         context.set_promise_compiled(reference, code);
         Ok(reference.raw())
@@ -1648,19 +1648,24 @@ pub unsafe fn code_reference(owner: usize, code: Sexp) -> R<Sexp> {
     })
 }
 
-/// [`code_reference`] for code on the handle types: the position in the pool of the reference
-/// that runs `code`, and the reference.
+/// [`code_reference`] for code on the handle types.
 fn compiled_reference<'c, 's>(
     context: &'c mut Cx<'s>,
     owner: usize,
     code: Local<'_>,
 ) -> R<(&'c Cx<'s>, Gc<'c, Promise>)> {
-    // The code holds its constant pool, which holds the source.
-    let source = context.root(source_of(code.read(context)));
-    let (context, _, reference) =
-        take_reference(context, source, Some((owner, NO_REFERENCE_SLOT)))?;
+    ready_references(context, 1)?;
+    let context = &*context;
+    Ok((context, place_code_reference(context, owner, code.read(context))))
+}
+
+/// [`compiled_reference`] once the pool is ready: the reference names the code's source, and
+/// keeps the code in its environment field.
+#[inline(always)]
+fn place_code_reference<'c>(context: &'c Cx<'_>, owner: usize, code: Gc<'_>) -> Gc<'c, Promise> {
+    let reference = place_reference(context, source_of(code), Some((owner, NO_REFERENCE_SLOT)));
     context.set_promise_environment(reference, code);
-    Ok((context, reference))
+    reference
 }
 
 /// The source a compiled argument's `code` was compiled from, which its constant pool keeps.
@@ -1675,53 +1680,73 @@ fn source_of<'c>(code: Gc<'c>) -> Gc<'c> {
     }
 }
 
-/// The next free reference of [`Interp::references`], now naming `symbol`, with its position in
-/// the pool and the context, which nothing can collect through while the reference is used.
-/// `aim` gives the frame and the slot a slot frame's reference reads ([`handles::aim_target`]);
-/// without it the target is left for the caller to fill in.
+/// The next free reference of [`Interp::references`], now naming `symbol`, with the context,
+/// which nothing can collect through while the reference is used. `aim` gives the frame and
+/// the slot a slot frame's reference reads ([`handles::aim_target`]); without it the target is
+/// left for the caller to fill in.
 #[inline(always)]
 fn take_reference<'c, 's>(
     context: &'c mut Cx<'s>,
     symbol: Local<'_>,
     aim: Option<(usize, u32)>,
-) -> R<(&'c Cx<'s>, usize, Gc<'c, Promise>)> {
-    let index = interp().references_used as usize;
-    let free = handles::pooled_reference(context, index)
-        .is_some_and(|(reference, _)| !reference.is_shared());
-    if !free {
-        renew_reference(context, index, symbol)?;
-    }
+) -> R<(&'c Cx<'s>, Gc<'c, Promise>)> {
+    ready_references(context, 1)?;
     let context = &*context;
+    Ok((context, place_reference(context, symbol, aim)))
+}
+
+/// Makes the next `count` positions of the pool hold references that nothing else counts, so
+/// that placing them ([`place_reference`]) allocates nothing.
+#[inline(always)]
+fn ready_references(context: &mut Cx<'_>, count: usize) -> R<()> {
+    let used = interp().references_used as usize;
+    for index in used..used + count {
+        let free = handles::pooled_reference(context, index)
+            .is_some_and(|(reference, _)| !reference.is_shared());
+        if !free {
+            renew_reference(context, index)?;
+        }
+    }
+    Ok(())
+}
+
+/// The next reference of the pool, which [`ready_references`] made free, now naming `symbol`
+/// and aimed as [`take_reference`] aims it.
+#[inline(always)]
+fn place_reference<'c>(
+    context: &'c Cx<'_>,
+    symbol: impl Pointer<Value>,
+    aim: Option<(usize, u32)>,
+) -> Gc<'c, Promise> {
+    let index = interp().references_used as usize;
     let Some((reference, target)) = handles::pooled_reference(context, index) else {
         panic!("argument reference {index} is not in the pool");
     };
-    if free {
-        context.set_promise_code(reference, symbol);
-        // A call that failed while forcing the reference left it marked, and the mark belongs
-        // to that call's argument, not to the one that takes the reference next.
-        reference.set_flags(PROMISE_INTERRUPTED, false);
-    }
+    context.set_promise_code(reference, symbol);
+    // A call that failed while forcing the reference left it marked, and the mark belongs to
+    // that call's argument, not to the one that takes the reference next.
+    reference.set_flags(PROMISE_INTERRUPTED, false);
     if let Some((owner, slot)) = aim {
         handles::aim_target(context, target, owner, slot);
     }
     interp().references_used += 1;
     activity::count(Counter::ArgumentReferences);
-    Ok((context, index, reference))
+    reference
 }
 
-/// Puts a new reference naming `symbol` at position `index` of the pool, which ends the pool or
-/// holds a reference something else counts. A `...` list counts the references it collected
+/// Puts a new reference at position `index` of the pool, which ends the pool or holds a
+/// reference something else counts. A `...` list counts the references it collected
 /// until its frame is released (`Heap::release_frame`), which happens late for a frame that
 /// waits for a reconcile and never for the frame of a call that failed. Handed out with that
 /// count, the reference would not look held by its frame alone once a frame detached it
 /// ([`detach_reference`]), so the pool gives it up and makes another.
 #[cold]
 #[inline(never)]
-fn renew_reference(context: &mut Cx<'_>, index: usize, symbol: Local<'_>) -> R<()> {
+fn renew_reference(context: &mut Cx<'_>, index: usize) -> R<()> {
     let mut target = context.alloc::<Integer>(3)?;
     target.as_mut_slice().fill(0);
     let target = target.finish();
-    handles::replace_pooled_reference(context, index, symbol, target)
+    handles::replace_pooled_reference(context, index, handles::null(), target)
 }
 
 /// The slot an argument reference names for a variable its frame keeps in no slot: forcing it
@@ -2152,15 +2177,22 @@ pub unsafe fn pending_env(owner: usize) -> R<Sexp> {
 pub fn pending_environment<'a>(context: &'a mut Cx<'_>, owner: usize) -> R<Gc<'a, Environment>> {
     context.read_or_make(
         |context| handles::live_frame(context, owner).pending(),
-        |context| {
-            // The frame holds its function while the environment is reserved.
-            context.reserve(ENVIRONMENT_BYTES);
-            let context: &Cx<'_> = context;
-            let environment = handles::live_frame(context, owner).make_pending()?;
-            activity::count(Counter::FrameEnvironments);
-            Ok(environment)
-        },
+        |context| make_pending_environment(context, owner),
     )
+}
+
+/// [`pending_environment`] for a slot frame that has not made it yet.
+#[inline]
+fn make_pending_environment<'a>(
+    context: &'a mut Cx<'_>,
+    owner: usize,
+) -> R<Gc<'a, Environment>> {
+    // The frame holds its function while the environment is reserved.
+    context.reserve(ENVIRONMENT_BYTES);
+    let context: &Cx<'_> = context;
+    let environment = handles::live_frame(context, owner).make_pending()?;
+    activity::count(Counter::FrameEnvironments);
+    Ok(environment)
 }
 
 /// The environment of an unforced `promise`: for an argument reference, that of the frame it
@@ -4409,6 +4441,10 @@ pub unsafe fn frame_env(index: usize, cause: Reify) -> R<Sexp> {
     if frame.env.raw() != nil() || frame.slots == crate::NO_SLOTS {
         return Ok(frame.env.raw());
     }
+    // A profile summary records each request for the environment.
+    if frame.pending.raw() != nil() && !activity::enabled() {
+        return Ok(frame.pending.raw());
+    }
     handles::in_caller_scope(|context| Ok(frame_environment_of(context, index, cause)?.raw()))
 }
 
@@ -4417,8 +4453,13 @@ pub unsafe fn frame_env(index: usize, cause: Reify) -> R<Sexp> {
 pub fn frame_environment_of<'a>(context: &'a mut Cx<'_>, index: usize, cause: Reify) -> R<Gc<'a>> {
     context.read_or_make(
         |context| {
-            let frame = handles::live_frame(context, index);
-            (!frame.in_slots()).then(|| frame.recorded_environment())
+            let frame = &interp().frames[index];
+            if frame.env.raw() != nil() || frame.slots == crate::NO_SLOTS {
+                return Some(frame.env.get(context));
+            }
+            // A profile summary records each request for the environment.
+            (frame.pending.raw() != nil() && !activity::enabled())
+                .then(|| frame.pending.get(context))
         },
         |context| Ok(reified_environment(context, index, cause)?.value()),
     )
@@ -4442,8 +4483,10 @@ fn reified_environment<'a>(
             Reify::Site(site) => site as u32,
         };
         handles::live_frame(context, index).set_reified_by(reason);
+        return pending_environment(context, index);
     }
-    pending_environment(context, index)
+    // Without a summary the caller found no environment that stands for the frame.
+    make_pending_environment(context, index)
 }
 
 /// [`frame_environment_of`] for a frame that has an environment or runs on slots, rooted.
@@ -5583,30 +5626,30 @@ pub(crate) fn promise_defaults(context: &mut Cx<'_>, owner: usize, promised: u64
         let function = context.root(handles::live_frame(context, owner).function());
         handles::build_slot_defaults(context, function)?;
     }
-    let Some(defaults) = slot_defaults(context, handles::live_frame(context, owner).function())
-    else {
+    // Readying the pool is all that allocates, so the frame, which holds its function and so
+    // the defaults, keeps everything the loop reads.
+    ready_references(context, promised.count_ones() as usize)?;
+    let context = &*context;
+    let frame = handles::live_frame(context, owner);
+    let Some(defaults) = slot_defaults(context, frame.function()) else {
         panic!("a slot frame's defaults were not kept for its formals");
     };
-    // The frame holds its function, which holds the defaults, but a reference may allocate,
-    // so the defaults are rooted.
-    let defaults = context.root(defaults);
     let mut pending = promised;
     while pending != 0 {
         let index = pending.trailing_zeros() as usize;
         pending &= pending - 1;
-        let code = context.root(defaults.read(context).get(index));
-        let (reading, reference) = if code.r_type() == SexpType::Bytecode {
-            compiled_reference(context, owner, code)?
+        let code = defaults.get(index);
+        let reference = if code.r_type() == SexpType::Bytecode {
+            place_code_reference(context, owner, code)
         } else {
-            let slot = handles::live_frame(context, owner)
+            let slot = frame
                 .slot_names()
                 .iter()
                 .position(|name| name.is(code))
                 .map_or(NO_REFERENCE_SLOT, |slot| slot as u32);
-            let (reading, _, reference) = take_reference(context, code, Some((owner, slot)))?;
-            (reading, reference)
+            place_reference(context, code, Some((owner, slot)))
         };
-        handles::live_frame(reading, owner).store_slot(index, reference.value());
+        frame.store_slot(index, reference.value());
     }
     Ok(())
 }

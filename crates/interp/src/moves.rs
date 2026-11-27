@@ -446,6 +446,7 @@ unsafe fn end_all() -> R<()> {
 /// How many entries `value` has, when it is a value a move handles: a dictionary, a set, a plain
 /// list or an Array, which an update may grow in place. A list with attributes is never updated
 /// in place, so moving one gains nothing.
+#[inline]
 unsafe fn extent(value: Sexp) -> Option<usize> {
     match value.kind() {
         SexpType::Record
