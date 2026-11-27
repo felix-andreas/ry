@@ -153,3 +153,31 @@ file local.R
 run ry run local.R
 expect exit 1
 expect stderr "six"
+
+# An earlier command's own values keep the types the file it sourced gave them, even after a
+# later command's check reads the edited file.
+file lib/six.R
+| six <- function(x: I64) -> I64 x * 6i64
+file reload.txt
+| source("lib/six.R"); x <- six(1i64)
+| writeLines("six <- function(x: I64) -> Str \"s\"", "lib/six.R")
+| reload <- function() source("lib/six.R")
+| z: Str <- x
+stdin reload.txt
+run ry run --runtime ry
+expect stderr "expected `Str`, found `I64`"
+
+# The last file to run defines a name, though an earlier file sources the other definition.
+file order/a1.R
+| f <- function(x: I64) -> I64 x
+file order/a.R
+| source("order/a1.R")
+file order/b.R
+| f <- function(x: I64) -> Str "s"
+file order.R
+| source("order/a.R")
+| source("order/b.R")
+| y: I64 <- f(1i64)
+run ry run order.R
+expect exit 1
+expect stderr "expected `I64`, found `Str`"

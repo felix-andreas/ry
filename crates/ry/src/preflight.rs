@@ -17,15 +17,13 @@ use {
     rustc_hash::{FxHashMap, FxHashSet},
     salsa::Setter,
     semantics::{
-        DocumentKind, Elaboration, ProjectFiles, RootDatabase, SourceBase, SourceFile, SourcePaths,
+        DocumentKind, Elaboration, ProjectFiles, RootDatabase, SourceFile,
         diagnostics::{Diagnostic, RelatedLocation, Severity},
         file_source_calls, has_ry_syntax, is_ry_syntax, normalize_relative_path, session,
-        source_candidates,
         stubs::{install_shipped_stubs, is_native_function},
     },
     std::{
         borrow::Cow,
-        collections::BTreeMap,
         env::current_dir,
         fs, io,
         path::{Path, PathBuf},
@@ -62,6 +60,8 @@ pub struct Preflight {
     /// Where the last accepted input went, so that [`Preflight::retract`] can take back the part
     /// of it that never ran.
     last: Option<Last>,
+    /// The files the session's `source()` calls have read.
+    sourced: SourcedFiles,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -106,6 +106,7 @@ impl Preflight {
             plain: String::new(),
             plain_path: None,
             last: None,
+            sourced: SourcedFiles::default(),
         }
     }
 
@@ -149,7 +150,7 @@ impl Preflight {
         }
         self.flush_plain();
         let file = session::command_file(&self.db, format!("{input}\n"));
-        follow_sources(&mut self.db, file);
+        follow_sources(&mut self.db, &mut self.sourced, file);
         let db = self.db.clone();
         let config = &self.config;
         let (contributions, (verdict, reported, elaborations)) = on_analysis_stack(move || {
@@ -276,7 +277,7 @@ impl Preflight {
 
     fn push_unchecked(&mut self, text: String, path: Arc<Path>) {
         let file = session::command_file(&self.db, text);
-        follow_sources(&mut self.db, file);
+        follow_sources(&mut self.db, &mut self.sourced, file);
         let db = self.db.clone();
         let contributions = on_analysis_stack(move || session::prepare(&db, file));
         // The readers a command that already ran breaks are not this command's to refuse.
@@ -559,10 +560,9 @@ struct SourcedAnalysis {
     db: RootDatabase,
     /// `[check] inline-annotations` and `prelude`, the settings the database reads.
     settings: (bool, bool),
-    /// How many files the database holds, counting each version of an edited file: past
-    /// [`SOURCED_FILES_LIMIT`], a fresh database replaces it, so a process that sources ever new
-    /// files keeps a bounded analysis.
-    files: usize,
+    /// Past [`SOURCED_FILES_LIMIT`] files, counting each version of an edited file, a fresh
+    /// database replaces this one, so a process that sources ever new files stays bounded.
+    sourced: SourcedFiles,
 }
 
 static SOURCED_ANALYSES: LazyLock<Mutex<Vec<SourcedAnalysis>>> = LazyLock::new(Mutex::default);
@@ -622,12 +622,12 @@ pub fn elaborate_sourced(path: &Path) -> Result<Option<(u64, String)>, CommandEr
         .iter()
         .position(|analysis| analysis.settings == settings)
     {
-        Some(index) if analyses[index].files <= SOURCED_FILES_LIMIT => index,
+        Some(index) if analyses[index].sourced.created <= SOURCED_FILES_LIMIT => index,
         Some(index) => {
             analyses[index] = SourcedAnalysis {
                 db: analysis_database(&config),
                 settings,
-                files: 0,
+                sourced: SourcedFiles::default(),
             };
             index
         }
@@ -635,19 +635,25 @@ pub fn elaborate_sourced(path: &Path) -> Result<Option<(u64, String)>, CommandEr
             analyses.push(SourcedAnalysis {
                 db: analysis_database(&config),
                 settings,
-                files: 0,
+                sourced: SourcedFiles::default(),
             });
             analyses.len() - 1
         }
     };
-    let SourcedAnalysis { db, files, .. } = &mut analyses[index];
-    // The file joins the same map as the files it sources, so a file sourced both directly and
+    let SourcedAnalysis { db, sourced, .. } = &mut analyses[index];
+    // The file joins the same store as the files it sources, so a file sourced both directly and
     // through another is one file to the analysis.
-    let mut followed = FollowedSources::new(db);
-    let key = source_key(followed.root.as_deref(), path);
-    let file = followed.file(db, key, format!("{source}\n"));
-    followed.follow(db, file);
-    *files += followed.finish(db);
+    let file = match current_dir() {
+        Ok(root) => {
+            let mut follow = Follow {
+                root: &root,
+                loaded: FxHashMap::default(),
+                stack: vec![canonical.clone()],
+            };
+            load_sourced(db, sourced, &mut follow, canonical, format!("{source}\n"))
+        }
+        Err(_) => SourceFile::new(db, format!("{source}\n"), DocumentKind::Script),
+    };
     let analysis = db.clone();
     let (_, reported, elaborations) = on_analysis_stack(move || findings(&analysis, file, &config));
     let db = &*db;
@@ -682,134 +688,126 @@ pub fn elaborate_sourced(path: &Path) -> Result<Option<(u64, String)>, CommandEr
     Ok(Some((xxh3_64(source.as_bytes()), program)))
 }
 
-/// Gives the analysis the files `file` reads through `source()` with a literal path, and the
-/// files those read in turn, so that a script may call what they define, as `ry check` lets it.
-/// R resolves such a path against the working directory, so the paths are relative to it, and
-/// each file is read again here, because a session may edit one between two `source()` calls.
-fn follow_sources(db: &mut RootDatabase, file: SourceFile) {
+/// The files a host that runs code has read for `source()`, each by its canonical path in its
+/// latest version.
+#[derive(Default)]
+struct SourcedFiles {
+    files: FxHashMap<PathBuf, SourceFile>,
+    /// How many files this has made, counting each version of an edited file.
+    created: usize,
+}
+
+/// One walk over the files a check sources.
+struct Follow<'a> {
+    /// The working directory, which R resolves a relative path against.
+    root: &'a Path,
+    /// Each file this walk has loaded, so a file sourced from two places is read once.
+    loaded: FxHashMap<PathBuf, SourceFile>,
+    /// The files being loaded, outermost first: a file that sources itself, directly or not,
+    /// never finishes in R either, so that call is left out.
+    stack: Vec<PathBuf>,
+}
+
+/// Records in `file`, a command nothing has read yet, the file each of its literal `source()`
+/// calls reads, resolved against the working directory as R resolves it, and loads those in
+/// turn, so that a script may call what they define, as `ry check` lets it. Each file is read
+/// again here, because a session may edit one between two `source()` calls.
+fn follow_sources(db: &mut RootDatabase, sourced: &mut SourcedFiles, file: SourceFile) {
     // A command that never names `source` reads no file, and most commands are such.
     if !file.text(db).contains("source") {
         return;
     }
-    let mut followed = FollowedSources::new(db);
-    followed.follow(db, file);
-    followed.finish(db);
-}
-
-/// The [`SourcePaths`] map under construction, keyed by paths relative to the working
-/// directory. A file whose text changed on disk gets a new [`SourceFile`] rather than new text,
-/// because a console command that sourced the old text keeps binding what that text defined.
-struct FollowedSources {
-    /// The working directory, or `None` when it cannot be read: R then resolves no relative
-    /// path either, and nothing is followed.
-    root: Option<PathBuf>,
-    paths: BTreeMap<String, SourceFile>,
-    created: usize,
-    changed: bool,
-}
-
-impl FollowedSources {
-    fn new(db: &RootDatabase) -> Self {
-        FollowedSources {
-            root: current_dir().ok(),
-            paths: SourcePaths::try_get(db)
-                .map(|paths| paths.paths(db).clone())
-                .unwrap_or_default(),
-            created: 0,
-            changed: false,
-        }
-    }
-
-    /// The file at `key` with `text`, the one the map holds when its text is the same.
-    fn file(&mut self, db: &RootDatabase, key: String, text: String) -> SourceFile {
-        if let Some(&existing) = self.paths.get(&key)
-            && *existing.text(db) == text
-        {
-            return existing;
-        }
-        let file = SourceFile::new(db, text, DocumentKind::Script);
-        self.created += 1;
-        self.paths.insert(key, file);
-        self.changed = true;
-        file
-    }
-
-    fn follow(&mut self, db: &RootDatabase, file: SourceFile) {
-        let Some(root) = self.root.clone() else {
-            return;
-        };
-        let mut visited = FxHashSet::default();
-        let mut pending = vec![file];
-        while let Some(current) = pending.pop() {
-            let analysis = db.clone();
-            let literals = on_analysis_stack(move || file_source_calls(&analysis, current).clone());
-            for literal in literals {
-                let mut found = None;
-                for candidate in source_candidates(None, &literal) {
-                    match fs::read_to_string(root.join(&candidate)) {
-                        Ok(text) => {
-                            found = Some((candidate, text));
-                            break;
-                        }
-                        // A file that is gone must not resolve the literal from an earlier read.
-                        Err(_) => self.changed |= self.paths.remove(&candidate).is_some(),
-                    }
-                }
-                let Some((key, text)) = found else {
-                    continue;
-                };
-                if !visited.insert(key.clone()) {
-                    continue;
-                }
-                let target = self.file(db, key, format!("{}\n", r_source_text(&text)));
-                pending.push(target);
-            }
-        }
-    }
-
-    /// Sets the map and returns how many files the analysis gained.
-    fn finish(self, db: &mut RootDatabase) -> usize {
-        if self.changed {
-            match SourcePaths::try_get(db) {
-                Some(existing) => {
-                    existing.set_paths(db).to(self.paths);
-                }
-                None => {
-                    let _: SourcePaths = SourcePaths::builder(self.paths)
-                        .base(SourceBase::WorkingDirectory)
-                        .new(db);
-                }
-            }
-        }
-        self.created
-    }
-}
-
-/// The [`SourcePaths`] key of the file R reads at `path`: its path relative to the working
-/// directory `root`, as a literal `source()` path names it, or else its canonical path, which
-/// no literal path resolves to.
-fn source_key(root: Option<&Path>, path: &Path) -> String {
-    let relative = if path.is_absolute() {
-        root.and_then(|root| fs::canonicalize(root).ok())
-            .zip(fs::canonicalize(path).ok())
-            .and_then(|(root, canonical)| {
-                canonical
-                    .strip_prefix(root)
-                    .ok()
-                    .and_then(Path::to_str)
-                    .map(str::to_owned)
-            })
-    } else {
-        path.to_str().map(str::to_owned)
+    // Without a working directory R resolves no relative path either.
+    let Ok(root) = current_dir() else {
+        return;
     };
-    relative
-        .and_then(|relative| normalize_relative_path(&relative))
-        .unwrap_or_else(|| {
-            fs::canonicalize(path)
-                .unwrap_or_else(|_| path.to_path_buf())
-                .to_string_lossy()
-                .into_owned()
-        })
+    let mut follow = Follow {
+        root: &root,
+        loaded: FxHashMap::default(),
+        stack: Vec::new(),
+    };
+    let targets = direct_targets(db, sourced, &mut follow, file);
+    file.set_sources(db).to(Some(targets.into()));
+}
+
+/// The file whose canonical path is `canonical` and whose text is `text`, with what it sources
+/// recorded. A file keeps its [`SourceFile`] only while its text and the files it sources are
+/// the same, because a record never changes: a console command that sourced an earlier version
+/// keeps binding what that version defined.
+fn load_sourced(
+    db: &mut RootDatabase,
+    sourced: &mut SourcedFiles,
+    follow: &mut Follow<'_>,
+    canonical: PathBuf,
+    text: String,
+) -> SourceFile {
+    let existing = sourced
+        .files
+        .get(&canonical)
+        .copied()
+        .filter(|existing| *existing.text(db) == text);
+    let probe = existing.unwrap_or_else(|| {
+        sourced.created += 1;
+        SourceFile::new(db, text.clone(), DocumentKind::Script)
+    });
+    let targets = direct_targets(db, sourced, follow, probe);
+    let file = match existing {
+        Some(existing) if existing.sources(db).as_deref() == Some(&targets[..]) => existing,
+        Some(_) => {
+            sourced.created += 1;
+            let file = SourceFile::new(db, text, DocumentKind::Script);
+            file.set_sources(db).to(Some(targets.into()));
+            file
+        }
+        None => {
+            probe.set_sources(db).to(Some(targets.into()));
+            probe
+        }
+    };
+    sourced.files.insert(canonical.clone(), file);
+    follow.loaded.insert(canonical, file);
+    file
+}
+
+/// The file each of `file`'s literal `source()` calls reads, in call order, loaded.
+fn direct_targets(
+    db: &mut RootDatabase,
+    sourced: &mut SourcedFiles,
+    follow: &mut Follow<'_>,
+    file: SourceFile,
+) -> Vec<SourceFile> {
+    let analysis = db.clone();
+    let literals = on_analysis_stack(move || file_source_calls(&analysis, file).clone());
+    let mut targets = Vec::new();
+    for literal in literals {
+        let Some(relative) = normalize_relative_path(&literal) else {
+            continue;
+        };
+        let Ok(canonical) = fs::canonicalize(follow.root.join(relative)) else {
+            continue;
+        };
+        if follow.stack.contains(&canonical) {
+            continue;
+        }
+        if let Some(&loaded) = follow.loaded.get(&canonical) {
+            targets.push(loaded);
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&canonical) else {
+            continue;
+        };
+        follow.stack.push(canonical.clone());
+        let target = load_sourced(
+            db,
+            sourced,
+            follow,
+            canonical,
+            format!("{}\n", r_source_text(&text)),
+        );
+        follow.stack.pop();
+        targets.push(target);
+    }
+    targets
 }
 
 /// `text` as R's parser reads a file: without a byte order mark, with `\n` line endings and one

@@ -1748,6 +1748,11 @@ impl Worker {
             let literals = self.source_calls(file);
             let directory = path.parent().map(Path::to_path_buf);
             for literal in literals {
+                // `sourced_files` follows no absolute path, so loading its file would only hold
+                // an unread file.
+                if semantics::is_absolute_path(&literal) {
+                    continue;
+                }
                 let candidates = directory
                     .iter()
                     .map(|directory| directory.join(&literal))
