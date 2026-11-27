@@ -579,35 +579,35 @@ disappears when the helper under it is migrated.
 
 Written against the handle types: tier 0's element and matrix stores and its replacement forms
 (`x[i] <- v`, `x[[i]] <- v`, `x$name <- v`, `x[i, j] <- v` and `f(x) <- v`, on a frame slot or a
-binding); subscript resolution,
-element reads and stores, `[`, `[[`, `$`, `@` with their replacement forms, the array builders
-(`matrix`, `array`, `t`, `aperm`, `asplit`, `max.col`), `cbind`, `rbind` and `lengths`
-(`subset.rs`); the
-attribute readers and setters with their fast-path entries (`attr`, `attributes`, `names`, `dim`,
-`dimnames`, `class`, `oldClass`, `levels<-`, `comment`, `length<-`, `inherits`, `unclass` and the
-replacement forms); the class readers `class_of`, `implicit_class`, `.class2` and `.cache_class`
-(`dispatch.rs`); NextMethod's argument patch and the POSIXlt readers and builtins
-(`system.rs`); the value copies (`duplicate`, `shallow_duplicate`, the wrapper and replacement
-copies), the attribute setters and copiers, pairlist names and the pairlist and list conversions
-behind `values.rs`, whose raw names are thin entries into `handles.rs`; `strings.rs` but for `subject_at` and `flag`, which `agrep` calls raw; the bit
-conversions in `arith.rs`; the host hooks (`interp::Hooks`) that `libr` fills, which take and
-return handles, so `libr` roots what an ALTREP class method returns before the interpreter sees
-it (only `connection_method`, `enter_from_native` and `guard_native` stay `unsafe`, because they
-run native code); the `arima0` and `ppr` routines of the stats crate; and the tree-walking evaluator's control flow
-and language specials (`{`, `(`, `if`, `for`, `while`, `repeat`, `break`, `next`, `return`,
-`function`, `&&`, `||`, `switch`, `missing`, `on.exit`, `nargs`, `substitute` with the methods
-package's `do_substitute_direct`, `.Primitive`, `~`, `delayedAssign`, `makeLazy`, `call`,
-`expression` and `all.names`). Those specials reach the loop and function contexts, the srcref
-and the closure maker through wrappers in `handles.rs` (`in_loop` and `loop_jump` hold a loop's
-environment, `Args::register_on_exit` stores into the frame), because the bytecode loop and the
-JIT share those raw helpers. Two pieces of the API are not built: the
-bytecode loop's register accessor and `Held<T>` fields in traced structures. The replacement
-forms reach a frame through `RunningFrame` and `Slot` in `bytecode.rs`, a narrow form of that
-accessor: a slot read is a `Gc` that borrows the context, a store takes a rooted value, and an
-in-place write needs the `Owned` that `claim` returns only when the slot holds the value itself
-and the value is unshared. A binding is claimed the same way (`handles::claim_binding`), so a
-variable bound to a promise is copied before its first write instead of written through the
-promise.
+binding); subscript resolution, element reads and stores, `[`, `[[`, `$`, `@` with their replacement
+forms, the array builders (`matrix`, `array`, `t`, `aperm`, `asplit`, `max.col`), `cbind`, `rbind`
+and `lengths` (`subset.rs`); the attribute readers and setters with their fast-path entries (`attr`,
+`attributes`, `names`, `dim`, `dimnames`, `class`, `oldClass`, `levels<-`, `comment`, `length<-`,
+`inherits`, `unclass` and the replacement forms); the class readers `class_of`, `implicit_class`,
+`.class2` and `.cache_class` (`dispatch.rs`); NextMethod's argument patch and the POSIXlt readers
+and builtins (`system.rs`); the value copies (`duplicate`, `shallow_duplicate`, the wrapper and
+replacement copies), the attribute setters and copiers, pairlist names and the pairlist and list
+conversions behind `values.rs`, whose raw names are thin entries into `handles.rs`; `strings.rs` but
+for `subject_at` and `flag`, which `agrep` calls raw; the bit conversions in `arith.rs`; the host
+hooks (`interp::Hooks`) that `libr` fills, which take and return handles, so `libr` roots what an
+ALTREP class method returns before the interpreter sees it (only `connection_method`,
+`enter_from_native` and `guard_native` stay `unsafe`, because they run native code); the `arima0`
+and `ppr` routines of the stats crate; and the tree-walking evaluator's control flow and language
+specials (`{`, `(`, `if`, `for`, `while`, `repeat`, `break`, `next`, `return`, `function`, `&&`,
+`||`, `switch`, `missing`, `on.exit`, `nargs`, `substitute` with the methods package's
+`do_substitute_direct`, `.Primitive`, `~`, `delayedAssign`, `makeLazy`, `call`, `expression` and
+`all.names`); the call specials `.Internal`, `forceAndCall`, `Tailcall`, `Exec`, `Recall` and
+`eval`; and assignment (`<-`, `=`, `<<-` and the replacement chain of `f(x) <- v`, which tier 0
+enters through the raw entry `eval::compiled_complex_assign`). The specials reach the loop and
+function contexts, the srcref and the closure maker through wrappers in `handles.rs` (`in_loop` and
+`loop_jump` hold a loop's environment, `Args::register_on_exit` stores into the frame), because the
+bytecode loop and the JIT share those raw helpers. Two pieces of the API are not built: the bytecode
+loop's register accessor and `Held<T>` fields in traced structures. The replacement forms reach a
+frame through `RunningFrame` and `Slot` in `bytecode.rs`, a narrow form of that accessor: a slot
+read is a `Gc` that borrows the context, a store takes a rooted value, and an in-place write needs
+the `Owned` that `claim` returns only when the slot holds the value itself and the value is
+unshared. A binding is claimed the same way (`handles::claim_binding`), so a variable bound to a
+promise is copied before its first write instead of written through the promise.
 
 An unmigrated caller reaches a migrated function through a raw entry, an `unsafe fn` over `Sexp`
 that states what the caller must hold. Which helper the entry uses decides its cost:
@@ -629,10 +629,9 @@ The order:
    in place go first (tier 0's stores, the replacement and attribute builtins, name matching,
    string encoding), then `values.rs`, the evaluator and the bytecode loop, and the leaf builtins
    last, because a leaf rarely holds a value across a safepoint. The evaluator's call machinery
-   (`eval`, `apply_closure`, argument matching and promises, with the specials `.Internal`,
-   `forceAndCall`, `Tailcall`, `Exec`, `Recall` and `eval`) and assignment (`<-`, `<<-`, `=` and
-   the complex assignment the bytecode loop shares) move with the bytecode loop, because they
-   keep values in frames and unwinds, which need the register accessor and `Held<T>`.
+   (`eval`, `apply_closure`, argument matching and promises) moves with the bytecode loop,
+   because it keeps values in frames and unwinds, which need the register accessor and
+   `Held<T>`.
 2. `stats`, `graphics`, `frames`.
 3. `libr`, `jit`, `typed`: entry points make a `Cx`; raw access leaves their bodies.
 4. `heap` stops exporting the raw accessors outside a `raw` module that only the boundary imports,

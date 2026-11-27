@@ -15,16 +15,14 @@ use {
         coerce::{CoercionWarnings, real_to_int},
         conditions, deparse, dispatch,
         handles::{
-            self, Cells, Chars, Cx, Environment, Expression, Gc, Integer, Language, List, Local,
-            Promise, Real, Str, StringFill, Symbol, safe,
+            self, AssignmentCall, AssignmentCopy, Cells, Chars, Cx, Environment, Expression, Gc,
+            Integer, Language, List, Local, Owned, Pairlist, Promise, Real, Str, StringFill,
+            Symbol, Tagged, safe,
         },
         interp, moves, scope,
         unwind::{ArgumentReader, Jump, R, Rooted, Unwind, error, error_in, missing_argument},
         utils::record_profile_sample,
-        values::{
-            self, alloc, cons_tagged, length, missing_arg, nil, symbol_name, symbols, triple,
-            unbound,
-        },
+        values::{self, alloc, length, missing_arg, nil, symbol_name, symbols, triple, unbound},
     },
     heap::{
         ENVIRONMENT_BYTES, Formal, PendingAccess, TRIPLE_BYTES,
@@ -3779,19 +3777,6 @@ unsafe fn formal_binding(env: Sexp, formal: Sexp, actual: Sexp) -> R<Formal> {
     })
 }
 
-/// The arguments as a rooted pairlist of their values or promises. The caller keeps the values
-/// alive, so one collection check covers every cell.
-pub unsafe fn args_pairlist(args: &[Arg]) -> R<Sexp> {
-    let heap = crate::heap();
-    heap.reserve(TRIPLE_BYTES * args.len(), &[]);
-    let mut list = nil();
-    for arg in args.iter().rev() {
-        list = heap.alloc_triple_uncollected(SexpType::Pairlist, arg.value, list, arg.tag)?;
-    }
-    heap.root(list);
-    Ok(list)
-}
-
 /// Runs a closure body in an environment whose arguments are already bound.
 pub unsafe fn run_closure(
     call: Sexp,
@@ -5446,26 +5431,26 @@ pub const BUILTINS: &[BuiltinDef] = &[
     special("next", 0, safe!(do_next)),
     special("return", -1, safe!(do_return)),
     special("function", -1, safe!(do_function)),
-    special("<-", 2, do_assign).invisible(),
-    special("=", 2, do_assign).invisible(),
-    special("<<-", 2, do_assign).invisible(),
+    special("<-", 2, safe!(do_assign)).invisible(),
+    special("=", 2, safe!(do_assign)).invisible(),
+    special("<<-", 2, safe!(do_assign)).invisible(),
     special("quote", 1, safe!(do_quote)),
     special("&&", 2, safe!(do_and2)),
     special("||", 2, safe!(do_or2)),
     special("switch", -1, safe!(do_switch)).keep_visibility(),
     special("missing", 1, safe!(do_missing)),
     special("on.exit", -1, safe!(do_on_exit)).invisible(),
-    special(".Internal", 1, do_internal).keep_visibility(),
+    special(".Internal", 1, safe!(do_internal)).keep_visibility(),
     special("substitute", -1, safe!(do_substitute)),
     builtin("invisible", -1, safe!(do_invisible)).invisible(),
     builtin("nargs", 0, safe!(do_nargs)),
-    special("forceAndCall", -1, do_force_and_call).keep_visibility(),
-    special("Tailcall", -1, do_tailcall).keep_visibility(),
-    special("Exec", -1, do_exec).keep_visibility(),
+    special("forceAndCall", -1, safe!(do_force_and_call)).keep_visibility(),
+    special("Tailcall", -1, safe!(do_tailcall)).keep_visibility(),
+    special("Exec", -1, safe!(do_exec)).keep_visibility(),
     special("declare", -1, |_| Ok(nil())).invisible(),
-    internal("eval", 3, do_eval).keep_visibility(),
+    internal("eval", 3, safe!(do_eval)).keep_visibility(),
     internal("withVisible", 1, safe!(do_with_visible)),
-    internal_special("Recall", -1, do_recall).keep_visibility(),
+    internal_special("Recall", -1, safe!(do_recall)).keep_visibility(),
     builtin(".Primitive", 1, safe!(do_primitive)),
     internal("identity", 1, |call| Ok(call.arg(0))),
     special("~", -1, safe!(do_tilde)),
@@ -5681,9 +5666,16 @@ fn do_paren<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Lo
         return handles::evaluate(context, expression, environment);
     }
     // `(...)` is a builtin call in GNU R, so the dots expand into its single argument.
-    let expanded = handles::evaluated_arguments(context, arguments.expression(), environment)?;
+    let call = arguments.expression();
+    let cells = call
+        .downcast::<Language>()
+        .map_or_else(handles::null, |call| {
+            context.root(call.read(context).rest())
+        });
+    let mut expanded = SmallVec::<[Tagged<'s>; 8]>::new();
+    handles::evaluate_arguments(context, &mut expanded, (cells, call), environment, false)?;
     match expanded.as_slice() {
-        [(_, value)] => Ok(*value),
+        [argument] => Ok(argument.value),
         _ => Err(arguments.error(format!(
             "{} argument{} passed to '(' which requires 1",
             expanded.len(),
@@ -6381,30 +6373,49 @@ fn do_on_exit<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<
     Ok(handles::null())
 }
 
-unsafe fn do_internal(call: &Call<'_>) -> R<Sexp> {
-    let inner = call.arg(0);
-    if inner.kind() != SexpType::Language || inner.car().kind() != SexpType::Symbol {
-        return Err(call.error("invalid .Internal() argument"));
-    }
-    let Some(function) = crate::builtins::internal_function(inner.car()) else {
-        return Err(call.error(format!(
+fn do_internal<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let invalid = || arguments.error("invalid .Internal() argument");
+    let inner = arguments
+        .value(0)
+        .downcast::<Language>()
+        .ok_or_else(invalid)?;
+    let name = inner.read(context).head();
+    let name = context.root(name.downcast::<Symbol>().ok_or_else(invalid)?);
+    let Some(function) = handles::internal_function(context, name) else {
+        return Err(arguments.error(format!(
             "there is no .Internal function '{}'",
-            symbol_name(inner.car())
+            handles::text(name.read(context).name())
         )));
     };
-    let definition = builtin_def(function)?;
-    let args = if function.kind() == SexpType::Builtin {
-        evaluate_args(inner.cdr(), call.env()?, definition.keep_missing, inner)?
+    let definition = handles::builtin_definition(function)?;
+    let environment = arguments.environment(context)?;
+    let cells = context.root(inner.read(context).rest());
+    let mut values = SmallVec::<[Tagged<'s>; 8]>::new();
+    if function.r_type() == SexpType::Builtin {
+        handles::evaluate_arguments(
+            context,
+            &mut values,
+            (cells, inner.value()),
+            environment,
+            definition.keep_missing,
+        )?;
     } else {
-        unevaluated_args(inner.cdr())
-    };
-    if definition.generic != Generic::None
-        && let Some(value) =
-            dispatch::try_builtin_dispatch(definition, inner, function, &args, call.env()?)?
-    {
-        return Ok(value);
+        let mut cell = cells.read(context).downcast::<Pairlist>();
+        while let Some(current) = cell {
+            values.push(Tagged {
+                tag: context.root(current.tag()),
+                value: context.root(current.head()),
+            });
+            cell = current.rest().downcast::<Pairlist>();
+        }
     }
-    call_builtin(definition, inner, function, &args, call.env()?)
+    handles::dispatch_builtin_call(
+        context,
+        definition,
+        (inner.value(), function),
+        &values,
+        environment,
+    )
 }
 
 fn do_invisible<'s>(_context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
@@ -6417,158 +6428,172 @@ fn do_nargs<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Lo
     handles::integer(context, count)
 }
 
-unsafe fn do_force_and_call(call: &Call<'_>) -> R<Sexp> {
-    let count = values::as_integer_scalar(eval(call.arg(0), call.env()?)?).max(0) as usize;
-    let function = eval(call.arg(1), call.env()?)?;
-    let heap = crate::heap();
-    heap.root(function);
+fn do_force_and_call<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let environment = arguments.environment(context)?;
+    let count = handles::evaluate(context, arguments.value(0), environment)?;
+    let count = handles::integer_scalar(context, count).max(0) as usize;
+    let function = handles::evaluate(context, arguments.value(1), environment)?;
     // The callee's arguments are the call's own cells after `n` and `FUN` whenever the special
     // received them unchanged, which is every call written in source, so `Reduce` and the
     // apply family pay no pairlist per call. GNU R conses the same tail into one new call.
     // A call without `FUN` reaches the "attempt to apply non-function" error below, as in GNU R.
-    let arguments = call.args.get(2..).unwrap_or(&[]);
-    let rest = match call_tail(call.call, arguments) {
+    let rest = match call_tail(context, arguments) {
         Some(rest) => rest,
-        None => values::pairlist(
-            &arguments
-                .iter()
-                .map(|arg| (arg.tag, arg.value))
-                .collect::<SmallVec<[(Sexp, Sexp); 8]>>(),
-            SexpType::Pairlist,
-        )?,
-    };
-    heap.root(rest);
-    let inner_call = values::lcons(call.arg(1), rest)?;
-    heap.root(inner_call);
-    match function.kind() {
-        SexpType::Closure => {
-            let mut args = Args::new();
-            // As for a compiled call (see `op_call_generic`): a variable passes its value, or
-            // the caller's own promise for it, when no argument can assign and neither the
-            // callee nor a handler can look at the promise before it is forced.
-            if no_calls(rest)
-                && !crate::effects::calling_handler_established()
-                && crate::effects::effect_free(function)?
-            {
-                eager_args_into(rest, call.env()?, &mut args)?;
-            } else {
-                promise_args_into(rest, call.env()?, &mut args)?;
+        None => {
+            let mut cells = Cells::new(SexpType::Pairlist);
+            for index in 2..arguments.len() {
+                cells.push(context, arguments.tag(index), arguments.value(index))?;
             }
-            for arg in args.iter().take(count) {
-                if arg.value.kind() == SexpType::Promise {
-                    force_promise(arg.value)?;
-                }
-            }
-            apply_closure_owning(inner_call, function, &args, call.env()?, None)
+            cells.finish().map_or_else(handles::null, Owned::finish)
         }
-        _ => apply_call(inner_call, function, rest, call.env()?),
+    };
+    let inner_call = handles::language(context, arguments.value(1), rest)?;
+    if function.r_type() != SexpType::Closure {
+        return handles::apply_call(context, inner_call.value(), function, rest, environment);
     }
+    // As for a compiled call (see `op_call_generic`): a variable passes its value, or the
+    // caller's own promise for it, when no argument can assign and neither the callee nor a
+    // handler can look at the promise before it is forced.
+    let eager = no_calls(context, rest)
+        && !crate::effects::calling_handler_established()
+        && handles::effect_free(context, function)?;
+    let values = handles::closure_arguments(context, rest, environment, eager)?;
+    for argument in values.iter().take(count) {
+        if argument.value.r_type() == SexpType::Promise {
+            handles::force(context, argument.value)?;
+        }
+    }
+    handles::apply_closure_tagged(context, inner_call, function, &values, Some(environment))
 }
 
 /// Whether no argument expression in the pairlist `arguments` is a call.
-unsafe fn no_calls(mut arguments: Sexp) -> bool {
-    while arguments.kind() == SexpType::Pairlist {
+fn no_calls(context: &Cx<'_>, arguments: Local<'_>) -> bool {
+    let mut cell = arguments.read(context).downcast::<Pairlist>();
+    while let Some(current) = cell {
         if matches!(
-            arguments.car().kind(),
+            current.head().r_type(),
             SexpType::Language | SexpType::Bytecode | SexpType::Promise
         ) {
             return false;
         }
-        arguments = arguments.cdr();
+        cell = current.rest().downcast::<Pairlist>();
     }
     true
 }
 
-/// The cells of `call` after its first two arguments, when they hold exactly `args`.
-unsafe fn call_tail(call: Sexp, args: &[Arg]) -> Option<Sexp> {
-    let mut cell = call.cdr();
+/// The cells of the call after its first two arguments, when they hold exactly the arguments
+/// after the first two.
+fn call_tail<'s>(context: &Cx<'s>, arguments: &handles::Args<'_, 's>) -> Option<Local<'s>> {
+    let call = arguments
+        .expression()
+        .read(context)
+        .downcast::<Language>()?;
+    let mut cell = call.rest();
     for _ in 0..2 {
-        if cell.kind() != SexpType::Pairlist {
-            return None;
-        }
-        cell = cell.cdr();
+        cell = cell.downcast::<Pairlist>()?.rest();
     }
     let tail = cell;
-    for arg in args {
-        if cell.kind() != SexpType::Pairlist || cell.car() != arg.value || cell.tag() != arg.tag {
+    for index in 2..arguments.len() {
+        let current = cell.downcast::<Pairlist>()?;
+        if !current.head().is(arguments.value(index)) || !current.tag().is(arguments.tag(index)) {
             return None;
         }
-        cell = cell.cdr();
+        cell = current.rest();
     }
-    (cell == nil()).then_some(tail)
+    cell.is(handles::null()).then(|| context.root(tail))
 }
 
 /// `Tailcall(FUN, ...)`, R 4.4's request to call `FUN(...)` in place of the calling frame.
 /// GNU R only reuses the frame when the call is in tail position and no `on.exit` is pending,
 /// and otherwise evaluates the call normally, which is what this does every time: the value is
 /// the same, but deep recursion still grows the stack.
-unsafe fn do_tailcall(call: &Call<'_>) -> R<Sexp> {
-    let function = call.args.split_first();
-    let Some((function, rest)) = function.filter(|(function, _)| function.value != missing_arg())
-    else {
+fn do_tailcall<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let environment = arguments.environment(context)?;
+    if arguments.is_empty() || handles::is_missing_argument(arguments.value(0)) {
+        let call = handles::lexical_call(context, environment);
         return Err(missing_argument(
-            lexical_call(call.env()?),
+            call.raw(),
             "FUN",
             ArgumentReader::TailcallRec,
         ));
+    }
+    let function = match handles::dense::<Str>(context, arguments.value(0))? {
+        Some(name) if name.len() == 1 => handles::install_element(context, name, 0)?.value(),
+        _ => arguments.value(0),
     };
-    let function = if function.value.kind() == SexpType::String && length(function.value) == 1 {
-        values::install(&values::string_at(function.value, 0).unwrap_or_default())?
-    } else {
-        function.value
-    };
-    let rest = values::pairlist(
-        &rest
-            .iter()
-            .map(|arg| (arg.tag, arg.value))
-            .collect::<Vec<_>>(),
-        SexpType::Pairlist,
-    )?;
-    eval(values::lcons(function, rest)?, call.env()?)
+    let mut cells = Cells::new(SexpType::Language);
+    cells.push(context, handles::null(), function)?;
+    for index in 1..arguments.len() {
+        cells.push(context, arguments.tag(index), arguments.value(index))?;
+    }
+    let call = cells.finish().map_or_else(handles::null, Owned::finish);
+    handles::evaluate(context, call, environment)
 }
 
 /// `Exec(expr, envir)`: evaluates the call `expr` in `envir`, by default the caller's frame,
 /// as a tail call in the same sense as [`do_tailcall`].
-unsafe fn do_exec(call: &Call<'_>) -> R<Sexp> {
-    let mut expr = None;
+fn do_exec<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let environment = arguments.environment(context)?;
+    let mut expression = None;
     let mut envir = None;
-    let mut positional = Vec::new();
-    for arg in call.args {
-        match arg.tag {
-            tag if tag != nil() && values::symbol_name(tag) == "expr" => expr = Some(arg.value),
-            tag if tag != nil() && values::symbol_name(tag) == "envir" => envir = Some(arg.value),
-            _ => positional.push(arg.value),
+    let mut positional = SmallVec::<[Local<'s>; 2]>::new();
+    for index in 0..arguments.len() {
+        let name = arguments
+            .tag(index)
+            .read(context)
+            .downcast::<Symbol>()
+            .map(|tag| tag.name().bytes());
+        match name {
+            Some(b"expr") => expression = Some(arguments.value(index)),
+            Some(b"envir") => envir = Some(arguments.value(index)),
+            _ => positional.push(arguments.value(index)),
         }
     }
     let mut positional = positional.into_iter();
-    let expr = expr.or_else(|| positional.next());
+    let expression = expression.or_else(|| positional.next());
     let envir = envir.or_else(|| positional.next());
     if positional.next().is_some() {
         return Err(error("unused argument"));
     }
     // GNU R keeps a missing argument passed on as `expr` missing instead of evaluating it.
-    let expr = match expr.filter(|expr| *expr != values::missing_arg()) {
-        Some(expr) if !argument_is_missing(expr, call.env()?)? => expr,
-        _ => {
-            return Err(missing_argument(
-                lexical_call(call.env()?),
-                "expr",
-                ArgumentReader::Tailcall,
-            ));
+    let passed = match expression {
+        Some(expression) if !handles::is_missing_argument(expression) => {
+            let missing = match expression.downcast::<Symbol>() {
+                Some(symbol) => handles::is_missing_in(context, symbol, environment)?,
+                None => false,
+            };
+            (!missing).then_some(expression)
         }
+        _ => None,
     };
-    let mut expr = eval(expr, call.env()?)?;
-    if expr.kind() == SexpType::Expression && length(expr) == 1 {
-        expr = values::list_elt(expr, 0);
+    let Some(expression) = passed else {
+        let call = handles::lexical_call(context, environment);
+        return Err(missing_argument(
+            call.raw(),
+            "expr",
+            ArgumentReader::Tailcall,
+        ));
+    };
+    let mut expression = handles::evaluate(context, expression, environment)?;
+    if expression.r_type() == SexpType::Expression && handles::length(context, expression) == 1 {
+        expression = handles::item(context, expression, 0)?;
     }
-    if expr.kind() != SexpType::Language {
+    if expression.r_type() != SexpType::Language {
         return Err(error("\"expr\" must be a call expression"));
     }
-    let env = match envir.filter(|envir| *envir != values::missing_arg()) {
-        Some(envir) => eval(envir, call.env()?)?,
-        None => call.env()?,
+    let target = match envir.filter(|envir| !handles::is_missing_argument(*envir)) {
+        Some(envir) => {
+            let envir = handles::evaluate(context, envir, environment)?;
+            envir.downcast::<Environment>().ok_or_else(|| {
+                error(format!(
+                    "invalid 'envir' argument of type '{}'",
+                    envir.r_type().name()
+                ))
+            })?
+        }
+        None => environment,
     };
-    eval(expr, env)
+    handles::evaluate(context, expression, target)
 }
 
 /// `R_forceAndCall`: evaluates `call` in `env`, forcing the promises of a closure's first
@@ -6848,61 +6873,87 @@ unsafe fn call_seeded(
     run_on_heap_frame(call, function, args, env, None, entry)
 }
 
-unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
-    let expression = call.arg(0);
-    let mut env = call.arg(1);
+fn do_eval<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let expression = arguments.value(0);
     // An S4 object that extends "environment" stands for the environment in its `.xData`
     // slot. GNU R names the type of what that conversion made of a bad `enclos`, which is
     // `NULL`.
-    let enclosure = match call.arg(2) {
-        enclosure if matches!(enclosure.kind(), SexpType::Nil | SexpType::Environment) => enclosure,
-        enclosure => match values::get_attr(enclosure, values::symbols().dot_xdata) {
-            data if enclosure.kind() == SexpType::Object
-                && data.kind() == SexpType::Environment =>
-            {
-                data
-            }
-            _ => return Err(error("invalid 'enclos' argument of type 'NULL'")),
-        },
+    let enclosure = arguments.value(2);
+    let enclosure = match enclosure.downcast::<Environment>() {
+        Some(enclosure) => Some(enclosure),
+        None if enclosure.r_type() == SexpType::Nil => None,
+        None => Some(
+            extended_environment(context, enclosure)
+                .ok_or_else(|| error("invalid 'enclos' argument of type 'NULL'"))?,
+        ),
     };
-    if env.kind() == SexpType::Object {
-        let data = values::get_attr(env, values::symbols().dot_xdata);
-        env = if data.kind() == SexpType::Environment {
-            data
-        } else {
-            nil()
-        };
+    let mut envir = arguments.value(1);
+    if envir.r_type() == SexpType::Object {
+        envir = extended_environment(context, envir).map_or_else(handles::null, Local::value);
     }
-    match env.kind() {
-        SexpType::Environment => {}
-        SexpType::Nil => {
-            env = if enclosure.kind() == SexpType::Environment {
-                enclosure
-            } else {
-                values::base_env()
-            };
-        }
-        SexpType::List => {
-            env = crate::envir::list_to_env(env, enclosure)?;
-        }
+    let environment = match envir.r_type() {
+        SexpType::Environment => envir
+            .downcast::<Environment>()
+            .ok_or_else(|| invalid_envir(envir))?,
+        SexpType::Nil => enclosure.unwrap_or_else(handles::base_environment),
+        SexpType::List => handles::list_environment_in(context, envir, enclosure)?,
         SexpType::Pairlist => {
-            let list = values::pairlist_to_list(env)?;
-            env = crate::envir::list_to_env(list, enclosure)?;
+            let list = handles::pairlist_to_list(context, envir)?;
+            handles::list_environment_in(context, list, enclosure)?
         }
         SexpType::Integer | SexpType::Real => {
-            if length(env) != 1 {
+            if handles::length(context, envir) != 1 {
                 return Err(error("numeric 'envir' arg not of length one"));
             }
-            let which = values::as_integer_scalar(env);
+            let which = handles::integer_scalar(context, envir);
             if which == NA_INTEGER {
-                return Err(invalid_envir(env));
+                return Err(invalid_envir(envir));
             }
-            env = crate::envir::sys_frame(which, call.env()?)?;
+            let caller = arguments.environment(context)?;
+            handles::sys_frame(context, which, caller)?
         }
-        _ => return Err(invalid_envir(env)),
+        _ => return Err(invalid_envir(envir)),
+    };
+    let caller = arguments.environment(context)?;
+    handles::evaluate_in_context(
+        context,
+        expression,
+        environment,
+        (arguments.function(), caller),
+    )
+}
+
+/// The environment in the `.xData` slot of an S4 object that extends "environment".
+fn extended_environment<'s>(context: &Cx<'s>, object: Local<'s>) -> Option<Local<'s, Environment>> {
+    if object.r_type() != SexpType::Object {
+        return None;
     }
-    // `eval` runs its expression in a context of its own, as GNU R's does: it counts as a frame
-    // for `sys.call` and friends, and a `return` in the expression returns from `eval`.
+    let data = handles::get_attribute(context, object, handles::symbol(|s| s.dot_xdata));
+    data.downcast::<Environment>()
+        .map(|data| context.root(data))
+}
+
+fn invalid_envir(envir: Local<'_>) -> Unwind {
+    error(format!(
+        "invalid 'envir' argument of type '{}'",
+        envir.r_type().name()
+    ))
+}
+
+/// Evaluates `expression` in `env` in a context of its own, as GNU R's `eval` does: it counts
+/// as a frame of `function` for `sys.call` and friends, with `sys_parent` as its parent, and a
+/// `return` in the expression returns from it. An expression vector evaluates element by
+/// element, and a promise is forced.
+///
+/// # Safety
+///
+/// All four are rooted.
+pub(crate) unsafe fn eval_in_context(
+    expression: Sexp,
+    env: Sexp,
+    function: Sexp,
+    sys_parent: Sexp,
+) -> R<Sexp> {
     let state = interp();
     let caller = state.frames.last().map_or(nil(), |frame| frame.call);
     let handlers = state.handlers.clone();
@@ -6910,9 +6961,9 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     state.calls_ever = state.calls_ever.wrapping_add(1);
     state.frames.push(Frame {
         call: caller,
-        function: call.op,
+        function,
         env,
-        sys_parent: call.env()?,
+        sys_parent,
         args: state.frame_args.len() as u32,
         on_exit: ThinVec::new(),
         handlers: handlers.clone(),
@@ -6952,13 +7003,6 @@ unsafe fn do_eval(call: &Call<'_>) -> R<Sexp> {
     result
 }
 
-unsafe fn invalid_envir(env: Sexp) -> Unwind {
-    error(format!(
-        "invalid 'envir' argument of type '{}'",
-        env.kind().name()
-    ))
-}
-
 fn do_with_visible<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
     let flag = handles::logical_constant(context, i32::from(interp().visible))?;
     let mut list = context.alloc::<List>(2)?;
@@ -6983,21 +7027,16 @@ fn do_with_visible<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) 
 /// closure itself received, unforced, so the function decides afresh whether to evaluate each
 /// one, and `substitute` in it sees the code `Recall` was called with. Neither frame needs an
 /// environment, so a slot frame hands out its pending one.
-unsafe fn do_recall(call: &Call<'_>) -> R<Sexp> {
-    let outside = || call.error("'Recall' called from outside a closure");
-    let own = call.frame_index().ok_or_else(outside)?;
-    let caller = crate::envir::caller_index(own).ok_or_else(outside)?;
-    let (caller_call, function) = (
-        interp().frames[caller].call,
-        interp().frames[caller].function,
-    );
-    materialize_references(own)?;
-    let args: Args = crate::frame_args(interp(), own).iter().copied().collect();
-    apply(
-        caller_call,
-        function,
-        &args,
-        frame_sys_parent(caller, Reify::Site(Site::ParentFrame))?,
+fn do_recall<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    let Some(recalled) = arguments.recalled(context)? else {
+        return Err(arguments.error("'Recall' called from outside a closure"));
+    };
+    handles::apply(
+        context,
+        recalled.call,
+        recalled.function,
+        &recalled.arguments,
+        recalled.parent,
     )
 }
 
@@ -7276,41 +7315,41 @@ fn substitute_list<'s>(
 
 // Assignment.
 
-unsafe fn do_assign(call: &Call<'_>) -> R<Sexp> {
-    if call.len() != 2 {
-        return Err(call.error("invalid assignment"));
+fn do_assign<'s>(context: &mut Cx<'s>, arguments: &handles::Args<'_, 's>) -> R<Local<'s>> {
+    if arguments.len() != 2 {
+        return Err(arguments.error("invalid assignment"));
     }
-    let superassign = call.call.car() == symbols().assign2;
-    let mut target = call.arg(0);
-    if target.kind() == SexpType::String && length(target) >= 1 {
-        target = values::install_charsxp(target.element(0))?;
+    let whole = arguments.expression();
+    let superassign = whole
+        .downcast::<Language>()
+        .is_some_and(|call| call.read(context).head().is(handles::symbol(|s| s.assign2)));
+    let mut target = arguments.value(0);
+    if let Some(name) = handles::dense::<Str>(context, target)?
+        && !name.is_empty()
+    {
+        target = handles::install_element(context, name, 0)?.value();
     }
-    match target.kind() {
-        SexpType::Symbol => {
-            let value = match superassign {
-                false => rebind(target, call.arg(1), call.env()?)?,
-                true => eval(call.arg(1), call.env()?)?,
-            };
-            assign_symbol(target, value, call.env()?, superassign)?;
-            Ok(value)
-        }
-        SexpType::Language => {
-            let value = match superassign {
-                false => rebind(target, call.arg(1), call.env()?)?,
-                true => eval(call.arg(1), call.env()?)?,
-            };
-            complex_assign(call.call, target, value, call.env()?, superassign, &[])?;
-            Ok(value)
-        }
-        _ => Err(call.error("invalid (do_set) left-hand side to assignment")),
+    let assigned = target.downcast::<Symbol>();
+    if assigned.is_none() && target.r_type() != SexpType::Language {
+        return Err(arguments.error("invalid (do_set) left-hand side to assignment"));
     }
+    let environment = arguments.environment(context)?;
+    let value = match superassign {
+        false => handles::rebind(context, target, arguments.value(1), environment)?,
+        true => handles::evaluate(context, arguments.value(1), environment)?,
+    };
+    match assigned {
+        Some(symbol) => assign_variable(context, symbol, value, environment, superassign)?,
+        None => complex_assign(context, whole, target, value, environment, superassign, &[])?,
+    }
+    Ok(value)
 }
 
 /// Evaluates `value`, the right-hand side of `target <- value`. When it calls a function with
 /// `target` itself as the first argument, as in `d <- Dict.insert(d, k, v)` or
 /// `state$seen <- Set.insert(state$seen, k)`, the call may update the value in place (see
 /// [`rebind_call`]).
-unsafe fn rebind(target: Sexp, value: Sexp, env: Sexp) -> R<Sexp> {
+pub(crate) unsafe fn rebind(target: Sexp, value: Sexp, env: Sexp) -> R<Sexp> {
     let first_argument_is_target = value.kind() == SexpType::Language
         && value.car().kind() == SexpType::Symbol
         && value.cdr().kind() == SexpType::Pairlist
@@ -7656,14 +7695,6 @@ pub unsafe fn reuse_permitted(env: Sexp, value: Sexp) -> bool {
     }) || !bytecode::registers_hold(value)
 }
 
-pub unsafe fn assign_symbol(symbol: Sexp, value: Sexp, env: Sexp, superassign: bool) -> R<()> {
-    if superassign {
-        set_var(symbol, value, env.enclosure())
-    } else {
-        assign_local(symbol, value, env, crate::heap().frame_cell(env, symbol))
-    }
-}
-
 /// `symbol <- value` in `env`, whose own frame binds `symbol` to `cell`, or not at all.
 #[inline(always)]
 pub unsafe fn assign_local(symbol: Sexp, value: Sexp, env: Sexp, cell: Option<Sexp>) -> R<()> {
@@ -7687,6 +7718,35 @@ pub unsafe fn assign_local(symbol: Sexp, value: Sexp, env: Sexp, cell: Option<Se
     Ok(())
 }
 
+/// `symbol <- value` in `environment`, or `symbol <<- value` from it.
+fn assign_variable<'s>(
+    context: &mut Cx<'s>,
+    symbol: Local<'s, Symbol>,
+    value: Local<'s>,
+    environment: Local<'s, Environment>,
+    superassign: bool,
+) -> R<()> {
+    if superassign {
+        let enclosure = enclosure_of(context, environment);
+        return handles::assign_outward(context, symbol, value, enclosure);
+    }
+    let binding =
+        handles::frame_binding(context, environment, symbol).map(|cell| context.root(cell));
+    handles::assign_local(context, symbol, value, environment, binding)
+}
+
+/// Where `<<-` from `environment` starts: its enclosure, or the empty environment itself, whose
+/// enclosure is `NULL`.
+fn enclosure_of<'s>(
+    context: &Cx<'s>,
+    environment: Local<'s, Environment>,
+) -> Local<'s, Environment> {
+    match environment.read(context).enclosure() {
+        Some(enclosure) => context.root(enclosure),
+        None => handles::empty_environment(),
+    }
+}
+
 /// `f(x, ...) <- value`: evaluates the getter chain down to the variable, then applies the
 /// replacement functions from the outside in and assigns the result to the variable.
 ///
@@ -7694,278 +7754,351 @@ pub unsafe fn assign_local(symbol: Sexp, value: Sexp, env: Sexp, cell: Option<Se
 /// code has already evaluated, each a forced promise whose code is the argument's (or that code
 /// itself, for one the replacement must evaluate), so the replacement evaluates none of them a
 /// second time.
-pub unsafe fn complex_assign(
-    whole: Sexp,
-    target: Sexp,
-    value: Sexp,
-    env: Sexp,
+pub fn complex_assign<'s>(
+    context: &mut Cx<'s>,
+    whole: Local<'s>,
+    target: Local<'s>,
+    value: Local<'s>,
+    environment: Local<'s, Environment>,
     superassign: bool,
-    evaluated: &[Sexp],
+    evaluated: &[Local<'s>],
 ) -> R<()> {
-    let symbols = symbols();
-    let mut getters: SmallVec<[Sexp; 4]> = SmallVec::new();
+    let mut getters: SmallVec<[Local<'s, Language>; 4]> = SmallVec::new();
     let mut inner = target;
-    while inner.kind() == SexpType::Language {
-        getters.push(inner);
-        inner = inner.cdr().car();
+    while let Some(getter) = inner.downcast::<Language>() {
+        getters.push(getter);
+        inner = match handles::cell_fields(getter.read(context).rest()) {
+            Some((first, _, _)) => context.root(first),
+            None => handles::null(),
+        };
     }
-    if inner.kind() == SexpType::String && length(inner) == 1 {
-        inner = values::install_charsxp(inner.element(0))?;
+    if let Some(name) = handles::dense::<Str>(context, inner)?
+        && name.len() == 1
+    {
+        inner = handles::install_element(context, name, 0)?.value();
     }
-    if inner.kind() != SexpType::Symbol {
-        return Err(error_in(
+    let Some(inner) = inner.downcast::<Symbol>() else {
+        return Err(handles::error_in(
             whole,
             "target of assignment expands to non-language object",
         ));
-    }
-    let lookup_env = if superassign { env.enclosure() } else { env };
-    let mut base = find_var(inner, lookup_env)?;
-    if base == missing_arg() {
+    };
+    let lookup_environment = match superassign {
+        true => enclosure_of(context, environment),
+        false => environment,
+    };
+    let mut base = handles::variable(context, inner, lookup_environment)?;
+    if handles::is_missing_argument(base) {
         // GNU R reads the name in the frame when the frame binds it and in the enclosure
         // otherwise, and the error names the call of the environment the read started in.
-        let reader = if superassign || find_var_in_frame(inner, env)? == unbound() {
-            env.enclosure()
+        let reader = if superassign || handles::frame_binding(context, environment, inner).is_none()
+        {
+            enclosure_of(context, environment)
         } else {
-            env
+            environment
         };
-        return Err(missing_argument(
-            lexical_call(reader),
-            &symbol_name(inner),
-            ArgumentReader::Eval,
-        ));
+        let call = handles::lexical_call(context, reader);
+        let name = handles::text(inner.read(context).name()).into_owned();
+        return Err(missing_argument(call.raw(), &name, ArgumentReader::Eval));
     }
-    if base == unbound() {
+    if base.raw() == unbound() {
         // GNU R evaluates the name in the enclosure and names the call whose frame that is, or
         // no call when the enclosure is not a frame's.
-        let enclosure = env.enclosure();
-        let frames = &interp().frames;
-        let call = frames
-            .iter()
-            .rev()
-            .find(|frame| frame.owns(enclosure))
-            .map_or(nil(), |frame| frame.call);
-        return Err(error_in(
+        let call = handles::owning_call(context, enclosure_of(context, environment));
+        let name = handles::text(inner.read(context).name());
+        return Err(handles::error_in(
             call,
-            format!("object '{}' not found", symbol_name(inner)),
+            format!("object '{name}' not found"),
         ));
     }
     // A promise that another reference also holds, as the caller's `...` list does for an
     // argument passed on through `...`, shares its value with that holder. GNU R wraps each such
     // argument in a promise of its own, whose value then counts a second reference.
-    let shared_promise = base.kind() == SexpType::Promise && values::maybe_shared(base);
-    if base.kind() == SexpType::Promise {
-        base = force_promise(base)?;
+    let shared_promise = base.r_type() == SexpType::Promise && base.is_shared();
+    if base.r_type() == SexpType::Promise {
+        base = handles::force(context, base)?;
     }
-    // A profile summary counts the assignment once, when its first level builds a call.
-    let counted = Cell::new(!activity::enabled());
-    let original = base;
-    let count_built = || -> R<()> {
-        if !counted.replace(true) {
-            let shape = unsafe { assignment_shape(&getters, original, superassign, env) }?;
-            activity::count_general_assignment(activity::label(&shape));
-        }
-        Ok(())
-    };
-    let heap = crate::heap();
-    let local_cell = heap.frame_cell(env, inner);
+    let local_binding =
+        handles::frame_binding(context, environment, inner).map(|cell| context.root(cell));
     // An index that assigns, as in `x[{x[2] <- 3; 1}] <- 2`, rebinds the variable while the
     // replacement still holds the old value, which therefore must be a copy. The `*tmp*`
     // promise deliberately counts no reference, so the inner assignment cannot see the share.
     let index_assigns = getters.iter().any(|getter| {
-        any_item(getter.cdr().cdr(), |argument| {
-            assigns_to(argument, inner, symbols)
+        handles::cell_fields(getter.read(context).rest()).is_some_and(|(_, _, indices)| {
+            any_item(indices, |argument| {
+                assigns_to(argument, inner.read(context))
+            })
         })
     });
-    let mut binding_env = lookup_env;
-    let mut binding_cell = None;
-    while binding_env != heap.known().empty_env {
-        binding_cell = heap.frame_cell(binding_env, inner);
-        if binding_cell.is_some() {
-            break;
-        }
-        binding_env = binding_env.enclosure();
-    }
+    let found = handles::enclosing_binding(context, inner, lookup_environment)
+        .map(|(holder, cell)| (context.root(holder), context.root(cell)));
     // A locked binding rejects the final assignment, so the replacement must not have modified
     // its value in place by then. `<<-` writes the binding it found, `<-` the local one.
     let written = if superassign {
-        binding_cell
+        found.map(|(_, cell)| cell)
     } else {
-        local_cell
+        local_binding
     };
-    let locked = written.is_some_and(|cell| cell.has_gp(gp::BINDING_LOCKED));
+    let locked = written.is_some_and(|cell| cell.read(context).is_locked());
+    let holder = found.map_or_else(handles::empty_environment, |(holder, _)| holder);
     // Ending a move into this frame hands the caller `base` back, which makes it shared, and
     // must come before any level changes in place, since an inner level is an element of it.
-    crate::moves::modifying(base)?;
+    handles::modifying(context, base)?;
     // The value being the variable's own, as in `x$a$b <- x`, counts no second reference.
-    if values::maybe_shared(base)
-        || value == base
+    if base.is_shared()
+        || base.is(value)
         || shared_promise
         || locked
         || index_assigns
-        || (!superassign && local_cell.is_none())
-        || !reuse_permitted(binding_env, base)
+        || (!superassign && local_binding.is_none())
+        || !handles::reuse_permitted(context, holder, base)
     {
-        // A copy-on-write copy is the same value, so an Array stays an Array; the
-        // replacement function decides whether the write keeps it one.
-        let was_array = base.is_array();
         // As in GNU R, a shared local variable is copied under a wrapper, which defers copying
         // the data until the replacement writes to it; a replacement that only changes
         // attributes, or writes nothing, as `x[FALSE] <- 1` does, never copies it.
-        base = if !superassign && local_cell.is_some() && values::maybe_shared(base) {
-            values::replacement_copy(base)?
+        let how = if !superassign && local_binding.is_some() && base.is_shared() {
+            AssignmentCopy::Replacement
         } else {
-            values::shallow_duplicate(base)?
+            AssignmentCopy::Storage
         };
-        base.set_array(was_array);
+        base = handles::assignment_copy(context, base, how)?;
     }
     // GNU R binds `*tmp*` in this frame for the length of the assignment, and in a hashed frame
     // that moves the table's chain counter, which `ls(sorted = FALSE)` order depends on.
-    heap.count_transient_binding(env, symbols.tmp);
-    crate::heap().root(base);
-    interp().tmp_values.push((env, base));
-    let replaced: R<Sexp> = (|| unsafe {
-        // Values of each level, innermost first: the variable, then each getter applied to it.
-        let mut levels: SmallVec<[Sexp; 4]> = smallvec![base];
-        let tmp_symbol = symbols.tmp;
-        let mut shared = false;
-        for getter in getters.iter().skip(1).rev() {
-            count_built()?;
-            let previous = *levels.last().unwrap_or(&base);
-            let promise = forced_promise(tmp_symbol, previous)?;
-            crate::heap().untrack_references(promise);
-            // The call names `*tmp*`, as GNU R's does, while the argument it is evaluated with is
-            // the promise holding the level below.
-            let rest = getter.cdr().cdr();
-            let getter_call = values::lcons(
-                getter.car(),
-                values::cons_tagged(tmp_symbol, rest, getter.cdr().tag())?,
-            )?;
-            crate::heap().root(getter_call);
-            let arguments = values::cons_tagged(promise, rest, getter.cdr().tag())?;
-            crate::heap().root(arguments);
-            let function = call_head_function(getter.car(), env)?;
-            let mut level = apply_call(getter_call, function, arguments, env)?;
-            if values::maybe_shared(level) || shared || level == value {
-                shared = true;
-                let was_array = level.is_array();
-                level = values::shallow_duplicate(level)?;
-                level.set_array(was_array);
-            }
-            levels.push(level);
-        }
-        let right_hand_side = match whole.cdr().cdr().kind() {
-            SexpType::Pairlist | SexpType::Language => whole.cdr().cdr().car(),
-            _ => value,
+    handles::count_tmp_binding(context, environment);
+    let tmp_value = handles::bind_tmp_value(context, Some(environment), base);
+    let assignment = Assignment {
+        whole,
+        getters: &getters,
+        base,
+        value,
+        environment,
+        superassign,
+        // A profile summary counts the assignment once, when its first level builds a call.
+        counted: Cell::new(!activity::enabled()),
+    };
+    let replaced = replace_levels(context, &assignment, evaluated);
+    handles::unbind_tmp_value(tmp_value);
+    let mut replaced = replaced?;
+    if !superassign && handles::is_altrep(replaced) {
+        let bound = handles::frame_binding(context, environment, inner)
+            .is_some_and(|cell| cell.content().is(replaced) && !cell.is_active());
+        replaced = handles::unwrap_assigned(context, replaced, bound);
+    }
+    assign_variable(context, inner, replaced, environment, superassign)
+}
+
+/// What every level of one complex assignment reads.
+struct Assignment<'a, 's> {
+    whole: Local<'s>,
+    /// The target's calls, outermost first.
+    getters: &'a [Local<'s, Language>],
+    /// The variable's value, which the assignment may change in place.
+    base: Local<'s>,
+    value: Local<'s>,
+    environment: Local<'s, Environment>,
+    superassign: bool,
+    counted: Cell<bool>,
+}
+
+/// The variable's new value: each getter applied to the level below, innermost first, then
+/// each replacement function from the outside in.
+fn replace_levels<'s>(
+    context: &mut Cx<'s>,
+    assignment: &Assignment<'_, 's>,
+    evaluated: &[Local<'s>],
+) -> R<Local<'s>> {
+    let Assignment {
+        whole,
+        getters,
+        base,
+        value,
+        environment,
+        ..
+    } = *assignment;
+    let tmp = handles::permanent_symbol(|s| s.tmp).value();
+    // Values of each level, innermost first: the variable, then each getter applied to it.
+    let mut levels: SmallVec<[Local<'s>; 4]> = smallvec![base];
+    let mut shared = false;
+    for getter in getters.iter().skip(1).rev() {
+        count_assignment(context, assignment)?;
+        let previous = levels.last().copied().unwrap_or(base);
+        let promise = handles::uncounted_forced_promise(context, tmp, previous)?;
+        // The call names `*tmp*`, as GNU R's does, while the argument it is evaluated with is
+        // the promise holding the level below.
+        let getter_cell = getter.read(context);
+        let head = context.root(getter_cell.head());
+        let (tag, rest) = match handles::cell_fields(getter_cell.rest()) {
+            Some((_, tag, rest)) => (context.root(tag), context.root(rest)),
+            None => (handles::null(), handles::null()),
         };
-        let mut replacement = value;
-        for (depth, getter) in getters.iter().enumerate() {
-            let object = levels[levels.len() - 1 - depth];
-            let setter = replacement_function(getter.car(), whole)?;
-            let function = call_head_function(setter, env)?;
-            // A closure reports its errors against its own call, `` `f<-`(`*tmp*`, value = v) ``,
-            // as GNU R's does, so only a primitive replacement names the assignment. A level
-            // past the first reports as GNU R does, against the assignment of that level's
-            // target, such as `` names(x) <- `*vtmp*` `` in `names(x)[2] <- "b"`.
-            let primitive = function.kind() != SexpType::Closure;
-            let reported = if !primitive || depth == 0 {
-                whole
-            } else {
-                values::call(whole.car(), &[*getter, symbols.vtmp])?
+        let first = handles::cons(context, tag, tmp, rest)?;
+        let getter_call = handles::language(context, head, first)?;
+        let arguments = handles::cons(context, tag, promise.value(), rest)?;
+        let function = handles::head_function(context, head, environment)?;
+        let mut level = handles::apply_call(
+            context,
+            getter_call.value(),
+            function,
+            arguments,
+            environment,
+        )?;
+        if level.is_shared() || shared || level.is(value) {
+            shared = true;
+            level = handles::assignment_copy(context, level, AssignmentCopy::Storage)?;
+        }
+        levels.push(level);
+    }
+    let right_hand_side = handles::cell_fields(whole.read(context))
+        .and_then(|(_, _, arguments)| handles::cell_fields(arguments))
+        .and_then(|(_, _, rest)| handles::cell_fields(rest))
+        .map_or(value, |(expression, _, _)| context.root(expression));
+    let value_symbol = handles::permanent_symbol(|s| s.value).value();
+    let mut replacement = value;
+    for (depth, getter) in getters.iter().enumerate() {
+        let object = levels[levels.len() - 1 - depth];
+        let head = context.root(getter.read(context).head());
+        let setter = replacement_function(context, head, whole)?;
+        let function = handles::head_function(context, setter, environment)?;
+        // A closure reports its errors against its own call, `` `f<-`(`*tmp*`, value = v) ``,
+        // as GNU R's does, so only a primitive replacement names the assignment. A level
+        // past the first reports as GNU R does, against the assignment of that level's
+        // target, such as `` names(x) <- `*vtmp*` `` in `names(x)[2] <- "b"`.
+        let primitive = function.r_type() != SexpType::Closure;
+        let reported = if !primitive || depth == 0 {
+            whole
+        } else {
+            let assign = context.root(whole.downcast::<Language>().map_or_else(
+                || handles::null().read(context),
+                |whole| whole.read(context).head(),
+            ));
+            let untagged = |value| Tagged {
+                tag: handles::null(),
+                value,
             };
-            crate::heap().root(reported);
-            if primitive {
-                let frame_depth = interp().frames.len();
-                // The level's target stands for the replacement call, which only an error that
-                // names it builds (`generated_replacement_call`).
-                let outer = interp()
-                    .assignment_call
-                    .replace((*getter, reported, frame_depth));
-                let level_arguments = if depth == 0 { evaluated } else { &[] };
-                // An inner level belongs to the variable's value, which the level's own arguments
-                // may share, as `names(x)[{ keep <- x; 2 }]` does after the getters ran.
-                let owner = if depth + 1 < levels.len() {
-                    base
-                } else {
-                    nil()
-                };
-                let result = replace_through_primitive(
-                    function,
-                    *getter,
-                    (object, replacement),
-                    (reported, owner),
-                    env,
-                    level_arguments,
-                );
-                interp().assignment_call = outer;
-                if let Some(result) = result? {
-                    replacement = result;
-                    continue;
-                }
+            let items = [
+                untagged(getter.value()),
+                untagged(handles::permanent_symbol(|s| s.vtmp).value()),
+            ];
+            let arguments = handles::chain(context, &items, handles::null())?;
+            handles::language(context, assign, arguments)?.value()
+        };
+        if primitive {
+            // The level's target stands for the replacement call, which only an error that
+            // names it builds (`generated_replacement_call`).
+            let published = AssignmentCall::enter(context, getter.value(), reported);
+            let level_arguments = if depth == 0 { evaluated } else { &[] };
+            // An inner level belongs to the variable's value, which the level's own arguments
+            // may share, as `names(x)[{ keep <- x; 2 }]` does after the getters ran.
+            let owner = (depth + 1 < levels.len()).then_some(base);
+            let result = replace_through_primitive(
+                context,
+                function,
+                *getter,
+                (object, replacement),
+                (reported, owner),
+                environment,
+                level_arguments,
+            )?;
+            drop(published);
+            if let Some(result) = result {
+                replacement = result;
+                continue;
             }
-            count_built()?;
-            // The object promise is the `*tmp*` GNU R binds: it must not count as a reference, or
-            // the replacement function would always see its target as shared and copy it.
-            let object_promise = forced_promise(tmp_symbol, object)?;
-            crate::heap().untrack_references(object_promise);
-            // The outermost replacement's value promise carries the right-hand side's expression,
-            // which `substitute(value)` returns; an inner one carries the value itself, as in GNU R.
-            let value_code = if depth == 0 {
-                right_hand_side
-            } else {
-                replacement
-            };
-            // GNU R's value promise does not count either, so a replacement that updated its target
-            // in place stays uniquely referenced for the next update.
-            let value_promise = forced_promise(value_code, replacement)?;
-            crate::heap().untrack_references(value_promise);
-            // The call `` `f<-`(`*tmp*`, ..., value = v) `` and the argument list it is applied
-            // with differ only in their first argument, so they share the cells after it, unless
-            // the arguments are already evaluated: then the call keeps their code.
-            let mut tail_items: SmallVec<[(Sexp, Sexp); 4]> = SmallVec::new();
-            let mut rest = getter.cdr().cdr();
-            while matches!(rest.kind(), SexpType::Pairlist | SexpType::Language) {
-                tail_items.push((rest.tag(), rest.car()));
-                rest = rest.cdr();
-            }
-            tail_items.push((symbols.value, value_promise));
-            let tail = values::pairlist(&tail_items, SexpType::Pairlist)?;
-            let setter_call = values::lcons(setter, values::cons(tmp_symbol, tail)?)?;
-            let argument_tail = if depth == 0 && evaluated.len() + 1 == tail_items.len() {
-                for (item, &argument) in tail_items.iter_mut().zip(evaluated) {
-                    item.1 = argument;
-                }
-                crate::heap().root(setter_call);
-                values::pairlist(&tail_items, SexpType::Pairlist)?
+        }
+        count_assignment(context, assignment)?;
+        // The object promise is the `*tmp*` GNU R binds: it must not count as a reference, or
+        // the replacement function would always see its target as shared and copy it.
+        let object_promise = handles::uncounted_forced_promise(context, tmp, object)?;
+        // The outermost replacement's value promise carries the right-hand side's expression,
+        // which `substitute(value)` returns; an inner one carries the value itself, as in GNU R.
+        let value_code = if depth == 0 {
+            right_hand_side
+        } else {
+            replacement
+        };
+        // GNU R's value promise does not count either, so a replacement that updated its target
+        // in place stays uniquely referenced for the next update.
+        let value_promise = handles::uncounted_forced_promise(context, value_code, replacement)?;
+        // The call `` `f<-`(`*tmp*`, ..., value = v) `` and the argument list it is applied
+        // with differ only in their first argument, so they share the cells after it, unless
+        // the arguments are already evaluated: then the call keeps their code.
+        let mut items: SmallVec<[Tagged<'s>; 6]> = SmallVec::new();
+        items.push(Tagged {
+            tag: handles::null(),
+            value: tmp,
+        });
+        let mut rest = handles::cell_fields(getter.read(context).rest())
+            .map_or_else(|| handles::null().read(context), |(_, _, rest)| rest);
+        while let Some((index, tag, next)) = handles::cell_fields(rest) {
+            items.push(Tagged {
+                tag: context.root(tag),
+                value: context.root(index),
+            });
+            rest = next;
+        }
+        let value_item = Tagged {
+            tag: value_symbol,
+            value: value_promise.value(),
+        };
+        items.push(value_item);
+        let setter_call = handles::chain(context, &items, handles::null())?;
+        let indices = &items[1..items.len() - 1];
+        // The arguments after `*tmp*` are the call's own cells.
+        let tail = handles::cell_fields(setter_call.read(context))
+            .map_or_else(handles::null, |(_, _, tail)| context.root(tail));
+        let setter_call = handles::language(context, setter, setter_call)?;
+        let argument_tail =
+            if depth == 0 && !evaluated.is_empty() && evaluated.len() == indices.len() {
+                let mut arguments: SmallVec<[Tagged<'s>; 6]> = indices
+                    .iter()
+                    .zip(evaluated)
+                    .map(|(index, &value)| Tagged {
+                        tag: index.tag,
+                        value,
+                    })
+                    .collect();
+                arguments.push(value_item);
+                handles::chain(context, &arguments, handles::null())?
             } else {
                 tail
             };
-            let arguments = values::cons(object_promise, argument_tail)?;
-            if !primitive {
-                replacement = apply_call(setter_call, function, arguments, env)?;
-                continue;
-            }
-            let frame_depth = interp().frames.len();
-            let outer = interp()
-                .assignment_call
-                .replace((setter_call, reported, frame_depth));
-            let result = apply_call(setter_call, function, arguments, env);
-            interp().assignment_call = outer;
-            replacement = result?;
+        let arguments = handles::cons(
+            context,
+            handles::null(),
+            object_promise.value(),
+            argument_tail,
+        )?;
+        if !primitive {
+            replacement = handles::apply_call(
+                context,
+                setter_call.value(),
+                function,
+                arguments,
+                environment,
+            )?;
+            continue;
         }
-        Ok(replacement)
-    })();
-    interp().tmp_values.pop();
-    let mut replaced = replaced?;
-    if !superassign && replaced.is_altrep() {
-        let bound = heap
-            .frame_cell(env, inner)
-            .is_some_and(|cell| cell.cdr() == replaced && !cell.has_gp(gp::ACTIVE_BINDING));
-        replaced = handles::with_result(|context| {
-            let replaced = handles::adopt(context, replaced);
-            Ok(handles::unwrap_assigned(context, replaced, bound).raw())
-        })?;
+        let published = AssignmentCall::enter(context, setter_call.value(), reported);
+        replacement = handles::apply_call(
+            context,
+            setter_call.value(),
+            function,
+            arguments,
+            environment,
+        )?;
+        drop(published);
     }
-    assign_symbol(inner, replaced, env, superassign)
+    Ok(replacement)
+}
+
+/// Counts the assignment in a profile summary, once.
+fn count_assignment(context: &mut Cx<'_>, assignment: &Assignment<'_, '_>) -> R<()> {
+    if !assignment.counted.replace(true) {
+        let shape = assignment_shape(context, assignment)?;
+        activity::count_general_assignment(activity::label(&shape));
+    }
+    Ok(())
 }
 
 /// One level of a complex assignment through the replacement primitive `function` itself:
@@ -7977,19 +8110,20 @@ pub unsafe fn complex_assign(
 ///
 /// The primitive runs with `getter` as its call, which the caller has published as the
 /// replacement call of the assignment in progress ([`crate::Interp::assignment_call`]), so its
-/// errors report against `reported`.
-unsafe fn replace_through_primitive(
-    function: Sexp,
-    getter: Sexp,
-    (object, value): (Sexp, Sexp),
-    (reported, owner): (Sexp, Sexp),
-    env: Sexp,
-    evaluated: &[Sexp],
-) -> R<Option<Sexp>> {
-    let definition = builtin_def(function)?;
-    let symbols = symbols();
-    let special = function.kind() == SexpType::Special;
-    let dollar = definition.symbol == Some(symbols.dollar_assign);
+/// errors report against `reported`. `owner` is the variable's value when `object` is an inner
+/// level of it.
+fn replace_through_primitive<'s>(
+    context: &mut Cx<'s>,
+    function: Local<'s>,
+    getter: Local<'s, Language>,
+    (object, value): (Local<'s>, Local<'s>),
+    (reported, owner): (Local<'s>, Option<Local<'s>>),
+    environment: Local<'s, Environment>,
+    evaluated: &[Local<'s>],
+) -> R<Option<Local<'s>>> {
+    let definition = handles::builtin_definition(function)?;
+    let special = function.r_type() == SexpType::Special;
+    let dollar = definition.symbol == Some(symbols().dollar_assign);
     // Of the specials, `[<-` and `[[<-` evaluate every argument, and `$<-` all but the name.
     if special && !dollar && !definition.is_dispatch_or_eval() {
         return Ok(None);
@@ -7999,23 +8133,26 @@ unsafe fn replace_through_primitive(
     if !internal && definition.generic != Generic::None {
         return Ok(None);
     }
-    let caller = dispatch::Caller::Env(env);
-    if internal && dispatch::has_internal_method(definition, function, object, caller)? {
+    if internal
+        && handles::has_internal_method(context, definition, function, object, Some(environment))?
+    {
         return Ok(None);
     }
-    let rest = getter.cdr().cdr();
+    let rest = handles::cell_fields(getter.read(context).rest())
+        .map_or_else(handles::null, |(_, _, rest)| context.root(rest));
     if dollar {
-        let named = rest.kind() == SexpType::Pairlist
-            && rest.cdr() == nil()
-            && rest.tag() == nil()
-            && match rest.car().kind() {
-                SexpType::Symbol => rest.car() != missing_arg(),
-                SexpType::String => length(rest.car()) >= 1,
+        let named = handles::cell_fields(rest.read(context)).and_then(|(name, tag, after)| {
+            let plain = after.is(handles::null()) && tag.is(handles::null());
+            let named = match name.r_type() {
+                SexpType::Symbol => !handles::is_missing_argument(context.root(name)),
+                SexpType::String => !name.standard::<Str>().is_some_and(|name| name.is_empty()),
                 _ => false,
             };
-        if !named {
+            (plain && named).then(|| context.root(name))
+        });
+        let Some(name) = named else {
             return Ok(None);
-        }
+        };
         let observed = activity::hooks() != 0;
         let index = builtin_index(definition);
         let _activity = observed.then(|| activity::enter(Activity::Builtin, index as u32));
@@ -8023,31 +8160,43 @@ unsafe fn replace_through_primitive(
             activity::record_builtin(index);
         }
         if observed && activity::profile_ticked() {
-            record_profile_sample(Some(definition.name))?;
+            handles::record_profile_sample(context, definition.name)?;
         }
         // An error is signalled here, as a builtin call signals its own, while the assignment
         // is the call it reports.
-        let result = scope(|| {
-            let name = crate::subset::name_argument(rest.car())?;
-            crate::subset::dollar_assign(object, name, value, getter)
-        })
-        .and_then(|result| crate::unwind::raise_parked().map(|()| result))
-        .map_err(|unwind| builtin_failure(unbound(), unwind))?;
+        let result = crate::subset::argument_name(context, name)
+            .and_then(|name| {
+                crate::subset::assign_dollar(context, object, name, value, getter.value())
+            })
+            .and_then(|result| crate::unwind::raise_parked().map(|()| result))
+            .map_err(|unwind| handles::builtin_failure(context, unwind))?;
         return Ok(Some(result));
     }
     let keep_missing = special || definition.keep_missing;
-    let mut args = Args::new();
-    args.push(Arg {
-        tag: nil(),
+    let mut arguments: SmallVec<[Tagged<'s>; 8]> = smallvec![Tagged {
+        tag: handles::null(),
         value: object,
-    });
-    if evaluated.is_empty() || evaluated.len() != values::pairlist_length(rest) {
-        evaluate_args_into(rest, env, keep_missing, reported, &mut args)?;
+    }];
+    let mut count = 0;
+    let mut cell = rest.read(context);
+    while let Some((_, _, next)) = handles::cell_fields(cell) {
+        count += 1;
+        cell = next;
+    }
+    if evaluated.is_empty() || evaluated.len() != count {
+        handles::evaluate_arguments(
+            context,
+            &mut arguments,
+            (rest, reported),
+            environment,
+            keep_missing,
+        )?;
     } else {
         // Declining after a variable was read would read it a second time in the built call.
-        let unevaluated = evaluated.iter().any(|argument| match argument.kind() {
+        let dots = handles::symbol(|s| s.dots);
+        let unevaluated = evaluated.iter().any(|argument| match argument.r_type() {
             SexpType::Symbol => {
-                *argument == symbols.dots || (*argument == missing_arg() && !keep_missing)
+                argument.is(dots) || (handles::is_missing_argument(*argument) && !keep_missing)
             }
             SexpType::Language | SexpType::Bytecode => true,
             _ => false,
@@ -8055,93 +8204,144 @@ unsafe fn replace_through_primitive(
         if unevaluated {
             return Ok(None);
         }
-        let mut item = rest;
+        let mut cell = rest;
         for &argument in evaluated {
+            let Some((_, tag, next)) = handles::cell_fields(cell.read(context)) else {
+                break;
+            };
+            let (tag, next) = (context.root(tag), context.root(next));
+            cell = next;
             // A forced promise holds the value compiled code evaluated. Anything else is the
             // argument's code: a constant, an empty argument, or a formal left for this lookup.
-            let value = match argument.kind() {
-                SexpType::Promise => value_of(argument)?,
-                SexpType::Symbol if argument == missing_arg() => argument,
-                SexpType::Symbol if keep_missing && argument_is_missing(argument, env)? => {
-                    missing_arg()
+            let value = match argument.downcast::<Symbol>() {
+                _ if argument.r_type() == SexpType::Promise => handles::force(context, argument)?,
+                Some(_) if handles::is_missing_argument(argument) => argument,
+                Some(symbol)
+                    if keep_missing && handles::is_missing_in(context, symbol, environment)? =>
+                {
+                    handles::missing_argument()
                 }
-                SexpType::Symbol => {
-                    let value = eval_symbol(argument, env)?;
-                    crate::heap().root(value);
-                    value
-                }
-                _ => argument,
+                Some(symbol) => handles::symbol_value(context, symbol, environment)?,
+                None => argument,
             };
-            args.push(Arg {
-                tag: item.tag(),
-                value,
-            });
-            item = item.cdr();
+            arguments.push(Tagged { tag, value });
         }
     }
     // GNU R's getter marks an attribute it returns as not mutable, so the level is a copy by
     // the time it is written. Here it is copied only when its owner became shared meanwhile.
-    if owner != nil() && values::maybe_shared(owner) && args[0].value == object {
-        let was_array = object.is_array();
-        let copy = values::shallow_duplicate(object)?;
-        copy.set_array(was_array);
-        crate::heap().root(copy);
-        args[0].value = copy;
+    if owner.is_some_and(|owner| owner.is_shared()) && arguments[0].value.is(object) {
+        arguments[0].value = handles::assignment_copy(context, object, AssignmentCopy::Storage)?;
     }
-    args.push(Arg {
-        tag: symbols.value,
+    arguments.push(Tagged {
+        tag: handles::permanent_symbol(|s| s.value).value(),
         value,
     });
-    call_builtin(definition, getter, function, &args, env).map(Some)
+    handles::call_builtin_tagged(
+        context,
+        definition,
+        (getter.value(), function),
+        &arguments,
+        Some(environment),
+    )
+    .map(Some)
 }
 
 /// The call GNU R generates for one level of a complex assignment, `` `f<-`(`*tmp*`, i, value = v) ``,
 /// from the level's target `f(x, i)` and the assignment `f(x, i) <- v` it reports as.
+///
+/// # Safety
+///
+/// Both are live, and stay so through an allocation.
 pub unsafe fn generated_replacement_call(target: Sexp, assignment: Sexp) -> R<Sexp> {
-    let symbols = symbols();
-    let setter = replacement_function(target.car(), assignment)?;
-    crate::heap().root(setter);
-    let mut items: SmallVec<[(Sexp, Sexp); 4]> = smallvec![(nil(), symbols.tmp)];
-    let mut rest = target.cdr().cdr();
-    while matches!(rest.kind(), SexpType::Pairlist | SexpType::Language) {
-        items.push((rest.tag(), rest.car()));
-        rest = rest.cdr();
+    handles::with_result(|context| {
+        let target = handles::held(context, target);
+        let assignment = handles::held(context, assignment);
+        Ok(replacement_call_of(context, target, assignment)?.raw())
+    })
+}
+
+/// [`generated_replacement_call`] on handles.
+fn replacement_call_of<'s>(
+    context: &mut Cx<'s>,
+    target: Local<'s>,
+    assignment: Local<'s>,
+) -> R<Local<'s>> {
+    let Some((head, _, arguments)) = handles::cell_fields(target.read(context)) else {
+        return Err(error(
+            "internal error: a replacement target that is not a call",
+        ));
+    };
+    let head = context.root(head);
+    let arguments = context.root(arguments);
+    let setter = replacement_function(context, head, assignment)?;
+    let mut cells = Cells::new(SexpType::Language);
+    cells.push(context, handles::null(), setter)?;
+    cells.push(
+        context,
+        handles::null(),
+        handles::permanent_symbol(|s| s.tmp).value(),
+    )?;
+    let mut indices: SmallVec<[Tagged<'s>; 4]> = SmallVec::new();
+    let mut rest = handles::cell_fields(arguments.read(context))
+        .map_or_else(|| handles::null().read(context), |(_, _, rest)| rest);
+    while let Some((index, tag, next)) = handles::cell_fields(rest) {
+        indices.push(Tagged {
+            tag: context.root(tag),
+            value: context.root(index),
+        });
+        rest = next;
     }
-    items.push((symbols.value, assignment.cdr().cdr().car()));
-    values::lcons(setter, values::pairlist(&items, SexpType::Pairlist)?)
+    for index in indices {
+        cells.push(context, index.tag, index.value)?;
+    }
+    let value = handles::cell_fields(assignment.read(context))
+        .and_then(|(_, _, arguments)| handles::cell_fields(arguments))
+        .and_then(|(_, _, rest)| handles::cell_fields(rest))
+        .map_or_else(handles::null, |(value, _, _)| context.root(value));
+    cells.push(
+        context,
+        handles::permanent_symbol(|s| s.value).value(),
+        value,
+    )?;
+    Ok(cells.finish().map_or_else(handles::null, Owned::finish))
 }
 
 /// A profile summary's name for a complex assignment's target: the replacement functions from
 /// the outside in, then the variable's type, as in `` `names<-` `[<-` on character ``, whether
-/// the variable's class has a method for its replacement, and whether the frame `env` runs a
-/// body that is not compiled.
-unsafe fn assignment_shape(
-    getters: &[Sexp],
-    base: Sexp,
-    superassign: bool,
-    env: Sexp,
-) -> R<String> {
+/// the variable's class has a method for its replacement, and whether the frame runs a body
+/// that is not compiled.
+fn assignment_shape(context: &mut Cx<'_>, assignment: &Assignment<'_, '_>) -> R<String> {
     let mut shape = String::new();
-    for getter in getters {
-        let head = getter.car();
+    for getter in assignment.getters {
+        let head = getter
+            .read(context)
+            .head()
+            .downcast::<Symbol>()
+            .map(|head| handles::text(head.name()).into_owned());
         // A summary is shared, so only a replacement function base R defines is named.
         let mut name = None;
-        if head.kind() == SexpType::Symbol {
-            let setter = format!("{}<-", symbol_name(head));
-            if crate::builtins::primitive(&setter).is_some()
-                || find_var_in_frame(values::install(&setter)?, values::base_namespace())?
-                    != unbound()
-            {
+        if let Some(head) = &head {
+            let setter = format!("{head}<-");
+            if handles::primitive(&setter).is_some() {
                 name = Some(setter);
+            } else {
+                let symbol = handles::install_bytes(context, setter.as_bytes())?;
+                if handles::frame_binding(context, handles::base_namespace(), symbol).is_some() {
+                    name = Some(setter);
+                }
             }
         }
         match name {
             Some(name) => shape.push_str(&format!("`{name}` ")),
-            None if head.kind() == SexpType::Symbol => shape.push_str("(a function) "),
+            None if head.is_some() => shape.push_str("(a function) "),
             None => shape.push_str("(computed) "),
         }
     }
-    shape.push_str(if superassign { "by `<<-` on " } else { "on " });
+    shape.push_str(if assignment.superassign {
+        "by `<<-` on "
+    } else {
+        "on "
+    });
     // Nor is a class a user's code defines.
     const PUBLIC_CLASSES: [&str; 12] = [
         "data.frame",
@@ -8157,28 +8357,38 @@ unsafe fn assignment_shape(
         "R6",
         "formula",
     ];
-    shape.push_str(crate::coerce::type_name(base));
-    if base.is_object() {
-        let class = values::get_attr(base, symbols().class);
-        let known = (0..length(class)).find_map(|index| {
-            let name = values::string_at(class, index)?;
-            PUBLIC_CLASSES.iter().find(|public| **public == name)
+    let base = assignment.base;
+    shape.push_str(handles::type_name(base));
+    if handles::is_object(base) {
+        let class = handles::get_attribute(context, base, handles::symbol(|s| s.class));
+        let known = class.standard::<Str>().and_then(|class| {
+            (0..class.len()).find_map(|index| {
+                let name = handles::text(class.get(index));
+                PUBLIC_CLASSES.iter().find(|public| **public == name)
+            })
         });
         shape.push_str(&format!(" ({})", known.unwrap_or(&"an object")));
-        let innermost = getters.last().map(|getter| getter.car());
-        if let Some(head) = innermost.filter(|head| head.kind() == SexpType::Symbol)
-            && let Some(function) = crate::builtins::primitive(&format!("{}<-", symbol_name(head)))
-        {
-            let definition = builtin_def(function)?;
-            let caller = dispatch::Caller::Env(env);
-            if (definition.generic == Generic::Internal || function.kind() == SexpType::Special)
-                && dispatch::has_internal_method(definition, function, base, caller)?
+        let innermost = assignment
+            .getters
+            .last()
+            .and_then(|getter| getter.read(context).head().downcast::<Symbol>())
+            .map(|head| format!("{}<-", handles::text(head.name())));
+        if let Some(function) = innermost.and_then(|setter| handles::primitive(&setter)) {
+            let definition = handles::builtin_definition(function)?;
+            if (definition.generic == Generic::Internal || function.r_type() == SexpType::Special)
+                && handles::has_internal_method(
+                    context,
+                    definition,
+                    function,
+                    base,
+                    Some(assignment.environment),
+                )?
             {
                 shape.push_str(" with a method");
             }
         }
     }
-    if !env.has_gp(gp::COMPILED_FRAME) {
+    if !handles::is_compiled_frame(context, assignment.environment) {
         shape.push_str(", uncompiled");
     }
     Ok(shape)
@@ -8186,81 +8396,120 @@ unsafe fn assignment_shape(
 
 /// Whether `expression` contains an assignment whose target is `variable` or a part of it. An
 /// assignment to another variable cannot rebind `variable`, so it needs no defensive copy.
-pub(crate) unsafe fn assigns_to(
-    expression: Sexp,
-    variable: Sexp,
-    symbols: &values::Symbols,
-) -> bool {
-    if expression.kind() != SexpType::Language {
+pub(crate) fn assigns_to(expression: Gc<'_>, variable: Gc<'_, Symbol>) -> bool {
+    let Some(call) = expression.downcast::<Language>() else {
         return false;
-    }
-    let head = expression.car();
-    let assignment = head == symbols.assign || head == symbols.assign2 || head == symbols.assign_eq;
+    };
+    let head = call.head();
+    let assignment = head.is(handles::symbol(|s| s.assign))
+        || head.is(handles::symbol(|s| s.assign2))
+        || head.is(handles::symbol(|s| s.assign_eq));
     if assignment {
-        let mut target = expression.cdr().car();
-        while target.kind() == SexpType::Language {
-            target = target.cdr().car();
+        let mut target = handles::cell_fields(call.rest()).map(|(target, _, _)| target);
+        while let Some(getter) = target.and_then(|target| target.downcast::<Language>()) {
+            target = handles::cell_fields(getter.rest()).map(|(target, _, _)| target);
         }
-        let named = target == variable
-            || (target.kind() == SexpType::String
-                && length(target) == 1
-                && target.element(0).bytes() == variable.car().bytes());
+        let named = target.is_some_and(|target| {
+            target.is(variable)
+                || target.standard::<Str>().is_some_and(|name| {
+                    name.len() == 1 && name.get(0).bytes() == variable.name().bytes()
+                })
+        });
         if named {
             return true;
         }
     }
-    any_item(expression, |part| assigns_to(part, variable, symbols))
+    any_item(expression, |part| assigns_to(part, variable))
+}
+
+/// [`complex_assign`] for compiled code, whose frame holds every operand.
+///
+/// # Safety
+///
+/// The caller keeps every operand alive until this returns, and releases what this roots.
+pub unsafe fn compiled_complex_assign(
+    whole: Sexp,
+    target: Sexp,
+    value: Sexp,
+    env: Sexp,
+    superassign: bool,
+    evaluated: &[Sexp],
+) -> R<()> {
+    // SAFETY: the caller's contract.
+    unsafe {
+        handles::in_caller_scope(|context| {
+            let whole = handles::held(context, whole);
+            let target = handles::held(context, target);
+            let value = handles::held(context, value);
+            let environment = handles::held(context, env)
+                .downcast::<Environment>()
+                .ok_or_else(|| error("internal error: an assignment outside an environment"))?;
+            let evaluated: SmallVec<[Local<'_>; 4]> = evaluated
+                .iter()
+                .map(|&argument| handles::held(context, argument))
+                .collect();
+            complex_assign(
+                context,
+                whole,
+                target,
+                value,
+                environment,
+                superassign,
+                &evaluated,
+            )
+        })
+    }
 }
 
 /// Whether `test` holds for any value of the pairlist or call `list`.
-unsafe fn any_item(mut list: Sexp, mut test: impl FnMut(Sexp) -> bool) -> bool {
-    while matches!(list.kind(), SexpType::Pairlist | SexpType::Language) {
-        if test(list.car()) {
+fn any_item<'a>(mut list: Gc<'a>, mut test: impl FnMut(Gc<'a>) -> bool) -> bool {
+    while let Some((item, _, rest)) = handles::cell_fields(list) {
+        if test(item) {
             return true;
         }
-        list = list.cdr();
+        list = rest;
     }
     false
 }
 
-/// The function a call's head names: a symbol is looked up as a function, anything else (such
-/// as `pkg::f`) is evaluated.
-unsafe fn call_head_function(head: Sexp, env: Sexp) -> R<Sexp> {
-    let function = if head.kind() == SexpType::Symbol {
-        find_fun(head, env)?
-    } else {
-        eval(head, env)?
-    };
-    crate::heap().root(function);
-    Ok(function)
-}
-
 /// The replacement function for a getter: `f<-` for `f`, and `pkg::\`f<-\`` for `pkg::f`.
-unsafe fn replacement_function(getter: Sexp, whole: Sexp) -> R<Sexp> {
-    match getter.kind() {
-        SexpType::Symbol => {
-            if let Some(&symbol) = interp().replacement_symbols.get(&getter) {
-                return Ok(symbol);
-            }
-            let mut name: SmallVec<[u8; 32]> = SmallVec::from_slice(getter.car().bytes());
-            name.extend_from_slice(b"<-");
-            let symbol = values::install_bytes(&name)?;
-            interp().replacement_symbols.insert(getter, symbol);
-            Ok(symbol)
-        }
-        SexpType::Language
-            if (getter.car() == symbols().double_colon
-                || getter.car() == symbols().triple_colon)
-                && values::length(getter) == 3 =>
-        {
-            let function = getter.cdr().cdr().car();
-            let mut name = function.car().bytes().to_vec();
-            name.extend_from_slice(b"<-");
-            let symbol = values::install_bytes(&name)?;
-            values::call(getter.car(), &[getter.cdr().car(), symbol])
-        }
-        _ => Err(error_in(whole, "invalid function in complex assignment")),
+fn replacement_function<'s>(
+    context: &mut Cx<'s>,
+    getter: Local<'s>,
+    whole: Local<'s>,
+) -> R<Local<'s>> {
+    if let Some(name) = getter.downcast::<Symbol>() {
+        return Ok(handles::replacement_symbol(context, name)?.value());
     }
+    let qualified = handles::cell_fields(getter.read(context)).and_then(|(head, _, rest)| {
+        let colons = head.is(handles::symbol(|s| s.double_colon))
+            || head.is(handles::symbol(|s| s.triple_colon));
+        let (package, _, rest) = handles::cell_fields(rest)?;
+        let (function, _, end) = handles::cell_fields(rest)?;
+        let function = function.downcast::<Symbol>()?;
+        (colons && end.is(handles::null())).then(|| {
+            (
+                context.root(head),
+                context.root(package),
+                context.root(function),
+            )
+        })
+    });
+    let Some((head, package, function)) = qualified else {
+        return Err(handles::error_in(
+            whole,
+            "invalid function in complex assignment",
+        ));
+    };
+    let mut name = function.read(context).name().bytes().to_vec();
+    name.extend_from_slice(b"<-");
+    let symbol = handles::install_bytes(context, &name)?;
+    let mut cells = Cells::new(SexpType::Language);
+    cells.push(context, handles::null(), head)?;
+    cells.push(context, handles::null(), package)?;
+    let symbol = context.root(symbol);
+    cells.push(context, handles::null(), symbol.value())?;
+    Ok(cells.finish().map_or_else(handles::null, Owned::finish))
 }
 
 /// Evaluates each element of an expression vector in turn, with its srcref current, and
@@ -8354,8 +8603,4 @@ pub unsafe fn tagged(tag: &str, value: Sexp) -> R<Arg> {
         tag: values::install(tag)?,
         value,
     })
-}
-
-pub unsafe fn cons_value(value: Sexp, rest: Sexp, tag: Sexp) -> R<Sexp> {
-    cons_tagged(value, rest, tag)
 }
