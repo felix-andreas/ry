@@ -10,7 +10,8 @@
 pub use heap::handle::{
     Alt, Atomic, Binding, Bytecode, Chars, Closure, Complex, Cx, Elements, Enclosing, Environment,
     Exact, Expression, Fresh, Gc, Held, I64, Identity, Integer, Item, Kind, Language, List, Local,
-    Logical, Owned, Pairlist, Pointer, Promise, Raw, Real, Str, Symbol, Unfilled, Value, Vector,
+    LocalBinding, Logical, Owned, Pairlist, Pointer, Promise, Raw, Real, Str, Symbol, Unfilled,
+    Value, Vector,
 };
 use {
     crate::{
@@ -1516,6 +1517,19 @@ pub unsafe fn reading<T>(body: impl for<'s> FnOnce(&Cx<'s>) -> T) -> T {
     body(&context)
 }
 
+/// [`reading`] for a function `body` that takes its operands as `data`, which inlines where a
+/// closure that inlines a larger body would stay out of line ([`in_caller_scope_with`]).
+///
+/// # Safety
+///
+/// As for [`with`].
+#[inline(always)]
+pub unsafe fn reading_with<D, T>(data: D, body: for<'s> fn(&Cx<'s>, D) -> T) -> T {
+    // SAFETY: as in `with`, and a shared context roots and frees nothing.
+    let context = unsafe { Cx::enter(NonNull::from(&mut *crate::heap())) };
+    body(&context, data)
+}
+
 /// [`in_caller_scope`] for a function `body` that takes its operands as `data`. Tier 0
 /// compiles each handler twice, for running and for stepping, so a closure or a generic shim
 /// a handler calls has two callers and LLVM keeps a large one out of line; a call through a
@@ -1842,6 +1856,14 @@ pub fn error_in(call: Local<'_>, message: impl Into<String>) -> Unwind {
 pub fn null<'s>() -> Local<'s> {
     // SAFETY: `NULL` is a permanent root of the heap.
     unsafe { Local::adopt(values::nil()) }
+}
+
+/// The marker of an unbound variable and of an unforced promise's value, which the heap keeps
+/// for as long as it lives.
+#[inline]
+pub fn unbound<'s>() -> Local<'s> {
+    // SAFETY: the marker is a permanent root of the heap.
+    unsafe { Local::adopt(values::unbound()) }
 }
 
 /// The base namespace, which the heap keeps for as long as it lives.
@@ -3138,6 +3160,32 @@ pub fn closure<'s>(
     }
 }
 
+/// A closure of `formals` and `body`, with `srcref`, over an environment the frame at `owner`
+/// holds: the one that stands for it when `pending`, else its own. The answer borrows the
+/// context, for a caller that hands it on or roots it.
+pub fn frame_closure<'c>(
+    _context: &'c mut Cx<'_>,
+    owner: usize,
+    pending: bool,
+    formals: Local<'_>,
+    body: Local<'_>,
+    srcref: Local<'_>,
+) -> R<Gc<'c>> {
+    let frame = &crate::interp().frames[owner];
+    let environment = match pending {
+        true => frame.pending.raw(),
+        false => frame.env.raw(),
+    };
+    // SAFETY: the frame holds the environment and the other three are rooted while the
+    // closure allocates, which `&mut Cx` permits, and the answer borrows the context, so
+    // nothing allocates before the caller roots it.
+    unsafe {
+        let closure =
+            crate::eval::make_closure(formals.raw(), body.raw(), srcref.raw(), environment)?;
+        Ok(Gc::adopt(closure))
+    }
+}
+
 /// The `break` (`next` false) or `next` of the loop in `environment`, raised as an error first
 /// when no loop can catch it.
 pub fn loop_jump(_context: &mut Cx<'_>, environment: Local<'_, Environment>, next: bool) -> Unwind {
@@ -3711,9 +3759,7 @@ impl<'c, 's> LiveFrame<'c, 's> {
     #[inline]
     pub fn slot(self, slot: usize) -> Gc<'c> {
         let value = crate::interp().bytecode.registers[self.fields().slots as usize + 1 + slot];
-        // SAFETY: the collector traces the register file, and the borrow of the context lets
-        // nothing store into the register before the value's last use.
-        unsafe { Gc::adopt(value) }
+        register_value(self.context, value)
     }
 
     /// What the slot of a slot frame named `symbol` holds ([`LiveFrame::slot`]), or `None` when
@@ -3729,21 +3775,426 @@ impl<'c, 's> LiveFrame<'c, 's> {
         let slot = names.iter().position(|name| name.is(symbol))?;
         Some(self.slot(slot))
     }
+
+    /// The frame's environment as the frame records it: `NULL` for a slot frame that runs in
+    /// its slots and for a frame that has no environment of its own.
+    #[inline]
+    pub fn recorded_environment(self) -> Gc<'c> {
+        self.fields().env.get(self.context)
+    }
+
+    /// The environment the call was made from as the frame records it, `NULL` when the frame
+    /// names its caller by position instead ([`LiveFrame::caller`]).
+    #[inline]
+    pub fn recorded_sys_parent(self) -> Gc<'c> {
+        self.fields().sys_parent.get(self.context)
+    }
+
+    /// The formals of the frame's function, which a slot frame's first slots hold in order.
+    #[inline]
+    pub fn formals(self) -> impl Iterator<Item = Gc<'c>> {
+        let mut cell = self.function().formals().downcast::<Pairlist>();
+        std::iter::from_fn(move || {
+            let current = cell?;
+            cell = current.rest().downcast::<Pairlist>();
+            Some(current.tag())
+        })
+    }
+
+    /// The register that holds slot `slot`.
+    #[inline]
+    pub fn slot_register(self, slot: usize) -> usize {
+        self.header() + 1 + slot
+    }
+
+    /// The arguments the frame was called with, as `sys.call` matched them: the frame's entries
+    /// of the interpreter's argument stack.
+    pub fn arguments(self) -> impl Iterator<Item = Gc<'c>> {
+        let state = crate::interp();
+        let start = self.fields().args as usize;
+        let end = state
+            .frames
+            .get(self.index + 1)
+            .map_or(state.frame_args.len(), |next| next.args as usize);
+        // SAFETY: the interpreter traces the argument stack, and the borrow of the context lets
+        // nothing pop it before the last value is used.
+        state.frame_args[start..end]
+            .iter()
+            .map(|argument| unsafe { Gc::adopt(argument.value) })
+    }
+
+    /// The register below a slot frame's slots, which holds its environment once it has one.
+    #[inline]
+    pub fn header(self) -> usize {
+        self.fields().slots as usize
+    }
+
+    /// Whether the frame runs on slots, with or without an environment.
+    #[inline]
+    pub fn has_slots(self) -> bool {
+        self.fields().slots != crate::NO_SLOTS
+    }
+
+    /// Whether the frame keeps every variable in its slot: a slot frame without an environment.
+    #[inline]
+    pub fn in_slots(self) -> bool {
+        self.has_slots() && self.fields().env.raw() == values::nil()
+    }
+
+    /// The environment that stands for a slot frame, once something has asked for it.
+    #[inline]
+    pub fn pending(self) -> Option<Gc<'c, Environment>> {
+        self.fields()
+            .pending
+            .get(self.context)
+            .downcast::<Environment>()
+    }
+
+    /// The environment the call was made from, `None` when the caller is the slot frame at
+    /// [`LiveFrame::caller`] and had no environment when it made the call.
+    #[inline]
+    pub fn sys_parent(self) -> Option<Gc<'c, Environment>> {
+        self.fields()
+            .sys_parent
+            .get(self.context)
+            .downcast::<Environment>()
+    }
+
+    /// The position of the slot frame the call was made from, when the frame records its caller
+    /// by position instead of by environment.
+    #[inline]
+    pub fn caller(self) -> Option<usize> {
+        let caller = self.fields().caller;
+        (caller != crate::NO_SLOTS).then_some(caller as usize)
+    }
+
+    /// Whether formal `position` of a slot frame is missing (`missing()`).
+    #[inline]
+    pub fn is_missing_formal(self, position: usize) -> bool {
+        position < 64 && self.fields().missing & (1 << position) != 0
+    }
+
+    /// The names of a slot frame's slots, its formals first.
+    #[inline]
+    pub fn slot_names(self) -> &'c [Gc<'c>] {
+        slot_layout(self.function()).map_or(&[], |(names, _)| names)
+    }
+
+    /// The dispatch variables a method's frame binds (`.Generic` and the like), each with the
+    /// value recorded for it.
+    #[inline]
+    pub fn method_vars(self) -> impl Iterator<Item = (Gc<'c, Symbol>, Gc<'c>)> + Clone {
+        // SAFETY: the interpreter traces the dispatch variables of every live frame, each first
+        // field is a symbol, which `UseMethod` records, and the borrow of the context lets
+        // nothing collect before the last one is used.
+        crate::method_vars(crate::interp(), self.index)
+            .iter()
+            .map(|&(symbol, value)| unsafe { (Gc::adopt(symbol), Gc::adopt(value)) })
+    }
+
+    /// Stores `value` in slot `slot`, which counts a reference to it and gives up the one to
+    /// what the slot held. The store frees nothing, so what the context reads stays valid.
+    #[inline]
+    pub fn store_slot(self, slot: usize, value: impl Pointer<Value>) {
+        let register = self.header() + 1 + slot;
+        let registers = &mut crate::interp().bytecode.registers;
+        assert!(
+            register < registers.len(),
+            "slot {slot} is past the register file"
+        );
+        // SAFETY: the register is one of the live frame's slots, which only running code writes,
+        // the value is live, and the store counts references without freeing anything.
+        unsafe { crate::heap().store_slot(&mut registers[register], value.raw()) };
+    }
+
+    /// Moves the variables bound in `slots` into cells of the frame's environment, which binds
+    /// none of them yet, each formal with its missing flag, and leaves the slots unbound. The
+    /// cells take over the slots' counts. Returns how many variables moved. The caller has
+    /// suspended collection.
+    pub fn move_slots_to_cells(self, slots: Range<usize>) -> R<usize> {
+        let index = self.index;
+        let Some(environment) = self.pending() else {
+            panic!("frame {index} moved a variable before it had an environment");
+        };
+        let names = self.slot_names();
+        let mut formals = None;
+        let mut bindings: SmallVec<[LocalBinding<'_>; 12]> = SmallVec::new();
+        for slot in slots.clone() {
+            let value = self.slot(slot);
+            if is_unbound(value) {
+                continue;
+            }
+            let Some(symbol) = names.get(slot).and_then(|name| name.downcast::<Symbol>()) else {
+                panic!("frame {index}: slot {slot} has no name");
+            };
+            bindings.push(LocalBinding {
+                symbol,
+                value,
+                missing: self.is_missing_formal(slot)
+                    && slot < *formals.get_or_insert_with(|| self.formals().count()),
+            });
+        }
+        if bindings.is_empty() {
+            return Ok(0);
+        }
+        if syntax::testing::invariants_enabled() {
+            for binding in &bindings {
+                assert!(
+                    self.context
+                        .own_binding(environment, binding.symbol)
+                        .is_none(),
+                    "frame {index}: {:?} is bound in a slot and in a cell at once",
+                    text(binding.symbol.name())
+                );
+            }
+        }
+        self.context
+            .define_locals_uncollected(environment, &bindings)?;
+        let start = self.header() + 1;
+        let registers = &mut crate::interp().bytecode.registers;
+        let unbound = values::unbound();
+        for register in &mut registers[start + slots.start..start + slots.end] {
+            // SAFETY: each bound slot's variable has just been bound in a cell, which counts it
+            // too, so giving up the slot's count frees nothing and needs no note of a zero count.
+            unsafe { register.decrement_refcount() };
+            *register = unbound;
+        }
+        Ok(bindings.len())
+    }
+
+    /// Makes `environment` the one that stands for the slot frame, which the frame then holds.
+    /// The environment records the frame's slot names, so a lookup of any other name passes it
+    /// without asking the frame, and the frame's dispatch variables.
+    #[inline]
+    pub fn stand_in(self, environment: Gc<'_, Environment>) {
+        let index = self.index;
+        let Some((names, _)) = compiled_slots(self.function()) else {
+            panic!("slot frame {index} runs code without a slot table");
+        };
+        // SAFETY: the frame's function holds its slot table, and so the names, for as long as
+        // the environment stands for the frame.
+        unsafe {
+            self.context
+                .set_slot_owner(environment, index, names.value())
+        };
+        self.context
+            .expect_dispatch_variables(environment, self.method_vars().map(|(symbol, _)| symbol));
+        // SAFETY: the frame holds the environment from here on, and the interpreter traces its
+        // fields.
+        crate::interp().frames[index].pending = unsafe { Held::adopt(environment.raw()) };
+    }
+
+    /// Makes the environment that stands for the slot frame its environment, in its header
+    /// register too, so the frame's code reads and writes by name from here on. `false`, with
+    /// nothing changed, when the frame has an environment already.
+    #[inline]
+    pub fn enter_environment(self) -> bool {
+        if self.fields().env.raw() != values::nil() {
+            return false;
+        }
+        let Some(pending) = self.pending() else {
+            panic!("frame {} has no environment to switch to", self.index);
+        };
+        let header = self.header();
+        let frame = &mut crate::interp().frames[self.index];
+        // SAFETY: the pending environment is the frame's own, which it holds, and the header
+        // register is the frame's, which the collector traces.
+        unsafe {
+            frame.env = Held::adopt(pending.raw());
+            crate::interp().bytecode.registers[header] = pending.raw();
+            pending.raw().set_gp_bits(gp::PENDING_FRAME, false);
+            pending.raw().set_gp_bits(gp::PARTIAL_FRAME, true);
+        }
+        true
+    }
+
+    /// Records `reason` as what last asked for the slot frame's environment, for the profile
+    /// summary.
+    #[inline]
+    pub fn set_reified_by(self, reason: u32) {
+        crate::interp().frames[self.index].reified_by = reason;
+    }
+
+    /// What last asked for the slot frame's environment, for the profile summary.
+    #[inline]
+    pub fn reified_by(self) -> u32 {
+        self.fields().reified_by
+    }
 }
 
-/// The environment of the live frame at `index`, made for a slot frame that has none yet
-/// (`eval::frame_env`); `cause` says what asked for it.
-pub fn frame_environment<'s>(
-    context: &mut Cx<'s>,
+/// The live frame at position `index` of the frame stack, `None` past its top.
+#[inline]
+pub fn frame_if_live<'c, 's>(context: &'c Cx<'s>, index: usize) -> Option<LiveFrame<'c, 's>> {
+    (index < crate::interp().frames.len()).then_some(LiveFrame { index, context })
+}
+
+/// The slot and the missing flag of each formal `symbols` names in the frame at `index`, read in
+/// one walk of the formals, so `symbols` must be listed in the order the closure declares them.
+/// `None` when the frame is no slot frame that keeps every variable in its slot, or a symbol is
+/// not a formal at its place in that order. Prologues read their arguments through it on every
+/// call, so it reads the frame once.
+#[inline(always)]
+pub fn formal_slots<'c, const N: usize>(
+    context: &'c Cx<'_>,
     index: usize,
-    cause: crate::eval::Reify,
-) -> R<Local<'s, Environment>> {
-    // SAFETY: making the environment allocates, which `&mut Cx` permits, and the frame holds
-    // the environment it returns.
-    unsafe {
-        let environment = crate::eval::frame_env(index, cause)?;
-        Ok(context.root(Gc::<Environment>::adopt(environment)))
+    symbols: [Gc<'_, Symbol>; N],
+) -> Option<[(Gc<'c>, bool); N]> {
+    let state = crate::interp();
+    let frame = state.frames.get(index)?;
+    if frame.slots == crate::NO_SLOTS || frame.env.raw() != values::nil() {
+        return None;
     }
+    let slots = state.bytecode.registers.get(frame.slots as usize + 1..)?;
+    let mut cell = frame.function.get(context).downcast::<Closure>()?.formals();
+    let mut next = 0;
+    let mut found = [(null().read(context), false); N];
+    for (entry, symbol) in found.iter_mut().zip(symbols) {
+        let position = loop {
+            let pair = cell.downcast::<Pairlist>()?;
+            cell = pair.rest();
+            next += 1;
+            if pair.tag().is(symbol) {
+                break next - 1;
+            }
+        };
+        let missing = position < 64 && frame.missing & (1 << position) != 0;
+        *entry = (register_value(context, *slots.get(position)?), missing);
+    }
+    Some(found)
+}
+
+/// `value`, read from a register, as a handle.
+#[inline(always)]
+fn register_value<'c>(_context: &'c Cx<'_>, value: Sexp) -> Gc<'c> {
+    // SAFETY: the collector traces the register file, and the borrow of the context lets
+    // nothing collect before the value's last use; a store under `&Cx` frees nothing.
+    unsafe { Gc::adopt(value) }
+}
+
+/// The argument reference at position `index` of the interpreter's pool and its target, a
+/// three-element integer vector (`eval::argument_reference`), once the pool has made one there.
+#[inline]
+pub fn pooled_reference<'c>(
+    _context: &'c Cx<'_>,
+    index: usize,
+) -> Option<(Gc<'c, Promise>, Gc<'c, Integer>)> {
+    let state = crate::interp();
+    let (&reference, &target) = state
+        .references
+        .get(index)
+        .zip(state.reference_targets.get(index))?;
+    // SAFETY: the pool roots each reference and target it made, and makes each as a promise
+    // and an integer vector. One replaced under `&Cx` is only noted at count zero, and the
+    // borrow of the context lets nothing collect before its last use.
+    Some(unsafe { (Gc::adopt(reference), Gc::adopt(target)) })
+}
+
+/// Puts a new argument reference naming `symbol` over `target` at position `index` of the pool,
+/// which ends the pool or holds a reference something else counts, and gives up the pool's
+/// counts on what the position held.
+#[inline]
+pub fn replace_pooled_reference(
+    _context: &mut Cx<'_>,
+    index: usize,
+    symbol: impl Pointer<Value>,
+    target: Local<'_, Integer>,
+) -> R<()> {
+    let target = target.raw();
+    // SAFETY: the symbol and the target are rooted while the promise allocates, which
+    // `&mut Cx` permits, and the pool holds the new promise before anything else allocates.
+    // The counts pair with the ones given up here or when the pool next places a reference at
+    // the position.
+    unsafe {
+        let reference = crate::heap().alloc_compiled_promise(
+            values::unbound(),
+            symbol.raw(),
+            values::nil(),
+            target,
+        )?;
+        reference.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
+        reference.increment_refcount();
+        target.increment_refcount();
+        let state = crate::interp();
+        if index == state.references.len() {
+            state.references.push(reference);
+            state.reference_targets.push(target);
+            return Ok(());
+        }
+        state.references[index].decrement_refcount();
+        state.references[index] = reference;
+        state.reference_targets[index].decrement_refcount();
+        state.reference_targets[index] = target;
+    }
+    Ok(())
+}
+
+/// Gives position `index` of the pool, whose reference is being detached, a new reference over
+/// the position's target, which the detached promise no longer needs once it names its
+/// frame's environment. The detached promise gives up the pool's count, so its frame alone
+/// holds it.
+#[inline]
+pub fn refill_detached_place(_context: &mut Cx<'_>, index: usize) -> R<()> {
+    let Some(&target) = crate::interp().reference_targets.get(index) else {
+        panic!("argument reference {index} left the pool");
+    };
+    // SAFETY: the pool roots the target while the promise allocates, which `&mut Cx` permits,
+    // and holds the new promise before anything else allocates. The count given up pairs with
+    // the one the pool counted when it placed the detached reference.
+    unsafe {
+        let reference = crate::heap().alloc_compiled_promise(
+            values::unbound(),
+            values::nil(),
+            values::nil(),
+            target,
+        )?;
+        reference.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
+        reference.increment_refcount();
+        let state = crate::interp();
+        state.references[index].decrement_refcount();
+        state.references[index] = reference;
+    }
+    Ok(())
+}
+
+/// The pool's reference at `index`, its target pointed at slot `slot` of the frame at `owner`:
+/// the frame's position, the slot and the frame's header register. One read of the pool serves
+/// both, since every call into slots takes its references here.
+#[inline]
+pub fn aim_reference<'c>(
+    _context: &'c mut Cx<'_>,
+    index: usize,
+    owner: usize,
+    slot: u32,
+) -> Gc<'c, Promise> {
+    let state = crate::interp();
+    let header = state.frames[owner].slots;
+    let (Some(&reference), Some(&target)) = (
+        state.references.get(index),
+        state.reference_targets.get(index),
+    ) else {
+        panic!("argument reference {index} is not in the pool");
+    };
+    // SAFETY: the pool makes each target as a three-element integer vector of its own, and
+    // `&mut Cx` ends every slice read through the context. The pool holds the reference, and
+    // the answer borrows the context.
+    unsafe {
+        values::ints_mut(target).copy_from_slice(&[owner as i32, slot as i32, header as i32]);
+        Gc::adopt(reference)
+    }
+}
+
+/// The live frame whose header register is `header`, the innermost one when promise code runs
+/// on an outer frame's slots.
+#[inline]
+pub fn frame_at_header<'c, 's>(context: &'c Cx<'s>, header: usize) -> LiveFrame<'c, 's> {
+    let Some(index) = crate::interp()
+        .frames
+        .iter()
+        .rposition(|frame| frame.slots as usize == header)
+    else {
+        panic!("a slot frame's activation outlived its frame");
+    };
+    LiveFrame { index, context }
 }
 
 /// What the code of the unforced `promise` gives when run where the promise was made: its
@@ -4266,6 +4717,30 @@ pub fn promise<'s>(
     }
 }
 
+/// Appends the tag and the expression of each argument cell of `call` to `cells`, `false` when
+/// it is no call. C code may link the cells with `LCONS`, which GNU R evaluates the same. The
+/// caller owns the buffer, so a list of many cells is never moved on return.
+#[inline]
+pub fn call_cells<'s>(
+    context: &Cx<'s>,
+    call: Local<'s>,
+    cells: &mut SmallVec<[Tagged<'s>; 8]>,
+) -> bool {
+    let Some(head) = call.read(context).downcast::<Language>() else {
+        return false;
+    };
+    let mut cell = head.rest();
+    while let Some((expression, tag, rest)) = cell_fields(cell) {
+        // R code may rewrite a call it holds alone in place, so each part is rooted itself.
+        cells.push(Tagged {
+            tag: context.root(tag),
+            value: context.root(expression),
+        });
+        cell = rest;
+    }
+    true
+}
+
 /// The tag and the unforced value of each cell of `...` in `environment`, none when it holds
 /// no arguments.
 pub fn dots_cells<'s>(
@@ -4587,6 +5062,14 @@ pub fn build_slot_defaults(context: &mut Cx<'_>, function: Local<'_, Closure>) -
 /// bind, so it trusts the constant pool's layout instead of checking each entry.
 #[inline(always)]
 pub fn slot_layout<'a>(function: Gc<'a, Closure>) -> Option<(&'a [Gc<'a>], usize)> {
+    let (names, registers) = compiled_slots(function)?;
+    Some((names.elements(), registers))
+}
+
+/// The list of slot names of `function`'s compiled body and the number of registers its code
+/// uses beyond them ([`slot_layout`]).
+#[inline]
+fn compiled_slots<'a>(function: Gc<'a, Closure>) -> Option<(Gc<'a, List>, usize)> {
     let code = function.body().downcast::<Bytecode>()?;
     // SAFETY: only the compiler and the code image's reader, which restores what the compiler
     // wrote, make a `BCODESXP` (GNU R's byte code loads as its source). Both lay the constant
@@ -4601,7 +5084,7 @@ pub fn slot_layout<'a>(function: Gc<'a, Closure>) -> Option<(&'a [Gc<'a>], usize
         if table == values::nil() {
             return None;
         }
-        let names = Gc::<'a, List>::adopt(*(table.data() as *const Sexp).add(1)).elements();
+        let names = Gc::<'a, List>::adopt(*(table.data() as *const Sexp).add(1));
         let registers = *((*pool.add(bytecode::REGISTERS)).data() as *const i32);
         Some((names, registers as usize))
     }

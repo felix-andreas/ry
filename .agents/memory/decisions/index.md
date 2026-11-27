@@ -527,6 +527,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Argument matching and slot binding take handles, and a new frame's formals go through a window
 - Variable lookups take handles, and a frame holds its objects in `Held`
 - Promise forcing takes handles, and a live frame is read through `LiveFrame`
+- The frame machinery takes handles, and an allocation that cannot collect runs under `&Cx`
 
 ## C API, R home and packages
 

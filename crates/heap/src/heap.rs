@@ -326,6 +326,7 @@ enum Counted {
 /// A formal bound by [`Heap::define_formals`]. `missing` marks a formal the call did not supply,
 /// for `missing()`.
 #[derive(Clone, Copy)]
+#[repr(C)]
 pub struct Formal {
     pub symbol: Sexp,
     pub value: Sexp,
