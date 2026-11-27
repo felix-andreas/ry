@@ -575,3 +575,17 @@ v: double[]
 b: double[]
 d: Date
 m: matrix
+
+#---- a_comparison_refuses_an_environment
+# R compares only atomic values and lists: `globalenv() == 1` stops.
+same <- function(a, b) a == b
+zero <- function(x) x == 0
+r1 <- same(1L, globalenv())
+r2 <- zero(new.env())
+#++++
+same: <T: eq, U: eq> fn(a: T, b: U) -> Compared<T>
+zero: <T: equatable or number> fn(x: T) -> Compared<T>
+r1: Unknown
+r2: Unknown
+141..152 error[type-mismatch] expected a value `==` can compare (anything but a function or an environment), found `environment`
+165..174 error[type-mismatch] expected a value `==` can test against a number (an atomic value, a class, `I64` or `F64`), found `environment`

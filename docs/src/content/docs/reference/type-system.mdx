@@ -794,7 +794,7 @@ A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
   endpoint of `:` infers, so `function(n) 1:n` is `<T: scalar numeric> fn(n: T) -> double[]`.
 - `item` admits what a [`List`](#lists) can hold: a number, a `Bool`, a `Str`, or another ry value.
   `List.from_r` uses it to type a `list[T]` argument.
-- `eq` admits every value but a function: the values `==` compares.
+- `eq` admits every value but a function or an environment: the values `==` compares.
 - `comparable` admits the R values a comparison takes: an atomic value other than `complex` or
   `raw` in any vector shape, a list, which R compares element by element, and a class.
 - `equatable` admits what `comparable` does and `complex` and `raw`, which R tests for equality but

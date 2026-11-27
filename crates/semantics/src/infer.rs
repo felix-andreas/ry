@@ -3018,7 +3018,8 @@ pub(crate) fn constraint_rejects<'db>(
             _ => false,
         },
         Constraint::Eq => match ty.kind(db) {
-            TyKind::Function(_) => false,
+            TyKind::Function(_) | TyKind::Environment(_) => false,
+            TyKind::Named(name, _) if name.text(db) == "environment" => false,
             TyKind::Rigid(name) => binder_implies(name),
             _ => true,
         },
@@ -3026,6 +3027,9 @@ pub(crate) fn constraint_rejects<'db>(
             // `NULL > 0` is `logical(0)`.
             TyKind::Any | TyKind::Unknown | TyKind::Frame(..) | TyKind::Null => true,
             TyKind::Rigid(name) => binder_implies(name),
+            // R compares only atomic values and lists: `globalenv() == 1` is an error.
+            TyKind::Environment(_) => false,
+            TyKind::Named(name, _) if name.text(db) == "environment" => false,
             // A class compares through R's `Ops` methods; a ry nominal is a ry value.
             TyKind::Named(name, _) => {
                 !is_ry_value_type(db, ty)
