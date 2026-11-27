@@ -1383,7 +1383,7 @@ fn pending_of<'c>(context: &'c Cx<'_>, owner: usize) -> Gc<'c, Environment> {
 }
 
 /// Moves the variables in `slots` of the slot frame at `owner` into binding cells of its
-/// environment, each as [`bind_arguments`] and the assignments since would have bound it: a
+/// environment, each as [`bind_environment`] and the assignments since would have bound it: a
 /// formal with its missing flag, an argument reference as the promise it stands for
 /// ([`detach_reference`]), since a cell can be read after the call that made the reference
 /// returns. A slot that binds nothing is skipped. The slots give up their references and read
@@ -1601,7 +1601,7 @@ pub fn slot_reference<'a>(
     slot: u32,
     symbol: Local<'_>,
 ) -> R<Gc<'a, Promise>> {
-    Ok(take_reference(context, symbol, Some((owner, slot)))?.2)
+    Ok(take_reference(context, symbol, Some((owner, slot)))?.1)
 }
 
 /// An argument reference to `expression`, a variable, uncompiled code or a constant, of a
@@ -1615,7 +1615,7 @@ pub unsafe fn env_reference(env: Sexp, expression: Sexp) -> R<Sexp> {
             handles::held(context, env),
             handles::held(context, expression),
         );
-        let (context, _, reference) = take_reference(context, expression, None)?;
+        let (context, reference) = take_reference(context, expression, None)?;
         context.set_promise_environment(reference, environment);
         Ok(reference.raw())
     })
@@ -1629,7 +1629,7 @@ pub unsafe fn env_code_reference(env: Sexp, code: Sexp) -> R<Sexp> {
         let (environment, code) = (handles::held(context, env), handles::held(context, code));
         // The code holds its constant pool, and the caller holds the code.
         let source = handles::held(context, source_of(code.read(context)).raw());
-        let (context, _, reference) = take_reference(context, source, None)?;
+        let (context, reference) = take_reference(context, source, None)?;
         context.set_promise_environment(reference, environment);
         context.set_promise_compiled(reference, code);
         Ok(reference.raw())
@@ -1648,19 +1648,27 @@ pub unsafe fn code_reference(owner: usize, code: Sexp) -> R<Sexp> {
     })
 }
 
-/// [`code_reference`] for code on the handle types: the position in the pool of the reference
-/// that runs `code`, and the reference.
+/// [`code_reference`] for code on the handle types.
 fn compiled_reference<'c, 's>(
     context: &'c mut Cx<'s>,
     owner: usize,
     code: Local<'_>,
 ) -> R<(&'c Cx<'s>, Gc<'c, Promise>)> {
-    // The code holds its constant pool, which holds the source.
-    let source = context.root(source_of(code.read(context)));
-    let (context, _, reference) =
-        take_reference(context, source, Some((owner, NO_REFERENCE_SLOT)))?;
+    ready_references(context, 1)?;
+    let context = &*context;
+    Ok((
+        context,
+        place_code_reference(context, owner, code.read(context)),
+    ))
+}
+
+/// [`compiled_reference`] once the pool is ready: the reference names the code's source, and
+/// keeps the code in its environment field.
+#[inline(always)]
+fn place_code_reference<'c>(context: &'c Cx<'_>, owner: usize, code: Gc<'_>) -> Gc<'c, Promise> {
+    let reference = place_reference(context, source_of(code), Some((owner, NO_REFERENCE_SLOT)));
     context.set_promise_environment(reference, code);
-    Ok((context, reference))
+    reference
 }
 
 /// The source a compiled argument's `code` was compiled from, which its constant pool keeps.
@@ -1675,53 +1683,73 @@ fn source_of<'c>(code: Gc<'c>) -> Gc<'c> {
     }
 }
 
-/// The next free reference of [`Interp::references`], now naming `symbol`, with its position in
-/// the pool and the context, which nothing can collect through while the reference is used.
-/// `aim` gives the frame and the slot a slot frame's reference reads ([`handles::aim_target`]);
-/// without it the target is left for the caller to fill in.
+/// The next free reference of [`Interp::references`], now naming `symbol`, with the context,
+/// which nothing can collect through while the reference is used. `aim` gives the frame and
+/// the slot a slot frame's reference reads ([`handles::aim_target`]); without it the target is
+/// left for the caller to fill in.
 #[inline(always)]
 fn take_reference<'c, 's>(
     context: &'c mut Cx<'s>,
     symbol: Local<'_>,
     aim: Option<(usize, u32)>,
-) -> R<(&'c Cx<'s>, usize, Gc<'c, Promise>)> {
-    let index = interp().references_used as usize;
-    let free = handles::pooled_reference(context, index)
-        .is_some_and(|(reference, _)| !reference.is_shared());
-    if !free {
-        renew_reference(context, index, symbol)?;
-    }
+) -> R<(&'c Cx<'s>, Gc<'c, Promise>)> {
+    ready_references(context, 1)?;
     let context = &*context;
+    Ok((context, place_reference(context, symbol, aim)))
+}
+
+/// Makes the next `count` positions of the pool hold references that nothing else counts, so
+/// that placing them ([`place_reference`]) allocates nothing.
+#[inline(always)]
+fn ready_references(context: &mut Cx<'_>, count: usize) -> R<()> {
+    let used = interp().references_used as usize;
+    for index in used..used + count {
+        let free = handles::pooled_reference(context, index)
+            .is_some_and(|(reference, _)| !reference.is_shared());
+        if !free {
+            renew_reference(context, index)?;
+        }
+    }
+    Ok(())
+}
+
+/// The next reference of the pool, which [`ready_references`] made free, now naming `symbol`
+/// and aimed as [`take_reference`] aims it.
+#[inline(always)]
+fn place_reference<'c>(
+    context: &'c Cx<'_>,
+    symbol: impl Pointer<Value>,
+    aim: Option<(usize, u32)>,
+) -> Gc<'c, Promise> {
+    let index = interp().references_used as usize;
     let Some((reference, target)) = handles::pooled_reference(context, index) else {
         panic!("argument reference {index} is not in the pool");
     };
-    if free {
-        context.set_promise_code(reference, symbol);
-        // A call that failed while forcing the reference left it marked, and the mark belongs
-        // to that call's argument, not to the one that takes the reference next.
-        reference.set_flags(PROMISE_INTERRUPTED, false);
-    }
+    context.set_promise_code(reference, symbol);
+    // A call that failed while forcing the reference left it marked, and the mark belongs to
+    // that call's argument, not to the one that takes the reference next.
+    reference.set_flags(PROMISE_INTERRUPTED, false);
     if let Some((owner, slot)) = aim {
         handles::aim_target(context, target, owner, slot);
     }
     interp().references_used += 1;
     activity::count(Counter::ArgumentReferences);
-    Ok((context, index, reference))
+    reference
 }
 
-/// Puts a new reference naming `symbol` at position `index` of the pool, which ends the pool or
-/// holds a reference something else counts. A `...` list counts the references it collected
+/// Puts a new reference at position `index` of the pool, which ends the pool or holds a
+/// reference something else counts. A `...` list counts the references it collected
 /// until its frame is released (`Heap::release_frame`), which happens late for a frame that
 /// waits for a reconcile and never for the frame of a call that failed. Handed out with that
 /// count, the reference would not look held by its frame alone once a frame detached it
 /// ([`detach_reference`]), so the pool gives it up and makes another.
 #[cold]
 #[inline(never)]
-fn renew_reference(context: &mut Cx<'_>, index: usize, symbol: Local<'_>) -> R<()> {
+fn renew_reference(context: &mut Cx<'_>, index: usize) -> R<()> {
     let mut target = context.alloc::<Integer>(3)?;
     target.as_mut_slice().fill(0);
     let target = target.finish();
-    handles::replace_pooled_reference(context, index, symbol, target)
+    handles::replace_pooled_reference(context, index, handles::null(), target)
 }
 
 /// The slot an argument reference names for a variable its frame keeps in no slot: forcing it
@@ -2152,15 +2180,19 @@ pub unsafe fn pending_env(owner: usize) -> R<Sexp> {
 pub fn pending_environment<'a>(context: &'a mut Cx<'_>, owner: usize) -> R<Gc<'a, Environment>> {
     context.read_or_make(
         |context| handles::live_frame(context, owner).pending(),
-        |context| {
-            // The frame holds its function while the environment is reserved.
-            context.reserve(ENVIRONMENT_BYTES);
-            let context: &Cx<'_> = context;
-            let environment = handles::live_frame(context, owner).make_pending()?;
-            activity::count(Counter::FrameEnvironments);
-            Ok(environment)
-        },
+        |context| make_pending_environment(context, owner),
     )
+}
+
+/// [`pending_environment`] for a slot frame that has not made it yet.
+#[inline]
+fn make_pending_environment<'a>(context: &'a mut Cx<'_>, owner: usize) -> R<Gc<'a, Environment>> {
+    // The frame holds its function while the environment is reserved.
+    context.reserve(ENVIRONMENT_BYTES);
+    let context: &Cx<'_> = context;
+    let environment = handles::live_frame(context, owner).make_pending()?;
+    activity::count(Counter::FrameEnvironments);
+    Ok(environment)
 }
 
 /// The environment of an unforced `promise`: for an argument reference, that of the frame it
@@ -2320,7 +2352,7 @@ pub unsafe fn apply_call(call: Sexp, function: Sexp, arguments: Sexp, env: Sexp)
                 return result;
             }
             promise_args_into(arguments, env, &mut args)?;
-            apply_closure_owning(call, function, &args, env, None)
+            apply_closure(call, function, &args, env, None)
         }
         _ => Err(error_in(call, "attempt to apply non-function")),
     }
@@ -3213,9 +3245,9 @@ pub unsafe fn build_call(function: Sexp, args: &[Arg]) -> R<Sexp> {
     values::pairlist(&items, SexpType::Language)
 }
 
-/// Applies a closure: matches the arguments to the formals, binds them in a fresh environment,
-/// runs the body, and handles `return` and `on.exit`. `supplied` are extra bindings for a method
-/// frame (`.Generic` and friends).
+/// Applies a closure: matches the arguments to the formals, binds them in a slot frame or a
+/// fresh environment, runs the body, and handles `return` and `on.exit`. `supplied` are extra
+/// bindings for a method frame (`.Generic` and friends). The raw entry of [`apply_closure_in`].
 pub unsafe fn apply_closure(
     call: Sexp,
     function: Sexp,
@@ -3223,30 +3255,144 @@ pub unsafe fn apply_closure(
     sys_parent: Sexp,
     supplied: Option<&[(Sexp, Sexp)]>,
 ) -> R<Sexp> {
-    if function.has_gp(gp::NATIVE_ENTRY)
-        && supplied.is_none()
-        && let Some(value) = crate::base_fast_paths::native_entry(function, args)?
-    {
-        return Ok(value);
-    }
-    if crate::annotations::is_typed(function)
-        && let Some(value) = try_native_typed(call, function, args, sys_parent, supplied)?
-    {
-        return value;
-    }
-    if let Some(frame) = bind_slots(call, function, args)? {
-        let method_vars = supplied.unwrap_or(&[]);
-        return run_frame(
+    match prepare_raw_call(call, function, args, sys_parent, supplied)? {
+        Prepared::Done(value) => Ok(value),
+        Prepared::Slots(frame) => run_frame(
             call,
             function,
-            frame,
+            CallFrame::Slots(frame),
             sys_parent,
             args,
             Entry::Unchecked,
-            method_vars,
-        );
+            supplied.unwrap_or(&[]),
+        ),
+        Prepared::Heap => {
+            run_on_heap_frame(call, function, args, sys_parent, supplied, Entry::Unchecked)
+        }
     }
-    run_on_heap_frame(call, function, args, sys_parent, supplied, Entry::Unchecked)
+}
+
+/// [`prepare_closure_call`] for a raw closure call.
+///
+/// # Safety
+///
+/// The caller holds the call, the closure, its caller's environment, the arguments and the
+/// method variables until the call returns, and releases the handle stack after it.
+#[inline(always)]
+unsafe fn prepare_raw_call(
+    call: Sexp,
+    function: Sexp,
+    args: &[Arg],
+    sys_parent: Sexp,
+    supplied: Option<&[(Sexp, Sexp)]>,
+) -> R<Prepared<Sexp>> {
+    handles::in_caller_scope(|context| {
+        let supplied = supplied.map(|supplied| handles::method_variables(context, supplied));
+        let closure_call = closure_call(
+            handles::held(context, call),
+            handles::held(context, function),
+            handles::tagged(context, args),
+            handles::held(context, sys_parent),
+            supplied,
+        )?;
+        Ok(match prepare_closure_call(context, &closure_call)? {
+            Prepared::Done(value) => Prepared::Done(value.raw()),
+            Prepared::Slots(frame) => Prepared::Slots(frame),
+            Prepared::Heap => Prepared::Heap,
+        })
+    })
+}
+
+/// The call `call` of `function`, which must be a closure.
+#[inline(always)]
+fn closure_call<'a, 's>(
+    call: Local<'s>,
+    function: Local<'s>,
+    args: &'a [Tagged<'s>],
+    sys_parent: Local<'s>,
+    supplied: Option<handles::MethodVariables<'a, 's>>,
+) -> R<ClosureCall<'a, 's>> {
+    let Some(function) = function.downcast::<Closure>() else {
+        return Err(error(
+            "internal error: a closure call's function is not a closure",
+        ));
+    };
+    Ok(ClosureCall {
+        call,
+        function,
+        args,
+        sys_parent,
+        supplied,
+    })
+}
+
+/// A call of a closure, as [`apply_closure_in`] runs it.
+#[derive(Clone, Copy)]
+pub struct ClosureCall<'a, 's> {
+    pub call: Local<'s>,
+    pub function: Local<'s, Closure>,
+    pub args: &'a [Tagged<'s>],
+    /// The environment the call was made from, or `NULL` for a call from a slot frame that
+    /// has none.
+    pub sys_parent: Local<'s>,
+    /// The method variables of a dispatched call, which its frame binds.
+    pub supplied: Option<handles::MethodVariables<'a, 's>>,
+}
+
+/// Applies a closure ([`apply_closure`]): a native entry or the native tier answers it, or its
+/// frame is a slot frame from [`enter`] to [`leave`], or a fresh environment on the general
+/// path.
+pub fn apply_closure_in<'s>(
+    context: &mut Cx<'s>,
+    closure_call: &ClosureCall<'_, 's>,
+) -> R<Local<'s>> {
+    match prepare_closure_call(context, closure_call)? {
+        Prepared::Done(value) => Ok(value),
+        Prepared::Slots(frame) => handles::run_slot_frame(context, closure_call, frame),
+        Prepared::Heap => run_heap_call(context, closure_call, Signature::Unchecked),
+    }
+}
+
+/// How a closure call goes on once [`prepare_closure_call`] has looked at it.
+enum Prepared<V> {
+    /// A native entry or the native tier answered it.
+    Done(V),
+    /// Its arguments are bound in the slot frame, which [`enter`] pushes.
+    Slots(SlotFrame),
+    /// It runs in a fresh environment ([`run_heap_call`]).
+    Heap,
+}
+
+/// Answers a closure call natively when a native entry or the native tier takes it, and
+/// otherwise binds its arguments in a slot frame when it gets one.
+#[inline(always)]
+fn prepare_closure_call<'s>(
+    context: &mut Cx<'s>,
+    closure_call: &ClosureCall<'_, 's>,
+) -> R<Prepared<Local<'s>>> {
+    let &ClosureCall {
+        call,
+        function,
+        args,
+        supplied,
+        ..
+    } = closure_call;
+    let closure = function.read(context);
+    if closure.has_flag(gp::NATIVE_ENTRY)
+        && supplied.is_none()
+        && let Some(value) = handles::native_entry(context, function, args)?
+    {
+        return Ok(Prepared::Done(value));
+    }
+    if crate::annotations::typed_closure(function.read(context))
+        && let Some(value) = native_typed(context, closure_call)?
+    {
+        return Ok(Prepared::Done(value?));
+    }
+    Ok(match bind_slot_frame(context, call, function, args)? {
+        Some(frame) => Prepared::Slots(frame),
+        None => Prepared::Heap,
+    })
 }
 
 /// Runs the call `call` of the typed closure `function` with `args` in the interpreter, as a
@@ -3262,11 +3408,10 @@ pub unsafe fn run_interpreted(
 }
 
 /// Runs a call of `function` in a fresh environment that binds `args`, the path of a call
-/// that gets no slot frame. An environment can be read after the call that made an argument
-/// reference returns, so a reference among `args` becomes the promise it stands for first
-/// ([`detach_references`]), rooted in a handle scope of this call alone: a caller that makes
-/// many calls (`lapply`) keeps no root per call.
-unsafe fn run_on_heap_frame(
+/// that gets no slot frame ([`run_heap_call`]). Out of line, so a caller that tries a slot
+/// frame first keeps a small stack frame on that path.
+#[inline(never)]
+pub(crate) unsafe fn run_on_heap_frame(
     call: Sexp,
     function: Sexp,
     args: &[Arg],
@@ -3274,56 +3419,152 @@ unsafe fn run_on_heap_frame(
     supplied: Option<&[(Sexp, Sexp)]>,
     entry: Entry,
 ) -> R<Sexp> {
-    if !args.iter().any(|arg| is_reference(arg.value)) {
-        let env = bind_arguments(call, function, args, supplied)?;
-        return run_closure(call, function, env, sys_parent, args, entry);
-    }
-    crate::scope(|| {
-        detach_references(args)?;
-        let env = bind_arguments(call, function, args, supplied)?;
-        run_closure(call, function, env, sys_parent, args, entry)
+    // The caller holds the call, the closure, its caller's environment, the arguments, the
+    // method variables and the signature until the call returns.
+    handles::in_caller_scope(|context| {
+        let supplied = supplied.map(|supplied| handles::method_variables(context, supplied));
+        let closure_call = closure_call(
+            handles::held(context, call),
+            handles::held(context, function),
+            handles::tagged(context, args),
+            handles::held(context, sys_parent),
+            supplied,
+        )?;
+        let signature = match entry {
+            Entry::Unchecked => Signature::Unchecked,
+            Entry::Checked(signature) => {
+                Signature::Checked(signature.map(|signature| handles::held(context, signature)))
+            }
+        };
+        Ok(run_heap_call(context, &closure_call, signature)?.raw())
     })
 }
 
-/// Runs a call of the typed closure `function` natively when the native tier takes it, and
+/// Runs `closure_call` in a fresh environment that binds its arguments ([`run_heap_frame`]).
+/// Detaching a reference among the arguments roots its promise, and the roots go with a handle
+/// scope of this call alone: a caller that makes many calls (`lapply`) keeps no root per call.
+fn run_heap_call<'s>(
+    context: &mut Cx<'s>,
+    closure_call: &ClosureCall<'_, 's>,
+    signature: Signature<'s>,
+) -> R<Local<'s>> {
+    if !closure_call
+        .args
+        .iter()
+        .any(|arg| is_argument_reference(context, arg.value))
+    {
+        return run_heap_frame(context, closure_call, signature);
+    }
+    context.scope_enclosed(|inner, enclosing| {
+        let args: SmallVec<[Tagged<'_>; 8]> = closure_call
+            .args
+            .iter()
+            .map(|arg| Tagged {
+                tag: enclosing.pass(arg.tag),
+                value: enclosing.pass(arg.value),
+            })
+            .collect();
+        let passed = ClosureCall {
+            call: enclosing.pass(closure_call.call),
+            function: enclosing.pass(closure_call.function),
+            args: &args,
+            sys_parent: enclosing.pass(closure_call.sys_parent),
+            supplied: closure_call
+                .supplied
+                .map(|supplied| supplied.pass(enclosing)),
+        };
+        let signature = match signature {
+            Signature::Unchecked => Signature::Unchecked,
+            Signature::Checked(signature) => {
+                Signature::Checked(signature.map(|signature| enclosing.pass(signature)))
+            }
+        };
+        run_heap_frame(inner, &passed, signature)
+    })
+}
+
+/// Whether `value` is an argument reference, which names a slot of a running frame.
+#[inline(always)]
+fn is_argument_reference(context: &Cx<'_>, value: Local<'_>) -> bool {
+    value
+        .downcast::<Promise>()
+        .is_some_and(|promise| promise.read(context).has_flag(gp::ARGUMENT_REFERENCE))
+}
+
+/// Makes each argument reference among `args` the promise it stands for ([`detach`]), for a
+/// frame that can keep its arguments past the call that made the references. The promises are
+/// rooted in the caller's scope.
+fn detach_arguments<'s>(context: &mut Cx<'s>, args: &[Tagged<'s>]) -> R<()> {
+    for arg in args {
+        if is_argument_reference(context, arg.value)
+            && let Some(reference) = arg.value.downcast::<Promise>()
+        {
+            let reference = context.root(reference.read(context));
+            detach(context, reference)?;
+        }
+    }
+    Ok(())
+}
+
+/// Runs `closure_call` in a fresh environment that binds its arguments. An environment can be
+/// read after the call that made an argument reference returns, so a reference among the
+/// arguments becomes the promise it stands for first.
+fn run_heap_frame<'s>(
+    context: &mut Cx<'s>,
+    closure_call: &ClosureCall<'_, 's>,
+    signature: Signature<'s>,
+) -> R<Local<'s>> {
+    let &ClosureCall {
+        call,
+        function,
+        args,
+        sys_parent,
+        supplied,
+    } = closure_call;
+    detach_arguments(context, args)?;
+    let arguments = match supplied {
+        Some(supplied) => Arguments::Matched(supplied),
+        None => Arguments::Unsupplied,
+    };
+    let environment = bind_environment(context, call, function, args, arguments)?;
+    let general = GeneralFrame {
+        call,
+        function,
+        body: BodyFrame::Environment(environment),
+        sys_parent,
+        args,
+        method_vars: handles::MethodVariables::none(),
+    };
+    run_general(context, &general, signature)
+}
+
+/// Runs `closure_call`, a call of a typed closure, natively when the native tier takes it, and
 /// otherwise reports why it runs in the interpreter.
-unsafe fn try_native_typed(
-    call: Sexp,
-    function: Sexp,
-    args: &[Arg],
-    sys_parent: Sexp,
-    supplied: Option<&[(Sexp, Sexp)]>,
-) -> R<Option<R<Sexp>>> {
+fn native_typed<'s>(
+    context: &mut Cx<'s>,
+    closure_call: &ClosureCall<'_, 's>,
+) -> R<Option<R<Local<'s>>>> {
+    let &ClosureCall {
+        call,
+        function,
+        args,
+        sys_parent,
+        supplied,
+    } = closure_call;
     if supplied.is_some() {
-        crate::annotations::log_interpreted_because(
+        handles::log_interpreted_because(
+            context,
             call,
             "it is a method that dispatch called, which the native tier does not take",
         );
         return Ok(None);
     }
     // The native tier binds the arguments itself and may keep one, so it gets promises.
-    detach_references(args)?;
-    // The caller's frame holds the call, its environment and the arguments.
-    handles::in_caller_scope(|context| {
-        let call = handles::held(context, call);
-        let caller = handles::held(context, sys_parent);
-        let args = handles::tagged(context, args);
-        force_typed_arguments(context, call, args, caller)
-    })?;
-    let Some(tier) = bytecode::tier() else {
-        crate::annotations::log_interpreted_because(call, "no native tier is loaded");
-        return Ok(None);
-    };
-    let value = (tier.call)(&bytecode::TypedCall {
-        call,
-        function,
-        args,
-        sys_parent,
-    });
-    if value.is_none() {
-        crate::annotations::log_interpreted(call);
-    }
-    Ok(value)
+    detach_arguments(context, args)?;
+    force_typed_arguments(context, call, args, sys_parent)?;
+    Ok(handles::call_native_tier(
+        context, call, function, args, sys_parent,
+    ))
 }
 
 /// Forces, left to right, each argument promise that typed code wrote: a call from one typed
@@ -3410,32 +3651,12 @@ fn is_typed_frame(context: &Cx<'_>, environment: Gc<'_, Environment>) -> bool {
         })
 }
 
-/// [`apply_closure`] for promises the caller built for this call alone and never reads again,
-/// which the call releases once it returns, as GNU R's `unpromiseArgs` does: a promise only the
-/// argument list still holds gives up its value, so an argument's large value can be freed
-/// before a collection finds it.
-pub unsafe fn apply_closure_owning(
-    call: Sexp,
-    function: Sexp,
-    args: &[Arg],
-    sys_parent: Sexp,
-    supplied: Option<&[(Sexp, Sexp)]>,
-) -> R<Sexp> {
-    let entered = apply_closure_entering(call, function, args, sys_parent, supplied)?;
-    if entered.header == crate::NO_SLOTS {
-        return Ok(entered.value);
-    }
-    let slots = bytecode::slot_count(function.cdr());
-    let result = on_large_stack(|| bytecode::run_slots(function, entered.header as usize, slots));
-    leave(entered.depth as usize, result)
-}
-
-/// [`apply_closure_owning`] up to the point where the body would run, so that an interpreter
-/// loop can run it in place rather than recursing ([`enter`]). A call that does not get a slot
-/// frame, or that the general path has to run whole, comes back with its value and
+/// [`apply_closure`] up to the point where the body would run, so that an interpreter loop can
+/// run it in place rather than recursing ([`enter`]). A call that does not get a slot frame,
+/// or that the general path has to run whole, comes back with its value and
 /// [`crate::NO_SLOTS`].
-// Inlined so that the Rust path, which runs the body right after, does not pay for a second
-// function's frame and for passing `Entered` through memory.
+// Inlined so that the interpreter loop, which runs the body right after, does not pay for a
+// second function's frame and for passing `Entered` through memory.
 #[inline]
 pub unsafe fn apply_closure_entering(
     call: Sexp,
@@ -3449,77 +3670,25 @@ pub unsafe fn apply_closure_entering(
         header: crate::NO_SLOTS,
         depth: 0,
     };
-    if function.has_gp(gp::NATIVE_ENTRY)
-        && supplied.is_none()
-        && let Some(value) = crate::base_fast_paths::native_entry(function, args)?
-    {
-        return Ok(whole(value));
-    }
-    if crate::annotations::is_typed(function)
-        && let Some(value) = try_native_typed(call, function, args, sys_parent, supplied)?
-    {
-        return Ok(whole(value?));
-    }
-    let method_vars = supplied.unwrap_or(&[]);
-    if let Some(frame) = bind_slots(call, function, args)? {
-        let CallFrame::Slots {
-            header,
-            missing,
-            promised,
-        } = frame
-        else {
-            let value = run_frame_general(
-                call,
-                function,
-                frame,
-                sys_parent,
-                args,
-                Entry::Unchecked,
-                method_vars,
-            )?;
-            return Ok(whole(value));
-        };
-        return enter(
+    match prepare_raw_call(call, function, args, sys_parent, supplied)? {
+        Prepared::Done(value) => Ok(whole(value)),
+        Prepared::Slots(frame) => enter(
             call,
             function,
             sys_parent,
             args,
-            method_vars,
-            header,
-            missing,
-            promised,
+            supplied.unwrap_or(&[]),
+            frame.header,
+            frame.missing,
+            frame.promised,
             Entering::Start,
-        );
+        ),
+        Prepared::Heap => {
+            let value =
+                run_on_heap_frame(call, function, args, sys_parent, supplied, Entry::Unchecked)?;
+            Ok(whole(value))
+        }
     }
-    let value = run_on_heap_frame(call, function, args, sys_parent, supplied, Entry::Unchecked)?;
-    Ok(whole(value))
-}
-
-/// A fresh environment for a call of the closure `function`, with `args` matched to its formals
-/// and bound, and rooted in the caller's handle scope.
-pub unsafe fn bind_arguments(
-    call: Sexp,
-    function: Sexp,
-    args: &[Arg],
-    supplied: Option<&[(Sexp, Sexp)]>,
-) -> R<Sexp> {
-    // The caller holds the call, the closure, the arguments and the method variables until the
-    // call returns.
-    handles::in_caller_scope(|context| {
-        let call = handles::held(context, call);
-        let Some(function) = handles::held(context, function).downcast::<Closure>() else {
-            return Err(error(
-                "internal error: a closure call's function is not a closure",
-            ));
-        };
-        let args = handles::tagged(context, args);
-        let supplied = supplied.map(|supplied| handles::method_variables(context, supplied));
-        let arguments = match &supplied {
-            Some(supplied) => Arguments::Matched(supplied),
-            None => Arguments::Unsupplied,
-        };
-        Ok(bind_environment(context, call, function, args, arguments)?.raw())
-    })
 }
 
 /// How [`bind_environment`] takes a call's arguments.
@@ -3527,7 +3696,7 @@ enum Arguments<'a, 's> {
     /// Matched to the formals, by position when that is all they need.
     Unsupplied,
     /// Matched to the formals, with the method variables of a dispatched call bound after.
-    Matched(&'a [handles::MethodVariable<'s>]),
+    Matched(handles::MethodVariables<'a, 's>),
     /// By position alone: argument `i` binds formal `i` ([`apply_closure_moved`]).
     Positional,
 }
@@ -3613,7 +3782,7 @@ fn bind_environment<'s>(
     let environment = reading.root(environment);
     if let Arguments::Matched(supplied) = arguments {
         let generic_call_env = handles::symbol(|symbols| symbols.dot_generic_call_env);
-        for variable in supplied {
+        for variable in supplied.iter() {
             if context.own_binding(environment, variable.symbol).is_some() {
                 continue;
             }
@@ -3644,32 +3813,34 @@ fn bind_environment<'s>(
 #[derive(Clone, Copy)]
 pub enum CallFrame {
     Env(Sexp),
-    /// A slot frame at `header` whose left-out formals are `missing`, of which `promised` have
-    /// a default that is code, not a literal ([`CallShape`]).
-    Slots {
-        header: u32,
-        missing: u64,
-        promised: u64,
-    },
+    Slots(SlotFrame),
+}
+
+/// A slot frame at `header` whose left-out formals are `missing`, of which `promised` have a
+/// default that is code, not a literal ([`CallShape`]).
+///
+/// Only the binder makes one, so a slot frame's header always names registers it filled.
+#[derive(Clone, Copy)]
+pub struct SlotFrame {
+    header: u32,
+    missing: u64,
+    promised: u64,
+}
+
+impl SlotFrame {
+    /// The header register, the missing formals and the promised ones, for a raw entry that
+    /// pushes the frame itself ([`enter`]).
+    #[inline(always)]
+    pub fn parts(self) -> (u32, u64, u64) {
+        (self.header, self.missing, self.promised)
+    }
 }
 
 /// Binds `args` to `function`'s formals in a slot frame pushed onto the register file, or
 /// returns `None` when the call needs an environment from the start: the body is not compiled
 /// with a slot table, a debugger, a move or a type signature watches the frame, or a missing
 /// formal's default is neither a literal, a symbol, nor code compiled with its own slot table.
-pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<CallFrame>> {
-    if activity::hooks() & (activity::DEBUGGER | activity::MOVES) != 0
-        || function == interp().namespace_loader
-        || function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
-        || crate::annotations::is_typed(function)
-    {
-        return Ok(None);
-    }
-    if function.cdr().kind() != SexpType::Bytecode
-        && bytecode::compile_before_call(function)?.kind() != SexpType::Bytecode
-    {
-        return Ok(None);
-    }
+pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<SlotFrame>> {
     // The caller holds the call, the closure and the arguments until the call returns, and
     // releases the handle stack after it.
     handles::in_caller_scope(|context| {
@@ -3678,8 +3849,32 @@ pub unsafe fn bind_slots(call: Sexp, function: Sexp, args: &[Arg]) -> R<Option<C
             return Ok(None);
         };
         let args = handles::tagged(context, args);
-        bind_formals(context, call, function, args)
+        bind_slot_frame(context, call, function, args)
     })
+}
+
+/// [`bind_slots`] on the handle types.
+#[inline(always)]
+fn bind_slot_frame<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'_>,
+    function: Local<'_, Closure>,
+    args: &[Tagged<'s>],
+) -> R<Option<SlotFrame>> {
+    let closure = function.read(context);
+    if activity::hooks() & (activity::DEBUGGER | activity::MOVES) != 0
+        || function.raw() == interp().namespace_loader
+        || closure.has_flag(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)
+        || crate::annotations::typed_closure(closure)
+    {
+        return Ok(None);
+    }
+    if closure.body().r_type() != SexpType::Bytecode
+        && !handles::compile_before_call(context, function)?
+    {
+        return Ok(None);
+    }
+    bind_formals(context, call, function, args)
 }
 
 fn bind_formals<'s>(
@@ -3687,7 +3882,7 @@ fn bind_formals<'s>(
     call: Local<'_>,
     function: Local<'_, Closure>,
     args: &[Tagged<'s>],
-) -> R<Option<CallFrame>> {
+) -> R<Option<SlotFrame>> {
     let closure = function.read(context);
     let Some((names, registers)) = handles::slot_layout(closure) else {
         return Ok(None);
@@ -3742,7 +3937,7 @@ fn bind_formals<'s>(
         };
         match stored {
             Stored::All { missing, promised } => {
-                return Ok(Some(CallFrame::Slots {
+                return Ok(Some(SlotFrame {
                     header: window.close() as u32,
                     missing,
                     promised,
@@ -4203,7 +4398,7 @@ fn plan_sources(
 pub unsafe fn call_matching(call: Sexp, function: Sexp, args: &[Arg], sys_parent: Sexp) -> R<Sexp> {
     match matched_sources(function, args, call)? {
         Some((shape, sources)) => call_with_plan(call, function, shape, &sources, args, sys_parent),
-        None => apply_closure_owning(call, function, args, sys_parent, None),
+        None => apply_closure(call, function, args, sys_parent, None),
     }
 }
 
@@ -4396,7 +4591,7 @@ pub unsafe fn run_inlined(
         } else {
             pop_raw_frame(depth, result)
         };
-    hooks.returned(&result);
+    hooks.returned(result.as_ref().ok().copied());
     result
 }
 
@@ -4409,7 +4604,20 @@ pub unsafe fn frame_env(index: usize, cause: Reify) -> R<Sexp> {
     if frame.env.raw() != nil() || frame.slots == crate::NO_SLOTS {
         return Ok(frame.env.raw());
     }
-    handles::in_caller_scope(|context| Ok(frame_environment_of(context, index, cause)?.raw()))
+    // A profile summary records each request for the environment.
+    if frame.pending.raw() != nil() && !activity::enabled() {
+        return Ok(frame.pending.raw());
+    }
+    reify_frame_environment(index, cause)
+}
+
+/// The environment [`frame_env`] makes for the slot frame at `index`, out of line so that
+/// the fast reads of [`frame_env`] and [`frame_sys_parent`] inline into their callers. The
+/// frame holds it.
+#[cold]
+#[inline(never)]
+unsafe fn reify_frame_environment(index: usize, cause: Reify) -> R<Sexp> {
+    handles::in_caller_scope(|context| Ok(reified_environment(context, index, cause)?.raw()))
 }
 
 /// [`frame_env`] for code on the handle types: `NULL` for a frame that has no environment of
@@ -4417,8 +4625,13 @@ pub unsafe fn frame_env(index: usize, cause: Reify) -> R<Sexp> {
 pub fn frame_environment_of<'a>(context: &'a mut Cx<'_>, index: usize, cause: Reify) -> R<Gc<'a>> {
     context.read_or_make(
         |context| {
-            let frame = handles::live_frame(context, index);
-            (!frame.in_slots()).then(|| frame.recorded_environment())
+            let frame = &interp().frames[index];
+            if frame.env.raw() != nil() || frame.slots == crate::NO_SLOTS {
+                return Some(frame.env.get(context));
+            }
+            // A profile summary records each request for the environment.
+            (frame.pending.raw() != nil() && !activity::enabled())
+                .then(|| frame.pending.get(context))
         },
         |context| Ok(reified_environment(context, index, cause)?.value()),
     )
@@ -4657,6 +4870,7 @@ pub unsafe fn slot_owner_env(cause: Reify) -> R<Sexp> {
 }
 
 /// `parent.frame()` of the frame at `index`: the environment its call was made from.
+#[inline]
 pub unsafe fn frame_sys_parent(index: usize, cause: Reify) -> R<Sexp> {
     let frame = &interp().frames[index];
     if frame.sys_parent.raw() != nil() || frame.caller == crate::NO_SLOTS {
@@ -4670,7 +4884,7 @@ pub unsafe fn frame_sys_parent(index: usize, cause: Reify) -> R<Sexp> {
     if fields.pending.raw() != nil() && !activity::enabled() {
         return Ok(fields.pending.raw());
     }
-    handles::in_caller_scope(|context| Ok(frame_environment_of(context, caller, cause)?.raw()))
+    reify_frame_environment(caller, cause)
 }
 
 /// [`frame_sys_parent`] for code on the handle types.
@@ -4719,17 +4933,28 @@ pub unsafe fn apply_closure_moved(
     args: &[Arg],
     sys_parent: Sexp,
 ) -> R<Sexp> {
-    let env = handles::in_caller_scope(|context| {
+    // The caller holds the call, the closure, its caller's environment and the arguments until
+    // the call returns.
+    handles::in_caller_scope(|context| {
         let call = handles::held(context, call);
         let Some(function) = handles::held(context, function).downcast::<Closure>() else {
             return Err(error(
                 "internal error: a closure call's function is not a closure",
             ));
         };
+        let sys_parent = handles::held(context, sys_parent);
         let args = handles::tagged(context, args);
-        Ok(bind_environment(context, call, function, args, Arguments::Positional)?.raw())
-    })?;
-    run_closure(call, function, env, sys_parent, args, Entry::Unchecked)
+        let environment = bind_environment(context, call, function, args, Arguments::Positional)?;
+        let frame = GeneralFrame {
+            call,
+            function,
+            body: BodyFrame::Environment(environment),
+            sys_parent,
+            args,
+            method_vars: handles::MethodVariables::none(),
+        };
+        Ok(run_general(context, &frame, Signature::Unchecked)?.raw())
+    })
 }
 
 /// Whether every argument is untagged and the formals, which have no `...`, take them all.
@@ -4747,26 +4972,6 @@ fn positional(closure: Gc<'_, Closure>, args: &[Tagged<'_>]) -> bool {
     args.len() <= count && args.iter().all(|arg| arg.tag.is(handles::null()))
 }
 
-/// Runs a closure body in an environment whose arguments are already bound.
-pub unsafe fn run_closure(
-    call: Sexp,
-    function: Sexp,
-    env: Sexp,
-    sys_parent: Sexp,
-    args: &[Arg],
-    entry: Entry,
-) -> R<Sexp> {
-    run_frame(
-        call,
-        function,
-        CallFrame::Env(env),
-        sys_parent,
-        args,
-        entry,
-        &[],
-    )
-}
-
 /// Runs a closure body in `frame`, whose arguments are already bound. `sys_parent` is the
 /// environment the call was made from, or `NULL` when the caller is the frame below this one
 /// and has no environment yet. A slot frame's registers are released however the call ends.
@@ -4779,11 +4984,11 @@ pub unsafe fn run_frame(
     entry: Entry,
     method_vars: &[(Sexp, Sexp)],
 ) -> R<Sexp> {
-    let CallFrame::Slots {
+    let CallFrame::Slots(SlotFrame {
         header,
         missing,
         promised,
-    } = frame
+    }) = frame
     else {
         return run_frame_general(call, function, frame, sys_parent, args, entry, method_vars);
     };
@@ -4869,11 +5074,11 @@ pub unsafe fn enter(
             || function == state.namespace_loader
             || (state.debugger.is_some() && function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP)))
     {
-        let frame = CallFrame::Slots {
+        let frame = CallFrame::Slots(SlotFrame {
             header,
             missing,
             promised,
-        };
+        });
         let value = run_frame_general(
             call,
             function,
@@ -5068,7 +5273,7 @@ unsafe fn returning_summarized(function: Sexp, depth: usize) {
 }
 
 /// [`run_frame`] for a frame with an environment, and for a slot frame whose call needs more
-/// than [`enter`] and [`leave`] do.
+/// than [`enter`] and [`leave`] do ([`run_general`]).
 unsafe fn run_frame_general(
     call: Sexp,
     function: Sexp,
@@ -5078,64 +5283,141 @@ unsafe fn run_frame_general(
     entry: Entry,
     method_vars: &[(Sexp, Sexp)],
 ) -> R<Sexp> {
-    let (env, slots, missing, promised) = match frame {
-        CallFrame::Env(env) => (env, crate::NO_SLOTS, 0, 0),
-        CallFrame::Slots {
-            header,
-            missing,
-            promised,
-        } => (nil(), header, missing, promised),
+    // The caller holds the call, the closure, the frame's environment, its caller's
+    // environment, the arguments, the method variables and the signature until the call
+    // returns.
+    handles::in_caller_scope(|context| {
+        let call = handles::held(context, call);
+        let Some(function) = handles::held(context, function).downcast::<Closure>() else {
+            return Err(error(
+                "internal error: a closure call's function is not a closure",
+            ));
+        };
+        let body = match frame {
+            CallFrame::Env(env) => {
+                let Some(environment) = handles::held(context, env).downcast::<Environment>()
+                else {
+                    return Err(error(
+                        "internal error: a closure call's frame is not an environment",
+                    ));
+                };
+                BodyFrame::Environment(environment)
+            }
+            CallFrame::Slots(frame) => BodyFrame::Slots(frame),
+        };
+        let sys_parent = handles::held(context, sys_parent);
+        let args = handles::tagged(context, args);
+        let method_vars = handles::method_variables(context, method_vars);
+        let signature = match entry {
+            Entry::Unchecked => Signature::Unchecked,
+            Entry::Checked(signature) => {
+                Signature::Checked(signature.map(|signature| handles::held(context, signature)))
+            }
+        };
+        let frame = GeneralFrame {
+            call,
+            function,
+            body,
+            sys_parent,
+            args,
+            method_vars,
+        };
+        Ok(run_general(context, &frame, signature)?.raw())
+    })
+}
+
+/// A closure call on the general path ([`run_general`]).
+pub struct GeneralFrame<'a, 's> {
+    pub call: Local<'s>,
+    pub function: Local<'s, Closure>,
+    pub body: BodyFrame<'s>,
+    /// The environment the call was made from, or `NULL` when the caller is the frame below
+    /// this one and has no environment yet.
+    pub sys_parent: Local<'s>,
+    pub args: &'a [Tagged<'s>],
+    pub method_vars: handles::MethodVariables<'a, 's>,
+}
+
+/// Where the body of a call on the general path runs: [`CallFrame`] on the handle types.
+#[derive(Clone, Copy)]
+pub enum BodyFrame<'s> {
+    Environment(Local<'s, Environment>),
+    Slots(SlotFrame),
+}
+
+/// How a call's arguments meet the closure's annotations: [`Entry`] on the handle types.
+enum Signature<'s> {
+    /// The argument checks run once the frame is pushed.
+    Unchecked,
+    /// The caller checked the arguments; holds the signature, `None` for an untyped closure.
+    Checked(Option<Local<'s>>),
+}
+
+/// Runs the call `frame` describes, on the general path: everything [`enter`] and [`leave`]
+/// leave out (the boundary-call recorder, a tracked move, the object-system refusal, the
+/// debugger, the argument and return checks, a namespace load) and the body, whose arguments
+/// are already bound. A slot frame's registers are released however the call ends.
+fn run_general<'s>(
+    context: &mut Cx<'s>,
+    frame: &GeneralFrame<'_, 's>,
+    signature: Signature<'s>,
+) -> R<Local<'s>> {
+    let &GeneralFrame {
+        call,
+        function,
+        body,
+        sys_parent,
+        method_vars,
+        ..
+    } = frame;
+    let (environment, slots, promised) = match body {
+        BodyFrame::Environment(environment) => (Some(environment), crate::NO_SLOTS, 0),
+        BodyFrame::Slots(slot_frame) => (None, slot_frame.header, slot_frame.promised),
     };
     let _window = SlotWindow(slots, interp().references_used);
     let _activity = activity::enter(Activity::CallSetup, 0);
-    let mut hooks =
-        crate::profile_summary::enter_closure(call, function, sys_parent, method_vars, env);
-    if slots == crate::NO_SLOTS {
-        moves::entering_closure(function, env)?;
+    let mut recorded = handles::record_closure_entry(
+        context,
+        call,
+        function,
+        sys_parent,
+        method_vars,
+        environment,
+    );
+    if let Some(environment) = environment {
+        moves::entering_closure(function, environment)?;
     }
     let state = interp();
     if state.frames.len() as u32 >= state.max_depth {
         return Err(crate::unwind::expression_stack_overflow());
     }
-    // A `NULL` `sys_parent` comes from byte code running on a slot frame's slots, the caller.
-    let caller = if sys_parent == nil() {
-        state.slot_owner
-    } else {
-        crate::NO_SLOTS
-    };
     if !state.object_systems {
-        let sys_parent = if caller != crate::NO_SLOTS {
-            frame_env(caller as usize, Reify::Site(Site::ObjectSystemCheck))?
+        // A `NULL` `sys_parent` comes from byte code running on a slot frame's slots, the caller.
+        let sys_parent = if sys_parent.is(handles::null()) {
+            let site = Reify::Site(Site::ObjectSystemCheck);
+            let caller = state.slot_owner as usize;
+            context.root_answer(|context| frame_environment_of(context, caller, site))?
         } else {
             sys_parent
         };
-        refuse_object_system(call, function, sys_parent)?;
+        handles::refuse_object_system(context, call, function, sys_parent)?;
     }
-    let (depth, sampled) = push_frame(
-        call,
-        function,
-        env,
-        sys_parent,
-        args,
-        method_vars,
-        slots,
-        missing,
-        caller,
-        true,
-    );
+    let (pushed, sampled) = handles::push_frame(context, frame);
+    let depth = pushed.depth();
     if let Err(unwind) = sampled {
-        return pop_raw_frame(depth, Err(unwind));
+        pop_frame(context, depth, None);
+        return Err(unwind);
     }
-    let state = interp();
-    if state.debugger.is_some() && function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP) {
-        function.set_gp_bits(gp::CLOSURE_STEP, false);
+    let closure = function.read(context);
+    if interp().debugger.is_some() && closure.has_flag(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP) {
+        closure.clear_step();
         crate::debugger::debugged_call(depth);
     }
-    let signature = match entry {
+    let signature = match (environment, signature) {
         // A slot frame's closure is never typed (`bind_slots`).
-        _ if slots != crate::NO_SLOTS => default_promises(depth - 1, promised).map(|()| None),
-        Entry::Unchecked => crate::annotations::enter(call, function, env, depth),
-        Entry::Checked(signature) => Ok(signature),
+        (None, _) => promise_defaults(context, depth - 1, promised).map(|()| None),
+        (Some(_), Signature::Unchecked) => handles::check_arguments(context, call, &pushed),
+        (Some(_), Signature::Checked(signature)) => Ok(signature),
     };
     // Ends the namespace load however the call exits, a panic included, so a load that never
     // returns cannot keep major collections deferred.
@@ -5146,47 +5428,53 @@ unsafe fn run_frame_general(
             crate::image::touch::leave_namespace_load();
         }
     }
-    let _namespace_load = (function == state.namespace_loader).then(|| {
+    let namespace_load = (function.raw() == interp().namespace_loader).then(|| {
         crate::heap().enter_namespace_load();
         crate::image::touch::enter_namespace_load();
         NamespaceLoad
     });
-    let result = signature.map(|signature| {
-        let result = scope(|| {
-            on_large_stack(|| {
-                if slots != crate::NO_SLOTS {
-                    let state = interp();
-                    let owner = state.slot_owner;
-                    state.slot_owner = (depth - 1) as u32;
-                    let count = bytecode::slot_count(function.cdr());
-                    let result = bytecode::run_slots(function, slots as usize, count);
-                    interp().slot_owner = owner;
-                    return result;
-                }
-                match crate::replay::body(function)? {
-                    Some(replayed) => eval(replayed, env),
-                    None => bytecode::run_body(function, function.cdr(), env),
-                }
-            })
-        });
-        (signature, result)
-    });
-    let loaded = _namespace_load.is_some();
-    drop(_namespace_load);
-    let (signature, result) = match result {
-        Ok(pair) => pair,
+    let (signature, result) = match signature {
+        Ok(signature) => (signature, handles::run_closure_body(context, &pushed)),
         Err(unwind) => (None, Err(unwind)),
     };
-    let result = match result {
-        Ok(namespace) if loaded => {
-            crate::ahead::namespace_loaded(namespace);
-            Ok(namespace)
-        }
-        result => result,
-    };
-    let result = finish_raw_frame(call, depth, signature, result);
-    hooks.returned(&result);
+    let loaded = namespace_load.is_some();
+    drop(namespace_load);
+    if loaded && let Ok(namespace) = &result {
+        handles::namespace_loaded(context, *namespace);
+    }
+    let result = finish_frame(context, call, depth, signature, result);
+    let value = result.as_ref().ok().map(|value| value.read(context));
+    pop_frame(context, depth, value);
+    handles::closure_returned(&mut recorded, &result);
     result
+}
+
+/// Runs the body of `function` in its frame at `depth`: on the slot frame at `slots`, as the
+/// slot owner, or else in `env`. What the body roots is released, and its value is rooted in
+/// the caller's handle scope.
+pub(crate) unsafe fn run_closure_body(
+    function: Sexp,
+    env: Sexp,
+    slots: u32,
+    depth: usize,
+) -> R<Sexp> {
+    scope(|| {
+        on_large_stack(|| {
+            if slots != crate::NO_SLOTS {
+                let state = interp();
+                let owner = state.slot_owner;
+                state.slot_owner = (depth - 1) as u32;
+                let count = bytecode::slot_count(function.cdr());
+                let result = bytecode::run_slots(function, slots as usize, count);
+                interp().slot_owner = owner;
+                return result;
+            }
+            match crate::replay::body(function)? {
+                Some(replayed) => eval(replayed, env),
+                None => bytecode::run_body(function, function.cdr(), env),
+            }
+        })
+    })
 }
 
 /// What a call returns once its body has run with `result`: a `return()` aimed at the frame, the
@@ -5401,7 +5689,7 @@ unsafe fn release_window(header: u32) {
 /// and returns the frame's depth. On an error the frame is pushed all the same.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-unsafe fn push_frame(
+pub(crate) unsafe fn push_frame(
     call: Sexp,
     function: Sexp,
     env: Sexp,
@@ -5583,30 +5871,30 @@ pub(crate) fn promise_defaults(context: &mut Cx<'_>, owner: usize, promised: u64
         let function = context.root(handles::live_frame(context, owner).function());
         handles::build_slot_defaults(context, function)?;
     }
-    let Some(defaults) = slot_defaults(context, handles::live_frame(context, owner).function())
-    else {
+    // Readying the pool is all that allocates, so the frame, which holds its function and so
+    // the defaults, keeps everything the loop reads.
+    ready_references(context, promised.count_ones() as usize)?;
+    let context = &*context;
+    let frame = handles::live_frame(context, owner);
+    let Some(defaults) = slot_defaults(context, frame.function()) else {
         panic!("a slot frame's defaults were not kept for its formals");
     };
-    // The frame holds its function, which holds the defaults, but a reference may allocate,
-    // so the defaults are rooted.
-    let defaults = context.root(defaults);
     let mut pending = promised;
     while pending != 0 {
         let index = pending.trailing_zeros() as usize;
         pending &= pending - 1;
-        let code = context.root(defaults.read(context).get(index));
-        let (reading, reference) = if code.r_type() == SexpType::Bytecode {
-            compiled_reference(context, owner, code)?
+        let code = defaults.get(index);
+        let reference = if code.r_type() == SexpType::Bytecode {
+            place_code_reference(context, owner, code)
         } else {
-            let slot = handles::live_frame(context, owner)
+            let slot = frame
                 .slot_names()
                 .iter()
                 .position(|name| name.is(code))
                 .map_or(NO_REFERENCE_SLOT, |slot| slot as u32);
-            let (reading, _, reference) = take_reference(context, code, Some((owner, slot)))?;
-            (reading, reference)
+            place_reference(context, code, Some((owner, slot)))
         };
-        handles::live_frame(reading, owner).store_slot(index, reference.value());
+        frame.store_slot(index, reference.value());
     }
     Ok(())
 }
@@ -5705,7 +5993,7 @@ fn on_large_stack_slow<T>(body: impl FnOnce() -> T) -> T {
 /// callee is recognized by the name the call uses (`setClass(...)` or `methods::setClass(...)`)
 /// and by the package that owns the closure, so a local function of the same name is left alone
 /// and a renamed alias (`f <- setClass`) is not caught.
-unsafe fn refuse_object_system(call: Sexp, function: Sexp, sys_parent: Sexp) -> R<()> {
+pub(crate) unsafe fn refuse_object_system(call: Sexp, function: Sexp, sys_parent: Sexp) -> R<()> {
     let mut head = call.car();
     if head.kind() == SexpType::Language
         && head.car().kind() == SexpType::Symbol
@@ -7780,7 +8068,7 @@ pub unsafe fn call_with_values(call: Sexp, function: Sexp, values: &[Sexp], env:
             });
             expression = expression.cdr();
         }
-        return apply_closure_owning(call, function, &args, env, None);
+        return apply_closure(call, function, &args, env, None);
     }
     let definition = builtin_def(function)?;
     args.extend(values.iter().map(|&value| Arg { tag: nil(), value }));
@@ -8029,7 +8317,15 @@ unsafe fn call_seeded(
     if !matches!(entry, Entry::Checked(Some(_)))
         && let Some(frame) = bind_slots(call, function, args)?
     {
-        return run_frame(call, function, frame, env, args, entry, &[]);
+        return run_frame(
+            call,
+            function,
+            CallFrame::Slots(frame),
+            env,
+            args,
+            entry,
+            &[],
+        );
     }
     run_on_heap_frame(call, function, args, env, None, entry)
 }
@@ -9771,11 +10067,4 @@ pub fn value_args(values: &[Sexp]) -> Args {
 
 pub unsafe fn alloc_list(count: usize) -> R<Sexp> {
     alloc(SexpType::List, count)
-}
-
-pub unsafe fn tagged(tag: &str, value: Sexp) -> R<Arg> {
-    Ok(Arg {
-        tag: values::install(tag)?,
-        value,
-    })
 }

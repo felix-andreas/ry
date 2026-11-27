@@ -25,8 +25,7 @@ use {
         arith::Op,
         arrays,
         builtins::{Arg, BuiltinDef, BuiltinFn, Call, builtin},
-        conditions,
-        eval::{self, CallFrame},
+        conditions, eval,
         numbers::{self, Overflow, Rounding},
         records, scope,
         sort::{IdenticalFlags, identical},
@@ -863,14 +862,20 @@ unsafe fn invoke(call: &Call<'_>, callback: Callback, arguments: &[Sexp]) -> R<S
             items.extend(arguments.iter().map(|argument| (nil(), argument.value)));
             let form = values::pairlist(&items, SexpType::Language)?;
             crate::heap().root(form);
-            let frame = match eval::bind_slots(form, function, &arguments)? {
-                Some(frame) => frame,
-                None => CallFrame::Env(eval::bind_arguments(form, function, &arguments, None)?),
+            let Some(frame) = eval::bind_slots(form, function, &arguments)? else {
+                return eval::run_on_heap_frame(
+                    form,
+                    function,
+                    &arguments,
+                    call.env()?,
+                    None,
+                    Entry::Unchecked,
+                );
             };
             eval::run_frame(
                 form,
                 function,
-                frame,
+                eval::CallFrame::Slots(frame),
                 call.env()?,
                 &arguments,
                 Entry::Unchecked,

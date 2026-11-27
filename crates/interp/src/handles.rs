@@ -4163,26 +4163,60 @@ pub struct MethodVariable<'s> {
     pub value: Local<'s>,
 }
 
+/// The dispatch variables of a method's call, symbols paired with their values, as the caller
+/// holds them: a view that reads each pair as a [`MethodVariable`] of the scope `'s` and hands
+/// the pairs back to the raw frame entry without a copy.
+#[derive(Clone, Copy)]
+pub struct MethodVariables<'a, 's> {
+    pairs: &'a [(Sexp, Sexp)],
+    scope: PhantomData<Local<'s>>,
+}
+
+impl<'a, 's> MethodVariables<'a, 's> {
+    /// The variables of a call that dispatch did not make, which has none.
+    pub fn none() -> Self {
+        MethodVariables {
+            pairs: &[],
+            scope: PhantomData,
+        }
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = MethodVariable<'s>> + 'a {
+        self.pairs.iter().map(|&(symbol, value)| {
+            // SAFETY: `method_variables` made the view from symbols paired with values that
+            // the caller holds for all of `'s`.
+            unsafe {
+                MethodVariable {
+                    symbol: Local::adopt(symbol),
+                    value: Local::adopt(value),
+                }
+            }
+        })
+    }
+
+    /// The variables as handles of the nested scope `'inner`, which `'s` encloses.
+    pub fn pass<'inner>(self, _enclosing: Enclosing<'s, 'inner>) -> MethodVariables<'a, 'inner> {
+        MethodVariables {
+            pairs: self.pairs,
+            scope: PhantomData,
+        }
+    }
+}
+
 /// The dispatch variables `variables`, symbols paired with their values, as handles of the
 /// caller's scope.
 ///
 /// # Safety
 ///
 /// Each first field is a symbol, and the caller holds every value until the scope ends.
-pub unsafe fn method_variables<'s>(
+pub unsafe fn method_variables<'a, 's>(
     _context: &Cx<'s>,
-    variables: &[(Sexp, Sexp)],
-) -> SmallVec<[MethodVariable<'s>; 4]> {
-    variables
-        .iter()
-        // SAFETY: the caller's contract.
-        .map(|&(symbol, value)| unsafe {
-            MethodVariable {
-                symbol: Local::adopt(symbol),
-                value: Local::adopt(value),
-            }
-        })
-        .collect()
+    variables: &'a [(Sexp, Sexp)],
+) -> MethodVariables<'a, 's> {
+    MethodVariables {
+        pairs: variables,
+        scope: PhantomData,
+    }
 }
 
 /// The live frame at position `index` of the frame stack, `None` past its top.
@@ -4282,7 +4316,7 @@ pub fn replace_pooled_reference(
             promise: reference,
             target,
         };
-        // The pool grows only at its end: `index` is the count of references in use.
+        // The pool grows only at its end, so `index` is at most one past its last position.
         debug_assert!(index <= references.len());
         let Some(pooled) = references.get_mut(index) else {
             references.push(replacement);
@@ -5296,9 +5330,169 @@ unsafe fn long_replacement_call<'s>(
     }
 }
 
+/// A frame [`push_frame`] pushed, which the calls that run in it take, so that a depth or a
+/// slot frame they read is one a push made.
+pub struct PushedFrame<'s> {
+    depth: usize,
+    slots: u32,
+    function: Local<'s, Closure>,
+    environment: Option<Local<'s, Environment>>,
+}
+
+impl PushedFrame<'_> {
+    /// The frame's depth: one more than its index in the frame stack.
+    #[inline(always)]
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+}
+
+/// Pushes the frame of the call `frame` describes, with what the push owes a profile, which
+/// may fail; the frame is pushed all the same (`eval::push_frame`).
+#[inline(always)]
+pub fn push_frame<'s>(
+    _context: &mut Cx<'s>,
+    frame: &crate::eval::GeneralFrame<'_, 's>,
+) -> (PushedFrame<'s>, R<()>) {
+    let (environment, slots, missing) = match frame.body {
+        crate::eval::BodyFrame::Environment(environment) => (Some(environment), crate::NO_SLOTS, 0),
+        crate::eval::BodyFrame::Slots(slot_frame) => {
+            let (header, missing, _) = slot_frame.parts();
+            (None, header, missing)
+        }
+    };
+    // A `NULL` `sys_parent` comes from byte code running on a slot frame's slots, the caller.
+    let caller = if frame.sys_parent.is(null()) {
+        crate::interp().slot_owner
+    } else {
+        crate::NO_SLOTS
+    };
+    // SAFETY: the frame holds what it records from here on, and until then the caller's scope
+    // does. A profile sample may run R code, which `&mut Cx` permits. `Tagged` has `Arg`'s
+    // layout, and a slot frame's header names the registers its binder filled.
+    let (depth, sampled) = unsafe {
+        let args = std::slice::from_raw_parts(frame.args.as_ptr().cast::<Arg>(), frame.args.len());
+        crate::eval::push_frame(
+            frame.call.raw(),
+            frame.function.raw(),
+            environment.map_or_else(values::nil, Local::raw),
+            frame.sys_parent.raw(),
+            args,
+            frame.method_vars.pairs,
+            slots,
+            missing,
+            caller,
+            true,
+        )
+    };
+    let pushed = PushedFrame {
+        depth,
+        slots,
+        function: frame.function,
+        environment,
+    };
+    (pushed, sampled)
+}
+
+/// Records the call `call` of the closure `function` for the boundary-call recorder while it
+/// records (`profile_summary::enter_closure`).
+#[inline(always)]
+pub fn record_closure_entry(
+    _context: &mut Cx<'_>,
+    call: Local<'_>,
+    function: Local<'_, Closure>,
+    sys_parent: Local<'_>,
+    method_vars: MethodVariables<'_, '_>,
+    environment: Option<Local<'_, Environment>>,
+) -> crate::profile_summary::ClosureScope {
+    if heap::activity::hooks() & heap::activity::CAPTURE == 0 {
+        return crate::profile_summary::ClosureScope::default();
+    }
+    let environment = environment.map_or_else(values::nil, Local::raw);
+    // SAFETY: everything is rooted, and the recorder may run R code, which `&mut Cx` permits.
+    unsafe {
+        crate::profile_summary::enter_closure(
+            call.raw(),
+            function.raw(),
+            sys_parent.raw(),
+            method_vars.pairs,
+            environment,
+        )
+    }
+}
+
+/// Hands the boundary-call recorder the outcome of the call [`record_closure_entry`] recorded.
+#[inline(always)]
+pub fn closure_returned(scope: &mut crate::profile_summary::ClosureScope, result: &R<Local<'_>>) {
+    // SAFETY: the value is rooted.
+    unsafe { scope.returned(result.as_ref().ok().map(|value| value.raw())) }
+}
+
+/// Refuses the call `call` of `function` from the frame of `sys_parent` when it would define
+/// a class of an object system the session turned off (`eval::refuse_object_system`).
+pub fn refuse_object_system(
+    _context: &mut Cx<'_>,
+    call: Local<'_>,
+    function: Local<'_, Closure>,
+    sys_parent: Local<'_>,
+) -> R<()> {
+    // SAFETY: everything is rooted, and the error allocates, which `&mut Cx` permits.
+    unsafe { crate::eval::refuse_object_system(call.raw(), function.raw(), sys_parent.raw()) }
+}
+
+/// The signature of the closure of `frame`, made by `call`, once the arguments its environment
+/// binds meet it, or `None` for an untyped closure or a slot frame (`annotations::enter`).
+#[inline]
+pub fn check_arguments<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'_>,
+    frame: &PushedFrame<'_>,
+) -> R<Option<Local<'s>>> {
+    let Some(environment) = frame.environment else {
+        return Ok(None);
+    };
+    // SAFETY: everything is rooted, the checks may force promises, which `&mut Cx` permits,
+    // and the signature is rooted before anything else runs.
+    unsafe {
+        let signature = crate::annotations::enter(
+            call.raw(),
+            frame.function.raw(),
+            environment.raw(),
+            frame.depth,
+        )?;
+        Ok(signature.map(|signature| rooted(context, signature)))
+    }
+}
+
+/// Runs the body of the closure of `frame` in it, on its slot frame or else in its
+/// environment (`eval::run_closure_body`).
+#[inline(always)]
+pub fn run_closure_body<'s>(_context: &mut Cx<'s>, frame: &PushedFrame<'_>) -> R<Local<'s>> {
+    let environment = frame.environment.map_or_else(values::nil, Local::raw);
+    // SAFETY: the frame holds the function and its environment, the body runs any R code,
+    // which `&mut Cx` permits, and its value is rooted in the context's scope.
+    unsafe {
+        let value = crate::eval::run_closure_body(
+            frame.function.raw(),
+            environment,
+            frame.slots,
+            frame.depth,
+        )?;
+        Ok(Local::adopt(value))
+    }
+}
+
+/// Tells the ahead-of-time compiler that a namespace load returned `namespace`
+/// (`ahead::namespace_loaded`).
+pub fn namespace_loaded(_context: &mut Cx<'_>, namespace: Local<'_>) {
+    // SAFETY: the namespace is rooted, and compiling its typed code allocates, which `&mut Cx`
+    // permits.
+    unsafe { crate::ahead::namespace_loaded(namespace.raw()) }
+}
+
 /// The closure `function` applied by `call` to `arguments`, each tagged as the argument of
-/// `call` in its position is, from the frame of `caller`, or from a slot frame that has none.
-/// The closure's frame keeps the arguments (`eval::apply_closure_owning`).
+/// `call` in its position is, from the frame of `caller`, or from a slot frame that has none
+/// (`eval::apply_closure_in`).
 #[inline(always)]
 pub fn apply_closure<'s>(
     context: &mut Cx<'s>,
@@ -5307,14 +5501,25 @@ pub fn apply_closure<'s>(
     arguments: impl ExactSizeIterator<Item = Local<'s>>,
     caller: Option<Local<'s, Environment>>,
 ) -> R<Local<'s>> {
-    let caller = caller.map_or_else(values::nil, Local::raw);
-    // SAFETY: the call, the function, the arguments and the caller's environment are rooted,
-    // and the closure runs any R code, which `&mut Cx` permits.
+    let Some(function) = function.downcast::<Closure>() else {
+        return Err(error(
+            "internal error: a closure call's function is not a closure",
+        ));
+    };
+    let sys_parent = caller.map_or_else(null, Local::value);
+    // SAFETY: the call is live and has an argument for each value, and the tagged arguments
+    // are rooted through the values they hold. `Tagged` has `Arg`'s layout.
     unsafe {
-        let result = tagged_as_in(call.raw(), arguments, |tagged| {
-            crate::eval::apply_closure_owning(call.raw(), function.raw(), tagged, caller, None)
-        })?;
-        Ok(rooted(context, result))
+        tagged_as_in(call.raw(), arguments, |raw| {
+            let closure_call = crate::eval::ClosureCall {
+                call: call.value(),
+                function,
+                args: tagged(context, raw),
+                sys_parent,
+                supplied: None,
+            };
+            crate::eval::apply_closure_in(context, &closure_call)
+        })
     }
 }
 
@@ -5326,15 +5531,121 @@ pub fn apply_closure_tagged<'s>(
     arguments: &[Tagged<'s>],
     caller: Option<Local<'s, Environment>>,
 ) -> R<Local<'s>> {
-    let caller = caller.map_or_else(values::nil, Local::raw);
-    // SAFETY: everything is rooted, and the closure runs any R code, which `&mut Cx` permits.
+    let Some(function) = function.downcast::<Closure>() else {
+        return Err(error(
+            "internal error: a closure call's function is not a closure",
+        ));
+    };
+    let closure_call = crate::eval::ClosureCall {
+        call: call.value(),
+        function,
+        args: arguments,
+        sys_parent: caller.map_or_else(null, Local::value),
+        supplied: None,
+    };
+    crate::eval::apply_closure_in(context, &closure_call)
+}
+
+/// The value of a call of `function`, which has a native entry, on `args` when the native code
+/// takes them (`base_fast_paths::native_entry`).
+#[inline(always)]
+pub fn native_entry<'s>(
+    context: &mut Cx<'s>,
+    function: Local<'_, Closure>,
+    args: &[Tagged<'_>],
+) -> R<Option<Local<'s>>> {
+    // SAFETY: everything is rooted, and the native code may allocate, which `&mut Cx` permits.
     // `Tagged` has `Arg`'s layout.
     unsafe {
-        let arguments =
-            std::slice::from_raw_parts(arguments.as_ptr().cast::<Arg>(), arguments.len());
-        let result =
-            crate::eval::apply_closure_owning(call.raw(), function.raw(), arguments, caller, None)?;
-        Ok(rooted(context, result))
+        let args = std::slice::from_raw_parts(args.as_ptr().cast::<Arg>(), args.len());
+        let value = crate::base_fast_paths::native_entry(function.raw(), args)?;
+        Ok(value.map(|value| rooted(context, value)))
+    }
+}
+
+/// Reports, while typed code is logged, that the call `call` of a typed closure runs in the
+/// interpreter for `reason` (`annotations::log_interpreted_because`).
+pub fn log_interpreted_because(_context: &mut Cx<'_>, call: Local<'_>, reason: &str) {
+    // SAFETY: the call is rooted, and the report allocates, which `&mut Cx` permits.
+    unsafe { crate::annotations::log_interpreted_because(call.raw(), reason) }
+}
+
+/// The value of the call `call` of the typed closure `function` on `args` from the frame of
+/// `sys_parent` when the native tier takes it, and otherwise `None`, reported as a call that
+/// runs in the interpreter. The arguments are promises, never argument references.
+pub fn call_native_tier<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'_>,
+    function: Local<'_, Closure>,
+    args: &[Tagged<'_>],
+    sys_parent: Local<'_>,
+) -> Option<R<Local<'s>>> {
+    let Some(tier) = crate::bytecode::tier() else {
+        log_interpreted_because(context, call, "no native tier is loaded");
+        return None;
+    };
+    // SAFETY: everything is rooted, the native code runs any R code, which `&mut Cx` permits,
+    // and its value is rooted before anything else runs. `Tagged` has `Arg`'s layout.
+    unsafe {
+        let args = std::slice::from_raw_parts(args.as_ptr().cast::<Arg>(), args.len());
+        let value = (tier.call)(&crate::bytecode::TypedCall {
+            call: call.raw(),
+            function: function.raw(),
+            args,
+            sys_parent: sys_parent.raw(),
+        });
+        match value {
+            Some(value) => Some(value.map(|value| rooted(context, value))),
+            None => {
+                crate::annotations::log_interpreted(call.raw());
+                None
+            }
+        }
+    }
+}
+
+/// Compiles the body of `function` when its first call would compile it, and whether the body
+/// is then compiled (`bytecode::compile_before_call`).
+#[inline]
+pub fn compile_before_call(_context: &mut Cx<'_>, function: Local<'_, Closure>) -> R<bool> {
+    // SAFETY: the closure is rooted, and compiling allocates, which `&mut Cx` permits; the
+    // compiled body is held by the closure's shared code and only its type is read.
+    unsafe {
+        let body = crate::bytecode::compile_before_call(function.raw())?;
+        Ok(body.kind() == SexpType::Bytecode)
+    }
+}
+
+/// Runs `closure_call` in the slot frame its arguments were bound in, `frame`, from the push
+/// of its frame to its exit (`eval::run_frame`).
+#[inline(always)]
+pub fn run_slot_frame<'s>(
+    context: &mut Cx<'s>,
+    closure_call: &crate::eval::ClosureCall<'_, 's>,
+    frame: crate::eval::SlotFrame,
+) -> R<Local<'s>> {
+    let method_vars = closure_call
+        .supplied
+        .map_or(&[][..], |supplied| supplied.pairs);
+    // SAFETY: the caller's scope holds the call, the closure, the arguments, the method
+    // variables and the caller's environment, the frame holds them once pushed, and the body
+    // runs any R code, which `&mut Cx` permits. Its value is rooted before anything else runs.
+    // `Tagged` has `Arg`'s layout.
+    unsafe {
+        let args = std::slice::from_raw_parts(
+            closure_call.args.as_ptr().cast::<Arg>(),
+            closure_call.args.len(),
+        );
+        let value = crate::eval::run_frame(
+            closure_call.call.raw(),
+            closure_call.function.raw(),
+            crate::eval::CallFrame::Slots(frame),
+            closure_call.sys_parent.raw(),
+            args,
+            crate::annotations::Entry::Unchecked,
+            method_vars,
+        )?;
+        Ok(rooted(context, value))
     }
 }
 

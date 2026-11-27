@@ -113,6 +113,24 @@ fn a_scope_reading_its_enclosing_scope_keeps_both() {
 }
 
 #[test]
+fn an_enclosed_scope_returns_its_result_rooted_in_the_enclosing_scope() {
+    with_context(GcStress::EveryAllocation, |cx| -> Result<(), HeapError> {
+        let outer = integers(cx, &[1, 2, 3])?;
+        let doubled = cx.scope_enclosed(|cx, enclosing| {
+            let outer = enclosing.pass(outer);
+            let values: Vec<i32> = outer.as_slice(cx).iter().map(|value| value * 2).collect();
+            cx.alloc::<Real>(64)?;
+            integers(cx, &values)
+        })?;
+        cx.alloc::<Real>(64)?;
+        assert_eq!(doubled.as_slice(cx), [2, 4, 6]);
+        assert_eq!(outer.as_slice(cx), [1, 2, 3]);
+        Ok(())
+    })
+    .expect("allocation");
+}
+
+#[test]
 fn a_write_reads_other_vectors_and_refuses_its_own_storage() {
     with_context(GcStress::EveryAllocation, |cx| -> Result<(), HeapError> {
         let target = integers(cx, &[1, 2, 3, 4])?;

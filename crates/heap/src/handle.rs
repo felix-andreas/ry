@@ -530,6 +530,31 @@ impl<'s> Cx<'s> {
 }
 
 impl<'s> Cx<'s> {
+    /// [`Cx::scope`] for a body that also reads handles of this scope, which the [`Enclosing`]
+    /// it receives passes in.
+    #[inline]
+    pub fn scope_enclosed<T: Kind, E: Reroot>(
+        &mut self,
+        body: impl for<'inner> FnOnce(
+            &mut Cx<'inner>,
+            Enclosing<'s, 'inner>,
+        ) -> Result<Local<'inner, T>, E>,
+    ) -> Result<Local<'s, T>, E> {
+        let raw =
+            self.scope_reading(|inner, enclosing| body(inner, enclosing).map(|value| value.raw));
+        // SAFETY: the heap is live, and the result was a handle of the released scope, so no
+        // allocation has run since its root was released.
+        let heap = unsafe { &mut *self.heap.as_ptr() };
+        raw.map(|raw| {
+            heap.root(raw);
+            Local {
+                raw,
+                scope: PhantomData,
+                kind: PhantomData,
+            }
+        })
+    }
+
     /// A nested handle scope for a body that reads handles of this scope and hands out plain
     /// data: it receives an [`Enclosing`], which passes those handles in, and whatever it roots
     /// is released on return. A loop that runs R code for each element uses it, so that the
@@ -864,6 +889,14 @@ impl<'a> Gc<'a, Promise> {
 }
 
 impl<'a> Gc<'a, Closure> {
+    /// Clears the debugger's single-step flag ([`gp::CLOSURE_STEP`]) of the closure.
+    #[inline]
+    pub fn clear_step(self) {
+        // SAFETY: the closure is live for `'a`, and the flag is a bit of its header that only
+        // the debugger reads, never across a change.
+        unsafe { self.raw.set_gp_bits(gp::CLOSURE_STEP, false) }
+    }
+
     /// The formals: a pairlist of defaults, each tagged with its formal's name, or `NULL`.
     #[inline]
     pub fn formals(self) -> Gc<'a> {

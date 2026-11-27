@@ -1,0 +1,10 @@
+[stdout]
+| [1] 5 5 1
+| [1] 7 7 1
+| [1] 42 42
+[messages]
+[warnings]
+[errors]
+[value]
+double
+| c(42, 42)
