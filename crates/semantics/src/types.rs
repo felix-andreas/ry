@@ -696,6 +696,11 @@ pub struct FunctionType<'db> {
     /// or a closure that only forwards to one, so a call folds like a direct `Reduce` and its
     /// accumulator may widen past the start. Inferred only.
     pub reduces: Option<ReduceForward<'db>>,
+    /// Two operand types the body compares that stay separate variables, because R compares
+    /// across its types (`function(x, lo) x < lo` takes a `Date` and a string). A ry value
+    /// compares only with its own type, so a call where either side is one must make both
+    /// that type. Inferred only.
+    pub compared: &'db [ComparedPair<'db>],
     /// Built from a call on a value of unknown type, so its parameters are the arguments that
     /// call passed rather than formals: another call may pass a different set of names, which
     /// the real callee's defaults or `...` may accept.
@@ -725,6 +730,7 @@ impl<'db> FunctionType<'db> {
             dispatch: None,
             null_unless: None,
             reduces: None,
+            compared: &[],
             from_calls: false,
         }
     }
@@ -754,6 +760,14 @@ pub struct NullUnless<'db> {
 pub struct DefaultRead<'db> {
     pub formal: Name<'db>,
     pub default_of: Name<'db>,
+}
+
+/// The two operand types of a comparison between different open values
+/// ([`FunctionType::compared`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::SalsaValue)]
+pub struct ComparedPair<'db> {
+    pub left: Ty<'db>,
+    pub right: Ty<'db>,
 }
 
 /// `function(q, valueOnly = TRUE) if (valueOnly) prob else list(value = prob)`: `ret` is the
@@ -1755,6 +1769,14 @@ fn rebuilt_type<'db>(
                 when_false: map(flag.when_false),
                 ..flag
             });
+            let compared: SmallVec<[ComparedPair<'db>; 2]> = function
+                .compared
+                .iter()
+                .map(|pair| ComparedPair {
+                    left: map(pair.left),
+                    right: map(pair.right),
+                })
+                .collect();
             Ty::new(
                 db,
                 TyKind::Function(&FunctionType {
@@ -1763,6 +1785,7 @@ fn rebuilt_type<'db>(
                     variadic,
                     ret,
                     flag_return,
+                    compared: &compared,
                     ..**function
                 }),
             )
@@ -1826,6 +1849,10 @@ fn for_each_child<'db>(kind: &TyKind<'db>, visit: &mut impl FnMut(Ty<'db>)) {
             if let Some(flag) = function.flag_return {
                 visit(flag.when_true);
                 visit(flag.when_false);
+            }
+            for pair in function.compared {
+                visit(pair.left);
+                visit(pair.right);
             }
         }
         TyKind::Named(_, arguments) => arguments.iter().copied().for_each(visit),
@@ -2054,6 +2081,7 @@ fn stored_kind<'a>(arena: &'a Bump, kind: TyKind<'a>) -> TyKind<'a> {
             missing_tested: arena.alloc_slice_copy(function.missing_tested),
             condition_only: arena.alloc_slice_copy(function.condition_only),
             elementwise: arena.alloc_slice_copy(function.elementwise),
+            compared: arena.alloc_slice_copy(function.compared),
             ..*function
         })),
         TyKind::Union(members) => TyKind::Union(arena.alloc_slice_copy(members)),

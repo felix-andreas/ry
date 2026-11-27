@@ -43,42 +43,62 @@ positive <- function(x) x > 0L
 #++++
 positive: <T: comparable or number> fn(x: T) -> Compared<T>
 
-#---- two_flexible_comparison_operands_are_one_type
-# ry compares only like values, so the two operands are one type. R compares across types, so
-# a call with two R values widens that type to their union instead.
+#---- two_flexible_comparison_operands_stay_separate_types
+# R compares across types and returns either operand unchanged, so the two operands stay
+# separate types. ry compares a ry value only with its own type, so a call that passes one
+# checks the other operand against it, through any function that forwards the pair.
 cmp <- function(a, b) a < b
 same <- function(a, b) a == b
+keep <- function(x, lo) {
+  if (any(x < lo)) warning("low")
+  x
+}
+due <- function(d, cutoff) (d + 30) > cutoff
+forward <- function(p, q) cmp(p, q)
 k: I64 <- 1
 x: F64 <- 2.5
 s: Str <- "s"
 mixed <- cmp(1L, "s")
-shaped <- cmp(1L, 1:3)
-promoted <- cmp(c(1.5, 2), 3L)
 dated <- cmp(Sys.Date(), "2020-01-01")
 equal_mixed <- same(1L, "a")
+kept_date <- keep(as.Date("2020-01-01"), "2019-01-01")
+kept_integers <- keep(1:3, 0.5)
+due_date <- due(Sys.Date(), "2024-01-01")
+forwarded <- forward(1L, "s")
 ry_numbers <- cmp(k, 2)
 ry_strings <- same(s, s)
-bad_numbers <- cmp(k, x)
-bad_string <- same(k, s)
 whole_literal <- cmp(k, 2L)
+bad_numbers <- cmp(k, x)
+bad_string <- same(s, k)
+bad_due <- due(k, "s")
+bad_forwarded <- forward(k, "s")
 #++++
-cmp: <T: comparable or ordered> fn(a: T, b: T) -> Compared<T>
-same: <T: eq> fn(a: T, b: T) -> Compared<T>
+cmp: <T: comparable or ordered, U: comparable or ordered> fn(a: T, b: U) -> Compared<T>
+same: <T: eq, U: eq> fn(a: T, b: U) -> Compared<T>
+keep: <T: comparable or ordered, U: comparable or ordered> fn(x: T, lo: U) -> T
+due: <T: arithmetic or number, U: comparable or ordered> fn(d: T, cutoff: U) -> Compared<T>
+forward: <T: comparable or ordered, U: comparable or ordered> fn(p: T, q: U) -> Compared<T>
 k: I64
 x: F64
 s: Str
 mixed: logical
-shaped: logical[]
-promoted: logical[]
 dated: logical
 equal_mixed: logical
+kept_date: Date
+kept_integers: integer[]
+due_date: logical
+forwarded: logical
 ry_numbers: Bool
 ry_strings: Bool
+whole_literal: Bool
 bad_numbers: Unknown
 bad_string: Unknown
-whole_literal: Bool
-475..476 error[type-mismatch] expected `I64`, found `F64`
-500..501 error[type-mismatch] expected `I64`, found `Str`
+bad_due: Unknown
+bad_forwarded: Unknown
+857..858 error[type-mismatch] expected `I64`, found `F64`
+882..883 error[type-mismatch] expected `Str`, found `I64`
+903..906 error[type-mismatch] expected `I64`, found `character`
+936..939 error[type-mismatch] expected `I64`, found `character`
 
 #---- an_open_value_tested_for_equality_admits_complex
 # R tests `complex` values for equality but has no order for them.

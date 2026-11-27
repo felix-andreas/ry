@@ -35,14 +35,14 @@ use {
         },
         top_level::super_assigned_names,
         types::{
-            Atomic, Binder, Bound, Constraint, DefaultRead, FamilyResult, FlagReturn, FrameKind,
-            FunctionType, InferenceVar, Name, NativeField, NativeScalar, NullUnless, NumberLiteral,
-            Parameter, QueryName, RecordField, ReduceForward, RestParameter, TYPE_SIZE_CEILING, Ty,
-            TyKind, TypeList, TypeScheme, any, array, array_element, column_type, conflicting_tags,
-            contains_inference_var, contains_rigid, erase_vars, for_each_child_type,
-            frame_with_row, is_bare_tags, is_ry_value_type, is_tag_type, map_child_types,
-            native_record, native_scalar, null, r_column_type, scalar, substitute_rigid, type_size,
-            union_of, unknown,
+            Atomic, Binder, Bound, ComparedPair, Constraint, DefaultRead, FamilyResult, FlagReturn,
+            FrameKind, FunctionType, InferenceVar, Name, NativeField, NativeScalar, NullUnless,
+            NumberLiteral, Parameter, QueryName, RecordField, ReduceForward, RestParameter,
+            TYPE_SIZE_CEILING, Ty, TyKind, TypeList, TypeScheme, any, array, array_element,
+            column_type, conflicting_tags, contains_inference_var, contains_rigid, erase_vars,
+            for_each_child_type, frame_with_row, is_bare_tags, is_ry_value_type, is_tag_type,
+            map_child_types, native_record, native_scalar, null, r_column_type, scalar,
+            substitute_rigid, type_size, union_of, unknown,
         },
     },
     bumpalo::{Bump, collections::Vec as BumpVec},
@@ -1080,6 +1080,7 @@ fn check_item_in<'db>(
         value_defaulted_formals: Bitset::new_in(arena, bindings),
         missing_path_defaults: Bitset::new_in(arena, bindings),
         missing_path_values: Vec::new(),
+        compared_pairs: Vec::new(),
         non_local_slots: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
         string_values: Column::new_in(arena, bindings),
         value_read_slots: None,
@@ -2249,6 +2250,9 @@ struct Checker<'db, 'a> {
     /// The values written on those paths, which become the parameter's default type, so a
     /// call that omits the argument gets the written value as a default would give it.
     missing_path_values: Vec<(BindingId, Ty<'db>)>,
+    /// Pairs of different open operands compared in the function bodies being inferred, which
+    /// the innermost function's signature takes as [`FunctionType::compared`].
+    compared_pairs: Vec<ComparedPair<'db>>,
     /// Slots for names this item reads but another item binds, so guard refinements live
     /// in the environment like any slot's. Ids are minted above naming's so they never collide.
     non_local_slots: ArenaMap<'a, Symbol, BindingId>,
@@ -4947,6 +4951,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     false => self.callback_frame_level,
                 };
                 let pending_mark = self.pending_enclosing_writes.len();
+                let compared_mark = self.compared_pairs.len();
                 let mark = self.environment.mark();
                 let uses = self.formal_uses(&module[parameters], *body);
                 let mut probed = FxHashSet::default();
@@ -5098,6 +5103,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                 self.frame_level = enclosing_frame_level;
                 self.callback_frame_level = enclosing_callback_frame_level;
                 self.called_formals = enclosing_called_formals;
+                let compared = self.function_compared_pairs(compared_mark, &named, return_ty);
                 self.table.level -= 1;
                 Ty::new(
                     self.db,
@@ -5138,6 +5144,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                             .map(|name| Name::new(self.db, name)),
                         null_unless,
                         reduces,
+                        compared: &compared,
                         from_calls: false,
                     }),
                 )
@@ -12917,20 +12924,15 @@ impl<'db, 'a> Checker<'db, 'a> {
         };
         let compared = match (open_operand(resolved_left), open_operand(resolved_right)) {
             (Some(left), Some(right)) if left == right => Some((left, lhs_range, itself)),
-            // Two different open operands are one type, as ry compares only like values. A
-            // call widens the type over R's types instead (`f(1L, "a")` binds
-            // `integer | character`), since R compares across them.
+            // Two different open operands stay separate types, because R compares an `integer`
+            // with a `character` and returns either unchanged (`function(x, lo) { if (any(x <
+            // lo)) warning(); x }`). A ry value compares only with its own type, so the pair
+            // goes into the signature and a call that passes one checks the other against it.
             (Some(left), Some(right)) => {
-                let snapshot = self.table.snapshot();
-                if self.table.unify(self.db, left, right).is_ok() {
-                    Some((left, lhs_range, itself))
-                } else {
-                    self.table.rollback(snapshot);
-                    // Two declared binders stay apart, and each must admit the comparison.
-                    self.constrain_operand(lhs_range, left, itself);
-                    self.constrain_operand(rhs_range, right, itself);
-                    return self.table.family(self.db, FamilyResult::Comparison, left);
-                }
+                self.constrain_operand(lhs_range, left, itself);
+                self.constrain_operand(rhs_range, right, itself);
+                self.compared_pairs.push(ComparedPair { left, right });
+                return self.table.family(self.db, FamilyResult::Comparison, left);
             }
             (Some(left), None) => {
                 beside_literal(rhs).map(|constraint| (left, lhs_range, constraint))
@@ -14212,6 +14214,53 @@ impl<'db, 'a> Checker<'db, 'a> {
     /// `while`, and which are read at least once. A nested function's reads count like any
     /// other. One walk serves every parameter, since a walk per parameter is quadratic in
     /// long signatures.
+    /// The pairs a function literal's body compared since `mark`, as its signature keeps them:
+    /// those whose open sides the parameters or the result name. A pair whose variable belongs
+    /// to an enclosing function stays listed for that function too.
+    fn function_compared_pairs(
+        &mut self,
+        mark: usize,
+        parameters: &[Parameter<'db>],
+        ret: Ty<'db>,
+    ) -> Vec<ComparedPair<'db>> {
+        let pairs = self.compared_pairs.split_off(mark);
+        if pairs.is_empty() {
+            return Vec::new();
+        }
+        let mut signature_vars = FxHashSet::default();
+        for parameter in parameters {
+            self.table
+                .collect_unbound_vars(self.db, parameter.ty, &mut signature_vars);
+        }
+        self.table
+            .collect_unbound_vars(self.db, ret, &mut signature_vars);
+        let mut kept: Vec<ComparedPair<'db>> = Vec::new();
+        for pair in pairs {
+            let left = self.table.resolve(self.db, pair.left);
+            let right = self.table.resolve(self.db, pair.right);
+            let mut vars = FxHashSet::default();
+            self.table.collect_unbound_vars(self.db, left, &mut vars);
+            self.table.collect_unbound_vars(self.db, right, &mut vars);
+            if vars.is_empty() || left == right {
+                continue;
+            }
+            let escapes = vars.iter().any(|&var| {
+                matches!(*self.table.entry(var), Entry::Unbound { level, .. } if level < self.table.level)
+            });
+            if escapes {
+                self.compared_pairs.push(ComparedPair { left, right });
+            }
+            let named = vars.iter().all(|var| signature_vars.contains(var));
+            let seen = kept.iter().any(|kept| {
+                (kept.left, kept.right) == (left, right) || (kept.left, kept.right) == (right, left)
+            });
+            if named && !seen {
+                kept.push(ComparedPair { left, right });
+            }
+        }
+        kept
+    }
+
     fn condition_only_names(&self, body: ExprId, parameters: &[Formal]) -> Vec<Symbol> {
         // Per parameter: read as a whole condition, and read some other way.
         let mut reads: Vec<(Symbol, bool, bool)> = parameters
@@ -20113,6 +20162,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                         dispatch: None,
                         null_unless: None,
                         reduces: None,
+                        compared: &[],
                         from_calls: true,
                     }),
                 );
@@ -20653,8 +20703,73 @@ impl<'db, 'a> Checker<'db, 'a> {
                 is_ry_value_type(self.db, parameter)
             });
         let outer_ry_callee = std::mem::replace(&mut self.ry_callee, ry_callee);
-        let findings = self.match_argument_targets(callee_range, function, arguments);
+        let mut findings = self.match_argument_targets(callee_range, function, arguments);
         self.ry_callee = outer_ry_callee;
+        if findings.is_empty() {
+            findings = self.check_compared_pairs(callee_range, function, arguments);
+        }
+        findings
+    }
+
+    /// A ry value compares only with its own type, so where the callee compares two
+    /// operands that stay separate types for R's sake, a ry value on either side makes the
+    /// other side that type. A pair the call leaves open is the caller's to keep.
+    fn check_compared_pairs(
+        &mut self,
+        callee_range: TextRange,
+        function: &FunctionType<'db>,
+        arguments: &[CallArgument<'db>],
+    ) -> Vec<TypeError<'db>> {
+        let mut findings = Vec::new();
+        for pair in function.compared {
+            let left = self.table.resolve(self.db, pair.left);
+            let right = self.table.resolve(self.db, pair.right);
+            let left_ry = is_ry_value_type(self.db, left);
+            let right_ry = is_ry_value_type(self.db, right);
+            if !left_ry && !right_ry {
+                if self.table.contains_unbound_var(self.db, left)
+                    || self.table.contains_unbound_var(self.db, right)
+                {
+                    self.compared_pairs.push(ComparedPair { left, right });
+                }
+                continue;
+            }
+            // The argument that passed the other side is checked against the ry value, as a
+            // direct parameter of that type would check it, so a number literal adapts.
+            let (expected, found) = if right_ry && !left_ry {
+                (right, left)
+            } else {
+                (left, right)
+            };
+            let argument = arguments.iter().rev().find(|argument| {
+                argument
+                    .ty
+                    .is_some_and(|ty| self.table.resolve(self.db, ty) == found)
+            });
+            if let Some(argument) = argument
+                && let Some(ty) = argument.ty
+            {
+                if let Err(error) = self.check_argument(
+                    expected,
+                    ty,
+                    argument.range,
+                    argument.whole_double,
+                    argument.value,
+                ) {
+                    findings.push(error);
+                }
+                continue;
+            }
+            let snapshot = self.table.snapshot();
+            if self.table.unify(self.db, expected, found).is_ok() {
+                continue;
+            }
+            self.table.rollback(snapshot);
+            findings.push(TypeError {
+                range: callee_range,
+                kind: TypeErrorKind::Mismatch { expected, found },
+            });
+        }
         findings
     }
 

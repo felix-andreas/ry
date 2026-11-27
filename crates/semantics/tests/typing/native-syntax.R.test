@@ -941,7 +941,7 @@ upto <- function(n) {
   n > 0
 }
 #++++
-between: <T: comparable or ordered> fn(a: T, b: T) -> Compared<T>
+between: <T: comparable or ordered, U: comparable or ordered> fn(a: T, b: U) -> Compared<T>
 is_a: <T: equatable or Str> fn(x: T) -> Compared<T>
 s: Str
 r: Record{a: I64}

@@ -49,8 +49,8 @@ pub enum Widening {
     Fixed,
     /// Numeric-constrained when it bound, so a wider number rebinds it (`f(1L, 0.5)`).
     Numeric,
-    /// Tied by a comparison of two open operands, so another comparable R type joins it as a
-    /// union (`f(1L, "a")` for `function(a, b) a < b`): R compares across types.
+    /// Bound under a comparison or equality constraint, so another comparable R type joins it
+    /// as a union (`Bool.is_eq(1L, "a")` for `<T: eq> fn(a: T, b: T)`): R compares across types.
     Compared {
         equality: bool,
     },
@@ -1351,10 +1351,12 @@ impl<'db> InferenceTable<'db> {
         let actual = self.resolve(db, actual);
         match widening {
             Widening::Fixed => false,
-            Widening::Numeric => self.widen_numeric_binding(db, representative, bound, actual),
+            Widening::Numeric => {
+                self.widen_numeric_binding(db, representative, bound, actual, widening)
+            }
             Widening::Compared { equality } => {
                 if numeric_rank(db, bound).is_some() && numeric_rank(db, actual).is_some() {
-                    return self.widen_numeric_binding(db, representative, bound, actual);
+                    return self.widen_numeric_binding(db, representative, bound, actual, widening);
                 }
                 let r_value = |ty: Ty<'db>| {
                     !matches!(
@@ -1363,7 +1365,7 @@ impl<'db> InferenceTable<'db> {
                     ) && !is_ry_value_type(db, ty)
                 };
                 let constraint = if equality {
-                    Constraint::Eq
+                    Constraint::Equatable
                 } else {
                     Constraint::Comparable
                 };
@@ -1386,12 +1388,15 @@ impl<'db> InferenceTable<'db> {
         }
     }
 
+    /// `widening` is kept on the rebound entry, so a comparison's variable widened by a number
+    /// still takes a later string.
     fn widen_numeric_binding(
         &mut self,
         db: &'db dyn Db,
         representative: InferenceVar,
         bound: Ty<'db>,
         actual: Ty<'db>,
+        widening: Widening,
     ) -> bool {
         // Arithmetic between a matrix and a plain number or vector gives a matrix, so a
         // variable tied by `a * H` takes `f(2, m)` and `f(m, 2)` alike and binds the matrix.
@@ -1444,7 +1449,7 @@ impl<'db> InferenceTable<'db> {
                 representative,
                 Entry::Bound {
                     ty: actual,
-                    widening: Widening::Numeric,
+                    widening,
                 },
             );
             return true;
@@ -1461,7 +1466,7 @@ impl<'db> InferenceTable<'db> {
                     representative,
                     Entry::Bound {
                         ty: widened,
-                        widening: Widening::Numeric,
+                        widening,
                     },
                 );
                 true

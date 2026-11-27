@@ -95,26 +95,28 @@ interface group therefore resolves through an explicit canonical fixpoint in
 Pinned by `cyclic_group_answers_are_forcing_order_independent` in `crates/semantics/tests/test_parallel.rs`
 and the fixture `recursion__a_long_recursive_chain_settles_through_its_annotation`.
 
-## Two open comparison operands are one type that widens over R's types
+## Two open comparison operands stay two types, and a ry value checks the pair at the call
 
 **Status:** built.
 
-`function(a, b) a < b` is `<T: comparable or ordered> fn(a: T, b: T) -> Compared<T>` (`eq` under
-`==` and `!=`): the operands unify, because ry compares only two values of one type, and a ry value
-beside another type stops at run time (`1i64 < "s"`). R compares across types, so a variable bound
-under a comparison constraint (`Widening::Compared` in `infer.rs`) widens when a later argument is
-another R type the constraint admits: a number by R's promotion, anything else to the union
-(`cmp(1L, "s")` binds `integer | character`). A ry value never widens. The union is a sound choice
-of `T`, so a declared `<T: eq>` widens too (`Bool.is_eq(1L, "one")`). Keeping the operands as two
-variables (the previous design) let `I64` beside `Str` through and made `Compared<T>` follow the
-left operand alone. Two declared binders that cannot unify stay apart, each asked the constraint.
+`function(a, b) a < b` is `<T: comparable or ordered, U: comparable or ordered> fn(a: T, b: U)`
+(`eq` under `==`). R compares across types and a function often returns one operand unchanged
+(`keep <- function(x, lo) { if (any(x < lo)) warning(); x }`), so unifying the operands was
+rejected: it widened `keep(as.Date(...), "2019-01-01")` to `Date | character` and let one operand's
+constraint bind the other (`(d + 30) > cutoff` refused a string `cutoff`). ry compares a ry value
+only with its own type, so the body records the pair (`FunctionType::compared`, inferred only, not
+printed) and `check_compared_pairs` checks a call: a ry value on either side checks the other
+side's argument as a parameter of that type (a literal adapts, so `cmp(1i64, 2)` passes), and a pair
+the call leaves open passes to the caller's signature. An overload set or a third binder spelling
+the relation was rejected as heavier than a side fact the annotation syntax need not express.
 
-`==` and `!=` beside a literal ask `equatable or number` and `equatable or Str`, where `equatable` is
-`comparable` plus `complex` and `raw`, which R tests for equality but does not order. A constraint
-that only a comparison gave leaves an `if`'s two open branches joined by union
-(`join_branch_values`). Pinned by `two_flexible_comparison_operands_are_one_type`,
-`an_open_value_tested_for_equality_admits_complex` and
-`two_open_operands_and_a_string_literal_ask_for_a_comparison`.
+A variable bound under a comparison constraint (`Widening::Compared`, `infer.rs`) widens over R's
+types, numbers by promotion and others to the union, so a declared `<T: eq>` takes
+`Bool.is_eq(1L, "one")`; a ry value never widens. `==` and `!=` beside a literal ask `equatable or
+number` and `equatable or Str`, where `equatable` is `comparable` plus `complex` and `raw`, which R
+tests for equality but does not order. Pinned by
+`two_flexible_comparison_operands_stay_separate_types` and
+`an_open_value_tested_for_equality_admits_complex`.
 
 ## Union compatibility commits a flexible argument at first use, in program order
 

@@ -359,7 +359,7 @@ run <- function() {
 #++++
 countdown: <T: arithmetic or number> fn(n: T) -> integer
 greet: <T, U> fn(name: T, [greeting]: U) -> character
-clamp: <T: comparable or ordered> fn(x: T, lo: T, [hi]: T) -> T
+clamp: <T: comparable or ordered, U: comparable or ordered, V: comparable or ordered> fn(x: T, lo: U, [hi]: V) -> U | V | T
 compose: <T, U, V> fn(f: fn(T) -> U, g: fn(V) -> T) -> fn(x: V) -> U
 run: fn() -> list{depth: integer, hello: character, hi: character, bounded: integer, out: integer}
 
