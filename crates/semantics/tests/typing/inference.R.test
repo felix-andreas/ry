@@ -95,10 +95,73 @@ bad_numbers: Unknown
 bad_string: Unknown
 bad_due: Unknown
 bad_forwarded: Unknown
-857..858 error[type-mismatch] expected `I64`, found `F64`
-882..883 error[type-mismatch] expected `Str`, found `I64`
-903..906 error[type-mismatch] expected `I64`, found `character`
-936..939 error[type-mismatch] expected `I64`, found `character`
+857..858 error[type-mismatch] the called function compares this `F64` with `I64`, and a ry value compares only with its own type
+882..883 error[type-mismatch] the called function compares this `I64` with `Str`, and a ry value compares only with its own type
+903..906 error[type-mismatch] the called function compares this `character` with `I64`, and a ry value compares only with its own type. Convert the R value with `Str.from_r()`
+936..939 error[type-mismatch] the called function compares this `character` with `I64`, and a ry value compares only with its own type. Convert the R value with `Str.from_r()`
+
+#---- a_compared_pair_follows_the_operands_everywhere
+# The pair check reaches a comparison whose sides the body settles, a function a call
+# returns, a local function, a union holding a ry value and a function passed where a
+# function type is declared. A literal default adapts as a passed literal does, and the
+# finding underlines the argument that passed the compared side.
+cmp <- function(a, b) a < b
+same <- function(a, b) a == b
+need_i <- function(v: I64) -> I64 v
+need_s <- function(v: Str) -> Str v
+settled <- function(a, b) {
+  r <- a < b
+  need_i(a)
+  need_s(b)
+  r
+}
+below <- function(q) function(a) a < q
+fwd <- function(p, q) {
+  inner <- function(u) u < q
+  inner(p)
+}
+apply_pair <- function(f: fn(I64, Str) -> Bool, x: I64, y: Str) -> Bool f(x, y)
+floor0 <- function(a, lo = 0) a < lo
+pick <- function(a, b, c) if (a < b) c else c
+k: I64 <- 1
+s: Str <- "s"
+m: I64 | NULL <- NULL
+below_s <- below("s")
+curried <- below_s(k)
+curried_ok <- below(k)(3)
+local <- fwd(k, "s")
+maybe <- same(m, "s")
+passed <- apply_pair(cmp, k, s)
+defaulted <- floor0(k)
+blamed <- pick("x", k, "y")
+#++++
+cmp: <T: comparable or ordered, U: comparable or ordered> fn(a: T, b: U) -> Compared<T>
+same: <T: eq, U: eq> fn(a: T, b: U) -> Compared<T>
+need_i: fn(v: I64) -> I64
+need_s: fn(v: Str) -> Str
+settled: Unknown
+below: <T: comparable or ordered, U: comparable or ordered> fn(q: T) -> fn(a: U) -> Compared<U>
+fwd: <T: comparable or ordered, U: comparable or ordered> fn(p: T, q: U) -> Compared<T>
+apply_pair: fn(f: fn(I64, Str) -> Bool, x: I64, y: Str) -> Bool
+floor0: <T: comparable or ordered, U: comparable or ordered> fn(a: T, [lo]: U) -> Compared<T>
+pick: <T: comparable or ordered, U: comparable or ordered, V> fn(a: T, b: U, c: V) -> V
+k: I64
+s: Str
+m: I64 | NULL
+below_s: <T: comparable or ordered> fn(a: T) -> Compared<T>
+curried: Unknown
+curried_ok: Bool
+local: Unknown
+maybe: Unknown
+passed: Unknown
+defaulted: Bool
+blamed: Unknown
+490..495 error[type-mismatch] `<` is not defined between `I64` and `Str`
+875..882 error[type-mismatch] this call compares `character` with `I64`, and a ry value compares only with its own type. Convert the R value with `Str.from_r()`
+928..931 error[type-mismatch] the called function compares this `character` with `I64`, and a ry value compares only with its own type. Convert the R value with `Str.from_r()`
+950..953 error[type-mismatch] the called function compares this `character` with `I64 | NULL`, and a ry value compares only with its own type
+976..979 error[type-mismatch] this function compares `Str` with `I64` where it is called this way, and a ry value compares only with its own type
+1025..1028 error[type-mismatch] the called function compares this `character` with `I64`, and a ry value compares only with its own type. Convert the R value with `Str.from_r()`
 
 #---- an_open_value_tested_for_equality_admits_complex
 # R tests `complex` values for equality but has no order for them.

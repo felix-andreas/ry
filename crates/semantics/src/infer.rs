@@ -10,11 +10,12 @@ use {
         diagnostics::nearest_name,
         stubs::stubs,
         types::{
-            Atomic, Binder, Constraint, FamilyResult, FrameKind, FunctionType, InferenceVar, Name,
-            NativeField, NativeScalar, RecordField, Ty, TyKind, array, array_element,
-            contains_inference_var, family_result, for_each_child_type, frame_with_row,
-            is_ry_value_type, map_child_types, native_record_with_row, native_scalar,
-            r_column_type, scalar, substitute_rigid, union_of, unknown,
+            Atomic, Binder, ComparedPair, Constraint, FamilyResult, FrameKind, FunctionType,
+            InferenceVar, Name, NativeField, NativeScalar, RecordField, Ty, TyKind, array,
+            array_element, contains_inference_var, family_result, for_each_child_type,
+            frame_with_row, holds_ry_value, is_ry_value_type, map_child_types,
+            native_record_with_row, native_scalar, r_column_type, scalar, substitute_rigid,
+            union_of, unknown,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -23,6 +24,7 @@ use {
         cell::{Cell, RefCell},
         mem,
     },
+    syntax::TextRange,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +69,17 @@ pub enum UnifyError<'db> {
 pub struct Snapshot {
     entries: usize,
     undo: usize,
+    comparisons: usize,
+}
+
+/// A comparison of two operands that stay separate types, waiting for the function that
+/// encloses it to keep it in its signature or to find its two sides settled.
+#[derive(Debug, Clone, Copy)]
+pub struct PendingComparison<'db> {
+    pub pair: ComparedPair<'db>,
+    pub range: TextRange,
+    /// The operator of a comparison written in the function, or `None` for one a call left open.
+    pub operator: Option<&'static str>,
 }
 
 #[derive(Debug, Default)]
@@ -78,6 +91,9 @@ pub struct InferenceTable<'db> {
     /// a literal). The table owns them so that a rollback drops a discarded variable together
     /// with its entry: a stale record would default whichever variable reuses its id.
     literals: Vec<(InferenceVar, bool)>,
+    /// Owned by the table, like `literals`, so that a rollback drops the comparisons of the
+    /// discarded inference together with the variables they name.
+    pub comparisons: Vec<PendingComparison<'db>>,
     pub level: u32,
     /// `None` (no globals at all) reads as an empty table.
     pub definitions: Option<TypeDefinitions<'db>>,
@@ -188,6 +204,7 @@ impl<'db> InferenceTable<'db> {
         Snapshot {
             entries: self.entries.len(),
             undo: self.undo.len(),
+            comparisons: self.comparisons.len(),
         }
     }
 
@@ -199,6 +216,7 @@ impl<'db> InferenceTable<'db> {
             }
         }
         self.entries.truncate(snapshot.entries);
+        self.comparisons.truncate(snapshot.comparisons);
         // Ids grow with creation, so the discarded literals are the newest.
         while self
             .literals
@@ -755,7 +773,19 @@ impl<'db> InferenceTable<'db> {
                 if let (Some(left), Some(right)) = (&left.variadic, &right.variadic) {
                     self.unify(db, left.element, right.element)?;
                 }
-                self.unify(db, left.ret, right.ret)
+                self.unify(db, left.ret, right.ret)?;
+                // A ry value compares only with its own type, so a pair one function compares
+                // makes the other side of it that type.
+                for pair in left.compared.iter().chain(right.compared) {
+                    let compared_left = self.resolve(db, pair.left);
+                    let compared_right = self.resolve(db, pair.right);
+                    if (holds_ry_value(db, compared_left) || holds_ry_value(db, compared_right))
+                        && self.unify(db, compared_left, compared_right).is_err()
+                    {
+                        return Err(UnifyError::Mismatch(a, b));
+                    }
+                }
+                Ok(())
             }
             (
                 TyKind::Named(left_name, left_arguments),
@@ -2163,7 +2193,34 @@ impl<'db> InferenceTable<'db> {
                 return false;
             }
         }
-        self.compatible_probe(db, actual.ret, expected.ret, depth + 1)
+        if !self.compatible_probe(db, actual.ret, expected.ret, depth + 1) {
+            return false;
+        }
+        // The parameters are bound by now, so a pair the actual function compares is checked
+        // as a call would check it.
+        actual
+            .compared
+            .iter()
+            .all(|&pair| self.compared_pair_fits(db, pair, depth + 1))
+    }
+
+    /// Whether the two sides of a compared pair may meet as they resolve: a ry value on one
+    /// side needs its own type on the other.
+    pub fn compared_pair_fits(
+        &mut self,
+        db: &'db dyn Db,
+        pair: ComparedPair<'db>,
+        depth: usize,
+    ) -> bool {
+        let left = self.resolve(db, pair.left);
+        let right = self.resolve(db, pair.right);
+        if holds_ry_value(db, left) {
+            self.compatible_probe(db, right, left, depth)
+        } else if holds_ry_value(db, right) {
+            self.compatible_probe(db, left, right, depth)
+        } else {
+            true
+        }
     }
 
     /// Names the failing position: a parameter's constraint does not survive into
@@ -2197,6 +2254,18 @@ impl<'db> InferenceTable<'db> {
                 required_constraint: self.variable_constraint(db, required),
                 returns,
             });
+        }
+        for &pair in actual.compared {
+            if !self.compared_pair_fits(db, pair, 0) {
+                let left = self.resolve(db, pair.left);
+                let right = self.resolve(db, pair.right);
+                let (expected, found) = if holds_ry_value(db, left) {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
+                return Some(FunctionMismatch::Compared { expected, found });
+            }
         }
         None
     }
@@ -2360,6 +2429,9 @@ pub enum FunctionMismatch<'db> {
         /// The constraint the expected result type carries, such as `item` on `List.map`'s `B`.
         required_constraint: Option<Constraint>,
     },
+    /// The function compares two of its operands, and the expected interface gives one side a
+    /// ry value and the other a value of another type.
+    Compared { expected: Ty<'db>, found: Ty<'db> },
 }
 
 /// `path` names enclosing fields first and ends in the field the finding is about.

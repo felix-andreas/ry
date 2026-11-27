@@ -2851,8 +2851,10 @@ the same way, because a condition reads R's truth of a number, which a ry number
   call that passes one checks the other operand against it, as a parameter of that type would:
   two `Str`s give a `Bool`, `cmp(1i64, 2)` takes the literal as an `I64`, and `cmp(1i64, "s")` and
   `cmp(1i64, 2.5)` are type errors. The check follows the pair through a function that forwards
-  it (`function(p, q) cmp(p, q)`), although the signature does not show it. Two records are a
-  type error.
+  it (`function(p, q) cmp(p, q)`) or returns a function comparing it (`function(q) function(a) a <
+  q`), and through a function passed where a function type is declared, although the signature
+  does not show it. A literal default adapts as a passed literal does, so `function(a, lo = 0) a <
+  lo` takes an `I64`. Two records are a type error.
 
 A ry `List` meets a comparison's constraint through its items, as it compares item by item, and a
 ry nominal through its representation. A declared binder widens over R's types, so
@@ -2860,8 +2862,8 @@ ry nominal through its representation. A declared binder widens over R's types, 
 `complex` value passes `function(x) x == 0` but not `function(x) x > 0`, because R tests it for
 equality and has no order for it. Two gaps remain: the result of two different open operands
 follows the left one alone, so `cmp(1L, 1:3)` is a `logical` rather than a `logical[]`, and an
-`I64` beside an R `integer` vector (`cmp(1i64, 1:3)`) is a type error, although the runtime
-compares them.
+`I64` beside an R `integer` scalar (`cmp(1i64, x)` for `x: integer`) is a type error, although the
+runtime compares them.
 
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
 vector, so `f <- function(x) x + c(1L, 2L)` is `<T: arithmetic> fn(x: T) -> double[]` and accepts

@@ -699,7 +699,8 @@ pub struct FunctionType<'db> {
     /// Two operand types the body compares that stay separate variables, because R compares
     /// across its types (`function(x, lo) x < lo` takes a `Date` and a string). A ry value
     /// compares only with its own type, so a call where either side is one must make both
-    /// that type. Inferred only.
+    /// that type. Inferred only, and part of the type's identity, so two signatures that print
+    /// alike can differ in it.
     pub compared: &'db [ComparedPair<'db>],
     /// Built from a call on a value of unknown type, so its parameters are the arguments that
     /// call passed rather than formals: another call may pass a different set of names, which
@@ -1352,6 +1353,15 @@ pub fn is_ry_value_type(db: &dyn Db, ty: Ty<'_>) -> bool {
             !members.is_empty() && members.iter().all(|&member| is_ry_value_type(db, member))
         }
         _ => false,
+    }
+}
+
+/// A ry value, or a union with one among its members: a value that compares only with its
+/// own type (`I64 | NULL` beside a `character` is an error, as `m == "s"` is).
+pub fn holds_ry_value(db: &dyn Db, ty: Ty<'_>) -> bool {
+    match ty.kind(db) {
+        TyKind::Union(members) => members.iter().any(|&member| is_ry_value_type(db, member)),
+        _ => is_ry_value_type(db, ty),
     }
 }
 

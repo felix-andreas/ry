@@ -107,7 +107,12 @@ constraint bind the other (`(d + 30) > cutoff` refused a string `cutoff`). ry co
 only with its own type, so the body records the pair (`FunctionType::compared`, inferred only, not
 printed) and `check_compared_pairs` checks a call: a ry value on either side checks the other
 side's argument as a parameter of that type (a literal adapts, so `cmp(1i64, 2)` passes), and a pair
-the call leaves open passes to the caller's signature. An overload set or a third binder spelling
+the call leaves open passes to the caller's signature. The pending pairs live in the inference
+table, so a rollback drops them. A pair the body settles is checked at the item's end (at the
+comparison, after default literals settle); a pair with a var of an enclosing function moves to it,
+so curried functions and local closures carry it. The pair is part of the function type's identity:
+unifying two function types and passing a function value check both sides' pairs. A settled side
+from a default literal passes beside a ry number of its family. An overload set or a third binder spelling
 the relation was rejected as heavier than a side fact the annotation syntax need not express.
 
 A variable bound under a comparison constraint (`Widening::Compared`, `infer.rs`) widens over R's
@@ -115,7 +120,8 @@ types, numbers by promotion and others to the union, so a declared `<T: eq>` tak
 `Bool.is_eq(1L, "one")`; a ry value never widens. `==` and `!=` beside a literal ask `equatable or
 number` and `equatable or Str`, where `equatable` is `comparable` plus `complex` and `raw`, which R
 tests for equality but does not order. Pinned by
-`two_flexible_comparison_operands_stay_separate_types` and
+`two_flexible_comparison_operands_stay_separate_types`,
+`a_compared_pair_follows_the_operands_everywhere` and
 `an_open_value_tested_for_equality_admits_complex`.
 
 ## Union compatibility commits a flexible argument at first use, in program order
@@ -1171,4 +1177,4 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - `comparable` is the R half: an atomic type other than `complex` or `raw` in any shape, a list, or a class (R's `Ops` methods). A ry nominal unfolds to its body for the two comparison families, so `type Count = I64` compares with a number.
 - `Compared<T>` over a ry record, tuple, tag or nominal is `Bool`, and over a ry `List` `List<Bool>`, since a `List` compares item by item (`InferenceTable::family`); a `List` meets the comparison constraints through its item type.
 - `key` admits ry values, so it meets a comparison family as an R atomic scalar (`AtomicElement`), as it meets an arithmetic one; otherwise a key compared with a number would let a `Str` through.
-- Two different open operands, or one beside a string literal, ask nothing (`backlog.md`).
+- Two different open operands record a compared pair (the entry above); one beside a string literal asks `comparable or Str`.

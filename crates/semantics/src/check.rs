@@ -16,8 +16,8 @@ use {
             is_whole_number_double,
         },
         infer::{
-            Entry, FunctionMismatch, InferenceTable, RecordMismatch, Snapshot, UNCHECKED_WITNESS,
-            UnifyError, apply_definition, constraint_rejects, numeric_join,
+            Entry, FunctionMismatch, InferenceTable, PendingComparison, RecordMismatch, Snapshot,
+            UNCHECKED_WITNESS, UnifyError, apply_definition, constraint_rejects, numeric_join,
         },
         metadata::{
             imported_by_name, imports_every_name, is_own_package, own_package_reaches,
@@ -40,9 +40,9 @@ use {
             NumberLiteral, Parameter, QueryName, RecordField, ReduceForward, RestParameter,
             TYPE_SIZE_CEILING, Ty, TyKind, TypeList, TypeScheme, any, array, array_element,
             column_type, conflicting_tags, contains_inference_var, contains_rigid, erase_vars,
-            for_each_child_type, frame_with_row, is_bare_tags, is_ry_value_type, is_tag_type,
-            map_child_types, native_record, native_scalar, null, r_column_type, scalar,
-            substitute_rigid, type_size, union_of, unknown,
+            for_each_child_type, frame_with_row, holds_ry_value, is_bare_tags, is_ry_value_type,
+            is_tag_type, map_child_types, native_record, native_scalar, null, r_column_type,
+            scalar, substitute_rigid, type_size, union_of, unknown,
         },
     },
     bumpalo::{Bump, collections::Vec as BumpVec},
@@ -435,6 +435,14 @@ pub enum TypeErrorKind<'db> {
         left: Ty<'db>,
         right: Option<Ty<'db>>,
         r_side: Option<Ty<'db>>,
+    },
+    /// A function compares two operands that stay separate types, and a call gives one side a
+    /// ry value and the other a value of another type. `argument` says whether the finding
+    /// underlines the argument that passed `found` or the whole call.
+    ComparedOperands {
+        expected: Ty<'db>,
+        found: Ty<'db>,
+        argument: bool,
     },
     /// `/` on a ry integer type, which has no exact quotient.
     IntegerDivision {
@@ -1080,7 +1088,6 @@ fn check_item_in<'db>(
         value_defaulted_formals: Bitset::new_in(arena, bindings),
         missing_path_defaults: Bitset::new_in(arena, bindings),
         missing_path_values: Vec::new(),
-        compared_pairs: Vec::new(),
         non_local_slots: HashMap::with_hasher_in(FxBuildHasher, Arena(arena)),
         string_values: Column::new_in(arena, bindings),
         value_read_slots: None,
@@ -1246,6 +1253,7 @@ fn check_item_in<'db>(
         }
     }
     context.default_literal_vars();
+    context.settle_item_comparisons();
     let recorded = mem::take(&mut context.recorded.types);
     let i64_literals = recorded
         .iter()
@@ -2250,9 +2258,6 @@ struct Checker<'db, 'a> {
     /// The values written on those paths, which become the parameter's default type, so a
     /// call that omits the argument gets the written value as a default would give it.
     missing_path_values: Vec<(BindingId, Ty<'db>)>,
-    /// Pairs of different open operands compared in the function bodies being inferred, which
-    /// the innermost function's signature takes as [`FunctionType::compared`].
-    compared_pairs: Vec<ComparedPair<'db>>,
     /// Slots for names this item reads but another item binds, so guard refinements live
     /// in the environment like any slot's. Ids are minted above naming's so they never collide.
     non_local_slots: ArenaMap<'a, Symbol, BindingId>,
@@ -3682,6 +3687,19 @@ fn holds_ry_scalar(db: &dyn Db, ty: Ty<'_>) -> bool {
     }
 }
 
+/// Whether an R literal of `found`'s type would take the ry scalar `expected` where it is
+/// written: a number for a ry number, a string for a `Str` and a logical for a `Bool`.
+fn literal_family(db: &dyn Db, expected: Ty<'_>, found: Ty<'_>) -> bool {
+    match (expected.kind(db), found.kind(db)) {
+        (TyKind::Native(native), TyKind::Scalar(Atomic::Integer | Atomic::Double)) => {
+            native.is_number()
+        }
+        (TyKind::Native(NativeScalar::Str), TyKind::Scalar(Atomic::Character))
+        | (TyKind::Native(NativeScalar::Bool), TyKind::Scalar(Atomic::Logical)) => true,
+        _ => false,
+    }
+}
+
 /// The ry scalar a number suffix such as `i64` names.
 fn suffix_scalar(ty: NumberType) -> NativeScalar {
     match ty {
@@ -4951,7 +4969,7 @@ impl<'db, 'a> Checker<'db, 'a> {
                     false => self.callback_frame_level,
                 };
                 let pending_mark = self.pending_enclosing_writes.len();
-                let compared_mark = self.compared_pairs.len();
+                let compared_mark = self.table.comparisons.len();
                 let mark = self.environment.mark();
                 let uses = self.formal_uses(&module[parameters], *body);
                 let mut probed = FxHashSet::default();
@@ -12931,7 +12949,11 @@ impl<'db, 'a> Checker<'db, 'a> {
             (Some(left), Some(right)) => {
                 self.constrain_operand(lhs_range, left, itself);
                 self.constrain_operand(rhs_range, right, itself);
-                self.compared_pairs.push(ComparedPair { left, right });
+                self.table.comparisons.push(PendingComparison {
+                    pair: ComparedPair { left, right },
+                    range: lhs_range.cover(rhs_range),
+                    operator: operator_spelling(operator),
+                });
                 return self.table.family(self.db, FamilyResult::Comparison, left);
             }
             (Some(left), None) => {
@@ -14210,23 +14232,20 @@ impl<'db, 'a> Checker<'db, 'a> {
             .any_child(id, |child| self.writes_name(child, name))
     }
 
-    /// The parameters whose every read under `body` is the whole condition of an `if` or a
-    /// `while`, and which are read at least once. A nested function's reads count like any
-    /// other. One walk serves every parameter, since a walk per parameter is quadratic in
-    /// long signatures.
     /// The pairs a function literal's body compared since `mark`, as its signature keeps them:
-    /// those whose open sides the parameters or the result name. A pair whose variable belongs
-    /// to an enclosing function stays listed for that function too.
+    /// those whose open sides the parameters or the result name, beside variables of enclosing
+    /// functions. A pair with an enclosing function's variable stays pending for that function
+    /// too, and a pair whose two sides the body settled is checked here.
     fn function_compared_pairs(
         &mut self,
         mark: usize,
         parameters: &[Parameter<'db>],
         ret: Ty<'db>,
     ) -> Vec<ComparedPair<'db>> {
-        let pairs = self.compared_pairs.split_off(mark);
-        if pairs.is_empty() {
+        if mark >= self.table.comparisons.len() {
             return Vec::new();
         }
+        let pending = self.table.comparisons.split_off(mark);
         let mut signature_vars = FxHashSet::default();
         for parameter in parameters {
             self.table
@@ -14235,32 +14254,107 @@ impl<'db, 'a> Checker<'db, 'a> {
         self.table
             .collect_unbound_vars(self.db, ret, &mut signature_vars);
         let mut kept: Vec<ComparedPair<'db>> = Vec::new();
-        for pair in pairs {
-            let left = self.table.resolve(self.db, pair.left);
-            let right = self.table.resolve(self.db, pair.right);
+        for comparison in pending {
+            let left = self.table.resolve(self.db, comparison.pair.left);
+            let right = self.table.resolve(self.db, comparison.pair.right);
             let mut vars = FxHashSet::default();
             self.table.collect_unbound_vars(self.db, left, &mut vars);
             self.table.collect_unbound_vars(self.db, right, &mut vars);
-            if vars.is_empty() || left == right {
+            if vars.is_empty() {
+                self.settle_comparison(comparison, left, right);
                 continue;
             }
-            let escapes = vars.iter().any(|&var| {
-                matches!(*self.table.entry(var), Entry::Unbound { level, .. } if level < self.table.level)
-            });
-            if escapes {
-                self.compared_pairs.push(ComparedPair { left, right });
+            if left == right {
+                continue;
             }
-            let named = vars.iter().all(|var| signature_vars.contains(var));
+            let level = self.table.level;
+            let mut outer = 0;
+            let mut named = 0;
+            for &var in &vars {
+                if signature_vars.contains(&var) {
+                    named += 1;
+                } else if matches!(*self.table.entry(var), Entry::Unbound { level: var_level, .. } if var_level < level)
+                {
+                    outer += 1;
+                }
+            }
+            let pair = ComparedPair { left, right };
+            if outer > 0 {
+                self.table
+                    .comparisons
+                    .push(PendingComparison { pair, ..comparison });
+            }
             let seen = kept.iter().any(|kept| {
                 (kept.left, kept.right) == (left, right) || (kept.left, kept.right) == (right, left)
             });
-            if named && !seen {
-                kept.push(ComparedPair { left, right });
+            if named > 0 && named + outer == vars.len() && !seen {
+                kept.push(pair);
             }
         }
         kept
     }
 
+    /// Checks the comparisons left pending at the item's end whose two sides it settled.
+    fn settle_item_comparisons(&mut self) {
+        for comparison in mem::take(&mut self.table.comparisons) {
+            let left = self.table.resolve(self.db, comparison.pair.left);
+            let right = self.table.resolve(self.db, comparison.pair.right);
+            if !self.table.contains_unbound_var(self.db, left)
+                && !self.table.contains_unbound_var(self.db, right)
+            {
+                self.settle_comparison(comparison, left, right);
+            }
+        }
+    }
+
+    /// A comparison whose sides are settled: a ry value on one side needs its own type on
+    /// the other.
+    fn settle_comparison(
+        &mut self,
+        comparison: PendingComparison<'db>,
+        left: Ty<'db>,
+        right: Ty<'db>,
+    ) {
+        let left_ry = holds_ry_value(self.db, left);
+        let right_ry = holds_ry_value(self.db, right);
+        if (!left_ry && !right_ry)
+            || self.table.compatible(self.db, left, right)
+            || self.table.compatible(self.db, right, left)
+        {
+            return;
+        }
+        let kind = match comparison.operator {
+            Some(operator) => TypeErrorKind::NumberOperands {
+                operator,
+                left,
+                right: Some(right),
+                r_side: [left, right]
+                    .into_iter()
+                    .find(|&side| !holds_ry_value(self.db, side)),
+            },
+            None => {
+                let (expected, found) = if left_ry {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
+                TypeErrorKind::ComparedOperands {
+                    expected,
+                    found,
+                    argument: false,
+                }
+            }
+        };
+        self.errors.push(TypeError {
+            range: comparison.range,
+            kind,
+        });
+    }
+
+    /// The parameters whose every read under `body` is the whole condition of an `if` or a
+    /// `while`, and which are read at least once. A nested function's reads count like any
+    /// other. One walk serves every parameter, since a walk per parameter is quadratic in
+    /// long signatures.
     fn condition_only_names(&self, body: ExprId, parameters: &[Formal]) -> Vec<Symbol> {
         // Per parameter: read as a whole condition, and read some other way.
         let mut reads: Vec<(Symbol, bool, bool)> = parameters
@@ -20724,53 +20818,107 @@ impl<'db, 'a> Checker<'db, 'a> {
         for pair in function.compared {
             let left = self.table.resolve(self.db, pair.left);
             let right = self.table.resolve(self.db, pair.right);
-            let left_ry = is_ry_value_type(self.db, left);
-            let right_ry = is_ry_value_type(self.db, right);
+            let left_ry = holds_ry_value(self.db, left);
+            let right_ry = holds_ry_value(self.db, right);
             if !left_ry && !right_ry {
                 if self.table.contains_unbound_var(self.db, left)
                     || self.table.contains_unbound_var(self.db, right)
                 {
-                    self.compared_pairs.push(ComparedPair { left, right });
+                    self.table.comparisons.push(PendingComparison {
+                        pair: ComparedPair { left, right },
+                        range: callee_range,
+                        operator: None,
+                    });
                 }
                 continue;
             }
+            let (expected, found, found_side) = if right_ry && !left_ry {
+                (right, left, pair.left)
+            } else {
+                (left, right, pair.right)
+            };
             // The argument that passed the other side is checked against the ry value, as a
             // direct parameter of that type would check it, so a number literal adapts.
-            let (expected, found) = if right_ry && !left_ry {
-                (right, left)
-            } else {
-                (left, right)
-            };
-            let argument = arguments.iter().rev().find(|argument| {
-                argument
-                    .ty
-                    .is_some_and(|ty| self.table.resolve(self.db, ty) == found)
-            });
-            if let Some(argument) = argument
+            if let Some(argument) = self.compared_argument(function, arguments, found_side, found)
                 && let Some(ty) = argument.ty
             {
-                if let Err(error) = self.check_argument(
+                if let Err(mut error) = self.check_argument(
                     expected,
                     ty,
                     argument.range,
                     argument.whole_double,
                     argument.value,
                 ) {
+                    if let TypeErrorKind::Mismatch { expected, found } = error.kind {
+                        error.kind = TypeErrorKind::ComparedOperands {
+                            expected,
+                            found,
+                            argument: true,
+                        };
+                    }
                     findings.push(error);
                 }
                 continue;
             }
-            let snapshot = self.table.snapshot();
-            if self.table.unify(self.db, expected, found).is_ok() {
+            // No argument passed that side. An open side takes the ry value's type (a curried
+            // `function(a) function(b) a < b` given an `I64`), and a settled one came from a
+            // parameter's default, whose literal adapts as a passed literal would.
+            if self.table.contains_unbound_var(self.db, found) {
+                let snapshot = self.table.snapshot();
+                if self.table.unify(self.db, expected, found).is_ok() {
+                    continue;
+                }
+                self.table.rollback(snapshot);
+            } else if self.table.compatible(self.db, found, expected)
+                || literal_family(self.db, expected, found)
+            {
                 continue;
             }
-            self.table.rollback(snapshot);
             findings.push(TypeError {
                 range: callee_range,
-                kind: TypeErrorKind::Mismatch { expected, found },
+                kind: TypeErrorKind::ComparedOperands {
+                    expected,
+                    found,
+                    argument: false,
+                },
             });
         }
         findings
+    }
+
+    /// The argument the parameter typed `side` took, or, where no parameter is typed by the
+    /// side itself, the last argument whose type is `found`.
+    fn compared_argument<'arguments>(
+        &mut self,
+        function: &FunctionType<'db>,
+        arguments: &'arguments [CallArgument<'db>],
+        side: Ty<'db>,
+        found: Ty<'db>,
+    ) -> Option<&'arguments CallArgument<'db>> {
+        let arena = self.arena;
+        let targets = argument_targets(self.db, arena, function, argument_shapes(arena, arguments));
+        let by_parameter = targets
+            .iter()
+            .zip(arguments)
+            .find_map(|(target, argument)| {
+                let parameter = match target {
+                    Some(ArgumentTarget::Positional(index)) => {
+                        function.positional.get(*index).copied()
+                    }
+                    Some(ArgumentTarget::Named(index)) => {
+                        function.named.get(*index).map(|parameter| parameter.ty)
+                    }
+                    _ => None,
+                };
+                (parameter == Some(side)).then_some(argument)
+            });
+        by_parameter.or_else(|| {
+            arguments.iter().rev().find(|argument| {
+                argument
+                    .ty
+                    .is_some_and(|ty| self.table.resolve(self.db, ty) == found)
+            })
+        })
     }
 
     fn match_argument_targets(
@@ -21786,6 +21934,10 @@ impl<'db, 'a> Checker<'db, 'a> {
             open_positionals.is_empty()
                 && open_named.iter().all(|field| field.optional)
                 && self.table.compatible(self.db, actual_callback.ret, ret)
+                && actual_callback
+                    .compared
+                    .iter()
+                    .all(|&pair| self.table.compared_pair_fits(self.db, pair, 0))
         }
     }
 
