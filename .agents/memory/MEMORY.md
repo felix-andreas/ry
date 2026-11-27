@@ -28,6 +28,7 @@ Most important first. Each line names the open item, and the detail is at its po
 **Runtime correctness and compatibility**
 
 - Failures main already has: "Open: broken on main".
+- Open bug: `install.packages` of several packages, or of one with missing dependencies, downloads them and installs nothing without an error ("Open: the runtime").
 - Memory safety: interpreter code moves onto handle types that make holding an unrooted value across an allocation a compile error (`development/design/memory-safety.md`). Tier 0's stores, the attribute setters, name matching and the subset forms are on them, and the order of the rest is in "Open: the handle migration".
 - Open bug: with `RY_JIT=stress`, compiled code misses a write that an argument promise makes to its caller's variable, so `crates/oracle/cases/environments__code_argument_references.R` fails in that mode ("Open: the JIT").
 - Runtime gaps, among them annotations at run time, graphics ("Graphics gaps"), the corpus packages' own tests ("Corpus package tests: what still fails"), the top CRAN packages' tests ("Top CRAN packages: what still fails") and GNU R's regression tests: "Open: the runtime".

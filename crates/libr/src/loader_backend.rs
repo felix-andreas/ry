@@ -347,18 +347,23 @@ pub fn set_check(
 }
 
 /// The host's [`ElaborateSource`] as interp's `SourceElaborator`. A file whose parse holds no
-/// ry syntax runs as R reads it without asking the host, so plain R code pays a scan of its
-/// tree's kinds and tokens and reads no configuration. The elaborated text is taken only when the host elaborated
-/// the text the parse reads, so a file that changed on disk after R read it parses as R read it.
+/// ry syntax runs as R reads it without asking the host, so plain R code pays one walk of its
+/// tree and touches no file. The elaborated text is taken only when the host elaborated the text
+/// the parse reads, so a file that changed on disk after R read it parses as R read it.
 fn elaborated_source(name: &str, text: &str, root: &SyntaxNode) -> Result<Option<String>, ()> {
     let Some(elaborate) = ELABORATE_SOURCE.get() else {
         return Ok(None);
     };
-    if !semantics::has_ry_syntax(root, text) {
+    if !semantics::has_ry_syntax(root) {
         return Ok(None);
     }
-    // A name with a NUL byte names no file the host could read.
-    let Ok(name) = CString::new(name) else {
+    // A connection's description, such as a URL, names no file the host could read, and
+    // neither does a name with a NUL byte.
+    let path = interp::connections::expand_path(name);
+    if !std::path::Path::new(&path).is_file() {
+        return Ok(None);
+    }
+    let Ok(name) = CString::new(path) else {
         return Ok(None);
     };
     let mut program: Option<(u64, String)> = None;

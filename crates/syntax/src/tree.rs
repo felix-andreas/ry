@@ -1580,6 +1580,20 @@ impl<'a> NodeRef<'a> {
             .is_some_and(|kinds| kinds.iter().any(|&kind| wanted(kind)))
     }
 
+    /// Whether `wanted` accepts any element under this node, this one included, in one pass
+    /// over the kind column, like [`NodeRef::any_kind`]. A token comes with its cursor, so
+    /// `wanted` reads the text only of the kinds it asks about.
+    pub fn any_element(self, wanted: impl Fn(SyntaxKind, Option<TokenRef<'a>>) -> bool) -> bool {
+        let tree = self.tree;
+        let start = tree.column(self.index);
+        let end = tree.column(tree.end(self.index));
+        tree.columns.kinds.get(start..end).is_some_and(|kinds| {
+            (self.index..).zip(kinds).any(|(index, &kind)| {
+                wanted(kind, (!kind.is_node()).then(|| token_ref(tree, index)))
+            })
+        })
+    }
+
     /// The first node in preorder under this one, this one included, with `kind` and exactly
     /// `range`. Starts never decrease in preorder, so every element starting where `range`
     /// starts sits in one run that a binary search finds.

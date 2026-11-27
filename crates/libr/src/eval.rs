@@ -239,8 +239,9 @@ impl Evaluator for Interpreter {
             .into_iter()
             .map(|line| line.unwrap_or_else(|| "NA".into()))
             .collect();
-        let Ok(expressions) =
-            interp::lower::parse_with_srcfile(&lines.join("\n"), "<text>", srcfile)
+        let text = lines.join("\n");
+        let Ok(expressions) = interp::lower::parse_script(&text, "<text>", srcfile)
+            .and_then(|script| interp::lower::lower_script(&script, srcfile))
         else {
             return Ok(ParseOutcome {
                 expressions: runtime().nil(),

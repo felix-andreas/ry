@@ -143,7 +143,7 @@ impl Preflight {
     pub fn check_elaborations(&mut self, input: &str) -> Option<Vec<Elaboration>> {
         self.last = None;
         if !self.analyzed {
-            if !has_ry_syntax(&syntax::parse(input).syntax_node(), input) {
+            if !has_ry_syntax(&syntax::parse(input).syntax_node()) {
                 self.last = Some(Last::Plain {
                     start: self.plain.len(),
                 });
@@ -438,7 +438,7 @@ pub fn elaborate_package(
         // A file that is not text in the package's encoding is the analysis's to report.
         typed = encoding.decode(bytes).is_none_or(|source| {
             source.contains("typing: strict")
-                || has_ry_syntax(&syntax::parse(&source).syntax_node(), &source)
+                || has_ry_syntax(&syntax::parse(&source).syntax_node())
         });
     }
     if !typed {

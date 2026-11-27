@@ -820,30 +820,30 @@ pub fn comment_annotation<'db>(
     annotations.get(index).map(|(_, annotation)| annotation)
 }
 
-/// Whether `source`, parsed as `root`, holds anything analysis decides: an inline or comment
-/// annotation, a `# typing:` directive, a record, tuple, list, tag or `match`, a suffixed number,
-/// or a native function call such as `List.range(1, 10)`. Missing one of these leaves an `I64`
+/// Whether the parse `root` holds anything analysis decides: an inline or comment annotation,
+/// a `# typing:` directive, a record, tuple, list, tag or `match`, a suffixed number, or a
+/// native function call such as `List.range(1, 10)`. Missing one of these leaves an `I64`
 /// literal an R double at run time, so the test errs toward analysis. It reads the tree's kind
-/// column and its tokens once and builds nothing, so a host runs it on every file R parses.
-pub fn has_ry_syntax(root: &SyntaxNode, source: &str) -> bool {
-    let root = root.node_ref();
-    source.contains("#:")
-        || root.any_kind(|kind| {
-            is_ry_syntax(kind)
-                || kind == SyntaxKind::SUFFIXED_NUMBER
-                // The kind column has no parents, so a binder list counts wherever it sits:
-                // outside a function's it is in a type definition or a `#:` comment anyway.
-                || syntax::is_inline_annotation_kind(kind, Some(SyntaxKind::FUNCTION_DEF))
-        })
-        || root.tokens().any(|token| match token.kind() {
-            SyntaxKind::COMMENT => token
+/// column once, and the text only of comments and names, so a host runs it on every file R
+/// parses.
+pub fn has_ry_syntax(root: &SyntaxNode) -> bool {
+    root.node_ref().any_element(|kind, token| match kind {
+        SyntaxKind::ANNOTATION_MARKER | SyntaxKind::SUFFIXED_NUMBER => true,
+        SyntaxKind::COMMENT => token.is_some_and(|token| {
+            token
                 .text()
                 .trim_start_matches('#')
                 .trim_start()
-                .starts_with("typing:"),
-            SyntaxKind::IDENT => stubs::is_native_function(token.text()),
-            _ => false,
-        })
+                .starts_with("typing:")
+        }),
+        SyntaxKind::IDENT => token.is_some_and(|token| stubs::is_native_function(token.text())),
+        // The kind column has no parents, so a binder list counts wherever it sits: outside a
+        // function's it is in a type definition or a `#:` comment anyway.
+        _ => {
+            is_ry_syntax(kind)
+                || syntax::is_inline_annotation_kind(kind, Some(SyntaxKind::FUNCTION_DEF))
+        }
+    })
 }
 
 /// Whether a node of `kind` builds a ry value: a record, tuple, list, tag or `match`.
@@ -4785,6 +4785,25 @@ fn set_generic_target(node: &SyntaxNode) -> Option<(String, TextRange)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ry_syntax_gate_reads_kinds_comments_and_names() {
+        let cases = [
+            ("f <- function(x) x + 1\nprint(f(2)) # done\n", false),
+            ("x <- \"#: in a string\"\n", false),
+            ("x <- 1L\n", false),
+            ("#: (x: double) -> double\nf <- function(x) x\n", true),
+            ("# typing: strict\nf <- function(x) x\n", true),
+            ("f <- function(x: double) -> double x\n", true),
+            ("n <- 3i64\n", true),
+            ("p <- (x = 1, y = 2)\n", true),
+            ("for (i in List.range(1, 3)) print(i)\n", true),
+        ];
+        for (text, expected) in cases {
+            let root = syntax::parse(text).syntax_node();
+            assert_eq!(has_ry_syntax(&root), expected, "{text:?}");
+        }
+    }
 
     #[test]
     fn refusal_is_idempotent() {

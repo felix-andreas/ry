@@ -2698,6 +2698,13 @@ The end-to-end guard rests on the corpus suites.
 
 What steps 2 to 4 of `development/design/r-runtime.md` left for later, most pressing first.
 
+- **`install.packages` with more than one package installs nothing and reports no error.** On
+  ry's runtime, `install.packages(c("praise", "R6"), lib = "lib", verbose = TRUE, repos =
+  "https://cloud.r-project.org")` prints only `system (cmd0): <ry home>/bin/R CMD INSTALL` and
+  the two `trying URL` lines, then `list.files("lib")` is `character(0)` and the script exits 0.
+  `install.packages("praise", ...)` alone installs and prints `* DONE (praise)`, and so does a
+  loop that installs one package per call. A package whose dependencies are missing goes the
+  same way, since its dependencies join the list.
 - **stringi was last seen to segfault on load in the cloud containers, even with `RY_JIT=off`** (unverified), which stops the `strings` benchmark and stringr there. Reproduce with `library(stringi)` under `ry run` before relying on either.
 - **Audit `libr` entry points for arguments C code passes as `NULL`.** `R_getVarEx`'s default
   was the one found (`decisions/libr-rcmd.md`, "A C API argument that may be a C `NULL` is typed
