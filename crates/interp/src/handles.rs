@@ -4360,6 +4360,29 @@ pub fn build_slot_defaults(context: &mut Cx<'_>, function: Local<'_, Closure>) -
     unsafe { bytecode::slot_defaults(function.raw()).map(drop) }
 }
 
+/// The slot names of `function`'s compiled body, the formals first, and how many registers its
+/// code uses after them, when the body is compiled with a slot table. A call reads this on every
+/// bind, so it trusts the constant pool's layout instead of checking each entry.
+#[inline]
+pub fn slot_layout<'a>(function: Gc<'a, Closure>) -> Option<(&'a [Gc<'a>], usize)> {
+    let code = function.body().downcast::<Bytecode>()?;
+    // SAFETY: only the compiler and the code image's reader, which restores what the compiler
+    // wrote, make a `BCODESXP` (GNU R's byte code loads as its source). Both lay the constant
+    // pool out as `bytecode` says: a list whose `SLOTS` entry is `NULL` or a list with the slot
+    // names at entry 1, and whose `REGISTERS` entry is a one-element integer vector. The
+    // closure holds its body for `'a`.
+    unsafe {
+        let constants = code.raw().cdr();
+        let table = constants.element(bytecode::SLOTS);
+        if table == values::nil() {
+            return None;
+        }
+        let names = Gc::<'a, List>::adopt(table.element(1)).elements();
+        let registers = *values::ints(constants.element(bytecode::REGISTERS)).first()?;
+        Some((names, registers as usize))
+    }
+}
+
 /// The slot table of `function`'s compiled body (`bytecode::SLOTS`), or `None` when the body
 /// is not compiled or is compiled without one. Entry 1 is the slot names, the formals first.
 #[inline]

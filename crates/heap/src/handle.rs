@@ -814,12 +814,6 @@ impl<T: Kind> Held<T> {
         }
     }
 
-    /// Holds `value` instead, which is live now and stays so because the structure is marked.
-    #[inline]
-    pub fn set(&mut self, value: impl Pointer<T>) {
-        self.raw = value.raw();
-    }
-
     #[inline]
     pub fn raw(&self) -> Sexp {
         self.raw

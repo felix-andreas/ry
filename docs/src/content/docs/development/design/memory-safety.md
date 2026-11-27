@@ -607,8 +607,9 @@ outward assignment of `<<-`), which return `None` for an unbound name instead of
 function contexts, the srcref and the closure maker through wrappers in `handles.rs` (`in_loop` and
 `loop_jump` hold a loop's environment, `Args::register_on_exit` stores into the frame), because the
 bytecode loop and the JIT share those raw helpers. An interpreter frame holds its call, function,
-environment, `sys.parent`, pending promise, srcref and `on.exit` code in `Held<T>` fields, so
-writing one takes `unsafe` (`Held::adopt`) and reading one as a handle takes the context. The
+environment, `sys.parent`, pending environment, srcref and `on.exit` code in `Held<T>` fields, so
+writing one takes `unsafe` (`Held::adopt`) and reading one as a `Gc` (`Held::get`) borrows the
+context. The
 bytecode loop's register accessor is not built. Two narrow forms of that
 accessor reach a frame's slots. The replacement forms use `RunningFrame` and `Slot` in
 `bytecode.rs`: a slot read is a `Gc` that borrows the context, a store takes a rooted value, and an

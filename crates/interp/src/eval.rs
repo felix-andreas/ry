@@ -93,24 +93,28 @@ pub unsafe fn eval_symbol_reporting(
     lexical: impl FnOnce() -> Sexp,
     reader: ArgumentReader,
 ) -> R<Sexp> {
-    handles::in_caller_scope(|cx| {
+    handles::in_caller_scope(|context| {
         let (symbol, env) = (Local::adopt(symbol), Local::adopt(env));
-        Ok(
-            symbol_value_reporting(cx, symbol, env, |cx| handles::held(cx, lexical()), reader)?
-                .raw(),
-        )
+        Ok(symbol_value_reporting(
+            context,
+            symbol,
+            env,
+            |context| handles::held(context, lexical()),
+            reader,
+        )?
+        .raw())
     })
 }
 
 /// The value of the name `symbol` in `environment`, as evaluating the name gives it: its
 /// promise forced and an active binding called.
 pub fn symbol_value<'s>(
-    cx: &mut Cx<'s>,
+    context: &mut Cx<'s>,
     symbol: Local<'s, Symbol>,
     environment: Local<'s, Environment>,
 ) -> R<Local<'s>> {
-    let lexical = |cx: &Cx<'s>| handles::lexical_call(cx, environment);
-    symbol_value_reporting(cx, symbol, environment, lexical, ArgumentReader::Eval)
+    let lexical = |context: &Cx<'s>| handles::lexical_call(context, environment);
+    symbol_value_reporting(context, symbol, environment, lexical, ArgumentReader::Eval)
 }
 
 /// [`symbol_value`] for a lookup that starts in `environment` on behalf of a frame that is not
@@ -120,43 +124,43 @@ pub fn symbol_value<'s>(
 /// evaluator or compiled code reads the name, which GNU R tells apart in the class of the error
 /// for a missing argument.
 pub fn symbol_value_reporting<'s>(
-    cx: &mut Cx<'s>,
+    context: &mut Cx<'s>,
     symbol: Local<'s, Symbol>,
     environment: Local<'s, Environment>,
     lexical: impl FnOnce(&Cx<'s>) -> Local<'s>,
     reader: ArgumentReader,
 ) -> R<Local<'s>> {
-    let name = symbol.read(cx).name().bytes();
+    let name = symbol.read(context).name().bytes();
     if symbol.is(handles::symbol(|symbols| symbols.dots)) {
         return Err(error("'...' used in an incorrect context"));
     }
     if let Some(index) = dot_dot_position(name) {
-        return dot_dot_value(cx, index, environment, lexical, reader);
+        return dot_dot_value(context, index, environment, lexical, reader);
     }
     // The empty symbol is `R_MissingArg`, which GNU R's base frame binds to itself, so
     // evaluating it is a missing argument without a name where the lookup reaches base, and
     // an unbound object below an environment that does not (rlang's empty quosure).
     let value = if symbol.is(handles::missing_argument()) {
-        if reaches_base(environment.read(cx)) {
-            return Err(missing_argument(lexical(cx).raw(), "", reader));
+        if reaches_base(environment.read(context)) {
+            return Err(missing_argument(lexical(context).raw(), "", reader));
         }
         None
     } else {
-        found_value(cx, symbol, environment, true)?
+        found_value(context, symbol, environment, true)?
     };
     let Some(value) = value else {
-        let name = handles::text(symbol.read(cx).name()).into_owned();
+        let name = handles::text(symbol.read(context).name()).into_owned();
         return Err(handles::error_in(
-            lexical(cx),
+            lexical(context),
             format!("object '{name}' not found"),
         ));
     };
     if handles::is_missing_argument(value) {
-        let name = handles::text(symbol.read(cx).name()).into_owned();
-        return Err(missing_argument(lexical(cx).raw(), &name, reader));
+        let name = handles::text(symbol.read(context).name()).into_owned();
+        return Err(missing_argument(lexical(context).raw(), &name, reader));
     }
     match value.downcast::<Promise>() {
-        Some(promise) => handles::force(cx, promise.value()),
+        Some(promise) => handles::force(context, promise.value()),
         None => Ok(value),
     }
 }
@@ -195,7 +199,7 @@ pub fn dot_dot_position(name: &[u8]) -> Option<usize> {
 
 /// The value of `..index` in `environment`: the `index`th element of `...`, forced.
 fn dot_dot_value<'s>(
-    cx: &mut Cx<'s>,
+    context: &mut Cx<'s>,
     index: usize,
     environment: Local<'s, Environment>,
     lexical: impl FnOnce(&Cx<'s>) -> Local<'s>,
@@ -205,24 +209,24 @@ fn dot_dot_value<'s>(
         return Err(error("indexing '...' with non-positive index 0"));
     }
     let dots_symbol = handles::permanent_symbol(|symbols| symbols.dots);
-    let Some(dots) = found_value(cx, dots_symbol, environment, false)? else {
+    let Some(dots) = found_value(context, dots_symbol, environment, false)? else {
         return Err(error(format!(
             "..{index} used in an incorrect context, no ... to look in"
         )));
     };
-    let mut cell = dots.read(cx);
+    let mut cell = dots.read(context);
     let mut position = 1;
     while let Some((value, _, rest)) = handles::cell_fields(cell) {
         if position == index {
             if handles::is_missing_argument(value) {
                 return Err(missing_argument(
-                    lexical(cx).raw(),
+                    lexical(context).raw(),
                     &format!("..{index}"),
                     reader,
                 ));
             }
-            let value = cx.root(value);
-            return handles::force(cx, value);
+            let value = context.root(value);
+            return handles::force(context, value);
         }
         position += 1;
         cell = rest;
@@ -246,14 +250,14 @@ pub enum Found<'a> {
 
 /// The binding cell for `symbol` from `env` outward.
 pub unsafe fn find_cell(symbol: Sexp, env: Sexp) -> Option<Sexp> {
-    handles::reading(|cx| {
-        visible_binding(cx, Gc::adopt(symbol), Gc::adopt(env)).map(|binding| binding.raw())
+    handles::reading(|context| {
+        visible_binding(context, Gc::adopt(symbol), Gc::adopt(env)).map(|binding| binding.raw())
     })
 }
 
 /// The binding `symbol` reads from `environment` outward.
 pub fn visible_binding<'a>(
-    cx: &'a Cx<'_>,
+    context: &'a Cx<'_>,
     symbol: Gc<'_, Symbol>,
     environment: Gc<'_, Environment>,
 ) -> Option<Gc<'a, Binding>> {
@@ -261,9 +265,9 @@ pub fn visible_binding<'a>(
     let mut scope = Some(environment);
     while let Some(environment) = scope.filter(|scope| !scope.is(empty)) {
         if environment.is(global) {
-            return handles::global_binding(cx, symbol);
+            return handles::global_binding(context, symbol);
         }
-        if let Some(binding) = handles::frame_binding(cx, environment, symbol) {
+        if let Some(binding) = handles::frame_binding(context, environment, symbol) {
             return Some(binding);
         }
         scope = environment.enclosure();
@@ -275,14 +279,14 @@ pub fn visible_binding<'a>(
 /// whose frame holds it. Unlike [`visible_binding`], the walk reads the global environment's own
 /// frame and goes on through the search path.
 pub fn enclosing_binding<'a>(
-    cx: &'a Cx<'_>,
+    context: &'a Cx<'_>,
     symbol: Gc<'_, Symbol>,
     enclosure: Gc<'a, Environment>,
 ) -> Option<(Gc<'a, Environment>, Gc<'a, Binding>)> {
     let empty = handles::empty_environment();
     let mut scope = Some(enclosure);
     while let Some(environment) = scope.filter(|scope| !scope.is(empty)) {
-        if let Some(binding) = handles::frame_binding(cx, environment, symbol) {
+        if let Some(binding) = handles::frame_binding(context, environment, symbol) {
             return Some((environment, binding));
         }
         scope = environment.enclosure();
@@ -293,17 +297,20 @@ pub fn enclosing_binding<'a>(
 /// What a binding gives a lookup.
 fn binding_found(binding: Gc<'_, Binding>) -> Found<'_> {
     if binding.is_active() {
-        Found::Active(binding)
-    } else {
-        Found::Value(binding.content())
+        return Found::Active(binding);
+    }
+    // C code can store `R_UnboundValue` in a binding (`Rf_defineVar`), which binds nothing.
+    match binding.content() {
+        content if handles::is_unbound(content) => Found::Unbound,
+        content => Found::Value(content),
     }
 }
 
 /// The value of a binding cell, calling an active binding's function.
 pub unsafe fn cell_value(cell: Sexp) -> R<Sexp> {
-    handles::in_caller_scope(|cx| {
-        let found = bound(cx, binding_found(Gc::adopt(cell)));
-        Ok(resolve(cx, found)?.map_or_else(unbound, Local::raw))
+    handles::in_caller_scope(|context| {
+        let found = bound(context, binding_found(Gc::adopt(cell)));
+        Ok(resolve(context, found)?.map_or_else(unbound, Local::raw))
     })
 }
 
@@ -315,24 +322,24 @@ enum Bound<'s> {
     Active(Local<'s>),
 }
 
-fn bound<'s>(cx: &Cx<'s>, found: Found<'_>) -> Bound<'s> {
+fn bound<'s>(context: &Cx<'s>, found: Found<'_>) -> Bound<'s> {
     match found {
         Found::Unbound => Bound::Unbound,
-        Found::Value(value) => Bound::Value(cx.root(value)),
-        Found::Active(binding) => Bound::Active(cx.root(binding.content())),
+        Found::Value(value) => Bound::Value(context.root(value)),
+        Found::Active(binding) => Bound::Active(context.root(binding.content())),
     }
 }
 
 /// What `found` stands for as a value: a binding's content, or what an active binding's
 /// function returns. `None` for an unbound name.
-fn resolve<'s>(cx: &mut Cx<'s>, found: Bound<'s>) -> R<Option<Local<'s>>> {
+fn resolve<'s>(context: &mut Cx<'s>, found: Bound<'s>) -> R<Option<Local<'s>>> {
     match found {
         Bound::Unbound => Ok(None),
         Bound::Value(value) => Ok(Some(value)),
         Bound::Active(function) => {
             interp().active_binding_reads += 1;
             let value = handles::apply(
-                cx,
+                context,
                 handles::null(),
                 function,
                 &[],
@@ -361,45 +368,50 @@ pub(crate) unsafe fn lexical_call(env: Sexp) -> Sexp {
 /// `findVar`: the value bound to `symbol` from `env` outward, or `R_UnboundValue`. Promises are
 /// returned unforced.
 pub unsafe fn find_var(symbol: Sexp, env: Sexp) -> R<Sexp> {
-    handles::in_caller_scope(|cx| {
-        let found = match find_variable(cx, Gc::adopt(symbol), Gc::adopt(env), false) {
+    handles::in_caller_scope(|context| {
+        let found = match find_variable(context, Gc::adopt(symbol), Gc::adopt(env), false) {
             Found::Value(value) => return Ok(value.raw()),
-            found => bound(cx, found),
+            found => bound(context, found),
         };
-        Ok(resolve(cx, found)?.map_or_else(unbound, Local::raw))
+        Ok(resolve(context, found)?.map_or_else(unbound, Local::raw))
     })
 }
 
 /// The value bound to `symbol` from `environment` outward, `None` when nothing binds it.
 /// A promise comes back unforced, though an active binding is called.
 pub fn variable<'s>(
-    cx: &mut Cx<'s>,
+    context: &mut Cx<'s>,
     symbol: Local<'_, Symbol>,
     environment: Local<'_, Environment>,
 ) -> R<Option<Local<'s>>> {
-    found_value(cx, symbol, environment, false)
+    found_value(context, symbol, environment, false)
 }
 
 /// [`variable`], where `forcing` says the caller forces a promise it gets at once and keeps
 /// only the value ([`find_variable`]).
 fn found_value<'s>(
-    cx: &mut Cx<'s>,
+    context: &mut Cx<'s>,
     symbol: Local<'_, Symbol>,
     environment: Local<'_, Environment>,
     forcing: bool,
 ) -> R<Option<Local<'s>>> {
     let found = bound(
-        cx,
-        find_variable(cx, symbol.read(cx), environment.read(cx), forcing),
+        context,
+        find_variable(
+            context,
+            symbol.read(context),
+            environment.read(context),
+            forcing,
+        ),
     );
-    resolve(cx, found)
+    resolve(context, found)
 }
 
 /// `findVar`, reading a slot frame's variable from its slot where it sits ([`slot_binding`])
 /// instead of moving it into a cell. `forcing` says the caller forces a promise it gets at once
 /// and keeps only the value, which is what lets it see an argument reference.
 pub fn find_variable<'a>(
-    cx: &'a Cx<'_>,
+    context: &'a Cx<'_>,
     symbol: Gc<'_, Symbol>,
     environment: Gc<'_, Environment>,
     forcing: bool,
@@ -409,17 +421,17 @@ pub fn find_variable<'a>(
     let mut scope = environment;
     while !scope.is(empty) {
         if scope.is(global) {
-            if let Some(binding) = handles::global_binding(cx, symbol) {
+            if let Some(binding) = handles::global_binding(context, symbol) {
                 return binding_found(binding);
             }
             break;
         }
         if scope.has_flag(gp::SLOT_FRAME)
-            && let Some(value) = handles::slot_variable(cx, scope, symbol, forcing)
+            && let Some(value) = handles::slot_variable(context, scope, symbol, forcing)
         {
             return Found::Value(value);
         }
-        if let Some(binding) = handles::frame_binding(cx, scope, symbol) {
+        if let Some(binding) = handles::frame_binding(context, scope, symbol) {
             return binding_found(binding);
         }
         let Some(enclosure) = scope.enclosure() else {
@@ -428,7 +440,7 @@ pub fn find_variable<'a>(
         scope = enclosure;
     }
     if symbol.is(handles::symbol(|symbols| symbols.tmp))
-        && let Some(value) = handles::tmp_variable(cx, scope)
+        && let Some(value) = handles::tmp_variable(context, scope)
     {
         return Found::Value(value);
     }
@@ -496,37 +508,38 @@ pub(crate) unsafe fn tmp_value(env: Sexp) -> Sexp {
 
 /// The value bound to `symbol` in `env`'s own frame, or `R_UnboundValue`.
 pub unsafe fn find_var_in_frame(symbol: Sexp, env: Sexp) -> R<Sexp> {
-    handles::in_caller_scope(|cx| {
+    handles::in_caller_scope(|context| {
         let environment = Gc::<Environment>::adopt(env);
-        let found = match handles::frame_binding(cx, environment, Gc::<Symbol>::adopt(symbol)) {
+        let found = match handles::frame_binding(context, environment, Gc::<Symbol>::adopt(symbol))
+        {
             Some(binding) => binding_found(binding),
             None => Found::Unbound,
         };
         let found = match found {
             Found::Value(value) => return Ok(value.raw()),
-            found => bound(cx, found),
+            found => bound(context, found),
         };
-        Ok(resolve(cx, found)?.map_or_else(unbound, Local::raw))
+        Ok(resolve(context, found)?.map_or_else(unbound, Local::raw))
     })
 }
 
 /// The value `symbol` has in the frame of `environment` itself, its promise forced, or `None`
 /// when the frame does not bind it: `e[["name"]]`, `e$name` and `get(inherits = FALSE)`.
 pub fn frame_value<'s>(
-    cx: &mut Cx<'s>,
+    context: &mut Cx<'s>,
     environment: Local<'_, Environment>,
     symbol: impl Pointer<Symbol>,
 ) -> R<Option<Local<'s>>> {
-    handles::reaching_environment(cx)?;
-    let found = match handles::frame_binding(cx, environment, symbol) {
-        Some(binding) => bound(cx, binding_found(binding)),
+    handles::reaching_environment(context)?;
+    let found = match handles::frame_binding(context, environment, symbol) {
+        Some(binding) => bound(context, binding_found(binding)),
         None => Bound::Unbound,
     };
-    let Some(value) = resolve(cx, found)? else {
+    let Some(value) = resolve(context, found)? else {
         return Ok(None);
     };
     // A promise roots itself while its code runs, and it holds its value afterwards.
-    handles::force(cx, value).map(Some)
+    handles::force(context, value).map(Some)
 }
 
 /// `findFun`: the first function bound to `symbol` from `env` outward.
@@ -537,76 +550,53 @@ pub unsafe fn find_fun(symbol: Sexp, env: Sexp) -> R<Sexp> {
 /// `findFun3`: [`find_fun`] for the head of `call`, which a missing function's error names, as
 /// in GNU R.
 pub unsafe fn find_called_fun(symbol: Sexp, env: Sexp, call: Sexp) -> R<Sexp> {
-    handles::in_caller_scope(|cx| {
+    handles::in_caller_scope(|context| {
         let (symbol, env) = (Local::adopt(symbol), Local::adopt(env));
-        let call = (call != unbound()).then(|| handles::held(cx, call));
-        Ok(function_value(cx, symbol, env, call)?.raw())
+        let call = (call != unbound()).then(|| handles::held(context, call));
+        Ok(function_value(context, symbol, env, call)?.raw())
     })
 }
 
 /// The first function bound to `symbol` from `environment` outward, forcing the promises on
 /// the way. `call` is the call whose head `symbol` is, which a missing function's error names.
 pub fn function_value<'s>(
-    cx: &mut Cx<'s>,
+    context: &mut Cx<'s>,
     symbol: Local<'s, Symbol>,
     environment: Local<'s, Environment>,
     call: Option<Local<'s>>,
 ) -> R<Local<'s>> {
     let call = call.map_or_else(unbound, Local::raw);
     let _activity = activity::enter(Activity::Lookup, 0);
-    let global = handles::global_environment();
-    let empty = handles::empty_environment();
-    let mut scope = environment;
-    while !scope.is(empty) {
-        let binding = if scope.is(global) {
-            // The first binding on the search path usually is the function; only when it is
-            // not does the walk go on frame by frame, to skip it as GNU R does.
-            if let Some(binding) = handles::global_binding(cx, symbol)
-                && !binding.is_active()
-            {
-                let mut value = binding.content();
-                if let Some(promise) = value.downcast::<Promise>()
-                    && !handles::is_unbound(promise.result())
-                {
-                    value = promise.result();
+    let mut scope = Some(environment);
+    while let Some(start) = scope {
+        let (at, found, in_slot) =
+            match function_walk(context, symbol.read(context), start.read(context)) {
+                Walk::Function(function) => return Ok(context.root(function)),
+                Walk::Missing => {
+                    let name = handles::text(symbol.read(context).name()).into_owned();
+                    return Err(missing_argument(call, &name, ArgumentReader::Get));
                 }
-                if is_function(value.r_type()) {
-                    return Ok(cx.root(value));
+                Walk::NotFound => break,
+                Walk::Run { at, found, in_slot } => {
+                    (context.root(at), bound(context, found), in_slot)
                 }
-            }
-            handles::frame_binding(cx, scope, symbol).map(|binding| cx.root(binding))
-        } else if scope.read(cx).has_flag(gp::SLOT_FRAME)
-            && let Some(value) = handles::slot_variable(cx, scope, symbol, true)
-        {
-            let value = cx.root(value);
-            let value = handles::force(cx, value)?;
+            };
+        if let Some(value) = resolve(context, found)? {
+            let value = handles::force(context, value)?;
             if is_function(value.r_type()) {
                 return Ok(value);
             }
-            // The variable sits in its slot, so no cell binds the name.
-            None
-        } else {
-            handles::frame_binding(cx, scope, symbol).map(|binding| cx.root(binding))
-        };
-        if let Some(binding) = binding {
-            let found = bound(cx, binding_found(binding.read(cx)));
-            if let Some(value) = resolve(cx, found)? {
-                let value = handles::force(cx, value)?;
-                if is_function(value.r_type()) {
-                    return Ok(value);
-                }
-                if handles::is_missing_argument(value) {
-                    let name = handles::text(symbol.read(cx).name()).into_owned();
-                    return Err(missing_argument(call, &name, ArgumentReader::Get));
-                }
+            if !in_slot && handles::is_missing_argument(value) {
+                let name = handles::text(symbol.read(context).name()).into_owned();
+                return Err(missing_argument(call, &name, ArgumentReader::Get));
             }
         }
-        let Some(enclosure) = scope.read(cx).enclosure() else {
-            break;
-        };
-        scope = cx.root(enclosure);
+        scope = at
+            .read(context)
+            .enclosure()
+            .map(|enclosure| context.root(enclosure));
     }
-    let name = handles::text(symbol.read(cx).name()).into_owned();
+    let name = handles::text(symbol.read(context).name()).into_owned();
     Err(error_in(
         call,
         format!(
@@ -616,19 +606,117 @@ pub fn function_value<'s>(
     ))
 }
 
+/// Where [`function_walk`] stops.
+enum Walk<'a> {
+    Function(Gc<'a>),
+    /// The first binding that is not a function is the empty argument.
+    Missing,
+    NotFound,
+    /// A binding whose value needs code to run, an unforced promise or an active binding, in
+    /// the frame of `at`. `in_slot` says a slot frame keeps it in its slot.
+    Run {
+        at: Gc<'a, Environment>,
+        found: Found<'a>,
+        in_slot: bool,
+    },
+}
+
+/// Walks from `environment` outward over the bindings of `symbol` whose values are already
+/// there, so nothing allocates and the walk roots nothing, up to a function, the empty argument,
+/// or a binding whose value needs code to run.
+fn function_walk<'a>(
+    context: &'a Cx<'_>,
+    symbol: Gc<'_, Symbol>,
+    environment: Gc<'a, Environment>,
+) -> Walk<'a> {
+    let (global, empty) = (handles::global_environment(), handles::empty_environment());
+    let mut scope = environment;
+    while !scope.is(empty) {
+        let found = if scope.is(global) {
+            // The first binding on the search path usually is the function; only when it is
+            // not does the walk go on frame by frame, to skip it as GNU R does.
+            if let Some(binding) = handles::global_binding(context, symbol)
+                && !binding.is_active()
+                && let Some(value) = settled(binding.content())
+                && is_function(value.r_type())
+            {
+                return Walk::Function(value);
+            }
+            handles::frame_binding(context, scope, symbol).map(binding_found)
+        } else if scope.has_flag(gp::SLOT_FRAME)
+            && let Some(value) = handles::slot_variable(context, scope, symbol, true)
+        {
+            match settled(value) {
+                Some(value) if is_function(value.r_type()) => return Walk::Function(value),
+                // The variable sits in its slot, so no cell binds the name.
+                Some(_) => None,
+                None => {
+                    let found = Found::Value(value);
+                    return Walk::Run {
+                        at: scope,
+                        found,
+                        in_slot: true,
+                    };
+                }
+            }
+        } else {
+            handles::frame_binding(context, scope, symbol).map(binding_found)
+        };
+        match found {
+            Some(Found::Value(value)) => match settled(value) {
+                Some(value) if is_function(value.r_type()) => return Walk::Function(value),
+                Some(value) if handles::is_missing_argument(value) => return Walk::Missing,
+                Some(_) => {}
+                None => {
+                    let found = Found::Value(value);
+                    return Walk::Run {
+                        at: scope,
+                        found,
+                        in_slot: false,
+                    };
+                }
+            },
+            Some(found @ Found::Active(_)) => {
+                return Walk::Run {
+                    at: scope,
+                    found,
+                    in_slot: false,
+                };
+            }
+            Some(Found::Unbound) | None => {}
+        }
+        let Some(enclosure) = scope.enclosure() else {
+            break;
+        };
+        scope = enclosure;
+    }
+    Walk::NotFound
+}
+
+/// What forcing `value` gives without running code: `value` itself, or a forced promise's
+/// value. `None` for a promise not yet forced.
+fn settled(value: Gc<'_>) -> Option<Gc<'_>> {
+    match value.downcast::<Promise>() {
+        Some(promise) if handles::is_unbound(promise.result()) => None,
+        Some(promise) => Some(promise.result()),
+        None => Some(value),
+    }
+}
+
 /// The function a call's head names: a symbol is looked up as a function from `environment`,
 /// anything else (such as `pkg::f`) is evaluated there.
 fn head_function<'s>(
-    cx: &mut Cx<'s>,
+    context: &mut Cx<'s>,
     head: Local<'s>,
     environment: Local<'s, Environment>,
 ) -> R<Local<'s>> {
     match head.downcast::<Symbol>() {
-        Some(symbol) => function_value(cx, symbol, environment, None),
-        None => handles::evaluate(cx, head, environment),
+        Some(symbol) => function_value(context, symbol, environment, None),
+        None => handles::evaluate(context, head, environment),
     }
 }
 
+/// Whether a value of type `kind` can be called: a closure, a builtin or a special.
 fn is_function(kind: SexpType) -> bool {
     matches!(
         kind,
@@ -636,46 +724,50 @@ fn is_function(kind: SexpType) -> bool {
     )
 }
 
-/// Binds `symbol` in `env`'s own frame.
+/// Binds `symbol` in `env`'s own frame. The caller holds `value` rooted.
 pub unsafe fn define(symbol: Sexp, value: Sexp, env: Sexp) -> R<()> {
-    handles::in_caller_scope(|cx| {
+    handles::in_caller_scope(|context| {
         let (symbol, value, env) = (
             Local::adopt(symbol),
-            handles::held(cx, value),
+            handles::held(context, value),
             Local::adopt(env),
         );
-        define_variable(cx, symbol, value, env)
+        define_variable(context, symbol, value, env)
     })
 }
 
 /// Binds `symbol` to `value` in the frame of `environment` itself, as `assign` does: an
 /// active binding's function is called with the value instead.
 pub fn define_variable(
-    cx: &mut Cx<'_>,
+    context: &mut Cx<'_>,
     symbol: Local<'_, Symbol>,
     value: Local<'_>,
     environment: Local<'_, Environment>,
 ) -> R<()> {
-    if let Some(binding) = handles::frame_binding(cx, environment, symbol)
+    if let Some(binding) = handles::frame_binding(context, environment, symbol)
         && binding.is_active()
     {
-        let binding = cx.root(binding);
-        return call_active_setter(cx, binding, value);
+        let binding = context.root(binding);
+        return call_active_setter(context, binding, value);
     }
-    handles::define_binding(cx, environment, symbol, value)
+    handles::define_binding(context, environment, symbol, value)
 }
 
 /// Calls the function of the active `binding` with `value`, which is how assigning to it
 /// works.
-fn call_active_setter(cx: &mut Cx<'_>, binding: Local<'_, Binding>, value: Local<'_>) -> R<()> {
-    let function = cx.root(binding.read(cx).content());
-    let value = cx.root(value);
+fn call_active_setter(
+    context: &mut Cx<'_>,
+    binding: Local<'_, Binding>,
+    value: Local<'_>,
+) -> R<()> {
+    let function = context.root(binding.read(context).content());
+    let value = context.root(value);
     let argument = Tagged {
         tag: handles::null(),
         value,
     };
     handles::apply(
-        cx,
+        context,
         handles::null(),
         function,
         &[argument],
@@ -685,34 +777,37 @@ fn call_active_setter(cx: &mut Cx<'_>, binding: Local<'_, Binding>, value: Local
 }
 
 /// `<<-`: assigns to the nearest existing binding above `env`, or in the global environment.
+/// The caller holds `value` rooted.
 pub unsafe fn set_var(symbol: Sexp, value: Sexp, env: Sexp) -> R<()> {
-    handles::in_caller_scope(|cx| {
+    handles::in_caller_scope(|context| {
         let (symbol, value, env) = (
             Local::adopt(symbol),
-            handles::held(cx, value),
+            handles::held(context, value),
             Local::adopt(env),
         );
-        assign_outward(cx, symbol, value, env)
+        assign_outward(context, symbol, value, env)
     })
 }
 
 /// `symbol <<- value` from `environment`: the nearest binding outward changes, or the global
 /// environment gains one.
 pub fn assign_outward(
-    cx: &mut Cx<'_>,
+    context: &mut Cx<'_>,
     symbol: Local<'_, Symbol>,
     value: Local<'_>,
     environment: Local<'_, Environment>,
 ) -> R<()> {
-    let Some((_, binding)) = enclosing_binding(cx, symbol.read(cx), environment.read(cx)) else {
-        return define_variable(cx, symbol, value, handles::global_environment());
+    let Some((_, binding)) =
+        enclosing_binding(context, symbol.read(context), environment.read(context))
+    else {
+        return define_variable(context, symbol, value, handles::global_environment());
     };
-    let binding = cx.root(binding);
-    if binding.read(cx).is_active() {
-        return call_active_setter(cx, binding, value);
+    let binding = context.root(binding);
+    if binding.read(context).is_active() {
+        return call_active_setter(context, binding, value);
     }
-    handles::assign_binding(cx, binding, value)?;
-    handles::mark_assigned(cx, binding);
+    handles::assign_binding(context, binding, value)?;
+    handles::mark_assigned(context, binding);
     Ok(())
 }
 
@@ -3152,7 +3247,7 @@ fn bind_formals<'s>(
     args: &[Tagged<'s>],
 ) -> R<Option<CallFrame>> {
     let closure = function.read(context);
-    let Some((names, registers)) = slot_layout(context, closure) else {
+    let Some((names, registers)) = handles::slot_layout(closure) else {
         return Ok(None);
     };
     let slot_count = names.len();
@@ -3239,20 +3334,6 @@ fn bind_formals<'s>(
         handles::build_slot_defaults(context, function)?;
         compiled = true;
     }
-}
-
-/// The slot names of `function`'s compiled body, the formals first, and how many registers its
-/// code uses after them, when the body is compiled with a slot table.
-fn slot_layout<'a>(
-    _context: &'a Cx<'_>,
-    function: Gc<'a, Closure>,
-) -> Option<(&'a [Gc<'a>], usize)> {
-    let constants = handles::constants(function.body().downcast::<Bytecode>()?)?;
-    let table = constants.get(bytecode::SLOTS)?.standard::<List>()?;
-    let names = table.elements().get(1)?.standard::<List>()?.elements();
-    let registers = constants.get(bytecode::REGISTERS)?.standard::<Integer>()?;
-    let registers = usize::try_from(*registers.as_slice().first()?).ok()?;
-    Some((names, registers))
 }
 
 /// Whether a default goes into a slot as it is: a constant, not code to run.
@@ -3386,7 +3467,7 @@ fn bind_method_formals(
     let mut compiled = false;
     loop {
         let closure = method.read(context);
-        let Some((names, registers)) = slot_layout(context, closure) else {
+        let Some((names, registers)) = handles::slot_layout(closure) else {
             return Ok(None);
         };
         let mut window = handles::Window::open(context, names.len(), registers)?;
@@ -3479,7 +3560,7 @@ pub unsafe fn direct_sources(function: Sexp, call: Sexp) -> R<Option<CallPlan>> 
         let Some(function) = handles::held(context, function).downcast::<Closure>() else {
             return Ok(None);
         };
-        let Some((shape, dots_index)) = plannable(context, function.read(context)) else {
+        let Some((shape, dots_index)) = plannable(function.read(context)) else {
             return Ok(None);
         };
         let dots = handles::symbol(|symbols| symbols.dots);
@@ -3520,7 +3601,7 @@ pub unsafe fn matched_sources(function: Sexp, args: &[Arg], call: Sexp) -> R<Opt
             return Ok(None);
         };
         let args = handles::tagged(context, args);
-        let Some((shape, dots_index)) = plannable(context, function.read(context)) else {
+        let Some((shape, dots_index)) = plannable(function.read(context)) else {
             return Ok(None);
         };
         plan_sources(context, function, shape, dots_index, args, call)
@@ -3534,11 +3615,11 @@ pub type CallPlan = (CallShape, SmallVec<[i32; 8]>);
 /// The [`CallShape`] of `function` and which formal is `...`, when calls of it can take their
 /// arguments straight into slots: its body is compiled with a slot table whose first names
 /// are its formals.
-fn plannable(context: &Cx<'_>, function: Gc<'_, Closure>) -> Option<(CallShape, Option<usize>)> {
+fn plannable(function: Gc<'_, Closure>) -> Option<(CallShape, Option<usize>)> {
     if function.raw() == interp().namespace_loader || crate::annotations::typed_closure(function) {
         return None;
     }
-    let (names, registers) = slot_layout(context, function)?;
+    let (names, registers) = handles::slot_layout(function)?;
     let mut shape = CallShape {
         formals: 0,
         slots: u16::try_from(names.len()).ok()?,
@@ -5210,6 +5291,11 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
         if expressions.is_empty() {
             break;
         }
+        // The frame no longer holds the code it handed over, and making its environment
+        // allocates.
+        for &expression in &expressions {
+            crate::heap().root(expression);
+        }
         // A slot frame keeps exit code compiled for its slots, which runs there without an
         // environment; only an expression that did not compile needs one.
         let (function, header) = (frame.function.raw(), frame.slots);
@@ -5230,9 +5316,6 @@ unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
                 }
             }
         };
-        for &expression in &expressions {
-            crate::heap().root(expression);
-        }
         let returns_here =
             |jump: &Jump| matches!(*jump, Jump::Return { env: target, .. } if target == env);
         if first {
