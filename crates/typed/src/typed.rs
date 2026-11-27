@@ -86,6 +86,17 @@ const NATIVE_SEGMENT: usize = 8 * 1024 * 1024;
 /// The stack below [`STACK_LIMIT`] left for the runtime functions the deepest frame calls.
 const NATIVE_RESERVE: usize = 128 * 1024;
 
+/// The lowest frame address native code started on the caller's stack segment may reach, or 0
+/// when the segment cannot be measured. The JIT's scalar native functions take it as an
+/// argument and compare their frames against it, as typed code compares against
+/// [`STACK_LIMIT`].
+pub fn native_stack_limit() -> usize {
+    match interp::eval::stack_floor() {
+        0 => 0,
+        floor => floor + NATIVE_RESERVE,
+    }
+}
+
 /// Why a closure does not compile, for the log.
 #[derive(Clone, Debug)]
 pub struct Refusal(pub Cow<'static, str>);
@@ -298,17 +309,22 @@ pub unsafe fn call(
         sys_parent: typed.sys_parent,
     }));
     let words = arguments.words.as_ptr();
-    let status = stacker::maybe_grow(NATIVE_STACK, NATIVE_SEGMENT, || {
-        let marker = 0u8;
-        let here = std::ptr::addr_of!(marker) as usize;
-        let limit = stacker::remaining_stack().map_or(0, |remaining| {
-            here.saturating_sub(remaining) + NATIVE_RESERVE
-        });
+    let mut run = |limit: usize| {
         let outer_limit = STACK_LIMIT.swap(limit, Ordering::Relaxed);
         let status = trampoline(depth_budget(), words, out.as_mut_ptr());
         STACK_LIMIT.store(outer_limit, Ordering::Relaxed);
         status
-    });
+    };
+    // The interpreter's bounds answer for a call entered on its segment with room to spare,
+    // which skips `stacker`'s thread-local reads.
+    let marker = 0u8;
+    let here = std::ptr::addr_of!(marker) as usize;
+    let floor = interp::eval::stack_floor();
+    let status = if floor != 0 && here.saturating_sub(floor) >= NATIVE_STACK {
+        run(floor + NATIVE_RESERVE)
+    } else {
+        stacker::maybe_grow(NATIVE_STACK, NATIVE_SEGMENT, || run(native_stack_limit()))
+    };
     RUNNING.set(outer);
     if status != 0 {
         arguments.release();

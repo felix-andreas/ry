@@ -678,6 +678,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A native dictionary's value layout comes from the checker's spelling of the value type (settled)
 - A record or tuple that R holds converts at the native entry, and its shape is its type (settled)
 - Native code stops before the stack runs out, not only after a frame count (settled)
+- An empty map result the checker typed runs natively (settled)
 
 ## DataFrame and the table engine
 
