@@ -773,7 +773,10 @@ impl<'db> InferenceTable<'db> {
                 if let (Some(left), Some(right)) = (&left.variadic, &right.variadic) {
                     self.unify(db, left.element, right.element)?;
                 }
-                self.unify(db, left.ret, right.ret)?;
+                match self.family_fixed_point(db, left.ret, right.ret) {
+                    Some(settled) => settled?,
+                    None => self.unify(db, left.ret, right.ret)?,
+                }
                 // A ry value compares only with its own type, so a pair one function compares
                 // makes the other side of it that type.
                 for pair in left.compared.iter().chain(right.compared) {
@@ -1224,6 +1227,52 @@ impl<'db> InferenceTable<'db> {
             }
             _ => Err(mismatch),
         }
+    }
+
+    /// A callback returning `Promoted<T>` where `T` is expected back, as a fold's accumulator
+    /// asks (`Reduce(function(a, b) a * 2, x, 1L)`): `T` is a type the family keeps. On R's
+    /// side that is only the outcome itself (`integer * 2` is `double`), on ry's every number
+    /// (or `Bool` for a comparison). A variable that admits both takes R's outcome, which is
+    /// what R computes for an untyped callback. Only a function's return settles this way: a
+    /// branch join (`if (flag) x <- x + 1`) keeps `T | Promoted<T>` open instead. `None` when
+    /// the returns are not that shape.
+    fn family_fixed_point(
+        &mut self,
+        db: &'db dyn Db,
+        actual: Ty<'db>,
+        expected: Ty<'db>,
+    ) -> Option<Result<(), UnifyError<'db>>> {
+        let family = self.shallow_resolve(db, actual);
+        let TyKind::Family(result, operand) = *family.kind(db) else {
+            return None;
+        };
+        let TyKind::Var(operand) = *self.shallow_resolve(db, operand).kind(db) else {
+            return None;
+        };
+        let TyKind::Var(expected) = *self.shallow_resolve(db, expected).kind(db) else {
+            return None;
+        };
+        let var = self.find(operand);
+        if self.find(expected) != var {
+            return None;
+        }
+        let Entry::Unbound { constraint, .. } = *self.entry(var) else {
+            return None;
+        };
+        let r_outcome = result.r_outcome(db);
+        Some(if constraint_rejects(db, self, constraint, r_outcome).is_none() {
+            self.bind(db, var, r_outcome)
+        } else {
+            match result {
+                FamilyResult::Arithmetic if constraint.join(Constraint::Number).is_some() => {
+                    self.constrain(db, var, Constraint::Number)
+                }
+                FamilyResult::Comparison => {
+                    self.bind(db, var, native_scalar(db, NativeScalar::Bool))
+                }
+                FamilyResult::Arithmetic => Err(UnifyError::Occurs(var, family)),
+            }
+        })
     }
 
     fn family_operand_constraint(&self, db: &'db dyn Db, operand: Ty<'db>) -> Constraint {
@@ -2193,7 +2242,11 @@ impl<'db> InferenceTable<'db> {
                 return false;
             }
         }
-        if !self.compatible_probe(db, actual.ret, expected.ret, depth + 1) {
+        let returns = match self.family_fixed_point(db, actual.ret, expected.ret) {
+            Some(settled) => settled.is_ok(),
+            None => self.compatible_probe(db, actual.ret, expected.ret, depth + 1),
+        };
+        if !returns {
             return false;
         }
         // The parameters are bound by now, so a pair the actual function compares is checked
@@ -2245,7 +2298,11 @@ impl<'db> InferenceTable<'db> {
                 accepts,
             });
         }
-        if !self.compatible(db, actual.ret, expected.ret) {
+        let returns = match self.family_fixed_point(db, actual.ret, expected.ret) {
+            Some(settled) => settled.is_ok(),
+            None => self.compatible(db, actual.ret, expected.ret),
+        };
+        if !returns {
             let returns = self.resolve(db, actual.ret);
             let required = self.resolve(db, expected.ret);
             return Some(FunctionMismatch::Return {

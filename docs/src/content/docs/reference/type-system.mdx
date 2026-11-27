@@ -2843,6 +2843,13 @@ the same way, because a condition reads R's truth of a number, which a ry number
   `I64` and a `logical` for a `double` or a `character`. Calling it with a `Str` is a type error,
   because ry compares a `Str` only with a `Str`.
 
+A callback whose family result must have its operand's type, as a fold's accumulator must
+(`Reduce(function(acc, x) acc * 2, 1:3, 1L)`), takes a type the family keeps: `double` on R's
+side, since `integer * 2` is a `double`, or a ry number. That `Reduce` call is a `double`, and
+`List.walk(xs, k, function(acc, x) acc * 2)` with `k: I64` is an `I64`. An accumulator that
+admits both takes R's `double`, so `function(ys, init) List.walk(ys, init, function(acc, y)
+acc * 2)` takes a `double` `init` and refuses an `I64`.
+
 - `function(a, b) a < b` is `<T: comparable or ordered, U: comparable or ordered> fn(a: T, b: U)
   -> Compared<T>`. The two operands stay separate types, because R compares an `integer` with a
   `character` and a function may return either operand unchanged: `cmp(1L, "s")` is a `logical`,
