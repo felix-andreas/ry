@@ -2398,8 +2398,14 @@ unsafe fn s4_dispatch_holding(op: Sexp, call: Sexp, promised: &Args, env: Sexp) 
 
 /// Whether `value` is an unforced promise of a symbol that is a missing argument where the
 /// promise was made, which the primitive takes as an empty subscript.
-unsafe fn promise_of_missing(value: Sexp) -> R<bool> {
-    let value = eval::root_promise(value);
+unsafe fn promise_of_missing(mut value: Sexp) -> R<bool> {
+    // The root of a chain of promises, as `eval::value_is_missing` asks.
+    while value.kind() == SexpType::Promise
+        && value.car() == unbound()
+        && value.cdr().kind() == SexpType::Promise
+    {
+        value = value.cdr();
+    }
     if value.kind() != SexpType::Promise || value.car() != unbound() {
         return Ok(false);
     }

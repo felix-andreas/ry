@@ -724,7 +724,7 @@ enum Holder {
 /// into a new promise, and a shared unforced promise whose check may convert is wrapped in one
 /// before the check is registered: storing the conversion in the caller's promise would change
 /// the caller's variable, and fail the check of an outer typed frame that binds the same
-/// promise. `missing()` sees through the wrapper ([`crate::eval::root_promise`]).
+/// promise. `missing()` sees through the wrapper (`eval::value_is_missing`).
 unsafe fn check_argument(
     call: Sexp,
     signature: Sexp,
@@ -733,20 +733,27 @@ unsafe fn check_argument(
     value: Sexp,
     depth: usize,
 ) -> R<()> {
+    let rebind = |value: Sexp| -> R<()> {
+        match holder {
+            Holder::Binding(cell) => crate::heap().set_binding_value(cell, value)?,
+            Holder::Dots(cell) => crate::heap().set_car(cell, value),
+        }
+        Ok(())
+    };
     if value.kind() != SexpType::Promise {
         if value == values::missing_arg() {
             return Ok(());
         }
         let checked = check_value(call, signature, slot, value)?;
         if checked != value {
-            rebind(holder, checked)?;
+            rebind(checked)?;
         }
         return Ok(());
     }
     if value.car() != values::unbound() {
         let checked = check_value(call, signature, slot, value.car())?;
         if checked != value.car() {
-            rebind(holder, crate::eval::forced_promise(value.cdr(), checked)?)?;
+            rebind(crate::eval::forced_promise(value.cdr(), checked)?)?;
         }
         return Ok(());
     }
@@ -760,7 +767,7 @@ unsafe fn check_argument(
         // Evaluating a promise forces it. The global environment, never a slot frame's, keeps
         // the wrapper an ordinary promise when it is forced.
         promise = crate::eval::make_promise(value, values::global_env())?;
-        rebind(holder, promise)?;
+        rebind(promise)?;
     }
     promise.set_gp_bits(gp::CHECKED_PROMISE, true);
     interp().annotations.pending.push(Pending {
@@ -770,14 +777,6 @@ unsafe fn check_argument(
         slot,
         depth,
     });
-    Ok(())
-}
-
-unsafe fn rebind(holder: Holder, value: Sexp) -> R<()> {
-    match holder {
-        Holder::Binding(cell) => crate::heap().set_binding_value(cell, value)?,
-        Holder::Dots(cell) => crate::heap().set_car(cell, value),
-    }
     Ok(())
 }
 
