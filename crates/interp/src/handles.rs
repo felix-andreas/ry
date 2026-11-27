@@ -4401,7 +4401,7 @@ pub fn slot_table<'a>(_context: &Cx<'_>, function: Gc<'a, Closure>) -> Option<Gc
     constants(code)?.get(bytecode::SLOTS)?.standard::<List>()
 }
 
-/// The constant pool of `code`, or `None` when it is not a list.
+/// The constant pool of `code`, or `None` when it is not a list with its own storage (ALTREP).
 #[inline]
 pub fn constants(code: Gc<'_, Bytecode>) -> Option<&[Gc<'_>]> {
     Some(code.constants().standard::<List>()?.elements())

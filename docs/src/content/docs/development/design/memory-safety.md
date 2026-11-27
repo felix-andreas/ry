@@ -598,15 +598,21 @@ specials (`{`, `(`, `if`, `for`, `while`, `repeat`, `break`, `next`, `return`, `
 `do_substitute_direct`, `.Primitive`, `~`, `delayedAssign`, `makeLazy`, `call`, `expression` and
 `all.names`); the call specials `.Internal`, `forceAndCall`, `Tailcall`, `Exec`, `Recall` and
 `eval`; and assignment (`<-`, `=`, `<<-` and the replacement chain of `f(x) <- v`, which tier 0
-enters through the raw entry `eval::compiled_complex_assign`). The specials reach the loop and
+enters through the raw entry `eval::compiled_complex_assign`); argument matching (`match_args`, the
+match plan a compiled body keeps in its constant pool, and `match.call`); and the slot binders
+(`bind_slots`, `bind_plan`, `enter_method`, `direct_sources` and `matched_sources`). The specials reach the loop and
 function contexts, the srcref and the closure maker through wrappers in `handles.rs` (`in_loop` and
 `loop_jump` hold a loop's environment, `Args::register_on_exit` stores into the frame), because the
 bytecode loop and the JIT share those raw helpers. Two pieces of the API are not built: the bytecode
-loop's register accessor and `Held<T>` fields in traced structures. The replacement forms reach a
-frame through `RunningFrame` and `Slot` in `bytecode.rs`, a narrow form of that accessor: a slot
-read is a `Gc` that borrows the context, a store takes a rooted value, and an in-place write needs
-the `Owned` that `claim` returns only when the slot holds the value itself and the value is
-unshared. A binding is claimed the same way (`handles::claim_binding`), so a variable bound to a
+loop's register accessor and `Held<T>` fields in traced structures. Two narrow forms of that
+accessor reach a frame's slots. The replacement forms use `RunningFrame` and `Slot` in
+`bytecode.rs`: a slot read is a `Gc` that borrows the context, a store takes a rooted value, and an
+in-place write needs the `Owned` that `claim` returns only when the slot holds the value itself and
+the value is unshared. The binders store a new frame's formals through `handles::Window`, which
+borrows the context while it is open, so everything that allocates (the `...` list, the compiled
+defaults, the match plan) happens before it opens, and a window dropped without `close` gives back
+the references its stores counted and the registers. A method's frame reads the generic's slots
+through `Window::under`. A binding is claimed the same way (`handles::claim_binding`), so a variable bound to a
 promise is copied before its first write instead of written through the promise.
 
 An unmigrated caller reaches a migrated function through a raw entry, an `unsafe fn` over `Sexp`
@@ -629,7 +635,7 @@ The order:
    in place go first (tier 0's stores, the replacement and attribute builtins, name matching,
    string encoding), then `values.rs`, the evaluator and the bytecode loop, and the leaf builtins
    last, because a leaf rarely holds a value across a safepoint. The evaluator's call machinery
-   (`eval`, `apply_closure`, argument matching and promises) moves with the bytecode loop,
+   (`eval`, `apply_closure` and promises) moves with the bytecode loop,
    because it keeps values in frames and unwinds, which need the register accessor and
    `Held<T>`.
 2. `stats`, `graphics`, `frames`.
