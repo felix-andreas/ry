@@ -1474,7 +1474,7 @@ fn box_slots(context: &mut Cx<'_>, owner: usize, slots: std::ops::Range<usize>) 
     let frame = handles::live_frame(context, owner);
     let pending = pending_of(context, owner);
     let names = frame.slot_names();
-    let formals = frame.formals().count();
+    let mut formals = None;
     let mut bindings: SmallVec<[LocalBinding<'_>; 12]> = SmallVec::new();
     for slot in slots.clone() {
         let value = frame.slot(slot);
@@ -1487,7 +1487,8 @@ fn box_slots(context: &mut Cx<'_>, owner: usize, slots: std::ops::Range<usize>) 
         bindings.push(LocalBinding {
             symbol,
             value,
-            missing: slot < formals && frame.is_missing_formal(slot),
+            missing: frame.is_missing_formal(slot)
+                && slot < *formals.get_or_insert_with(|| frame.formals().count()),
         });
     }
     if bindings.is_empty() {
@@ -2696,8 +2697,14 @@ unsafe fn call_builtin_checked(
             ),
         ));
     }
-    if checks.names && args.iter().any(|arg| arg.tag != nil()) {
-        check_argument_names(definition, call, args)?;
+    if checks.names {
+        // A loop, where `Iterator::any` shares one out-of-line copy with other callers.
+        for arg in args {
+            if arg.tag != nil() {
+                check_argument_names(definition, call, args)?;
+                break;
+            }
+        }
     }
     if activity::profile_ticked() {
         record_profile_sample(Some(definition.name))?;
@@ -4496,7 +4503,13 @@ pub const OBSERVING_REASONS: [&str; 18] = [
 /// its slot and has a `...` formal.
 #[inline(always)]
 pub unsafe fn slot_dots(index: usize) -> Option<Sexp> {
-    handles::reading(|context| frame_dots(context, index).map(Gc::raw))
+    handles::reading_with(index, raw_frame_dots)
+}
+
+/// [`frame_dots`] as a raw pointer, for the raw entry.
+#[inline(always)]
+fn raw_frame_dots(context: &Cx<'_>, index: usize) -> Option<Sexp> {
+    frame_dots(context, index).map(Gc::raw)
 }
 
 /// [`slot_dots`] for code on the handle types.
@@ -4528,10 +4541,8 @@ pub fn variable_register(context: &Cx<'_>, index: usize, symbol: Gc<'_, Symbol>)
 /// missing, when it is a slot frame that keeps every variable in its slot and has such a formal.
 #[inline(always)]
 pub unsafe fn slot_formal(index: usize, symbol: Sexp) -> Option<(Sexp, bool)> {
-    handles::reading(|context| {
-        let [(value, missing)] = formal_slots(context, index, [Gc::adopt(symbol)])?;
-        Some((value.raw(), missing))
-    })
+    let [found] = handles::reading_with((index, [Gc::adopt(symbol)]), raw_formal_slots)?;
+    Some(found)
 }
 
 /// [`slot_formal`] for several formals in one walk of the formals, so `symbols` must be listed
@@ -4542,10 +4553,18 @@ pub unsafe fn slot_formals<const N: usize>(
     index: usize,
     symbols: [Sexp; N],
 ) -> Option<[(Sexp, bool); N]> {
-    handles::reading(|context| {
-        let found = formal_slots(context, index, symbols.map(|symbol| Gc::adopt(symbol)))?;
-        Some(found.map(|(value, missing)| (value.raw(), missing)))
-    })
+    let symbols = symbols.map(|symbol| Gc::adopt(symbol));
+    handles::reading_with((index, symbols), raw_formal_slots)
+}
+
+/// [`formal_slots`] as raw pointers, for the raw entries.
+#[inline(always)]
+fn raw_formal_slots<const N: usize>(
+    context: &Cx<'_>,
+    (index, symbols): (usize, [Gc<'_, Symbol>; N]),
+) -> Option<[(Sexp, bool); N]> {
+    let found = formal_slots(context, index, symbols)?;
+    Some(found.map(|(value, missing)| (value.raw(), missing)))
 }
 
 /// [`slot_formals`] for code on the handle types.

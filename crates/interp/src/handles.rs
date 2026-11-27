@@ -1517,6 +1517,19 @@ pub unsafe fn reading<T>(body: impl for<'s> FnOnce(&Cx<'s>) -> T) -> T {
     body(&context)
 }
 
+/// [`reading`] for a function `body` that takes its operands as `data`, which inlines where a
+/// closure that inlines a larger body would stay out of line ([`in_caller_scope_with`]).
+///
+/// # Safety
+///
+/// As for [`with`].
+#[inline(always)]
+pub unsafe fn reading_with<D, T>(data: D, body: for<'s> fn(&Cx<'s>, D) -> T) -> T {
+    // SAFETY: as in `with`, and a shared context roots and frees nothing.
+    let context = unsafe { Cx::enter(NonNull::from(&mut *crate::heap())) };
+    body(&context, data)
+}
+
 /// [`in_caller_scope`] for a function `body` that takes its operands as `data`. Tier 0
 /// compiles each handler twice, for running and for stepping, so a closure or a generic shim
 /// a handler calls has two callers and LLVM keeps a large one out of line; a call through a
@@ -3756,11 +3769,11 @@ impl<'c, 's> LiveFrame<'c, 's> {
     /// The formals of the frame's function, which a slot frame's first slots hold in order.
     #[inline]
     pub fn formals(self) -> impl Iterator<Item = Gc<'c>> {
-        let mut cell = self.function().formals();
+        let mut cell = self.function().formals().downcast::<Pairlist>();
         std::iter::from_fn(move || {
-            let (_, tag, rest) = cell_fields(cell)?;
-            cell = rest;
-            Some(tag)
+            let current = cell?;
+            cell = current.rest().downcast::<Pairlist>();
+            Some(current.tag())
         })
     }
 
@@ -3887,6 +3900,7 @@ impl<'c, 's> LiveFrame<'c, 's> {
 
     /// Records in `environment` that it stands for the slot frame, with the frame's slot names,
     /// so a lookup of any other name passes it without asking the frame.
+    #[inline]
     pub fn stand_in(self, environment: Gc<'_, Environment>) {
         let Some((names, _)) = compiled_slots(self.function()) else {
             panic!("slot frame {} runs code without a slot table", self.index);
