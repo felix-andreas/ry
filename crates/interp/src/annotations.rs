@@ -368,7 +368,7 @@ pub fn checks_pending() -> bool {
 /// Drops the checks of the frame at `depth` whose promises were never forced, so a promise that
 /// escapes its call is no longer checked. Every closure exit calls it, because a frame whose
 /// entry check failed may already have registered some.
-pub unsafe fn leave(depth: usize) {
+pub fn leave(depth: usize) {
     let pending = &mut interp().annotations.pending;
     while let Some(entry) = pending.last()
         && entry.depth >= depth
@@ -377,7 +377,9 @@ pub unsafe fn leave(depth: usize) {
         pending.pop();
         // A promise forwarded through `...` can be pending in an outer typed frame too.
         if !pending.iter().any(|entry| entry.promise == promise) {
-            promise.set_gp_bits(gp::CHECKED_PROMISE, false);
+            // SAFETY: the interpreter traces the promises of pending checks, and the flag is a
+            // header bit no reader keeps across a change.
+            unsafe { promise.set_gp_bits(gp::CHECKED_PROMISE, false) };
         }
     }
 }

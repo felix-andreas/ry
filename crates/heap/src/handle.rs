@@ -185,6 +185,20 @@ impl<'s> Cx<'s> {
         }
     }
 
+    /// Gives up what the environment of a returning slot frame holds once nothing outlives the
+    /// frame through it ([`Heap::discard_frame`]). It frees nothing at once, so `value`, which
+    /// the frame returns, stays valid.
+    #[inline]
+    pub fn discard_frame(
+        &self,
+        environment: impl Pointer<Environment>,
+        value: impl Pointer<Value>,
+    ) {
+        // SAFETY: the heap and both objects are live, and releasing references frees nothing
+        // by itself.
+        unsafe { (*self.heap.as_ptr()).discard_frame(environment.raw(), value.raw()) }
+    }
+
     /// Tells a method's slot frame environment the names of its dispatch variables
     /// ([`Heap::expect_dispatch_variables`]).
     #[inline]
@@ -835,6 +849,15 @@ impl<'a> Gc<'a, Environment> {
     pub fn may_bind(self, symbol: impl Pointer<Symbol>) -> bool {
         // SAFETY: the environment is live for `'a`, and the test reads its frame's filter.
         unsafe { (*self.raw.frame_ptr()).may_bind(symbol.raw()) }
+    }
+
+    /// Sets or clears the interpreter's flags `bits` of the environment, which describe how
+    /// its frame runs and which only the interpreter reads.
+    #[inline]
+    pub fn set_flags(self, bits: u16, on: bool) {
+        // SAFETY: the environment is live for `'a`, and the flags are bits of its header that
+        // no reader keeps across a change.
+        unsafe { self.raw.set_gp_bits(bits, on) }
     }
 }
 

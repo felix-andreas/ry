@@ -17,7 +17,7 @@ use {
         handles::{
             self, AssignmentCall, AssignmentCopy, Binding, Bytecode, Cells, Chars, Closure, Cx,
             Environment, Expression, Gc, Held, Integer, Language, List, Local, LocalBinding, Owned,
-            Pairlist, Pointer, Promise, Real, Str, StringFill, Symbol, Tagged, safe,
+            Pairlist, Pointer, Promise, Real, Str, StringFill, Symbol, Tagged, Value, safe,
         },
         interp, moves, scope,
         unwind::{ArgumentReader, Jump, R, Rooted, Unwind, error, error_in, missing_argument},
@@ -4252,11 +4252,11 @@ pub unsafe fn run_inlined(
     let frame = &state.frames[depth - 1];
     let result =
         if frame.env.raw() != nil() || !frame.on_exit.is_empty() || frame.pending.raw() != nil() {
-            finish_frame(call, depth, None, result)
+            finish_raw_frame(call, depth, None, result)
         } else {
             result
         };
-    let result = pop_frame(function, depth, result);
+    let result = pop_raw_frame(depth, result);
     hooks.returned(&result);
     result
 }
@@ -4941,8 +4941,8 @@ pub unsafe fn leave(depth: usize, result: R<Sexp>) -> R<Sexp> {
         Err(unwind) => unwind.root(),
     }
     state.slot_owner = owner;
-    let result = finish_frame(call, depth, None, result);
-    let result = pop_frame(function, depth, result);
+    let result = finish_raw_frame(call, depth, None, result);
+    let result = pop_raw_frame(depth, result);
     release_window(header);
     release_frame_references(references);
     result
@@ -5022,7 +5022,7 @@ unsafe fn run_frame_general(
         true,
     );
     if let Err(unwind) = sampled {
-        return pop_frame(function, depth, Err(unwind));
+        return pop_raw_frame(depth, Err(unwind));
     }
     let state = interp();
     if state.debugger.is_some() && function.has_gp(gp::CLOSURE_DEBUG | gp::CLOSURE_STEP) {
@@ -5082,8 +5082,8 @@ unsafe fn run_frame_general(
         }
         result => result,
     };
-    let result = finish_frame(call, depth, signature, result);
-    let result = pop_frame(function, depth, result);
+    let result = finish_raw_frame(call, depth, signature, result);
+    let result = pop_raw_frame(depth, result);
     hooks.returned(&result);
     result
 }
@@ -5091,80 +5091,93 @@ unsafe fn run_frame_general(
 /// What a call returns once its body has run with `result`: a `return()` aimed at the frame, the
 /// return type check, and the `on.exit` expressions, before the frame pops.
 #[inline(always)]
-unsafe fn finish_frame(
-    call: Sexp,
+fn finish_frame<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'_>,
     depth: usize,
-    signature: Option<Sexp>,
-    result: R<Sexp>,
-) -> R<Sexp> {
-    // A slot frame may have made its environment while the body ran; until it does, only its
-    // pending environment, if it handed one out, can name the frame as a `return` target.
-    let frame = &interp().frames[depth - 1];
-    let env = if frame.env.raw() == nil() {
-        frame.pending.raw()
-    } else {
-        frame.env.raw()
-    };
-    let result = if env == nil() {
-        result
-    } else {
-        stray_loop_jump(call, env, catch_return(env, result))
+    signature: Option<Local<'_>>,
+    result: R<Local<'s>>,
+) -> R<Local<'s>> {
+    let result = match return_target(context, depth) {
+        None => result,
+        Some(target) => stray_loop_jump(call, target, catch_return(context, target, result)),
     };
     let result = match (signature, result) {
-        (Some(signature), Ok(value)) => crate::annotations::check_return(call, signature, value),
+        (Some(signature), Ok(value)) => handles::check_return(context, call, signature, value),
         (_, result) => result,
     };
     crate::annotations::leave(depth);
     // `return()` may also come from an `on.exit` expression, which runs in the same frame and
     // so returns from it too.
-    let state = interp();
-    let result = if state.frames[depth - 1].on_exit.is_empty() {
+    let result = if interp().frames[depth - 1].on_exit.is_empty() {
         result
     } else {
-        let result = run_on_exit(depth, result);
-        let frame = &interp().frames[depth - 1];
-        catch_return(
-            if frame.env.raw() == nil() {
-                frame.pending.raw()
-            } else {
-                frame.env.raw()
-            },
-            result,
-        )
+        let result = run_on_exit(context, depth, result);
+        match return_target(context, depth) {
+            None => result,
+            Some(target) => catch_return(context, target, result),
+        }
     };
-    let env = state.frames[depth - 1].pending.raw();
-    if env == nil() {
+    let Some(pending) = handles::live_frame(context, depth - 1).pending() else {
         return result;
-    }
-    if env.has_gp(gp::SLOT_FRAME) {
+    };
+    // Lifting the frame's variables allocates, and the flag is cleared after it.
+    let pending = context.root(pending);
+    if pending.read(context).has_flag(gp::SLOT_FRAME) {
         // An error return keeps the environment, since the unwind may carry it or anything
         // made over it.
-        let cause = match result {
-            Ok(value) => outliving_cause(depth - 1, value),
+        let cause = match &result {
+            Ok(value) => handles::outliving_cause(context, depth - 1, *value),
             Err(_) => Some(Site::PromiseOrEnvironmentOutlives),
         };
         match cause {
             Some(cause) => {
                 // The variables move while nothing else can run, as in a lookup's move.
                 crate::heap().inhibit_collection();
-                let lifted = lift_frame(depth - 1, Some(cause));
+                let lifted = lift(context, depth - 1, Some(cause));
                 crate::heap().allow_collection();
                 lifted?;
             }
             None => {
-                let state = interp();
-                crate::forget_pending_closures(state, depth - 1);
+                crate::forget_pending_closures(interp(), depth - 1);
                 // The environment dies here, so the frame has none left for the pop to release.
-                state.frames[depth - 1].env = Held::adopt(nil());
-                if let Ok(value) = result {
-                    crate::heap().discard_frame(env, value);
+                handles::live_frame(context, depth - 1).drop_environment();
+                if let Ok(value) = &result {
+                    context.discard_frame(pending, *value);
                 }
             }
         }
     }
     // The body has returned, so no register of compiled code holds a value of the frame.
-    env.set_gp_bits(gp::COMPILED_FRAME, false);
+    pending.read(context).set_flags(gp::COMPILED_FRAME, false);
     result
+}
+
+/// The environment a `return()` aimed at the frame at `depth` (one-based) names: the frame's
+/// own, or for a slot frame that has not made one, the environment that stands for it once it
+/// has handed one out.
+fn return_target<'a>(context: &'a Cx<'_>, depth: usize) -> Option<Gc<'a>> {
+    let frame = handles::live_frame(context, depth - 1);
+    let environment = frame.recorded_environment();
+    if environment.r_type() != SexpType::Nil {
+        return Some(environment);
+    }
+    frame.pending().map(|pending| pending.value())
+}
+
+/// [`finish_frame`] for raw callers, with the frame's `call` and `signature` held by the frame.
+unsafe fn finish_raw_frame(
+    call: Sexp,
+    depth: usize,
+    signature: Option<Sexp>,
+    result: R<Sexp>,
+) -> R<Sexp> {
+    handles::in_caller_scope(|context| {
+        let call = handles::held(context, call);
+        let signature = signature.map(|signature| handles::held(context, signature));
+        let result = result.map(|value| handles::adopt(context, value));
+        Ok(finish_frame(context, call, depth, signature, result)?.raw())
+    })
 }
 
 /// What keeps the environment of the slot frame at `index` alive past the frame as it returns
@@ -5355,36 +5368,27 @@ unsafe fn profiled_entry(function: Sexp, counted: bool) -> R<()> {
     }
 }
 
-/// Pops the frame at `depth` (one-based) once its call has finished with `result`, restoring
-/// the condition stacks and srcref of the caller.
+/// Pops the frame at `depth` (one-based) once its call has finished, `value` the value it
+/// returned unless it unwound, restoring the condition stacks and srcref of the caller.
 #[inline(always)]
-unsafe fn pop_frame(function: Sexp, depth: usize, result: R<Sexp>) -> R<Sexp> {
-    let state = interp();
+fn pop_frame(context: &Cx<'_>, depth: usize, value: Option<Gc<'_>>) {
     if activity::enabled() {
-        if activity::sample_ticked() {
-            crate::profile_summary::resolve_samples(state.frames.len());
-        }
-        let frame = &state.frames[depth - 1];
-        let end = state
-            .frames
-            .get(depth)
-            .map_or(state.frame_args.len(), |next| next.args as usize);
-        let args = state
-            .frame_args
-            .get(frame.args as usize..end)
-            .unwrap_or(&[]);
-        count_package_call(function, Some(frame), args);
+        handles::count_frame_exit(context, depth - 1);
     }
+    let state = interp();
     // An unwind that skipped frames above this one needs the general truncation; a call
     // returning normally does not.
     if state.frames.len() != depth {
         crate::truncate_frames(state, depth);
     }
     crate::forget_pending_closures(state, depth - 1);
+    if let Some(value) = value {
+        handles::release_frame(context, depth - 1, value);
+    }
     let Some(frame) = state.frames.last() else {
         panic!("a closure call's frame was popped while the call ran");
     };
-    let (env, closures, srcref) = (frame.env.raw(), frame.closures, frame.srcref.raw());
+    let (closures, srcref) = (frame.closures, frame.srcref.raw());
     let (args, method_vars) = (frame.args as usize, frame.method_vars as usize);
     let Some((handlers, restarts)) = state.frames.pop() else {
         panic!("a closure call's frame was popped while the call ran");
@@ -5395,13 +5399,16 @@ unsafe fn pop_frame(function: Sexp, depth: usize, result: R<Sexp>) -> R<Sexp> {
     state.frame_args.truncate(args);
     state.method_vars.truncate(method_vars);
     state.srcref = srcref;
-    if let Ok(value) = result
-        && env != nil()
-    {
-        let created = state.frame_closures.get(closures as usize..).unwrap_or(&[]);
-        crate::heap().release_frame(env, value, created);
-    }
     state.frame_closures.truncate(closures as usize);
+}
+
+/// [`pop_frame`] for raw callers, which hold `result` until it returns.
+#[inline(always)]
+unsafe fn pop_raw_frame(depth: usize, result: R<Sexp>) -> R<Sexp> {
+    handles::reading(|context| {
+        let value = result.as_ref().ok().map(|&value| Gc::adopt(value));
+        pop_frame(context, depth, value);
+    });
     result
 }
 
@@ -5627,12 +5634,16 @@ unsafe fn refuse_object_system(call: Sexp, function: Sexp, sys_parent: Sexp) -> 
 
 /// A `break` or `next` that leaves the closure frame of `env` had no loop to go to, which is an
 /// error that `try()` can catch, reported against the closure's call as in GNU R.
-fn stray_loop_jump(call: Sexp, env: Sexp, result: R<Sexp>) -> R<Sexp> {
+fn stray_loop_jump<'s>(
+    call: Local<'_>,
+    environment: impl Pointer<Value>,
+    result: R<Local<'s>>,
+) -> R<Local<'s>> {
     match result {
         Err(Unwind::Jump(Jump::Break { env: target } | Jump::Next { env: target }))
-            if target == env =>
+            if target == environment.raw() =>
         {
-            Err(error_in(
+            Err(handles::error_in(
                 call,
                 "no loop for break/next, jumping to top level",
             ))
@@ -5641,20 +5652,18 @@ fn stray_loop_jump(call: Sexp, env: Sexp, result: R<Sexp>) -> R<Sexp> {
     }
 }
 
-/// The value of a `return()` that unwinds to the frame of `env`.
-unsafe fn catch_return(env: Sexp, result: R<Sexp>) -> R<Sexp> {
+/// The value of a `return()` that unwinds to the frame of `environment`.
+fn catch_return<'s>(
+    context: &Cx<'s>,
+    environment: impl Pointer<Value>,
+    result: R<Local<'s>>,
+) -> R<Local<'s>> {
     match result {
-        Err(unwind) if unwind.returns_to(env) => {
-            let Unwind::Jump(jump) = unwind else {
-                unreachable!()
-            };
-            let Jump::Return { value, .. } = jump else {
-                unreachable!()
-            };
-            crate::heap().root(value);
-            Ok(value)
-        }
-        other => other,
+        Err(unwind) => match handles::returned_value(context, &unwind, environment) {
+            Some(value) => Ok(value),
+            None => Err(unwind),
+        },
+        ok => ok,
     }
 }
 
@@ -5666,133 +5675,147 @@ unsafe fn catch_return(env: Sexp, result: R<Sexp>) -> R<Sexp> {
 /// code adds to them or replaces them. GNU R runs that list only when the frame is entered
 /// again: when the expression left by a jump, or after the last expression of a frame that a
 /// jump is unwinding. A frame that returns drops it.
-unsafe fn run_on_exit(depth: usize, result: R<Sexp>) -> R<Sexp> {
+fn run_on_exit<'s>(context: &mut Cx<'s>, depth: usize, result: R<Local<'s>>) -> R<Local<'s>> {
     if interp().frames[depth - 1].on_exit.is_empty() {
         return result;
     }
     let mut visible = interp().visible;
-    let mark = crate::heap().handle_mark();
-    let mut returned = None;
-    let mut outcome = result;
-    let mut first = true;
-    loop {
-        let frame = &mut interp().frames[depth - 1];
-        let expressions = std::mem::take(&mut frame.on_exit);
-        if expressions.is_empty() {
-            break;
-        }
-        // The code taken from the frame is held by nothing else, and making its environment
-        // allocates.
-        for expression in &expressions {
-            crate::heap().root(expression.raw());
-        }
-        // A slot frame keeps exit code compiled for its slots, which runs there without an
-        // environment; only an expression that did not compile needs one.
-        let (function, header) = (frame.function.raw(), frame.slots);
-        // Other exit code, such as the call `withr::defer` registers through `do.call`, runs in
-        // the frame's environment, which takes only the variables that code reads.
-        let env = if frame.env.raw() != nil()
-            || expressions
-                .iter()
-                .all(|expression| expression.raw().kind() == SexpType::Bytecode)
-        {
-            frame.env.raw()
-        } else {
-            match frame_env(depth - 1, Reify::Site(Site::OnExit)) {
-                Ok(env) => env,
-                Err(unwind) => {
-                    outcome = Err(unwind);
-                    break;
-                }
-            }
+    let outcome = context.scope(|context| {
+        let result = match result {
+            Ok(value) => Ok(context.root(value.read(context))),
+            Err(unwind) => Err(unwind),
         };
-        let returns_here =
-            |jump: &Jump| matches!(*jump, Jump::Return { env: target, .. } if target == env);
-        if first {
-            first = false;
-            // A `return(x)` unwinding to this frame is the value the function returns.
-            returned = match &outcome {
-                Ok(value) => Some(*value),
-                Err(Unwind::Jump(jump)) => match *jump {
-                    Jump::Return { value, .. } if returns_here(jump) => Some(value),
-                    _ => None,
-                },
-                Err(_) => None,
-            };
-            interp().returned_values.push(returned);
-            // The value is on its way to the caller and nothing counts it yet, so exit code that
-            // modifies a variable holding it would write into the value the caller receives.
-            // GNU R counts it for as long as the exit code runs.
-            if let Some(value) = returned {
-                value.increment_refcount();
-            }
-        }
+        let pass = match exit_code(context, depth) {
+            Ok(Some(pass)) => pass,
+            Ok(None) => return result,
+            Err(unwind) => return Err(unwind),
+        };
+        // A `return(x)` unwinding to this frame is the value the function returns.
+        let returned = match &result {
+            Ok(value) => Some(*value),
+            Err(unwind) => handles::returned_value(context, unwind, pass.environment),
+        };
+        interp()
+            .returned_values
+            .push(returned.map(|value| value.raw()));
+        // The value is on its way to the caller and nothing counts it yet, so exit code that
+        // modifies a variable holding it would write into the value the caller receives. GNU R
+        // counts it for as long as the exit code runs.
+        let outcome = match returned {
+            Some(value) => handles::referenced_while(context, value, |context| {
+                exit_passes(context, depth, pass, result, &mut visible)
+            }),
+            None => exit_passes(context, depth, pass, result, &mut visible),
+        };
+        interp().returned_values.pop();
+        outcome
+    });
+    interp().visible = visible;
+    outcome
+}
+
+/// The exit code a frame lists for one pass of [`run_on_exit`], taken from the frame, and the
+/// environment it runs in.
+struct ExitCode<'s> {
+    expressions: SmallVec<[Local<'s>; 2]>,
+    environment: Local<'s>,
+}
+
+/// Takes the `on.exit` expressions of frame `depth`, `None` when it lists none.
+fn exit_code<'s>(context: &mut Cx<'s>, depth: usize) -> R<Option<ExitCode<'s>>> {
+    let listed = std::mem::take(&mut interp().frames[depth - 1].on_exit);
+    if listed.is_empty() {
+        return Ok(None);
+    }
+    // The code taken from the frame is held by nothing else, and making its environment
+    // allocates.
+    let expressions: SmallVec<[Local<'s>; 2]> = listed
+        .iter()
+        .map(|expression| context.root(expression.get(context)))
+        .collect();
+    // A slot frame keeps exit code compiled for its slots, which runs there without an
+    // environment; only an expression that did not compile needs one. Other exit code, such
+    // as the call `withr::defer` registers through `do.call`, runs in the frame's environment,
+    // which takes only the variables that code reads.
+    let recorded = handles::live_frame(context, depth - 1).recorded_environment();
+    let environment = if recorded.r_type() != SexpType::Nil
+        || expressions
+            .iter()
+            .all(|expression| expression.r_type() == SexpType::Bytecode)
+    {
+        context.root(recorded)
+    } else {
+        frame_environment(context, depth - 1, Reify::Site(Site::OnExit))?.value()
+    };
+    Ok(Some(ExitCode {
+        expressions,
+        environment,
+    }))
+}
+
+/// Runs the passes of [`run_on_exit`] from `pass` on, with `result` the frame's outcome so far.
+fn exit_passes<'s>(
+    context: &mut Cx<'s>,
+    depth: usize,
+    mut pass: ExitCode<'s>,
+    result: R<Local<'s>>,
+    visible: &mut bool,
+) -> R<Local<'s>> {
+    let mut outcome = result;
+    loop {
+        let environment = pass.environment;
         let mut jumped = false;
-        for (position, expression) in expressions.iter().enumerate() {
-            let expression = expression.raw();
-            interp().frames[depth - 1].on_exit = expressions[position + 1..]
-                .iter()
-                .map(|expression| Held::adopt(expression.raw()))
-                .collect();
+        for (position, &expression) in pass.expressions.iter().enumerate() {
+            handles::live_frame(context, depth - 1)
+                .set_exit_code(&pass.expressions[position + 1..]);
             // A handler stack that a condition left in place must not run the exit code.
             let saved_handlers = interp().handlers.clone();
             let _saved = crate::conditions::set_aside(saved_handlers.clone(), None);
             interp().handlers = interp().frames[depth - 1].handlers.clone();
-            let exit = if expression.kind() == SexpType::Bytecode {
-                bytecode::run_promise_on_slots(expression, function, depth - 1, header as usize)
-            } else {
-                eval(expression, env)
+            let exit = match (
+                expression.downcast::<Bytecode>(),
+                environment.downcast::<Environment>(),
+            ) {
+                (Some(code), _) => handles::run_on_slots(context, code, depth - 1),
+                (None, Some(environment)) => handles::evaluate(context, expression, environment),
+                (None, None) => panic!("exit code that did not compile ran without an environment"),
             };
             interp().handlers = saved_handlers;
-            match exit {
+            if let Err(unwind) = exit {
                 // `on.exit(return(x))` makes `x` the frame's value, even over an error
                 // unwinding through it, as in GNU R.
-                Err(Unwind::Jump(jump)) if returns_here(&jump) => {
-                    if let Jump::Return { value, .. } = jump {
+                match handles::returned_value(context, &unwind, environment) {
+                    Some(value) => {
                         outcome = Ok(value);
-                        visible = interp().visible;
+                        *visible = interp().visible;
                         if let Some(top) = interp().returned_values.last_mut() {
-                            *top = Some(value);
+                            *top = Some(value.raw());
                         }
                     }
-                    jumped = true;
-                    break;
+                    None => outcome = Err(unwind),
                 }
-                Err(unwind) => {
-                    outcome = Err(unwind);
-                    jumped = true;
-                    break;
-                }
-                Ok(_) => {}
+                jumped = true;
+                break;
             }
         }
-        let unwinding = match &outcome {
-            Ok(_) => false,
-            Err(Unwind::Jump(jump)) => !returns_here(jump),
-            Err(_) => true,
-        };
+        let unwinding = matches!(&outcome, Err(unwind) if !unwind.returns_to(environment.raw()));
         if !jumped && !unwinding {
             interp().frames[depth - 1].on_exit.clear();
             break;
         }
-        match &outcome {
-            Ok(value) => crate::heap().root(*value),
-            Err(unwind) => unwind.root(),
+        // The unwind waits while the next pass runs R code.
+        if let Err(unwind) = &outcome {
+            unwind.root();
         }
+        pass = match exit_code(context, depth) {
+            Ok(Some(next)) => next,
+            Ok(None) => break,
+            Err(unwind) => {
+                outcome = Err(unwind);
+                break;
+            }
+        };
     }
-    if let Some(value) = returned {
-        value.decrement_refcount();
-    }
-    // The first pass pushes the entry, and a pass that fails before that leaves none to pop.
-    if !first {
-        interp().returned_values.pop();
-    }
-    crate::heap().release_handles(mark);
-    match &outcome {
-        Ok(value) => crate::heap().root(*value),
-        Err(unwind) => unwind.root(),
-    }
-    interp().visible = visible;
     outcome
 }
 
@@ -8023,7 +8046,13 @@ pub(crate) unsafe fn eval_in_context(
     drop(recorded);
     // `return()` may come from the body or from an `on.exit` expression, which runs in the
     // same frame and so returns from it too.
-    let result = catch_return(env, run_on_exit(depth, catch_return(env, result)));
+    let result = handles::in_caller_scope(|context| {
+        let env = handles::held(context, env);
+        let result = result.map(|value| handles::adopt(context, value));
+        let result = catch_return(context, env, result);
+        let result = run_on_exit(context, depth, result);
+        Ok(catch_return(context, env, result)?.raw())
+    });
     let state = interp();
     // The frame's saved stack, which `.addGlobHands` may have rewritten.
     conditions::restore_handlers(state.frames[depth - 1].handlers.clone());

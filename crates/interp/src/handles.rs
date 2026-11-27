@@ -3215,6 +3215,96 @@ pub fn loop_continues(result: R<()>, environment: Local<'_, Environment>) -> R<b
     }
 }
 
+/// The value a `return()` that `unwind` carries to the frame of `environment`, rooted, or
+/// `None` when `unwind` is no such return.
+#[inline]
+pub fn returned_value<'s>(
+    context: &Cx<'s>,
+    unwind: &Unwind,
+    environment: impl Pointer<Value>,
+) -> Option<Local<'s>> {
+    use crate::unwind::Jump;
+    match *unwind {
+        Unwind::Jump(Jump::Return { env, value }) if env == environment.raw() => {
+            // SAFETY: an unwind holds what it carries alive, and nothing allocates before the
+            // root.
+            Some(unsafe { rooted(context, value) })
+        }
+        _ => None,
+    }
+}
+
+/// `value`, the result of the call `call` of a typed closure, checked against the return type
+/// of `signature` (`annotations::check_return`).
+pub fn check_return<'s>(
+    context: &mut Cx<'s>,
+    call: Local<'_>,
+    signature: Local<'_>,
+    value: Local<'_>,
+) -> R<Local<'s>> {
+    // SAFETY: the three are rooted, and a check may raise an error or convert the value, which
+    // `&mut Cx` permits. The result is rooted before anything else allocates.
+    unsafe {
+        let value = crate::annotations::check_return(call.raw(), signature.raw(), value.raw())?;
+        Ok(rooted(context, value))
+    }
+}
+
+/// What keeps the environment of the returning slot frame at `index` alive past the frame as
+/// it returns `value` (`eval::outliving_cause`).
+pub fn outliving_cause(
+    _context: &Cx<'_>,
+    index: usize,
+    value: Local<'_>,
+) -> Option<crate::eval::Site> {
+    // SAFETY: the frame is live and holds its slots and environment, the value is rooted, and
+    // the test reads reference counts and cells without allocating.
+    unsafe { crate::eval::outliving_cause(index, value.raw()) }
+}
+
+/// Gives up what the environment of the returning frame at `index` holds when nothing else
+/// counts a reference to it (`Heap::release_frame`). It frees nothing at once, so `value`,
+/// which the frame returns, stays valid.
+pub fn release_frame(_context: &Cx<'_>, index: usize, value: Gc<'_>) {
+    let state = crate::interp();
+    let frame = &state.frames[index];
+    let environment = frame.env.raw();
+    if environment == values::nil() {
+        return;
+    }
+    let created = state
+        .frame_closures
+        .get(frame.closures as usize..)
+        .unwrap_or(&[]);
+    // SAFETY: the frame holds its environment, the interpreter traces the closures the frame
+    // made, and releasing references frees nothing by itself.
+    unsafe { crate::heap().release_frame(environment, value.raw(), created) }
+}
+
+/// What the pop of the frame at `index` owes a profile summary: the samples that waited, and
+/// the count of a call to a package's closure (`eval::count_package_call`).
+#[cold]
+pub fn count_frame_exit(_context: &Cx<'_>, index: usize) {
+    let state = crate::interp();
+    let frame = &state.frames[index];
+    let end = state
+        .frames
+        .get(index + 1)
+        .map_or(state.frame_args.len(), |next| next.args as usize);
+    let args = state
+        .frame_args
+        .get(frame.args as usize..end)
+        .unwrap_or(&[]);
+    // SAFETY: the frame holds its function and the interpreter traces its arguments, and
+    // filing samples and counting a call allocate nothing on the heap.
+    unsafe {
+        if heap::activity::sample_ticked() {
+            crate::profile_summary::resolve_samples(state.frames.len());
+        }
+        crate::eval::count_package_call(frame.function.raw(), Some(frame), args);
+    }
+}
+
 /// The `return` of `value` from the closure whose frame is `environment`.
 pub fn return_jump(environment: Local<'_, Environment>, value: Local<'_>) -> Unwind {
     crate::unwind::jump(crate::unwind::Jump::Return {
@@ -4019,6 +4109,24 @@ impl<'c, 's> LiveFrame<'c, 's> {
     #[inline]
     pub fn reified_by(self) -> u32 {
         self.fields().reified_by
+    }
+
+    /// Makes `expressions` the frame's `on.exit` code, which the frame roots from here on.
+    pub fn set_exit_code(self, expressions: &[Local<'_>]) {
+        // SAFETY: each expression is rooted, and the frame's `on.exit` list is marked with the
+        // frame from here on.
+        let expressions = expressions
+            .iter()
+            .map(|expression| unsafe { Held::adopt(expression.raw()) })
+            .collect();
+        crate::interp().frames[self.index].on_exit = expressions;
+    }
+
+    /// Forgets the environment of a returning slot frame that dies with it, so the frame's pop
+    /// releases nothing through it.
+    pub fn drop_environment(self) {
+        // SAFETY: `NULL` lives as long as the heap.
+        crate::interp().frames[self.index].env = unsafe { Held::adopt(values::nil()) };
     }
 }
 
