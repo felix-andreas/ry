@@ -184,6 +184,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A record pattern's `..` takes no name
 - ry values join covariantly, and a walk's tag state widens
 - Unannotated arithmetic infers a constraint per number family and a family-dependent result
+- A comparison of an open operand asks what both families compare
 
 ## Analysis core
 

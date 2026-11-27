@@ -1148,3 +1148,12 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - Where only R values fit (an overload set's argument, a union operand, a condition, an operand beside another open value) a family narrows to its R outcome, because those rules type R's semantics.
 - A family operand variable that reaches no parameter defaults to `double` at generalization, so no unsolvable family leaks into an export.
 - `num` meets a ry constraint as that constraint, a `List` item as `number`, and anything R as `numeric`; a number literal stays the literal. A condition narrows an open `num` value to `numeric` (`Checker::narrow_condition_number`). `has_r_bound` counts every joined constraint, so such a signature is a boundary function.
+
+## A comparison of an open operand asks what both families compare
+
+**Status:** built (`Constraint::{Comparable, Ordered, ComparableOrNumber, ComparableOrOrdered}` in `types.rs`; admission in `infer.rs` `constraint_rejects`; `Checker::infer_compare` in `check.rs`; `native-syntax.R.test` case `a_comparison_asks_what_both_families_compare`).
+
+- Previous shape: `Compared<T>` asked nothing of `T`, so `pos <- function(x) x > 0` accepted a `Str` or a record and typed the call `Bool`, while `s > 0` written directly is a `type-mismatch`.
+- The constraint follows the other side, because each family compares a different set: beside a number literal `comparable or number` (R compares any atomic value with a number, ry only a number); a value with itself under `==`/`!=` `eq`; under an ordering operator `comparable or ordered` (`I64`, `F64`, `Str` on the ry side).
+- `comparable` is the R half: an atomic type other than `complex` or `raw` in any shape, a list, or a class (R's `Ops` methods). A ry nominal unfolds to its body for the two comparison families, so `type Count = I64` compares with a number.
+- `Compared<T>` over a ry record or list reduces to `Bool` (`family_result`), as ry's `==` compares them structurally.
