@@ -1265,22 +1265,45 @@ impl<'a, 'db> Judge<'a, 'db> {
                         Some(_) => !assigns_name(module, body, name),
                     }
             }
-            ExpressionKind::Unary {
-                operator: UnaryOperator::Minus | UnaryOperator::Plus | UnaryOperator::Not,
-                operand,
-            } => ahead(operand),
+            // The body's own definitions are not in scope at the call, so an operator or a
+            // function it binds (`` `+` <- ``, `Num.abs <- `) would differ where R reads the default.
+            ExpressionKind::Unary { operator, operand } => {
+                let spelling = match operator {
+                    UnaryOperator::Minus => "-",
+                    UnaryOperator::Plus => "+",
+                    UnaryOperator::Not => "!",
+                    _ => return false,
+                };
+                !assigns_name(module, body, Symbol::from(spelling)) && ahead(operand)
+            }
             ExpressionKind::Binary {
                 operator, lhs, rhs, ..
             } => {
-                !matches!(
-                    operator,
+                let spelling = match operator {
+                    BinaryOperator::Add => "+",
+                    BinaryOperator::Subtract => "-",
+                    BinaryOperator::Multiply => "*",
+                    BinaryOperator::Divide => "/",
+                    BinaryOperator::Power => "^",
+                    BinaryOperator::Modulo => "%%",
+                    BinaryOperator::IntegerDivide => "%/%",
+                    BinaryOperator::Less => "<",
+                    BinaryOperator::Greater => ">",
+                    BinaryOperator::LessEq => "<=",
+                    BinaryOperator::GreaterEq => ">=",
+                    BinaryOperator::Equal => "==",
+                    BinaryOperator::NotEqual => "!=",
+                    BinaryOperator::And => "&",
+                    BinaryOperator::And2 => "&&",
+                    BinaryOperator::Or => "|",
+                    BinaryOperator::Or2 => "||",
                     BinaryOperator::Special
-                        | BinaryOperator::Sequence
-                        | BinaryOperator::Pipe
-                        | BinaryOperator::Tilde
-                        | BinaryOperator::Help
-                ) && ahead(lhs)
-                    && ahead(rhs)
+                    | BinaryOperator::Sequence
+                    | BinaryOperator::Pipe
+                    | BinaryOperator::Tilde
+                    | BinaryOperator::Help => return false,
+                };
+                !assigns_name(module, body, Symbol::from(spelling)) && ahead(lhs) && ahead(rhs)
             }
             ExpressionKind::Paren(inner) => ahead(inner),
             ExpressionKind::Tuple(items) | ExpressionKind::Array(items) => {
@@ -1290,6 +1313,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             ExpressionKind::Tag { payload, .. } => payload.is_none_or(ahead),
             ExpressionKind::Call { callee, arguments } => {
                 matches!(self.callee(callee), Callee::Std(name) if COMPILED_STD.contains(&name.as_str()))
+                    && !matches!(*module.kind(callee), ExpressionKind::NameRef(name) if assigns_name(module, body, name))
                     && module[arguments]
                         .iter()
                         .all(|argument| argument.value.is_some_and(ahead))

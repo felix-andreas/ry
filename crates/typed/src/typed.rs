@@ -868,8 +868,12 @@ unsafe fn still_resolves(compiled: &Compiled) -> bool {
 unsafe fn compile(function: Sexp, params: &[Type]) -> Result<Compiled, Refusal> {
     for _ in 0..MAX_SHAPE_ROUNDS {
         let (lowered, linker) = lower_settled(function, params)?;
-        let arguments: SmallVec<[Option<(SexpType, bool)>; 4]> =
-            params.iter().map(|&ty| storage(ty)).collect();
+        // A left-out formal's default meets its annotation where R would check it.
+        let arguments: SmallVec<[Option<(SexpType, bool)>; 4]> = params
+            .iter()
+            .chain(&lowered.defaults)
+            .map(|&ty| storage(ty))
+            .collect();
         let result = storage(lowered.function.result);
         if !interp::annotations::admits_storage(function, &arguments, result) {
             return Err(Refusal::new("the types fail the closure's annotations"));
