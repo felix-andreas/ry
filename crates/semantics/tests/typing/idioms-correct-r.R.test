@@ -78,7 +78,7 @@ trim <- function(op, n) {
   if (op == "tail") out else rev(out)
 }
 #++++
-spread: <T, U> fn(x: T, [var]: U) -> Any
+spread: <T, U: comparable> fn(x: T, [var]: U) -> Any
 trim: <T: equatable or Str, U, V> fn(op: T, n: U) -> list[V]
 
 #---- a_formal_used_only_as_a_function_still_infers_as_one
@@ -3018,7 +3018,7 @@ available <- function(model, rcp) {
   i
 }
 #++++
-available: <T, U> fn(model: T, rcp: U) -> matrix | NULL
+available: <T: equatable, U: equatable> fn(model: T, rcp: U) -> matrix | NULL
 
 #---- a_name_a_computed_assign_may_bind_is_not_the_package_function
 layout <- function(p) p

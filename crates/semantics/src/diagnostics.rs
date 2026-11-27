@@ -35,8 +35,8 @@ use {
         types::{
             Atomic, Binder, Bound, Constraint, FamilyResult, FrameKind, FunctionType, InferenceVar,
             Name, NativeField, NativeScalar, QueryName, RecordField, Ty, TyKind, TypeScheme,
-            array_element, contains_inference_var, for_each_child_type,
-            map_child_types, null, substitute_rigid, union_of,
+            array_element, contains_inference_var, for_each_child_type, map_child_types, null,
+            substitute_rigid, union_of,
         },
     },
     rustc_hash::{FxHashMap, FxHashSet},

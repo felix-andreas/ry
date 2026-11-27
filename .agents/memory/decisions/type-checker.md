@@ -112,7 +112,12 @@ table, so a rollback drops them. A pair the body settles is checked at the item'
 comparison, after default literals settle); a pair with a var of an enclosing function moves to it,
 so curried functions and local closures carry it. The pair is part of the function type's identity:
 unifying two function types and passing a function value check both sides' pairs. A settled side
-from a default literal passes beside a ry number of its family. An overload set or a third binder spelling
+from a default literal passes beside a ry number of its family. A side settled on a ry value
+binds the other side's open type (any statement order); a side settled on an R value constrains the
+other to the R half of its constraint (`comparable` under an order). The call finds an argument by
+its parameter's type identity, never by type equality, so another parameter of that type is never
+blamed. A left-out default adapts only when it is a literal (`ComparedPair::left_literal`), and an
+annotated function keeps its pairs too. An overload set or a third binder spelling
 the relation was rejected as heavier than a side fact the annotation syntax need not express.
 
 A variable bound under a comparison constraint (`Widening::Compared`, `infer.rs`) widens over R's
@@ -121,7 +126,8 @@ types, numbers by promotion and others to the union, so a declared `<T: eq>` tak
 number` and `equatable or Str`, where `equatable` is `comparable` plus `complex` and `raw`, which R
 tests for equality but does not order. Pinned by
 `two_flexible_comparison_operands_stay_separate_types`,
-`a_compared_pair_follows_the_operands_everywhere` and
+`a_compared_pair_follows_the_operands_everywhere`,
+`a_compared_pair_checks_what_the_body_settles` and
 `an_open_value_tested_for_equality_admits_complex`.
 
 ## Union compatibility commits a flexible argument at first use, in program order

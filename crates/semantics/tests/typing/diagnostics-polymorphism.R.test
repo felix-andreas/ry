@@ -194,7 +194,7 @@ near <- function(x, y, tolerance = 1e-8) abs(x - y) < tolerance
 times <- near(Sys.time(), Sys.time())
 days <- near(Sys.Date(), Sys.Date())
 #++++
-near: <T: arithmetic, U> fn(x: T, y: T, [tolerance]: U) -> logical
+near: <T: arithmetic, U: comparable> fn(x: T, y: T, [tolerance]: U) -> logical
 times: logical
 days: logical
 
