@@ -205,10 +205,14 @@ pub(crate) unsafe fn declared_params(closure: Sexp) -> Result<SmallVec<[Type; 4]
 /// look up, so the text alone says which values arrive. A tag from R is any tag, whichever union
 /// the annotation names, because R code can build every tag. A record or tuple takes the shape
 /// its fields give a value converted from R (`to_box`), so a value of another storage, such as
-/// an integer in a `double` field, misses the code and compiles at the call. An open record and
-/// a set or a dictionary, which has no R value, give no type, and such a closure compiles at its
-/// first call.
-pub(crate) unsafe fn annotated_type(annotation: &str) -> Option<Type> {
+/// an integer in a `double` field, misses the code and compiles at the call. An open record, a
+/// record or list that holds a tag, and a set or a dictionary, which has no R value, give no
+/// type, and such a closure compiles at its first call.
+///
+/// # Safety
+///
+/// Interns symbols and layouts, so it runs on the interpreter's thread.
+pub unsafe fn annotated_type(annotation: &str) -> Option<Type> {
     let annotation = annotation.trim();
     if annotation.starts_with(':') {
         return Some(Type::Tag(shapes::ANY));
@@ -281,12 +285,11 @@ unsafe fn annotated_box(annotation: &str) -> Option<Item> {
     shapes::intern(layout, &items).map(Item::Record)
 }
 
-/// The item a record field of this annotation holds once converted from R: a scalar, a ry list,
-/// a tag or a nested record or tuple. An R vector field converts to no item.
+/// The item a record field or list item of this annotation holds once converted from R: a
+/// scalar, a ry list or a nested record or tuple. A tag gives none: a `match` on a tag inside a
+/// box compiles only for the tag shapes a converted value confirmed, and before the script runs
+/// none is, so the closure waits for its first call.
 unsafe fn annotated_field(annotation: &str) -> Option<Item> {
-    if annotation.starts_with(':') {
-        return Some(Item::Tag(shapes::ANY));
-    }
     if let Some(items) = annotation
         .strip_prefix("List")
         .and_then(|rest| rest.trim_start().strip_prefix('<'))

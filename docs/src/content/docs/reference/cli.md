@@ -223,8 +223,8 @@ started
 A function compiles ahead when it is defined at the top level of the script as
 `name <- function(...)` and each parameter's annotation says which values arrive from R: a number,
 `Bool`, `Str`, a `List` of those, a tag union, a table such as `DataFrame` or
-`DataFrame{price: double[]}`, or a record or tuple that spells out each field, such as
-`Record{x: F64, at: Point}` or `List<Tuple{I64, Str}>`. The typed functions it calls compile with it, whatever their
+`DataFrame{price: double[]}`, or a record or tuple that spells out each field as one of those
+or as another such record, such as `Record{x: F64, at: Point}` or `List<Tuple{I64, Str}>`. The typed functions it calls compile with it, whatever their
 parameters. A file the script sources into the global environment, as `source("helpers.R")` does,
 compiles the same way when `source()` has read it, before any of it runs. These compile at their
 first call instead:
@@ -237,8 +237,9 @@ first call instead:
   `ry: another build of ry installed rates, so its typed functions compiled as it loaded; reinstall it to compile them at install`;
 - a function defined after the script set `options(keep.source = TRUE)`, or in a statement that
   holds a literal R warns about, such as `1.5L`;
-- a top-level function with an open record (`Record{x: F64, ..}`), `Dict`, `Set` or function
-  parameter that no typed function compiled ahead calls;
+- a top-level function with a parameter that is an open record (`Record{x: F64, ..}`), a record
+  or list that holds a tag, a `Dict`, a `Set` or a function, unless a typed function compiled
+  ahead calls it;
 - a function that calls a name the script binds to something else later. It was compiled for the
   first definition of the name, and compiles again at its next call after the rebinding;
 - a function that converts an R value with `Num.from_r`, or with a `List.from_r` whose item type
