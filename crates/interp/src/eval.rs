@@ -3302,7 +3302,7 @@ unsafe fn try_native_typed(
 /// does, so the tiers agree on a typed program. An argument the typed caller names is its own
 /// even when the interpreter forwards the caller's promise for a variable (an effect-free
 /// callee's eager arguments). An argument written in R code, including one a typed function
-/// receives through `...`, stays lazy, and so does a missing one, as `missing()` reads it.
+/// passes on as `...`, stays lazy, and so does a missing one, as `missing()` reads it.
 unsafe fn force_typed_arguments(call: Sexp, args: &[Arg], sys_parent: Sexp) -> R<()> {
     let dots = symbols().dots;
     let mut expressions = if is_typed_frame(sys_parent) {
@@ -3316,7 +3316,11 @@ unsafe fn force_typed_arguments(call: Sexp, args: &[Arg], sys_parent: Sexp) -> R
             && expressions.kind() == SexpType::Pairlist
             && expressions.car() == dots
         {
-            from_dots = dots_length(sys_parent)?;
+            let mut cell = dots_binding(sys_parent)?;
+            while cell.kind() == SexpType::Dots || cell.kind() == SexpType::Pairlist {
+                from_dots += 1;
+                cell = cell.cdr();
+            }
             expressions = expressions.cdr();
         }
         let named_by_typed_caller = if from_dots > 0 {
@@ -3331,7 +3335,8 @@ unsafe fn force_typed_arguments(call: Sexp, args: &[Arg], sys_parent: Sexp) -> R
         let promise = arg.value;
         if promise.kind() == SexpType::Promise
             && promise.car() == unbound()
-            && (named_by_typed_caller || written_in_typed_code(promise))
+            && (named_by_typed_caller
+                || (!promise.has_gp(gp::ARGUMENT_REFERENCE) && is_typed_frame(promise.tag())))
             && !argument_is_missing(promise.cdr(), promise.tag())?
         {
             force_promise(promise)?;
@@ -3340,25 +3345,8 @@ unsafe fn force_typed_arguments(call: Sexp, args: &[Arg], sys_parent: Sexp) -> R
     Ok(())
 }
 
-/// How many arguments `...` in `env` passes on.
-unsafe fn dots_length(env: Sexp) -> R<usize> {
-    let mut cell = dots_binding(env)?;
-    let mut length = 0;
-    while cell.kind() == SexpType::Dots || cell.kind() == SexpType::Pairlist {
-        length += 1;
-        cell = cell.cdr();
-    }
-    Ok(length)
-}
-
-/// Whether `promise`'s code is in the body of a typed function: its environment is the frame of
-/// a live call of one. A typed function never runs on slots, so a promise over a slot frame is
-/// R code's.
-unsafe fn written_in_typed_code(promise: Sexp) -> bool {
-    !promise.has_gp(gp::ARGUMENT_REFERENCE) && is_typed_frame(promise.tag())
-}
-
-/// Whether `env` is the frame of a live call of a typed function.
+/// Whether `env` is the frame of a live call of a typed function. A typed function never runs
+/// on slots, so a promise over a slot frame is R code's.
 unsafe fn is_typed_frame(env: Sexp) -> bool {
     if env.has_gp(gp::SLOT_FRAME) {
         return false;
