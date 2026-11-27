@@ -2931,13 +2931,7 @@ unsafe fn attach_inner(
     if code_image::hash(code) != version.hash {
         return Err("its code does not match the file");
     }
-    let invisible = match lower::visibility(closure) {
-        lower::Visibility::Visible => false,
-        lower::Visibility::Invisible => true,
-        lower::Visibility::Mixed => {
-            return Err("R returns its value invisibly on some paths only");
-        }
-    };
+    let invisible = lower::returns_invisibly(closure)?;
     let mut resolved: FxHashMap<u32, Speculation> = FxHashMap::default();
     let mut speculations = Vec::with_capacity(version.lookups.len());
     for &lookup in &version.lookups {

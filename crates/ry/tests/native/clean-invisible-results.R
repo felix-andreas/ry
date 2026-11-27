@@ -44,3 +44,50 @@ apply_quiet <- function(f: fn(F64) -> F64, x: F64) -> F64 f(x)
 passed <- function(x: F64) -> F64 apply_quiet(\(y) { z <- y }, x)
 passed(5)
 print(passed(5))
+quiet <- function(y: F64) -> F64 { z <- y }
+apply_local <- function(f: fn(F64) -> F64, x: F64) -> F64 {
+  g <- function(y: F64) -> F64 f(y)
+  g(x)
+}
+via_local <- function(x: F64) -> F64 apply_local(quiet, x)
+local_pass <- function(x: F64) -> F64 {
+  g <- function(h: fn(F64) -> F64, y: F64) -> F64 h(y)
+  g(\(v) { w <- v }, x)
+}
+twice <- function(f: fn(F64) -> F64, x: F64) -> F64 f(x)
+nested <- function(x: F64) -> F64 twice(\(y) twice(quiet, y), x)
+loud <- function(x: F64) -> F64 twice(\(y) y + 1, x)
+counted <- function(n: I64, f: fn(F64) -> F64) -> F64 if (n == 0) f(1) else counted(n - 1, f)
+through_recursion <- function(x: F64) -> F64 counted(3, quiet)
+via_local(5)
+local_pass(6)
+nested(3)
+loud(3)
+through_recursion(1)
+
+# A loop that only a `return` leaves gives the returned value, visibly.
+first_above <- function(x: F64) -> F64 {
+  repeat {
+    x <- x + 1
+    if (x > 3) return(x)
+  }
+}
+newton <- function(x: F64) -> F64 {
+  guess <- x
+  while (TRUE) {
+    better <- (guess + x / guess) / 2
+    if (abs(better - guess) < 1e-9) return(better)
+    guess <- better
+  }
+}
+count_to <- function(n: I64) -> NULL {
+  i <- 0i64
+  repeat {
+    i <- i + 1i64
+    if (i > n) break
+  }
+}
+first_above(1)
+newton(2)
+count_to(3)
+print(count_to(3))

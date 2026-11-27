@@ -3230,6 +3230,13 @@ impl ShownWalk<'_> {
     fn tail(&mut self, id: ExprId, shown: &mut Shown) {
         let module = self.module;
         match *module.kind(id) {
+            // A loop that only a `return` leaves gives no value of its own.
+            ExpressionKind::Repeat { body } if !breaks(module, body) => {}
+            ExpressionKind::While { condition, body }
+                if matches!(
+                    module.kind(condition),
+                    ExpressionKind::Literal(LiteralKind::Logical(true))
+                ) && !breaks(module, body) => {}
             ExpressionKind::Assign { .. }
             | ExpressionKind::For { .. }
             | ExpressionKind::While { .. }
@@ -3339,5 +3346,22 @@ impl ShownWalk<'_> {
             _ => {}
         }
         module.for_each_child(id, |child| self.collect_locals(child));
+    }
+}
+
+/// Whether a `break` in `id` leaves the loop `id` is the body of: one outside the loops and
+/// functions `id` holds.
+fn breaks(module: &Module, id: ExprId) -> bool {
+    match module.kind(id) {
+        ExpressionKind::Break => true,
+        ExpressionKind::Function { .. }
+        | ExpressionKind::For { .. }
+        | ExpressionKind::While { .. }
+        | ExpressionKind::Repeat { .. } => false,
+        _ => {
+            let mut found = false;
+            module.for_each_child(id, |child| found = found || breaks(module, child));
+            found
+        }
     }
 }

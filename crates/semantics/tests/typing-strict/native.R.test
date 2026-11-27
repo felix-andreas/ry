@@ -157,8 +157,14 @@ show_all <- function(n: I64) -> NULL {
 }
 bump_all <- function(xs: List<I64>) List.for_each(xs, function(x: I64) x + 1)
 mixed <- function(x: F64) -> F64 if (x > 0) x else { y <- 0 }
+first_above <- function(x: F64) -> F64 {
+  repeat {
+    x <- x + 1
+    if (x > 3) return(x)
+  }
+}
 show_all(2)
-cat(remember(2), mixed(1), "\n")
+cat(remember(2), mixed(1), first_above(1), "\n")
 bump_all([1, 2])
 #++++
 == script.R
@@ -166,6 +172,7 @@ remember: fn(x: F64) -> F64
 show_all: fn(n: I64) -> NULL
 bump_all: fn(xs: List<I64>) -> NULL
 mixed: fn(x: F64) -> F64
+first_above: fn(x: F64) -> F64
 NULL
 NULL
 NULL

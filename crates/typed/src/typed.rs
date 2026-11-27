@@ -190,7 +190,7 @@ pub struct Compiled {
     /// because they were being compiled, each with the result type the call assumed. The code
     /// is right only while each of them has current code of that result type.
     pub cells: SmallVec<[(Key, Type); 1]>,
-    /// Whether R returns the value invisibly ([`lower::visibility`]).
+    /// Whether R returns the value invisibly ([`lower::returns_invisibly`]).
     pub invisible: bool,
 }
 
