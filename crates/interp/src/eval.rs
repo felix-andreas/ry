@@ -146,7 +146,24 @@ pub fn symbol_value_reporting<'s>(
         }
         None
     } else {
-        found_value(context, symbol, environment, true)?
+        let found = find_variable(
+            context,
+            symbol.read(context),
+            environment.read(context),
+            true,
+        );
+        match found {
+            // A plain value or a forced promise needs no code run, so it is rooted once, as
+            // the result.
+            Found::Value(value) if !handles::is_missing_argument(value) => match settled(value) {
+                Some(value) => return Ok(context.root(value)),
+                None => Some(context.root(value)),
+            },
+            found => {
+                let found = bound(context, found);
+                resolve(context, found)?
+            }
+        }
     };
     let Some(value) = value else {
         let name = handles::text(symbol.read(context).name()).into_owned();
@@ -306,10 +323,26 @@ fn binding_found(binding: Gc<'_, Binding>) -> Found<'_> {
     }
 }
 
-/// The value of a binding cell, calling an active binding's function.
+/// The value of a binding cell, calling an active binding's function. A cell C code left
+/// holding `R_UnboundValue` gives that, which is what a raw caller tests for.
+#[inline]
 pub unsafe fn cell_value(cell: Sexp) -> R<Sexp> {
+    // SAFETY: the caller passes a live binding cell.
+    let binding = unsafe { Gc::<Binding>::adopt(cell) };
+    if binding.is_active() {
+        // SAFETY: as for `cell_value`.
+        return unsafe { active_value(cell) };
+    }
+    Ok(binding.content().raw())
+}
+
+/// [`cell_value`] for an active binding, kept apart so that the common read stays small
+/// enough to inline into its callers.
+#[cold]
+#[inline(never)]
+unsafe fn active_value(cell: Sexp) -> R<Sexp> {
     handles::in_caller_scope(|context| {
-        let found = bound(context, binding_found(Gc::adopt(cell)));
+        let found = bound(context, Found::Active(Gc::adopt(cell)));
         Ok(resolve(context, found)?.map_or_else(unbound, Local::raw))
     })
 }
@@ -507,20 +540,20 @@ pub(crate) unsafe fn tmp_value(env: Sexp) -> Sexp {
 }
 
 /// The value bound to `symbol` in `env`'s own frame, or `R_UnboundValue`.
+#[inline]
 pub unsafe fn find_var_in_frame(symbol: Sexp, env: Sexp) -> R<Sexp> {
-    handles::in_caller_scope(|context| {
-        let environment = Gc::<Environment>::adopt(env);
-        let found = match handles::frame_binding(context, environment, Gc::<Symbol>::adopt(symbol))
-        {
-            Some(binding) => binding_found(binding),
-            None => Found::Unbound,
-        };
-        let found = match found {
-            Found::Value(value) => return Ok(value.raw()),
-            found => bound(context, found),
-        };
-        Ok(resolve(context, found)?.map_or_else(unbound, Local::raw))
-    })
+    // SAFETY: the caller passes a live symbol and environment.
+    let cell = unsafe {
+        handles::reading(|context| {
+            handles::frame_binding(context, Gc::<Environment>::adopt(env), Gc::<Symbol>::adopt(symbol))
+                .map(|binding| binding.raw())
+        })
+    };
+    match cell {
+        // SAFETY: the cell is live.
+        Some(cell) => unsafe { cell_value(cell) },
+        None => Ok(unbound()),
+    }
 }
 
 /// The value `symbol` has in the frame of `environment` itself, its promise forced, or `None`
