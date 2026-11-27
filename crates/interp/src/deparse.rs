@@ -5,6 +5,7 @@
 
 use {
     crate::{
+        annotations::{self, FIRST_FORMAL_SLOT, RETURN_SLOT, TEXTS},
         builtins::{BuiltinDef, Call, internal},
         format, records, standard_library, strings,
         unwind::{R, Unwind, error},
@@ -38,6 +39,9 @@ pub mod options {
     pub const DEFAULT: u32 = KEEP_NA | KEEP_INTEGER | NICE_NAMES | SHOW_ATTRIBUTES;
     /// What error messages and `print` of a call use.
     pub const SIMPLE: u32 = KEEP_INTEGER | KEEP_NA | NICE_NAMES;
+    /// ry's own: a typed closure shows its annotations. Only `print` asks, because `deparse`
+    /// and `dput` write R code that another R may read.
+    pub const TYPED_SIGNATURES: u32 = 1 << 20;
 }
 
 /// Deparses to lines at the default cutoff.
@@ -320,6 +324,9 @@ struct Deparser {
     /// The first error GNU R's deparser would raise. Deparsing goes on with the plain value, so
     /// callers that cannot fail still get text.
     failure: Option<Unwind>,
+    /// The annotation texts of the closure whose formals are deparsed next, as its signature
+    /// keeps them.
+    formal_types: Option<Sexp>,
 }
 
 impl Deparser {
@@ -342,6 +349,7 @@ impl Deparser {
             incomplete: false,
             scipen: None,
             failure: None,
+            formal_types: None,
         }
     }
 
@@ -643,9 +651,24 @@ impl Deparser {
         // GNU R deparses a function without its source under its simple options, so constants
         // in the formals and body show without their attributes.
         self.opts &= !(options::QUOTE_EXPRESSIONS | options::SHOW_ATTRIBUTES | options::USE_SOURCE);
+        // A typed closure shows the annotation texts its signature keeps, so a function without
+        // source, such as an installed package's, prints as the typed definition it is.
+        let types = match self.opts & options::TYPED_SIGNATURES {
+            0 => None,
+            _ => annotations::signature_of(function).map(|signature| signature.element(TEXTS)),
+        };
         self.print("function (");
+        self.formal_types = types;
         self.arguments(function.car(), true);
-        self.print(") ");
+        self.print(")");
+        if let Some(types) = types {
+            let result = values::string_elt(types, RETURN_SLOT);
+            if !result.bytes().is_empty() {
+                self.print(" -> ");
+                self.print(&String::from_utf8_lossy(result.bytes()));
+            }
+        }
+        self.print(" ");
         self.write_line();
         self.deparse(crate::bytecode::closure_body(function));
         self.opts = saved;
@@ -655,6 +678,13 @@ impl Deparser {
     /// breaks.
     unsafe fn arguments(&mut self, mut list: Sexp, formals: bool) {
         let mut broken = false;
+        // Taken, so a function literal in a default deparses its own formals untyped.
+        let types = if formals {
+            self.formal_types.take()
+        } else {
+            None
+        };
+        let mut position = 0;
         while list != nil() {
             if !matches!(
                 list.kind(),
@@ -673,6 +703,15 @@ impl Deparser {
                     self.print(&tag_text(&name, self.backtick));
                 }
                 if formals {
+                    if let Some(types) = types
+                        && position + FIRST_FORMAL_SLOT < values::length(types)
+                    {
+                        let text = values::string_elt(types, position + FIRST_FORMAL_SLOT);
+                        if !text.bytes().is_empty() {
+                            self.print(": ");
+                            self.print(&String::from_utf8_lossy(text.bytes()));
+                        }
+                    }
                     if list.car() != values::missing_arg() {
                         self.print(" = ");
                         self.argument = true;
@@ -690,6 +729,7 @@ impl Deparser {
                 self.deparse(list.car());
             }
             list = list.cdr();
+            position += 1;
             if list != nil() {
                 self.print(", ");
                 self.line_break(&mut broken);

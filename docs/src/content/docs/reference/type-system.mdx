@@ -373,6 +373,23 @@ Error in halve("a") : argument `value` must be `double`, not `character`
 GNU R reads a `#:` block as a comment, so a file annotated only in `#:` blocks runs under
 `Rscript` without checks.
 
+**`print` shows the annotations; `deparse` does not.** A function that keeps no source references,
+such as one from an installed package or any function under `ry run`, prints from its code, and
+`print` writes the signature's types into it. `deparse` and `dput` write the erasure, because they
+produce R code that another R may read:
+
+```r
+scale <- function(values: double, by: double = 1) -> double values * by
+scale
+deparse(scale)
+```
+
+```text ry run runtime=ry
+function (values: double, by: double = 1) -> double 
+values * by
+[1] "function (values, by = 1) " "values * by"
+```
+
 Two kinds of signature are not checked at run time:
 
 - **A coercion.** `@trust`, `@if-unknown` and `@new` say how the value gets its type instead of

@@ -1185,3 +1185,10 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - `Compared<T>` over a ry record, tuple, tag or nominal is `Bool`, and over a ry `List` `List<Bool>`, since a `List` compares item by item (`InferenceTable::family`); a `List` meets the comparison constraints through its item type.
 - `key` admits ry values, so it meets a comparison family as an R atomic scalar (`AtomicElement`), as it meets an arithmetic one; otherwise a key compared with a number would let a `Str` through.
 - Two different open operands record a compared pair (the entry above); one beside a string literal asks `comparable or Str`.
+
+## Record and tag payload fields display in sorted order
+
+**Status:** settled (type rendering in `types.rs`).
+
+- A record type and a tag payload show their fields sorted by name, in diagnostics as in hovers, so `:Rect(width: double, height: double)` displays as `:Rect(height: double, width: double)`.
+- The sorted order is the semantics: a positional index counts the sorted fields (`type-system.mdx`), and a structural type has no declaration order to recover, since two spellings of one record are the same interned type. Roc sorts record fields the same way.

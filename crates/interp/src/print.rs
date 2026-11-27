@@ -333,8 +333,10 @@ unsafe fn print_closure(function: Sexp, options: &PrintOptions) -> R<()> {
         true => deparse::source_lines(get_attr(function, symbols().srcref)),
         false => None,
     };
-    let lines =
-        source.unwrap_or_else(|| deparse::deparse_lines(function, 60, deparse::options::SIMPLE));
+    let lines = source.unwrap_or_else(|| {
+        let opts = deparse::options::SIMPLE | deparse::options::TYPED_SIGNATURES;
+        deparse::deparse_lines(function, 60, opts)
+    });
     for line in lines {
         out(&format!("{line}\n"));
     }

@@ -124,15 +124,15 @@ const SCALAR: Mask = 1 << 30;
 /// A signature is a list: the masks by slot, the annotation texts by slot, the formal names by
 /// formal position, and the definition's body.
 const MASKS: usize = 0;
-const TEXTS: usize = 1;
+pub(crate) const TEXTS: usize = 1;
 const NAMES: usize = 2;
 const BODY: usize = 3;
 
 /// Slot 0 of a signature is the return value, slot 1 the rest parameter, and slot `2 + i` the
 /// formal at position `i`.
-const RETURN_SLOT: usize = 0;
+pub(crate) const RETURN_SLOT: usize = 0;
 const REST_SLOT: usize = 1;
-const FIRST_FORMAL_SLOT: usize = 2;
+pub(crate) const FIRST_FORMAL_SLOT: usize = 2;
 
 /// Records the checks a function literal's signature asks for, keyed by the formals or body the
 /// lowering just built for it. The signature is the one [`syntax::annotation::signature`]
@@ -693,7 +693,7 @@ unsafe fn log_fallback(call: Sexp, reason: &str) {
     }
 }
 
-unsafe fn signature_of(function: Sexp) -> Option<Sexp> {
+pub(crate) unsafe fn signature_of(function: Sexp) -> Option<Sexp> {
     let formals = function.car();
     // Every closure call asks, and almost none is typed: the formals' bit answers before the
     // body's source is looked up.
