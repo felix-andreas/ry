@@ -1647,6 +1647,7 @@ pub unsafe fn argument_reference(owner: usize, slot: u32, symbol: Sexp) -> R<Sex
 }
 
 /// [`argument_reference`] for code on the handle types.
+#[inline]
 pub fn slot_reference<'a>(
     context: &'a mut Cx<'_>,
     owner: usize,
@@ -1734,6 +1735,7 @@ fn reference_at<'c>(context: &'c Cx<'_>, index: usize) -> Gc<'c, Promise> {
 
 /// The position in [`Interp::references`] of the next free reference, now naming `symbol`,
 /// with its target left for the caller to fill in.
+#[inline]
 fn take_reference<'s>(context: &mut Cx<'s>, symbol: Local<'_>) -> R<usize> {
     let index = interp().references_used as usize;
     match handles::pooled_reference(context, index) {
@@ -1743,22 +1745,28 @@ fn take_reference<'s>(context: &mut Cx<'s>, symbol: Local<'_>) -> R<usize> {
             // belongs to that call's argument, not to the one that takes the reference next.
             reference.set_flags(PROMISE_INTERRUPTED, false);
         }
-        // A `...` list counts the references it collected until its frame is released
-        // (`Heap::release_frame`), which happens late for a frame that waits for a reconcile
-        // and never for the frame of a call that failed. Handed out with that count, the
-        // reference would not look held by its frame alone once a frame detached it
-        // ([`detach_reference`]), so the pool gives it up and makes another.
-        _ => {
-            let mut target = context.alloc::<Integer>(3)?;
-            target.as_mut_slice().fill(0);
-            let target = target.finish();
-            let reference = handles::new_argument_reference(context, symbol, target)?;
-            handles::place_reference(context, index, reference, Some(target));
-        }
+        _ => renew_reference(context, index, symbol)?,
     }
     interp().references_used += 1;
     activity::count(Counter::ArgumentReferences);
     Ok(index)
+}
+
+/// Puts a new reference naming `symbol` at position `index` of the pool, which ends the pool or
+/// holds a reference something else counts. A `...` list counts the references it collected
+/// until its frame is released (`Heap::release_frame`), which happens late for a frame that
+/// waits for a reconcile and never for the frame of a call that failed. Handed out with that
+/// count, the reference would not look held by its frame alone once a frame detached it
+/// ([`detach_reference`]), so the pool gives it up and makes another.
+#[cold]
+#[inline(never)]
+fn renew_reference(context: &mut Cx<'_>, index: usize, symbol: Local<'_>) -> R<()> {
+    let mut target = context.alloc::<Integer>(3)?;
+    target.as_mut_slice().fill(0);
+    let target = target.finish();
+    let reference = handles::new_argument_reference(context, symbol, target)?;
+    handles::place_reference(context, index, reference, Some(target));
+    Ok(())
 }
 
 /// The slot an argument reference names for a variable its frame keeps in no slot: forcing it
@@ -4486,11 +4494,13 @@ pub const OBSERVING_REASONS: [&str; 18] = [
 
 /// The `...` slot of the frame at `index`, when it is a slot frame that keeps every variable in
 /// its slot and has a `...` formal.
+#[inline(always)]
 pub unsafe fn slot_dots(index: usize) -> Option<Sexp> {
     handles::reading(|context| frame_dots(context, index).map(Gc::raw))
 }
 
 /// [`slot_dots`] for code on the handle types.
+#[inline(always)]
 pub fn frame_dots<'c>(context: &'c Cx<'_>, index: usize) -> Option<Gc<'c>> {
     let frame = handles::frame_if_live(context, index).filter(|frame| frame.in_slots())?;
     let dots = handles::symbol(|symbols| symbols.dots);
@@ -4500,11 +4510,13 @@ pub fn frame_dots<'c>(context: &'c Cx<'_>, index: usize) -> Option<Gc<'c>> {
 
 /// The register that holds the variable `symbol` of the frame at `index`, when it is a slot
 /// frame that keeps every variable in its slot and has a slot of that name.
+#[inline]
 pub unsafe fn slot_register(index: usize, symbol: Sexp) -> Option<usize> {
     handles::reading(|context| variable_register(context, index, Gc::adopt(symbol)))
 }
 
 /// [`slot_register`] for code on the handle types.
+#[inline]
 pub fn variable_register(context: &Cx<'_>, index: usize, symbol: Gc<'_, Symbol>) -> Option<usize> {
     let frame = handles::frame_if_live(context, index)
         .filter(|frame| frame.in_slots() && frame.role() != crate::FrameRole::Inlined)?;
@@ -4514,6 +4526,7 @@ pub fn variable_register(context: &Cx<'_>, index: usize, symbol: Gc<'_, Symbol>)
 
 /// What the slot of the formal `symbol` holds in the frame at `index`, and whether the formal is
 /// missing, when it is a slot frame that keeps every variable in its slot and has such a formal.
+#[inline(always)]
 pub unsafe fn slot_formal(index: usize, symbol: Sexp) -> Option<(Sexp, bool)> {
     handles::reading(|context| {
         let [(value, missing)] = formal_slots(context, index, [Gc::adopt(symbol)])?;
@@ -4524,6 +4537,7 @@ pub unsafe fn slot_formal(index: usize, symbol: Sexp) -> Option<(Sexp, bool)> {
 /// [`slot_formal`] for several formals in one walk of the formals, so `symbols` must be listed
 /// in the order the closure declares them. `None` when the frame is no slot frame that keeps
 /// every variable in its slot, or when a symbol is not a formal at its place in that order.
+#[inline(always)]
 pub unsafe fn slot_formals<const N: usize>(
     index: usize,
     symbols: [Sexp; N],
@@ -4535,6 +4549,7 @@ pub unsafe fn slot_formals<const N: usize>(
 }
 
 /// [`slot_formals`] for code on the handle types.
+#[inline(always)]
 pub fn formal_slots<'c, const N: usize>(
     context: &'c Cx<'_>,
     index: usize,
