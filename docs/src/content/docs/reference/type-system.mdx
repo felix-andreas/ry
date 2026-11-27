@@ -385,8 +385,8 @@ Two kinds of signature are not checked at run time:
 
 A signature that is only the name of a type alias, as in `#: Scaler` with
 `#: @alias Scaler {fn(values: double, by: double) -> double}`, is checked and compiled like the
-function type it names, because `ry run`, the console, `ry install` and `ry build` write that type
-out in place of the name before the code runs. Code that `source()` or `ry load` reads is not
+function type it names, because `ry run`, the console, `ry load`, `ry install` and `ry build` write
+that type out in place of the name before the code runs. Code that `source()` reads is not
 rewritten, so there such a function has no run-time checks and runs in the interpreter.
 
 The console attaches a `#:` block the same way. A command that ends in a `#:` block is unfinished,
@@ -776,15 +776,27 @@ A binder name may carry a constraint, written `NAME: CONSTRAINT`, as in
   endpoint of `:` infers, so `function(n) 1:n` is `<T: scalar numeric> fn(n: T) -> double[]`.
 - `item` admits what a [`List`](#lists) can hold: a number, a `Bool`, a `Str`, or another ry value.
   `List.from_r` uses it to type a `list[T]` argument.
+- `eq` admits every value but a function: the values `==` compares.
+- `comparable` admits the R values a comparison takes: an atomic value other than `complex` or
+  `raw` in any vector shape, a list, which R compares element by element, and a class.
+- `equatable` admits what `comparable` does and `complex` and `raw`, which R tests for equality but
+  does not order.
+- `ordered` admits the ry values with an order: `I64`, `F64` and `Str`. A number literal passed for
+  an `ordered` parameter is a ry number, and a string literal a `Str`.
+- `comparable or number` admits everything `comparable` does and `I64` and `F64`.
+- `comparable or Str` admits everything `comparable` does and `Str`.
+- `comparable or ordered` admits everything `comparable` does and what `ordered` does.
+- `equatable or number` and `equatable or Str` admit everything `equatable` does and the ry numbers
+  or `Str`.
 
-The last four join an R constraint and a ry one, and they are what
-[unannotated arithmetic](#unannotated-values-in-arithmetic) infers, with a result written
-`Promoted<T>` or `Compared<T>` when R and ry give different results:
+The constraints named `... or ...` join an R constraint and a ry one, and they are what
+[unannotated arithmetic](#unannotated-values-in-arithmetic) and comparisons infer, with a result
+written `Promoted<T>` or `Compared<T>` when R and ry give different results:
 
-| Type | `T` a ry number | `T` an R value |
+| Type | `T` a ry value | `T` an R value |
 | --- | --- | --- |
 | `Promoted<T>` | `T` | `double` |
-| `Compared<T>` | `Bool` | `logical` |
+| `Compared<T>` | `Bool`, or `List<Bool>` for a `List` | `logical` |
 
 So `function(x) x * 2` is `<T: arithmetic or number> fn(x: T) -> Promoted<T>`: it gives an `I64`
 for an `I64`, as `x * 2` on an `I64` does in ry, and a `double` for an `integer`, as R does. `Promoted<T>` and `Compared<T>` may be written in an annotation too.
@@ -1703,14 +1715,14 @@ type-mismatch
   x this literal does not fit `I64`, which cannot hold its value exactly
 ```
 
-A literal runs as the type the checker gave it. Before `ry run` or the console runs code on ry's
-runtime, every unsuffixed literal the checker typed as `I64` is spelled with its suffix, so the arm
+A literal runs as the type the checker gave it. Before `ry run`, the console or `ry load` runs code
+on ry's runtime, every unsuffixed literal the checker typed as `I64` is spelled with its suffix, so the arm
 `:Err(_) => 0` in a function declared `-> I64` returns `0i64`, and `xs <- [1, 2]` is a `List<I64>`.
 An empty list keeps its item type the same way: `[]` and a `List.map` whose items come from its
 callback carry the item type the checker gave them, so `List.map(List.range(3, 1), \(v) v * 2)` is
 an empty `List<I64>` and its `List.sum` is `0i64`.
 A file with no ry syntax and no strict mode is not analyzed, and its literals keep R's types. Code
-that `ry load` or `source()` runs is not elaborated this way: there an operator converts a literal
+that `source()` runs is not elaborated this way: there an operator converts a literal
 operand, and an annotated binding such as `n: I64 <- 5` converts its literal. An `I64` parameter and an `-> I64` result
 convert the same way, so `f(3)` passes `3i64` to `f <- function(n: I64) ...`. A conversion that
 cannot be exact is an error, never a rounded value.
@@ -2799,7 +2811,12 @@ operand pick the [constraint](#constraints) and the result:
 | two of one type, under `/` | `numeric or F64` | `Promoted<T>` |
 | two of one type, under `^` | `num` | `Promoted<T>` |
 | beside any other value | `arithmetic` | R's result |
-| a comparison beside a literal or itself | none | `Compared<T>` |
+| `x` beside a number literal, under `<`, `>`, `<=` or `>=` (`x > 0`) | `comparable or number` | `Compared<T>` |
+| `x` beside a string literal, under `<`, `>`, `<=` or `>=` | `comparable or Str` | `Compared<T>` |
+| `x` beside a number literal, under `==` or `!=` (`x == 0`) | `equatable or number` | `Compared<T>` |
+| `x` beside a string literal, under `==` or `!=` (`x == "a"`) | `equatable or Str` | `Compared<T>` |
+| a value compared with itself, or with another open value, under `==` or `!=` | `eq` | `Compared<T>` |
+| a value compared with itself, or with another open value, under `<`, `>`, `<=` or `>=` | `comparable or ordered` | `Compared<T>` |
 
 A whole literal is one with no fractional part, so `2.0` counts as whole and `2.5` does not. A
 class such as `Date` adds a number but not another value of its own, so two operands of one type
@@ -2822,8 +2839,34 @@ the same way, because a condition reads R's truth of a number, which a ry number
   type error. Calling it with two `I64`s is an `I64`.
 - `function(a, b) a - b` is `<T: arithmetic or number> fn(a: T, b: T) -> Promoted<T>`, and gives
   a `double` for two dates and an `I64` for two `I64`s.
-- `function(x) x > 0` is `<T> fn(x: T) -> Compared<T>`, a `Bool` for an `I64` and a `logical` for
-  a `double`.
+- `function(x) x > 0` is `<T: comparable or number> fn(x: T) -> Compared<T>`, a `Bool` for an
+  `I64` and a `logical` for a `double` or a `character`. Calling it with a `Str` is a type error,
+  because ry compares a `Str` only with a `Str`.
+
+- `function(a, b) a < b` is `<T: comparable or ordered, U: comparable or ordered> fn(a: T, b: U)
+  -> Compared<T>`. The two operands stay separate types, because R compares an `integer` with a
+  `character` and a function may return either operand unchanged: `cmp(1L, "s")` is a `logical`,
+  and `keep <- function(x, lo) { if (any(x < lo)) warning("low"); x }` returns a `Date` for
+  `keep(Sys.Date(), "2020-01-01")`. ry compares a ry value only with a value of its own type, so a
+  call that passes one checks the other operand against it, as a parameter of that type would:
+  two `Str`s give a `Bool`, `cmp(1i64, 2)` takes the literal as an `I64`, and `cmp(1i64, "s")` and
+  `cmp(1i64, 2.5)` are type errors. The check follows the pair through a function that forwards
+  it (`function(p, q) cmp(p, q)`) or returns a function comparing it (`function(q) function(a) a <
+  q`), and through a function passed where a function type is declared, although the signature
+  does not show it, and through a function with a declared return type. A literal default adapts
+  as a passed literal does, so `function(a, lo = 0) a < lo` takes an `I64`, while `lo = 2.5` or
+  `lo = sqrt(2)` keeps its `double` and refuses one. An operand compared with an R value admits
+  only R values, so `function(a, b: double) a < b` refuses an `I64` for `a`. Two records are a
+  type error.
+
+A ry `List` meets a comparison's constraint through its items, as it compares item by item, and a
+ry nominal through its representation. A declared binder widens over R's types, so
+`Bool.is_eq(1L, "one")` is a `Bool`, while `Bool.is_eq(1i64, "one")` is a type error. A
+`complex` value passes `function(x) x == 0` but not `function(x) x > 0`, because R tests it for
+equality and has no order for it. Two gaps remain: the result of two different open operands
+follows the left one alone, so `cmp(1L, 1:3)` is a `logical` rather than a `logical[]`, and an
+`I64` beside an R `integer` scalar (`cmp(1i64, x)` for `x: integer`) is a type error, although the
+runtime compares them.
 
 When the other operand is a vector, the unannotated operand stays open and the result is a `double`
 vector, so `f <- function(x) x + c(1L, 2L)` is `<T: arithmetic> fn(x: T) -> double[]` and accepts
@@ -2932,8 +2975,9 @@ operator is never reported as unused.
 
 `<`, `<=`, `>`, `>=`, `==`, and `!=` compare two `logical`, `integer`, `double`, or `character`
 operands, mixed freely. R coerces both operands to a common type before comparing, so
-`Sys.getenv("RSTUDIO") == 1` and `1L < "a"` are legal R and are not reported. `complex` and `raw`
-operands are not supported, so `1i < 2` is a type error. A map-like vector takes part through its
+`Sys.getenv("RSTUDIO") == 1` and `1L < "a"` are legal R and are not reported. A `complex` operand
+compares under `==` and `!=` only, so `1i == 0` is a `logical` and `1i < 2` is a type error. `raw`
+operands are not supported. A map-like vector takes part through its
 compatibility with an array-like vector. A `NULL` operand, or a `NULL` member of a union, is
 accepted, because R answers an empty `logical` vector instead of failing, as
 [union operands](#operators-over-union-operands) describe. A list compared with an atomic value

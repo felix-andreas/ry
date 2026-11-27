@@ -3876,7 +3876,13 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             constraint:
                 constraint @ (Constraint::ArithmeticOrNumber
                 | Constraint::ArithmeticOrF64
-                | Constraint::NumericOrF64),
+                | Constraint::NumericOrF64
+                | Constraint::ComparableOrNumber
+                | Constraint::ComparableOrOrdered
+                | Constraint::ComparableOrStr
+                | Constraint::EquatableOrNumber
+                | Constraint::EquatableOrStr
+                | Constraint::Eq),
             found,
         } if matches!(found.kind(db), TyKind::Rigid(_)) => {
             let found = renderer.render(db, *found);
@@ -4000,6 +4006,11 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                     ),
                 }
             }
+            FunctionMismatch::Compared { expected, found } => format!(
+                "this function compares `{}` with `{}` where it is called this way, and a ry value compares only with its own type",
+                renderer.render(db, *found),
+                renderer.render(db, *expected)
+            ),
         },
         TypeErrorKind::NotAList { found } => {
             format!("expected a list, found `{}`", renderer.render(db, *found))
@@ -4384,6 +4395,29 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
                 None => format!("{rule}. A `List` has one dimension and no names"),
             }
         }
+        TypeErrorKind::ComparedOperands {
+            expected,
+            found,
+            argument,
+        } => {
+            let head = if *argument {
+                format!(
+                    "the called function compares this `{}` with `{}`, and a ry value compares only with its own type",
+                    renderer.render(db, *found),
+                    renderer.render(db, *expected)
+                )
+            } else {
+                format!(
+                    "this call compares `{}` with `{}`, and a ry value compares only with its own type",
+                    renderer.render(db, *found),
+                    renderer.render(db, *expected)
+                )
+            };
+            match r_conversion(db, *found, *expected) {
+                Some(conversion) => format!("{head}. Convert the R value with `{conversion}`"),
+                None => head,
+            }
+        }
         TypeErrorKind::NumberOperands {
             operator,
             left,
@@ -4410,14 +4444,11 @@ fn render_type_error_message(db: &dyn Db, error: &TypeError<'_>) -> String {
             };
             let equality = matches!(*operator, "==" | "!=");
             if let Some(r_side) = r_side {
-                // The conversion that turns the R side into the ry scalar beside it.
-                let conversion = match r_side.kind(db) {
-                    _ if native(*left).is_none() && native(*right).is_none() => None,
-                    TyKind::Scalar(Atomic::Character) => Some("Str.from_r()"),
-                    TyKind::Scalar(Atomic::Logical) => Some("Bool.from_r()"),
-                    TyKind::Scalar(Atomic::Integer | Atomic::Double) => Some("Num.from_r()"),
-                    TyKind::Vector(_) => Some("List.from_r()"),
-                    _ => None,
+                let ry_side = if r_side == left { *right } else { *left };
+                let conversion = if native(*left).is_none() && native(*right).is_none() {
+                    None
+                } else {
+                    r_conversion(db, *r_side, ry_side)
                 };
                 return match conversion {
                     Some(conversion) => format!(
@@ -4893,7 +4924,28 @@ fn constraint_description(constraint: Constraint) -> &'static str {
         Constraint::Number => "a ry number (`I64` or `F64`)",
         Constraint::Int => "an `I64`",
         Constraint::Frac => "an `F64`",
+        Constraint::Str => "a `Str`",
         Constraint::Eq => "a value `==` can compare (anything but a function)",
+        Constraint::Comparable => {
+            "a comparable R value (a numeric, `character` or `logical` value, or a class)"
+        }
+        Constraint::Equatable => "an R value `==` can compare (an atomic value or a class)",
+        Constraint::Ordered => "an ordered ry value (`I64`, `F64` or `Str`)",
+        Constraint::ComparableOrNumber => {
+            "a value a number compares with (numeric, `character`, `logical`, a class, `I64` or `F64`)"
+        }
+        Constraint::ComparableOrOrdered => {
+            "a value with an order (numeric, `character`, `logical`, a class, `I64`, `F64` or `Str`)"
+        }
+        Constraint::ComparableOrStr => {
+            "a value a string compares with (numeric, `character`, `logical`, a class, or `Str`)"
+        }
+        Constraint::EquatableOrNumber => {
+            "a value `==` can test against a number (an atomic value, a class, `I64` or `F64`)"
+        }
+        Constraint::EquatableOrStr => {
+            "a value `==` can test against a string (an atomic value, a class, or `Str`)"
+        }
         Constraint::WholeLiteral { .. } | Constraint::FracLiteral => "a number",
         Constraint::StrLiteral => "a string",
         Constraint::BoolLiteral => "`TRUE` or `FALSE`",
@@ -4908,6 +4960,29 @@ fn atomic_name(atomic: Atomic) -> &'static str {
         Atomic::Complex => "complex",
         Atomic::Character => "character",
         Atomic::Raw => "raw",
+    }
+}
+
+/// The conversion that turns the R value `r_side` into the ry type `ry_side`, when one does.
+fn r_conversion(db: &dyn Db, r_side: Ty<'_>, ry_side: Ty<'_>) -> Option<&'static str> {
+    let native = match ry_side.kind(db) {
+        TyKind::Native(native) => Some(*native),
+        _ => None,
+    };
+    match r_side.kind(db) {
+        TyKind::Scalar(Atomic::Character) if native == Some(NativeScalar::Str) => {
+            Some("Str.from_r()")
+        }
+        TyKind::Scalar(Atomic::Logical) if native == Some(NativeScalar::Bool) => {
+            Some("Bool.from_r()")
+        }
+        TyKind::Scalar(Atomic::Integer | Atomic::Double)
+            if native.is_some_and(NativeScalar::is_number) =>
+        {
+            Some("Num.from_r()")
+        }
+        TyKind::Vector(_) if array_element(db, ry_side).is_some() => Some("List.from_r()"),
+        _ => None,
     }
 }
 

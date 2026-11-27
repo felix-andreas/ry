@@ -194,7 +194,7 @@ near <- function(x, y, tolerance = 1e-8) abs(x - y) < tolerance
 times <- near(Sys.time(), Sys.time())
 days <- near(Sys.Date(), Sys.Date())
 #++++
-near: <T: arithmetic, U> fn(x: T, y: T, [tolerance]: U) -> logical
+near: <T: arithmetic, U: comparable> fn(x: T, y: T, [tolerance]: U) -> logical
 times: logical
 days: logical
 
@@ -217,13 +217,15 @@ both <- List.concat([1], [2.5])
 both: List<F64>
 
 #---- a_shared_parameter_still_rejects_unrelated_types
-same <- Bool.is_eq(1L, "one")
+same <- Bool.is_eq(1i64, "one")
 mixed <- List.concat([1], ["a"])
+r_values <- Bool.is_eq(1L, "one")
 #++++
 same: Unknown
 mixed: Unknown
-23..28 error[type-mismatch] expected `integer`, found `character`
-56..61 error[type-mismatch] expected `List<I64>`, found `List<Str>`
+r_values: Bool
+25..30 error[type-mismatch] expected `I64`, found `character`
+58..63 error[type-mismatch] expected `List<I64>`, found `List<Str>`
 
 #---- a_joined_parameter_checks_a_callback_against_the_join
 #: <T> fn(f: fn(T) -> logical, a: T, b: T) -> logical

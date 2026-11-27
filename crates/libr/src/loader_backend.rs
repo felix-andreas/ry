@@ -23,7 +23,8 @@ use {
         values::{self, install, length, nil},
     },
     loader::{
-        Code, Loader, NamespaceConditions, Source, find_package_root, parse_namespace_conditions,
+        Code, ElaboratedFile, Loader, NamespaceConditions, Source, find_package_root,
+        parse_namespace_conditions,
         r::{RUNTIME_RY, RValue, error_value, failure_value, plan_value},
     },
     rustc_hash::{FxHashMap, FxHashSet},
@@ -289,6 +290,19 @@ static CHECK: OnceLock<Check> = OnceLock::new();
 
 static STRICT_CONFIG: OnceLock<Check> = OnceLock::new();
 
+/// Asks the host for the elaborated text of the typed package at `root`, a NUL-terminated
+/// path, which it hands to `sink` one file at a time, with `context`, before it returns: 0 when
+/// it elaborated the package, and any other value when it could not, after reporting why. It
+/// may block while it checks the package.
+pub type Elaborate = extern "C" fn(*const c_char, ElaboratedSink, *mut c_void) -> c_int;
+
+/// Receives one elaborated file: its path relative to the package root, the XXH3 64-bit hash of
+/// the text the host elaborated ([`ElaboratedFile::written`]), and the elaborated text, both
+/// as UTF-8 bytes that live for the call.
+pub type ElaboratedSink = extern "C" fn(*mut c_void, *const u8, usize, u64, *const u8, usize);
+
+static ELABORATE: OnceLock<Elaborate> = OnceLock::new();
+
 /// Whether a plan has been made in this session, whose first load the verdict covers.
 static PLANNED: AtomicBool = AtomicBool::new(false);
 
@@ -297,8 +311,14 @@ static PLANNED: AtomicBool = AtomicBool::new(false);
 /// to check instead, while its definitions bind. Whether a package is strict is the
 /// `strict_config` query's answer for its own root, so a strict package that a non-strict
 /// script loads is checked, as it is on GNU R.
-pub fn set_check(strict_config: Check, check: Check) {
-    if STRICT_CONFIG.set(strict_config).is_err() || CHECK.set(check).is_err() {
+///
+/// `elaborate` gives every load of a typed package that changes something the text the checker
+/// elaborates, so the package runs as `ry run` would run it.
+pub fn set_check(strict_config: Check, check: Check, elaborate: Elaborate) {
+    if STRICT_CONFIG.set(strict_config).is_err()
+        || CHECK.set(check).is_err()
+        || ELABORATE.set(elaborate).is_err()
+    {
         panic!("the host sets the strict check once per session");
     }
 }
@@ -375,10 +395,38 @@ fn plan(root: &str, full: bool, conditions: &NamespaceConditions) -> RValue {
     };
     let mut session = session();
     session.loader.set_strict(strict);
-    let plan = match session.loader.plan(Path::new(root), full, conditions) {
+    let mut plan = match session.loader.plan(Path::new(root), full, conditions) {
         Ok(plan) => plan,
         Err(failure) => return failure_value(&failure),
     };
+    if !plan.typed {
+        // A package that dropped its typed code keeps no elaborated text.
+        session.loader.set_elaborated(&plan.root, Vec::new());
+    } else if (plan.read_sources || !plan.is_noop())
+        && let Some(elaborate) = ELABORATE.get()
+    {
+        let Ok(elaborated_root) = CString::new(plan.root.to_string_lossy().into_owned()) else {
+            return error_value(&format!("{} has a NUL byte in its path", plan.package));
+        };
+        let mut files: Vec<ElaboratedFile> = Vec::new();
+        let status = elaborate(
+            elaborated_root.as_ptr(),
+            receive_elaborated,
+            (&raw mut files).cast::<c_void>(),
+        );
+        if status != 0 {
+            return error_value(&format!(
+                "{} was not loaded, because ry could not elaborate its typed code",
+                plan.package
+            ));
+        }
+        if session.loader.set_elaborated(&plan.root, files) {
+            plan = match session.loader.plan(Path::new(root), full, conditions) {
+                Ok(plan) => plan,
+                Err(failure) => return failure_value(&failure),
+            };
+        }
+    }
     let covered = VERDICT.get().is_some() && !PLANNED.swap(true, Ordering::Relaxed);
     if plan.strict
         && !plan.is_noop()
@@ -419,6 +467,32 @@ fn plan(root: &str, full: bool, conditions: &NamespaceConditions) -> RValue {
         },
     );
     value
+}
+
+/// The [`ElaboratedSink`] [`plan`] hands the host, whose context is the plan's
+/// `Vec<ElaboratedFile>`.
+extern "C" fn receive_elaborated(
+    context: *mut c_void,
+    path: *const u8,
+    path_length: usize,
+    written: u64,
+    text: *const u8,
+    text_length: usize,
+) {
+    // SAFETY: `plan` passes its vector as the context and the host calls this before its call
+    // returns, with byte ranges that live for this call.
+    let (files, path, text) = unsafe {
+        (
+            &mut *context.cast::<Vec<ElaboratedFile>>(),
+            std::slice::from_raw_parts(path, path_length),
+            std::slice::from_raw_parts(text, text_length),
+        )
+    };
+    files.push(ElaboratedFile {
+        path: String::from_utf8_lossy(path).into_owned(),
+        written,
+        text: String::from_utf8_lossy(text).into_owned(),
+    });
 }
 
 /// `.Internal(ryLoaderAwaitVerdict())`, which the loader calls once the effect-free part of a

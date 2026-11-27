@@ -100,7 +100,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Recursion in a function-valued assignment is monomorphic (built, with exceptions)
 - Deep resolve cuts a cycle to `Unknown` and resolves a shared subtree once
 - The interface fixpoint is canonical per group, so a cyclic scheme does not depend on forcing order (built, with exceptions)
-- There is no third constraint kind, so two flexible comparison operands stay unconstrained (built, with exceptions)
+- Two open comparison operands stay two types, and a ry value checks the pair at the call
 - Union compatibility commits a flexible argument at first use, in program order
 - Strict mode attributes a recursive binding the fixpoint cannot fully type
 - An undeclared type name errors once at the reference and compares like `Unknown`
@@ -184,6 +184,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - A record pattern's `..` takes no name
 - ry values join covariantly, and a walk's tag state widens
 - Unannotated arithmetic infers a constraint per number family and a family-dependent result
+- A comparison of an open operand asks what both families compare
 
 ## Analysis core
 

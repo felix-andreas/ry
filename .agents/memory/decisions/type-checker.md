@@ -95,15 +95,40 @@ interface group therefore resolves through an explicit canonical fixpoint in
 Pinned by `cyclic_group_answers_are_forcing_order_independent` in `crates/semantics/tests/test_parallel.rs`
 and the fixture `recursion__a_long_recursive_chain_settles_through_its_annotation`.
 
-## There is no third constraint kind, so two flexible comparison operands stay unconstrained
+## Two open comparison operands stay two types, and a ry value checks the pair at the call
 
-**Status:** built, except the same-family error on two concrete operands, which "Comparisons coerce across atomic types" supersedes, and the two-kind limit: `Constraint` has `Key`, `Number`, `Eq` and other kinds.
+**Status:** built.
 
-Two flexible operands of a comparison stay unconstrained: `function(a, b) a < b` infers
-`<T, U> fn(a: T, b: U) -> logical`, and a cross-family call is accepted. R coerces across atomic families
-(`1 < "2"` compares as characters), so tying the operands to a family or to each other rejects legal
-programs. A "comparable" constraint was rejected: it would be nearly vacuous (every atomic family is
-comparable) and is the traits tripwire. Pinned by `two_flexible_comparison_stays_unconstrained`.
+`function(a, b) a < b` is `<T: comparable or ordered, U: comparable or ordered> fn(a: T, b: U)`
+(`eq` under `==`). R compares across types and a function often returns one operand unchanged
+(`keep <- function(x, lo) { if (any(x < lo)) warning(); x }`), so unifying the operands was
+rejected: it widened `keep(as.Date(...), "2019-01-01")` to `Date | character` and let one operand's
+constraint bind the other (`(d + 30) > cutoff` refused a string `cutoff`). ry compares a ry value
+only with its own type, so the body records the pair (`FunctionType::compared`, inferred only, not
+printed) and `check_compared_pairs` checks a call: a ry value on either side checks the other
+side's argument as a parameter of that type (a literal adapts, so `cmp(1i64, 2)` passes), and a pair
+the call leaves open passes to the caller's signature. The pending pairs live in the inference
+table, so a rollback drops them. A pair the body settles is checked at the item's end (at the
+comparison, after default literals settle); a pair with a var of an enclosing function moves to it,
+so curried functions and local closures carry it. The pair is part of the function type's identity:
+unifying two function types and passing a function value check both sides' pairs. A side settled on a ry value
+binds the other side's open type (any statement order); a side settled on an R value constrains the
+other to the R half of its constraint (`comparable` under an order), so a ry-only constraint
+reports. A declared binder counts as open, so an annotated `<T: ordered, U: ordered>` keeps its pair. The call finds an argument by
+its parameter's type identity, never by type equality, so another parameter of that type is never
+blamed. A left-out default adapts only when it is a number, string or logical literal (`ComparedPair::left_literal`), and an
+annotated function keeps its pairs too. An overload set or a third binder spelling
+the relation was rejected as heavier than a side fact the annotation syntax need not express.
+
+A variable bound under a comparison constraint (`Widening::Compared`, `infer.rs`) widens over R's
+types, numbers by promotion and others to the union, so a declared `<T: eq>` takes
+`Bool.is_eq(1L, "one")`; a ry value never widens. `==` and `!=` beside a literal ask `equatable or
+number` and `equatable or Str`, where `equatable` is `comparable` plus `complex` and `raw`, which R
+tests for equality but does not order. Pinned by
+`two_flexible_comparison_operands_stay_separate_types`,
+`a_compared_pair_follows_the_operands_everywhere`,
+`a_compared_pair_checks_what_the_body_settles` and
+`an_open_value_tested_for_equality_admits_complex`.
 
 ## Union compatibility commits a flexible argument at first use, in program order
 
@@ -1148,3 +1173,14 @@ Fixtures: `typing-scripts/scripts.R.test` (`a_field_write_mismatch_keeps_the_rec
 - Where only R values fit (an overload set's argument, a union operand, a condition, an operand beside another open value) a family narrows to its R outcome, because those rules type R's semantics.
 - A family operand variable that reaches no parameter defaults to `double` at generalization, so no unsolvable family leaks into an export.
 - `num` meets a ry constraint as that constraint, a `List` item as `number`, and anything R as `numeric`; a number literal stays the literal. A condition narrows an open `num` value to `numeric` (`Checker::narrow_condition_number`). `has_r_bound` counts every joined constraint, so such a signature is a boundary function.
+
+## A comparison of an open operand asks what both families compare
+
+**Status:** built (`Constraint::{Comparable, Ordered, ComparableOrNumber, ComparableOrOrdered}` in `types.rs`; admission in `infer.rs` `constraint_rejects`; `Checker::infer_compare` in `check.rs`; `native-syntax.R.test` case `a_comparison_asks_what_both_families_compare`).
+
+- Previous shape: `Compared<T>` asked nothing of `T`, so `pos <- function(x) x > 0` accepted a `Str` or a record and typed the call `Bool`, while `s > 0` written directly is a `type-mismatch`.
+- The constraint follows the other side, because each family compares a different set: beside a number literal `comparable or number` (R compares any atomic value with a number, ry only a number); a value with itself under `==`/`!=` `eq`; under an ordering operator `comparable or ordered` (`I64`, `F64`, `Str` on the ry side).
+- `comparable` is the R half: an atomic type other than `complex` or `raw` in any shape, a list, or a class (R's `Ops` methods). A ry nominal unfolds to its body for the two comparison families, so `type Count = I64` compares with a number.
+- `Compared<T>` over a ry record, tuple, tag or nominal is `Bool`, and over a ry `List` `List<Bool>`, since a `List` compares item by item (`InferenceTable::family`); a `List` meets the comparison constraints through its item type.
+- `key` admits ry values, so it meets a comparison family as an R atomic scalar (`AtomicElement`), as it meets an arithmetic one; otherwise a key compared with a number would let a `Str` through.
+- Two different open operands record a compared pair (the entry above); one beside a string literal asks `comparable or Str`.

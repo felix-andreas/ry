@@ -114,4 +114,4 @@ classify <- function(x) {
   switch("mode", a = "one", "other")
 }
 #++++
-classify: <T> fn(x: T) -> character
+classify: <T: comparable or number> fn(x: T) -> character

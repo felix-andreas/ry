@@ -265,7 +265,6 @@ dependency graph to change:
   checker binary has 504 dependencies where `decisions/tooling-bench-ci.md` says it does not depend on the runtime.
 - `libr` has 23 separate `[[test]]` binaries, each linked against the full runtime, and no fast
   linker is configured.
-- `editors/zed` is a workspace member and adds about 60 wasm crates to the lockfile.
 
 Three pipeline facts are below any reasonable bar and cheap to fix once main is meant to be green.
 Every workflow is `workflow_dispatch` only, and `release.yml` runs no test. No job tests macOS or

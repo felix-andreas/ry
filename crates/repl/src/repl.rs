@@ -252,18 +252,34 @@ pub fn ry_runtime_files() -> Result<(Option<PathBuf>, Option<PathBuf>), ReplErro
 pub type PackageCheck = extern "C" fn(*const std::ffi::c_char) -> std::ffi::c_int;
 
 /// Makes ry's runtime ask `check` before every load of a strict package that changes
-/// something, so code strict mode refuses never runs. Call it once, before running the runtime.
+/// something, so code strict mode refuses never runs, and `elaborate` for the text every such
+/// load of a typed package runs. Call it once, before running the runtime.
 pub fn set_package_check_on_ry_runtime(
     strict_config: PackageCheck,
     check: PackageCheck,
+    elaborate: PackageElaborate,
 ) -> Result<(), ReplError> {
     let library = ry_runtime()?;
-    type SetCheck = unsafe extern "C" fn(PackageCheck, PackageCheck);
+    type SetCheck = unsafe extern "C" fn(PackageCheck, PackageCheck, PackageElaborate);
     let set_check = runtime_entry::<SetCheck>(library, "ry_loader_set_check")?;
     // SAFETY: the entry point has this signature in every runtime of this build.
-    unsafe { set_check(strict_config, check) };
+    unsafe { set_check(strict_config, check, elaborate) };
     Ok(())
 }
+
+/// Hands each file of the typed package at the given root to the sink, with the sink's context:
+/// its path relative to the root, the XXH3 64-bit hash of the text the checker elaborated, and
+/// the elaborated text. 0 means the package was elaborated; any other value that it could not
+/// be, after the host has reported why. Mirrors `libr::loader_backend::Elaborate`.
+pub type PackageElaborate = extern "C" fn(
+    *const std::ffi::c_char,
+    ElaboratedSink,
+    *mut std::ffi::c_void,
+) -> std::ffi::c_int;
+
+/// Mirrors `libr::loader_backend::ElaboratedSink`.
+pub type ElaboratedSink =
+    extern "C" fn(*mut std::ffi::c_void, *const u8, usize, u64, *const u8, usize);
 
 /// Called by the package loader before the parts of a load that may have effects: 0 lets them
 /// run, and any other value is the status the process exits with. It may block.

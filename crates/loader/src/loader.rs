@@ -16,8 +16,8 @@ use {
         file_conditional_writers, file_definitions, file_typing_mode,
         load_index::{
             IndexedFile, IndexedItem, PackageFile, PackageIndex, PackageSources, Registration,
-            S4Definition, classify_top_level, file_binds, file_items, file_load_index, fnv1a,
-            package_index,
+            S4Definition, classify_top_level, file_binds, file_holds_typed_code, file_items,
+            file_load_index, fnv1a, package_index,
         },
         metadata::{
             DynamicLibraryDirective, NamespaceImportDirective, NamespaceSpec, OS_TYPE,
@@ -72,6 +72,21 @@ pub struct Loader {
     /// `NAMESPACE`, which for a package exporting tens of thousands of names costs more than
     /// the rest of a reload, so a reload that changed none of those leaves them be.
     purity_root: Option<PathBuf>,
+    /// The text ry's runtime runs in place of each typed file's own, per package root and then
+    /// per path, as [`Loader::set_elaborated`] set it.
+    elaborated: FxHashMap<PathBuf, FxHashMap<String, ElaboratedFile>>,
+}
+
+/// A file's text as the checker elaborates it for ry's runtime, which runs the I64 literals,
+/// empty lists and signatures with the types the checker gave them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElaboratedFile {
+    /// The path relative to the package root, as a plan names it.
+    pub path: String,
+    /// [`xxh3_64`] of the text the elaboration rewrote. A file whose text differs keeps it,
+    /// because the rewrite's offsets would land elsewhere.
+    pub written: u64,
+    pub text: String,
 }
 
 /// A package's sources as the loader reads them.
@@ -221,6 +236,13 @@ pub struct Plan {
     pub run_on_load: bool,
     /// Strict mode covers the package, so the host checks it before the plan runs anything.
     pub strict: bool,
+    /// The package holds typed code, which ry's runtime runs as the checker elaborates it
+    /// ([`Loader::set_elaborated`]).
+    pub typed: bool,
+    /// The read took new text for some `R/` file. A host that elaborates typed code elaborates
+    /// again even when the plan writes nothing, because an edit of a `#:` annotation alone
+    /// changes only the elaborated text.
+    pub read_sources: bool,
     /// Things the backend should tell the user, such as a directive it cannot honor.
     pub warnings: Vec<String>,
 }
@@ -502,6 +524,35 @@ impl Loader {
         self.strict = strict;
     }
 
+    /// Sets the elaborated text of the package at `root`'s typed files, which a plan then
+    /// reads in place of a file's own text while that text is the one elaborated. Returns
+    /// whether that changed any file, so the caller plans again to load the new text.
+    pub fn set_elaborated(&mut self, root: &Path, files: Vec<ElaboratedFile>) -> bool {
+        let next: FxHashMap<String, ElaboratedFile> = files
+            .into_iter()
+            .map(|file| (file.path.clone(), file))
+            .collect();
+        let previous = self.elaborated.remove(root).unwrap_or_default();
+        let changed: Vec<&String> = next
+            .iter()
+            .filter(|(path, file)| previous.get(*path) != Some(*file))
+            .map(|(path, _)| path)
+            .chain(previous.keys().filter(|path| !next.contains_key(*path)))
+            .collect();
+        // Forgetting a stamp makes the next read take the file again, and with it the text
+        // that now stands for it.
+        if let Some(stamps) = self.stamps.get_mut(root) {
+            for path in &changed {
+                stamps.remove(*path);
+            }
+        }
+        let any = !changed.is_empty();
+        if !next.is_empty() {
+            self.elaborated.insert(root.to_path_buf(), next);
+        }
+        any
+    }
+
     /// Reads the package at or above `path` and plans loading it. Without a committed state, or
     /// with `full`, the plan builds the namespace from scratch; otherwise it patches the loaded
     /// one. `conditions` holds the host's values for the conditions of `if` directives in
@@ -517,7 +568,15 @@ impl Loader {
         // Taken from the stamps the read takes before it reads each file, so an edit made
         // while the plan is read shows as a change later.
         let (fingerprint, planned) = match self.read(&root, Some(conditions)) {
-            Ok((inputs, fingerprint)) => (fingerprint, self.plan_inputs(&root, inputs, full)),
+            Ok((inputs, fingerprint)) => {
+                let read_sources = inputs.files.iter().any(|(_, text)| text.is_some());
+                let planned = self.plan_inputs(&root, inputs, full);
+                let planned = planned.map(|plan| Plan {
+                    read_sources,
+                    ..plan
+                });
+                (fingerprint, planned)
+            }
             // The read stopped before it took any stamp, so the package is as it was.
             Err(LoadError::Conditionals(conditionals)) => {
                 return Err(LoadError::Conditionals(conditionals));
@@ -685,6 +744,7 @@ impl Loader {
         self.derive_in_parallel(files, |db, file| {
             file_items(db, file);
             file_typing_mode(db, file);
+            file_holds_typed_code(db, file);
         });
         if self.prepare_purity(position) {
             // Classifying a constant resolves its callees through the project-wide definition
@@ -1049,7 +1109,13 @@ impl Loader {
             let text = if unchanged {
                 None
             } else {
-                Some(read_source(&absolute, encoding)?)
+                let text = read_source(&absolute, encoding)?;
+                let elaborated = self
+                    .elaborated
+                    .get(root)
+                    .and_then(|files| files.get(&path))
+                    .filter(|file| file.written == xxh3_64(text.as_bytes()));
+                Some(elaborated.map_or(text, |file| file.text.clone()))
             };
             stamps.insert(path.clone(), stamp);
             files.push((path, text));
@@ -1863,6 +1929,8 @@ pub fn diff<'text>(
         exports_changed,
         keeps_names,
         strict: index.strict,
+        typed: index.typed,
+        read_sources: false,
         namespace: index.namespace.clone(),
         warnings,
     }
@@ -2331,6 +2399,8 @@ impl Plan {
             keeps_names: true,
             run_on_load: false,
             strict: state.index.strict,
+            typed: state.index.typed,
+            read_sources: false,
             warnings: Vec::new(),
         }
     }
