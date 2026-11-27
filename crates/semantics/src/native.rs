@@ -335,9 +335,10 @@ impl Uncompiled {
                  `List`"
             ),
             Uncompiled::RecursiveFunctionArgument(name) => format!(
-                "a function passed to a recursive call of `{name}` that reads a local function, \
-                 a function parameter or a name set on some paths only {YET}. Loop instead, or \
-                 define the function inside `{name}`"
+                "a function passed to a recursive call of `{name}` that calls a function \
+                 parameter {YET}: each level would wrap the function once more. Loop instead, \
+                 or pass the function on as it is and what the wrapper adds as a parameter of \
+                 its own"
             ),
             Uncompiled::InvisibleResult => format!(
                 "the function ends in an expression whose value R returns invisibly, which {YET}. \
@@ -2726,7 +2727,9 @@ impl<'a, 'db> Judge<'a, 'db> {
                 for &(_, value) in arguments {
                     if self.function_argument(value)
                         && self.own == Some(name)
-                        && self.reads_caller_function(value)
+                        && !matches!(*module.kind(value), ExpressionKind::NameRef(forwarded)
+                            if matches!(self.lookup(forwarded), Some(Slot::FunctionParameter)))
+                        && self.wraps_function_parameter(value)
                     {
                         self.uncompiled(value, Uncompiled::RecursiveFunctionArgument(name));
                     }
@@ -2784,35 +2787,25 @@ impl<'a, 'db> Judge<'a, 'db> {
         }
     }
 
-    /// Whether a function passed to a recursive call reads a local function, a function
-    /// parameter or a name set on some paths only. Native code specializes the recursion for
-    /// the function it passes and hands the values the function reads in as arguments, which
-    /// a function or a possibly unset name cannot be.
-    fn reads_caller_function(&self, value: ExprId) -> bool {
+    /// Whether a function passed to a recursive call reads a function parameter, itself or
+    /// through a local function it reads. Native code compiles the recursion once per function
+    /// it passes, so a function that wraps the function parameter would need a copy per level.
+    fn wraps_function_parameter(&self, value: ExprId) -> bool {
         let module = self.judged.module;
-        let function = match *module.kind(value) {
-            ExpressionKind::NameRef(name) => match self.lookup(name) {
-                Some(Slot::Function(function)) => function,
-                _ => return false,
-            },
-            _ => value,
-        };
-        let ExpressionKind::Function { parameters, body } = *module.kind(function) else {
-            return false;
-        };
-        let own = &module[parameters];
-        let mut pending: SmallVec<[ExprId; 16]> = SmallVec::from_slice(&[body]);
+        let mut pending: SmallVec<[ExprId; 16]> = SmallVec::from_slice(&[value]);
+        let mut seen: SmallVec<[ExprId; 4]> = SmallVec::new();
         while let Some(id) = pending.pop() {
-            if let ExpressionKind::NameRef(name) = *module.kind(id)
-                && !own.iter().any(|parameter| parameter.name == name)
-                && matches!(
-                    self.lookup(name),
-                    Some(Slot::Function(_) | Slot::FunctionParameter | Slot::Maybe(_))
-                )
-            {
-                return true;
+            match *module.kind(id) {
+                ExpressionKind::NameRef(name) => match self.lookup(name) {
+                    Some(Slot::FunctionParameter) => return true,
+                    Some(Slot::Function(function)) if !seen.contains(&function) => {
+                        seen.push(function);
+                        pending.push(function);
+                    }
+                    _ => {}
+                },
+                _ => module.for_each_child(id, |child| pending.push(child)),
             }
-            module.for_each_child(id, |child| pending.push(child));
         }
         false
     }

@@ -36,3 +36,23 @@ looped <- function(n: I64) -> I64 {
   total
 }
 print(looped(4i64))
+fold <- function(n: I64, f: fn(k: I64) -> I64) -> I64 if (n <= 0i64) 0i64 else f(n) + fold(n - 1i64, f)
+through_local <- function(n: I64) -> I64 {
+  square <- function(x: I64) -> I64 x * x
+  fold(n, \(k) square(k) + 1i64)
+}
+print(through_local(3i64))
+on_some_paths <- function(n: I64, flag: Bool) -> I64 {
+  if (flag) by <- 2i64
+  fold(n, \(k) k * by)
+}
+print(on_some_paths(3i64, TRUE))
+with_helper <- function(n: I64, f: fn(k: I64) -> I64) -> I64 {
+  helper <- function(x: I64) -> I64 x + 1i64
+  if (n <= 0i64) 0i64 else f(n) + with_helper(n - 1i64, \(k) helper(k))
+}
+started <- function(n: I64) -> I64 with_helper(n, \(k) k * 10i64)
+print(started(3i64))
+wrapping <- function(n: I64, g: fn(k: I64) -> I64) -> I64 fold(n, \(k) g(k) * 2i64)
+wrapped <- function(n: I64) -> I64 wrapping(n, \(k) k + 5i64)
+print(wrapped(3i64))
