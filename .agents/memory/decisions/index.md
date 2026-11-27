@@ -521,6 +521,7 @@ An entry listed here without a status is built. `check` fails on an entry withou
 - Profiles run over the start-up image
 - Native routines enter through the same safe entry as builtins
 - A replacement form updates a variable in place only when its binding holds the value
+- The evaluator's specials take handles; call machinery and assignment move with the bytecode loop
 
 ## C API, R home and packages
 

@@ -593,7 +593,14 @@ behind `values.rs`, whose raw names are thin entries into `handles.rs`; `strings
 conversions in `arith.rs`; the host hooks (`interp::Hooks`) that `libr` fills, which take and
 return handles, so `libr` roots what an ALTREP class method returns before the interpreter sees
 it (only `connection_method`, `enter_from_native` and `guard_native` stay `unsafe`, because they
-run native code); and the `arima0` and `ppr` routines of the stats crate. Two pieces of the API are not built: the
+run native code); the `arima0` and `ppr` routines of the stats crate; and the tree-walking evaluator's control flow
+and language specials (`{`, `(`, `if`, `for`, `while`, `repeat`, `break`, `next`, `return`,
+`function`, `&&`, `||`, `switch`, `missing`, `on.exit`, `nargs`, `substitute` with the methods
+package's `do_substitute_direct`, `.Primitive`, `~`, `delayedAssign`, `makeLazy`, `call`,
+`expression` and `all.names`). Those specials reach the loop and function contexts, the srcref
+and the closure maker through wrappers in `handles.rs` (`in_loop` and `loop_jump` hold a loop's
+environment, `Args::register_on_exit` stores into the frame), because the bytecode loop and the
+JIT share those raw helpers. Two pieces of the API are not built: the
 bytecode loop's register accessor and `Held<T>` fields in traced structures. The replacement
 forms reach a frame through `RunningFrame` and `Slot` in `bytecode.rs`, a narrow form of that
 accessor: a slot read is a `Gc` that borrows the context, a store takes a rooted value, and an
@@ -621,7 +628,11 @@ The order:
 1. `interp`, by risk and not by ease: the paths that keep a value across an allocation or write
    in place go first (tier 0's stores, the replacement and attribute builtins, name matching,
    string encoding), then `values.rs`, the evaluator and the bytecode loop, and the leaf builtins
-   last, because a leaf rarely holds a value across a safepoint.
+   last, because a leaf rarely holds a value across a safepoint. The evaluator's call machinery
+   (`eval`, `apply_closure`, argument matching and promises, with the specials `.Internal`,
+   `forceAndCall`, `Tailcall`, `Exec`, `Recall` and `eval`) and assignment (`<-`, `<<-`, `=` and
+   the complex assignment the bytecode loop shares) move with the bytecode loop, because they
+   keep values in frames and unwinds, which need the register accessor and `Held<T>`.
 2. `stats`, `graphics`, `frames`.
 3. `libr`, `jit`, `typed`: entry points make a `Cx`; raw access leaves their bodies.
 4. `heap` stops exporting the raw accessors outside a `raw` module that only the boundary imports,
