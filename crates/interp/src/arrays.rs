@@ -96,9 +96,9 @@ pub unsafe fn finish(vector: Sexp) -> Sexp {
     vector
 }
 
-/// An empty Array in `like`'s storage.
-pub unsafe fn empty_like(like: Sexp) -> R<Sexp> {
-    Ok(finish(alloc(like.kind(), 0)?))
+/// An empty Array in `storage`.
+pub unsafe fn empty_of(storage: SexpType) -> R<Sexp> {
+    Ok(finish(alloc(storage, 0)?))
 }
 
 /// The positions of the first `limit` missing values in an atomic vector, in increasing order.
@@ -241,8 +241,9 @@ unsafe fn do_array(call: &Call<'_>) -> R<Sexp> {
 /// checker gave the conversion, and the conversion gives a list of that type or fails
 /// ([`checked_conversion`]); around a `List.from_r_missing(x)` it is the type of the items inside
 /// `:Ok` ([`checked_missing`]); around a `Num.from_r(x)` it is `"I64"` or `"F64"`, and the
-/// conversion gives that number or fails ([`numbers::checked_number`]). The test is the call's
-/// text, because the preflight writes the wrapper around the standard library's conversions only.
+/// conversion gives that number or fails ([`numbers::checked_number`]); around a
+/// `List.map_try(list, f)` it is the item type of the list inside `:Ok`. The test is the call's
+/// text, because the preflight writes the wrapper around the standard library's calls only.
 unsafe fn do_items(call: &Call<'_>) -> R<Sexp> {
     let list = call.arg(0);
     let converted = call.call.cdr().car();
@@ -256,6 +257,17 @@ unsafe fn do_items(call: &Call<'_>) -> R<Sexp> {
             _ => return Err(call.error("the number type must be \"I64\" or \"F64\"")),
         };
         return numbers::checked_number(converted, list, expected);
+    }
+    let mut list = list;
+    let mut mapped_try = false;
+    if conversion.as_deref() == Some("List.map_try")
+        && let Some((name, Some(payload))) = crate::standard_library::tag_parts(list)?
+        && name == "Ok"
+        && payload.is_array()
+        && length(payload) == 0
+    {
+        list = payload;
+        mapped_try = true;
     }
     if !list.is_array() {
         return Ok(list);
@@ -286,7 +298,11 @@ unsafe fn do_items(call: &Call<'_>) -> R<Sexp> {
     if length(list) != 0 {
         return Ok(list);
     }
-    empty_in(list, expected.storage())
+    let empty = empty_in(list, expected.storage())?;
+    if mapped_try {
+        return crate::standard_library::ok(empty);
+    }
+    Ok(empty)
 }
 
 /// The list the `List.from_r` call `conversion` gave, as a list of `expected` items, the type

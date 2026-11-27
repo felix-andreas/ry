@@ -1263,6 +1263,7 @@ fn check_item_in<'db>(
     let num_from_r = Symbol::lookup("Num.from_r");
     let from_r_or = Symbol::lookup("List.from_r_or");
     let from_r_missing = Symbol::lookup("List.from_r_missing");
+    let map_try = Symbol::lookup("List.map_try");
     let mut checked_types: ThinVec<(ExprId, CheckedType)> = recorded
         .iter()
         .enumerate()
@@ -1307,6 +1308,16 @@ fn check_item_in<'db>(
                         } else {
                             item
                         };
+                        return list_items(db, item).map(|items| (id, CheckedType::List(items)));
+                    }
+                    // The list inside `:Ok` takes its items from the callback, as `List.map`'s.
+                    ExpressionKind::NameRef(name) if Some(*name) == map_try => {
+                        if !library(callee, *name) {
+                            return None;
+                        }
+                        let ty = context.table.resolve(db, (*slot)?);
+                        let list = ok_payload(db, ty)?;
+                        let item = crate::types::array_element(db, list)?;
                         return list_items(db, item).map(|items| (id, CheckedType::List(items)));
                     }
                     // `.ry_items` returns any other value unchanged, so a library name a project
