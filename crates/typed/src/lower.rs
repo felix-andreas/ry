@@ -385,6 +385,10 @@ unsafe fn typed_definition(formals: Sexp, body: Sexp) -> bool {
     key.has_gp(heap::object::gp::TYPED_DEFINITION)
 }
 
+/// The signature slot of a closure's first formal, after the return value's and the rest
+/// parameter's ([`interp::annotations::stream_signature`]).
+const FIRST_SLOT: usize = 2;
+
 /// The index [`Op::CallTyped`] uses for the function calling itself.
 pub const SELF: usize = usize::MAX;
 
@@ -578,6 +582,43 @@ unsafe fn lower_calling(
         lowering.param_variables.push(variable);
         lowering.bind(symbol, Binding::Value(variable));
     }
+    // A specialization binds the function parameters of the function it specializes to the
+    // functions passed in their place, each literal seeing the values it reads as parameters.
+    let bindings = specialized_bindings(closure)?.unwrap_or_default();
+    let mut capture_ids: SmallVec<[Option<u32>; 2]> = SmallVec::new();
+    for (at, passed, reads) in bindings {
+        let (callable, capture) = match passed {
+            PassedFunction::Typed(name, function) => (Callable::Typed(name, function), None),
+            PassedFunction::Library(name) => (Callable::Library(name), None),
+            PassedFunction::Literal(formals, body) => {
+                let mut names = FxHashMap::default();
+                for (name, formal) in reads {
+                    let Some(binding @ Binding::Value(_)) = lowering.lookup(formal) else {
+                        return Err(Refusal::new("a specialization called without a value"));
+                    };
+                    names.insert(name, binding);
+                }
+                lowering.captures.push(names);
+                let id = lowering.captures.len() as u32 - 1;
+                (Callable::Captured(formals, body, id), Some(id))
+            }
+        };
+        capture_ids.push(capture);
+        match at {
+            SpecializedAt::Formal(symbol) => lowering.bind(symbol, Binding::Function(callable)),
+            SpecializedAt::Read { owner, name } => {
+                let names = capture_ids
+                    .get(owner)
+                    .copied()
+                    .flatten()
+                    .and_then(|id| lowering.captures.get_mut(id as usize))
+                    .ok_or(Refusal::new(
+                        "a specialization's function read by no literal",
+                    ))?;
+                names.insert(name, Binding::Function(callable));
+            }
+        }
+    }
     let defaults = if params.len() < formals.len() || params.contains(&Type::Absent) {
         lowering.left_out_defaults(&formals, &assigned)?
     } else {
@@ -644,6 +685,50 @@ enum Callable {
 enum Argument {
     Value(Local),
     Function(Callable),
+}
+
+/// A function a call passes to a typed function that lowers as a call of that function's
+/// specialization ([`specialization`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PassedFunction {
+    /// A function literal or local function, by its formals and body.
+    Literal(Sexp, Sexp),
+    /// A typed closure and the name that names it.
+    Typed(Sexp, Sexp),
+    /// A function of base R or the standard library, by the symbol that names it.
+    Library(Sexp),
+}
+
+/// Where a passed function stands: in place of a formal of the function a call passes it to, or
+/// as a function an earlier passed literal reads by name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PassedAt {
+    Formal(usize),
+    Read { owner: usize, name: Sexp },
+}
+
+/// The functions a call passes, each before the functions it reads, with where it stands and,
+/// for a literal, the names of the values it reads from its caller's scopes, in the order the
+/// literal reads them.
+type PassedFunctions = SmallVec<[(PassedAt, PassedFunction, SmallVec<[Sexp; 2]>); 1]>;
+
+/// A value a passed literal reads from its caller, and whether the name may be unset there.
+#[derive(Clone, Copy, Debug)]
+struct CapturedValue {
+    local: Local,
+    maybe: bool,
+}
+
+/// How many passed functions deep a literal may read another passed function.
+const MAX_PASSED_DEPTH: usize = 8;
+
+/// The functions a call passes ([`PassedFunctions`]), the values their literals read from the
+/// caller, in the order of the literals' names, and the names they read that no scope binds.
+#[derive(Default)]
+struct Passing {
+    passed: PassedFunctions,
+    captured: SmallVec<[CapturedValue; 4]>,
+    globals: SmallVec<[Sexp; 2]>,
 }
 
 /// What a name in scope stands for.
@@ -1519,21 +1604,7 @@ impl Lowering<'_> {
     /// as `Num.pi`, read as its value for as long as the lookup finds that binding, or else a
     /// global that holds a ry value.
     unsafe fn library_constant(&mut self, symbol: Sexp) -> Result<Local, Refusal> {
-        // Locals are bound as lowering reaches their assignment, so a read that a loop runs
-        // again after a later assignment of the same name would keep reading the outside one.
-        if assigns(interp::bytecode::closure_body(self.closure), symbol)
-            || self
-                .inlining
-                .iter()
-                .any(|&function| assigns(interp::bytecode::closure_body(function), symbol))
-        {
-            self.forward = Some((symbol, self.scopes.len()));
-            return Err(Refusal(Cow::Owned(format!(
-                "it reads `{}` from outside the function before it assigns it: give the local \
-                 another name",
-                rvalues::symbol_name(symbol)
-            ))));
-        }
+        self.read_before_assignment(symbol)?;
         // `package:std` binds the very object the builtins environment was created with, and
         // that object is shared, so nothing modifies it in place.
         let original = interp::standard_library::builtins_env()
@@ -1547,6 +1618,27 @@ impl Lowering<'_> {
             }
             _ => self.global(symbol),
         }
+    }
+
+    /// Refuses a read of `symbol` from outside the function where the function assigns it.
+    /// Locals are bound as lowering reaches their assignment, so a read that a loop runs again
+    /// after a later assignment of the same name would keep reading the outside one; the
+    /// lowering then runs again with the name declared before the loop.
+    unsafe fn read_before_assignment(&mut self, symbol: Sexp) -> Result<(), Refusal> {
+        if assigns(interp::bytecode::closure_body(self.closure), symbol)
+            || self
+                .inlining
+                .iter()
+                .any(|&function| assigns(interp::bytecode::closure_body(function), symbol))
+        {
+            self.forward = Some((symbol, self.scopes.len()));
+            return Err(Refusal(Cow::Owned(format!(
+                "it reads `{}` from outside the function before it assigns it: give the local \
+                 another name",
+                rvalues::symbol_name(symbol)
+            ))));
+        }
+        Ok(())
     }
 
     /// A read of the global `symbol`, which holds a ry value. The code reads the binding each
@@ -2508,25 +2600,93 @@ impl Lowering<'_> {
         let body = interp::bytecode::closure_body(function);
         let Some(values) = plain_values(arguments) else {
             // Compiled code holds no function values, so a function passed to a parameter is
-            // known where the call is lowered, and the callee lowers into the caller with that
-            // function in place of the parameter, once per call.
-            if function.tag() != self.env
-                || function == self.closure
-                || self.inlining.contains(&function)
-                || self.called.contains(&function)
+            // known where the call is lowered. The callee lowers into the caller with that
+            // function in place of the parameter, once per call, unless it is recursive or a
+            // specialization for that function exists: then the call goes to the callee's
+            // specialization ([`specialization`]).
+            let passed = self.passed_functions(arguments);
+            let existing = passed
+                .as_ref()
+                .ok()
+                .and_then(|passing| existing_specialization(function, &passing.passed));
+            if existing.is_none()
+                && function.tag() == self.env
+                && function != self.closure
+                && !self.inlining.contains(&function)
+                && !self.called.contains(&function)
             {
+                if tail_invisible(body) {
+                    return Err(Refusal::new("the body's value may be invisible"));
+                }
+                self.inlining.push(function);
+                let value = self.inline(function.car(), body, 0, arguments, crate::storage);
+                self.inlining.pop();
+                // A refusal that widens a variable's tags lowers again inlined; any other goes
+                // to the callee's specialization.
+                if value.is_err() && self.widen.is_none() {
+                    self.refused.get_or_insert(function);
+                }
+                return value;
+            }
+            if function.tag() != self.env {
                 return Err(Refusal::new(
-                    "a function passed to a typed function that does not lower into its caller, \
-                     such as a recursive one",
+                    "a function passed to a typed function of another environment",
                 ));
             }
-            if tail_invisible(body) {
-                return Err(Refusal::new("the body's value may be invisible"));
+            let Passing {
+                passed,
+                captured,
+                globals,
+            } = passed?;
+            for symbol in globals {
+                self.read_before_assignment(symbol)?;
             }
-            self.inlining.push(function);
-            let value = self.inline(function.car(), body, 0, arguments, crate::storage);
-            self.inlining.pop();
-            return value;
+            let synthetic = match existing {
+                Some(synthetic) => synthetic,
+                None => specialization(function, &passed)?,
+            };
+            let mut values: SmallVec<[Local; 4]> = SmallVec::new();
+            for &argument in arguments {
+                if let Argument::Value(value) = argument {
+                    values.push(value);
+                }
+            }
+            // A name set on some paths only gives the call up where it is unset, before the
+            // call rather than where the literal reads it, and the interpreter runs the call.
+            for value in &captured {
+                if value.maybe {
+                    let flag = self.flag(value.local)?;
+                    let (set, unset) = (self.builder.block(), self.builder.block());
+                    self.builder.terminate(Terminator::Branch {
+                        condition: flag,
+                        then: set,
+                        otherwise: unset,
+                    });
+                    self.builder.switch_to(set);
+                }
+                values.push(value.local);
+            }
+            let result = self.typed_call(synthetic, &values)?;
+            // The passed function reads a captured parameter somewhere inside the call, so the
+            // read counts after it, where R may already have run code the call makes.
+            let block = self.builder.current;
+            let position = self
+                .builder
+                .function
+                .blocks
+                .get(block.0 as usize)
+                .map_or(0, |block| block.insts.len()) as u32;
+            for value in &captured {
+                for param in self.forced_by(value.local) {
+                    self.param_reads.push(ParamRead {
+                        block,
+                        position,
+                        param,
+                        into: None,
+                    });
+                }
+            }
+            return Ok(Some(result));
         };
         let values = &values[..];
         let own = function == self.closure;
@@ -2564,6 +2724,119 @@ impl Lowering<'_> {
         Ok(self
             .builder
             .emit(result, Op::CallTyped(index, SmallVec::from_slice(values))))
+    }
+
+    /// The functions `arguments` pass, by formal position, with the values the passed literals
+    /// and local functions read from the scopes they see, in the order their names list them
+    /// ([`PassedFunction::Literal`]), and the names they read that no scope binds.
+    unsafe fn passed_functions(&self, arguments: &[Argument]) -> Result<Passing, Refusal> {
+        let mut passing = Passing::default();
+        for (position, &argument) in arguments.iter().enumerate() {
+            if let Argument::Function(callable) = argument {
+                self.describe_passed(PassedAt::Formal(position), callable, &mut passing)?;
+            }
+        }
+        Ok(passing)
+    }
+
+    /// Adds `callable` to `passing` at `at`, then each function it reads by name, a literal read
+    /// by a literal it wraps being refused so that a recursion cannot specialize without end.
+    unsafe fn describe_passed(
+        &self,
+        at: PassedAt,
+        callable: Callable,
+        passing: &mut Passing,
+    ) -> Result<(), Refusal> {
+        let (formals, body, capture) = match callable {
+            Callable::Typed(name, function) => {
+                passing
+                    .passed
+                    .push((at, PassedFunction::Typed(name, function), SmallVec::new()));
+                return Ok(());
+            }
+            Callable::Library(name) => {
+                passing
+                    .passed
+                    .push((at, PassedFunction::Library(name), SmallVec::new()));
+                return Ok(());
+            }
+            Callable::Inline(formals, body, scope) => (formals, body, Err(scope)),
+            Callable::Captured(formals, body, capture) => (formals, body, Ok(capture)),
+        };
+        let literal = PassedFunction::Literal(formals, body);
+        let mut depth = 0;
+        let mut ancestor = at;
+        while let PassedAt::Read { owner, .. } = ancestor {
+            depth += 1;
+            let Some(&(owner_at, owner_function, _)) = passing.passed.get(owner) else {
+                break;
+            };
+            if owner_function == literal || depth >= MAX_PASSED_DEPTH {
+                return Err(Refusal::new(
+                    "a function literal passed to a recursive typed function that wraps the \
+                     function its caller was passed",
+                ));
+            }
+            ancestor = owner_at;
+        }
+        let sees = |symbol: Sexp| match capture {
+            Err(scope) => self
+                .scopes
+                .iter()
+                .take(scope + 1)
+                .rev()
+                .find_map(|held| held.names.get(&symbol).copied()),
+            Ok(capture) => self
+                .captures
+                .get(capture as usize)
+                .and_then(|names| names.get(&symbol).copied()),
+        };
+        let own: SmallVec<[Sexp; 4]> = rvalues::pairlist_items(formals)
+            .iter()
+            .map(|&(symbol, _)| symbol)
+            .collect();
+        let mut symbols = SmallVec::new();
+        free_symbols(formals, &mut symbols);
+        free_symbols(body, &mut symbols);
+        let index = passing.passed.len();
+        passing.passed.push((at, literal, SmallVec::new()));
+        let mut functions: SmallVec<[(Sexp, Callable); 2]> = SmallVec::new();
+        for symbol in symbols {
+            if own.contains(&symbol) {
+                continue;
+            }
+            let (local, maybe) = match sees(symbol) {
+                None => {
+                    if !passing.globals.contains(&symbol) {
+                        passing.globals.push(symbol);
+                    }
+                    continue;
+                }
+                Some(Binding::Function(callable)) => {
+                    functions.push((symbol, callable));
+                    continue;
+                }
+                Some(Binding::Hidden) => return Err(hidden_refusal()),
+                Some(Binding::Value(local)) => (local, false),
+                Some(Binding::Maybe(local)) => (local, true),
+            };
+            if self.unusable.contains(&local)
+                || self.pending.iter().any(|held| held.contains(&local))
+            {
+                return Err(Refusal::new(
+                    "a function literal passed to a recursive typed function that reads an \
+                     empty list or a value its caller has given away",
+                ));
+            }
+            if let Some((.., names)) = passing.passed.get_mut(index) {
+                names.push(symbol);
+            }
+            passing.captured.push(CapturedValue { local, maybe });
+        }
+        for (name, callable) in functions {
+            self.describe_passed(PassedAt::Read { owner: index, name }, callable, passing)?;
+        }
+        Ok(())
     }
 
     /// The arguments of a call of a local or typed function. A function literal, a local
@@ -11903,6 +12176,230 @@ unsafe fn eta(name: Sexp, arity: usize) -> Result<(Sexp, Sexp), Refusal> {
     heap.preserve(body);
     ETA.with_borrow_mut(|made| made.push((name, arity, formals, body)));
     Ok((formals, body))
+}
+
+/// A typed function specialized for the functions a call passes it ([`specialization`]).
+struct Specialization {
+    function: Sexp,
+    passed: PassedFunctions,
+    synthetic: Sexp,
+}
+
+thread_local! {
+    /// The specializations made, kept for the session, at most [`MAX_SPECIALIZATIONS`].
+    static SPECIALIZATIONS: RefCell<Vec<Specialization>> = const { RefCell::new(Vec::new()) };
+}
+
+/// How many specializations of typed functions for passed functions a session makes. A
+/// function that passes a different literal to itself at each level would make one per level.
+const MAX_SPECIALIZATIONS: usize = 256;
+
+/// The specialization of `function` for `passed`, when one was made.
+fn existing_specialization(function: Sexp, passed: &PassedFunctions) -> Option<Sexp> {
+    SPECIALIZATIONS.with_borrow(|made| {
+        made.iter()
+            .find(|held| held.function == function && held.passed == *passed)
+            .map(|held| held.synthetic)
+    })
+}
+
+/// The typed closure that runs `function` with the functions of `passed` in place of their
+/// parameters, made once per function and passed functions. Compiled code holds no function
+/// values, so a recursive function that passes a function on to itself cannot lower the
+/// function into each call. Its specialization takes the other parameters, then one parameter
+/// per value a passed literal reads from its caller, and binds each function parameter to its
+/// function before the body runs ([`specialized_bindings`]). A recursive call that passes the
+/// same functions on is then the specialization calling itself.
+///
+/// The closure is `function`'s body over the remaining formals in `function`'s environment,
+/// with `function`'s signature for them, so it is ordinary R that only the typed core runs.
+unsafe fn specialization(function: Sexp, passed: &PassedFunctions) -> Result<Sexp, Refusal> {
+    if let Some(synthetic) = existing_specialization(function, passed) {
+        return Ok(synthetic);
+    }
+    if SPECIALIZATIONS.with_borrow(Vec::len) >= MAX_SPECIALIZATIONS {
+        return Err(Refusal::new(
+            "the session made its limit of typed functions specialized for passed functions",
+        ));
+    }
+    let failed = |_| Refusal::new("a typed function specialized for a passed function");
+    let carried = interp::annotations::stream_signature(function)
+        .map_err(failed)?
+        .ok_or(Refusal::new("a passed function's callee has no signature"))?;
+    let (masks, texts) = (carried.element(0), carried.element(1));
+    let formals = rvalues::pairlist_items(function.car());
+    if masks.kind() != SexpType::Integer
+        || rvalues::length(masks) != FIRST_SLOT + formals.len()
+        || rvalues::length(texts) != rvalues::length(masks)
+    {
+        return Err(Refusal::new(
+            "a passed function's callee has another signature",
+        ));
+    }
+    let mut kept: Vec<(Sexp, i32, String)> = vec![];
+    for slot in 0..FIRST_SLOT {
+        let text = rvalues::string_at(texts, slot).unwrap_or_default();
+        kept.push((
+            rvalues::nil(),
+            masks.slice::<i32>()[slot],
+            text.into_owned(),
+        ));
+    }
+    for (position, &(symbol, _)) in formals.iter().enumerate() {
+        if passed
+            .iter()
+            .any(|&(held, ..)| held == PassedAt::Formal(position))
+        {
+            continue;
+        }
+        let slot = FIRST_SLOT + position;
+        let text = rvalues::string_at(texts, slot).unwrap_or_default();
+        kept.push((symbol, masks.slice::<i32>()[slot], text.into_owned()));
+    }
+    let mut captures = 0;
+    for (.., names) in passed {
+        for _ in names {
+            captures += 1;
+            let symbol = rvalues::install(&format!(".ry_captured{captures}")).map_err(failed)?;
+            kept.push((symbol, 0, String::new()));
+        }
+    }
+    if kept.len() == FIRST_SLOT {
+        return Err(Refusal::new(
+            "a function passed to a recursive typed function that takes nothing else",
+        ));
+    }
+    let mut synthetic_formals = rvalues::nil();
+    for &(symbol, ..) in kept[FIRST_SLOT..].iter().rev() {
+        synthetic_formals = rvalues::cons_tagged(rvalues::missing_arg(), synthetic_formals, symbol)
+            .map_err(failed)?;
+    }
+    let heap = interp::heap();
+    heap.preserve(synthetic_formals);
+    let body = interp::bytecode::closure_body(function);
+    let synthetic = rvalues::triple(SexpType::Closure, synthetic_formals, body, function.tag())
+        .map_err(failed)?;
+    heap.preserve(synthetic);
+    let masks: Vec<i32> = kept.iter().map(|&(_, mask, _)| mask).collect();
+    let texts: Vec<&str> = kept.iter().map(|(.., text)| text.as_str()).collect();
+    let names: Vec<String> = kept[FIRST_SLOT..]
+        .iter()
+        .map(|&(symbol, ..)| rvalues::symbol_name(symbol).into_owned())
+        .collect();
+    let masks = rvalues::integer_vector(&masks).map_err(failed)?;
+    heap.preserve(masks);
+    let texts = rvalues::string_vector(&texts).map_err(failed)?;
+    heap.preserve(texts);
+    let names = rvalues::string_vector(&names).map_err(failed)?;
+    heap.preserve(names);
+    let signature = rvalues::list_vector(&[masks, texts, names]).map_err(failed);
+    for object in [masks, texts, names] {
+        heap.release(object);
+    }
+    interp::annotations::restore_signature(synthetic, signature?).map_err(failed)?;
+    // The literals' code outlives the caller that holds it once the specialization is made.
+    heap.preserve(function);
+    for &(_, passed, _) in passed {
+        let (PassedFunction::Literal(first, second) | PassedFunction::Typed(first, second)) =
+            passed
+        else {
+            continue;
+        };
+        heap.preserve(first);
+        heap.preserve(second);
+    }
+    SPECIALIZATIONS.with_borrow_mut(|made| {
+        made.push(Specialization {
+            function,
+            passed: passed.clone(),
+            synthetic,
+        })
+    });
+    Ok(synthetic)
+}
+
+/// Where [`specialized_bindings`] binds a passed function: to a formal's symbol, or to a name
+/// that an earlier passed literal reads.
+enum SpecializedAt {
+    Formal(Sexp),
+    Read { owner: usize, name: Sexp },
+}
+
+/// For the specialization `closure`, each function the call passed, with where it is bound
+/// and, for a literal, the names it reads with the parameters that pass their values
+/// ([`specialization`]). `None` when `closure` is no specialization.
+#[allow(clippy::type_complexity)]
+unsafe fn specialized_bindings(
+    closure: Sexp,
+) -> Result<
+    Option<SmallVec<[(SpecializedAt, PassedFunction, SmallVec<[(Sexp, Sexp); 2]>); 1]>>,
+    Refusal,
+> {
+    let Some((function, passed)) = SPECIALIZATIONS.with_borrow(|made| {
+        made.iter()
+            .find(|held| held.synthetic == closure)
+            .map(|held| (held.function, held.passed.clone()))
+    }) else {
+        return Ok(None);
+    };
+    let failed = |_| Refusal::new("a typed function specialized for a passed function");
+    let formals = rvalues::pairlist_items(function.car());
+    let mut captures = 0;
+    let mut bindings = SmallVec::new();
+    for (at, passed, names) in passed {
+        let at = match at {
+            PassedAt::Formal(position) => SpecializedAt::Formal(
+                formals
+                    .get(position)
+                    .ok_or(Refusal::new(
+                        "a specialization of another function's formals",
+                    ))?
+                    .0,
+            ),
+            PassedAt::Read { owner, name } => SpecializedAt::Read { owner, name },
+        };
+        let mut reads = SmallVec::new();
+        for name in names {
+            captures += 1;
+            let formal = rvalues::install(&format!(".ry_captured{captures}")).map_err(failed)?;
+            reads.push((name, formal));
+        }
+        bindings.push((at, passed, reads));
+    }
+    Ok(Some(bindings))
+}
+
+/// The symbols `code` reads or names, each once in the order it first appears, leaving out the
+/// field names of `$` and `@`.
+unsafe fn free_symbols(code: Sexp, out: &mut SmallVec<[Sexp; 4]>) {
+    match code.kind() {
+        SexpType::Symbol => {
+            if code != rvalues::missing_arg() && !out.contains(&code) {
+                out.push(code);
+            }
+        }
+        SexpType::Language => {
+            let head = code.car();
+            let items = rvalues::pairlist_items(code.cdr());
+            if head.kind() == SexpType::Symbol && matches!(&*rvalues::symbol_name(head), "$" | "@")
+            {
+                if let Some(&(_, object)) = items.first() {
+                    free_symbols(object, out);
+                }
+                return;
+            }
+            free_symbols(head, out);
+            for (_, item) in items {
+                free_symbols(item, out);
+            }
+        }
+        SexpType::Pairlist => {
+            for (_, item) in rvalues::pairlist_items(code) {
+                free_symbols(item, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The tags a value of `ty` holds: a tag's union, or the item union of a ry list of tags or of
