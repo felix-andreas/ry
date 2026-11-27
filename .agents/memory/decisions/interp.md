@@ -442,7 +442,7 @@ Design and measurements: `development/design/slot-frames.md`.
   defaults (`eval::default_promises`). A reference becomes a real promise only where something
   outliving the call can hold it (`detach_reference`: a heap-frame callee, a variable that gets a
   cell, native typed entries, non-closure methods). `.GenericCallEnv` is read through
-  `eval::method_var_value` when the caller has no environment.
+  `eval::method_variable` when the caller has no environment.
 - **Why.** One request for the frame's identity used to pay for every variable, while most
   requesters need only the object or one or two variables. The finance tests made 10.2M whole
   environments in 53M closure calls and freed 348M objects.

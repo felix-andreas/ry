@@ -98,6 +98,183 @@ impl<'s> Cx<'s> {
         unsafe { (*self.heap.as_ptr()).settle_promise(promise.raw(), value.raw()) }
     }
 
+    /// Collects now if allocating `bytes` would pass the collection trigger, so that the
+    /// `_uncollected` allocations of at most `bytes` that follow need no check of their own.
+    /// Every object the caller still uses must be rooted.
+    #[inline]
+    pub fn reserve(&mut self, bytes: usize) {
+        // SAFETY: the heap is live, and `&mut self` means no `Gc` of this context is in use, so
+        // whatever a collection frees or moves is unreachable or rooted.
+        unsafe { (*self.heap.as_ptr()).reserve(bytes, &[]) }
+    }
+
+    /// A new function frame enclosed by `enclosure` that stands for a running slot frame
+    /// (`gp::FUNCTION_FRAME`, `gp::PENDING_FRAME` and `gp::COMPILED_FRAME`), made without a
+    /// collection check: it follows a [`Cx::reserve`] that covers it. It takes `&self` because
+    /// an allocation that cannot collect frees and moves nothing.
+    #[inline]
+    pub fn new_pending_frame_uncollected<'a>(
+        &'a self,
+        enclosure: impl Pointer<Environment>,
+    ) -> HeapResult<Gc<'a, Environment>> {
+        // SAFETY: the heap and the enclosure are live, the allocation collects nothing, and the
+        // new environment lives until the next safepoint, which `'a` ends before. The flags
+        // name no slot owner, which the frame records next.
+        unsafe {
+            let environment =
+                (*self.heap.as_ptr()).alloc_environment_uncollected(enclosure.raw(), 0)?;
+            environment.set_gp_bits(
+                gp::FUNCTION_FRAME | gp::PENDING_FRAME | gp::COMPILED_FRAME,
+                true,
+            );
+            Ok(Gc::adopt(environment))
+        }
+    }
+
+    /// Binds `bindings`, none of which the function frame `environment` binds yet, without a
+    /// collection check ([`Heap::define_locals_uncollected`]). It takes `&self` because the
+    /// cells it makes cannot collect: the caller has reserved room or inhibited collection.
+    pub fn define_locals_uncollected(
+        &self,
+        environment: impl Pointer<Environment>,
+        bindings: &[LocalBinding<'_>],
+    ) -> HeapResult<()> {
+        // SAFETY: a binding is laid out as a formal, the heap, the environment and every bound
+        // object are live, and the cells are made without a collection.
+        unsafe {
+            let formals = std::slice::from_raw_parts(
+                bindings.as_ptr().cast::<crate::Formal>(),
+                bindings.len(),
+            );
+            (*self.heap.as_ptr()).define_locals_uncollected(environment.raw(), formals)
+        }
+    }
+
+    /// Records that the environment stands for the live slot frame at `owner` whose slot
+    /// names are `names` ([`Heap::set_slot_owner`]).
+    ///
+    /// # Safety
+    ///
+    /// The record holds `names` without counting them, so something must keep them alive for
+    /// as long as the environment stands for the frame: the frame's function does.
+    #[inline]
+    pub unsafe fn set_slot_owner(
+        &self,
+        environment: impl Pointer<Environment>,
+        owner: usize,
+        names: Gc<'_>,
+    ) {
+        // SAFETY: the heap and the environment are live, and the caller keeps the names alive.
+        unsafe { (*self.heap.as_ptr()).set_slot_owner(environment.raw(), Some((owner, names.raw))) }
+    }
+
+    /// Records that the environment stands for no slot frame any more and clears its
+    /// `gp::SLOT_FRAME` flags, which tell the heap to read the slot owner. An environment that
+    /// stands for none keeps its count of removed bindings in the same field, so it is left as
+    /// it is.
+    #[inline]
+    pub fn release_slot_frame(&self, environment: impl Pointer<Environment>) {
+        let environment = environment.raw();
+        // SAFETY: the heap and the environment are live, and no call allocates.
+        unsafe {
+            let heap = &mut *self.heap.as_ptr();
+            if heap.slot_owner(environment).is_some() {
+                heap.set_slot_owner(environment, None);
+            }
+            environment.set_gp_bits(gp::SLOT_FRAME, false);
+        }
+    }
+
+    /// Tells a method's slot frame environment the names of its dispatch variables
+    /// ([`Heap::expect_dispatch_variables`]).
+    #[inline]
+    pub fn expect_dispatch_variables<'a>(
+        &self,
+        environment: impl Pointer<Environment>,
+        symbols: impl Iterator<Item = Gc<'a, Symbol>>,
+    ) {
+        // SAFETY: the heap, the environment and the symbols are live, and recording a name
+        // allocates nothing.
+        unsafe {
+            (*self.heap.as_ptr())
+                .expect_dispatch_variables(environment.raw(), symbols.map(|symbol| symbol.raw))
+        }
+    }
+
+    /// Lists a closure frame's bindings as a call binds them ([`Heap::order_frame`]).
+    #[inline]
+    pub fn order_frame(
+        &self,
+        environment: impl Pointer<Environment>,
+        rank: impl Fn(Gc<'_, Symbol>) -> Option<u32>,
+        formals: u32,
+    ) {
+        // SAFETY: the heap and the environment are live, every symbol the frame binds is live,
+        // and ordering the bindings allocates nothing.
+        unsafe {
+            (*self.heap.as_ptr()).order_frame(
+                environment.raw(),
+                |symbol| rank(Gc::adopt(symbol)),
+                formals,
+            )
+        }
+    }
+
+    /// Stores `value` as the value of `promise`, which counts the reference and runs the
+    /// write barrier. It takes `&self` because the store frees nothing.
+    #[inline]
+    pub fn set_promise_value(&self, promise: impl Pointer<Promise>, value: impl Pointer<Value>) {
+        // SAFETY: the heap and both objects are live, and the store frees nothing.
+        unsafe { (*self.heap.as_ptr()).set_car(promise.raw(), value.raw()) }
+    }
+
+    /// Stores `code` as the expression of `promise` ([`Cx::set_promise_value`]).
+    #[inline]
+    pub fn set_promise_code(&self, promise: impl Pointer<Promise>, code: impl Pointer<Value>) {
+        // SAFETY: as for `set_promise_value`.
+        unsafe { (*self.heap.as_ptr()).set_cdr(promise.raw(), code.raw()) }
+    }
+
+    /// Stores `environment` in the environment field of `promise`, an environment, code or
+    /// `NULL` ([`Gc::environment`], [`Cx::set_promise_value`]).
+    #[inline]
+    pub fn set_promise_environment(
+        &self,
+        promise: impl Pointer<Promise>,
+        environment: impl Pointer<Value>,
+    ) {
+        // SAFETY: as for `set_promise_value`.
+        unsafe { (*self.heap.as_ptr()).set_tag(promise.raw(), environment.raw()) }
+    }
+
+    /// Stores `compiled` in the attribute field of `promise` ([`Gc::compiled`],
+    /// [`Cx::set_promise_value`]).
+    #[inline]
+    pub fn set_promise_compiled(
+        &self,
+        promise: impl Pointer<Promise>,
+        compiled: impl Pointer<Value>,
+    ) {
+        // SAFETY: as for `set_promise_value`.
+        unsafe { (*self.heap.as_ptr()).set_attrib(promise.raw(), compiled.raw()) }
+    }
+
+    /// The answer `read` finds in the heap, or else the answer `make` makes, which may
+    /// allocate. [`Cx::read_or`] for an answer that always exists.
+    #[inline]
+    pub fn read_or_make<'a, T: Kind, E>(
+        &'a mut self,
+        read: impl for<'r> FnOnce(&'r Cx<'s>) -> Option<Gc<'r, T>>,
+        make: impl FnOnce(&'a mut Cx<'s>) -> Result<Gc<'a, T>, E>,
+    ) -> Result<Gc<'a, T>, E> {
+        let this: *mut Cx<'s> = self;
+        // SAFETY: as in `read_or`.
+        if let Some(answer) = read(unsafe { &*this }) {
+            return Ok(answer);
+        }
+        make(unsafe { &mut *this })
+    }
+
     /// The answer `read` finds in the heap, or else the answer of `rest`, which may allocate.
     /// Because the answer borrows the context, a caller returns it before the next safepoint
     /// and it needs no root.
@@ -372,6 +549,13 @@ impl<'a, T: Kind> Gc<'a, T> {
         unsafe { self.raw.kind() }
     }
 
+    /// Whether more than one object refers to this one ([`Local::is_shared`]).
+    #[inline]
+    pub fn is_shared(self) -> bool {
+        // SAFETY: the object is live for `'a`.
+        unsafe { self.raw.refcount() > 1 }
+    }
+
     /// Whether any of the flags `bits` (`object::gp`) is set in the object's header.
     #[inline]
     pub fn has_flag(self, bits: u16) -> bool {
@@ -611,6 +795,26 @@ impl<'a> Gc<'a, Bytecode> {
         unsafe { Gc::adopt(self.raw.cdr()) }
     }
 }
+
+/// A variable a function frame binds: its symbol, its value and whether it is a missing
+/// formal ([`Cx::define_locals_uncollected`]). It is laid out as a [`Formal`], so a list of
+/// them binds without a copy.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct LocalBinding<'a> {
+    pub symbol: Gc<'a, Symbol>,
+    pub value: Gc<'a>,
+    pub missing: bool,
+}
+
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
+    assert!(size_of::<LocalBinding<'static>>() == size_of::<crate::Formal>());
+    assert!(align_of::<LocalBinding<'static>>() == align_of::<crate::Formal>());
+    assert!(offset_of!(LocalBinding<'static>, symbol) == offset_of!(crate::Formal, symbol));
+    assert!(offset_of!(LocalBinding<'static>, value) == offset_of!(crate::Formal, value));
+    assert!(offset_of!(LocalBinding<'static>, missing) == offset_of!(crate::Formal, missing));
+};
 
 impl<'a> Gc<'a, Environment> {
     /// The environment that encloses this one, which lookups continue in, or `None` for the

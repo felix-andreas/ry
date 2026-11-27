@@ -1164,7 +1164,7 @@ pub(crate) unsafe fn use_method_in_slots(
     // enclosure (`lazy_caller` checked that its own slots bind none of the names probed), the
     // method finds it as its caller by position, and `.GenericCallEnv` is recorded as unbound:
     // whoever reads the variable asks the caller for its environment
-    // (`eval::method_var_value`).
+    // (`eval::method_variable`).
     let found = generic_method(site, generic, object, function.tag(), enclosure, unbound())?;
     let new_call = renamed_call(frame_call, found.method_name)?;
     drop(dispatching);

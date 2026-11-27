@@ -91,7 +91,10 @@ impl Call<'_> {
         if self.rho != nil() || self.frame == crate::NO_SLOTS {
             return Ok(self.rho);
         }
-        crate::eval::frame_env(self.frame as usize, crate::eval::Reify::Builtin(self.op))
+        crate::eval::frame_env(
+            self.frame as usize,
+            crate::eval::Reify::Builtin(self.op.primitive_index()),
+        )
     }
 
     /// The position in the frame stack of the slot frame the call was made from, while that

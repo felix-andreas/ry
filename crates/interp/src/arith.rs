@@ -5435,6 +5435,7 @@ unsafe fn parallel_extreme(call: &Call<'_>, is_max: bool) -> R<Sexp> {
 
 /// Folds `values`, recycled, into `out` with `combine(current, value)`, or copies them in when
 /// `first`.
+#[inline(always)]
 fn fold_items<T: Copy>(out: &mut [T], values: &[T], first: bool, combine: impl Fn(T, T) -> T) {
     if let [value] = *values {
         for slot in out.iter_mut() {
