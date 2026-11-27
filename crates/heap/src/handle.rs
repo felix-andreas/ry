@@ -434,6 +434,14 @@ impl<'a> Gc<'a, Symbol> {
         // SAFETY: a symbol's `car` is its print name, a `CHARSXP` that the symbol keeps alive.
         unsafe { Gc::adopt(self.raw.car()) }
     }
+
+    /// The builtin `.Internal(name(...))` calls for this name, or `NULL`.
+    #[inline]
+    pub fn internal(self) -> Gc<'a> {
+        // SAFETY: a symbol's `tag` holds its internal function or `NULL`, and the builtin table
+        // keeps every internal for as long as the heap lives.
+        unsafe { Gc::adopt(self.raw.tag()) }
+    }
 }
 
 impl<'a> Gc<'a, Pairlist> {
@@ -498,6 +506,13 @@ impl<'a> Gc<'a, Environment> {
         // SAFETY: the environment is live for `'a` and keeps its enclosure alive, and an
         // enclosure is an environment.
         unsafe { Gc::adopt(self.raw.enclosure()) }
+    }
+
+    /// Whether any of the flags `bits` (`object::gp`) is set on the environment.
+    #[inline]
+    pub fn has_flag(self, bits: u16) -> bool {
+        // SAFETY: the environment is live, and the test reads its header.
+        unsafe { self.raw.has_gp(bits) }
     }
 }
 

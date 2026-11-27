@@ -629,7 +629,7 @@ unsafe fn do_assign(call: &Call<'_>) -> R<Sexp> {
     if inherits {
         eval::set_var(symbol, value, env)?;
     } else {
-        eval::assign_symbol(symbol, value, env, false)?;
+        eval::assign_local(symbol, value, env, crate::heap().frame_cell(env, symbol))?;
     }
     Ok(value)
 }

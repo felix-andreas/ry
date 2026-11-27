@@ -3257,10 +3257,10 @@ pub fn effect_free(_context: &mut Cx<'_>, function: Local<'_>) -> R<bool> {
 
 /// The function `.Internal(name(...))` calls, if there is one.
 #[inline]
-pub fn internal_function<'s>(name: impl Pointer<Symbol>) -> Option<Local<'s>> {
-    // SAFETY: the symbol is live, and the builtin table holds each internal for as long as the
-    // interpreter lives.
-    unsafe { crate::builtins::internal_function(name.raw()).map(|function| Local::adopt(function)) }
+pub fn internal_function<'s>(context: &Cx<'s>, name: Local<'_, Symbol>) -> Option<Local<'s>> {
+    let function = name.read(context).internal();
+    matches!(function.r_type(), SexpType::Builtin | SexpType::Special)
+        .then(|| context.root(function))
 }
 
 /// The call `head(rest...)`, sharing the cells of `rest`.
@@ -3269,12 +3269,9 @@ pub fn language<'s>(
     head: Local<'_>,
     rest: Local<'_>,
 ) -> R<Local<'s, Language>> {
-    // SAFETY: both are rooted while the cell allocates, as `&mut Cx` permits, and the cell is
-    // rooted before anything else allocates.
-    unsafe {
-        let call = rooted(context, values::lcons(head.raw(), rest.raw())?);
-        Ok(Local::adopt(call.raw()))
-    }
+    let call = cell(context, SexpType::Language, null(), head, rest)?;
+    call.downcast::<Language>()
+        .ok_or_else(|| error("internal error: a call cell is not a call"))
 }
 
 /// The pairlist that starts with `value`, tagged `tag`, and continues with the cells of `rest`.
@@ -3284,10 +3281,20 @@ pub fn cons<'s>(
     value: Local<'_>,
     rest: Local<'_>,
 ) -> R<Local<'s>> {
+    cell(context, SexpType::Pairlist, tag, value, rest)
+}
+
+fn cell<'s>(
+    context: &mut Cx<'s>,
+    kind: SexpType,
+    tag: Local<'_>,
+    value: Local<'_>,
+    rest: Local<'_>,
+) -> R<Local<'s>> {
     // SAFETY: all three are rooted while the cell allocates, as `&mut Cx` permits, and the cell
     // is rooted before anything else allocates.
     unsafe {
-        let cell = values::cons_tagged(value.raw(), rest.raw(), tag.raw())?;
+        let cell = values::triple(kind, value.raw(), rest.raw(), tag.raw())?;
         Ok(rooted(context, cell))
     }
 }
@@ -3324,11 +3331,7 @@ pub fn variable<'s>(
     symbol: Local<'_, Symbol>,
     environment: Local<'_, Environment>,
 ) -> R<Local<'s>> {
-    // SAFETY: both are rooted, and an active binding runs its function, which `&mut Cx` permits.
-    unsafe {
-        let value = crate::eval::find_var(symbol.raw(), environment.raw())?;
-        Ok(rooted(context, value))
-    }
+    lookup(context, symbol, environment, false)
 }
 
 /// The function a call's head names: a symbol is looked up as a function from `environment`,
@@ -3338,13 +3341,26 @@ pub fn head_function<'s>(
     head: Local<'s>,
     environment: Local<'s, Environment>,
 ) -> R<Local<'s>> {
-    let Some(symbol) = head.downcast::<Symbol>() else {
-        return evaluate(context, head, environment);
-    };
-    // SAFETY: both are rooted, and the lookup may force promises, which `&mut Cx` permits.
+    match head.downcast::<Symbol>() {
+        Some(symbol) => lookup(context, symbol, environment, true),
+        None => evaluate(context, head, environment),
+    }
+}
+
+fn lookup<'s>(
+    context: &mut Cx<'s>,
+    symbol: Local<'_, Symbol>,
+    environment: Local<'_, Environment>,
+    function: bool,
+) -> R<Local<'s>> {
+    // SAFETY: both are rooted, and a lookup may force promises or run an active binding's
+    // function, which `&mut Cx` permits.
     unsafe {
-        let function = crate::eval::find_fun(symbol.raw(), environment.raw())?;
-        Ok(rooted(context, function))
+        let value = match function {
+            true => crate::eval::find_fun(symbol.raw(), environment.raw())?,
+            false => crate::eval::find_var(symbol.raw(), environment.raw())?,
+        };
+        Ok(rooted(context, value))
     }
 }
 
@@ -3367,9 +3383,8 @@ pub fn rebind<'s>(
 /// Whether the frame of `environment` runs a compiled body, which keeps values in registers
 /// that count no reference.
 #[inline]
-pub fn is_compiled_frame(environment: impl Pointer<Environment>) -> bool {
-    // SAFETY: the environment is live, and the test reads its header.
-    unsafe { environment.raw().has_gp(gp::COMPILED_FRAME) }
+pub fn is_compiled_frame(context: &Cx<'_>, environment: Local<'_, Environment>) -> bool {
+    environment.read(context).has_flag(gp::COMPILED_FRAME)
 }
 
 /// A promise of `code` already forced to `value`, which counts no reference to either, as
@@ -3379,10 +3394,28 @@ pub fn uncounted_forced_promise<'s>(
     code: Local<'_>,
     value: Local<'_>,
 ) -> R<Local<'s, Promise>> {
-    let promise = forced_promise(context, code, value)?;
-    // SAFETY: the promise is new, so nothing else relies on the counts it gives back.
-    unsafe { crate::heap().untrack_references(promise.raw()) };
-    Ok(promise)
+    settled_promise(context, code, value, false)
+}
+
+fn settled_promise<'s>(
+    context: &mut Cx<'s>,
+    code: Local<'_>,
+    value: Local<'_>,
+    counted: bool,
+) -> R<Local<'s, Promise>> {
+    // SAFETY: both are rooted, the promise allocates, which `&mut Cx` permits, and a promise
+    // is what the allocation makes. An uncounted promise is new, so nothing else relies on the
+    // counts it gives back.
+    unsafe {
+        let promise = rooted(
+            context,
+            crate::eval::forced_promise(code.raw(), value.raw())?,
+        );
+        if !counted {
+            crate::heap().untrack_references(promise.raw());
+        }
+        Ok(Local::adopt(promise.raw()))
+    }
 }
 
 /// Records a profile sample whose innermost entry is the builtin `name`.
@@ -3441,6 +3474,24 @@ pub fn evaluate_in_context<'s>(
         )?;
         Ok(rooted(context, value))
     }
+}
+
+/// The symbol of the replacement function for `name`, `name<-`.
+pub fn replacement_symbol<'s>(
+    context: &mut Cx<'s>,
+    name: Local<'_, Symbol>,
+) -> R<Local<'s, Symbol>> {
+    if let Some(&symbol) = crate::interp().replacement_symbols.get(&name.raw()) {
+        // SAFETY: the table holds symbols, which the heap keeps for as long as it lives.
+        return Ok(unsafe { Local::adopt(symbol) });
+    }
+    let mut bytes: SmallVec<[u8; 32]> = SmallVec::from_slice(name.read(context).name().bytes());
+    bytes.extend_from_slice(b"<-");
+    let symbol = install_bytes(context, &bytes)?;
+    crate::interp()
+        .replacement_symbols
+        .insert(name.raw(), symbol.raw());
+    Ok(context.root(symbol))
 }
 
 /// Ends the moves an assignment into an environment would make observable.
@@ -3914,7 +3965,6 @@ pub fn bind_tmp_value<'s>(
 #[inline(always)]
 pub fn unbind_tmp_value(tmp_value: TmpValue<'_>) {
     if let Some(entry) = tmp_value.entry {
-        // `eval::complex_assign` pushes and pops its own entries, which must balance.
         let popped = crate::interp().tmp_values.pop();
         debug_assert_eq!(popped, Some(entry));
     }
@@ -3985,12 +4035,7 @@ pub fn forced_promise<'s>(
     code: Local<'_>,
     value: Local<'_>,
 ) -> R<Local<'s, Promise>> {
-    // SAFETY: both are rooted, the promise allocates, which `&mut Cx` permits, and a promise
-    // is what the allocation makes.
-    unsafe {
-        let promise = crate::eval::forced_promise(code.raw(), value.raw())?;
-        Ok(Local::adopt(rooted(context, promise).raw()))
-    }
+    settled_promise(context, code, value, true)
 }
 
 /// A promise to evaluate `code` in `environment`.

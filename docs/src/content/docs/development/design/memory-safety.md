@@ -597,7 +597,9 @@ run native code); the `arima0` and `ppr` routines of the stats crate; and the tr
 and language specials (`{`, `(`, `if`, `for`, `while`, `repeat`, `break`, `next`, `return`,
 `function`, `&&`, `||`, `switch`, `missing`, `on.exit`, `nargs`, `substitute` with the methods
 package's `do_substitute_direct`, `.Primitive`, `~`, `delayedAssign`, `makeLazy`, `call`,
-`expression` and `all.names`). Those specials reach the loop and function contexts, the srcref
+`expression` and `all.names`); the call specials `.Internal`, `forceAndCall`, `Tailcall`, `Exec`,
+`Recall` and `eval`; and assignment (`<-`, `=`, `<<-` and the complex assignment `f(x) <- v`
+walks, which tier 0 reaches through the raw entry `eval::compiled_complex_assign`). Those specials reach the loop and function contexts, the srcref
 and the closure maker through wrappers in `handles.rs` (`in_loop` and `loop_jump` hold a loop's
 environment, `Args::register_on_exit` stores into the frame), because the bytecode loop and the
 JIT share those raw helpers. Two pieces of the API are not built: the
@@ -629,10 +631,9 @@ The order:
    in place go first (tier 0's stores, the replacement and attribute builtins, name matching,
    string encoding), then `values.rs`, the evaluator and the bytecode loop, and the leaf builtins
    last, because a leaf rarely holds a value across a safepoint. The evaluator's call machinery
-   (`eval`, `apply_closure`, argument matching and promises, with the specials `.Internal`,
-   `forceAndCall`, `Tailcall`, `Exec`, `Recall` and `eval`) and assignment (`<-`, `<<-`, `=` and
-   the complex assignment the bytecode loop shares) move with the bytecode loop, because they
-   keep values in frames and unwinds, which need the register accessor and `Held<T>`.
+   (`eval`, `apply_closure`, argument matching and promises) moves with the bytecode loop,
+   because it keeps values in frames and unwinds, which need the register accessor and
+   `Held<T>`.
 2. `stats`, `graphics`, `frames`.
 3. `libr`, `jit`, `typed`: entry points make a `Cx`; raw access leaves their bodies.
 4. `heap` stops exporting the raw accessors outside a `raw` module that only the boundary imports,

@@ -2965,7 +2965,7 @@ pub(crate) unsafe fn name_argument(value: Sexp) -> R<Sexp> {
 }
 
 /// The name argument of `$` and `@`: a symbol or string, never evaluated.
-fn argument_name<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s, Chars>> {
+pub(crate) fn argument_name<'s>(context: &mut Cx<'s>, value: Local<'s>) -> R<Local<'s, Chars>> {
     // A promise comes from `NextMethod` and stands for the name the method received.
     let value = handles::force(context, value)?;
     if let Some(symbol) = value.downcast::<Symbol>() {
