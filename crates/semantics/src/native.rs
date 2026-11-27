@@ -335,9 +335,10 @@ impl Uncompiled {
                  `List`"
             ),
             Uncompiled::RecursiveFunctionArgument(name) => format!(
-                "a function passed to a recursive call of `{name}` {YET}: native code lowers a \
-                 function that takes a function into each of its callers, which a recursion \
-                 cannot end. Loop instead, or define the function inside `{name}`"
+                "a function passed to a recursive call of `{name}` that calls a function \
+                 parameter {YET}: each level would wrap the function once more. Loop instead, \
+                 or pass the function on as it is and what the wrapper adds as a parameter of \
+                 its own"
             ),
             Uncompiled::InvisibleResult => format!(
                 "the function ends in an expression whose value R returns invisibly, which {YET}. \
@@ -2723,12 +2724,15 @@ impl<'a, 'db> Judge<'a, 'db> {
             // The type check matches the arguments to the formals, and native code matches them
             // as R does, left-out formals taking their defaults.
             Callee::Native(name) => {
-                let mut passes_function = false;
                 for &(_, value) in arguments {
-                    passes_function |= self.function_argument(value);
-                }
-                if passes_function && self.own == Some(name) {
-                    self.uncompiled(id, Uncompiled::RecursiveFunctionArgument(name));
+                    if self.function_argument(value)
+                        && self.own == Some(name)
+                        && !matches!(*module.kind(value), ExpressionKind::NameRef(forwarded)
+                            if matches!(self.lookup(forwarded), Some(Slot::FunctionParameter)))
+                        && self.wraps_function_parameter(value)
+                    {
+                        self.uncompiled(value, Uncompiled::RecursiveFunctionArgument(name));
+                    }
                 }
             }
             Callee::R(name, origin) => self.r_call(id, name, origin, arguments, usage),
@@ -2781,6 +2785,29 @@ impl<'a, 'db> Judge<'a, 'db> {
                 false
             }
         }
+    }
+
+    /// Whether a function passed to a recursive call reads a function parameter, itself or
+    /// through a local function it reads. Native code compiles the recursion once per function
+    /// it passes, so a function that wraps the function parameter would need a copy per level.
+    fn wraps_function_parameter(&self, value: ExprId) -> bool {
+        let module = self.judged.module;
+        let mut pending: SmallVec<[ExprId; 16]> = SmallVec::from_slice(&[value]);
+        let mut seen: SmallVec<[ExprId; 4]> = SmallVec::new();
+        while let Some(id) = pending.pop() {
+            match *module.kind(id) {
+                ExpressionKind::NameRef(name) => match self.lookup(name) {
+                    Some(Slot::FunctionParameter) => return true,
+                    Some(Slot::Function(function)) if !seen.contains(&function) => {
+                        seen.push(function);
+                        pending.push(function);
+                    }
+                    _ => {}
+                },
+                _ => module.for_each_child(id, |child| pending.push(child)),
+            }
+        }
+        false
     }
 
     fn r_call(
