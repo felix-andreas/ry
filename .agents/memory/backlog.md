@@ -689,12 +689,12 @@ A test user's application workload (`tools/bench/appsuite`) spends its time flat
 Rule and order: `development/design/memory-safety.md`, "Migration".
 
 - **Raw, in order.** The evaluator's call machinery (`eval`, `eval_call`, `apply_closure`,
-  `match_args`, promises) together with the bytecode loop, the register accessor and `Held<T>`; the constructors, element
-  readers and coercions of `values.rs` (`alloc`, `cons`, `mkchar`, `install`, the scalars,
-  `list_get`, `as_*_scalar`) move with those callers. The raw helpers that the bytecode loop and
-  the JIT share with the migrated specials (`as_condition`, `plain_flag`, `logical_operand_of`,
-  `switch_alternative`, `reachable_loop`, `make_closure`, `run_loop`, `statement_srcref`) keep
-  their wrappers in `handles.rs` until then.
+  `match_args`, promises) together with the bytecode loop, the register accessor and `Held<T>`; the
+  constructors, element readers and coercions of `values.rs` (`alloc`, `cons`, `mkchar`, `install`,
+  the scalars, `list_get`, `as_*_scalar`) move with those callers. The raw helpers that the bytecode
+  loop and the JIT share with the migrated specials (`as_condition`, `plain_flag`,
+  `logical_operand_of`, `switch_alternative`, `reachable_loop`, `make_closure`, `run_loop`,
+  `statement_srcref`) keep their wrappers in `handles.rs` until then.
 - **Not built**: the register accessor beyond the replacement forms' `RunningFrame`, `Held<T>`.
 - **Unaudited.** `jit::runtime` helpers outside `scoped` must leave no handle.
 - **Unverified.** `assign_one` grows an owned list by moving its elements (`grow`, `final_step`)

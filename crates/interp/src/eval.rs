@@ -8422,6 +8422,45 @@ pub(crate) fn assigns_to(expression: Gc<'_>, variable: Gc<'_, Symbol>) -> bool {
     any_item(expression, |part| assigns_to(part, variable))
 }
 
+/// [`complex_assign`] for compiled code, whose frame holds every operand.
+///
+/// # Safety
+///
+/// The caller keeps every operand alive until this returns, and releases what this roots.
+pub unsafe fn compiled_complex_assign(
+    whole: Sexp,
+    target: Sexp,
+    value: Sexp,
+    env: Sexp,
+    superassign: bool,
+    evaluated: &[Sexp],
+) -> R<()> {
+    // SAFETY: the caller's contract.
+    unsafe {
+        handles::in_caller_scope(|context| {
+            let whole = handles::held(context, whole);
+            let target = handles::held(context, target);
+            let value = handles::held(context, value);
+            let environment = handles::held(context, env)
+                .downcast::<Environment>()
+                .ok_or_else(|| error("internal error: an assignment outside an environment"))?;
+            let evaluated: SmallVec<[Local<'_>; 4]> = evaluated
+                .iter()
+                .map(|&argument| handles::held(context, argument))
+                .collect();
+            complex_assign(
+                context,
+                whole,
+                target,
+                value,
+                environment,
+                superassign,
+                &evaluated,
+            )
+        })
+    }
+}
+
 /// Whether `test` holds for any value of the pairlist or call `list`.
 fn any_item<'a>(mut list: Gc<'a>, mut test: impl FnMut(Gc<'a>) -> bool) -> bool {
     while let Some((item, _, rest)) = handles::cell_fields(list) {
@@ -8471,45 +8510,6 @@ fn replacement_function<'s>(
     let symbol = context.root(symbol);
     cells.push(context, handles::null(), symbol.value())?;
     Ok(cells.finish().map_or_else(handles::null, Owned::finish))
-}
-
-/// [`complex_assign`] for compiled code, whose frame holds every operand.
-///
-/// # Safety
-///
-/// The caller keeps every operand alive until this returns, and releases what this roots.
-pub unsafe fn compiled_complex_assign(
-    whole: Sexp,
-    target: Sexp,
-    value: Sexp,
-    env: Sexp,
-    superassign: bool,
-    evaluated: &[Sexp],
-) -> R<()> {
-    // SAFETY: the caller's contract.
-    unsafe {
-        handles::in_caller_scope(|context| {
-            let whole = handles::held(context, whole);
-            let target = handles::held(context, target);
-            let value = handles::held(context, value);
-            let environment = handles::held(context, env)
-                .downcast::<Environment>()
-                .ok_or_else(|| error("internal error: an assignment outside an environment"))?;
-            let evaluated: SmallVec<[Local<'_>; 4]> = evaluated
-                .iter()
-                .map(|&argument| handles::held(context, argument))
-                .collect();
-            complex_assign(
-                context,
-                whole,
-                target,
-                value,
-                environment,
-                superassign,
-                &evaluated,
-            )
-        })
-    }
 }
 
 /// Evaluates each element of an expression vector in turn, with its srcref current, and

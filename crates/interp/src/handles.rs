@@ -1750,10 +1750,10 @@ impl<'s> Args<'_, 's> {
     /// that frame's caller as the new frame's parent. `None` outside a closure called from
     /// another one.
     pub fn recalled(&self, context: &mut Cx<'s>) -> R<Option<Recalled<'s>>> {
-        // SAFETY: finding the frames reads the frame stack, which holds each frame's call,
-        // function and arguments until it ends, after the context's scope. Moving the frame's
-        // argument references into promises and making the parent's environment allocate, which
-        // `&mut Cx` permits, and each object is rooted before the next allocation.
+        // SAFETY: the frame stack holds each frame's call, function and arguments until the
+        // frame ends, which is after the context's scope. Detaching the argument references
+        // and making the parent's environment allocate, which `&mut Cx` permits, and each
+        // object is rooted before the next allocation.
         unsafe {
             let Some(own) = self.call.frame_index() else {
                 return Ok(None);
@@ -3426,27 +3426,6 @@ pub fn uncounted_forced_promise<'s>(
     settled_promise(context, code, value, false)
 }
 
-fn settled_promise<'s>(
-    context: &mut Cx<'s>,
-    code: Local<'_>,
-    value: Local<'_>,
-    counted: bool,
-) -> R<Local<'s, Promise>> {
-    // SAFETY: both are rooted, the promise allocates, which `&mut Cx` permits, and a promise
-    // is what the allocation makes. An uncounted promise is new, so nothing else relies on the
-    // counts it gives back.
-    unsafe {
-        let promise = rooted(
-            context,
-            crate::eval::forced_promise(code.raw(), value.raw())?,
-        );
-        if !counted {
-            crate::heap().untrack_references(promise.raw());
-        }
-        Ok(Local::adopt(promise.raw()))
-    }
-}
-
 /// Records a profile sample whose innermost entry is the builtin `name`.
 pub fn record_profile_sample(_context: &mut Cx<'_>, name: &str) -> R<()> {
     // SAFETY: recording reads the frame stack and allocates, which `&mut Cx` permits.
@@ -4066,6 +4045,27 @@ pub fn forced_promise<'s>(
     value: Local<'_>,
 ) -> R<Local<'s, Promise>> {
     settled_promise(context, code, value, true)
+}
+
+fn settled_promise<'s>(
+    context: &mut Cx<'s>,
+    code: Local<'_>,
+    value: Local<'_>,
+    counted: bool,
+) -> R<Local<'s, Promise>> {
+    // SAFETY: both are rooted, the promise allocates, which `&mut Cx` permits, and a promise
+    // is what the allocation makes. An uncounted promise is new, so nothing else relies on the
+    // counts it gives back.
+    unsafe {
+        let promise = rooted(
+            context,
+            crate::eval::forced_promise(code.raw(), value.raw())?,
+        );
+        if !counted {
+            crate::heap().untrack_references(promise.raw());
+        }
+        Ok(Local::adopt(promise.raw()))
+    }
 }
 
 /// A promise to evaluate `code` in `environment`.
