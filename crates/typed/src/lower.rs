@@ -2722,9 +2722,9 @@ impl Lowering<'_> {
     }
 
     /// Binds the formals a call from R code leaves out, past the parameters or standing for an
-    /// [`Type::Absent`] one, to their defaults. R computes a default where the body first reads its formal, so the parameters
-    /// a default reads count as read there (`Lowering::param_aliases`), as an untyped local
-    /// function's argument does.
+    /// [`Type::Absent`] one, to their defaults. R computes a default where the body first reads
+    /// its formal, so the parameters a default reads count as read there
+    /// (`Lowering::param_aliases`), as an untyped local function's argument does.
     unsafe fn left_out_defaults(
         &mut self,
         formals: &[(Sexp, Sexp)],

@@ -2957,9 +2957,9 @@ unsafe fn call_typed(typed: &TypedCall<'_>) -> Option<R<Sexp>> {
 
 /// The arguments a native call passes, as values with no promise left: `None` unless every
 /// argument matches a formal as R matches it and is at hand without evaluating anything. A
-/// formal the call leaves out with a constant scalar default gets that value; from the first
-/// one whose default is not, the formals are left out, for the typed core's code to compute,
-/// up to the next one the call passes ([`ReadAhead::absent`]). Also gives what reading them
+/// formal the call leaves out with a constant scalar default gets that value, and the typed
+/// core's code computes any other default; one before a later value stands in the compile key as
+/// `Type::Absent` ([`ReadAhead::absent`]). Also gives what reading them
 /// ahead read ([`ReadAhead`]): each promise read without forcing, with its value, and each
 /// variable a value depends on.
 pub(crate) unsafe fn gather(
@@ -3017,37 +3017,13 @@ pub(crate) unsafe fn gather(
     };
     let mut arguments: SmallVec<[Sexp; 4]> = SmallVec::new();
     let mut ahead = ReadAhead::default();
-    // The first formal, and its position, whose default the typed core computes in the
-    // function's own code, up to the next formal the call passes.
-    let mut left_out: Option<(usize, Sexp)> = None;
+    // The formals, with their positions, left out since the last value `arguments` holds, whose
+    // defaults the typed core computes in the function's own code.
+    let mut left_out: SmallVec<[(usize, Sexp); 4]> = SmallVec::new();
     let mut formal = formals;
     for (position, &item) in matched.iter().enumerate() {
-        match item {
+        let value = match item {
             Some(item) => {
-                if let Some((start, mut skipped)) = left_out.take() {
-                    for absent in start..position {
-                        if skipped.car() == values::missing_arg() {
-                            annotations::decline(|| {
-                                format!(
-                                    "the call leaves out `{}`, which has no default",
-                                    values::symbol_name(skipped.tag())
-                                )
-                            });
-                            return None;
-                        }
-                        if absent >= 64 {
-                            annotations::decline(|| {
-                                String::from(
-                                    "the call leaves out a formal past the 64th and passes a \
-                                     later one",
-                                )
-                            });
-                            return None;
-                        }
-                        ahead.absent |= 1 << absent;
-                        skipped = skipped.cdr();
-                    }
-                }
                 let arg = &args[item];
                 let value = if arg.value.kind() == SexpType::Promise {
                     let Some(value) = promise_value(arg.value, &mut ahead, position as u32, 0)
@@ -3086,9 +3062,8 @@ pub(crate) unsafe fn gather(
                 } else {
                     arg.value
                 };
-                arguments.push(value);
+                value
             }
-            None if left_out.is_some() => {}
             None => {
                 // A missing argument's default is evaluated in the call's frame, so a constant
                 // scalar is that constant, and so is code that names no formal and that
@@ -3121,39 +3096,57 @@ pub(crate) unsafe fn gather(
                     ) && value.length() == 1
                         && value.attrib() == values::nil()
                 }) {
-                    Some(value) => arguments.push(value),
-                    None => left_out = Some((position, formal)),
+                    Some(value) => value,
+                    None => {
+                        left_out.push((position, formal));
+                        formal = formal.cdr();
+                        continue;
+                    }
                 }
             }
+        };
+        // The formals left out before this one stand in the compile key as `Type::Absent`.
+        for &(absent, _) in &left_out {
+            if absent >= 64 {
+                annotations::decline(|| {
+                    String::from(
+                        "the call leaves out a formal past the 64th and passes a later one",
+                    )
+                });
+                return None;
+            }
+            ahead.absent |= 1 << absent;
         }
+        if !left_to_native(&left_out) {
+            return None;
+        }
+        left_out.clear();
+        arguments.push(value);
         formal = formal.cdr();
     }
-    // The typed core computes the defaults from `left_out` on in the function's own code, where
-    // they can read the formals.
-    if let Some((_, formal)) = left_out
-        && !left_to_native(formal)
-    {
+    if !left_to_native(&left_out) {
         return None;
     }
     Some((arguments, ahead))
 }
 
-/// Whether the formals from `formal` on can be left to the typed core's code: each has a
-/// default.
-unsafe fn left_to_native(mut formal: Sexp) -> bool {
-    while formal.kind() == SexpType::Pairlist {
-        if formal.car() == values::missing_arg() {
+/// Whether the formals `left_out` can be left to the typed core's code: each has a default.
+unsafe fn left_to_native(left_out: &[(usize, Sexp)]) -> bool {
+    match left_out
+        .iter()
+        .find(|(_, formal)| formal.car() == values::missing_arg())
+    {
+        Some(&(_, formal)) => {
             annotations::decline(|| {
                 format!(
                     "the call leaves out `{}`, which has no default",
                     values::symbol_name(formal.tag())
                 )
             });
-            return false;
+            false
         }
-        formal = formal.cdr();
+        None => true,
     }
-    true
 }
 
 /// The bit of `position` in the mask of arguments read ahead from variables, which
