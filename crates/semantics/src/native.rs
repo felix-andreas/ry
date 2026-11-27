@@ -761,7 +761,7 @@ pub fn native_blockers(judged: Judged<'_, '_>) -> ThinVec<NativeBlocker> {
         locals: FxHashSet::default(),
         hidden: FxHashSet::default(),
         reported: FxHashSet::default(),
-        reported_dict: false,
+        reported_keyed: false,
         control_depth: 0,
         probing: 0,
         nested: 0,
@@ -972,7 +972,7 @@ struct Judge<'a, 'db> {
     hidden: FxHashSet<Symbol>,
     /// Outside names already reported, so each is reported where it first appears.
     reported: FxHashSet<Symbol>,
-    reported_dict: bool,
+    reported_keyed: bool,
     control_depth: u32,
     /// How many loop trials enclose the walk ([`Judge::in_loop`]).
     probing: u32,
@@ -1016,7 +1016,7 @@ struct WalkState<'db> {
     early_reads: usize,
     hidden: FxHashSet<Symbol>,
     reported: FxHashSet<Symbol>,
-    reported_dict: bool,
+    reported_keyed: bool,
     local_functions: Vec<(ExprId, bool)>,
     invisible: Option<ExprId>,
     converted_locals: Vec<(Symbol, usize)>,
@@ -1055,7 +1055,7 @@ impl<'a, 'db> Judge<'a, 'db> {
     /// Reports a dictionary or set the typed core has no layout for, once per judged function:
     /// every later use of the same collection would repeat the finding.
     fn keyed_layout(&mut self, range: TextRange, uncompiled: Uncompiled) {
-        if !std::mem::replace(&mut self.reported_dict, true) {
+        if !std::mem::replace(&mut self.reported_keyed, true) {
             self.block_at(range, NativeBlockerKind::Uncompiled(uncompiled));
         }
     }
@@ -1112,7 +1112,7 @@ impl<'a, 'db> Judge<'a, 'db> {
         };
         self.scope.clear();
         self.reported.clear();
-        self.reported_dict = false;
+        self.reported_keyed = false;
         self.locals.clear();
         self.hidden.clear();
         self.control_depth = 0;
@@ -1813,7 +1813,7 @@ impl<'a, 'db> Judge<'a, 'db> {
             early_reads: self.early_reads.len(),
             hidden: self.hidden.clone(),
             reported: self.reported.clone(),
-            reported_dict: self.reported_dict,
+            reported_keyed: self.reported_keyed,
             local_functions: self.local_functions.clone(),
             invisible: self.invisible,
             converted_locals: self.converted_locals.clone(),
@@ -1826,7 +1826,7 @@ impl<'a, 'db> Judge<'a, 'db> {
         self.early_reads.truncate(state.early_reads);
         self.hidden = state.hidden;
         self.reported = state.reported;
-        self.reported_dict = state.reported_dict;
+        self.reported_keyed = state.reported_keyed;
         self.local_functions = state.local_functions;
         self.invisible = state.invisible;
         self.converted_locals = state.converted_locals;

@@ -61,9 +61,9 @@ pub enum Type {
     },
     /// An R list whose elements are scalars of these items.
     List(Item),
-    /// ry's `Set` of these items: their distinct values in first-insertion order, held in the
-    /// native dictionary with a placeholder value per element (`entry_items`), which never
-    /// crosses back to R.
+    /// ry's `Set` of these items: their distinct values in first-insertion order. A set never
+    /// crosses back to R, and it is held in the native dictionary with a placeholder value per
+    /// element (`entry_items`).
     Set(Item),
     Dict {
         key: Item,

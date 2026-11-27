@@ -5175,9 +5175,10 @@ impl Lowering<'_> {
                     .builder
                     .emit(Type::of_item(key), Op::ItemAt(keys, positions.counter));
                 // A set's step takes only the element.
-                if values.is_some() {
-                    entry_value = Some(self.entry_value(values, value, positions.counter));
-                }
+                entry_value = values.map(|values| {
+                    self.builder
+                        .emit(Type::of_item(value), Op::ItemAt(values, positions.counter))
+                });
                 (positions, element, positions.counter)
             }
             (None, Some(list)) => {
@@ -9269,8 +9270,11 @@ impl Lowering<'_> {
             .builder
             .emit(Type::of_item(key), Op::ItemAt(keys, positions.counter));
         let mut inputs: SmallVec<[Local; 2]> = SmallVec::from_slice(&[entry_key]);
-        if values.is_some() {
-            inputs.push(self.entry_value(values, value, positions.counter));
+        if let Some(values) = values {
+            inputs.push(
+                self.builder
+                    .emit(Type::of_item(value), Op::ItemAt(values, positions.counter)),
+            );
         }
         let inner = self
             .apply(callable, &inputs)?
@@ -9389,8 +9393,11 @@ impl Lowering<'_> {
             .builder
             .emit(Type::of_item(key), Op::ItemAt(keys, positions.counter));
         let mut inputs: SmallVec<[Local; 2]> = SmallVec::from_slice(&[entry_key]);
-        if values.is_some() {
-            inputs.push(self.entry_value(values, value, positions.counter));
+        if let Some(values) = values {
+            inputs.push(
+                self.builder
+                    .emit(Type::of_item(value), Op::ItemAt(values, positions.counter)),
+            );
         }
         let mapped = self
             .apply(callable, &inputs)?
