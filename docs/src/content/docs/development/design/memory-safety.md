@@ -622,8 +622,15 @@ settle a promise without running code (`settle_without_code`, `peeked_variable`,
 environment (`pending_environment`, `frame_environment_of`, `caller_environment`), the
 closures over its slots (`closure_over_slots`), the readers of its slots
 (`frame_dots`, `variable_register`, `formal_slots`) and the lifting of its slots into an
-environment (`lift`, `box_slots`). The predicates that ask whether a slot or a reference is a
-missing argument (`value_is_missing`, `reference_is_missing`, `symbol_is_missing`) stay raw.
+environment (`lift`, `box_slots`); the predicates that ask whether a slot or a reference is a
+missing argument (`value_is_missing`, `reference_is_missing`, `symbol_is_missing`); a heap frame's
+binding of its formals and defaults (`bind_environment`, whose default promises are built after
+one `reserve` with the `_uncollected` allocators); the forcing of a typed closure's arguments; and
+a frame's exit (`catch_return`, `run_on_exit`, `finish_frame`, `pop_frame`). Entering and leaving
+a frame (`eval::enter`, `eval::leave`) stay `unsafe fn` by design: a frame's lifetime is not
+lexical, because `leave` truncates the handle stack to the mark `enter` recorded, so no borrow of
+the context can span it. Both are built from safe pieces, and the lexical paths that wrap them
+take a `Cx`.
 A promise is rooted for as long as its code runs, because that code can remove the last binding
 that holds it. A reader reaches a live frame through `handles::LiveFrame`, which borrows the
 context, so a slot read through it cannot outlive an allocation; `handles::pending_frame` panics
