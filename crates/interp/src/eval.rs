@@ -1275,21 +1275,24 @@ pub unsafe fn slot_closure(header: usize, formals: Sexp, body: Sexp, srcref: Sex
 }
 
 /// [`slot_closure`] for code on the handle types.
-pub fn closure_over_slots<'s>(
-    context: &mut Cx<'s>,
+pub fn closure_over_slots<'c>(
+    context: &'c mut Cx<'_>,
     header: usize,
-    formals: Local<'s>,
-    body: Local<'s>,
-    srcref: Local<'s>,
-) -> R<Local<'s>> {
-    let owner = handles::frame_at_header(context, header).index();
+    formals: Local<'_>,
+    body: Local<'_>,
+    srcref: Local<'_>,
+) -> R<Gc<'c>> {
+    let frame = handles::frame_at_header(context, header);
+    let (owner, in_slots) = (frame.index(), frame.in_slots());
     let state = interp();
     if crate::pending_closures_of(&state.pending_closures, owner).len() >= crate::FRAME_CLOSURES {
-        let environment = frame_environment(context, owner, Reify::Site(Site::FunctionDefinition))?;
-        return handles::closure(context, formals, body, srcref, environment);
+        if in_slots {
+            reified_environment(context, owner, Reify::Site(Site::FunctionDefinition))?;
+        }
+        return handles::frame_closure(context, owner, in_slots, formals, body, srcref);
     }
-    let environment = context.root_answer(|context| pending_environment(context, owner))?;
-    let closure = handles::closure(context, formals, body, srcref, environment)?;
+    pending_environment(context, owner)?;
+    let closure = handles::frame_closure(context, owner, true, formals, body, srcref)?;
     // The frame is the innermost one unless a promise of an outer frame defines the closure,
     // so the entry nearly always goes at the end.
     let state = interp();
@@ -1765,9 +1768,7 @@ fn renew_reference(context: &mut Cx<'_>, index: usize, symbol: Local<'_>) -> R<(
     let mut target = context.alloc::<Integer>(3)?;
     target.as_mut_slice().fill(0);
     let target = target.finish();
-    let reference = handles::new_argument_reference(context, symbol, target)?;
-    handles::place_reference(context, index, reference, Some(target));
-    Ok(())
+    handles::replace_pooled_reference(context, index, symbol, Some(target))
 }
 
 /// The slot an argument reference names for a variable its frame keeps in no slot: forcing it
@@ -2116,11 +2117,10 @@ pub fn detach<'s>(context: &mut Cx<'s>, reference: Local<'s, Promise>) -> R<()> 
         let (owner, _) = reference_target(fields);
         pending_environment(context, owner)?;
     }
-    let Some((_, target)) = handles::pooled_reference(context, index) else {
-        panic!("argument reference {index} left the pool");
-    };
-    let target = context.root(target);
-    let fresh = handles::new_argument_reference(context, handles::null(), target)?;
+    // The pool's count goes with the pool's place: a promise that kept it would never count as
+    // held by its frame alone, so the frame's release would leave it forced, and the value it
+    // holds would look shared for the rest of its life.
+    handles::replace_pooled_reference(context, index, handles::null(), None)?;
     let context: &Cx<'s> = context;
     let [value, code, environment, compiled] = reference_promise(context, reference.read(context));
     context.set_promise_value(reference, value);
@@ -2130,10 +2130,6 @@ pub fn detach<'s>(context: &mut Cx<'s>, reference: Local<'s, Promise>) -> R<()> 
     reference
         .read(context)
         .set_flags(gp::ARGUMENT_REFERENCE, false);
-    // The pool's count goes with the pool's place: a promise that kept it would never count as
-    // held by its frame alone, so the frame's release would leave it forced, and the value it
-    // holds would look shared for the rest of its life.
-    handles::place_reference(context, index, fresh, None);
     Ok(())
 }
 
@@ -2208,13 +2204,7 @@ pub fn pending_environment<'a>(context: &'a mut Cx<'_>, owner: usize) -> R<Gc<'a
                 gp::FUNCTION_FRAME | gp::PENDING_FRAME | gp::COMPILED_FRAME,
                 true,
             );
-            // A lookup of any other name passes the environment without asking the frame.
             frame.stand_in(environment);
-            context.expect_dispatch_variables(
-                environment,
-                frame.method_vars().map(|(symbol, _)| symbol),
-            );
-            frame.set_pending(environment);
             activity::count(Counter::FrameEnvironments);
             Ok(environment)
         },
@@ -4348,22 +4338,29 @@ pub fn frame_environment_of<'a>(context: &'a mut Cx<'_>, index: usize, cause: Re
             let frame = handles::live_frame(context, index);
             (!frame.in_slots()).then(|| frame.recorded_environment())
         },
-        |context| {
-            if activity::enabled() {
-                let reason = match cause {
-                    Reify::Builtin(primitive) => {
-                        let Some(definition) = interp().builtin(primitive) else {
-                            return Err(error("invalid primitive"));
-                        };
-                        SITES + builtin_index(definition) as u32
-                    }
-                    Reify::Site(site) => site as u32,
-                };
-                handles::live_frame(context, index).set_reified_by(reason);
-            }
-            Ok(pending_environment(context, index)?.value())
-        },
+        |context| Ok(reified_environment(context, index, cause)?.value()),
     )
+}
+
+/// The environment that stands for the slot frame at `index`, which `cause` asked for.
+fn reified_environment<'a>(
+    context: &'a mut Cx<'_>,
+    index: usize,
+    cause: Reify,
+) -> R<Gc<'a, Environment>> {
+    if activity::enabled() {
+        let reason = match cause {
+            Reify::Builtin(primitive) => {
+                let Some(definition) = interp().builtin(primitive) else {
+                    return Err(error("invalid primitive"));
+                };
+                SITES + builtin_index(definition) as u32
+            }
+            Reify::Site(site) => site as u32,
+        };
+        handles::live_frame(context, index).set_reified_by(reason);
+    }
+    pending_environment(context, index)
 }
 
 /// [`frame_environment_of`] for a frame that has an environment or runs on slots, rooted.

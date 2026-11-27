@@ -3160,6 +3160,32 @@ pub fn closure<'s>(
     }
 }
 
+/// A closure of `formals` and `body`, with `srcref`, over an environment the frame at `owner`
+/// holds: the one that stands for it when `pending`, else its own. The answer borrows the
+/// context, for a caller that hands it on or roots it.
+pub fn frame_closure<'c>(
+    _context: &'c mut Cx<'_>,
+    owner: usize,
+    pending: bool,
+    formals: Local<'_>,
+    body: Local<'_>,
+    srcref: Local<'_>,
+) -> R<Gc<'c>> {
+    let frame = &crate::interp().frames[owner];
+    let environment = match pending {
+        true => frame.pending.raw(),
+        false => frame.env.raw(),
+    };
+    // SAFETY: the frame holds the environment and the other three are rooted while the
+    // closure allocates, which `&mut Cx` permits, and the answer borrows the context, so
+    // nothing allocates before the caller roots it.
+    unsafe {
+        let closure =
+            crate::eval::make_closure(formals.raw(), body.raw(), srcref.raw(), environment)?;
+        Ok(Gc::adopt(closure))
+    }
+}
+
 /// The `break` (`next` false) or `next` of the loop in `environment`, raised as an error first
 /// when no loop can catch it.
 pub fn loop_jump(_context: &mut Cx<'_>, environment: Local<'_, Environment>, next: bool) -> Unwind {
@@ -3898,28 +3924,26 @@ impl<'c, 's> LiveFrame<'c, 's> {
         }
     }
 
-    /// Records in `environment` that it stands for the slot frame, with the frame's slot names,
-    /// so a lookup of any other name passes it without asking the frame.
+    /// Makes `environment` the one that stands for the slot frame, which the frame then holds.
+    /// The environment records the frame's slot names, so a lookup of any other name passes it
+    /// without asking the frame, and the frame's dispatch variables.
     #[inline]
     pub fn stand_in(self, environment: Gc<'_, Environment>) {
+        let index = self.index;
         let Some((names, _)) = compiled_slots(self.function()) else {
-            panic!("slot frame {} runs code without a slot table", self.index);
+            panic!("slot frame {index} runs code without a slot table");
         };
         // SAFETY: the frame's function holds its slot table, and so the names, for as long as
         // the environment stands for the frame.
         unsafe {
             self.context
-                .set_slot_owner(environment, self.index, names.value())
+                .set_slot_owner(environment, index, names.value())
         };
-    }
-
-    /// Records `environment` as the one that stands for the slot frame, which the frame then
-    /// holds.
-    #[inline]
-    pub fn set_pending(self, environment: Gc<'_, Environment>) {
+        self.context
+            .expect_dispatch_variables(environment, self.method_vars().map(|(symbol, _)| symbol));
         // SAFETY: the frame holds the environment from here on, and the interpreter traces its
         // fields.
-        crate::interp().frames[self.index].pending = unsafe { Held::adopt(environment.raw()) };
+        crate::interp().frames[index].pending = unsafe { Held::adopt(environment.raw()) };
     }
 
     /// Makes the environment that stands for the slot frame its environment, in its header
@@ -3984,28 +4008,37 @@ pub fn pooled_reference<'c>(
     Some(unsafe { (Gc::adopt(reference), Gc::adopt(target)) })
 }
 
-/// A new argument reference naming `symbol` that keeps its target in `target`, outside the
-/// pool until [`place_reference`] puts it there.
-pub fn new_argument_reference<'s>(
-    context: &mut Cx<'s>,
+/// Puts a new argument reference naming `symbol` at position `index` of the pool, with
+/// `target` as its target when given and else over the position's, and gives up the pool's
+/// counts on what the position held ([`place_reference`]).
+#[inline]
+pub fn replace_pooled_reference(
+    context: &mut Cx<'_>,
+    index: usize,
     symbol: impl Pointer<Value>,
-    target: Local<'_, Integer>,
-) -> R<Local<'s, Promise>> {
-    // SAFETY: the symbol is rooted or permanent and the target rooted while the promise
-    // allocates, which `&mut Cx` permits, and the allocation makes a promise, rooted at once.
+    target: Option<Local<'_, Integer>>,
+) -> R<()> {
+    let target_raw = match target {
+        Some(target) => target.raw(),
+        None => match crate::interp().reference_targets.get(index) {
+            Some(&target) => target,
+            None => panic!("argument reference {index} left the pool"),
+        },
+    };
+    // SAFETY: the symbol is rooted or permanent and the pool or the caller roots the target
+    // while the promise allocates, which `&mut Cx` permits, and the pool holds the new promise
+    // before anything else allocates.
     unsafe {
         let reference = crate::heap().alloc_compiled_promise(
             values::unbound(),
             symbol.raw(),
             values::nil(),
-            target.raw(),
+            target_raw,
         )?;
-        let reference = context.root(Gc::<Promise>::adopt(reference));
-        reference
-            .read(context)
-            .set_flags(gp::ARGUMENT_REFERENCE, true);
-        Ok(reference)
+        reference.set_gp_bits(gp::ARGUMENT_REFERENCE, true);
+        place_reference(context, index, Gc::<Promise>::adopt(reference), target);
     }
+    Ok(())
 }
 
 /// Puts `reference` at position `index` of the pool, with `target` as its target when given
@@ -4013,7 +4046,7 @@ pub fn new_argument_reference<'s>(
 /// up the ones it counted on what the position held; at the end of the pool it grows by one,
 /// which needs a target. Counting frees nothing, so what the context reads stays valid.
 #[inline]
-pub fn place_reference(
+fn place_reference(
     _context: &Cx<'_>,
     index: usize,
     reference: impl Pointer<Promise>,
