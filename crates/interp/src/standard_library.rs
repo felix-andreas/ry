@@ -750,7 +750,7 @@ unsafe fn sequence(call: &Call<'_>, like: Sexp, items: &[Sexp]) -> R<Sexp> {
 /// `like`, so their type is known without a guess.
 unsafe fn subset(call: &Call<'_>, like: Sexp, items: &[Sexp]) -> R<Sexp> {
     if items.is_empty() && like.is_array() {
-        return arrays::empty_like(like);
+        return arrays::empty_of(like.kind());
     }
     sequence(call, like, items)
 }
@@ -1061,7 +1061,7 @@ unsafe fn record(fields: &[(&str, Sexp)]) -> R<Sexp> {
 }
 
 /// The name and the single payload value of a tag, or `None` for anything else.
-unsafe fn tag_parts(value: Sexp) -> R<Option<(String, Option<Sexp>)>> {
+pub(crate) unsafe fn tag_parts(value: Sexp) -> R<Option<(String, Option<Sexp>)>> {
     if value.kind() != SexpType::Record {
         return Ok(None);
     }
@@ -1959,6 +1959,10 @@ unsafe fn list_chunks_of(call: &Call<'_>) -> R<Sexp> {
     let [list, size] = arguments(call, ["list", "size"])?;
     let items = list_elements(call, "list", list)?;
     let size = count(call, "size", size)?;
+    // The chunks are lists, so an empty result is a list of lists without an item to tell by.
+    if (size == 0 || items.is_empty()) && list.is_array() {
+        return arrays::empty_of(SexpType::List);
+    }
     if size == 0 {
         return sequence(call, list, &[]);
     }

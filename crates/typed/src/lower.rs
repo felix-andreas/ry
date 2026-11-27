@@ -7392,8 +7392,8 @@ impl Lowering<'_> {
     }
 
     /// `List.chunks_of(list, size)`: slices of `size` items, the last one shorter. A size below
-    /// one and an empty list run in the interpreter, which gives no chunks for zero, raises the
-    /// error for a negative size, and builds an empty result without an item type.
+    /// one runs in the interpreter, which gives no chunks for zero and raises the error for a
+    /// negative size.
     unsafe fn chunks_of(&mut self, arguments: &Arguments) -> Result<Local, Refusal> {
         let [list, size] = arguments.exactly(2)?[..] else {
             return Err(Refusal::new("a malformed `List.chunks_of`"));
@@ -7413,11 +7413,6 @@ impl Lowering<'_> {
         let chunks_ty = self.builder.ty(chunks);
         let held = self.builder.emit(ty, Op::Copy(list));
         let total = self.builder.emit(Type::I64, Op::Length(held));
-        let zero = self.builder.emit(Type::I64, Op::Const(Constant::I64(0)));
-        let empty = self
-            .builder
-            .emit(Type::Lgl, Op::Compare(Compare::Eq, Item::I64, total, zero));
-        self.fail_if(empty);
         let arith = |lower: &mut Self, op: Arith, a: Local, b: Local| {
             lower
                 .builder
@@ -11932,13 +11927,14 @@ enum Step {
 
 /// The mapping calls whose empty result the native code builds when a `.ry_items` wraps them,
 /// with their arities: the checker wraps each whose result items only a callback gives.
-const SETTLED_EMPTY: [(&str, usize); 6] = [
+const SETTLED_EMPTY: [(&str, usize); 7] = [
     ("List.map", 2),
     ("List.map_with_index", 2),
     ("List.map2", 3),
     ("List.map3", 4),
     ("List.map4", 5),
     ("List.join_map", 2),
+    ("List.map_try", 2),
 ];
 
 /// The item a `vapply` template such as `numeric(1)` declares.

@@ -566,7 +566,7 @@ How the typed core lowers, compiles, links and attaches typed code: registers, l
 **Status:** settled.
 
 - The checker wraps a `List.map` family call whose items come only from its callback in `.ry_items(call, hint)` (`builds_fresh_items`, `crates/semantics/src/check.rs`), and the interpreter's `.ry_items` gives an empty list the hint's storage. Native code builds the empty list from the same item type, so the two tiers agree without the stop that sent an empty result to the interpreter.
-- The lowering of `.ry_items` sets `settled_empty` for its operand when the operand is one of `SETTLED_EMPTY` (`crates/typed/src/lower.rs`), and `map`, `join_map` and `map_many` drop their empty-result stop only then. An unwrapped call keeps the stop, because the interpreter would give `logical(0)`.
+- The lowering of `.ry_items` sets `settled_empty` for its operand when the operand is one of `SETTLED_EMPTY` (`crates/typed/src/lower.rs`), and `map`, `join_map` and `map_many` drop their empty-result stop only then. An unwrapped call keeps the stop, because the interpreter would give `logical(0)`. `List.map_try`'s hint names the items of the list inside `:Ok` (`ok_payload`), and `.ry_items` settles that payload. `List.chunks_of` needs no hint: its items are lists, so the interpreter gives an empty result list storage (`arrays::empty_of`) and native code has no stop for it.
 
 ## A field read moves a list out of a record no one else holds
 

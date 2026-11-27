@@ -28,8 +28,9 @@ expect stdout "[2i64, 4i64]"
 expect stdout "[1] \"kept\" \"I64\"  \"I64\"  \"I64\" "
 expect stdout "[]"
 
-# A typed function that maps an empty list runs on native code: the checker gives the result's
-# item type, so both tiers build the same empty list and no call falls back to the interpreter.
+# A typed function that maps or chunks an empty list runs on native code: the checker gives the
+# result's item type (a chunk is always a list), so both tiers build the same empty list and no
+# call falls back to the interpreter.
 file mapped.R
 | doubled <- function(xs: List<I64>) -> List<I64> List.map(xs, \(x) x * 2i64)
 | halves <- function(xs: List<I64>) -> List<F64> List.map_with_index(xs, \(x, i) Num.to_f64(x) / 2.0)
@@ -38,9 +39,21 @@ file mapped.R
 | pieces <- function(xs: List<I64>) -> List<F64> List.join_map(xs, \(x) [Num.to_f64(x)])
 | xs <- List.from_r(integer(0))
 | print(c(typeof(doubled(xs)), typeof(halves(xs)), typeof(words(xs)), typeof(points(xs)), typeof(pieces(xs))))
+| chunks <- function(xs: List<I64>) -> List<List<I64>> List.chunks_of(xs, 2i64)
+| tried <- function(xs: List<I64>) -> Result<List<Str>, Str> List.map_try(xs, \(x) :Ok("a"))
+| counted <- function(xs: List<I64>) -> Result<List<I64>, Str> List.map_try(xs, \(x) :Ok(x))
+| payload <- function(result) as.list(result)$payload[[1]]
+| print(c(typeof(chunks(xs)), typeof(payload(tried(xs))), typeof(payload(counted(xs)))))
 
 env RY_TYPED_LOG 1
 run ry run --runtime ry mapped.R
 expect exit 0
 expect stdout "[1] \"I64\"       \"double\"    \"character\" \"list\"      \"double\"   "
+expect stdout "[1] \"list\"      \"character\" \"I64\"      "
 expect stderr lacks "runs in the interpreter"
+
+env RY_JIT off
+run ry run --runtime ry mapped.R
+expect exit 0
+expect stdout "[1] \"I64\"       \"double\"    \"character\" \"list\"      \"double\"   "
+expect stdout "[1] \"list\"      \"character\" \"I64\"      "
