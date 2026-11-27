@@ -2,27 +2,27 @@
 #---- record_literal
 p <- (x = 1, y = 2L)
 #++++
-p: Record{x: double, y: integer}
+p: Record{x: I64, y: I64}
 
 #---- record_fields_print_sorted
 p <- (y = 2, x = 1)
 #++++
-p: Record{x: double, y: double}
+p: Record{x: I64, y: I64}
 
 #---- one_field_record
 p <- (x = 1,)
 #++++
-p: Record{x: double}
+p: Record{x: I64}
 
 #---- tuple_literal
 t <- (1L, "a")
 #++++
-t: Tuple{integer, character}
+t: Tuple{I64, Str}
 
 #---- one_item_tuple
 t <- (1L,)
 #++++
-t: Tuple{integer}
+t: Tuple{I64}
 
 #---- empty_tuple
 t <- ()
@@ -37,96 +37,96 @@ n: :None
 #---- positional_tag
 s <- :Some(5L)
 #++++
-s: :Some(integer)
+s: :Some(I64)
 
 #---- named_tag
 r <- :Rect(width = 2, height = 3)
 #++++
-r: :Rect(height: double, width: double)
+r: :Rect(height: I64, width: I64)
 
 #---- nested_literals
 v <- (point = (x = 1, y = 2), tag = :Some((1L, "a")))
 #++++
-v: Record{point: Record{x: double, y: double}, tag: :Some(Tuple{integer, character})}
+v: Record{point: Record{x: I64, y: I64}, tag: :Some(Tuple{I64, Str})}
 
 #==== field_access
 #---- dollar_reads_an_exact_field
 p <- (x = 1, y = 2L)
 y <- p$y
 #++++
-p: Record{x: double, y: integer}
-y: integer
+p: Record{x: I64, y: I64}
+y: I64
 
 #---- unknown_field_suggests_the_nearest_name
 p <- (width = 1, height = 2)
 w <- p$widht
 #++++
-p: Record{height: double, width: double}
+p: Record{height: I64, width: I64}
 w: Unknown
-36..41 error[type-mismatch] field `widht` does not exist in `Record{height: double, width: double}`. Did you mean `width`?
+36..41 error[type-mismatch] field `widht` does not exist in `Record{height: I64, width: I64}`. Did you mean `width`?
 
 #---- unknown_field_without_a_near_name
 p <- (width = 1,)
 w <- p$z
 #++++
-p: Record{width: double}
+p: Record{width: I64}
 w: Unknown
-25..26 error[type-mismatch] field `z` does not exist in `Record{width: double}`
+25..26 error[type-mismatch] field `z` does not exist in `Record{width: I64}`
 
 #---- double_bracket_reads_a_field_by_string
 p <- (x = 1, y = 2L)
 y <- p[["y"]]
 #++++
-p: Record{x: double, y: integer}
-y: integer
+p: Record{x: I64, y: I64}
+y: I64
 
 #---- double_bracket_unknown_field
 p <- (x = 1, y = 2L)
 y <- p[["why"]]
 #++++
-p: Record{x: double, y: integer}
+p: Record{x: I64, y: I64}
 y: Unknown
-29..34 error[type-mismatch] field `why` does not exist in `Record{x: double, y: integer}`
+29..34 error[type-mismatch] field `why` does not exist in `Record{x: I64, y: I64}`
 
 #---- record_reads_a_position_in_sorted_field_order
 p <- (x = 1, y = 2L)
 y <- p[[1L]]
 #++++
-p: Record{x: double, y: integer}
-y: double
+p: Record{x: I64, y: I64}
+y: I64
 
 #---- tuple_reads_by_literal_position
 t <- (1L, "a")
 a <- t[[1L]]
 b <- t[[2L]]
 #++++
-t: Tuple{integer, character}
-a: integer
-b: character
+t: Tuple{I64, Str}
+a: I64
+b: Str
 
 #---- tuple_position_past_the_end
 t <- (1L, "a")
 c <- t[[3L]]
 #++++
-t: Tuple{integer, character}
+t: Tuple{I64, Str}
 c: Unknown
-23..25 error[type-mismatch] position 3 does not exist in `Tuple{integer, character}`
+23..25 error[type-mismatch] position 3 does not exist in `Tuple{I64, Str}`
 
 #---- tuple_has_no_fields
 t <- (1L, "a")
 c <- t$x
 #++++
-t: Tuple{integer, character}
+t: Tuple{I64, Str}
 c: Unknown
-22..23 error[type-mismatch] field `x` does not exist in `Tuple{integer, character}`
+22..23 error[type-mismatch] field `x` does not exist in `Tuple{I64, Str}`
 
 #---- single_bracket_is_not_supported
 p <- (x = 1,)
 q <- p["x"]
 #++++
-p: Record{x: double}
+p: Record{x: I64}
 q: Unknown
-19..25 error[type-mismatch] `[` is not supported on `Record{x: double}`
+19..25 error[type-mismatch] `[` is not supported on `Record{x: I64}`
 
 #==== compatibility
 #---- record_is_not_a_list
@@ -136,7 +136,7 @@ y <- f((x = 1,))
 #++++
 f: fn(l: list{x: double}) -> double
 y: Unknown
-64..72 error[type-mismatch] expected `list{x: double}`, found `Record{x: double}`
+64..72 error[type-mismatch] expected `list{x: double}`, found `Record{x: I64}`
 
 #---- list_is_not_a_record
 #: fn(r: Record{x: double}) -> double
@@ -162,7 +162,7 @@ z <- f((x = 1,))
 #++++
 f: fn(r: Record{x: double, y: double}) -> double
 z: Unknown
-77..85 error[type-mismatch] expected `Record{x: double, y: double}`, found `Record{x: double}`
+77..85 error[type-mismatch] expected `Record{x: double, y: double}`, found `Record{x: I64}`
 
 #---- integer_widens_into_a_double_field
 #: fn(r: Record{x: double}) -> double
@@ -190,7 +190,7 @@ a <- f(:Some("a"))
 #++++
 f: fn(o: :Some(integer) | :None) -> logical
 a: Unknown
-79..82 error[type-mismatch] expected `integer`, found `character`
+79..82 error[type-mismatch] expected `integer`, found `Str`
 
 #---- tag_outside_a_closed_union
 #: fn(o: :Some(integer) | :None) -> logical
@@ -208,7 +208,7 @@ a <- f(:Some(1L, 2L))
 #++++
 f: fn(o: :Some(integer) | :None) -> logical
 a: Unknown
-73..86 error[type-mismatch] expected `:Some(integer) | :None`, found `:Some(integer, integer)`
+73..86 error[type-mismatch] expected `:Some(integer) | :None`, found `:Some(I64, I64)`
 
 #---- if_joins_tags_into_a_union
 f <- function(flag) if (flag) :Some(1L) else :None
@@ -237,7 +237,7 @@ b <- f(:Some("a"))
 f: fn(o: Option<integer>) -> logical
 a: logical
 b: Unknown
-130..133 error[type-mismatch] expected `integer`, found `character`
+130..133 error[type-mismatch] expected `integer`, found `Str`
 
 #==== open_unions
 #---- unlisted_tag_fits_an_open_union
@@ -257,7 +257,7 @@ a <- f(:Ok("x"))
 #++++
 f: fn(r: :Ok(integer) | ..) -> logical
 a: Unknown
-72..75 error[type-mismatch] expected `integer`, found `character`
+72..75 error[type-mismatch] expected `integer`, found `Str`
 
 #---- a_lone_open_union_holds_every_tag
 count <- function(r: ..) -> I64 { 1 }
@@ -609,9 +609,9 @@ f: fn(o: :Some(integer) | :None) -> integer
 p <- (y = "a", x = 1)
 z <- p[[3L]]
 #++++
-p: Record{x: double, y: character}
+p: Record{x: I64, y: Str}
 z: Unknown
-30..32 error[type-mismatch] position 3 does not exist in `Record{x: double, y: character}`
+30..32 error[type-mismatch] position 3 does not exist in `Record{x: I64, y: Str}`
 
 #---- catch_all_accepts_values_that_are_not_tags
 h <- function(x) match (x) { :A => 1; _ => 2 }
@@ -630,7 +630,7 @@ b <- base::paste(p)
 n <- nchar((1L, "a"))
 u <- toupper(:Some(1L))
 #++++
-p: Record{x: double, y: double}
+p: Record{x: I64, y: I64}
 s: Unknown
 b: Unknown
 n: Unknown
@@ -649,13 +649,13 @@ d <- identical(p, p)
 e <- list(p, :None)
 print(p)
 #++++
-p: Record{x: double, y: double}
+p: Record{x: I64, y: I64}
 a: integer
 b: list[Any]
 c: character
 d: logical
-e: list{Record{x: double, y: double}, :None}
-Record{x: double, y: double}
+e: list{Record{x: I64, y: I64}, :None}
+Record{x: I64, y: I64}
 
 #---- the_project_s_own_functions_take_them
 keep <- function(v) v
@@ -664,7 +664,7 @@ sum <- function(v) 0
 s <- sum((x = 1,))
 #++++
 keep: <T> fn(v: T) -> T
-k: Record{x: double}
+k: Record{x: I64}
 sum: <T> fn([v]: T) -> double
 s: double
 
@@ -690,9 +690,9 @@ f: fn(flag: logical) -> character
 p <- (x = 1, y = 2)
 p$x <- "a"
 #++++
-p: Record{x: double, y: double}
+p: Record{x: I64, y: I64}
 character
-27..30 error[type-mismatch] expected `double`, found `character`
+27..30 error[type-mismatch] expected `I64`, found `character`
 
 #---- write_cannot_add_a_field
 p <- (x = 1, y = 2)
@@ -700,18 +700,18 @@ p$z <- 3
 q <- (x = 1,)
 q[["w"]] <- 1
 #++++
-p: Record{x: double, y: double}
+p: Record{x: I64, y: I64}
 double
-q: Record{x: double}
+q: Record{x: I64}
 double
-22..23 error[type-mismatch] field `z` does not exist in `Record{x: double, y: double}`, and assigning to it cannot add it, because a record's fields are fixed
-43..51 error[type-mismatch] field `w` does not exist in `Record{x: double}`, and assigning to it cannot add it, because a record's fields are fixed
+22..23 error[type-mismatch] field `z` does not exist in `Record{x: I64, y: I64}`, and assigning to it cannot add it, because a record's fields are fixed
+43..51 error[type-mismatch] field `w` does not exist in `Record{x: I64}`, and assigning to it cannot add it, because a record's fields are fixed
 
 #---- write_of_a_compatible_value_keeps_the_type
 p <- (x = 1, y = 2)
 p$x <- 3L
 #++++
-p: Record{x: double, y: double}
+p: Record{x: I64, y: I64}
 integer
 
 #---- payload_pattern_on_a_tag_without_payload
@@ -755,7 +755,7 @@ v <- f((x = 1, y = "b"))
 #++++
 f: fn(p: Record{x: double, y: double}) -> double
 v: Unknown
-89..92 error[type-mismatch] expected `double`, found `character`
+89..92 error[type-mismatch] expected `double`, found `Str`
 
 #---- inline_ascription_blames_the_field_value
 w: Record{x: double} <- (x = "s",)
@@ -768,7 +768,7 @@ type Money = Record{amount: double}
 m <- @Money((amount = "x",))
 #++++
 m: Unknown
-58..61 error[type-mismatch] expected `double`, found `character`
+58..61 error[type-mismatch] expected `double`, found `Str`
 
 #---- two_mismatched_fields_blame_the_whole_record
 #: Record{x: double, y: double}
@@ -961,13 +961,13 @@ z <- keep((b = 1L,))
 read_b <- function<R>(x: Record{a: I64, ..R}) -> I64 x$b
 #++++
 keep: <R> fn(x: Record{a: I64, ..R}) -> Record{a: I64, ..R}
-y: Record{a: I64, b: character}
-b: character
+y: Record{a: I64, b: Str}
+b: Str
 c: Unknown
 z: Unknown
 read_b: <R> fn(x: Record{a: I64, ..R}) -> I64
-131..132 error[type-mismatch] field `c` does not exist in `Record{a: I64, b: character}`
-143..152 error[type-mismatch] expected `Record{a: I64, ..T}`, found `Record{b: integer}`
+131..132 error[type-mismatch] field `c` does not exist in `Record{a: I64, b: Str}`
+143..152 error[type-mismatch] expected `Record{a: I64, ..T}`, found `Record{b: I64}`
 209..210 error[type-mismatch] field `b` does not exist in `Record{a: I64, ..R}`
 
 #---- a_literal_adapts_to_the_listed_fields
@@ -978,7 +978,7 @@ two <- keep((a = 1, b = 2))
 #++++
 keep: <R> fn(x: Record{a: I64, ..R}) -> Record{a: I64, ..R}
 one: Record{a: I64}
-two: Record{a: I64, b: double}
+two: Record{a: I64, b: I64}
 
 #---- the_row_carries_through_an_update
 # typing: strict
@@ -1035,7 +1035,7 @@ y <- from_alias((a = 1L, b = "x"))
 to_alias: <S> fn(x: Record{a: I64, ..S}) -> Rec<S>
 from_alias: <S> fn(x: Rec<S>) -> Record{a: I64, ..S}
 wrong: fn(x: Rec<I64>) -> I64
-y: Record{a: I64, b: character}
+y: Record{a: I64, b: Str}
 199..202 error[annotation] `R` is a row in `Rec`, so its argument must be a type parameter or a `Record{...}` type
 
 #---- a_closed_record_does_not_take_a_rigid_row

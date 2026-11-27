@@ -32,14 +32,14 @@ xs: Unknown
 #---- tags_join_into_a_union
 ts <- [:Ok(1), :Err("no")]
 #++++
-ts: List<:Ok(double) | :Err(character)>
+ts: List<:Ok(I64) | :Err(Str)>
 
 #---- records_box_into_a_list
 points <- [(x = 1, y = 2), (x = 3, y = 4)]
 first_x <- points[[1]]$x
 #++++
-points: List<Record{x: double, y: double}>
-first_x: double
+points: List<Record{x: I64, y: I64}>
+first_x: I64
 
 #---- missing_value_is_an_error
 xs <- [1, NA]
@@ -128,13 +128,13 @@ d <- List.from_r(list((x = 1,), (x = 2,)))
 a: List<F64>
 b: List<I64>
 c1: List<Str>
-d: List<Record{x: double}>
+d: List<Record{x: I64}>
 
 #---- array_of_records_passes_as_a_list
 xs <- [(x = 1,), (x = 2,)]
 n <- length(xs)
 #++++
-xs: List<Record{x: double}>
+xs: List<Record{x: I64}>
 n: integer
 
 #==== operators
@@ -385,9 +385,9 @@ total: List<I64>
 people <- [(name = "a", age = 1), (name = "b", age = 2)]
 renamed <- List.update(people, 1L, function(p) (name = p$nme, age = p$age))
 #++++
-people: List<Record{age: double, name: character}>
+people: List<Record{age: I64, name: Str}>
 renamed: Unknown
-114..117 error[type-mismatch] field `nme` does not exist in `Record{age: double, name: character}`. Did you mean `name`?
+114..117 error[type-mismatch] field `nme` does not exist in `Record{age: I64, name: Str}`. Did you mean `name`?
 
 #---- undecided_items_take_their_type_from_use
 squares <- List.map([1, 2], \(x) x * x)

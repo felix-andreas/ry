@@ -87,24 +87,24 @@ n: Unknown
 p <- (x = 1.5, y = 2.5)
 q <- (..p, y = 3.5)
 #++++
-p: Record{x: double, y: double}
-q: Record{x: double, y: double}
+p: Record{x: F64, y: F64}
+q: Record{x: F64, y: F64}
 
 #---- an_update_cannot_add_a_field
 p <- (x = 1, y = 2)
 q <- (..p, z = 3)
 #++++
-p: Record{x: double, y: double}
+p: Record{x: I64, y: I64}
 q: Unknown
-31..32 error[type-mismatch] field `z` does not exist in `Record{x: double, y: double}`
+31..32 error[type-mismatch] field `z` does not exist in `Record{x: I64, y: I64}`
 
 #---- an_update_keeps_each_field_type
 p <- (name = "Ada", age = 36)
 q <- (..p, age = "old")
 #++++
-p: Record{age: double, name: character}
+p: Record{age: I64, name: Str}
 q: Unknown
-47..52 error[type-mismatch] expected `double`, found `character`
+47..52 error[type-mismatch] expected `I64`, found `character`
 
 #---- only_a_record_updates
 n <- 1L
@@ -592,7 +592,7 @@ replace_all <- function(text: Str) -> Str {
 point <- (x = 1, y = 2.5)
 #++++
 replace_all: fn(text: Str) -> Str
-point: Record{x: double, y: double}
+point: Record{x: I64, y: F64}
 
 #==== conversions
 #---- missing_values_convert_with_a_default_or_as_results
